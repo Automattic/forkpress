@@ -1,7 +1,7 @@
 use crate::store::Store;
 use anyhow::Result;
 use russh::server::{Auth, Msg, Server as _, Session};
-use russh::{Channel, ChannelId};
+use russh::{Channel, ChannelId, MethodKind, MethodSet};
 use russh_sftp::protocol::{
     Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode, Version,
 };
@@ -347,7 +347,6 @@ struct SshHandler {
     role: Arc<Mutex<String>>,
 }
 
-#[async_trait::async_trait]
 impl russh::server::Handler for SshHandler {
     type Error = anyhow::Error;
 
@@ -355,7 +354,8 @@ impl russh::server::Handler for SshHandler {
         if self.store.auth_enabled() {
             // Force the client to send a password.
             return Ok(Auth::Reject {
-                proceed_with_methods: Some(russh::MethodSet::PASSWORD),
+                proceed_with_methods: Some(MethodSet::from(&[MethodKind::Password][..])),
+                partial_success: false,
             });
         }
         *self.role.lock().await = "admin".to_string();
@@ -376,7 +376,7 @@ impl russh::server::Handler for SshHandler {
                 *self.role.lock().await = role;
                 Ok(Auth::Accept)
             }
-            None => Ok(Auth::Reject { proceed_with_methods: None }),
+            None => Ok(Auth::Reject { proceed_with_methods: None, partial_success: false }),
         }
     }
 
@@ -430,8 +430,8 @@ impl russh::server::Server for SshServer {
 }
 
 pub async fn run_sftp_server(addr: &str, store: Arc<Store>) -> Result<()> {
-    let key = russh::keys::key::KeyPair::generate_ed25519()
-        .ok_or_else(|| anyhow::anyhow!("failed to generate ed25519 key"))?;
+    let key = russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519)
+        .map_err(|e| anyhow::anyhow!("failed to generate ed25519 key: {}", e))?;
 
     let config = russh::server::Config {
         auth_rejection_time: std::time::Duration::from_millis(100),
@@ -449,8 +449,8 @@ pub async fn run_sftp_server(addr: &str, store: Arc<Store>) -> Result<()> {
 }
 
 pub async fn run_sftp_server_on(listener: tokio::net::TcpListener, store: Arc<Store>) -> Result<()> {
-    let key = russh::keys::key::KeyPair::generate_ed25519()
-        .ok_or_else(|| anyhow::anyhow!("failed to generate ed25519 key"))?;
+    let key = russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519)
+        .map_err(|e| anyhow::anyhow!("failed to generate ed25519 key: {}", e))?;
 
     let config = Arc::new(russh::server::Config {
         auth_rejection_time: std::time::Duration::from_millis(100),
@@ -492,13 +492,12 @@ mod tests {
 
     struct TestClientHandler;
 
-    #[async_trait::async_trait]
     impl russh::client::Handler for TestClientHandler {
         type Error = anyhow::Error;
 
         async fn check_server_key(
             &mut self,
-            _server_public_key: &russh::keys::key::PublicKey,
+            _server_public_key: &russh::keys::PublicKey,
         ) -> Result<bool, Self::Error> {
             Ok(true)
         }
