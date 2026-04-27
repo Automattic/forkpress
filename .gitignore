@@ -1,0 +1,14 @@
+ext/branchfs.so
+*.o
+*.lo
+*.la
+/tmp/branchfs*.db
+e2e/wp-src/
+e2e/*.log
+e2e/dolt-data/
+e2e/*.db
+/target/
+/.gitpress/
+/.forkpress/
+/.build/
+/dist/

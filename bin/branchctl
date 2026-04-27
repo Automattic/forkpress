@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Thin shell wrapper that runs scripts/branchctl.php with the branchfs
+# extension loaded. Resolves its own install dir so it works whether invoked
+# from the repo or a bind-mount (e.g. inside the docker image at /app).
+SELF="$(readlink -f "$0")"
+DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
+EXT="${BRANCHFS_EXT:-$DIR/ext/branchfs.so}"
+# Startup "Missing arginfo" warnings are harmless, silence via stderr filter
+# since they're emitted before php.ini processing completes.
+exec 3>&2
+exec 2> >(grep -v 'Missing arginfo' >&3)
+exec php -d "extension=$EXT" \
+    -d display_startup_errors=Off \
+    "$DIR/scripts/branchctl.php" "$@"
