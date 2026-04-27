@@ -1,0 +1,34 @@
+x-common: &common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: branched-wp:latest
+  volumes:
+    - .:/app
+  tty: true
+
+services:
+  # Live WordPress you can click around in. Bind-mounts the repo so edits
+  # on the host (C extension, PHP scripts, etc.) don't need an image rebuild —
+  # the entrypoint will re-run `make` if ext/branchfs.c changed.
+  # Hit it from your Mac at http://localhost:18080/.
+  dev:
+    <<: *common
+    ports:
+      - "18080:18080"
+    stdin_open: true
+    command: ["bash", "e2e/dev.sh"]
+
+  # Automated 8-step e2e test. Non-zero exit on any failure.
+  e2e:
+    <<: *common
+    command: ["bash", "e2e/run_e2e.sh"]
+
+  # Drop into a bash shell with the extension built and ports forwarded.
+  shell:
+    <<: *common
+    ports:
+      - "18080:18080"
+      - "13306:13306"
+    stdin_open: true
+    command: ["/bin/bash"]
