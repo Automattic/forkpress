@@ -97,7 +97,7 @@ target. No system PHP, no dynamic libs.
 ```bash
 make dist           # one-time, ~3-5 min on Apple Silicon (static-php-cli)
 make forkpress
-./target/release/forkpress start
+./target/release/forkpress serve
 ```
 
 That boots:
@@ -112,6 +112,22 @@ Branch management:
 ./target/release/forkpress branch create marketing
 ./target/release/forkpress branch list
 ```
+
+Agent/worktree workflow:
+
+```bash
+./target/release/forkpress agents http://localhost:18080/site.git ./agents --count 10
+cd ./agents/agent-1
+# edit files with an agent
+../../target/release/forkpress push -m "Agent 1 changes"
+```
+
+`forkpress serve` is an alias for `forkpress start`. `forkpress agents`
+creates `agent-1` … `agent-10` ForkPress branches and matching local
+git worktrees. `forkpress push` does `git add -A`, `git commit`, and
+`git push` so a worktree becomes previewable over HTTP in one step.
+Use normal `git pull --rebase --autostash` inside any worktree to pull
+newer remote changes into that agent's branch.
 
 Release artifacts for Linux (x86_64 + aarch64) and macOS (aarch64 +
 x86_64) are produced by `.github/workflows/release.yml` on every tag.

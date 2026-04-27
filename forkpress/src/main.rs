@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{ArgAction, Args, Parser, Subcommand};
 use flate2::read::GzDecoder;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Cursor, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -31,7 +31,12 @@ struct Cli {
 enum Commands {
     /// Create a new site.fp and seed the default admin user.
     Init(InitArgs),
+    #[command(alias = "serve")]
     Start(StartArgs),
+    /// Create local worktrees for multiple agents.
+    Agents(AgentsArgs),
+    /// Stage, commit, and push a local checkout so it becomes previewable.
+    Push(PushArgs),
     Branch(BranchPassthrough),
     #[command(alias = "branchctl")]
     Branchctl(BranchPassthrough),
@@ -110,6 +115,50 @@ struct SharedPaths {
 
     #[arg(long)]
     php_bin: Option<PathBuf>,
+}
+
+#[derive(Args, Debug, Clone)]
+struct AgentsArgs {
+    #[command(flatten)]
+    shared: SharedPaths,
+
+    /// Git remote, e.g. http://wp.localhost:18080/site.git.
+    remote: String,
+
+    /// Directory that will hold the main checkout and agent worktrees.
+    #[arg(default_value = "forkpress-agents")]
+    dir: PathBuf,
+
+    /// Number of agent branches/worktrees to create.
+    #[arg(long, default_value_t = 10)]
+    count: usize,
+
+    /// Branch name prefix. Branches are named `<prefix>-1`, `<prefix>-2`, etc.
+    #[arg(long, default_value = "agent")]
+    prefix: String,
+
+    /// Parent ForkPress branch to fork from.
+    #[arg(long, default_value = "main")]
+    from: String,
+
+    /// Name for the configured git remote.
+    #[arg(long, default_value = "origin")]
+    remote_name: String,
+}
+
+#[derive(Args, Debug, Clone)]
+struct PushArgs {
+    /// Existing git checkout or worktree.
+    #[arg(default_value = ".")]
+    repo: PathBuf,
+
+    /// Commit message. Defaults to `forkpress: update <branch>`.
+    #[arg(short, long)]
+    message: Option<String>,
+
+    /// Remote name to push to.
+    #[arg(long, default_value = "origin")]
+    remote_name: String,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -304,6 +353,8 @@ fn run() -> Result<i32> {
     match cli.command {
         Commands::Init(args) => init_command(args),
         Commands::Start(args) => start_command(args),
+        Commands::Agents(args) => agents_command(args),
+        Commands::Push(args) => push_command(args),
         Commands::Branch(args) | Commands::Branchctl(args) => branch_command(args),
         Commands::User(args) => user_command(args),
         Commands::Backup(args) => backup_command(args),
@@ -543,6 +594,121 @@ fn start_command(args: StartArgs) -> Result<i32> {
     Ok(0)
 }
 
+fn agents_command(args: AgentsArgs) -> Result<i32> {
+    ensure_git_available()?;
+    if args.count == 0 {
+        bail!("--count must be greater than zero");
+    }
+
+    let layout = Layout::new(args.shared.work_dir.clone())?;
+    prepare_runtime(&layout)?;
+    let runtime = PortableRuntime::from_layout(&layout);
+
+    if !layout.site_fp.exists() || !layout.bootstrap_marker.exists() {
+        bail!(
+            "no bootstrapped site found in {}. Run `forkpress start` first",
+            layout.work_dir.display()
+        );
+    }
+
+    let root_dir = absolutize(args.dir)?;
+    fs::create_dir_all(&root_dir)
+        .with_context(|| format!("failed to create {}", root_dir.display()))?;
+    let repo = root_dir.join("site");
+    if repo.exists() {
+        ensure_git_repository(&repo)?;
+    } else {
+        run_git(
+            None,
+            [
+                OsString::from("clone"),
+                OsString::from("--origin"),
+                OsString::from(&args.remote_name),
+                OsString::from(&args.remote),
+                repo.as_os_str().to_owned(),
+            ],
+        )?;
+    }
+
+    for index in 1..=args.count {
+        let branch = format!("{}-{}", args.prefix, index);
+        ensure_branch_exists(&layout, &runtime, &args.shared, &branch, &args.from)?;
+    }
+
+    run_git(
+        Some(&repo),
+        [
+            OsString::from("fetch"),
+            OsString::from("--prune"),
+            OsString::from(&args.remote_name),
+        ],
+    )?;
+
+    for index in 1..=args.count {
+        let branch = format!("{}-{}", args.prefix, index);
+        let worktree_path = root_dir.join(&branch);
+        if worktree_path.exists() {
+            println!(
+                "forkpress: reusing existing worktree {}",
+                worktree_path.display()
+            );
+            continue;
+        }
+        add_agent_worktree(&repo, &args.remote_name, &branch, &worktree_path)?;
+        println!(
+            "forkpress: {} ready at {}",
+            branch,
+            worktree_path.display()
+        );
+    }
+
+    println!(
+        "forkpress: {} agent worktrees ready under {}",
+        args.count,
+        root_dir.display()
+    );
+    Ok(0)
+}
+
+fn push_command(args: PushArgs) -> Result<i32> {
+    ensure_git_available()?;
+    let repo = absolutize(args.repo)?;
+    ensure_git_repository(&repo)?;
+
+    let branch = git_stdout(&repo, ["rev-parse", "--abbrev-ref", "HEAD"])?;
+    if branch == "HEAD" {
+        bail!("push requires a named branch; detached HEAD is not supported");
+    }
+
+    let status = git_stdout(&repo, ["status", "--porcelain"])?;
+    if !status.trim().is_empty() {
+        run_git(Some(&repo), [OsString::from("add"), OsString::from("-A")])?;
+        let message = args
+            .message
+            .unwrap_or_else(|| default_commit_message(&branch));
+        run_git(
+            Some(&repo),
+            [
+                OsString::from("commit"),
+                OsString::from("-m"),
+                OsString::from(message),
+            ],
+        )?;
+    }
+
+    run_git(
+        Some(&repo),
+        [
+            OsString::from("push"),
+            OsString::from(&args.remote_name),
+            OsString::from(format!("HEAD:refs/heads/{branch}")),
+        ],
+    )?;
+
+    println!("forkpress: {branch} is now previewable over HTTP");
+    Ok(0)
+}
+
 /// Background GC loop. Runs until `stop` flips true. Each tick invokes
 /// `scripts/branchctl.php gc` via the bundled PHP and appends stdout/stderr
 /// to a dedicated log file (separate from php-server.log so one stream's
@@ -634,6 +800,80 @@ fn branch_command(args: BranchPassthrough) -> Result<i32> {
     write_filtered_output(&output.stdout, &output.stderr)?;
 
     Ok(output.status.code().unwrap_or(1))
+}
+
+fn default_commit_message(branch: &str) -> String {
+    format!("forkpress: update {branch}")
+}
+
+fn ensure_branch_exists(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    branch: &str,
+    from: &str,
+) -> Result<()> {
+    let mut command = php_base_command(layout, runtime, shared);
+    command
+        .arg(layout.runtime_dir.join("scripts/branchctl.php"))
+        .arg("create")
+        .arg(branch)
+        .arg("--from")
+        .arg(from)
+        .env("BRANCHFS_DB", &layout.site_fp)
+        .env("BRANCHFS_SQLITE_WP_DB", &layout.site_fp)
+        .env("BRANCHFS_ROOT_HOST", "localhost")
+        .env("PORT", "80");
+
+    let output = command
+        .output()
+        .with_context(|| format!("failed to create branch {branch} via bundled php"))?;
+
+    if output.status.success() {
+        write_filtered_output(&output.stdout, &output.stderr)?;
+        return Ok(());
+    }
+
+    let stderr_text = String::from_utf8_lossy(&output.stderr);
+    if stderr_text.contains("already exists") {
+        println!("forkpress: reusing existing branch {branch}");
+        return Ok(());
+    }
+
+    write_filtered_output(&output.stdout, &output.stderr)?;
+    bail!("branchctl create {branch} exited with status {}", output.status);
+}
+
+fn add_agent_worktree(
+    repo: &std::path::Path,
+    remote_name: &str,
+    branch: &str,
+    path: &std::path::Path,
+) -> Result<()> {
+    if git_ref_exists(repo, &format!("refs/heads/{branch}"))? {
+        run_git(
+            Some(repo),
+            [
+                OsString::from("worktree"),
+                OsString::from("add"),
+                path.as_os_str().to_owned(),
+                OsString::from(branch),
+            ],
+        )
+    } else {
+        run_git(
+            Some(repo),
+            [
+                OsString::from("worktree"),
+                OsString::from("add"),
+                OsString::from("--track"),
+                OsString::from("-b"),
+                OsString::from(branch),
+                path.as_os_str().to_owned(),
+                OsString::from(format!("{remote_name}/{branch}")),
+            ],
+        )
+    }
 }
 
 impl Layout {
@@ -1014,6 +1254,121 @@ fn write_filtered_output(stdout: &[u8], stderr: &[u8]) -> Result<()> {
     Ok(())
 }
 
+fn ensure_git_available() -> Result<()> {
+    let status = Command::new("git")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("failed to execute `git --version`")?;
+    if !status.success() {
+        bail!("git is required for this command");
+    }
+    Ok(())
+}
+
+fn ensure_git_repository(repo: &std::path::Path) -> Result<()> {
+    let status = Command::new("git")
+        .arg("rev-parse")
+        .arg("--git-dir")
+        .current_dir(repo)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .with_context(|| format!("failed to inspect git checkout at {}", repo.display()))?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("not a git checkout: {}", repo.display());
+    }
+}
+
+fn run_git<I, S>(cwd: Option<&std::path::Path>, args: I) -> Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let args_vec: Vec<OsString> = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_owned())
+        .collect();
+    let mut command = Command::new("git");
+    command
+        .args(&args_vec)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    if let Some(dir) = cwd {
+        command.current_dir(dir);
+    }
+
+    let status = command.status().with_context(|| {
+        format!(
+            "failed to run git {}",
+            args_vec
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+    })?;
+    if !status.success() {
+        bail!("git exited with status {status}");
+    }
+    Ok(())
+}
+
+fn git_stdout<I, S>(cwd: &std::path::Path, args: I) -> Result<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let args_vec: Vec<OsString> = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_owned())
+        .collect();
+    let output = Command::new("git")
+        .args(&args_vec)
+        .current_dir(cwd)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to run git {}",
+                args_vec
+                    .iter()
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        })?;
+    if !output.status.success() {
+        bail!(
+            "git {} exited with status {}",
+            args_vec
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(" "),
+            output.status
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn git_ref_exists(repo: &std::path::Path, reference: &str) -> Result<bool> {
+    let status = Command::new("git")
+        .arg("rev-parse")
+        .arg("--verify")
+        .arg("--quiet")
+        .arg(reference)
+        .current_dir(repo)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .with_context(|| format!("failed to inspect git ref {reference}"))?;
+    Ok(status.success())
+}
+
 fn wait_for_tcp(host: &str, port: u16, timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -1036,3 +1391,12 @@ fn tcp_port_open(host: &str, port: u16) -> bool {
         .any(|addr| TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok())
 }
 
+#[cfg(test)]
+mod git_helper_tests {
+    use super::*;
+
+    #[test]
+    fn commit_message_mentions_branch() {
+        assert_eq!(default_commit_message("agent-3"), "forkpress: update agent-3");
+    }
+}
