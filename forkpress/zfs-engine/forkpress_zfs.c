@@ -42,6 +42,14 @@
 
 #define FORKPRESS_ZFS_ROOT_ZAP_OBJ 1
 
+#if defined(__APPLE__)
+int
+fstat64_blk(int fd, struct stat64 *st)
+{
+    return (fstat64(fd, st));
+}
+#endif
+
 typedef struct tpool { int unused; } tpool_t;
 
 tpool_t *

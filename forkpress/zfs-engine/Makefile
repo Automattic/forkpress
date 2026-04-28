@@ -129,6 +129,11 @@ ZCOMMON_SRCS := \
     $(ZFS)/module/zcommon/zfs_fletcher_superscalar.c \
     $(ZFS)/module/zcommon/zfs_fletcher_superscalar4.c
 
+ifeq ($(ZFS_ENGINE_AARCH64),1)
+ZCOMMON_SRCS += \
+    $(ZFS)/module/zcommon/zfs_fletcher_aarch64_neon.c
+endif
+
 AVL_SRCS := $(ZFS)/module/avl/avl.c
 UNICODE_SRCS := $(wildcard $(ZFS)/module/unicode/*.c)
 ZUTIL_SRCS := $(wildcard $(ZFS)/lib/libzutil/*.c)
