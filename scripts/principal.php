@@ -22,8 +22,10 @@
  *     whose name is FORKPRESS_ACTOR (if set) or 'system'. The FORKPRESS_ACTOR
  *     env var has no security value in that mode — it's a display-only hint
  *     that lets operators attribute rows in audit_log.
- *   Auth mode: auth_enabled=1. FORKPRESS_ACTOR is IGNORED entirely. Principal
- *     must arrive via --user/--password OR FORKPRESS_TOKEN.
+ *   Auth mode: auth_enabled=1. FORKPRESS_ACTOR is IGNORED entirely. Remote
+ *     writes must arrive via --user/--password OR FORKPRESS_TOKEN. The bundled
+ *     local control path sets FORKPRESS_LOCAL_CTL=1 and receives a synthetic
+ *     local operator principal.
  */
 
 if (!class_exists('Principal', false)) {
@@ -34,7 +36,8 @@ if (!class_exists('Principal', false)) {
  *   name        — the actor string to write into audit_log.actor
  *   role        — 'admin' | 'write' | 'read' | 'system' (legacy)
  *   synthetic   — true when the principal wasn't derived from a users-row
- *                 credential check (legacy auth_enabled=0 sites only)
+ *                 credential check (legacy auth_enabled=0 sites or the local
+ *                 control path)
  */
 final class Principal
 {
@@ -203,6 +206,7 @@ function principal_verify_password(SQLite3 $db, string $username, string $passwo
  * Resolution order when auth is enabled:
  *   1. --user/--password flags (best path; direct credential check)
  *   2. FORKPRESS_TOKEN env var (HMAC-signed short-lived token)
+ *   3. FORKPRESS_LOCAL_CTL=1 from the bundled local CLI
  * Anything else → failure, caller writes an auth error and exits non-zero.
  *
  * When auth is DISABLED the CLI runs as a synthetic `system` principal
@@ -247,6 +251,19 @@ function principal_resolve(string $site_fp, array $flags, ?string &$reason = nul
             }
             [$u, $role, $_exp] = $verified;
             return new Principal($u, $role, false);
+        }
+
+        $local_ctl = getenv('FORKPRESS_LOCAL_CTL');
+        if ($local_ctl === '1') {
+            $name = 'local';
+            $env_user = getenv('USER');
+            if ($env_user === false || $env_user === '') {
+                $env_user = getenv('LOGNAME');
+            }
+            if ($env_user !== false && $env_user !== '') {
+                $name = 'local:' . (string)$env_user;
+            }
+            return new Principal($name, 'admin', /*synthetic=*/ true);
         }
 
         $reason = "auth: this site has auth_enabled=1; pass --user <u> --password <p> "

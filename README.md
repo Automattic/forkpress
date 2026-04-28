@@ -104,7 +104,7 @@ subdomains to `127.0.0.1`.
 From the same project directory:
 
 ```bash
-forkpress git branch create agent-1 --user admin --password admin
+forkpress branch create agent-1
 forkpress clone http://admin:admin@wp.localhost:18080/site.git site
 cd site
 git switch agent-1
@@ -143,9 +143,7 @@ With the site server running, create 10 branches and 10 Git worktrees:
 
 ```bash
 forkpress agents \
-  --remote http://admin:admin@wp.localhost:18080/site.git \
-  --user admin \
-  --password admin
+  --remote http://admin:admin@wp.localhost:18080/site.git
 ```
 
 This creates:
@@ -178,8 +176,6 @@ Create fewer or differently named worktrees:
 ```bash
 forkpress agents \
   --remote http://admin:admin@wp.localhost:18080/site.git \
-  --user admin \
-  --password admin \
   --count 3 \
   --prefix experiment
 ```
@@ -194,8 +190,10 @@ forkpress agents \
 - `forkpress server stop [--work-dir .forkpress]` stops one site server;
   `forkpress server stop --all` stops every running ForkPress site server in
   the registry.
-- `forkpress git branch create <name> [--from main] --user admin --password admin`
-  creates a ForkPress branch.
+- `forkpress branch create <name> [--from main]` creates a ForkPress branch
+  from the local site control command.
+- `forkpress git branch create <name> [--from main]` is a compatibility alias
+  for local branch creation.
 - `forkpress clone <remote> [dir]` wraps `git clone`.
 - `forkpress commit -m "message"` stages, commits, and pushes the current Git
   branch back into ForkPress.
@@ -234,8 +232,8 @@ make test-all
 Push a version tag:
 
 ```bash
-git tag v0.1.2
-git push origin v0.1.2
+git tag v0.1.3
+git push origin v0.1.3
 ```
 
 The release workflow builds and uploads the four target archives listed above.

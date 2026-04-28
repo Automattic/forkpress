@@ -86,6 +86,7 @@ test-all: ext/branchfs.so
 	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_merge.php
 	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_gc.php
 	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_push_auth.php
+	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_branchctl_local_auth.php
 
 clean:
 	rm -f ext/branchfs.so /tmp/branchfs_test*.db /tmp/branchfs_wp*.db

@@ -1506,6 +1506,7 @@ fn branch_command(args: BranchPassthrough) -> Result<i32> {
         );
     }
 
+    let (root_host, port) = branchctl_url_hint(&layout)?;
     let mut command = php_base_command(&layout, &runtime, &args.shared);
     command.arg(layout.runtime_dir.join("scripts/branchctl.php"));
     for arg in &args.args {
@@ -1513,8 +1514,9 @@ fn branch_command(args: BranchPassthrough) -> Result<i32> {
     }
     command.env("BRANCHFS_DB", &layout.site_fp);
     command.env("BRANCHFS_SQLITE_WP_DB", &layout.site_fp);
-    command.env("BRANCHFS_ROOT_HOST", "wp.localhost");
-    command.env("PORT", "18080");
+    command.env("BRANCHFS_ROOT_HOST", &root_host);
+    command.env("PORT", &port);
+    command.env("FORKPRESS_LOCAL_CTL", "1");
 
     let output = command
         .output()
@@ -1523,6 +1525,13 @@ fn branch_command(args: BranchPassthrough) -> Result<i32> {
     write_filtered_output(&output.stdout, &output.stderr)?;
 
     Ok(output.status.code().unwrap_or(1))
+}
+
+fn branchctl_url_hint(layout: &Layout) -> Result<(String, String)> {
+    if let Some(record) = running_record_for_work_dir(&layout.work_dir)? {
+        return Ok((record.root_host, record.port.to_string()));
+    }
+    Ok(("wp.localhost".to_string(), "18080".to_string()))
 }
 
 fn default_commit_message(branch: &str) -> String {
@@ -1541,6 +1550,7 @@ fn ensure_branch_exists(
     from: &str,
     auth: &BranchAuth,
 ) -> Result<()> {
+    let (root_host, port) = branchctl_url_hint(layout)?;
     let mut command = php_base_command(layout, runtime, shared);
     command
         .arg(layout.runtime_dir.join("scripts/branchctl.php"))
@@ -1550,8 +1560,9 @@ fn ensure_branch_exists(
         .arg(from)
         .env("BRANCHFS_DB", &layout.site_fp)
         .env("BRANCHFS_SQLITE_WP_DB", &layout.site_fp)
-        .env("BRANCHFS_ROOT_HOST", "wp.localhost")
-        .env("PORT", "18080");
+        .env("BRANCHFS_ROOT_HOST", &root_host)
+        .env("PORT", &port)
+        .env("FORKPRESS_LOCAL_CTL", "1");
     auth.append_to(&mut command);
 
     let output = command
