@@ -75,6 +75,7 @@ jobs:
               'forkpress/zfs-engine/forkpress_zfs.c',
               'forkpress/zfs-engine/include/libintl.h',
               'forkpress/zfs-engine/include/sys/endian.h',
+              'forkpress/zfs-engine/include/sys/simd.h',
               'forkpress/zfs-engine/include/sys/stdtypes.h',
               'forkpress/zfs-engine/include/sys/sysmacros.h',
               'forkpress/zfs-engine/include/sys/types32.h',
