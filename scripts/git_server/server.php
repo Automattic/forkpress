@@ -605,6 +605,7 @@ function git_apply_file_changes(SQLite3 $sqlite, int $branch_id, array $new_file
 
 function git_dump_branch_database(SQLite3 $sqlite, int $branch_id, string $branch_name): string {
     $prefix = 'b' . $branch_id . '_wp_';
+    $parent_prefix = git_parent_database_prefix($sqlite, $branch_id);
     $like = str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], $prefix) . '%';
     $stmt = $sqlite->prepare(
         "SELECT name FROM sqlite_master
@@ -626,8 +627,18 @@ function git_dump_branch_database(SQLite3 $sqlite, int $branch_id, string $branc
         if (str_ends_with($store_table, '__overlay') || str_ends_with($store_table, '__tombstones')) {
             continue;
         }
+        $suffix = substr($store_table, strlen($prefix));
+        $source_table = $store_table;
+        $fallback_table = $parent_prefix ? $parent_prefix . $suffix : null;
         $logical_table = 'wp_' . substr($store_table, strlen($prefix));
         $columns = git_table_columns($sqlite, $store_table);
+        if (!$columns && $fallback_table) {
+            $fallback_columns = git_table_columns($sqlite, $fallback_table);
+            if ($fallback_columns) {
+                $source_table = $fallback_table;
+                $columns = $fallback_columns;
+            }
+        }
         if (!$columns) {
             continue;
         }
@@ -640,7 +651,14 @@ function git_dump_branch_database(SQLite3 $sqlite, int $branch_id, string $branc
         }
         $out .= 'CREATE TABLE ' . git_sql_ident($logical_table) . ' (' . implode(', ', $defs) . ");\n";
 
-        $select = $sqlite->query('SELECT * FROM ' . git_sql_ident($store_table));
+        $select = $sqlite->query('SELECT * FROM ' . git_sql_ident($source_table));
+        if ($select === false && $fallback_table && $source_table !== $fallback_table) {
+            $source_table = $fallback_table;
+            $select = $sqlite->query('SELECT * FROM ' . git_sql_ident($source_table));
+        }
+        if ($select === false) {
+            continue;
+        }
         while ($data = $select->fetchArray(SQLITE3_ASSOC)) {
             $names = [];
             $values = [];
@@ -660,9 +678,29 @@ function git_dump_branch_database(SQLite3 $sqlite, int $branch_id, string $branc
     return $out;
 }
 
+function git_parent_database_prefix(SQLite3 $sqlite, int $branch_id): ?string {
+    $stmt = $sqlite->prepare(
+        "SELECT parent.id AS parent_id
+         FROM branches child
+         JOIN branches parent ON child.parent_branch = parent.name
+         WHERE child.id = :branch_id
+         LIMIT 1"
+    );
+    $stmt->bindValue(':branch_id', $branch_id, SQLITE3_INTEGER);
+    $result = $stmt->execute();
+    $row = $result ? $result->fetchArray(SQLITE3_ASSOC) : false;
+    if (!$row || empty($row['parent_id'])) {
+        return null;
+    }
+    return 'b' . (int)$row['parent_id'] . '_wp_';
+}
+
 function git_table_columns(SQLite3 $sqlite, string $table): array {
     $columns = [];
     $result = $sqlite->query('PRAGMA table_info(' . git_sql_ident($table) . ')');
+    if ($result === false) {
+        return [];
+    }
     while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
         $columns[] = $row;
     }

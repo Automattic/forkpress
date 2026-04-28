@@ -19,6 +19,113 @@ $debug_log  = $argv[5] ?? '/tmp/wp-debug.log';
 
 $table_prefix = getenv('WP_TABLE_PREFIX') ?: 'b1_wp_';
 
+function branchfs_mkdir_p(string $path): void {
+    if (is_dir($path)) {
+        return;
+    }
+    if (!@mkdir($path, 0755, true) && !is_dir($path)) {
+        die("ERROR: Could not create $path\n");
+    }
+}
+
+function branchfs_copy_tree(string $source_dir, string $dest_dir): int {
+    if (!is_dir($source_dir)) {
+        die("ERROR: Missing source directory $source_dir\n");
+    }
+
+    $copied = 0;
+    branchfs_mkdir_p($dest_dir);
+
+    $iterator = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($source_dir, RecursiveDirectoryIterator::SKIP_DOTS),
+        RecursiveIteratorIterator::SELF_FIRST
+    );
+
+    foreach ($iterator as $file) {
+        $source_path = $file->getPathname();
+        $rel_path = substr($source_path, strlen($source_dir) + 1);
+        $rel_path = str_replace(DIRECTORY_SEPARATOR, '/', $rel_path);
+        $dest_path = rtrim($dest_dir, '/') . '/' . $rel_path;
+
+        if ($file->isDir()) {
+            branchfs_mkdir_p($dest_path);
+            continue;
+        }
+
+        branchfs_mkdir_p(dirname($dest_path));
+        $bytes = file_put_contents($dest_path, file_get_contents($source_path));
+        if ($bytes === false) {
+            die("ERROR: Could not copy $source_path to $dest_path\n");
+        }
+        $copied++;
+    }
+
+    return $copied;
+}
+
+function install_sqlite_integration(string $vendor_dir): void {
+    $plugin_source = rtrim($vendor_dir, '/') . '/sqlite-database-integration';
+    $plugin_dest = 'branchfs://main/wp-content/plugins/sqlite-database-integration';
+
+    $copied = branchfs_copy_tree($plugin_source, $plugin_dest);
+
+    branchfs_mkdir_p('branchfs://main/wp-content');
+    $dropin = <<<'PHP'
+<?php
+/**
+ * ForkPress SQLite database drop-in.
+ *
+ * Loaded by WordPress before the mysqli requirement check. Keep paths relative
+ * to this file so cloned branches load their own branchfs:// plugin copy.
+ */
+
+define( 'SQLITE_DB_DROPIN_VERSION', '1.8.0' );
+
+$document_root = getenv( 'BRANCHFS_WP_ROOT' ) ?: ( $_SERVER['DOCUMENT_ROOT'] ?? '' );
+$sqlite_plugin_implementation_folder_path = $document_root
+	? rtrim( $document_root, '/' ) . '/wp-content/plugins/sqlite-database-integration'
+	: '';
+
+if ( ! file_exists( $sqlite_plugin_implementation_folder_path . '/wp-includes/sqlite/db.php' ) ) {
+	return;
+}
+
+if ( ! defined( 'DATABASE_TYPE' ) ) {
+	define( 'DATABASE_TYPE', 'sqlite' );
+}
+if ( ! defined( 'DB_ENGINE' ) ) {
+	define( 'DB_ENGINE', 'sqlite' );
+}
+
+require_once $sqlite_plugin_implementation_folder_path . '/wp-includes/sqlite/db.php';
+
+add_action(
+	'admin_footer',
+	function() {
+		if ( defined( 'SQLITE_MAIN_FILE' ) ) {
+			return;
+		}
+		if ( ! function_exists( 'activate_plugin' ) ) {
+			require_once ABSPATH . 'wp-admin/includes/plugin.php';
+		}
+
+		$plugin = 'sqlite-database-integration/load.php';
+		$plugin_path = WP_PLUGIN_DIR . '/' . $plugin;
+
+		if ( file_exists( $plugin_path ) && is_plugin_inactive( $plugin ) ) {
+			activate_plugin( $plugin, '', false, true );
+		}
+	}
+);
+PHP;
+
+    $written = file_put_contents('branchfs://main/wp-content/db.php', $dropin);
+    if ($written === false) {
+        die("ERROR: Could not write wp-content/db.php\n");
+    }
+    echo "  sqlite drop-in installed ($copied plugin files, $written bytes)\n";
+}
+
 // --- Init branchfs (protocol only, no interception yet) ---
 branchfs_set_db($db_path);
 branchfs_set_root($wp_root);
@@ -29,9 +136,17 @@ branchfs_set_root($wp_root);
 $config = <<<CFG
 <?php
 // SQLite database integration constants
-define('FQDB',    '__FQDB__');
-define('DB_DIR',  '__DB_DIR__');
-define('DB_FILE', '__DB_FILE__');
+if (!defined('FQDB')) {
+    define('FQDB',    '__FQDB__');
+    define('DB_DIR',  '__DB_DIR__');
+    define('DB_FILE', '__DB_FILE__');
+}
+define('DB_NAME', 'forkpress');
+define('DB_USER', 'forkpress');
+define('DB_PASSWORD', 'forkpress');
+define('DB_HOST', 'localhost');
+define('DB_CHARSET', 'utf8mb4');
+define('DB_COLLATE', '');
 
 \$table_prefix = isset(\$GLOBALS['_branchfs_table_prefix'])
     ? \$GLOBALS['_branchfs_table_prefix']
@@ -85,6 +200,8 @@ if ($mu_plugin && file_exists($mu_plugin)) {
     );
     echo "  mu-plugin installed\n";
 }
+
+install_sqlite_integration(dirname(__DIR__) . '/vendor');
 
 // --- Install WordPress ---
 branchfs_set_branch('main');

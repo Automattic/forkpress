@@ -22,8 +22,8 @@ one `forkpress` binary per target. Git is still used as the local worktree tool.
 
 ## Install
 
-Download the archive for your platform from a tagged GitHub release and put the
-`forkpress` binary on your `PATH`.
+Download the archive for your platform from a tagged GitHub release, unpack it,
+and put the `forkpress` binary on your `PATH`.
 
 Release targets:
 
@@ -32,17 +32,43 @@ Release targets:
 - `x86_64-apple-darwin`
 - `aarch64-apple-darwin`
 
-## Run A Site
+Example:
 
 ```bash
-forkpress init
+tar -xzf forkpress-aarch64-apple-darwin.tar.gz
+chmod +x forkpress
+./forkpress --help
+```
+
+## Run A Site
+
+Start in an empty project directory. The `--admin-password admin` value makes
+the Git push examples below work without a credential prompt; use a stronger
+password for anything beyond a local throwaway site.
+
+Terminal 1:
+
+```bash
+forkpress init --admin-password admin
 forkpress serve
 ```
+
+The first `serve` imports WordPress into `.forkpress/site.fp`, installs the
+SQLite database drop-in, creates the WordPress admin user, and starts the local
+server. Leave it running.
 
 Open:
 
 ```text
 http://wp.localhost:18080/
+```
+
+WordPress login:
+
+```text
+http://wp.localhost:18080/wp-admin/
+username: admin
+password: admin
 ```
 
 Branch previews use subdomains:
@@ -55,12 +81,53 @@ If your resolver does not handle `*.localhost`, add host entries or run
 `forkpress serve --root-host wp.local` and route `wp.local` plus the branch
 subdomains to `127.0.0.1`.
 
-## Run 10 Agents
+## Work On One Branch
 
-With `forkpress serve` running:
+Terminal 2, from the same project directory:
 
 ```bash
-forkpress agents
+forkpress git branch create agent-1 --user admin --password admin
+forkpress clone http://admin:admin@wp.localhost:18080/site.git site
+cd site
+git switch agent-1
+```
+
+The checkout has this shape:
+
+```text
+site/
+  database.sql        # read-only branch database snapshot
+  wordpress/          # editable WordPress files
+```
+
+Make a file change under `wordpress/`, then publish it back to ForkPress:
+
+```bash
+printf "hello from agent-1\n" > wordpress/wp-content/agent-1.txt
+forkpress commit -m "agent-1 file change"
+```
+
+Preview the branch:
+
+```text
+http://agent-1.wp.localhost:18080/wp-content/agent-1.txt
+```
+
+Pull newer branch state into the checkout:
+
+```bash
+forkpress pull
+```
+
+## Run 10 Agents
+
+With `forkpress serve` still running, create 10 branches and 10 Git worktrees:
+
+```bash
+forkpress agents \
+  --remote http://admin:admin@wp.localhost:18080/site.git \
+  --user admin \
+  --password admin
 ```
 
 This creates:
@@ -88,20 +155,34 @@ Preview it at:
 http://agent-1.wp.localhost:18080/
 ```
 
-Pull newer branch state into any worktree:
+Create fewer or differently named worktrees:
 
 ```bash
-forkpress pull
+forkpress agents \
+  --remote http://admin:admin@wp.localhost:18080/site.git \
+  --user admin \
+  --password admin \
+  --count 3 \
+  --prefix experiment
 ```
 
-Create one branch manually:
+## Commands
 
-```bash
-forkpress git branch create feature-a
-forkpress clone
-cd site
-git checkout feature-a
-```
+- `forkpress init --admin-password admin` creates `.forkpress/site.fp` and a
+  Git push user named `admin`.
+- `forkpress serve` imports and boots WordPress if needed, then serves HTTP and
+  Git from `.forkpress/site.fp`.
+- `forkpress git branch create <name> [--from main] --user admin --password admin`
+  creates a ForkPress branch.
+- `forkpress clone <remote> [dir]` wraps `git clone`.
+- `forkpress commit -m "message"` stages, commits, and pushes the current Git
+  branch back into ForkPress.
+- `forkpress pull` wraps `git pull --rebase --autostash`.
+- `forkpress user add/list/remove/verify` manages Git push users.
+
+`database.sql` in Git checkouts is for model context only. Edits to
+`database.sql` are ignored on push; database writes should happen through the
+running WordPress preview.
 
 ## Build From Source
 
@@ -131,8 +212,8 @@ make test-all
 Push a version tag:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 The release workflow builds and uploads the four target archives listed above.

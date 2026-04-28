@@ -178,6 +178,14 @@ struct AgentsArgs {
     /// Name for the configured git remote.
     #[arg(long, default_value = "origin")]
     remote_name: String,
+
+    /// ForkPress user for local branch creation when auth is enabled.
+    #[arg(long)]
+    user: Option<String>,
+
+    /// ForkPress password for local branch creation when auth is enabled.
+    #[arg(long)]
+    password: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -642,7 +650,8 @@ fn git_command(args: GitPassthrough) -> Result<i32> {
 
     if args.args.len() >= 3 && args.args[0] == "branch" && args.args[1] == "create" {
         let branch = &args.args[2];
-        let from = git_branch_create_from(&args.args[3..])?;
+        let create_args = git_branch_create_args(&args.args[3..])?;
+        create_args.auth.validate()?;
         let layout = Layout::new(args.shared.work_dir.clone())?;
         prepare_runtime(&layout)?;
         let runtime = PortableRuntime::from_layout(&layout);
@@ -652,7 +661,14 @@ fn git_command(args: GitPassthrough) -> Result<i32> {
                 layout.work_dir.display()
             );
         }
-        ensure_branch_exists(&layout, &runtime, &args.shared, branch, &from)?;
+        ensure_branch_exists(
+            &layout,
+            &runtime,
+            &args.shared,
+            branch,
+            &create_args.from,
+            &create_args.auth,
+        )?;
         println!("forkpress: branch {branch} ready");
         return Ok(0);
     }
@@ -663,8 +679,42 @@ fn git_command(args: GitPassthrough) -> Result<i32> {
     Ok(0)
 }
 
-fn git_branch_create_from(args: &[String]) -> Result<String> {
-    let mut from = "main".to_string();
+#[derive(Debug, Clone, Default)]
+struct BranchAuth {
+    user: Option<String>,
+    password: Option<String>,
+}
+
+impl BranchAuth {
+    fn validate(&self) -> Result<()> {
+        if self.user.is_some() != self.password.is_some() {
+            bail!("--user and --password must be passed together");
+        }
+        Ok(())
+    }
+
+    fn append_to(&self, command: &mut Command) {
+        if let (Some(user), Some(password)) = (&self.user, &self.password) {
+            command
+                .arg("--user")
+                .arg(user)
+                .arg("--password")
+                .arg(password);
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct BranchCreateArgs {
+    from: String,
+    auth: BranchAuth,
+}
+
+fn git_branch_create_args(args: &[String]) -> Result<BranchCreateArgs> {
+    let mut parsed = BranchCreateArgs {
+        from: "main".to_string(),
+        auth: BranchAuth::default(),
+    };
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -672,13 +722,27 @@ fn git_branch_create_from(args: &[String]) -> Result<String> {
                 let Some(value) = args.get(index + 1) else {
                     bail!("--from requires a branch name");
                 };
-                from = value.clone();
+                parsed.from = value.clone();
+                index += 2;
+            }
+            "--user" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--user requires a username");
+                };
+                parsed.auth.user = Some(value.clone());
+                index += 2;
+            }
+            "--password" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--password requires a password");
+                };
+                parsed.auth.password = Some(value.clone());
                 index += 2;
             }
             other => bail!("unsupported argument for `forkpress git branch create`: {other}"),
         }
     }
-    Ok(from)
+    Ok(parsed)
 }
 
 fn agents_command(args: AgentsArgs) -> Result<i32> {
@@ -686,6 +750,11 @@ fn agents_command(args: AgentsArgs) -> Result<i32> {
     if args.count == 0 {
         bail!("--count must be greater than zero");
     }
+    let auth = BranchAuth {
+        user: args.user.clone(),
+        password: args.password.clone(),
+    };
+    auth.validate()?;
 
     let layout = Layout::new(args.shared.work_dir.clone())?;
     prepare_runtime(&layout)?;
@@ -719,7 +788,7 @@ fn agents_command(args: AgentsArgs) -> Result<i32> {
 
     for index in 1..=args.count {
         let branch = format!("{}-{}", args.prefix, index);
-        ensure_branch_exists(&layout, &runtime, &args.shared, &branch, &args.from)?;
+        ensure_branch_exists(&layout, &runtime, &args.shared, &branch, &args.from, &auth)?;
     }
 
     run_git(
@@ -765,6 +834,7 @@ fn push_command(args: PushArgs) -> Result<i32> {
 
     let status = git_stdout(&repo, ["status", "--porcelain"])?;
     if !status.trim().is_empty() {
+        ensure_git_identity(&repo)?;
         run_git(Some(&repo), [OsString::from("add"), OsString::from("-A")])?;
         let message = args
             .message
@@ -790,6 +860,43 @@ fn push_command(args: PushArgs) -> Result<i32> {
 
     println!("forkpress: {branch} is now previewable over HTTP");
     Ok(0)
+}
+
+fn ensure_git_identity(repo: &std::path::Path) -> Result<()> {
+    if !git_config_is_set(repo, "user.name")? {
+        run_git(
+            Some(repo),
+            [
+                OsString::from("config"),
+                OsString::from("user.name"),
+                OsString::from("ForkPress Agent"),
+            ],
+        )?;
+    }
+    if !git_config_is_set(repo, "user.email")? {
+        run_git(
+            Some(repo),
+            [
+                OsString::from("config"),
+                OsString::from("user.email"),
+                OsString::from("forkpress-agent@local"),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn git_config_is_set(repo: &std::path::Path, key: &str) -> Result<bool> {
+    let status = Command::new("git")
+        .arg("config")
+        .arg("--get")
+        .arg(key)
+        .current_dir(repo)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .with_context(|| format!("failed to inspect git config {key}"))?;
+    Ok(status.success())
 }
 
 /// Background GC loop. Runs until `stop` flips true. Each tick invokes
@@ -873,8 +980,8 @@ fn branch_command(args: BranchPassthrough) -> Result<i32> {
     }
     command.env("BRANCHFS_DB", &layout.site_fp);
     command.env("BRANCHFS_SQLITE_WP_DB", &layout.site_fp);
-    command.env("BRANCHFS_ROOT_HOST", "localhost");
-    command.env("PORT", "80");
+    command.env("BRANCHFS_ROOT_HOST", "wp.localhost");
+    command.env("PORT", "18080");
 
     let output = command
         .output()
@@ -899,6 +1006,7 @@ fn ensure_branch_exists(
     shared: &SharedPaths,
     branch: &str,
     from: &str,
+    auth: &BranchAuth,
 ) -> Result<()> {
     let mut command = php_base_command(layout, runtime, shared);
     command
@@ -909,8 +1017,9 @@ fn ensure_branch_exists(
         .arg(from)
         .env("BRANCHFS_DB", &layout.site_fp)
         .env("BRANCHFS_SQLITE_WP_DB", &layout.site_fp)
-        .env("BRANCHFS_ROOT_HOST", "localhost")
-        .env("PORT", "80");
+        .env("BRANCHFS_ROOT_HOST", "wp.localhost")
+        .env("PORT", "18080");
+    auth.append_to(&mut command);
 
     let output = command
         .output()
@@ -1435,8 +1544,18 @@ mod git_helper_tests {
     }
 
     #[test]
-    fn parses_git_branch_create_from() {
-        let args = vec!["--from".to_string(), "main".to_string()];
-        assert_eq!(git_branch_create_from(&args).unwrap(), "main");
+    fn parses_git_branch_create_args() {
+        let args = vec![
+            "--from".to_string(),
+            "main".to_string(),
+            "--user".to_string(),
+            "admin".to_string(),
+            "--password".to_string(),
+            "admin".to_string(),
+        ];
+        let parsed = git_branch_create_args(&args).unwrap();
+        assert_eq!(parsed.from, "main");
+        assert_eq!(parsed.auth.user.as_deref(), Some("admin"));
+        assert_eq!(parsed.auth.password.as_deref(), Some("admin"));
     }
 }
