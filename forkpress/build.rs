@@ -17,7 +17,7 @@ fn main() -> Result<()> {
         .context("forkpress crate should live directly under the repo root")?;
     let target = env::var("TARGET").context("TARGET env var missing (set by cargo)")?;
 
-    if target.contains("linux") && env::var_os("FORKPRESS_DISABLE_EMBEDDED_ZFS").is_none() {
+    if supports_embedded_zfs(&target) && env::var_os("FORKPRESS_DISABLE_EMBEDDED_ZFS").is_none() {
         build_embedded_zfs(repo_root, &target)?;
         println!("cargo:rustc-cfg=forkpress_embedded_zfs");
     } else {
@@ -97,6 +97,14 @@ fn build_embedded_zfs(repo_root: &Path, target: &str) -> Result<()> {
         engine_dir.join("forkpress_zfs.c").display()
     );
     println!(
+        "cargo:rerun-if-changed={}",
+        engine_dir.join("include/sys/endian.h").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        engine_dir.join("include/sys/sysmacros.h").display()
+    );
+    println!(
         "cargo:rerun-if-env-changed={}",
         target_env_key("CC", target)
     );
@@ -123,6 +131,14 @@ fn build_embedded_zfs(repo_root: &Path, target: &str) -> Result<()> {
             "ZFS_ENGINE_MUSL",
             if target.contains("musl") { "1" } else { "0" },
         )
+        .env(
+            "ZFS_ENGINE_DARWIN",
+            if target.contains("apple-darwin") {
+                "1"
+            } else {
+                "0"
+            },
+        )
         .status()
         .context("failed to run make for embedded ZFS engine")?;
     if !status.success() {
@@ -131,10 +147,14 @@ fn build_embedded_zfs(repo_root: &Path, target: &str) -> Result<()> {
 
     println!("cargo:rustc-link-search=native={}", target_build.display());
     println!("cargo:rustc-link-lib=static=forkpress_zfs");
-    if !target.contains("musl") {
+    if target.contains("linux") && !target.contains("musl") {
         println!("cargo:rustc-link-lib=pthread");
     }
     Ok(())
+}
+
+fn supports_embedded_zfs(target: &str) -> bool {
+    target.contains("linux") || target.contains("apple-darwin")
 }
 
 fn ensure_zfs_experiment_source(work_root: &Path) -> Result<PathBuf> {

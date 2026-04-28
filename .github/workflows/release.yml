@@ -72,7 +72,9 @@ jobs:
               'ext/branchfs.h',
               'forkpress/build.rs',
               'forkpress/zfs-engine/Makefile',
-              'forkpress/zfs-engine/forkpress_zfs.c'
+              'forkpress/zfs-engine/forkpress_zfs.c',
+              'forkpress/zfs-engine/include/sys/endian.h',
+              'forkpress/zfs-engine/include/sys/sysmacros.h'
             ) }}
 
       - name: Build dist bundle

@@ -2323,10 +2323,11 @@ surface needed for the ZFS strategy while branch-directory import/export is
 connected to the embedded engine.
 
 The forkpress binary now includes an embedded OpenZFS userland engine on Linux
-targets. Cargo builds the same OpenZFS 2.2.6 subset used by the real-zfs
-experiment, plus bundled zlib, into a static archive and links it into the
-single `forkpress` executable. There is no system ZFS install, kernel module,
-FUSE mount, Node runtime, Docker service, dynamic library, or sidecar daemon.
+and macOS targets. Cargo builds the same OpenZFS 2.2.6 subset used by the
+real-zfs experiment, plus bundled zlib, into a static archive and links it into
+the single `forkpress` executable. There is no system ZFS install, kernel
+module, FUSE mount, Node runtime, Docker service, dynamic library, or sidecar
+daemon.
 
 Run `forkpress zfs smoke --work-dir .forkpress` to verify the linked engine.
 The smoke test creates a file-backed pool image, creates a dataset, writes and

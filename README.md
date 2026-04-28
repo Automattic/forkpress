@@ -248,10 +248,10 @@ The ZFS strategy is currently split into two layers:
   `.forkpress/zfs/branches`. WordPress runs against normal files, so post
   editor loads, uploads, plugin pages, and SQLite writes do not need BranchFS
   stream wrappers or table-prefix overlays.
-- Embedded storage engine layer: Linux release builds link a ForkPress-specific
-  OpenZFS 2.2.6 userland subset and bundled zlib into the single `forkpress`
-  binary. The current CLI exposes this through `forkpress zfs smoke`; branch
-  import/export still needs to be connected to it.
+- Embedded storage engine layer: Linux and macOS release builds link a
+  ForkPress-specific OpenZFS 2.2.6 userland subset and bundled zlib into the
+  single `forkpress` binary. The current CLI exposes this through
+  `forkpress zfs smoke`; branch import/export still needs to be connected to it.
 
 Current runtime flow:
 
@@ -279,7 +279,7 @@ ordinary files. A post save on `feature.wp.localhost` writes to
 write to `main` and it does not pass through SQL COW views or overlay tables.
 
 ForkPress now ships the engine without a system ZFS install by native-linking a
-small OpenZFS userland engine into the binary on Linux targets:
+small OpenZFS userland engine into the binary on Linux and macOS targets:
 
 - The release artifact remains one `forkpress` binary.
 - Cargo fetches the pinned real-zfs/OpenZFS sources at build time, builds a
@@ -299,7 +299,7 @@ proves the primitives are viable: real pools, datasets, snapshots, and clones
 on a file-backed pool. That artifact is not the one ForkPress should embed
 directly because it is Emscripten JS plus a threaded Wasm module that expects a
 browser or Node worker runtime. ForkPress now builds the same OpenZFS subset as
-native static code for the Linux binary.
+native static code for Linux and macOS binaries.
 
 The target OpenZFS-backed strategy is different from BranchFS:
 

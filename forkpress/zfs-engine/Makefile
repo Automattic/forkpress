@@ -6,8 +6,16 @@ ZLIB_DIR   ?=
 CC         ?= cc
 AR         ?= ar
 MODE       ?= release
+ENGINE_DIR := $(dir $(WRAPPER))
+
+ifeq ($(ZFS_ENGINE_DARWIN),1)
+LIBSPL_OS := freebsd
+else
+LIBSPL_OS := linux
+endif
 
 INCS := \
+    -I $(ENGINE_DIR)/include \
     -I $(ZLIB_DIR) \
     -I $(EXPERIMENT)/src/config \
     -I $(EXPERIMENT)/src/shim \
@@ -15,7 +23,7 @@ INCS := \
     -I $(ZFS)/include \
     -I $(ZFS)/lib/libzutil \
     -I $(ZFS)/lib/libspl/include \
-    -I $(ZFS)/lib/libspl/include/os/linux
+    -I $(ZFS)/lib/libspl/include/os/$(LIBSPL_OS)
 
 DEFS_COMMON := \
     -D_GNU_SOURCE \
@@ -44,6 +52,25 @@ DEFS_COMMON += \
     -Dreaddir64=readdir
 endif
 
+ifeq ($(ZFS_ENGINE_DARWIN),1)
+DEFS_COMMON += \
+    -Dopen64=open \
+    -Dpread64=pread \
+    -Dpwrite64=pwrite \
+    -Dlseek64=lseek \
+    -Dfopen64=fopen \
+    -Dfreopen64=freopen \
+    -Dfseeko64=fseeko \
+    -Dftello64=ftello \
+    -Dmmap64=mmap \
+    -Dtruncate64=truncate \
+    -Dftruncate64=ftruncate \
+    -Dloff_t=off_t \
+    -DO_LARGEFILE=0 \
+    -DO_DSYNC=0 \
+    -Dissetugid=forkpress_zfs_issetugid
+endif
+
 ifeq ($(MODE),debug)
 DEFS := $(DEFS_COMMON) -DZFS_DEBUG=1 -DDEBUG=1
 OPTFLAGS := -O1 -g
@@ -55,7 +82,6 @@ endif
 CFLAGS := $(OPTFLAGS) -ffunction-sections -fdata-sections -fPIC \
           -fvisibility=hidden -pthread $(DEFS) $(INCS) \
           -include $(EXPERIMENT)/src/config/zfs_config.h \
-          -include sys/sysmacros.h \
           -Wno-format \
           -Wno-unused-parameter \
           -Wno-unused-function \
