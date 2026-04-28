@@ -227,6 +227,9 @@ The selected strategy is written during `forkpress init` and reused by later
 commands. This keeps future backends from accidentally running BranchFS-specific
 code against a different storage model.
 
+For a driver-by-driver comparison, including ZFS portability and Windows notes,
+see [`docs/storage-drivers.md`](docs/storage-drivers.md).
+
 Supported strategy values:
 
 - `branchfs` (default, aliases: `sqlite`, `sqlite-cow`): current production
