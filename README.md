@@ -10,19 +10,22 @@ directories.
 
 - `forkpress init` creates the local site store using the default `branchfs`
   strategy.
-- `forkpress init --strategy zfs` records an experimental ZFS strategy choice
-  for a new work directory. The ZFS HTTP/Git backend is not wired yet.
+- `forkpress init --strategy zfs` creates a no-SQL-overlay branch backend under
+  `.forkpress/zfs/branches`.
 - `forkpress server start` starts the preview server in the background.
 - `forkpress server list` shows running site servers.
 - `forkpress server stop` stops the current site's server.
 - `forkpress logs --file wp` shows WordPress debug output and fatal errors.
 - `http://wp.localhost:18080/` serves `main`.
 - `http://agent-1.wp.localhost:18080/` serves branch `agent-1`.
-- `forkpress clone` clones the site files from `http://wp.localhost:18080/site.git`.
-- `forkpress agents` creates 10 branches and 10 Git worktrees by default.
-- `forkpress commit` stages, commits, and pushes a worktree so it is previewable.
-- `database.sql` appears in every branch checkout as a read-only snapshot of that
-  branch's WordPress tables for model context.
+- With `branchfs`, `forkpress clone` clones the site files from
+  `http://wp.localhost:18080/site.git`.
+- With `branchfs`, `forkpress agents` creates 10 branches and 10 Git worktrees
+  by default.
+- With `branchfs`, `forkpress commit` stages, commits, and pushes a worktree so
+  it is previewable.
+- With `branchfs`, `database.sql` appears in every branch checkout as a
+  read-only snapshot of that branch's WordPress tables for model context.
 
 No FUSE, no Docker, no external daemon sidecars, no system PHP. The release
 artifact is one `forkpress` binary per target. Git is still used as the local
@@ -59,10 +62,21 @@ forkpress init --admin-password admin
 forkpress server start
 ```
 
-The first server start imports WordPress into `.forkpress/site.fp`, writes the
-`.forkpress/site.toml` strategy manifest if it does not exist yet, installs the
-SQLite database drop-in, creates the WordPress admin user, and starts the local
-server.
+For the default `branchfs` strategy, the first server start imports WordPress
+into `.forkpress/site.fp`, writes the `.forkpress/site.toml` strategy manifest
+if it does not exist yet, installs the SQLite database drop-in, creates the
+WordPress admin user, and starts the local server.
+
+To try the ZFS strategy:
+
+```bash
+forkpress init --strategy zfs --admin-password admin
+forkpress server start
+forkpress branch create agent-1
+```
+
+That stores branch files and each branch's SQLite database as ordinary files
+under `.forkpress/zfs/branches/<branch>`. It does not use SQL overlays.
 
 List running site servers:
 
@@ -212,12 +226,50 @@ Supported strategy values:
 - `branchfs` (default, aliases: `sqlite`, `sqlite-cow`): current production
   strategy. Files live in BranchFS tables, and WordPress database branches use
   SQLite COW views, overlays, tombstones, and triggers.
-- `zfs`: experimental strategy marker. `forkpress init --strategy zfs` records
-  the strategy and writes `.forkpress/zfs/README.md`, but HTTP serving, branch
-  operations, and Git protocol integration intentionally refuse for now instead
-  of pretending to be ZFS.
+- `zfs`: experimental no-SQL-overlay strategy. Branches are materialized as
+  ordinary WordPress directories under `.forkpress/zfs/branches/<branch>`.
+  Each branch has its own SQLite database file at
+  `wp-content/database/.ht.sqlite`. Branch creation clones the source branch
+  with filesystem copy-on-write primitives when available and falls back to a
+  regular copy. HTTP serving and local branch creation are wired; Git smart
+  HTTP for this strategy is still pending.
 
-### ZFS Shipping Plan
+### ZFS Strategy And Shipping Plan
+
+The ZFS strategy is currently split into two layers:
+
+- Working runtime layer: materialized branch directories in
+  `.forkpress/zfs/branches`. WordPress runs against normal files, so post
+  editor loads, uploads, plugin pages, and SQLite writes do not need BranchFS
+  stream wrappers or table-prefix overlays.
+- Pending storage engine layer: replace the current filesystem clone/copy
+  operation with an embedded OpenZFS pool engine while keeping the same
+  materialized-directory HTTP boundary.
+
+Current runtime flow:
+
+```mermaid
+flowchart LR
+    cli[forkpress CLI]
+    branches[.forkpress/zfs/branches]
+    main[main/<br/>WordPress + wp-content/database/.ht.sqlite]
+    feature[feature/<br/>WordPress + wp-content/database/.ht.sqlite]
+    router[runtime/router_zfs.php]
+    php[Bundled PHP + WordPress]
+
+    cli --> branches
+    branches --> main
+    branches --> feature
+    cli -- branch create --> feature
+    router --> main
+    router --> feature
+    php <--> router
+```
+
+The important property is that a branch write changes only that branch's
+ordinary files. A post save on `feature.wp.localhost` writes to
+`.forkpress/zfs/branches/feature/wp-content/database/.ht.sqlite`; it does not
+write to `main` and it does not pass through SQL COW views or overlay tables.
 
 ForkPress can ship ZFS without a system ZFS install by embedding a
 ForkPress-specific OpenZFS engine compiled to WebAssembly/WASI:
@@ -241,7 +293,7 @@ directly because it is Emscripten JS plus a threaded Wasm module that expects a
 browser or Node worker runtime. ForkPress should instead build a headless
 WASI module with a small exported C ABI.
 
-The intended ZFS strategy is different from BranchFS:
+The target OpenZFS-backed strategy is different from BranchFS:
 
 - one ZFS dataset per ForkPress branch
 - branch creation = snapshot parent + clone snapshot
@@ -253,15 +305,15 @@ The intended ZFS strategy is different from BranchFS:
 - Git push writes file changes into the target ZFS dataset and snapshots the
   result
 
-Because the ZFS pool is inside a normal file and there is no FUSE/kernel mount,
-PHP cannot directly access dataset files. The HTTP backend should therefore use
-materialized branch working directories as caches:
+Because the future ZFS pool is inside a normal file and there is no FUSE/kernel
+mount, PHP cannot directly access dataset files. The HTTP backend therefore
+keeps the materialized branch-directory boundary:
 
 ```mermaid
 flowchart LR
     pool[(.forkpress/zfs/pool.img<br/>OpenZFS pool)]
     engine[zfsengine.wasm<br/>WASI module]
-    cache[.forkpress/zfs/worktrees/feature<br/>materialized cache]
+    cache[.forkpress/zfs/branches/feature<br/>materialized branch]
     php[Bundled PHP + WordPress]
     git[Git endpoint]
 
@@ -273,10 +325,11 @@ flowchart LR
     git <--> engine
 ```
 
-For a request, ForkPress exports the requested branch dataset into its cache,
-runs WordPress against ordinary files and an ordinary SQLite database file, then
-imports changed files and the database file back into the branch dataset under
-a branch lock. Git uses the same engine path, not BranchFS tables.
+With the embedded OpenZFS engine in place, ForkPress will export the requested
+branch dataset into the materialized branch directory, run WordPress against
+ordinary files and an ordinary SQLite database file, then import changed files
+and the database file back into the dataset under a branch lock. Git will use
+the same engine path, not BranchFS tables.
 
 ### Building Blocks
 
@@ -504,7 +557,12 @@ parent rows with those branch-local rows.
   site.fp                         # branchfs strategy durable site store
   runtime/                        # unpacked embedded PHP, scripts, WP source
   wproot/                         # PHP server document root
-  zfs/                            # experimental ZFS strategy notes/state
+  zfs/
+    branches.txt                  # branch list for the admin-bar switcher
+    branches/
+      main/                       # zfs strategy main branch WordPress tree
+      feature/                    # zfs strategy cloned branch WordPress tree
+        wp-content/database/.ht.sqlite
   logs/
     wp-debug.log                  # WordPress fatal/errors
     php-errors.log                # PHP error_log target
@@ -520,6 +578,10 @@ BranchFS store. On runtime upgrades, ForkPress refreshes those managed files so
 existing `.fp` sites use the SQLite adapter bundled with the current binary.
 
 ## Work On One Branch
+
+This Git checkout workflow currently applies to the default `branchfs` strategy.
+For `zfs` strategy sites, use browser/admin branch previews and
+`forkpress branch create` while Git smart HTTP is being wired to the ZFS engine.
 
 From the same project directory:
 
@@ -611,11 +673,11 @@ forkpress agents \
 - `forkpress init --admin-password admin` creates `.forkpress/site.toml`,
   `.forkpress/site.fp`, and a Git push user named `admin` using the default
   `branchfs` strategy.
-- `forkpress init --strategy zfs` records an experimental ZFS strategy for a
-  new work directory. Commands that need HTTP, Git, or branch operations will
-  refuse until the ZFS backend is implemented.
+- `forkpress init --strategy zfs --admin-password admin` creates a no-SQL-overlay
+  ZFS-strategy site under `.forkpress/zfs/branches`.
 - `forkpress server start` imports and boots WordPress if needed, then serves
-  HTTP and Git from `.forkpress/site.fp` in the background for `branchfs` sites.
+  HTTP from the initialized strategy. For `branchfs`, Git smart HTTP is served
+  from `.forkpress/site.fp`; for `zfs`, Git smart HTTP is not wired yet.
 - `forkpress start --background` is the equivalent lower-level command.
 - `forkpress server list` shows running ForkPress site servers.
 - `forkpress server stop [--work-dir .forkpress]` stops one site server;

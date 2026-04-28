@@ -5,7 +5,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -502,6 +502,8 @@ struct Layout {
     site_manifest: PathBuf,
     site_fp: PathBuf,
     zfs_dir: PathBuf,
+    zfs_branches_dir: PathBuf,
+    zfs_branch_list: PathBuf,
     wp_root: PathBuf,
     debug_log: PathBuf,
     php_error_log: PathBuf,
@@ -667,10 +669,14 @@ fn init_branchfs_site(args: InitArgs, layout: Layout, runtime: PortableRuntime) 
 }
 
 fn init_zfs_site(args: InitArgs, layout: Layout) -> Result<i32> {
-    fs::create_dir_all(&layout.zfs_dir)
-        .with_context(|| format!("failed to create {}", layout.zfs_dir.display()))?;
+    prepare_runtime(&layout)?;
+    let runtime = PortableRuntime::from_layout(&layout);
+    fs::create_dir_all(&layout.zfs_branches_dir)
+        .with_context(|| format!("failed to create {}", layout.zfs_branches_dir.display()))?;
+    ensure_zfs_main_branch(&layout, &runtime, &args)?;
     write_site_manifest(&layout, SiteManifest::new(StorageStrategy::Zfs))?;
     write_zfs_experiment_notes(&layout)?;
+    write_zfs_branch_list(&layout)?;
 
     println!(
         "forkpress: zfs strategy initialised in {}",
@@ -678,9 +684,7 @@ fn init_zfs_site(args: InitArgs, layout: Layout) -> Result<i32> {
     );
     println!("  title:     {}", args.site_title);
     println!("  root host: {}", args.root_host);
-    println!(
-        "  status:    experimental strategy selected; HTTP/Git backend wiring is not implemented yet"
-    );
+    println!("  status:    ready; branches are materialized under .forkpress/zfs/branches");
     Ok(0)
 }
 
@@ -966,6 +970,16 @@ mod storage_strategy_tests {
         let parsed = SiteManifest::parse(&rendered).unwrap();
         assert_eq!(parsed.strategy, StorageStrategy::Zfs);
     }
+
+    #[test]
+    fn zfs_branch_names_are_dns_label_safe() {
+        assert!(validate_branch_name("feature-1").is_ok());
+        assert!(validate_branch_name("agent_2").is_ok());
+        assert!(validate_branch_name("").is_err());
+        assert!(validate_branch_name("has.dot").is_err());
+        assert!(validate_branch_name("../main").is_err());
+        assert!(validate_branch_name(&"a".repeat(64)).is_err());
+    }
 }
 
 fn start_command(args: StartArgs) -> Result<i32> {
@@ -975,18 +989,22 @@ fn start_command(args: StartArgs) -> Result<i32> {
 
     let layout = Layout::new(args.shared.work_dir.clone())?;
     let strategy = initialized_storage_strategy(&layout)?.unwrap_or(StorageStrategy::Branchfs);
-    if strategy != StorageStrategy::Branchfs {
-        bail_strategy_unsupported("server start", strategy)?;
-    }
     prepare_runtime(&layout)?;
     ensure_ports_available(&args)?;
 
     let runtime = PortableRuntime::from_layout(&layout);
 
-    ensure_bootstrapped(&layout, &runtime, &args)?;
-
     let workers = args.workers.unwrap_or_else(default_worker_count);
-    let mut php = start_php_server(&layout, &runtime, &args, workers)?;
+    let mut php = match strategy {
+        StorageStrategy::Branchfs => {
+            ensure_bootstrapped(&layout, &runtime, &args)?;
+            start_php_server(&layout, &runtime, &args, workers)?
+        }
+        StorageStrategy::Zfs => {
+            ensure_zfs_bootstrapped(&layout, &runtime, &args)?;
+            start_zfs_php_server(&layout, &runtime, &args, workers)?
+        }
+    };
     let _registration =
         register_running_server(&layout, &args, std::process::id(), Some(php.id()))?;
 
@@ -1000,11 +1018,16 @@ fn start_command(args: StartArgs) -> Result<i32> {
         "Branch site: http://<branch>.{}:{}/",
         args.root_host, args.port
     );
-    println!(
-        "Git remote: http://{}:{}/site.git",
-        args.root_host, args.port
-    );
-    println!("DB access:  database.sql in each git branch checkout (read-only snapshot)");
+    if strategy == StorageStrategy::Branchfs {
+        println!(
+            "Git remote: http://{}:{}/site.git",
+            args.root_host, args.port
+        );
+        println!("DB access:  database.sql in each git branch checkout (read-only snapshot)");
+    } else {
+        println!("Git remote: not available for zfs strategy yet");
+        println!("DB access:  wp-content/database/.ht.sqlite inside each materialized branch");
+    }
     println!(
         "Logs:       forkpress logs --work-dir {} --file wp",
         shell_quote_path(&layout.work_dir)
@@ -1081,10 +1104,6 @@ fn start_command(args: StartArgs) -> Result<i32> {
 fn start_background_command(args: StartArgs) -> Result<i32> {
     let layout = Layout::new(args.shared.work_dir.clone())?;
     fs::create_dir_all(&layout.logs_dir)?;
-    let strategy = initialized_storage_strategy(&layout)?.unwrap_or(StorageStrategy::Branchfs);
-    if strategy != StorageStrategy::Branchfs {
-        bail_strategy_unsupported("server start", strategy)?;
-    }
     ensure_ports_available(&args)?;
 
     if let Some(record) = running_record_for_work_dir(&layout.work_dir)? {
@@ -1653,9 +1672,17 @@ fn git_command(args: GitPassthrough) -> Result<i32> {
         let create_args = git_branch_create_args(&args.args[3..])?;
         create_args.auth.validate()?;
         let layout = Layout::new(args.shared.work_dir.clone())?;
-        ensure_branchfs_strategy(&layout, "git branch create")?;
+        let strategy = require_initialized_strategy(&layout, "git branch create")?;
         prepare_runtime(&layout)?;
         let runtime = PortableRuntime::from_layout(&layout);
+        if strategy == StorageStrategy::Zfs {
+            if create_args.auth.user.is_some() {
+                bail!("zfs local branch creation does not use --user/--password");
+            }
+            create_zfs_branch(&layout, &runtime, &args.shared, branch, &create_args.from)?;
+            println!("forkpress: branch {branch} ready");
+            return Ok(0);
+        }
         if !layout.site_fp.exists() || !layout.bootstrap_marker.exists() {
             bail!(
                 "no bootstrapped site found in {}. Run `forkpress server start` first",
@@ -1965,9 +1992,13 @@ fn branch_command(args: BranchPassthrough) -> Result<i32> {
     }
 
     let layout = Layout::new(args.shared.work_dir.clone())?;
-    ensure_branchfs_strategy(&layout, "branch")?;
+    let strategy = require_initialized_strategy(&layout, "branch")?;
     prepare_runtime(&layout)?;
     let runtime = PortableRuntime::from_layout(&layout);
+
+    if strategy == StorageStrategy::Zfs {
+        return zfs_branch_command(args, layout, runtime);
+    }
 
     if !layout.site_fp.exists() || !layout.bootstrap_marker.exists() {
         bail!(
@@ -1995,6 +2026,43 @@ fn branch_command(args: BranchPassthrough) -> Result<i32> {
     write_filtered_output(&output.stdout, &output.stderr)?;
 
     Ok(output.status.code().unwrap_or(1))
+}
+
+fn zfs_branch_command(
+    args: BranchPassthrough,
+    layout: Layout,
+    runtime: PortableRuntime,
+) -> Result<i32> {
+    match args.args[0].as_str() {
+        "list" => {
+            for branch in zfs_branch_names(&layout)? {
+                println!("{branch}");
+            }
+            Ok(0)
+        }
+        "create" => {
+            let Some(branch) = args.args.get(1) else {
+                bail!("branch create requires a branch name");
+            };
+            let mut from = "main".to_string();
+            let mut index = 2;
+            while index < args.args.len() {
+                match args.args[index].as_str() {
+                    "--from" => {
+                        let Some(value) = args.args.get(index + 1) else {
+                            bail!("--from requires a branch name");
+                        };
+                        from = value.clone();
+                        index += 2;
+                    }
+                    other => bail!("unsupported argument for `forkpress branch create`: {other}"),
+                }
+            }
+            create_zfs_branch(&layout, &runtime, &args.shared, branch, &from)?;
+            Ok(0)
+        }
+        other => bail!("zfs branch subcommand is not implemented yet: {other}"),
+    }
 }
 
 fn branchctl_url_hint(layout: &Layout) -> Result<(String, String)> {
@@ -2098,6 +2166,8 @@ impl Layout {
             site_manifest: work_dir.join("site.toml"),
             site_fp: work_dir.join("site.fp"),
             zfs_dir: work_dir.join("zfs"),
+            zfs_branches_dir: work_dir.join("zfs/branches"),
+            zfs_branch_list: work_dir.join("zfs/branches.txt"),
             wp_root: work_dir.join("wproot"),
             debug_log: work_dir.join("logs/wp-debug.log"),
             php_error_log: work_dir.join("logs/php-errors.log"),
@@ -2190,9 +2260,17 @@ fn write_zfs_experiment_notes(layout: &Layout) -> Result<()> {
 
 This site was initialized with `strategy = \"zfs\"`.
 
-The current binary records the strategy choice and refuses BranchFS-specific
-commands for this work directory. The concrete ZFS backend is intentionally not
-faked here.
+This backend uses materialized branch directories under `.forkpress/zfs/branches`.
+Each branch contains an ordinary WordPress tree and its own ordinary SQLite
+database file at `wp-content/database/.ht.sqlite`. WordPress reads and writes
+those files directly, so this strategy does not use BranchFS streams, SQL COW
+views, tombstones, triggers, or per-branch table prefixes.
+
+Branch creation currently clones the source branch directory with filesystem
+copy-on-write primitives when the host supports them (Linux `FICLONE`, macOS
+`clonefile`) and falls back to a regular copy. That gives the HTTP/runtime
+surface needed for the ZFS strategy while the embedded OpenZFS engine is wired
+in behind the same branch-directory boundary.
 
 The shipping path is an embedded OpenZFS WebAssembly/WASI engine:
 
@@ -2216,7 +2294,7 @@ The design target is:
 
 Because the pool lives inside a normal file and there is no mount layer, PHP
 will not read dataset contents directly. ForkPress should materialize a branch
-dataset into `.forkpress/zfs/worktrees/<branch>` for HTTP, run WordPress against
+dataset into `.forkpress/zfs/branches/<branch>` for HTTP, run WordPress against
 that ordinary directory, then import changed files and the SQLite database back
 into the dataset under a branch lock.
 ";
@@ -2339,6 +2417,251 @@ fn ensure_ports_available(args: &StartArgs) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn ensure_zfs_bootstrapped(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    args: &StartArgs,
+) -> Result<()> {
+    let init_args = InitArgs {
+        shared: args.shared.clone(),
+        strategy: StorageStrategy::Zfs,
+        site_title: args.site_title.clone(),
+        root_host: args.root_host.clone(),
+        admin_password: Some("admin".to_string()),
+    };
+    ensure_zfs_main_branch(layout, runtime, &init_args)?;
+    write_site_manifest_if_missing(layout, SiteManifest::new(StorageStrategy::Zfs))?;
+    write_zfs_branch_list(layout)?;
+    Ok(())
+}
+
+fn ensure_zfs_main_branch(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    args: &InitArgs,
+) -> Result<()> {
+    let main_root = zfs_branch_root(layout, "main");
+    if !main_root.join("wp-load.php").is_file() {
+        fs::create_dir_all(&layout.zfs_branches_dir)
+            .with_context(|| format!("failed to create {}", layout.zfs_branches_dir.display()))?;
+        if main_root.exists() {
+            fs::remove_dir_all(&main_root)
+                .with_context(|| format!("failed to reset {}", main_root.display()))?;
+        }
+        copy_tree_cow(&layout.runtime_dir.join("runtime/wp-src"), &main_root)?;
+    }
+
+    run_zfs_bootstrap_script(
+        layout,
+        runtime,
+        &args.shared,
+        &main_root,
+        &args.site_title,
+        args.admin_password.as_deref().unwrap_or("admin"),
+    )?;
+    Ok(())
+}
+
+fn run_zfs_bootstrap_script(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    branch_root: &Path,
+    site_title: &str,
+    admin_password: &str,
+) -> Result<()> {
+    run_php_script(
+        layout,
+        runtime,
+        shared,
+        "runtime/bootstrap_zfs_wp.php",
+        [
+            branch_root.as_os_str(),
+            OsStr::new(site_title),
+            layout
+                .runtime_dir
+                .join("vendor/sqlite-database-integration")
+                .as_os_str(),
+            layout
+                .runtime_dir
+                .join("wp-plugin/branchfs-wp.php")
+                .as_os_str(),
+            layout.debug_log.as_os_str(),
+            OsStr::new(admin_password),
+        ],
+    )
+}
+
+fn zfs_branch_root(layout: &Layout, branch: &str) -> PathBuf {
+    layout.zfs_branches_dir.join(branch)
+}
+
+fn validate_branch_name(branch: &str) -> Result<()> {
+    let valid = !branch.is_empty()
+        && branch.len() <= 63
+        && branch
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-');
+    if !valid {
+        bail!("invalid branch name: {branch}");
+    }
+    Ok(())
+}
+
+fn zfs_branch_names(layout: &Layout) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    let Ok(entries) = fs::read_dir(&layout.zfs_branches_dir) else {
+        return Ok(names);
+    };
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if validate_branch_name(&name).is_ok() {
+            names.push(name);
+        }
+    }
+    names.sort_by(|a, b| {
+        if a == "main" {
+            std::cmp::Ordering::Less
+        } else if b == "main" {
+            std::cmp::Ordering::Greater
+        } else {
+            a.cmp(b)
+        }
+    });
+    Ok(names)
+}
+
+fn write_zfs_branch_list(layout: &Layout) -> Result<()> {
+    fs::create_dir_all(&layout.zfs_dir)
+        .with_context(|| format!("failed to create {}", layout.zfs_dir.display()))?;
+    let mut out = String::new();
+    for name in zfs_branch_names(layout)? {
+        out.push_str(&name);
+        out.push('\n');
+    }
+    fs::write(&layout.zfs_branch_list, out)
+        .with_context(|| format!("failed to write {}", layout.zfs_branch_list.display()))
+}
+
+fn create_zfs_branch(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    branch: &str,
+    from: &str,
+) -> Result<()> {
+    validate_branch_name(branch)?;
+    validate_branch_name(from)?;
+    let source = zfs_branch_root(layout, from);
+    if !source.is_dir() {
+        bail!("source branch does not exist: {from}");
+    }
+    let dest = zfs_branch_root(layout, branch);
+    if dest.exists() {
+        bail!("branch already exists: {branch}");
+    }
+    copy_tree_cow(&source, &dest)?;
+    run_zfs_bootstrap_script(layout, runtime, shared, &dest, "ForkPress", "admin")?;
+    write_zfs_branch_list(layout)?;
+    let (root_host, port) = branchctl_url_hint(layout)
+        .unwrap_or_else(|_| ("wp.localhost".to_string(), "18080".to_string()));
+    println!("forkpress: zfs cloned '{from}' -> '{branch}'");
+    println!(
+        "Visit http://{}.{root_host}:{port}/ to see this branch.",
+        branch
+    );
+    Ok(())
+}
+
+fn copy_tree_cow(source: &Path, dest: &Path) -> Result<()> {
+    if !source.is_dir() {
+        bail!("source directory not found: {}", source.display());
+    }
+    if dest.exists() {
+        bail!("destination already exists: {}", dest.display());
+    }
+    fs::create_dir_all(dest).with_context(|| format!("failed to create {}", dest.display()))?;
+
+    let mut stack = vec![source.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let rel = dir
+            .strip_prefix(source)
+            .with_context(|| format!("{} is not under {}", dir.display(), source.display()))?;
+        let out_dir = dest.join(rel);
+        fs::create_dir_all(&out_dir)
+            .with_context(|| format!("failed to create {}", out_dir.display()))?;
+
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            let rel_path = path.strip_prefix(source)?;
+            let out_path = dest.join(rel_path);
+            if file_type.is_dir() {
+                stack.push(path);
+            } else if file_type.is_file() {
+                clone_or_copy_file(&path, &out_path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn clone_or_copy_file(source: &Path, dest: &Path) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if try_clone_file(source, dest).is_err() {
+        fs::copy(source, dest).with_context(|| {
+            format!("failed to copy {} to {}", source.display(), dest.display())
+        })?;
+    }
+    let permissions = fs::metadata(source)?.permissions();
+    let _ = fs::set_permissions(dest, permissions);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn try_clone_file(source: &Path, dest: &Path) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    let src = File::open(source)?;
+    let dst = OpenOptions::new().write(true).create_new(true).open(dest)?;
+    let rc = unsafe { libc::ioctl(dst.as_raw_fd(), 0x4004_9409 as _, src.as_raw_fd()) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        let _ = fs::remove_file(dest);
+        Err(std::io::Error::last_os_error()).context("FICLONE failed")
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn try_clone_file(source: &Path, dest: &Path) -> Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    unsafe extern "C" {
+        fn clonefile(src: *const libc::c_char, dst: *const libc::c_char, flags: u32)
+        -> libc::c_int;
+    }
+    let src = CString::new(source.as_os_str().as_bytes())?;
+    let dst = CString::new(dest.as_os_str().as_bytes())?;
+    let rc = unsafe { clonefile(src.as_ptr(), dst.as_ptr(), 0) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error()).context("clonefile failed")
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn try_clone_file(_source: &Path, _dest: &Path) -> Result<()> {
+    bail!("platform file clone unsupported")
 }
 
 fn ensure_bootstrapped(layout: &Layout, runtime: &PortableRuntime, args: &StartArgs) -> Result<()> {
@@ -2508,6 +2831,65 @@ fn start_php_server(
     // single-worker debug path is byte-identical to the pre-workers behaviour.
     // PHP_CLI_SERVER_WORKERS is a Linux/macOS-only feature — on Windows the
     // built-in server simply ignores the variable, which is fine.
+    if workers > 1 {
+        command.env("PHP_CLI_SERVER_WORKERS", workers.to_string());
+    }
+
+    let child = command
+        .spawn()
+        .context("failed to start bundled php server")?;
+
+    let mut guard = ChildGuard {
+        name: "php server",
+        child,
+    };
+
+    wait_for_tcp(&args.host, args.port, Duration::from_secs(30))
+        .with_context(|| format!("php server did not open {}:{}", args.host, args.port))?;
+
+    if let Some(status) = guard.try_wait()? {
+        bail!(
+            "php server exited early with status {status}. Check {}",
+            layout.php_server_log.display()
+        );
+    }
+
+    Ok(guard)
+}
+
+fn start_zfs_php_server(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    args: &StartArgs,
+    workers: usize,
+) -> Result<ChildGuard> {
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&layout.php_server_log)?;
+    let log_err = log.try_clone()?;
+
+    let mut command = php_base_command(layout, runtime, &args.shared);
+    command
+        .arg("-d")
+        .arg("log_errors=On")
+        .arg("-d")
+        .arg(format!("error_log={}", layout.php_error_log.display()))
+        .arg("-d")
+        .arg("post_max_size=100M")
+        .arg("-d")
+        .arg("upload_max_filesize=100M")
+        .arg("-S")
+        .arg(format!("{}:{}", args.host, args.port))
+        .arg("-t")
+        .arg(&layout.zfs_branches_dir)
+        .arg(layout.runtime_dir.join("runtime/router_zfs.php"))
+        .env("FORKPRESS_ZFS_BRANCHES_DIR", &layout.zfs_branches_dir)
+        .env("FORKPRESS_BRANCH_LIST", &layout.zfs_branch_list)
+        .env("FORKPRESS_ROOT_HOST", &args.root_host)
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err));
+
     if workers > 1 {
         command.env("PHP_CLI_SERVER_WORKERS", workers.to_string());
     }

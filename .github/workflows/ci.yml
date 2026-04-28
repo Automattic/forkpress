@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  pull_request:
+    paths:
+      - 'forkpress/**'
+      - 'ext/**'
+      - 'runtime/**'
+      - 'scripts/**'
+      - 'sql/**'
+      - 'tests/**'
+      - 'wp-plugin/**'
+      - 'vendor/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/ci.yml'
+  push:
+    branches: ['trunk']
+
+jobs:
+  linux-zfs-e2e:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang curl git pkg-config unzip \
+            php-cli composer re2c bison nodejs
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Rust unit tests
+        run: FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress
+
+      - name: Build dist bundle
+        run: scripts/build-dist.sh
+        env:
+          FORKPRESS_TARGET: x86_64-unknown-linux-musl
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Build forkpress
+        run: cargo build --release --target x86_64-unknown-linux-musl -p forkpress
+
+      - name: ZFS strategy e2e
+        run: tests/test_zfs_strategy_e2e.sh target/x86_64-unknown-linux-musl/release/forkpress
