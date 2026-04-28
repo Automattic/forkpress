@@ -182,7 +182,7 @@ ForkPress gives different tools different views of the same local site:
 flowchart TB
     subgraph Binary["forkpress static binary"]
         rust[Rust CLI<br/>forkpress/src/main.rs]
-        bundle[Embedded runtime tarball]
+        bundle[Runtime payload<br/>embedded into the binary]
     end
 
     subgraph Runtime[".forkpress/runtime"]
@@ -218,6 +218,10 @@ The important pieces are:
 
 - `forkpress`: Rust wrapper that unpacks the embedded runtime, starts/stops the
   local PHP server, runs local control scripts, and wraps common Git workflows.
+- Runtime payload: build-time archive embedded into the `forkpress` executable.
+  Cargo builds it from the bundled PHP binary, PHP scripts, WordPress archive,
+  SQLite integration plugin, SQL files, and mu-plugin. On first use, ForkPress
+  unpacks it into `.forkpress/runtime`.
 - `branchfs`: native PHP extension compiled into the bundled PHP binary. It
   provides the `branchfs://<branch>/path` stream wrapper, file operation
   interception for WordPress-style absolute paths, and SQLite-backed file store
