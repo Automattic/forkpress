@@ -1903,6 +1903,35 @@ fn ensure_bootstrapped(layout: &Layout, runtime: &PortableRuntime, args: &StartA
         File::create(&layout.bootstrap_marker)?;
     }
 
+    run_branchctl_migrations_quiet(layout, runtime, &args.shared)?;
+
+    Ok(())
+}
+
+fn run_branchctl_migrations_quiet(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+) -> Result<()> {
+    let mut command = php_base_command(layout, runtime, shared);
+    command
+        .arg(layout.runtime_dir.join("scripts/branchctl.php"))
+        .arg("list")
+        .env("BRANCHFS_DB", &layout.site_fp)
+        .env("BRANCHFS_SQLITE_WP_DB", &layout.site_fp)
+        .env("FORKPRESS_LOCAL_CTL", "1");
+
+    let output = command
+        .output()
+        .context("failed to run branchctl migration check")?;
+    if !output.status.success() {
+        write_filtered_output(&output.stdout, &output.stderr)?;
+        bail!(
+            "branchctl migration check exited with status {}",
+            output.status
+        );
+    }
+
     Ok(())
 }
 

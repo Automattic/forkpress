@@ -511,6 +511,18 @@ SQL);
             cow_install_parent_triggers($db, $p);
         }
     }
+
+    /* v0.1.4 created COW views from WordPress SQLite tables whose DDL used
+     * backticks, but failed to create the corresponding __overlay tables.
+     * Repair those stores opportunistically whenever branchctl opens them.
+     */
+    if (function_exists('cow_repair_missing_overlays')) {
+        try {
+            cow_repair_missing_overlays($db);
+        } catch (\Throwable $e) {
+            trigger_error('COW overlay repair failed: ' . $e->getMessage(), E_USER_WARNING);
+        }
+    }
 }
 
 // TODO3 #12 `audit_log_write` lives in audit_helpers.php — first slice of

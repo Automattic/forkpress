@@ -28,6 +28,74 @@
 // is touched. For ~22 typical WP tables, branch create is milliseconds
 // regardless of row count.
 
+/** Quote a SQLite identifier with double quotes. */
+function cow_quote_identifier(string $name): string {
+    return '"' . str_replace('"', '""', $name) . '"';
+}
+
+/** Regex fragment matching the common SQLite/MySQL identifier spellings. */
+function cow_identifier_regex(string $name): string {
+    $quoted = preg_quote($name, '/');
+    return '(?:`' . $quoted . '`|"' . $quoted . '"|\[' . $quoted . '\]|' . $quoted . ')';
+}
+
+/** Rewrite a CREATE TABLE statement to target a new table name.
+ *
+ *  The WordPress SQLite integration emits backtick-quoted identifiers
+ *  (`b1_wp_options`). Older COW creation only matched bare/double-quoted
+ *  names, so overlay creation silently retried the parent table DDL and
+ *  left branch views pointing at missing __overlay tables.
+ */
+function cow_rewrite_create_table_name(string $ddl, string $old_name, string $new_name): string {
+    $pattern = '/^(CREATE\s+TABLE\s+)(?:IF\s+NOT\s+EXISTS\s+)?'
+             . cow_identifier_regex($old_name)
+             . '(\s*\()/is';
+    $count = 0;
+    $rewritten = preg_replace_callback(
+        $pattern,
+        fn($m) => $m[1] . 'IF NOT EXISTS ' . cow_quote_identifier($new_name) . $m[2],
+        $ddl,
+        1,
+        $count
+    );
+    if ($rewritten === null || $count !== 1) {
+        throw new RuntimeException("could not rewrite CREATE TABLE DDL for $old_name");
+    }
+    return $rewritten;
+}
+
+/** Rewrite a CREATE INDEX statement to target a new index name and table. */
+function cow_rewrite_create_index(string $ddl, string $old_index, string $new_index,
+                                  string $old_table, string $new_table): string {
+    $index_pattern = '/^(CREATE\s+(?:UNIQUE\s+)?INDEX\s+)(?:IF\s+NOT\s+EXISTS\s+)?'
+                   . cow_identifier_regex($old_index) . '/is';
+    $count = 0;
+    $rewritten = preg_replace_callback(
+        $index_pattern,
+        fn($m) => $m[1] . 'IF NOT EXISTS ' . cow_quote_identifier($new_index),
+        $ddl,
+        1,
+        $count
+    );
+    if ($rewritten === null || $count !== 1) {
+        throw new RuntimeException("could not rewrite CREATE INDEX DDL for $old_index");
+    }
+
+    $table_pattern = '/(\bON\s+)' . cow_identifier_regex($old_table) . '(\s*\()/is';
+    $count = 0;
+    $rewritten = preg_replace_callback(
+        $table_pattern,
+        fn($m) => $m[1] . cow_quote_identifier($new_table) . $m[2],
+        $rewritten,
+        1,
+        $count
+    );
+    if ($rewritten === null || $count !== 1) {
+        throw new RuntimeException("could not retarget CREATE INDEX DDL for $old_index");
+    }
+    return $rewritten;
+}
+
 /** Return ordered PRIMARY KEY column names for a table or view.
  *
  *  `PRAGMA table_info()` on a VIEW returns rows with pk=0 for every column —
@@ -531,17 +599,23 @@ function cow_create_branch_table(SQLite3 $db, int $branch_id, int $parent_id,
 
     // Build overlay table.
     if ($parent_ddl !== '') {
-        $overlay_ddl = preg_replace(
-            '/^(CREATE\s+TABLE\s+)(?:IF\s+NOT\s+EXISTS\s+)?"?'
-            . preg_quote($ddl_source, '/') . '"?(\s*\()/is',
-            '$1IF NOT EXISTS "' . $overlay_name . '"$2',
-            $parent_ddl, 1
-        );
-        $db->exec($overlay_ddl);
+        $overlay_ddl = cow_rewrite_create_table_name($parent_ddl, $ddl_source, $overlay_name);
+        if (!$db->exec($overlay_ddl)) {
+            throw new RuntimeException(
+                "failed to create overlay table $overlay_name: " . $db->lastErrorMsg()
+            );
+        }
     } else {
         // Last-ditch fallback: copy via SELECT (loses constraints).
-        $db->exec("CREATE TABLE IF NOT EXISTS \"$overlay_name\" AS "
-                . "SELECT * FROM \"$ddl_source\" WHERE 0");
+        if (!$db->exec("CREATE TABLE IF NOT EXISTS " . cow_quote_identifier($overlay_name) . " AS "
+                . "SELECT * FROM " . cow_quote_identifier($ddl_source) . " WHERE 0")) {
+            throw new RuntimeException(
+                "failed to create fallback overlay table $overlay_name: " . $db->lastErrorMsg()
+            );
+        }
+    }
+    if (!cow_is_table($db, $overlay_name)) {
+        throw new RuntimeException("overlay table $overlay_name was not created");
     }
 
     // Tombstone table: just the PK columns. Preserve types where we can.
@@ -603,18 +677,18 @@ function cow_create_branch_table(SQLite3 $db, int $branch_id, int $parent_id,
             // to avoid collision with the parent's identically-named index.
             $new_idx_name = $branch_prefix . $old_idx_name;
         }
-        $idx_sql = preg_replace(
-            '/^(CREATE\s+(?:UNIQUE\s+)?INDEX\s+)(?:IF\s+NOT\s+EXISTS\s+)?"?'
-            . preg_quote($old_idx_name, '/') . '"?/i',
-            '$1IF NOT EXISTS "' . $new_idx_name . '"',
-            $irow['sql'], 1
+        $idx_sql = cow_rewrite_create_index(
+            $irow['sql'],
+            $old_idx_name,
+            $new_idx_name,
+            $ddl_source,
+            $overlay_name
         );
-        $idx_sql = preg_replace(
-            '/\bON\s+"?' . preg_quote($ddl_source, '/') . '"?\s*\(/i',
-            'ON "' . $overlay_name . '" (',
-            $idx_sql, 1
-        );
-        @$db->exec($idx_sql);
+        if (!$db->exec($idx_sql)) {
+            throw new RuntimeException(
+                "failed to create overlay index $new_idx_name: " . $db->lastErrorMsg()
+            );
+        }
     }
 
     // TODO3 #7 + hostile-review #17: Reserve a disjoint AUTOINCREMENT
@@ -641,15 +715,27 @@ function cow_create_branch_table(SQLite3 $db, int $branch_id, int $parent_id,
     }
     if ($branch_id > 1) {
         $branch_seq = ($branch_id - 1) * COW_AUTOINCR_STRIDE;
-        $db->exec("INSERT OR REPLACE INTO sqlite_sequence (name, seq) "
-                . "VALUES ('" . SQLite3::escapeString($overlay_name) . "', $branch_seq)");
+        if (!$db->exec("INSERT OR REPLACE INTO sqlite_sequence (name, seq) "
+                . "VALUES ('" . SQLite3::escapeString($overlay_name) . "', $branch_seq)"
+        )) {
+            throw new RuntimeException(
+                "failed to seed sqlite_sequence for $overlay_name: " . $db->lastErrorMsg()
+            );
+        }
     }
 
     // Create view + triggers.
     $view_sql_body = cow_resolve_view_sql(
         $overlay_name, $tomb_name, $parent_table, $pk_cols, $columns
     );
-    $db->exec("CREATE VIEW IF NOT EXISTS \"$logical_name\" AS $view_sql_body");
+    if (!$db->exec("CREATE VIEW IF NOT EXISTS " . cow_quote_identifier($logical_name) . " AS $view_sql_body")) {
+        throw new RuntimeException(
+            "failed to create COW view $logical_name: " . $db->lastErrorMsg()
+        );
+    }
+    if (!cow_is_view($db, $logical_name)) {
+        throw new RuntimeException("COW logical object $logical_name is not a view");
+    }
     // Capture per-column defaults from the overlay so the trigger can
     // COALESCE(NEW.col, default) when the user omits a NOT NULL column.
     $defaults = [];
@@ -664,11 +750,18 @@ function cow_create_branch_table(SQLite3 $db, int $branch_id, int $parent_id,
     // Single-column UNIQUE constraints — used for cross-layer UNIQUE
     // RAISE guards in the INSTEAD OF triggers (TODO3 #10).
     $unique_cols = cow_single_col_unique_columns($db, $overlay_name);
+    foreach (['ins', 'upd', 'del'] as $kind) {
+        $db->exec('DROP TRIGGER IF EXISTS ' . cow_quote_identifier("{$logical_name}__cow_$kind"));
+    }
     foreach (cow_trigger_sql($logical_name, $overlay_name, $tomb_name,
                              $pk_cols, $columns, $defaults,
                              $branch_id, $parent_table, $parent_cols,
                              $unique_cols) as $trg) {
-        $db->exec($trg);
+        if (!$db->exec($trg)) {
+            throw new RuntimeException(
+                "failed to create COW trigger for $logical_name: " . $db->lastErrorMsg()
+            );
+        }
     }
 
     // Record the COW marker so merge / introspection can detect format.
@@ -706,12 +799,9 @@ function cow_create_branch_table(SQLite3 $db, int $branch_id, int $parent_id,
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='"
         . SQLite3::escapeString($ddl_source) . "'"
     );
-    $ancestor_ddl = preg_replace(
-        '/^(CREATE\s+TABLE\s+)(?:IF\s+NOT\s+EXISTS\s+)?"?'
-        . preg_quote($ddl_source, '/') . '"?/is',
-        '$1IF NOT EXISTS "' . $logical_name . '"',
-        $raw_ddl, 1
-    );
+    $ancestor_ddl = $raw_ddl !== ''
+        ? cow_rewrite_create_table_name($raw_ddl, $ddl_source, $logical_name)
+        : '';
     $idxs = [];
     $ix = $db->query(
         "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='"
@@ -744,6 +834,37 @@ function cow_create_branch_table(SQLite3 $db, int $branch_id, int $parent_id,
     $sch->bindValue(':d', $ancestor_ddl ?: $raw_ddl, SQLITE3_TEXT);
     $sch->bindValue(':i', json_encode($idxs, JSON_UNESCAPED_UNICODE), SQLITE3_TEXT);
     $sch->execute();
+}
+
+/** Repair COW branch views created without their overlay table.
+ *
+ *  This is intentionally narrow: it only repairs branches that already have
+ *  a COW marker and a missing __overlay table. The repaired branch keeps its
+ *  existing inherited view/tombstones and gets a correctly shaped overlay.
+ */
+function cow_repair_missing_overlays(SQLite3 $db): int {
+    $repaired = 0;
+    $r = $db->query(
+        "SELECT branch_id, parent_branch_id, table_suffix "
+      . "FROM db_cow_branches ORDER BY branch_id, table_suffix"
+    );
+    if (!$r) return 0;
+
+    while ($row = $r->fetchArray(SQLITE3_ASSOC)) {
+        $branch_id = (int)$row['branch_id'];
+        $parent_id = (int)$row['parent_branch_id'];
+        $suffix = (string)$row['table_suffix'];
+        if ($branch_id <= 1 || $parent_id <= 0 || $suffix === '') continue;
+
+        $logical = cow_logical_name($branch_id, $suffix);
+        $overlay = $logical . '__overlay';
+        if (cow_is_table($db, $overlay)) continue;
+
+        cow_create_branch_table($db, $branch_id, $parent_id, $suffix);
+        $repaired++;
+    }
+
+    return $repaired;
 }
 
 /** Recreate views (and triggers) for $table_suffix in every branch whose
@@ -1132,5 +1253,3 @@ function cow_migrate_legacy_branch(SQLite3 $db, int $branch_id): int {
     }
     return $migrated;
 }
-
-
