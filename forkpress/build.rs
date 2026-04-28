@@ -105,6 +105,10 @@ fn build_embedded_zfs(repo_root: &Path, target: &str) -> Result<()> {
         engine_dir.join("include/sys/sysmacros.h").display()
     );
     println!(
+        "cargo:rerun-if-changed={}",
+        engine_dir.join("include/sys/uio.h").display()
+    );
+    println!(
         "cargo:rerun-if-env-changed={}",
         target_env_key("CC", target)
     );

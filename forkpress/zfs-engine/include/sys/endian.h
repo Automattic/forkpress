@@ -16,6 +16,9 @@
 #define _BYTE_ORDER BYTE_ORDER
 #endif
 
+#undef htonll
+#undef ntohll
+
 #else
 #include_next <sys/endian.h>
 #endif

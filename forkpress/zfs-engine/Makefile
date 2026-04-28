@@ -66,8 +66,10 @@ DEFS_COMMON += \
     -Dtruncate64=truncate \
     -Dftruncate64=ftruncate \
     -Dloff_t=off_t \
+    -DEREMOTEIO=EIO \
     -DO_LARGEFILE=0 \
     -DO_DSYNC=0 \
+    -D__EMSCRIPTEN__=1 \
     -Dissetugid=forkpress_zfs_issetugid
 endif
 
