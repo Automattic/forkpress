@@ -78,6 +78,7 @@ DEFS_COMMON += \
     -DO_DSYNC=0 \
     -DO_DIRECT=0 \
     -D__EMSCRIPTEN__=1 \
+    -Dpthread_mutex_destroy=forkpress_zfs_pthread_mutex_destroy \
     -Dissetugid=forkpress_zfs_issetugid
 endif
 

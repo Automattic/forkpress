@@ -43,6 +43,21 @@
 #define FORKPRESS_ZFS_ROOT_ZAP_OBJ 1
 
 #if defined(__APPLE__)
+#ifdef pthread_mutex_destroy
+#undef pthread_mutex_destroy
+#endif
+
+static int forkpress_zfs_finalizing = 0;
+
+int
+forkpress_zfs_pthread_mutex_destroy(pthread_mutex_t *mutex)
+{
+    int err = pthread_mutex_destroy(mutex);
+    if (forkpress_zfs_finalizing && (err == EINVAL || err == EBUSY))
+        return (0);
+    return (err);
+}
+
 int
 fstat64_blk(int fd, struct stat64 *st)
 {
@@ -141,7 +156,13 @@ forkpress_zfs_init(void)
 int
 forkpress_zfs_fini(void)
 {
+#if defined(__APPLE__)
+    forkpress_zfs_finalizing = 1;
+#endif
     kernel_fini();
+#if defined(__APPLE__)
+    forkpress_zfs_finalizing = 0;
+#endif
     return (0);
 }
 
