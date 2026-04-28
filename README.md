@@ -20,8 +20,9 @@ agents can work in separate directories.
 - `database.sql` appears in every branch checkout as a read-only snapshot of that
   branch's WordPress tables for model context.
 
-No FUSE, no Docker, no daemon sidecars, no system PHP. The release artifact is
-one `forkpress` binary per target. Git is still used as the local worktree tool.
+No FUSE, no Docker, no external daemon sidecars, no system PHP. The release
+artifact is one `forkpress` binary per target. Git is still used as the local
+worktree tool.
 
 ## Install
 
@@ -130,51 +131,282 @@ If your resolver does not handle `*.localhost`, add host entries or run
 `forkpress server start --root-host wp.local` and route `wp.local` plus the
 branch subdomains to `127.0.0.1`.
 
-## How ForkPress Stores A Site
+## Architecture Overview
 
-ForkPress keeps the runtime files outside your worktrees and stores site state
-in `.forkpress/site.fp`.
+ForkPress has one durable artifact per site: `.forkpress/site.fp`. That file is
+a SQLite database containing the WordPress file tree, WordPress database tables,
+branch metadata, Git-facing file snapshots, users, and site config. The
+downloaded `forkpress` executable carries the PHP runtime, WordPress source,
+ForkPress PHP scripts, the WordPress SQLite integration plugin, and the native
+`branchfs` PHP extension.
+
+This overview uses the same order as most useful architecture docs: first the
+system context, then the building blocks, then the important runtime and storage
+flows. The goal is to make clear what owns state and what is only an interface.
+
+There is no Dolt server in the current architecture. There is also no MySQL
+daemon, FUSE mount, Samba share, Docker service, or long-lived helper process
+besides the optional background ForkPress server you start. WordPress still
+issues MySQL-shaped queries, but the bundled SQLite integration translates them
+to SQLite and stores the data in `.forkpress/site.fp`.
+
+### System Context
 
 ```mermaid
 flowchart LR
-    bin[forkpress binary] --> runtime[.forkpress/runtime<br/>embedded PHP, WordPress, scripts]
-    bin --> root[.forkpress/wproot<br/>server document root]
-    bin --> store[.forkpress/site.fp<br/>SQLite site store]
-    server[PHP server] --> router[runtime/router.php]
-    router --> main[wp.localhost<br/>main]
-    router --> branch["<branch>.wp.localhost<br/>branch preview"]
-    router --> store
-    clone[Git checkout] --> files[wordpress/<br/>editable files]
-    clone --> snapshot[database.sql<br/>read-only context snapshot]
-    files --> push[forkpress commit]
-    push --> store
+    user[Developer or agent] --> cli[forkpress CLI]
+    browser[Browser] --> http[Local HTTP server<br/>wp.localhost:18080]
+    git[Git client] --> smart[Git smart HTTP<br/>/site.git]
+
+    cli --> fp[(.forkpress/site.fp<br/>site store)]
+    http --> fp
+    smart --> fp
+
+    cli --> worktree[Git worktrees<br/>wordpress/ files]
+    git --> worktree
 ```
 
-Inside `site.fp`, files and database tables are branch-scoped.
+ForkPress gives different tools different views of the same local site:
+
+- The browser gets a normal WordPress site per branch:
+  `wp.localhost` is `main`, and `<branch>.wp.localhost` is that branch.
+- Git gets a temporary repository synthesized from `.forkpress/site.fp`.
+- Agents get editable worktrees containing `wordpress/` files plus a
+  read-only `database.sql` snapshot for context.
+- WordPress gets a PHP document root at `.forkpress/wproot`, but file reads and
+  writes are intercepted and resolved from the current branch in `site.fp`.
+
+### Building Blocks
 
 ```mermaid
 flowchart TB
-    subgraph Files
-        mainFiles[main file rows] --> branchRead[branch reads inherited files]
-        branchOverlay[branch file overlay/tombstones] --> branchTree[resolved branch tree]
-        branchRead --> branchTree
+    subgraph Binary["forkpress static binary"]
+        rust[Rust CLI<br/>forkpress/src/main.rs]
+        bundle[Embedded runtime tarball]
     end
 
-    subgraph Database
-        mainTable[b1_wp_posts table] --> cowView[b3_wp_posts COW view]
-        overlay[b3_wp_posts__overlay] --> cowView
-        tombstones[b3_wp_posts__tombstones] --> cowView
+    subgraph Runtime[".forkpress/runtime"]
+        php[Static PHP binary<br/>branchfs built in]
+        router[runtime/router.php]
+        ctl[scripts/branchctl.php<br/>merge/reset/gc/users]
+        gitserver[scripts/git_server/server.php]
+        sqlitewp[WordPress SQLite integration]
+        wp[WordPress source]
     end
 
-    mainSite[wp.localhost] --> mainFiles
-    mainSite --> mainTable
-    branchSite[feature.wp.localhost] --> branchTree
-    branchSite --> cowView
+    subgraph Store[".forkpress/site.fp"]
+        meta[branches, users, site_config]
+        files[files, blobs, blob_chunks]
+        fscommits[fs_commits, fs_commit_files]
+        tables[bN_wp_* tables/views]
+    end
+
+    rust --> bundle
+    bundle --> Runtime
+    rust --> php
+    php --> router
+    php --> ctl
+    router --> sqlitewp
+    router --> gitserver
+    router --> wp
+    router --> Store
+    ctl --> Store
+    gitserver --> Store
 ```
 
-Changing a branch writes only that branch's file overlay and COW database
-overlay. `main` and sibling branches keep reading their own rows until you
-explicitly merge or reset with ForkPress commands.
+The important pieces are:
+
+- `forkpress`: Rust wrapper that unpacks the embedded runtime, starts/stops the
+  local PHP server, runs local control scripts, and wraps common Git workflows.
+- `branchfs`: native PHP extension compiled into the bundled PHP binary. It
+  provides the `branchfs://<branch>/path` stream wrapper, file operation
+  interception for WordPress-style absolute paths, and SQLite-backed file store
+  access. It is a PHP extension using SQLite internally, not a separate SQLite
+  loadable extension that users install.
+- `runtime/router.php`: resolves the branch from the host name, activates
+  `branchfs`, sets the branch-specific WordPress table prefix, handles Git
+  smart-HTTP routes, and boots WordPress through branch-scoped paths so OPcache
+  keys compiled PHP per branch.
+- `scripts/branchctl.php` and related scripts: create branches, merge/reset
+  branch state, garbage collect unreachable file blobs, manage users, and repair
+  COW database objects.
+- `scripts/git_server/server.php`: builds a temporary Git repository from
+  BranchFS snapshots for clone/fetch/push. It is a Git protocol adapter, not the
+  source of truth.
+- WordPress SQLite integration: the managed `wp-content/db.php` drop-in loads
+  the bundled plugin. It translates WordPress's MySQL dialect to SQLite/PDO.
+  ForkPress patches that path so writes through branch COW views work.
+
+### SQLite And Extensions
+
+ForkPress does not require users to install a SQLite extension. SQLite is the
+on-disk store and query engine inside `.forkpress/site.fp`, accessed from the
+bundled PHP runtime through PHP's SQLite APIs and PDO SQLite.
+
+The custom native code is `branchfs`, a PHP extension compiled into the bundled
+PHP binary for release builds. In local developer builds, tests may load
+`ext/branchfs.so`, but release archives still ship a single `forkpress`
+executable.
+
+The WordPress SQLite integration plugin is PHP code, not a SQLite extension. It
+parses and rewrites MySQL-flavored WordPress queries into SQLite-compatible SQL.
+ForkPress then relies on ordinary SQLite tables, views, indexes, triggers, and
+transactions to implement branch isolation.
+
+### What Git Means Here
+
+Git is the editing and transport interface for files. It is not where the live
+site is stored.
+
+```mermaid
+sequenceDiagram
+    participant Agent as Agent worktree
+    participant Git as git clone/push
+    participant Server as ForkPress Git endpoint
+    participant Store as site.fp
+
+    Agent->>Git: forkpress clone / git switch branch
+    Git->>Server: upload-pack / info refs
+    Server->>Store: materialize fs_commits + current branch files
+    Store-->>Server: wordpress/ files + database.sql snapshot
+    Server-->>Agent: temporary Git repository
+
+    Agent->>Agent: edit wordpress/ files
+    Agent->>Git: forkpress commit
+    Git->>Server: receive-pack
+    Server->>Store: apply wordpress/ file changes to branch overlay
+    Server->>Store: record fs_commit snapshot
+```
+
+On clone/fetch, ForkPress materializes Git commits from `fs_commits` and the
+current file tree in `site.fp`. Each Git branch corresponds to a ForkPress
+branch. Every commit contains:
+
+- `wordpress/`: editable WordPress files for that branch.
+- `database.sql`: a generated, read-only SQL dump of the branch's WordPress
+  tables for model context.
+
+On push, only files under `wordpress/` are applied back to `site.fp`.
+`database.sql` is intentionally ignored. Database changes should be made by
+loading the branch in WordPress, not by editing SQL dumps.
+
+### What Dolt Means Here
+
+Dolt is not part of the shipped runtime. Earlier design notes may mention a
+Dolt-backed MySQL-compatible branch database, but the current single-binary
+implementation uses SQLite only:
+
+- no `dolt sql-server`
+- no MySQL port
+- no `database/branch` connection syntax
+- no Dolt commits or Dolt merges
+
+ForkPress branch isolation is implemented inside SQLite with per-branch tables,
+views, overlays, tombstones, and control scripts.
+
+### Branch Storage
+
+`site.fp` has two branch-aware storage layers.
+
+```mermaid
+flowchart TB
+    subgraph FileLayer["File layer"]
+        blobs[blobs/blob_chunks<br/>content-addressed file bytes]
+        mainFiles[files rows for main]
+        branchFiles[files rows for feature<br/>overrides and tombstones]
+        resolved[resolved branch tree]
+        commits[fs_commits<br/>snapshots for Git]
+        blobs --> mainFiles
+        blobs --> branchFiles
+        mainFiles --> resolved
+        branchFiles --> resolved
+        resolved --> commits
+    end
+
+    subgraph DbLayer["WordPress database layer"]
+        mainTable[b1_wp_posts<br/>main real table]
+        view[b8_wp_posts<br/>branch COW view]
+        overlay[b8_wp_posts__overlay<br/>branch-local changed rows]
+        tomb[b8_wp_posts__tombstones<br/>branch-local deletes]
+        trig[INSTEAD OF triggers]
+        mainTable --> view
+        overlay --> view
+        tomb --> view
+        trig --> overlay
+        trig --> tomb
+    end
+```
+
+Files are copy-on-write at the path level:
+
+- `blobs` stores file content by hash. Large blobs are split into
+  `blob_chunks`.
+- `files` stores per-branch path metadata. A row with a `blob_hash` overrides
+  the parent. A row with `blob_hash = NULL` is a tombstone delete.
+- `fs_commits` and `fs_commit_files` store full file-tree snapshots used to
+  build Git history and roll back file pushes.
+
+WordPress database tables are copy-on-write at the row level:
+
+- `main` uses real tables named like `b1_wp_posts`.
+- A branch gets logical table names like `b8_wp_posts`.
+- Those branch logical tables are SQLite views over the parent table plus
+  branch-local overlay/tombstone tables.
+- `INSTEAD OF INSERT/UPDATE/DELETE` triggers redirect writes on the view into
+  the branch overlay and tombstones.
+- The SQLite integration's MySQL compatibility tables are updated so WordPress
+  still sees normal WordPress tables and indexes.
+
+This means a branch can edit files, options, posts, users, plugin state, and
+schema without changing `main` or sibling branches. Merging is explicit.
+
+### Request Flow
+
+```mermaid
+sequenceDiagram
+    participant Browser
+    participant Router as router.php
+    participant BranchFS as branchfs extension
+    participant WP as WordPress
+    participant SQLite as SQLite integration/PDO
+    participant Store as site.fp
+
+    Browser->>Router: GET http://feature.wp.localhost:18080/wp-admin/
+    Router->>Store: look up branch id for feature
+    Router->>BranchFS: set db, root, branch; activate interception
+    Router->>WP: require branchfs://feature/index.php
+    WP->>BranchFS: read PHP/theme/plugin files
+    BranchFS->>Store: resolve inherited files + feature overrides
+    WP->>SQLite: run MySQL-shaped wpdb queries with b8_wp_ prefix
+    SQLite->>Store: read/write SQLite COW views and overlays
+    Store-->>Browser: rendered WordPress response
+```
+
+When a branch writes a post or option, WordPress writes to `b8_wp_*` tables for
+that branch. Those names are views, so the write is captured by triggers and
+stored in `b8_wp_*__overlay` or `b8_wp_*__tombstones`. Reads combine inherited
+parent rows with those branch-local rows.
+
+### Local Directory Layout
+
+```text
+.forkpress/
+  site.fp                         # durable site store
+  runtime/                        # unpacked embedded PHP, scripts, WP source
+  wproot/                         # PHP server document root
+  logs/
+    wp-debug.log                  # WordPress fatal/errors
+    php-errors.log                # PHP error_log target
+    php-server.log                # PHP built-in server output
+    forkpress-server.log          # background wrapper output
+    gc.log                        # background branch GC
+  server.pid                      # server process marker
+```
+
+Managed WordPress files such as `wp-config.php`, `wp-content/db.php`, the
+SQLite integration plugin, and the `branchfs-wp.php` mu-plugin live inside the
+BranchFS store. On runtime upgrades, ForkPress refreshes those managed files so
+existing `.fp` sites use the SQLite adapter bundled with the current binary.
 
 ## Work On One Branch
 
