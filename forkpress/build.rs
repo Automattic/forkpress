@@ -159,14 +159,6 @@ fn build_embedded_zfs(repo_root: &Path, target: &str) -> Result<()> {
                 "0"
             },
         )
-        .env(
-            "ZFS_ENGINE_AARCH64",
-            if target.starts_with("aarch64-") {
-                "1"
-            } else {
-                "0"
-            },
-        )
         .status()
         .context("failed to run make for embedded ZFS engine")?;
     if !status.success() {

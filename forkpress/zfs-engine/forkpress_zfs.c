@@ -39,8 +39,23 @@
 
 #include <libzutil.h>
 #include <zutil_import.h>
+#include <zfs_fletcher.h>
 
 #define FORKPRESS_ZFS_ROOT_ZAP_OBJ 1
+
+#if defined(__aarch64__) && !defined(__FreeBSD__)
+static boolean_t
+forkpress_zfs_aarch64_neon_valid(void)
+{
+    return (B_FALSE);
+}
+
+const fletcher_4_ops_t fletcher_4_aarch64_neon_ops = {
+    .valid = forkpress_zfs_aarch64_neon_valid,
+    .uses_fpu = B_FALSE,
+    .name = "aarch64_neon_disabled"
+};
+#endif
 
 #if defined(__APPLE__)
 #ifdef pthread_mutex_destroy
