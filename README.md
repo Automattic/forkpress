@@ -8,7 +8,9 @@ agents can work in separate directories.
 ## What You Get
 
 - `forkpress init` creates the local site store.
-- `forkpress serve` starts the preview server.
+- `forkpress serve --background` starts the preview server.
+- `forkpress server list` shows running site servers.
+- `forkpress server stop` stops the current site's server.
 - `http://wp.localhost:18080/` serves `main`.
 - `http://agent-1.wp.localhost:18080/` serves branch `agent-1`.
 - `forkpress clone` clones the site files from `http://wp.localhost:18080/site.git`.
@@ -46,16 +48,32 @@ Start in an empty project directory. The `--admin-password admin` value makes
 the Git push examples below work without a credential prompt; use a stronger
 password for anything beyond a local throwaway site.
 
-Terminal 1:
-
 ```bash
 forkpress init --admin-password admin
-forkpress serve
+forkpress serve --background
 ```
 
 The first `serve` imports WordPress into `.forkpress/site.fp`, installs the
 SQLite database drop-in, creates the WordPress admin user, and starts the local
-server. Leave it running.
+server.
+
+List running site servers:
+
+```bash
+forkpress server list
+```
+
+Stop this site's server from the same project directory:
+
+```bash
+forkpress server stop
+```
+
+Stop every ForkPress site server started by your user:
+
+```bash
+forkpress server stop --all
+```
 
 Open:
 
@@ -78,12 +96,12 @@ http://<branch>.wp.localhost:18080/
 ```
 
 If your resolver does not handle `*.localhost`, add host entries or run
-`forkpress serve --root-host wp.local` and route `wp.local` plus the branch
+`forkpress serve --background --root-host wp.local` and route `wp.local` plus the branch
 subdomains to `127.0.0.1`.
 
 ## Work On One Branch
 
-Terminal 2, from the same project directory:
+From the same project directory:
 
 ```bash
 forkpress git branch create agent-1 --user admin --password admin
@@ -121,7 +139,7 @@ forkpress pull
 
 ## Run 10 Agents
 
-With `forkpress serve` still running, create 10 branches and 10 Git worktrees:
+With the site server running, create 10 branches and 10 Git worktrees:
 
 ```bash
 forkpress agents \
@@ -170,8 +188,12 @@ forkpress agents \
 
 - `forkpress init --admin-password admin` creates `.forkpress/site.fp` and a
   Git push user named `admin`.
-- `forkpress serve` imports and boots WordPress if needed, then serves HTTP and
-  Git from `.forkpress/site.fp`.
+- `forkpress serve --background` imports and boots WordPress if needed, then
+  serves HTTP and Git from `.forkpress/site.fp` in the background.
+- `forkpress server list` shows running ForkPress site servers.
+- `forkpress server stop [--work-dir .forkpress]` stops one site server;
+  `forkpress server stop --all` stops every running ForkPress site server in
+  the registry.
 - `forkpress git branch create <name> [--from main] --user admin --password admin`
   creates a ForkPress branch.
 - `forkpress clone <remote> [dir]` wraps `git clone`.
@@ -212,8 +234,8 @@ make test-all
 Push a version tag:
 
 ```bash
-git tag v0.1.1
-git push origin v0.1.1
+git tag v0.1.2
+git push origin v0.1.2
 ```
 
 The release workflow builds and uploads the four target archives listed above.
