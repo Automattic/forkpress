@@ -1,9 +1,9 @@
 use anyhow::{Context, Result, anyhow, bail};
-use clap::{ArgAction, Args, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use flate2::read::GzDecoder;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Cursor, Write};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -56,6 +56,8 @@ enum Commands {
     Branchctl(BranchPassthrough),
     /// Manage authentication users (add/list/remove/verify/auth-enabled).
     User(UserPassthrough),
+    /// Show WordPress, PHP, server, and maintenance logs.
+    Logs(LogsArgs),
     /// Consistent hot-copy of a running .fp file via SQLite VACUUM INTO.
     Backup(BackupArgs),
     /// Write a .fp file to a portable directory tree (files + SQL + manifest).
@@ -129,6 +131,45 @@ struct SharedPaths {
 
     #[arg(long)]
     php_bin: Option<PathBuf>,
+}
+
+#[derive(Args, Debug, Clone)]
+struct LogsArgs {
+    #[arg(long, default_value = ".forkpress")]
+    work_dir: PathBuf,
+
+    /// Log file to read.
+    #[arg(long, value_enum, default_value_t = LogSelection::Wp)]
+    file: LogSelection,
+
+    /// Number of lines to print before exiting or following.
+    #[arg(short = 'n', long, default_value_t = 80)]
+    lines: usize,
+
+    /// Keep printing new log output until interrupted.
+    #[arg(short, long)]
+    follow: bool,
+
+    /// Print known log paths instead of log contents.
+    #[arg(long)]
+    paths: bool,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+enum LogSelection {
+    /// WordPress debug log. Critical errors and PHP fatals usually land here.
+    Wp,
+    /// PHP error_log target for the bundled server.
+    #[value(alias = "php-errors")]
+    Php,
+    /// PHP built-in server access/output log.
+    Server,
+    /// ForkPress background server wrapper log.
+    Forkpress,
+    /// Background branch garbage-collection log.
+    Gc,
+    /// Every known log file.
+    All,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -462,6 +503,7 @@ fn run() -> Result<i32> {
         Commands::Git(args) => git_command(args),
         Commands::Branch(args) | Commands::Branchctl(args) => branch_command(args),
         Commands::User(args) => user_command(args),
+        Commands::Logs(args) => logs_command(args),
         Commands::Backup(args) => backup_command(args),
         Commands::Export(args) => export_command(args),
         Commands::Import(args) => import_command(args),
@@ -618,6 +660,178 @@ fn import_command(args: ImportArgs) -> Result<i32> {
     Ok(0)
 }
 
+#[derive(Debug, Clone)]
+struct LogFileSpec {
+    name: &'static str,
+    path: PathBuf,
+    description: &'static str,
+}
+
+fn logs_command(args: LogsArgs) -> Result<i32> {
+    let layout = Layout::new(args.work_dir.clone())?;
+    let files = selected_log_files(&layout, args.file);
+
+    if args.paths {
+        for file in files {
+            println!(
+                "{}\t{}\t{}",
+                file.name,
+                file.path.display(),
+                file.description
+            );
+        }
+        return Ok(0);
+    }
+
+    if args.follow && files.len() != 1 {
+        bail!("--follow requires one log file; pass --file wp, php, server, forkpress, or gc");
+    }
+
+    let multiple = files.len() > 1;
+    for (idx, file) in files.iter().enumerate() {
+        if multiple {
+            if idx > 0 {
+                println!();
+            }
+            println!("==> {}: {} <==", file.name, file.path.display());
+        }
+        print_log_tail(file, args.lines)?;
+    }
+
+    if args.follow {
+        follow_log_file(&files[0])?;
+    }
+
+    Ok(0)
+}
+
+fn selected_log_files(layout: &Layout, selection: LogSelection) -> Vec<LogFileSpec> {
+    let wp = LogFileSpec {
+        name: "wp",
+        path: layout.debug_log.clone(),
+        description: "WordPress debug log",
+    };
+    let php = LogFileSpec {
+        name: "php",
+        path: layout.php_error_log.clone(),
+        description: "PHP error_log",
+    };
+    let server = LogFileSpec {
+        name: "server",
+        path: layout.php_server_log.clone(),
+        description: "PHP built-in server output",
+    };
+    let forkpress = LogFileSpec {
+        name: "forkpress",
+        path: layout.forkpress_server_log.clone(),
+        description: "ForkPress background server wrapper",
+    };
+    let gc = LogFileSpec {
+        name: "gc",
+        path: layout.logs_dir.join("gc.log"),
+        description: "background branch garbage collection",
+    };
+
+    match selection {
+        LogSelection::Wp => vec![wp],
+        LogSelection::Php => vec![php],
+        LogSelection::Server => vec![server],
+        LogSelection::Forkpress => vec![forkpress],
+        LogSelection::Gc => vec![gc],
+        LogSelection::All => vec![wp, php, server, forkpress, gc],
+    }
+}
+
+fn print_log_tail(file: &LogFileSpec, lines: usize) -> Result<()> {
+    match fs::read_to_string(&file.path) {
+        Ok(contents) => {
+            for line in tail_lines(&contents, lines) {
+                println!("{line}");
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            println!(
+                "forkpress: log has not been created yet: {}",
+                file.path.display()
+            );
+        }
+        Err(err) => {
+            return Err(err).with_context(|| format!("failed to read {}", file.path.display()));
+        }
+    }
+    Ok(())
+}
+
+fn tail_lines(contents: &str, line_count: usize) -> Vec<&str> {
+    if line_count == 0 {
+        return Vec::new();
+    }
+    let lines: Vec<&str> = contents.lines().collect();
+    let start = lines.len().saturating_sub(line_count);
+    lines[start..].to_vec()
+}
+
+fn follow_log_file(file: &LogFileSpec) -> Result<()> {
+    println!(
+        "forkpress: following {} at {} (Ctrl-C to stop)",
+        file.name,
+        file.path.display()
+    );
+
+    let mut offset = fs::metadata(&file.path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+
+    loop {
+        match File::open(&file.path) {
+            Ok(mut handle) => {
+                let len = handle
+                    .metadata()
+                    .with_context(|| format!("failed to stat {}", file.path.display()))?
+                    .len();
+                if len < offset {
+                    offset = 0;
+                }
+                handle
+                    .seek(SeekFrom::Start(offset))
+                    .with_context(|| format!("failed to seek {}", file.path.display()))?;
+                let mut buf = Vec::new();
+                handle
+                    .read_to_end(&mut buf)
+                    .with_context(|| format!("failed to read {}", file.path.display()))?;
+                if !buf.is_empty() {
+                    print!("{}", String::from_utf8_lossy(&buf));
+                    std::io::stdout().flush()?;
+                }
+                offset = handle.stream_position().with_context(|| {
+                    format!("failed to read position for {}", file.path.display())
+                })?;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err).with_context(|| format!("failed to open {}", file.path.display()));
+            }
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::*;
+
+    #[test]
+    fn tail_lines_returns_requested_suffix() {
+        assert_eq!(tail_lines("one\ntwo\nthree\n", 2), vec!["two", "three"]);
+    }
+
+    #[test]
+    fn tail_lines_handles_short_and_zero_counts() {
+        assert_eq!(tail_lines("one\ntwo\n", 10), vec!["one", "two"]);
+        assert_eq!(tail_lines("one\ntwo\n", 0), Vec::<&str>::new());
+    }
+}
+
 fn start_command(args: StartArgs) -> Result<i32> {
     if args.background {
         return start_background_command(args);
@@ -651,7 +865,14 @@ fn start_command(args: StartArgs) -> Result<i32> {
         args.root_host, args.port
     );
     println!("DB access:  database.sql in each git branch checkout (read-only snapshot)");
-    println!("Logs:       {}", layout.logs_dir.display());
+    println!(
+        "Logs:       forkpress logs --work-dir {} --file wp",
+        shell_quote_path(&layout.work_dir)
+    );
+    println!(
+        "Follow:     forkpress logs --work-dir {} --file wp --follow",
+        shell_quote_path(&layout.work_dir)
+    );
     println!(
         "Stop:       forkpress server stop --work-dir {}",
         shell_quote_path(&layout.work_dir)
@@ -794,8 +1015,12 @@ fn start_background_command(args: StartArgs) -> Result<i32> {
                 args.root_host, args.port
             );
             println!(
-                "Logs:       {}",
-                shell_quote_path(&layout.forkpress_server_log)
+                "Logs:       forkpress logs --work-dir {} --file wp",
+                shell_quote_path(&layout.work_dir)
+            );
+            println!(
+                "Follow:     forkpress logs --work-dir {} --file wp --follow",
+                shell_quote_path(&layout.work_dir)
             );
             println!(
                 "Stop:       forkpress server stop --work-dir {}",

@@ -476,6 +476,17 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 	private $last_affected_rows;
 
 	/**
+	 * Override for the last inserted row ID.
+	 *
+	 * SQLite does not update PDO::lastInsertId() for inserts that happen inside
+	 * INSTEAD OF triggers on views. BranchFS branch tables are writable COW
+	 * views, so we fill this after successful view inserts.
+	 *
+	 * @var int|string|null
+	 */
+	private $last_insert_id;
+
+	/**
 	 * SQLite column metadata for the last emulated query.
 	 *
 	 * @var array
@@ -1117,6 +1128,10 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 	 * @return int|string
 	 */
 	public function get_insert_id() {
+		if ( null !== $this->last_insert_id ) {
+			return $this->last_insert_id;
+		}
+
 		$last_insert_id = $this->connection->get_last_insert_id();
 		if ( is_numeric( $last_insert_id ) ) {
 			$last_insert_id = (int) $last_insert_id;
@@ -1831,6 +1846,7 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 		$parts                   = array();
 		$on_conflict_update_list = null;
 		$emulate_view_upsert     = false;
+		$target_is_view          = false;
 		$insert_body             = null;
 		$table_name              = null;
 		foreach ( $node->get_children() as $child ) {
@@ -1869,6 +1885,7 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 				$table_name = $this->unquote_sqlite_identifier( $this->translate( $table_ref ) );
 				$insert_body = $this->translate_insert_or_replace_body( $table_name, $child );
 				$parts[]     = $insert_body;
+				$target_is_view = $this->sqlite_table_is_view( $table_name );
 			} elseif ( $is_node && 'insertUpdateList' === $child->rule_name ) {
 				/*
 				 * Translate "ON DUPLICATE KEY UPDATE" to "ON CONFLICT DO UPDATE SET".
@@ -1881,7 +1898,7 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 				 */
 				$sqlite_version = $this->get_sqlite_version();
 				$on_conflict_update_list = $this->translate_update_list( $table_name, $child );
-				if ( $this->sqlite_table_is_view( $table_name ) ) {
+				if ( $target_is_view ) {
 					$emulate_view_upsert = true;
 				} elseif ( version_compare( $sqlite_version, '3.35.0', '<' ) ) {
 					// Use the compatibility path below.
@@ -1959,6 +1976,9 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 		}
 
 		$this->last_result_statement = $this->execute_sqlite_query( $query );
+		if ( $target_is_view && null !== $table_name ) {
+			$this->capture_view_insert_id( $table_name );
+		}
 	}
 
 	/**
@@ -2001,6 +2021,7 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 	): void {
 		try {
 			$this->last_result_statement = $this->execute_sqlite_query( $insert_query );
+			$this->capture_view_insert_id( $table_name );
 			return;
 		} catch ( PDOException $e ) {
 			$conflict_columns = $this->parse_unique_constraint_columns( $e );
@@ -2050,6 +2071,71 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 		);
 
 		$this->last_result_statement = $this->execute_sqlite_query( $update_query );
+	}
+
+	/**
+	 * Capture the generated auto-increment ID after inserting through a view.
+	 *
+	 * @param string $table_name Target view name.
+	 */
+	private function capture_view_insert_id( string $table_name ): void {
+		$auto_column = $this->auto_increment_column_for_table( $table_name );
+		if ( null === $auto_column ) {
+			return;
+		}
+
+		$overlay_name = $table_name . '__overlay';
+		$id_source    = $this->sqlite_table_exists( $overlay_name ) ? $overlay_name : $table_name;
+		$stmt         = $this->execute_sqlite_query(
+			sprintf(
+				'SELECT MAX(%s) FROM %s',
+				$this->quote_sqlite_identifier( $auto_column ),
+				$this->quote_sqlite_identifier( $id_source )
+			)
+		);
+		$value        = $stmt->fetchColumn();
+		if ( is_numeric( $value ) ) {
+			$this->last_insert_id = (int) $value;
+		}
+	}
+
+	/**
+	 * Get the auto-increment column for a logical table/view.
+	 *
+	 * @param string $table_name Table or view name.
+	 * @return string|null Auto-increment column name, if present.
+	 */
+	private function auto_increment_column_for_table( string $table_name ): ?string {
+		$stmt = $this->execute_sqlite_query(
+			'
+				SELECT column_name
+				FROM ' . $this->quote_sqlite_identifier(
+				$this->information_schema_builder->get_table_name( false, 'columns' )
+			) . '
+				WHERE table_schema = ?
+				AND table_name = ?
+				AND LOWER(extra) LIKE ?
+				ORDER BY ordinal_position
+				LIMIT 1
+			',
+			array( $this->get_saved_db_name( $this->main_db_name ), $table_name, '%auto_increment%' )
+		);
+		$column = $stmt->fetchColumn();
+		return is_string( $column ) && '' !== $column ? $column : null;
+	}
+
+	/**
+	 * Check whether a SQLite object is a real table.
+	 *
+	 * @param string $table_name The SQLite object name.
+	 * @return bool Whether the object is a table.
+	 */
+	private function sqlite_table_exists( string $table_name ): bool {
+		$stmt = $this->execute_sqlite_query(
+			"SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+			array( $table_name )
+		);
+		return false !== $stmt->fetchColumn();
 	}
 
 	/**
@@ -6738,6 +6824,7 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 		$this->last_sqlite_queries      = array();
 		$this->last_result_statement    = null;
 		$this->last_affected_rows       = null;
+		$this->last_insert_id           = null;
 		$this->last_column_meta         = array();
 		$this->is_readonly              = false;
 		$this->wrapper_transaction_type = null;

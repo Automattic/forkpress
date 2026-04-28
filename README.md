@@ -11,6 +11,7 @@ agents can work in separate directories.
 - `forkpress server start` starts the preview server in the background.
 - `forkpress server list` shows running site servers.
 - `forkpress server stop` stops the current site's server.
+- `forkpress logs --file wp` shows WordPress debug output and fatal errors.
 - `http://wp.localhost:18080/` serves `main`.
 - `http://agent-1.wp.localhost:18080/` serves branch `agent-1`.
 - `forkpress clone` clones the site files from `http://wp.localhost:18080/site.git`.
@@ -74,6 +75,32 @@ Stop every ForkPress site server started by your user:
 ```bash
 forkpress server stop --all
 ```
+
+View WordPress critical errors and PHP fatals:
+
+```bash
+forkpress logs --file wp
+```
+
+Follow new WordPress log output while you reproduce a problem in the browser:
+
+```bash
+forkpress logs --file wp --follow
+```
+
+Print every known log path:
+
+```bash
+forkpress logs --file all --paths
+```
+
+Useful log files:
+
+- `wp`: `.forkpress/logs/wp-debug.log`, WordPress debug output and fatal errors.
+- `php`: `.forkpress/logs/php-errors.log`, PHP `error_log` output.
+- `server`: `.forkpress/logs/php-server.log`, PHP built-in server access/output.
+- `forkpress`: `.forkpress/logs/forkpress-server.log`, background server wrapper.
+- `gc`: `.forkpress/logs/gc.log`, background branch garbage collection.
 
 Open:
 
@@ -247,6 +274,8 @@ forkpress agents \
 - `forkpress server stop [--work-dir .forkpress]` stops one site server;
   `forkpress server stop --all` stops every running ForkPress site server in
   the registry.
+- `forkpress logs [--file wp|php|server|forkpress|gc|all] [-n 80] [--follow]`
+  prints local site logs. Use `--paths` to list log locations.
 - `forkpress branch create <name> [--from main]` creates a ForkPress branch
   from the local site control command.
 - `forkpress git branch create <name> [--from main]` is a compatibility alias
@@ -289,8 +318,8 @@ make test-all
 Push a version tag:
 
 ```bash
-git tag v0.1.7
-git push origin v0.1.7
+git tag v0.1.8
+git push origin v0.1.8
 ```
 
 The release workflow builds and uploads the four target archives listed above.
