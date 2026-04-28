@@ -76,6 +76,7 @@ DEFS_COMMON += \
     -DHAVE_STRLCPY=1 \
     -DO_LARGEFILE=0 \
     -DO_DSYNC=0 \
+    -DO_DIRECT=0 \
     -D__EMSCRIPTEN__=1 \
     -Dissetugid=forkpress_zfs_issetugid
 endif
