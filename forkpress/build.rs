@@ -106,6 +106,10 @@ fn build_embedded_zfs(repo_root: &Path, target: &str) -> Result<()> {
     );
     println!(
         "cargo:rerun-if-changed={}",
+        engine_dir.join("include/sys/types32.h").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
         engine_dir.join("include/sys/uio.h").display()
     );
     println!(

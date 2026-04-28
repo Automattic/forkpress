@@ -67,6 +67,7 @@ DEFS_COMMON += \
     -Dftruncate64=ftruncate \
     -Dloff_t=off_t \
     -DECKSUM=97 \
+    -DENOTACTIVE=ECANCELED \
     -DEREMOTEIO=EIO \
     -DERESTART=EAGAIN \
     -DHAVE_STRLCAT=1 \
