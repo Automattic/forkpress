@@ -8,7 +8,7 @@ agents can work in separate directories.
 ## What You Get
 
 - `forkpress init` creates the local site store.
-- `forkpress serve --background` starts the preview server.
+- `forkpress server start` starts the preview server in the background.
 - `forkpress server list` shows running site servers.
 - `forkpress server stop` stops the current site's server.
 - `http://wp.localhost:18080/` serves `main`.
@@ -50,10 +50,10 @@ password for anything beyond a local throwaway site.
 
 ```bash
 forkpress init --admin-password admin
-forkpress serve --background
+forkpress server start
 ```
 
-The first `serve` imports WordPress into `.forkpress/site.fp`, installs the
+The first server start imports WordPress into `.forkpress/site.fp`, installs the
 SQLite database drop-in, creates the WordPress admin user, and starts the local
 server.
 
@@ -184,8 +184,9 @@ forkpress agents \
 
 - `forkpress init --admin-password admin` creates `.forkpress/site.fp` and a
   Git push user named `admin`.
-- `forkpress serve --background` imports and boots WordPress if needed, then
-  serves HTTP and Git from `.forkpress/site.fp` in the background.
+- `forkpress server start` imports and boots WordPress if needed, then serves
+  HTTP and Git from `.forkpress/site.fp` in the background.
+- `forkpress serve --background` is the equivalent lower-level command.
 - `forkpress server list` shows running ForkPress site servers.
 - `forkpress server stop [--work-dir .forkpress]` stops one site server;
   `forkpress server stop --all` stops every running ForkPress site server in
@@ -232,8 +233,8 @@ make test-all
 Push a version tag:
 
 ```bash
-git tag v0.1.3
-git push origin v0.1.3
+git tag v0.1.4
+git push origin v0.1.4
 ```
 
 The release workflow builds and uploads the four target archives listed above.
