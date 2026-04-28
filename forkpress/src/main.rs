@@ -31,7 +31,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Create a new site.fp and seed the default admin user.
+    /// Create a new ForkPress site and seed the default admin user.
     Init(InitArgs),
     /// Clone the ForkPress git remote into a local checkout.
     Clone(CloneArgs),
@@ -70,6 +70,11 @@ enum Commands {
 struct InitArgs {
     #[command(flatten)]
     shared: SharedPaths,
+
+    /// Storage strategy for this site. Existing sites keep their initialized
+    /// strategy; this flag is only used by `forkpress init`.
+    #[arg(long, value_enum, default_value_t = StorageStrategy::Branchfs)]
+    strategy: StorageStrategy,
 
     /// Site title written to site_config. Defaults to "ForkPress".
     #[arg(long, default_value = "ForkPress")]
@@ -170,6 +175,79 @@ enum LogSelection {
     Gc,
     /// Every known log file.
     All,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+enum StorageStrategy {
+    /// Current single-file SQLite store: BranchFS files plus COW WordPress DB views.
+    #[value(alias = "sqlite", alias = "sqlite-cow")]
+    Branchfs,
+    /// Experimental ZFS-backed store: real filesystem/database files versioned by ZFS.
+    Zfs,
+}
+
+impl StorageStrategy {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Branchfs => "branchfs",
+            Self::Zfs => "zfs",
+        }
+    }
+
+    fn display_name(self) -> &'static str {
+        match self {
+            Self::Branchfs => "branchfs/sqlite",
+            Self::Zfs => "zfs",
+        }
+    }
+
+    fn from_manifest_value(value: &str) -> Result<Self> {
+        match value.trim() {
+            "branchfs" | "sqlite" | "sqlite-cow" => Ok(Self::Branchfs),
+            "zfs" => Ok(Self::Zfs),
+            other => bail!("unknown storage strategy in site manifest: {other}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SiteManifest {
+    strategy: StorageStrategy,
+}
+
+impl SiteManifest {
+    fn new(strategy: StorageStrategy) -> Self {
+        Self { strategy }
+    }
+
+    fn parse(contents: &str) -> Result<Self> {
+        let mut strategy = None;
+        for raw_line in contents.lines() {
+            let line = raw_line.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let key = key.trim();
+            let value = value.trim().trim_matches('"');
+            if key == "strategy" {
+                strategy = Some(StorageStrategy::from_manifest_value(value)?);
+            }
+        }
+
+        Ok(Self {
+            strategy: strategy.unwrap_or(StorageStrategy::Branchfs),
+        })
+    }
+
+    fn render(&self) -> String {
+        format!(
+            "# ForkPress site manifest\nversion = 1\nstrategy = \"{}\"\n",
+            self.strategy.as_str()
+        )
+    }
 }
 
 #[derive(Args, Debug, Clone)]
@@ -421,7 +499,9 @@ struct Layout {
     work_dir: PathBuf,
     runtime_dir: PathBuf,
     logs_dir: PathBuf,
+    site_manifest: PathBuf,
     site_fp: PathBuf,
+    zfs_dir: PathBuf,
     wp_root: PathBuf,
     debug_log: PathBuf,
     php_error_log: PathBuf,
@@ -543,16 +623,25 @@ fn pull_command(args: PullArgs) -> Result<i32> {
 
 fn init_command(args: InitArgs) -> Result<i32> {
     let layout = Layout::new(args.shared.work_dir.clone())?;
-    prepare_runtime(&layout)?;
-    let runtime = PortableRuntime::from_layout(&layout);
 
-    if layout.site_fp.exists() {
+    if initialized_storage_strategy(&layout)?.is_some() {
         bail!(
-            "init: a site.fp already exists at {}. Remove it or choose a different --work-dir.",
-            layout.site_fp.display()
+            "init: a ForkPress site already exists in {}. Remove it or choose a different --work-dir.",
+            layout.work_dir.display()
         );
     }
 
+    match args.strategy {
+        StorageStrategy::Branchfs => {
+            prepare_runtime(&layout)?;
+            let runtime = PortableRuntime::from_layout(&layout);
+            init_branchfs_site(args, layout, runtime)
+        }
+        StorageStrategy::Zfs => init_zfs_site(args, layout),
+    }
+}
+
+fn init_branchfs_site(args: InitArgs, layout: Layout, runtime: PortableRuntime) -> Result<i32> {
     let mut script_args: Vec<std::ffi::OsString> = vec![layout.site_fp.as_os_str().to_owned()];
     if let Some(pw) = &args.admin_password {
         script_args.push(std::ffi::OsString::from("--admin-password"));
@@ -566,6 +655,7 @@ fn init_command(args: InitArgs) -> Result<i32> {
         "scripts/init_db.php",
         script_args.iter().map(|s| s.as_os_str()),
     )?;
+    write_site_manifest(&layout, SiteManifest::new(StorageStrategy::Branchfs))?;
 
     println!(
         "forkpress: site initialised at {}",
@@ -576,20 +666,32 @@ fn init_command(args: InitArgs) -> Result<i32> {
     Ok(0)
 }
 
+fn init_zfs_site(args: InitArgs, layout: Layout) -> Result<i32> {
+    fs::create_dir_all(&layout.zfs_dir)
+        .with_context(|| format!("failed to create {}", layout.zfs_dir.display()))?;
+    write_site_manifest(&layout, SiteManifest::new(StorageStrategy::Zfs))?;
+    write_zfs_experiment_notes(&layout)?;
+
+    println!(
+        "forkpress: zfs strategy initialised in {}",
+        layout.work_dir.display()
+    );
+    println!("  title:     {}", args.site_title);
+    println!("  root host: {}", args.root_host);
+    println!(
+        "  status:    experimental strategy selected; HTTP/Git backend wiring is not implemented yet"
+    );
+    Ok(0)
+}
+
 fn user_command(args: UserPassthrough) -> Result<i32> {
     if args.args.is_empty() {
         bail!("user requires a subcommand, e.g. `forkpress user add alice s3cret --role write`");
     }
     let layout = Layout::new(args.shared.work_dir.clone())?;
+    ensure_branchfs_strategy(&layout, "user")?;
     prepare_runtime(&layout)?;
     let runtime = PortableRuntime::from_layout(&layout);
-
-    if !layout.site_fp.exists() {
-        bail!(
-            "no site.fp found in {}. Run `forkpress init` first.",
-            layout.work_dir.display()
-        );
-    }
 
     let mut command = php_base_command(&layout, &runtime, &args.shared);
     command.arg(layout.runtime_dir.join("scripts/user_admin.php"));
@@ -607,6 +709,9 @@ fn user_command(args: UserPassthrough) -> Result<i32> {
 
 fn backup_command(args: BackupArgs) -> Result<i32> {
     let layout = Layout::new(args.shared.work_dir.clone())?;
+    if args.source.is_none() {
+        ensure_branchfs_strategy(&layout, "backup")?;
+    }
     prepare_runtime(&layout)?;
     let runtime = PortableRuntime::from_layout(&layout);
     let src = args.source.unwrap_or_else(|| layout.site_fp.clone());
@@ -625,6 +730,9 @@ fn backup_command(args: BackupArgs) -> Result<i32> {
 
 fn export_command(args: ExportArgs) -> Result<i32> {
     let layout = Layout::new(args.shared.work_dir.clone())?;
+    if args.source.is_none() {
+        ensure_branchfs_strategy(&layout, "export")?;
+    }
     prepare_runtime(&layout)?;
     let runtime = PortableRuntime::from_layout(&layout);
     let src = args.source.unwrap_or_else(|| layout.site_fp.clone());
@@ -833,12 +941,43 @@ mod log_tests {
     }
 }
 
+#[cfg(test)]
+mod storage_strategy_tests {
+    use super::*;
+
+    #[test]
+    fn manifest_parses_branchfs_and_aliases() {
+        let manifest = SiteManifest::parse("version = 1\nstrategy = \"sqlite\"\n").unwrap();
+        assert_eq!(manifest.strategy, StorageStrategy::Branchfs);
+
+        let manifest = SiteManifest::parse("strategy = \"sqlite-cow\"\n").unwrap();
+        assert_eq!(manifest.strategy, StorageStrategy::Branchfs);
+    }
+
+    #[test]
+    fn manifest_parses_zfs() {
+        let manifest = SiteManifest::parse("strategy = \"zfs\"\n").unwrap();
+        assert_eq!(manifest.strategy, StorageStrategy::Zfs);
+    }
+
+    #[test]
+    fn manifest_render_round_trips() {
+        let rendered = SiteManifest::new(StorageStrategy::Zfs).render();
+        let parsed = SiteManifest::parse(&rendered).unwrap();
+        assert_eq!(parsed.strategy, StorageStrategy::Zfs);
+    }
+}
+
 fn start_command(args: StartArgs) -> Result<i32> {
     if args.background {
         return start_background_command(args);
     }
 
     let layout = Layout::new(args.shared.work_dir.clone())?;
+    let strategy = initialized_storage_strategy(&layout)?.unwrap_or(StorageStrategy::Branchfs);
+    if strategy != StorageStrategy::Branchfs {
+        bail_strategy_unsupported("server start", strategy)?;
+    }
     prepare_runtime(&layout)?;
     ensure_ports_available(&args)?;
 
@@ -942,6 +1081,10 @@ fn start_command(args: StartArgs) -> Result<i32> {
 fn start_background_command(args: StartArgs) -> Result<i32> {
     let layout = Layout::new(args.shared.work_dir.clone())?;
     fs::create_dir_all(&layout.logs_dir)?;
+    let strategy = initialized_storage_strategy(&layout)?.unwrap_or(StorageStrategy::Branchfs);
+    if strategy != StorageStrategy::Branchfs {
+        bail_strategy_unsupported("server start", strategy)?;
+    }
     ensure_ports_available(&args)?;
 
     if let Some(record) = running_record_for_work_dir(&layout.work_dir)? {
@@ -1510,6 +1653,7 @@ fn git_command(args: GitPassthrough) -> Result<i32> {
         let create_args = git_branch_create_args(&args.args[3..])?;
         create_args.auth.validate()?;
         let layout = Layout::new(args.shared.work_dir.clone())?;
+        ensure_branchfs_strategy(&layout, "git branch create")?;
         prepare_runtime(&layout)?;
         let runtime = PortableRuntime::from_layout(&layout);
         if !layout.site_fp.exists() || !layout.bootstrap_marker.exists() {
@@ -1614,6 +1758,7 @@ fn agents_command(args: AgentsArgs) -> Result<i32> {
     auth.validate()?;
 
     let layout = Layout::new(args.shared.work_dir.clone())?;
+    ensure_branchfs_strategy(&layout, "agents")?;
     prepare_runtime(&layout)?;
     let runtime = PortableRuntime::from_layout(&layout);
 
@@ -1820,6 +1965,7 @@ fn branch_command(args: BranchPassthrough) -> Result<i32> {
     }
 
     let layout = Layout::new(args.shared.work_dir.clone())?;
+    ensure_branchfs_strategy(&layout, "branch")?;
     prepare_runtime(&layout)?;
     let runtime = PortableRuntime::from_layout(&layout);
 
@@ -1949,7 +2095,9 @@ impl Layout {
         Ok(Self {
             runtime_dir: work_dir.join("runtime"),
             logs_dir: work_dir.join("logs"),
+            site_manifest: work_dir.join("site.toml"),
             site_fp: work_dir.join("site.fp"),
+            zfs_dir: work_dir.join("zfs"),
             wp_root: work_dir.join("wproot"),
             debug_log: work_dir.join("logs/wp-debug.log"),
             php_error_log: work_dir.join("logs/php-errors.log"),
@@ -1971,6 +2119,97 @@ impl PortableRuntime {
             php: root.join("bin/php"),
         }
     }
+}
+
+fn read_site_manifest(layout: &Layout) -> Result<Option<SiteManifest>> {
+    if !layout.site_manifest.is_file() {
+        return Ok(None);
+    }
+    let contents = fs::read_to_string(&layout.site_manifest)
+        .with_context(|| format!("failed to read {}", layout.site_manifest.display()))?;
+    SiteManifest::parse(&contents)
+        .with_context(|| format!("failed to parse {}", layout.site_manifest.display()))
+        .map(Some)
+}
+
+fn write_site_manifest(layout: &Layout, manifest: SiteManifest) -> Result<()> {
+    fs::create_dir_all(&layout.work_dir)?;
+    fs::write(&layout.site_manifest, manifest.render())
+        .with_context(|| format!("failed to write {}", layout.site_manifest.display()))
+}
+
+fn write_site_manifest_if_missing(layout: &Layout, manifest: SiteManifest) -> Result<()> {
+    if read_site_manifest(layout)?.is_none() {
+        write_site_manifest(layout, manifest)?;
+    }
+    Ok(())
+}
+
+fn initialized_storage_strategy(layout: &Layout) -> Result<Option<StorageStrategy>> {
+    if let Some(manifest) = read_site_manifest(layout)? {
+        return Ok(Some(manifest.strategy));
+    }
+
+    // Back-compat: sites created before the manifest existed are the original
+    // BranchFS/SQLite strategy and can be detected from site.fp.
+    if layout.site_fp.exists() {
+        return Ok(Some(StorageStrategy::Branchfs));
+    }
+
+    Ok(None)
+}
+
+fn require_initialized_strategy(layout: &Layout, command: &str) -> Result<StorageStrategy> {
+    initialized_storage_strategy(layout)?.ok_or_else(|| {
+        anyhow!(
+            "{command}: no ForkPress site found in {}. Run `forkpress init` first.",
+            layout.work_dir.display()
+        )
+    })
+}
+
+fn ensure_branchfs_strategy(layout: &Layout, command: &str) -> Result<()> {
+    let strategy = require_initialized_strategy(layout, command)?;
+    if strategy != StorageStrategy::Branchfs {
+        bail_strategy_unsupported(command, strategy)?;
+    }
+    Ok(())
+}
+
+fn bail_strategy_unsupported(command: &str, strategy: StorageStrategy) -> Result<()> {
+    bail!(
+        "{command} is not implemented for the {} storage strategy yet. This site was initialized with strategy = \"{}\".",
+        strategy.display_name(),
+        strategy.as_str()
+    )
+}
+
+fn write_zfs_experiment_notes(layout: &Layout) -> Result<()> {
+    let notes = "\
+# ForkPress ZFS strategy
+
+This site was initialized with `strategy = \"zfs\"`.
+
+The current binary records the strategy choice and refuses BranchFS-specific
+commands for this work directory. The concrete ZFS backend is intentionally not
+faked here: it still needs a runtime that can expose a ZFS pool, datasets,
+snapshots, clones, and file/database reads to ForkPress HTTP and Git paths.
+
+The design target is:
+
+- one ZFS dataset per ForkPress branch
+- branch creation = snapshot parent + clone snapshot
+- WordPress files and the SQLite database file live inside the active dataset
+- Git clone/fetch materializes `wordpress/` and `database.sql` from the selected
+  dataset, not from BranchFS SQL overlays
+- Git push writes files into the target dataset and snapshots the result
+";
+    fs::write(layout.zfs_dir.join("README.md"), notes).with_context(|| {
+        format!(
+            "failed to write {}",
+            layout.zfs_dir.join("README.md").display()
+        )
+    })
 }
 
 fn absolutize(path: PathBuf) -> Result<PathBuf> {
@@ -2087,6 +2326,8 @@ fn ensure_ports_available(args: &StartArgs) -> Result<()> {
 }
 
 fn ensure_bootstrapped(layout: &Layout, runtime: &PortableRuntime, args: &StartArgs) -> Result<()> {
+    write_site_manifest_if_missing(layout, SiteManifest::new(StorageStrategy::Branchfs))?;
+
     if !layout.site_fp.exists() {
         run_php_script(
             layout,

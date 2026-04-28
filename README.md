@@ -1,13 +1,17 @@
 # ForkPress
 
 ForkPress is a single-binary local WordPress branch runner for agent work.
-It stores a whole site in one `.fp` SQLite file, serves each branch on its own
-local subdomain, and exposes the WordPress file tree through Git so multiple
-agents can work in separate directories.
+The default `branchfs` storage strategy stores a whole site in one `.fp`
+SQLite file, serves each branch on its own local subdomain, and exposes the
+WordPress file tree through Git so multiple agents can work in separate
+directories.
 
 ## What You Get
 
-- `forkpress init` creates the local site store.
+- `forkpress init` creates the local site store using the default `branchfs`
+  strategy.
+- `forkpress init --strategy zfs` records an experimental ZFS strategy choice
+  for a new work directory. The ZFS HTTP/Git backend is not wired yet.
 - `forkpress server start` starts the preview server in the background.
 - `forkpress server list` shows running site servers.
 - `forkpress server stop` stops the current site's server.
@@ -55,7 +59,8 @@ forkpress init --admin-password admin
 forkpress server start
 ```
 
-The first server start imports WordPress into `.forkpress/site.fp`, installs the
+The first server start imports WordPress into `.forkpress/site.fp`, writes the
+`.forkpress/site.toml` strategy manifest if it does not exist yet, installs the
 SQLite database drop-in, creates the WordPress admin user, and starts the local
 server.
 
@@ -133,22 +138,27 @@ branch subdomains to `127.0.0.1`.
 
 ## Architecture Overview
 
-ForkPress has one durable artifact per site: `.forkpress/site.fp`. That file is
-a SQLite database containing the WordPress file tree, WordPress database tables,
-branch metadata, Git-facing file snapshots, users, and site config. The
-downloaded `forkpress` executable carries the PHP runtime, WordPress source,
-ForkPress PHP scripts, the WordPress SQLite integration plugin, and the native
-`branchfs` PHP extension.
+Every ForkPress work directory has `.forkpress/site.toml`, a small manifest
+that records which storage strategy the site uses. Existing sites created
+before the manifest existed are treated as `branchfs` sites when
+`.forkpress/site.fp` is present.
+
+The default strategy is `branchfs`. In that strategy, the durable site artifact
+is `.forkpress/site.fp`: a SQLite database containing the WordPress file tree,
+WordPress database tables, branch metadata, Git-facing file snapshots, users,
+and site config. The downloaded `forkpress` executable carries the PHP runtime,
+WordPress source, ForkPress PHP scripts, the WordPress SQLite integration
+plugin, and the native `branchfs` PHP extension.
 
 This overview uses the same order as most useful architecture docs: first the
 system context, then the building blocks, then the important runtime and storage
 flows. The goal is to make clear what owns state and what is only an interface.
 
-There is no Dolt server in the current architecture. There is also no MySQL
-daemon, FUSE mount, Samba share, Docker service, or long-lived helper process
-besides the optional background ForkPress server you start. WordPress still
-issues MySQL-shaped queries, but the bundled SQLite integration translates them
-to SQLite and stores the data in `.forkpress/site.fp`.
+There is no Dolt server in the current `branchfs` architecture. There is also
+no MySQL daemon, FUSE mount, Samba share, Docker service, or long-lived helper
+process besides the optional background ForkPress server you start. WordPress
+still issues MySQL-shaped queries, but the bundled SQLite integration
+translates them to SQLite and stores the data in `.forkpress/site.fp`.
 
 ### System Context
 
@@ -158,7 +168,8 @@ flowchart LR
     browser[Browser] --> http[Local HTTP server<br/>wp.localhost:18080]
     git[Git client] --> smart[Git smart HTTP<br/>/site.git]
 
-    cli --> fp[(.forkpress/site.fp<br/>site store)]
+    cli --> manifest[.forkpress/site.toml<br/>strategy manifest]
+    manifest --> fp[(.forkpress/site.fp<br/>branchfs site store)]
     http --> fp
     smart --> fp
 
@@ -170,13 +181,55 @@ ForkPress gives different tools different views of the same local site:
 
 - The browser gets a normal WordPress site per branch:
   `wp.localhost` is `main`, and `<branch>.wp.localhost` is that branch.
-- Git gets a temporary repository synthesized from `.forkpress/site.fp`.
+- Git gets a temporary repository synthesized from `.forkpress/site.fp` for
+  `branchfs` sites.
 - Agents get editable worktrees containing `wordpress/` files plus a
   read-only `database.sql` snapshot for context.
-- WordPress gets a PHP document root at `.forkpress/wproot`, but file reads and
-  writes are intercepted and resolved from the current branch in `site.fp`.
+- WordPress gets a PHP document root at `.forkpress/wproot`, but in the
+  `branchfs` strategy file reads and writes are intercepted and resolved from
+  the current branch in `site.fp`.
+
+### Storage Strategies
+
+ForkPress now treats storage as a site-level strategy:
+
+```text
+.forkpress/
+  site.toml
+```
+
+```toml
+version = 1
+strategy = "branchfs"
+```
+
+The selected strategy is written during `forkpress init` and reused by later
+commands. This keeps future backends from accidentally running BranchFS-specific
+code against a different storage model.
+
+Supported strategy values:
+
+- `branchfs` (default, aliases: `sqlite`, `sqlite-cow`): current production
+  strategy. Files live in BranchFS tables, and WordPress database branches use
+  SQLite COW views, overlays, tombstones, and triggers.
+- `zfs`: experimental strategy marker. `forkpress init --strategy zfs` records
+  the strategy and writes `.forkpress/zfs/README.md`, but HTTP serving, branch
+  operations, and Git protocol integration intentionally refuse for now instead
+  of pretending to be ZFS.
+
+The intended ZFS strategy is different from BranchFS: one ZFS dataset per
+ForkPress branch, branch creation as snapshot + clone, WordPress files and the
+SQLite database file stored directly inside the active dataset, and Git
+clone/fetch/push materializing and writing that dataset. There should be no
+SQL-level overlays in that mode. The
+[OpenZFS WebAssembly experiment](https://adamziel.github.io/experiments/real-zfs/)
+demonstrates the target primitive shape: real pools, datasets, snapshots, and
+clones on a file-backed pool.
 
 ### Building Blocks
+
+The working backend today is `branchfs`, so the detailed building-block and
+request-flow diagrams below describe that strategy.
 
 ```mermaid
 flowchart TB
@@ -297,15 +350,15 @@ loading the branch in WordPress, not by editing SQL dumps.
 ### What Dolt Means Here
 
 Dolt is not part of the shipped runtime. Earlier design notes may mention a
-Dolt-backed MySQL-compatible branch database, but the current single-binary
-implementation uses SQLite only:
+Dolt-backed MySQL-compatible branch database, but the current working
+`branchfs` implementation uses SQLite only:
 
 - no `dolt sql-server`
 - no MySQL port
 - no `database/branch` connection syntax
 - no Dolt commits or Dolt merges
 
-ForkPress branch isolation is implemented inside SQLite with per-branch tables,
+BranchFS branch isolation is implemented inside SQLite with per-branch tables,
 views, overlays, tombstones, and control scripts.
 
 ### Branch Storage
@@ -395,9 +448,11 @@ parent rows with those branch-local rows.
 
 ```text
 .forkpress/
-  site.fp                         # durable site store
+  site.toml                       # storage strategy manifest
+  site.fp                         # branchfs strategy durable site store
   runtime/                        # unpacked embedded PHP, scripts, WP source
   wproot/                         # PHP server document root
+  zfs/                            # experimental ZFS strategy notes/state
   logs/
     wp-debug.log                  # WordPress fatal/errors
     php-errors.log                # PHP error_log target
@@ -501,10 +556,14 @@ forkpress agents \
 
 ## Commands
 
-- `forkpress init --admin-password admin` creates `.forkpress/site.fp` and a
-  Git push user named `admin`.
+- `forkpress init --admin-password admin` creates `.forkpress/site.toml`,
+  `.forkpress/site.fp`, and a Git push user named `admin` using the default
+  `branchfs` strategy.
+- `forkpress init --strategy zfs` records an experimental ZFS strategy for a
+  new work directory. Commands that need HTTP, Git, or branch operations will
+  refuse until the ZFS backend is implemented.
 - `forkpress server start` imports and boots WordPress if needed, then serves
-  HTTP and Git from `.forkpress/site.fp` in the background.
+  HTTP and Git from `.forkpress/site.fp` in the background for `branchfs` sites.
 - `forkpress start --background` is the equivalent lower-level command.
 - `forkpress server list` shows running ForkPress site servers.
 - `forkpress server stop [--work-dir .forkpress]` stops one site server;
