@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS blobs (
 -- Chunked storage for large blobs. Each chunk is a 1 MB slice of the blob
 -- content, keyed by (blob_hash, chunk_no). chunk_no starts at 0 and is
 -- contiguous. Only present for blobs whose blobs.data IS NULL.
--- See PRD SF1 (chunked blob storage) and ext/branchfs.c::store_write_file.
+-- See ext/branchfs.c::store_write_file.
 CREATE TABLE IF NOT EXISTS blob_chunks (
     blob_hash TEXT NOT NULL,
     chunk_no  INTEGER NOT NULL,
@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS fs_commits (
     commit_hash TEXT NOT NULL DEFAULT (lower(hex(randomblob(16)))),
     parent_id   INTEGER,                        -- previous fs_commit on this branch
     message     TEXT,
+    kind        TEXT NOT NULL DEFAULT 'FULL',    -- FULL | DELTA
     created_at  TEXT DEFAULT (datetime('now')),
     UNIQUE (branch_id, commit_hash),
     FOREIGN KEY (branch_id) REFERENCES branches(id),
@@ -74,6 +75,7 @@ CREATE TABLE IF NOT EXISTS fs_commit_files (
     mode        INTEGER,
     mtime       INTEGER,
     is_dir      INTEGER DEFAULT 0,
+    op          TEXT NOT NULL DEFAULT 'UPSERT',  -- UPSERT | DELETE
     PRIMARY KEY (commit_id, path),
     FOREIGN KEY (commit_id) REFERENCES fs_commits(id),
     FOREIGN KEY (blob_hash) REFERENCES blobs(hash)
@@ -83,12 +85,11 @@ CREATE TABLE IF NOT EXISTS fs_commit_files (
 INSERT OR IGNORE INTO branches (name, parent_branch) VALUES ('main', NULL);
 
 -- Authentication: per-site user accounts and site-wide config flags.
--- Every write surface (SFTP, SMB, MySQL proxy, git push) consults these
--- tables; see fileserver/src/store.rs verify_user_password / auth_enabled.
+-- Git push consults these tables when auth_enabled is set.
 CREATE TABLE IF NOT EXISTS users (
     username      TEXT PRIMARY KEY,
     password_hash TEXT NOT NULL,
-    mysql_sha1    TEXT,            -- SHA1(SHA1(password)) hex; required for MySQL native auth
+    mysql_sha1    TEXT,            -- retained for compatibility with older .fp files
     role          TEXT NOT NULL CHECK(role IN ('admin','write','read')),
     created_at    TEXT DEFAULT (datetime('now'))
 );

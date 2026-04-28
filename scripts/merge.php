@@ -15,8 +15,8 @@
  * --strategy=ours             -- target wins on conflict
  * --strategy=theirs           -- source wins on conflict
  *
- * Phase 1 (file 3-way merge) and Phase 2 (DB 3-way merge — see PRD F9)
- * both run inside this script.
+ * Phase 1 (file 3-way merge) and Phase 2 (DB 3-way merge) both run inside
+ * this script.
  *
  * Usage: php merge.php {source-branch} {target-branch} [db-path] [--strategy=...]
  */
@@ -78,7 +78,7 @@ echo "On-ID-collision: $on_id_collision\n\n";
 $db = new SQLite3($db_path);
 // 15s busy timeout + sqlite_retry_busy() wrappers around the two write
 // transactions below handle SQLITE_BUSY under concurrent writer load
-// (parallel HTTP + SFTP + MySQL + other branchctl invocations).
+// (parallel HTTP, git push, and other branchctl invocations).
 $db->busyTimeout(15000);
 $db->exec('PRAGMA journal_mode = WAL');
 $db->exec('PRAGMA wal_autocheckpoint = 500');

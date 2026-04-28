@@ -8,7 +8,14 @@ on:
     paths:
       - 'forkpress/**'
       - 'ext/**'
+      - 'runtime/**'
+      - 'scripts/**'
+      - 'sql/**'
+      - 'wp-plugin/**'
+      - 'vendor/**'
       - 'scripts/build-dist.sh'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - '.github/workflows/release.yml'
 
 jobs:
@@ -25,10 +32,10 @@ jobs:
             target: x86_64-apple-darwin
             os: darwin
           - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             os: linux
           - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-musl
             os: linux
     runs-on: ${{ matrix.runner }}
     steps:
@@ -67,6 +74,8 @@ jobs:
 
       - name: Build dist bundle
         run: scripts/build-dist.sh
+        env:
+          FORKPRESS_TARGET: ${{ matrix.target }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:

@@ -329,8 +329,9 @@ function git_check_auth(?SQLite3 $sqlite = null): ?string {
 }
 
 /**
- * Build a Git repository on disk from branchfs state (file tree only).
- * Note: WordPress database content is not included in the git clone.
+ * Build a Git repository on disk from branchfs state.
+ * Each branch contains the WordPress file tree plus database.sql, a read-only
+ * SQL snapshot of that branch's WordPress tables for local agent context.
  */
 function git_build_repository(string $repo_dir, SQLite3 $sqlite): void {
     // Clean and recreate
@@ -395,6 +396,7 @@ function git_build_repository(string $repo_dir, SQLite3 $sqlite): void {
                     $updates['wordpress/' . $fr['path']] = $blob_data;
                 }
             }
+            $updates['database.sql'] = git_dump_branch_database($sqlite, $branch_id, $branch_name);
 
             if (empty($updates)) continue;
 
@@ -464,8 +466,9 @@ function git_auto_snapshot(SQLite3 $sqlite, string $branch_name, int $branch_id)
 
 /**
  * Process push: apply received git changes back to branchfs.
- * Note: database (WordPress DB) changes pushed via git are not applied —
- * only file-system changes are persisted.
+ * Note: database.sql changes pushed via git are not applied. The SQL file is
+ * a read-only branch snapshot; WordPress writes still go through the preview
+ * server and branchfs SQLite store.
  * Throws \RuntimeException on unrecoverable errors; the caller rolls back.
  */
 function git_process_push(string $repo_dir, $fs, GitRepository $repo, SQLite3 $sqlite, string $auth_user, ?array $pre_state = null): void {
@@ -598,6 +601,90 @@ function git_apply_file_changes(SQLite3 $sqlite, int $branch_id, array $new_file
             $stmt->execute();
         }
     }
+}
+
+function git_dump_branch_database(SQLite3 $sqlite, int $branch_id, string $branch_name): string {
+    $prefix = 'b' . $branch_id . '_wp_';
+    $like = str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], $prefix) . '%';
+    $stmt = $sqlite->prepare(
+        "SELECT name FROM sqlite_master
+         WHERE type IN ('table', 'view') AND name LIKE :prefix ESCAPE '\\'
+         ORDER BY name"
+    );
+    $stmt->bindValue(':prefix', $like, SQLITE3_TEXT);
+    $result = $stmt->execute();
+
+    $out = "-- ForkPress database snapshot for branch " . git_sql_comment($branch_name) . "\n";
+    $out .= "-- This file is read-only in git; push WordPress file changes from wordpress/.\n";
+    $out .= "PRAGMA foreign_keys=OFF;\nBEGIN TRANSACTION;\n\n";
+
+    while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+        $store_table = (string)$row['name'];
+        if (strncmp($store_table, $prefix, strlen($prefix)) !== 0) {
+            continue;
+        }
+        if (str_ends_with($store_table, '__overlay') || str_ends_with($store_table, '__tombstones')) {
+            continue;
+        }
+        $logical_table = 'wp_' . substr($store_table, strlen($prefix));
+        $columns = git_table_columns($sqlite, $store_table);
+        if (!$columns) {
+            continue;
+        }
+
+        $out .= 'DROP TABLE IF EXISTS ' . git_sql_ident($logical_table) . ";\n";
+        $defs = [];
+        foreach ($columns as $column) {
+            $type = trim((string)($column['type'] ?? ''));
+            $defs[] = git_sql_ident((string)$column['name']) . ' ' . ($type !== '' ? $type : 'TEXT');
+        }
+        $out .= 'CREATE TABLE ' . git_sql_ident($logical_table) . ' (' . implode(', ', $defs) . ");\n";
+
+        $select = $sqlite->query('SELECT * FROM ' . git_sql_ident($store_table));
+        while ($data = $select->fetchArray(SQLITE3_ASSOC)) {
+            $names = [];
+            $values = [];
+            foreach ($columns as $column) {
+                $name = (string)$column['name'];
+                $names[] = git_sql_ident($name);
+                $values[] = git_sql_literal($data[$name] ?? null);
+            }
+            $out .= 'INSERT INTO ' . git_sql_ident($logical_table)
+                . ' (' . implode(', ', $names) . ') VALUES ('
+                . implode(', ', $values) . ");\n";
+        }
+        $out .= "\n";
+    }
+
+    $out .= "COMMIT;\n";
+    return $out;
+}
+
+function git_table_columns(SQLite3 $sqlite, string $table): array {
+    $columns = [];
+    $result = $sqlite->query('PRAGMA table_info(' . git_sql_ident($table) . ')');
+    while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+        $columns[] = $row;
+    }
+    return $columns;
+}
+
+function git_sql_ident(string $identifier): string {
+    return '"' . str_replace('"', '""', $identifier) . '"';
+}
+
+function git_sql_literal($value): string {
+    if ($value === null) {
+        return 'NULL';
+    }
+    if (is_int($value) || is_float($value)) {
+        return (string)$value;
+    }
+    return "'" . SQLite3::escapeString((string)$value) . "'";
+}
+
+function git_sql_comment(string $text): string {
+    return str_replace(["\r", "\n"], ' ', $text);
 }
 
 /**

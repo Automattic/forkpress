@@ -48,7 +48,17 @@ CFLAGS  := -fPIC -shared -O2 -Wall -DCOMPILE_DL_BRANCHFS -DHAVE_CONFIG_H=0 $(SQL
 INCLUDES := $(PHP_EXTRA_INCS)
 LDFLAGS := $(SQLITE_LIBS)
 RUSTUP ?= $(shell command -v rustup 2>/dev/null)
+UNAME_S := $(shell uname -s)
+UNAME_M := $(shell uname -m)
+ifeq ($(UNAME_S)-$(UNAME_M),Darwin-arm64)
+FORKPRESS_TARGET ?= aarch64-apple-darwin
+else ifeq ($(UNAME_S)-$(UNAME_M),Darwin-x86_64)
+FORKPRESS_TARGET ?= x86_64-apple-darwin
+else ifeq ($(UNAME_S)-$(UNAME_M),Linux-x86_64)
 FORKPRESS_TARGET ?= x86_64-unknown-linux-musl
+else ifeq ($(UNAME_S)-$(UNAME_M),Linux-aarch64)
+FORKPRESS_TARGET ?= aarch64-unknown-linux-musl
+endif
 
 .PHONY: all clean test test-compat init-db test-all forkpress dist
 
@@ -84,9 +94,9 @@ clean:
 # forkpress. First-time build compiles static PHP from source and takes
 # ~3-5 minutes on Apple Silicon; subsequent runs reuse the cached PHP.
 dist:
-	scripts/build-dist.sh
+	FORKPRESS_TARGET=$(FORKPRESS_TARGET) scripts/build-dist.sh
 
-# Build the shippable forkpress binary for the host target. Requires `dist`
-# to have run at least once.
+# Build the shippable forkpress binary for FORKPRESS_TARGET. Requires `dist`
+# to have run at least once for the same target.
 forkpress:
-	cargo build --release -p forkpress
+	cargo build --release --target $(FORKPRESS_TARGET) -p forkpress

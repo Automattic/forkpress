@@ -3,10 +3,9 @@ ext/branchfs.so
 *.lo
 *.la
 /tmp/branchfs*.db
-e2e/wp-src/
-e2e/*.log
-e2e/dolt-data/
-e2e/*.db
+runtime/wp-src/
+runtime/*.log
+runtime/*.db
 /target/
 /.gitpress/
 /.forkpress/

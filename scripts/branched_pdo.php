@@ -505,8 +505,7 @@ class BootstrapBranchedPDO
     /** Primary chokepoint. Always call this after opening a PDO. */
     public static function ensure(?PDO $pdo, string $site_fp, string $branch = 'main'): ?string
     {
-        // Runtime sentinel for the hostile-review round-3 behavioral test
-        // (e2e/test_principal_auth.py::test_branchctl_ddl_path_actually_invokes_bootstrap).
+        // Runtime sentinel for behavioral tests that assert this path is used.
         // A comment or dead code cannot satisfy this; only an actual call
         // reaches this line at runtime. Default mode is a no-op.
         if (getenv('BRANCHFS_TRACE_ENSURE')) { fwrite(STDERR, "BRANCHFS_ENSURE_CALLED\n"); }
@@ -530,4 +529,3 @@ class BootstrapBranchedPDO
         return $pdo;
     }
 }
-

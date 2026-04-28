@@ -30,10 +30,10 @@ $db = new SQLite3($db_path);
 $db->exec('PRAGMA journal_mode = WAL');
 $db->exec('PRAGMA foreign_keys = ON');
 
-// Cap WAL growth under heavy write bursts (SFTP upload + multi-branch
+// Cap WAL growth under heavy write bursts (git push + multi-branch
 // merges + concurrent HTTP). The default 1000-page threshold (~4 MB)
 // lets the WAL balloon to many megabytes between writes; 500 keeps the
-// file closer to 2 MB. See PRD F10 (WAL management) for details.
+// file closer to 2 MB.
 $db->exec('PRAGMA wal_autocheckpoint = 500');
 
 $schema = file_get_contents($schema_path);
@@ -50,9 +50,8 @@ echo "Database initialized successfully.\n";
 echo "  - 'main' branch created\n";
 
 // Test-only override: `FORKPRESS_INIT_AUTH_ENABLED=0` flips auth off at
-// init time so the e2e suite doesn't have to plumb --user/--password
-// through every branchctl invocation. Production callers (forkpress
-// init) never set this env var and keep the secure default of '1'.
+// init time for compatibility tests. Production callers (forkpress init)
+// never set this env var and keep the secure default of '1'.
 $env_auth = getenv('FORKPRESS_INIT_AUTH_ENABLED');
 if ($env_auth !== false && $env_auth !== '' && $env_auth !== '1') {
     $stmt = $db->prepare(

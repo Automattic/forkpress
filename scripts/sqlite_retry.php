@@ -5,8 +5,8 @@
  * SQLite serialises writes: only one writer can hold the write lock at
  * a time. PHP's SQLite3::busyTimeout() tells SQLite to poll the lock
  * up to a deadline before giving up. Under concurrent write load
- * (two HTTP requests, SFTP upload + HTTP request, MySQL proxy + HTTP
- * request, parallel branchctl invocations) the deadline can still be
+ * (two HTTP requests, a git push plus HTTP request, or parallel branchctl
+ * invocations) the deadline can still be
  * exceeded — the error surfaces as "database is locked" / SQLITE_BUSY
  * and bubbles up as a 500 or a failed CLI command.
  *

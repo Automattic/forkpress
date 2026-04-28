@@ -3,29 +3,33 @@
 # forkpress at build time. Produces dist/<triple>/ ready for
 # `cargo build --release` to embed.
 #
-# Currently builds for the host target. CI matrix handles cross-targets
-# (Linux variants are typically built inside a matching Docker image).
+# Builds the bundled runtime for the host by default. CI passes
+# FORKPRESS_TARGET so the bundle path matches the Rust target triple.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-# --- Host target detection -------------------------------------------------
+# --- Target detection ------------------------------------------------------
 UNAME_S=$(uname -s)
 UNAME_M=$(uname -m)
-case "$UNAME_S-$UNAME_M" in
-  Darwin-arm64)  TRIPLE=aarch64-apple-darwin       ;;
-  Darwin-x86_64) TRIPLE=x86_64-apple-darwin        ;;
-  Linux-x86_64)  TRIPLE=x86_64-unknown-linux-gnu   ;;
-  Linux-aarch64) TRIPLE=aarch64-unknown-linux-gnu  ;;
-  *) echo "unsupported host: $UNAME_S $UNAME_M" >&2; exit 1 ;;
-esac
+if [ -n "${FORKPRESS_TARGET:-}" ]; then
+  TRIPLE="$FORKPRESS_TARGET"
+else
+  case "$UNAME_S-$UNAME_M" in
+    Darwin-arm64)  TRIPLE=aarch64-apple-darwin        ;;
+    Darwin-x86_64) TRIPLE=x86_64-apple-darwin         ;;
+    Linux-x86_64)  TRIPLE=x86_64-unknown-linux-musl   ;;
+    Linux-aarch64) TRIPLE=aarch64-unknown-linux-musl  ;;
+    *) echo "unsupported host: $UNAME_S $UNAME_M" >&2; exit 1 ;;
+  esac
+fi
 
 # BUILD_DIR and DIST_DIR can be overridden to isolate per-target state
 # (e.g. running cross-target builds back-to-back, or from inside a container
 # that should not scribble on the host's .build/).
 DIST_DIR="${FORKPRESS_DIST_DIR:-$REPO_ROOT/dist/$TRIPLE}"
-BUILD_DIR="${FORKPRESS_BUILD_DIR:-$REPO_ROOT/.build}"
+BUILD_DIR="${FORKPRESS_BUILD_DIR:-$REPO_ROOT/.build/$TRIPLE}"
 SPC_DIR="$BUILD_DIR/static-php-cli"
 
 # WordPress-ready extension set.

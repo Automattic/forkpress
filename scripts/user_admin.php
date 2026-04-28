@@ -101,15 +101,8 @@ function valid_role(string $r): bool {
 
 function set_user(SQLite3 $db, string $username, string $password, string $role): void {
     $hash = password_hash($password, PASSWORD_BCRYPT);
-    // MySQL native password auth verifies SHA1(password). To avoid storing
-    // the plaintext, we keep SHA1(SHA1(password)) and, in the wire path,
-    // compute expected reply = SHA1(password_sha1) XOR SHA1(salt || mysql_sha1).
-    // But SHA1(password) isn't directly recoverable from SHA1(SHA1(password)).
-    // We store the mysql_sha1 hex so the MySQL handler can brute-force NOTHING
-    // — and instead uses a compatibility mode (see authenticate() in
-    // mysql_proxy.rs): the client sends reply; we accept if
-    // SHA1(SHA1(reply XOR SHA1(salt || mysql_sha1))) == mysql_sha1.
-    // That's exactly the mysql_native_password algorithm.
+    // Retained for older .fp files that still have mysql_sha1 in the users
+    // table. Git push auth uses password_hash/password_verify.
     $mysql_sha1 = strtolower(bin2hex(sha1(sha1($password, true), true)));
 
     $s = $db->prepare(

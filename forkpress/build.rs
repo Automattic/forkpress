@@ -43,14 +43,11 @@ fn main() -> Result<()> {
         "sql",
         "vendor",
         "wp-plugin",
-        "e2e/router.php",
-        "e2e/bootstrap_wp.php",
-        "e2e/wp.zip",
+        "runtime/router.php",
+        "runtime/bootstrap_wp.php",
+        "runtime/wp.zip",
     ] {
-        println!(
-            "cargo:rerun-if-changed={}",
-            repo_root.join(rel).display()
-        );
+        println!("cargo:rerun-if-changed={}", repo_root.join(rel).display());
     }
 
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
@@ -75,11 +72,15 @@ fn build_bundle(repo_root: &Path, dist_dir: &Path, out: &Path) -> Result<()> {
     add_tree(&mut tar, repo_root, "sql")?;
     add_tree(&mut tar, repo_root, "vendor")?;
     add_tree(&mut tar, repo_root, "wp-plugin")?;
-    add_file(&mut tar, repo_root, "e2e/router.php")?;
-    add_file(&mut tar, repo_root, "e2e/bootstrap_wp.php")?;
-    add_file(&mut tar, repo_root, "e2e/wp.zip")?;
+    add_file(&mut tar, repo_root, "runtime/router.php")?;
+    add_file(&mut tar, repo_root, "runtime/bootstrap_wp.php")?;
+    add_file(&mut tar, repo_root, "runtime/wp.zip")?;
 
-    add_file_as(&mut tar, &dist_dir.join("bin/php"), "portable-runtime/bin/php")?;
+    add_file_as(
+        &mut tar,
+        &dist_dir.join("bin/php"),
+        "portable-runtime/bin/php",
+    )?;
 
     tar.finish()?;
     let encoder = tar.into_inner()?;

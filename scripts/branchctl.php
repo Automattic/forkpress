@@ -10,14 +10,14 @@
  *   branchctl delete {name}
  *   branchctl show {name}
  *
- * Environment — all optional; defaults match e2e/dev.sh defaults:
+ * Environment:
  *   BRANCHFS_DB      path to the branchfs SQLite file    [/tmp/branchfs-dev/branchfs.db]
  */
 
 error_reporting(E_ALL & ~E_WARNING & ~E_NOTICE);
 
 if (!extension_loaded('branchfs')) {
-    fwrite(STDERR, "branchctl: branchfs extension not loaded. Run with `php -d extension=/app/ext/branchfs.so ...` or use bin/branchctl.\n");
+    fwrite(STDERR, "branchctl: branchfs extension not loaded. Use the bundled `forkpress branch ...` command.\n");
     exit(2);
 }
 
@@ -102,7 +102,7 @@ if (isset($flags['db'])) $DB_PATH = (string)$flags['db'];
 
 if (!file_exists($DB_PATH)) {
     fwrite(STDERR, "branchctl: branchfs DB not found: $DB_PATH\n");
-    fwrite(STDERR, "           Run `bash e2e/dev.sh` first, or set BRANCHFS_DB.\n");
+    fwrite(STDERR, "           Run `forkpress serve` first, or set BRANCHFS_DB.\n");
     exit(2);
 }
 
@@ -359,16 +359,16 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_ts    ON audit_log(ts);
 CREATE INDEX IF NOT EXISTS idx_audit_log_actor ON audit_log(actor);
 /* Hostile-review finding #2 — tamper-resistant audit_log.
  *
- * A user with write access to the .fp file (via sqlite3 shell, a rogue
- * PHP caller, or the MySQL proxy) could previously run
+ * A user with write access to the .fp file (via sqlite3 shell or a rogue
+ * PHP caller) could previously run
  *   DELETE FROM audit_log
  *   UPDATE audit_log SET actor='spoofed'
  * to cover their tracks. These BEFORE triggers fire RAISE(ABORT) so
- * neither statement commits. There is NO safe path through PHP or the
- * proxy to rewrite history.
+ * neither statement commits. There is no safe path through bundled PHP
+ * operations to rewrite history.
  *
  * Limitation: a caller who can DROP TABLE audit_log has already escaped
- * every protection SQLite offers. That's documented in LIMITATIONS.md.
+ * every protection SQLite offers.
  * Mitigation at the OS level (write-protect the .fp when handing it to
  * an untrusted consumer) is the operator's responsibility. */
 CREATE TRIGGER IF NOT EXISTS audit_log_no_update
@@ -2786,11 +2786,9 @@ case 'migrate': {
 case '_ddl': {
     // Hidden subcommand: run DDL on a branch through BranchedPDO.
     //
-    // The MySQL proxy (fileserver/src/mysql_proxy.rs) shells out to this
-    // command whenever a client runs ALTER TABLE / CREATE INDEX / DROP INDEX
-    // against a table that SQLite considers a VIEW on the branch. Routing
-    // through BranchedPDO reuses the exact same view-rebuild / overlay
-    // re-targeting logic that in-process PHP callers already get.
+    // This keeps branch-specific ALTER TABLE / CREATE INDEX / DROP INDEX
+    // routing on the same view-rebuild / overlay re-targeting path that
+    // in-process PHP callers already get.
     //
     // Usage: branchctl _ddl --branch <name> [--db <path>]   (SQL on stdin)
     //

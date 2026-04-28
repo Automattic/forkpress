@@ -31,13 +31,24 @@ struct Cli {
 enum Commands {
     /// Create a new site.fp and seed the default admin user.
     Init(InitArgs),
+    /// Clone the ForkPress git remote into a local checkout.
+    Clone(CloneArgs),
+    /// Pull the current checkout with rebase/autostash.
+    Pull(PullArgs),
+    /// Start the local preview server.
     #[command(alias = "serve")]
     Start(StartArgs),
     /// Create local worktrees for multiple agents.
     Agents(AgentsArgs),
     /// Stage, commit, and push a local checkout so it becomes previewable.
     Push(PushArgs),
+    /// Alias for `push`, matching the agent workflow language.
+    Commit(PushArgs),
+    /// Git-compatible wrapper plus `forkpress git branch create <name>`.
+    Git(GitPassthrough),
+    /// Manage ForkPress branches.
     Branch(BranchPassthrough),
+    /// Alias for `branch`.
     #[command(alias = "branchctl")]
     Branchctl(BranchPassthrough),
     /// Manage authentication users (add/list/remove/verify/auth-enabled).
@@ -59,8 +70,8 @@ struct InitArgs {
     #[arg(long, default_value = "ForkPress")]
     site_title: String,
 
-    /// Root host used in generated banners. Defaults to "localhost".
-    #[arg(long, default_value = "localhost")]
+    /// Root host used in generated banners. Defaults to "wp.localhost".
+    #[arg(long, default_value = "wp.localhost")]
     root_host: String,
 
     /// Admin password. If omitted a random password is generated and
@@ -118,11 +129,34 @@ struct SharedPaths {
 }
 
 #[derive(Args, Debug, Clone)]
+struct CloneArgs {
+    /// Git remote to clone.
+    #[arg(default_value_t = default_git_remote())]
+    remote: String,
+
+    /// Directory to create for the checkout.
+    #[arg(default_value = "site")]
+    dir: PathBuf,
+
+    /// Name for the configured git remote.
+    #[arg(long, default_value = "origin")]
+    remote_name: String,
+}
+
+#[derive(Args, Debug, Clone)]
+struct PullArgs {
+    /// Existing git checkout or worktree.
+    #[arg(default_value = ".")]
+    repo: PathBuf,
+}
+
+#[derive(Args, Debug, Clone)]
 struct AgentsArgs {
     #[command(flatten)]
     shared: SharedPaths,
 
     /// Git remote, e.g. http://wp.localhost:18080/site.git.
+    #[arg(long, default_value_t = default_git_remote())]
     remote: String,
 
     /// Directory that will hold the main checkout and agent worktrees.
@@ -162,6 +196,15 @@ struct PushArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+struct GitPassthrough {
+    #[command(flatten)]
+    shared: SharedPaths,
+
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true, action = ArgAction::Append)]
+    args: Vec<String>,
+}
+
+#[derive(Args, Debug, Clone)]
 struct StartArgs {
     #[command(flatten)]
     shared: SharedPaths,
@@ -172,23 +215,11 @@ struct StartArgs {
     #[arg(long, default_value_t = 18080)]
     port: u16,
 
-    #[arg(long, default_value = "localhost")]
+    #[arg(long, default_value = "wp.localhost")]
     root_host: String,
 
     #[arg(long, default_value = "ForkPress")]
     site_title: String,
-
-    #[arg(long, default_value_t = 2222)]
-    sftp_port: u16,
-
-    #[arg(long, default_value_t = 8888)]
-    smb_port: u16,
-
-    #[arg(long, default_value_t = 3306)]
-    mysql_port: u16,
-
-    #[arg(long, default_value_t = false)]
-    no_fileserver: bool,
 
     /// Number of concurrent PHP workers (PHP_CLI_SERVER_WORKERS).
     /// Defaults to min(8, num_cpus * 2). Pass --workers 1 to force
@@ -271,8 +302,8 @@ mod duration_tests {
         assert_eq!(parse_duration(""), None);
         assert_eq!(parse_duration("bogus"), None);
         assert_eq!(parse_duration("h"), None);
-        assert_eq!(parse_duration("10"), None);   // no suffix
-        assert_eq!(parse_duration("1d"), None);   // unsupported unit
+        assert_eq!(parse_duration("10"), None); // no suffix
+        assert_eq!(parse_duration("1d"), None); // unsupported unit
         assert_eq!(parse_duration("1h30m"), None); // compound not supported
         assert_eq!(parse_duration("-5s"), None);
     }
@@ -304,7 +335,6 @@ struct Layout {
     debug_log: PathBuf,
     php_error_log: PathBuf,
     php_server_log: PathBuf,
-    fileserver_log: PathBuf,
     runtime_ready_marker: PathBuf,
     bootstrap_marker: PathBuf,
 }
@@ -312,7 +342,6 @@ struct Layout {
 #[derive(Debug, Clone)]
 struct PortableRuntime {
     php: PathBuf,
-    fileserver: PathBuf,
 }
 
 struct ChildGuard {
@@ -352,15 +381,48 @@ fn run() -> Result<i32> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Init(args) => init_command(args),
+        Commands::Clone(args) => clone_command(args),
+        Commands::Pull(args) => pull_command(args),
         Commands::Start(args) => start_command(args),
         Commands::Agents(args) => agents_command(args),
-        Commands::Push(args) => push_command(args),
+        Commands::Push(args) | Commands::Commit(args) => push_command(args),
+        Commands::Git(args) => git_command(args),
         Commands::Branch(args) | Commands::Branchctl(args) => branch_command(args),
         Commands::User(args) => user_command(args),
         Commands::Backup(args) => backup_command(args),
         Commands::Export(args) => export_command(args),
         Commands::Import(args) => import_command(args),
     }
+}
+
+fn clone_command(args: CloneArgs) -> Result<i32> {
+    ensure_git_available()?;
+    run_git(
+        None,
+        [
+            OsString::from("clone"),
+            OsString::from("--origin"),
+            OsString::from(&args.remote_name),
+            OsString::from(&args.remote),
+            args.dir.as_os_str().to_owned(),
+        ],
+    )?;
+    Ok(0)
+}
+
+fn pull_command(args: PullArgs) -> Result<i32> {
+    ensure_git_available()?;
+    let repo = absolutize(args.repo)?;
+    ensure_git_repository(&repo)?;
+    run_git(
+        Some(&repo),
+        [
+            OsString::from("pull"),
+            OsString::from("--rebase"),
+            OsString::from("--autostash"),
+        ],
+    )?;
+    Ok(0)
 }
 
 fn init_command(args: InitArgs) -> Result<i32> {
@@ -375,8 +437,7 @@ fn init_command(args: InitArgs) -> Result<i32> {
         );
     }
 
-    let mut script_args: Vec<std::ffi::OsString> =
-        vec![layout.site_fp.as_os_str().to_owned()];
+    let mut script_args: Vec<std::ffi::OsString> = vec![layout.site_fp.as_os_str().to_owned()];
     if let Some(pw) = &args.admin_password {
         script_args.push(std::ffi::OsString::from("--admin-password"));
         script_args.push(std::ffi::OsString::from(pw));
@@ -390,7 +451,10 @@ fn init_command(args: InitArgs) -> Result<i32> {
         script_args.iter().map(|s| s.as_os_str()),
     )?;
 
-    println!("forkpress: site initialised at {}", layout.site_fp.display());
+    println!(
+        "forkpress: site initialised at {}",
+        layout.site_fp.display()
+    );
     println!("  title:     {}", args.site_title);
     println!("  root host: {}", args.root_host);
     Ok(0)
@@ -429,9 +493,7 @@ fn backup_command(args: BackupArgs) -> Result<i32> {
     let layout = Layout::new(args.shared.work_dir.clone())?;
     prepare_runtime(&layout)?;
     let runtime = PortableRuntime::from_layout(&layout);
-    let src = args
-        .source
-        .unwrap_or_else(|| layout.site_fp.clone());
+    let src = args.source.unwrap_or_else(|| layout.site_fp.clone());
     if !src.is_file() {
         bail!("backup: source .fp not found: {}", src.display());
     }
@@ -449,9 +511,7 @@ fn export_command(args: ExportArgs) -> Result<i32> {
     let layout = Layout::new(args.shared.work_dir.clone())?;
     prepare_runtime(&layout)?;
     let runtime = PortableRuntime::from_layout(&layout);
-    let src = args
-        .source
-        .unwrap_or_else(|| layout.site_fp.clone());
+    let src = args.source.unwrap_or_else(|| layout.site_fp.clone());
     if !src.is_file() {
         bail!("export: source .fp not found: {}", src.display());
     }
@@ -470,7 +530,10 @@ fn import_command(args: ImportArgs) -> Result<i32> {
     prepare_runtime(&layout)?;
     let runtime = PortableRuntime::from_layout(&layout);
     if !args.input_dir.is_dir() {
-        bail!("import: source directory not found: {}", args.input_dir.display());
+        bail!(
+            "import: source directory not found: {}",
+            args.input_dir.display()
+        );
     }
     run_php_script(
         &layout,
@@ -493,17 +556,9 @@ fn start_command(args: StartArgs) -> Result<i32> {
 
     let workers = args.workers.unwrap_or_else(default_worker_count);
     let mut php = start_php_server(&layout, &runtime, &args, workers)?;
-    let mut fileserver = if args.no_fileserver {
-        None
-    } else {
-        start_fileserver(&layout, &runtime, &args)?
-    };
 
     if workers > 1 {
-        println!(
-            "PHP workers: {} (PHP_CLI_SERVER_WORKERS)",
-            workers
-        );
+        println!("PHP workers: {} (PHP_CLI_SERVER_WORKERS)", workers);
     } else {
         println!("PHP workers: 1 (single-request mode — set --workers >1 for concurrency)");
     }
@@ -516,14 +571,7 @@ fn start_command(args: StartArgs) -> Result<i32> {
         "Git remote: http://{}:{}/site.git",
         args.root_host, args.port
     );
-    if fileserver.is_some() {
-        println!("SFTP:       sftp://<branch>@{}:{}/", args.root_host, args.sftp_port);
-        println!("SMB:        smb://{}:{}/branch-name/", args.root_host, args.smb_port);
-        println!(
-            "MySQL:      mysql -u root -h {} -P {} <branch-name>",
-            args.root_host, args.mysql_port
-        );
-    }
+    println!("DB access:  database.sql in each git branch checkout (read-only snapshot)");
     println!("Logs:       {}", layout.logs_dir.display());
     println!("Press Ctrl+C to stop.");
 
@@ -573,15 +621,6 @@ fn start_command(args: StartArgs) -> Result<i32> {
             );
         }
 
-        if let Some(fs) = fileserver.as_mut() {
-            if let Some(status) = fs.try_wait()? {
-                bail!(
-                    "fileserver exited unexpectedly with status {status}. Check {}",
-                    layout.fileserver_log.display()
-                );
-            }
-        }
-
         thread::sleep(Duration::from_millis(250));
     }
 
@@ -592,6 +631,54 @@ fn start_command(args: StartArgs) -> Result<i32> {
     }
 
     Ok(0)
+}
+
+fn git_command(args: GitPassthrough) -> Result<i32> {
+    if args.args.is_empty() {
+        bail!(
+            "git requires arguments, e.g. `forkpress git clone` or `forkpress git branch create agent-1`"
+        );
+    }
+
+    if args.args.len() >= 3 && args.args[0] == "branch" && args.args[1] == "create" {
+        let branch = &args.args[2];
+        let from = git_branch_create_from(&args.args[3..])?;
+        let layout = Layout::new(args.shared.work_dir.clone())?;
+        prepare_runtime(&layout)?;
+        let runtime = PortableRuntime::from_layout(&layout);
+        if !layout.site_fp.exists() || !layout.bootstrap_marker.exists() {
+            bail!(
+                "no bootstrapped site found in {}. Run `forkpress serve` first",
+                layout.work_dir.display()
+            );
+        }
+        ensure_branch_exists(&layout, &runtime, &args.shared, branch, &from)?;
+        println!("forkpress: branch {branch} ready");
+        return Ok(0);
+    }
+
+    ensure_git_available()?;
+    let git_args: Vec<OsString> = args.args.iter().map(OsString::from).collect();
+    run_git(None, git_args)?;
+    Ok(0)
+}
+
+fn git_branch_create_from(args: &[String]) -> Result<String> {
+    let mut from = "main".to_string();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--from" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--from requires a branch name");
+                };
+                from = value.clone();
+                index += 2;
+            }
+            other => bail!("unsupported argument for `forkpress git branch create`: {other}"),
+        }
+    }
+    Ok(from)
 }
 
 fn agents_command(args: AgentsArgs) -> Result<i32> {
@@ -655,11 +742,7 @@ fn agents_command(args: AgentsArgs) -> Result<i32> {
             continue;
         }
         add_agent_worktree(&repo, &args.remote_name, &branch, &worktree_path)?;
-        println!(
-            "forkpress: {} ready at {}",
-            branch,
-            worktree_path.display()
-        );
+        println!("forkpress: {} ready at {}", branch, worktree_path.display());
     }
 
     println!(
@@ -806,6 +889,10 @@ fn default_commit_message(branch: &str) -> String {
     format!("forkpress: update {branch}")
 }
 
+fn default_git_remote() -> String {
+    "http://wp.localhost:18080/site.git".to_string()
+}
+
 fn ensure_branch_exists(
     layout: &Layout,
     runtime: &PortableRuntime,
@@ -841,7 +928,10 @@ fn ensure_branch_exists(
     }
 
     write_filtered_output(&output.stdout, &output.stderr)?;
-    bail!("branchctl create {branch} exited with status {}", output.status);
+    bail!(
+        "branchctl create {branch} exited with status {}",
+        output.status
+    );
 }
 
 fn add_agent_worktree(
@@ -887,7 +977,6 @@ impl Layout {
             debug_log: work_dir.join("logs/wp-debug.log"),
             php_error_log: work_dir.join("logs/php-errors.log"),
             php_server_log: work_dir.join("logs/php-server.log"),
-            fileserver_log: work_dir.join("logs/fileserver.log"),
             runtime_ready_marker: work_dir.join("runtime/.forkpress-runtime-ready"),
             bootstrap_marker: work_dir.join(".forkpress-bootstrap-complete"),
             work_dir,
@@ -900,7 +989,6 @@ impl PortableRuntime {
         let root = layout.runtime_dir.join("portable-runtime");
         Self {
             php: root.join("bin/php"),
-            fileserver: root.join("bin/fileserver"),
         }
     }
 }
@@ -961,13 +1049,13 @@ fn prepare_runtime(layout: &Layout) -> Result<()> {
 }
 
 fn ensure_wp_source_unzipped(layout: &Layout) -> Result<()> {
-    let wp_src_dir = layout.runtime_dir.join("e2e/wp-src");
+    let wp_src_dir = layout.runtime_dir.join("runtime/wp-src");
     if wp_src_dir.join("wp-load.php").exists() {
         return Ok(());
     }
 
     fs::create_dir_all(&wp_src_dir)?;
-    let zip_file = File::open(layout.runtime_dir.join("e2e/wp.zip"))
+    let zip_file = File::open(layout.runtime_dir.join("runtime/wp.zip"))
         .context("failed to open embedded WordPress archive")?;
     let mut zip = ZipArchive::new(zip_file).context("failed to read embedded WordPress zip")?;
 
@@ -1010,17 +1098,6 @@ fn ensure_ports_available(args: &StartArgs) -> Result<()> {
             args.host
         );
     }
-    if !args.no_fileserver {
-        if tcp_port_open(&args.host, args.sftp_port) {
-            bail!("SFTP port {} is already in use on {}", args.sftp_port, args.host);
-        }
-        if tcp_port_open(&args.host, args.smb_port) {
-            bail!("SMB port {} is already in use on {}", args.smb_port, args.host);
-        }
-        if tcp_port_open(&args.host, args.mysql_port) {
-            bail!("MySQL port {} is already in use on {}", args.mysql_port, args.host);
-        }
-    }
     Ok(())
 }
 
@@ -1042,7 +1119,7 @@ fn ensure_bootstrapped(layout: &Layout, runtime: &PortableRuntime, args: &StartA
             &args.shared,
             "scripts/import_wp.php",
             [
-                layout.runtime_dir.join("e2e/wp-src").as_os_str(),
+                layout.runtime_dir.join("runtime/wp-src").as_os_str(),
                 layout.site_fp.as_os_str(),
                 OsStr::new("main"),
             ],
@@ -1052,7 +1129,7 @@ fn ensure_bootstrapped(layout: &Layout, runtime: &PortableRuntime, args: &StartA
             layout,
             runtime,
             &args.shared,
-            "e2e/bootstrap_wp.php",
+            "runtime/bootstrap_wp.php",
             [
                 layout.site_fp.as_os_str(),
                 layout.wp_root.as_os_str(),
@@ -1097,7 +1174,7 @@ fn start_php_server(
         .arg(format!("{}:{}", args.host, args.port))
         .arg("-t")
         .arg(&layout.wp_root)
-        .arg(layout.runtime_dir.join("e2e/router.php"))
+        .arg(layout.runtime_dir.join("runtime/router.php"))
         .env("BRANCHFS_DB", &layout.site_fp)
         .env("BRANCHFS_SQLITE_WP_DB", &layout.site_fp)
         .env("BRANCHFS_WP_ROOT", &layout.wp_root)
@@ -1136,57 +1213,6 @@ fn start_php_server(
     }
 
     Ok(guard)
-}
-
-fn start_fileserver(
-    layout: &Layout,
-    runtime: &PortableRuntime,
-    args: &StartArgs,
-) -> Result<Option<ChildGuard>> {
-    if !runtime.fileserver.is_file() {
-        eprintln!(
-            "fileserver binary not found at {} — SFTP/SMB disabled. \
-             Build it with: cd branched-wp/fileserver && go build -o fileserver .",
-            runtime.fileserver.display()
-        );
-        return Ok(None);
-    }
-
-    let log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&layout.fileserver_log)?;
-    let log_err = log.try_clone()?;
-
-    let child = Command::new(&runtime.fileserver)
-        .arg("--db")
-        .arg(&layout.site_fp)
-        .arg("--sftp-addr")
-        .arg(format!("{}:{}", args.host, args.sftp_port))
-        .arg("--smb-addr")
-        .arg(format!("{}:{}", args.host, args.smb_port))
-        .arg("--mysql-addr")
-        .arg(format!("{}:{}", args.host, args.mysql_port))
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_err))
-        .spawn()
-        .context("failed to start fileserver")?;
-
-    let mut guard = ChildGuard {
-        name: "fileserver",
-        child,
-    };
-
-    // Give the fileserver a moment to start; check it hasn't already crashed.
-    thread::sleep(Duration::from_millis(300));
-    if let Some(status) = guard.try_wait()? {
-        bail!(
-            "fileserver exited early with status {status}. Check {}",
-            layout.fileserver_log.display()
-        );
-    }
-
-    Ok(Some(guard))
 }
 
 fn php_base_command(_layout: &Layout, runtime: &PortableRuntime, shared: &SharedPaths) -> Command {
@@ -1397,6 +1423,20 @@ mod git_helper_tests {
 
     #[test]
     fn commit_message_mentions_branch() {
-        assert_eq!(default_commit_message("agent-3"), "forkpress: update agent-3");
+        assert_eq!(
+            default_commit_message("agent-3"),
+            "forkpress: update agent-3"
+        );
+    }
+
+    #[test]
+    fn default_remote_points_at_local_server() {
+        assert_eq!(default_git_remote(), "http://wp.localhost:18080/site.git");
+    }
+
+    #[test]
+    fn parses_git_branch_create_from() {
+        let args = vec!["--from".to_string(), "main".to_string()];
+        assert_eq!(git_branch_create_from(&args).unwrap(), "main");
     }
 }

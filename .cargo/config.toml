@@ -1,5 +1,7 @@
-# Default to the host target. The Linux musl build used by release artifacts
-# is selected explicitly via `cargo build --target x86_64-unknown-linux-musl`.
+# Default to the host target. Linux release artifacts explicitly use musl.
 
 [target.x86_64-unknown-linux-musl]
+linker = "rust-lld"
+
+[target.aarch64-unknown-linux-musl]
 linker = "rust-lld"

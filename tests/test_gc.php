@@ -27,6 +27,7 @@ branchfs_set_root($ROOT);
 // Seed main with one blob.
 file_put_contents('branchfs://main/shared.txt', "shared content\n");
 $blobs_after_main = (int)(new SQLite3($DB))->querySingle("SELECT COUNT(*) FROM blobs");
+branchfs_set_db($DB);
 
 // Fork feature branch and write 3 unique blobs only on it.
 branchfs_create_branch('feature', 'main');

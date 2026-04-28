@@ -1,6 +1,0 @@
-# Build context only needs Dockerfile + entrypoint.sh — source is bind-mounted
-# at runtime, not baked into the image. Keep this list tight.
-*
-!Dockerfile
-!entrypoint.sh
-!.dockerignore

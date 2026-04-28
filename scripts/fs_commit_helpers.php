@@ -36,9 +36,16 @@ function fs_materialize_commit_tree(SQLite3 $db, int $commit_id): array {
         "SELECT branch_id FROM fs_commits WHERE id = $commit_id"
     );
     if ($branch_id <= 0) return [];
+    $kind_expr = fs_table_has_column($db, 'fs_commits', 'kind')
+        ? "COALESCE(kind,'FULL')"
+        : "'FULL'";
+    $op_expr = fs_table_has_column($db, 'fs_commit_files', 'op')
+        ? "COALESCE(op,'UPSERT')"
+        : "'UPSERT'";
+
     $commits = [];
     $r = $db->query(
-        "SELECT id, COALESCE(kind,'FULL') AS kind FROM fs_commits "
+        "SELECT id, $kind_expr AS kind FROM fs_commits "
       . "WHERE branch_id = $branch_id AND id <= $commit_id ORDER BY id"
     );
     while ($row = $r->fetchArray(SQLITE3_ASSOC)) $commits[] = $row;
@@ -55,7 +62,7 @@ function fs_materialize_commit_tree(SQLite3 $db, int $commit_id): array {
         if ($kind === 'FULL') $tree = [];
         $rr = $db->query(
             "SELECT path, blob_hash, mode, mtime, is_dir, "
-          . "       COALESCE(op,'UPSERT') AS op "
+          . "       $op_expr AS op "
           . "FROM fs_commit_files WHERE commit_id = $cid"
         );
         while ($row = $rr->fetchArray(SQLITE3_ASSOC)) {
@@ -74,6 +81,16 @@ function fs_materialize_commit_tree(SQLite3 $db, int $commit_id): array {
         $rr->finalize();
     }
     return $tree;
+}
+
+function fs_table_has_column(SQLite3 $db, string $table, string $column): bool {
+    $result = $db->query('PRAGMA table_info("' . str_replace('"', '""', $table) . '")');
+    while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+        if ((string)$row['name'] === $column) {
+            return true;
+        }
+    }
+    return false;
 }
 
 }
