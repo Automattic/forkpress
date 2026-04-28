@@ -70,35 +70,392 @@ add_filter('request_filesystem_credentials', function ($credentials) {
     return $credentials;
 });
 
-/**
- * Add branch indicator to admin bar.
- */
-add_action('admin_bar_menu', function ($wp_admin_bar) {
-    if (!function_exists('branchfs_get_branch')) return;
+function forkpress_env_is_disabled(string $name): bool {
+    $value = getenv($name);
+    if ($value === false) {
+        return false;
+    }
 
-    $branch = branchfs_get_branch();
-    if (!$branch || $branch === 'main') return;
+    return in_array(strtolower(trim((string) $value)), ['0', 'false', 'no', 'off'], true);
+}
+
+function forkpress_auto_login_enabled(): bool {
+    if (defined('FORKPRESS_AUTO_LOGIN')) {
+        return (bool) FORKPRESS_AUTO_LOGIN;
+    }
+
+    return !forkpress_env_is_disabled('FORKPRESS_AUTO_LOGIN');
+}
+
+function forkpress_current_branch(): ?string {
+    if (function_exists('branchfs_get_branch')) {
+        $branch = branchfs_get_branch();
+        if (is_string($branch) && $branch !== '') {
+            return $branch;
+        }
+    }
+
+    $branch = $_SERVER['BRANCHFS_BRANCH'] ?? '';
+    return is_string($branch) && $branch !== '' ? $branch : null;
+}
+
+if (!function_exists('auth_redirect')) {
+    function auth_redirect() {
+        if (forkpress_auto_login_enabled()) {
+            $user = wp_get_current_user();
+            if ($user && !empty($user->ID)) {
+                do_action('auth_redirect', (int) $user->ID);
+                return;
+            }
+        }
+
+        $request_uri = $_SERVER['REQUEST_URI'] ?? '';
+        $secure = apply_filters('secure_auth_redirect', is_ssl() || force_ssl_admin());
+        if ($secure && !is_ssl() && strpos($request_uri, 'wp-admin') !== false) {
+            if (strpos($request_uri, 'http') === 0) {
+                wp_redirect(set_url_scheme($request_uri, 'https'));
+            } else {
+                wp_redirect('https://' . $_SERVER['HTTP_HOST'] . $request_uri);
+            }
+            exit;
+        }
+
+        $scheme = apply_filters('auth_redirect_scheme', '');
+        $user_id = wp_validate_auth_cookie('', $scheme);
+        if ($user_id) {
+            do_action('auth_redirect', $user_id);
+            if (!$secure && get_user_option('use_ssl', $user_id) && strpos($request_uri, 'wp-admin') !== false) {
+                if (strpos($request_uri, 'http') === 0) {
+                    wp_redirect(set_url_scheme($request_uri, 'https'));
+                } else {
+                    wp_redirect('https://' . $_SERVER['HTTP_HOST'] . $request_uri);
+                }
+                exit;
+            }
+            return;
+        }
+
+        nocache_headers();
+        $redirect = (strpos($request_uri, '/options.php') !== false && wp_get_referer())
+            ? wp_get_referer()
+            : set_url_scheme('http://' . $_SERVER['HTTP_HOST'] . $request_uri);
+        wp_redirect(wp_login_url($redirect, true));
+        exit;
+    }
+}
+
+/**
+ * Local previews are disposable, so make admin available without a login form
+ * unless FORKPRESS_AUTO_LOGIN=0 or FORKPRESS_AUTO_LOGIN is defined false.
+ */
+add_action('init', function () {
+    if (!forkpress_auto_login_enabled() || is_user_logged_in()) {
+        return;
+    }
+    if ((defined('WP_INSTALLING') && WP_INSTALLING) || (defined('DOING_CRON') && DOING_CRON)) {
+        return;
+    }
+    if (($_REQUEST['action'] ?? '') === 'logout') {
+        return;
+    }
+
+    $user = get_user_by('login', 'admin');
+    if (!$user) {
+        $admins = get_users([
+            'role'   => 'administrator',
+            'number' => 1,
+            'fields' => 'all',
+        ]);
+        $user = $admins[0] ?? null;
+    }
+    if (!$user || empty($user->ID)) {
+        return;
+    }
+
+    $user_id = (int) $user->ID;
+    wp_set_current_user($user_id);
+
+    if (forkpress_current_branch() !== 'main' || headers_sent()) {
+        return;
+    }
+
+    $captured_auth = null;
+    $captured_logged_in = null;
+    $captured_scheme = null;
+
+    $capture_auth = function ($auth_cookie, $expire, $expiration, $cookie_user_id, $scheme) use (&$captured_auth, &$captured_scheme, $user_id) {
+        if ((int) $cookie_user_id === $user_id) {
+            $captured_auth = $auth_cookie;
+            $captured_scheme = $scheme;
+        }
+    };
+    $capture_logged_in = function ($logged_in_cookie, $expire, $expiration, $cookie_user_id) use (&$captured_logged_in, $user_id) {
+        if ((int) $cookie_user_id === $user_id) {
+            $captured_logged_in = $logged_in_cookie;
+        }
+    };
+
+    add_action('set_auth_cookie', $capture_auth, 10, 6);
+    add_action('set_logged_in_cookie', $capture_logged_in, 10, 6);
+    wp_set_auth_cookie($user_id, true, is_ssl());
+    remove_action('set_auth_cookie', $capture_auth, 10);
+    remove_action('set_logged_in_cookie', $capture_logged_in, 10);
+
+    $auth_cookie_name = $captured_scheme === 'secure_auth' ? SECURE_AUTH_COOKIE : AUTH_COOKIE;
+    if (is_string($captured_auth) && $captured_auth !== '') {
+        $_COOKIE[$auth_cookie_name] = $captured_auth;
+    }
+    if (is_string($captured_logged_in) && $captured_logged_in !== '') {
+        $_COOKIE[LOGGED_IN_COOKIE] = $captured_logged_in;
+    }
+}, 1);
+
+function forkpress_branchfs_db_path(): ?string {
+    $path = getenv('BRANCHFS_DB');
+    if (is_string($path) && $path !== '') {
+        return $path;
+    }
+    if (defined('FQDB') && is_string(FQDB) && FQDB !== '') {
+        return FQDB;
+    }
+    return null;
+}
+
+function forkpress_branch_url(string $branch): string {
+    $root_host = getenv('BRANCHFS_ROOT_HOST');
+    if (!is_string($root_host) || $root_host === '') {
+        $root_host = 'wp.localhost';
+    }
+
+    $current_host = $_SERVER['HTTP_HOST'] ?? '';
+    $port = preg_match('/:(\d+)$/', $current_host, $m) ? ':' . $m[1] : '';
+    $host = $branch === 'main' ? $root_host : $branch . '.' . $root_host;
+    $scheme = is_ssl() ? 'https' : 'http';
+    $uri = $_SERVER['REQUEST_URI'] ?? '/wp-admin/';
+    if (!is_string($uri) || $uri === '') {
+        $uri = '/wp-admin/';
+    }
+
+    return $scheme . '://' . $host . $port . $uri;
+}
+
+function forkpress_local_branches(string $current_branch): array {
+    $db_path = forkpress_branchfs_db_path();
+    if (!$db_path || !class_exists('SQLite3') || !is_readable($db_path)) {
+        return [$current_branch];
+    }
+
+    try {
+        $db = new SQLite3($db_path, SQLITE3_OPEN_READONLY);
+        $db->busyTimeout(200);
+        $stmt = $db->prepare(
+            "SELECT name FROM branches
+             ORDER BY CASE WHEN name = :current THEN 0 WHEN name = 'main' THEN 1 ELSE 2 END,
+                      datetime(created_at) DESC,
+                      name ASC
+             LIMIT 200"
+        );
+        $stmt->bindValue(':current', $current_branch, SQLITE3_TEXT);
+        $result = $stmt->execute();
+        $branches = [];
+        while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+            if (!empty($row['name']) && is_string($row['name'])) {
+                $branches[] = $row['name'];
+            }
+        }
+        $db->close();
+    } catch (Throwable $e) {
+        return [$current_branch];
+    }
+
+    return $branches ?: [$current_branch];
+}
+
+add_action('admin_bar_menu', function ($wp_admin_bar) {
+    $branch = forkpress_current_branch();
+    if (!$branch) {
+        return;
+    }
 
     $wp_admin_bar->add_node([
         'id'    => 'branchfs-indicator',
-        'title' => '&#9733; Branch: ' . esc_html($branch),
+        'title' => 'Branch: ' . esc_html($branch),
+        'href'  => forkpress_branch_url($branch),
         'meta'  => ['class' => 'branchfs-branch-indicator'],
     ]);
 }, 100);
 
-/**
- * Style the branch indicator.
- */
-add_action('admin_head', function () {
-    if (!function_exists('branchfs_get_branch')) return;
-    $branch = branchfs_get_branch();
-    if (!$branch || $branch === 'main') return;
+function forkpress_branch_switcher_assets(): void {
+    $branch = forkpress_current_branch();
+    if (!$branch || !is_admin_bar_showing()) {
+        return;
+    }
 
     echo '<style>
-        #wpadminbar .branchfs-branch-indicator .ab-item {
+        #wpadminbar #wp-admin-bar-branchfs-indicator > .ab-item {
             background: #2271b1 !important;
             color: #fff !important;
         }
+        #wpadminbar #wp-admin-bar-branchfs-indicator {
+            position: relative;
+        }
+        #wpadminbar .branchfs-switcher-panel {
+            background: #1d2327;
+            border: 1px solid #3c434a;
+            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.28);
+            box-sizing: border-box;
+            color: #f0f0f1;
+            display: none;
+            left: 0;
+            padding: 10px;
+            position: absolute;
+            top: 32px;
+            width: 280px;
+            z-index: 99999;
+        }
+        #wpadminbar #wp-admin-bar-branchfs-indicator:hover .branchfs-switcher-panel,
+        #wpadminbar #wp-admin-bar-branchfs-indicator.branchfs-switcher-open .branchfs-switcher-panel {
+            display: block;
+        }
+        #wpadminbar .branchfs-switcher-filter {
+            background: #fff;
+            border: 1px solid #8c8f94;
+            border-radius: 3px;
+            box-sizing: border-box;
+            color: #1d2327;
+            font-size: 13px;
+            height: 30px;
+            line-height: 1.4;
+            margin: 0 0 8px;
+            padding: 4px 8px;
+            width: 100%;
+        }
+        #wpadminbar .branchfs-switcher-list {
+            max-height: 360px;
+            overflow: auto;
+        }
+        #wpadminbar .branchfs-switcher-branch {
+            border-radius: 3px;
+            box-sizing: border-box;
+            color: #f0f0f1 !important;
+            display: block;
+            font-size: 13px;
+            line-height: 1.4;
+            overflow: hidden;
+            padding: 7px 8px;
+            text-decoration: none;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        #wpadminbar .branchfs-switcher-branch:hover,
+        #wpadminbar .branchfs-switcher-branch:focus {
+            background: #2c3338;
+            color: #fff !important;
+            outline: none;
+        }
+        #wpadminbar .branchfs-switcher-branch.is-current {
+            background: #2271b1;
+            color: #fff !important;
+        }
+        #wpadminbar .branchfs-switcher-empty {
+            color: #c3c4c7;
+            font-size: 13px;
+            line-height: 1.4;
+            padding: 7px 8px;
+        }
     </style>';
-});
+}
+add_action('admin_head', 'forkpress_branch_switcher_assets');
+add_action('wp_head', 'forkpress_branch_switcher_assets');
 
+function forkpress_render_branch_switcher(): void {
+    static $rendered = false;
+    if ($rendered || !is_admin_bar_showing()) {
+        return;
+    }
+
+    $current = forkpress_current_branch();
+    if (!$current) {
+        return;
+    }
+
+    $rendered = true;
+    $branches = array_values(array_unique(forkpress_local_branches($current)));
+    $data = array_map(function (string $branch) use ($current): array {
+        return [
+            'name'    => $branch,
+            'url'     => forkpress_branch_url($branch),
+            'current' => $branch === $current,
+        ];
+    }, $branches);
+    $json = function_exists('wp_json_encode') ? wp_json_encode($data) : json_encode($data);
+    if (!is_string($json) || $json === '') {
+        return;
+    }
+    ?>
+    <script>
+    (function () {
+        var item = document.getElementById('wp-admin-bar-branchfs-indicator');
+        if (!item || item.querySelector('.branchfs-switcher-panel')) {
+            return;
+        }
+
+        var branches = <?php echo $json; ?>;
+        var panel = document.createElement('div');
+        panel.className = 'branchfs-switcher-panel';
+        panel.innerHTML = '<input class="branchfs-switcher-filter" type="search" autocomplete="off" placeholder="Filter branches" aria-label="Filter branches"><div class="branchfs-switcher-list" role="menu"></div>';
+        item.appendChild(panel);
+
+        var input = panel.querySelector('.branchfs-switcher-filter');
+        var list = panel.querySelector('.branchfs-switcher-list');
+
+        function render() {
+            var query = input.value.toLowerCase();
+            var matches = branches.filter(function (branch) {
+                return !query || branch.name.toLowerCase().indexOf(query) !== -1;
+            }).slice(0, 20);
+
+            list.innerHTML = '';
+            if (!matches.length) {
+                var empty = document.createElement('div');
+                empty.className = 'branchfs-switcher-empty';
+                empty.textContent = 'No branches';
+                list.appendChild(empty);
+                return;
+            }
+
+            matches.forEach(function (branch) {
+                var link = document.createElement('a');
+                link.className = 'branchfs-switcher-branch' + (branch.current ? ' is-current' : '');
+                link.href = branch.url;
+                link.role = 'menuitem';
+                link.textContent = branch.name;
+                list.appendChild(link);
+            });
+        }
+
+        item.addEventListener('mouseenter', function () {
+            item.classList.add('branchfs-switcher-open');
+            window.setTimeout(function () { input.focus(); }, 0);
+        });
+        item.addEventListener('mouseleave', function () {
+            item.classList.remove('branchfs-switcher-open');
+        });
+        panel.addEventListener('click', function (event) {
+            event.stopPropagation();
+        });
+        input.addEventListener('input', render);
+        input.addEventListener('keydown', function (event) {
+            if (event.key === 'Escape') {
+                input.value = '';
+                render();
+                input.blur();
+            }
+        });
+        render();
+    }());
+    </script>
+    <?php
+}
+add_action('admin_footer', 'forkpress_render_branch_switcher');
+add_action('wp_footer', 'forkpress_render_branch_switcher');

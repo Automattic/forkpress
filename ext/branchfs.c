@@ -534,6 +534,51 @@ int store_rmdir(int branch_id, const char *path) {
  * Section 3: Path resolution helpers
  * ================================================================ */
 
+/* Normalize a branch-relative path by removing duplicate slashes and dot
+ * segments. The store never uses a leading slash, but WordPress sometimes
+ * builds branchfs:// URLs from ABSPATH plus an absolute-looking suffix, e.g.
+ * branchfs://main//wp-admin/includes/plugin.php. */
+static int normalize_branchfs_rel_path(const char *in, char *out, size_t out_len) {
+    if (!in || !out || out_len == 0) return 0;
+
+    const char *segs[BRANCHFS_MAX_PATH / 2];
+    size_t seg_lens[BRANCHFS_MAX_PATH / 2];
+    int nseg = 0;
+
+    const char *p = in;
+    while (*p == '/') p++;
+    while (*p) {
+        const char *q = p;
+        while (*q && *q != '/') q++;
+        size_t slen = q - p;
+        if (slen == 0 || (slen == 1 && p[0] == '.')) {
+            /* skip empty or "." */
+        } else if (slen == 2 && p[0] == '.' && p[1] == '.') {
+            if (nseg > 0) nseg--;
+        } else {
+            if (nseg >= (int)(sizeof(segs) / sizeof(segs[0]))) return 0;
+            segs[nseg] = p;
+            seg_lens[nseg] = slen;
+            nseg++;
+        }
+        p = q;
+        while (*p == '/') p++;
+    }
+
+    size_t pos = 0;
+    for (int i = 0; i < nseg; i++) {
+        if (i > 0) {
+            if (pos + 1 >= out_len) return 0;
+            out[pos++] = '/';
+        }
+        if (pos + seg_lens[i] >= out_len) return 0;
+        memcpy(out + pos, segs[i], seg_lens[i]);
+        pos += seg_lens[i];
+    }
+    out[pos] = '\0';
+    return 1;
+}
+
 /* Parse branchfs://branch/path → branch name + relative path */
 static int parse_branchfs_url(const char *url, char *branch, size_t branch_len,
     char *path, size_t path_len)
@@ -551,11 +596,7 @@ static int parse_branchfs_url(const char *url, char *branch, size_t branch_len,
         return 0;
     }
     snprintf(branch, branch_len, "%.*s", (int)(slash - rest), rest);
-    snprintf(path, path_len, "%s", slash + 1);
-    /* Remove trailing slash */
-    size_t pl = strlen(path);
-    while (pl > 0 && path[pl - 1] == '/') path[--pl] = '\0';
-    return 0;
+    return normalize_branchfs_rel_path(slash + 1, path, path_len) ? 0 : -1;
 }
 
 /* Resolve a path to branch-relative. Returns 1 if under WP root, 0 otherwise. */
@@ -953,7 +994,17 @@ static php_stream *branchfs_stream_opener(php_stream_wrapper *wrapper, const cha
     int branch_id = store_get_branch_id(branch);
     if (branch_id < 0) return NULL;
 
-    return do_open_file(branch_id, path, mode, options, opened_path STREAMS_REL_CC);
+    php_stream *stream = do_open_file(branch_id, path, mode, options, opened_path STREAMS_REL_CC);
+    if (stream && opened_path) {
+        char normalized[BRANCHFS_MAX_PATH + 280];
+        if (path[0] == '\0') {
+            snprintf(normalized, sizeof(normalized), "branchfs://%s", branch);
+        } else {
+            snprintf(normalized, sizeof(normalized), "branchfs://%s/%s", branch, path);
+        }
+        *opened_path = zend_string_init(normalized, strlen(normalized), 0);
+    }
+    return stream;
 }
 
 static int branchfs_url_stat(php_stream_wrapper *wrapper, const char *url, int flags,
@@ -974,7 +1025,17 @@ static php_stream *branchfs_dir_opener(php_stream_wrapper *wrapper, const char *
     if (parse_branchfs_url(filename, branch, sizeof(branch), path, sizeof(path)) != 0) return NULL;
     int branch_id = store_get_branch_id(branch);
     if (branch_id < 0) return NULL;
-    return do_open_dir(branch_id, path STREAMS_REL_CC);
+    php_stream *stream = do_open_dir(branch_id, path STREAMS_REL_CC);
+    if (stream && opened_path) {
+        char normalized[BRANCHFS_MAX_PATH + 280];
+        if (path[0] == '\0') {
+            snprintf(normalized, sizeof(normalized), "branchfs://%s", branch);
+        } else {
+            snprintf(normalized, sizeof(normalized), "branchfs://%s/%s", branch, path);
+        }
+        *opened_path = zend_string_init(normalized, strlen(normalized), 0);
+    }
+    return stream;
 }
 
 static int branchfs_unlink(php_stream_wrapper *wrapper, const char *url, int options,

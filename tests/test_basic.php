@@ -71,6 +71,14 @@ assert_eq($read, $content, 'Read back matches written content');
 echo "\n# File existence and stat\n";
 assert_true(file_exists('branchfs://main/index.php'), 'file_exists returns true');
 assert_true(!file_exists('branchfs://main/nonexistent.php'), 'file_exists returns false for missing');
+assert_true(file_exists('branchfs://main//index.php'), 'branchfs:// accepts duplicate slash after branch');
+assert_eq(file_get_contents('branchfs://main//index.php'), $content, 'duplicate-slash branchfs:// path reads same file');
+
+$once_fn = 'branchfs_once_' . getmypid();
+file_put_contents('branchfs://main/once.php', "<?php function $once_fn() { return 'ok'; }\n");
+require_once 'branchfs://main/once.php';
+require_once 'branchfs://main//once.php';
+assert_eq($once_fn(), 'ok', 'require_once de-duplicates normalized branchfs:// paths');
 
 $stat = stat('branchfs://main/index.php');
 assert_true($stat !== false, 'stat() works');

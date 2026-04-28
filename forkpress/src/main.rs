@@ -1288,7 +1288,7 @@ fn git_command(args: GitPassthrough) -> Result<i32> {
         let runtime = PortableRuntime::from_layout(&layout);
         if !layout.site_fp.exists() || !layout.bootstrap_marker.exists() {
             bail!(
-                "no bootstrapped site found in {}. Run `forkpress serve` first",
+                "no bootstrapped site found in {}. Run `forkpress server start` first",
                 layout.work_dir.display()
             );
         }
@@ -1393,7 +1393,7 @@ fn agents_command(args: AgentsArgs) -> Result<i32> {
 
     if !layout.site_fp.exists() || !layout.bootstrap_marker.exists() {
         bail!(
-            "no bootstrapped site found in {}. Run `forkpress start` first",
+            "no bootstrapped site found in {}. Run `forkpress server start` first",
             layout.work_dir.display()
         );
     }
@@ -1599,7 +1599,7 @@ fn branch_command(args: BranchPassthrough) -> Result<i32> {
 
     if !layout.site_fp.exists() || !layout.bootstrap_marker.exists() {
         bail!(
-            "no bootstrapped site found in {}. Run `forkpress start` first",
+            "no bootstrapped site found in {}. Run `forkpress server start` first",
             layout.work_dir.display()
         );
     }

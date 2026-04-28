@@ -117,6 +117,16 @@ if (preg_match('|^/([a-zA-Z0-9_\-]+)\.git(/.*)?$|', $path, $git_match)) {
 
 // --- Route request via branchfs:// URL so OPcache keys per branch ---
 $branch_root = "branchfs://$branch";
+
+// Common admin-screen shortcut: WordPress keeps this page under wp-admin.
+// If a site has its own root plugins.php file, serve that file instead.
+if ($path === '/plugins.php'
+    && !file_exists($branch_root . '/plugins.php')
+    && file_exists($branch_root . '/wp-admin/plugins.php')) {
+    header('Location: /wp-admin/plugins.php' . ($query !== '' ? '?' . $query : ''), true, 302);
+    return true;
+}
+
 $file_url    = $branch_root . $path;
 
 if (substr($path, -1) === '/') {

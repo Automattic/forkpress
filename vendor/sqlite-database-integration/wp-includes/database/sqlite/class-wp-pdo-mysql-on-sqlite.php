@@ -1830,6 +1830,9 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 	private function execute_insert_or_replace_statement( WP_Parser_Node $node ): void {
 		$parts                   = array();
 		$on_conflict_update_list = null;
+		$emulate_view_upsert     = false;
+		$insert_body             = null;
+		$table_name              = null;
 		foreach ( $node->get_children() as $child ) {
 			$is_token = $child instanceof WP_MySQL_Token;
 			$is_node  = $child instanceof WP_Parser_Node;
@@ -1864,7 +1867,8 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 			) {
 				$table_ref  = $node->get_first_child_node( 'tableRef' );
 				$table_name = $this->unquote_sqlite_identifier( $this->translate( $table_ref ) );
-				$parts[]    = $this->translate_insert_or_replace_body( $table_name, $child );
+				$insert_body = $this->translate_insert_or_replace_body( $table_name, $child );
+				$parts[]     = $insert_body;
 			} elseif ( $is_node && 'insertUpdateList' === $child->rule_name ) {
 				/*
 				 * Translate "ON DUPLICATE KEY UPDATE" to "ON CONFLICT DO UPDATE SET".
@@ -1876,11 +1880,15 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 				 * See bellow at "Handle ON CONFLICT clause for SQLite < 3.35.0".
 				 */
 				$sqlite_version = $this->get_sqlite_version();
-				if ( version_compare( $sqlite_version, '3.35.0', '<' ) ) {
-					$on_conflict_update_list = $this->translate_update_list( $table_name, $child );
+				$on_conflict_update_list = $this->translate_update_list( $table_name, $child );
+				if ( $this->sqlite_table_is_view( $table_name ) ) {
+					$emulate_view_upsert = true;
+				} elseif ( version_compare( $sqlite_version, '3.35.0', '<' ) ) {
+					// Use the compatibility path below.
 				} else {
 					$parts[] = 'ON CONFLICT DO UPDATE SET ';
-					$parts[] = $this->translate_update_list( $table_name, $child );
+					$parts[] = $on_conflict_update_list;
+					$on_conflict_update_list = null;
 				}
 			} else {
 				$parts[] = $this->translate( $child );
@@ -1888,6 +1896,11 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 		}
 
 		$query = implode( ' ', $parts );
+
+		if ( $emulate_view_upsert && null !== $on_conflict_update_list && null !== $insert_body ) {
+			$this->execute_view_upsert( $query, $table_name, $insert_body, $on_conflict_update_list );
+			return;
+		}
 
 		/*
 		 * Handle ON CONFLICT clause for SQLite < 3.35.0.
@@ -1946,6 +1959,125 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 		}
 
 		$this->last_result_statement = $this->execute_sqlite_query( $query );
+	}
+
+	/**
+	 * Check whether a SQLite object is a view.
+	 *
+	 * @param string|null $table_name The SQLite object name.
+	 * @return bool Whether the object is a view.
+	 */
+	private function sqlite_table_is_view( ?string $table_name ): bool {
+		if ( null === $table_name || '' === $table_name ) {
+			return false;
+		}
+
+		$stmt = $this->execute_sqlite_query(
+			"SELECT 1 FROM sqlite_master WHERE type = 'view' AND name = ? LIMIT 1",
+			array( $table_name )
+		);
+		return false !== $stmt->fetchColumn();
+	}
+
+	/**
+	 * Emulate MySQL ON DUPLICATE KEY UPDATE for writable COW views.
+	 *
+	 * SQLite rejects native UPSERT syntax on views before INSTEAD OF triggers
+	 * can run. BranchFS branch tables are writable views, so try the insert
+	 * first and, on a unique collision, perform the duplicate-key update
+	 * through the same view. The view triggers keep the write branch-local.
+	 *
+	 * @param string $insert_query            SQLite INSERT query without ON CONFLICT.
+	 * @param string $table_name              Target view name.
+	 * @param string $insert_body             Translated INSERT body.
+	 * @param string $on_conflict_update_list Translated duplicate-key update list.
+	 * @throws PDOException When the insert fails for a non-unique reason.
+	 */
+	private function execute_view_upsert(
+		string $insert_query,
+		string $table_name,
+		string $insert_body,
+		string $on_conflict_update_list
+	): void {
+		try {
+			$this->last_result_statement = $this->execute_sqlite_query( $insert_query );
+			return;
+		} catch ( PDOException $e ) {
+			$conflict_columns = $this->parse_unique_constraint_columns( $e );
+			if ( empty( $conflict_columns ) ) {
+				throw $e;
+			}
+		}
+
+		$select_offset = stripos( $insert_body, ') SELECT ' );
+		if ( false === $select_offset ) {
+			throw $this->new_driver_exception(
+				'Could not emulate ON DUPLICATE KEY UPDATE for a view.'
+			);
+		}
+
+		$excluded_name = $this->quote_sqlite_identifier( 'excluded' );
+		$column_list   = substr( $insert_body, 0, $select_offset + 1 );
+		$select_body   = substr( $insert_body, $select_offset + 2 );
+		$update_list   = preg_replace_callback(
+			'/`excluded`\\.`((?:``|[^`])+)`/',
+			function ( $matches ) use ( $excluded_name ) {
+				$column_name = str_replace( '``', '`', $matches[1] );
+				$column_ref  = $this->quote_sqlite_identifier( $column_name );
+				return sprintf( '(SELECT %s FROM %s)', $column_ref, $excluded_name );
+			},
+			$on_conflict_update_list
+		);
+
+		$where = array();
+		foreach ( $conflict_columns as $column_name ) {
+			$column_ref = $this->quote_sqlite_identifier( $column_name );
+			$where[]   = sprintf(
+				'%1$s IS (SELECT %1$s FROM %2$s)',
+				$column_ref,
+				$excluded_name
+			);
+		}
+
+		$update_query = sprintf(
+			'WITH %s %s AS (%s) UPDATE %s SET %s WHERE %s',
+			$excluded_name,
+			$column_list,
+			$select_body,
+			$this->quote_sqlite_identifier( $table_name ),
+			$update_list,
+			implode( ' AND ', $where )
+		);
+
+		$this->last_result_statement = $this->execute_sqlite_query( $update_query );
+	}
+
+	/**
+	 * Parse SQLite unique-constraint columns from a PDO exception.
+	 *
+	 * @param PDOException $e The exception raised by SQLite.
+	 * @return string[] Column names, or an empty list for non-unique failures.
+	 */
+	private function parse_unique_constraint_columns( PDOException $e ): array {
+		if ( ! preg_match( '/UNIQUE constraint failed: ([^\n]+)/', $e->getMessage(), $matches ) ) {
+			return array();
+		}
+
+		$column_refs = explode( ',', preg_replace( '/\s+\([^)]*\).*$/', '', $matches[1] ) );
+		$columns     = array();
+		foreach ( $column_refs as $column_ref ) {
+			$column_ref = trim( $column_ref );
+			$dot_pos    = strrpos( $column_ref, '.' );
+			if ( false !== $dot_pos ) {
+				$column_ref = substr( $column_ref, $dot_pos + 1 );
+			}
+			$column_ref = trim( $column_ref, "`\" \t\r\n" );
+			if ( '' !== $column_ref ) {
+				$columns[] = str_replace( array( '``', '""' ), array( '`', '"' ), $column_ref );
+			}
+		}
+
+		return $columns;
 	}
 
 	/**
