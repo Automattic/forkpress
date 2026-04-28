@@ -76,6 +76,7 @@ jobs:
         run: scripts/build-dist.sh
         env:
           FORKPRESS_TARGET: ${{ matrix.target }}
+          GITHUB_TOKEN: ${{ github.token }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
