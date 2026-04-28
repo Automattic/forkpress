@@ -98,6 +98,10 @@ fn build_embedded_zfs(repo_root: &Path, target: &str) -> Result<()> {
     );
     println!(
         "cargo:rerun-if-changed={}",
+        engine_dir.join("include/libintl.h").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
         engine_dir.join("include/sys/endian.h").display()
     );
     println!(
