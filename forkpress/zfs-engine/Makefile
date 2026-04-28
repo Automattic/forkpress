@@ -67,6 +67,8 @@ DEFS_COMMON += \
     -Dftruncate64=ftruncate \
     -Dloff_t=off_t \
     -DEREMOTEIO=EIO \
+    -DHAVE_STRLCAT=1 \
+    -DHAVE_STRLCPY=1 \
     -DO_LARGEFILE=0 \
     -DO_DSYNC=0 \
     -D__EMSCRIPTEN__=1 \
@@ -156,12 +158,16 @@ SPL_SRCS := \
     $(ZFS)/lib/libspl/assert.c \
     $(ZFS)/lib/libspl/atomic.c \
     $(ZFS)/lib/libspl/list.c \
-    $(ZFS)/lib/libspl/strlcat.c \
-    $(ZFS)/lib/libspl/strlcpy.c \
     $(ZFS)/lib/libspl/mkdirp.c \
     $(ZFS)/lib/libspl/page.c \
     $(ZFS)/lib/libspl/timestamp.c \
     $(ZFS)/lib/libspl/getexecname.c
+
+ifneq ($(ZFS_ENGINE_DARWIN),1)
+SPL_SRCS += \
+    $(ZFS)/lib/libspl/strlcat.c \
+    $(ZFS)/lib/libspl/strlcpy.c
+endif
 
 SHIM_SRCS := \
     $(EXPERIMENT)/src/shim/xdr_stub.c \
