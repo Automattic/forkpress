@@ -217,14 +217,66 @@ Supported strategy values:
   operations, and Git protocol integration intentionally refuse for now instead
   of pretending to be ZFS.
 
-The intended ZFS strategy is different from BranchFS: one ZFS dataset per
-ForkPress branch, branch creation as snapshot + clone, WordPress files and the
-SQLite database file stored directly inside the active dataset, and Git
-clone/fetch/push materializing and writing that dataset. There should be no
-SQL-level overlays in that mode. The
+### ZFS Shipping Plan
+
+ForkPress can ship ZFS without a system ZFS install by embedding a
+ForkPress-specific OpenZFS engine compiled to WebAssembly/WASI:
+
+- The release artifact remains one `forkpress` binary. Cargo embeds
+  `zfsengine.wasm` the same way it embeds the PHP runtime payload.
+- The Rust binary embeds a Wasm runtime and calls the ZFS engine in process.
+- The durable storage is a sparse `.forkpress/zfs/pool.img` file.
+- The ZFS engine opens that pool image through WASI file APIs, so there is no
+  kernel module, FUSE mount, Samba share, Docker service, Node runtime, or
+  system ZFS dependency.
+- OpenZFS code remains in the Wasm module rather than being native-linked into
+  the Rust binary. The project still needs a license review because OpenZFS is
+  CDDL and ForkPress is GPL-2.0.
+
+The browser demo at
 [OpenZFS WebAssembly experiment](https://adamziel.github.io/experiments/real-zfs/)
-demonstrates the target primitive shape: real pools, datasets, snapshots, and
-clones on a file-backed pool.
+proves the primitives are viable: real pools, datasets, snapshots, and clones
+on a file-backed pool. That artifact is not the one ForkPress should embed
+directly because it is Emscripten JS plus a threaded Wasm module that expects a
+browser or Node worker runtime. ForkPress should instead build a headless
+WASI module with a small exported C ABI.
+
+The intended ZFS strategy is different from BranchFS:
+
+- one ZFS dataset per ForkPress branch
+- branch creation = snapshot parent + clone snapshot
+- WordPress files and the SQLite database file are versioned together inside
+  the branch dataset
+- no SQL-level overlays, COW views, tombstones, or branch table prefixes
+- Git clone/fetch materializes `wordpress/` and `database.sql` from the ZFS
+  branch dataset
+- Git push writes file changes into the target ZFS dataset and snapshots the
+  result
+
+Because the ZFS pool is inside a normal file and there is no FUSE/kernel mount,
+PHP cannot directly access dataset files. The HTTP backend should therefore use
+materialized branch working directories as caches:
+
+```mermaid
+flowchart LR
+    pool[(.forkpress/zfs/pool.img<br/>OpenZFS pool)]
+    engine[zfsengine.wasm<br/>WASI module]
+    cache[.forkpress/zfs/worktrees/feature<br/>materialized cache]
+    php[Bundled PHP + WordPress]
+    git[Git endpoint]
+
+    pool <--> engine
+    engine --> cache
+    cache --> php
+    php --> cache
+    cache --> engine
+    git <--> engine
+```
+
+For a request, ForkPress exports the requested branch dataset into its cache,
+runs WordPress against ordinary files and an ordinary SQLite database file, then
+imports changed files and the database file back into the branch dataset under
+a branch lock. Git uses the same engine path, not BranchFS tables.
 
 ### Building Blocks
 

@@ -2192,8 +2192,18 @@ This site was initialized with `strategy = \"zfs\"`.
 
 The current binary records the strategy choice and refuses BranchFS-specific
 commands for this work directory. The concrete ZFS backend is intentionally not
-faked here: it still needs a runtime that can expose a ZFS pool, datasets,
-snapshots, clones, and file/database reads to ForkPress HTTP and Git paths.
+faked here.
+
+The shipping path is an embedded OpenZFS WebAssembly/WASI engine:
+
+- build a headless `zfsengine.wasm` from OpenZFS userland code
+- embed that module into the `forkpress` binary at Cargo build time
+- run it from Rust through an embedded Wasm runtime
+- store the pool in `.forkpress/zfs/pool.img`
+- expose ZFS operations through a small C ABI: init pool, create dataset,
+  snapshot, clone, list files, read file, write file, export tree, import tree
+- do not require a system ZFS install, kernel module, FUSE mount, Node runtime,
+  Docker service, or sidecar daemon
 
 The design target is:
 
@@ -2203,6 +2213,12 @@ The design target is:
 - Git clone/fetch materializes `wordpress/` and `database.sql` from the selected
   dataset, not from BranchFS SQL overlays
 - Git push writes files into the target dataset and snapshots the result
+
+Because the pool lives inside a normal file and there is no mount layer, PHP
+will not read dataset contents directly. ForkPress should materialize a branch
+dataset into `.forkpress/zfs/worktrees/<branch>` for HTTP, run WordPress against
+that ordinary directory, then import changed files and the SQLite database back
+into the dataset under a branch lock.
 ";
     fs::write(layout.zfs_dir.join("README.md"), notes).with_context(|| {
         format!(
