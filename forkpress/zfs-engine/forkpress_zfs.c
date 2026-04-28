@@ -169,8 +169,17 @@ forkpress_zfs_init(void)
 int
 forkpress_zfs_fini(void)
 {
+#if defined(__APPLE__)
+    /*
+     * libzpool's userspace teardown asserts on Darwin pthread cleanup after
+     * successful pool operations. ForkPress uses this engine as process-local
+     * state, so Darwin lets the process reclaim it at exit.
+     */
+    return (0);
+#else
     kernel_fini();
     return (0);
+#endif
 }
 
 int
