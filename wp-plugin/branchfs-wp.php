@@ -95,6 +95,16 @@ function forkpress_current_branch(): ?string {
         }
     }
 
+    $branch = getenv('FORKPRESS_BRANCH');
+    if (is_string($branch) && $branch !== '') {
+        return $branch;
+    }
+
+    $branch = $_SERVER['FORKPRESS_BRANCH'] ?? '';
+    if (is_string($branch) && $branch !== '') {
+        return $branch;
+    }
+
     $branch = $_SERVER['BRANCHFS_BRANCH'] ?? '';
     return is_string($branch) && $branch !== '' ? $branch : null;
 }
@@ -222,7 +232,10 @@ function forkpress_branchfs_db_path(): ?string {
 }
 
 function forkpress_branch_url(string $branch): string {
-    $root_host = getenv('BRANCHFS_ROOT_HOST');
+    $root_host = getenv('FORKPRESS_ROOT_HOST');
+    if (!is_string($root_host) || $root_host === '') {
+        $root_host = getenv('BRANCHFS_ROOT_HOST');
+    }
     if (!is_string($root_host) || $root_host === '') {
         $root_host = 'wp.localhost';
     }
@@ -240,6 +253,27 @@ function forkpress_branch_url(string $branch): string {
 }
 
 function forkpress_local_branches(string $current_branch): array {
+    $branch_list = getenv('FORKPRESS_BRANCH_LIST');
+    if (is_string($branch_list) && $branch_list !== '' && is_readable($branch_list)) {
+        $branches = [];
+        foreach (file($branch_list, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as $line) {
+            $name = trim((string) $line);
+            if ($name !== '' && preg_match('/^[a-zA-Z0-9_\-]{1,63}$/', $name)) {
+                $branches[] = $name;
+            }
+        }
+        if ($branches) {
+            usort($branches, function (string $a, string $b) use ($current_branch): int {
+                if ($a === $current_branch) return -1;
+                if ($b === $current_branch) return 1;
+                if ($a === 'main') return -1;
+                if ($b === 'main') return 1;
+                return strnatcasecmp($a, $b);
+            });
+            return array_values(array_unique($branches));
+        }
+    }
+
     $db_path = forkpress_branchfs_db_path();
     if (!$db_path || !class_exists('SQLite3') || !is_readable($db_path)) {
         return [$current_branch];
