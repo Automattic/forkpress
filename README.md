@@ -78,6 +78,12 @@ forkpress branch create agent-1
 That stores branch files and each branch's SQLite database as ordinary files
 under `.forkpress/zfs/branches/<branch>`. It does not use SQL overlays.
 
+To verify the embedded OpenZFS engine linked into the binary:
+
+```bash
+forkpress zfs smoke --work-dir .forkpress
+```
+
 List running site servers:
 
 ```bash
@@ -234,7 +240,7 @@ Supported strategy values:
   regular copy. HTTP serving and local branch creation are wired; Git smart
   HTTP for this strategy is still pending.
 
-### ZFS Strategy And Shipping Plan
+### ZFS Strategy And Embedded Engine
 
 The ZFS strategy is currently split into two layers:
 
@@ -242,9 +248,10 @@ The ZFS strategy is currently split into two layers:
   `.forkpress/zfs/branches`. WordPress runs against normal files, so post
   editor loads, uploads, plugin pages, and SQLite writes do not need BranchFS
   stream wrappers or table-prefix overlays.
-- Pending storage engine layer: replace the current filesystem clone/copy
-  operation with an embedded OpenZFS pool engine while keeping the same
-  materialized-directory HTTP boundary.
+- Embedded storage engine layer: Linux release builds link a ForkPress-specific
+  OpenZFS 2.2.6 userland subset and bundled zlib into the single `forkpress`
+  binary. The current CLI exposes this through `forkpress zfs smoke`; branch
+  import/export still needs to be connected to it.
 
 Current runtime flow:
 
@@ -271,27 +278,28 @@ ordinary files. A post save on `feature.wp.localhost` writes to
 `.forkpress/zfs/branches/feature/wp-content/database/.ht.sqlite`; it does not
 write to `main` and it does not pass through SQL COW views or overlay tables.
 
-ForkPress can ship ZFS without a system ZFS install by embedding a
-ForkPress-specific OpenZFS engine compiled to WebAssembly/WASI:
+ForkPress now ships the engine without a system ZFS install by native-linking a
+small OpenZFS userland engine into the binary on Linux targets:
 
-- The release artifact remains one `forkpress` binary. Cargo embeds
-  `zfsengine.wasm` the same way it embeds the PHP runtime payload.
-- The Rust binary embeds a Wasm runtime and calls the ZFS engine in process.
-- The durable storage is a sparse `.forkpress/zfs/pool.img` file.
-- The ZFS engine opens that pool image through WASI file APIs, so there is no
+- The release artifact remains one `forkpress` binary.
+- Cargo fetches the pinned real-zfs/OpenZFS sources at build time, builds a
+  static archive, and links it into the Rust executable.
+- The durable storage is a sparse `.forkpress/zfs/*.img` pool file.
+- The ZFS engine opens that pool image through normal file APIs, so there is no
   kernel module, FUSE mount, Samba share, Docker service, Node runtime, or
   system ZFS dependency.
-- OpenZFS code remains in the Wasm module rather than being native-linked into
-  the Rust binary. The project still needs a license review because OpenZFS is
-  CDDL and ForkPress is GPL-2.0.
+- The engine currently exposes a small C ABI for pool create/import/export,
+  dataset create, snapshot, clone, logical file write, and logical file read.
+- The project still needs a license review because OpenZFS is CDDL and
+  ForkPress is GPL-2.0.
 
 The browser demo at
 [OpenZFS WebAssembly experiment](https://adamziel.github.io/experiments/real-zfs/)
 proves the primitives are viable: real pools, datasets, snapshots, and clones
 on a file-backed pool. That artifact is not the one ForkPress should embed
 directly because it is Emscripten JS plus a threaded Wasm module that expects a
-browser or Node worker runtime. ForkPress should instead build a headless
-WASI module with a small exported C ABI.
+browser or Node worker runtime. ForkPress now builds the same OpenZFS subset as
+native static code for the Linux binary.
 
 The target OpenZFS-backed strategy is different from BranchFS:
 
@@ -305,14 +313,14 @@ The target OpenZFS-backed strategy is different from BranchFS:
 - Git push writes file changes into the target ZFS dataset and snapshots the
   result
 
-Because the future ZFS pool is inside a normal file and there is no FUSE/kernel
+Because the ZFS pool is inside a normal file and there is no FUSE/kernel
 mount, PHP cannot directly access dataset files. The HTTP backend therefore
 keeps the materialized branch-directory boundary:
 
 ```mermaid
 flowchart LR
     pool[(.forkpress/zfs/pool.img<br/>OpenZFS pool)]
-    engine[zfsengine.wasm<br/>WASI module]
+    engine[embedded OpenZFS engine<br/>static archive in forkpress]
     cache[.forkpress/zfs/branches/feature<br/>materialized branch]
     php[Bundled PHP + WordPress]
     git[Git endpoint]
@@ -325,11 +333,11 @@ flowchart LR
     git <--> engine
 ```
 
-With the embedded OpenZFS engine in place, ForkPress will export the requested
-branch dataset into the materialized branch directory, run WordPress against
-ordinary files and an ordinary SQLite database file, then import changed files
-and the database file back into the dataset under a branch lock. Git will use
-the same engine path, not BranchFS tables.
+The next integration step is to export the requested branch dataset into the
+materialized branch directory, run WordPress against ordinary files and an
+ordinary SQLite database file, then import changed files and the database file
+back into the dataset under a branch lock. Git should use the same engine path,
+not BranchFS tables.
 
 ### Building Blocks
 
@@ -675,6 +683,9 @@ forkpress agents \
   `branchfs` strategy.
 - `forkpress init --strategy zfs --admin-password admin` creates a no-SQL-overlay
   ZFS-strategy site under `.forkpress/zfs/branches`.
+- `forkpress zfs smoke --work-dir .forkpress` verifies the embedded OpenZFS
+  engine by creating a pool image, writing and reading a logical file,
+  snapshotting, cloning, exporting, importing, and reading from the clone.
 - `forkpress server start` imports and boots WordPress if needed, then serves
   HTTP from the initialized strategy. For `branchfs`, Git smart HTTP is served
   from `.forkpress/site.fp`; for `zfs`, Git smart HTTP is not wired yet.

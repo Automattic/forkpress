@@ -13,6 +13,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 use zip::ZipArchive;
 
+mod zfs_engine;
+
 const RUNTIME_BUNDLE: &[u8] = include_bytes!(env!("FORKPRESS_RUNTIME_BUNDLE"));
 const RUNTIME_BUNDLE_ID: &str = env!("CARGO_PKG_VERSION");
 const STARTUP_WARNING_FILTER: &str = "Missing arginfo";
@@ -64,6 +66,8 @@ enum Commands {
     Export(ExportArgs),
     /// Rebuild a .fp from a directory tree produced by `forkpress export`.
     Import(ImportArgs),
+    /// Inspect and smoke-test the embedded ZFS engine.
+    Zfs(ZfsArgs),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -127,6 +131,29 @@ struct ImportArgs {
     input_dir: PathBuf,
     /// Destination .fp path (must not exist).
     dest: PathBuf,
+}
+
+#[derive(Args, Debug, Clone)]
+struct ZfsArgs {
+    #[command(subcommand)]
+    command: ZfsCommand,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum ZfsCommand {
+    /// Create/import/export a file-backed pool, then snapshot and clone a dataset.
+    Smoke(ZfsSmokeArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+struct ZfsSmokeArgs {
+    /// ForkPress site state directory. The smoke pool image is written under zfs/.
+    #[arg(long, default_value = ".forkpress")]
+    work_dir: PathBuf,
+
+    /// Pool image size in MiB.
+    #[arg(long, default_value_t = 128)]
+    pool_size_mib: u64,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -590,6 +617,7 @@ fn run() -> Result<i32> {
         Commands::Backup(args) => backup_command(args),
         Commands::Export(args) => export_command(args),
         Commands::Import(args) => import_command(args),
+        Commands::Zfs(args) => zfs_command(args),
     }
 }
 
@@ -771,6 +799,28 @@ fn import_command(args: ImportArgs) -> Result<i32> {
         [args.input_dir.as_os_str(), args.dest.as_os_str()],
     )?;
     Ok(0)
+}
+
+fn zfs_command(args: ZfsArgs) -> Result<i32> {
+    match args.command {
+        ZfsCommand::Smoke(args) => {
+            let layout = Layout::new(args.work_dir)?;
+            fs::create_dir_all(&layout.zfs_dir)
+                .with_context(|| format!("failed to create {}", layout.zfs_dir.display()))?;
+            let pool_img = layout.zfs_dir.join("engine-smoke.img");
+            let size = args
+                .pool_size_mib
+                .checked_mul(1024 * 1024)
+                .ok_or_else(|| anyhow!("--pool-size-mib is too large"))?;
+            let report = zfs_engine::smoke(&pool_img, size)?;
+            println!("forkpress: embedded ZFS engine smoke passed");
+            println!("  built-in: {}", zfs_engine::available());
+            println!("  pool:     {}", pool_img.display());
+            println!("  main:     {}", report.read_main);
+            println!("  clone:    {}", report.read_clone);
+            Ok(0)
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2269,19 +2319,19 @@ views, tombstones, triggers, or per-branch table prefixes.
 Branch creation currently clones the source branch directory with filesystem
 copy-on-write primitives when the host supports them (Linux `FICLONE`, macOS
 `clonefile`) and falls back to a regular copy. That gives the HTTP/runtime
-surface needed for the ZFS strategy while the embedded OpenZFS engine is wired
-in behind the same branch-directory boundary.
+surface needed for the ZFS strategy while branch-directory import/export is
+connected to the embedded engine.
 
-The shipping path is an embedded OpenZFS WebAssembly/WASI engine:
+The forkpress binary now includes an embedded OpenZFS userland engine on Linux
+targets. Cargo builds the same OpenZFS 2.2.6 subset used by the real-zfs
+experiment, plus bundled zlib, into a static archive and links it into the
+single `forkpress` executable. There is no system ZFS install, kernel module,
+FUSE mount, Node runtime, Docker service, dynamic library, or sidecar daemon.
 
-- build a headless `zfsengine.wasm` from OpenZFS userland code
-- embed that module into the `forkpress` binary at Cargo build time
-- run it from Rust through an embedded Wasm runtime
-- store the pool in `.forkpress/zfs/pool.img`
-- expose ZFS operations through a small C ABI: init pool, create dataset,
-  snapshot, clone, list files, read file, write file, export tree, import tree
-- do not require a system ZFS install, kernel module, FUSE mount, Node runtime,
-  Docker service, or sidecar daemon
+Run `forkpress zfs smoke --work-dir .forkpress` to verify the linked engine.
+The smoke test creates a file-backed pool image, creates a dataset, writes and
+reads a logical file through the DMU, snapshots the dataset, clones the
+snapshot, exports the pool, imports it again, and reads from the clone.
 
 The design target is:
 

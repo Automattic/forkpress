@@ -28,7 +28,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential clang curl git pkg-config unzip \
-            php-cli composer re2c bison nodejs
+            musl-tools php-cli composer re2c bison nodejs
 
       - uses: dtolnay/rust-toolchain@stable
         with:

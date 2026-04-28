@@ -54,7 +54,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential clang curl git pkg-config unzip \
-            php-cli composer re2c bison
+            musl-tools php-cli composer re2c bison
 
       # Static PHP builds are slow (3-5 min of compilation). Cache the whole
       # .build/ directory so we skip the clone, composer install, downloads,
@@ -69,7 +69,10 @@ jobs:
               'scripts/build-dist.sh',
               'scripts/spc-patch-branchfs.php',
               'ext/branchfs.c',
-              'ext/branchfs.h'
+              'ext/branchfs.h',
+              'forkpress/build.rs',
+              'forkpress/zfs-engine/Makefile',
+              'forkpress/zfs-engine/forkpress_zfs.c'
             ) }}
 
       - name: Build dist bundle
