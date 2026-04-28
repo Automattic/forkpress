@@ -168,7 +168,9 @@ define('DISALLOW_FILE_MODS', true);
 define('WP_AUTO_UPDATE_CORE', false);
 define('AUTOMATIC_UPDATER_DISABLED', true);
 define('WP_HTTP_BLOCK_EXTERNAL', true);
-define('DISABLE_WP_CRON', true);
+if (!defined('DISABLE_WP_CRON')) {
+    define('DISABLE_WP_CRON', true);
+}
 
 if (isset(\$_SERVER['HTTP_HOST'])) {
     define('WP_HOME',    'http://' . \$_SERVER['HTTP_HOST']);

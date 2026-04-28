@@ -1992,11 +1992,40 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 			return false;
 		}
 
+		$candidates = array_values(
+			array_unique(
+				array_filter(
+					array(
+						$table_name,
+						$this->sqlite_object_basename( $table_name ),
+					),
+					'strlen'
+				)
+			)
+		);
+		$placeholders = implode( ', ', array_fill( 0, count( $candidates ), '?' ) );
 		$stmt = $this->execute_sqlite_query(
-			"SELECT 1 FROM sqlite_master WHERE type = 'view' AND name = ? LIMIT 1",
-			array( $table_name )
+			"SELECT 1 FROM sqlite_master WHERE type = 'view' AND name IN ($placeholders)
+			UNION ALL
+			SELECT 1 FROM sqlite_temp_master WHERE type = 'view' AND name IN ($placeholders)
+			LIMIT 1",
+			array_merge( $candidates, $candidates )
 		);
 		return false !== $stmt->fetchColumn();
+	}
+
+	/**
+	 * Strip an optional SQLite database/schema qualifier from an object name.
+	 *
+	 * @param string $object_name SQLite object name, optionally schema-qualified.
+	 * @return string Unqualified object name.
+	 */
+	private function sqlite_object_basename( string $object_name ): string {
+		$dot_pos = strrpos( $object_name, '.' );
+		if ( false === $dot_pos ) {
+			return $object_name;
+		}
+		return substr( $object_name, $dot_pos + 1 );
 	}
 
 	/**
@@ -2131,9 +2160,24 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 	 * @return bool Whether the object is a table.
 	 */
 	private function sqlite_table_exists( string $table_name ): bool {
+		$candidates = array_values(
+			array_unique(
+				array_filter(
+					array(
+						$table_name,
+						$this->sqlite_object_basename( $table_name ),
+					),
+					'strlen'
+				)
+			)
+		);
+		$placeholders = implode( ', ', array_fill( 0, count( $candidates ), '?' ) );
 		$stmt = $this->execute_sqlite_query(
-			"SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
-			array( $table_name )
+			"SELECT 1 FROM sqlite_master WHERE type = 'table' AND name IN ($placeholders)
+			UNION ALL
+			SELECT 1 FROM sqlite_temp_master WHERE type = 'table' AND name IN ($placeholders)
+			LIMIT 1",
+			array_merge( $candidates, $candidates )
 		);
 		return false !== $stmt->fetchColumn();
 	}

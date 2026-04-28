@@ -430,6 +430,7 @@ struct Layout {
     server_pid_file: PathBuf,
     runtime_ready_marker: PathBuf,
     bootstrap_marker: PathBuf,
+    managed_files_marker: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -1957,6 +1958,7 @@ impl Layout {
             server_pid_file: work_dir.join("server.pid"),
             runtime_ready_marker: work_dir.join("runtime/.forkpress-runtime-ready"),
             bootstrap_marker: work_dir.join(".forkpress-bootstrap-complete"),
+            managed_files_marker: work_dir.join(".forkpress-managed-files-version"),
             work_dir,
         })
     }
@@ -2126,10 +2128,58 @@ fn ensure_bootstrapped(layout: &Layout, runtime: &PortableRuntime, args: &StartA
         )?;
 
         File::create(&layout.bootstrap_marker)?;
+        write_managed_files_marker(layout)?;
+    } else {
+        refresh_managed_wp_files_if_needed(layout, runtime, args)?;
     }
 
     run_branchctl_migrations_quiet(layout, runtime, &args.shared)?;
 
+    Ok(())
+}
+
+fn managed_files_marker_contents() -> String {
+    format!("forkpress-managed-files {RUNTIME_BUNDLE_ID}\n")
+}
+
+fn write_managed_files_marker(layout: &Layout) -> Result<()> {
+    fs::write(
+        &layout.managed_files_marker,
+        managed_files_marker_contents(),
+    )
+    .with_context(|| format!("failed to write {}", layout.managed_files_marker.display()))
+}
+
+fn refresh_managed_wp_files_if_needed(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    args: &StartArgs,
+) -> Result<()> {
+    let expected = managed_files_marker_contents();
+    let current = fs::read_to_string(&layout.managed_files_marker)
+        .map(|contents| contents == expected)
+        .unwrap_or(false);
+    if current {
+        return Ok(());
+    }
+
+    run_php_script(
+        layout,
+        runtime,
+        &args.shared,
+        "runtime/refresh_wp_files.php",
+        [
+            layout.site_fp.as_os_str(),
+            layout.wp_root.as_os_str(),
+            OsStr::new(&args.site_title),
+            layout
+                .runtime_dir
+                .join("wp-plugin/branchfs-wp.php")
+                .as_os_str(),
+            layout.debug_log.as_os_str(),
+        ],
+    )?;
+    write_managed_files_marker(layout)?;
     Ok(())
 }
 

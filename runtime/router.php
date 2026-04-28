@@ -181,9 +181,6 @@ if (file_exists($file_url) && !is_dir($file_url)) {
 if (is_dir($file_url)) {
     $index_url = rtrim($file_url, '/') . '/index.php';
     if (file_exists($index_url)) {
-        if (!defined('ABSPATH')) {
-            define('ABSPATH', "$branch_root/");
-        }
         $_SERVER['DOCUMENT_ROOT']   = $wp_root;
         $_SERVER['SCRIPT_FILENAME'] = $index_url;
         require $index_url;
@@ -191,11 +188,9 @@ if (is_dir($file_url)) {
     }
 }
 
-// Fallback: WP pretty permalinks — defer to wp-blog-header via branchfs://
-if (!defined('ABSPATH')) {
-    define('ABSPATH', "$branch_root/");
-}
+// Fallback: WP pretty permalinks — run WordPress's front controller so it
+// defines WP_USE_THEMES before loading wp-blog-header.php.
 $_SERVER['DOCUMENT_ROOT']   = $wp_root;
 $_SERVER['SCRIPT_FILENAME'] = "$branch_root/index.php";
-require "$branch_root/wp-blog-header.php";
+require "$branch_root/index.php";
 return true;

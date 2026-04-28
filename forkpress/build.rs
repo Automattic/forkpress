@@ -45,6 +45,8 @@ fn main() -> Result<()> {
         "wp-plugin",
         "runtime/router.php",
         "runtime/bootstrap_wp.php",
+        "runtime/managed_wp_files.php",
+        "runtime/refresh_wp_files.php",
         "runtime/wp.zip",
     ] {
         println!("cargo:rerun-if-changed={}", repo_root.join(rel).display());
@@ -74,6 +76,8 @@ fn build_bundle(repo_root: &Path, dist_dir: &Path, out: &Path) -> Result<()> {
     add_tree(&mut tar, repo_root, "wp-plugin")?;
     add_file(&mut tar, repo_root, "runtime/router.php")?;
     add_file(&mut tar, repo_root, "runtime/bootstrap_wp.php")?;
+    add_file(&mut tar, repo_root, "runtime/managed_wp_files.php")?;
+    add_file(&mut tar, repo_root, "runtime/refresh_wp_files.php")?;
     add_file(&mut tar, repo_root, "runtime/wp.zip")?;
 
     add_file_as(
