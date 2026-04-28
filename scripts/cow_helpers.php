@@ -96,6 +96,194 @@ function cow_rewrite_create_index(string $ddl, string $old_index, string $new_in
     return $rewritten;
 }
 
+function cow_sql_literal($value): string {
+    if ($value === null) return 'NULL';
+    return "'" . SQLite3::escapeString((string)$value) . "'";
+}
+
+function cow_has_column(SQLite3 $db, string $table, string $column): bool {
+    $r = $db->query('PRAGMA table_info(' . cow_quote_identifier($table) . ')');
+    if (!$r) return false;
+    while ($row = $r->fetchArray(SQLITE3_ASSOC)) {
+        if (strcasecmp((string)$row['name'], $column) === 0) return true;
+    }
+    return false;
+}
+
+/** Copy WordPress SQLite integration metadata from a parent table to a COW view.
+ *
+ *  The SQLite integration translates MySQL INSERT/UPDATE forms by consulting
+ *  its own `_wp_sqlite_mysql_information_schema_*` tables. Our COW branch
+ *  logical tables are SQLite views created outside that integration, so we
+ *  mirror the parent's metadata under the branch logical table name.
+ */
+function cow_sync_information_schema_for_table(SQLite3 $db, int $branch_id, int $parent_id,
+                                               string $table_suffix): void {
+    $source_table = cow_logical_name($parent_id, $table_suffix);
+    $dest_table   = cow_logical_name($branch_id, $table_suffix);
+    $parent_prefix = "b{$parent_id}_wp_";
+    $branch_prefix = "b{$branch_id}_wp_";
+
+    $schema_tables = [
+        'tables',
+        'columns',
+        'statistics',
+        'table_constraints',
+        'key_column_usage',
+        'referential_constraints',
+    ];
+
+    foreach ($schema_tables as $schema_suffix) {
+        $schema_table = '_wp_sqlite_mysql_information_schema_' . $schema_suffix;
+        if (!cow_is_table($db, $schema_table) || !cow_has_column($db, $schema_table, 'TABLE_NAME')) {
+            continue;
+        }
+
+        $columns = cow_table_columns($db, $schema_table);
+        if (empty($columns)) continue;
+
+        $quoted_columns = implode(', ', array_map('cow_quote_identifier', $columns));
+        $select_exprs = [];
+        foreach ($columns as $column) {
+            $quoted = cow_quote_identifier($column);
+            $upper = strtoupper($column);
+            if ($upper === 'TABLE_NAME') {
+                $select_exprs[] = cow_sql_literal($dest_table) . ' AS ' . $quoted;
+            } elseif ($upper === 'TABLE_TYPE') {
+                // These COW views are writable through INSTEAD OF triggers; make
+                // MySQL-compat introspection treat them as normal WordPress tables.
+                $select_exprs[] = "'BASE TABLE' AS " . $quoted;
+            } elseif (in_array($upper, [
+                'INDEX_NAME',
+                'CONSTRAINT_NAME',
+                'UNIQUE_CONSTRAINT_NAME',
+                'REFERENCED_TABLE_NAME',
+            ], true)) {
+                $select_exprs[] = 'REPLACE(' . $quoted . ', '
+                    . cow_sql_literal($parent_prefix) . ', '
+                    . cow_sql_literal($branch_prefix) . ') AS ' . $quoted;
+            } else {
+                $select_exprs[] = $quoted;
+            }
+        }
+
+        $where = cow_quote_identifier('TABLE_NAME') . ' = ' . cow_sql_literal($source_table);
+        if (cow_has_column($db, $schema_table, 'TABLE_SCHEMA')) {
+            $where .= ' AND ' . cow_quote_identifier('TABLE_SCHEMA') . " = 'sqlite_database'";
+        }
+
+        $delete_where = cow_quote_identifier('TABLE_NAME') . ' = ' . cow_sql_literal($dest_table);
+        if (cow_has_column($db, $schema_table, 'TABLE_SCHEMA')) {
+            $delete_where .= ' AND ' . cow_quote_identifier('TABLE_SCHEMA') . " = 'sqlite_database'";
+        }
+
+        $db->exec('DELETE FROM ' . cow_quote_identifier($schema_table) . ' WHERE ' . $delete_where);
+        $ok = $db->exec(
+            'INSERT OR REPLACE INTO ' . cow_quote_identifier($schema_table)
+            . ' (' . $quoted_columns . ') SELECT '
+            . implode(', ', $select_exprs)
+            . ' FROM ' . cow_quote_identifier($schema_table)
+            . ' WHERE ' . $where
+        );
+        if (!$ok) {
+            throw new RuntimeException(
+                "failed to sync SQLite information schema for $dest_table: " . $db->lastErrorMsg()
+            );
+        }
+    }
+}
+
+function cow_sync_all_information_schema(SQLite3 $db): int {
+    $synced = 0;
+    $r = $db->query(
+        "SELECT branch_id, parent_branch_id, table_suffix "
+      . "FROM db_cow_branches ORDER BY branch_id, table_suffix"
+    );
+    if (!$r) return 0;
+    while ($row = $r->fetchArray(SQLITE3_ASSOC)) {
+        $branch_id = (int)$row['branch_id'];
+        $parent_id = (int)$row['parent_branch_id'];
+        $suffix = (string)$row['table_suffix'];
+        if ($branch_id <= 1 || $parent_id <= 0 || $suffix === '') continue;
+        cow_sync_information_schema_for_table($db, $branch_id, $parent_id, $suffix);
+        $synced++;
+    }
+    return $synced;
+}
+
+/** Seed branch-local WordPress role/capability rows that include table_prefix. */
+function cow_seed_wordpress_prefix_rows(SQLite3 $db, int $branch_id, int $parent_id): void {
+    if ($branch_id <= 1 || $parent_id <= 0) return;
+
+    $parent_prefix = "b{$parent_id}_wp_";
+    $branch_prefix = "b{$branch_id}_wp_";
+
+    $parent_options = cow_logical_name($parent_id, 'options');
+    $branch_options = cow_logical_name($branch_id, 'options');
+    if ((cow_is_table($db, $parent_options) || cow_is_view($db, $parent_options))
+        && (cow_is_table($db, $branch_options) || cow_is_view($db, $branch_options))) {
+        $src = $parent_prefix . 'user_roles';
+        $dst = $branch_prefix . 'user_roles';
+        $ok = $db->exec(
+            'INSERT INTO ' . cow_quote_identifier($branch_options)
+            . ' ("option_name", "option_value", "autoload") '
+            . 'SELECT ' . cow_sql_literal($dst) . ', src."option_value", src."autoload" '
+            . 'FROM ' . cow_quote_identifier($parent_options) . ' src '
+            . 'WHERE src."option_name" = ' . cow_sql_literal($src)
+            . ' AND NOT EXISTS (SELECT 1 FROM ' . cow_quote_identifier($branch_options)
+            . ' dst WHERE dst."option_name" = ' . cow_sql_literal($dst) . ')'
+        );
+        if (!$ok) {
+            throw new RuntimeException(
+                "failed to seed WordPress roles option for b$branch_id: " . $db->lastErrorMsg()
+            );
+        }
+    }
+
+    $parent_usermeta = cow_logical_name($parent_id, 'usermeta');
+    $branch_usermeta = cow_logical_name($branch_id, 'usermeta');
+    if ((cow_is_table($db, $parent_usermeta) || cow_is_view($db, $parent_usermeta))
+        && (cow_is_table($db, $branch_usermeta) || cow_is_view($db, $branch_usermeta))) {
+        foreach (['capabilities', 'user_level'] as $suffix) {
+            $src = $parent_prefix . $suffix;
+            $dst = $branch_prefix . $suffix;
+            $ok = $db->exec(
+                'INSERT INTO ' . cow_quote_identifier($branch_usermeta)
+                . ' ("user_id", "meta_key", "meta_value") '
+                . 'SELECT src."user_id", ' . cow_sql_literal($dst) . ', src."meta_value" '
+                . 'FROM ' . cow_quote_identifier($parent_usermeta) . ' src '
+                . 'WHERE src."meta_key" = ' . cow_sql_literal($src)
+                . ' AND NOT EXISTS (SELECT 1 FROM ' . cow_quote_identifier($branch_usermeta)
+                . ' dst WHERE dst."user_id" = src."user_id"'
+                . ' AND dst."meta_key" = ' . cow_sql_literal($dst) . ')'
+            );
+            if (!$ok) {
+                throw new RuntimeException(
+                    "failed to seed WordPress usermeta $dst for b$branch_id: " . $db->lastErrorMsg()
+                );
+            }
+        }
+    }
+}
+
+function cow_seed_all_wordpress_prefix_rows(SQLite3 $db): int {
+    $seeded = 0;
+    $r = $db->query("SELECT id, parent_branch FROM branches WHERE id > 1 ORDER BY id");
+    if (!$r) return 0;
+    while ($row = $r->fetchArray(SQLITE3_ASSOC)) {
+        $branch_id = (int)$row['id'];
+        $parent_name = (string)($row['parent_branch'] ?? '');
+        if ($branch_id <= 1 || $parent_name === '') continue;
+        $parent_id = (int)$db->querySingle(
+            "SELECT id FROM branches WHERE name = '" . SQLite3::escapeString($parent_name) . "'"
+        );
+        if ($parent_id <= 0) continue;
+        cow_seed_wordpress_prefix_rows($db, $branch_id, $parent_id);
+        $seeded++;
+    }
+    return $seeded;
+}
+
 /** Return ordered PRIMARY KEY column names for a table or view.
  *
  *  `PRAGMA table_info()` on a VIEW returns rows with pk=0 for every column —
@@ -834,6 +1022,8 @@ function cow_create_branch_table(SQLite3 $db, int $branch_id, int $parent_id,
     $sch->bindValue(':d', $ancestor_ddl ?: $raw_ddl, SQLITE3_TEXT);
     $sch->bindValue(':i', json_encode($idxs, JSON_UNESCAPED_UNICODE), SQLITE3_TEXT);
     $sch->execute();
+
+    cow_sync_information_schema_for_table($db, $branch_id, $parent_id, $table_suffix);
 }
 
 /** Repair COW branch views created without their overlay table.

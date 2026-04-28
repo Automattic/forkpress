@@ -519,8 +519,10 @@ SQL);
     if (function_exists('cow_repair_missing_overlays')) {
         try {
             cow_repair_missing_overlays($db);
+            cow_sync_all_information_schema($db);
+            cow_seed_all_wordpress_prefix_rows($db);
         } catch (\Throwable $e) {
-            trigger_error('COW overlay repair failed: ' . $e->getMessage(), E_USER_WARNING);
+            trigger_error('COW branch metadata repair failed: ' . $e->getMessage(), E_USER_WARNING);
         }
     }
 }
@@ -1832,6 +1834,7 @@ case 'create': {
                 cow_create_branch_table($db, $new_id, $parent_id, $suffix);
                 $created++;
             }
+            cow_seed_wordpress_prefix_rows($db, $new_id, $parent_id);
             $db->exec('COMMIT');
         } catch (\Throwable $e) {
             $db->exec('ROLLBACK');
