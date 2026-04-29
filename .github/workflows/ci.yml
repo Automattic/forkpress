@@ -18,6 +18,35 @@ on:
     branches: ['trunk']
 
 jobs:
+  mac-release-artifact-cas-smoke:
+    runs-on: macos-14
+    steps:
+      - name: Download v0.1.10 release artifact
+        run: |
+          curl -L -o forkpress-aarch64-apple-darwin.tar.gz \
+            https://github.com/Automattic/forkpress/releases/download/v0.1.10/forkpress-aarch64-apple-darwin.tar.gz
+          tar -xzf forkpress-aarch64-apple-darwin.tar.gz
+          chmod +x forkpress
+
+      - name: CAS main host smoke
+        run: |
+          set -euo pipefail
+          BIN="$(pwd)/forkpress"
+          TMP="$(mktemp -d /tmp/forkpress-release-cas.XXXXXX)"
+          STATE="$TMP/state"
+          SITE="$TMP/site"
+          export FORKPRESS_STATE_DIR="$STATE"
+          mkdir -p "$STATE" "$SITE"
+          cleanup() {
+            "$BIN" server stop --work-dir "$SITE/.forkpress" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          cd "$SITE"
+          "$BIN" init --strategy cas --admin-password admin
+          "$BIN" server start --background
+          curl -v "http://wp.localhost:18080/" -o "$TMP/home.html"
+          grep -F "<title>ForkPress" "$TMP/home.html"
+
   linux-zfs-e2e:
     runs-on: ubuntu-24.04
     steps:
