@@ -235,7 +235,14 @@ enum StorageStrategy {
     /// Current single-file SQLite store: BranchFS files plus COW WordPress DB views.
     #[value(alias = "sqlite", alias = "sqlite-cow")]
     Branchfs,
-    /// Experimental ZFS-backed store: real filesystem/database files versioned by ZFS.
+    /// Experimental materialized COW store: normal branch directories with COW file views.
+    #[value(
+        name = "cow",
+        alias = "zfs",
+        alias = "mac-cow",
+        alias = "materialized",
+        alias = "materialized-cow"
+    )]
     Zfs,
     /// Experimental Redb-backed content-addressed file store with branch manifests.
     #[value(alias = "redb", alias = "cas-redb")]
@@ -279,7 +286,7 @@ impl StorageStrategy {
     fn as_str(self) -> &'static str {
         match self {
             Self::Branchfs => "branchfs",
-            Self::Zfs => "zfs",
+            Self::Zfs => "cow",
             Self::Cas => "cas",
         }
     }
@@ -287,7 +294,7 @@ impl StorageStrategy {
     fn display_name(self) -> &'static str {
         match self {
             Self::Branchfs => "branchfs/sqlite",
-            Self::Zfs => "zfs",
+            Self::Zfs => "cow/materialized",
             Self::Cas => "cas/redb",
         }
     }
@@ -295,7 +302,7 @@ impl StorageStrategy {
     fn from_manifest_value(value: &str) -> Result<Self> {
         match value.trim() {
             "branchfs" | "sqlite" | "sqlite-cow" => Ok(Self::Branchfs),
-            "zfs" => Ok(Self::Zfs),
+            "cow" | "zfs" | "mac-cow" | "materialized" | "materialized-cow" => Ok(Self::Zfs),
             "cas" | "redb" | "cas-redb" => Ok(Self::Cas),
             other => bail!("unknown storage strategy in site manifest: {other}"),
         }
@@ -806,7 +813,7 @@ fn init_zfs_site(args: InitArgs, layout: Layout) -> Result<i32> {
     write_zfs_branch_list(&layout)?;
 
     println!(
-        "forkpress: zfs strategy initialised in {}",
+        "forkpress: COW materialized strategy initialised in {}",
         layout.work_dir.display()
     );
     println!("  title:     {}", args.site_title);
@@ -875,6 +882,18 @@ fn doctor_storage_command(args: DoctorStorageArgs) -> Result<i32> {
     println!("ForkPress storage capability report");
     println!("  work dir:     {}", layout.work_dir.display());
     println!("  branch dir:   {}", target.display());
+    if let Some(manifest) = read_site_manifest(&layout)? {
+        println!("  strategy:     {}", manifest.strategy.as_str());
+        if let Some(file_view) = manifest.file_view {
+            println!("  file view:    {}", file_view.as_str());
+            if file_view == FileViewStrategy::MacosApfsSparsebundle {
+                println!(
+                    "  measurement:  `du` can overcount APFS clone sharing; compare `df -h {}` before/after branch creation",
+                    layout.macos_cow_mount.display()
+                );
+            }
+        }
+    }
 
     if probe_reflink_dir(&target)? {
         println!("  reflinks:     yes");
@@ -888,7 +907,7 @@ fn doctor_storage_command(args: DoctorStorageArgs) -> Result<i32> {
     {
         println!("  macOS APFS sparsebundle: available through hdiutil");
         println!(
-            "  recommendation: forkpress init --strategy zfs will create {} and mount it at {}",
+            "  recommendation: forkpress init --strategy cow will create {} and mount it at {}",
             layout.macos_cow_image.display(),
             layout.macos_cow_mount.display()
         );
@@ -1176,6 +1195,31 @@ mod storage_strategy_tests {
     fn manifest_parses_zfs() {
         let manifest = SiteManifest::parse("strategy = \"zfs\"\n").unwrap();
         assert_eq!(manifest.strategy, StorageStrategy::Zfs);
+
+        let manifest = SiteManifest::parse("strategy = \"cow\"\n").unwrap();
+        assert_eq!(manifest.strategy, StorageStrategy::Zfs);
+
+        let manifest = SiteManifest::parse("strategy = \"mac-cow\"\n").unwrap();
+        assert_eq!(manifest.strategy, StorageStrategy::Zfs);
+    }
+
+    #[test]
+    fn cli_accepts_cow_strategy_aliases() {
+        for strategy in ["cow", "mac-cow", "zfs"] {
+            let cli = Cli::try_parse_from([
+                "forkpress",
+                "init",
+                "--strategy",
+                strategy,
+                "--admin-password",
+                "admin",
+            ])
+            .unwrap();
+            let Commands::Init(args) = cli.command else {
+                panic!("expected init command");
+            };
+            assert_eq!(args.strategy, StorageStrategy::Zfs);
+        }
     }
 
     #[test]
@@ -1203,11 +1247,12 @@ mod storage_strategy_tests {
 
     #[test]
     fn manifest_render_round_trips() {
-        let rendered = SiteManifest::new(StorageStrategy::Cas)
+        let rendered = SiteManifest::new(StorageStrategy::Zfs)
             .with_file_view(FileViewStrategy::Reflink)
             .render();
         let parsed = SiteManifest::parse(&rendered).unwrap();
-        assert_eq!(parsed.strategy, StorageStrategy::Cas);
+        assert!(rendered.contains("strategy = \"cow\""));
+        assert_eq!(parsed.strategy, StorageStrategy::Zfs);
         assert_eq!(parsed.file_view, Some(FileViewStrategy::Reflink));
     }
 
@@ -1271,7 +1316,7 @@ fn start_command(args: StartArgs) -> Result<i32> {
             println!("DB access:  database.sql in each git branch checkout (read-only snapshot)");
         }
         StorageStrategy::Zfs => {
-            println!("Git remote: not available for zfs strategy yet");
+            println!("Git remote: not available for cow strategy yet");
             println!("DB access:  wp-content/database/.ht.sqlite inside each materialized branch");
         }
         StorageStrategy::Cas => {
@@ -2567,9 +2612,9 @@ fn bail_strategy_unsupported(command: &str, strategy: StorageStrategy) -> Result
 
 fn write_zfs_experiment_notes(layout: &Layout) -> Result<()> {
     let notes = "\
-# ForkPress ZFS strategy
+# ForkPress materialized COW strategy
 
-This site was initialized with `strategy = \"zfs\"`.
+This site was initialized with `strategy = \"cow\"`.
 
 This backend uses materialized branch directories under `.forkpress/zfs/branches`.
 Each branch contains an ordinary WordPress tree and its own ordinary SQLite
@@ -2584,6 +2629,13 @@ location cannot clone files, ForkPress creates a rootless APFS sparsebundle
 under `.forkpress/macos-cow`, mounts it at `.forkpress/macos-cow/mount`, and
 links `.forkpress/zfs/branches` into that APFS volume. A regular full copy is
 only the last-resort file view.
+
+APFS clone sharing is not visible to tools that add up path sizes. `du`, Finder,
+and many disk analyzers can count shared clone extents once for every branch, so
+a COW branch can appear to consume another full WordPress tree. To inspect
+physical growth on macOS, compare `df -h .forkpress/macos-cow/mount` before and
+after branch creation, or inspect the allocated size of
+`.forkpress/macos-cow/branches.sparsebundle`.
 
 The forkpress binary now includes an embedded OpenZFS userland engine on Linux
 and macOS targets. Cargo builds the same OpenZFS 2.2.6 subset used by the
@@ -3176,7 +3228,7 @@ fn create_zfs_branch(
     write_zfs_branch_list(layout)?;
     let (root_host, port) = branchctl_url_hint(layout)
         .unwrap_or_else(|_| ("wp.localhost".to_string(), "18080".to_string()));
-    println!("forkpress: zfs cloned '{from}' -> '{branch}'");
+    println!("forkpress: COW cloned '{from}' -> '{branch}'");
     println!(
         "Visit http://{}.{root_host}:{port}/ to see this branch.",
         branch
