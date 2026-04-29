@@ -33,6 +33,8 @@ BUILD_DIR="${FORKPRESS_BUILD_DIR:-$REPO_ROOT/.build/$TRIPLE}"
 SPC_DIR="$BUILD_DIR/static-php-cli"
 CAS_TARGET_DIR="$BUILD_DIR/cas-ffi-target"
 CAS_LIB_DIR="$CAS_TARGET_DIR/$TRIPLE/release"
+DOLTLITE_SRC_DIR="$BUILD_DIR/doltlite-src"
+DOLTLITE_BUILD_DIR="$DOLTLITE_SRC_DIR/build"
 
 # WordPress-ready extension set.
 # Exclusions:
@@ -54,6 +56,44 @@ fi
 export FORKPRESS_CAS_LIB_DIR="$CAS_LIB_DIR"
 export SPC_EXTRA_LIBS="${SPC_EXTRA_LIBS:-} $CAS_STATIC_LIB"
 
+echo "==> Building Doltlite static library for bundled SQLite/PDO"
+if [ ! -d "$DOLTLITE_SRC_DIR/.git" ]; then
+  rm -rf "$DOLTLITE_SRC_DIR"
+  git clone --depth 1 --branch "${FORKPRESS_DOLTLITE_REF:-v0.9.0}" https://github.com/dolthub/doltlite.git "$DOLTLITE_SRC_DIR"
+fi
+(
+  cd "$DOLTLITE_SRC_DIR"
+  if [ ! -f .forkpress-doltlite-patched ]; then
+    git reset --hard >/dev/null
+    git clean -fdx >/dev/null
+    BUILD=src/build.c
+    N=$(grep -cF '    tabOpts |= TF_WithoutRowid;' "$BUILD")
+    if [ "$N" != "1" ]; then
+      echo "ERROR: Doltlite build.c patch expected exactly 1 match, found $N" >&2
+      exit 1
+    fi
+    sed -i.bak 's@^    tabOpts |= TF_WithoutRowid;$@    /* patched by ForkPress: do not auto-convert composite-PK tables */ (void)0;@' "$BUILD"
+    patch -p1 --no-backup-if-mismatch < "$REPO_ROOT/scripts/doltlite-patches/eqSeen-preservation.patch"
+    patch -p1 --no-backup-if-mismatch < "$REPO_ROOT/scripts/doltlite-patches/mergeScan-check-tree-delete.patch"
+    patch -p1 --no-backup-if-mismatch < "$REPO_ROOT/scripts/doltlite-patches/preserve-original-value-when-sortkey-lossy.patch"
+    touch .forkpress-doltlite-patched
+  fi
+  mkdir -p build
+  cd build
+  CFLAGS="-DSQLITE_ENABLE_COLUMN_METADATA -DSQLITE_ENABLE_FTS5 -DSQLITE_USE_URI -DSQLITE_ENABLE_JSON1" \
+    ../configure
+  make -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)" doltlite-lib
+  cp ../src/sqlite3ext.h sqlite3ext.h
+)
+for dep in "$DOLTLITE_BUILD_DIR/libdoltlite.a" "$DOLTLITE_BUILD_DIR/sqlite3.h" "$DOLTLITE_BUILD_DIR/sqlite3ext.h"; do
+  if [ ! -f "$dep" ]; then
+    echo "ERROR: expected Doltlite build artifact missing: $dep" >&2
+    exit 1
+  fi
+done
+export FORKPRESS_DOLTLITE_LIB_DIR="$DOLTLITE_BUILD_DIR"
+export SPC_EXTRA_LIBS="${SPC_EXTRA_LIBS:-} -lz -lpthread"
+
 # --- 1. Static PHP via static-php-cli --------------------------------------
 # Build branchfs directly into the php binary as a builtin extension.
 #
@@ -66,9 +106,9 @@ export SPC_EXTRA_LIBS="${SPC_EXTRA_LIBS:-} $CAS_STATIC_LIB"
 
 NEED_PHP_BUILD=1
 if [ -x "$SPC_DIR/buildroot/bin/php" ]; then
-  if "$SPC_DIR/buildroot/bin/php" -r 'exit(extension_loaded("branchfs") && function_exists("branchfs_set_cas_store") ? 0 : 1);' >/dev/null 2>&1; then
+  if "$SPC_DIR/buildroot/bin/php" -r 'exit(extension_loaded("branchfs") && function_exists("branchfs_set_cas_store") && (new SQLite3(":memory:"))->querySingle("SELECT doltlite_engine()") === "prolly" ? 0 : 1);' >/dev/null 2>&1; then
     NEED_PHP_BUILD=0
-    for dep in "$CAS_STATIC_LIB" "$REPO_ROOT/ext/branchfs.c" "$REPO_ROOT/ext/branchfs.h" "$REPO_ROOT/scripts/spc-patch-branchfs.php"; do
+    for dep in "$CAS_STATIC_LIB" "$DOLTLITE_BUILD_DIR/libdoltlite.a" "$DOLTLITE_BUILD_DIR/sqlite3.h" "$DOLTLITE_BUILD_DIR/sqlite3ext.h" "$REPO_ROOT/ext/branchfs.c" "$REPO_ROOT/ext/branchfs.h" "$REPO_ROOT/scripts/spc-patch-branchfs.php"; do
       if [ "$dep" -nt "$SPC_DIR/buildroot/bin/php" ]; then
         NEED_PHP_BUILD=1
         break
@@ -144,6 +184,12 @@ if ! printf '%s\n' "$_php_modules" | grep -qi '^branchfs$'; then
   echo "ERROR: branchfs is not a loaded extension in the built php binary." >&2
   echo "       php -m output:" >&2
   printf '%s\n' "$_php_modules" | sed 's/^/         /' >&2
+  exit 1
+fi
+
+if ! "$DIST_DIR/bin/php" -r 'exit((new SQLite3(":memory:"))->querySingle("SELECT doltlite_engine()") === "prolly" ? 0 : 1);' >/dev/null 2>&1; then
+  echo "ERROR: bundled PHP SQLite is not backed by Doltlite." >&2
+  echo "       Rebuild logs should show: forkpress patch: Doltlite installed as buildroot libsqlite3" >&2
   exit 1
 fi
 

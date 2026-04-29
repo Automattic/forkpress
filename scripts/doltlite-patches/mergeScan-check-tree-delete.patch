@@ -1,0 +1,45 @@
+Check mutmap for tree-key DELETE when emitting a tree entry in mergeScan
+
+prollyBtCursorIndexMoveto can position the merge cursor directly at a
+mutmap INSERT entry via setCursorToMutMapEntryPhys, which jumps mmIdx
+past any sort-earlier mutmap entries. The subsequent mergeScan
+iteration, on seeing `cmp*dir < 0` (tree entry ahead of mutmap[mmIdx]),
+emits the tree entry without noticing that the mutmap contains a
+DELETE for that tree key at an earlier order index. The tree key was
+logically deleted but stays visible to the scan — SQLite then follows
+its rowid and calls TableMoveto to a rowid that mutmap says is
+deleted, which hits the "database disk image is malformed" check in
+sqlite3VdbeFinishMoveto.
+
+--- a/src/prolly_btree.c
++++ b/src/prolly_btree.c
+@@ -3631,6 +3631,29 @@
+     }
+     cmp = mergeCompare(pCur, e);
+     if( cmp*dir < 0 ){
++      /* Tree entry is ahead of mutmap[mmIdx] in scan direction.
++      ** Check whether the mutmap has a DELETE entry for the tree
++      ** key at an order index the iteration has already walked
++      ** past (e.g. after setCursorToMutMapEntryPhys jumped mmIdx
++      ** directly to a later INSERT). Without this check the scan
++      ** would emit a logically-deleted tree row and SQLite would
++      ** later TableMoveto a rowid that mutmap says is gone. */
++      ProllyMutMapEntry *delE = 0;
++      int delRc;
++      if( pCur->curIntKey ){
++        delRc = prollyMutMapFindRc(pCur->pMutMap, 0, 0,
++                                   prollyCursorIntKey(&pCur->pCur), &delE);
++      }else{
++        const u8 *pK; int nK;
++        prollyCursorKey(&pCur->pCur, &pK, &nK);
++        delRc = prollyMutMapFindRc(pCur->pMutMap, pK, nK, 0, &delE);
++      }
++      if( delRc!=SQLITE_OK ) return delRc;
++      if( delE && delE->op==PROLLY_EDIT_DELETE ){
++        int advRc = advanceTreeCursor(pCur, dir);
++        if( advRc!=SQLITE_OK ) return advRc;
++        continue;
++      }
+       pCur->mergeSrc = MERGE_SRC_TREE;
+       if( pRes ) *pRes = 0;
+       return SQLITE_OK;

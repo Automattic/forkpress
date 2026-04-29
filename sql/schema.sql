@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS blobs (
     -- and backward compatibility with legacy .fp files.
     data        BLOB,
     size        INTEGER NOT NULL
-);
+) WITHOUT ROWID;
 
 -- Chunked storage for large blobs. Each chunk is a 1 MB slice of the blob
 -- content, keyed by (blob_hash, chunk_no). chunk_no starts at 0 and is
@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS blob_chunks (
     data      BLOB NOT NULL,
     PRIMARY KEY (blob_hash, chunk_no),
     FOREIGN KEY (blob_hash) REFERENCES blobs(hash) ON DELETE CASCADE
-);
+) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_blob_chunks_hash ON blob_chunks(blob_hash);
 
 CREATE TABLE IF NOT EXISTS branches (
@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS files (
     PRIMARY KEY (branch_id, path),
     FOREIGN KEY (branch_id) REFERENCES branches(id),
     FOREIGN KEY (blob_hash) REFERENCES blobs(hash)
-);
+) WITHOUT ROWID;
 
 CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
 CREATE INDEX IF NOT EXISTS idx_files_branch_dir ON files(branch_id, path);
@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS fs_commit_files (
     PRIMARY KEY (commit_id, path),
     FOREIGN KEY (commit_id) REFERENCES fs_commits(id),
     FOREIGN KEY (blob_hash) REFERENCES blobs(hash)
-);
+) WITHOUT ROWID;
 
 -- Seed the 'main' branch
 INSERT OR IGNORE INTO branches (name, parent_branch) VALUES ('main', NULL);
@@ -92,12 +92,12 @@ CREATE TABLE IF NOT EXISTS users (
     mysql_sha1    TEXT,            -- retained for compatibility with older .fp files
     role          TEXT NOT NULL CHECK(role IN ('admin','write','read')),
     created_at    TEXT DEFAULT (datetime('now'))
-);
+) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS site_config (
     key   TEXT PRIMARY KEY,
     value TEXT
-);
+) WITHOUT ROWID;
 
 -- Brand-new site: auth is enabled by default. Existing sites created
 -- before this change get auth_enabled='0' in branchctl.php::fs_migrate().

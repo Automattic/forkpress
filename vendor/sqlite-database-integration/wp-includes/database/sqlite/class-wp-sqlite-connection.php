@@ -83,6 +83,18 @@ class WP_SQLite_Connection {
 		// Throw exceptions on error.
 		$this->pdo->setAttribute( PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION );
 
+		$forkpress_branch = getenv( 'FORKPRESS_BRANCH' );
+		if ( is_string( $forkpress_branch ) && preg_match( '/^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/', $forkpress_branch ) ) {
+			try {
+				$stmt = $this->pdo->prepare( 'SELECT dolt_checkout(?)' );
+				$stmt->execute( array( $forkpress_branch ) );
+			} catch ( PDOException $e ) {
+				if ( false === stripos( $e->getMessage(), 'no such function' ) ) {
+					throw $e;
+				}
+			}
+		}
+
 		// Configure SQLite timeout.
 		if ( isset( $options['timeout'] ) && is_int( $options['timeout'] ) ) {
 			$timeout = $options['timeout'];

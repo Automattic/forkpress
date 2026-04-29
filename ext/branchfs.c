@@ -50,6 +50,7 @@ static int branchfs_metadata(php_stream_wrapper *wrapper, const char *url, int o
     void *value, php_stream_context *context);
 static const char *store_current_branch_name(void);
 static int store_open_cas(const char *store_path);
+static int store_checkout_branch_if_supported(const char *branch_name);
 
 /* ================================================================
  * Section 1: FNV-1a hash for content addressing
@@ -126,6 +127,29 @@ void store_close(void) {
 
 static const char *store_current_branch_name(void) {
     return BRANCHFS_G(current_branch) ? BRANCHFS_G(current_branch) : "main";
+}
+
+static int store_checkout_branch_if_supported(const char *branch_name) {
+    if (!BRANCHFS_G(db) || !branch_name || branch_name[0] == '\0') return 0;
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(BRANCHFS_G(db), "SELECT dolt_checkout(?)", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        /* Plain SQLite-backed BranchFS does not provide Doltlite functions. */
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+
+    sqlite3_bind_text(stmt, 1, branch_name, -1, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc == SQLITE_ROW || rc == SQLITE_DONE) {
+        return 0;
+    }
+
+    php_error_docref(NULL, E_WARNING, "branchfs: cannot checkout Doltlite branch %s: %s",
+        branch_name, sqlite3_errmsg(BRANCHFS_G(db)));
+    return -1;
 }
 
 int store_get_branch_id(const char *branch_name) {
@@ -1626,6 +1650,9 @@ PHP_FUNCTION(branchfs_activate) {
         !BRANCHFS_G(wp_root) || !BRANCHFS_G(current_branch)) {
         php_error_docref(NULL, E_WARNING,
             "branchfs: must set a store, root, and branch before activating");
+        RETURN_FALSE;
+    }
+    if (BRANCHFS_G(db) && store_checkout_branch_if_supported(BRANCHFS_G(current_branch)) < 0) {
         RETURN_FALSE;
     }
     if (store_get_branch_id(BRANCHFS_G(current_branch)) < 0) {

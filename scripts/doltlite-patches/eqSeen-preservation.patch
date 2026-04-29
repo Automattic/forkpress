@@ -1,0 +1,37 @@
+Preserve pIdxKey->eqSeen across findMatchingMutMapEntry
+
+findMatchingMutMapEntry's internal sqlite3VdbeRecordCompare probes reset
+and then re-set pIdxKey->eqSeen on every iteration, clobbering the flag
+that the tree-scan loop set to signal an exact prefix match. OP_SeekGE
+with BTREE_SEEK_EQ relies on that eqSeen flag to decide whether an
+exact match was found, so without this save/restore the second same-
+table DELETE inside a SAVEPOINT silently bails to seek_not_found and
+the DELETE is lost.
+
+--- a/src/prolly_btree.c
++++ b/src/prolly_btree.c
+@@ -4445,6 +4445,14 @@
+          || (pPending && pPending!=pCur->pMutMap
+              && !prollyMutMapIsEmpty(pPending)))
+        && !(treeFound && treeCmp==0) ){
++      /* findMatchingMutMapEntry's internal sqlite3VdbeRecordCompare
++      ** calls reset and re-set pIdxKey->eqSeen on every probe,
++      ** clobbering the flag that the tree-scan loop above set.
++      ** OP_SeekGE with BTREE_SEEK_EQ relies on that eqSeen to detect
++      ** an exact prefix match; without save/restore, the second
++      ** same-table DELETE inside a SAVEPOINT silently bails out of
++      ** seek_not_found. */
++      int savedEqSeen = pIdxKey->eqSeen;
+       rc = findMatchingMutMapEntry((ProllyMutMap*)pCur->pMutMap,
+                                    pCur->pKeyInfo,
+                                    pIdxKey, pSortKey, nSortKey,
+@@ -4462,6 +4470,9 @@
+           return rc;
+         }
+       }
++      if( !mutE ){
++        pIdxKey->eqSeen = savedEqSeen;
++      }
+       if( mutE ){
+ 
+         const u8 *pMutVal = mutE->pVal;

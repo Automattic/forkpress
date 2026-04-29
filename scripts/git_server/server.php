@@ -21,10 +21,11 @@ use WordPress\Git\Model\TreeEntry;
 use WordPress\Git\Protocol\GitProtocolEncoderPipe;
 use WordPress\HttpServer\Response\StreamingResponseWriter;
 
-function git_server_handle(string $db_path, string $wp_root, string $git_path, string $query_string): void {
+function git_server_handle(string $db_path, string $wp_root, string $git_path, string $query_string, array $options = []): void {
     ini_set('memory_limit', '512M');
     set_time_limit(300);
 
+    $storage = $options['storage'] ?? 'branchfs';
     $sqlite = new SQLite3($db_path, SQLITE3_OPEN_READWRITE);
     $sqlite->busyTimeout(5000);
 
@@ -47,7 +48,7 @@ function git_server_handle(string $db_path, string $wp_root, string $git_path, s
             git_rmrf($cache_root);
         }
     });
-    $repo_dir = $cache_root . '/repo';
+    $repo_dir = $cache_root . '/site.git';
 
     // Determine request type
     $is_post_receive = ($git_path === '/git-receive-pack');
@@ -81,12 +82,49 @@ function git_server_handle(string $db_path, string $wp_root, string $git_path, s
     // Capture pre-push state for rollback on failure.
     $pre_state = null;
     if ($is_post_receive) {
-        $pre_state = git_capture_pre_state($sqlite);
+        $pre_state = $storage === 'doltlite'
+            ? git_doltlite_capture_pre_state($db_path)
+            : git_capture_pre_state($sqlite);
         ob_start();
     }
 
     // Build the repository from branchfs state
-    git_build_repository($repo_dir, $sqlite);
+    if ($storage === 'doltlite') {
+        git_build_doltlite_repository($repo_dir, $db_path);
+    } else {
+        git_build_repository($repo_dir, $sqlite);
+    }
+
+    // Doltlite repositories are generated as ordinary bare Git repositories.
+    // Use Git's own CGI backend for the wire protocol, then import pushed refs
+    // back into Doltlite after receive-pack mutates the temporary repo.
+    if ($storage === 'doltlite') {
+        $request_bytes = file_get_contents('php://input');
+        $backend_output = git_run_http_backend($cache_root, $git_path, $query_string, $request_bytes);
+
+        if ($is_post_receive && $auth_user !== null) {
+            $fs = LocalFilesystem::create($repo_dir);
+            $repo = new GitRepository($fs, ['default_branch' => 'main']);
+            $push_error = null;
+            try {
+                git_process_doltlite_push($repo_dir, $fs, $repo, $db_path, $auth_user, $pre_state);
+            } catch (\Throwable $e) {
+                $push_error = $e->getMessage();
+                error_log("Push processing error: $push_error\n" . $e->getTraceAsString());
+            }
+            if ($push_error !== null) {
+                git_doltlite_rollback_to_state($pre_state, $db_path);
+                http_response_code(500);
+                header('Content-Type: text/plain');
+                $short = substr(str_replace(["\n", "\r"], ' ', $push_error), 0, 500);
+                echo "branchfs: push rejected: $short\n";
+                return;
+            }
+        }
+
+        git_emit_cgi_response($backend_output);
+        return;
+    }
 
     // Create the toolkit repository and endpoint
     $fs = LocalFilesystem::create($repo_dir);
@@ -108,7 +146,11 @@ function git_server_handle(string $db_path, string $wp_root, string $git_path, s
     if ($is_post_receive && $auth_user !== null) {
         $push_error = null;
         try {
-            git_process_push($repo_dir, $fs, $repo, $sqlite, $auth_user, $pre_state);
+            if ($storage === 'doltlite') {
+                git_process_doltlite_push($repo_dir, $fs, $repo, $db_path, $auth_user, $pre_state);
+            } else {
+                git_process_push($repo_dir, $fs, $repo, $sqlite, $auth_user, $pre_state);
+            }
         } catch (\Throwable $e) {
             $push_error = $e->getMessage();
             error_log("Push processing error: $push_error\n" . $e->getTraceAsString());
@@ -116,7 +158,11 @@ function git_server_handle(string $db_path, string $wp_root, string $git_path, s
 
         if ($push_error !== null) {
             // Roll back branchfs, replace the buffered response with HTTP 500.
-            git_rollback_to_state($pre_state, $sqlite);
+            if ($storage === 'doltlite') {
+                git_doltlite_rollback_to_state($pre_state, $db_path);
+            } else {
+                git_rollback_to_state($pre_state, $sqlite);
+            }
             if (ob_get_level() > 0) ob_end_clean();
             http_response_code(500);
             header('Content-Type: text/plain');
@@ -128,6 +174,77 @@ function git_server_handle(string $db_path, string $wp_root, string $git_path, s
         // Success: flush the buffered git protocol response to the client.
         if (ob_get_level() > 0) ob_end_flush();
     }
+}
+
+function git_run_http_backend(string $project_root, string $git_path, string $query_string, string $request_bytes): string {
+    $env = $_ENV;
+    $env['GIT_PROJECT_ROOT'] = $project_root;
+    $env['GIT_HTTP_EXPORT_ALL'] = '1';
+    $env['PATH_INFO'] = '/site.git' . $git_path;
+    $env['REQUEST_METHOD'] = $_SERVER['REQUEST_METHOD'] ?? 'GET';
+    $env['QUERY_STRING'] = $query_string;
+    $env['REMOTE_ADDR'] = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
+    $env['CONTENT_TYPE'] = $_SERVER['CONTENT_TYPE'] ?? '';
+    $env['HTTP_CONTENT_TYPE'] = $_SERVER['CONTENT_TYPE'] ?? '';
+    $env['CONTENT_LENGTH'] = (string)strlen($request_bytes);
+    if (isset($_SERVER['HTTP_GIT_PROTOCOL'])) {
+        $env['HTTP_GIT_PROTOCOL'] = $_SERVER['HTTP_GIT_PROTOCOL'];
+    }
+
+    $descriptors = [
+        0 => ['pipe', 'r'],
+        1 => ['pipe', 'w'],
+        2 => ['pipe', 'w'],
+    ];
+    $proc = proc_open('git http-backend', $descriptors, $pipes, $project_root, $env);
+    if (!is_resource($proc)) {
+        throw new RuntimeException('failed to start git http-backend');
+    }
+    fwrite($pipes[0], $request_bytes);
+    fclose($pipes[0]);
+    $stdout = stream_get_contents($pipes[1]);
+    fclose($pipes[1]);
+    $stderr = stream_get_contents($pipes[2]);
+    fclose($pipes[2]);
+    $status = proc_close($proc);
+    if ($status !== 0) {
+        error_log(trim($stderr) ?: "git http-backend exited with status $status");
+        if ($stdout !== '') {
+            return $stdout;
+        }
+        throw new RuntimeException(trim($stderr) ?: "git http-backend exited with status $status");
+    }
+    return $stdout;
+}
+
+function git_emit_cgi_response(string $response): void {
+    $pos = strpos($response, "\r\n\r\n");
+    $sep_len = 4;
+    if ($pos === false) {
+        $pos = strpos($response, "\n\n");
+        $sep_len = 2;
+    }
+    if ($pos === false) {
+        echo $response;
+        return;
+    }
+
+    $raw_headers = substr($response, 0, $pos);
+    $body = substr($response, $pos + $sep_len);
+    foreach (preg_split('/\r?\n/', $raw_headers) as $line) {
+        if ($line === '') {
+            continue;
+        }
+        if (stripos($line, 'Status:') === 0) {
+            $status = (int)trim(substr($line, 7));
+            if ($status > 0) {
+                http_response_code($status);
+            }
+            continue;
+        }
+        header($line, false);
+    }
+    echo $body;
 }
 
 /**
@@ -444,6 +561,160 @@ function git_build_repository(string $repo_dir, SQLite3 $sqlite): void {
 
     // Set HEAD to main
     file_put_contents($repo_dir . '/HEAD', "ref: refs/heads/main\n");
+    git_normalize_loose_refs($repo_dir);
+}
+
+function git_doltlite_open(string $db_path, string $branch = 'main'): SQLite3 {
+    $db = new SQLite3($db_path, SQLITE3_OPEN_READWRITE | SQLITE3_OPEN_CREATE);
+    $db->busyTimeout(5000);
+    @$db->exec('PRAGMA foreign_keys=ON');
+    $checkout = @$db->querySingle("SELECT dolt_checkout('" . SQLite3::escapeString($branch) . "')");
+    if ($checkout === false || $checkout === null) {
+        throw new RuntimeException("failed to checkout Doltlite branch $branch: " . $db->lastErrorMsg());
+    }
+    return $db;
+}
+
+function git_doltlite_sql_string(string $value): string {
+    return "'" . SQLite3::escapeString($value) . "'";
+}
+
+function git_doltlite_branches(string $db_path): array {
+    $db = new SQLite3($db_path, SQLITE3_OPEN_READWRITE);
+    $db->busyTimeout(5000);
+    $rows = $db->query("SELECT name FROM dolt_branches ORDER BY CASE WHEN name='main' THEN 0 ELSE 1 END, name");
+    $branches = [];
+    while ($row = $rows->fetchArray(SQLITE3_ASSOC)) {
+        $branches[] = (string)$row['name'];
+    }
+    return $branches;
+}
+
+function git_doltlite_branch_meta(string $db_path, string $branch): array {
+    $db = new SQLite3($db_path, SQLITE3_OPEN_READWRITE);
+    $db->busyTimeout(5000);
+    $stmt = $db->prepare('SELECT hash, latest_commit_date FROM dolt_branches WHERE name = :name');
+    $stmt->bindValue(':name', $branch, SQLITE3_TEXT);
+    $result = $stmt->execute();
+    $row = $result ? $result->fetchArray(SQLITE3_ASSOC) : false;
+    return is_array($row) ? $row : [];
+}
+
+function git_build_doltlite_repository(string $repo_dir, string $db_path): void {
+    if (is_dir($repo_dir)) {
+        git_rmrf($repo_dir);
+    }
+    mkdir($repo_dir, 0755, true);
+
+    $fs = LocalFilesystem::create($repo_dir);
+    $repo = new GitRepository($fs, ['default_branch' => 'main']);
+    $repo->set_config_value(['user', 'name'], 'ForkPress Doltlite');
+    $repo->set_config_value(['user', 'email'], 'doltlite@local');
+    $repo->set_config_value(['http', 'receivepack'], 'true');
+
+    foreach (git_doltlite_branches($db_path) as $branch_name) {
+        $sqlite = git_doltlite_open($db_path, $branch_name);
+        $branch_id = git_fs_branch_id($sqlite, $branch_name);
+        if ($branch_id === 0) {
+            continue;
+        }
+
+        $updates = [];
+        $tree = git_fs_resolve_tree($sqlite, $branch_id);
+        foreach ($tree as $p => $fr) {
+            if (!empty($fr['is_dir']) || empty($fr['blob_hash'])) continue;
+            $blob_data = git_get_blob_data($sqlite, $fr['blob_hash']);
+            if ($blob_data !== null) {
+                $updates['wordpress/' . $fr['path']] = $blob_data;
+            }
+        }
+        $updates['database.sql'] = git_dump_doltlite_database($sqlite, $branch_name);
+        if (empty($updates)) continue;
+        ksort($updates, SORT_STRING);
+
+        $branch_meta = git_doltlite_branch_meta($db_path, $branch_name);
+        $timestamp = strtotime($branch_meta['latest_commit_date'] ?? '') ?: 1;
+        $date_str = $timestamp . ' +0000';
+        $author = 'ForkPress Doltlite <doltlite@local>';
+        $message = "ForkPress Doltlite export: $branch_name\n\nDoltlite-Commit: " . ($branch_meta['hash'] ?? '');
+
+        $ref_path = "refs/heads/$branch_name";
+        if (!$fs->is_file($ref_path)) {
+            $repo->set_branch_tip($ref_path, Commit::NULL_HASH);
+        }
+        $repo->checkout($ref_path);
+        $git_hash = $repo->commit([
+            'commit' => [
+                'message' => $message,
+                'author' => $author,
+                'author_date' => $date_str,
+                'committer' => $author,
+                'committer_date' => $date_str,
+                'parents' => [],
+            ],
+            'updates' => $updates,
+        ]);
+        $repo->set_branch_tip($ref_path, $git_hash);
+    }
+
+    file_put_contents($repo_dir . '/HEAD', "ref: refs/heads/main\n");
+    git_normalize_loose_refs($repo_dir);
+}
+
+function git_normalize_loose_refs(string $repo_dir): void {
+    $refs_dir = $repo_dir . '/refs/heads';
+    if (!is_dir($refs_dir)) {
+        return;
+    }
+    foreach (scandir($refs_dir) as $name) {
+        if ($name === '.' || $name === '..') {
+            continue;
+        }
+        $path = $refs_dir . '/' . $name;
+        if (!is_file($path)) {
+            continue;
+        }
+        $contents = file_get_contents($path);
+        if ($contents !== false && $contents !== '' && !str_ends_with($contents, "\n")) {
+            file_put_contents($path, $contents . "\n");
+        }
+    }
+}
+
+function git_dump_doltlite_database(SQLite3 $sqlite, string $branch_name): string {
+    $out = "-- ForkPress Doltlite database snapshot for branch " . git_sql_comment($branch_name) . "\n";
+    $out .= "-- This file is read-only in git; push WordPress file changes from wordpress/.\n";
+    $out .= "PRAGMA foreign_keys=OFF;\nBEGIN TRANSACTION;\n\n";
+
+    $tables = [];
+    $r = $sqlite->query(
+        "SELECT name, sql FROM sqlite_master
+         WHERE type='table'
+           AND name LIKE 'wp\_%' ESCAPE '\\'
+           AND name NOT LIKE 'sqlite_%'
+         ORDER BY name"
+    );
+    while ($row = $r->fetchArray(SQLITE3_ASSOC)) {
+        $tables[] = $row;
+    }
+    foreach ($tables as $table) {
+        $name = (string)$table['name'];
+        $sql = trim((string)$table['sql']);
+        if ($sql !== '') {
+            $out .= $sql . ";\n";
+        }
+        $rows = $sqlite->query('SELECT * FROM "' . str_replace('"', '""', $name) . '"');
+        while ($row = $rows->fetchArray(SQLITE3_ASSOC)) {
+            $cols = array_keys($row);
+            $vals = array_map(fn($v) => $v === null ? 'NULL' : "'" . SQLite3::escapeString((string)$v) . "'", array_values($row));
+            $out .= 'INSERT INTO "' . str_replace('"', '""', $name) . '" ("'
+                . implode('","', array_map(fn($c) => str_replace('"', '""', $c), $cols))
+                . '") VALUES (' . implode(',', $vals) . ");\n";
+        }
+        $out .= "\n";
+    }
+    $out .= "COMMIT;\n";
+    return $out;
 }
 
 /**
@@ -537,6 +808,92 @@ function git_process_push(string $repo_dir, $fs, GitRepository $repo, SQLite3 $s
 
         // Record a paired fs_commit
         git_fs_record_snapshot($sqlite, $branch_id, trim($message));
+    }
+}
+
+function git_doltlite_capture_pre_state(string $db_path): array {
+    $state = ['branches' => []];
+    foreach (git_doltlite_branches($db_path) as $branch) {
+        $db = git_doltlite_open($db_path, $branch);
+        $state['branches'][$branch] = (string)$db->querySingle('SELECT dolt_hashof(' . git_doltlite_sql_string('HEAD') . ')');
+    }
+    return $state;
+}
+
+function git_doltlite_rollback_to_state(?array $state, string $db_path): void {
+    // Doltlite does not expose a complete branch reset-to-hash workflow in this
+    // thin adapter yet. Keep the hook so failed pushes are reported cleanly;
+    // future work can wire this to dolt_reset once the target ref syntax is
+    // stable for this use.
+    unset($state, $db_path);
+}
+
+function git_process_doltlite_push(string $repo_dir, $fs, GitRepository $repo, string $db_path, string $auth_user, ?array $pre_state = null): void {
+    unset($fs, $auth_user, $pre_state);
+    $reserved = git_reserved_branch_names();
+    $refs_dir = $repo_dir . '/refs/heads';
+    if (!is_dir($refs_dir)) return;
+
+    foreach (scandir($refs_dir) as $ref_file) {
+        if ($ref_file[0] === '.') continue;
+        $branch_name = $ref_file;
+        $tip_hash = trim(file_get_contents($refs_dir . '/' . $ref_file));
+        if (Commit::is_null_hash($tip_hash)) continue;
+        if (in_array(strtolower($branch_name), $reserved, true)) {
+            throw new \RuntimeException("refusing to push to reserved branch name '$branch_name'");
+        }
+
+        if (!in_array($branch_name, git_doltlite_branches($db_path), true)) {
+            $main = git_doltlite_open($db_path, 'main');
+            $main->querySingle('SELECT dolt_branch(' . git_doltlite_sql_string($branch_name) . ')');
+            $branch_db = git_doltlite_open($db_path, $branch_name);
+            $s = $branch_db->prepare('INSERT OR IGNORE INTO branches (name, parent_branch) VALUES (:n, :p)');
+            $s->bindValue(':n', $branch_name, SQLITE3_TEXT);
+            $s->bindValue(':p', 'main', SQLITE3_TEXT);
+            $s->execute();
+        }
+
+        $sqlite = git_doltlite_open($db_path, $branch_name);
+        $branch_id = git_fs_branch_id($sqlite, $branch_name);
+        if ($branch_id === 0) {
+            $s = $sqlite->prepare('INSERT OR IGNORE INTO branches (name, parent_branch) VALUES (:n, :p)');
+            $s->bindValue(':n', $branch_name, SQLITE3_TEXT);
+            $s->bindValue(':p', $branch_name === 'main' ? null : 'main', $branch_name === 'main' ? SQLITE3_NULL : SQLITE3_TEXT);
+            $s->execute();
+            $branch_id = git_fs_branch_id($sqlite, $branch_name);
+        }
+        if ($branch_id === 0) {
+            throw new \RuntimeException("cannot resolve ForkPress branch row for '$branch_name'");
+        }
+
+        try {
+            $commit_obj = $repo->read_object($tip_hash);
+            $commit = $commit_obj->as_commit();
+        } catch (\Throwable $e) {
+            throw new \RuntimeException("cannot read pushed commit $tip_hash: " . $e->getMessage());
+        }
+
+        $message = $commit->message ?? 'Push via git';
+        $message = preg_replace('/\n\nFS-Commit:.*$/s', '', $message);
+        $all_files = [];
+        git_walk_tree($repo, $commit->tree, '', $all_files);
+
+        $wp_files = [];
+        foreach ($all_files as $path => $blob_hash) {
+            if (strncmp($path, 'wordpress/', 10) !== 0) continue;
+            $wp_files[substr($path, 10)] = $blob_hash;
+        }
+
+        git_apply_file_changes($sqlite, $branch_id, $wp_files, $repo);
+        git_fs_record_snapshot($sqlite, $branch_id, trim($message));
+        $commit_msg = git_doltlite_sql_string(trim($message) !== '' ? trim($message) : 'Push via git');
+        $result = @$sqlite->querySingle("SELECT dolt_commit('-A', '-m', $commit_msg)");
+        if ($result === false || $result === null) {
+            $err = $sqlite->lastErrorMsg();
+            if (stripos($err, 'nothing to commit') === false && stripos($err, 'no changes') === false) {
+                throw new \RuntimeException("dolt_commit failed on '$branch_name': $err");
+            }
+        }
     }
 }
 

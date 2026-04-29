@@ -10,14 +10,48 @@
  * Invoked via: spc build --with-added-patch=scripts/spc-patch-branchfs.php
  */
 
-// @phpstan-ignore-next-line -- runs inside spc's BuilderBase method via require
-if ($this->getPatchPoint() !== 'after-php-extract') {
-    return;
-}
-
 $repo_root = realpath(__DIR__ . '/..');
 if ($repo_root === false) {
     throw new RuntimeException('forkpress patch: cannot resolve repo root');
+}
+
+// @phpstan-ignore-next-line -- runs inside spc's BuilderBase method via require
+if ($this->getPatchPoint() === 'before-php-configure') {
+    $doltlite_lib_dir = getenv('FORKPRESS_DOLTLITE_LIB_DIR');
+    if ($doltlite_lib_dir && is_dir($doltlite_lib_dir)) {
+        $lib = $doltlite_lib_dir . '/libdoltlite.a';
+        $h = $doltlite_lib_dir . '/sqlite3.h';
+        $hext = $doltlite_lib_dir . '/sqlite3ext.h';
+        if (!is_file($lib) || !is_file($h) || !is_file($hext)) {
+            throw new RuntimeException('forkpress patch: Doltlite lib dir is missing libdoltlite.a/sqlite3.h/sqlite3ext.h');
+        }
+        if (!is_dir(BUILD_ROOT_PATH . '/lib/pkgconfig')) {
+            mkdir(BUILD_ROOT_PATH . '/lib/pkgconfig', 0755, true);
+        }
+        if (!copy($lib, BUILD_ROOT_PATH . '/lib/libsqlite3.a')
+            || !copy($h, BUILD_ROOT_PATH . '/include/sqlite3.h')
+            || !copy($hext, BUILD_ROOT_PATH . '/include/sqlite3ext.h')) {
+            throw new RuntimeException('forkpress patch: failed to install Doltlite as libsqlite3');
+        }
+        $pc = BUILD_ROOT_PATH . '/lib/pkgconfig/sqlite3.pc';
+        if (is_file($pc)) {
+            $contents = file_get_contents($pc);
+            $contents = preg_replace('/^Libs:.*$/m', 'Libs: -L${libdir} -lsqlite3', $contents);
+            if (preg_match('/^Libs\.private:/m', $contents)) {
+                $contents = preg_replace('/^Libs\.private:.*$/m', 'Libs.private: -lz -lpthread', $contents);
+            } else {
+                $contents .= "\nLibs.private: -lz -lpthread\n";
+            }
+            file_put_contents($pc, $contents);
+        }
+        logger()->info('forkpress patch: Doltlite installed as buildroot libsqlite3');
+    }
+    return;
+}
+
+// @phpstan-ignore-next-line -- runs inside spc's BuilderBase method via require
+if ($this->getPatchPoint() !== 'after-php-extract') {
+    return;
 }
 
 $php_src = SOURCE_PATH . '/php-src';

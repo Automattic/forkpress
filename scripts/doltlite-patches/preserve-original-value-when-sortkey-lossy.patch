@@ -1,0 +1,53 @@
+Preserve the original record when the sort-key encoding is lossy
+
+For a non-INTKEY cursor, prollyBtCursorInsert normally picks between
+two storage shapes:
+
+  - splitKey=1 — sort key holds a prefix of the record and the rest of
+    the record is stored as the value (WITHOUT ROWID tables, secondary
+    indexes);
+  - splitKey=0 — sort key holds every field and no value is stored.
+
+On read, getCursorPayload prefers the stored value; if none is
+present it reconstructs a SQLite record from the sort key bytes. That
+round-trip is lossless for BINARY collations but the sort-key encoder
+in sortkey.c lower-cases A-Z under NOCASE and strips trailing spaces
+under RTRIM.
+
+--- a/src/prolly_btree.c
++++ b/src/prolly_btree.c
+@@ -4716,7 +4716,33 @@
+                                       pCur->pKeyInfo,
+                                       &pSortKey, &nSortKey);
+     if( rc==SQLITE_OK ){
+-      if( splitKey ){
++      /* When every field of the record is folded into the sort key
++      ** (splitKey==0) we would normally store no value and, on read,
++      ** reconstruct the SQLite record from the sort key. That is
++      ** lossless for BINARY collations but the sort-key encoder
++      ** lower-cases A-Z under NOCASE and strips trailing spaces
++      ** under RTRIM. When SQLite picks the auto-index as a covering
++      ** index for a plain column read (e.g. `SELECT pkcol FROM t`
++      ** on a composite-PK rowid table with NOCASE pkcol), OP_Column
++      ** reads the reconstructed (folded) bytes and returns them to
++      ** the caller in place of the original column value. Preserve
++      ** the original record as the value whenever any field in
++      ** pKeyInfo uses a lossy collation so the read path prefers
++      ** the original bytes over the reconstructed ones. */
++      int lossy = 0;
++      if( pCur->pKeyInfo ){
++        int i;
++        for( i = 0; i < pCur->pKeyInfo->nAllField; i++ ){
++          CollSeq *pColl = pCur->pKeyInfo->aColl[i];
++          if( pColl && pColl->zName
++           && ( sqlite3StrICmp(pColl->zName, "NOCASE")==0
++             || sqlite3StrICmp(pColl->zName, "RTRIM")==0 ) ){
++            lossy = 1;
++            break;
++          }
++        }
++      }
++      if( splitKey || lossy ){
+         rc = prollyMutMapInsert(pCur->pMutMap,
+                                  pSortKey, nSortKey, 0,
+                                  (const u8*)pPayload->pKey, (int)pPayload->nKey);

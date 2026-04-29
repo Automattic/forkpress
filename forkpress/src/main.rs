@@ -215,6 +215,9 @@ enum StorageStrategy {
     /// Experimental Redb-backed content-addressed file store with branch manifests.
     #[value(alias = "redb", alias = "cas-redb")]
     Cas,
+    /// Experimental Doltlite-backed store: one branched SQLite-family DB for files and WordPress tables.
+    #[value(alias = "dolt-lite", alias = "dolt")]
+    Doltlite,
 }
 
 impl StorageStrategy {
@@ -223,6 +226,7 @@ impl StorageStrategy {
             Self::Branchfs => "branchfs",
             Self::Zfs => "zfs",
             Self::Cas => "cas",
+            Self::Doltlite => "doltlite",
         }
     }
 
@@ -231,6 +235,7 @@ impl StorageStrategy {
             Self::Branchfs => "branchfs/sqlite",
             Self::Zfs => "zfs",
             Self::Cas => "cas/redb",
+            Self::Doltlite => "doltlite",
         }
     }
 
@@ -239,6 +244,7 @@ impl StorageStrategy {
             "branchfs" | "sqlite" | "sqlite-cow" => Ok(Self::Branchfs),
             "zfs" => Ok(Self::Zfs),
             "cas" | "redb" | "cas-redb" => Ok(Self::Cas),
+            "doltlite" | "dolt-lite" | "dolt" => Ok(Self::Doltlite),
             other => bail!("unknown storage strategy in site manifest: {other}"),
         }
     }
@@ -543,6 +549,10 @@ struct Layout {
     cas_wp_root: PathBuf,
     cas_branches_dir: PathBuf,
     cas_branch_list: PathBuf,
+    doltlite_dir: PathBuf,
+    doltlite_db: PathBuf,
+    doltlite_wp_root: PathBuf,
+    doltlite_branch_list: PathBuf,
     wp_root: PathBuf,
     debug_log: PathBuf,
     php_error_log: PathBuf,
@@ -681,6 +691,7 @@ fn init_command(args: InitArgs) -> Result<i32> {
         }
         StorageStrategy::Zfs => init_zfs_site(args, layout),
         StorageStrategy::Cas => init_cas_site(args, layout),
+        StorageStrategy::Doltlite => init_doltlite_site(args, layout),
     }
 }
 
@@ -747,6 +758,29 @@ fn init_cas_site(args: InitArgs, layout: Layout) -> Result<i32> {
     println!("  root host: {}", args.root_host);
     println!("  store:     {}", layout.cas_store.display());
     println!("  status:    ready; WordPress files are served lazily from Redb");
+    Ok(0)
+}
+
+fn init_doltlite_site(args: InitArgs, layout: Layout) -> Result<i32> {
+    prepare_runtime(&layout)?;
+    let runtime = PortableRuntime::from_layout(&layout);
+    fs::create_dir_all(&layout.doltlite_dir)
+        .with_context(|| format!("failed to create {}", layout.doltlite_dir.display()))?;
+    fs::create_dir_all(&layout.doltlite_wp_root)
+        .with_context(|| format!("failed to create {}", layout.doltlite_wp_root.display()))?;
+    ensure_doltlite_main_branch(&layout, &runtime, &args)?;
+    write_site_manifest(&layout, SiteManifest::new(StorageStrategy::Doltlite))?;
+    write_doltlite_notes(&layout)?;
+    write_doltlite_branch_list(&layout, &runtime, &args.shared)?;
+
+    println!(
+        "forkpress: doltlite strategy initialised in {}",
+        layout.work_dir.display()
+    );
+    println!("  title:     {}", args.site_title);
+    println!("  root host: {}", args.root_host);
+    println!("  db:        {}", layout.doltlite_db.display());
+    println!("  status:    ready; files and WordPress tables share Doltlite branches");
     Ok(0)
 }
 
@@ -1057,6 +1091,14 @@ mod storage_strategy_tests {
     }
 
     #[test]
+    fn manifest_parses_doltlite() {
+        let manifest = SiteManifest::parse("strategy = \"doltlite\"\n").unwrap();
+        assert_eq!(manifest.strategy, StorageStrategy::Doltlite);
+        let alias = SiteManifest::parse("strategy = \"dolt-lite\"\n").unwrap();
+        assert_eq!(alias.strategy, StorageStrategy::Doltlite);
+    }
+
+    #[test]
     fn manifest_render_round_trips() {
         let rendered = SiteManifest::new(StorageStrategy::Cas).render();
         let parsed = SiteManifest::parse(&rendered).unwrap();
@@ -1100,6 +1142,10 @@ fn start_command(args: StartArgs) -> Result<i32> {
             ensure_cas_bootstrapped(&layout, &runtime, &args)?;
             start_cas_php_server(&layout, &runtime, &args, workers)?
         }
+        StorageStrategy::Doltlite => {
+            ensure_doltlite_bootstrapped(&layout, &runtime, &args)?;
+            start_doltlite_php_server(&layout, &runtime, &args, workers)?
+        }
     };
     let _registration =
         register_running_server(&layout, &args, std::process::id(), Some(php.id()))?;
@@ -1129,6 +1175,13 @@ fn start_command(args: StartArgs) -> Result<i32> {
         StorageStrategy::Cas => {
             println!("Git remote: not available for cas strategy yet");
             println!("DB access:  .forkpress/cas/branches/<branch>/.ht.sqlite");
+        }
+        StorageStrategy::Doltlite => {
+            println!(
+                "Git remote: http://{}:{}/site.git",
+                args.root_host, args.port
+            );
+            println!("DB access:  {}", layout.doltlite_db.display());
         }
     }
     println!(
@@ -1795,6 +1848,20 @@ fn git_command(args: GitPassthrough) -> Result<i32> {
                 println!("forkpress: branch {branch} ready");
                 return Ok(0);
             }
+            StorageStrategy::Doltlite => {
+                if create_args.auth.user.is_some() {
+                    bail!("doltlite local branch creation does not use --user/--password");
+                }
+                create_doltlite_branch(
+                    &layout,
+                    &runtime,
+                    &args.shared,
+                    branch,
+                    &create_args.from,
+                )?;
+                println!("forkpress: branch {branch} ready");
+                return Ok(0);
+            }
             StorageStrategy::Branchfs => {}
         }
         if !layout.site_fp.exists() || !layout.bootstrap_marker.exists() {
@@ -1899,15 +1966,33 @@ fn agents_command(args: AgentsArgs) -> Result<i32> {
     auth.validate()?;
 
     let layout = Layout::new(args.shared.work_dir.clone())?;
-    ensure_branchfs_strategy(&layout, "agents")?;
     prepare_runtime(&layout)?;
     let runtime = PortableRuntime::from_layout(&layout);
+    let strategy = require_initialized_strategy(&layout, "agents")?;
 
-    if !layout.site_fp.exists() || !layout.bootstrap_marker.exists() {
-        bail!(
-            "no bootstrapped site found in {}. Run `forkpress server start` first",
-            layout.work_dir.display()
-        );
+    match strategy {
+        StorageStrategy::Branchfs => {
+            if !layout.site_fp.exists() || !layout.bootstrap_marker.exists() {
+                bail!(
+                    "no bootstrapped site found in {}. Run `forkpress server start` first",
+                    layout.work_dir.display()
+                );
+            }
+        }
+        StorageStrategy::Doltlite => {
+            ensure_doltlite_main_branch(
+                &layout,
+                &runtime,
+                &InitArgs {
+                    shared: args.shared.clone(),
+                    strategy: StorageStrategy::Doltlite,
+                    site_title: "ForkPress".to_string(),
+                    root_host: "wp.localhost".to_string(),
+                    admin_password: Some("admin".to_string()),
+                },
+            )?;
+        }
+        other => bail_strategy_unsupported("agents", other)?,
     }
 
     let root_dir = absolutize(args.dir)?;
@@ -1931,7 +2016,21 @@ fn agents_command(args: AgentsArgs) -> Result<i32> {
 
     for index in 1..=args.count {
         let branch = format!("{}-{}", args.prefix, index);
-        ensure_branch_exists(&layout, &runtime, &args.shared, &branch, &args.from, &auth)?;
+        match strategy {
+            StorageStrategy::Branchfs => {
+                ensure_branch_exists(&layout, &runtime, &args.shared, &branch, &args.from, &auth)?;
+            }
+            StorageStrategy::Doltlite => {
+                create_doltlite_branch_if_missing(
+                    &layout,
+                    &runtime,
+                    &args.shared,
+                    &branch,
+                    &args.from,
+                )?;
+            }
+            _ => unreachable!(),
+        }
     }
 
     run_git(
@@ -2113,6 +2212,7 @@ fn branch_command(args: BranchPassthrough) -> Result<i32> {
     match strategy {
         StorageStrategy::Zfs => return zfs_branch_command(args, layout, runtime),
         StorageStrategy::Cas => return cas_branch_command(args, layout, runtime),
+        StorageStrategy::Doltlite => return doltlite_branch_command(args, layout, runtime),
         StorageStrategy::Branchfs => {}
     }
 
@@ -2326,6 +2426,10 @@ impl Layout {
             cas_wp_root: work_dir.join("cas/wproot"),
             cas_branches_dir: work_dir.join("cas/branches"),
             cas_branch_list: work_dir.join("cas/branches.txt"),
+            doltlite_dir: work_dir.join("doltlite"),
+            doltlite_db: work_dir.join("doltlite/site.doltlite"),
+            doltlite_wp_root: work_dir.join("doltlite/wproot"),
+            doltlite_branch_list: work_dir.join("doltlite/branches.txt"),
             wp_root: work_dir.join("wproot"),
             debug_log: work_dir.join("logs/wp-debug.log"),
             php_error_log: work_dir.join("logs/php-errors.log"),
@@ -2497,6 +2601,115 @@ strategy yet.
             layout.cas_dir.join("README.md").display()
         )
     })
+}
+
+fn write_doltlite_notes(layout: &Layout) -> Result<()> {
+    fs::create_dir_all(&layout.doltlite_dir)
+        .with_context(|| format!("failed to create {}", layout.doltlite_dir.display()))?;
+    let notes = "\
+# ForkPress Doltlite strategy
+
+This site was initialized with `strategy = \"doltlite\"`.
+
+The storage root is `.forkpress/doltlite/site.doltlite`. WordPress files use
+the same BranchFS table layout as the default driver, but each request checks
+out the active Doltlite branch on its SQLite connections before reading files
+or WordPress tables. Files and database rows share one native Doltlite branch
+graph.
+
+There are no ForkPress SQL COW views for WordPress tables in this strategy.
+Branch creation uses Doltlite's `dolt_branch()` and requests select the branch
+through Doltlite's `dolt_checkout(?)` SQL function.
+";
+    fs::write(layout.doltlite_dir.join("README.md"), notes).with_context(|| {
+        format!(
+            "failed to write {}",
+            layout.doltlite_dir.join("README.md").display()
+        )
+    })
+}
+
+fn ensure_doltlite_bootstrapped(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    args: &StartArgs,
+) -> Result<()> {
+    let init_args = InitArgs {
+        shared: args.shared.clone(),
+        strategy: StorageStrategy::Doltlite,
+        site_title: args.site_title.clone(),
+        root_host: args.root_host.clone(),
+        admin_password: Some("admin".to_string()),
+    };
+    ensure_doltlite_main_branch(layout, runtime, &init_args)?;
+    write_site_manifest_if_missing(layout, SiteManifest::new(StorageStrategy::Doltlite))?;
+    write_doltlite_branch_list(layout, runtime, &args.shared)?;
+    Ok(())
+}
+
+fn ensure_doltlite_main_branch(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    args: &InitArgs,
+) -> Result<()> {
+    fs::create_dir_all(&layout.doltlite_dir)
+        .with_context(|| format!("failed to create {}", layout.doltlite_dir.display()))?;
+    fs::create_dir_all(&layout.doltlite_wp_root)
+        .with_context(|| format!("failed to create {}", layout.doltlite_wp_root.display()))?;
+
+    if !layout.doltlite_db.exists() {
+        let mut script_args: Vec<std::ffi::OsString> =
+            vec![layout.doltlite_db.as_os_str().to_owned()];
+        if let Some(pw) = &args.admin_password {
+            script_args.push(std::ffi::OsString::from("--admin-password"));
+            script_args.push(std::ffi::OsString::from(pw));
+        }
+
+        run_php_script(
+            layout,
+            runtime,
+            &args.shared,
+            "scripts/init_db.php",
+            script_args.iter().map(|s| s.as_os_str()),
+        )?;
+
+        let staging = layout.doltlite_dir.join("staging-main");
+        if staging.exists() {
+            fs::remove_dir_all(&staging)
+                .with_context(|| format!("failed to reset {}", staging.display()))?;
+        }
+        copy_tree_cow(&layout.runtime_dir.join("runtime/wp-src"), &staging)?;
+        install_doltlite_managed_wp_files(layout, &staging)?;
+        run_php_script(
+            layout,
+            runtime,
+            &args.shared,
+            "scripts/import_wp.php",
+            [
+                staging.as_os_str(),
+                layout.doltlite_db.as_os_str(),
+                OsStr::new("main"),
+            ],
+        )?;
+        fs::remove_dir_all(&staging)
+            .with_context(|| format!("failed to remove {}", staging.display()))?;
+    }
+
+    run_doltlite_bootstrap_script(
+        layout,
+        runtime,
+        &args.shared,
+        "main",
+        &args.site_title,
+        args.admin_password.as_deref().unwrap_or("admin"),
+    )?;
+    run_doltlite_ctl(
+        layout,
+        runtime,
+        &args.shared,
+        ["commit", "main", "--message", "Initial ForkPress import"],
+    )?;
+    Ok(())
 }
 
 fn absolutize(path: PathBuf) -> Result<PathBuf> {
@@ -3062,6 +3275,256 @@ fn create_cas_branch(
     Ok(())
 }
 
+fn install_doltlite_managed_wp_files(layout: &Layout, branch_root: &Path) -> Result<()> {
+    let wp_content = branch_root.join("wp-content");
+    fs::create_dir_all(wp_content.join("plugins"))
+        .with_context(|| format!("failed to create {}", wp_content.join("plugins").display()))?;
+    fs::create_dir_all(wp_content.join("mu-plugins")).with_context(|| {
+        format!(
+            "failed to create {}",
+            wp_content.join("mu-plugins").display()
+        )
+    })?;
+
+    let plugin_dest = wp_content.join("plugins/sqlite-database-integration");
+    if plugin_dest.exists() {
+        fs::remove_dir_all(&plugin_dest)
+            .with_context(|| format!("failed to reset {}", plugin_dest.display()))?;
+    }
+    copy_tree_cow(
+        &layout
+            .runtime_dir
+            .join("vendor/sqlite-database-integration"),
+        &plugin_dest,
+    )?;
+
+    fs::copy(
+        layout.runtime_dir.join("wp-plugin/branchfs-wp.php"),
+        wp_content.join("mu-plugins/branchfs-wp.php"),
+    )
+    .with_context(|| {
+        format!(
+            "failed to install {}",
+            wp_content.join("mu-plugins/branchfs-wp.php").display()
+        )
+    })?;
+
+    fs::write(wp_content.join("db.php"), doltlite_sqlite_dropin())
+        .with_context(|| format!("failed to write {}", wp_content.join("db.php").display()))?;
+    fs::write(branch_root.join("wp-config.php"), doltlite_wp_config()).with_context(|| {
+        format!(
+            "failed to write {}",
+            branch_root.join("wp-config.php").display()
+        )
+    })
+}
+
+fn run_doltlite_bootstrap_script(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    branch: &str,
+    site_title: &str,
+    admin_password: &str,
+) -> Result<()> {
+    run_php_script(
+        layout,
+        runtime,
+        shared,
+        "runtime/bootstrap_doltlite_wp.php",
+        [
+            layout.doltlite_db.as_os_str(),
+            layout.doltlite_wp_root.as_os_str(),
+            OsStr::new(branch),
+            OsStr::new(site_title),
+            layout.debug_log.as_os_str(),
+            OsStr::new(admin_password),
+        ],
+    )
+}
+
+fn doltlite_sqlite_dropin() -> &'static str {
+    cas_sqlite_dropin()
+}
+
+fn doltlite_wp_config() -> &'static str {
+    r#"<?php
+$forkpress_branch = getenv('FORKPRESS_BRANCH') ?: ($_SERVER['FORKPRESS_BRANCH'] ?? 'main');
+if (!preg_match('/^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/', $forkpress_branch)) {
+    $forkpress_branch = 'main';
+}
+
+$forkpress_db = getenv('FORKPRESS_DOLTLITE_DB');
+if (!$forkpress_db) {
+    $forkpress_db = dirname(dirname(__DIR__)) . '/site.doltlite';
+}
+
+if (!defined('FQDB')) {
+    define('FQDB',    $forkpress_db);
+    define('DB_DIR',  dirname($forkpress_db));
+    define('DB_FILE', basename($forkpress_db));
+}
+define('DB_NAME', 'forkpress');
+define('DB_USER', 'forkpress');
+define('DB_PASSWORD', 'forkpress');
+define('DB_HOST', 'localhost');
+define('DB_CHARSET', 'utf8mb4');
+define('DB_COLLATE', '');
+
+$table_prefix = 'wp_';
+
+define('AUTH_KEY',         'forkpress-doltlite-k1-xxxxxxxxxxxxxxxx');
+define('SECURE_AUTH_KEY',  'forkpress-doltlite-k2-xxxxxxxxxxxxxxxx');
+define('LOGGED_IN_KEY',    'forkpress-doltlite-k3-xxxxxxxxxxxxxxxx');
+define('NONCE_KEY',        'forkpress-doltlite-k4-xxxxxxxxxxxxxxxx');
+define('AUTH_SALT',        'forkpress-doltlite-s1-xxxxxxxxxxxxxxxx');
+define('SECURE_AUTH_SALT', 'forkpress-doltlite-s2-xxxxxxxxxxxxxxxx');
+define('LOGGED_IN_SALT',   'forkpress-doltlite-s3-xxxxxxxxxxxxxxxx');
+define('NONCE_SALT',       'forkpress-doltlite-s4-xxxxxxxxxxxxxxxx');
+
+define('WP_DEBUG', true);
+define('WP_DEBUG_LOG', getenv('FORKPRESS_DOLTLITE_DEBUG_LOG') ?: '/tmp/forkpress-doltlite-wp-debug.log');
+define('WP_DEBUG_DISPLAY', false);
+define('DISALLOW_FILE_MODS', true);
+define('WP_AUTO_UPDATE_CORE', false);
+define('AUTOMATIC_UPDATER_DISABLED', true);
+define('WP_HTTP_BLOCK_EXTERNAL', true);
+if (!defined('DISABLE_WP_CRON')) {
+    define('DISABLE_WP_CRON', true);
+}
+
+if (isset($_SERVER['HTTP_HOST'])) {
+    define('WP_HOME',    'http://' . $_SERVER['HTTP_HOST']);
+    define('WP_SITEURL', 'http://' . $_SERVER['HTTP_HOST']);
+}
+
+if (!defined('ABSPATH')) {
+    define('ABSPATH', 'branchfs://' . $forkpress_branch . '/');
+}
+
+require_once ABSPATH . 'wp-settings.php';
+"#
+}
+
+fn doltlite_branch_command(
+    args: BranchPassthrough,
+    layout: Layout,
+    runtime: PortableRuntime,
+) -> Result<i32> {
+    run_doltlite_ctl(
+        &layout,
+        &runtime,
+        &args.shared,
+        args.args.iter().map(|s| s.as_str()),
+    )
+}
+
+fn create_doltlite_branch(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    branch: &str,
+    from: &str,
+) -> Result<()> {
+    validate_branch_name(branch)?;
+    validate_branch_name(from)?;
+    run_doltlite_ctl(layout, runtime, shared, ["create", branch, "--from", from])?;
+    let (root_host, port) = branchctl_url_hint(layout)
+        .unwrap_or_else(|_| ("wp.localhost".to_string(), "18080".to_string()));
+    println!("forkpress: doltlite branched '{from}' -> '{branch}'");
+    println!(
+        "Visit http://{}.{root_host}:{port}/ to see this branch.",
+        branch
+    );
+    Ok(())
+}
+
+fn create_doltlite_branch_if_missing(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    branch: &str,
+    from: &str,
+) -> Result<()> {
+    let exists = doltlite_branch_exists(layout, runtime, shared, branch)?;
+    if exists {
+        println!("forkpress: reusing existing branch {branch}");
+        return Ok(());
+    }
+    create_doltlite_branch(layout, runtime, shared, branch, from)
+}
+
+fn doltlite_branch_exists(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    branch: &str,
+) -> Result<bool> {
+    let mut command = php_base_command(layout, runtime, shared);
+    command
+        .arg(layout.runtime_dir.join("scripts/doltlite_ctl.php"))
+        .arg("exists")
+        .arg(branch)
+        .env("FORKPRESS_DOLTLITE_DB", &layout.doltlite_db);
+    let output = command
+        .output()
+        .context("failed to inspect doltlite branch")?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).trim() == "yes");
+    }
+    write_filtered_output(&output.stdout, &output.stderr)?;
+    bail!("doltlite branch exists check exited with {}", output.status)
+}
+
+fn write_doltlite_branch_list(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+) -> Result<()> {
+    fs::create_dir_all(&layout.doltlite_dir)
+        .with_context(|| format!("failed to create {}", layout.doltlite_dir.display()))?;
+    let mut command = php_base_command(layout, runtime, shared);
+    command
+        .arg(layout.runtime_dir.join("scripts/doltlite_ctl.php"))
+        .arg("list")
+        .env("FORKPRESS_DOLTLITE_DB", &layout.doltlite_db);
+    let output = command
+        .output()
+        .context("failed to list doltlite branches")?;
+    if !output.status.success() {
+        write_filtered_output(&output.stdout, &output.stderr)?;
+        bail!("doltlite branch list exited with {}", output.status);
+    }
+    fs::write(&layout.doltlite_branch_list, &output.stdout)
+        .with_context(|| format!("failed to write {}", layout.doltlite_branch_list.display()))
+}
+
+fn run_doltlite_ctl<'a, I>(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    args: I,
+) -> Result<i32>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut command = php_base_command(layout, runtime, shared);
+    command
+        .arg(layout.runtime_dir.join("scripts/doltlite_ctl.php"))
+        .env("FORKPRESS_DOLTLITE_DB", &layout.doltlite_db)
+        .env("FORKPRESS_BRANCH_LIST", &layout.doltlite_branch_list);
+    for arg in args {
+        command.arg(arg);
+    }
+    let output = command.output().context("failed to run doltlite_ctl.php")?;
+    write_filtered_output(&output.stdout, &output.stderr)?;
+    if !output.status.success() {
+        bail!("doltlite_ctl.php exited with {}", output.status);
+    }
+    let _ = write_doltlite_branch_list(layout, runtime, shared);
+    Ok(output.status.code().unwrap_or(0))
+}
+
 fn copy_tree_cow(source: &Path, dest: &Path) -> Result<()> {
     if !source.is_dir() {
         bail!("source directory not found: {}", source.display());
@@ -3460,6 +3923,64 @@ fn start_cas_php_server(
     Ok(guard)
 }
 
+fn start_doltlite_php_server(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    args: &StartArgs,
+    workers: usize,
+) -> Result<ChildGuard> {
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&layout.php_server_log)?;
+    let log_err = log.try_clone()?;
+
+    let mut command = php_base_command(layout, runtime, &args.shared);
+    command
+        .arg("-d")
+        .arg("log_errors=On")
+        .arg("-d")
+        .arg(format!("error_log={}", layout.php_error_log.display()))
+        .arg("-d")
+        .arg("post_max_size=100M")
+        .arg("-d")
+        .arg("upload_max_filesize=100M")
+        .arg("-S")
+        .arg(format!("{}:{}", args.host, args.port))
+        .arg("-t")
+        .arg(&layout.doltlite_wp_root)
+        .arg(layout.runtime_dir.join("runtime/router_doltlite.php"))
+        .env("FORKPRESS_DOLTLITE_DB", &layout.doltlite_db)
+        .env("FORKPRESS_DOLTLITE_WP_ROOT", &layout.doltlite_wp_root)
+        .env("FORKPRESS_DOLTLITE_DEBUG_LOG", &layout.debug_log)
+        .env("FORKPRESS_BRANCH_LIST", &layout.doltlite_branch_list)
+        .env("FORKPRESS_ROOT_HOST", &args.root_host)
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err));
+
+    if workers > 1 {
+        command.env("PHP_CLI_SERVER_WORKERS", workers.to_string());
+    }
+
+    let child = command
+        .spawn()
+        .context("failed to start bundled php server")?;
+
+    let mut guard = ChildGuard {
+        name: "php server",
+        child,
+    };
+    wait_for_tcp(&args.host, args.port, Duration::from_secs(30))
+        .with_context(|| format!("php server did not open {}:{}", args.host, args.port))?;
+    if let Some(status) = guard.try_wait()? {
+        bail!(
+            "php server exited during startup with status {status}. Check {}",
+            layout.php_server_log.display()
+        );
+    }
+    Ok(guard)
+}
+
 fn php_base_command(_layout: &Layout, runtime: &PortableRuntime, shared: &SharedPaths) -> Command {
     // branchfs is compiled into the php binary as a builtin extension
     // (see scripts/build-dist.sh), so no -d extension=... flag is needed.
@@ -3468,7 +3989,9 @@ fn php_base_command(_layout: &Layout, runtime: &PortableRuntime, shared: &Shared
         .arg("-d")
         .arg("display_errors=Off")
         .arg("-d")
-        .arg("display_startup_errors=Off");
+        .arg("display_startup_errors=Off")
+        .arg("-d")
+        .arg("max_execution_time=0");
     command
 }
 

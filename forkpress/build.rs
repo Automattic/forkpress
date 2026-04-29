@@ -24,9 +24,15 @@ fn main() -> Result<()> {
         println!("cargo:warning=embedded ZFS engine is disabled for target {target}");
     }
 
+    println!("cargo:rerun-if-env-changed=FORKPRESS_RUNTIME_BUNDLE");
+
     // Allow skipping the dist build entirely for `cargo check` runs:
     //   FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo check -p forkpress
-    if env::var_os("FORKPRESS_RUNTIME_BUNDLE").is_some() {
+    if let Some(bundle) = env::var_os("FORKPRESS_RUNTIME_BUNDLE") {
+        println!(
+            "cargo:rustc-env=FORKPRESS_RUNTIME_BUNDLE={}",
+            bundle.to_string_lossy()
+        );
         return Ok(());
     }
 
@@ -56,9 +62,11 @@ fn main() -> Result<()> {
         "runtime/router.php",
         "runtime/router_zfs.php",
         "runtime/router_cas.php",
+        "runtime/router_doltlite.php",
         "runtime/bootstrap_wp.php",
         "runtime/bootstrap_zfs_wp.php",
         "runtime/bootstrap_cas_wp.php",
+        "runtime/bootstrap_doltlite_wp.php",
         "runtime/managed_wp_files.php",
         "runtime/refresh_wp_files.php",
         "runtime/wp.zip",
@@ -358,9 +366,11 @@ fn build_bundle(repo_root: &Path, dist_dir: &Path, out: &Path) -> Result<()> {
     add_file(&mut tar, repo_root, "runtime/router.php")?;
     add_file(&mut tar, repo_root, "runtime/router_zfs.php")?;
     add_file(&mut tar, repo_root, "runtime/router_cas.php")?;
+    add_file(&mut tar, repo_root, "runtime/router_doltlite.php")?;
     add_file(&mut tar, repo_root, "runtime/bootstrap_wp.php")?;
     add_file(&mut tar, repo_root, "runtime/bootstrap_zfs_wp.php")?;
     add_file(&mut tar, repo_root, "runtime/bootstrap_cas_wp.php")?;
+    add_file(&mut tar, repo_root, "runtime/bootstrap_doltlite_wp.php")?;
     add_file(&mut tar, repo_root, "runtime/managed_wp_files.php")?;
     add_file(&mut tar, repo_root, "runtime/refresh_wp_files.php")?;
     add_file(&mut tar, repo_root, "runtime/wp.zip")?;
