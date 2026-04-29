@@ -27,6 +27,10 @@ fn main() -> Result<()> {
     // Allow skipping the dist build entirely for `cargo check` runs:
     //   FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo check -p forkpress
     if env::var_os("FORKPRESS_RUNTIME_BUNDLE").is_some() {
+        println!(
+            "cargo:rustc-env=FORKPRESS_RUNTIME_BUNDLE_ID={}-external",
+            env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "dev".to_string())
+        );
         return Ok(());
     }
 
@@ -69,13 +73,34 @@ fn main() -> Result<()> {
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
     let bundle_path = out_dir.join("forkpress-runtime.tar.gz");
     build_bundle(repo_root, &dist_dir, &bundle_path)?;
+    let bundle_hash = fnv1a_hex(&fs::read(&bundle_path).with_context(|| {
+        format!(
+            "failed to read generated runtime bundle at {}",
+            bundle_path.display()
+        )
+    })?);
+    let bundle_id = format!(
+        "{}-{}",
+        env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "dev".to_string()),
+        bundle_hash
+    );
 
     println!(
         "cargo:rustc-env=FORKPRESS_RUNTIME_BUNDLE={}",
         bundle_path.display()
     );
+    println!("cargo:rustc-env=FORKPRESS_RUNTIME_BUNDLE_ID={bundle_id}");
 
     Ok(())
+}
+
+fn fnv1a_hex(bytes: &[u8]) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 fn build_embedded_zfs(repo_root: &Path, target: &str) -> Result<()> {
