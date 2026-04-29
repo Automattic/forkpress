@@ -21,10 +21,10 @@ jobs:
   mac-release-artifact-cas-smoke:
     runs-on: macos-14
     steps:
-      - name: Download v0.1.10 release artifact
+      - name: Download v0.1.11 release artifact
         run: |
           curl -L -o forkpress-aarch64-apple-darwin.tar.gz \
-            https://github.com/Automattic/forkpress/releases/download/v0.1.10/forkpress-aarch64-apple-darwin.tar.gz
+            https://github.com/Automattic/forkpress/releases/download/v0.1.11/forkpress-aarch64-apple-darwin.tar.gz
           tar -xzf forkpress-aarch64-apple-darwin.tar.gz
           chmod +x forkpress
 
