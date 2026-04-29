@@ -23,6 +23,12 @@ trap cleanup EXIT
 "$BIN" server start --work-dir "$WORK" --port "$PORT" --root-host wp.localhost
 "$BIN" server list | grep -F "$WORK" >/dev/null
 
+curl -sS -D "$TMP/main-headers.out" -H "Host: wp.localhost:$PORT" \
+  "http://127.0.0.1:$PORT/" \
+  -o "$TMP/main-home.html"
+grep -F "X-ForkPress-Branch: main" "$TMP/main-headers.out" >/dev/null
+grep -F "<title>ForkPress" "$TMP/main-home.html" >/dev/null
+
 "$BIN" branch --work-dir "$WORK" create feature-cas > "$TMP/branch-create.out"
 grep -F "feature-cas.wp.localhost:$PORT" "$TMP/branch-create.out" >/dev/null
 test -f "$WORK/cas/store.redb"
