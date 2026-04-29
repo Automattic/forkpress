@@ -27,14 +27,25 @@ for ($i = 2; $i < count($argv); $i++) {
 echo "Initializing BranchFS database at: $db_path\n";
 
 $db = new SQLite3($db_path);
-$db->exec('PRAGMA journal_mode = WAL');
+$is_doltlite = false;
+try {
+    $engine = @$db->querySingle('SELECT doltlite_engine()');
+    $is_doltlite = is_string($engine) && $engine !== '';
+} catch (Throwable $e) {
+    $is_doltlite = false;
+}
+if (!$is_doltlite) {
+    $db->exec('PRAGMA journal_mode = WAL');
+}
 $db->exec('PRAGMA foreign_keys = ON');
 
 // Cap WAL growth under heavy write bursts (git push + multi-branch
 // merges + concurrent HTTP). The default 1000-page threshold (~4 MB)
 // lets the WAL balloon to many megabytes between writes; 500 keeps the
 // file closer to 2 MB.
-$db->exec('PRAGMA wal_autocheckpoint = 500');
+if (!$is_doltlite) {
+    $db->exec('PRAGMA wal_autocheckpoint = 500');
+}
 
 $schema = file_get_contents($schema_path);
 if (!$schema) {

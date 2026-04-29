@@ -22,10 +22,18 @@ if (!extension_loaded('branchfs')) {
 }
 
 branchfs_set_db($db_path);
+// Activate BranchFS so Doltlite-backed imports run inside one transaction, but
+// keep the interception root outside the staging tree. Otherwise the iterator
+// below would read the still-empty BranchFS tree instead of the real files.
+branchfs_set_root($wp_dir . '/.branchfs-import-root');
+branchfs_set_branch($branch);
 
 $branch_id = branchfs_create_branch($branch, $branch === 'main' ? null : 'main');
 if ($branch_id === false) {
     die("import_wp:Could not create/find branch '$branch'\n");
+}
+if (!branchfs_activate()) {
+    die("import_wp:Could not activate branch '$branch'\n");
 }
 
 echo "Importing $wp_dir into branch '$branch' (id=$branch_id)...\n";
@@ -63,3 +71,5 @@ foreach ($iterator as $file) {
 echo "Done: $count files, $dir_count directories imported";
 if ($errors) echo " ($errors errors)";
 echo "\n";
+
+branchfs_deactivate();
