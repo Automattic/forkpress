@@ -42,6 +42,8 @@ ZEND_BEGIN_MODULE_GLOBALS(branchfs)
     int   intercepting;
     branchfs_backend_t backend;
     sqlite3 *db;
+    int sqlite_is_doltlite;
+    int sqlite_tx_active;
     void *cas_handle;
     const php_stream_wrapper_ops *orig_plain_ops;
 ZEND_END_MODULE_GLOBALS(branchfs)

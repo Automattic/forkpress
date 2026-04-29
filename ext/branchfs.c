@@ -50,7 +50,10 @@ static int branchfs_metadata(php_stream_wrapper *wrapper, const char *url, int o
     void *value, php_stream_context *context);
 static const char *store_current_branch_name(void);
 static int store_open_cas(const char *store_path);
+static int store_detect_doltlite(void);
 static int store_checkout_branch_if_supported(const char *branch_name);
+static int store_begin_request_transaction_if_needed(void);
+static void store_end_request_transaction(void);
 
 /* ================================================================
  * Section 1: FNV-1a hash for content addressing
@@ -89,7 +92,11 @@ int store_open(const char *db_path) {
         BRANCHFS_G(db) = NULL;
         return -1;
     }
-    sqlite3_exec(BRANCHFS_G(db), "PRAGMA journal_mode=WAL", NULL, NULL, NULL);
+    BRANCHFS_G(sqlite_is_doltlite) = store_detect_doltlite();
+    BRANCHFS_G(sqlite_tx_active) = 0;
+    if (!BRANCHFS_G(sqlite_is_doltlite)) {
+        sqlite3_exec(BRANCHFS_G(db), "PRAGMA journal_mode=WAL", NULL, NULL, NULL);
+    }
     sqlite3_exec(BRANCHFS_G(db), "PRAGMA foreign_keys=ON", NULL, NULL, NULL);
     sqlite3_busy_timeout(BRANCHFS_G(db), 5000);
     return 0;
@@ -114,9 +121,12 @@ static int store_open_cas(const char *store_path) {
 
 void store_close(void) {
     if (BRANCHFS_G(db)) {
+        store_end_request_transaction();
         sqlite3_close(BRANCHFS_G(db));
         BRANCHFS_G(db) = NULL;
     }
+    BRANCHFS_G(sqlite_is_doltlite) = 0;
+    BRANCHFS_G(sqlite_tx_active) = 0;
 #ifdef HAVE_BRANCHFS_CAS
     if (BRANCHFS_G(cas_handle)) {
         fp_cas_close(BRANCHFS_G(cas_handle));
@@ -129,6 +139,21 @@ static const char *store_current_branch_name(void) {
     return BRANCHFS_G(current_branch) ? BRANCHFS_G(current_branch) : "main";
 }
 
+static int store_detect_doltlite(void) {
+    if (!BRANCHFS_G(db)) return 0;
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(BRANCHFS_G(db), "SELECT doltlite_engine()", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_ROW || rc == SQLITE_DONE;
+}
+
 static int store_checkout_branch_if_supported(const char *branch_name) {
     if (!BRANCHFS_G(db) || !branch_name || branch_name[0] == '\0') return 0;
 
@@ -137,8 +162,10 @@ static int store_checkout_branch_if_supported(const char *branch_name) {
     if (rc != SQLITE_OK) {
         /* Plain SQLite-backed BranchFS does not provide Doltlite functions. */
         sqlite3_finalize(stmt);
+        BRANCHFS_G(sqlite_is_doltlite) = 0;
         return 0;
     }
+    BRANCHFS_G(sqlite_is_doltlite) = 1;
 
     sqlite3_bind_text(stmt, 1, branch_name, -1, SQLITE_STATIC);
     rc = sqlite3_step(stmt);
@@ -150,6 +177,35 @@ static int store_checkout_branch_if_supported(const char *branch_name) {
     php_error_docref(NULL, E_WARNING, "branchfs: cannot checkout Doltlite branch %s: %s",
         branch_name, sqlite3_errmsg(BRANCHFS_G(db)));
     return -1;
+}
+
+static int store_begin_request_transaction_if_needed(void) {
+    if (!BRANCHFS_G(db) || !BRANCHFS_G(sqlite_is_doltlite) || BRANCHFS_G(sqlite_tx_active)) {
+        return 0;
+    }
+
+    char *errmsg = NULL;
+    int rc = sqlite3_exec(BRANCHFS_G(db), "BEGIN", NULL, NULL, &errmsg);
+    if (rc != SQLITE_OK) {
+        php_error_docref(NULL, E_WARNING, "branchfs: cannot begin Doltlite request transaction: %s",
+            errmsg ? errmsg : sqlite3_errmsg(BRANCHFS_G(db)));
+        sqlite3_free(errmsg);
+        return -1;
+    }
+    BRANCHFS_G(sqlite_tx_active) = 1;
+    return 0;
+}
+
+static void store_end_request_transaction(void) {
+    if (!BRANCHFS_G(db) || !BRANCHFS_G(sqlite_tx_active)) return;
+
+    char *errmsg = NULL;
+    int rc = sqlite3_exec(BRANCHFS_G(db), "COMMIT", NULL, NULL, &errmsg);
+    if (rc != SQLITE_OK) {
+        sqlite3_free(errmsg);
+        sqlite3_exec(BRANCHFS_G(db), "ROLLBACK", NULL, NULL, NULL);
+    }
+    BRANCHFS_G(sqlite_tx_active) = 0;
 }
 
 int store_get_branch_id(const char *branch_name) {
@@ -435,13 +491,15 @@ int store_write_file(int branch_id, const char *path, const char *data, size_t s
             /* Metadata row with NULL data + chunks in blob_chunks. Wrap the
              * whole insert in a transaction so a crash leaves no orphan
              * metadata pointing at missing chunks. */
-            sqlite3_exec(BRANCHFS_G(db), "BEGIN IMMEDIATE", NULL, NULL, NULL);
+            int owns_chunk_tx = !BRANCHFS_G(sqlite_tx_active);
+            sqlite3_exec(BRANCHFS_G(db), owns_chunk_tx ? "BEGIN IMMEDIATE" : "SAVEPOINT branchfs_blob", NULL, NULL, NULL);
             sqlite3_stmt *bstmt;
             rc = sqlite3_prepare_v2(BRANCHFS_G(db),
                 "INSERT OR IGNORE INTO blobs (hash, data, size) VALUES (?, NULL, ?)",
                 -1, &bstmt, NULL);
             if (rc != SQLITE_OK) {
-                sqlite3_exec(BRANCHFS_G(db), "ROLLBACK", NULL, NULL, NULL);
+                sqlite3_exec(BRANCHFS_G(db), owns_chunk_tx ? "ROLLBACK" : "ROLLBACK TO branchfs_blob", NULL, NULL, NULL);
+                if (!owns_chunk_tx) sqlite3_exec(BRANCHFS_G(db), "RELEASE branchfs_blob", NULL, NULL, NULL);
                 efree(hash);
                 return -1;
             }
@@ -455,7 +513,8 @@ int store_write_file(int branch_id, const char *path, const char *data, size_t s
                 "INSERT OR IGNORE INTO blob_chunks (blob_hash, chunk_no, data) VALUES (?, ?, ?)",
                 -1, &cstmt, NULL);
             if (rc != SQLITE_OK) {
-                sqlite3_exec(BRANCHFS_G(db), "ROLLBACK", NULL, NULL, NULL);
+                sqlite3_exec(BRANCHFS_G(db), owns_chunk_tx ? "ROLLBACK" : "ROLLBACK TO branchfs_blob", NULL, NULL, NULL);
+                if (!owns_chunk_tx) sqlite3_exec(BRANCHFS_G(db), "RELEASE branchfs_blob", NULL, NULL, NULL);
                 efree(hash);
                 return -1;
             }
@@ -469,14 +528,15 @@ int store_write_file(int branch_id, const char *path, const char *data, size_t s
                 sqlite3_bind_blob(cstmt, 3, data + off, (int)clen, SQLITE_STATIC);
                 if (sqlite3_step(cstmt) != SQLITE_DONE) {
                     sqlite3_finalize(cstmt);
-                    sqlite3_exec(BRANCHFS_G(db), "ROLLBACK", NULL, NULL, NULL);
+                    sqlite3_exec(BRANCHFS_G(db), owns_chunk_tx ? "ROLLBACK" : "ROLLBACK TO branchfs_blob", NULL, NULL, NULL);
+                    if (!owns_chunk_tx) sqlite3_exec(BRANCHFS_G(db), "RELEASE branchfs_blob", NULL, NULL, NULL);
                     efree(hash);
                     return -1;
                 }
                 chunk_no++;
             }
             sqlite3_finalize(cstmt);
-            sqlite3_exec(BRANCHFS_G(db), "COMMIT", NULL, NULL, NULL);
+            sqlite3_exec(BRANCHFS_G(db), owns_chunk_tx ? "COMMIT" : "RELEASE branchfs_blob", NULL, NULL, NULL);
         }
     }
 
@@ -1660,12 +1720,16 @@ PHP_FUNCTION(branchfs_activate) {
             "branchfs: branch does not exist: %s", BRANCHFS_G(current_branch));
         RETURN_FALSE;
     }
+    if (store_begin_request_transaction_if_needed() < 0) {
+        RETURN_FALSE;
+    }
     BRANCHFS_G(active) = 1;
     RETURN_TRUE;
 }
 
 PHP_FUNCTION(branchfs_deactivate) {
     ZEND_PARSE_PARAMETERS_NONE();
+    store_end_request_transaction();
     BRANCHFS_G(active) = 0;
     RETURN_TRUE;
 }
@@ -2474,6 +2538,8 @@ static const zend_function_entry branchfs_functions[] = {
 static void php_branchfs_globals_ctor(zend_branchfs_globals *g) {
     memset(g, 0, sizeof(*g));
     g->backend = BRANCHFS_BACKEND_SQLITE;
+    g->sqlite_is_doltlite = 0;
+    g->sqlite_tx_active = 0;
 }
 
 static void php_branchfs_globals_dtor(zend_branchfs_globals *g) {

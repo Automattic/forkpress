@@ -17,7 +17,7 @@ use forkpress_cas_store as cas_store;
 mod zfs_engine;
 
 const RUNTIME_BUNDLE: &[u8] = include_bytes!(env!("FORKPRESS_RUNTIME_BUNDLE"));
-const RUNTIME_BUNDLE_ID: &str = env!("CARGO_PKG_VERSION");
+const RUNTIME_BUNDLE_ID: &str = env!("FORKPRESS_RUNTIME_BUNDLE_ID");
 const STARTUP_WARNING_FILTER: &str = "Missing arginfo";
 const SERVER_REGISTRY_FILE: &str = "servers.tsv";
 

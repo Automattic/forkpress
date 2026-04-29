@@ -3,6 +3,7 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 use std::env;
 use std::fs::{self, File};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tar::Builder;
@@ -29,10 +30,13 @@ fn main() -> Result<()> {
     // Allow skipping the dist build entirely for `cargo check` runs:
     //   FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo check -p forkpress
     if let Some(bundle) = env::var_os("FORKPRESS_RUNTIME_BUNDLE") {
+        let bundle_path = PathBuf::from(&bundle);
+        let bundle_id = runtime_bundle_id(&manifest_dir, &bundle_path)?;
         println!(
             "cargo:rustc-env=FORKPRESS_RUNTIME_BUNDLE={}",
             bundle.to_string_lossy()
         );
+        println!("cargo:rustc-env=FORKPRESS_RUNTIME_BUNDLE_ID={bundle_id}");
         return Ok(());
     }
 
@@ -77,13 +81,43 @@ fn main() -> Result<()> {
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
     let bundle_path = out_dir.join("forkpress-runtime.tar.gz");
     build_bundle(repo_root, &dist_dir, &bundle_path)?;
+    let bundle_id = runtime_bundle_id(&manifest_dir, &bundle_path)?;
 
     println!(
         "cargo:rustc-env=FORKPRESS_RUNTIME_BUNDLE={}",
         bundle_path.display()
     );
+    println!("cargo:rustc-env=FORKPRESS_RUNTIME_BUNDLE_ID={bundle_id}");
 
     Ok(())
+}
+
+fn runtime_bundle_id(manifest_dir: &Path, bundle_path: &Path) -> Result<String> {
+    let version = env::var("CARGO_PKG_VERSION")?;
+    let hash = hash_file(bundle_path)
+        .with_context(|| format!("failed to hash runtime bundle {}", bundle_path.display()))?;
+    let crate_name = manifest_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("forkpress");
+    Ok(format!("{crate_name}-{version}-{hash:016x}"))
+}
+
+fn hash_file(path: &Path) -> Result<u64> {
+    let mut file = File::open(path)?;
+    let mut hash = 0xcbf29ce484222325_u64;
+    let mut buf = [0_u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        for byte in &buf[..n] {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    Ok(hash)
 }
 
 fn build_embedded_zfs(repo_root: &Path, target: &str) -> Result<()> {
