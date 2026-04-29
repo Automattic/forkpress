@@ -24,10 +24,15 @@ const SERVER_REGISTRY_FILE: &str = "servers.tsv";
 #[derive(Parser, Debug)]
 #[command(
     name = "forkpress",
+    disable_version_flag = true,
     version,
     about = "Single-binary WordPress with git-style branching"
 )]
 struct Cli {
+    /// Print version.
+    #[arg(short = 'v', long = "version", action = ArgAction::Version)]
+    _version: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
