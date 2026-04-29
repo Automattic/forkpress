@@ -20,7 +20,7 @@ cleanup() {
 trap cleanup EXIT
 
 "$BIN" init --strategy cas --work-dir "$WORK" --admin-password admin
-"$BIN" server start --work-dir "$WORK" --port "$PORT" --root-host wp.localhost --workers 1
+"$BIN" server start --work-dir "$WORK" --port "$PORT" --root-host wp.localhost
 "$BIN" server list | grep -F "$WORK" >/dev/null
 
 "$BIN" branch --work-dir "$WORK" create feature-cas > "$TMP/branch-create.out"
