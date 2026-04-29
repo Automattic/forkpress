@@ -1,6 +1,6 @@
 <?php
 /**
- * Bootstrap a plain-filesystem WordPress branch for the ForkPress ZFS strategy.
+ * Bootstrap a plain-filesystem WordPress branch for materialized ForkPress strategies.
  *
  * Usage:
  *   php bootstrap_zfs_wp.php <branch-root> <site-title> <sqlite-plugin-source> <mu-plugin> <debug-log> [admin-password]
@@ -191,4 +191,4 @@ if (!file_exists($db_path) || filesize($db_path) === 0) {
     echo "  WordPress installed (admin user_id={$result['user_id']})\n";
 }
 
-echo "  zfs branch root bootstrapped ($copied sqlite plugin files)\n";
+echo "  plain branch root bootstrapped ($copied sqlite plugin files)\n";

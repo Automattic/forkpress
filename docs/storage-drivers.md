@@ -19,6 +19,7 @@ constraint.
 | BranchFS + SQLite COW | Default production driver. `strategy = "branchfs"`. | Small and portable. One `.forkpress/site.fp` file stores files, branch metadata, users, Git snapshots, and WordPress tables. Git smart HTTP is wired. Works with the bundled PHP runtime and does not need a host database. | Complex SQL compatibility surface. WordPress writes MySQL-shaped SQL that is translated to SQLite, then routed through branch views, overlays, tombstones, and triggers. Some plugin/query patterns can hit SQLite-view edge cases. File and DB versioning are separate layers that must be kept in sync by ForkPress code. |
 | Materialized ZFS strategy | Experimental runtime path. `strategy = "zfs"` creates ordinary branch directories under `.forkpress/zfs/branches`. | Simple for WordPress: each branch is just a normal WP tree plus its own `wp-content/database/.ht.sqlite`. No BranchFS stream wrapper and no SQL-level branch overlays. Browser/admin workflows already exercise normal file and SQLite writes. | Not yet backed by ZFS datasets for normal branch operations. Branch creation currently materializes/copies branch directories. Git smart HTTP is not wired for this strategy. It is easy to understand but not the final storage model. |
 | Embedded OpenZFS engine | Built into Linux and macOS ForkPress binaries; exposed by `forkpress zfs smoke`. | Real OpenZFS primitives inside the single binary: pool image, dataset create, snapshot, clone, export/import, logical file read/write. This is the path toward branch = ZFS dataset, create branch = snapshot + clone, and no SQL overlays. | Native OpenZFS userland is C code with strong POSIX assumptions. We had to add Darwin shims for endian, `uio`, `types32`, `libintl`, `dirent64`, error codes, `O_DIRECT`, SIMD auxv, `fstat64_blk`, and mutex teardown. Current engine API is narrow and not yet connected to branch import/export or Git. License review is required because OpenZFS is CDDL. |
+| CAS + Redb manifests | Experimental runtime path. `strategy = "cas"` creates ordinary branch directories under `.forkpress/cas/branches` and stores blobs/manifests in `.forkpress/cas/store.redb`. | Pure Rust, single-binary friendly, and portable across Linux/macOS/Windows in principle. Branch creation shares unchanged file blobs by copying a manifest pointer in Redb. WordPress still sees normal files and a branch-local SQLite database file. | The materialized branch directory is still a full runtime view, so there is not yet a lazy filesystem. Git smart HTTP is not wired. SQLite database files are versioned as files, so semantic DB merge remains future work. Snapshot consistency while a branch is being actively written needs branch locking before this becomes production-grade. |
 | System ZFS | Not a ForkPress driver. Useful only as background comparison. | Mature snapshots/clones when the host already has OpenZFS installed. Kernel/filesystem integration means normal programs can read datasets directly. | Violates the single-binary constraint. Requires host kernel modules or platform filesystem drivers, admin permissions, installation, unload/upgrade handling, and platform-specific support. Not acceptable for the default local-agent distribution. |
 | Dolt | Future candidate, not shipped. | Native database branching, commits, diffs, and merges. MySQL-compatible protocol could map well to WordPress's MySQL assumptions. | Dolt is a separate Go stack/server in its normal deployment model. Shipping it under the one-static-binary Rust constraint would require major integration work or a sidecar exception. It handles database state, not WordPress files, so we still need a file branch driver. |
 | Turso/libSQL | Future candidate, not shipped. | SQLite-family technology with embeddable and replicated modes. Potentially attractive for branch-local databases and remote sync. | It does not automatically solve WordPress's MySQL dialect, branch merge semantics, or file versioning. We would still need a file driver and a clear model for per-branch DB isolation. |
@@ -38,6 +39,53 @@ For the target ZFS driver, Git should source data from the ZFS branch dataset:
 export `wordpress/` and a database snapshot from the dataset, accept pushed file
 changes, write those changes into the target dataset, then snapshot. It should
 not go through BranchFS tables.
+
+For the CAS driver, Git should eventually source data from branch manifests in
+`.forkpress/cas/store.redb`. The store is already tree-shaped enough to export
+`wordpress/`; the missing pieces are `database.sql` generation from the
+branch-local SQLite file, push application back into a materialized branch, and
+snapshotting the result into a new manifest.
+
+## CAS + Redb Model
+
+The CAS driver is the first pure-Rust cheap-branching experiment:
+
+```mermaid
+flowchart LR
+    redb[(.forkpress/cas/store.redb)]
+    blobs[blobs<br/>SHA-256 hash -> bytes]
+    manifests[branch manifests<br/>branch -> path/hash list]
+    main[main materialized dir]
+    feature[feature materialized dir]
+    wp[WordPress + branch-local SQLite file]
+
+    redb --> blobs
+    redb --> manifests
+    manifests -- hydrate --> main
+    manifests -- hydrate --> feature
+    feature <--> wp
+    wp --> feature
+    feature -- snapshot --> blobs
+    feature -- snapshot --> manifests
+```
+
+Current behavior:
+
+1. `forkpress init --strategy cas` bootstraps `main` as ordinary WordPress
+   files under `.forkpress/cas/branches/main`.
+2. ForkPress scans that branch, stores file bytes in Redb by SHA-256 hash, and
+   writes a branch manifest.
+3. `forkpress branch create feature --from main` snapshots the source branch,
+   copies the source manifest to `feature`, and materializes `feature` from the
+   shared blobs.
+4. WordPress serves and writes the materialized branch directory. The SQLite
+   database stays branch-local at `wp-content/database/.ht.sqlite`.
+
+This proves the storage direction without requiring FUSE, a kernel filesystem,
+or a sidecar daemon. The cost is that ForkPress has to decide when to snapshot
+materialized changes back into Redb. Today it snapshots on init and branch
+creation; explicit commit/checkpoint and Git integration still need to be
+wired.
 
 ## Target ZFS Model
 

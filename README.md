@@ -12,6 +12,8 @@ directories.
   strategy.
 - `forkpress init --strategy zfs` creates a no-SQL-overlay branch backend under
   `.forkpress/zfs/branches`.
+- `forkpress init --strategy cas` creates a Redb-backed content-addressed
+  branch backend under `.forkpress/cas`.
 - `forkpress server start` starts the preview server in the background.
 - `forkpress server list` shows running site servers.
 - `forkpress server stop` stops the current site's server.
@@ -77,6 +79,18 @@ forkpress branch create agent-1
 
 That stores branch files and each branch's SQLite database as ordinary files
 under `.forkpress/zfs/branches/<branch>`. It does not use SQL overlays.
+
+To try the CAS strategy:
+
+```bash
+forkpress init --strategy cas --admin-password admin
+forkpress server start
+forkpress branch create agent-1
+```
+
+That stores content-addressed file blobs and branch manifests in
+`.forkpress/cas/store.redb`, then materializes each branch as ordinary files
+under `.forkpress/cas/branches/<branch>`.
 
 To verify the embedded OpenZFS engine linked into the binary:
 
@@ -242,6 +256,13 @@ Supported strategy values:
   with filesystem copy-on-write primitives when available and falls back to a
   regular copy. HTTP serving and local branch creation are wired; Git smart
   HTTP for this strategy is still pending.
+- `cas` (aliases: `redb`, `cas-redb`): experimental content-addressed strategy.
+  Branches are materialized as ordinary WordPress directories under
+  `.forkpress/cas/branches/<branch>`, while `.forkpress/cas/store.redb` stores
+  SHA-256-keyed file blobs and branch manifests. Branch creation snapshots the
+  source branch into Redb, copies the manifest pointer, and materializes the
+  new branch from shared blobs. HTTP serving and local branch creation are
+  wired; Git smart HTTP for this strategy is still pending.
 
 ### ZFS Strategy And Embedded Engine
 
@@ -574,6 +595,13 @@ parent rows with those branch-local rows.
       main/                       # zfs strategy main branch WordPress tree
       feature/                    # zfs strategy cloned branch WordPress tree
         wp-content/database/.ht.sqlite
+  cas/
+    store.redb                    # cas strategy blobs and branch manifests
+    branches.txt
+    branches/
+      main/                       # cas strategy materialized branch tree
+      feature/
+        wp-content/database/.ht.sqlite
   logs/
     wp-debug.log                  # WordPress fatal/errors
     php-errors.log                # PHP error_log target
@@ -591,8 +619,8 @@ existing `.fp` sites use the SQLite adapter bundled with the current binary.
 ## Work On One Branch
 
 This Git checkout workflow currently applies to the default `branchfs` strategy.
-For `zfs` strategy sites, use browser/admin branch previews and
-`forkpress branch create` while Git smart HTTP is being wired to the ZFS engine.
+For `zfs` and `cas` strategy sites, use browser/admin branch previews and
+`forkpress branch create` while Git smart HTTP is being wired to those stores.
 
 From the same project directory:
 
@@ -686,12 +714,15 @@ forkpress agents \
   `branchfs` strategy.
 - `forkpress init --strategy zfs --admin-password admin` creates a no-SQL-overlay
   ZFS-strategy site under `.forkpress/zfs/branches`.
+- `forkpress init --strategy cas --admin-password admin` creates a
+  Redb-backed content-addressed site under `.forkpress/cas`.
 - `forkpress zfs smoke --work-dir .forkpress` verifies the embedded OpenZFS
   engine by creating a pool image, writing and reading a logical file,
   snapshotting, cloning, exporting, importing, and reading from the clone.
 - `forkpress server start` imports and boots WordPress if needed, then serves
   HTTP from the initialized strategy. For `branchfs`, Git smart HTTP is served
-  from `.forkpress/site.fp`; for `zfs`, Git smart HTTP is not wired yet.
+  from `.forkpress/site.fp`; for `zfs` and `cas`, Git smart HTTP is not wired
+  yet.
 - `forkpress start --background` is the equivalent lower-level command.
 - `forkpress server list` shows running ForkPress site servers.
 - `forkpress server stop [--work-dir .forkpress]` stops one site server;

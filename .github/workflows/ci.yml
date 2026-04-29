@@ -49,6 +49,9 @@ jobs:
       - name: ZFS strategy e2e
         run: tests/test_zfs_strategy_e2e.sh target/x86_64-unknown-linux-musl/release/forkpress
 
+      - name: CAS strategy e2e
+        run: tests/test_cas_strategy_e2e.sh target/x86_64-unknown-linux-musl/release/forkpress
+
   mac-zfs-engine:
     name: mac-zfs-engine ${{ matrix.target }}
     strategy:

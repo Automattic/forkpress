@@ -13,6 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use zip::ZipArchive;
 
+mod cas_store;
 mod zfs_engine;
 
 const RUNTIME_BUNDLE: &[u8] = include_bytes!(env!("FORKPRESS_RUNTIME_BUNDLE"));
@@ -211,6 +212,9 @@ enum StorageStrategy {
     Branchfs,
     /// Experimental ZFS-backed store: real filesystem/database files versioned by ZFS.
     Zfs,
+    /// Experimental Redb-backed content-addressed file store with branch manifests.
+    #[value(alias = "redb", alias = "cas-redb")]
+    Cas,
 }
 
 impl StorageStrategy {
@@ -218,6 +222,7 @@ impl StorageStrategy {
         match self {
             Self::Branchfs => "branchfs",
             Self::Zfs => "zfs",
+            Self::Cas => "cas",
         }
     }
 
@@ -225,6 +230,7 @@ impl StorageStrategy {
         match self {
             Self::Branchfs => "branchfs/sqlite",
             Self::Zfs => "zfs",
+            Self::Cas => "cas/redb",
         }
     }
 
@@ -232,6 +238,7 @@ impl StorageStrategy {
         match value.trim() {
             "branchfs" | "sqlite" | "sqlite-cow" => Ok(Self::Branchfs),
             "zfs" => Ok(Self::Zfs),
+            "cas" | "redb" | "cas-redb" => Ok(Self::Cas),
             other => bail!("unknown storage strategy in site manifest: {other}"),
         }
     }
@@ -531,6 +538,10 @@ struct Layout {
     zfs_dir: PathBuf,
     zfs_branches_dir: PathBuf,
     zfs_branch_list: PathBuf,
+    cas_dir: PathBuf,
+    cas_store: PathBuf,
+    cas_branches_dir: PathBuf,
+    cas_branch_list: PathBuf,
     wp_root: PathBuf,
     debug_log: PathBuf,
     php_error_log: PathBuf,
@@ -668,6 +679,7 @@ fn init_command(args: InitArgs) -> Result<i32> {
             init_branchfs_site(args, layout, runtime)
         }
         StorageStrategy::Zfs => init_zfs_site(args, layout),
+        StorageStrategy::Cas => init_cas_site(args, layout),
     }
 }
 
@@ -713,6 +725,27 @@ fn init_zfs_site(args: InitArgs, layout: Layout) -> Result<i32> {
     println!("  title:     {}", args.site_title);
     println!("  root host: {}", args.root_host);
     println!("  status:    ready; branches are materialized under .forkpress/zfs/branches");
+    Ok(0)
+}
+
+fn init_cas_site(args: InitArgs, layout: Layout) -> Result<i32> {
+    prepare_runtime(&layout)?;
+    let runtime = PortableRuntime::from_layout(&layout);
+    fs::create_dir_all(&layout.cas_branches_dir)
+        .with_context(|| format!("failed to create {}", layout.cas_branches_dir.display()))?;
+    ensure_cas_main_branch(&layout, &runtime, &args)?;
+    write_site_manifest(&layout, SiteManifest::new(StorageStrategy::Cas))?;
+    write_cas_notes(&layout)?;
+    write_cas_branch_list(&layout)?;
+
+    println!(
+        "forkpress: cas strategy initialised in {}",
+        layout.work_dir.display()
+    );
+    println!("  title:     {}", args.site_title);
+    println!("  root host: {}", args.root_host);
+    println!("  store:     {}", layout.cas_store.display());
+    println!("  status:    ready; branches are materialized under .forkpress/cas/branches");
     Ok(0)
 }
 
@@ -1015,10 +1048,18 @@ mod storage_strategy_tests {
     }
 
     #[test]
+    fn manifest_parses_cas() {
+        let manifest = SiteManifest::parse("strategy = \"cas\"\n").unwrap();
+        assert_eq!(manifest.strategy, StorageStrategy::Cas);
+        let alias = SiteManifest::parse("strategy = \"redb\"\n").unwrap();
+        assert_eq!(alias.strategy, StorageStrategy::Cas);
+    }
+
+    #[test]
     fn manifest_render_round_trips() {
-        let rendered = SiteManifest::new(StorageStrategy::Zfs).render();
+        let rendered = SiteManifest::new(StorageStrategy::Cas).render();
         let parsed = SiteManifest::parse(&rendered).unwrap();
-        assert_eq!(parsed.strategy, StorageStrategy::Zfs);
+        assert_eq!(parsed.strategy, StorageStrategy::Cas);
     }
 
     #[test]
@@ -1054,6 +1095,10 @@ fn start_command(args: StartArgs) -> Result<i32> {
             ensure_zfs_bootstrapped(&layout, &runtime, &args)?;
             start_zfs_php_server(&layout, &runtime, &args, workers)?
         }
+        StorageStrategy::Cas => {
+            ensure_cas_bootstrapped(&layout, &runtime, &args)?;
+            start_cas_php_server(&layout, &runtime, &args, workers)?
+        }
     };
     let _registration =
         register_running_server(&layout, &args, std::process::id(), Some(php.id()))?;
@@ -1068,15 +1113,22 @@ fn start_command(args: StartArgs) -> Result<i32> {
         "Branch site: http://<branch>.{}:{}/",
         args.root_host, args.port
     );
-    if strategy == StorageStrategy::Branchfs {
-        println!(
-            "Git remote: http://{}:{}/site.git",
-            args.root_host, args.port
-        );
-        println!("DB access:  database.sql in each git branch checkout (read-only snapshot)");
-    } else {
-        println!("Git remote: not available for zfs strategy yet");
-        println!("DB access:  wp-content/database/.ht.sqlite inside each materialized branch");
+    match strategy {
+        StorageStrategy::Branchfs => {
+            println!(
+                "Git remote: http://{}:{}/site.git",
+                args.root_host, args.port
+            );
+            println!("DB access:  database.sql in each git branch checkout (read-only snapshot)");
+        }
+        StorageStrategy::Zfs => {
+            println!("Git remote: not available for zfs strategy yet");
+            println!("DB access:  wp-content/database/.ht.sqlite inside each materialized branch");
+        }
+        StorageStrategy::Cas => {
+            println!("Git remote: not available for cas strategy yet");
+            println!("DB access:  wp-content/database/.ht.sqlite inside each materialized branch");
+        }
     }
     println!(
         "Logs:       forkpress logs --work-dir {} --file wp",
@@ -1725,13 +1777,24 @@ fn git_command(args: GitPassthrough) -> Result<i32> {
         let strategy = require_initialized_strategy(&layout, "git branch create")?;
         prepare_runtime(&layout)?;
         let runtime = PortableRuntime::from_layout(&layout);
-        if strategy == StorageStrategy::Zfs {
-            if create_args.auth.user.is_some() {
-                bail!("zfs local branch creation does not use --user/--password");
+        match strategy {
+            StorageStrategy::Zfs => {
+                if create_args.auth.user.is_some() {
+                    bail!("zfs local branch creation does not use --user/--password");
+                }
+                create_zfs_branch(&layout, &runtime, &args.shared, branch, &create_args.from)?;
+                println!("forkpress: branch {branch} ready");
+                return Ok(0);
             }
-            create_zfs_branch(&layout, &runtime, &args.shared, branch, &create_args.from)?;
-            println!("forkpress: branch {branch} ready");
-            return Ok(0);
+            StorageStrategy::Cas => {
+                if create_args.auth.user.is_some() {
+                    bail!("cas local branch creation does not use --user/--password");
+                }
+                create_cas_branch(&layout, &runtime, &args.shared, branch, &create_args.from)?;
+                println!("forkpress: branch {branch} ready");
+                return Ok(0);
+            }
+            StorageStrategy::Branchfs => {}
         }
         if !layout.site_fp.exists() || !layout.bootstrap_marker.exists() {
             bail!(
@@ -2046,8 +2109,10 @@ fn branch_command(args: BranchPassthrough) -> Result<i32> {
     prepare_runtime(&layout)?;
     let runtime = PortableRuntime::from_layout(&layout);
 
-    if strategy == StorageStrategy::Zfs {
-        return zfs_branch_command(args, layout, runtime);
+    match strategy {
+        StorageStrategy::Zfs => return zfs_branch_command(args, layout, runtime),
+        StorageStrategy::Cas => return cas_branch_command(args, layout, runtime),
+        StorageStrategy::Branchfs => {}
     }
 
     if !layout.site_fp.exists() || !layout.bootstrap_marker.exists() {
@@ -2112,6 +2177,43 @@ fn zfs_branch_command(
             Ok(0)
         }
         other => bail!("zfs branch subcommand is not implemented yet: {other}"),
+    }
+}
+
+fn cas_branch_command(
+    args: BranchPassthrough,
+    layout: Layout,
+    runtime: PortableRuntime,
+) -> Result<i32> {
+    match args.args[0].as_str() {
+        "list" => {
+            for branch in cas_branch_names(&layout)? {
+                println!("{branch}");
+            }
+            Ok(0)
+        }
+        "create" => {
+            let Some(branch) = args.args.get(1) else {
+                bail!("branch create requires a branch name");
+            };
+            let mut from = "main".to_string();
+            let mut index = 2;
+            while index < args.args.len() {
+                match args.args[index].as_str() {
+                    "--from" => {
+                        let Some(value) = args.args.get(index + 1) else {
+                            bail!("--from requires a branch name");
+                        };
+                        from = value.clone();
+                        index += 2;
+                    }
+                    other => bail!("unsupported argument for `forkpress branch create`: {other}"),
+                }
+            }
+            create_cas_branch(&layout, &runtime, &args.shared, branch, &from)?;
+            Ok(0)
+        }
+        other => bail!("cas branch subcommand is not implemented yet: {other}"),
     }
 }
 
@@ -2218,6 +2320,10 @@ impl Layout {
             zfs_dir: work_dir.join("zfs"),
             zfs_branches_dir: work_dir.join("zfs/branches"),
             zfs_branch_list: work_dir.join("zfs/branches.txt"),
+            cas_dir: work_dir.join("cas"),
+            cas_store: work_dir.join("cas/store.redb"),
+            cas_branches_dir: work_dir.join("cas/branches"),
+            cas_branch_list: work_dir.join("cas/branches.txt"),
             wp_root: work_dir.join("wproot"),
             debug_log: work_dir.join("logs/wp-debug.log"),
             php_error_log: work_dir.join("logs/php-errors.log"),
@@ -2353,6 +2459,36 @@ into the dataset under a branch lock.
         format!(
             "failed to write {}",
             layout.zfs_dir.join("README.md").display()
+        )
+    })
+}
+
+fn write_cas_notes(layout: &Layout) -> Result<()> {
+    fs::create_dir_all(&layout.cas_dir)
+        .with_context(|| format!("failed to create {}", layout.cas_dir.display()))?;
+    let notes = "\
+# ForkPress CAS strategy
+
+This site was initialized with `strategy = \"cas\"`.
+
+The runtime view is materialized under `.forkpress/cas/branches/<branch>` so
+WordPress sees ordinary files and an ordinary SQLite database at
+`wp-content/database/.ht.sqlite`.
+
+The durable experimental store is `.forkpress/cas/store.redb`. It stores:
+
+- content-addressed file blobs keyed by SHA-256 hash
+- branch manifests listing paths and blob hashes
+- branch pointers that make local branch creation share unchanged blobs
+
+Creating a branch snapshots the source materialized branch into Redb, copies the
+source branch manifest to the new branch, and materializes that manifest into a
+new branch directory. Git smart HTTP is not wired to this strategy yet.
+";
+    fs::write(layout.cas_dir.join("README.md"), notes).with_context(|| {
+        format!(
+            "failed to write {}",
+            layout.cas_dir.join("README.md").display()
         )
     })
 }
@@ -2562,8 +2698,12 @@ fn validate_branch_name(branch: &str) -> Result<()> {
 }
 
 fn zfs_branch_names(layout: &Layout) -> Result<Vec<String>> {
+    plain_branch_names(&layout.zfs_branches_dir)
+}
+
+fn plain_branch_names(branches_dir: &Path) -> Result<Vec<String>> {
     let mut names = Vec::new();
-    let Ok(entries) = fs::read_dir(&layout.zfs_branches_dir) else {
+    let Ok(entries) = fs::read_dir(branches_dir) else {
         return Ok(names);
     };
     for entry in entries {
@@ -2623,6 +2763,122 @@ fn create_zfs_branch(
     let (root_host, port) = branchctl_url_hint(layout)
         .unwrap_or_else(|_| ("wp.localhost".to_string(), "18080".to_string()));
     println!("forkpress: zfs cloned '{from}' -> '{branch}'");
+    println!(
+        "Visit http://{}.{root_host}:{port}/ to see this branch.",
+        branch
+    );
+    Ok(())
+}
+
+fn ensure_cas_bootstrapped(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    args: &StartArgs,
+) -> Result<()> {
+    let init_args = InitArgs {
+        shared: args.shared.clone(),
+        strategy: StorageStrategy::Cas,
+        site_title: args.site_title.clone(),
+        root_host: args.root_host.clone(),
+        admin_password: Some("admin".to_string()),
+    };
+    ensure_cas_main_branch(layout, runtime, &init_args)?;
+    write_site_manifest_if_missing(layout, SiteManifest::new(StorageStrategy::Cas))?;
+    write_cas_branch_list(layout)?;
+    Ok(())
+}
+
+fn ensure_cas_main_branch(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    args: &InitArgs,
+) -> Result<()> {
+    let main_root = cas_branch_root(layout, "main");
+    if !main_root.join("wp-load.php").is_file() {
+        fs::create_dir_all(&layout.cas_branches_dir)
+            .with_context(|| format!("failed to create {}", layout.cas_branches_dir.display()))?;
+        if main_root.exists() {
+            fs::remove_dir_all(&main_root)
+                .with_context(|| format!("failed to reset {}", main_root.display()))?;
+        }
+        copy_tree_cow(&layout.runtime_dir.join("runtime/wp-src"), &main_root)?;
+    }
+
+    run_zfs_bootstrap_script(
+        layout,
+        runtime,
+        &args.shared,
+        &main_root,
+        &args.site_title,
+        args.admin_password.as_deref().unwrap_or("admin"),
+    )?;
+    let report = cas_store::snapshot_branch(&layout.cas_store, &main_root, "main")?;
+    println!(
+        "  cas snapshot main ({} files, {} bytes)",
+        report.files, report.bytes
+    );
+    Ok(())
+}
+
+fn cas_branch_root(layout: &Layout, branch: &str) -> PathBuf {
+    layout.cas_branches_dir.join(branch)
+}
+
+fn cas_branch_names(layout: &Layout) -> Result<Vec<String>> {
+    plain_branch_names(&layout.cas_branches_dir)
+}
+
+fn write_cas_branch_list(layout: &Layout) -> Result<()> {
+    fs::create_dir_all(&layout.cas_dir)
+        .with_context(|| format!("failed to create {}", layout.cas_dir.display()))?;
+    let mut out = String::new();
+    for name in cas_branch_names(layout)? {
+        out.push_str(&name);
+        out.push('\n');
+    }
+    fs::write(&layout.cas_branch_list, out)
+        .with_context(|| format!("failed to write {}", layout.cas_branch_list.display()))
+}
+
+fn create_cas_branch(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    branch: &str,
+    from: &str,
+) -> Result<()> {
+    validate_branch_name(branch)?;
+    validate_branch_name(from)?;
+    let source = cas_branch_root(layout, from);
+    if !source.is_dir() {
+        bail!("source branch does not exist: {from}");
+    }
+    let dest = cas_branch_root(layout, branch);
+    if dest.exists() {
+        bail!("branch already exists: {branch}");
+    }
+
+    let source_report = cas_store::snapshot_branch(&layout.cas_store, &source, from)?;
+    let branch_report = cas_store::create_branch_from(&layout.cas_store, from, branch, &dest)?;
+    run_zfs_bootstrap_script(layout, runtime, shared, &dest, "ForkPress", "admin")?;
+    let final_report = cas_store::snapshot_branch(&layout.cas_store, &dest, branch)?;
+    write_cas_branch_list(layout)?;
+
+    let (root_host, port) = branchctl_url_hint(layout)
+        .unwrap_or_else(|_| ("wp.localhost".to_string(), "18080".to_string()));
+    println!("forkpress: cas cloned '{from}' -> '{branch}'");
+    println!(
+        "  source snapshot: {} files, {} bytes",
+        source_report.files, source_report.bytes
+    );
+    println!(
+        "  shared manifest: {} files, {} bytes",
+        branch_report.files, branch_report.bytes
+    );
+    println!(
+        "  branch snapshot: {} files, {} bytes",
+        final_report.files, final_report.bytes
+    );
     println!(
         "Visit http://{}.{root_host}:{port}/ to see this branch.",
         branch
@@ -2935,8 +3191,10 @@ fn start_zfs_php_server(
         .arg("-t")
         .arg(&layout.zfs_branches_dir)
         .arg(layout.runtime_dir.join("runtime/router_zfs.php"))
+        .env("FORKPRESS_BRANCHES_DIR", &layout.zfs_branches_dir)
         .env("FORKPRESS_ZFS_BRANCHES_DIR", &layout.zfs_branches_dir)
         .env("FORKPRESS_BRANCH_LIST", &layout.zfs_branch_list)
+        .env("FORKPRESS_PLAIN_STRATEGY", "zfs")
         .env("FORKPRESS_ROOT_HOST", &args.root_host)
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
@@ -2964,6 +3222,64 @@ fn start_zfs_php_server(
         );
     }
 
+    Ok(guard)
+}
+
+fn start_cas_php_server(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    args: &StartArgs,
+    workers: usize,
+) -> Result<ChildGuard> {
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&layout.php_server_log)?;
+    let log_err = log.try_clone()?;
+
+    let mut command = php_base_command(layout, runtime, &args.shared);
+    command
+        .arg("-d")
+        .arg("log_errors=On")
+        .arg("-d")
+        .arg(format!("error_log={}", layout.php_error_log.display()))
+        .arg("-d")
+        .arg("post_max_size=100M")
+        .arg("-d")
+        .arg("upload_max_filesize=100M")
+        .arg("-S")
+        .arg(format!("{}:{}", args.host, args.port))
+        .arg("-t")
+        .arg(&layout.cas_branches_dir)
+        .arg(layout.runtime_dir.join("runtime/router_zfs.php"))
+        .env("FORKPRESS_BRANCHES_DIR", &layout.cas_branches_dir)
+        .env("FORKPRESS_ZFS_BRANCHES_DIR", &layout.cas_branches_dir)
+        .env("FORKPRESS_BRANCH_LIST", &layout.cas_branch_list)
+        .env("FORKPRESS_PLAIN_STRATEGY", "cas")
+        .env("FORKPRESS_ROOT_HOST", &args.root_host)
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err));
+
+    if workers > 1 {
+        command.env("PHP_CLI_SERVER_WORKERS", workers.to_string());
+    }
+
+    let child = command
+        .spawn()
+        .context("failed to start bundled php server")?;
+
+    let mut guard = ChildGuard {
+        name: "php server",
+        child,
+    };
+    wait_for_tcp(&args.host, args.port, Duration::from_secs(30))
+        .with_context(|| format!("php server did not open {}:{}", args.host, args.port))?;
+    if let Some(status) = guard.try_wait()? {
+        bail!(
+            "php server exited during startup with status {status}. Check {}",
+            layout.php_server_log.display()
+        );
+    }
     Ok(guard)
 }
 

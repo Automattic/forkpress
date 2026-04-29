@@ -1,24 +1,26 @@
 <?php
 /**
- * Plain-file router for the ForkPress ZFS strategy.
+ * Plain-file router for ForkPress materialized-branch strategies.
  *
  * Branch resolution matches the BranchFS router:
  *   - <root-domain>       -> main
  *   - <branch>.<root>     -> branch
  *
  * Each branch is a materialized WordPress tree under
- * .forkpress/zfs/branches/<branch>. WordPress reads and writes ordinary files
- * and an ordinary SQLite database in that tree; there are no SQL overlays.
+ * .forkpress/<strategy>/branches/<branch>. WordPress reads and writes
+ * ordinary files and an ordinary SQLite database in that tree; there are no
+ * SQL overlays.
  */
 
 error_reporting(E_ALL & ~E_WARNING & ~E_NOTICE & ~E_DEPRECATED);
 
-$branches_dir = getenv('FORKPRESS_ZFS_BRANCHES_DIR');
+$branches_dir = getenv('FORKPRESS_BRANCHES_DIR') ?: getenv('FORKPRESS_ZFS_BRANCHES_DIR');
+$strategy_label = getenv('FORKPRESS_PLAIN_STRATEGY') ?: 'plain-file';
 $root_host = getenv('FORKPRESS_ROOT_HOST') ?: 'wp.localhost';
 
 if (!$branches_dir || !is_dir($branches_dir)) {
     http_response_code(500);
-    echo "FORKPRESS_ZFS_BRANCHES_DIR env var required\n";
+    echo "FORKPRESS_BRANCHES_DIR env var required\n";
     return true;
 }
 
@@ -60,7 +62,7 @@ $query = parse_url($uri, PHP_URL_QUERY) ?: '';
 
 if (preg_match('|^/([a-zA-Z0-9_\-]+)\.git(/.*)?$|', $path)) {
     http_response_code(501);
-    echo "Git smart HTTP is not wired for the zfs strategy yet\n";
+    echo "Git smart HTTP is not wired for the $strategy_label strategy yet\n";
     return true;
 }
 
