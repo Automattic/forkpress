@@ -89,8 +89,10 @@ forkpress branch create agent-1
 ```
 
 That stores content-addressed file blobs and branch manifests in
-`.forkpress/cas/store.redb`, then materializes each branch as ordinary files
-under `.forkpress/cas/branches/<branch>`.
+`.forkpress/cas/store.redb`. WordPress files are served lazily from that store
+through the built-in `branchfs` PHP extension. Each branch's SQLite database
+directory lives under `.forkpress/cas/branches/<branch>`, with the database at
+`.forkpress/cas/branches/<branch>/.ht.sqlite`.
 
 To verify the embedded OpenZFS engine linked into the binary:
 
@@ -257,12 +259,15 @@ Supported strategy values:
   regular copy. HTTP serving and local branch creation are wired; Git smart
   HTTP for this strategy is still pending.
 - `cas` (aliases: `redb`, `cas-redb`): experimental content-addressed strategy.
-  Branches are materialized as ordinary WordPress directories under
-  `.forkpress/cas/branches/<branch>`, while `.forkpress/cas/store.redb` stores
-  SHA-256-keyed file blobs and branch manifests. Branch creation snapshots the
-  source branch into Redb, copies the manifest pointer, and materializes the
-  new branch from shared blobs. HTTP serving and local branch creation are
-  wired; Git smart HTTP for this strategy is still pending.
+  `.forkpress/cas/store.redb` stores SHA-256-keyed WordPress file blobs and
+  branch manifests. HTTP serving uses `runtime/router_cas.php` plus the
+  built-in `branchfs` PHP extension to read and write those files lazily from
+  Redb. `.forkpress/cas/wproot` is a virtual document root path for PHP path
+  interception, not a full WordPress copy. Each branch keeps its ordinary
+  SQLite database directory under `.forkpress/cas/branches/<branch>`. Branch
+  creation copies the source manifest in Redb and copies the source branch DB
+  directory. HTTP serving and local branch creation are wired; Git smart HTTP
+  for this strategy is still pending.
 
 ### ZFS Strategy And Embedded Engine
 
@@ -597,11 +602,12 @@ parent rows with those branch-local rows.
         wp-content/database/.ht.sqlite
   cas/
     store.redb                    # cas strategy blobs and branch manifests
+    wproot/                       # virtual docroot path; not a full WP tree
     branches.txt
     branches/
-      main/                       # cas strategy materialized branch tree
+      main/                       # cas strategy branch-local SQLite files
       feature/
-        wp-content/database/.ht.sqlite
+        .ht.sqlite
   logs/
     wp-debug.log                  # WordPress fatal/errors
     php-errors.log                # PHP error_log target
@@ -612,9 +618,11 @@ parent rows with those branch-local rows.
 ```
 
 Managed WordPress files such as `wp-config.php`, `wp-content/db.php`, the
-SQLite integration plugin, and the `branchfs-wp.php` mu-plugin live inside the
-BranchFS store. On runtime upgrades, ForkPress refreshes those managed files so
-existing `.fp` sites use the SQLite adapter bundled with the current binary.
+SQLite integration plugin, and the `branchfs-wp.php` mu-plugin live in the
+active strategy's file store. For the default `branchfs` strategy that means
+`.forkpress/site.fp`; for `cas` it means the Redb manifest/blob store. On
+runtime upgrades, ForkPress refreshes those managed files so existing sites use
+the SQLite adapter bundled with the current binary.
 
 ## Work On One Branch
 

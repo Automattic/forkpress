@@ -9,10 +9,9 @@ anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 ctrlc = "3.5"
 flate2 = "1.1"
+forkpress-cas-store = { path = "../crates/cas-store" }
 libc = "0.2"
 num_cpus = "1.16"
-redb = "4.1.0"
-sha2 = "0.11.0"
 tar = "0.4"
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
 

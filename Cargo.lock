@@ -301,13 +301,30 @@ dependencies = [
  "clap",
  "ctrlc",
  "flate2",
+ "forkpress-cas-store",
  "libc",
  "num_cpus",
- "redb",
- "sha2",
  "tar",
  "walkdir",
  "zip",
+]
+
+[[package]]
+name = "forkpress-cas-ffi"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "forkpress-cas-store",
+ "libc",
+]
+
+[[package]]
+name = "forkpress-cas-store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "redb",
+ "sha2",
 ]
 
 [[package]]

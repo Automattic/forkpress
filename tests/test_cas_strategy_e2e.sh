@@ -26,6 +26,10 @@ trap cleanup EXIT
 "$BIN" branch --work-dir "$WORK" create feature-cas > "$TMP/branch-create.out"
 grep -F "feature-cas.wp.localhost:$PORT" "$TMP/branch-create.out" >/dev/null
 test -f "$WORK/cas/store.redb"
+test -d "$WORK/cas/wproot"
+test ! -e "$WORK/cas/wproot/wp-load.php"
+test -f "$WORK/cas/branches/feature-cas/.ht.sqlite"
+test ! -e "$WORK/cas/branches/feature-cas/wp-load.php"
 
 curl -sS -H "Host: feature-cas.wp.localhost:$PORT" \
   "http://127.0.0.1:$PORT/wp-admin/post-new.php" \

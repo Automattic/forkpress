@@ -31,6 +31,8 @@ fi
 DIST_DIR="${FORKPRESS_DIST_DIR:-$REPO_ROOT/dist/$TRIPLE}"
 BUILD_DIR="${FORKPRESS_BUILD_DIR:-$REPO_ROOT/.build/$TRIPLE}"
 SPC_DIR="$BUILD_DIR/static-php-cli"
+CAS_TARGET_DIR="$BUILD_DIR/cas-ffi-target"
+CAS_LIB_DIR="$CAS_TARGET_DIR/$TRIPLE/release"
 
 # WordPress-ready extension set.
 # Exclusions:
@@ -42,6 +44,16 @@ EXTENSIONS="bcmath,ctype,curl,dom,exif,fileinfo,filter,mbstring,openssl,pcntl,pd
 
 mkdir -p "$DIST_DIR/bin"
 
+echo "==> Building Rust CAS static library for PHP branchfs"
+cargo build --release --target "$TRIPLE" -p forkpress-cas-ffi --target-dir "$CAS_TARGET_DIR"
+CAS_STATIC_LIB="$CAS_LIB_DIR/libforkpress_cas_ffi.a"
+if [ ! -f "$CAS_STATIC_LIB" ]; then
+  echo "ERROR: expected CAS static library was not built: $CAS_STATIC_LIB" >&2
+  exit 1
+fi
+export FORKPRESS_CAS_LIB_DIR="$CAS_LIB_DIR"
+export SPC_EXTRA_LIBS="${SPC_EXTRA_LIBS:-} $CAS_STATIC_LIB"
+
 # --- 1. Static PHP via static-php-cli --------------------------------------
 # Build branchfs directly into the php binary as a builtin extension.
 #
@@ -52,7 +64,22 @@ mkdir -p "$DIST_DIR/bin"
 # (scripts/spc-patch-branchfs.php). The php binary thereby carries branchfs
 # natively — no `-d extension=...` flag, no separate .so in the dist/ layout.
 
-if [ ! -x "$SPC_DIR/buildroot/bin/php" ]; then
+NEED_PHP_BUILD=1
+if [ -x "$SPC_DIR/buildroot/bin/php" ]; then
+  if "$SPC_DIR/buildroot/bin/php" -r 'exit(extension_loaded("branchfs") && function_exists("branchfs_set_cas_store") ? 0 : 1);' >/dev/null 2>&1; then
+    NEED_PHP_BUILD=0
+    for dep in "$CAS_STATIC_LIB" "$REPO_ROOT/ext/branchfs.c" "$REPO_ROOT/ext/branchfs.h" "$REPO_ROOT/scripts/spc-patch-branchfs.php"; do
+      if [ "$dep" -nt "$SPC_DIR/buildroot/bin/php" ]; then
+        NEED_PHP_BUILD=1
+        break
+      fi
+    done
+  else
+    rm -f "$SPC_DIR/buildroot/bin/php"
+  fi
+fi
+
+if [ "$NEED_PHP_BUILD" = "1" ]; then
   echo "==> Building static PHP via static-php-cli (first-time: 3-5 minutes)"
   if [ ! -d "$SPC_DIR" ]; then
     mkdir -p "$BUILD_DIR"

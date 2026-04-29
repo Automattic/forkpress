@@ -13,7 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use zip::ZipArchive;
 
-mod cas_store;
+use forkpress_cas_store as cas_store;
 mod zfs_engine;
 
 const RUNTIME_BUNDLE: &[u8] = include_bytes!(env!("FORKPRESS_RUNTIME_BUNDLE"));
@@ -540,6 +540,7 @@ struct Layout {
     zfs_branch_list: PathBuf,
     cas_dir: PathBuf,
     cas_store: PathBuf,
+    cas_wp_root: PathBuf,
     cas_branches_dir: PathBuf,
     cas_branch_list: PathBuf,
     wp_root: PathBuf,
@@ -745,7 +746,7 @@ fn init_cas_site(args: InitArgs, layout: Layout) -> Result<i32> {
     println!("  title:     {}", args.site_title);
     println!("  root host: {}", args.root_host);
     println!("  store:     {}", layout.cas_store.display());
-    println!("  status:    ready; branches are materialized under .forkpress/cas/branches");
+    println!("  status:    ready; WordPress files are served lazily from Redb");
     Ok(0)
 }
 
@@ -1127,7 +1128,7 @@ fn start_command(args: StartArgs) -> Result<i32> {
         }
         StorageStrategy::Cas => {
             println!("Git remote: not available for cas strategy yet");
-            println!("DB access:  wp-content/database/.ht.sqlite inside each materialized branch");
+            println!("DB access:  .forkpress/cas/branches/<branch>/.ht.sqlite");
         }
     }
     println!(
@@ -2322,6 +2323,7 @@ impl Layout {
             zfs_branch_list: work_dir.join("zfs/branches.txt"),
             cas_dir: work_dir.join("cas"),
             cas_store: work_dir.join("cas/store.redb"),
+            cas_wp_root: work_dir.join("cas/wproot"),
             cas_branches_dir: work_dir.join("cas/branches"),
             cas_branch_list: work_dir.join("cas/branches.txt"),
             wp_root: work_dir.join("wproot"),
@@ -2471,9 +2473,13 @@ fn write_cas_notes(layout: &Layout) -> Result<()> {
 
 This site was initialized with `strategy = \"cas\"`.
 
-The runtime view is materialized under `.forkpress/cas/branches/<branch>` so
-WordPress sees ordinary files and an ordinary SQLite database at
-`wp-content/database/.ht.sqlite`.
+WordPress files are stored in `.forkpress/cas/store.redb` and served lazily
+through the built-in `branchfs` PHP extension. `.forkpress/cas/wproot` is the
+virtual document root path used for PHP path interception; it is not a full
+copy of WordPress.
+
+Each branch has an ordinary SQLite database at
+`.forkpress/cas/branches/<branch>/.ht.sqlite`.
 
 The durable experimental store is `.forkpress/cas/store.redb`. It stores:
 
@@ -2481,9 +2487,9 @@ The durable experimental store is `.forkpress/cas/store.redb`. It stores:
 - branch manifests listing paths and blob hashes
 - branch pointers that make local branch creation share unchanged blobs
 
-Creating a branch snapshots the source materialized branch into Redb, copies the
-source branch manifest to the new branch, and materializes that manifest into a
-new branch directory. Git smart HTTP is not wired to this strategy yet.
+Creating a branch copies the source branch manifest in Redb and copies only the
+source branch's SQLite database directory. Git smart HTTP is not wired to this
+strategy yet.
 ";
     fs::write(layout.cas_dir.join("README.md"), notes).with_context(|| {
         format!(
@@ -2793,35 +2799,200 @@ fn ensure_cas_main_branch(
     runtime: &PortableRuntime,
     args: &InitArgs,
 ) -> Result<()> {
-    let main_root = cas_branch_root(layout, "main");
-    if !main_root.join("wp-load.php").is_file() {
-        fs::create_dir_all(&layout.cas_branches_dir)
-            .with_context(|| format!("failed to create {}", layout.cas_branches_dir.display()))?;
-        if main_root.exists() {
-            fs::remove_dir_all(&main_root)
-                .with_context(|| format!("failed to reset {}", main_root.display()))?;
+    fs::create_dir_all(&layout.cas_dir)
+        .with_context(|| format!("failed to create {}", layout.cas_dir.display()))?;
+    fs::create_dir_all(&layout.cas_wp_root)
+        .with_context(|| format!("failed to create {}", layout.cas_wp_root.display()))?;
+    fs::create_dir_all(&layout.cas_branches_dir)
+        .with_context(|| format!("failed to create {}", layout.cas_branches_dir.display()))?;
+
+    if !cas_store::branch_exists(&layout.cas_store, "main").unwrap_or(false) {
+        let staging = layout.cas_dir.join("staging-main");
+        if staging.exists() {
+            fs::remove_dir_all(&staging)
+                .with_context(|| format!("failed to reset {}", staging.display()))?;
         }
-        copy_tree_cow(&layout.runtime_dir.join("runtime/wp-src"), &main_root)?;
+        copy_tree_cow(&layout.runtime_dir.join("runtime/wp-src"), &staging)?;
+        install_cas_managed_wp_files(layout, &staging)?;
+        let report = cas_store::snapshot_branch(&layout.cas_store, &staging, "main")?;
+        fs::remove_dir_all(&staging)
+            .with_context(|| format!("failed to remove {}", staging.display()))?;
+        println!(
+            "  cas snapshot main ({} files, {} bytes)",
+            report.files, report.bytes
+        );
     }
 
-    run_zfs_bootstrap_script(
+    run_cas_bootstrap_script(
         layout,
         runtime,
         &args.shared,
-        &main_root,
+        "main",
         &args.site_title,
         args.admin_password.as_deref().unwrap_or("admin"),
     )?;
-    let report = cas_store::snapshot_branch(&layout.cas_store, &main_root, "main")?;
-    println!(
-        "  cas snapshot main ({} files, {} bytes)",
-        report.files, report.bytes
-    );
     Ok(())
 }
 
 fn cas_branch_root(layout: &Layout, branch: &str) -> PathBuf {
     layout.cas_branches_dir.join(branch)
+}
+
+fn install_cas_managed_wp_files(layout: &Layout, branch_root: &Path) -> Result<()> {
+    let wp_content = branch_root.join("wp-content");
+    fs::create_dir_all(wp_content.join("plugins"))
+        .with_context(|| format!("failed to create {}", wp_content.join("plugins").display()))?;
+    fs::create_dir_all(wp_content.join("mu-plugins")).with_context(|| {
+        format!(
+            "failed to create {}",
+            wp_content.join("mu-plugins").display()
+        )
+    })?;
+
+    let plugin_dest = wp_content.join("plugins/sqlite-database-integration");
+    if plugin_dest.exists() {
+        fs::remove_dir_all(&plugin_dest)
+            .with_context(|| format!("failed to reset {}", plugin_dest.display()))?;
+    }
+    copy_tree_cow(
+        &layout
+            .runtime_dir
+            .join("vendor/sqlite-database-integration"),
+        &plugin_dest,
+    )?;
+
+    fs::copy(
+        layout.runtime_dir.join("wp-plugin/branchfs-wp.php"),
+        wp_content.join("mu-plugins/branchfs-wp.php"),
+    )
+    .with_context(|| {
+        format!(
+            "failed to install {}",
+            wp_content.join("mu-plugins/branchfs-wp.php").display()
+        )
+    })?;
+
+    fs::write(wp_content.join("db.php"), cas_sqlite_dropin())
+        .with_context(|| format!("failed to write {}", wp_content.join("db.php").display()))?;
+    fs::write(branch_root.join("wp-config.php"), cas_wp_config()).with_context(|| {
+        format!(
+            "failed to write {}",
+            branch_root.join("wp-config.php").display()
+        )
+    })
+}
+
+fn run_cas_bootstrap_script(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    branch: &str,
+    site_title: &str,
+    admin_password: &str,
+) -> Result<()> {
+    run_php_script(
+        layout,
+        runtime,
+        shared,
+        "runtime/bootstrap_cas_wp.php",
+        [
+            layout.cas_store.as_os_str(),
+            layout.cas_wp_root.as_os_str(),
+            layout.cas_branches_dir.as_os_str(),
+            OsStr::new(branch),
+            OsStr::new(site_title),
+            layout.debug_log.as_os_str(),
+            OsStr::new(admin_password),
+        ],
+    )
+}
+
+fn cas_sqlite_dropin() -> &'static str {
+    r#"<?php
+/**
+ * ForkPress SQLite database drop-in for lazy CAS branches.
+ */
+
+define( 'SQLITE_DB_DROPIN_VERSION', '1.8.0' );
+
+$sqlite_plugin_implementation_folder_path = __DIR__ . '/plugins/sqlite-database-integration';
+
+if ( ! file_exists( $sqlite_plugin_implementation_folder_path . '/wp-includes/sqlite/db.php' ) ) {
+	return;
+}
+
+if ( ! defined( 'DATABASE_TYPE' ) ) {
+	define( 'DATABASE_TYPE', 'sqlite' );
+}
+if ( ! defined( 'DB_ENGINE' ) ) {
+	define( 'DB_ENGINE', 'sqlite' );
+}
+
+require_once $sqlite_plugin_implementation_folder_path . '/wp-includes/sqlite/db.php';
+"#
+}
+
+fn cas_wp_config() -> &'static str {
+    r#"<?php
+$forkpress_branch = getenv('FORKPRESS_BRANCH') ?: ($_SERVER['FORKPRESS_BRANCH'] ?? 'main');
+if (!preg_match('/^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/', $forkpress_branch)) {
+    $forkpress_branch = 'main';
+}
+
+$forkpress_db_base = getenv('FORKPRESS_CAS_DB_BASE');
+if (!$forkpress_db_base) {
+    $forkpress_db_base = dirname(__DIR__) . '/branches';
+}
+$forkpress_db_dir = rtrim($forkpress_db_base, "/\\") . DIRECTORY_SEPARATOR . $forkpress_branch;
+if (!is_dir($forkpress_db_dir)) {
+    @mkdir($forkpress_db_dir, 0755, true);
+}
+
+if (!defined('FQDB')) {
+    define('FQDB',    $forkpress_db_dir . DIRECTORY_SEPARATOR . '.ht.sqlite');
+    define('DB_DIR',  $forkpress_db_dir);
+    define('DB_FILE', '.ht.sqlite');
+}
+define('DB_NAME', 'forkpress');
+define('DB_USER', 'forkpress');
+define('DB_PASSWORD', 'forkpress');
+define('DB_HOST', 'localhost');
+define('DB_CHARSET', 'utf8mb4');
+define('DB_COLLATE', '');
+
+$table_prefix = 'wp_';
+
+define('AUTH_KEY',         'forkpress-cas-k1-xxxxxxxxxxxxxxxx');
+define('SECURE_AUTH_KEY',  'forkpress-cas-k2-xxxxxxxxxxxxxxxx');
+define('LOGGED_IN_KEY',    'forkpress-cas-k3-xxxxxxxxxxxxxxxx');
+define('NONCE_KEY',        'forkpress-cas-k4-xxxxxxxxxxxxxxxx');
+define('AUTH_SALT',        'forkpress-cas-s1-xxxxxxxxxxxxxxxx');
+define('SECURE_AUTH_SALT', 'forkpress-cas-s2-xxxxxxxxxxxxxxxx');
+define('LOGGED_IN_SALT',   'forkpress-cas-s3-xxxxxxxxxxxxxxxx');
+define('NONCE_SALT',       'forkpress-cas-s4-xxxxxxxxxxxxxxxx');
+
+define('WP_DEBUG', true);
+define('WP_DEBUG_LOG', getenv('FORKPRESS_CAS_DEBUG_LOG') ?: '/tmp/forkpress-cas-wp-debug.log');
+define('WP_DEBUG_DISPLAY', false);
+define('DISALLOW_FILE_MODS', true);
+define('WP_AUTO_UPDATE_CORE', false);
+define('AUTOMATIC_UPDATER_DISABLED', true);
+define('WP_HTTP_BLOCK_EXTERNAL', true);
+if (!defined('DISABLE_WP_CRON')) {
+    define('DISABLE_WP_CRON', true);
+}
+
+if (isset($_SERVER['HTTP_HOST'])) {
+    define('WP_HOME',    'http://' . $_SERVER['HTTP_HOST']);
+    define('WP_SITEURL', 'http://' . $_SERVER['HTTP_HOST']);
+}
+
+if (!defined('ABSPATH')) {
+    define('ABSPATH', 'branchfs://' . $forkpress_branch . '/');
+}
+
+require_once ABSPATH . 'wp-settings.php';
+"#
 }
 
 fn cas_branch_names(layout: &Layout) -> Result<Vec<String>> {
@@ -2849,35 +3020,40 @@ fn create_cas_branch(
 ) -> Result<()> {
     validate_branch_name(branch)?;
     validate_branch_name(from)?;
-    let source = cas_branch_root(layout, from);
-    if !source.is_dir() {
+    if !cas_store::branch_exists(&layout.cas_store, from).unwrap_or(false) {
         bail!("source branch does not exist: {from}");
     }
+    if cas_store::branch_exists(&layout.cas_store, branch).unwrap_or(false) {
+        bail!("branch already exists: {branch}");
+    }
+
+    fs::create_dir_all(&layout.cas_branches_dir)
+        .with_context(|| format!("failed to create {}", layout.cas_branches_dir.display()))?;
+    fs::create_dir_all(&layout.cas_wp_root)
+        .with_context(|| format!("failed to create {}", layout.cas_wp_root.display()))?;
+
+    let source = cas_branch_root(layout, from);
     let dest = cas_branch_root(layout, branch);
     if dest.exists() {
         bail!("branch already exists: {branch}");
     }
 
-    let source_report = cas_store::snapshot_branch(&layout.cas_store, &source, from)?;
-    let branch_report = cas_store::create_branch_from(&layout.cas_store, from, branch, &dest)?;
-    run_zfs_bootstrap_script(layout, runtime, shared, &dest, "ForkPress", "admin")?;
-    let final_report = cas_store::snapshot_branch(&layout.cas_store, &dest, branch)?;
+    let branch_report = cas_store::clone_branch_manifest(&layout.cas_store, from, branch)?;
+    if source.is_dir() {
+        copy_tree_cow(&source, &dest)?;
+    } else {
+        fs::create_dir_all(&dest)
+            .with_context(|| format!("failed to create {}", dest.display()))?;
+    }
+    run_cas_bootstrap_script(layout, runtime, shared, branch, "ForkPress", "admin")?;
     write_cas_branch_list(layout)?;
 
     let (root_host, port) = branchctl_url_hint(layout)
         .unwrap_or_else(|_| ("wp.localhost".to_string(), "18080".to_string()));
     println!("forkpress: cas cloned '{from}' -> '{branch}'");
     println!(
-        "  source snapshot: {} files, {} bytes",
-        source_report.files, source_report.bytes
-    );
-    println!(
         "  shared manifest: {} files, {} bytes",
         branch_report.files, branch_report.bytes
-    );
-    println!(
-        "  branch snapshot: {} files, {} bytes",
-        final_report.files, final_report.bytes
     );
     println!(
         "Visit http://{}.{root_host}:{port}/ to see this branch.",
@@ -3250,12 +3426,13 @@ fn start_cas_php_server(
         .arg("-S")
         .arg(format!("{}:{}", args.host, args.port))
         .arg("-t")
-        .arg(&layout.cas_branches_dir)
-        .arg(layout.runtime_dir.join("runtime/router_zfs.php"))
-        .env("FORKPRESS_BRANCHES_DIR", &layout.cas_branches_dir)
-        .env("FORKPRESS_ZFS_BRANCHES_DIR", &layout.cas_branches_dir)
+        .arg(&layout.cas_wp_root)
+        .arg(layout.runtime_dir.join("runtime/router_cas.php"))
+        .env("FORKPRESS_CAS_STORE", &layout.cas_store)
+        .env("FORKPRESS_CAS_WP_ROOT", &layout.cas_wp_root)
+        .env("FORKPRESS_CAS_DB_BASE", &layout.cas_branches_dir)
+        .env("FORKPRESS_CAS_DEBUG_LOG", &layout.debug_log)
         .env("FORKPRESS_BRANCH_LIST", &layout.cas_branch_list)
-        .env("FORKPRESS_PLAIN_STRATEGY", "cas")
         .env("FORKPRESS_ROOT_HOST", &args.root_host)
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));

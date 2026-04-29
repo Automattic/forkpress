@@ -1,0 +1,12 @@
+[package]
+name = "forkpress-cas-ffi"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+anyhow = "1.0"
+forkpress-cas-store = { path = "../cas-store" }
+libc = "0.2"

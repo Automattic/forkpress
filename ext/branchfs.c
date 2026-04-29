@@ -10,6 +10,25 @@
 
 ZEND_DECLARE_MODULE_GLOBALS(branchfs)
 
+#ifdef HAVE_BRANCHFS_CAS
+void *fp_cas_open(const char *path);
+void fp_cas_close(void *handle);
+void fp_cas_free(unsigned char *ptr, size_t len);
+int fp_cas_branch_exists(void *handle, const char *branch);
+int fp_cas_create_branch(void *handle, const char *branch, const char *parent);
+int fp_cas_read_file(void *handle, const char *branch, const char *path,
+    unsigned char **out_data, size_t *out_len);
+int fp_cas_write_file(void *handle, const char *branch, const char *path,
+    const unsigned char *data, size_t len);
+int fp_cas_mkdir(void *handle, const char *branch, const char *path);
+int fp_cas_unlink(void *handle, const char *branch, const char *path);
+int fp_cas_rename(void *handle, const char *branch, const char *from, const char *to);
+int fp_cas_stat(void *handle, const char *branch, const char *path,
+    int *out_is_dir, size_t *out_len);
+int fp_cas_list_dir(void *handle, const char *branch, const char *path,
+    unsigned char **out_data, size_t *out_len);
+#endif
+
 /* Forward declarations */
 static php_stream *branchfs_stream_opener(php_stream_wrapper *wrapper, const char *filename,
     const char *mode, int options, zend_string **opened_path,
@@ -29,6 +48,8 @@ static int branchfs_rmdir(php_stream_wrapper *wrapper, const char *url, int opti
     php_stream_context *context);
 static int branchfs_metadata(php_stream_wrapper *wrapper, const char *url, int options,
     void *value, php_stream_context *context);
+static const char *store_current_branch_name(void);
+static int store_open_cas(const char *store_path);
 
 /* ================================================================
  * Section 1: FNV-1a hash for content addressing
@@ -58,6 +79,7 @@ char *store_compute_hash(const char *data, size_t size) {
  * ================================================================ */
 
 int store_open(const char *db_path) {
+    BRANCHFS_G(backend) = BRANCHFS_BACKEND_SQLITE;
     if (BRANCHFS_G(db)) return 0;
     int rc = sqlite3_open(db_path, &BRANCHFS_G(db));
     if (rc != SQLITE_OK) {
@@ -72,14 +94,49 @@ int store_open(const char *db_path) {
     return 0;
 }
 
+static int store_open_cas(const char *store_path) {
+#ifdef HAVE_BRANCHFS_CAS
+    BRANCHFS_G(backend) = BRANCHFS_BACKEND_CAS;
+    if (BRANCHFS_G(cas_handle)) return 0;
+    BRANCHFS_G(cas_handle) = fp_cas_open(store_path);
+    if (!BRANCHFS_G(cas_handle)) {
+        php_error_docref(NULL, E_WARNING, "branchfs: cannot open CAS store %s", store_path);
+        return -1;
+    }
+    return 0;
+#else
+    (void)store_path;
+    php_error_docref(NULL, E_WARNING, "branchfs: CAS backend not compiled into this PHP binary");
+    return -1;
+#endif
+}
+
 void store_close(void) {
     if (BRANCHFS_G(db)) {
         sqlite3_close(BRANCHFS_G(db));
         BRANCHFS_G(db) = NULL;
     }
+#ifdef HAVE_BRANCHFS_CAS
+    if (BRANCHFS_G(cas_handle)) {
+        fp_cas_close(BRANCHFS_G(cas_handle));
+        BRANCHFS_G(cas_handle) = NULL;
+    }
+#endif
+}
+
+static const char *store_current_branch_name(void) {
+    return BRANCHFS_G(current_branch) ? BRANCHFS_G(current_branch) : "main";
 }
 
 int store_get_branch_id(const char *branch_name) {
+    if (BRANCHFS_G(backend) == BRANCHFS_BACKEND_CAS) {
+#ifdef HAVE_BRANCHFS_CAS
+        if (!BRANCHFS_G(cas_handle) || !branch_name) return -1;
+        return fp_cas_branch_exists(BRANCHFS_G(cas_handle), branch_name) ? 1 : -1;
+#else
+        return -1;
+#endif
+    }
     if (!BRANCHFS_G(db) || !branch_name) return -1;
     sqlite3_stmt *stmt;
     int rc = sqlite3_prepare_v2(BRANCHFS_G(db),
@@ -95,6 +152,14 @@ int store_get_branch_id(const char *branch_name) {
 }
 
 int store_create_branch(const char *name, const char *parent) {
+    if (BRANCHFS_G(backend) == BRANCHFS_BACKEND_CAS) {
+#ifdef HAVE_BRANCHFS_CAS
+        if (!BRANCHFS_G(cas_handle)) return -1;
+        return fp_cas_create_branch(BRANCHFS_G(cas_handle), name, parent) == 0 ? 1 : -1;
+#else
+        return -1;
+#endif
+    }
     if (!BRANCHFS_G(db)) return -1;
     sqlite3_stmt *stmt;
     int rc = sqlite3_prepare_v2(BRANCHFS_G(db),
@@ -269,10 +334,46 @@ static int resolve_branch_chain(int branch_id, const char *path,
 }
 
 int store_read_file(int branch_id, const char *path, char **data, size_t *size) {
+    if (BRANCHFS_G(backend) == BRANCHFS_BACKEND_CAS) {
+#ifdef HAVE_BRANCHFS_CAS
+        (void)branch_id;
+        if (!BRANCHFS_G(cas_handle)) return -1;
+        unsigned char *cas_data = NULL;
+        size_t cas_size = 0;
+        int rc = fp_cas_read_file(BRANCHFS_G(cas_handle), store_current_branch_name(),
+            path, &cas_data, &cas_size);
+        if (rc != 0) return -1;
+        char *buf = emalloc(cas_size + 1);
+        if (cas_size > 0 && cas_data) memcpy(buf, cas_data, cas_size);
+        buf[cas_size] = '\0';
+        fp_cas_free(cas_data, cas_size);
+        *data = buf;
+        *size = cas_size;
+        return 0;
+#else
+        (void)branch_id;
+        (void)path;
+        return -1;
+#endif
+    }
     return resolve_branch_chain(branch_id, path, data, size, NULL, NULL, NULL);
 }
 
 int store_write_file(int branch_id, const char *path, const char *data, size_t size) {
+    if (BRANCHFS_G(backend) == BRANCHFS_BACKEND_CAS) {
+#ifdef HAVE_BRANCHFS_CAS
+        (void)branch_id;
+        if (!BRANCHFS_G(cas_handle)) return -1;
+        return fp_cas_write_file(BRANCHFS_G(cas_handle), store_current_branch_name(),
+            path, (const unsigned char *)data, size) == 0 ? 0 : -1;
+#else
+        (void)branch_id;
+        (void)path;
+        (void)data;
+        (void)size;
+        return -1;
+#endif
+    }
     if (!BRANCHFS_G(db)) return -1;
 
     char *hash = store_compute_hash(data, size);
@@ -372,17 +473,79 @@ int store_write_file(int branch_id, const char *path, const char *data, size_t s
 }
 
 int store_stat_file(int branch_id, const char *path, int *is_dir, size_t *size, int *mode, time_t *mtime) {
+    if (BRANCHFS_G(backend) == BRANCHFS_BACKEND_CAS) {
+#ifdef HAVE_BRANCHFS_CAS
+        (void)branch_id;
+        if (!BRANCHFS_G(cas_handle)) return -1;
+        int cas_is_dir = 0;
+        size_t cas_size = 0;
+        if (fp_cas_stat(BRANCHFS_G(cas_handle), store_current_branch_name(),
+            path, &cas_is_dir, &cas_size) != 0) {
+            return -1;
+        }
+        if (is_dir) *is_dir = cas_is_dir;
+        if (size) *size = cas_size;
+        if (mode) *mode = cas_is_dir ? 16877 : 33188;
+        if (mtime) *mtime = time(NULL);
+        return 0;
+#else
+        (void)branch_id;
+        (void)path;
+        return -1;
+#endif
+    }
     /* resolve_branch_chain now reads b.size directly via the LEFT JOIN, so
      * stat is a single query whether the blob is inline or chunked. */
     return resolve_branch_chain(branch_id, path, NULL, size, is_dir, mode, mtime);
 }
 
 int store_file_exists(int branch_id, const char *path) {
+    if (BRANCHFS_G(backend) == BRANCHFS_BACKEND_CAS) {
+        int is_dir = 0;
+        return store_stat_file(branch_id, path, &is_dir, NULL, NULL, NULL) == 0;
+    }
     int is_dir = 0;
     return resolve_branch_chain(branch_id, path, NULL, NULL, &is_dir, NULL, NULL) == 0;
 }
 
 int store_list_dir(int branch_id, const char *dir_path, char ***entries, int *count) {
+    if (BRANCHFS_G(backend) == BRANCHFS_BACKEND_CAS) {
+#ifdef HAVE_BRANCHFS_CAS
+        (void)branch_id;
+        if (!BRANCHFS_G(cas_handle)) return -1;
+        *entries = NULL;
+        *count = 0;
+        unsigned char *data = NULL;
+        size_t len = 0;
+        if (fp_cas_list_dir(BRANCHFS_G(cas_handle), store_current_branch_name(),
+            dir_path, &data, &len) != 0) {
+            return -1;
+        }
+        int capacity = 16;
+        int n = 0;
+        char **result = emalloc(sizeof(char*) * capacity);
+        size_t start = 0;
+        for (size_t i = 0; i <= len; i++) {
+            if (i != len && data[i] != '\n') continue;
+            if (i > start) {
+                if (n >= capacity) {
+                    capacity *= 2;
+                    result = erealloc(result, sizeof(char*) * capacity);
+                }
+                result[n++] = estrndup((const char *)data + start, i - start);
+            }
+            start = i + 1;
+        }
+        fp_cas_free(data, len);
+        *entries = result;
+        *count = n;
+        return 0;
+#else
+        (void)branch_id;
+        (void)dir_path;
+        return -1;
+#endif
+    }
     if (!BRANCHFS_G(db)) return -1;
 
     *entries = NULL;
@@ -486,6 +649,19 @@ int store_list_dir(int branch_id, const char *dir_path, char ***entries, int *co
 }
 
 int store_mkdir(int branch_id, const char *path, int mode) {
+    if (BRANCHFS_G(backend) == BRANCHFS_BACKEND_CAS) {
+#ifdef HAVE_BRANCHFS_CAS
+        (void)branch_id;
+        (void)mode;
+        if (!BRANCHFS_G(cas_handle)) return -1;
+        return fp_cas_mkdir(BRANCHFS_G(cas_handle), store_current_branch_name(), path) == 0 ? 0 : -1;
+#else
+        (void)branch_id;
+        (void)path;
+        (void)mode;
+        return -1;
+#endif
+    }
     if (!BRANCHFS_G(db)) return -1;
     sqlite3_stmt *stmt;
     int rc = sqlite3_prepare_v2(BRANCHFS_G(db),
@@ -502,6 +678,17 @@ int store_mkdir(int branch_id, const char *path, int mode) {
 }
 
 int store_unlink(int branch_id, const char *path) {
+    if (BRANCHFS_G(backend) == BRANCHFS_BACKEND_CAS) {
+#ifdef HAVE_BRANCHFS_CAS
+        (void)branch_id;
+        if (!BRANCHFS_G(cas_handle)) return -1;
+        return fp_cas_unlink(BRANCHFS_G(cas_handle), store_current_branch_name(), path) == 0 ? 0 : -1;
+#else
+        (void)branch_id;
+        (void)path;
+        return -1;
+#endif
+    }
     if (!BRANCHFS_G(db)) return -1;
     /* Insert a tombstone */
     sqlite3_stmt *stmt;
@@ -518,6 +705,18 @@ int store_unlink(int branch_id, const char *path) {
 }
 
 int store_rename(int branch_id, const char *from, const char *to) {
+    if (BRANCHFS_G(backend) == BRANCHFS_BACKEND_CAS) {
+#ifdef HAVE_BRANCHFS_CAS
+        (void)branch_id;
+        if (!BRANCHFS_G(cas_handle)) return -1;
+        return fp_cas_rename(BRANCHFS_G(cas_handle), store_current_branch_name(), from, to) == 0 ? 0 : -1;
+#else
+        (void)branch_id;
+        (void)from;
+        (void)to;
+        return -1;
+#endif
+    }
     char *data = NULL;
     size_t size = 0;
     if (store_read_file(branch_id, from, &data, &size) != 0) return -1;
@@ -1369,6 +1568,23 @@ PHP_FUNCTION(branchfs_set_db) {
     RETURN_FALSE;
 }
 
+PHP_FUNCTION(branchfs_set_cas_store) {
+    char *path;
+    size_t path_len;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STRING(path, path_len)
+    ZEND_PARSE_PARAMETERS_END();
+
+    if (BRANCHFS_G(cas_store_path)) efree(BRANCHFS_G(cas_store_path));
+    BRANCHFS_G(cas_store_path) = estrndup(path, path_len);
+
+    store_close();
+    if (store_open_cas(BRANCHFS_G(cas_store_path)) == 0) {
+        RETURN_TRUE;
+    }
+    RETURN_FALSE;
+}
+
 PHP_FUNCTION(branchfs_set_root) {
     char *path;
     size_t path_len;
@@ -1406,9 +1622,15 @@ PHP_FUNCTION(branchfs_get_branch) {
 
 PHP_FUNCTION(branchfs_activate) {
     ZEND_PARSE_PARAMETERS_NONE();
-    if (!BRANCHFS_G(db) || !BRANCHFS_G(wp_root) || !BRANCHFS_G(current_branch)) {
+    if ((!BRANCHFS_G(db) && !BRANCHFS_G(cas_handle)) ||
+        !BRANCHFS_G(wp_root) || !BRANCHFS_G(current_branch)) {
         php_error_docref(NULL, E_WARNING,
-            "branchfs: must set db, root, and branch before activating");
+            "branchfs: must set a store, root, and branch before activating");
+        RETURN_FALSE;
+    }
+    if (store_get_branch_id(BRANCHFS_G(current_branch)) < 0) {
+        php_error_docref(NULL, E_WARNING,
+            "branchfs: branch does not exist: %s", BRANCHFS_G(current_branch));
         RETURN_FALSE;
     }
     BRANCHFS_G(active) = 1;
@@ -2167,6 +2389,10 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_branchfs_set_db, 0, 0, 1)
     ZEND_ARG_INFO(0, path)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_INFO_EX(arginfo_branchfs_set_cas_store, 0, 0, 1)
+    ZEND_ARG_INFO(0, path)
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_INFO_EX(arginfo_branchfs_set_root, 0, 0, 1)
     ZEND_ARG_INFO(0, path)
 ZEND_END_ARG_INFO()
@@ -2205,6 +2431,7 @@ ZEND_END_ARG_INFO()
 
 static const zend_function_entry branchfs_functions[] = {
     PHP_FE(branchfs_set_db,        arginfo_branchfs_set_db)
+    PHP_FE(branchfs_set_cas_store, arginfo_branchfs_set_cas_store)
     PHP_FE(branchfs_set_root,      arginfo_branchfs_set_root)
     PHP_FE(branchfs_set_branch,    arginfo_branchfs_set_branch)
     PHP_FE(branchfs_get_branch,    arginfo_branchfs_get_branch)
@@ -2219,6 +2446,7 @@ static const zend_function_entry branchfs_functions[] = {
 
 static void php_branchfs_globals_ctor(zend_branchfs_globals *g) {
     memset(g, 0, sizeof(*g));
+    g->backend = BRANCHFS_BACKEND_SQLITE;
 }
 
 static void php_branchfs_globals_dtor(zend_branchfs_globals *g) {
@@ -2334,9 +2562,11 @@ PHP_RINIT_FUNCTION(branchfs) {
 PHP_RSHUTDOWN_FUNCTION(branchfs) {
     store_close();
     if (BRANCHFS_G(db_path)) { efree(BRANCHFS_G(db_path)); BRANCHFS_G(db_path) = NULL; }
+    if (BRANCHFS_G(cas_store_path)) { efree(BRANCHFS_G(cas_store_path)); BRANCHFS_G(cas_store_path) = NULL; }
     if (BRANCHFS_G(wp_root)) { efree(BRANCHFS_G(wp_root)); BRANCHFS_G(wp_root) = NULL; }
     if (BRANCHFS_G(current_branch)) { efree(BRANCHFS_G(current_branch)); BRANCHFS_G(current_branch) = NULL; }
     BRANCHFS_G(active) = 0;
+    BRANCHFS_G(backend) = BRANCHFS_BACKEND_SQLITE;
     return SUCCESS;
 }
 
@@ -2344,6 +2574,7 @@ PHP_MINFO_FUNCTION(branchfs) {
     php_info_print_table_start();
     php_info_print_table_header(2, "branchfs support", "enabled");
     php_info_print_table_row(2, "Version", PHP_BRANCHFS_VERSION);
+    php_info_print_table_row(2, "Backend", BRANCHFS_G(backend) == BRANCHFS_BACKEND_CAS ? "cas" : "sqlite");
     php_info_print_table_row(2, "Branch", BRANCHFS_G(current_branch) ? BRANCHFS_G(current_branch) : "(none)");
     php_info_print_table_row(2, "WP Root", BRANCHFS_G(wp_root) ? BRANCHFS_G(wp_root) : "(none)");
     php_info_print_table_row(2, "Active", BRANCHFS_G(active) ? "yes" : "no");

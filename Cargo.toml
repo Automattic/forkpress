@@ -1,4 +1,4 @@
 [workspace]
-members = ["forkpress"]
+members = ["crates/cas-store", "crates/cas-ffi", "forkpress"]
 default-members = ["forkpress"]
 resolver = "2"

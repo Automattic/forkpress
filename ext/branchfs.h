@@ -24,17 +24,25 @@
  * stay in sync with scripts that materialize branch files from the store. */
 #define BRANCHFS_CHUNK_SIZE (1024 * 1024)
 
+typedef enum {
+    BRANCHFS_BACKEND_SQLITE = 0,
+    BRANCHFS_BACKEND_CAS = 1
+} branchfs_backend_t;
+
 extern zend_module_entry branchfs_module_entry;
 #define phpext_branchfs_ptr &branchfs_module_entry
 
 /* ---- Module globals ---- */
 ZEND_BEGIN_MODULE_GLOBALS(branchfs)
     char *db_path;
+    char *cas_store_path;
     char *wp_root;
     char *current_branch;
     int   active;
     int   intercepting;
+    branchfs_backend_t backend;
     sqlite3 *db;
+    void *cas_handle;
     const php_stream_wrapper_ops *orig_plain_ops;
 ZEND_END_MODULE_GLOBALS(branchfs)
 
