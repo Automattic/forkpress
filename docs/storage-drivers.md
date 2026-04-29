@@ -87,6 +87,214 @@ materialized changes back into Redb. Today it snapshots on init and branch
 creation; explicit commit/checkpoint and Git integration still need to be
 wired.
 
+## CAS Tradeoffs And Open Decisions
+
+The CAS driver should be read as a branch-storage experiment, not as a finished
+replacement for `branchfs`. It answers one question well: can ForkPress create
+cheap branches with a pure-Rust embedded store while keeping WordPress on
+ordinary files? The answer is yes for local preview and post-save workflows.
+The harder questions are snapshot timing, Git integration, database merge, and
+garbage collection.
+
+### What The CAS Store Owns
+
+Redb is the durable metadata/blob store for the strategy:
+
+- `blobs`: SHA-256 hash -> complete file bytes
+- `branches`: branch name -> serialized manifest
+
+The manifest is the branch tree: directories plus file paths, sizes, and blob
+hashes. Branch creation snapshots the source materialized directory into Redb,
+copies the manifest pointer to the new branch name, then hydrates that manifest
+into `.forkpress/cas/branches/<branch>`.
+
+The materialized directory is the runtime working copy. WordPress never reads
+directly from Redb; it reads and writes normal files. That is intentional:
+WordPress, PHP, the SQLite integration plugin, uploads, plugin/theme code, and
+debugging tools all behave like they are using a normal filesystem.
+
+```mermaid
+sequenceDiagram
+    participant CLI as forkpress CLI
+    participant Source as source materialized branch
+    participant Redb as store.redb
+    participant Dest as new materialized branch
+    participant WP as WordPress runtime
+
+    CLI->>Source: scan files
+    CLI->>Redb: write new/changed blobs by SHA-256
+    CLI->>Redb: write source manifest
+    CLI->>Redb: copy manifest pointer to new branch
+    CLI->>Dest: hydrate files from shared blobs
+    WP->>Dest: read/write normal PHP files and .ht.sqlite
+```
+
+### Upsides
+
+- Single-binary fit is strong. Redb and SHA-256 hashing are Rust dependencies
+  linked into `forkpress`; there is no kernel module, daemon, shared library,
+  system database, FUSE mount, or Docker service.
+- WordPress compatibility is better than a virtual filesystem path. PHP sees
+  ordinary files, so `require`, plugin pages, uploads, and SQLite database
+  writes avoid the BranchFS stream-wrapper and SQL-view compatibility surface.
+- Branch creation can share unchanged bytes in the durable store. A new branch
+  manifest can point at the same blob hashes as the parent instead of copying
+  those bytes inside Redb.
+- The durable model maps naturally to Git export. A manifest is already a tree;
+  an adapter can synthesize Git trees from manifests without asking WordPress or
+  BranchFS to resolve files.
+- Debuggability is good. A broken branch can be inspected directly under
+  `.forkpress/cas/branches/<branch>`, and the branch SQLite file is just
+  `wp-content/database/.ht.sqlite`.
+- Windows is more plausible than native ZFS. The strategy uses ordinary files
+  plus Rust libraries, so the hard Windows kernel-driver problem does not apply.
+
+### Downsides
+
+- The runtime branch directory is still a full materialization. Redb dedupes
+  durable blobs, but `.forkpress/cas/branches/<branch>` currently contains
+  full file copies. Disk use is therefore "shared in the store, duplicated in
+  the live working trees" until we add lazy hydration, reflinks, or sparse
+  checkout behavior.
+- Snapshot timing is explicit and incomplete. Today ForkPress snapshots on init
+  and branch creation. WordPress can write files and the SQLite DB after that,
+  but those changes are not durable in Redb until a later snapshot operation is
+  wired.
+- SQLite databases are treated as opaque files. That gives correct branch
+  isolation, but not row-level database diffs or semantic database merges. A
+  one-byte post change can rewrite a large SQLite blob in the CAS store.
+- There is no Git smart HTTP for CAS yet. The current Git endpoint is still
+  `branchfs`-specific; CAS needs a new adapter that exports manifests, applies
+  pushed file changes to the materialized branch, then records a new manifest.
+- Garbage collection is not implemented. Redb can accumulate blobs that no live
+  branch manifest references. We need a mark-and-sweep pass over all branch
+  manifests before this becomes a long-lived store.
+- Branch operations need locking. Snapshotting while WordPress is writing
+  `.ht.sqlite`, uploads, or plugin files can capture an inconsistent tree. CAS
+  needs a per-branch lock and probably a SQLite checkpoint/flush step before
+  snapshot.
+- Binary blobs limit merge quality. This is fine for local preview isolation,
+  but content-level merges for uploads and database files need higher-level
+  policy.
+
+### Redb vs Fjall
+
+Redb is the implementation currently shipped because it is a small embedded
+Rust key-value store with simple transactional tables. The current CAS shape
+only needs two maps: blob hash to bytes, and branch name to manifest. That makes
+Redb a good first fit.
+
+Fjall remains worth evaluating for a future CAS backend. The likely tradeoff is
+different rather than strictly better:
+
+| Store | Why it fits | Risks / questions |
+| --- | --- | --- |
+| Redb | Simple embedded transactional tables; easy to package; good match for a small number of maps; no background daemon. | Large opaque blobs may rewrite more than we want; one-writer branch operations should be serialized; we need our own GC, manifest schema evolution, and large-blob/chunking policy. |
+| Fjall | LSM-style storage may be attractive for write-heavy snapshots, range scans, and future chunk indexes; still Rust-embeddable and single-binary friendly. | Compaction behavior, write amplification, crash recovery semantics, and operational knobs need evaluation. ForkPress would still own branch manifests, locks, SQLite snapshot consistency, and Git integration. |
+
+The store choice does not change the product model. Both Redb and Fjall would
+need the same ForkPress-level pieces: branch manifests, blob/chunk references,
+snapshot locks, manifest GC, Git export/import, and a database story.
+
+### Database Strategy
+
+For CAS, the database is deliberately branch-local:
+
+```text
+.forkpress/cas/branches/main/wp-content/database/.ht.sqlite
+.forkpress/cas/branches/feature/wp-content/database/.ht.sqlite
+```
+
+This avoids BranchFS's hardest failure mode: MySQL-shaped WordPress writes
+being translated to SQLite and then applied through branch SQL views. In CAS,
+WordPress writes to one normal SQLite file owned by the current branch.
+
+The tradeoff is mergeability. ForkPress can snapshot the SQLite file as a blob,
+but it cannot yet explain "merge this post row from feature into main" at the
+storage layer. We have a few future options:
+
+- Keep database merge out of scope and treat branch DB state as preview-only
+  unless exported through WordPress/WP-CLI-level operations.
+- Generate `database.sql` for Git clone/fetch as read-only context, like
+  `branchfs`, but ignore it on push.
+- Add explicit database export/import commands that understand WordPress tables
+  and merge at an application-aware layer.
+- Pair CAS files with a future database-native branch driver such as Dolt or a
+  libSQL/Turso-style design if the single-binary constraint can still be met.
+
+### Git Strategy
+
+CAS should eventually have its own Git adapter:
+
+```mermaid
+flowchart LR
+    remote[Git client]
+    adapter[CAS Git adapter]
+    redb[(store.redb)]
+    branch[materialized branch]
+    snapshot[new manifest]
+
+    remote -- clone/fetch --> adapter
+    adapter -- read branch manifest --> redb
+    adapter -- synthesize wordpress/ tree --> remote
+    remote -- push file changes --> adapter
+    adapter -- apply changed files --> branch
+    branch -- snapshot --> snapshot
+    snapshot --> redb
+```
+
+Clone/fetch can be manifest-only: read the branch manifest, stream file blobs
+as a Git tree, and generate `database.sql` from the branch SQLite file if we
+want the same context artifact as `branchfs`.
+
+Push should not mutate Redb directly from Git objects. A safer path is:
+
+1. Lock the target branch.
+2. Apply pushed `wordpress/` file changes to the materialized branch.
+3. Let ForkPress run any required managed-file refresh or validation.
+4. Snapshot the materialized branch into Redb as a new manifest.
+5. Unlock the branch.
+
+That keeps the live WordPress view and durable CAS view in sync through one
+path.
+
+### Garbage Collection
+
+CAS needs mark-and-sweep GC:
+
+1. Read every live branch manifest from `branches`.
+2. Mark every referenced file hash.
+3. Delete unmarked blob rows from `blobs`.
+4. Optionally compact the underlying store if the chosen engine supports it and
+   it is safe to do so.
+
+This is simpler than BranchFS row/table GC because manifests make reachability
+explicit. It still needs locking so a branch create or snapshot cannot race
+with blob deletion.
+
+### When CAS Is The Right Experiment
+
+CAS is the best near-term experiment when the goal is:
+
+- stay inside the single-binary Rust distribution model
+- avoid SQL-level branch overlays
+- keep WordPress running against normal files
+- make branch creation cheaper in the durable store
+- keep Windows possible in a future release
+
+CAS is not yet the right answer when the goal is:
+
+- true lazy filesystem COW for runtime directories
+- database-aware diffs/merges
+- Git clone/push parity with `branchfs`
+- production durability while WordPress writes concurrently
+- long-lived stores without a GC/checkpoint story
+
+The practical next milestone is a `forkpress cas snapshot <branch>` or
+strategy-neutral `forkpress checkpoint <branch>` command that locks the branch,
+flushes SQLite state, writes a manifest, and exposes enough metadata for Git
+export.
+
 ## Target ZFS Model
 
 The intended ZFS-backed driver is:
