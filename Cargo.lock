@@ -295,7 +295,7 @@ dependencies = [
 
 [[package]]
 name = "forkpress"
-version = "0.1.12-mac-cow.1"
+version = "0.1.12-mac-cow.2"
 dependencies = [
  "anyhow",
  "clap",

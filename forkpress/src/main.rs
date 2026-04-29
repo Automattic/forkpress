@@ -31,7 +31,7 @@ const SERVER_REGISTRY_FILE: &str = "servers.tsv";
 struct Cli {
     /// Print version.
     #[arg(short = 'v', long = "version", action = ArgAction::Version)]
-    _version: bool,
+    _version: Option<bool>,
 
     #[command(subcommand)]
     command: Commands,
@@ -4132,6 +4132,33 @@ fn tcp_port_open(host: &str, port: u16) -> bool {
 #[cfg(test)]
 mod git_helper_tests {
     use super::*;
+    use clap::error::ErrorKind;
+
+    #[test]
+    fn short_version_flag_prints_version() {
+        let err = Cli::try_parse_from(["forkpress", "-v"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::DisplayVersion);
+    }
+
+    #[test]
+    fn long_version_flag_prints_version() {
+        let err = Cli::try_parse_from(["forkpress", "--version"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::DisplayVersion);
+    }
+
+    #[test]
+    fn version_flag_does_not_break_subcommand_parsing() {
+        let cli = Cli::try_parse_from([
+            "forkpress",
+            "init",
+            "--work-dir",
+            ".forkpress",
+            "--admin-password",
+            "admin",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Commands::Init(_)));
+    }
 
     #[test]
     fn commit_message_mentions_branch() {
