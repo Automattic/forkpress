@@ -1,6 +1,8 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use flate2::read::GzDecoder;
+#[cfg(target_os = "macos")]
+use std::ffi::CString;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
@@ -68,6 +70,8 @@ enum Commands {
     Logs(LogsArgs),
     /// Inspect local ForkPress environment and storage capabilities.
     Doctor(DoctorArgs),
+    /// Inspect, mount, and detach mount-backed site storage.
+    Storage(StorageArgs),
     /// Consistent hot-copy of a running .fp file via SQLite VACUUM INTO.
     Backup(BackupArgs),
     /// Write a .fp file to a portable directory tree (files + SQL + manifest).
@@ -211,6 +215,55 @@ enum DoctorCommand {
 struct DoctorStorageArgs {
     #[command(flatten)]
     shared: SharedPaths,
+}
+
+#[derive(Args, Debug, Clone)]
+struct StorageArgs {
+    #[command(subcommand)]
+    command: StorageCommand,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum StorageCommand {
+    /// Show whether this site's mount-backed storage is attached.
+    Status(StorageStatusArgs),
+    /// Attach this site's mount-backed storage.
+    Mount(StorageMountArgs),
+    /// Detach this site's mount-backed storage so the work dir can be moved or deleted.
+    Detach(StorageDetachArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+struct StorageStatusArgs {
+    /// ForkPress site state directory.
+    #[arg(long, default_value = ".forkpress")]
+    work_dir: PathBuf,
+}
+
+#[derive(Args, Debug, Clone)]
+struct StorageMountArgs {
+    /// ForkPress site state directory.
+    #[arg(long, default_value = ".forkpress")]
+    work_dir: PathBuf,
+}
+
+#[derive(Args, Debug, Clone)]
+struct StorageDetachArgs {
+    /// ForkPress site state directory.
+    #[arg(long, default_value = ".forkpress")]
+    work_dir: PathBuf,
+
+    /// Do not stop this site's ForkPress server before detaching storage.
+    #[arg(long)]
+    keep_server: bool,
+
+    /// Seconds to wait when stopping the matching site server.
+    #[arg(long, default_value_t = 10)]
+    timeout: u64,
+
+    /// Force detach. Use only after normal detach reports that the mount is busy.
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -717,6 +770,7 @@ fn run() -> Result<i32> {
         Commands::User(args) => user_command(args),
         Commands::Logs(args) => logs_command(args),
         Commands::Doctor(args) => doctor_command(args),
+        Commands::Storage(args) => storage_command(args),
         Commands::Backup(args) => backup_command(args),
         Commands::Export(args) => export_command(args),
         Commands::Import(args) => import_command(args),
@@ -920,6 +974,133 @@ fn doctor_storage_command(args: DoctorStorageArgs) -> Result<i32> {
     }
 
     Ok(0)
+}
+
+fn storage_command(args: StorageArgs) -> Result<i32> {
+    match args.command {
+        StorageCommand::Status(args) => storage_status_command(args),
+        StorageCommand::Mount(args) => storage_mount_command(args),
+        StorageCommand::Detach(args) => storage_detach_command(args),
+    }
+}
+
+fn storage_status_command(args: StorageStatusArgs) -> Result<i32> {
+    let layout = Layout::new(args.work_dir)?;
+
+    println!("ForkPress storage status");
+    println!("  work dir:  {}", layout.work_dir.display());
+
+    let manifest = read_site_manifest(&layout)?;
+    if let Some(manifest) = &manifest {
+        println!("  strategy:  {}", manifest.strategy.as_str());
+        if let Some(file_view) = manifest.file_view {
+            println!("  file view: {}", file_view.as_str());
+        }
+    } else {
+        println!("  site:      not initialized");
+    }
+
+    match manifest.as_ref().and_then(|manifest| manifest.file_view) {
+        Some(FileViewStrategy::MacosApfsSparsebundle) => {
+            print_macos_cow_storage_status(&layout)?;
+        }
+        _ => {
+            if layout.macos_cow_image.exists() || layout.macos_cow_mount.exists() {
+                print_macos_cow_storage_status(&layout)?;
+            } else {
+                println!("  mount:     none");
+            }
+        }
+    }
+
+    Ok(0)
+}
+
+fn storage_mount_command(args: StorageMountArgs) -> Result<i32> {
+    let layout = Layout::new(args.work_dir)?;
+    let strategy = require_initialized_strategy(&layout, "storage mount")?;
+    if strategy != StorageStrategy::Zfs {
+        println!(
+            "forkpress: no mount-backed storage for strategy = \"{}\"",
+            strategy.as_str()
+        );
+        return Ok(0);
+    }
+
+    let file_view = ensure_zfs_file_view_ready(&layout)?;
+    match file_view {
+        FileViewStrategy::MacosApfsSparsebundle => {
+            ensure_macos_apfs_sparsebundle_file_view(&layout)?;
+            println!(
+                "forkpress: COW storage mounted at {}",
+                layout.macos_cow_mount.display()
+            );
+            println!("Branches: {}", layout.zfs_branches_dir.display());
+        }
+        FileViewStrategy::Reflink | FileViewStrategy::Copy => {
+            println!(
+                "forkpress: storage file view \"{}\" does not use a detachable mount",
+                file_view.as_str()
+            );
+        }
+    }
+
+    Ok(0)
+}
+
+fn storage_detach_command(args: StorageDetachArgs) -> Result<i32> {
+    let layout = Layout::new(args.work_dir)?;
+
+    if !args.keep_server {
+        if let Some(record) = running_record_for_work_dir(&layout.work_dir)? {
+            stop_server_record(&record, Duration::from_secs(args.timeout))?;
+        }
+    }
+
+    let manifest = read_site_manifest(&layout)?;
+    let has_macos_cow = manifest.as_ref().and_then(|manifest| manifest.file_view)
+        == Some(FileViewStrategy::MacosApfsSparsebundle)
+        || layout.macos_cow_image.exists()
+        || layout.macos_cow_mount.exists();
+
+    if !has_macos_cow {
+        println!(
+            "forkpress: no detachable storage found for {}",
+            layout.work_dir.display()
+        );
+        return Ok(0);
+    }
+
+    detach_macos_apfs_sparsebundle_file_view(&layout, args.force)?;
+    Ok(0)
+}
+
+#[cfg(target_os = "macos")]
+fn print_macos_cow_storage_status(layout: &Layout) -> Result<()> {
+    println!("  image:     {}", layout.macos_cow_image.display());
+    println!("  mount:     {}", layout.macos_cow_mount.display());
+    match macos_mount_info(&layout.macos_cow_mount)? {
+        Some(info) => {
+            println!("  attached:  yes");
+            println!("  device:    {}", info.device);
+        }
+        None => {
+            println!("  attached:  no");
+            println!(
+                "  attach:    forkpress storage mount --work-dir {}",
+                shell_quote_path(&layout.work_dir)
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn print_macos_cow_storage_status(layout: &Layout) -> Result<()> {
+    println!("  image:     {}", layout.macos_cow_image.display());
+    println!("  mount:     {}", layout.macos_cow_mount.display());
+    println!("  attached:  not available on this OS");
+    Ok(())
 }
 
 fn backup_command(args: BackupArgs) -> Result<i32> {
@@ -1223,6 +1404,38 @@ mod storage_strategy_tests {
     }
 
     #[test]
+    fn cli_accepts_storage_lifecycle_commands() {
+        let status =
+            Cli::try_parse_from(["forkpress", "storage", "status", "--work-dir", ".forkpress"])
+                .unwrap();
+        assert!(matches!(
+            status.command,
+            Commands::Storage(StorageArgs {
+                command: StorageCommand::Status(_)
+            })
+        ));
+
+        let detach = Cli::try_parse_from([
+            "forkpress",
+            "storage",
+            "detach",
+            "--work-dir",
+            ".forkpress",
+            "--force",
+            "--keep-server",
+        ])
+        .unwrap();
+        let Commands::Storage(StorageArgs {
+            command: StorageCommand::Detach(args),
+        }) = detach.command
+        else {
+            panic!("expected storage detach command");
+        };
+        assert!(args.force);
+        assert!(args.keep_server);
+    }
+
+    #[test]
     fn manifest_parses_file_view() {
         let manifest =
             SiteManifest::parse("strategy = \"zfs\"\nfile_view = \"macos-apfs-sparsebundle\"\n")
@@ -1336,6 +1549,7 @@ fn start_command(args: StartArgs) -> Result<i32> {
         "Stop:       forkpress server stop --work-dir {}",
         shell_quote_path(&layout.work_dir)
     );
+    print_storage_detach_hint_if_needed(&layout)?;
     println!("List:       forkpress server list");
     println!("Press Ctrl+C to stop.");
 
@@ -1485,6 +1699,7 @@ fn start_background_command(args: StartArgs) -> Result<i32> {
                 "Stop:       forkpress server stop --work-dir {}",
                 shell_quote_path(&layout.work_dir)
             );
+            print_storage_detach_hint_if_needed(&layout)?;
             println!("List:       forkpress server list");
             return Ok(0);
         }
@@ -1512,6 +1727,18 @@ fn append_start_args(command: &mut Command, args: &StartArgs, layout: &Layout) {
     if let Some(gc_interval) = &args.gc_interval {
         command.arg("--gc-interval").arg(gc_interval);
     }
+}
+
+fn print_storage_detach_hint_if_needed(layout: &Layout) -> Result<()> {
+    if read_site_manifest(layout)?.and_then(|manifest| manifest.file_view)
+        == Some(FileViewStrategy::MacosApfsSparsebundle)
+    {
+        println!(
+            "Detach:     forkpress storage detach --work-dir {}",
+            shell_quote_path(&layout.work_dir)
+        );
+    }
+    Ok(())
 }
 
 fn server_command(args: ServerArgs) -> Result<i32> {
@@ -2637,6 +2864,16 @@ physical growth on macOS, compare `df -h .forkpress/macos-cow/mount` before and
 after branch creation, or inspect the allocated size of
 `.forkpress/macos-cow/branches.sparsebundle`.
 
+Manage mount-backed COW storage through ForkPress:
+
+- `forkpress storage status --work-dir .forkpress`
+- `forkpress storage mount --work-dir .forkpress`
+- `forkpress storage detach --work-dir .forkpress`
+
+Detach stops this site's ForkPress server first, then asks macOS to detach the
+sparsebundle. Use `--force` only when normal detach reports a busy mount and
+you have closed terminals/editors that were using `.forkpress/macos-cow/mount`.
+
 The forkpress binary now includes an embedded OpenZFS userland engine on Linux
 and macOS targets. Cargo builds the same OpenZFS 2.2.6 subset used by the
 real-zfs experiment, plus bundled zlib, into a static archive and links it into
@@ -2990,18 +3227,136 @@ fn ensure_macos_apfs_sparsebundle_file_view(_layout: &Layout) -> Result<()> {
     bail!("macOS APFS sparsebundle file view is only available on macOS")
 }
 
+#[derive(Debug, Clone)]
+#[cfg(target_os = "macos")]
+struct MacosMountInfo {
+    device: String,
+}
+
+#[cfg(target_os = "macos")]
+fn macos_mount_info(mount: &Path) -> Result<Option<MacosMountInfo>> {
+    if !mount.exists() {
+        return Ok(None);
+    }
+
+    use std::mem::MaybeUninit;
+
+    let mount = absolutize(mount.to_path_buf())?;
+    let mount_c = CString::new(mount.as_os_str().as_encoded_bytes())
+        .with_context(|| format!("{} contains an interior NUL byte", mount.display()))?;
+    let mut stat = MaybeUninit::<libc::statfs>::zeroed();
+    let rc = unsafe { libc::statfs(mount_c.as_ptr(), stat.as_mut_ptr()) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("failed to inspect mount status for {}", mount.display()));
+    }
+    let stat = unsafe { stat.assume_init() };
+    let mounted_on = c_char_array_to_string(&stat.f_mntonname);
+    if Path::new(&mounted_on) != mount {
+        return Ok(None);
+    }
+
+    Ok(Some(MacosMountInfo {
+        device: c_char_array_to_string(&stat.f_mntfromname),
+    }))
+}
+
+#[cfg(target_os = "macos")]
+fn c_char_array_to_string(buf: &[libc::c_char]) -> String {
+    let end = buf.iter().position(|ch| *ch == 0).unwrap_or(buf.len());
+    let bytes: Vec<u8> = buf[..end].iter().map(|ch| *ch as u8).collect();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+#[cfg(target_os = "macos")]
+fn detach_macos_apfs_sparsebundle_file_view(layout: &Layout, force: bool) -> Result<()> {
+    let Some(info) = macos_mount_info(&layout.macos_cow_mount)? else {
+        println!(
+            "forkpress: COW storage is already detached for {}",
+            layout.work_dir.display()
+        );
+        println!(
+            "Attach:     forkpress storage mount --work-dir {}",
+            shell_quote_path(&layout.work_dir)
+        );
+        return Ok(());
+    };
+
+    let mut first_args = vec![OsString::from("detach")];
+    if force {
+        first_args.push(OsString::from("-force"));
+    }
+    first_args.push(OsString::from(&info.device));
+
+    let first = hdiutil_output(first_args)?;
+    if !first.status.success() {
+        let mut fallback_args = vec![OsString::from("detach")];
+        if force {
+            fallback_args.push(OsString::from("-force"));
+        }
+        fallback_args.push(layout.macos_cow_mount.as_os_str().to_owned());
+        let fallback = hdiutil_output(fallback_args)?;
+        if !fallback.status.success() {
+            let message = hdiutil_failure_message(&fallback);
+            if message.to_ascii_lowercase().contains("busy") {
+                bail!(
+                    "COW storage is still busy at {}.\nClose terminals/editors using that path, or inspect open files with:\n  lsof +D {}\nThen run:\n  forkpress storage detach --work-dir {}{}",
+                    layout.macos_cow_mount.display(),
+                    shell_quote_path(&layout.macos_cow_mount),
+                    shell_quote_path(&layout.work_dir),
+                    if force { "" } else { " --force" }
+                );
+            }
+            bail!("{message}");
+        }
+    }
+
+    if macos_mount_info(&layout.macos_cow_mount)?.is_some() {
+        bail!(
+            "hdiutil reported success, but COW storage is still attached at {}",
+            layout.macos_cow_mount.display()
+        );
+    }
+
+    println!(
+        "forkpress: detached COW storage mounted at {}",
+        layout.macos_cow_mount.display()
+    );
+    println!("Remove site: rm -rf {}", shell_quote_path(&layout.work_dir));
+    println!(
+        "Attach again: forkpress storage mount --work-dir {}",
+        shell_quote_path(&layout.work_dir)
+    );
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn detach_macos_apfs_sparsebundle_file_view(_layout: &Layout, _force: bool) -> Result<()> {
+    bail!("macOS APFS sparsebundle detach is only available on macOS")
+}
+
 #[cfg(target_os = "macos")]
 fn run_hdiutil(args: impl IntoIterator<Item = OsString>) -> Result<()> {
-    let output = Command::new("hdiutil")
-        .args(args)
-        .output()
-        .context("failed to run hdiutil")?;
+    let output = hdiutil_output(args)?;
     if output.status.success() {
         return Ok(());
     }
+    bail!("{}", hdiutil_failure_message(&output))
+}
+
+#[cfg(target_os = "macos")]
+fn hdiutil_output(args: impl IntoIterator<Item = OsString>) -> Result<std::process::Output> {
+    Command::new("hdiutil")
+        .args(args)
+        .output()
+        .context("failed to run hdiutil")
+}
+
+#[cfg(target_os = "macos")]
+fn hdiutil_failure_message(output: &std::process::Output) -> String {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    bail!(
+    format!(
         "hdiutil exited with status {}{}{}{}{}",
         output.status,
         if stdout.trim().is_empty() {

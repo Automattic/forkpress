@@ -16,6 +16,7 @@ mkdir -p "$STATE"
 
 cleanup() {
   "$BIN" server stop --work-dir "$WORK" >/dev/null 2>&1 || true
+  "$BIN" storage detach --work-dir "$WORK" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -24,6 +25,8 @@ grep -E 'file_view = "(reflink|file-copy|macos-apfs-sparsebundle)"' "$WORK/site.
 grep -F 'strategy = "cow"' "$WORK/site.toml" >/dev/null
 "$BIN" doctor storage --work-dir "$WORK" > "$TMP/storage-doctor.out"
 grep -F "ForkPress storage capability report" "$TMP/storage-doctor.out" >/dev/null
+"$BIN" storage status --work-dir "$WORK" > "$TMP/storage-status.out"
+grep -F "ForkPress storage status" "$TMP/storage-status.out" >/dev/null
 "$BIN" server start --work-dir "$WORK" --port "$PORT" --root-host wp.localhost --workers 1
 "$BIN" server list | grep -F "$WORK" >/dev/null
 

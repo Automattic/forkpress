@@ -265,6 +265,25 @@ APFS clone sharing, so they can make a cloned branch look like it consumed a
 full extra WordPress tree. Use `df -h .forkpress/macos-cow/mount` or watch the
 sparsebundle's allocated size to estimate physical growth.
 
+The sparsebundle is an OS mount, so stop/detach it through ForkPress before
+moving or deleting the work directory:
+
+```bash
+forkpress storage status --work-dir .forkpress
+forkpress storage detach --work-dir .forkpress
+rm -rf .forkpress
+```
+
+`forkpress storage detach` stops this site's ForkPress server first, then
+detaches the APFS storage. If macOS reports that another app is still using the
+mount, close terminals or editors pointed at `.forkpress/macos-cow/mount` and
+run the command again. `--force` asks macOS for a forced detach. Reattach branch
+files without starting the server with:
+
+```bash
+forkpress storage mount --work-dir .forkpress
+```
+
 For a driver-by-driver comparison, including ZFS portability and Windows notes,
 see [`docs/storage-drivers.md`](docs/storage-drivers.md).
 
@@ -757,6 +776,9 @@ forkpress agents \
   Redb-backed content-addressed site under `.forkpress/cas`.
 - `forkpress doctor storage --work-dir .forkpress` probes file clone support
   and prints the recommended materialized branch file view.
+- `forkpress storage status|mount|detach --work-dir .forkpress` manages
+  detachable storage used by the `cow` strategy on macOS. Detach before
+  deleting a work directory that contains `.forkpress/macos-cow/mount`.
 - `forkpress zfs smoke --work-dir .forkpress` verifies the embedded OpenZFS
   engine by creating a pool image, writing and reading a logical file,
   snapshotting, cloning, exporting, importing, and reading from the clone.
