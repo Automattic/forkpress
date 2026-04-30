@@ -87,5 +87,10 @@ jobs:
       - name: Build forkpress
         run: cargo build --release --target ${{ matrix.target }} -p forkpress
 
+      - name: ZFS strategy e2e through APFS sparsebundle
+        run: tests/test_zfs_strategy_e2e.sh target/${{ matrix.target }}/release/forkpress
+        env:
+          FORKPRESS_FORCE_MACOS_APFS_SPARSEBUNDLE: "1"
+
       - name: CAS strategy e2e
         run: tests/test_cas_strategy_e2e.sh target/${{ matrix.target }}/release/forkpress

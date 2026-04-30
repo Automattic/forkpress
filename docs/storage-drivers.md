@@ -17,13 +17,51 @@ constraint.
 | Driver | Current status | Upsides | Downsides |
 | --- | --- | --- | --- |
 | BranchFS + SQLite COW | Default production driver. `strategy = "branchfs"`. | Small and portable. One `.forkpress/site.fp` file stores files, branch metadata, users, Git snapshots, and WordPress tables. Git smart HTTP is wired. Works with the bundled PHP runtime and does not need a host database. | Complex SQL compatibility surface. WordPress writes MySQL-shaped SQL that is translated to SQLite, then routed through branch views, overlays, tombstones, and triggers. Some plugin/query patterns can hit SQLite-view edge cases. File and DB versioning are separate layers that must be kept in sync by ForkPress code. |
-| Materialized ZFS strategy | Experimental runtime path. `strategy = "zfs"` creates ordinary branch directories under `.forkpress/zfs/branches`. | Simple for WordPress: each branch is just a normal WP tree plus its own `wp-content/database/.ht.sqlite`. No BranchFS stream wrapper and no SQL-level branch overlays. Browser/admin workflows already exercise normal file and SQLite writes. | Not yet backed by ZFS datasets for normal branch operations. Branch creation currently materializes/copies branch directories. Git smart HTTP is not wired for this strategy. It is easy to understand but not the final storage model. |
+| Materialized COW strategy | Experimental runtime path. `strategy = "cow"` creates ordinary branch directories under `.forkpress/zfs/branches` and records a `file_view`. `zfs`, `mac-cow`, and `materialized-cow` remain accepted aliases. | Simple for WordPress: each branch is just a normal WP tree plus its own `wp-content/database/.ht.sqlite`. No BranchFS stream wrapper and no SQL-level branch overlays. Browser/admin workflows already exercise normal file and SQLite writes. On macOS, ForkPress can create a rootless APFS sparsebundle when the current volume cannot clone files. | Not yet backed by ZFS datasets for normal branch operations. Git smart HTTP is not wired for this strategy. Full file-copy materialization remains possible, but should be treated as the last-resort file view. APFS clone sharing is easy to mis-measure with path-size tools. |
 | Embedded OpenZFS engine | Built into Linux and macOS ForkPress binaries; exposed by `forkpress zfs smoke`. | Real OpenZFS primitives inside the single binary: pool image, dataset create, snapshot, clone, export/import, logical file read/write. This is the path toward branch = ZFS dataset, create branch = snapshot + clone, and no SQL overlays. | Native OpenZFS userland is C code with strong POSIX assumptions. We had to add Darwin shims for endian, `uio`, `types32`, `libintl`, `dirent64`, error codes, `O_DIRECT`, SIMD auxv, `fstat64_blk`, and mutex teardown. Current engine API is narrow and not yet connected to branch import/export or Git. License review is required because OpenZFS is CDDL. |
 | CAS + Redb manifests | Experimental lazy runtime path. `strategy = "cas"` stores WordPress files as blobs/manifests in `.forkpress/cas/store.redb`, serves them through the built-in `branchfs` PHP extension, and stores branch-local SQLite database directories under `.forkpress/cas/branches/<branch>`. | Pure Rust, single-binary friendly, and portable across Linux/macOS/Windows in principle. Branch creation shares unchanged WordPress file blobs by copying a manifest pointer in Redb. There is no SQL-level branch overlay: each branch has a normal SQLite database file. | Git smart HTTP is not wired. The lazy filesystem goes through PHP's stream-wrapper/interception surface, so compatibility work remains for unusual PHP filesystem calls. Branch-local SQLite directories are copied as opaque state, so semantic DB merge remains future work. Redb GC, branch locking, and concurrent-writer policy still need production hardening. |
 | System ZFS | Not a ForkPress driver. Useful only as background comparison. | Mature snapshots/clones when the host already has OpenZFS installed. Kernel/filesystem integration means normal programs can read datasets directly. | Violates the single-binary constraint. Requires host kernel modules or platform filesystem drivers, admin permissions, installation, unload/upgrade handling, and platform-specific support. Not acceptable for the default local-agent distribution. |
 | Dolt | Future candidate, not shipped. | Native database branching, commits, diffs, and merges. MySQL-compatible protocol could map well to WordPress's MySQL assumptions. | Dolt is a separate Go stack/server in its normal deployment model. Shipping it under the one-static-binary Rust constraint would require major integration work or a sidecar exception. It handles database state, not WordPress files, so we still need a file branch driver. |
 | Turso/libSQL | Future candidate, not shipped. | SQLite-family technology with embeddable and replicated modes. Potentially attractive for branch-local databases and remote sync. | It does not automatically solve WordPress's MySQL dialect, branch merge semantics, or file versioning. We would still need a file driver and a clear model for per-branch DB isolation. |
-| Plain filesystem copy/reflink | Useful primitive, not enough as the final driver. | Very easy to reason about. Ordinary files are easy for PHP, editors, backup tools, and debuggers. Reflinks/clones can be cheap on filesystems that support them. | No portable version graph. Reflink support and semantics differ by platform/filesystem. Rollback, merge, Git export, and garbage collection all become ForkPress responsibilities. |
+| Plain filesystem copy/reflink | Useful primitive, not enough as the final driver. | Very easy to reason about. Ordinary files are easy for PHP, editors, backup tools, and debuggers. Reflinks/clones can be cheap on filesystems that support them. | No portable version graph. Reflink support and semantics differ by platform/filesystem. Rollback, merge, Git export, and garbage collection all become ForkPress responsibilities. Plain full copies should only be the terminal fallback after COW storage and mount-like options fail. |
+
+## File View Cascade
+
+ForkPress should prefer ordinary paths, because normal software can work with
+ordinary paths. The file view cascade is therefore:
+
+1. materialized COW directories in the current location;
+2. automatically created/guided COW-capable storage;
+3. native lazy mount or mount-like adapters;
+4. built-in local network mounts;
+5. protocol/API access;
+6. full materialization as the last resort.
+
+The current Mac-first implementation applies the first two tiers to the
+materialized `cow` strategy:
+
+- `forkpress doctor storage --work-dir .forkpress` probes the branch directory
+  by cloning a temporary source file, writing to the clone, and verifying the
+  source did not change.
+- `forkpress init --strategy cow` records the selected `file_view` in
+  `.forkpress/site.toml`.
+- On macOS, if `.forkpress/zfs/branches` cannot use `clonefile`, ForkPress
+  creates `.forkpress/macos-cow/branches.sparsebundle`, mounts it at
+  `.forkpress/macos-cow/mount`, and symlinks `.forkpress/zfs/branches` to the
+  APFS-backed branch directory.
+- Branch creation requires COW clones when `file_view` is `reflink` or
+  `macos-apfs-sparsebundle`. `file-copy` remains explicit terminal fallback.
+
+This is not yet a full lazy mount. It is a compatibility-first COW
+materialization path: editors, PHP, WP-CLI, backup tools, and shell commands see
+normal files while the filesystem shares unchanged file blocks.
+
+APFS clone sharing is not visible to tools that sum file sizes by path. `du`,
+Finder, `stat`, and many disk analyzers can count the same shared extents under
+each cloned branch. On macOS, compare `df -h .forkpress/macos-cow/mount` before
+and after branch creation, or inspect the allocated size of
+`.forkpress/macos-cow/branches.sparsebundle`, when you need to estimate real
+physical growth.
 
 ## What Git Means In These Drivers
 

@@ -10,7 +10,7 @@ directories.
 
 - `forkpress init` creates the local site store using the default `branchfs`
   strategy.
-- `forkpress init --strategy zfs` creates a no-SQL-overlay branch backend under
+- `forkpress init --strategy cow` creates a no-SQL-overlay branch backend under
   `.forkpress/zfs/branches`.
 - `forkpress init --strategy cas` creates a Redb-backed content-addressed
   branch backend under `.forkpress/cas`.
@@ -69,16 +69,19 @@ into `.forkpress/site.fp`, writes the `.forkpress/site.toml` strategy manifest
 if it does not exist yet, installs the SQLite database drop-in, creates the
 WordPress admin user, and starts the local server.
 
-To try the ZFS strategy:
+To try the materialized COW strategy:
 
 ```bash
-forkpress init --strategy zfs --admin-password admin
+forkpress init --strategy cow --admin-password admin
 forkpress server start
 forkpress branch create agent-1
 ```
 
 That stores branch files and each branch's SQLite database as ordinary files
-under `.forkpress/zfs/branches/<branch>`. It does not use SQL overlays.
+under `.forkpress/zfs/branches/<branch>`. It does not use SQL overlays. On
+macOS, the branch directory uses APFS `clonefile` directly when possible, or a
+rootless APFS sparsebundle under `.forkpress/macos-cow` when the project volume
+cannot clone files.
 
 To try the CAS strategy:
 
@@ -243,6 +246,25 @@ The selected strategy is written during `forkpress init` and reused by later
 commands. This keeps future backends from accidentally running BranchFS-specific
 code against a different storage model.
 
+Materialized strategies may also record a file view:
+
+```toml
+version = 1
+strategy = "cow"
+file_view = "reflink"
+```
+
+Run `forkpress doctor storage --work-dir .forkpress` to see whether the current
+branch directory supports file clones. On macOS, `cow` initialization first
+tries APFS `clonefile` in place. If the current volume cannot clone files,
+ForkPress creates a rootless APFS sparsebundle under `.forkpress/macos-cow`,
+mounts it at `.forkpress/macos-cow/mount`, and links
+`.forkpress/zfs/branches` into that mounted APFS volume. Full file-copy
+materialization is the last-resort file view. `du` and Finder do not understand
+APFS clone sharing, so they can make a cloned branch look like it consumed a
+full extra WordPress tree. Use `df -h .forkpress/macos-cow/mount` or watch the
+sparsebundle's allocated size to estimate physical growth.
+
 For a driver-by-driver comparison, including ZFS portability and Windows notes,
 see [`docs/storage-drivers.md`](docs/storage-drivers.md).
 
@@ -251,13 +273,15 @@ Supported strategy values:
 - `branchfs` (default, aliases: `sqlite`, `sqlite-cow`): current production
   strategy. Files live in BranchFS tables, and WordPress database branches use
   SQLite COW views, overlays, tombstones, and triggers.
-- `zfs`: experimental no-SQL-overlay strategy. Branches are materialized as
+- `cow` (aliases: `zfs`, `mac-cow`, `materialized-cow`): experimental
+  no-SQL-overlay strategy. Branches are materialized as
   ordinary WordPress directories under `.forkpress/zfs/branches/<branch>`.
   Each branch has its own SQLite database file at
-  `wp-content/database/.ht.sqlite`. Branch creation clones the source branch
-  with filesystem copy-on-write primitives when available and falls back to a
-  regular copy. HTTP serving and local branch creation are wired; Git smart
-  HTTP for this strategy is still pending.
+  `wp-content/database/.ht.sqlite`. Branch creation uses the recorded
+  `file_view`: APFS/Btrfs/XFS/ReFS-style file clones where available, macOS
+  APFS sparsebundle storage when needed, and regular copies only as the final
+  fallback. HTTP serving and local branch creation are wired; Git smart HTTP
+  for this strategy is still pending.
 - `cas` (aliases: `redb`, `cas-redb`): experimental content-addressed strategy.
   `.forkpress/cas/store.redb` stores SHA-256-keyed WordPress file blobs and
   branch manifests. HTTP serving uses `runtime/router_cas.php` plus the
@@ -269,14 +293,16 @@ Supported strategy values:
   directory. HTTP serving and local branch creation are wired; Git smart HTTP
   for this strategy is still pending.
 
-### ZFS Strategy And Embedded Engine
+### Materialized COW Strategy And Embedded ZFS Engine
 
-The ZFS strategy is currently split into two layers:
+The materialized COW strategy is currently split into two layers:
 
 - Working runtime layer: materialized branch directories in
   `.forkpress/zfs/branches`. WordPress runs against normal files, so post
   editor loads, uploads, plugin pages, and SQLite writes do not need BranchFS
-  stream wrappers or table-prefix overlays.
+  stream wrappers or table-prefix overlays. On macOS this directory may be a
+  symlink into `.forkpress/macos-cow/mount/branches`, an APFS sparsebundle
+  volume created by ForkPress when the original location has no COW clones.
 - Embedded storage engine layer: Linux and macOS release builds link a
   ForkPress-specific OpenZFS 2.2.6 userland subset and bundled zlib into the
   single `forkpress` binary. The current CLI exposes this through
@@ -596,10 +622,14 @@ parent rows with those branch-local rows.
   wproot/                         # PHP server document root
   zfs/
     branches.txt                  # branch list for the admin-bar switcher
-    branches/
-      main/                       # zfs strategy main branch WordPress tree
-      feature/                    # zfs strategy cloned branch WordPress tree
+    branches/                     # may symlink into macos-cow/mount/branches
+      main/                       # cow strategy main branch WordPress tree
+      feature/                    # cow strategy cloned branch WordPress tree
         wp-content/database/.ht.sqlite
+  macos-cow/
+    branches.sparsebundle/        # optional rootless APFS storage on macOS
+    mount/
+      branches/
   cas/
     store.redb                    # cas strategy blobs and branch manifests
     wproot/                       # virtual docroot path; not a full WP tree
@@ -720,16 +750,19 @@ forkpress agents \
 - `forkpress init --admin-password admin` creates `.forkpress/site.toml`,
   `.forkpress/site.fp`, and a Git push user named `admin` using the default
   `branchfs` strategy.
-- `forkpress init --strategy zfs --admin-password admin` creates a no-SQL-overlay
-  ZFS-strategy site under `.forkpress/zfs/branches`.
+- `forkpress init --strategy cow --admin-password admin` creates a no-SQL-overlay
+  materialized site under `.forkpress/zfs/branches`, choosing a COW-capable
+  file view when the platform supports one.
 - `forkpress init --strategy cas --admin-password admin` creates a
   Redb-backed content-addressed site under `.forkpress/cas`.
+- `forkpress doctor storage --work-dir .forkpress` probes file clone support
+  and prints the recommended materialized branch file view.
 - `forkpress zfs smoke --work-dir .forkpress` verifies the embedded OpenZFS
   engine by creating a pool image, writing and reading a logical file,
   snapshotting, cloning, exporting, importing, and reading from the clone.
 - `forkpress server start` imports and boots WordPress if needed, then serves
   HTTP from the initialized strategy. For `branchfs`, Git smart HTTP is served
-  from `.forkpress/site.fp`; for `zfs` and `cas`, Git smart HTTP is not wired
+  from `.forkpress/site.fp`; for `cow` and `cas`, Git smart HTTP is not wired
   yet.
 - `forkpress start --background` is the equivalent lower-level command.
 - `forkpress server list` shows running ForkPress site servers.

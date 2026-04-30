@@ -78,7 +78,10 @@ forkpress_zfs_mkdir_p($wp_content . '/plugins');
 forkpress_zfs_mkdir_p($wp_content . '/mu-plugins');
 
 $plugin_dest = $wp_content . '/plugins/sqlite-database-integration';
-$copied = forkpress_zfs_copy_tree($sqlite_plugin_source, $plugin_dest);
+$copied = 0;
+if (!file_exists($plugin_dest . '/load.php')) {
+    $copied = forkpress_zfs_copy_tree($sqlite_plugin_source, $plugin_dest);
+}
 
 $dropin = <<<'PHP'
 <?php
@@ -191,4 +194,4 @@ if (!file_exists($db_path) || filesize($db_path) === 0) {
     echo "  WordPress installed (admin user_id={$result['user_id']})\n";
 }
 
-echo "  plain branch root bootstrapped ($copied sqlite plugin files)\n";
+echo "  materialized branch root bootstrapped ($copied sqlite plugin files)\n";

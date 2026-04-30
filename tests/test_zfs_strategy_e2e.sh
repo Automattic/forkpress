@@ -19,12 +19,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
-"$BIN" init --strategy zfs --work-dir "$WORK" --admin-password admin
+"$BIN" init --strategy cow --work-dir "$WORK" --admin-password admin
+grep -E 'file_view = "(reflink|file-copy|macos-apfs-sparsebundle)"' "$WORK/site.toml" >/dev/null
+grep -F 'strategy = "cow"' "$WORK/site.toml" >/dev/null
+"$BIN" doctor storage --work-dir "$WORK" > "$TMP/storage-doctor.out"
+grep -F "ForkPress storage capability report" "$TMP/storage-doctor.out" >/dev/null
 "$BIN" server start --work-dir "$WORK" --port "$PORT" --root-host wp.localhost --workers 1
 "$BIN" server list | grep -F "$WORK" >/dev/null
 
 "$BIN" branch --work-dir "$WORK" create feature-zfs > "$TMP/branch-create.out"
 grep -F "feature-zfs.wp.localhost:$PORT" "$TMP/branch-create.out" >/dev/null
+echo "feature only" > "$WORK/zfs/branches/feature-zfs/wp-content/forkpress-branch.txt"
+test ! -e "$WORK/zfs/branches/main/wp-content/forkpress-branch.txt"
 
 curl -sS -H "Host: feature-zfs.wp.localhost:$PORT" \
   "http://127.0.0.1:$PORT/wp-admin/post-new.php" \
@@ -65,4 +71,4 @@ grep -F "$TITLE" "$TMP/edit.html" >/dev/null
 
 "$BIN" branch --work-dir "$WORK" list | grep -F "feature-zfs" >/dev/null
 
-echo "PASS zfs strategy e2e"
+echo "PASS cow materialized strategy e2e"

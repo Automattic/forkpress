@@ -10,7 +10,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zip::ZipArchive;
 
 use forkpress_cas_store as cas_store;
@@ -24,10 +24,15 @@ const SERVER_REGISTRY_FILE: &str = "servers.tsv";
 #[derive(Parser, Debug)]
 #[command(
     name = "forkpress",
+    disable_version_flag = true,
     version,
     about = "Single-binary WordPress with git-style branching"
 )]
 struct Cli {
+    /// Print version.
+    #[arg(short = 'v', long = "version", action = ArgAction::Version)]
+    _version: Option<bool>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -61,6 +66,8 @@ enum Commands {
     User(UserPassthrough),
     /// Show WordPress, PHP, server, and maintenance logs.
     Logs(LogsArgs),
+    /// Inspect local ForkPress environment and storage capabilities.
+    Doctor(DoctorArgs),
     /// Consistent hot-copy of a running .fp file via SQLite VACUUM INTO.
     Backup(BackupArgs),
     /// Write a .fp file to a portable directory tree (files + SQL + manifest).
@@ -188,6 +195,24 @@ struct LogsArgs {
     paths: bool,
 }
 
+#[derive(Args, Debug, Clone)]
+struct DoctorArgs {
+    #[command(subcommand)]
+    command: DoctorCommand,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum DoctorCommand {
+    /// Probe branch file storage options for this machine and --work-dir.
+    Storage(DoctorStorageArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+struct DoctorStorageArgs {
+    #[command(flatten)]
+    shared: SharedPaths,
+}
+
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 enum LogSelection {
     /// WordPress debug log. Critical errors and PHP fatals usually land here.
@@ -210,18 +235,58 @@ enum StorageStrategy {
     /// Current single-file SQLite store: BranchFS files plus COW WordPress DB views.
     #[value(alias = "sqlite", alias = "sqlite-cow")]
     Branchfs,
-    /// Experimental ZFS-backed store: real filesystem/database files versioned by ZFS.
+    /// Experimental materialized COW store: normal branch directories with COW file views.
+    #[value(
+        name = "cow",
+        alias = "zfs",
+        alias = "mac-cow",
+        alias = "materialized",
+        alias = "materialized-cow"
+    )]
     Zfs,
     /// Experimental Redb-backed content-addressed file store with branch manifests.
     #[value(alias = "redb", alias = "cas-redb")]
     Cas,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileViewStrategy {
+    /// Materialized directories whose file contents are cloned by the host FS.
+    Reflink,
+    /// macOS rootless APFS sparsebundle mounted under .forkpress.
+    MacosApfsSparsebundle,
+    /// Last-resort full copies.
+    Copy,
+}
+
+impl FileViewStrategy {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Reflink => "reflink",
+            Self::MacosApfsSparsebundle => "macos-apfs-sparsebundle",
+            Self::Copy => "file-copy",
+        }
+    }
+
+    fn from_manifest_value(value: &str) -> Result<Self> {
+        match value.trim() {
+            "reflink" | "clonefile" | "ficlone" => Ok(Self::Reflink),
+            "macos-apfs-sparsebundle" | "apfs-sparsebundle" => Ok(Self::MacosApfsSparsebundle),
+            "file-copy" | "copy" => Ok(Self::Copy),
+            other => bail!("unknown file_view strategy in site manifest: {other}"),
+        }
+    }
+
+    fn requires_cow(self) -> bool {
+        self != Self::Copy
+    }
+}
+
 impl StorageStrategy {
     fn as_str(self) -> &'static str {
         match self {
             Self::Branchfs => "branchfs",
-            Self::Zfs => "zfs",
+            Self::Zfs => "cow",
             Self::Cas => "cas",
         }
     }
@@ -229,7 +294,7 @@ impl StorageStrategy {
     fn display_name(self) -> &'static str {
         match self {
             Self::Branchfs => "branchfs/sqlite",
-            Self::Zfs => "zfs",
+            Self::Zfs => "cow/materialized",
             Self::Cas => "cas/redb",
         }
     }
@@ -237,7 +302,7 @@ impl StorageStrategy {
     fn from_manifest_value(value: &str) -> Result<Self> {
         match value.trim() {
             "branchfs" | "sqlite" | "sqlite-cow" => Ok(Self::Branchfs),
-            "zfs" => Ok(Self::Zfs),
+            "cow" | "zfs" | "mac-cow" | "materialized" | "materialized-cow" => Ok(Self::Zfs),
             "cas" | "redb" | "cas-redb" => Ok(Self::Cas),
             other => bail!("unknown storage strategy in site manifest: {other}"),
         }
@@ -247,15 +312,25 @@ impl StorageStrategy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SiteManifest {
     strategy: StorageStrategy,
+    file_view: Option<FileViewStrategy>,
 }
 
 impl SiteManifest {
     fn new(strategy: StorageStrategy) -> Self {
-        Self { strategy }
+        Self {
+            strategy,
+            file_view: None,
+        }
+    }
+
+    fn with_file_view(mut self, file_view: FileViewStrategy) -> Self {
+        self.file_view = Some(file_view);
+        self
     }
 
     fn parse(contents: &str) -> Result<Self> {
         let mut strategy = None;
+        let mut file_view = None;
         for raw_line in contents.lines() {
             let line = raw_line.split('#').next().unwrap_or("").trim();
             if line.is_empty() {
@@ -268,19 +343,26 @@ impl SiteManifest {
             let value = value.trim().trim_matches('"');
             if key == "strategy" {
                 strategy = Some(StorageStrategy::from_manifest_value(value)?);
+            } else if key == "file_view" {
+                file_view = Some(FileViewStrategy::from_manifest_value(value)?);
             }
         }
 
         Ok(Self {
             strategy: strategy.unwrap_or(StorageStrategy::Branchfs),
+            file_view,
         })
     }
 
     fn render(&self) -> String {
-        format!(
+        let mut rendered = format!(
             "# ForkPress site manifest\nversion = 1\nstrategy = \"{}\"\n",
             self.strategy.as_str()
-        )
+        );
+        if let Some(file_view) = self.file_view {
+            rendered.push_str(&format!("file_view = \"{}\"\n", file_view.as_str()));
+        }
+        rendered
     }
 }
 
@@ -538,6 +620,14 @@ struct Layout {
     zfs_dir: PathBuf,
     zfs_branches_dir: PathBuf,
     zfs_branch_list: PathBuf,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    macos_cow_dir: PathBuf,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    macos_cow_image: PathBuf,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    macos_cow_mount: PathBuf,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    macos_cow_branches_dir: PathBuf,
     cas_dir: PathBuf,
     cas_store: PathBuf,
     cas_wp_root: PathBuf,
@@ -626,6 +716,7 @@ fn run() -> Result<i32> {
         Commands::Branch(args) | Commands::Branchctl(args) => branch_command(args),
         Commands::User(args) => user_command(args),
         Commands::Logs(args) => logs_command(args),
+        Commands::Doctor(args) => doctor_command(args),
         Commands::Backup(args) => backup_command(args),
         Commands::Export(args) => export_command(args),
         Commands::Import(args) => import_command(args),
@@ -712,19 +803,22 @@ fn init_branchfs_site(args: InitArgs, layout: Layout, runtime: PortableRuntime) 
 fn init_zfs_site(args: InitArgs, layout: Layout) -> Result<i32> {
     prepare_runtime(&layout)?;
     let runtime = PortableRuntime::from_layout(&layout);
-    fs::create_dir_all(&layout.zfs_branches_dir)
-        .with_context(|| format!("failed to create {}", layout.zfs_branches_dir.display()))?;
+    let file_view = prepare_zfs_file_view(&layout)?;
     ensure_zfs_main_branch(&layout, &runtime, &args)?;
-    write_site_manifest(&layout, SiteManifest::new(StorageStrategy::Zfs))?;
+    write_site_manifest(
+        &layout,
+        SiteManifest::new(StorageStrategy::Zfs).with_file_view(file_view),
+    )?;
     write_zfs_experiment_notes(&layout)?;
     write_zfs_branch_list(&layout)?;
 
     println!(
-        "forkpress: zfs strategy initialised in {}",
+        "forkpress: COW materialized strategy initialised in {}",
         layout.work_dir.display()
     );
     println!("  title:     {}", args.site_title);
     println!("  root host: {}", args.root_host);
+    println!("  file view: {}", file_view.as_str());
     println!("  status:    ready; branches are materialized under .forkpress/zfs/branches");
     Ok(0)
 }
@@ -771,6 +865,61 @@ fn user_command(args: UserPassthrough) -> Result<i32> {
         .context("failed to run user command via bundled php")?;
     write_filtered_output(&output.stdout, &output.stderr)?;
     Ok(output.status.code().unwrap_or(1))
+}
+
+fn doctor_command(args: DoctorArgs) -> Result<i32> {
+    match args.command {
+        DoctorCommand::Storage(args) => doctor_storage_command(args),
+    }
+}
+
+fn doctor_storage_command(args: DoctorStorageArgs) -> Result<i32> {
+    let layout = Layout::new(args.shared.work_dir)?;
+    let target = layout.zfs_branches_dir.clone();
+    fs::create_dir_all(&target)
+        .with_context(|| format!("failed to create {}", target.display()))?;
+
+    println!("ForkPress storage capability report");
+    println!("  work dir:     {}", layout.work_dir.display());
+    println!("  branch dir:   {}", target.display());
+    if let Some(manifest) = read_site_manifest(&layout)? {
+        println!("  strategy:     {}", manifest.strategy.as_str());
+        if let Some(file_view) = manifest.file_view {
+            println!("  file view:    {}", file_view.as_str());
+            if file_view == FileViewStrategy::MacosApfsSparsebundle {
+                println!(
+                    "  measurement:  `du` can overcount APFS clone sharing; compare `df -h {}` before/after branch creation",
+                    layout.macos_cow_mount.display()
+                );
+            }
+        }
+    }
+
+    if probe_reflink_dir(&target)? {
+        println!("  reflinks:     yes");
+        println!("  recommendation: materialized COW branches in place");
+        return Ok(0);
+    }
+
+    println!("  reflinks:     no");
+
+    #[cfg(target_os = "macos")]
+    {
+        println!("  macOS APFS sparsebundle: available through hdiutil");
+        println!(
+            "  recommendation: forkpress init --strategy cow will create {} and mount it at {}",
+            layout.macos_cow_image.display(),
+            layout.macos_cow_mount.display()
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        println!("  recommendation: no platform-specific COW fallback implemented yet");
+        println!("  final fallback: file-copy materialization");
+    }
+
+    Ok(0)
 }
 
 fn backup_command(args: BackupArgs) -> Result<i32> {
@@ -1046,6 +1195,46 @@ mod storage_strategy_tests {
     fn manifest_parses_zfs() {
         let manifest = SiteManifest::parse("strategy = \"zfs\"\n").unwrap();
         assert_eq!(manifest.strategy, StorageStrategy::Zfs);
+
+        let manifest = SiteManifest::parse("strategy = \"cow\"\n").unwrap();
+        assert_eq!(manifest.strategy, StorageStrategy::Zfs);
+
+        let manifest = SiteManifest::parse("strategy = \"mac-cow\"\n").unwrap();
+        assert_eq!(manifest.strategy, StorageStrategy::Zfs);
+    }
+
+    #[test]
+    fn cli_accepts_cow_strategy_aliases() {
+        for strategy in ["cow", "mac-cow", "zfs"] {
+            let cli = Cli::try_parse_from([
+                "forkpress",
+                "init",
+                "--strategy",
+                strategy,
+                "--admin-password",
+                "admin",
+            ])
+            .unwrap();
+            let Commands::Init(args) = cli.command else {
+                panic!("expected init command");
+            };
+            assert_eq!(args.strategy, StorageStrategy::Zfs);
+        }
+    }
+
+    #[test]
+    fn manifest_parses_file_view() {
+        let manifest =
+            SiteManifest::parse("strategy = \"zfs\"\nfile_view = \"macos-apfs-sparsebundle\"\n")
+                .unwrap();
+        assert_eq!(manifest.strategy, StorageStrategy::Zfs);
+        assert_eq!(
+            manifest.file_view,
+            Some(FileViewStrategy::MacosApfsSparsebundle)
+        );
+
+        let manifest = SiteManifest::parse("strategy = \"zfs\"\nfile_view = \"copy\"\n").unwrap();
+        assert_eq!(manifest.file_view, Some(FileViewStrategy::Copy));
     }
 
     #[test]
@@ -1058,9 +1247,13 @@ mod storage_strategy_tests {
 
     #[test]
     fn manifest_render_round_trips() {
-        let rendered = SiteManifest::new(StorageStrategy::Cas).render();
+        let rendered = SiteManifest::new(StorageStrategy::Zfs)
+            .with_file_view(FileViewStrategy::Reflink)
+            .render();
         let parsed = SiteManifest::parse(&rendered).unwrap();
-        assert_eq!(parsed.strategy, StorageStrategy::Cas);
+        assert!(rendered.contains("strategy = \"cow\""));
+        assert_eq!(parsed.strategy, StorageStrategy::Zfs);
+        assert_eq!(parsed.file_view, Some(FileViewStrategy::Reflink));
     }
 
     #[test]
@@ -1123,7 +1316,7 @@ fn start_command(args: StartArgs) -> Result<i32> {
             println!("DB access:  database.sql in each git branch checkout (read-only snapshot)");
         }
         StorageStrategy::Zfs => {
-            println!("Git remote: not available for zfs strategy yet");
+            println!("Git remote: not available for cow strategy yet");
             println!("DB access:  wp-content/database/.ht.sqlite inside each materialized branch");
         }
         StorageStrategy::Cas => {
@@ -2149,6 +2342,7 @@ fn zfs_branch_command(
     layout: Layout,
     runtime: PortableRuntime,
 ) -> Result<i32> {
+    ensure_zfs_file_view_ready(&layout)?;
     match args.args[0].as_str() {
         "list" => {
             for branch in zfs_branch_names(&layout)? {
@@ -2321,6 +2515,10 @@ impl Layout {
             zfs_dir: work_dir.join("zfs"),
             zfs_branches_dir: work_dir.join("zfs/branches"),
             zfs_branch_list: work_dir.join("zfs/branches.txt"),
+            macos_cow_dir: work_dir.join("macos-cow"),
+            macos_cow_image: work_dir.join("macos-cow/branches.sparsebundle"),
+            macos_cow_mount: work_dir.join("macos-cow/mount"),
+            macos_cow_branches_dir: work_dir.join("macos-cow/mount/branches"),
             cas_dir: work_dir.join("cas"),
             cas_store: work_dir.join("cas/store.redb"),
             cas_wp_root: work_dir.join("cas/wproot"),
@@ -2414,9 +2612,9 @@ fn bail_strategy_unsupported(command: &str, strategy: StorageStrategy) -> Result
 
 fn write_zfs_experiment_notes(layout: &Layout) -> Result<()> {
     let notes = "\
-# ForkPress ZFS strategy
+# ForkPress materialized COW strategy
 
-This site was initialized with `strategy = \"zfs\"`.
+This site was initialized with `strategy = \"cow\"`.
 
 This backend uses materialized branch directories under `.forkpress/zfs/branches`.
 Each branch contains an ordinary WordPress tree and its own ordinary SQLite
@@ -2424,11 +2622,20 @@ database file at `wp-content/database/.ht.sqlite`. WordPress reads and writes
 those files directly, so this strategy does not use BranchFS streams, SQL COW
 views, tombstones, triggers, or per-branch table prefixes.
 
-Branch creation currently clones the source branch directory with filesystem
-copy-on-write primitives when the host supports them (Linux `FICLONE`, macOS
-`clonefile`) and falls back to a regular copy. That gives the HTTP/runtime
-surface needed for the ZFS strategy while branch-directory import/export is
-connected to the embedded engine.
+Branch creation uses the file view recorded in `.forkpress/site.toml`.
+ForkPress first tries materialized COW branch directories with host filesystem
+clone primitives (Linux `FICLONE`, macOS `clonefile`). On macOS, if the current
+location cannot clone files, ForkPress creates a rootless APFS sparsebundle
+under `.forkpress/macos-cow`, mounts it at `.forkpress/macos-cow/mount`, and
+links `.forkpress/zfs/branches` into that APFS volume. A regular full copy is
+only the last-resort file view.
+
+APFS clone sharing is not visible to tools that add up path sizes. `du`, Finder,
+and many disk analyzers can count shared clone extents once for every branch, so
+a COW branch can appear to consume another full WordPress tree. To inspect
+physical growth on macOS, compare `df -h .forkpress/macos-cow/mount` before and
+after branch creation, or inspect the allocated size of
+`.forkpress/macos-cow/branches.sparsebundle`.
 
 The forkpress binary now includes an embedded OpenZFS userland engine on Linux
 and macOS targets. Cargo builds the same OpenZFS 2.2.6 subset used by the
@@ -2617,6 +2824,7 @@ fn ensure_zfs_bootstrapped(
     runtime: &PortableRuntime,
     args: &StartArgs,
 ) -> Result<()> {
+    let file_view = ensure_zfs_file_view_ready(layout)?;
     let init_args = InitArgs {
         shared: args.shared.clone(),
         strategy: StorageStrategy::Zfs,
@@ -2625,9 +2833,257 @@ fn ensure_zfs_bootstrapped(
         admin_password: Some("admin".to_string()),
     };
     ensure_zfs_main_branch(layout, runtime, &init_args)?;
-    write_site_manifest_if_missing(layout, SiteManifest::new(StorageStrategy::Zfs))?;
+    write_site_manifest_if_missing(
+        layout,
+        SiteManifest::new(StorageStrategy::Zfs).with_file_view(file_view),
+    )?;
     write_zfs_branch_list(layout)?;
     Ok(())
+}
+
+fn prepare_zfs_file_view(layout: &Layout) -> Result<FileViewStrategy> {
+    fs::create_dir_all(&layout.zfs_dir)
+        .with_context(|| format!("failed to create {}", layout.zfs_dir.display()))?;
+    fs::create_dir_all(&layout.zfs_branches_dir)
+        .with_context(|| format!("failed to create {}", layout.zfs_branches_dir.display()))?;
+
+    #[cfg(target_os = "macos")]
+    {
+        if std::env::var_os("FORKPRESS_FORCE_MACOS_APFS_SPARSEBUNDLE").is_some() {
+            prepare_macos_apfs_sparsebundle_file_view(layout)?;
+            return Ok(FileViewStrategy::MacosApfsSparsebundle);
+        }
+    }
+
+    if probe_reflink_dir(&layout.zfs_branches_dir)? {
+        return Ok(FileViewStrategy::Reflink);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        match prepare_macos_apfs_sparsebundle_file_view(layout) {
+            Ok(()) => return Ok(FileViewStrategy::MacosApfsSparsebundle),
+            Err(err) => {
+                eprintln!("forkpress: macOS APFS sparsebundle COW setup failed: {err:#}");
+                eprintln!("forkpress: falling back to full file-copy materialization");
+            }
+        }
+    }
+
+    Ok(FileViewStrategy::Copy)
+}
+
+fn ensure_zfs_file_view_ready(layout: &Layout) -> Result<FileViewStrategy> {
+    let mut manifest = read_site_manifest(layout)?;
+    if let Some(file_view) = manifest.as_ref().and_then(|manifest| manifest.file_view) {
+        ensure_zfs_file_view_available(layout, file_view)?;
+        return Ok(file_view);
+    }
+
+    let file_view = prepare_zfs_file_view(layout)?;
+    if let Some(existing) = manifest.as_mut() {
+        if existing.strategy == StorageStrategy::Zfs {
+            existing.file_view = Some(file_view);
+            write_site_manifest(layout, existing.clone())?;
+        }
+    }
+    Ok(file_view)
+}
+
+fn ensure_zfs_file_view_available(layout: &Layout, file_view: FileViewStrategy) -> Result<()> {
+    match file_view {
+        FileViewStrategy::Reflink | FileViewStrategy::Copy => {
+            fs::create_dir_all(&layout.zfs_branches_dir).with_context(|| {
+                format!("failed to create {}", layout.zfs_branches_dir.display())
+            })?;
+        }
+        FileViewStrategy::MacosApfsSparsebundle => {
+            ensure_macos_apfs_sparsebundle_file_view(layout)?;
+        }
+    }
+    Ok(())
+}
+
+fn zfs_branch_copies_require_cow(layout: &Layout) -> Result<bool> {
+    Ok(read_site_manifest(layout)?
+        .and_then(|manifest| manifest.file_view)
+        .map(FileViewStrategy::requires_cow)
+        .unwrap_or(false))
+}
+
+#[cfg(target_os = "macos")]
+fn prepare_macos_apfs_sparsebundle_file_view(layout: &Layout) -> Result<()> {
+    if layout.zfs_branches_dir.exists() && is_empty_dir(&layout.zfs_branches_dir)? {
+        fs::remove_dir(&layout.zfs_branches_dir).with_context(|| {
+            format!(
+                "failed to remove empty {}",
+                layout.zfs_branches_dir.display()
+            )
+        })?;
+    }
+    ensure_macos_apfs_sparsebundle_file_view(layout)?;
+    if !probe_reflink_dir(&layout.zfs_branches_dir)? {
+        bail!(
+            "mounted macOS APFS sparsebundle does not support clonefile at {}",
+            layout.zfs_branches_dir.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_macos_apfs_sparsebundle_file_view(layout: &Layout) -> Result<()> {
+    fs::create_dir_all(&layout.macos_cow_dir)
+        .with_context(|| format!("failed to create {}", layout.macos_cow_dir.display()))?;
+
+    if !layout.macos_cow_image.exists() {
+        run_hdiutil([
+            OsString::from("create"),
+            OsString::from("-type"),
+            OsString::from("SPARSEBUNDLE"),
+            OsString::from("-fs"),
+            OsString::from("APFS"),
+            OsString::from("-volname"),
+            OsString::from("ForkPressBranches"),
+            OsString::from("-size"),
+            OsString::from("32g"),
+            layout.macos_cow_image.as_os_str().to_owned(),
+        ])
+        .with_context(|| {
+            format!(
+                "failed to create APFS sparsebundle at {}",
+                layout.macos_cow_image.display()
+            )
+        })?;
+    }
+
+    if !layout.macos_cow_branches_dir.is_dir() {
+        fs::create_dir_all(&layout.macos_cow_mount)
+            .with_context(|| format!("failed to create {}", layout.macos_cow_mount.display()))?;
+        run_hdiutil([
+            OsString::from("attach"),
+            OsString::from("-nobrowse"),
+            OsString::from("-mountpoint"),
+            layout.macos_cow_mount.as_os_str().to_owned(),
+            layout.macos_cow_image.as_os_str().to_owned(),
+        ])
+        .with_context(|| {
+            format!(
+                "failed to mount APFS sparsebundle {} at {}",
+                layout.macos_cow_image.display(),
+                layout.macos_cow_mount.display()
+            )
+        })?;
+        fs::create_dir_all(&layout.macos_cow_branches_dir).with_context(|| {
+            format!(
+                "failed to create {}",
+                layout.macos_cow_branches_dir.display()
+            )
+        })?;
+    }
+
+    link_zfs_branches_to_macos_cow(layout)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ensure_macos_apfs_sparsebundle_file_view(_layout: &Layout) -> Result<()> {
+    bail!("macOS APFS sparsebundle file view is only available on macOS")
+}
+
+#[cfg(target_os = "macos")]
+fn run_hdiutil(args: impl IntoIterator<Item = OsString>) -> Result<()> {
+    let output = Command::new("hdiutil")
+        .args(args)
+        .output()
+        .context("failed to run hdiutil")?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    bail!(
+        "hdiutil exited with status {}{}{}{}{}",
+        output.status,
+        if stdout.trim().is_empty() {
+            ""
+        } else {
+            "\nstdout:\n"
+        },
+        stdout.trim(),
+        if stderr.trim().is_empty() {
+            ""
+        } else {
+            "\nstderr:\n"
+        },
+        stderr.trim()
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn link_zfs_branches_to_macos_cow(layout: &Layout) -> Result<()> {
+    use std::os::unix::fs::symlink;
+
+    fs::create_dir_all(&layout.zfs_dir)
+        .with_context(|| format!("failed to create {}", layout.zfs_dir.display()))?;
+
+    match fs::symlink_metadata(&layout.zfs_branches_dir) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            let target = fs::read_link(&layout.zfs_branches_dir).with_context(|| {
+                format!(
+                    "failed to read symlink {}",
+                    layout.zfs_branches_dir.display()
+                )
+            })?;
+            if target == layout.macos_cow_branches_dir {
+                return Ok(());
+            }
+            bail!(
+                "{} already points to {}; expected {}",
+                layout.zfs_branches_dir.display(),
+                target.display(),
+                layout.macos_cow_branches_dir.display()
+            );
+        }
+        Ok(meta) if meta.is_dir() => {
+            if !is_empty_dir(&layout.zfs_branches_dir)? {
+                bail!(
+                    "{} already contains branch data and cannot be replaced with APFS sparsebundle storage",
+                    layout.zfs_branches_dir.display()
+                );
+            }
+            fs::remove_dir(&layout.zfs_branches_dir).with_context(|| {
+                format!(
+                    "failed to remove empty {}",
+                    layout.zfs_branches_dir.display()
+                )
+            })?;
+        }
+        Ok(_) => bail!(
+            "{} exists and is not a directory or symlink",
+            layout.zfs_branches_dir.display()
+        ),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!("failed to inspect {}", layout.zfs_branches_dir.display())
+            });
+        }
+    }
+
+    symlink(&layout.macos_cow_branches_dir, &layout.zfs_branches_dir).with_context(|| {
+        format!(
+            "failed to link {} -> {}",
+            layout.zfs_branches_dir.display(),
+            layout.macos_cow_branches_dir.display()
+        )
+    })
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn is_empty_dir(path: &Path) -> Result<bool> {
+    let mut entries =
+        fs::read_dir(path).with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(entries.next().transpose()?.is_none())
 }
 
 fn ensure_zfs_main_branch(
@@ -2763,12 +3219,16 @@ fn create_zfs_branch(
     if dest.exists() {
         bail!("branch already exists: {branch}");
     }
-    copy_tree_cow(&source, &dest)?;
+    if zfs_branch_copies_require_cow(layout)? {
+        copy_tree_cow_required(&source, &dest)?;
+    } else {
+        copy_tree_cow(&source, &dest)?;
+    }
     run_zfs_bootstrap_script(layout, runtime, shared, &dest, "ForkPress", "admin")?;
     write_zfs_branch_list(layout)?;
     let (root_host, port) = branchctl_url_hint(layout)
         .unwrap_or_else(|_| ("wp.localhost".to_string(), "18080".to_string()));
-    println!("forkpress: zfs cloned '{from}' -> '{branch}'");
+    println!("forkpress: COW cloned '{from}' -> '{branch}'");
     println!(
         "Visit http://{}.{root_host}:{port}/ to see this branch.",
         branch
@@ -3062,7 +3522,21 @@ fn create_cas_branch(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TreeCloneMode {
+    AllowCopyFallback,
+    RequireCow,
+}
+
 fn copy_tree_cow(source: &Path, dest: &Path) -> Result<()> {
+    copy_tree_cow_mode(source, dest, TreeCloneMode::AllowCopyFallback)
+}
+
+fn copy_tree_cow_required(source: &Path, dest: &Path) -> Result<()> {
+    copy_tree_cow_mode(source, dest, TreeCloneMode::RequireCow)
+}
+
+fn copy_tree_cow_mode(source: &Path, dest: &Path, mode: TreeCloneMode) -> Result<()> {
     if !source.is_dir() {
         bail!("source directory not found: {}", source.display());
     }
@@ -3089,18 +3563,28 @@ fn copy_tree_cow(source: &Path, dest: &Path) -> Result<()> {
             if file_type.is_dir() {
                 stack.push(path);
             } else if file_type.is_file() {
-                clone_or_copy_file(&path, &out_path)?;
+                clone_or_copy_file(&path, &out_path, mode)?;
             }
         }
     }
     Ok(())
 }
 
-fn clone_or_copy_file(source: &Path, dest: &Path) -> Result<()> {
+fn clone_or_copy_file(source: &Path, dest: &Path, mode: TreeCloneMode) -> Result<()> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
-    if try_clone_file(source, dest).is_err() {
+    if let Err(err) = try_clone_file(source, dest) {
+        if mode == TreeCloneMode::RequireCow {
+            let _ = fs::remove_file(dest);
+            return Err(err).with_context(|| {
+                format!(
+                    "filesystem COW clone is required for {} -> {}",
+                    source.display(),
+                    dest.display()
+                )
+            });
+        }
         fs::copy(source, dest).with_context(|| {
             format!("failed to copy {} to {}", source.display(), dest.display())
         })?;
@@ -3108,6 +3592,40 @@ fn clone_or_copy_file(source: &Path, dest: &Path) -> Result<()> {
     let permissions = fs::metadata(source)?.permissions();
     let _ = fs::set_permissions(dest, permissions);
     Ok(())
+}
+
+fn probe_reflink_dir(dir: &Path) -> Result<bool> {
+    fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let probe_dir = dir.join(format!(
+        ".forkpress-cow-probe-{}-{nanos}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&probe_dir)
+        .with_context(|| format!("failed to create {}", probe_dir.display()))?;
+
+    let result = (|| -> Result<bool> {
+        let source = probe_dir.join("source.txt");
+        let dest = probe_dir.join("dest.txt");
+        fs::write(&source, b"canonical")
+            .with_context(|| format!("failed to write {}", source.display()))?;
+
+        if try_clone_file(&source, &dest).is_err() {
+            return Ok(false);
+        }
+
+        fs::write(&dest, b"branch")
+            .with_context(|| format!("failed to write {}", dest.display()))?;
+        let canonical =
+            fs::read(&source).with_context(|| format!("failed to read {}", source.display()))?;
+        Ok(canonical == b"canonical")
+    })();
+
+    let _ = fs::remove_dir_all(&probe_dir);
+    result
 }
 
 #[cfg(target_os = "linux")]
@@ -3138,6 +3656,7 @@ fn try_clone_file(source: &Path, dest: &Path) -> Result<()> {
     if rc == 0 {
         Ok(())
     } else {
+        let _ = fs::remove_file(dest);
         Err(std::io::Error::last_os_error()).context("clonefile failed")
     }
 }
@@ -3665,6 +4184,33 @@ fn tcp_port_open(host: &str, port: u16) -> bool {
 #[cfg(test)]
 mod git_helper_tests {
     use super::*;
+    use clap::error::ErrorKind;
+
+    #[test]
+    fn short_version_flag_prints_version() {
+        let err = Cli::try_parse_from(["forkpress", "-v"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::DisplayVersion);
+    }
+
+    #[test]
+    fn long_version_flag_prints_version() {
+        let err = Cli::try_parse_from(["forkpress", "--version"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::DisplayVersion);
+    }
+
+    #[test]
+    fn version_flag_does_not_break_subcommand_parsing() {
+        let cli = Cli::try_parse_from([
+            "forkpress",
+            "init",
+            "--work-dir",
+            ".forkpress",
+            "--admin-password",
+            "admin",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Commands::Init(_)));
+    }
 
     #[test]
     fn commit_message_mentions_branch() {
