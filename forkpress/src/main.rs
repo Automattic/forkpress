@@ -685,6 +685,7 @@ struct BranchPassthrough {
 #[derive(Debug, Clone)]
 struct Layout {
     work_dir: PathBuf,
+    project_dir: PathBuf,
     runtime_dir: PathBuf,
     logs_dir: PathBuf,
     site_manifest: PathBuf,
@@ -879,7 +880,7 @@ fn init_cow_site(args: InitArgs, layout: Layout) -> Result<i32> {
     prepare_runtime(&layout)?;
     let runtime = PortableRuntime::from_layout(&layout);
     let file_view = prepare_cow_file_view(&layout)?;
-    ensure_cow_main_branch(&layout, &runtime, &args)?;
+    ensure_cow_main_branch(&layout, &runtime, &args, file_view)?;
     write_site_manifest(
         &layout,
         SiteManifest::new(StorageStrategy::Cow).with_file_view(file_view),
@@ -894,7 +895,10 @@ fn init_cow_site(args: InitArgs, layout: Layout) -> Result<i32> {
     println!("  title:     {}", args.site_title);
     println!("  root host: {}", args.root_host);
     println!("  file view: {}", file_view.as_str());
-    println!("  status:    ready; branches are materialized under .forkpress/cow/branches");
+    println!(
+        "  status:    ready; branches are materialized under {}",
+        layout.cow_branches_dir.display()
+    );
     Ok(0)
 }
 
@@ -956,7 +960,8 @@ fn doctor_storage_command(args: DoctorStorageArgs) -> Result<i32> {
 
     println!("ForkPress storage capability report");
     println!("  work dir:     {}", layout.work_dir.display());
-    println!("  branch dir:   {}", target.display());
+    println!("  project dir:  {}", layout.project_dir.display());
+    println!("  branch roots: {}", target.display());
     if let Some(manifest) = read_site_manifest(&layout)? {
         println!("  strategy:     {}", manifest.strategy.as_str());
         if let Some(file_view) = manifest.file_view {
@@ -1056,7 +1061,7 @@ fn storage_mount_command(args: StorageMountArgs) -> Result<i32> {
                 "forkpress: COW storage mounted at {}",
                 layout.macos_cow_mount.display()
             );
-            println!("Branches: {}", layout.cow_branches_dir.display());
+            println!("Branch roots: {}", layout.cow_branches_dir.display());
         }
         FileViewStrategy::Reflink | FileViewStrategy::Copy => {
             println!(
@@ -1546,28 +1551,64 @@ mod storage_strategy_tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let new_site = root.join("new");
+        let new_project = root.join("new-project");
+        let new_site = new_project.join(".forkpress");
         let new_layout = Layout::new(new_site.clone()).unwrap();
         assert_eq!(
             new_layout.cow_dir,
-            absolutize(new_site).unwrap().join("cow")
+            absolutize(new_site.clone()).unwrap().join("cow")
+        );
+        assert_eq!(
+            new_layout.project_dir,
+            absolutize(new_project.clone()).unwrap()
+        );
+        assert_eq!(
+            new_layout.cow_branches_dir,
+            absolutize(new_project).unwrap()
+        );
+        fs::create_dir_all(new_site.join("cow")).unwrap();
+        fs::write(new_site.join("cow/branches.txt"), b"main\n").unwrap();
+        let new_layout_with_branch_list = Layout::new(new_site.clone()).unwrap();
+        assert_eq!(
+            new_layout_with_branch_list.cow_branches_dir,
+            new_layout.cow_branches_dir
         );
 
-        let legacy_site = root.join("legacy");
+        let legacy_cow_site = root.join("legacy-cow/.forkpress");
+        fs::create_dir_all(legacy_cow_site.join("cow/branches")).unwrap();
+        let legacy_cow_layout = Layout::new(legacy_cow_site.clone()).unwrap();
+        assert_eq!(
+            legacy_cow_layout.cow_dir,
+            absolutize(legacy_cow_site.clone()).unwrap().join("cow")
+        );
+        assert_eq!(
+            legacy_cow_layout.cow_branches_dir,
+            absolutize(legacy_cow_site).unwrap().join("cow/branches")
+        );
+
+        let legacy_site = root.join("legacy-zfs/.forkpress");
         fs::create_dir_all(legacy_site.join("zfs/branches")).unwrap();
         let legacy_layout = Layout::new(legacy_site.clone()).unwrap();
         assert_eq!(
             legacy_layout.cow_dir,
             absolutize(legacy_site).unwrap().join("zfs")
         );
+        assert_eq!(
+            legacy_layout.cow_branches_dir,
+            legacy_layout.cow_dir.join("branches")
+        );
 
-        let zfs_smoke_site = root.join("zfs-smoke-only");
+        let zfs_smoke_site = root.join("zfs-smoke-only/.forkpress");
         fs::create_dir_all(zfs_smoke_site.join("zfs")).unwrap();
         fs::write(zfs_smoke_site.join("zfs/engine-smoke.img"), b"").unwrap();
         let zfs_smoke_layout = Layout::new(zfs_smoke_site.clone()).unwrap();
         assert_eq!(
             zfs_smoke_layout.cow_dir,
-            absolutize(zfs_smoke_site).unwrap().join("cow")
+            absolutize(zfs_smoke_site.clone()).unwrap().join("cow")
+        );
+        assert_eq!(
+            zfs_smoke_layout.cow_branches_dir,
+            absolutize(root.join("zfs-smoke-only")).unwrap()
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -2842,19 +2883,25 @@ fn add_agent_worktree(
 impl Layout {
     fn new(work_dir: PathBuf) -> Result<Self> {
         let work_dir = absolutize(work_dir)?;
+        let project_dir = work_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| work_dir.clone());
         let primary_cow_dir = work_dir.join("cow");
         let legacy_cow_dir = work_dir.join("zfs");
-        let legacy_has_cow_data = legacy_cow_dir.join("branches").exists()
-            || legacy_cow_dir.join("branches.txt").exists();
-        let cow_dir = if primary_cow_dir.exists() || !legacy_has_cow_data {
-            primary_cow_dir
+        let legacy_primary_has_cow_data = path_exists_no_follow(&primary_cow_dir.join("branches"));
+        let legacy_zfs_has_cow_data = path_exists_no_follow(&legacy_cow_dir.join("branches"));
+        let (cow_dir, cow_branches_dir) = if legacy_primary_has_cow_data {
+            (primary_cow_dir.clone(), primary_cow_dir.join("branches"))
+        } else if legacy_zfs_has_cow_data {
+            (legacy_cow_dir.clone(), legacy_cow_dir.join("branches"))
         } else {
-            legacy_cow_dir
+            (primary_cow_dir.clone(), project_dir.clone())
         };
-        let cow_branches_dir = cow_dir.join("branches");
         let cow_branch_list = cow_dir.join("branches.txt");
 
         Ok(Self {
+            project_dir,
             runtime_dir: work_dir.join("runtime"),
             logs_dir: work_dir.join("logs"),
             site_manifest: work_dir.join("site.toml"),
@@ -2963,19 +3010,20 @@ fn write_cow_strategy_notes(layout: &Layout) -> Result<()> {
 
 This site was initialized with `strategy = \"cow\"`.
 
-This backend uses materialized branch directories under `.forkpress/cow/branches`.
-Each branch contains an ordinary WordPress tree and its own ordinary SQLite
-database file at `wp-content/database/.ht.sqlite`. WordPress reads and writes
-those files directly, so this strategy does not use BranchFS streams, SQL COW
-views, tombstones, triggers, or per-branch table prefixes.
+This backend uses materialized branch directories beside `.forkpress`. With the
+default layout, the main branch is `./main` and a branch named `marketing` is
+`./marketing`. Each branch contains an ordinary WordPress tree and its own
+ordinary SQLite database file at `wp-content/database/.ht.sqlite`. WordPress
+reads and writes those files directly, so this strategy does not use BranchFS
+streams, SQL COW views, tombstones, triggers, or per-branch table prefixes.
 
 Branch creation uses the file view recorded in `.forkpress/site.toml`.
 ForkPress first tries materialized COW branch directories with host filesystem
 clone primitives (Linux `FICLONE`, macOS `clonefile`). On macOS, if the current
 location cannot clone files, ForkPress creates a rootless APFS sparsebundle
 under `.forkpress/macos-cow`, mounts it at `.forkpress/macos-cow/mount`, and
-links `.forkpress/cow/branches` into that APFS volume. A regular full copy is
-only the last-resort file view.
+links each public branch directory, such as `./main`, into that APFS volume. A
+regular full copy is only the last-resort file view.
 
 APFS clone sharing is not visible to tools that add up path sizes. `du`, Finder,
 and many disk analyzers can count shared clone extents once for every branch, so
@@ -3018,9 +3066,9 @@ The design target is:
 
 Because the pool lives inside a normal file and there is no mount layer, PHP
 will not read dataset contents directly. ForkPress should materialize a branch
-dataset into `.forkpress/cow/branches/<branch>` for HTTP, run WordPress against
-that ordinary directory, then import changed files and the SQLite database back
-into the dataset under a branch lock.
+dataset into `./<branch>` for HTTP, run WordPress against that ordinary
+directory, then import changed files and the SQLite database back into the
+dataset under a branch lock.
 ";
     fs::write(layout.cow_dir.join("README.md"), notes).with_context(|| {
         format!(
@@ -3089,6 +3137,14 @@ fn absolutize(path: PathBuf) -> Result<PathBuf> {
         }
     }
     Ok(out)
+}
+
+fn path_exists_no_follow(path: &Path) -> bool {
+    match fs::symlink_metadata(path) {
+        Ok(_) => true,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => true,
+    }
 }
 
 fn prepare_runtime(layout: &Layout) -> Result<()> {
@@ -3190,7 +3246,7 @@ fn ensure_cow_bootstrapped(
         root_host: args.root_host.clone(),
         admin_password: Some("admin".to_string()),
     };
-    ensure_cow_main_branch(layout, runtime, &init_args)?;
+    ensure_cow_main_branch(layout, runtime, &init_args, file_view)?;
     write_site_manifest_if_missing(
         layout,
         SiteManifest::new(StorageStrategy::Cow).with_file_view(file_view),
@@ -3269,9 +3325,98 @@ fn cow_branch_copies_require_cow(layout: &Layout) -> Result<bool> {
         .unwrap_or(false))
 }
 
+fn cow_branch_storage_root(layout: &Layout, branch: &str, file_view: FileViewStrategy) -> PathBuf {
+    match file_view {
+        FileViewStrategy::MacosApfsSparsebundle => layout.macos_cow_branches_dir.join(branch),
+        FileViewStrategy::Reflink | FileViewStrategy::Copy => cow_branch_root(layout, branch),
+    }
+}
+
+fn ensure_empty_or_absent_dir(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    if !path.is_dir() || !is_empty_dir(path)? {
+        bail!(
+            "{} already exists and is not an empty directory",
+            path.display()
+        );
+    }
+    fs::remove_dir(path).with_context(|| format!("failed to remove empty {}", path.display()))
+}
+
+fn ensure_cow_public_branch_root(
+    layout: &Layout,
+    branch: &str,
+    storage_root: &Path,
+    file_view: FileViewStrategy,
+) -> Result<PathBuf> {
+    let public_root = cow_branch_root(layout, branch);
+    if file_view == FileViewStrategy::MacosApfsSparsebundle {
+        ensure_macos_cow_public_branch_link(&public_root, storage_root)?;
+    }
+    Ok(public_root)
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_macos_cow_public_branch_link(public_root: &Path, storage_root: &Path) -> Result<()> {
+    use std::os::unix::fs::symlink;
+
+    match fs::symlink_metadata(public_root) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            let target = fs::read_link(public_root)
+                .with_context(|| format!("failed to read symlink {}", public_root.display()))?;
+            if target == storage_root {
+                return Ok(());
+            }
+            bail!(
+                "{} already points to {}; expected {}",
+                public_root.display(),
+                target.display(),
+                storage_root.display()
+            );
+        }
+        Ok(_) => {
+            if public_root == storage_root {
+                return Ok(());
+            }
+            bail!(
+                "{} already exists; cannot link it to APFS sparsebundle storage at {}",
+                public_root.display(),
+                storage_root.display()
+            );
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("failed to inspect {}", public_root.display()));
+        }
+    }
+
+    if let Some(parent) = public_root.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    symlink(storage_root, public_root).with_context(|| {
+        format!(
+            "failed to link {} -> {}",
+            public_root.display(),
+            storage_root.display()
+        )
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ensure_macos_cow_public_branch_link(_public_root: &Path, _storage_root: &Path) -> Result<()> {
+    bail!("macOS APFS sparsebundle file view is only available on macOS")
+}
+
 #[cfg(target_os = "macos")]
 fn prepare_macos_apfs_sparsebundle_file_view(layout: &Layout) -> Result<()> {
-    if layout.cow_branches_dir.exists() && is_empty_dir(&layout.cow_branches_dir)? {
+    if layout.cow_branches_dir == layout.cow_dir.join("branches")
+        && layout.cow_branches_dir.exists()
+        && is_empty_dir(&layout.cow_branches_dir)?
+    {
         fs::remove_dir(&layout.cow_branches_dir).with_context(|| {
             format!(
                 "failed to remove empty {}",
@@ -3280,10 +3425,10 @@ fn prepare_macos_apfs_sparsebundle_file_view(layout: &Layout) -> Result<()> {
         })?;
     }
     ensure_macos_apfs_sparsebundle_file_view(layout)?;
-    if !probe_reflink_dir(&layout.cow_branches_dir)? {
+    if !probe_reflink_dir(&layout.macos_cow_branches_dir)? {
         bail!(
             "mounted macOS APFS sparsebundle does not support clonefile at {}",
-            layout.cow_branches_dir.display()
+            layout.macos_cow_branches_dir.display()
         );
     }
     Ok(())
@@ -3499,6 +3644,10 @@ fn hdiutil_failure_message(output: &std::process::Output) -> String {
 fn link_cow_branches_to_macos_cow(layout: &Layout) -> Result<()> {
     use std::os::unix::fs::symlink;
 
+    if layout.cow_branches_dir != layout.cow_dir.join("branches") {
+        return Ok(());
+    }
+
     fs::create_dir_all(&layout.cow_dir)
         .with_context(|| format!("failed to create {}", layout.cow_dir.display()))?;
 
@@ -3566,17 +3715,18 @@ fn ensure_cow_main_branch(
     layout: &Layout,
     runtime: &PortableRuntime,
     args: &InitArgs,
+    file_view: FileViewStrategy,
 ) -> Result<()> {
-    let main_root = cow_branch_root(layout, "main");
-    if !main_root.join("wp-load.php").is_file() {
-        fs::create_dir_all(&layout.cow_branches_dir)
-            .with_context(|| format!("failed to create {}", layout.cow_branches_dir.display()))?;
-        if main_root.exists() {
-            fs::remove_dir_all(&main_root)
-                .with_context(|| format!("failed to reset {}", main_root.display()))?;
+    let storage_root = cow_branch_storage_root(layout, "main", file_view);
+    if !storage_root.join("wp-load.php").is_file() {
+        if let Some(parent) = storage_root.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
         }
-        copy_tree_cow(&layout.runtime_dir.join("runtime/wp-src"), &main_root)?;
+        ensure_empty_or_absent_dir(&storage_root)?;
+        copy_tree_cow(&layout.runtime_dir.join("runtime/wp-src"), &storage_root)?;
     }
+    let main_root = ensure_cow_public_branch_root(layout, "main", &storage_root, file_view)?;
 
     run_cow_bootstrap_script(
         layout,
@@ -3636,7 +3786,31 @@ fn validate_branch_name(branch: &str) -> Result<()> {
 }
 
 fn cow_branch_names(layout: &Layout) -> Result<Vec<String>> {
-    plain_branch_names(&layout.cow_branches_dir)
+    let mut names = Vec::new();
+    let Ok(entries) = fs::read_dir(&layout.cow_branches_dir) else {
+        return Ok(names);
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if validate_branch_name(&name).is_err() {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() && path.join("wp-load.php").is_file() {
+            names.push(name);
+        }
+    }
+    names.sort_by(|a, b| {
+        if a == "main" {
+            std::cmp::Ordering::Less
+        } else if b == "main" {
+            std::cmp::Ordering::Greater
+        } else {
+            a.cmp(b)
+        }
+    });
+    Ok(names)
 }
 
 fn plain_branch_names(branches_dir: &Path) -> Result<Vec<String>> {
@@ -3687,11 +3861,18 @@ fn create_cow_branch(
 ) -> Result<()> {
     validate_branch_name(branch)?;
     validate_branch_name(from)?;
-    let source = cow_branch_root(layout, from);
+    let file_view = read_site_manifest(layout)?
+        .and_then(|manifest| manifest.file_view)
+        .unwrap_or(FileViewStrategy::Copy);
+    let source = cow_branch_storage_root(layout, from, file_view);
     if !source.is_dir() {
         bail!("source branch does not exist: {from}");
     }
-    let dest = cow_branch_root(layout, branch);
+    let public_dest = cow_branch_root(layout, branch);
+    if path_exists_no_follow(&public_dest) {
+        bail!("branch already exists: {branch}");
+    }
+    let dest = cow_branch_storage_root(layout, branch, file_view);
     if dest.exists() {
         bail!("branch already exists: {branch}");
     }
@@ -3700,7 +3881,8 @@ fn create_cow_branch(
     } else {
         copy_tree_cow(&source, &dest)?;
     }
-    run_cow_bootstrap_script(layout, runtime, shared, &dest, "ForkPress", "admin")?;
+    let branch_root = ensure_cow_public_branch_root(layout, branch, &dest, file_view)?;
+    run_cow_bootstrap_script(layout, runtime, shared, &branch_root, "ForkPress", "admin")?;
     write_cow_branch_list(layout)?;
     let (root_host, port) = branchctl_url_hint(layout)
         .unwrap_or_else(|_| ("wp.localhost".to_string(), "18080".to_string()));
