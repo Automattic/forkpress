@@ -7,7 +7,7 @@ if [ -z "$spec" ]; then
   exit 2
 fi
 
-if [[ "$spec" != ssh\ * ]]; then
+if [[ "$spec" != *[[:space:]]* ]]; then
   echo "$spec"
   exit 0
 fi
@@ -20,6 +20,7 @@ chmod 600 "$config"
 
 # Parse the common OpenSSH command shape people paste from hosting dashboards,
 # for example: ssh -p18765 -i ~/.ssh/id_siteground user@example.com
+# It also accepts ssh option strings such as: -F /tmp/wp-cow.conf mysite
 # This eval is intentionally local to the developer-controlled lab container.
 eval "set -- $spec"
 if [ "${1:-}" = "ssh" ]; then
@@ -30,6 +31,7 @@ host=""
 user=""
 port=""
 identity_file=""
+config_file=""
 declare -a options=()
 
 while [ "$#" -gt 0 ]; do
@@ -48,6 +50,14 @@ while [ "$#" -gt 0 ]; do
       ;;
     -i*)
       identity_file="${1#-i}"
+      shift
+      ;;
+    -F)
+      config_file="${2:-}"
+      shift 2
+      ;;
+    -F*)
+      config_file="${1#-F}"
       shift
       ;;
     -l)
@@ -89,6 +99,24 @@ fi
 if [ -z "$host" ]; then
   echo "could not find user@host in WPCOW_SSH: $spec" >&2
   exit 2
+fi
+
+if [ -n "$config_file" ]; then
+  if [ ! -f "$config_file" ]; then
+    echo "SSH config from WPCOW_SSH does not exist: $config_file" >&2
+    exit 2
+  fi
+  if ! grep -Eq "^[[:space:]]*Include[[:space:]]+$config_file([[:space:]]|\$)" "$config"; then
+    tmp="${config}.tmp"
+    {
+      echo "Include $config_file"
+      cat "$config"
+    } > "$tmp"
+    mv "$tmp" "$config"
+  fi
+  chmod 600 "$config"
+  echo "$host"
+  exit 0
 fi
 
 if [[ "$host" == *@* ]]; then
