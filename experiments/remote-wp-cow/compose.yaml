@@ -11,6 +11,9 @@ services:
       - /dev/fuse:/dev/fuse
     security_opt:
       - apparmor:unconfined
+    dns:
+      - "${WPCOW_DNS1:-1.1.1.1}"
+      - "${WPCOW_DNS2:-8.8.8.8}"
     ports:
       - "${WPCOW_HTTP_PORT:-8080}:8080"
     environment:
@@ -22,6 +25,8 @@ services:
       WPCOW_LOCAL_URL: "${WPCOW_LOCAL_URL:-http://localhost:8080}"
       WPCOW_SKIP_SCHEMA: "${WPCOW_SKIP_SCHEMA:-0}"
       WPCOW_NO_PROBE: "${WPCOW_NO_PROBE:-0}"
+      WPCOW_DNS1: "${WPCOW_DNS1:-1.1.1.1}"
+      WPCOW_DNS2: "${WPCOW_DNS2:-8.8.8.8}"
       WPCOW_MOUNTPOINT: "/mnt/wp-cow/${WPCOW_NAME:-example}"
       WPCOW_HTTP: 0.0.0.0:8080
       SSH_AUTH_SOCK: /run/host-services/ssh-auth.sock

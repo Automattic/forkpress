@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+fix=0
+if [ "${1:-}" = "--fix" ]; then
+  fix=1
+fi
+
+host="${WPCOW_DNS_HOST:-}"
+if [ -z "$host" ] && [ -n "${WPCOW_SSH:-}" ]; then
+  target="$(wp-cow-lab-ssh-target)"
+  host="$(ssh -G "$target" 2>/dev/null | awk '$1 == "hostname" { print $2; exit }')"
+fi
+
+if [ -z "$host" ] && [ -n "${WPCOW_REMOTE_URL:-}" ]; then
+  host="$(php -r 'echo parse_url(getenv("WPCOW_REMOTE_URL"), PHP_URL_HOST) ?: "";')"
+fi
+
+if [ -z "$host" ]; then
+  echo "could not determine host; set WPCOW_DNS_HOST=example.com" >&2
+  exit 2
+fi
+
+echo "host: $host"
+echo
+echo "/etc/resolv.conf:"
+cat /etc/resolv.conf
+
+echo
+echo "resolution:"
+if getent hosts "$host"; then
+  exit 0
+fi
+
+echo "DNS lookup failed for $host" >&2
+
+if [ "$fix" = "1" ]; then
+  dns1="${WPCOW_DNS1:-1.1.1.1}"
+  dns2="${WPCOW_DNS2:-8.8.8.8}"
+  printf 'nameserver %s\nnameserver %s\n' "$dns1" "$dns2" > /etc/resolv.conf
+  echo
+  echo "rewrote /etc/resolv.conf:"
+  cat /etc/resolv.conf
+  echo
+  echo "retry:"
+  getent hosts "$host"
+  exit 0
+fi
+
+cat >&2 <<'EOF'
+
+Try:
+  wp-cow-lab-dns --fix
+
+If that works, restart the lab after adding DNS values to .env:
+  WPCOW_DNS1=1.1.1.1
+  WPCOW_DNS2=8.8.8.8
+EOF
+exit 1

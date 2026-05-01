@@ -46,6 +46,22 @@ Inside the container, check the lab:
 wp-cow-lab-check
 ```
 
+If DNS fails inside Docker Desktop with an error such as
+`Temporary failure in name resolution`, check and temporarily repair the
+container resolver:
+
+```bash
+wp-cow-lab-dns
+wp-cow-lab-dns --fix
+```
+
+If `--fix` works, keep these values in `.env` and recreate the container:
+
+```bash
+WPCOW_DNS1=1.1.1.1
+WPCOW_DNS2=8.8.8.8
+```
+
 If your SSH command has flags, put them in `~/.ssh/config` on the Mac before
 starting the container. For example:
 

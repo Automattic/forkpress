@@ -36,4 +36,5 @@ if [ -n "${WPCOW_SSH:-}" ]; then
   target="$(wp-cow-lab-ssh-target)"
   ssh -G "$target" >/dev/null
   echo "ssh config resolves: $target"
+  wp-cow-lab-dns
 fi
