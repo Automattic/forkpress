@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+spec="${WPCOW_SSH:-}"
+if [ -z "$spec" ]; then
+  echo "missing required environment variable: WPCOW_SSH" >&2
+  exit 2
+fi
+
+if [[ "$spec" != ssh\ * ]]; then
+  echo "$spec"
+  exit 0
+fi
+
+alias_name="${WPCOW_SSH_ALIAS:-wp-cow-target}"
+config="${HOME}/.ssh/config"
+mkdir -p "${HOME}/.ssh"
+touch "$config"
+chmod 600 "$config"
+
+# Parse the common OpenSSH command shape people paste from hosting dashboards,
+# for example: ssh -p18765 -i ~/.ssh/id_siteground user@example.com
+# This eval is intentionally local to the developer-controlled lab container.
+eval "set -- $spec"
+if [ "${1:-}" = "ssh" ]; then
+  shift
+fi
+
+host=""
+user=""
+port=""
+identity_file=""
+declare -a options=()
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -p)
+      port="${2:-}"
+      shift 2
+      ;;
+    -p*)
+      port="${1#-p}"
+      shift
+      ;;
+    -i)
+      identity_file="${2:-}"
+      shift 2
+      ;;
+    -i*)
+      identity_file="${1#-i}"
+      shift
+      ;;
+    -l)
+      user="${2:-}"
+      shift 2
+      ;;
+    -l*)
+      user="${1#-l}"
+      shift
+      ;;
+    -o)
+      options+=("${2:-}")
+      shift 2
+      ;;
+    -o*)
+      options+=("${1#-o}")
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      echo "unsupported SSH option in WPCOW_SSH: $1" >&2
+      echo "put complex SSH settings in ~/.ssh/config and set WPCOW_SSH to the Host alias" >&2
+      exit 2
+      ;;
+    *)
+      host="$1"
+      shift
+      ;;
+  esac
+done
+
+if [ -z "$host" ] && [ "$#" -gt 0 ]; then
+  host="$1"
+fi
+
+if [ -z "$host" ]; then
+  echo "could not find user@host in WPCOW_SSH: $spec" >&2
+  exit 2
+fi
+
+if [[ "$host" == *@* ]]; then
+  if [ -z "$user" ]; then
+    user="${host%@*}"
+  fi
+  host="${host#*@}"
+fi
+
+tmp="${config}.tmp"
+awk -v alias="$alias_name" '
+  BEGIN { skip = 0 }
+  /^[[:space:]]*Host[[:space:]]+/ {
+    skip = 0
+    for (i = 2; i <= NF; i++) {
+      if ($i == alias) {
+        skip = 1
+      }
+    }
+  }
+  skip == 0 { print }
+' "$config" > "$tmp"
+mv "$tmp" "$config"
+
+{
+  echo
+  echo "Host $alias_name"
+  echo "  HostName $host"
+  if [ -n "$user" ]; then
+    echo "  User $user"
+  fi
+  if [ -n "$port" ]; then
+    echo "  Port $port"
+  fi
+  if [ -n "$identity_file" ]; then
+    echo "  IdentityFile $identity_file"
+    echo "  IdentitiesOnly yes"
+  fi
+  for option in "${options[@]}"; do
+    key="${option%%=*}"
+    value="${option#*=}"
+    if [ "$key" != "$value" ]; then
+      echo "  $key $value"
+    fi
+  done
+} >> "$config"
+
+chmod 600 "$config"
+echo "$alias_name"

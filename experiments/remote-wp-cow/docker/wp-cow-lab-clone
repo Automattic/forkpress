@@ -15,11 +15,12 @@ require_env WPCOW_REMOTE_URL
 require_env WPCOW_LOCAL_URL
 
 name="${WPCOW_NAME:-example}"
+ssh_target="$(wp-cow-lab-ssh-target)"
 args=(
   clone
   --force
   --name "$name"
-  --ssh "$WPCOW_SSH"
+  --ssh "$ssh_target"
   --path "$WPCOW_PATH"
   --remote-url "$WPCOW_REMOTE_URL"
   --local-url "$WPCOW_LOCAL_URL"

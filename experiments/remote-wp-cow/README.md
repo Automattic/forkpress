@@ -57,10 +57,14 @@ Host mysite
   IdentityFile ~/.ssh/id_ed25519
 ```
 
-Docker Compose mounts your Mac `~/.ssh` read-only and forwards the Docker
-Desktop SSH agent socket at `/run/host-services/ssh-auth.sock`.
+Docker Compose mounts your Mac `~/.ssh` read-only at `/host-ssh`, copies it
+into the container, and removes Apple-only OpenSSH options such as
+`UseKeychain`. It also forwards the Docker Desktop SSH agent socket at
+`/run/host-services/ssh-auth.sock`.
 
-Set the real site values in `.env`, or export them inside the container:
+Set the real site values in `.env`, or export them inside the container.
+`WPCOW_SSH` can be either a host alias from `~/.ssh/config` or a simple SSH
+command copied from a host dashboard:
 
 ```bash
 export WPCOW_NAME=example
@@ -68,6 +72,12 @@ export WPCOW_SSH=mysite
 export WPCOW_PATH=/home/user/public_html
 export WPCOW_REMOTE_URL=https://example.com
 export WPCOW_LOCAL_URL=http://localhost:8080
+```
+
+For example, this is accepted:
+
+```bash
+export WPCOW_SSH='ssh -p18765 -i ~/.ssh/id_siteground user@example.com'
 ```
 
 For a full local WordPress runtime, clone schema, initialize local MariaDB, and

@@ -6,6 +6,18 @@ export WPCOW_HOME="${WPCOW_HOME:-/root/.wp-cow}"
 mkdir -p "$WPCOW_HOME" /mnt/wp-cow /run/mysqld /var/log
 chown -R mysql:mysql /run/mysqld /var/lib/mysql
 
+mkdir -p /root/.ssh
+chmod 700 /root/.ssh
+if [ -d /host-ssh ]; then
+  cp -a /host-ssh/. /root/.ssh/ 2>/dev/null || true
+fi
+if [ -f /root/.ssh/config ]; then
+  # Linux OpenSSH rejects Apple-specific options such as UseKeychain.
+  sed -i.bak -E '/^[[:space:]]*UseKeychain([[:space:]]|$)/Id' /root/.ssh/config
+fi
+find /root/.ssh -type d -exec chmod 700 {} + 2>/dev/null || true
+find /root/.ssh -type f -exec chmod 600 {} + 2>/dev/null || true
+
 if [ ! -d /var/lib/mysql/mysql ]; then
   mariadb-install-db \
     --user=mysql \

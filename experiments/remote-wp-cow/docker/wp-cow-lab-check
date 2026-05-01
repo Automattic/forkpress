@@ -29,10 +29,11 @@ if [ -S "${SSH_AUTH_SOCK:-}" ]; then
   echo "ssh-agent socket: $SSH_AUTH_SOCK"
   ssh-add -L >/dev/null 2>&1 && echo "ssh-agent has identities" || echo "ssh-agent is available but has no listed identities"
 else
-  echo "no ssh-agent socket; ~/.ssh is still mounted read-only"
+  echo "no ssh-agent socket; host ~/.ssh is still copied into the container"
 fi
 
 if [ -n "${WPCOW_SSH:-}" ]; then
-  ssh -G "$WPCOW_SSH" >/dev/null
-  echo "ssh config resolves: $WPCOW_SSH"
+  target="$(wp-cow-lab-ssh-target)"
+  ssh -G "$target" >/dev/null
+  echo "ssh config resolves: $target"
 fi

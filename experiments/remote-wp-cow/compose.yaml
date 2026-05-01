@@ -30,7 +30,7 @@ services:
       - wp-cow-mounts:/mnt/wp-cow
       - type: bind
         source: ${HOME}/.ssh
-        target: /root/.ssh
+        target: /host-ssh
         read_only: true
       - type: bind
         source: /run/host-services/ssh-auth.sock
