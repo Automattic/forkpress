@@ -40,9 +40,10 @@ docker compose up -d
 docker compose exec wp-cow-lab bash
 ```
 
-The Compose port mapping is created from `WPCOW_HTTP_PORT` when the container is
-created. If you want port 9481, set it in `.env` or pass it when starting the
-lab:
+The Compose host port is created from `WPCOW_HTTP_PORT` when the container is
+created. The PHP server still listens on port `8080` inside the container. If
+you want to open port 9481 on the Mac, set it in `.env` or pass it when
+starting the lab:
 
 ```bash
 WPCOW_HTTP_PORT=9481 docker compose up -d
@@ -54,6 +55,9 @@ If you change the port after the container already exists, recreate it:
 docker compose down
 WPCOW_HTTP_PORT=9481 docker compose up -d --force-recreate
 ```
+
+Inside the container, keep `WPCOW_HTTP=0.0.0.0:8080` and set
+`WPCOW_LOCAL_URL=http://localhost:9481`.
 
 Inside the container, check the lab:
 
