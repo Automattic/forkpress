@@ -45,6 +45,8 @@ curl -sS -H "Host: feature-cow.wp.localhost:$PORT" \
   -o "$TMP/branch-post-new.html"
 grep -F "Branch: feature-cow" "$TMP/branch-post-new.html" >/dev/null
 grep -F "wp.apiFetch.createNonceMiddleware" "$TMP/branch-post-new.html" >/dev/null
+grep -F 'id="menu-dashboard"' "$TMP/branch-post-new.html" >/dev/null
+grep -F 'id="menu-posts"' "$TMP/branch-post-new.html" >/dev/null
 
 REST_NONCE="$(node - <<'NODE' "$TMP/branch-post-new.html"
 const fs = require('fs');

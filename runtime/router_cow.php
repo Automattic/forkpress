@@ -107,18 +107,18 @@ function forkpress_cow_send_file(string $path): void {
     readfile($path);
 }
 
-function forkpress_cow_require_php(string $path, string $branch_root): void {
+function forkpress_cow_prepare_php_request(string $path, string $branch_root): void {
     chdir($branch_root);
     $_SERVER['DOCUMENT_ROOT'] = $branch_root;
     $_SERVER['SCRIPT_FILENAME'] = $path;
     $_SERVER['SCRIPT_NAME'] = substr($path, strlen($branch_root));
     $_SERVER['PHP_SELF'] = $_SERVER['SCRIPT_NAME'];
-    require $path;
 }
 
 if (file_exists($full_path) && !is_dir($full_path)) {
     if (strtolower(pathinfo($full_path, PATHINFO_EXTENSION)) === 'php') {
-        forkpress_cow_require_php($full_path, $branch_root);
+        forkpress_cow_prepare_php_request($full_path, $branch_root);
+        require $full_path;
         return true;
     }
     forkpress_cow_send_file($full_path);
@@ -128,10 +128,12 @@ if (file_exists($full_path) && !is_dir($full_path)) {
 if (is_dir($full_path)) {
     $index = rtrim($full_path, '/') . '/index.php';
     if (file_exists($index)) {
-        forkpress_cow_require_php($index, $branch_root);
+        forkpress_cow_prepare_php_request($index, $branch_root);
+        require $index;
         return true;
     }
 }
 
-forkpress_cow_require_php($branch_root . '/index.php', $branch_root);
+forkpress_cow_prepare_php_request($branch_root . '/index.php', $branch_root);
+require $branch_root . '/index.php';
 return true;

@@ -107,23 +107,24 @@ function forkpress_cas_send_file(string $path): void {
     readfile($path);
 }
 
-function forkpress_cas_require_php(string $path, string $branch, string $wp_root): void {
+function forkpress_cas_prepare_php_request(string $path, string $wp_root): void {
     chdir($wp_root);
     $_SERVER['DOCUMENT_ROOT'] = $wp_root;
     $_SERVER['SCRIPT_FILENAME'] = $wp_root . '/' . $path;
     $_SERVER['SCRIPT_NAME'] = '/' . $path;
     $_SERVER['PHP_SELF'] = $_SERVER['SCRIPT_NAME'];
-    require "branchfs://$branch/$path";
 }
 
 if (is_file($file)) {
     if (strtolower(pathinfo($target, PATHINFO_EXTENSION)) === 'php') {
-        forkpress_cas_require_php($target, $branch, $wp_root);
+        forkpress_cas_prepare_php_request($target, $wp_root);
+        require "branchfs://$branch/$target";
         return true;
     }
     forkpress_cas_send_file($file);
     return true;
 }
 
-forkpress_cas_require_php('index.php', $branch, $wp_root);
+forkpress_cas_prepare_php_request('index.php', $wp_root);
+require "branchfs://$branch/index.php";
 return true;
