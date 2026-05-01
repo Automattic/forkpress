@@ -295,7 +295,7 @@ dependencies = [
 
 [[package]]
 name = "forkpress"
-version = "0.1.12-layout.1"
+version = "0.1.12-layout.2"
 dependencies = [
  "anyhow",
  "clap",
