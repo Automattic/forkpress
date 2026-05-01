@@ -1636,62 +1636,7 @@ function branchctl_is_readonly_cmd(string $cmd): bool {
  * audit_log" would otherwise slip through.
  */
 function branchctl_is_allowed_ddl(string $sql): bool {
-    // Normalize: strip leading whitespace + any SQL comments at the head.
-    $s = ltrim($sql);
-    // Strip leading SQL line & block comments until we hit real code.
-    while (true) {
-        if (strncmp($s, '--', 2) === 0) {
-            $eol = strpos($s, "\n");
-            $s = ($eol === false) ? '' : ltrim(substr($s, $eol + 1));
-            continue;
-        }
-        if (strncmp($s, '/*', 2) === 0) {
-            $end = strpos($s, '*/', 2);
-            if ($end === false) return false;
-            $s = ltrim(substr($s, $end + 2));
-            continue;
-        }
-        break;
-    }
-    if ($s === '') return false;
-
-    // Strip a trailing semicolon + whitespace so "ALTER TABLE x;" is OK.
-    // Reject multi-statement: any semicolon NOT at the trailing tail means
-    // a second statement follows.
-    $trimmed = rtrim($s, " \t\r\n;");
-    if (strpos($trimmed, ';') !== false) {
-        // A semicolon inside a string literal is fine; we do a quick
-        // scan that tracks single quotes only (DDL has no need for
-        // complex quoting — column names are backticked/double-quoted
-        // identifiers, not strings).
-        $in = false;
-        $len = strlen($trimmed);
-        for ($i = 0; $i < $len; $i++) {
-            $c = $trimmed[$i];
-            if ($c === "'") {
-                // Handle '' escape.
-                if ($in && $i + 1 < $len && $trimmed[$i + 1] === "'") {
-                    $i++;
-                    continue;
-                }
-                $in = !$in;
-            } elseif (!$in && $c === ';') {
-                return false;  // multi-statement
-            }
-        }
-    }
-
-    $up = strtoupper($trimmed);
-    // ALTER TABLE (add/drop/rename column, rename to) — BranchedPDO handles
-    // the view-rebuild. Note we accept RENAME TO even though BranchedPDO
-    // rejects it; BranchedPDO will surface its own RuntimeException.
-    if (preg_match('/^ALTER\s+TABLE\b/i', $trimmed)) return true;
-    // CREATE [UNIQUE] INDEX [IF NOT EXISTS] … ON …
-    if (preg_match('/^CREATE\s+(UNIQUE\s+)?INDEX\b/i', $trimmed)) return true;
-    // DROP INDEX [IF EXISTS] …
-    if (preg_match('/^DROP\s+INDEX\b/i', $trimmed)) return true;
-
-    return false;
+    return cow_sql_is_allowed_ddl($sql);
 }
 
 // Ensure the .fp has an audit_log table + triggers before the principal

@@ -28,15 +28,11 @@
 // is touched. For ~22 typical WP tables, branch create is milliseconds
 // regardless of row count.
 
+require_once __DIR__ . '/cow_sql_ast.php';
+
 /** Quote a SQLite identifier with double quotes. */
 function cow_quote_identifier(string $name): string {
     return '"' . str_replace('"', '""', $name) . '"';
-}
-
-/** Regex fragment matching the common SQLite/MySQL identifier spellings. */
-function cow_identifier_regex(string $name): string {
-    $quoted = preg_quote($name, '/');
-    return '(?:`' . $quoted . '`|"' . $quoted . '"|\[' . $quoted . '\]|' . $quoted . ')';
 }
 
 /** Rewrite a CREATE TABLE statement to target a new table name.
@@ -47,53 +43,13 @@ function cow_identifier_regex(string $name): string {
  *  left branch views pointing at missing __overlay tables.
  */
 function cow_rewrite_create_table_name(string $ddl, string $old_name, string $new_name): string {
-    $pattern = '/^(CREATE\s+TABLE\s+)(?:IF\s+NOT\s+EXISTS\s+)?'
-             . cow_identifier_regex($old_name)
-             . '(\s*\()/is';
-    $count = 0;
-    $rewritten = preg_replace_callback(
-        $pattern,
-        fn($m) => $m[1] . 'IF NOT EXISTS ' . cow_quote_identifier($new_name) . $m[2],
-        $ddl,
-        1,
-        $count
-    );
-    if ($rewritten === null || $count !== 1) {
-        throw new RuntimeException("could not rewrite CREATE TABLE DDL for $old_name");
-    }
-    return $rewritten;
+    return cow_sql_rewrite_create_table_name($ddl, $old_name, $new_name);
 }
 
 /** Rewrite a CREATE INDEX statement to target a new index name and table. */
 function cow_rewrite_create_index(string $ddl, string $old_index, string $new_index,
                                   string $old_table, string $new_table): string {
-    $index_pattern = '/^(CREATE\s+(?:UNIQUE\s+)?INDEX\s+)(?:IF\s+NOT\s+EXISTS\s+)?'
-                   . cow_identifier_regex($old_index) . '/is';
-    $count = 0;
-    $rewritten = preg_replace_callback(
-        $index_pattern,
-        fn($m) => $m[1] . 'IF NOT EXISTS ' . cow_quote_identifier($new_index),
-        $ddl,
-        1,
-        $count
-    );
-    if ($rewritten === null || $count !== 1) {
-        throw new RuntimeException("could not rewrite CREATE INDEX DDL for $old_index");
-    }
-
-    $table_pattern = '/(\bON\s+)' . cow_identifier_regex($old_table) . '(\s*\()/is';
-    $count = 0;
-    $rewritten = preg_replace_callback(
-        $table_pattern,
-        fn($m) => $m[1] . cow_quote_identifier($new_table) . $m[2],
-        $rewritten,
-        1,
-        $count
-    );
-    if ($rewritten === null || $count !== 1) {
-        throw new RuntimeException("could not retarget CREATE INDEX DDL for $old_index");
-    }
-    return $rewritten;
+    return cow_sql_rewrite_create_index($ddl, $old_index, $new_index, $old_table, $new_table);
 }
 
 function cow_sql_literal($value): string {
@@ -992,12 +948,12 @@ function cow_create_branch_table(SQLite3 $db, int $branch_id, int $parent_id,
         : '';
     $idxs = [];
     $ix = $db->query(
-        "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='"
+        "SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name='"
         . SQLite3::escapeString($ddl_source) . "' AND sql IS NOT NULL"
     );
     $parent_prefix_for_idx = "b{$parent_id}_wp_";
     $branch_prefix_for_idx = "b{$branch_id}_wp_";
-    while ($irow = $ix->fetchArray(SQLITE3_NUM)) {
+    while ($irow = $ix->fetchArray(SQLITE3_ASSOC)) {
         // Rewrite the parent-side index DDL to reference the branch's
         // logical names. This keeps schema_normalize_index_ddl producing
         // the SAME normalized key for "ancestor index" and "branch's
@@ -1005,12 +961,15 @@ function cow_create_branch_table(SQLite3 $db, int $branch_id, int $parent_id,
         // in the schema diff. Without this rewrite, the ancestor DDL
         // would still embed the parent's prefix, never normalizing to
         // match the branch's prefix-rewritten overlay index.
-        $isql = $irow[0];
-        // Just str_replace the prefix; the schema-merge normalization will
-        // strip it again on both sides. We avoid regex quote/identifier
-        // matching here because the DDL may use bare or quoted forms.
-        $isql = str_replace($parent_prefix_for_idx, $branch_prefix_for_idx, $isql);
-        $idxs[] = $isql;
+        $old_idx_name = (string)$irow['name'];
+        $new_idx_name = str_replace($parent_prefix_for_idx, $branch_prefix_for_idx, $old_idx_name);
+        $idxs[] = cow_rewrite_create_index(
+            (string)$irow['sql'],
+            $old_idx_name,
+            $new_idx_name,
+            $ddl_source,
+            $logical_name
+        );
     }
     $sch = $db->prepare(
         "INSERT OR REPLACE INTO db_snapshots_schema "

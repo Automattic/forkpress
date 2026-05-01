@@ -67,11 +67,18 @@ class BranchedPDO extends PDO
     }
 
     /** Convenience factory: `BranchedPDO::connect($fp, $branch)`. */
-    public static function connect(string $site_fp, string $branch,
-                                   array $options = []): self
+    public static function connect(string $dsn, ?string $username = null,
+                                   #[\SensitiveParameter] $password = null,
+                                   ?array $options = null): static
     {
-        return new self('sqlite:' . $site_fp, null, null, $options ?: null,
-                        $branch, $site_fp);
+        $site_fp = (string)preg_replace('#^sqlite:#', '', $dsn);
+        $branch = (string)($username ?? 'main');
+        if (is_array($password) && $options === null) {
+            $options = $password;
+        }
+
+        return new static('sqlite:' . $site_fp, null, null, $options ?: null,
+                          $branch, $site_fp);
     }
 
     /**
@@ -129,43 +136,19 @@ class BranchedPDO extends PDO
      * branch view (passes through unchanged).
      */
     private function maybe_route_ddl(string $sql) {
-        $trimmed = ltrim($sql);
-        // Quick reject: cheap prefix check before the regex pile.
-        $u4 = strtoupper(substr($trimmed, 0, 4));
-        if ($u4 !== 'ALTE' && $u4 !== 'CREA' && $u4 !== 'DROP') return false;
-
-        // -- ALTER TABLE <name> ADD/DROP/RENAME ... ----------------------
-        if (preg_match(
-            '/^ALTER\s+TABLE\s+(?:"([^"]+)"|`([^`]+)`|\[([^\]]+)\]|([A-Za-z_][A-Za-z0-9_]*))\s+(.+)$/is',
-            $trimmed, $m
-        )) {
-            $name  = $m[1] !== '' ? $m[1] : ($m[2] !== '' ? $m[2] : ($m[3] !== '' ? $m[3] : $m[4]));
-            $rest  = $m[5];
-            return $this->route_alter_table($name, $rest, $sql);
+        $analysis = cow_sql_analyze_ddl($sql);
+        if ($analysis === null) {
+            return false;
         }
 
-        // -- CREATE [UNIQUE] INDEX <name> ON <table>(...) ----------------
-        if (preg_match(
-            '/^CREATE\s+(UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?'
-          . '(?:"([^"]+)"|`([^`]+)`|\[([^\]]+)\]|([A-Za-z_][A-Za-z0-9_]*))\s+'
-          . 'ON\s+(?:"([^"]+)"|`([^`]+)`|\[([^\]]+)\]|([A-Za-z_][A-Za-z0-9_]*))\s*(\(.+)$/is',
-            $trimmed, $m
-        )) {
-            $unique   = !empty($m[1]);
-            $idx_name = $m[2] !== '' ? $m[2] : ($m[3] !== '' ? $m[3] : ($m[4] !== '' ? $m[4] : $m[5]));
-            $tbl_name = $m[6] !== '' ? $m[6] : ($m[7] !== '' ? $m[7] : ($m[8] !== '' ? $m[8] : $m[9]));
-            $rest     = $m[10];
-            return $this->route_create_index($unique, $idx_name, $tbl_name, $rest, $sql);
+        if ($analysis['type'] === 'alter_table') {
+            return $this->route_alter_table($analysis, $sql);
         }
-
-        // -- DROP INDEX [IF EXISTS] <name> --------------------------------
-        if (preg_match(
-            '/^DROP\s+INDEX\s+(?:IF\s+EXISTS\s+)?'
-          . '(?:"([^"]+)"|`([^`]+)`|\[([^\]]+)\]|([A-Za-z_][A-Za-z0-9_]*))\s*;?\s*$/is',
-            $trimmed, $m
-        )) {
-            $idx_name = $m[1] !== '' ? $m[1] : ($m[2] !== '' ? $m[2] : ($m[3] !== '' ? $m[3] : $m[4]));
-            return $this->route_drop_index($idx_name);
+        if ($analysis['type'] === 'create_index') {
+            return $this->route_create_index($analysis, $sql);
+        }
+        if ($analysis['type'] === 'drop_index') {
+            return $this->route_drop_index_statement($analysis);
         }
 
         return false;
@@ -175,17 +158,14 @@ class BranchedPDO extends PDO
      * Route an ALTER TABLE on a branch view to the underlying overlay,
      * recreating the view + triggers if the column list changed.
      */
-    private function route_alter_table(string $table, string $rest, string $original_sql) {
-        $kind = $this->classify_alter($rest);
+    private function route_alter_table(array $analysis, string $original_sql) {
+        $table = (string)$analysis['table'];
+        $kind = (string)$analysis['alter_kind'];
         if (!$this->is_branch_view($table)) {
             return false;  // not a branch view; pass through to PDO
         }
         $overlay = $table . '__overlay';
-        $rebuilt = preg_replace(
-            '/^ALTER\s+TABLE\s+("?[^"\s]+"?|`[^`]+`|\[[^\]]+\]|[A-Za-z_][A-Za-z0-9_]*)/is',
-            'ALTER TABLE "' . $overlay . '"',
-            $original_sql, 1
-        );
+        $rebuilt = cow_sql_rewrite_table_reference($original_sql, $analysis, $overlay);
 
         if ($kind === 'ADD_COLUMN') {
             parent::exec($rebuilt);
@@ -218,18 +198,6 @@ class BranchedPDO extends PDO
         // Unrecognized ALTER form — let PDO try it on the view. SQLite
         // will likely reject; user sees the real error.
         return false;
-    }
-
-    private function classify_alter(string $rest): string {
-        $up = strtoupper(ltrim($rest));
-        if (strncmp($up, 'ADD COLUMN', 10) === 0)    return 'ADD_COLUMN';
-        if (strncmp($up, 'ADD ', 4) === 0)           return 'ADD_COLUMN';
-        if (strncmp($up, 'DROP COLUMN', 11) === 0)   return 'DROP_COLUMN';
-        if (strncmp($up, 'DROP ', 5) === 0)          return 'DROP_COLUMN';
-        if (strncmp($up, 'RENAME COLUMN', 13) === 0) return 'RENAME_COLUMN';
-        if (strncmp($up, 'RENAME TO', 9) === 0)      return 'RENAME_TO';
-        if (strncmp($up, 'RENAME ', 7) === 0)        return 'RENAME_COLUMN';
-        return 'UNKNOWN';
     }
 
     /**
@@ -377,18 +345,30 @@ class BranchedPDO extends PDO
         return $logical;
     }
 
-    /** Route CREATE [UNIQUE] INDEX on a branch view to the overlay. */
-    private function route_create_index(bool $unique, string $idx_name,
-                                        string $tbl_name, string $cols_clause,
-                                        string $original_sql) {
+    /** Route CREATE INDEX on a branch view to the overlay. */
+    private function route_create_index(array $analysis, string $original_sql) {
+        $idx_name = (string)$analysis['index'];
+        $tbl_name = (string)$analysis['table'];
         if (!$this->is_branch_view($tbl_name)) {
             return false;
         }
         $overlay   = $tbl_name . '__overlay';
-        $unique_kw = $unique ? 'UNIQUE ' : '';
-        $sql = "CREATE {$unique_kw}INDEX IF NOT EXISTS \"$idx_name\" ON \"$overlay\" $cols_clause";
+        $sql = cow_sql_rewrite_create_index(
+            $original_sql,
+            $idx_name,
+            $idx_name,
+            $tbl_name,
+            $overlay
+        );
         parent::exec($sql);
         return true;
+    }
+
+    private function route_drop_index_statement(array $analysis) {
+        if (isset($analysis['table']) && !$this->is_branch_view((string)$analysis['table'])) {
+            return false;
+        }
+        return $this->route_drop_index((string)$analysis['index']);
     }
 
     /** DROP INDEX. Works on overlay-owned indexes; refuses parent-owned. */
