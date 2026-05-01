@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "wp-cow:"
+wp-cow --help | sed -n '1,8p'
+
+echo
+echo "tools:"
+ssh -V 2>&1
+php -v | sed -n '1p'
+mysql --version
+mysqldump --version
+
+echo
+echo "fuse:"
+if [ ! -e /dev/fuse ]; then
+  echo "missing /dev/fuse; start this lab with docker compose so the FUSE device is passed through" >&2
+  exit 1
+fi
+ls -l /dev/fuse
+
+echo
+echo "local mysql:"
+mysqladmin --protocol=tcp --host=127.0.0.1 --port=33071 --user=root ping
+
+echo
+echo "ssh:"
+if [ -S "${SSH_AUTH_SOCK:-}" ]; then
+  echo "ssh-agent socket: $SSH_AUTH_SOCK"
+  ssh-add -L >/dev/null 2>&1 && echo "ssh-agent has identities" || echo "ssh-agent is available but has no listed identities"
+else
+  echo "no ssh-agent socket; ~/.ssh is still mounted read-only"
+fi
+
+if [ -n "${WPCOW_SSH:-}" ]; then
+  ssh -G "$WPCOW_SSH" >/dev/null
+  echo "ssh config resolves: $WPCOW_SSH"
+fi

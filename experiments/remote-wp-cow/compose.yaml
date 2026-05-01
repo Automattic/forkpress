@@ -1,0 +1,41 @@
+services:
+  wp-cow-lab:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: wp-cow-lab
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+    devices:
+      - /dev/fuse:/dev/fuse
+    security_opt:
+      - apparmor:unconfined
+    ports:
+      - "${WPCOW_HTTP_PORT:-8080}:8080"
+    environment:
+      WPCOW_HOME: /root/.wp-cow
+      WPCOW_NAME: "${WPCOW_NAME:-example}"
+      WPCOW_SSH: "${WPCOW_SSH:-}"
+      WPCOW_PATH: "${WPCOW_PATH:-}"
+      WPCOW_REMOTE_URL: "${WPCOW_REMOTE_URL:-}"
+      WPCOW_LOCAL_URL: "${WPCOW_LOCAL_URL:-http://localhost:8080}"
+      WPCOW_SKIP_SCHEMA: "${WPCOW_SKIP_SCHEMA:-0}"
+      WPCOW_NO_PROBE: "${WPCOW_NO_PROBE:-0}"
+      WPCOW_MOUNTPOINT: "/mnt/wp-cow/${WPCOW_NAME:-example}"
+      WPCOW_HTTP: 0.0.0.0:8080
+      SSH_AUTH_SOCK: /run/host-services/ssh-auth.sock
+    volumes:
+      - wp-cow-state:/root/.wp-cow
+      - wp-cow-mounts:/mnt/wp-cow
+      - type: bind
+        source: ${HOME}/.ssh
+        target: /root/.ssh
+        read_only: true
+      - type: bind
+        source: /run/host-services/ssh-auth.sock
+        target: /run/host-services/ssh-auth.sock
+
+volumes:
+  wp-cow-state:
+  wp-cow-mounts:

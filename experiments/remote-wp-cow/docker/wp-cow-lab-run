@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+name="${WPCOW_NAME:-example}"
+mountpoint="${WPCOW_MOUNTPOINT:-/mnt/wp-cow/$name}"
+http="${WPCOW_HTTP:-0.0.0.0:8080}"
+
+mkdir -p "$mountpoint"
+echo "running $name at http://localhost:${http##*:}/ from $mountpoint"
+exec wp-cow run "$name" --mountpoint "$mountpoint" --http "$http"

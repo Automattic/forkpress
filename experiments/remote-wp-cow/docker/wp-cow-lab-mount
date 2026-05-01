@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+name="${WPCOW_NAME:-example}"
+mountpoint="${WPCOW_MOUNTPOINT:-/mnt/wp-cow/$name}"
+
+mkdir -p "$mountpoint"
+echo "mounting $name at $mountpoint"
+echo "this command stays in the foreground; open another shell with: docker compose exec wp-cow-lab bash"
+exec wp-cow mount "$name" --mountpoint "$mountpoint"

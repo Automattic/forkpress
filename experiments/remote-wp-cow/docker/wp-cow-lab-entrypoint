@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export WPCOW_HOME="${WPCOW_HOME:-/root/.wp-cow}"
+
+mkdir -p "$WPCOW_HOME" /mnt/wp-cow /run/mysqld /var/log
+chown -R mysql:mysql /run/mysqld /var/lib/mysql
+
+if [ ! -d /var/lib/mysql/mysql ]; then
+  mariadb-install-db \
+    --user=mysql \
+    --datadir=/var/lib/mysql \
+    --auth-root-authentication-method=normal \
+    >/var/log/wp-cow-mariadb-install.log 2>&1
+fi
+
+if ! mysqladmin --protocol=tcp --host=127.0.0.1 --port=33071 --user=root ping >/dev/null 2>&1; then
+  mariadbd \
+    --user=mysql \
+    --datadir=/var/lib/mysql \
+    --socket=/run/mysqld/mysqld.sock \
+    --bind-address=127.0.0.1 \
+    --port=33071 \
+    --skip-networking=0 \
+    --skip-name-resolve \
+    --skip-grant-tables \
+    >/var/log/wp-cow-mariadb.log 2>&1 &
+
+  for _ in $(seq 1 80); do
+    if mysqladmin --protocol=tcp --host=127.0.0.1 --port=33071 --user=root ping >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.25
+  done
+fi
+
+if ! mysqladmin --protocol=tcp --host=127.0.0.1 --port=33071 --user=root ping >/dev/null 2>&1; then
+  echo "MariaDB did not start. See /var/log/wp-cow-mariadb.log" >&2
+  exit 1
+fi
+
+exec "$@"

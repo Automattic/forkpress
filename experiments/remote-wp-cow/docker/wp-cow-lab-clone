@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+require_env() {
+  local name="$1"
+  if [ -z "${!name:-}" ]; then
+    echo "missing required environment variable: $name" >&2
+    exit 2
+  fi
+}
+
+require_env WPCOW_SSH
+require_env WPCOW_PATH
+require_env WPCOW_REMOTE_URL
+require_env WPCOW_LOCAL_URL
+
+name="${WPCOW_NAME:-example}"
+args=(
+  clone
+  --force
+  --name "$name"
+  --ssh "$WPCOW_SSH"
+  --path "$WPCOW_PATH"
+  --remote-url "$WPCOW_REMOTE_URL"
+  --local-url "$WPCOW_LOCAL_URL"
+)
+
+if [ "${WPCOW_NO_PROBE:-0}" = "1" ]; then
+  args+=(--no-probe)
+fi
+
+if [ "${WPCOW_SKIP_SCHEMA:-0}" = "1" ]; then
+  args+=(--skip-schema)
+fi
+
+wp-cow "${args[@]}"
+
+if [ "${WPCOW_SKIP_SCHEMA:-0}" != "1" ] && [ "${WPCOW_NO_PROBE:-0}" != "1" ]; then
+  wp-cow init-db "$name"
+fi
+
+echo
+echo "clone ready: $name"
+echo "mount files with: wp-cow-lab-mount"
+echo "run local PHP with: wp-cow-lab-run"
