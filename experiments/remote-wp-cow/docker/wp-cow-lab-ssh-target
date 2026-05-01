@@ -127,22 +127,7 @@ if [[ "$host" == *@* ]]; then
 fi
 
 tmp="${config}.tmp"
-awk -v alias="$alias_name" '
-  BEGIN { skip = 0 }
-  /^[[:space:]]*Host[[:space:]]+/ {
-    skip = 0
-    for (i = 2; i <= NF; i++) {
-      if ($i == alias) {
-        skip = 1
-      }
-    }
-  }
-  skip == 0 { print }
-' "$config" > "$tmp"
-mv "$tmp" "$config"
-
 {
-  echo
   echo "Host $alias_name"
   echo "  HostName $host"
   if [ -n "$user" ]; then
@@ -162,7 +147,21 @@ mv "$tmp" "$config"
       echo "  $key $value"
     fi
   done
-} >> "$config"
+  echo
+  awk -v alias="$alias_name" '
+    BEGIN { skip = 0 }
+    /^[[:space:]]*Host[[:space:]]+/ {
+      skip = 0
+      for (i = 2; i <= NF; i++) {
+        if ($i == alias) {
+          skip = 1
+        }
+      }
+    }
+    skip == 0 { print }
+  ' "$config"
+} > "$tmp"
+mv "$tmp" "$config"
 
 chmod 600 "$config"
 echo "$alias_name"
