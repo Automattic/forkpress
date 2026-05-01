@@ -6,5 +6,9 @@ mountpoint="${WPCOW_MOUNTPOINT:-/mnt/wp-cow/$name}"
 http="${WPCOW_HTTP:-0.0.0.0:8080}"
 
 mkdir -p "$mountpoint"
+if [ ! -f "${WPCOW_HOME:-/root/.wp-cow}/clones/$name/db/schema.sql" ]; then
+  echo "warning: ${WPCOW_HOME:-/root/.wp-cow}/clones/$name/db/schema.sql is missing" >&2
+  echo "WordPress will likely show a database connection error. Run wp-cow-lab-db-init first." >&2
+fi
 echo "running $name at http://localhost:${http##*:}/ from $mountpoint"
 exec wp-cow run "$name" --mountpoint "$mountpoint" --http "$http"

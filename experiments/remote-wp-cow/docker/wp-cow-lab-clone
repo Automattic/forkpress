@@ -38,6 +38,10 @@ wp-cow "${args[@]}"
 
 if [ "${WPCOW_SKIP_SCHEMA:-0}" != "1" ] && [ "${WPCOW_NO_PROBE:-0}" != "1" ]; then
   wp-cow init-db "$name"
+else
+  echo
+  echo "warning: DB schema was not initialized, so wp-cow-lab-run will not boot full WordPress yet." >&2
+  echo "run wp-cow-lab-db-init before opening the site in a browser." >&2
 fi
 
 echo

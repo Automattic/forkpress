@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+name="${WPCOW_NAME:-example}"
+
+if [ ! -f "${WPCOW_HOME:-/root/.wp-cow}/clones/$name/manifest.json" ]; then
+  echo "clone '$name' does not exist yet; run wp-cow-lab-clone first" >&2
+  exit 2
+fi
+
+echo "exporting remote schema for $name"
+wp-cow export-schema "$name"
+
+echo "initializing local MariaDB schema for $name"
+wp-cow init-db "$name"
+
+echo
+echo "database schema is ready. Remote read queries will be routed by wp-content/db.php."

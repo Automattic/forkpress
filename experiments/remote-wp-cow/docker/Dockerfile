@@ -36,6 +36,8 @@ COPY docker/wp-cow-lab-mount /usr/local/bin/wp-cow-lab-mount
 COPY docker/wp-cow-lab-run /usr/local/bin/wp-cow-lab-run
 COPY docker/wp-cow-lab-ssh-target /usr/local/bin/wp-cow-lab-ssh-target
 COPY docker/wp-cow-lab-dns /usr/local/bin/wp-cow-lab-dns
+COPY docker/wp-cow-lab-db-init /usr/local/bin/wp-cow-lab-db-init
+COPY docker/wp-cow-lab-cache /usr/local/bin/wp-cow-lab-cache
 RUN chmod +x /usr/local/bin/wp-cow-lab-*
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/wp-cow-lab-entrypoint"]

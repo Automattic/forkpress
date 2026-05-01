@@ -27,6 +27,7 @@ services:
       WPCOW_NO_PROBE: "${WPCOW_NO_PROBE:-0}"
       WPCOW_DNS1: "${WPCOW_DNS1:-1.1.1.1}"
       WPCOW_DNS2: "${WPCOW_DNS2:-8.8.8.8}"
+      WPCOW_CACHE_MAX_FILE_MB: "${WPCOW_CACHE_MAX_FILE_MB:-64}"
       WPCOW_MOUNTPOINT: "/mnt/wp-cow/${WPCOW_NAME:-example}"
       WPCOW_HTTP: 0.0.0.0:8080
       SSH_AUTH_SOCK: /run/host-services/ssh-auth.sock

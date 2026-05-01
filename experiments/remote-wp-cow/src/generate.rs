@@ -291,6 +291,7 @@ mod tests {
             },
             control_url: "http://127.0.0.1:39070".to_string(),
             cache_max_file_bytes: 1024,
+            remote_metadata_cache_ttl_secs: 30,
         }
     }
 

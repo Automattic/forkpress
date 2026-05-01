@@ -26,6 +26,8 @@ enum Command {
     Clone(CloneArgs),
     #[command(name = "init-db")]
     InitDb(NameArgs),
+    #[command(name = "export-schema")]
+    ExportSchema(NameArgs),
     #[command(name = "materialize")]
     Materialize(MaterializeArgs),
     #[command(name = "mount")]
@@ -109,6 +111,7 @@ pub fn run() -> Result<()> {
     match cli.command {
         Command::Clone(args) => clone_site(args),
         Command::InitDb(args) => init_db(args),
+        Command::ExportSchema(args) => export_schema(args),
         Command::Materialize(args) => materialize(args),
         Command::Mount(args) => mount(args),
         Command::Run(args) => run_clone(args),
@@ -186,6 +189,17 @@ fn init_db(args: NameArgs) -> Result<()> {
     let manifest = load_manifest(&paths.manifest)?;
     db::init_local_db(&manifest, &paths)?;
     println!("initialized local database '{}'", manifest.local_db.name);
+    Ok(())
+}
+
+fn export_schema(args: NameArgs) -> Result<()> {
+    let state_dir = args.state_dir.unwrap_or(default_state_dir()?);
+    let paths = clone_paths(&state_dir, &args.name);
+    let manifest = load_manifest(&paths.manifest)?;
+    let remote = RemoteClient::new(manifest.clone(), Some(paths.run.join("ssh-control.sock")));
+    remote.ensure_master()?;
+    db::export_schema(&remote, &paths)?;
+    println!("exported remote schema for '{}'", manifest.name);
     Ok(())
 }
 

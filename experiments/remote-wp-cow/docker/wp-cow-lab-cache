@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+name="${WPCOW_NAME:-example}"
+root="${WPCOW_HOME:-/root/.wp-cow}/clones/$name"
+cache="$root/file-cache"
+mountpoint="${WPCOW_MOUNTPOINT:-/mnt/wp-cow/$name}"
+cmd="${1:-status}"
+
+case "$cmd" in
+  status)
+    echo "cache directory: $cache"
+    if [ -d "$cache" ]; then
+      du -sh "$cache" 2>/dev/null || true
+      find "$cache" -type f 2>/dev/null | wc -l | awk '{ print "cached files: " $1 }'
+    else
+      echo "cache directory does not exist yet"
+    fi
+    ;;
+  clear)
+    rm -rf "$cache"
+    mkdir -p "$cache"
+    echo "cleared $cache"
+    ;;
+  warm-core)
+    for path in \
+      index.php \
+      wp-blog-header.php \
+      wp-load.php \
+      wp-settings.php \
+      wp-includes/version.php \
+      wp-includes/load.php \
+      wp-includes/plugin.php
+    do
+      if [ -e "$mountpoint/$path" ]; then
+        dd if="$mountpoint/$path" of=/dev/null bs=1M status=none || true
+      fi
+    done
+    "$0" status
+    ;;
+  *)
+    echo "usage: wp-cow-lab-cache [status|clear|warm-core]" >&2
+    exit 2
+    ;;
+esac

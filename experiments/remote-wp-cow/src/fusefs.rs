@@ -10,7 +10,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::config::{ClonePaths, Manifest};
 use crate::overlay::OverlayStore;
@@ -18,6 +18,12 @@ use crate::remote::{RemoteClient, RemoteEntry};
 
 const ROOT_INO: u64 = 1;
 const TTL: Duration = Duration::from_secs(1);
+
+#[derive(Clone)]
+struct Timed<T> {
+    value: T,
+    expires_at: Instant,
+}
 
 enum Handle {
     Local(File),
@@ -33,6 +39,9 @@ pub struct CowFs {
     next_ino: u64,
     handles: HashMap<u64, Handle>,
     next_fh: u64,
+    remote_stat_cache: HashMap<PathBuf, Timed<RemoteEntry>>,
+    remote_readdir_cache: HashMap<PathBuf, Timed<Vec<RemoteEntry>>>,
+    remote_cache_ttl: Duration,
     uid: u32,
     gid: u32,
 }
@@ -43,6 +52,7 @@ impl CowFs {
         let mut path_to_ino = HashMap::new();
         ino_to_path.insert(ROOT_INO, PathBuf::new());
         path_to_ino.insert(PathBuf::new(), ROOT_INO);
+        let remote_cache_ttl = Duration::from_secs(manifest.remote_metadata_cache_ttl_secs);
         Self {
             manifest,
             remote,
@@ -52,6 +62,9 @@ impl CowFs {
             next_ino: ROOT_INO + 1,
             handles: HashMap::new(),
             next_fh: 1,
+            remote_stat_cache: HashMap::new(),
+            remote_readdir_cache: HashMap::new(),
+            remote_cache_ttl,
             uid: unsafe { libc::getuid() },
             gid: unsafe { libc::getgid() },
         }
@@ -93,8 +106,62 @@ impl CowFs {
             return Ok(self.attr_from_metadata(ino, &metadata));
         }
 
-        let entry = self.remote.stat(rel)?;
+        let entry = self.remote_stat(rel)?;
         Ok(self.attr_from_remote(ino, &entry))
+    }
+
+    fn remote_stat(&mut self, rel: &Path) -> io::Result<RemoteEntry> {
+        if let Some(cached) = self.remote_stat_cache.get(rel) {
+            if cached.expires_at > Instant::now() {
+                return Ok(cached.value.clone());
+            }
+        }
+
+        let entry = self.remote.stat(rel)?;
+        self.remote_stat_cache.insert(
+            rel.to_path_buf(),
+            Timed {
+                value: entry.clone(),
+                expires_at: Instant::now() + self.remote_cache_ttl,
+            },
+        );
+        Ok(entry)
+    }
+
+    fn remote_readdir(&mut self, rel: &Path) -> io::Result<Vec<RemoteEntry>> {
+        if let Some(cached) = self.remote_readdir_cache.get(rel) {
+            if cached.expires_at > Instant::now() {
+                return Ok(cached.value.clone());
+            }
+        }
+
+        let entries = self.remote.readdir(rel)?;
+        let expires_at = Instant::now() + self.remote_cache_ttl;
+        for entry in &entries {
+            self.remote_stat_cache.insert(
+                rel.join(&entry.name),
+                Timed {
+                    value: entry.clone(),
+                    expires_at,
+                },
+            );
+        }
+        self.remote_readdir_cache.insert(
+            rel.to_path_buf(),
+            Timed {
+                value: entries.clone(),
+                expires_at,
+            },
+        );
+        Ok(entries)
+    }
+
+    fn invalidate_remote_cache(&mut self, rel: &Path) {
+        self.remote_stat_cache.remove(rel);
+        self.remote_readdir_cache.remove(rel);
+        if let Some(parent) = rel.parent() {
+            self.remote_readdir_cache.remove(parent);
+        }
     }
 
     fn attr_from_metadata(&self, ino: u64, metadata: &fs::Metadata) -> FileAttr {
@@ -232,6 +299,7 @@ impl Filesystem for CowFs {
             fs::create_dir_all(&upper)?;
             fs::set_permissions(&upper, fs::Permissions::from_mode(mode & 0o7777))?;
             self.overlay.clear_whiteout(&rel).map_err(anyhow_to_io)?;
+            self.invalidate_remote_cache(&rel);
             let ino = self.ino_for_path(&rel);
             self.attr_for_path(&rel, ino)
         })();
@@ -272,7 +340,7 @@ impl Filesystem for CowFs {
             }
 
             if !old_upper.exists() {
-                let entry = self.remote.stat(&old_rel)?;
+                let entry = self.remote_stat(&old_rel)?;
                 if entry.kind == "dir" {
                     return Err(io::Error::from_raw_os_error(ENOTSUP));
                 }
@@ -286,6 +354,8 @@ impl Filesystem for CowFs {
             self.overlay
                 .clear_whiteout(&new_rel)
                 .map_err(anyhow_to_io)?;
+            self.invalidate_remote_cache(&old_rel);
+            self.invalidate_remote_cache(&new_rel);
             let ino = self.ino_for_path(&new_rel);
             self.ino_to_path.insert(ino, new_rel.clone());
             self.path_to_ino.insert(new_rel, ino);
@@ -437,6 +507,7 @@ impl Filesystem for CowFs {
                 .mode(mode & 0o7777);
             let file = opts.open(&upper)?;
             self.overlay.clear_whiteout(&rel).map_err(anyhow_to_io)?;
+            self.invalidate_remote_cache(&rel);
             let ino = self.ino_for_path(&rel);
             let attr = self.attr_for_path(&rel, ino)?;
             let fh = self.allocate_handle(Handle::Local(file));
@@ -512,9 +583,10 @@ impl CowFs {
         let result = (|| {
             let rel = self.child_path(parent, name)?;
             self.overlay.remove_upper(&rel).map_err(anyhow_to_io)?;
-            if self.remote.stat(&rel).is_ok() {
+            if self.remote_stat(&rel).is_ok() {
                 self.overlay.add_whiteout(&rel).map_err(anyhow_to_io)?;
             }
+            self.invalidate_remote_cache(&rel);
             Ok(())
         })();
         match result {
@@ -535,7 +607,7 @@ impl CowFs {
         entries.push((parent_ino, FileType::Directory, OsString::from("..")));
 
         let mut by_name: BTreeMap<String, RemoteEntry> = BTreeMap::new();
-        match self.remote.readdir(&rel) {
+        match self.remote_readdir(&rel) {
             Ok(remote_entries) => {
                 for entry in remote_entries {
                     by_name.insert(entry.name.clone(), entry);

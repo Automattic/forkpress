@@ -8,6 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 
 pub const MANIFEST_VERSION: u32 = 1;
+const DEFAULT_CACHE_MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const DEFAULT_REMOTE_METADATA_CACHE_TTL_SECS: u64 = 30;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
@@ -21,7 +23,10 @@ pub struct Manifest {
     pub probe: Probe,
     pub local_db: LocalDb,
     pub control_url: String,
+    #[serde(default = "default_cache_max_file_bytes")]
     pub cache_max_file_bytes: u64,
+    #[serde(default = "default_remote_metadata_cache_ttl_secs")]
+    pub remote_metadata_cache_ttl_secs: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -91,9 +96,27 @@ impl Manifest {
                 port: 33071,
             },
             control_url: "http://127.0.0.1:39070".to_string(),
-            cache_max_file_bytes: 8 * 1024 * 1024,
+            cache_max_file_bytes: cache_max_file_bytes_from_env(),
+            remote_metadata_cache_ttl_secs: DEFAULT_REMOTE_METADATA_CACHE_TTL_SECS,
         }
     }
+}
+
+fn default_cache_max_file_bytes() -> u64 {
+    DEFAULT_CACHE_MAX_FILE_BYTES
+}
+
+fn default_remote_metadata_cache_ttl_secs() -> u64 {
+    DEFAULT_REMOTE_METADATA_CACHE_TTL_SECS
+}
+
+fn cache_max_file_bytes_from_env() -> u64 {
+    std::env::var("WPCOW_CACHE_MAX_FILE_MB")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .map(|mb| mb.saturating_mul(1024 * 1024))
+        .filter(|bytes| *bytes > 0)
+        .unwrap_or(DEFAULT_CACHE_MAX_FILE_BYTES)
 }
 
 pub fn default_state_dir() -> Result<PathBuf> {

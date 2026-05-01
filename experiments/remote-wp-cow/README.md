@@ -119,6 +119,7 @@ For a full local WordPress runtime, clone schema, initialize local MariaDB, and
 run the local PHP server:
 
 ```bash
+export WPCOW_SKIP_SCHEMA=0
 wp-cow-lab-clone
 wp-cow-lab-run
 ```
@@ -138,12 +139,33 @@ wp-cow-lab-clone
 wp-cow-lab-mount
 ```
 
+If you already created a filesystem-only clone and then want to open WordPress
+in a browser, initialize the local database schema without deleting the clone or
+its file cache:
+
+```bash
+wp-cow-lab-db-init
+wp-cow-lab-run
+```
+
 Then open another shell:
 
 ```bash
 docker compose exec wp-cow-lab bash
 ls -la /mnt/wp-cow/example
 cat /mnt/wp-cow/example/wp-config.php
+```
+
+Remote file contents are cached separately from local mutations in
+`~/.wp-cow/clones/<name>/file-cache`, which is persisted by the Docker
+`wp-cow-state` volume. Files up to `WPCOW_CACHE_MAX_FILE_MB` are cached as whole
+files on first read; larger files are streamed by range. The Docker lab defaults
+that limit to 64 MB. Check or clear the cache with:
+
+```bash
+wp-cow-lab-cache status
+wp-cow-lab-cache warm-core
+wp-cow-lab-cache clear
 ```
 
 Stop the lab:
