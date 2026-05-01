@@ -18,7 +18,7 @@ on:
     branches: ['trunk']
 
 jobs:
-  linux-zfs-e2e:
+  linux-cow-e2e:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -46,14 +46,14 @@ jobs:
       - name: Build forkpress
         run: cargo build --release --target x86_64-unknown-linux-musl -p forkpress
 
-      - name: ZFS strategy e2e
-        run: tests/test_zfs_strategy_e2e.sh target/x86_64-unknown-linux-musl/release/forkpress
+      - name: COW strategy e2e
+        run: tests/test_cow_strategy_e2e.sh target/x86_64-unknown-linux-musl/release/forkpress
 
       - name: CAS strategy e2e
         run: tests/test_cas_strategy_e2e.sh target/x86_64-unknown-linux-musl/release/forkpress
 
-  mac-zfs-engine:
-    name: mac-zfs-engine ${{ matrix.target }}
+  mac-cow-e2e:
+    name: mac-cow-e2e ${{ matrix.target }}
     strategy:
       fail-fast: false
       matrix:
@@ -87,8 +87,8 @@ jobs:
       - name: Build forkpress
         run: cargo build --release --target ${{ matrix.target }} -p forkpress
 
-      - name: ZFS strategy e2e through APFS sparsebundle
-        run: tests/test_zfs_strategy_e2e.sh target/${{ matrix.target }}/release/forkpress
+      - name: COW strategy e2e through APFS sparsebundle
+        run: tests/test_cow_strategy_e2e.sh target/${{ matrix.target }}/release/forkpress
         env:
           FORKPRESS_FORCE_MACOS_APFS_SPARSEBUNDLE: "1"
 

@@ -7,7 +7,7 @@ if [ ! -x "$BIN" ]; then
   exit 1
 fi
 
-TMP="$(mktemp -d /tmp/forkpress-zfs-e2e.XXXXXX)"
+TMP="$(mktemp -d /tmp/forkpress-cow-e2e.XXXXXX)"
 STATE="$TMP/state"
 WORK="$TMP/site"
 PORT="${FORKPRESS_E2E_PORT:-18383}"
@@ -29,15 +29,15 @@ grep -F "ForkPress storage status" "$TMP/storage-status.out" >/dev/null
 "$BIN" serve --work-dir "$WORK" --port "$PORT" --root-host wp.localhost --workers 1
 "$BIN" server list | grep -F "$WORK" >/dev/null
 
-"$BIN" branch --work-dir "$WORK" create feature-zfs > "$TMP/branch-create.out"
-grep -F "feature-zfs.wp.localhost:$PORT" "$TMP/branch-create.out" >/dev/null
-echo "feature only" > "$WORK/zfs/branches/feature-zfs/wp-content/forkpress-branch.txt"
-test ! -e "$WORK/zfs/branches/main/wp-content/forkpress-branch.txt"
+"$BIN" branch --work-dir "$WORK" create feature-cow > "$TMP/branch-create.out"
+grep -F "feature-cow.wp.localhost:$PORT" "$TMP/branch-create.out" >/dev/null
+echo "feature only" > "$WORK/cow/branches/feature-cow/wp-content/forkpress-branch.txt"
+test ! -e "$WORK/cow/branches/main/wp-content/forkpress-branch.txt"
 
-curl -sS -H "Host: feature-zfs.wp.localhost:$PORT" \
+curl -sS -H "Host: feature-cow.wp.localhost:$PORT" \
   "http://127.0.0.1:$PORT/wp-admin/post-new.php" \
   -o "$TMP/branch-post-new.html"
-grep -F "Branch: feature-zfs" "$TMP/branch-post-new.html" >/dev/null
+grep -F "Branch: feature-cow" "$TMP/branch-post-new.html" >/dev/null
 grep -F "wp.apiFetch.createNonceMiddleware" "$TMP/branch-post-new.html" >/dev/null
 
 REST_NONCE="$(node - <<'NODE' "$TMP/branch-post-new.html"
@@ -50,13 +50,13 @@ console.log(match[1]);
 NODE
 )"
 
-TITLE="ZFS backend saved $(date +%s)"
+TITLE="COW backend saved $(date +%s)"
 HTTP="$(
   curl -sS -o "$TMP/rest-save.json" -w '%{http_code}' \
-    -H "Host: feature-zfs.wp.localhost:$PORT" \
+    -H "Host: feature-cow.wp.localhost:$PORT" \
     -H "Content-Type: application/json" \
     -H "X-WP-Nonce: $REST_NONCE" \
-    --data "{\"title\":\"$TITLE\",\"content\":\"Saved from ForkPress ZFS e2e\",\"status\":\"publish\"}" \
+    --data "{\"title\":\"$TITLE\",\"content\":\"Saved from ForkPress COW e2e\",\"status\":\"publish\"}" \
     "http://127.0.0.1:$PORT/index.php?rest_route=/wp/v2/posts"
 )"
 if [ "$HTTP" != "201" ]; then
@@ -66,11 +66,11 @@ if [ "$HTTP" != "201" ]; then
   exit 1
 fi
 
-curl -sS -H "Host: feature-zfs.wp.localhost:$PORT" \
+curl -sS -H "Host: feature-cow.wp.localhost:$PORT" \
   "http://127.0.0.1:$PORT/wp-admin/edit.php" \
   -o "$TMP/edit.html"
 grep -F "$TITLE" "$TMP/edit.html" >/dev/null
 
-"$BIN" branch --work-dir "$WORK" list | grep -F "feature-zfs" >/dev/null
+"$BIN" branch --work-dir "$WORK" list | grep -F "feature-cow" >/dev/null
 
 echo "PASS cow materialized strategy e2e"

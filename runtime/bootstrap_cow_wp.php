@@ -3,7 +3,7 @@
  * Bootstrap a plain-filesystem WordPress branch for materialized ForkPress strategies.
  *
  * Usage:
- *   php bootstrap_zfs_wp.php <branch-root> <site-title> <sqlite-plugin-source> <mu-plugin> <debug-log> [admin-password]
+ *   php bootstrap_cow_wp.php <branch-root> <site-title> <sqlite-plugin-source> <mu-plugin> <debug-log> [admin-password]
  */
 
 error_reporting(E_ALL & ~E_WARNING & ~E_NOTICE);
@@ -16,31 +16,31 @@ $debug_log = $argv[5] ?? '/tmp/wp-debug.log';
 $admin_password = $argv[6] ?? 'admin';
 
 if ($branch_root === '' || !is_dir($branch_root)) {
-    die("bootstrap_zfs_wp: branch root missing or not a directory\n");
+    die("bootstrap_cow_wp: branch root missing or not a directory\n");
 }
 if (!file_exists($branch_root . '/wp-load.php')) {
-    die("bootstrap_zfs_wp: WordPress source missing in $branch_root\n");
+    die("bootstrap_cow_wp: WordPress source missing in $branch_root\n");
 }
 if ($sqlite_plugin_source === '' || !is_dir($sqlite_plugin_source)) {
-    die("bootstrap_zfs_wp: sqlite plugin source missing\n");
+    die("bootstrap_cow_wp: sqlite plugin source missing\n");
 }
 
-function forkpress_zfs_mkdir_p(string $path): void {
+function forkpress_cow_mkdir_p(string $path): void {
     if (is_dir($path)) {
         return;
     }
     if (!@mkdir($path, 0755, true) && !is_dir($path)) {
-        die("bootstrap_zfs_wp: could not create $path\n");
+        die("bootstrap_cow_wp: could not create $path\n");
     }
 }
 
-function forkpress_zfs_copy_tree(string $source_dir, string $dest_dir): int {
+function forkpress_cow_copy_tree(string $source_dir, string $dest_dir): int {
     if (!is_dir($source_dir)) {
-        die("bootstrap_zfs_wp: missing source directory $source_dir\n");
+        die("bootstrap_cow_wp: missing source directory $source_dir\n");
     }
 
     $copied = 0;
-    forkpress_zfs_mkdir_p($dest_dir);
+    forkpress_cow_mkdir_p($dest_dir);
     $iterator = new RecursiveIteratorIterator(
         new RecursiveDirectoryIterator($source_dir, RecursiveDirectoryIterator::SKIP_DOTS),
         RecursiveIteratorIterator::SELF_FIRST
@@ -53,13 +53,13 @@ function forkpress_zfs_copy_tree(string $source_dir, string $dest_dir): int {
         $dest_path = rtrim($dest_dir, '/') . '/' . $rel_path;
 
         if ($file->isDir()) {
-            forkpress_zfs_mkdir_p($dest_path);
+            forkpress_cow_mkdir_p($dest_path);
             continue;
         }
 
-        forkpress_zfs_mkdir_p(dirname($dest_path));
+        forkpress_cow_mkdir_p(dirname($dest_path));
         if (!copy($source_path, $dest_path)) {
-            die("bootstrap_zfs_wp: could not copy $source_path to $dest_path\n");
+            die("bootstrap_cow_wp: could not copy $source_path to $dest_path\n");
         }
         $copied++;
     }
@@ -72,15 +72,15 @@ $db_dir = $wp_content . '/database';
 $db_file = '.ht.sqlite';
 $db_path = $db_dir . '/' . $db_file;
 
-forkpress_zfs_mkdir_p($wp_content);
-forkpress_zfs_mkdir_p($db_dir);
-forkpress_zfs_mkdir_p($wp_content . '/plugins');
-forkpress_zfs_mkdir_p($wp_content . '/mu-plugins');
+forkpress_cow_mkdir_p($wp_content);
+forkpress_cow_mkdir_p($db_dir);
+forkpress_cow_mkdir_p($wp_content . '/plugins');
+forkpress_cow_mkdir_p($wp_content . '/mu-plugins');
 
 $plugin_dest = $wp_content . '/plugins/sqlite-database-integration';
 $copied = 0;
 if (!file_exists($plugin_dest . '/load.php')) {
-    $copied = forkpress_zfs_copy_tree($sqlite_plugin_source, $plugin_dest);
+    $copied = forkpress_cow_copy_tree($sqlite_plugin_source, $plugin_dest);
 }
 
 $dropin = <<<'PHP'
@@ -128,14 +128,14 @@ define('DB_COLLATE', '');
 
 $table_prefix = 'wp_';
 
-define('AUTH_KEY',         'forkpress-zfs-k1-xxxxxxxxxxxxxxxx');
-define('SECURE_AUTH_KEY',  'forkpress-zfs-k2-xxxxxxxxxxxxxxxx');
-define('LOGGED_IN_KEY',    'forkpress-zfs-k3-xxxxxxxxxxxxxxxx');
-define('NONCE_KEY',        'forkpress-zfs-k4-xxxxxxxxxxxxxxxx');
-define('AUTH_SALT',        'forkpress-zfs-s1-xxxxxxxxxxxxxxxx');
-define('SECURE_AUTH_SALT', 'forkpress-zfs-s2-xxxxxxxxxxxxxxxx');
-define('LOGGED_IN_SALT',   'forkpress-zfs-s3-xxxxxxxxxxxxxxxx');
-define('NONCE_SALT',       'forkpress-zfs-s4-xxxxxxxxxxxxxxxx');
+define('AUTH_KEY',         'forkpress-cow-k1-xxxxxxxxxxxxxxxx');
+define('SECURE_AUTH_KEY',  'forkpress-cow-k2-xxxxxxxxxxxxxxxx');
+define('LOGGED_IN_KEY',    'forkpress-cow-k3-xxxxxxxxxxxxxxxx');
+define('NONCE_KEY',        'forkpress-cow-k4-xxxxxxxxxxxxxxxx');
+define('AUTH_SALT',        'forkpress-cow-s1-xxxxxxxxxxxxxxxx');
+define('SECURE_AUTH_SALT', 'forkpress-cow-s2-xxxxxxxxxxxxxxxx');
+define('LOGGED_IN_SALT',   'forkpress-cow-s3-xxxxxxxxxxxxxxxx');
+define('NONCE_SALT',       'forkpress-cow-s4-xxxxxxxxxxxxxxxx');
 
 define('WP_DEBUG', true);
 define('WP_DEBUG_LOG', '__DEBUG_LOG__');
@@ -189,7 +189,7 @@ if (!file_exists($db_path) || filesize($db_path) === 0) {
     ob_end_clean();
 
     if (empty($result['user_id'])) {
-        die("bootstrap_zfs_wp: WordPress install failed\n");
+        die("bootstrap_cow_wp: WordPress install failed\n");
     }
     echo "  WordPress installed (admin user_id={$result['user_id']})\n";
 }

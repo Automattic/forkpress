@@ -14,7 +14,7 @@
 
 error_reporting(E_ALL & ~E_WARNING & ~E_NOTICE & ~E_DEPRECATED);
 
-$branches_dir = getenv('FORKPRESS_BRANCHES_DIR') ?: getenv('FORKPRESS_ZFS_BRANCHES_DIR');
+$branches_dir = getenv('FORKPRESS_BRANCHES_DIR') ?: getenv('FORKPRESS_COW_BRANCHES_DIR') ?: getenv('FORKPRESS_ZFS_BRANCHES_DIR');
 $strategy_label = getenv('FORKPRESS_PLAIN_STRATEGY') ?: 'plain-file';
 $root_host = getenv('FORKPRESS_ROOT_HOST') ?: 'wp.localhost';
 
@@ -78,7 +78,7 @@ if (substr($path, -1) === '/') {
     $full_path .= 'index.php';
 }
 
-function forkpress_zfs_send_file(string $path): void {
+function forkpress_cow_send_file(string $path): void {
     $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
     $mimes = [
         'css'   => 'text/css',
@@ -107,7 +107,7 @@ function forkpress_zfs_send_file(string $path): void {
     readfile($path);
 }
 
-function forkpress_zfs_require_php(string $path, string $branch_root): void {
+function forkpress_cow_require_php(string $path, string $branch_root): void {
     chdir($branch_root);
     $_SERVER['DOCUMENT_ROOT'] = $branch_root;
     $_SERVER['SCRIPT_FILENAME'] = $path;
@@ -118,20 +118,20 @@ function forkpress_zfs_require_php(string $path, string $branch_root): void {
 
 if (file_exists($full_path) && !is_dir($full_path)) {
     if (strtolower(pathinfo($full_path, PATHINFO_EXTENSION)) === 'php') {
-        forkpress_zfs_require_php($full_path, $branch_root);
+        forkpress_cow_require_php($full_path, $branch_root);
         return true;
     }
-    forkpress_zfs_send_file($full_path);
+    forkpress_cow_send_file($full_path);
     return true;
 }
 
 if (is_dir($full_path)) {
     $index = rtrim($full_path, '/') . '/index.php';
     if (file_exists($index)) {
-        forkpress_zfs_require_php($index, $branch_root);
+        forkpress_cow_require_php($index, $branch_root);
         return true;
     }
 }
 
-forkpress_zfs_require_php($branch_root . '/index.php', $branch_root);
+forkpress_cow_require_php($branch_root . '/index.php', $branch_root);
 return true;

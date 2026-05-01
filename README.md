@@ -11,7 +11,7 @@ directories.
 - `forkpress init` creates the local site store using the platform default
   strategy: `cow` on macOS, `branchfs` elsewhere.
 - `forkpress init --strategy cow` creates a no-SQL-overlay branch backend under
-  `.forkpress/zfs/branches`.
+  `.forkpress/cow/branches`.
 - `forkpress init --strategy cas` creates a Redb-backed content-addressed
   branch backend under `.forkpress/cas`.
 - `forkpress serve` starts the preview server in the background and attaches
@@ -91,7 +91,7 @@ forkpress branch create agent-1
 ```
 
 That stores branch files and each branch's SQLite database as ordinary files
-under `.forkpress/zfs/branches/<branch>`. It does not use SQL overlays. On
+under `.forkpress/cow/branches/<branch>`. It does not use SQL overlays. On
 macOS, the branch directory uses APFS `clonefile` directly when possible, or a
 rootless APFS sparsebundle under `.forkpress/macos-cow` when the project volume
 cannot clone files.
@@ -273,7 +273,7 @@ branch directory supports file clones. On macOS, `cow` initialization first
 tries APFS `clonefile` in place. If the current volume cannot clone files,
 ForkPress creates a rootless APFS sparsebundle under `.forkpress/macos-cow`,
 mounts it at `.forkpress/macos-cow/mount`, and links
-`.forkpress/zfs/branches` into that mounted APFS volume. Full file-copy
+`.forkpress/cow/branches` into that mounted APFS volume. Full file-copy
 materialization is the last-resort file view. `du` and Finder do not understand
 APFS clone sharing, so they can make a cloned branch look like it consumed a
 full extra WordPress tree. Use `df -h .forkpress/macos-cow/mount` or watch the
@@ -310,9 +310,9 @@ Supported strategy values:
 - `branchfs` (default, aliases: `sqlite`, `sqlite-cow`): current production
   strategy. Files live in BranchFS tables, and WordPress database branches use
   SQLite COW views, overlays, tombstones, and triggers.
-- `cow` (aliases: `zfs`, `mac-cow`, `materialized-cow`): experimental
+- `cow` (legacy aliases: `zfs`, `mac-cow`, `materialized-cow`): experimental
   no-SQL-overlay strategy. Branches are materialized as
-  ordinary WordPress directories under `.forkpress/zfs/branches/<branch>`.
+  ordinary WordPress directories under `.forkpress/cow/branches/<branch>`.
   Each branch has its own SQLite database file at
   `wp-content/database/.ht.sqlite`. Branch creation uses the recorded
   `file_view`: APFS/Btrfs/XFS/ReFS-style file clones where available, macOS
@@ -335,7 +335,7 @@ Supported strategy values:
 The materialized COW strategy is currently split into two layers:
 
 - Working runtime layer: materialized branch directories in
-  `.forkpress/zfs/branches`. WordPress runs against normal files, so post
+  `.forkpress/cow/branches`. WordPress runs against normal files, so post
   editor loads, uploads, plugin pages, and SQLite writes do not need BranchFS
   stream wrappers or table-prefix overlays. On macOS this directory may be a
   symlink into `.forkpress/macos-cow/mount/branches`, an APFS sparsebundle
@@ -350,10 +350,10 @@ Current runtime flow:
 ```mermaid
 flowchart LR
     cli[forkpress CLI]
-    branches[.forkpress/zfs/branches]
+    branches[.forkpress/cow/branches]
     main[main/<br/>WordPress + wp-content/database/.ht.sqlite]
     feature[feature/<br/>WordPress + wp-content/database/.ht.sqlite]
-    router[runtime/router_zfs.php]
+    router[runtime/router_cow.php]
     php[Bundled PHP + WordPress]
 
     cli --> branches
@@ -367,7 +367,7 @@ flowchart LR
 
 The important property is that a branch write changes only that branch's
 ordinary files. A post save on `feature.wp.localhost` writes to
-`.forkpress/zfs/branches/feature/wp-content/database/.ht.sqlite`; it does not
+`.forkpress/cow/branches/feature/wp-content/database/.ht.sqlite`; it does not
 write to `main` and it does not pass through SQL COW views or overlay tables.
 
 ForkPress now ships the engine without a system ZFS install by native-linking a
@@ -413,7 +413,7 @@ keeps the materialized branch-directory boundary:
 flowchart LR
     pool[(.forkpress/zfs/pool.img<br/>OpenZFS pool)]
     engine[embedded OpenZFS engine<br/>static archive in forkpress]
-    cache[.forkpress/zfs/branches/feature<br/>materialized branch]
+    cache[.forkpress/cow/branches/feature<br/>materialized branch]
     php[Bundled PHP + WordPress]
     git[Git endpoint]
 
@@ -657,12 +657,14 @@ parent rows with those branch-local rows.
   site.fp                         # branchfs strategy durable site store
   runtime/                        # unpacked embedded PHP, scripts, WP source
   wproot/                         # PHP server document root
-  zfs/
+  cow/
     branches.txt                  # branch list for the admin-bar switcher
     branches/                     # may symlink into macos-cow/mount/branches
       main/                       # cow strategy main branch WordPress tree
       feature/                    # cow strategy cloned branch WordPress tree
         wp-content/database/.ht.sqlite
+  zfs/
+    engine-smoke.img              # embedded OpenZFS smoke/target-driver pool images
   macos-cow/
     branches.sparsebundle/        # optional rootless APFS storage on macOS
     mount/
@@ -694,7 +696,7 @@ the SQLite adapter bundled with the current binary.
 ## Work On One Branch
 
 This Git checkout workflow currently applies to the default `branchfs` strategy.
-For `zfs` and `cas` strategy sites, use browser/admin branch previews and
+For `cow` and `cas` strategy sites, use browser/admin branch previews and
 `forkpress branch create` while Git smart HTTP is being wired to those stores.
 
 From the same project directory:
@@ -789,7 +791,7 @@ forkpress agents \
 - `forkpress init --admin-password admin` uses a known local admin password,
   which is useful for throwaway Git examples.
 - `forkpress init --strategy cow --admin-password admin` creates a no-SQL-overlay
-  materialized site under `.forkpress/zfs/branches`, choosing a COW-capable
+  materialized site under `.forkpress/cow/branches`, choosing a COW-capable
   file view when the platform supports one.
 - `forkpress init --strategy cas --admin-password admin` creates a
   Redb-backed content-addressed site under `.forkpress/cas`.

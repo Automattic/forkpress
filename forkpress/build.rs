@@ -58,10 +58,10 @@ fn main() -> Result<()> {
         "vendor",
         "wp-plugin",
         "runtime/router.php",
-        "runtime/router_zfs.php",
+        "runtime/router_cow.php",
         "runtime/router_cas.php",
         "runtime/bootstrap_wp.php",
-        "runtime/bootstrap_zfs_wp.php",
+        "runtime/bootstrap_cow_wp.php",
         "runtime/bootstrap_cas_wp.php",
         "runtime/managed_wp_files.php",
         "runtime/refresh_wp_files.php",
@@ -381,10 +381,10 @@ fn build_bundle(repo_root: &Path, dist_dir: &Path, out: &Path) -> Result<()> {
     add_tree(&mut tar, repo_root, "vendor")?;
     add_tree(&mut tar, repo_root, "wp-plugin")?;
     add_file(&mut tar, repo_root, "runtime/router.php")?;
-    add_file(&mut tar, repo_root, "runtime/router_zfs.php")?;
+    add_file(&mut tar, repo_root, "runtime/router_cow.php")?;
     add_file(&mut tar, repo_root, "runtime/router_cas.php")?;
     add_file(&mut tar, repo_root, "runtime/bootstrap_wp.php")?;
-    add_file(&mut tar, repo_root, "runtime/bootstrap_zfs_wp.php")?;
+    add_file(&mut tar, repo_root, "runtime/bootstrap_cow_wp.php")?;
     add_file(&mut tar, repo_root, "runtime/bootstrap_cas_wp.php")?;
     add_file(&mut tar, repo_root, "runtime/managed_wp_files.php")?;
     add_file(&mut tar, repo_root, "runtime/refresh_wp_files.php")?;
