@@ -47,9 +47,12 @@ enum Commands {
     Clone(CloneArgs),
     /// Pull the current checkout with rebase/autostash.
     Pull(PullArgs),
-    /// Start the local preview server.
-    #[command(alias = "serve")]
+    /// Start the local preview server in the foreground.
     Start(StartArgs),
+    /// Start the local preview server in the background.
+    Serve(StartArgs),
+    /// Stop this site's server and detach mount-backed storage.
+    Stop(ServerStopArgs),
     /// Start, list, and stop running ForkPress site servers.
     Server(ServerArgs),
     /// Create local worktrees for multiple agents.
@@ -89,7 +92,7 @@ struct InitArgs {
 
     /// Storage strategy for this site. Existing sites keep their initialized
     /// strategy; this flag is only used by `forkpress init`.
-    #[arg(long, value_enum, default_value_t = StorageStrategy::Branchfs)]
+    #[arg(long, value_enum, default_value_t = default_storage_strategy())]
     strategy: StorageStrategy,
 
     /// Site title written to site_config. Defaults to "ForkPress".
@@ -362,6 +365,14 @@ impl StorageStrategy {
     }
 }
 
+fn default_storage_strategy() -> StorageStrategy {
+    if cfg!(target_os = "macos") {
+        StorageStrategy::Zfs
+    } else {
+        StorageStrategy::Branchfs
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SiteManifest {
     strategy: StorageStrategy,
@@ -538,6 +549,10 @@ struct StartArgs {
     /// Start the site server in the background and return after it is ready.
     #[arg(long)]
     background: bool,
+
+    /// Keep `forkpress serve` in the foreground.
+    #[arg(long, conflicts_with = "background")]
+    foreground: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -573,6 +588,10 @@ struct ServerStopArgs {
     /// Seconds to wait for graceful shutdown before forcing the process down.
     #[arg(long, default_value_t = 10)]
     timeout: u64,
+
+    /// Force detach of mount-backed storage after stopping the server.
+    #[arg(long)]
+    force: bool,
 }
 
 /// Parse a duration string in one of `<N>s`, `<N>m`, `<N>h`. Returns `None`
@@ -762,6 +781,8 @@ fn run() -> Result<i32> {
         Commands::Clone(args) => clone_command(args),
         Commands::Pull(args) => pull_command(args),
         Commands::Start(args) => start_command(args),
+        Commands::Serve(args) => serve_command(args),
+        Commands::Stop(args) => server_stop_command(args),
         Commands::Server(args) => server_command(args),
         Commands::Agents(args) => agents_command(args),
         Commands::Push(args) | Commands::Commit(args) => push_command(args),
@@ -1057,22 +1078,29 @@ fn storage_detach_command(args: StorageDetachArgs) -> Result<i32> {
         }
     }
 
-    let manifest = read_site_manifest(&layout)?;
+    if !detach_storage_for_layout_if_present(&layout, args.force)? {
+        println!(
+            "forkpress: no detachable storage found for {}",
+            layout.work_dir.display()
+        );
+    }
+
+    Ok(0)
+}
+
+fn detach_storage_for_layout_if_present(layout: &Layout, force: bool) -> Result<bool> {
+    let manifest = read_site_manifest(layout)?;
     let has_macos_cow = manifest.as_ref().and_then(|manifest| manifest.file_view)
         == Some(FileViewStrategy::MacosApfsSparsebundle)
         || layout.macos_cow_image.exists()
         || layout.macos_cow_mount.exists();
 
     if !has_macos_cow {
-        println!(
-            "forkpress: no detachable storage found for {}",
-            layout.work_dir.display()
-        );
-        return Ok(0);
+        return Ok(false);
     }
 
-    detach_macos_apfs_sparsebundle_file_view(&layout, args.force)?;
-    Ok(0)
+    detach_macos_apfs_sparsebundle_file_view(layout, force)?;
+    Ok(true)
 }
 
 #[cfg(target_os = "macos")]
@@ -1404,6 +1432,34 @@ mod storage_strategy_tests {
     }
 
     #[test]
+    fn cli_init_uses_platform_default_strategy() {
+        let cli = Cli::try_parse_from(["forkpress", "init"]).unwrap();
+        let Commands::Init(args) = cli.command else {
+            panic!("expected init command");
+        };
+        assert_eq!(args.strategy, default_storage_strategy());
+    }
+
+    #[test]
+    fn cli_accepts_happy_path_serve_and_stop() {
+        let serve = Cli::try_parse_from(["forkpress", "serve", "--port", "18780"]).unwrap();
+        let Commands::Serve(args) = serve.command else {
+            panic!("expected serve command");
+        };
+        assert_eq!(args.port, 18780);
+        assert!(!args.background);
+        assert!(!args.foreground);
+
+        let stop =
+            Cli::try_parse_from(["forkpress", "stop", "--work-dir", ".forkpress", "--force"])
+                .unwrap();
+        let Commands::Stop(args) = stop.command else {
+            panic!("expected stop command");
+        };
+        assert!(args.force);
+    }
+
+    #[test]
     fn cli_accepts_storage_lifecycle_commands() {
         let status =
             Cli::try_parse_from(["forkpress", "storage", "status", "--work-dir", ".forkpress"])
@@ -1480,6 +1536,13 @@ mod storage_strategy_tests {
     }
 }
 
+fn serve_command(mut args: StartArgs) -> Result<i32> {
+    if !args.foreground {
+        args.background = true;
+    }
+    start_command(args)
+}
+
 fn start_command(args: StartArgs) -> Result<i32> {
     if args.background {
         return start_background_command(args);
@@ -1546,10 +1609,9 @@ fn start_command(args: StartArgs) -> Result<i32> {
         shell_quote_path(&layout.work_dir)
     );
     println!(
-        "Stop:       forkpress server stop --work-dir {}",
+        "Stop:       forkpress stop --work-dir {}",
         shell_quote_path(&layout.work_dir)
     );
-    print_storage_detach_hint_if_needed(&layout)?;
     println!("List:       forkpress server list");
     println!("Press Ctrl+C to stop.");
 
@@ -1607,6 +1669,10 @@ fn start_command(args: StartArgs) -> Result<i32> {
         // tick of the Ctrl-C; join to surface panics rather than leak.
         let _ = h.join();
     }
+
+    drop(php);
+    drop(_registration);
+    detach_storage_for_layout_if_present(&layout, false)?;
 
     Ok(0)
 }
@@ -1696,10 +1762,9 @@ fn start_background_command(args: StartArgs) -> Result<i32> {
                 shell_quote_path(&layout.work_dir)
             );
             println!(
-                "Stop:       forkpress server stop --work-dir {}",
+                "Stop:       forkpress stop --work-dir {}",
                 shell_quote_path(&layout.work_dir)
             );
-            print_storage_detach_hint_if_needed(&layout)?;
             println!("List:       forkpress server list");
             return Ok(0);
         }
@@ -1727,18 +1792,6 @@ fn append_start_args(command: &mut Command, args: &StartArgs, layout: &Layout) {
     if let Some(gc_interval) = &args.gc_interval {
         command.arg("--gc-interval").arg(gc_interval);
     }
-}
-
-fn print_storage_detach_hint_if_needed(layout: &Layout) -> Result<()> {
-    if read_site_manifest(layout)?.and_then(|manifest| manifest.file_view)
-        == Some(FileViewStrategy::MacosApfsSparsebundle)
-    {
-        println!(
-            "Detach:     forkpress storage detach --work-dir {}",
-            shell_quote_path(&layout.work_dir)
-        );
-    }
-    Ok(())
 }
 
 fn server_command(args: ServerArgs) -> Result<i32> {
@@ -1784,16 +1837,22 @@ fn server_stop_command(args: ServerStopArgs) -> Result<i32> {
     }
 
     let mut targets = Vec::new();
+    let mut detach_layouts = Vec::new();
     let records = live_server_records()?;
 
     if args.all {
         targets = records;
+        for record in &targets {
+            push_unique_detach_layout(&mut detach_layouts, Layout::new(record.work_dir.clone())?);
+        }
     } else if let Some(pid) = args.pid {
         if let Some(record) = records.iter().find(|record| record.pid == pid).cloned() {
+            push_unique_detach_layout(&mut detach_layouts, Layout::new(record.work_dir.clone())?);
             targets.push(record);
         }
     } else {
         let layout = Layout::new(args.work_dir.clone())?;
+        push_unique_detach_layout(&mut detach_layouts, layout.clone());
         if let Some(pid) = read_pid_file(&layout.server_pid_file)? {
             if let Some(record) = records.iter().find(|record| record.pid == pid).cloned() {
                 targets.push(record);
@@ -1811,14 +1870,26 @@ fn server_stop_command(args: ServerStopArgs) -> Result<i32> {
 
     if targets.is_empty() {
         println!("forkpress: no matching running site servers found");
-        return Ok(0);
+    } else {
+        for record in targets {
+            stop_server_record(&record, Duration::from_secs(args.timeout))?;
+        }
     }
 
-    for record in targets {
-        stop_server_record(&record, Duration::from_secs(args.timeout))?;
+    for layout in detach_layouts {
+        detach_storage_for_layout_if_present(&layout, args.force)?;
     }
 
     Ok(0)
+}
+
+fn push_unique_detach_layout(layouts: &mut Vec<Layout>, layout: Layout) {
+    if !layouts
+        .iter()
+        .any(|existing| existing.work_dir == layout.work_dir)
+    {
+        layouts.push(layout);
+    }
 }
 
 impl Drop for ServerRegistrationGuard {
@@ -2219,7 +2290,7 @@ fn git_command(args: GitPassthrough) -> Result<i32> {
         }
         if !layout.site_fp.exists() || !layout.bootstrap_marker.exists() {
             bail!(
-                "no bootstrapped site found in {}. Run `forkpress server start` first",
+                "no bootstrapped site found in {}. Run `forkpress serve` first",
                 layout.work_dir.display()
             );
         }
@@ -2325,7 +2396,7 @@ fn agents_command(args: AgentsArgs) -> Result<i32> {
 
     if !layout.site_fp.exists() || !layout.bootstrap_marker.exists() {
         bail!(
-            "no bootstrapped site found in {}. Run `forkpress server start` first",
+            "no bootstrapped site found in {}. Run `forkpress serve` first",
             layout.work_dir.display()
         );
     }
@@ -2538,7 +2609,7 @@ fn branch_command(args: BranchPassthrough) -> Result<i32> {
 
     if !layout.site_fp.exists() || !layout.bootstrap_marker.exists() {
         bail!(
-            "no bootstrapped site found in {}. Run `forkpress server start` first",
+            "no bootstrapped site found in {}. Run `forkpress serve` first",
             layout.work_dir.display()
         );
     }
@@ -2866,13 +2937,14 @@ after branch creation, or inspect the allocated size of
 
 Manage mount-backed COW storage through ForkPress:
 
-- `forkpress storage status --work-dir .forkpress`
-- `forkpress storage mount --work-dir .forkpress`
-- `forkpress storage detach --work-dir .forkpress`
+- `forkpress serve`
+- `forkpress stop`
+- `forkpress storage status --work-dir .forkpress` for diagnostics
+- `forkpress storage mount|detach --work-dir .forkpress` for manual cleanup
 
-Detach stops this site's ForkPress server first, then asks macOS to detach the
-sparsebundle. Use `--force` only when normal detach reports a busy mount and
-you have closed terminals/editors that were using `.forkpress/macos-cow/mount`.
+Stop asks macOS to detach the sparsebundle after stopping this site's ForkPress
+server. Use `--force` only when normal detach reports a busy mount and you have
+closed terminals/editors that were using `.forkpress/macos-cow/mount`.
 
 The forkpress binary now includes an embedded OpenZFS userland engine on Linux
 and macOS targets. Cargo builds the same OpenZFS 2.2.6 subset used by the
@@ -3300,7 +3372,7 @@ fn detach_macos_apfs_sparsebundle_file_view(layout: &Layout, force: bool) -> Res
             let message = hdiutil_failure_message(&fallback);
             if message.to_ascii_lowercase().contains("busy") {
                 bail!(
-                    "COW storage is still busy at {}.\nClose terminals/editors using that path, or inspect open files with:\n  lsof +D {}\nThen run:\n  forkpress storage detach --work-dir {}{}",
+                    "COW storage is still busy at {}.\nClose terminals/editors using that path, or inspect open files with:\n  lsof +D {}\nThen run:\n  forkpress stop --work-dir {}{}",
                     layout.macos_cow_mount.display(),
                     shell_quote_path(&layout.macos_cow_mount),
                     shell_quote_path(&layout.work_dir),

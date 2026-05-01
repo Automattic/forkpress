@@ -15,12 +15,12 @@ export FORKPRESS_STATE_DIR="$STATE"
 mkdir -p "$STATE"
 
 cleanup() {
-  "$BIN" server stop --work-dir "$WORK" >/dev/null 2>&1 || true
+  "$BIN" stop --work-dir "$WORK" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
 "$BIN" init --strategy cas --work-dir "$WORK" --admin-password admin
-"$BIN" server start --work-dir "$WORK" --port "$PORT" --root-host wp.localhost
+"$BIN" serve --work-dir "$WORK" --port "$PORT" --root-host wp.localhost
 "$BIN" server list | grep -F "$WORK" >/dev/null
 
 curl -sS -D "$TMP/main-headers.out" -H "Host: wp.localhost:$PORT" \

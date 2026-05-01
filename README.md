@@ -8,15 +8,17 @@ directories.
 
 ## What You Get
 
-- `forkpress init` creates the local site store using the default `branchfs`
-  strategy.
+- `forkpress init` creates the local site store using the platform default
+  strategy: `cow` on macOS, `branchfs` elsewhere.
 - `forkpress init --strategy cow` creates a no-SQL-overlay branch backend under
   `.forkpress/zfs/branches`.
 - `forkpress init --strategy cas` creates a Redb-backed content-addressed
   branch backend under `.forkpress/cas`.
-- `forkpress server start` starts the preview server in the background.
+- `forkpress serve` starts the preview server in the background and attaches
+  any mount-backed storage needed by the site.
 - `forkpress server list` shows running site servers.
-- `forkpress server stop` stops the current site's server.
+- `forkpress stop` stops the current site's server and detaches mount-backed
+  storage when the site uses it.
 - `forkpress logs --file wp` shows WordPress debug output and fatal errors.
 - `http://wp.localhost:18080/` serves `main`.
 - `http://agent-1.wp.localhost:18080/` serves branch `agent-1`.
@@ -55,25 +57,36 @@ chmod +x forkpress
 
 ## Run A Site
 
-Start in an empty project directory. The `--admin-password admin` value makes
-the Git push examples below work without a credential prompt; use a stronger
-password for anything beyond a local throwaway site.
+Start in an empty project directory:
+
+```bash
+forkpress init
+forkpress serve
+```
+
+`forkpress init` writes `.forkpress/site.toml`, creates the WordPress admin
+user, and prints a generated password if you did not pass one. `forkpress serve`
+boots the initialized strategy and returns after the server is ready.
+
+On macOS, the default strategy is `cow`: branches are ordinary WordPress
+directories backed by APFS file clones when possible, with a rootless
+sparsebundle fallback when needed. On Linux, the default strategy remains
+`branchfs`, which stores the site in `.forkpress/site.fp` and serves branch
+files through the built-in `branchfs` PHP extension.
+
+For a local throwaway site where you want the Git examples below to work as
+written, choose a known password:
 
 ```bash
 forkpress init --admin-password admin
-forkpress server start
+forkpress serve
 ```
-
-For the default `branchfs` strategy, the first server start imports WordPress
-into `.forkpress/site.fp`, writes the `.forkpress/site.toml` strategy manifest
-if it does not exist yet, installs the SQLite database drop-in, creates the
-WordPress admin user, and starts the local server.
 
 To try the materialized COW strategy:
 
 ```bash
 forkpress init --strategy cow --admin-password admin
-forkpress server start
+forkpress serve
 forkpress branch create agent-1
 ```
 
@@ -87,7 +100,7 @@ To try the CAS strategy:
 
 ```bash
 forkpress init --strategy cas --admin-password admin
-forkpress server start
+forkpress serve
 forkpress branch create agent-1
 ```
 
@@ -109,16 +122,17 @@ List running site servers:
 forkpress server list
 ```
 
-Stop this site's server from the same project directory:
+Stop this site's server from the same project directory. If the site uses a
+mount-backed storage view, this also detaches it:
 
 ```bash
-forkpress server stop
+forkpress stop
 ```
 
 Stop every ForkPress site server started by your user:
 
 ```bash
-forkpress server stop --all
+forkpress stop --all
 ```
 
 View WordPress critical errors and PHP fatals:
@@ -172,7 +186,7 @@ The WordPress admin bar shows the current branch. Hover `Branch: <name>` to
 filter and switch to another local branch; the menu shows up to 20 matches.
 
 If your resolver does not handle `*.localhost`, add host entries or run
-`forkpress server start --root-host wp.local` and route `wp.local` plus the
+`forkpress serve --root-host wp.local` and route `wp.local` plus the
 branch subdomains to `127.0.0.1`.
 
 ## Architecture Overview
@@ -265,23 +279,27 @@ APFS clone sharing, so they can make a cloned branch look like it consumed a
 full extra WordPress tree. Use `df -h .forkpress/macos-cow/mount` or watch the
 sparsebundle's allocated size to estimate physical growth.
 
-The sparsebundle is an OS mount, so stop/detach it through ForkPress before
+The sparsebundle is an OS mount, so stop the site through ForkPress before
 moving or deleting the work directory:
 
 ```bash
-forkpress storage status --work-dir .forkpress
-forkpress storage detach --work-dir .forkpress
+forkpress stop
 rm -rf .forkpress
 ```
 
-`forkpress storage detach` stops this site's ForkPress server first, then
-detaches the APFS storage. If macOS reports that another app is still using the
-mount, close terminals or editors pointed at `.forkpress/macos-cow/mount` and
-run the command again. `--force` asks macOS for a forced detach. Reattach branch
-files without starting the server with:
+`forkpress stop` stops this site's ForkPress server first, then detaches APFS
+storage when the site has a detachable mount. If macOS reports that another app
+is still using the mount, close terminals or editors pointed at
+`.forkpress/macos-cow/mount` and run `forkpress stop` again. `--force` asks
+macOS for a forced detach.
+
+The explicit storage commands remain available for diagnostics and manual
+cleanup:
 
 ```bash
+forkpress storage status --work-dir .forkpress
 forkpress storage mount --work-dir .forkpress
+forkpress storage detach --work-dir .forkpress
 ```
 
 For a driver-by-driver comparison, including ZFS portability and Windows notes,
@@ -766,9 +784,10 @@ forkpress agents \
 
 ## Commands
 
-- `forkpress init --admin-password admin` creates `.forkpress/site.toml`,
-  `.forkpress/site.fp`, and a Git push user named `admin` using the default
-  `branchfs` strategy.
+- `forkpress init` creates `.forkpress/site.toml` and initializes the platform
+  default strategy. On macOS this is `cow`; elsewhere it is `branchfs`.
+- `forkpress init --admin-password admin` uses a known local admin password,
+  which is useful for throwaway Git examples.
 - `forkpress init --strategy cow --admin-password admin` creates a no-SQL-overlay
   materialized site under `.forkpress/zfs/branches`, choosing a COW-capable
   file view when the platform supports one.
@@ -776,21 +795,22 @@ forkpress agents \
   Redb-backed content-addressed site under `.forkpress/cas`.
 - `forkpress doctor storage --work-dir .forkpress` probes file clone support
   and prints the recommended materialized branch file view.
-- `forkpress storage status|mount|detach --work-dir .forkpress` manages
-  detachable storage used by the `cow` strategy on macOS. Detach before
-  deleting a work directory that contains `.forkpress/macos-cow/mount`.
+- `forkpress storage status|mount|detach --work-dir .forkpress` diagnoses or
+  manually manages detachable storage used by the `cow` strategy on macOS.
 - `forkpress zfs smoke --work-dir .forkpress` verifies the embedded OpenZFS
   engine by creating a pool image, writing and reading a logical file,
   snapshotting, cloning, exporting, importing, and reading from the clone.
-- `forkpress server start` imports and boots WordPress if needed, then serves
-  HTTP from the initialized strategy. For `branchfs`, Git smart HTTP is served
-  from `.forkpress/site.fp`; for `cow` and `cas`, Git smart HTTP is not wired
-  yet.
-- `forkpress start --background` is the equivalent lower-level command.
+- `forkpress serve` boots WordPress if needed, starts the HTTP server in the
+  background, and attaches mount-backed storage when needed. For `branchfs`,
+  Git smart HTTP is served from `.forkpress/site.fp`; for `cow` and `cas`, Git
+  smart HTTP is not wired yet.
+- `forkpress start` is the lower-level foreground server command.
+- `forkpress start --background` and `forkpress server start` are compatibility
+  commands equivalent to background serving.
 - `forkpress server list` shows running ForkPress site servers.
-- `forkpress server stop [--work-dir .forkpress]` stops one site server;
-  `forkpress server stop --all` stops every running ForkPress site server in
-  the registry.
+- `forkpress stop [--work-dir .forkpress]` stops one site server and detaches
+  mount-backed storage. `forkpress stop --all` stops every running ForkPress
+  site server in the registry.
 - `forkpress logs [--file wp|php|server|forkpress|gc|all] [-n 80] [--follow]`
   prints local site logs. Use `--paths` to list log locations.
 - `forkpress branch create <name> [--from main]` creates a ForkPress branch

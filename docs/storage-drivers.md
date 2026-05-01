@@ -49,11 +49,11 @@ materialized `cow` strategy:
   creates `.forkpress/macos-cow/branches.sparsebundle`, mounts it at
   `.forkpress/macos-cow/mount`, and symlinks `.forkpress/zfs/branches` to the
   APFS-backed branch directory.
-- `forkpress storage status --work-dir .forkpress` shows whether the
-  sparsebundle is currently attached. `forkpress storage mount --work-dir
-  .forkpress` reattaches it without starting the web server. `forkpress storage
-  detach --work-dir .forkpress` stops the matching ForkPress server, detaches
-  the sparsebundle, and leaves the work directory removable.
+- `forkpress serve` attaches the sparsebundle when the selected file view needs
+  one. `forkpress stop` stops the matching ForkPress server, detaches the
+  sparsebundle, and leaves the work directory removable. `forkpress storage
+  status|mount|detach --work-dir .forkpress` remains available for diagnostics
+  and manual cleanup.
 - Branch creation requires COW clones when `file_view` is `reflink` or
   `macos-apfs-sparsebundle`. `file-copy` remains explicit terminal fallback.
 
@@ -65,9 +65,9 @@ macOS can refuse to detach a mounted sparsebundle while another process has an
 open file or current directory inside the mount. That is expected OS behavior,
 not a ForkPress storage corruption signal. The normal user flow is close the
 terminal/editor that is using `.forkpress/macos-cow/mount`, then run
-`forkpress storage detach --work-dir .forkpress` again. `--force` maps to
-macOS' forced detach path and should be reserved for cleanup after normal detach
-reports a busy mount.
+`forkpress stop --work-dir .forkpress` again. `--force` maps to macOS' forced
+detach path and should be reserved for cleanup after normal detach reports a
+busy mount.
 
 APFS clone sharing is not visible to tools that sum file sizes by path. `du`,
 Finder, `stat`, and many disk analyzers can count the same shared extents under

@@ -15,8 +15,7 @@ export FORKPRESS_STATE_DIR="$STATE"
 mkdir -p "$STATE"
 
 cleanup() {
-  "$BIN" server stop --work-dir "$WORK" >/dev/null 2>&1 || true
-  "$BIN" storage detach --work-dir "$WORK" >/dev/null 2>&1 || true
+  "$BIN" stop --work-dir "$WORK" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -27,7 +26,7 @@ grep -F 'strategy = "cow"' "$WORK/site.toml" >/dev/null
 grep -F "ForkPress storage capability report" "$TMP/storage-doctor.out" >/dev/null
 "$BIN" storage status --work-dir "$WORK" > "$TMP/storage-status.out"
 grep -F "ForkPress storage status" "$TMP/storage-status.out" >/dev/null
-"$BIN" server start --work-dir "$WORK" --port "$PORT" --root-host wp.localhost --workers 1
+"$BIN" serve --work-dir "$WORK" --port "$PORT" --root-host wp.localhost --workers 1
 "$BIN" server list | grep -F "$WORK" >/dev/null
 
 "$BIN" branch --work-dir "$WORK" create feature-zfs > "$TMP/branch-create.out"
