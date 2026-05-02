@@ -45,14 +45,20 @@ impl RemoteClient {
         if let Some(parent) = control_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let status = Command::new("ssh")
+        let mut command = Command::new("timeout");
+        command
+            .arg("--kill-after=2s")
+            .arg(format!("{}s", ssh_connect_timeout_secs() + 5))
+            .arg("ssh")
             .arg("-MNf")
             .arg("-S")
             .arg(control_path)
             .arg("-o")
             .arg("ControlMaster=yes")
             .arg("-o")
-            .arg("ControlPersist=600")
+            .arg("ControlPersist=600");
+        self.add_ssh_safety_options(&mut command);
+        let status = command
             .arg(&self.manifest.ssh)
             .status()
             .context("start SSH control master")?;
@@ -72,14 +78,34 @@ impl RemoteClient {
             command.arg("-o").arg("ControlMaster=auto");
             command.arg("-o").arg("ControlPersist=600");
         }
+        self.add_ssh_safety_options(&mut command);
         command.arg(&self.manifest.ssh);
         command.arg(remote_command);
         command
     }
 
     pub fn exec_capture(&self, remote_command: &str, stdin: Option<&[u8]>) -> io::Result<Vec<u8>> {
-        let mut child = self
-            .command(remote_command)
+        let timeout_secs = remote_command_timeout_secs();
+        let mut command = if timeout_secs > 0 {
+            let mut command = Command::new("timeout");
+            command
+                .arg("--kill-after=2s")
+                .arg(format!("{}s", timeout_secs))
+                .arg("ssh");
+            if let Some(control_path) = &self.control_path {
+                command.arg("-S").arg(control_path);
+                command.arg("-o").arg("ControlMaster=auto");
+                command.arg("-o").arg("ControlPersist=600");
+            }
+            self.add_ssh_safety_options(&mut command);
+            command.arg(&self.manifest.ssh);
+            command.arg(remote_command);
+            command
+        } else {
+            self.command(remote_command)
+        };
+
+        let mut child = command
             .stdin(if stdin.is_some() {
                 Stdio::piped()
             } else {
@@ -100,6 +126,15 @@ impl RemoteClient {
             return Ok(output.stdout);
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
+        if matches!(output.status.code(), Some(124) | Some(137)) {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "remote command timed out after {} seconds: {}",
+                    timeout_secs, stderr
+                ),
+            ));
+        }
         if output.status.code() == Some(2) || stderr.contains("WPCOW_ENOENT") {
             return Err(io::Error::new(io::ErrorKind::NotFound, stderr.to_string()));
         }
@@ -175,7 +210,9 @@ echo $target;
     pub fn remote_query_readonly(&self, sql: &str) -> Result<RemoteQueryResult> {
         let probe = &self.manifest.probe;
         let code = r#"
-$host=$argv[1];$user=$argv[2];$pass=$argv[3];$db=$argv[4];$sql=$argv[5];
+$host=$argv[1];$user=$argv[2];$pass=$argv[3];$db=$argv[4];$sql=$argv[5];$timeout=(int)$argv[6];
+if($timeout<1){$timeout=10;}
+@set_time_limit($timeout);
 if(!preg_match('/^\s*(SELECT|SHOW|DESCRIBE|DESC|EXPLAIN)\b/i',$sql)){
  fwrite(STDERR,"WPCOW_REFUSED_WRITE\n");exit(3);
 }
@@ -186,10 +223,13 @@ if(preg_match('/^(.+):([0-9]+)$/',$host,$m)){
  $host=$m[1];$socket=$m[2];
 }
 $mysqli=mysqli_init();
+@$mysqli->options(MYSQLI_OPT_CONNECT_TIMEOUT, min(5,$timeout));
 if(!@$mysqli->real_connect($host,$user,$pass,$db,$port,$socket)){
  fwrite(STDERR,mysqli_connect_error()."\n");exit(1);
 }
 @$mysqli->set_charset("utf8mb4");
+@$mysqli->query("SET SESSION max_execution_time=".max(1,$timeout * 1000));
+@$mysqli->query("SET SESSION max_statement_time=".max(1,$timeout));
 $res=$mysqli->query($sql, MYSQLI_STORE_RESULT);
 if($res===false){
  echo json_encode(array("ok"=>false,"error"=>$mysqli->error,"rows"=>array(),"fields"=>array(),"affected"=>0));
@@ -214,6 +254,7 @@ echo json_encode(array("ok"=>true,"error"=>"","rows"=>$rows,"fields"=>$fields,"a
                     probe.db_password.clone(),
                     probe.db_name.clone(),
                     sql.to_string(),
+                    remote_db_query_timeout_secs().to_string(),
                 ],
             )
             .context("remote readonly query")?;
@@ -243,6 +284,16 @@ echo json_encode(array("ok"=>true,"error"=>"","rows"=>$rows,"fields"=>$fields,"a
                 rel
             ))
         }
+    }
+
+    fn add_ssh_safety_options(&self, command: &mut Command) {
+        let connect_timeout = ssh_connect_timeout_secs();
+        command
+            .arg("-o")
+            .arg(format!("ConnectTimeout={connect_timeout}"));
+        command.arg("-o").arg("ServerAliveInterval=5");
+        command.arg("-o").arg("ServerAliveCountMax=1");
+        command.arg("-o").arg("BatchMode=yes");
     }
 }
 
@@ -319,6 +370,25 @@ pub fn shell_quote(value: impl AsRef<OsStr>) -> String {
     }
     let escaped = value.replace('\'', "'\"'\"'");
     format!("'{}'", escaped)
+}
+
+fn remote_command_timeout_secs() -> u64 {
+    env_u64("WPCOW_REMOTE_COMMAND_TIMEOUT_SECS", 20)
+}
+
+fn remote_db_query_timeout_secs() -> u64 {
+    env_u64("WPCOW_REMOTE_DB_QUERY_TIMEOUT_SECS", 10)
+}
+
+fn ssh_connect_timeout_secs() -> u64 {
+    env_u64("WPCOW_SSH_CONNECT_TIMEOUT_SECS", 8)
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or(default)
 }
 
 #[cfg(test)]

@@ -98,10 +98,19 @@ function cow_tables_from_sql( $sql ) {
 	return array_keys( $tables );
 }
 
+function cow_control_timeout_secs() {
+	$timeout = (int) getenv( 'WPCOW_CONTROL_REQUEST_TIMEOUT_SECS' );
+	if ( $timeout < 1 ) {
+		$timeout = 15;
+	}
+	return $timeout;
+}
+
 function cow_control_request( $path, $payload ) {
 	$payload['clone'] = WPCOW_CLONE;
 	$url = rtrim( WPCOW_CONTROL_URL, '/' ) . $path;
 	$body = json_encode( $payload );
+	$timeout = cow_control_timeout_secs();
 
 	if ( function_exists( 'curl_init' ) ) {
 		$ch = curl_init( $url );
@@ -109,7 +118,8 @@ function cow_control_request( $path, $payload ) {
 		curl_setopt( $ch, CURLOPT_HTTPHEADER, array( 'Content-Type: application/json' ) );
 		curl_setopt( $ch, CURLOPT_POSTFIELDS, $body );
 		curl_setopt( $ch, CURLOPT_RETURNTRANSFER, true );
-		curl_setopt( $ch, CURLOPT_TIMEOUT, 120 );
+		curl_setopt( $ch, CURLOPT_CONNECTTIMEOUT, min( 3, $timeout ) );
+		curl_setopt( $ch, CURLOPT_TIMEOUT, $timeout );
 		$raw = curl_exec( $ch );
 		$error = curl_error( $ch );
 		curl_close( $ch );
@@ -123,7 +133,7 @@ function cow_control_request( $path, $payload ) {
 					'method'  => 'POST',
 					'header'  => "Content-Type: application/json\r\n",
 					'content' => $body,
-					'timeout' => 120,
+					'timeout' => $timeout,
 				),
 			)
 		);

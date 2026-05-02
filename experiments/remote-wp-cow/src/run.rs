@@ -103,6 +103,21 @@ pub fn mount_only(manifest: Manifest, paths: ClonePaths, mountpoint: &Path) -> R
 
 fn start_php_server(paths: &ClonePaths, mountpoint: &Path, http_addr: &str) -> Result<Child> {
     Command::new("php")
+        .arg("-d")
+        .arg(format!(
+            "max_execution_time={}",
+            env_u64("WPCOW_PHP_MAX_EXECUTION_SECS", 30)
+        ))
+        .arg("-d")
+        .arg(format!(
+            "default_socket_timeout={}",
+            env_u64("WPCOW_PHP_SOCKET_TIMEOUT_SECS", 15)
+        ))
+        .arg("-d")
+        .arg(format!(
+            "mysqlnd.net_read_timeout={}",
+            env_u64("WPCOW_PHP_SOCKET_TIMEOUT_SECS", 15)
+        ))
         .arg("-S")
         .arg(http_addr)
         .arg("-t")
@@ -111,6 +126,13 @@ fn start_php_server(paths: &ClonePaths, mountpoint: &Path, http_addr: &str) -> R
         .stdin(Stdio::null())
         .spawn()
         .context("start php built-in server")
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or(default)
 }
 
 fn wait_for_mount(mountpoint: &Path) {

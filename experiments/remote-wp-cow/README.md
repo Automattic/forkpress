@@ -127,6 +127,12 @@ only if needed, initializes an empty local MariaDB database if needed, mounts
 the lazy filesystem, starts the DB control layer, and starts PHP. It does not
 download media or table rows up front.
 
+The lab uses bounded request timeouts so a bad remote DB query, unreachable SSH
+host, or slow remote file read should fail visibly instead of leaving the
+browser spinning forever. Adjust the defaults with
+`WPCOW_CONTROL_REQUEST_TIMEOUT_SECS`, `WPCOW_REMOTE_COMMAND_TIMEOUT_SECS`,
+`WPCOW_REMOTE_DB_QUERY_TIMEOUT_SECS`, and `WPCOW_PHP_MAX_EXECUTION_SECS`.
+
 Open this on the Mac:
 
 ```text

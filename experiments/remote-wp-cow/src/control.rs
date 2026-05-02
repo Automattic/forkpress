@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -67,39 +67,59 @@ fn handle_request(
 
     let mut body = String::new();
     request.as_reader().read_to_string(&mut body)?;
-    let input: ControlRequest = serde_json::from_str(&body).context("decode control JSON")?;
 
-    let response = match request.url() {
+    let response = match serde_json::from_str::<ControlRequest>(&body) {
+        Ok(input) => match control_response(request.url(), input, manifest, paths, remote) {
+            Ok(response) => response,
+            Err(err) => json!({ "ok": false, "error": err.to_string() }),
+        },
+        Err(err) => json!({ "ok": false, "error": format!("decode control JSON: {err}") }),
+    };
+
+    let status = match response.get("ok").and_then(|v| v.as_bool()) {
+        Some(true) => StatusCode(200),
+        Some(false) if response.get("error").and_then(|v| v.as_str()) == Some("not found") => {
+            StatusCode(404)
+        }
+        Some(false) => StatusCode(500),
+        None => StatusCode(500),
+    };
+    send_json(request, status, &response)
+}
+
+fn control_response(
+    url: &str,
+    input: ControlRequest,
+    manifest: &Manifest,
+    paths: &ClonePaths,
+    remote: &RemoteClient,
+) -> Result<serde_json::Value> {
+    match url {
         "/materialize" => {
             let tables = input.tables.unwrap_or_default();
             let materialized = db::materialize_tables(remote, manifest, paths, &tables)?;
-            json!({ "ok": true, "backend": "local", "materialized": materialized })
+            Ok(json!({ "ok": true, "backend": "local", "materialized": materialized }))
         }
         "/route" => {
             let tables = input.tables.unwrap_or_default();
             let decision = db::route_for_tables(remote, manifest, paths, &tables)?;
-            json!({ "ok": true, "backend": decision.backend, "materialized": decision.materialized })
+            Ok(
+                json!({ "ok": true, "backend": decision.backend, "materialized": decision.materialized }),
+            )
         }
         "/query" => {
             let sql = input.sql.ok_or_else(|| anyhow!("missing sql"))?;
             let result = db::remote_readonly_query(remote, &sql)?;
-            json!({
+            Ok(json!({
                 "ok": result.ok,
                 "error": result.error,
                 "rows": result.rows,
                 "fields": result.fields,
                 "affected": result.affected
-            })
+            }))
         }
-        _ => json!({ "ok": false, "error": "not found" }),
-    };
-
-    let status = if response.get("ok").and_then(|v| v.as_bool()) == Some(false) {
-        StatusCode(404)
-    } else {
-        StatusCode(200)
-    };
-    send_json(request, status, &response)
+        _ => Ok(json!({ "ok": false, "error": "not found" })),
+    }
 }
 
 fn send_json<T: Serialize>(request: Request, status: StatusCode, value: &T) -> Result<()> {

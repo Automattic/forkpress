@@ -299,6 +299,8 @@ fn serve_site(args: ServeArgs) -> Result<()> {
         manifest
     };
 
+    generate::write_wordpress_overrides(&paths, &manifest)?;
+
     if !paths.db.join("schema.sql").exists() {
         if args.no_probe {
             return Err(anyhow!(
