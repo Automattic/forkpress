@@ -10,6 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::config::ClonePaths;
 use crate::remote::{RemoteClient, RemoteEntry};
 
+pub const OPAQUE_MARKER: &str = ".wp-cow-opaque";
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct WhiteoutFile {
     deleted: BTreeSet<String>,
@@ -73,6 +75,10 @@ impl OverlayStore {
         Ok(self.upper.join(Self::clean_rel(rel)?))
     }
 
+    pub fn mirror_path(&self, rel: &Path) -> Result<PathBuf> {
+        Ok(self.file_cache.join("mirror").join(Self::clean_rel(rel)?))
+    }
+
     pub fn cache_path(&self, rel: &Path) -> PathBuf {
         let mut hasher = Sha256::new();
         hasher.update(Self::rel_string(rel));
@@ -82,7 +88,10 @@ impl OverlayStore {
 
     pub fn cached_file_path(&self, rel: &Path) -> Option<PathBuf> {
         let path = self.cache_path(rel);
-        path.is_file().then_some(path)
+        if path.is_file() {
+            return Some(path);
+        }
+        self.mirror_path(rel).ok().filter(|path| path.is_file())
     }
 
     pub fn cached_entry(&self, rel: &Path) -> Result<Option<RemoteEntry>> {
@@ -145,7 +154,10 @@ impl OverlayStore {
             fs::create_dir_all(parent)?;
         }
 
-        let entry = remote.stat(rel)?;
+        let entry = match self.cached_entry(rel)? {
+            Some(entry) => entry,
+            None => remote.stat(rel)?,
+        };
         if entry.kind == "dir" {
             fs::create_dir_all(&upper)?;
             return Ok(upper);
@@ -193,22 +205,29 @@ impl OverlayStore {
             if let Some(parent) = cache_path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            let tmp = cache_path.with_extension("tmp");
+            if cache_path.exists() {
+                return read_range_from_file(&cache_path, offset as u64, size as usize);
+            }
+            let tmp = self.cache_tmp_path(&cache_path);
             let mut out = File::create(&tmp)?;
-            let mut cursor = 0_u64;
-            let chunk = 1024 * 1024;
             let rel_string = Self::rel_string(rel);
             let _ = self.write_cache_progress(&rel_string, "fetching", 0, entry.size);
-            while cursor < entry.size {
-                let wanted = chunk.min((entry.size - cursor) as usize);
-                let bytes = remote.read_range(rel, cursor, wanted)?;
-                if bytes.is_empty() {
-                    break;
-                }
-                out.write_all(&bytes)?;
-                cursor += bytes.len() as u64;
-                let _ = self.write_cache_progress(&rel_string, "fetching", cursor, entry.size);
+            let bytes = remote
+                .read_file(rel)
+                .with_context(|| format!("remote cache fetch {}", rel_string))?;
+            let actual_size = bytes.len() as u64;
+            if actual_size != entry.size {
+                let _ = fs::remove_file(&tmp);
+                return Err(anyhow!(
+                    "remote file changed while caching {}: stat size {}, read size {}",
+                    rel_string,
+                    entry.size,
+                    actual_size
+                ));
             }
+            out.write_all(&bytes)?;
+            let _ = self.write_cache_progress(&rel_string, "fetching", actual_size, entry.size);
+            drop(out);
             fs::rename(tmp, &cache_path)?;
             self.put_cached_entry(rel, &entry)?;
             let _ = self.finish_cache_progress(&rel_string, entry.size);
@@ -227,13 +246,27 @@ impl OverlayStore {
     }
 
     pub fn list_upper(&self, rel: &Path) -> Result<Vec<RemoteEntry>> {
-        let path = self.upper_path(rel)?;
+        self.list_local_layer(&self.upper_path(rel)?)
+    }
+
+    pub fn list_mirror(&self, rel: &Path) -> Result<Vec<RemoteEntry>> {
+        self.list_local_layer(&self.mirror_path(rel)?)
+    }
+
+    pub fn is_opaque_dir(&self, rel: &Path) -> Result<bool> {
+        Ok(self.upper_path(rel)?.join(OPAQUE_MARKER).is_file())
+    }
+
+    fn list_local_layer(&self, path: &Path) -> Result<Vec<RemoteEntry>> {
         if !path.is_dir() {
             return Ok(Vec::new());
         }
         let mut out = Vec::new();
         for entry in fs::read_dir(path)? {
             let entry = entry?;
+            if entry.file_name() == OPAQUE_MARKER {
+                continue;
+            }
             let metadata = fs::symlink_metadata(entry.path())?;
             let file_type = metadata.file_type();
             out.push(RemoteEntry {
@@ -349,6 +382,19 @@ impl OverlayStore {
     fn progress_tmp_path(&self) -> PathBuf {
         self.file_cache.join(format!(
             "progress.json.tmp.{}.{}",
+            std::process::id(),
+            now_unix_ms()
+        ))
+    }
+
+    fn cache_tmp_path(&self, cache_path: &Path) -> PathBuf {
+        let name = cache_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("remote-file");
+        cache_path.with_file_name(format!(
+            "{}.tmp.{}.{}",
+            name,
             std::process::id(),
             now_unix_ms()
         ))

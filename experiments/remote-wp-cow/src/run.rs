@@ -1,15 +1,19 @@
 use anyhow::{anyhow, Context, Result};
+use std::collections::BTreeSet;
+use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::config::{ClonePaths, Manifest};
 use crate::control;
+use crate::db;
 use crate::fusefs;
-use crate::remote::RemoteClient;
+use crate::remote::{shell_quote, RemoteClient};
 
 pub struct RunOptions {
     pub mountpoint: PathBuf,
@@ -65,7 +69,18 @@ pub fn run_site(manifest: Manifest, paths: ClonePaths, options: RunOptions) -> R
     let mount_thread =
         thread::spawn(move || fusefs::mount_foreground(mount_manifest, mount_paths, &mountpoint));
 
-    wait_for_mount(&options.mountpoint);
+    if let Err(wait_err) = wait_for_mount(&options.mountpoint, &mount_thread) {
+        shutdown.store(true, Ordering::SeqCst);
+        if mount_thread.is_finished() {
+            match mount_thread.join() {
+                Ok(Err(mount_err)) => return Err(mount_err).with_context(|| wait_err.to_string()),
+                Ok(Ok(())) => return Err(wait_err),
+                Err(_) => return Err(anyhow!("mount thread panicked")).context(wait_err),
+            }
+        }
+        let _ = unmount(&options.mountpoint);
+        return Err(wait_err);
+    }
 
     let mut php = if options.skip_php {
         None
@@ -76,6 +91,17 @@ pub fn run_site(manifest: Manifest, paths: ClonePaths, options: RunOptions) -> R
             &options.http_addr,
         )?)
     };
+
+    if env_bool("WPCOW_PREFETCH_RUNTIME", true) {
+        let warm_manifest = manifest.clone();
+        let warm_paths = paths.clone();
+        let warm_remote = remote.clone();
+        thread::spawn(move || {
+            if let Err(err) = prefetch_runtime_files(&warm_manifest, &warm_paths, &warm_remote) {
+                eprintln!("wp-cow runtime prefetch skipped: {err:#}");
+            }
+        });
+    }
 
     eprintln!(
         "wp-cow running clone '{}' at {} from {}",
@@ -125,6 +151,181 @@ pub fn mount_only(manifest: Manifest, paths: ClonePaths, mountpoint: &Path) -> R
     fusefs::mount_foreground(manifest, paths, mountpoint)
 }
 
+fn prefetch_runtime_files(
+    manifest: &Manifest,
+    paths: &ClonePaths,
+    remote: &RemoteClient,
+) -> Result<()> {
+    let mirror = paths.file_cache.join("mirror");
+    fs::create_dir_all(&mirror)?;
+    let stamp = mirror.join(".wp-cow-runtime-prefetch-v2");
+    if stamp.is_file() {
+        return Ok(());
+    }
+
+    let mut rels = vec!["wp-admin".to_string(), "wp-includes".to_string()];
+    let mut themes = BTreeSet::new();
+    for option in ["template", "stylesheet"] {
+        if let Some(theme) = db::local_option_value(manifest, option)? {
+            if let Some(theme) = clean_theme_name(&theme) {
+                themes.insert(theme);
+            }
+        }
+    }
+    if themes.is_empty() {
+        for theme in remote_active_theme_names(manifest, remote)? {
+            themes.insert(theme);
+        }
+    }
+    for theme in themes {
+        rels.push(format!("wp-content/themes/{theme}"));
+    }
+
+    eprintln!(
+        "wp-cow warming runtime file cache in background: {}",
+        rels.join(", ")
+    );
+    let _ = write_prefetch_progress(paths, "prefetching-runtime", &rels.join(", "), 0, 0, 0);
+    let remote_paths = rels.iter().map(shell_quote).collect::<Vec<_>>().join(" ");
+    let remote_command = format!(
+        "cd {} && tar -cf - --ignore-failed-read {}",
+        shell_quote(&manifest.remote_path),
+        remote_paths
+    );
+    let mut ssh = remote
+        .command(&remote_command)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("start remote theme tar")?;
+    let mut tar = Command::new("tar")
+        .arg("-C")
+        .arg(&mirror)
+        .arg("-xf")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .spawn()
+        .context("start local theme tar")?;
+
+    {
+        let mut ssh_stdout = ssh.stdout.take().expect("ssh stdout piped");
+        let mut tar_stdin = tar.stdin.take().expect("tar stdin piped");
+        let mut buf = [0_u8; 64 * 1024];
+        let mut bytes = 0_u64;
+        loop {
+            let read = ssh_stdout.read(&mut buf)?;
+            if read == 0 {
+                break;
+            }
+            tar_stdin.write_all(&buf[..read])?;
+            bytes = bytes.saturating_add(read as u64);
+            if bytes == read as u64 || bytes % (1024 * 1024) < read as u64 {
+                let _ = write_prefetch_progress(
+                    paths,
+                    "prefetching-runtime",
+                    &rels.join(", "),
+                    bytes,
+                    0,
+                    bytes,
+                );
+            }
+        }
+    }
+
+    let ssh_output = ssh.wait_with_output()?;
+    let tar_status = tar.wait()?;
+    if !ssh_output.status.success() {
+        return Err(anyhow!(
+            "remote theme tar failed: {}",
+            String::from_utf8_lossy(&ssh_output.stderr)
+        ));
+    }
+    if !tar_status.success() {
+        return Err(anyhow!("local theme tar failed with status {}", tar_status));
+    }
+    fs::write(&stamp, b"ok\n")?;
+    let _ = write_prefetch_progress(paths, "cached", "", 0, 0, 0);
+    Ok(())
+}
+
+fn remote_active_theme_names(
+    manifest: &Manifest,
+    remote: &RemoteClient,
+) -> Result<BTreeSet<String>> {
+    let mut out = BTreeSet::new();
+    let Some(table) = safe_mysql_identifier(&format!("{}options", manifest.probe.table_prefix))
+    else {
+        return Ok(out);
+    };
+    let sql = format!(
+        "SELECT option_name, option_value FROM `{table}` WHERE option_name IN ('template','stylesheet')"
+    );
+    let result = db::remote_readonly_query(remote, &sql)?;
+    if !result.ok {
+        return Ok(out);
+    }
+    for row in result.rows {
+        let Some(value) = row.get("option_value").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        if let Some(theme) = clean_theme_name(value) {
+            out.insert(theme);
+        }
+    }
+    Ok(out)
+}
+
+fn safe_mysql_identifier(value: &str) -> Option<String> {
+    if value.is_empty()
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
+    {
+        return None;
+    }
+    Some(value.to_string())
+}
+
+fn write_prefetch_progress(
+    paths: &ClonePaths,
+    phase: &str,
+    active_path: &str,
+    active_bytes: u64,
+    active_total: u64,
+    bytes_cached: u64,
+) -> Result<()> {
+    fs::create_dir_all(&paths.file_cache)?;
+    let progress = serde_json::json!({
+        "phase": phase,
+        "active_path": active_path,
+        "active_bytes": active_bytes,
+        "active_total": active_total,
+        "files_cached": 0,
+        "bytes_cached": bytes_cached,
+        "last_cached_path": active_path,
+        "updated_at_unix_ms": now_unix_ms(),
+    });
+    let progress_path = paths.file_cache.join("progress.json");
+    let tmp = paths
+        .file_cache
+        .join(format!("progress.json.prefetch.{}.tmp", std::process::id()));
+    fs::write(&tmp, serde_json::to_vec_pretty(&progress)?)?;
+    fs::rename(tmp, progress_path)?;
+    Ok(())
+}
+
+fn clean_theme_name(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty()
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '.')
+    {
+        return None;
+    }
+    Some(value.to_string())
+}
+
 fn start_php_server(paths: &ClonePaths, mountpoint: &Path, http_addr: &str) -> Result<Child> {
     Command::new("php")
         .env(
@@ -163,13 +364,42 @@ fn env_u64(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-fn wait_for_mount(mountpoint: &Path) {
-    for _ in 0..40 {
+fn now_unix_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
+}
+
+fn env_bool(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|raw| {
+            matches!(
+                raw.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(default)
+}
+
+fn wait_for_mount(mountpoint: &Path, mount_thread: &JoinHandle<Result<()>>) -> Result<()> {
+    for _ in 0..100 {
         if mountpoint.join("wp-config.php").exists() {
-            return;
+            return Ok(());
         }
-        thread::sleep(Duration::from_millis(100));
+        if mount_thread.is_finished() {
+            return Err(anyhow!(
+                "FUSE mount exited before generated WordPress files became visible at {}",
+                mountpoint.display()
+            ));
+        }
+        thread::sleep(Duration::from_millis(200));
     }
+    Err(anyhow!(
+        "timed out waiting for FUSE mount at {}",
+        mountpoint.display()
+    ))
 }
 
 fn control_addr_from_url(url: &str) -> Result<String> {

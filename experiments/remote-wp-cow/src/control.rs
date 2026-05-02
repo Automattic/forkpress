@@ -71,7 +71,7 @@ fn handle_request(
     let response = match serde_json::from_str::<ControlRequest>(&body) {
         Ok(input) => match control_response(request.url(), input, manifest, paths, remote) {
             Ok(response) => response,
-            Err(err) => json!({ "ok": false, "error": err.to_string() }),
+            Err(err) => json!({ "ok": false, "error": format!("{err:#}") }),
         },
         Err(err) => json!({ "ok": false, "error": format!("decode control JSON: {err}") }),
     };

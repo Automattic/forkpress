@@ -1,9 +1,11 @@
 use anyhow::{anyhow, Context, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
-use std::io::{self, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -23,6 +25,7 @@ pub struct RemoteEntry {
 pub struct RemoteClient {
     manifest: Manifest,
     control_path: Option<PathBuf>,
+    file_helper: Arc<Mutex<Option<RemoteFileHelper>>>,
 }
 
 impl RemoteClient {
@@ -30,6 +33,7 @@ impl RemoteClient {
         Self {
             manifest,
             control_path,
+            file_helper: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -203,6 +207,19 @@ impl RemoteClient {
 
     pub fn stat(&self, rel: &Path) -> io::Result<RemoteEntry> {
         let full = self.remote_full_path(rel)?;
+        if remote_file_helper_enabled() {
+            let request = serde_json::json!({
+                "op": "stat",
+                "path": full,
+            });
+            if let Ok(response) = self.file_helper_request(request) {
+                if let Some(entry) = response.get("entry") {
+                    return serde_json::from_value(entry.clone())
+                        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err));
+                }
+            }
+        }
+
         let code = r#"
 $p=$argv[1];
 clearstatcache(true,$p);
@@ -224,6 +241,19 @@ echo json_encode(array(
 
     pub fn readdir(&self, rel: &Path) -> io::Result<Vec<RemoteEntry>> {
         let full = self.remote_full_path(rel)?;
+        if remote_file_helper_enabled() {
+            let request = serde_json::json!({
+                "op": "readdir",
+                "path": full,
+            });
+            if let Ok(response) = self.file_helper_request(request) {
+                if let Some(entries) = response.get("entries") {
+                    return serde_json::from_value(entries.clone())
+                        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err));
+                }
+            }
+        }
+
         let code = r#"
 $p=$argv[1];
 if(!is_dir($p)){fwrite(STDERR,"WPCOW_ENOENT\n");exit(2);}
@@ -245,6 +275,18 @@ echo json_encode($out);
 
     pub fn read_range(&self, rel: &Path, offset: u64, length: usize) -> io::Result<Vec<u8>> {
         let full = self.remote_full_path(rel)?;
+        if remote_file_helper_enabled() {
+            let request = serde_json::json!({
+                "op": "read_range",
+                "path": full,
+                "offset": offset,
+                "length": length,
+            });
+            if let Ok(response) = self.file_helper_request(request) {
+                return decode_helper_data(response);
+            }
+        }
+
         let code = r#"
 $p=$argv[1];$offset=(int)$argv[2];$length=(int)$argv[3];
 $f=@fopen($p,"rb");
@@ -255,8 +297,43 @@ echo fread($f,$length);
         self.php_eval(code, &[full, offset.to_string(), length.to_string()])
     }
 
+    pub fn read_file(&self, rel: &Path) -> io::Result<Vec<u8>> {
+        let full = self.remote_full_path(rel)?;
+        if remote_file_helper_enabled() {
+            let request = serde_json::json!({
+                "op": "read_file",
+                "path": full,
+            });
+            if let Ok(response) = self.file_helper_request(request) {
+                return decode_helper_data(response);
+            }
+        }
+
+        let code = r#"
+$p=$argv[1];
+$f=@fopen($p,"rb");
+if(!$f){fwrite(STDERR,"WPCOW_ENOENT\n");exit(2);}
+while(!feof($f)){
+ echo fread($f,1048576);
+}
+"#;
+        self.php_eval(code, &[full])
+    }
+
     pub fn readlink(&self, rel: &Path) -> io::Result<String> {
         let full = self.remote_full_path(rel)?;
+        if remote_file_helper_enabled() {
+            let request = serde_json::json!({
+                "op": "readlink",
+                "path": full,
+            });
+            if let Ok(response) = self.file_helper_request(request) {
+                if let Some(target) = response.get("target").and_then(|value| value.as_str()) {
+                    return Ok(target.to_string());
+                }
+            }
+        }
+
         let code = r#"
 $p=$argv[1];
 $target=@readlink($p);
@@ -273,6 +350,7 @@ echo $target;
 $host=$argv[1];$user=$argv[2];$pass=$argv[3];$db=$argv[4];$sql=$argv[5];$timeout=(int)$argv[6];
 if($timeout<1){$timeout=10;}
 @set_time_limit($timeout);
+if(function_exists("mysqli_report")){mysqli_report(MYSQLI_REPORT_OFF);}
 if(!preg_match('/^\s*(SELECT|SHOW|DESCRIBE|DESC|EXPLAIN)\b/i',$sql)){
  fwrite(STDERR,"WPCOW_REFUSED_WRITE\n");exit(3);
 }
@@ -322,6 +400,94 @@ echo json_encode(array("ok"=>true,"error"=>"","rows"=>$rows,"fields"=>$fields,"a
         Ok(result)
     }
 
+    fn file_helper_request(&self, request: serde_json::Value) -> io::Result<serde_json::Value> {
+        let mut last_error = None;
+        for _ in 0..2 {
+            match self.file_helper_request_once(&request) {
+                Ok(response) => return Ok(response),
+                Err(err) => {
+                    last_error = Some(err);
+                    let mut helper = self
+                        .file_helper
+                        .lock()
+                        .map_err(|_| io::Error::new(io::ErrorKind::Other, "file helper lock"))?;
+                    reset_file_helper(&mut helper);
+                }
+            }
+        }
+        Err(last_error
+            .unwrap_or_else(|| io::Error::new(io::ErrorKind::Other, "remote file helper failed")))
+    }
+
+    fn file_helper_request_once(
+        &self,
+        request: &serde_json::Value,
+    ) -> io::Result<serde_json::Value> {
+        let mut helper = self
+            .file_helper
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "file helper lock"))?;
+        if helper.is_none() {
+            *helper = Some(self.start_file_helper()?);
+        }
+        let helper = helper
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "file helper missing"))?;
+        let request = serde_json::to_vec(request)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+        helper.stdin.write_all(&request)?;
+        helper.stdin.write_all(b"\n")?;
+        helper.stdin.flush()?;
+
+        let mut line = String::new();
+        let read = helper.stdout.read_line(&mut line)?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "remote file helper closed",
+            ));
+        }
+        let response: serde_json::Value = serde_json::from_str(&line)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        if response.get("ok").and_then(|value| value.as_bool()) == Some(true) {
+            return Ok(response);
+        }
+        let error = response
+            .get("error")
+            .and_then(|value| value.as_str())
+            .unwrap_or("remote file helper error")
+            .to_string();
+        let kind = if response.get("kind").and_then(|value| value.as_str()) == Some("not_found") {
+            io::ErrorKind::NotFound
+        } else {
+            io::ErrorKind::Other
+        };
+        Err(io::Error::new(kind, error))
+    }
+
+    fn start_file_helper(&self) -> io::Result<RemoteFileHelper> {
+        let remote_command = format!("php -r {}", shell_quote(remote_file_helper_php()));
+        let mut command = self.ssh_command(&remote_command, 0);
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "file helper stdin"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "file helper stdout"))?;
+        Ok(RemoteFileHelper {
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+        })
+    }
+
     fn php_eval(&self, code: &str, args: &[String]) -> io::Result<Vec<u8>> {
         let mut command = format!("php -r {} --", shell_quote(code));
         for arg in args {
@@ -355,6 +521,118 @@ echo json_encode(array("ok"=>true,"error"=>"","rows"=>$rows,"fields"=>$fields,"a
         command.arg("-o").arg("ServerAliveCountMax=1");
         command.arg("-o").arg("BatchMode=yes");
     }
+}
+
+#[derive(Debug)]
+struct RemoteFileHelper {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl Drop for RemoteFileHelper {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn reset_file_helper(helper: &mut Option<RemoteFileHelper>) {
+    if let Some(mut helper) = helper.take() {
+        let _ = helper.child.kill();
+        let _ = helper.child.wait();
+    }
+}
+
+fn decode_helper_data(response: serde_json::Value) -> io::Result<Vec<u8>> {
+    let data = response
+        .get("data")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "helper response missing data")
+        })?;
+    BASE64
+        .decode(data)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+}
+
+fn remote_file_helper_enabled() -> bool {
+    env_bool("WPCOW_REMOTE_FILE_HELPER", true).unwrap_or(true)
+}
+
+fn remote_file_helper_php() -> &'static str {
+    r#"
+error_reporting(0);
+function wpcow_send($payload) {
+ echo json_encode($payload), "\n";
+ flush();
+}
+function wpcow_not_found() {
+ wpcow_send(array("ok"=>false,"kind"=>"not_found","error"=>"WPCOW_ENOENT"));
+}
+while (($line = fgets(STDIN)) !== false) {
+ $request = json_decode($line, true);
+ if (!is_array($request)) {
+  wpcow_send(array("ok"=>false,"error"=>"invalid request"));
+  continue;
+ }
+ $op = isset($request["op"]) ? $request["op"] : "";
+ $path = isset($request["path"]) ? $request["path"] : "";
+ if ($op === "stat") {
+  clearstatcache(true, $path);
+  $s = @lstat($path);
+  if ($s === false) { wpcow_not_found(); continue; }
+  $kind = is_link($path) ? "symlink" : (is_dir($path) ? "dir" : (is_file($path) ? "file" : "other"));
+  wpcow_send(array("ok"=>true,"entry"=>array(
+   "name"=>basename($path),
+   "kind"=>$kind,
+   "size"=>(int)$s["size"],
+   "mode"=>(int)$s["mode"],
+   "mtime"=>(int)$s["mtime"]
+  )));
+  continue;
+ }
+ if ($op === "readdir") {
+  if (!is_dir($path)) { wpcow_not_found(); continue; }
+  $out = array();
+  foreach (scandir($path) as $name) {
+   if ($name === "." || $name === "..") { continue; }
+   $child = $path . DIRECTORY_SEPARATOR . $name;
+   $s = @lstat($child);
+   if ($s === false) { continue; }
+   $kind = is_link($child) ? "symlink" : (is_dir($child) ? "dir" : (is_file($child) ? "file" : "other"));
+   $out[] = array("name"=>$name,"kind"=>$kind,"size"=>(int)$s["size"],"mode"=>(int)$s["mode"],"mtime"=>(int)$s["mtime"]);
+  }
+  wpcow_send(array("ok"=>true,"entries"=>$out));
+  continue;
+ }
+ if ($op === "read_file") {
+  if (!is_file($path)) { wpcow_not_found(); continue; }
+  $data = @file_get_contents($path);
+  if ($data === false) { wpcow_not_found(); continue; }
+  wpcow_send(array("ok"=>true,"data"=>base64_encode($data),"size"=>strlen($data)));
+  continue;
+ }
+ if ($op === "read_range") {
+  $offset = isset($request["offset"]) ? max(0, (int)$request["offset"]) : 0;
+  $length = isset($request["length"]) ? max(0, (int)$request["length"]) : 0;
+  $f = @fopen($path, "rb");
+  if (!$f) { wpcow_not_found(); continue; }
+  if ($offset > 0) { @fseek($f, $offset); }
+  $data = $length > 0 ? fread($f, $length) : "";
+  if ($data === false) { $data = ""; }
+  wpcow_send(array("ok"=>true,"data"=>base64_encode($data),"size"=>strlen($data)));
+  continue;
+ }
+ if ($op === "readlink") {
+  $target = @readlink($path);
+  if ($target === false) { wpcow_not_found(); continue; }
+  wpcow_send(array("ok"=>true,"target"=>$target));
+  continue;
+ }
+ wpcow_send(array("ok"=>false,"error"=>"unknown op"));
+}
+"#
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

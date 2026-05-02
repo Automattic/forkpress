@@ -3,16 +3,31 @@ use std::fs;
 use std::path::Path;
 
 use crate::config::{ClonePaths, Manifest};
+use crate::overlay::OPAQUE_MARKER;
 
 pub fn write_wordpress_overrides(paths: &ClonePaths, manifest: &Manifest) -> Result<()> {
     fs::create_dir_all(paths.upper.join("wp-content/mu-plugins"))?;
+    write_opaque_dir(paths.upper.join("wp-content/plugins"))?;
+    write_opaque_dir(paths.upper.join("wp-content/languages"))?;
     fs::write(paths.upper.join("wp-config.php"), wp_config_php(manifest))?;
     fs::write(paths.upper.join("wp-content/db.php"), db_dropin_php())?;
     fs::write(
         paths.upper.join("wp-content/mu-plugins/wp-cow-safety.php"),
         safety_mu_plugin_php(),
     )?;
-    fs::write(paths.generated.join("router.php"), router_php(paths))?;
+    fs::write(
+        paths.generated.join("router.php"),
+        router_php(paths, manifest),
+    )?;
+    Ok(())
+}
+
+fn write_opaque_dir(path: impl AsRef<Path>) -> Result<()> {
+    fs::create_dir_all(path.as_ref())?;
+    fs::write(
+        path.as_ref().join(OPAQUE_MARKER),
+        b"local overlay hides remote lower\n",
+    )?;
     Ok(())
 }
 
@@ -106,12 +121,14 @@ function cow_is_safe_read_sql( $sql ) {
 
 function cow_tables_from_sql( $sql ) {
 	$tables = array();
-	if ( preg_match_all( '/\b(?:FROM|JOIN|UPDATE|INTO|TABLE)\s+`?([A-Za-z0-9_$]+)`?/i', $sql, $matches ) ) {
-		foreach ( $matches[1] as $table ) {
-			$tables[ $table ] = true;
-		}
+	$stripped = ltrim( preg_replace( '/^\s*(?:\/\*.*?\*\/\s*|--[^\n]*\n\s*|#[^\n]*\n\s*)*/s', '', $sql ) );
+	if ( preg_match( '/^(?:INSERT|REPLACE)\s+(?:IGNORE\s+)?INTO\s+`?([A-Za-z0-9_$]+)`?/i', $stripped, $matches ) ) {
+		return array( $matches[1] );
 	}
-	if ( preg_match_all( '/\bUPDATE\s+(?:LOW_PRIORITY\s+)?(?:IGNORE\s+)?`?([A-Za-z0-9_$]+)`?/i', $sql, $matches ) ) {
+	if ( preg_match( '/^UPDATE\s+(?:LOW_PRIORITY\s+)?(?:IGNORE\s+)?`?([A-Za-z0-9_$]+)`?/i', $stripped, $matches ) ) {
+		$tables[ $matches[1] ] = true;
+	}
+	if ( preg_match_all( '/\b(?:FROM|JOIN|INTO|TABLE)\s+`?([A-Za-z0-9_$]+)`?/i', $sql, $matches ) ) {
 		foreach ( $matches[1] as $table ) {
 			$tables[ $table ] = true;
 		}
@@ -322,6 +339,10 @@ class Cow_DB extends wpdb {
 			$socket = $matches[2];
 		}
 
+		if ( function_exists( 'mysqli_report' ) ) {
+			mysqli_report( MYSQLI_REPORT_OFF );
+		}
+
 		$mysqli = mysqli_init();
 		if ( ! $mysqli ) {
 			$this->cow_remote_failed = true;
@@ -363,6 +384,11 @@ if ( ! defined( 'DISABLE_WP_CRON' ) ) {
 	define( 'DISABLE_WP_CRON', true );
 }
 
+if ( '1' !== getenv( 'WPCOW_ENABLE_PLUGINS' ) ) {
+	add_filter( 'option_active_plugins', '__return_empty_array', PHP_INT_MAX );
+	add_filter( 'site_option_active_sitewide_plugins', '__return_empty_array', PHP_INT_MAX );
+}
+
 add_filter( 'pre_http_request', static function ( $preempt, $args, $url ) {
 	if ( defined( 'WPCOW_ALLOW_OUTBOUND_HTTP' ) && WPCOW_ALLOW_OUTBOUND_HTTP ) {
 		return $preempt;
@@ -373,10 +399,12 @@ add_filter( 'pre_http_request', static function ( $preempt, $args, $url ) {
 "#
 }
 
-pub fn router_php(paths: &ClonePaths) -> String {
+pub fn router_php(paths: &ClonePaths, manifest: &Manifest) -> String {
     r#"<?php
 $wp_cow_progress_file = __WPCOW_PROGRESS_FILE__;
 $wp_cow_ready_file = __WPCOW_READY_FILE__;
+$wp_cow_remote_url = __WPCOW_REMOTE_URL__;
+$wp_cow_local_url = __WPCOW_LOCAL_URL__;
 
 if ( '/__wp-cow/progress' === parse_url( $_SERVER['REQUEST_URI'], PHP_URL_PATH ) ) {
 	header( 'Content-Type: application/json' );
@@ -431,6 +459,85 @@ function wp_cow_runtime_error_page( $title, $message, $details = '' ) {
 	echo '</main></body></html>';
 }
 
+function wp_cow_is_frontend_get( $path ) {
+	if ( ! in_array( $_SERVER['REQUEST_METHOD'], array( 'GET', 'HEAD' ), true ) ) {
+		return false;
+	}
+	if ( 0 === strpos( $path, '/wp-admin' ) || 0 === strpos( $path, '/wp-login.php' ) || 0 === strpos( $path, '/wp-json' ) ) {
+		return false;
+	}
+	return true;
+}
+
+function wp_cow_proxy_remote_frontend( $remote_url, $local_url, $path ) {
+	if ( '0' === getenv( 'WPCOW_PROXY_FRONTEND' ) || isset( $_GET['__wp_cow_local'] ) || ! wp_cow_is_frontend_get( $path ) ) {
+		return false;
+	}
+
+	$query = $_GET;
+	unset( $query['__wp_cow_bypass_splash'], $query['__wp_cow_local'] );
+	$target = rtrim( $remote_url, '/' ) . ( '/' === $path ? '/' : $path );
+	if ( ! empty( $query ) ) {
+		$target .= '?' . http_build_query( $query );
+	}
+
+	$timeout = (int) getenv( 'WPCOW_PROXY_TIMEOUT_SECS' );
+	if ( $timeout < 1 ) {
+		$timeout = 20;
+	}
+
+	$body = false;
+	$status = 0;
+	$content_type = 'text/html; charset=utf-8';
+	if ( function_exists( 'curl_init' ) ) {
+		$ch = curl_init( $target );
+		curl_setopt( $ch, CURLOPT_RETURNTRANSFER, true );
+		curl_setopt( $ch, CURLOPT_FOLLOWLOCATION, true );
+		curl_setopt( $ch, CURLOPT_CONNECTTIMEOUT, min( 5, $timeout ) );
+		curl_setopt( $ch, CURLOPT_TIMEOUT, $timeout );
+		curl_setopt( $ch, CURLOPT_USERAGENT, 'wp-cow frontend proxy' );
+		curl_setopt( $ch, CURLOPT_HTTPHEADER, array( 'X-WP-COW-Proxy: 1' ) );
+		$body = curl_exec( $ch );
+		$status = (int) curl_getinfo( $ch, CURLINFO_RESPONSE_CODE );
+		$type = curl_getinfo( $ch, CURLINFO_CONTENT_TYPE );
+		if ( is_string( $type ) && '' !== $type ) {
+			$content_type = $type;
+		}
+		curl_close( $ch );
+	} else {
+		$context = stream_context_create(
+			array(
+				'http' => array(
+					'timeout' => $timeout,
+					'ignore_errors' => true,
+					'header' => "User-Agent: wp-cow frontend proxy\r\nX-WP-COW-Proxy: 1\r\n",
+				),
+			)
+		);
+		$body = @file_get_contents( $target, false, $context );
+		$status = 200;
+	}
+
+	if ( false === $body || '' === $body || $status >= 500 ) {
+		return false;
+	}
+
+	if ( ! headers_sent() ) {
+		http_response_code( $status >= 300 ? 200 : max( 200, $status ) );
+		header( 'Content-Type: ' . $content_type );
+		header( 'Cache-Control: no-store' );
+		header( 'X-WP-COW-Frontend-Proxy: 1' );
+	}
+	if ( false !== stripos( $content_type, 'text/html' ) ) {
+		$body = str_replace( $remote_url, rtrim( $local_url, '/' ), $body );
+		$body = str_replace( preg_replace( '/^https:/', 'http:', $remote_url ), rtrim( $local_url, '/' ), $body );
+	}
+	if ( 'HEAD' !== $_SERVER['REQUEST_METHOD'] ) {
+		echo $body;
+	}
+	return true;
+}
+
 function wp_cow_render_wordpress( $ready_file ) {
 	ob_start();
 	require rtrim( $_SERVER['DOCUMENT_ROOT'], '/' ) . '/index.php';
@@ -464,6 +571,10 @@ if ( in_array( $path, array( '/wp-admin/install.php', '/wp-admin/setup-config.ph
 
 if ( '/' !== $path && is_file( $file ) ) {
 	return false;
+}
+
+if ( wp_cow_proxy_remote_frontend( $wp_cow_remote_url, $wp_cow_local_url, $path ) ) {
+	return true;
 }
 
 $should_show_splash = (
@@ -597,6 +708,8 @@ return wp_cow_render_wordpress( $wp_cow_ready_file );
         "__WPCOW_READY_FILE__",
         &php_string(&paths.run.join("first-request-ready.json").to_string_lossy()),
     )
+    .replace("__WPCOW_REMOTE_URL__", &php_string(&manifest.remote_url))
+    .replace("__WPCOW_LOCAL_URL__", &php_string(&manifest.local_url))
 }
 
 fn php_string(value: &str) -> String {
@@ -676,6 +789,7 @@ mod tests {
         assert!(php.contains("cow_db_runtime_fail"));
         assert!(php.contains("will not fall back to the empty local schema"));
         assert!(php.contains("'sql' => $query"));
+        assert!(php.contains("INSERT|REPLACE"));
     }
 
     #[test]
@@ -684,20 +798,26 @@ mod tests {
         assert!(php.contains("pre_wp_mail"));
         assert!(php.contains("X-Robots-Tag"));
         assert!(php.contains("pre_http_request"));
+        assert!(php.contains("WPCOW_ENABLE_PLUGINS"));
+        assert!(php.contains("option_active_plugins"));
     }
 
     #[test]
     fn router_exposes_splash_and_progress_endpoint() {
         let temp = tempfile::tempdir().unwrap();
         let paths = clone_paths(temp.path(), "example");
-        let php = router_php(&paths);
+        let php = router_php(&paths, &manifest());
         assert!(php.contains("/__wp-cow/progress"));
         assert!(php.contains("__wp_cow_bypass_splash"));
         assert!(php.contains("wp_cow_looks_like_installer"));
+        assert!(php.contains("wp_cow_proxy_remote_frontend"));
+        assert!(php.contains("X-WP-COW-Frontend-Proxy"));
         assert!(php.contains("WordPress tried to show the installation wizard"));
         assert!(php.contains("Cache-Control: no-store"));
         assert!(!php.contains("__WPCOW_PROGRESS_FILE__"));
         assert!(!php.contains("__WPCOW_READY_FILE__"));
+        assert!(!php.contains("__WPCOW_REMOTE_URL__"));
+        assert!(!php.contains("__WPCOW_LOCAL_URL__"));
     }
 
     #[test]
@@ -713,7 +833,7 @@ mod tests {
             ("wp-config.php", wp_config_php(&manifest())),
             ("db.php", db_dropin_php().to_string()),
             ("wp-cow-safety.php", safety_mu_plugin_php().to_string()),
-            ("router.php", router_php(&paths)),
+            ("router.php", router_php(&paths, &manifest())),
         ];
 
         for (name, php) in files {
@@ -749,11 +869,12 @@ mod tests {
         let docroot = temp.path().join("docroot");
         fs::create_dir_all(&docroot).unwrap();
         let router = paths.generated.join("router.php");
-        fs::write(&router, router_php(&paths)).unwrap();
+        fs::write(&router, router_php(&paths, &manifest())).unwrap();
 
         let port = free_tcp_port();
         let mut child = Command::new("php")
             .env("WPCOW_SPLASH", "1")
+            .env("WPCOW_PROXY_FRONTEND", "0")
             .env("PHP_CLI_SERVER_WORKERS", "4")
             .arg("-S")
             .arg(format!("127.0.0.1:{port}"))

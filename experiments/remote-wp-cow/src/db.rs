@@ -16,6 +16,8 @@ pub struct DbState {
     pub materialized_tables: BTreeSet<String>,
     #[serde(default)]
     pub option_bootstrap_tables: BTreeSet<String>,
+    #[serde(default)]
+    pub option_rows: BTreeSet<String>,
 }
 
 pub fn state_path(paths: &ClonePaths) -> PathBuf {
@@ -203,6 +205,18 @@ pub fn route_for_query(
         });
     }
 
+    let options_table = format!("{}options", manifest.probe.table_prefix);
+    let option_names = option_names_for_sql(sql_text, &options_table, &expanded);
+    if !option_names.is_empty() {
+        materialize_option_rows(remote, manifest, &mut state, &options_table, &option_names)
+            .with_context(|| format!("materialize option rows for {}", options_table))?;
+        write_state(paths, &state)?;
+        return Ok(RouteDecision {
+            backend: "local".to_string(),
+            materialized: Vec::new(),
+        });
+    }
+
     route_for_tables(remote, manifest, paths, tables)
 }
 
@@ -211,6 +225,32 @@ pub fn remote_readonly_query(remote: &RemoteClient, sql_text: &str) -> Result<Re
         return Err(anyhow!("refusing to send non-read SQL to remote"));
     }
     remote.remote_query_readonly(sql_text)
+}
+
+pub fn local_option_value(manifest: &Manifest, name: &str) -> Result<Option<String>> {
+    let table = format!("{}options", manifest.probe.table_prefix);
+    validate_table_name(&table)?;
+    let sql_text = format!(
+        "SELECT option_value FROM {} WHERE option_name='{}' LIMIT 1;",
+        qualified_table(manifest, &table),
+        mysql_string_literal(name)
+    );
+    let output = local_mysql_command(manifest)
+        .arg("--batch")
+        .arg("--raw")
+        .arg("--skip-column-names")
+        .arg("--execute")
+        .arg(sql_text)
+        .output()
+        .context("query local option value")?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let value = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .map(|line| line.to_string());
+    Ok(value)
 }
 
 #[derive(Debug, Serialize)]
@@ -222,7 +262,7 @@ pub struct RouteDecision {
 fn materialize_one_table(remote: &RemoteClient, manifest: &Manifest, table: &str) -> Result<()> {
     let probe = &manifest.probe;
     ensure_probe_has_db(probe)?;
-    let delete_sql = format!("DELETE FROM `{}`;", table.replace('`', "``"));
+    let delete_sql = format!("DELETE FROM {};", qualified_table(manifest, table));
     run_mysql_exec(manifest, &delete_sql)?;
 
     let dump_command = format!(
@@ -280,8 +320,8 @@ fn materialize_option_bootstrap(
 
     let where_sql = option_bootstrap_where_sql();
     let delete_sql = format!(
-        "DELETE FROM `{}` WHERE {};",
-        table.replace('`', "``"),
+        "DELETE FROM {} WHERE {};",
+        qualified_table(manifest, table),
         where_sql
     );
     run_mysql_exec(manifest, &delete_sql)?;
@@ -331,6 +371,85 @@ fn materialize_option_bootstrap(
     Ok(())
 }
 
+fn materialize_option_rows(
+    remote: &RemoteClient,
+    manifest: &Manifest,
+    state: &mut DbState,
+    table: &str,
+    names: &[String],
+) -> Result<()> {
+    let probe = &manifest.probe;
+    ensure_probe_has_db(probe)?;
+    validate_table_name(table)?;
+
+    let missing = names
+        .iter()
+        .filter(|name| !state.option_rows.contains(&option_row_key(table, name)))
+        .cloned()
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let where_sql = option_names_where_sql(&missing);
+    let delete_sql = format!(
+        "DELETE FROM {} WHERE {};",
+        qualified_table(manifest, table),
+        where_sql
+    );
+    run_mysql_exec(manifest, &delete_sql)?;
+
+    let dump_command = format!(
+        "MYSQL_PWD={} mysqldump {} --user={} --single-transaction --quick --skip-lock-tables --no-create-info --replace --where={} {} {}",
+        shell_quote(&probe.db_password),
+        remote_mysql_cli_options(&probe.db_host),
+        shell_quote(&probe.db_user),
+        shell_quote(&where_sql),
+        shell_quote(&probe.db_name),
+        shell_quote(table)
+    );
+
+    let mut ssh = remote
+        .command(&dump_command)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("start remote option row mysqldump over ssh")?;
+
+    let mut mysql = local_mysql_command(manifest);
+    mysql.arg(&manifest.local_db.name).stdin(Stdio::piped());
+    let mut mysql_child = mysql
+        .spawn()
+        .context("start local mysql option row import")?;
+
+    {
+        let mut ssh_stdout = ssh.stdout.take().expect("ssh stdout piped");
+        let mut mysql_stdin = mysql_child.stdin.take().expect("mysql stdin piped");
+        io::copy(&mut ssh_stdout, &mut mysql_stdin)?;
+    }
+
+    let ssh_output = ssh.wait_with_output()?;
+    let mysql_status = mysql_child.wait()?;
+
+    if !ssh_output.status.success() {
+        return Err(anyhow!(
+            "remote option row mysqldump failed: {}",
+            String::from_utf8_lossy(&ssh_output.stderr)
+        ));
+    }
+    if !mysql_status.success() {
+        return Err(anyhow!(
+            "local mysql option row import failed with status {}",
+            mysql_status
+        ));
+    }
+
+    for name in missing {
+        state.option_rows.insert(option_row_key(table, &name));
+    }
+    Ok(())
+}
+
 fn option_bootstrap_table_for_sql(
     table_prefix: &str,
     sql_text: &str,
@@ -361,6 +480,39 @@ fn option_bootstrap_table_for_sql(
     None
 }
 
+fn option_names_for_sql(sql_text: &str, options_table: &str, tables: &[String]) -> Vec<String> {
+    if !sql::is_safe_read_sql(sql_text) || sql::is_write_sql(sql_text) {
+        return Vec::new();
+    }
+    if !tables.iter().any(|table| table == options_table) {
+        return Vec::new();
+    }
+
+    let lower = sql_text.to_ascii_lowercase();
+    let Some(option_name_pos) = lower.find("option_name") else {
+        return Vec::new();
+    };
+    let tail = &sql_text[option_name_pos + "option_name".len()..];
+    let lower_tail = &lower[option_name_pos + "option_name".len()..];
+
+    if let Some(eq_pos) = lower_tail.find('=') {
+        if lower_tail[..eq_pos]
+            .chars()
+            .all(|ch| ch.is_ascii_whitespace() || ch == '`')
+        {
+            return first_sql_string_literal(&tail[eq_pos + 1..])
+                .into_iter()
+                .collect();
+        }
+    }
+
+    if let Some(in_pos) = lower_tail.find(" in ") {
+        return sql_string_literals_until_closing_paren(&tail[in_pos + 4..]);
+    }
+
+    Vec::new()
+}
+
 fn option_bootstrap_where_sql() -> String {
     let names = option_bootstrap_names()
         .iter()
@@ -368,6 +520,19 @@ fn option_bootstrap_where_sql() -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("autoload IN ('yes', 'on', 'auto-on', 'auto') OR option_name IN ({names})")
+}
+
+fn option_names_where_sql(names: &[String]) -> String {
+    let names = names
+        .iter()
+        .map(|name| format!("'{}'", mysql_string_literal(name)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("option_name IN ({names})")
+}
+
+fn option_row_key(table: &str, name: &str) -> String {
+    format!("{table}:{name}")
 }
 
 fn option_bootstrap_names() -> &'static [&'static str] {
@@ -404,6 +569,14 @@ fn local_mysql_command(manifest: &Manifest) -> Command {
     command
 }
 
+fn qualified_table(manifest: &Manifest, table: &str) -> String {
+    format!(
+        "`{}`.`{}`",
+        manifest.local_db.name.replace('`', "``"),
+        table.replace('`', "``")
+    )
+}
+
 fn run_mysql_exec(manifest: &Manifest, sql_text: &str) -> Result<()> {
     let mut command = local_mysql_command(manifest);
     command.arg("--execute").arg(sql_text);
@@ -416,6 +589,47 @@ fn run_mysql_exec(manifest: &Manifest, sql_text: &str) -> Result<()> {
 
 fn mysql_string_literal(value: &str) -> String {
     value.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
+fn first_sql_string_literal(input: &str) -> Option<String> {
+    sql_string_literals_until_closing_paren(input)
+        .into_iter()
+        .next()
+}
+
+fn sql_string_literals_until_closing_paren(input: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == ')' {
+            break;
+        }
+        if ch != '\'' {
+            continue;
+        }
+        let mut value = String::new();
+        while let Some(ch) = chars.next() {
+            if ch == '\\' {
+                if let Some(next) = chars.next() {
+                    value.push(next);
+                }
+                continue;
+            }
+            if ch == '\'' {
+                if chars.peek() == Some(&'\'') {
+                    let _ = chars.next();
+                    value.push('\'');
+                    continue;
+                }
+                break;
+            }
+            value.push(ch);
+        }
+        if !value.is_empty() {
+            out.push(value);
+        }
+    }
+    out
 }
 
 fn validate_table_name(table: &str) -> Result<()> {
@@ -514,6 +728,59 @@ mod tests {
                 &tables
             ),
             None
+        );
+    }
+
+    #[test]
+    fn extracts_targeted_option_reads() {
+        let tables = vec!["ady_options".to_string()];
+        assert_eq!(
+            option_names_for_sql(
+                "SELECT option_value FROM ady_options WHERE option_name = 'aioseo_options_internal_localized' LIMIT 1",
+                "ady_options",
+                &tables
+            ),
+            vec!["aioseo_options_internal_localized".to_string()]
+        );
+        assert_eq!(
+            option_names_for_sql(
+                "SELECT * FROM ady_options WHERE option_name IN ('a', 'b')",
+                "ady_options",
+                &tables
+            ),
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn qualifies_local_tables_for_exec_without_selected_database() {
+        let manifest = Manifest {
+            version: crate::config::MANIFEST_VERSION,
+            name: "calm".to_string(),
+            ssh: "example".to_string(),
+            remote_path: "/srv/www".to_string(),
+            remote_url: "https://example.com".to_string(),
+            local_url: "http://localhost:9481".to_string(),
+            created_at_unix: 1,
+            probe: crate::config::Probe::default(),
+            local_db: crate::config::LocalDb {
+                name: "cow_calm".to_string(),
+                user: "cow_calm".to_string(),
+                password: String::new(),
+                host: "127.0.0.1".to_string(),
+                port: 33071,
+            },
+            remote_db_tunnel: crate::config::RemoteDbTunnel {
+                host: "127.0.0.1".to_string(),
+                port: 33072,
+            },
+            control_url: "http://127.0.0.1:39070".to_string(),
+            cache_max_file_bytes: 1024,
+            remote_metadata_cache_ttl_secs: 30,
+        };
+        assert_eq!(
+            qualified_table(&manifest, "ady_options"),
+            "`cow_calm`.`ady_options`"
         );
     }
 }

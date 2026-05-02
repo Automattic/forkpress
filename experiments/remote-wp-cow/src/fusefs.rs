@@ -106,6 +106,18 @@ impl CowFs {
             return Ok(self.attr_from_metadata(ino, &metadata));
         }
 
+        let mirror = self.overlay.mirror_path(rel).map_err(anyhow_to_io)?;
+        if let Ok(metadata) = fs::symlink_metadata(&mirror) {
+            return Ok(self.attr_from_metadata(ino, &metadata));
+        }
+
+        if self.has_opaque_ancestor_active(rel)? {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "hidden by local opaque directory",
+            ));
+        }
+
         let entry = self.remote_stat(rel)?;
         Ok(self.attr_from_remote(ino, &entry))
     }
@@ -255,6 +267,7 @@ impl Filesystem for CowFs {
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let result = (|| {
             let rel = self.child_path(parent, name)?;
+            trace_fuse("lookup", &rel);
             let ino = self.ino_for_path(&rel);
             self.attr_for_path(&rel, ino)
         })();
@@ -272,6 +285,7 @@ impl Filesystem for CowFs {
             let rel = self
                 .path_for_ino(ino)
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "unknown inode"))?;
+            trace_fuse("getattr", &rel);
             self.attr_for_path(&rel, ino)
         })();
         match result {
@@ -385,6 +399,7 @@ impl Filesystem for CowFs {
             let rel = self
                 .path_for_ino(ino)
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "unknown inode"))?;
+            trace_fuse("open", &rel);
             if wants_write(flags) {
                 let upper = self
                     .overlay
@@ -404,12 +419,12 @@ impl Filesystem for CowFs {
                 let upper = self.overlay.upper_path(&rel).map_err(anyhow_to_io)?;
                 if upper.exists() {
                     let file = File::open(upper)?;
-                    Ok((self.allocate_handle(Handle::Local(file)), flags as u32))
+                    Ok((self.allocate_handle(Handle::Local(file)), 0))
                 } else if let Some(cache_path) = self.overlay.cached_file_path(&rel) {
                     let file = File::open(cache_path)?;
-                    Ok((self.allocate_handle(Handle::Local(file)), flags as u32))
+                    Ok((self.allocate_handle(Handle::Local(file)), 0))
                 } else {
-                    Ok((self.allocate_handle(Handle::Remote(rel)), flags as u32))
+                    Ok((self.allocate_handle(Handle::Remote(rel)), 0))
                 }
             }
         })();
@@ -446,16 +461,18 @@ impl Filesystem for CowFs {
                     }
                 }
             }
-            Some(Handle::Remote(rel)) => self
-                .overlay
-                .read_cached_or_remote(
-                    &self.remote,
-                    rel,
-                    offset,
-                    size,
-                    self.manifest.cache_max_file_bytes,
-                )
-                .map_err(anyhow_to_io),
+            Some(Handle::Remote(rel)) => {
+                trace_fuse("read-remote", rel);
+                self.overlay
+                    .read_cached_or_remote(
+                        &self.remote,
+                        rel,
+                        offset,
+                        size,
+                        self.manifest.cache_max_file_bytes,
+                    )
+                    .map_err(anyhow_to_io)
+            }
             None => Err(io::Error::new(io::ErrorKind::NotFound, "unknown handle")),
         };
         match result {
@@ -615,6 +632,7 @@ impl CowFs {
         let rel = self
             .path_for_ino(ino)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "unknown inode"))?;
+        trace_fuse("readdir", &rel);
 
         let mut entries = Vec::new();
         entries.push((ino, FileType::Directory, OsString::from(".")));
@@ -623,18 +641,26 @@ impl CowFs {
         entries.push((parent_ino, FileType::Directory, OsString::from("..")));
 
         let mut by_name: BTreeMap<String, RemoteEntry> = BTreeMap::new();
-        match self.remote_readdir(&rel) {
-            Ok(remote_entries) => {
-                for entry in remote_entries {
-                    by_name.insert(entry.name.clone(), entry);
+        let opaque = self.is_opaque_dir_active(&rel)?;
+        if !opaque {
+            match self.remote_readdir(&rel) {
+                Ok(remote_entries) => {
+                    for entry in remote_entries {
+                        by_name.insert(entry.name.clone(), entry);
+                    }
                 }
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err),
             }
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err),
         }
 
         for entry in self.overlay.list_upper(&rel).map_err(anyhow_to_io)? {
             by_name.insert(entry.name.clone(), entry);
+        }
+        if !opaque {
+            for entry in self.overlay.list_mirror(&rel).map_err(anyhow_to_io)? {
+                by_name.insert(entry.name.clone(), entry);
+            }
         }
 
         for (name, entry) in by_name {
@@ -652,6 +678,28 @@ impl CowFs {
 
         Ok(entries)
     }
+
+    fn is_opaque_dir_active(&self, rel: &Path) -> io::Result<bool> {
+        let is_opaque = self.overlay.is_opaque_dir(rel).map_err(anyhow_to_io)?;
+        if !is_opaque {
+            return Ok(false);
+        }
+        if rel.starts_with(Path::new("wp-content/plugins")) && env_bool("WPCOW_ENABLE_PLUGINS") {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    fn has_opaque_ancestor_active(&self, rel: &Path) -> io::Result<bool> {
+        let mut current = rel.parent();
+        while let Some(parent) = current {
+            if self.is_opaque_dir_active(parent)? {
+                return Ok(true);
+            }
+            current = parent.parent();
+        }
+        Ok(false)
+    }
 }
 
 pub fn mount_foreground(manifest: Manifest, paths: ClonePaths, mountpoint: &Path) -> Result<()> {
@@ -663,8 +711,6 @@ pub fn mount_foreground(manifest: Manifest, paths: ClonePaths, mountpoint: &Path
     let options = vec![
         MountOption::FSName(format!("wp-cow-{}", manifest.name)),
         MountOption::Subtype("wp-cow".to_string()),
-        MountOption::AutoUnmount,
-        MountOption::DefaultPermissions,
     ];
     fuser::mount2(fs, mountpoint, &options)?;
     Ok(())
@@ -702,10 +748,28 @@ fn unix_time(secs: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(secs)
 }
 
+fn trace_fuse(op: &str, rel: &Path) {
+    if std::env::var("WPCOW_TRACE_FUSE").ok().as_deref() == Some("1") {
+        eprintln!("wp-cow fuse {op} {}", OverlayStore::rel_string(rel));
+    }
+}
+
 fn wants_write(flags: i32) -> bool {
     (flags & libc::O_ACCMODE) != libc::O_RDONLY
         || flags & libc::O_TRUNC != 0
         || flags & libc::O_APPEND != 0
+}
+
+fn env_bool(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|raw| {
+            matches!(
+                raw.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn io_errno(err: &io::Error) -> i32 {
