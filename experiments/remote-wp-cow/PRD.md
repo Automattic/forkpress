@@ -97,6 +97,12 @@ If remote DB reads are too slow for first page boot, the next fallback should
 be a bounded bootstrap materialization of only essential option rows, not a full
 table dump.
 
+The MVP implements that fallback for `*_options`: on the first matching
+autoload/core-option read, it copies only autoloaded rows and core
+identity/theme/plugin option names into the local database and routes matching
+reads locally. Arbitrary non-bootstrap option reads still go through the remote
+read path unless the table has been fully materialized.
+
 ## Observability
 
 The CLI should print phase names and durations:

@@ -122,7 +122,7 @@ function cow_tables_from_sql( $sql ) {
 function cow_control_timeout_secs() {
 	$timeout = (int) getenv( 'WPCOW_CONTROL_REQUEST_TIMEOUT_SECS' );
 	if ( $timeout < 1 ) {
-		$timeout = 15;
+		$timeout = 60;
 	}
 	return $timeout;
 }
@@ -158,9 +158,10 @@ function cow_control_request( $path, $payload ) {
 		curl_setopt( $ch, CURLOPT_TIMEOUT, $timeout );
 		$raw = curl_exec( $ch );
 		$error = curl_error( $ch );
+		$errno = curl_errno( $ch );
 		curl_close( $ch );
 		if ( false === $raw ) {
-			return array( 'ok' => false, 'error' => $error );
+			return array( 'ok' => false, 'error' => 'curl error ' . $errno . ' calling ' . $url . ': ' . $error );
 		}
 	} else {
 		$context = stream_context_create(
@@ -170,18 +171,21 @@ function cow_control_request( $path, $payload ) {
 					'header'  => "Content-Type: application/json\r\n",
 					'content' => $body,
 					'timeout' => $timeout,
+					'ignore_errors' => true,
 				),
 			)
 		);
 		$raw = @file_get_contents( $url, false, $context );
 		if ( false === $raw ) {
-			return array( 'ok' => false, 'error' => 'wp-cow control request failed' );
+			$error = error_get_last();
+			$error = isset( $error['message'] ) ? $error['message'] : 'unknown stream error';
+			return array( 'ok' => false, 'error' => 'stream error calling ' . $url . ' after ' . $timeout . 's: ' . $error );
 		}
 	}
 
 	$decoded = json_decode( $raw, true );
 	if ( ! is_array( $decoded ) ) {
-		return array( 'ok' => false, 'error' => 'invalid wp-cow control response' );
+		return array( 'ok' => false, 'error' => 'invalid wp-cow control response from ' . $url . ': ' . substr( $raw, 0, 500 ) );
 	}
 	return $decoded;
 }
@@ -210,7 +214,7 @@ class Cow_DB extends wpdb {
 		}
 
 		if ( cow_is_safe_read_sql( $query ) ) {
-			$route = cow_control_request( '/route', array( 'tables' => $tables ) );
+			$route = cow_control_request( '/route', array( 'tables' => $tables, 'sql' => $query ) );
 			if ( ! empty( $route['ok'] ) && isset( $route['backend'] ) && 'remote' === $route['backend'] ) {
 				return $this->cow_remote_query( $query );
 			}
@@ -671,6 +675,7 @@ mod tests {
         assert!(php.contains("cow_remote_mysqli"));
         assert!(php.contains("cow_db_runtime_fail"));
         assert!(php.contains("will not fall back to the empty local schema"));
+        assert!(php.contains("'sql' => $query"));
     }
 
     #[test]

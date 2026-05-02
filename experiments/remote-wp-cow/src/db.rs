@@ -12,7 +12,10 @@ use crate::sql;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct DbState {
+    #[serde(default)]
     pub materialized_tables: BTreeSet<String>,
+    #[serde(default)]
+    pub option_bootstrap_tables: BTreeSet<String>,
 }
 
 pub fn state_path(paths: &ClonePaths) -> PathBuf {
@@ -174,6 +177,35 @@ pub fn route_for_tables(
     }
 }
 
+pub fn route_for_query(
+    remote: &RemoteClient,
+    manifest: &Manifest,
+    paths: &ClonePaths,
+    sql_text: &str,
+    tables: &[String],
+) -> Result<RouteDecision> {
+    let expanded = sql::expand_wordpress_groups(&manifest.probe.table_prefix, tables);
+    let mut state = load_state(paths)?;
+
+    if let Some(options_table) =
+        option_bootstrap_table_for_sql(&manifest.probe.table_prefix, sql_text, &expanded)
+    {
+        if !state.option_bootstrap_tables.contains(&options_table) {
+            materialize_option_bootstrap(remote, manifest, &options_table).with_context(|| {
+                format!("materialize option bootstrap rows for {}", options_table)
+            })?;
+            state.option_bootstrap_tables.insert(options_table);
+            write_state(paths, &state)?;
+        }
+        return Ok(RouteDecision {
+            backend: "local".to_string(),
+            materialized: Vec::new(),
+        });
+    }
+
+    route_for_tables(remote, manifest, paths, tables)
+}
+
 pub fn remote_readonly_query(remote: &RemoteClient, sql_text: &str) -> Result<RemoteQueryResult> {
     if !sql::is_safe_read_sql(sql_text) || sql::is_write_sql(sql_text) {
         return Err(anyhow!("refusing to send non-read SQL to remote"));
@@ -235,6 +267,128 @@ fn materialize_one_table(remote: &RemoteClient, manifest: &Manifest, table: &str
         ));
     }
     Ok(())
+}
+
+fn materialize_option_bootstrap(
+    remote: &RemoteClient,
+    manifest: &Manifest,
+    table: &str,
+) -> Result<()> {
+    let probe = &manifest.probe;
+    ensure_probe_has_db(probe)?;
+    validate_table_name(table)?;
+
+    let where_sql = option_bootstrap_where_sql();
+    let delete_sql = format!(
+        "DELETE FROM `{}` WHERE {};",
+        table.replace('`', "``"),
+        where_sql
+    );
+    run_mysql_exec(manifest, &delete_sql)?;
+
+    let dump_command = format!(
+        "MYSQL_PWD={} mysqldump {} --user={} --single-transaction --quick --skip-lock-tables --no-create-info --replace --where={} {} {}",
+        shell_quote(&probe.db_password),
+        remote_mysql_cli_options(&probe.db_host),
+        shell_quote(&probe.db_user),
+        shell_quote(&where_sql),
+        shell_quote(&probe.db_name),
+        shell_quote(table)
+    );
+
+    let mut ssh = remote
+        .command(&dump_command)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("start remote option bootstrap mysqldump over ssh")?;
+
+    let mut mysql = local_mysql_command(manifest);
+    mysql.arg(&manifest.local_db.name).stdin(Stdio::piped());
+    let mut mysql_child = mysql.spawn().context("start local mysql option import")?;
+
+    {
+        let mut ssh_stdout = ssh.stdout.take().expect("ssh stdout piped");
+        let mut mysql_stdin = mysql_child.stdin.take().expect("mysql stdin piped");
+        io::copy(&mut ssh_stdout, &mut mysql_stdin)?;
+    }
+
+    let ssh_output = ssh.wait_with_output()?;
+    let mysql_status = mysql_child.wait()?;
+
+    if !ssh_output.status.success() {
+        return Err(anyhow!(
+            "remote option bootstrap mysqldump failed: {}",
+            String::from_utf8_lossy(&ssh_output.stderr)
+        ));
+    }
+    if !mysql_status.success() {
+        return Err(anyhow!(
+            "local mysql option bootstrap import failed with status {}",
+            mysql_status
+        ));
+    }
+    Ok(())
+}
+
+fn option_bootstrap_table_for_sql(
+    table_prefix: &str,
+    sql_text: &str,
+    tables: &[String],
+) -> Option<String> {
+    if !sql::is_safe_read_sql(sql_text) || sql::is_write_sql(sql_text) {
+        return None;
+    }
+
+    let options_table = format!("{}options", table_prefix);
+    if !tables.iter().any(|table| table == &options_table) {
+        return None;
+    }
+
+    let lower = sql_text.to_ascii_lowercase();
+    if lower.contains("autoload") {
+        return Some(options_table);
+    }
+
+    if lower.contains("option_name")
+        && option_bootstrap_names()
+            .iter()
+            .any(|name| lower.contains(&format!("'{}'", name)))
+    {
+        return Some(options_table);
+    }
+
+    None
+}
+
+fn option_bootstrap_where_sql() -> String {
+    let names = option_bootstrap_names()
+        .iter()
+        .map(|name| format!("'{}'", mysql_string_literal(name)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("autoload IN ('yes', 'on', 'auto-on', 'auto') OR option_name IN ({names})")
+}
+
+fn option_bootstrap_names() -> &'static [&'static str] {
+    &[
+        "siteurl",
+        "home",
+        "blogname",
+        "blogdescription",
+        "admin_email",
+        "active_plugins",
+        "template",
+        "stylesheet",
+        "current_theme",
+        "permalink_structure",
+        "rewrite_rules",
+        "sidebars_widgets",
+        "stylesheet_root",
+        "template_root",
+        "upload_path",
+        "upload_url_path",
+    ]
 }
 
 fn local_mysql_command(manifest: &Manifest) -> Command {
@@ -331,6 +485,35 @@ mod tests {
         assert_eq!(
             remote_mysql_cli_options("localhost:/tmp/mysql.sock"),
             "--host='localhost' --socket='/tmp/mysql.sock'"
+        );
+    }
+
+    #[test]
+    fn detects_option_bootstrap_reads() {
+        let tables = vec!["ady_options".to_string()];
+        assert_eq!(
+            option_bootstrap_table_for_sql(
+                "ady_",
+                "SELECT option_name, option_value FROM ady_options WHERE autoload IN ( 'yes', 'on', 'auto-on', 'auto' )",
+                &tables
+            ),
+            Some("ady_options".to_string())
+        );
+        assert_eq!(
+            option_bootstrap_table_for_sql(
+                "ady_",
+                "SELECT option_value FROM ady_options WHERE option_name = 'siteurl' LIMIT 1",
+                &tables
+            ),
+            Some("ady_options".to_string())
+        );
+        assert_eq!(
+            option_bootstrap_table_for_sql(
+                "ady_",
+                "SELECT option_value FROM ady_options WHERE option_name = 'some_plugin_option' LIMIT 1",
+                &tables
+            ),
+            None
         );
     }
 }

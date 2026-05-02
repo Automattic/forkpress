@@ -134,7 +134,7 @@ fn start_php_server(paths: &ClonePaths, mountpoint: &Path, http_addr: &str) -> R
         .arg("-d")
         .arg(format!(
             "max_execution_time={}",
-            env_u64("WPCOW_PHP_MAX_EXECUTION_SECS", 30)
+            env_u64("WPCOW_PHP_MAX_EXECUTION_SECS", 90)
         ))
         .arg("-d")
         .arg(format!(

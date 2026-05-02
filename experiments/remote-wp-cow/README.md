@@ -148,6 +148,12 @@ subprocess per WordPress read query. Write-class SQL is still blocked from the
 remote database and materialized locally first. Set `WPCOW_REMOTE_DB_TUNNEL=0`
 to fall back to daemon-mediated remote reads.
 
+On first WordPress boot, `wp-cow` special-cases the options-table bootstrap
+query. It materializes only autoloaded option rows plus core identity/theme/plugin
+option names into the local database, then routes those matching reads locally.
+That keeps the common `SELECT ... FROM *_options WHERE autoload IN (...)` query
+off the slow remote `/query` fallback without dumping the whole database.
+
 The lab uses bounded request timeouts so a bad remote DB query, unreachable SSH
 host, or slow remote file read should fail visibly instead of leaving the
 browser spinning forever. Adjust the defaults with

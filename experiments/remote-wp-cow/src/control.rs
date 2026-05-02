@@ -102,7 +102,11 @@ fn control_response(
         }
         "/route" => {
             let tables = input.tables.unwrap_or_default();
-            let decision = db::route_for_tables(remote, manifest, paths, &tables)?;
+            let decision = if let Some(sql) = input.sql.as_deref() {
+                db::route_for_query(remote, manifest, paths, sql, &tables)?
+            } else {
+                db::route_for_tables(remote, manifest, paths, &tables)?
+            };
             Ok(
                 json!({ "ok": true, "backend": decision.backend, "materialized": decision.materialized }),
             )
