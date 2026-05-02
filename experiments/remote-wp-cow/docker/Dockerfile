@@ -1,9 +1,27 @@
-FROM rust:1-bookworm
+FROM rust:1-bookworm AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        fuse3 \
+        libfuse3-dev \
+        pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+RUN cargo build --release \
+    && cp target/release/wp-cow /usr/local/bin/wp-cow
+
+FROM dunglas/frankenphp:1-php8.3-bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV WPCOW_HOME=/root/.wp-cow
 
-RUN apt-get update \
+RUN install-php-extensions mysqli pdo_mysql \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         bash \
         ca-certificates \
@@ -14,20 +32,13 @@ RUN apt-get update \
         mariadb-client \
         mariadb-server \
         openssh-client \
-        php-cli \
-        php-mysqli \
         pkg-config \
         rsync \
         tini \
         vim-tiny \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /workspace
-COPY Cargo.toml Cargo.lock ./
-COPY src ./src
-RUN cargo build --release \
-    && cp target/release/wp-cow /usr/local/bin/wp-cow \
-    && cargo clean
+COPY --from=builder /usr/local/bin/wp-cow /usr/local/bin/wp-cow
 
 COPY docker/wp-cow-lab-entrypoint /usr/local/bin/wp-cow-lab-entrypoint
 COPY docker/wp-cow-lab-check /usr/local/bin/wp-cow-lab-check

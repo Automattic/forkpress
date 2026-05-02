@@ -26,9 +26,11 @@ cargo build
 
 ## Docker lab on macOS
 
-Use this when you are on a Mac and want a Linux shell with FUSE, PHP, SSH, and
-local MariaDB available. The container is intentionally privileged so FUSE can
-mount inside Docker Desktop's Linux VM.
+Use this when you are on a Mac and want a Linux shell with FUSE, FrankenPHP,
+SSH, and local MariaDB available. The container is intentionally privileged so
+FUSE can mount inside Docker Desktop's Linux VM. The Docker image uses the
+official FrankenPHP PHP 8.3 image and installs `mysqli`/`pdo_mysql` for
+WordPress.
 
 From this directory:
 
@@ -41,9 +43,9 @@ docker compose exec wp-cow-lab bash
 ```
 
 The Compose host port is created from `WPCOW_HTTP_PORT` when the container is
-created. The PHP server still listens on port `8080` inside the container. If
-you want to open port 9481 on the Mac, set it in `.env` or pass it when
-starting the lab:
+created. FrankenPHP still listens on port `8080` inside the container. If you
+want to open port 9481 on the Mac, set it in `.env` or pass it when starting
+the lab:
 
 ```bash
 WPCOW_HTTP_PORT=9481 docker compose up -d
@@ -124,8 +126,8 @@ wp-cow-lab-serve
 
 That is the normal path. It creates or reuses the lazy clone, exports schema
 only if needed, initializes an empty local MariaDB database if needed, mounts
-the lazy filesystem, starts the DB control layer, and starts PHP. It does not
-download media, runtime directories, or table rows up front.
+the lazy filesystem, starts the DB control layer, and starts FrankenPHP. It does
+not download media, runtime directories, or table rows up front.
 
 File reads are request-driven. When WordPress opens a remote file, `wp-cow`
 fetches that file into the persistent `file-cache/` and records the remote
@@ -138,9 +140,11 @@ The first browser hit can still spend time fetching the exact PHP files needed
 to boot WordPress. With `WPCOW_SPLASH=1` (the Docker default), `wp-cow` returns a
 temporary local splash page immediately and starts the real request in the
 browser. The splash polls `/__wp-cow/progress`, which is backed by the local file
-cache progress file, then swaps in the warmed WordPress response. PHP is started
-with multiple CLI server workers (`WPCOW_PHP_WORKERS`, default `4`) so progress
-polling can continue while the warm request is running.
+cache progress file, then swaps in the warmed WordPress response. FrankenPHP is
+started with multiple PHP threads (`WPCOW_PHP_WORKERS`, default `4`) so progress
+polling can continue while the warm request is running. Set
+`WPCOW_WEB_SERVER=php` only when you explicitly want the old PHP built-in
+development server fallback.
 
 The lab also starts a persistent SSH tunnel for remote database reads when the
 remote `DB_HOST` is TCP-reachable from the SSH host. This avoids one SSH/PHP
@@ -277,7 +281,7 @@ run/
 Local machine:
 
 - Linux with `/dev/fuse` access.
-- `ssh`, `php`, `mysql`, and `mysqldump` on `PATH`.
+- `ssh`, `frankenphp`, `php`, `mysql`, and `mysqldump` on `PATH`.
 - A local MySQL/MariaDB server reachable by the generated DB settings.
 
 Remote host:

@@ -13,6 +13,7 @@ use crate::config::{ClonePaths, Manifest};
 use crate::control;
 use crate::db;
 use crate::fusefs;
+use crate::generate::ROUTER_BASENAME;
 use crate::remote::{shell_quote, RemoteClient};
 
 pub struct RunOptions {
@@ -82,10 +83,10 @@ pub fn run_site(manifest: Manifest, paths: ClonePaths, options: RunOptions) -> R
         return Err(wait_err);
     }
 
-    let mut php = if options.skip_php {
+    let mut web = if options.skip_php {
         None
     } else {
-        Some(start_php_server(
+        Some(start_web_server(
             &paths,
             &options.mountpoint,
             &options.http_addr,
@@ -111,16 +112,16 @@ pub fn run_site(manifest: Manifest, paths: ClonePaths, options: RunOptions) -> R
     );
 
     while !shutdown.load(Ordering::SeqCst) {
-        if let Some(child) = php.as_mut() {
+        if let Some(child) = web.as_mut() {
             if let Some(status) = child.try_wait()? {
                 shutdown.store(true, Ordering::SeqCst);
-                return Err(anyhow!("php server exited with status {}", status));
+                return Err(anyhow!("web server exited with status {}", status));
             }
         }
         thread::sleep(Duration::from_millis(250));
     }
 
-    if let Some(mut child) = php {
+    if let Some(mut child) = web {
         let _ = child.kill();
         let _ = child.wait();
     }
@@ -326,7 +327,43 @@ fn clean_theme_name(value: &str) -> Option<String> {
     Some(value.to_string())
 }
 
-fn start_php_server(paths: &ClonePaths, mountpoint: &Path, http_addr: &str) -> Result<Child> {
+fn start_web_server(paths: &ClonePaths, mountpoint: &Path, http_addr: &str) -> Result<Child> {
+    match std::env::var("WPCOW_WEB_SERVER")
+        .unwrap_or_else(|_| "frankenphp".to_string())
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "php" | "php-dev" | "php-dev-server" => start_php_dev_server(paths, mountpoint, http_addr),
+        "frankenphp" => start_frankenphp_server(paths, mountpoint, http_addr),
+        other => Err(anyhow!(
+            "unsupported WPCOW_WEB_SERVER={other}; expected frankenphp or php"
+        )),
+    }
+}
+
+fn start_frankenphp_server(
+    paths: &ClonePaths,
+    mountpoint: &Path,
+    http_addr: &str,
+) -> Result<Child> {
+    let caddyfile = paths.run.join("Caddyfile");
+    fs::create_dir_all(&paths.run)?;
+    fs::write(
+        &caddyfile,
+        frankenphp_caddyfile(paths, mountpoint, http_addr),
+    )?;
+    Command::new(std::env::var("WPCOW_FRANKENPHP_BIN").unwrap_or_else(|_| "frankenphp".to_string()))
+        .arg("run")
+        .arg("--config")
+        .arg(&caddyfile)
+        .arg("--adapter")
+        .arg("caddyfile")
+        .stdin(Stdio::null())
+        .spawn()
+        .context("start FrankenPHP server")
+}
+
+fn start_php_dev_server(paths: &ClonePaths, mountpoint: &Path, http_addr: &str) -> Result<Child> {
     Command::new("php")
         .env(
             "PHP_CLI_SERVER_WORKERS",
@@ -357,6 +394,110 @@ fn start_php_server(paths: &ClonePaths, mountpoint: &Path, http_addr: &str) -> R
         .context("start php built-in server")
 }
 
+fn frankenphp_caddyfile(_paths: &ClonePaths, mountpoint: &Path, http_addr: &str) -> String {
+    let threads = env_u64("WPCOW_PHP_WORKERS", 4);
+    let max_execution = env_u64("WPCOW_PHP_MAX_EXECUTION_SECS", 90);
+    let socket_timeout = env_u64("WPCOW_PHP_SOCKET_TIMEOUT_SECS", 15);
+    let listen = caddy_listen(http_addr);
+    let root = caddy_quote(&mountpoint.to_string_lossy());
+    let router = format!("/{ROUTER_BASENAME}");
+    let bind = listen
+        .bind
+        .as_ref()
+        .map(|host| format!("\n\tbind {}", caddy_quote(host)))
+        .unwrap_or_default();
+    format!(
+        r#"{{
+	admin off
+	auto_https off
+	frankenphp {{
+		num_threads {threads}
+		max_threads {threads}
+		php_ini max_execution_time {max_execution}
+		php_ini default_socket_timeout {socket_timeout}
+		php_ini mysqlnd.net_read_timeout {socket_timeout}
+	}}
+}}
+
+{site_addr} {{{bind}
+	root * {root}
+
+	@wpCowRouter path {router}
+	handle @wpCowRouter {{
+		respond 404
+	}}
+
+	@static {{
+		file
+		not path *.php
+	}}
+	handle @static {{
+		file_server
+	}}
+
+	@phpFiles path *.php
+	handle @phpFiles {{
+		php
+	}}
+
+	handle {{
+		rewrite * {router}
+		php
+	}}
+}}
+"#,
+        site_addr = listen.site_addr,
+    )
+}
+
+struct CaddyListen {
+    site_addr: String,
+    bind: Option<String>,
+}
+
+fn caddy_listen(http_addr: &str) -> CaddyListen {
+    let without_scheme = http_addr
+        .strip_prefix("http://")
+        .or_else(|| http_addr.strip_prefix("https://"))
+        .unwrap_or(http_addr);
+    let authority = without_scheme
+        .split('/')
+        .next()
+        .unwrap_or(without_scheme)
+        .trim();
+    let (host, port) = split_host_port(authority);
+    let port = port.unwrap_or("80");
+    let bind = match host {
+        Some(host) if !matches!(host, "" | "0.0.0.0" | "*" | "::" | "[::]") => {
+            Some(host.trim_matches(['[', ']']).to_string())
+        }
+        _ => None,
+    };
+    CaddyListen {
+        site_addr: format!("http://:{port}"),
+        bind,
+    }
+}
+
+fn split_host_port(authority: &str) -> (Option<&str>, Option<&str>) {
+    if let Some(rest) = authority.strip_prefix('[') {
+        if let Some((host, tail)) = rest.split_once(']') {
+            return (
+                Some(host),
+                tail.strip_prefix(':').filter(|value| !value.is_empty()),
+            );
+        }
+    }
+    if let Some((host, port)) = authority.rsplit_once(':') {
+        return (Some(host), (!port.is_empty()).then_some(port));
+    }
+    (Some(authority), None)
+}
+
+fn caddy_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
 fn env_u64(name: &str, default: u64) -> u64 {
     std::env::var(name)
         .ok()
@@ -381,6 +522,22 @@ fn env_bool(name: &str, default: bool) -> bool {
             )
         })
         .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn caddy_listen_accepts_localhost_host_headers() {
+        let listen = caddy_listen("127.0.0.1:9481");
+        assert_eq!(listen.site_addr, "http://:9481");
+        assert_eq!(listen.bind.as_deref(), Some("127.0.0.1"));
+
+        let listen = caddy_listen("0.0.0.0:8080");
+        assert_eq!(listen.site_addr, "http://:8080");
+        assert_eq!(listen.bind, None);
+    }
 }
 
 fn wait_for_mount(mountpoint: &Path, mount_thread: &JoinHandle<Result<()>>) -> Result<()> {

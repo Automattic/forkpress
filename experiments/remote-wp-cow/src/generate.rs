@@ -5,20 +5,21 @@ use std::path::Path;
 use crate::config::{ClonePaths, Manifest};
 use crate::overlay::OPAQUE_MARKER;
 
+pub const ROUTER_BASENAME: &str = ".wp-cow-router.php";
+
 pub fn write_wordpress_overrides(paths: &ClonePaths, manifest: &Manifest) -> Result<()> {
     fs::create_dir_all(paths.upper.join("wp-content/mu-plugins"))?;
     write_opaque_dir(paths.upper.join("wp-content/plugins"))?;
     write_opaque_dir(paths.upper.join("wp-content/languages"))?;
+    let router = router_php(paths, manifest);
     fs::write(paths.upper.join("wp-config.php"), wp_config_php(manifest))?;
     fs::write(paths.upper.join("wp-content/db.php"), db_dropin_php())?;
+    fs::write(paths.upper.join(ROUTER_BASENAME), &router)?;
     fs::write(
         paths.upper.join("wp-content/mu-plugins/wp-cow-safety.php"),
         safety_mu_plugin_php(),
     )?;
-    fs::write(
-        paths.generated.join("router.php"),
-        router_php(paths, manifest),
-    )?;
+    fs::write(paths.generated.join("router.php"), router)?;
     Ok(())
 }
 
@@ -176,7 +177,9 @@ function cow_control_request( $path, $payload ) {
 		$raw = curl_exec( $ch );
 		$error = curl_error( $ch );
 		$errno = curl_errno( $ch );
-		curl_close( $ch );
+		if ( PHP_VERSION_ID < 80000 ) {
+			curl_close( $ch );
+		}
 		if ( false === $raw ) {
 			return array( 'ok' => false, 'error' => 'curl error ' . $errno . ' calling ' . $url . ': ' . $error );
 		}
@@ -503,7 +506,9 @@ function wp_cow_proxy_remote_frontend( $remote_url, $local_url, $path ) {
 		if ( is_string( $type ) && '' !== $type ) {
 			$content_type = $type;
 		}
-		curl_close( $ch );
+		if ( PHP_VERSION_ID < 80000 ) {
+			curl_close( $ch );
+		}
 	} else {
 		$context = stream_context_create(
 			array(

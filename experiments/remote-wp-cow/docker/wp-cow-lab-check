@@ -8,6 +8,13 @@ echo
 echo "tools:"
 ssh -V 2>&1
 php -v | sed -n '1p'
+frankenphp version | sed -n '1p'
+if frankenphp php-cli -m | grep -qx 'mysqli'; then
+  echo "frankenphp mysqli extension: yes"
+else
+  echo "frankenphp mysqli extension: missing" >&2
+  exit 1
+fi
 mysql --version
 mysqldump --version
 

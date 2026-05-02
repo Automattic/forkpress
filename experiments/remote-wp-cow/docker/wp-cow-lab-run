@@ -16,5 +16,5 @@ if [ ! -f "${WPCOW_HOME:-/root/.wp-cow}/clones/$name/db/schema.sql" ]; then
   echo "WordPress will likely show a database connection error. Run wp-cow-lab-db-init first." >&2
 fi
 echo "running $name at $public_url/ from $mountpoint"
-echo "container PHP listener: $http"
+echo "container web listener: $http"
 exec wp-cow run "$name" --mountpoint "$mountpoint" --http "$http"
