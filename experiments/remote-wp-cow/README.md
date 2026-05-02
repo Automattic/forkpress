@@ -135,6 +135,12 @@ many PHP file reads and stats for pure per-file SSH/FUSE reads to feel usable.
 Set `WPCOW_RUNTIME_SYNC_FORCE=1` to refresh the local runtime copy or
 `WPCOW_RUNTIME_SYNC=0` to return to fully lazy filesystem reads.
 
+The lab also starts a persistent SSH tunnel for remote database reads when the
+remote `DB_HOST` is TCP-reachable from the SSH host. This avoids one SSH/PHP
+subprocess per WordPress read query. Write-class SQL is still blocked from the
+remote database and materialized locally first. Set `WPCOW_REMOTE_DB_TUNNEL=0`
+to fall back to daemon-mediated remote reads.
+
 The lab uses bounded request timeouts so a bad remote DB query, unreachable SSH
 host, or slow remote file read should fail visibly instead of leaving the
 browser spinning forever. Adjust the defaults with

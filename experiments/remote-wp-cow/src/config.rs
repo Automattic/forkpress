@@ -22,6 +22,8 @@ pub struct Manifest {
     pub created_at_unix: u64,
     pub probe: Probe,
     pub local_db: LocalDb,
+    #[serde(default = "default_remote_db_tunnel")]
+    pub remote_db_tunnel: RemoteDbTunnel,
     pub control_url: String,
     #[serde(default = "default_cache_max_file_bytes")]
     pub cache_max_file_bytes: u64,
@@ -50,6 +52,12 @@ pub struct LocalDb {
     pub user: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub password: String,
+    pub host: String,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteDbTunnel {
     pub host: String,
     pub port: u16,
 }
@@ -95,6 +103,7 @@ impl Manifest {
                 host: "127.0.0.1".to_string(),
                 port: 33071,
             },
+            remote_db_tunnel: default_remote_db_tunnel(),
             control_url: "http://127.0.0.1:39070".to_string(),
             cache_max_file_bytes: cache_max_file_bytes_from_env(),
             remote_metadata_cache_ttl_secs: DEFAULT_REMOTE_METADATA_CACHE_TTL_SECS,
@@ -108,6 +117,13 @@ fn default_cache_max_file_bytes() -> u64 {
 
 fn default_remote_metadata_cache_ttl_secs() -> u64 {
     DEFAULT_REMOTE_METADATA_CACHE_TTL_SECS
+}
+
+fn default_remote_db_tunnel() -> RemoteDbTunnel {
+    RemoteDbTunnel {
+        host: "127.0.0.1".to_string(),
+        port: 33072,
+    }
 }
 
 fn cache_max_file_bytes_from_env() -> u64 {

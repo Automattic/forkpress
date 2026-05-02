@@ -4,7 +4,9 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::thread;
+use std::time::Duration;
 
 use crate::config::{Manifest, Probe};
 use crate::overlay::OverlayStore;
@@ -190,6 +192,67 @@ impl RemoteClient {
         }
 
         Ok(())
+    }
+
+    pub fn start_db_tunnel(&self) -> Result<Option<Child>> {
+        if env_bool("WPCOW_REMOTE_DB_TUNNEL", true) == Some(false) {
+            return Ok(None);
+        }
+        if self.manifest.probe.db_host.is_empty()
+            || self.manifest.probe.db_name.is_empty()
+            || self.manifest.probe.db_user.is_empty()
+        {
+            return Ok(None);
+        }
+
+        let Some((remote_host, remote_port)) = remote_db_tcp_target(&self.manifest.probe.db_host)
+        else {
+            return Ok(None);
+        };
+
+        let bind = format!(
+            "{}:{}:{}:{}",
+            self.manifest.remote_db_tunnel.host,
+            self.manifest.remote_db_tunnel.port,
+            remote_host,
+            remote_port
+        );
+        let mut command = Command::new("ssh");
+        if let Some(control_path) = &self.control_path {
+            command.arg("-S").arg(control_path);
+            command.arg("-o").arg("ControlMaster=auto");
+            command.arg("-o").arg("ControlPersist=600");
+        }
+        self.add_ssh_safety_options(&mut command);
+        command
+            .arg("-o")
+            .arg("ExitOnForwardFailure=yes")
+            .arg("-N")
+            .arg("-L")
+            .arg(bind)
+            .arg(&self.manifest.ssh)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+
+        let mut child = command.spawn().context("start remote DB SSH tunnel")?;
+        for _ in 0..20 {
+            if let Some(status) = child.try_wait()? {
+                let mut stderr = String::new();
+                if let Some(mut err) = child.stderr.take() {
+                    use std::io::Read;
+                    let _ = err.read_to_string(&mut stderr);
+                }
+                return Err(anyhow!(
+                    "remote DB SSH tunnel exited with status {}: {}",
+                    status,
+                    stderr
+                ));
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        Ok(Some(child))
     }
 
     pub fn stat(&self, rel: &Path) -> io::Result<RemoteEntry> {
@@ -457,6 +520,38 @@ fn env_u64(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+fn env_bool(name: &str, default: bool) -> Option<bool> {
+    let raw = std::env::var(name).ok()?;
+    match raw.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => Some(default),
+    }
+}
+
+fn remote_db_tcp_target(db_host: &str) -> Option<(String, u16)> {
+    if db_host.contains(":/") {
+        return None;
+    }
+
+    let (host, port) = if let Some((host, port)) = db_host.rsplit_once(':') {
+        if let Ok(port) = port.parse::<u16>() {
+            (host, port)
+        } else {
+            (db_host, 3306)
+        }
+    } else {
+        (db_host, 3306)
+    };
+
+    let host = match host {
+        "" | "localhost" => "127.0.0.1",
+        other => other,
+    };
+
+    Some((host.to_string(), port))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,5 +561,18 @@ mod tests {
         assert_eq!(shell_quote("abc"), "'abc'");
         assert_eq!(shell_quote("a'b"), "'a'\"'\"'b'");
         assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
+    fn parses_remote_db_tcp_targets() {
+        assert_eq!(
+            remote_db_tcp_target("localhost"),
+            Some(("127.0.0.1".to_string(), 3306))
+        );
+        assert_eq!(
+            remote_db_tcp_target("db.example.com:3307"),
+            Some(("db.example.com".to_string(), 3307))
+        );
+        assert_eq!(remote_db_tcp_target("localhost:/tmp/mysql.sock"), None);
     }
 }

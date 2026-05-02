@@ -2,6 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use std::fs;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use crate::config::{
     clone_paths, default_state_dir, derive_name, ensure_clone_dirs, load_manifest, write_manifest,
@@ -215,6 +216,7 @@ fn clone_site(args: CloneArgs) -> Result<()> {
 }
 
 fn serve_site(args: ServeArgs) -> Result<()> {
+    let serve_started = Instant::now();
     let state_dir = args.state_dir.clone().unwrap_or(default_state_dir()?);
     let name = args
         .name
@@ -222,6 +224,7 @@ fn serve_site(args: ServeArgs) -> Result<()> {
         .unwrap_or_else(|| derive_name(&args.remote_url, &args.local_url));
     let paths = clone_paths(&state_dir, &name);
 
+    let metadata_started = Instant::now();
     let manifest = if !paths.root.exists() || args.force {
         if paths.root.exists() {
             fs::remove_dir_all(&paths.root)?;
@@ -300,8 +303,13 @@ fn serve_site(args: ServeArgs) -> Result<()> {
 
         manifest
     };
+    println!(
+        "prepared clone metadata in {:.2}s",
+        metadata_started.elapsed().as_secs_f64()
+    );
 
     if should_sync_runtime(&paths, args.no_runtime_sync) {
+        let phase_started = Instant::now();
         let remote = RemoteClient::new(manifest.clone(), Some(paths.run.join("ssh-control.sock")));
         remote.ensure_master()?;
         println!(
@@ -312,7 +320,11 @@ fn serve_site(args: ServeArgs) -> Result<()> {
             .sync_runtime_files(&paths.upper)
             .context("sync WordPress runtime files")?;
         fs::write(paths.generated.join("runtime-files.synced"), b"ok\n")?;
-        println!("synced WordPress runtime files for '{}'", manifest.name);
+        println!(
+            "synced WordPress runtime files for '{}' in {:.2}s",
+            manifest.name,
+            phase_started.elapsed().as_secs_f64()
+        );
     } else {
         println!(
             "using local WordPress runtime files for '{}'",
@@ -323,6 +335,7 @@ fn serve_site(args: ServeArgs) -> Result<()> {
     generate::write_wordpress_overrides(&paths, &manifest)?;
 
     if !paths.db.join("schema.sql").exists() {
+        let phase_started = Instant::now();
         if args.no_probe {
             return Err(anyhow!(
                 "schema is missing and --no-probe prevents discovering remote DB settings"
@@ -331,20 +344,31 @@ fn serve_site(args: ServeArgs) -> Result<()> {
         let remote = RemoteClient::new(manifest.clone(), Some(paths.run.join("ssh-control.sock")));
         remote.ensure_master()?;
         db::export_schema(&remote, &paths).context("export schema")?;
-        println!("exported schema only for '{}'", manifest.name);
+        println!(
+            "exported schema only for '{}' in {:.2}s",
+            manifest.name,
+            phase_started.elapsed().as_secs_f64()
+        );
     }
 
+    let phase_started = Instant::now();
     if db::init_local_db_if_empty(&manifest, &paths)? {
         println!(
-            "initialized empty local database '{}'",
-            manifest.local_db.name
+            "initialized empty local database '{}' in {:.2}s",
+            manifest.local_db.name,
+            phase_started.elapsed().as_secs_f64()
         );
     } else {
-        println!("using existing local database '{}'", manifest.local_db.name);
+        println!(
+            "using existing local database '{}' ({:.2}s)",
+            manifest.local_db.name,
+            phase_started.elapsed().as_secs_f64()
+        );
     }
 
     println!(
-        "starting lazy COW server; files and database rows are fetched on demand, not copied up front"
+        "starting lazy COW server after {:.2}s; files and database rows are fetched on demand, not copied up front",
+        serve_started.elapsed().as_secs_f64()
     );
 
     let mountpoint = args

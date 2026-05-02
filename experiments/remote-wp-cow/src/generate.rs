@@ -35,6 +35,10 @@ $table_prefix = {table_prefix};
 
 define( 'WPCOW_CLONE',       {clone_name} );
 define( 'WPCOW_CONTROL_URL', {control_url} );
+define( 'WPCOW_REMOTE_DB_NAME',     {remote_db_name} );
+define( 'WPCOW_REMOTE_DB_USER',     {remote_db_user} );
+define( 'WPCOW_REMOTE_DB_PASSWORD', {remote_db_password} );
+define( 'WPCOW_REMOTE_DB_HOST',     {remote_db_host} );
 
 define( 'FS_METHOD', 'direct' );
 define( 'DISABLE_WP_CRON', true );
@@ -56,6 +60,13 @@ require_once ABSPATH . 'wp-settings.php';
         table_prefix = php_string(&manifest.probe.table_prefix),
         clone_name = php_string(&manifest.name),
         control_url = php_string(&manifest.control_url),
+        remote_db_name = php_string(&manifest.probe.db_name),
+        remote_db_user = php_string(&manifest.probe.db_user),
+        remote_db_password = php_string(&manifest.probe.db_password),
+        remote_db_host = php_string(&format!(
+            "{}:{}",
+            manifest.remote_db_tunnel.host, manifest.remote_db_tunnel.port
+        )),
     )
 }
 
@@ -151,6 +162,9 @@ function cow_control_request( $path, $payload ) {
 }
 
 class Cow_DB extends wpdb {
+	private $cow_remote_mysqli = null;
+	private $cow_remote_failed = false;
+
 	public function query( $query ) {
 		if ( ! $query ) {
 			return false;
@@ -184,6 +198,39 @@ class Cow_DB extends wpdb {
 	}
 
 	private function cow_remote_query( $query ) {
+		$remote = $this->cow_remote_mysqli();
+		if ( $remote instanceof mysqli ) {
+			$result = $remote->query( $query, MYSQLI_STORE_RESULT );
+			if ( false === $result ) {
+				$this->last_error = $remote->error;
+				return false;
+			}
+
+			$this->last_result = array();
+			$this->col_info = array();
+
+			if ( true === $result ) {
+				$this->num_rows = 0;
+				$this->rows_affected = (int) $remote->affected_rows;
+				$this->insert_id = (int) $remote->insert_id;
+				$this->last_error = '';
+				return $this->rows_affected;
+			}
+
+			foreach ( $result->fetch_fields() as $field ) {
+				$this->col_info[] = (object) array( 'name' => $field->name );
+			}
+			while ( $row = $result->fetch_assoc() ) {
+				$this->last_result[] = (object) $row;
+			}
+			$this->num_rows = count( $this->last_result );
+			$this->rows_affected = $this->num_rows;
+			$this->insert_id = (int) $remote->insert_id;
+			$this->last_error = '';
+
+			return $this->num_rows;
+		}
+
 		$result = cow_control_request( '/query', array( 'sql' => $query ) );
 		if ( empty( $result['ok'] ) ) {
 			$this->last_error = isset( $result['error'] ) ? $result['error'] : 'wp-cow remote query failed';
@@ -209,6 +256,56 @@ class Cow_DB extends wpdb {
 		$this->last_error = '';
 
 		return $this->num_rows;
+	}
+
+	private function cow_remote_mysqli() {
+		if ( $this->cow_remote_mysqli instanceof mysqli ) {
+			return $this->cow_remote_mysqli;
+		}
+		if ( $this->cow_remote_failed ) {
+			return null;
+		}
+		if ( '0' === getenv( 'WPCOW_REMOTE_DB_TUNNEL' ) ) {
+			$this->cow_remote_failed = true;
+			return null;
+		}
+
+		if (
+			! defined( 'WPCOW_REMOTE_DB_NAME' ) ||
+			! defined( 'WPCOW_REMOTE_DB_USER' ) ||
+			! defined( 'WPCOW_REMOTE_DB_HOST' ) ||
+			'' === WPCOW_REMOTE_DB_NAME ||
+			'' === WPCOW_REMOTE_DB_USER
+		) {
+			return null;
+		}
+
+		$host = WPCOW_REMOTE_DB_HOST;
+		$port = null;
+		$socket = null;
+		if ( preg_match( '/^(.+):([0-9]+)$/', $host, $matches ) ) {
+			$host = $matches[1];
+			$port = (int) $matches[2];
+		} elseif ( preg_match( '/^([^:]+):(\/.*)$/', $host, $matches ) ) {
+			$host = $matches[1];
+			$socket = $matches[2];
+		}
+
+		$mysqli = mysqli_init();
+		if ( ! $mysqli ) {
+			$this->cow_remote_failed = true;
+			return null;
+		}
+
+		@$mysqli->options( MYSQLI_OPT_CONNECT_TIMEOUT, 2 );
+		if ( ! @$mysqli->real_connect( $host, WPCOW_REMOTE_DB_USER, WPCOW_REMOTE_DB_PASSWORD, WPCOW_REMOTE_DB_NAME, $port, $socket ) ) {
+			$this->cow_remote_failed = true;
+			return null;
+		}
+
+		@$mysqli->set_charset( $this->charset ? $this->charset : 'utf8mb4' );
+		$this->cow_remote_mysqli = $mysqli;
+		return $this->cow_remote_mysqli;
 	}
 }
 
@@ -274,7 +371,7 @@ pub fn generated_file_paths(root: &Path) -> Vec<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{LocalDb, Manifest, Probe, MANIFEST_VERSION};
+    use crate::config::{LocalDb, Manifest, Probe, RemoteDbTunnel, MANIFEST_VERSION};
 
     fn manifest() -> Manifest {
         Manifest {
@@ -299,6 +396,10 @@ mod tests {
                 host: "127.0.0.1".to_string(),
                 port: 33071,
             },
+            remote_db_tunnel: RemoteDbTunnel {
+                host: "127.0.0.1".to_string(),
+                port: 33072,
+            },
             control_url: "http://127.0.0.1:39070".to_string(),
             cache_max_file_bytes: 1024,
             remote_metadata_cache_ttl_secs: 30,
@@ -312,6 +413,7 @@ mod tests {
         assert!(php.contains("define( 'WP_HOME',    'http://example.test' );"));
         assert!(php.contains("$table_prefix = 'wp_';"));
         assert!(php.contains("WPCOW_CONTROL_URL"));
+        assert!(php.contains("WPCOW_REMOTE_DB_HOST"));
     }
 
     #[test]
@@ -319,7 +421,7 @@ mod tests {
         let php = db_dropin_php();
         assert!(php.contains("cow_is_write_sql"));
         assert!(php.contains("/materialize"));
-        assert!(php.contains("/query"));
+        assert!(php.contains("cow_remote_mysqli"));
     }
 
     #[test]

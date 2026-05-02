@@ -24,6 +24,26 @@ pub fn run_site(manifest: Manifest, paths: ClonePaths, options: RunOptions) -> R
     let control_addr = control_addr_from_url(&manifest.control_url)?;
     let remote = RemoteClient::new(manifest.clone(), Some(paths.run.join("ssh-control.sock")));
     remote.ensure_master()?;
+    let mut db_tunnel = match remote.start_db_tunnel() {
+        Ok(Some(child)) => {
+            eprintln!(
+                "wp-cow remote DB tunnel listening at {}:{}",
+                manifest.remote_db_tunnel.host, manifest.remote_db_tunnel.port
+            );
+            Some(child)
+        }
+        Ok(None) => {
+            eprintln!(
+                "wp-cow remote DB tunnel disabled or unavailable; falling back to control reads"
+            );
+            None
+        }
+        Err(err) => {
+            eprintln!("wp-cow remote DB tunnel failed: {err:#}");
+            eprintln!("wp-cow falling back to control reads");
+            None
+        }
+    };
 
     let control_shutdown = shutdown.clone();
     let control_manifest = manifest.clone();
@@ -75,6 +95,10 @@ pub fn run_site(manifest: Manifest, paths: ClonePaths, options: RunOptions) -> R
     }
 
     if let Some(mut child) = php {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    if let Some(child) = db_tunnel.as_mut() {
         let _ = child.kill();
         let _ = child.wait();
     }
