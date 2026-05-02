@@ -36,6 +36,9 @@ wp-cow-lab-serve
 - No full `wp-content/uploads` copy.
 - No optimistic full database row dump.
 - Local writes must not reach production.
+- A warmed clone can be explicitly severed from the remote lower layers, then
+  refreshed and used in `wp-admin` without opening SSH or remote DB reads.
+- A local admin password reset must affect only the local materialized DB.
 
 ## Non-Goals
 
@@ -102,6 +105,27 @@ autoload/core-option read, it copies only autoloaded rows and core
 identity/theme/plugin option names into the local database and routes matching
 reads locally. Arbitrary non-bootstrap option reads still go through the remote
 read path unless the table has been fully materialized.
+
+## Severed Mode
+
+`wp-cow sever <name>` turns a clone from live-lower mode into local-only mode.
+It is not the default startup path because it must copy database rows, but it is
+the expected path when the user wants to disconnect from production and keep
+working locally.
+
+Severing should:
+
+- Materialize the core WordPress tables needed for local frontend/admin/content
+  edits: options, users, usermeta, posts, postmeta, terms, term_taxonomy,
+  term_relationships, comments, commentmeta, and links.
+- Cache WordPress admin/runtime program files needed for offline `wp-admin`
+  access without copying uploads.
+- Optionally set a local administrator password in the local DB only.
+- Write an offline marker that makes future `wp-cow run` skip SSH control
+  masters, remote DB tunnels, remote filesystem reads, and daemon remote
+  `/query` calls.
+- Continue serving local upper-layer file writes and local DB writes after the
+  remote link is severed.
 
 ## Observability
 

@@ -170,6 +170,8 @@ renders to reuse the program files WordPress just touched. The Docker lab
 defaults `WPCOW_FUSE_TTL_SECS` to `60`; lower values make live remote changes
 visible sooner, while higher values reduce repeated path walking.
 FrankenPHP also enables OPcache for parsed PHP code in the local web runtime.
+`WPCOW_PREFETCH_RUNTIME=1` can still be used for an explicit background warm,
+but it is off by default so normal `serve` remains request-driven.
 
 The lab uses bounded request timeouts so a bad remote DB query, unreachable SSH
 host, or slow remote file read should fail visibly instead of leaving the
@@ -182,6 +184,20 @@ If WordPress tries to show the installation wizard, the router treats that as a
 wp-cow DB/runtime failure. The clone should either show the real remote-backed
 site or a diagnostic error; the installer is not considered a successful local
 copy.
+
+To sever a warmed clone from the remote lower layers, run:
+
+```bash
+export WPCOW_LOCAL_ADMIN_PASSWORD='8u239huiwdsj91das'
+wp-cow-lab-sever
+wp-cow-lab-run
+```
+
+`wp-cow-lab-sever` materializes the core WordPress tables into local MariaDB,
+sets the admin password only in the local DB when requested, caches the
+WordPress admin/runtime program files needed for offline admin access, and
+writes `run/offline.json`. After that marker exists, `wp-cow run` does not open
+SSH, does not start the remote DB tunnel, and routes DB reads locally.
 
 Open this on the Mac:
 

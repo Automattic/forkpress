@@ -12,7 +12,7 @@ use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::config::{ClonePaths, Manifest};
+use crate::config::{self, ClonePaths, Manifest};
 use crate::overlay::OverlayStore;
 use crate::remote::{RemoteClient, RemoteEntry};
 
@@ -44,6 +44,7 @@ pub struct CowFs {
     remote_readdir_cache: HashMap<PathBuf, Timed<Vec<RemoteEntry>>>,
     remote_cache_ttl: Duration,
     kernel_cache_ttl: Duration,
+    offline: bool,
     uid: u32,
     gid: u32,
 }
@@ -59,6 +60,7 @@ impl CowFs {
             "WPCOW_FUSE_TTL_SECS",
             DEFAULT_KERNEL_CACHE_TTL_SECS,
         ));
+        let offline = config::is_offline(paths);
         Self {
             manifest,
             remote,
@@ -73,6 +75,7 @@ impl CowFs {
             remote_readdir_cache: HashMap::new(),
             remote_cache_ttl,
             kernel_cache_ttl,
+            offline,
             uid: unsafe { libc::getuid() },
             gid: unsafe { libc::getgid() },
         }
@@ -157,6 +160,13 @@ impl CowFs {
             return Ok(entry);
         }
 
+        if self.offline {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "clone is severed and path is not cached locally",
+            ));
+        }
+
         let entry = match self.remote.stat(rel) {
             Ok(entry) => entry,
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
@@ -178,6 +188,10 @@ impl CowFs {
     }
 
     fn remote_readdir(&mut self, rel: &Path) -> io::Result<Vec<RemoteEntry>> {
+        if self.offline {
+            return Ok(Vec::new());
+        }
+
         if let Some(cached) = self.remote_readdir_cache.get(rel) {
             if cached.expires_at > Instant::now() {
                 return Ok(cached.value.clone());
@@ -330,6 +344,12 @@ impl Filesystem for CowFs {
             if upper.exists() {
                 return fs::read_link(upper).map(|p| p.to_string_lossy().into_owned());
             }
+            if self.offline {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "clone is severed and symlink is not cached locally",
+                ));
+            }
             self.remote.readlink(&rel)
         })();
         match result {
@@ -450,6 +470,11 @@ impl Filesystem for CowFs {
                 } else if let Some(cache_path) = self.overlay.cached_file_path(&rel) {
                     let file = File::open(cache_path)?;
                     Ok((self.allocate_handle(Handle::Local(file)), 0))
+                } else if self.offline {
+                    Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "clone is severed and file is not cached locally",
+                    ))
                 } else {
                     Ok((self.allocate_handle(Handle::Remote(rel)), 0))
                 }
@@ -489,6 +514,9 @@ impl Filesystem for CowFs {
                 }
             }
             Some(Handle::Remote(rel)) => {
+                if self.offline {
+                    return reply.error(ENOENT);
+                }
                 trace_fuse("read-remote", rel);
                 self.overlay
                     .read_cached_or_remote(
@@ -733,7 +761,9 @@ pub fn mount_foreground(manifest: Manifest, paths: ClonePaths, mountpoint: &Path
     fs::create_dir_all(mountpoint)?;
     let control_path = paths.run.join("ssh-control.sock");
     let remote = RemoteClient::new(manifest.clone(), Some(control_path));
-    remote.ensure_master()?;
+    if !config::is_offline(&paths) {
+        remote.ensure_master()?;
+    }
     let fs = CowFs::new(manifest.clone(), &paths, remote);
     let options = vec![
         MountOption::FSName(format!("wp-cow-{}", manifest.name)),

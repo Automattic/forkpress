@@ -50,6 +50,7 @@ COPY docker/wp-cow-lab-dns /usr/local/bin/wp-cow-lab-dns
 COPY docker/wp-cow-lab-db-init /usr/local/bin/wp-cow-lab-db-init
 COPY docker/wp-cow-lab-cache /usr/local/bin/wp-cow-lab-cache
 COPY docker/wp-cow-lab-serve /usr/local/bin/wp-cow-lab-serve
+COPY docker/wp-cow-lab-sever /usr/local/bin/wp-cow-lab-sever
 RUN chmod +x /usr/local/bin/wp-cow-lab-*
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/wp-cow-lab-entrypoint"]

@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+name="${WPCOW_NAME:-example}"
+
+if [ ! -f "${WPCOW_HOME:-/root/.wp-cow}/clones/$name/manifest.json" ]; then
+  echo "clone '$name' does not exist yet; run wp-cow-lab-serve once first" >&2
+  exit 2
+fi
+
+args=(sever "$name")
+if [ -n "${WPCOW_LOCAL_ADMIN_PASSWORD:-}" ]; then
+  args+=(--admin-password "$WPCOW_LOCAL_ADMIN_PASSWORD")
+fi
+if [ -n "${WPCOW_LOCAL_ADMIN_LOGIN:-}" ]; then
+  args+=(--admin-login "$WPCOW_LOCAL_ADMIN_LOGIN")
+fi
+
+echo "severing remote lower layers for $name"
+exec wp-cow "${args[@]}"

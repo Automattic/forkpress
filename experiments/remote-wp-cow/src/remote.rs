@@ -77,6 +77,31 @@ impl RemoteClient {
         Ok(())
     }
 
+    pub fn stop_master(&self) -> Result<()> {
+        let Some(control_path) = &self.control_path else {
+            return Ok(());
+        };
+        if !control_path.exists() {
+            return Ok(());
+        }
+
+        let mut command = Command::new("ssh");
+        command.arg("-S").arg(control_path);
+        command.arg("-O").arg("exit");
+        self.add_ssh_safety_options(&mut command);
+        let status = command
+            .arg(&self.manifest.ssh)
+            .status()
+            .context("stop SSH control master")?;
+        if !status.success() {
+            return Err(anyhow!(
+                "failed to stop SSH control master for {}",
+                self.manifest.ssh
+            ));
+        }
+        Ok(())
+    }
+
     pub fn command(&self, remote_command: &str) -> Command {
         self.ssh_command(remote_command, 0)
     }

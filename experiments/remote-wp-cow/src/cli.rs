@@ -2,11 +2,11 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use std::fs;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::config::{
     clone_paths, default_state_dir, derive_name, ensure_clone_dirs, load_manifest, write_manifest,
-    Manifest, Probe,
+    write_offline_marker, Manifest, OfflineMarker, Probe,
 };
 use crate::db;
 use crate::generate;
@@ -33,6 +33,8 @@ enum Command {
     ExportSchema(NameArgs),
     #[command(name = "materialize")]
     Materialize(MaterializeArgs),
+    #[command(name = "sever")]
+    Sever(SeverArgs),
     #[command(name = "mount")]
     Mount(MountArgs),
     #[command(name = "run")]
@@ -108,6 +110,17 @@ struct MaterializeArgs {
 }
 
 #[derive(Debug, Args)]
+struct SeverArgs {
+    name: String,
+    #[arg(long = "admin-password")]
+    admin_password: Option<String>,
+    #[arg(long = "admin-login")]
+    admin_login: Option<String>,
+    #[arg(long)]
+    state_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
 struct MountArgs {
     name: String,
     #[arg(long)]
@@ -145,6 +158,7 @@ pub fn run() -> Result<()> {
         Command::InitDb(args) => init_db(args),
         Command::ExportSchema(args) => export_schema(args),
         Command::Materialize(args) => materialize(args),
+        Command::Sever(args) => sever(args),
         Command::Mount(args) => mount(args),
         Command::Run(args) => run_clone(args),
         Command::Probe(args) => {
@@ -405,6 +419,78 @@ fn materialize(args: MaterializeArgs) -> Result<()> {
     remote.ensure_master()?;
     let materialized = db::materialize_tables(&remote, &manifest, &paths, &args.tables)?;
     println!("{}", serde_json::to_string_pretty(&materialized)?);
+    Ok(())
+}
+
+fn sever(args: SeverArgs) -> Result<()> {
+    let started = Instant::now();
+    let state_dir = args.state_dir.unwrap_or(default_state_dir()?);
+    let paths = clone_paths(&state_dir, &args.name);
+    let manifest = load_manifest(&paths.manifest)?;
+    let remote = RemoteClient::new(manifest.clone(), Some(paths.run.join("ssh-control.sock")));
+
+    remote.ensure_master()?;
+    if !paths.db.join("schema.sql").exists() {
+        db::export_schema(&remote, &paths).context("export schema")?;
+    }
+    if db::init_local_db_if_empty(&manifest, &paths)? {
+        println!(
+            "initialized empty local database '{}'",
+            manifest.local_db.name
+        );
+    }
+
+    let requested_tables = db::wordpress_offline_table_names(&manifest.probe.table_prefix);
+    let tables = db::existing_local_tables(&manifest, &requested_tables)?;
+    let skipped = requested_tables.len().saturating_sub(tables.len());
+    if skipped > 0 {
+        println!(
+            "skipping {} WordPress tables that are not present in the local schema",
+            skipped
+        );
+    }
+    let materialized = db::materialize_tables(&remote, &manifest, &paths, &tables)
+        .context("materialize local offline database lower layer")?;
+    println!(
+        "materialized {} WordPress tables for local/offline use",
+        materialized.len()
+    );
+
+    println!("caching WordPress admin/runtime program files for offline use");
+    run::prefetch_runtime_files(&manifest, &paths, &remote)
+        .context("cache WordPress admin/runtime files")?;
+
+    let admin = if let Some(password) = args.admin_password.as_deref() {
+        let admin = db::set_local_admin_password(&manifest, args.admin_login.as_deref(), password)
+            .context("set local administrator password")?;
+        println!(
+            "set local administrator password for '{}' without writing to the remote DB",
+            admin.user_login
+        );
+        Some(admin.user_login)
+    } else {
+        None
+    };
+
+    let marker = OfflineMarker {
+        severed_at_unix: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        materialized_tables: tables,
+        admin_user: admin,
+    };
+    write_offline_marker(&paths, &marker)?;
+    generate::write_wordpress_overrides(&paths, &manifest)?;
+    if let Err(err) = remote.stop_master() {
+        eprintln!("warning: could not close SSH control master after severing: {err:#}");
+    }
+
+    println!(
+        "severed clone '{}' from remote lower layers in {:.2}s",
+        manifest.name,
+        started.elapsed().as_secs_f64()
+    );
     Ok(())
 }
 

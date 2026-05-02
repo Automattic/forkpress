@@ -20,6 +20,12 @@ pub struct DbState {
     pub option_rows: BTreeSet<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct LocalAdmin {
+    pub id: u64,
+    pub user_login: String,
+}
+
 pub fn state_path(paths: &ClonePaths) -> PathBuf {
     paths.db.join("state.json")
 }
@@ -151,6 +157,99 @@ pub fn materialize_tables(
 
     write_state(paths, &state)?;
     Ok(changed)
+}
+
+pub fn wordpress_offline_table_names(table_prefix: &str) -> Vec<String> {
+    [
+        "options",
+        "users",
+        "usermeta",
+        "posts",
+        "postmeta",
+        "terms",
+        "term_taxonomy",
+        "term_relationships",
+        "comments",
+        "commentmeta",
+        "links",
+    ]
+    .into_iter()
+    .map(|suffix| format!("{table_prefix}{suffix}"))
+    .collect()
+}
+
+pub fn existing_local_tables(manifest: &Manifest, tables: &[String]) -> Result<Vec<String>> {
+    for table in tables {
+        validate_table_name(table)?;
+    }
+    if tables.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let in_list = tables
+        .iter()
+        .map(|table| format!("'{}'", mysql_string_literal(table)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql_text = format!(
+        "SELECT table_name FROM information_schema.tables \
+         WHERE table_schema='{}' AND table_name IN ({});",
+        mysql_string_literal(&manifest.local_db.name),
+        in_list
+    );
+    let output = local_mysql_command(manifest)
+        .arg("--batch")
+        .arg("--raw")
+        .arg("--skip-column-names")
+        .arg("--execute")
+        .arg(sql_text)
+        .output()
+        .context("query local WordPress table list")?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "local table list query failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let present = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| line.to_string())
+        .collect::<BTreeSet<_>>();
+    Ok(tables
+        .iter()
+        .filter(|table| present.contains(table.as_str()))
+        .cloned()
+        .collect())
+}
+
+pub fn set_local_admin_password(
+    manifest: &Manifest,
+    login: Option<&str>,
+    password: &str,
+) -> Result<LocalAdmin> {
+    let users_table = format!("{}users", manifest.probe.table_prefix);
+    let usermeta_table = format!("{}usermeta", manifest.probe.table_prefix);
+    validate_table_name(&users_table)?;
+    validate_table_name(&usermeta_table)?;
+
+    let admin = if let Some(login) = login {
+        local_user_by_login(manifest, &users_table, login)?
+    } else {
+        local_first_admin_user(manifest, &users_table, &usermeta_table)?
+    };
+
+    let update_sql = format!(
+        "UPDATE {} SET user_pass=MD5('{}'), user_activation_key='' WHERE ID={};\
+         DELETE FROM {} WHERE user_id={} AND meta_key='session_tokens';",
+        qualified_table(manifest, &users_table),
+        mysql_string_literal(password),
+        admin.id,
+        qualified_table(manifest, &usermeta_table),
+        admin.id
+    );
+    run_mysql_exec(manifest, &update_sql)?;
+    Ok(admin)
 }
 
 pub fn route_for_tables(
@@ -307,6 +406,72 @@ fn materialize_one_table(remote: &RemoteClient, manifest: &Manifest, table: &str
         ));
     }
     Ok(())
+}
+
+fn local_first_admin_user(
+    manifest: &Manifest,
+    users_table: &str,
+    usermeta_table: &str,
+) -> Result<LocalAdmin> {
+    let capabilities_key = format!("{}capabilities", manifest.probe.table_prefix);
+    let sql_text = format!(
+        "SELECT u.ID, u.user_login \
+         FROM {} u \
+         JOIN {} m ON m.user_id = u.ID \
+         WHERE m.meta_key = '{}' AND m.meta_value LIKE '%administrator%' \
+         ORDER BY u.ID LIMIT 1;",
+        qualified_table(manifest, users_table),
+        qualified_table(manifest, usermeta_table),
+        mysql_string_literal(&capabilities_key)
+    );
+    local_admin_from_query(manifest, &sql_text, "find local administrator user")
+}
+
+fn local_user_by_login(manifest: &Manifest, users_table: &str, login: &str) -> Result<LocalAdmin> {
+    let sql_text = format!(
+        "SELECT ID, user_login FROM {} WHERE user_login='{}' LIMIT 1;",
+        qualified_table(manifest, users_table),
+        mysql_string_literal(login)
+    );
+    local_admin_from_query(manifest, &sql_text, "find requested local user")
+}
+
+fn local_admin_from_query(
+    manifest: &Manifest,
+    sql_text: &str,
+    context: &'static str,
+) -> Result<LocalAdmin> {
+    let output = local_mysql_command(manifest)
+        .arg("--batch")
+        .arg("--raw")
+        .arg("--skip-column-names")
+        .arg("--execute")
+        .arg(sql_text)
+        .output()
+        .context(context)?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "{} failed: {}",
+            context,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .next()
+        .ok_or_else(|| anyhow!("no local administrator user found"))?;
+    let (id, user_login) = line
+        .split_once('\t')
+        .ok_or_else(|| anyhow!("unexpected local user query output: {}", line))?;
+    let id = id
+        .parse::<u64>()
+        .with_context(|| format!("parse local user id from {}", id))?;
+    Ok(LocalAdmin {
+        id,
+        user_login: user_login.to_string(),
+    })
 }
 
 fn materialize_option_bootstrap(

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::config::{ClonePaths, Manifest};
+use crate::config::{self, ClonePaths, Manifest};
 use crate::control;
 use crate::db;
 use crate::fusefs;
@@ -28,25 +28,34 @@ pub fn run_site(manifest: Manifest, paths: ClonePaths, options: RunOptions) -> R
 
     let control_addr = control_addr_from_url(&manifest.control_url)?;
     let remote = RemoteClient::new(manifest.clone(), Some(paths.run.join("ssh-control.sock")));
-    remote.ensure_master()?;
-    let mut db_tunnel = match remote.start_db_tunnel() {
-        Ok(Some(child)) => {
-            eprintln!(
-                "wp-cow remote DB tunnel listening at {}:{}",
-                manifest.remote_db_tunnel.host, manifest.remote_db_tunnel.port
-            );
-            Some(child)
-        }
-        Ok(None) => {
-            eprintln!(
-                "wp-cow remote DB tunnel disabled or unavailable; falling back to control reads"
-            );
-            None
-        }
-        Err(err) => {
-            eprintln!("wp-cow remote DB tunnel failed: {err:#}");
-            eprintln!("wp-cow falling back to control reads");
-            None
+    let offline = config::is_offline(&paths);
+    let mut db_tunnel = if offline {
+        eprintln!(
+            "wp-cow clone '{}' is severed; remote filesystem and DB reads are disabled",
+            manifest.name
+        );
+        None
+    } else {
+        remote.ensure_master()?;
+        match remote.start_db_tunnel() {
+            Ok(Some(child)) => {
+                eprintln!(
+                    "wp-cow remote DB tunnel listening at {}:{}",
+                    manifest.remote_db_tunnel.host, manifest.remote_db_tunnel.port
+                );
+                Some(child)
+            }
+            Ok(None) => {
+                eprintln!(
+                    "wp-cow remote DB tunnel disabled or unavailable; falling back to control reads"
+                );
+                None
+            }
+            Err(err) => {
+                eprintln!("wp-cow remote DB tunnel failed: {err:#}");
+                eprintln!("wp-cow falling back to control reads");
+                None
+            }
         }
     };
 
@@ -93,7 +102,7 @@ pub fn run_site(manifest: Manifest, paths: ClonePaths, options: RunOptions) -> R
         )?)
     };
 
-    if env_bool("WPCOW_PREFETCH_RUNTIME", true) {
+    if !offline && env_bool("WPCOW_PREFETCH_RUNTIME", false) {
         let warm_manifest = manifest.clone();
         let warm_paths = paths.clone();
         let warm_remote = remote.clone();
@@ -152,19 +161,37 @@ pub fn mount_only(manifest: Manifest, paths: ClonePaths, mountpoint: &Path) -> R
     fusefs::mount_foreground(manifest, paths, mountpoint)
 }
 
-fn prefetch_runtime_files(
+pub(crate) fn prefetch_runtime_files(
     manifest: &Manifest,
     paths: &ClonePaths,
     remote: &RemoteClient,
 ) -> Result<()> {
     let mirror = paths.file_cache.join("mirror");
     fs::create_dir_all(&mirror)?;
-    let stamp = mirror.join(".wp-cow-runtime-prefetch-v2");
+    let stamp = mirror.join(".wp-cow-runtime-prefetch-v3");
     if stamp.is_file() {
         return Ok(());
     }
 
-    let mut rels = vec!["wp-admin".to_string(), "wp-includes".to_string()];
+    let mut rels = [
+        "index.php",
+        "wp-activate.php",
+        "wp-blog-header.php",
+        "wp-comments-post.php",
+        "wp-cron.php",
+        "wp-load.php",
+        "wp-login.php",
+        "wp-mail.php",
+        "wp-settings.php",
+        "wp-signup.php",
+        "wp-trackback.php",
+        "xmlrpc.php",
+        "wp-admin",
+        "wp-includes",
+    ]
+    .into_iter()
+    .map(|rel| rel.to_string())
+    .collect::<Vec<_>>();
     let mut themes = BTreeSet::new();
     for option in ["template", "stylesheet"] {
         if let Some(theme) = db::local_option_value(manifest, option)? {
@@ -432,6 +459,12 @@ fn frankenphp_caddyfile(_paths: &ClonePaths, mountpoint: &Path, http_addr: &str)
 		respond 404
 	}}
 
+	@wpAdminIndex path /wp-admin /wp-admin/
+	handle @wpAdminIndex {{
+		rewrite * /wp-admin/index.php
+		php
+	}}
+
 	@static {{
 		file
 		not path *.php
@@ -542,6 +575,15 @@ mod tests {
         let listen = caddy_listen("0.0.0.0:8080");
         assert_eq!(listen.site_addr, "http://:8080");
         assert_eq!(listen.bind, None);
+    }
+
+    #[test]
+    fn frankenphp_routes_wp_admin_directory_to_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::config::clone_paths(temp.path(), "example");
+        let caddyfile = frankenphp_caddyfile(&paths, Path::new("/tmp/mount"), "127.0.0.1:9481");
+        assert!(caddyfile.contains("@wpAdminIndex path /wp-admin /wp-admin/"));
+        assert!(caddyfile.contains("rewrite * /wp-admin/index.php"));
     }
 }
 

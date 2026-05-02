@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tiny_http::{Header, Request, Response, Server, StatusCode};
 
-use crate::config::{ClonePaths, Manifest};
+use crate::config::{self, ClonePaths, Manifest};
 use crate::db;
 use crate::remote::RemoteClient;
 
@@ -97,11 +97,27 @@ fn control_response(
     match url {
         "/materialize" => {
             let tables = input.tables.unwrap_or_default();
+            if config::is_offline(paths) {
+                return Ok(json!({
+                    "ok": true,
+                    "backend": "local",
+                    "materialized": [],
+                    "offline": true
+                }));
+            }
             let materialized = db::materialize_tables(remote, manifest, paths, &tables)?;
             Ok(json!({ "ok": true, "backend": "local", "materialized": materialized }))
         }
         "/route" => {
             let tables = input.tables.unwrap_or_default();
+            if config::is_offline(paths) {
+                return Ok(json!({
+                    "ok": true,
+                    "backend": "local",
+                    "materialized": [],
+                    "offline": true
+                }));
+            }
             let decision = if let Some(sql) = input.sql.as_deref() {
                 db::route_for_query(remote, manifest, paths, sql, &tables)?
             } else {
@@ -112,6 +128,12 @@ fn control_response(
             )
         }
         "/query" => {
+            if config::is_offline(paths) {
+                return Ok(json!({
+                    "ok": false,
+                    "error": "clone is severed from the remote database"
+                }));
+            }
             let sql = input.sql.ok_or_else(|| anyhow!("missing sql"))?;
             let result = db::remote_readonly_query(remote, &sql)?;
             Ok(json!({

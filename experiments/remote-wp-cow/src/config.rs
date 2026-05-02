@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 
 pub const MANIFEST_VERSION: u32 = 1;
+const OFFLINE_MARKER: &str = "offline.json";
 const DEFAULT_CACHE_MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const DEFAULT_REMOTE_METADATA_CACHE_TTL_SECS: u64 = 30;
 
@@ -72,6 +73,14 @@ pub struct ClonePaths {
     pub generated: PathBuf,
     pub run: PathBuf,
     pub whiteouts: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OfflineMarker {
+    pub severed_at_unix: u64,
+    pub materialized_tables: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_user: Option<String>,
 }
 
 impl Manifest {
@@ -155,6 +164,30 @@ pub fn clone_paths(state_dir: &Path, name: &str) -> ClonePaths {
         whiteouts: root.join("whiteouts.json"),
         root,
     }
+}
+
+pub fn offline_marker_path(paths: &ClonePaths) -> PathBuf {
+    paths.run.join(OFFLINE_MARKER)
+}
+
+pub fn is_offline(paths: &ClonePaths) -> bool {
+    offline_marker_path(paths).is_file()
+        || std::env::var("WPCOW_OFFLINE")
+            .ok()
+            .map(|raw| {
+                matches!(
+                    raw.to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+}
+
+pub fn write_offline_marker(paths: &ClonePaths, marker: &OfflineMarker) -> Result<()> {
+    fs::create_dir_all(&paths.run)?;
+    let json = serde_json::to_vec_pretty(marker)?;
+    fs::write(offline_marker_path(paths), [json, b"\n".to_vec()].concat())?;
+    Ok(())
 }
 
 pub fn ensure_clone_dirs(paths: &ClonePaths) -> Result<()> {

@@ -173,6 +173,11 @@ impl OverlayStore {
             ));
         }
 
+        if let Some(cached) = self.cached_file_path(rel) {
+            fs::copy(cached, &upper)?;
+            return Ok(upper);
+        }
+
         let mut out = File::create(&upper)?;
         let mut offset = 0_u64;
         let chunk = 1024 * 1024;

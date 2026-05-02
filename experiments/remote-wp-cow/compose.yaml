@@ -42,6 +42,8 @@ services:
       WPCOW_PHP_WORKERS: "${WPCOW_PHP_WORKERS:-4}"
       WPCOW_WEB_SERVER: "${WPCOW_WEB_SERVER:-frankenphp}"
       WPCOW_SPLASH: "${WPCOW_SPLASH:-1}"
+      WPCOW_LOCAL_ADMIN_PASSWORD: "${WPCOW_LOCAL_ADMIN_PASSWORD:-}"
+      WPCOW_LOCAL_ADMIN_LOGIN: "${WPCOW_LOCAL_ADMIN_LOGIN:-}"
       WPCOW_MOUNTPOINT: "/mnt/wp-cow/${WPCOW_NAME:-example}"
       WPCOW_HTTP: 0.0.0.0:8080
       SSH_AUTH_SOCK: /run/host-services/ssh-auth.sock
