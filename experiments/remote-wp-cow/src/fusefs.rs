@@ -17,7 +17,7 @@ use crate::overlay::OverlayStore;
 use crate::remote::{RemoteClient, RemoteEntry};
 
 const ROOT_INO: u64 = 1;
-const TTL: Duration = Duration::from_secs(1);
+const DEFAULT_KERNEL_CACHE_TTL_SECS: u64 = 60;
 
 #[derive(Clone)]
 struct Timed<T> {
@@ -40,8 +40,10 @@ pub struct CowFs {
     handles: HashMap<u64, Handle>,
     next_fh: u64,
     remote_stat_cache: HashMap<PathBuf, Timed<RemoteEntry>>,
+    remote_missing_cache: HashMap<PathBuf, Instant>,
     remote_readdir_cache: HashMap<PathBuf, Timed<Vec<RemoteEntry>>>,
     remote_cache_ttl: Duration,
+    kernel_cache_ttl: Duration,
     uid: u32,
     gid: u32,
 }
@@ -53,6 +55,10 @@ impl CowFs {
         ino_to_path.insert(ROOT_INO, PathBuf::new());
         path_to_ino.insert(PathBuf::new(), ROOT_INO);
         let remote_cache_ttl = Duration::from_secs(manifest.remote_metadata_cache_ttl_secs);
+        let kernel_cache_ttl = Duration::from_secs(env_u64(
+            "WPCOW_FUSE_TTL_SECS",
+            DEFAULT_KERNEL_CACHE_TTL_SECS,
+        ));
         Self {
             manifest,
             remote,
@@ -63,8 +69,10 @@ impl CowFs {
             handles: HashMap::new(),
             next_fh: 1,
             remote_stat_cache: HashMap::new(),
+            remote_missing_cache: HashMap::new(),
             remote_readdir_cache: HashMap::new(),
             remote_cache_ttl,
+            kernel_cache_ttl,
             uid: unsafe { libc::getuid() },
             gid: unsafe { libc::getgid() },
         }
@@ -128,8 +136,17 @@ impl CowFs {
                 return Ok(cached.value.clone());
             }
         }
+        if let Some(expires_at) = self.remote_missing_cache.get(rel) {
+            if *expires_at > Instant::now() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "cached remote miss",
+                ));
+            }
+        }
 
         if let Some(entry) = self.overlay.cached_entry(rel).map_err(anyhow_to_io)? {
+            self.remote_missing_cache.remove(rel);
             self.remote_stat_cache.insert(
                 rel.to_path_buf(),
                 Timed {
@@ -140,7 +157,16 @@ impl CowFs {
             return Ok(entry);
         }
 
-        let entry = self.remote.stat(rel)?;
+        let entry = match self.remote.stat(rel) {
+            Ok(entry) => entry,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                self.remote_missing_cache
+                    .insert(rel.to_path_buf(), Instant::now() + self.remote_cache_ttl);
+                return Err(err);
+            }
+            Err(err) => return Err(err),
+        };
+        self.remote_missing_cache.remove(rel);
         self.remote_stat_cache.insert(
             rel.to_path_buf(),
             Timed {
@@ -182,6 +208,7 @@ impl CowFs {
 
     fn invalidate_remote_cache(&mut self, rel: &Path) {
         self.remote_stat_cache.remove(rel);
+        self.remote_missing_cache.remove(rel);
         self.remote_readdir_cache.remove(rel);
         if let Some(parent) = rel.parent() {
             self.remote_readdir_cache.remove(parent);
@@ -272,7 +299,7 @@ impl Filesystem for CowFs {
             self.attr_for_path(&rel, ino)
         })();
         match result {
-            Ok(attr) => reply.entry(&TTL, &attr, 0),
+            Ok(attr) => reply.entry(&self.kernel_cache_ttl, &attr, 0),
             Err(err) => reply.error(io_errno(&err)),
         }
     }
@@ -289,7 +316,7 @@ impl Filesystem for CowFs {
             self.attr_for_path(&rel, ino)
         })();
         match result {
-            Ok(attr) => reply.attr(&TTL, &attr),
+            Ok(attr) => reply.attr(&self.kernel_cache_ttl, &attr),
             Err(err) => reply.error(io_errno(&err)),
         }
     }
@@ -331,7 +358,7 @@ impl Filesystem for CowFs {
             self.attr_for_path(&rel, ino)
         })();
         match result {
-            Ok(attr) => reply.entry(&TTL, &attr, 0),
+            Ok(attr) => reply.entry(&self.kernel_cache_ttl, &attr, 0),
             Err(err) => reply.error(io_errno(&err)),
         }
     }
@@ -547,7 +574,7 @@ impl Filesystem for CowFs {
             Ok((attr, fh))
         })();
         match result {
-            Ok((attr, fh)) => reply.created(&TTL, &attr, 0, fh, flags as u32),
+            Ok((attr, fh)) => reply.created(&self.kernel_cache_ttl, &attr, 0, fh, flags as u32),
             Err(err) => reply.error(io_errno(&err)),
         }
     }
@@ -770,6 +797,13 @@ fn env_bool(name: &str) -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or(default)
 }
 
 fn io_errno(err: &io::Error) -> i32 {

@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -12,12 +13,12 @@ use crate::remote::{RemoteClient, RemoteEntry};
 
 pub const OPAQUE_MARKER: &str = ".wp-cow-opaque";
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct WhiteoutFile {
     deleted: BTreeSet<String>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct MetadataFile {
     entries: BTreeMap<String, RemoteEntry>,
 }
@@ -39,6 +40,8 @@ pub struct OverlayStore {
     pub upper: PathBuf,
     pub file_cache: PathBuf,
     whiteouts_path: PathBuf,
+    whiteouts: RefCell<Option<WhiteoutFile>>,
+    metadata: RefCell<Option<MetadataFile>>,
 }
 
 impl OverlayStore {
@@ -47,6 +50,8 @@ impl OverlayStore {
             upper: paths.upper.clone(),
             file_cache: paths.file_cache.clone(),
             whiteouts_path: paths.whiteouts.clone(),
+            whiteouts: RefCell::new(None),
+            metadata: RefCell::new(None),
         }
     }
 
@@ -292,12 +297,19 @@ impl OverlayStore {
     }
 
     fn load_whiteouts(&self) -> Result<WhiteoutFile> {
+        if let Some(whiteouts) = self.whiteouts.borrow().as_ref() {
+            return Ok(whiteouts.clone());
+        }
         if !self.whiteouts_path.exists() {
-            return Ok(WhiteoutFile::default());
+            let whiteouts = WhiteoutFile::default();
+            *self.whiteouts.borrow_mut() = Some(whiteouts.clone());
+            return Ok(whiteouts);
         }
         let mut json = String::new();
         File::open(&self.whiteouts_path)?.read_to_string(&mut json)?;
-        Ok(serde_json::from_str(&json)?)
+        let whiteouts: WhiteoutFile = serde_json::from_str(&json)?;
+        *self.whiteouts.borrow_mut() = Some(whiteouts.clone());
+        Ok(whiteouts)
     }
 
     fn write_whiteouts(&self, whiteouts: &WhiteoutFile) -> Result<()> {
@@ -312,6 +324,7 @@ impl OverlayStore {
             .open(&self.whiteouts_path)?;
         file.write_all(&json)?;
         file.write_all(b"\n")?;
+        *self.whiteouts.borrow_mut() = Some(whiteouts.clone());
         Ok(())
     }
 
@@ -324,13 +337,20 @@ impl OverlayStore {
     }
 
     fn load_metadata(&self) -> Result<MetadataFile> {
+        if let Some(metadata) = self.metadata.borrow().as_ref() {
+            return Ok(metadata.clone());
+        }
         let path = self.metadata_path();
         if !path.exists() {
-            return Ok(MetadataFile::default());
+            let metadata = MetadataFile::default();
+            *self.metadata.borrow_mut() = Some(metadata.clone());
+            return Ok(metadata);
         }
         let mut json = String::new();
         File::open(path)?.read_to_string(&mut json)?;
-        Ok(serde_json::from_str(&json)?)
+        let metadata: MetadataFile = serde_json::from_str(&json)?;
+        *self.metadata.borrow_mut() = Some(metadata.clone());
+        Ok(metadata)
     }
 
     fn write_metadata(&self, metadata: &MetadataFile) -> Result<()> {
@@ -346,6 +366,7 @@ impl OverlayStore {
         file.write_all(b"\n")?;
         drop(file);
         fs::rename(tmp, self.metadata_path())?;
+        *self.metadata.borrow_mut() = Some(metadata.clone());
         Ok(())
     }
 

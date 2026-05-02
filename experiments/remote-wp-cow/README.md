@@ -29,7 +29,7 @@ cargo build
 Use this when you are on a Mac and want a Linux shell with FUSE, FrankenPHP,
 SSH, and local MariaDB available. The container is intentionally privileged so
 FUSE can mount inside Docker Desktop's Linux VM. The Docker image uses the
-official FrankenPHP PHP 8.3 image and installs `mysqli`/`pdo_mysql` for
+official FrankenPHP PHP 8.3 image and installs `mysqli`, `opcache`, and `pdo_mysql` for
 WordPress.
 
 From this directory:
@@ -165,11 +165,11 @@ Set `WPCOW_REMOTE_QUERY_CACHE=0` to disable it or adjust
 `WPCOW_REMOTE_QUERY_CACHE_MAX_ROWS` for large result sets. Local write-class SQL
 clears this cache before executing.
 
-Frontend GET responses are also cached under
-`~/.wp-cow/clones/<name>/db/page-cache` by default. This is what makes a warmed
-URL return immediately after the first real WordPress render. Set
-`WPCOW_PAGE_CACHE=0` to disable it. Local write-class SQL clears this cache
-before executing.
+The FUSE mount also keeps warmed path metadata live long enough for repeat
+renders to reuse the program files WordPress just touched. The Docker lab
+defaults `WPCOW_FUSE_TTL_SECS` to `60`; lower values make live remote changes
+visible sooner, while higher values reduce repeated path walking.
+FrankenPHP also enables OPcache for parsed PHP code in the local web runtime.
 
 The lab uses bounded request timeouts so a bad remote DB query, unreachable SSH
 host, or slow remote file read should fail visibly instead of leaving the

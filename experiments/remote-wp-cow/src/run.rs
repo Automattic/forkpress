@@ -416,6 +416,11 @@ fn frankenphp_caddyfile(_paths: &ClonePaths, mountpoint: &Path, http_addr: &str)
 		php_ini max_execution_time {max_execution}
 		php_ini default_socket_timeout {socket_timeout}
 		php_ini mysqlnd.net_read_timeout {socket_timeout}
+		php_ini opcache.enable 1
+		php_ini opcache.memory_consumption 192
+		php_ini opcache.max_accelerated_files 20000
+		php_ini opcache.validate_timestamps 1
+		php_ini opcache.revalidate_freq 2
 	}}
 }}
 

@@ -20,7 +20,7 @@ FROM dunglas/frankenphp:1-php8.3-bookworm
 ENV DEBIAN_FRONTEND=noninteractive
 ENV WPCOW_HOME=/root/.wp-cow
 
-RUN install-php-extensions mysqli pdo_mysql \
+RUN install-php-extensions mysqli opcache pdo_mysql \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
         bash \

@@ -15,6 +15,12 @@ else
   echo "frankenphp mysqli extension: missing" >&2
   exit 1
 fi
+if frankenphp php-cli -m | grep -qx 'Zend OPcache'; then
+  echo "frankenphp opcache extension: yes"
+else
+  echo "frankenphp opcache extension: missing" >&2
+  exit 1
+fi
 mysql --version
 mysqldump --version
 
