@@ -158,6 +158,19 @@ option names into the local database, then routes those matching reads locally.
 That keeps the common `SELECT ... FROM *_options WHERE autoload IN (...)` query
 off the slow remote `/query` fallback without dumping the whole database.
 
+Remote read queries that still need the lower database are cached under
+`~/.wp-cow/clones/<name>/db/query-cache` by default. This makes repeated page
+loads reuse local query results instead of crossing SSH/remote MySQL again.
+Set `WPCOW_REMOTE_QUERY_CACHE=0` to disable it or adjust
+`WPCOW_REMOTE_QUERY_CACHE_MAX_ROWS` for large result sets. Local write-class SQL
+clears this cache before executing.
+
+Frontend GET responses are also cached under
+`~/.wp-cow/clones/<name>/db/page-cache` by default. This is what makes a warmed
+URL return immediately after the first real WordPress render. Set
+`WPCOW_PAGE_CACHE=0` to disable it. Local write-class SQL clears this cache
+before executing.
+
 The lab uses bounded request timeouts so a bad remote DB query, unreachable SSH
 host, or slow remote file read should fail visibly instead of leaving the
 browser spinning forever. Adjust the defaults with

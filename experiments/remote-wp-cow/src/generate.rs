@@ -12,7 +12,10 @@ pub fn write_wordpress_overrides(paths: &ClonePaths, manifest: &Manifest) -> Res
     write_opaque_dir(paths.upper.join("wp-content/plugins"))?;
     write_opaque_dir(paths.upper.join("wp-content/languages"))?;
     let router = router_php(paths, manifest);
-    fs::write(paths.upper.join("wp-config.php"), wp_config_php(manifest))?;
+    fs::write(
+        paths.upper.join("wp-config.php"),
+        wp_config_php(manifest, paths),
+    )?;
     fs::write(paths.upper.join("wp-content/db.php"), db_dropin_php())?;
     fs::write(paths.upper.join(ROUTER_BASENAME), &router)?;
     fs::write(
@@ -32,7 +35,7 @@ fn write_opaque_dir(path: impl AsRef<Path>) -> Result<()> {
     Ok(())
 }
 
-pub fn wp_config_php(manifest: &Manifest) -> String {
+pub fn wp_config_php(manifest: &Manifest, paths: &ClonePaths) -> String {
     format!(
         r#"<?php
 /**
@@ -55,6 +58,8 @@ define( 'WPCOW_REMOTE_DB_NAME',     {remote_db_name} );
 define( 'WPCOW_REMOTE_DB_USER',     {remote_db_user} );
 define( 'WPCOW_REMOTE_DB_PASSWORD', {remote_db_password} );
 define( 'WPCOW_REMOTE_DB_HOST',     {remote_db_host} );
+define( 'WPCOW_QUERY_CACHE_DIR',    {query_cache_dir} );
+define( 'WPCOW_PAGE_CACHE_DIR',     {page_cache_dir} );
 
 define( 'FS_METHOD', 'direct' );
 define( 'DISABLE_WP_CRON', true );
@@ -93,6 +98,8 @@ require_once ABSPATH . 'wp-settings.php';
             "{}:{}",
             manifest.remote_db_tunnel.host, manifest.remote_db_tunnel.port
         )),
+        query_cache_dir = php_string(paths.db.join("query-cache").to_string_lossy().as_ref()),
+        page_cache_dir = php_string(paths.db.join("page-cache").to_string_lossy().as_ref()),
     )
 }
 
@@ -210,6 +217,68 @@ function cow_control_request( $path, $payload ) {
 	return $decoded;
 }
 
+function cow_remote_query_cache_enabled() {
+	return '0' !== getenv( 'WPCOW_REMOTE_QUERY_CACHE' ) && defined( 'WPCOW_QUERY_CACHE_DIR' ) && '' !== WPCOW_QUERY_CACHE_DIR;
+}
+
+function cow_remote_query_cache_file( $query ) {
+	if ( ! cow_remote_query_cache_enabled() ) {
+		return '';
+	}
+	return rtrim( WPCOW_QUERY_CACHE_DIR, '/' ) . '/' . hash( 'sha256', $query ) . '.json';
+}
+
+function cow_remote_query_cache_max_rows() {
+	$max = (int) getenv( 'WPCOW_REMOTE_QUERY_CACHE_MAX_ROWS' );
+	return $max > 0 ? $max : 5000;
+}
+
+function cow_remote_query_cache_get( $query ) {
+	$file = cow_remote_query_cache_file( $query );
+	if ( '' === $file || ! is_file( $file ) ) {
+		return null;
+	}
+	$decoded = json_decode( file_get_contents( $file ), true );
+	if ( ! is_array( $decoded ) || ! isset( $decoded['sql'], $decoded['result'] ) || $decoded['sql'] !== $query || ! is_array( $decoded['result'] ) ) {
+		return null;
+	}
+	return $decoded['result'];
+}
+
+function cow_remote_query_cache_set( $query, $result ) {
+	$file = cow_remote_query_cache_file( $query );
+	if ( '' === $file || empty( $result['ok'] ) || ! isset( $result['rows'] ) || ! is_array( $result['rows'] ) ) {
+		return;
+	}
+	if ( count( $result['rows'] ) > cow_remote_query_cache_max_rows() ) {
+		return;
+	}
+	if ( ! is_dir( dirname( $file ) ) && ! mkdir( dirname( $file ), 0777, true ) && ! is_dir( dirname( $file ) ) ) {
+		return;
+	}
+	$tmp = $file . '.' . getmypid() . '.tmp';
+	file_put_contents( $tmp, json_encode( array( 'sql' => $query, 'result' => $result ) ) );
+	@rename( $tmp, $file );
+}
+
+function cow_remote_query_cache_clear() {
+	if ( ! cow_remote_query_cache_enabled() || ! is_dir( WPCOW_QUERY_CACHE_DIR ) ) {
+		return;
+	}
+	foreach ( glob( rtrim( WPCOW_QUERY_CACHE_DIR, '/' ) . '/*.json' ) as $file ) {
+		@unlink( $file );
+	}
+}
+
+function cow_page_cache_clear() {
+	if ( ! defined( 'WPCOW_PAGE_CACHE_DIR' ) || '' === WPCOW_PAGE_CACHE_DIR || ! is_dir( WPCOW_PAGE_CACHE_DIR ) ) {
+		return;
+	}
+	foreach ( glob( rtrim( WPCOW_PAGE_CACHE_DIR, '/' ) . '/*.html' ) as $file ) {
+		@unlink( $file );
+	}
+}
+
 class Cow_DB extends wpdb {
 	private $cow_remote_mysqli = null;
 	private $cow_remote_failed = false;
@@ -230,6 +299,8 @@ class Cow_DB extends wpdb {
 				$this->last_error = isset( $result['error'] ) ? $result['error'] : 'wp-cow materialization failed';
 				cow_db_runtime_fail( 'control /materialize failed: ' . $this->last_error . "\n\nSQL:\n" . $query );
 			}
+			cow_remote_query_cache_clear();
+			cow_page_cache_clear();
 			return parent::query( $query );
 		}
 
@@ -249,6 +320,11 @@ class Cow_DB extends wpdb {
 	}
 
 	private function cow_remote_query( $query ) {
+		$cached = cow_remote_query_cache_get( $query );
+		if ( is_array( $cached ) ) {
+			return $this->cow_apply_remote_result( $cached );
+		}
+
 		$remote = $this->cow_remote_mysqli();
 		if ( $remote instanceof mysqli ) {
 			$result = $remote->query( $query, MYSQLI_STORE_RESULT );
@@ -257,29 +333,30 @@ class Cow_DB extends wpdb {
 				cow_db_runtime_fail( 'remote mysqli query failed: ' . $this->last_error . "\n\nSQL:\n" . $query );
 			}
 
-			$this->last_result = array();
-			$this->col_info = array();
+			$remote_result = array(
+				'ok'       => true,
+				'error'    => '',
+				'rows'     => array(),
+				'fields'   => array(),
+				'affected' => 0,
+			);
 
 			if ( true === $result ) {
-				$this->num_rows = 0;
-				$this->rows_affected = (int) $remote->affected_rows;
-				$this->insert_id = (int) $remote->insert_id;
-				$this->last_error = '';
-				return $this->rows_affected;
+				$remote_result['affected'] = (int) $remote->affected_rows;
+				cow_remote_query_cache_set( $query, $remote_result );
+				return $this->cow_apply_remote_result( $remote_result );
 			}
 
 			foreach ( $result->fetch_fields() as $field ) {
-				$this->col_info[] = (object) array( 'name' => $field->name );
+				$remote_result['fields'][] = $field->name;
 			}
 			while ( $row = $result->fetch_assoc() ) {
-				$this->last_result[] = (object) $row;
+				$remote_result['rows'][] = $row;
 			}
-			$this->num_rows = count( $this->last_result );
-			$this->rows_affected = $this->num_rows;
-			$this->insert_id = (int) $remote->insert_id;
-			$this->last_error = '';
+			$remote_result['affected'] = count( $remote_result['rows'] );
 
-			return $this->num_rows;
+			cow_remote_query_cache_set( $query, $remote_result );
+			return $this->cow_apply_remote_result( $remote_result );
 		}
 
 		$result = cow_control_request( '/query', array( 'sql' => $query ) );
@@ -288,6 +365,11 @@ class Cow_DB extends wpdb {
 			cow_db_runtime_fail( 'control /query failed: ' . $this->last_error . "\n\nSQL:\n" . $query );
 		}
 
+		cow_remote_query_cache_set( $query, $result );
+		return $this->cow_apply_remote_result( $result );
+	}
+
+	private function cow_apply_remote_result( $result ) {
 		$this->last_result = array();
 		if ( isset( $result['rows'] ) && is_array( $result['rows'] ) ) {
 			foreach ( $result['rows'] as $row ) {
@@ -304,6 +386,7 @@ class Cow_DB extends wpdb {
 
 		$this->num_rows = count( $this->last_result );
 		$this->rows_affected = isset( $result['affected'] ) ? (int) $result['affected'] : $this->num_rows;
+		$this->insert_id = 0;
 		$this->last_error = '';
 
 		return $this->num_rows;
@@ -406,6 +489,7 @@ pub fn router_php(paths: &ClonePaths, manifest: &Manifest) -> String {
     r#"<?php
 $wp_cow_progress_file = __WPCOW_PROGRESS_FILE__;
 $wp_cow_ready_file = __WPCOW_READY_FILE__;
+$wp_cow_page_cache_dir = __WPCOW_PAGE_CACHE_DIR__;
 $wp_cow_remote_url = __WPCOW_REMOTE_URL__;
 $wp_cow_local_url = __WPCOW_LOCAL_URL__;
 
@@ -472,7 +556,61 @@ function wp_cow_is_frontend_get( $path ) {
 	return true;
 }
 
-function wp_cow_proxy_remote_frontend( $remote_url, $local_url, $path ) {
+function wp_cow_page_cache_enabled() {
+	return '0' !== getenv( 'WPCOW_PAGE_CACHE' );
+}
+
+function wp_cow_page_cache_file( $cache_dir, $path ) {
+	if ( ! wp_cow_page_cache_enabled() || '' === $cache_dir || ! wp_cow_is_frontend_get( $path ) ) {
+		return '';
+	}
+	$query = $_GET;
+	unset( $query['__wp_cow_bypass_splash'], $query['__wp_cow_local'] );
+	ksort( $query );
+	$key = $path . '?' . http_build_query( $query );
+	return rtrim( $cache_dir, '/' ) . '/' . hash( 'sha256', $key ) . '.html';
+}
+
+function wp_cow_page_cache_get( $cache_dir, $path ) {
+	$file = wp_cow_page_cache_file( $cache_dir, $path );
+	if ( '' === $file || ! is_file( $file ) ) {
+		return false;
+	}
+	$body = file_get_contents( $file );
+	if ( false === $body ) {
+		return false;
+	}
+	if ( ! headers_sent() ) {
+		header( 'Content-Type: text/html; charset=utf-8' );
+		header( 'Cache-Control: no-store' );
+		header( 'X-WP-COW-Page-Cache: 1' );
+	}
+	if ( 'HEAD' !== $_SERVER['REQUEST_METHOD'] ) {
+		echo $body;
+	}
+	return true;
+}
+
+function wp_cow_page_cache_set( $cache_dir, $path, $body, $content_type ) {
+	if ( 'GET' !== $_SERVER['REQUEST_METHOD'] || false === stripos( $content_type, 'text/html' ) ) {
+		return;
+	}
+	$file = wp_cow_page_cache_file( $cache_dir, $path );
+	if ( '' === $file ) {
+		return;
+	}
+	if ( wp_cow_looks_like_installer( $body ) || false !== stripos( $body, 'wp-cow DB/runtime error' ) ) {
+		return;
+	}
+	if ( ! is_dir( dirname( $file ) ) && ! mkdir( dirname( $file ), 0777, true ) && ! is_dir( dirname( $file ) ) ) {
+		return;
+	}
+	$tmp = $file . '.' . getmypid() . '.tmp';
+	file_put_contents( $tmp, $body );
+	@rename( $tmp, $file );
+}
+
+function wp_cow_proxy_remote_frontend( $remote_url, $local_url, $path, $page_cache_dir ) {
 	if ( '0' === getenv( 'WPCOW_PROXY_FRONTEND' ) || isset( $_GET['__wp_cow_local'] ) || ! wp_cow_is_frontend_get( $path ) ) {
 		return false;
 	}
@@ -537,13 +675,14 @@ function wp_cow_proxy_remote_frontend( $remote_url, $local_url, $path ) {
 		$body = str_replace( $remote_url, rtrim( $local_url, '/' ), $body );
 		$body = str_replace( preg_replace( '/^https:/', 'http:', $remote_url ), rtrim( $local_url, '/' ), $body );
 	}
+	wp_cow_page_cache_set( $page_cache_dir, $path, $body, $content_type );
 	if ( 'HEAD' !== $_SERVER['REQUEST_METHOD'] ) {
 		echo $body;
 	}
 	return true;
 }
 
-function wp_cow_render_wordpress( $ready_file ) {
+function wp_cow_render_wordpress( $ready_file, $page_cache_dir, $path ) {
 	ob_start();
 	require rtrim( $_SERVER['DOCUMENT_ROOT'], '/' ) . '/index.php';
 	$html = ob_get_clean();
@@ -561,6 +700,7 @@ function wp_cow_render_wordpress( $ready_file ) {
 		mkdir( dirname( $ready_file ), 0777, true );
 	}
 	file_put_contents( $ready_file, json_encode( array( 'ready_at' => time() ) ) );
+	wp_cow_page_cache_set( $page_cache_dir, $path, $html, 'text/html; charset=utf-8' );
 	echo $html;
 	return true;
 }
@@ -578,7 +718,11 @@ if ( '/' !== $path && is_file( $file ) ) {
 	return false;
 }
 
-if ( wp_cow_proxy_remote_frontend( $wp_cow_remote_url, $wp_cow_local_url, $path ) ) {
+if ( wp_cow_page_cache_get( $wp_cow_page_cache_dir, $path ) ) {
+	return true;
+}
+
+if ( wp_cow_proxy_remote_frontend( $wp_cow_remote_url, $wp_cow_local_url, $path, $wp_cow_page_cache_dir ) ) {
 	return true;
 }
 
@@ -700,10 +844,10 @@ HTML;
 }
 
 if ( isset( $_GET['__wp_cow_bypass_splash'] ) ) {
-	return wp_cow_render_wordpress( $wp_cow_ready_file );
+	return wp_cow_render_wordpress( $wp_cow_ready_file, $wp_cow_page_cache_dir, $path );
 }
 
-return wp_cow_render_wordpress( $wp_cow_ready_file );
+return wp_cow_render_wordpress( $wp_cow_ready_file, $wp_cow_page_cache_dir, $path );
 "#
     .replace(
         "__WPCOW_PROGRESS_FILE__",
@@ -712,6 +856,10 @@ return wp_cow_render_wordpress( $wp_cow_ready_file );
     .replace(
         "__WPCOW_READY_FILE__",
         &php_string(&paths.run.join("first-request-ready.json").to_string_lossy()),
+    )
+    .replace(
+        "__WPCOW_PAGE_CACHE_DIR__",
+        &php_string(paths.db.join("page-cache").to_string_lossy().as_ref()),
     )
     .replace("__WPCOW_REMOTE_URL__", &php_string(&manifest.remote_url))
     .replace("__WPCOW_LOCAL_URL__", &php_string(&manifest.local_url))
@@ -775,12 +923,16 @@ mod tests {
 
     #[test]
     fn generated_config_shadows_urls_and_database() {
-        let php = wp_config_php(&manifest());
+        let temp = tempfile::tempdir().unwrap();
+        let paths = clone_paths(temp.path(), "example");
+        let php = wp_config_php(&manifest(), &paths);
         assert!(php.contains("define( 'DB_NAME',     'cow_example' );"));
         assert!(php.contains("define( 'WP_HOME',    'http://example.test' );"));
         assert!(php.contains("$table_prefix = 'wp_';"));
         assert!(php.contains("WPCOW_CONTROL_URL"));
         assert!(php.contains("WPCOW_REMOTE_DB_HOST"));
+        assert!(php.contains("WPCOW_QUERY_CACHE_DIR"));
+        assert!(php.contains("WPCOW_PAGE_CACHE_DIR"));
         assert!(php.contains("wp-cow DB/runtime error"));
         assert!(php.contains("wp-content/db.php"));
     }
@@ -791,6 +943,8 @@ mod tests {
         assert!(php.contains("cow_is_write_sql"));
         assert!(php.contains("/materialize"));
         assert!(php.contains("cow_remote_mysqli"));
+        assert!(php.contains("cow_remote_query_cache_get"));
+        assert!(php.contains("cow_remote_query_cache_set"));
         assert!(php.contains("cow_db_runtime_fail"));
         assert!(php.contains("will not fall back to the empty local schema"));
         assert!(php.contains("'sql' => $query"));
@@ -816,6 +970,8 @@ mod tests {
         assert!(php.contains("__wp_cow_bypass_splash"));
         assert!(php.contains("wp_cow_looks_like_installer"));
         assert!(php.contains("wp_cow_proxy_remote_frontend"));
+        assert!(php.contains("wp_cow_page_cache_get"));
+        assert!(php.contains("X-WP-COW-Page-Cache"));
         assert!(php.contains("X-WP-COW-Frontend-Proxy"));
         assert!(php.contains("WordPress tried to show the installation wizard"));
         assert!(php.contains("Cache-Control: no-store"));
@@ -835,7 +991,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let paths = clone_paths(temp.path(), "example");
         let files = [
-            ("wp-config.php", wp_config_php(&manifest())),
+            ("wp-config.php", wp_config_php(&manifest(), &paths)),
             ("db.php", db_dropin_php().to_string()),
             ("wp-cow-safety.php", safety_mu_plugin_php().to_string()),
             ("router.php", router_php(&paths, &manifest())),
