@@ -127,6 +127,10 @@ pub fn mount_only(manifest: Manifest, paths: ClonePaths, mountpoint: &Path) -> R
 
 fn start_php_server(paths: &ClonePaths, mountpoint: &Path, http_addr: &str) -> Result<Child> {
     Command::new("php")
+        .env(
+            "PHP_CLI_SERVER_WORKERS",
+            env_u64("WPCOW_PHP_WORKERS", 4).to_string(),
+        )
         .arg("-d")
         .arg(format!(
             "max_execution_time={}",

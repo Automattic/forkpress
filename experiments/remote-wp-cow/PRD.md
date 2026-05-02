@@ -27,6 +27,12 @@ wp-cow-lab-serve
 - Startup output shows timed phases so slow work is visible.
 - The browser must not spin indefinitely. Slow or failing remote work must
   return a visible error with timing context.
+- If the first real WordPress response is still warming files, the browser
+  should receive a local splash/progress page quickly instead of a blank loading
+  tab.
+- The clone must serve the actual remote-backed site. A WordPress installation
+  wizard indicates an empty or unavailable DB lower layer and must be surfaced
+  as a wp-cow runtime error, not success.
 - No full `wp-content/uploads` copy.
 - No optimistic full database row dump.
 - Local writes must not reach production.
@@ -55,6 +61,8 @@ Startup should do:
 5. Start local PHP immediately with generated local `wp-config.php`, DB drop-in,
    and safety MU plugin.
 6. Serve files lazily and persistently cache only the files touched by requests.
+7. For the first dynamic browser request, show a temporary splash page that
+   polls real file-cache progress while a bypass request warms WordPress.
 
 ## File Materialization Policy
 
@@ -99,7 +107,7 @@ The CLI should print phase names and durations:
 - file cache hits/misses where practical
 - mount
 - php start
-- first request diagnostics where practical
+- first request file-cache progress through `/__wp-cow/progress`
 
 ## Test Site
 
@@ -134,5 +142,7 @@ Then:
 curl -I --max-time 10 http://localhost:9481/
 ```
 
-The response must complete within the timeout. A WordPress error page is
-acceptable during development only if it returns quickly with diagnostic output.
+The response must complete within the timeout. A splash/progress page is
+acceptable while the first real page warms. A WordPress error page is acceptable
+during development only if it returns quickly with diagnostic output. The
+WordPress installation wizard is not acceptable as a successful response.

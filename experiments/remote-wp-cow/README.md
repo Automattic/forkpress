@@ -130,9 +130,17 @@ download media, runtime directories, or table rows up front.
 File reads are request-driven. When WordPress opens a remote file, `wp-cow`
 fetches that file into the persistent `file-cache/` and records the remote
 metadata beside it. Later reads and later runs use the local cached copy instead
-of fetching the file or statting it remotely again. Runtime batch sync is
-disabled by default; set `WPCOW_RUNTIME_SYNC=1` only for debugging a bounded
-runtime copy.
+of fetching the file or statting it remotely again. Runtime batch sync is not
+part of `serve`; old `WPCOW_RUNTIME_SYNC` environment values are ignored so
+plugin/theme/runtime trees stay lazy too.
+
+The first browser hit can still spend time fetching the exact PHP files needed
+to boot WordPress. With `WPCOW_SPLASH=1` (the Docker default), `wp-cow` returns a
+temporary local splash page immediately and starts the real request in the
+browser. The splash polls `/__wp-cow/progress`, which is backed by the local file
+cache progress file, then swaps in the warmed WordPress response. PHP is started
+with multiple CLI server workers (`WPCOW_PHP_WORKERS`, default `4`) so progress
+polling can continue while the warm request is running.
 
 The lab also starts a persistent SSH tunnel for remote database reads when the
 remote `DB_HOST` is TCP-reachable from the SSH host. This avoids one SSH/PHP
@@ -144,7 +152,13 @@ The lab uses bounded request timeouts so a bad remote DB query, unreachable SSH
 host, or slow remote file read should fail visibly instead of leaving the
 browser spinning forever. Adjust the defaults with
 `WPCOW_CONTROL_REQUEST_TIMEOUT_SECS`, `WPCOW_REMOTE_COMMAND_TIMEOUT_SECS`,
-`WPCOW_REMOTE_DB_QUERY_TIMEOUT_SECS`, and `WPCOW_PHP_MAX_EXECUTION_SECS`.
+`WPCOW_REMOTE_DB_QUERY_TIMEOUT_SECS`, `WPCOW_PHP_MAX_EXECUTION_SECS`, and
+`WPCOW_PHP_SOCKET_TIMEOUT_SECS`.
+
+If WordPress tries to show the installation wizard, the router treats that as a
+wp-cow DB/runtime failure. The clone should either show the real remote-backed
+site or a diagnostic error; the installer is not considered a successful local
+copy.
 
 Open this on the Mac:
 

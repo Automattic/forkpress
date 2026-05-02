@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::ClonePaths;
 use crate::remote::{RemoteClient, RemoteEntry};
@@ -17,6 +18,18 @@ struct WhiteoutFile {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct MetadataFile {
     entries: BTreeMap<String, RemoteEntry>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct CacheProgress {
+    phase: String,
+    active_path: String,
+    active_bytes: u64,
+    active_total: u64,
+    files_cached: u64,
+    bytes_cached: u64,
+    last_cached_path: String,
+    updated_at_unix_ms: u128,
 }
 
 #[derive(Debug, Clone)]
@@ -184,6 +197,8 @@ impl OverlayStore {
             let mut out = File::create(&tmp)?;
             let mut cursor = 0_u64;
             let chunk = 1024 * 1024;
+            let rel_string = Self::rel_string(rel);
+            let _ = self.write_cache_progress(&rel_string, "fetching", 0, entry.size);
             while cursor < entry.size {
                 let wanted = chunk.min((entry.size - cursor) as usize);
                 let bytes = remote.read_range(rel, cursor, wanted)?;
@@ -192,12 +207,20 @@ impl OverlayStore {
                 }
                 out.write_all(&bytes)?;
                 cursor += bytes.len() as u64;
+                let _ = self.write_cache_progress(&rel_string, "fetching", cursor, entry.size);
             }
             fs::rename(tmp, &cache_path)?;
             self.put_cached_entry(rel, &entry)?;
+            let _ = self.finish_cache_progress(&rel_string, entry.size);
             return read_range_from_file(&cache_path, offset as u64, size as usize);
         }
 
+        let _ = self.write_cache_progress(
+            &Self::rel_string(rel),
+            "streaming",
+            offset as u64,
+            offset as u64 + size as u64,
+        );
         remote
             .read_range(rel, offset as u64, size as usize)
             .with_context(|| format!("remote read {}", Self::rel_string(rel)))
@@ -263,6 +286,10 @@ impl OverlayStore {
         self.file_cache.join("metadata.json")
     }
 
+    fn progress_path(&self) -> PathBuf {
+        self.file_cache.join("progress.json")
+    }
+
     fn load_metadata(&self) -> Result<MetadataFile> {
         let path = self.metadata_path();
         if !path.exists() {
@@ -288,6 +315,80 @@ impl OverlayStore {
         fs::rename(tmp, self.metadata_path())?;
         Ok(())
     }
+
+    fn load_progress(&self) -> Result<CacheProgress> {
+        let path = self.progress_path();
+        if !path.exists() {
+            return Ok(CacheProgress {
+                phase: "idle".to_string(),
+                updated_at_unix_ms: now_unix_ms(),
+                ..CacheProgress::default()
+            });
+        }
+        let mut json = String::new();
+        File::open(path)?.read_to_string(&mut json)?;
+        Ok(serde_json::from_str(&json)?)
+    }
+
+    fn write_progress(&self, progress: &CacheProgress) -> Result<()> {
+        fs::create_dir_all(&self.file_cache)?;
+        let json = serde_json::to_vec_pretty(progress)?;
+        let tmp = self.progress_tmp_path();
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&tmp)?;
+        file.write_all(&json)?;
+        file.write_all(b"\n")?;
+        drop(file);
+        fs::rename(tmp, self.progress_path())?;
+        Ok(())
+    }
+
+    fn progress_tmp_path(&self) -> PathBuf {
+        self.file_cache.join(format!(
+            "progress.json.tmp.{}.{}",
+            std::process::id(),
+            now_unix_ms()
+        ))
+    }
+
+    fn write_cache_progress(
+        &self,
+        rel: &str,
+        phase: &str,
+        active_bytes: u64,
+        active_total: u64,
+    ) -> Result<()> {
+        let mut progress = self.load_progress()?;
+        progress.phase = phase.to_string();
+        progress.active_path = rel.to_string();
+        progress.active_bytes = active_bytes;
+        progress.active_total = active_total;
+        progress.updated_at_unix_ms = now_unix_ms();
+        self.write_progress(&progress)
+    }
+
+    fn finish_cache_progress(&self, rel: &str, size: u64) -> Result<()> {
+        let mut progress = self.load_progress()?;
+        progress.phase = "cached".to_string();
+        progress.active_path.clear();
+        progress.active_bytes = 0;
+        progress.active_total = 0;
+        progress.files_cached = progress.files_cached.saturating_add(1);
+        progress.bytes_cached = progress.bytes_cached.saturating_add(size);
+        progress.last_cached_path = rel.to_string();
+        progress.updated_at_unix_ms = now_unix_ms();
+        self.write_progress(&progress)
+    }
+}
+
+fn now_unix_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
 }
 
 fn read_range_from_file(path: &Path, offset: u64, size: usize) -> Result<Vec<u8>> {

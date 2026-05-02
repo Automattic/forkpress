@@ -12,7 +12,7 @@ pub fn write_wordpress_overrides(paths: &ClonePaths, manifest: &Manifest) -> Res
         paths.upper.join("wp-content/mu-plugins/wp-cow-safety.php"),
         safety_mu_plugin_php(),
     )?;
-    fs::write(paths.generated.join("router.php"), router_php())?;
+    fs::write(paths.generated.join("router.php"), router_php(paths))?;
     Ok(())
 }
 
@@ -45,6 +45,16 @@ define( 'DISABLE_WP_CRON', true );
 
 if ( ! defined( 'ABSPATH' ) ) {{
 	define( 'ABSPATH', __DIR__ . '/' );
+}}
+
+$wp_cow_db_dropin = ABSPATH . 'wp-content/db.php';
+if ( ! is_readable( $wp_cow_db_dropin ) ) {{
+	http_response_code( 500 );
+	header( 'Content-Type: text/plain; charset=utf-8' );
+	echo "wp-cow DB/runtime error\n\n";
+	echo "The generated wp-content/db.php drop-in is missing or unreadable. ";
+	echo "Refusing to boot against the empty local schema because that can look like a fresh WordPress install.\n";
+	exit( 1 );
 }}
 
 require_once ABSPATH . 'wp-settings.php';
@@ -117,6 +127,21 @@ function cow_control_timeout_secs() {
 	return $timeout;
 }
 
+function cow_db_runtime_fail( $message ) {
+	$message = (string) $message;
+	if ( ! headers_sent() ) {
+		http_response_code( 500 );
+		header( 'Content-Type: text/html; charset=utf-8' );
+	}
+	echo '<!doctype html><html><head><meta charset="utf-8"><title>wp-cow DB/runtime error</title>';
+	echo '<style>body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:48px;line-height:1.5;color:#1d2327}main{max-width:760px}pre{white-space:pre-wrap;background:#f6f7f7;border:1px solid #dcdcde;padding:16px}</style>';
+	echo '</head><body><main><h1>wp-cow DB/runtime error</h1>';
+	echo '<p>The remote database lower layer is unavailable, so this clone will not fall back to the empty local schema or show the WordPress installer as success.</p>';
+	echo '<pre>' . htmlspecialchars( $message, ENT_QUOTES, 'UTF-8' ) . '</pre>';
+	echo '</main></body></html>';
+	exit( 1 );
+}
+
 function cow_control_request( $path, $payload ) {
 	$payload['clone'] = WPCOW_CLONE;
 	$url = rtrim( WPCOW_CONTROL_URL, '/' ) . $path;
@@ -179,7 +204,7 @@ class Cow_DB extends wpdb {
 			$result = cow_control_request( '/materialize', array( 'tables' => $tables ) );
 			if ( empty( $result['ok'] ) ) {
 				$this->last_error = isset( $result['error'] ) ? $result['error'] : 'wp-cow materialization failed';
-				return false;
+				cow_db_runtime_fail( 'control /materialize failed: ' . $this->last_error . "\n\nSQL:\n" . $query );
 			}
 			return parent::query( $query );
 		}
@@ -192,6 +217,8 @@ class Cow_DB extends wpdb {
 			if ( ! empty( $route['ok'] ) && isset( $route['backend'] ) && 'local' === $route['backend'] ) {
 				return parent::query( $query );
 			}
+			$this->last_error = isset( $route['error'] ) ? $route['error'] : 'wp-cow route decision failed';
+			cow_db_runtime_fail( 'control /route failed: ' . $this->last_error . "\n\nSQL:\n" . $query );
 		}
 
 		return parent::query( $query );
@@ -203,7 +230,7 @@ class Cow_DB extends wpdb {
 			$result = $remote->query( $query, MYSQLI_STORE_RESULT );
 			if ( false === $result ) {
 				$this->last_error = $remote->error;
-				return false;
+				cow_db_runtime_fail( 'remote mysqli query failed: ' . $this->last_error . "\n\nSQL:\n" . $query );
 			}
 
 			$this->last_result = array();
@@ -234,7 +261,7 @@ class Cow_DB extends wpdb {
 		$result = cow_control_request( '/query', array( 'sql' => $query ) );
 		if ( empty( $result['ok'] ) ) {
 			$this->last_error = isset( $result['error'] ) ? $result['error'] : 'wp-cow remote query failed';
-			return false;
+			cow_db_runtime_fail( 'control /query failed: ' . $this->last_error . "\n\nSQL:\n" . $query );
 		}
 
 		$this->last_result = array();
@@ -342,17 +369,230 @@ add_filter( 'pre_http_request', static function ( $preempt, $args, $url ) {
 "#
 }
 
-pub fn router_php() -> &'static str {
+pub fn router_php(paths: &ClonePaths) -> String {
     r#"<?php
+$wp_cow_progress_file = __WPCOW_PROGRESS_FILE__;
+$wp_cow_ready_file = __WPCOW_READY_FILE__;
+
+if ( '/__wp-cow/progress' === parse_url( $_SERVER['REQUEST_URI'], PHP_URL_PATH ) ) {
+	header( 'Content-Type: application/json' );
+	header( 'Cache-Control: no-store' );
+	$progress = array(
+		'phase' => 'idle',
+		'active_path' => '',
+		'active_bytes' => 0,
+		'active_total' => 0,
+		'files_cached' => 0,
+		'bytes_cached' => 0,
+		'last_cached_path' => '',
+		'updated_at_unix_ms' => 0,
+	);
+	if ( is_file( $wp_cow_progress_file ) ) {
+		$decoded = json_decode( file_get_contents( $wp_cow_progress_file ), true );
+		if ( is_array( $decoded ) ) {
+			$progress = array_merge( $progress, $decoded );
+		}
+	}
+	$progress['ready'] = is_file( $wp_cow_ready_file );
+	echo json_encode( $progress );
+	return true;
+}
+
 $path = parse_url( $_SERVER['REQUEST_URI'], PHP_URL_PATH );
 $file = rtrim( $_SERVER['DOCUMENT_ROOT'], '/' ) . $path;
+
+function wp_cow_looks_like_installer( $html ) {
+	$html = (string) $html;
+	return (
+		false !== stripos( $html, 'wp-admin/install.php' ) ||
+		false !== stripos( $html, 'wp-admin/setup-config.php' ) ||
+		false !== stripos( $html, 'WordPress &rsaquo; Installation' ) ||
+		false !== stripos( $html, 'Welcome to the famous five-minute WordPress installation' )
+	);
+}
+
+function wp_cow_runtime_error_page( $title, $message, $details = '' ) {
+	if ( ! headers_sent() ) {
+		http_response_code( 500 );
+		header( 'Content-Type: text/html; charset=utf-8' );
+		header( 'Cache-Control: no-store' );
+	}
+	echo '<!doctype html><html><head><meta charset="utf-8"><title>' . htmlspecialchars( $title, ENT_QUOTES, 'UTF-8' ) . '</title>';
+	echo '<style>body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:48px;line-height:1.5;color:#1d2327}main{max-width:760px}pre{white-space:pre-wrap;background:#f6f7f7;border:1px solid #dcdcde;padding:16px}</style>';
+	echo '</head><body><main><h1>' . htmlspecialchars( $title, ENT_QUOTES, 'UTF-8' ) . '</h1>';
+	echo '<p>' . htmlspecialchars( $message, ENT_QUOTES, 'UTF-8' ) . '</p>';
+	if ( '' !== $details ) {
+		echo '<pre>' . htmlspecialchars( $details, ENT_QUOTES, 'UTF-8' ) . '</pre>';
+	}
+	echo '</main></body></html>';
+}
+
+function wp_cow_render_wordpress( $ready_file ) {
+	ob_start();
+	require rtrim( $_SERVER['DOCUMENT_ROOT'], '/' ) . '/index.php';
+	$html = ob_get_clean();
+
+	if ( wp_cow_looks_like_installer( $html ) ) {
+		wp_cow_runtime_error_page(
+			'wp-cow did not load the remote site',
+			'WordPress tried to show the installation wizard. This clone refuses to treat an empty or unavailable database lower layer as a successful site load.',
+			'Check the remote database probe, SSH connectivity, and wp-content/db.php drop-in before retrying.'
+		);
+		return true;
+	}
+
+	if ( ! is_dir( dirname( $ready_file ) ) ) {
+		mkdir( dirname( $ready_file ), 0777, true );
+	}
+	file_put_contents( $ready_file, json_encode( array( 'ready_at' => time() ) ) );
+	echo $html;
+	return true;
+}
+
+if ( in_array( $path, array( '/wp-admin/install.php', '/wp-admin/setup-config.php' ), true ) ) {
+	wp_cow_runtime_error_page(
+		'wp-cow did not load the remote site',
+		'WordPress tried to show an installation/setup path. This clone refuses to treat an empty or unavailable database lower layer as a successful site load.',
+		'Check the remote database probe, SSH connectivity, and wp-content/db.php drop-in before retrying.'
+	);
+	return true;
+}
 
 if ( '/' !== $path && is_file( $file ) ) {
 	return false;
 }
 
-require rtrim( $_SERVER['DOCUMENT_ROOT'], '/' ) . '/index.php';
+$should_show_splash = (
+	'0' !== getenv( 'WPCOW_SPLASH' ) &&
+	! isset( $_GET['__wp_cow_bypass_splash'] ) &&
+	! is_file( $wp_cow_ready_file ) &&
+	in_array( $_SERVER['REQUEST_METHOD'], array( 'GET', 'HEAD' ), true ) &&
+	( '/' === $path || false === strpos( basename( $path ), '.' ) )
+);
+
+if ( $should_show_splash ) {
+	header( 'Content-Type: text/html; charset=utf-8' );
+	header( 'Cache-Control: no-store' );
+	echo <<<'HTML'
+<!doctype html>
+<html>
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>wp-cow is warming this page</title>
+	<style>
+		body { margin: 0; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f6f7f7; color: #1d2327; }
+		main { max-width: 680px; margin: 12vh auto; padding: 0 24px; }
+		h1 { font-size: 24px; margin: 0 0 12px; font-weight: 600; }
+		p { color: #50575e; line-height: 1.5; }
+		.progress { height: 12px; background: #dcdcde; border-radius: 999px; overflow: hidden; margin: 24px 0 12px; }
+		.bar { width: 8%; height: 100%; background: #2271b1; transition: width 160ms linear; }
+		.meta { font-size: 13px; color: #50575e; white-space: pre-wrap; }
+		.error { color: #b32d2e; }
+	</style>
+</head>
+<body>
+<main>
+	<h1>Preparing local WordPress</h1>
+	<p>Fetching only the remote files this request needs. Cached files will be reused on later requests.</p>
+	<div class="progress"><div id="bar" class="bar"></div></div>
+	<div id="meta" class="meta">Starting...</div>
+</main>
+<script>
+(function () {
+	const bar = document.getElementById('bar');
+	const meta = document.getElementById('meta');
+	const target = new URL(window.location.href);
+	target.searchParams.set('__wp_cow_bypass_splash', '1');
+	let warmDone = false;
+	let lastWidth = 8;
+
+	function fmtBytes(bytes) {
+		if (!bytes) return '0 B';
+		const units = ['B', 'KB', 'MB', 'GB'];
+		let value = Number(bytes);
+		let unit = 0;
+		while (value >= 1024 && unit < units.length - 1) {
+			value /= 1024;
+			unit++;
+		}
+		return value.toFixed(unit ? 1 : 0) + ' ' + units[unit];
+	}
+
+	function render(progress) {
+		let width = lastWidth;
+		if (progress.active_total > 0) {
+			width = Math.max(8, Math.min(95, Math.round((progress.active_bytes / progress.active_total) * 100)));
+		} else if (!warmDone) {
+			width = Math.min(92, lastWidth + 3);
+		}
+		lastWidth = width;
+		bar.style.width = (warmDone ? 100 : width) + '%';
+		meta.textContent = [
+			'Phase: ' + (progress.phase || 'idle'),
+			progress.active_path ? 'Remote file: ' + progress.active_path : '',
+			progress.active_total ? 'Current file: ' + fmtBytes(progress.active_bytes) + ' / ' + fmtBytes(progress.active_total) : '',
+			'Files cached this run: ' + (progress.files_cached || 0),
+			'Bytes cached this run: ' + fmtBytes(progress.bytes_cached || 0),
+			progress.last_cached_path ? 'Last cached: ' + progress.last_cached_path : ''
+		].filter(Boolean).join('\n');
+	}
+
+	async function poll() {
+		while (!warmDone) {
+			try {
+				const response = await fetch('/__wp-cow/progress', { cache: 'no-store' });
+				if (response.ok) render(await response.json());
+			} catch (error) {}
+			await new Promise(resolve => setTimeout(resolve, 500));
+		}
+	}
+
+	async function warm() {
+		try {
+			const response = await fetch(target.toString(), { cache: 'no-store' });
+			const html = await response.text();
+			warmDone = true;
+			bar.style.width = '100%';
+			if (!response.ok) {
+				meta.className = 'meta error';
+				meta.textContent = html || ('Request failed with HTTP ' + response.status);
+				return;
+			}
+			document.open();
+			document.write(html);
+			document.close();
+		} catch (error) {
+			warmDone = true;
+			meta.className = 'meta error';
+			meta.textContent = String(error);
+		}
+	}
+
+	poll();
+	warm();
+})();
+</script>
+</body>
+</html>
+HTML;
+	return true;
+}
+
+if ( isset( $_GET['__wp_cow_bypass_splash'] ) ) {
+	return wp_cow_render_wordpress( $wp_cow_ready_file );
+}
+
+return wp_cow_render_wordpress( $wp_cow_ready_file );
 "#
+    .replace(
+        "__WPCOW_PROGRESS_FILE__",
+        &php_string(&paths.file_cache.join("progress.json").to_string_lossy()),
+    )
+    .replace(
+        "__WPCOW_READY_FILE__",
+        &php_string(&paths.run.join("first-request-ready.json").to_string_lossy()),
+    )
 }
 
 fn php_string(value: &str) -> String {
@@ -371,7 +611,12 @@ pub fn generated_file_paths(root: &Path) -> Vec<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{LocalDb, Manifest, Probe, RemoteDbTunnel, MANIFEST_VERSION};
+    use crate::config::{clone_paths, LocalDb, Manifest, Probe, RemoteDbTunnel, MANIFEST_VERSION};
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::process::Command;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     fn manifest() -> Manifest {
         Manifest {
@@ -414,6 +659,8 @@ mod tests {
         assert!(php.contains("$table_prefix = 'wp_';"));
         assert!(php.contains("WPCOW_CONTROL_URL"));
         assert!(php.contains("WPCOW_REMOTE_DB_HOST"));
+        assert!(php.contains("wp-cow DB/runtime error"));
+        assert!(php.contains("wp-content/db.php"));
     }
 
     #[test]
@@ -422,6 +669,8 @@ mod tests {
         assert!(php.contains("cow_is_write_sql"));
         assert!(php.contains("/materialize"));
         assert!(php.contains("cow_remote_mysqli"));
+        assert!(php.contains("cow_db_runtime_fail"));
+        assert!(php.contains("will not fall back to the empty local schema"));
     }
 
     #[test]
@@ -430,5 +679,208 @@ mod tests {
         assert!(php.contains("pre_wp_mail"));
         assert!(php.contains("X-Robots-Tag"));
         assert!(php.contains("pre_http_request"));
+    }
+
+    #[test]
+    fn router_exposes_splash_and_progress_endpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = clone_paths(temp.path(), "example");
+        let php = router_php(&paths);
+        assert!(php.contains("/__wp-cow/progress"));
+        assert!(php.contains("__wp_cow_bypass_splash"));
+        assert!(php.contains("wp_cow_looks_like_installer"));
+        assert!(php.contains("WordPress tried to show the installation wizard"));
+        assert!(php.contains("Cache-Control: no-store"));
+        assert!(!php.contains("__WPCOW_PROGRESS_FILE__"));
+        assert!(!php.contains("__WPCOW_READY_FILE__"));
+    }
+
+    #[test]
+    fn generated_php_lints() {
+        if Command::new("php").arg("-v").output().is_err() {
+            eprintln!("skipping generated PHP lint because php is not on PATH");
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let paths = clone_paths(temp.path(), "example");
+        let files = [
+            ("wp-config.php", wp_config_php(&manifest())),
+            ("db.php", db_dropin_php().to_string()),
+            ("wp-cow-safety.php", safety_mu_plugin_php().to_string()),
+            ("router.php", router_php(&paths)),
+        ];
+
+        for (name, php) in files {
+            let path = temp.path().join(name);
+            std::fs::write(&path, php).unwrap();
+            let output = Command::new("php")
+                .arg("-l")
+                .arg(&path)
+                .output()
+                .unwrap_or_else(|err| panic!("run php -l for {name}: {err}"));
+            assert!(
+                output.status.success(),
+                "php -l failed for {name}: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[test]
+    fn router_splash_and_progress_smoke_responds_quickly() {
+        if Command::new("php").arg("-v").output().is_err() {
+            eprintln!("skipping router smoke test because php is not on PATH");
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let paths = clone_paths(temp.path(), "example");
+        fs::create_dir_all(&paths.generated).unwrap();
+        fs::create_dir_all(&paths.file_cache).unwrap();
+        fs::create_dir_all(&paths.run).unwrap();
+
+        let docroot = temp.path().join("docroot");
+        fs::create_dir_all(&docroot).unwrap();
+        let router = paths.generated.join("router.php");
+        fs::write(&router, router_php(&paths)).unwrap();
+
+        let port = free_tcp_port();
+        let mut child = Command::new("php")
+            .env("WPCOW_SPLASH", "1")
+            .env("PHP_CLI_SERVER_WORKERS", "4")
+            .arg("-S")
+            .arg(format!("127.0.0.1:{port}"))
+            .arg("-t")
+            .arg(&docroot)
+            .arg(&router)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap_or_else(|err| panic!("start php server: {err}"));
+
+        let started = Instant::now();
+        let progress = loop {
+            if started.elapsed() > Duration::from_secs(5) {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("php router did not start within 5s");
+            }
+            if let Some(status) = child
+                .try_wait()
+                .unwrap_or_else(|err| panic!("poll php server: {err}"))
+            {
+                panic!("php router exited early with status {status}");
+            }
+            match http_get(port, "/__wp-cow/progress", Duration::from_secs(1)) {
+                Ok(response) if response.contains("\"phase\":\"idle\"") => break response,
+                Err(_) => thread::sleep(Duration::from_millis(50)),
+                Ok(_) => thread::sleep(Duration::from_millis(50)),
+            }
+        };
+        assert!(
+            progress.contains("\"phase\":\"idle\""),
+            "unexpected progress response: {}",
+            progress
+        );
+        assert!(
+            progress.contains("\"ready\":false"),
+            "unexpected progress response: {}",
+            progress
+        );
+
+        let request_started = Instant::now();
+        let splash = http_get_nonempty(port, "/wp-cow-smoke", Duration::from_secs(2));
+        assert!(
+            request_started.elapsed() < Duration::from_secs(2),
+            "splash took {:?}",
+            request_started.elapsed()
+        );
+        assert!(
+            splash.contains("Preparing local WordPress"),
+            "unexpected splash response: {}",
+            splash
+        );
+        assert!(
+            splash.contains("__wp_cow_bypass_splash"),
+            "unexpected splash response: {}",
+            splash
+        );
+
+        fs::write(
+            docroot.join("index.php"),
+            "<?php echo '<!doctype html><title>WordPress &rsaquo; Installation</title><a href=\"wp-admin/install.php\">install</a>';",
+        )
+        .unwrap();
+        let installer = http_get_nonempty(
+            port,
+            "/wp-cow-smoke?__wp_cow_bypass_splash=1",
+            Duration::from_secs(2),
+        );
+        assert!(
+            installer.starts_with("HTTP/1.1 500"),
+            "unexpected installer response: {}",
+            installer
+        );
+        assert!(
+            installer.contains("wp-cow did not load the remote site"),
+            "unexpected installer response: {}",
+            installer
+        );
+        fs::create_dir_all(docroot.join("wp-admin")).unwrap();
+        fs::write(
+            docroot.join("wp-admin/install.php"),
+            "<?php echo 'installer-direct';",
+        )
+        .unwrap();
+        let direct_installer =
+            http_get_nonempty(port, "/wp-admin/install.php", Duration::from_secs(2));
+        assert!(
+            direct_installer.starts_with("HTTP/1.1 500"),
+            "unexpected direct installer response: {}",
+            direct_installer
+        );
+        assert!(
+            direct_installer.contains("wp-cow did not load the remote site"),
+            "unexpected direct installer response: {}",
+            direct_installer
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    fn free_tcp_port() -> u16 {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.local_addr().unwrap().port()
+    }
+
+    fn http_get(port: u16, path: &str, timeout: Duration) -> std::io::Result<String> {
+        let mut stream = TcpStream::connect(("127.0.0.1", port))?;
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
+        write!(
+            stream,
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+        )?;
+
+        let mut response = String::new();
+        stream.read_to_string(&mut response)?;
+        Ok(response)
+    }
+
+    fn http_get_nonempty(port: u16, path: &str, timeout: Duration) -> String {
+        let started = Instant::now();
+        loop {
+            match http_get(port, path, Duration::from_millis(500)) {
+                Ok(response) if !response.is_empty() => return response,
+                Ok(_) | Err(_) if started.elapsed() < timeout => {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Ok(response) => panic!("empty response from {path}: {response}"),
+                Err(err) => panic!("request {path} failed: {err}"),
+            }
+        }
     }
 }

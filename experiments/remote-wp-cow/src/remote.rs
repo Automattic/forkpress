@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
-use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -139,59 +138,6 @@ impl RemoteClient {
             return Err(io::Error::new(io::ErrorKind::NotFound, stderr.to_string()));
         }
         Err(io::Error::new(io::ErrorKind::Other, stderr.to_string()))
-    }
-
-    pub fn sync_runtime_files(&self, upper: &Path) -> Result<()> {
-        fs::create_dir_all(upper).with_context(|| format!("create {}", upper.display()))?;
-
-        let remote_command = format!(
-            r#"cd {} && (find . -mindepth 1 -maxdepth 1 \( -type f -o -type l \) -print; find wp-content -mindepth 1 -maxdepth 1 \( -type f -o -type l \) -print 2>/dev/null; for p in wp-admin wp-includes wp-content/plugins wp-content/themes wp-content/mu-plugins wp-content/languages; do if [ -e "$p" ]; then printf '%s\n' "$p"; fi; done) | tar -cf - -T -"#,
-            shell_quote(&self.manifest.remote_path)
-        );
-
-        let mut ssh = self
-            .ssh_command(&remote_command, runtime_sync_timeout_secs())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .context("start remote runtime tar over ssh")?;
-
-        let mut tar = Command::new("tar")
-            .arg("--no-same-owner")
-            .arg("-C")
-            .arg(upper)
-            .arg("-xf")
-            .arg("-")
-            .stdin(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .context("start local runtime tar extraction")?;
-
-        let copy_result = {
-            let mut ssh_stdout = ssh.stdout.take().expect("ssh stdout piped");
-            let mut tar_stdin = tar.stdin.take().expect("tar stdin piped");
-            io::copy(&mut ssh_stdout, &mut tar_stdin).context("copy runtime tar stream")
-        };
-
-        let ssh_status = ssh.wait().context("wait for remote runtime tar")?;
-        let tar_status = tar.wait().context("wait for local runtime tar")?;
-
-        copy_result?;
-
-        if !ssh_status.success() {
-            return Err(anyhow!(
-                "remote runtime tar failed with status {}",
-                ssh_status
-            ));
-        }
-        if !tar_status.success() {
-            return Err(anyhow!(
-                "local runtime tar extraction failed with status {}",
-                tar_status
-            ));
-        }
-
-        Ok(())
     }
 
     pub fn start_db_tunnel(&self) -> Result<Option<Child>> {
@@ -499,10 +445,6 @@ pub fn shell_quote(value: impl AsRef<OsStr>) -> String {
 
 fn remote_command_timeout_secs() -> u64 {
     env_u64("WPCOW_REMOTE_COMMAND_TIMEOUT_SECS", 20)
-}
-
-fn runtime_sync_timeout_secs() -> u64 {
-    env_u64("WPCOW_RUNTIME_SYNC_TIMEOUT_SECS", 180)
 }
 
 fn remote_db_query_timeout_secs() -> u64 {

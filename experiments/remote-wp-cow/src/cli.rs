@@ -87,7 +87,7 @@ struct ServeArgs {
     http: String,
     #[arg(long)]
     no_php: bool,
-    #[arg(long)]
+    #[arg(long, hide = true)]
     no_runtime_sync: bool,
 }
 
@@ -308,29 +308,24 @@ fn serve_site(args: ServeArgs) -> Result<()> {
         metadata_started.elapsed().as_secs_f64()
     );
 
-    if should_sync_runtime(&paths, args.no_runtime_sync) {
-        let phase_started = Instant::now();
-        let remote = RemoteClient::new(manifest.clone(), Some(paths.run.join("ssh-control.sock")));
-        remote.ensure_master()?;
+    if args.no_runtime_sync {
         println!(
-            "syncing WordPress runtime files for '{}' (uploads stay lazy)",
-            manifest.name
-        );
-        remote
-            .sync_runtime_files(&paths.upper)
-            .context("sync WordPress runtime files")?;
-        fs::write(paths.generated.join("runtime-files.synced"), b"ok\n")?;
-        println!(
-            "synced WordPress runtime files for '{}' in {:.2}s",
-            manifest.name,
-            phase_started.elapsed().as_secs_f64()
-        );
-    } else {
-        println!(
-            "runtime sync skipped for '{}'; requested files will be cached on demand",
+            "--no-runtime-sync is now the fixed serve behavior for '{}'",
             manifest.name
         );
     }
+    if std::env::var_os("WPCOW_RUNTIME_SYNC").is_some()
+        || std::env::var_os("WPCOW_RUNTIME_SYNC_FORCE").is_some()
+    {
+        println!(
+            "ignoring runtime sync environment for '{}'; requested files will be fetched on demand",
+            manifest.name
+        );
+    }
+    println!(
+        "runtime/plugin/theme/upload trees stay lazy for '{}'; requested files will be cached on demand",
+        manifest.name
+    );
 
     generate::write_wordpress_overrides(&paths, &manifest)?;
 
@@ -380,25 +375,6 @@ fn serve_site(args: ServeArgs) -> Result<()> {
         skip_php: args.no_php,
     };
     run::run_site(manifest, paths, options)
-}
-
-fn should_sync_runtime(paths: &crate::config::ClonePaths, no_runtime_sync: bool) -> bool {
-    if no_runtime_sync || env_bool("WPCOW_RUNTIME_SYNC", false) == Some(false) {
-        return false;
-    }
-    if env_bool("WPCOW_RUNTIME_SYNC_FORCE", false) == Some(true) {
-        return true;
-    }
-    !paths.generated.join("runtime-files.synced").is_file()
-}
-
-fn env_bool(name: &str, default: bool) -> Option<bool> {
-    let raw = std::env::var(name).ok()?;
-    match raw.to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => Some(default),
-    }
 }
 
 fn init_db(args: NameArgs) -> Result<()> {
