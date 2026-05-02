@@ -123,9 +123,17 @@ wp-cow-lab-serve
 ```
 
 That is the normal path. It creates or reuses the lazy clone, exports schema
-only if needed, initializes an empty local MariaDB database if needed, mounts
-the lazy filesystem, starts the DB control layer, and starts PHP. It does not
-download media or table rows up front.
+only if needed, initializes an empty local MariaDB database if needed,
+pre-materializes the WordPress runtime files, mounts the lazy filesystem, starts
+the DB control layer, and starts PHP. Runtime file sync copies the root PHP
+files, `wp-admin`, `wp-includes`, plugin/theme/mu-plugin/language code, and
+top-level `wp-content` drop-ins. It does not copy `wp-content/uploads` or other
+large content data directories, and it does not download table rows up front.
+
+Runtime file sync is enabled by default because real WordPress boot performs too
+many PHP file reads and stats for pure per-file SSH/FUSE reads to feel usable.
+Set `WPCOW_RUNTIME_SYNC_FORCE=1` to refresh the local runtime copy or
+`WPCOW_RUNTIME_SYNC=0` to return to fully lazy filesystem reads.
 
 The lab uses bounded request timeouts so a bad remote DB query, unreachable SSH
 host, or slow remote file read should fail visibly instead of leaving the
