@@ -24,6 +24,8 @@ pub struct Cli {
 enum Command {
     #[command(name = "clone")]
     Clone(CloneArgs),
+    #[command(name = "serve")]
+    Serve(ServeArgs),
     #[command(name = "init-db")]
     InitDb(NameArgs),
     #[command(name = "export-schema")]
@@ -58,6 +60,32 @@ struct CloneArgs {
     no_probe: bool,
     #[arg(long)]
     skip_schema: bool,
+}
+
+#[derive(Debug, Args)]
+struct ServeArgs {
+    #[arg(long = "ssh")]
+    ssh: String,
+    #[arg(long = "path")]
+    path: String,
+    #[arg(long = "remote-url")]
+    remote_url: String,
+    #[arg(long = "local-url")]
+    local_url: String,
+    #[arg(long)]
+    name: Option<String>,
+    #[arg(long)]
+    state_dir: Option<PathBuf>,
+    #[arg(long)]
+    force: bool,
+    #[arg(long)]
+    no_probe: bool,
+    #[arg(long)]
+    mountpoint: Option<PathBuf>,
+    #[arg(long, default_value = "127.0.0.1:8080")]
+    http: String,
+    #[arg(long)]
+    no_php: bool,
 }
 
 #[derive(Debug, Args)]
@@ -110,6 +138,7 @@ pub fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Clone(args) => clone_site(args),
+        Command::Serve(args) => serve_site(args),
         Command::InitDb(args) => init_db(args),
         Command::ExportSchema(args) => export_schema(args),
         Command::Materialize(args) => materialize(args),
@@ -181,6 +210,129 @@ fn clone_site(args: CloneArgs) -> Result<()> {
         paths.root.display()
     );
     Ok(())
+}
+
+fn serve_site(args: ServeArgs) -> Result<()> {
+    let state_dir = args.state_dir.clone().unwrap_or(default_state_dir()?);
+    let name = args
+        .name
+        .clone()
+        .unwrap_or_else(|| derive_name(&args.remote_url, &args.local_url));
+    let paths = clone_paths(&state_dir, &name);
+
+    let manifest = if !paths.root.exists() || args.force {
+        if paths.root.exists() {
+            fs::remove_dir_all(&paths.root)?;
+        }
+        ensure_clone_dirs(&paths)?;
+
+        let probe = if args.no_probe {
+            Probe {
+                abspath: args.path.clone(),
+                wp_content_dir: format!("{}/wp-content", args.path.trim_end_matches('/')),
+                uploads_dir: format!("{}/wp-content/uploads", args.path.trim_end_matches('/')),
+                table_prefix: "wp_".to_string(),
+                siteurl: args.remote_url.clone(),
+                home: args.remote_url.clone(),
+                ..Probe::default()
+            }
+        } else {
+            probe_wordpress(&args.ssh, &args.path)?
+        };
+
+        let manifest = Manifest::new(
+            name,
+            args.ssh.clone(),
+            args.path.clone(),
+            args.remote_url.clone(),
+            args.local_url.clone(),
+            probe,
+        );
+
+        write_manifest(&paths.manifest, &manifest)?;
+        generate::write_wordpress_overrides(&paths, &manifest)?;
+        db::write_state(&paths, &db::DbState::default())?;
+        println!("created lazy clone '{}'", manifest.name);
+        manifest
+    } else {
+        let mut manifest = load_manifest(&paths.manifest)?;
+        let mut changed = false;
+        let mut should_probe = false;
+
+        if manifest.ssh != args.ssh {
+            manifest.ssh = args.ssh.clone();
+            changed = true;
+            should_probe = true;
+        }
+        if manifest.remote_path != args.path {
+            manifest.remote_path = args.path.clone();
+            changed = true;
+            should_probe = true;
+        }
+        if manifest.remote_url != args.remote_url {
+            manifest.remote_url = args.remote_url.clone();
+            changed = true;
+        }
+        if manifest.local_url != args.local_url {
+            manifest.local_url = args.local_url.clone();
+            changed = true;
+        }
+
+        if !args.no_probe
+            && (should_probe
+                || manifest.probe.db_name.is_empty()
+                || manifest.probe.db_host.is_empty()
+                || manifest.probe.db_user.is_empty())
+        {
+            manifest.probe = probe_wordpress(&manifest.ssh, &manifest.remote_path)?;
+            changed = true;
+        }
+
+        if changed {
+            write_manifest(&paths.manifest, &manifest)?;
+            generate::write_wordpress_overrides(&paths, &manifest)?;
+            println!("updated lazy clone '{}'", manifest.name);
+        } else {
+            println!("using existing lazy clone '{}'", manifest.name);
+        }
+
+        manifest
+    };
+
+    if !paths.db.join("schema.sql").exists() {
+        if args.no_probe {
+            return Err(anyhow!(
+                "schema is missing and --no-probe prevents discovering remote DB settings"
+            ));
+        }
+        let remote = RemoteClient::new(manifest.clone(), Some(paths.run.join("ssh-control.sock")));
+        remote.ensure_master()?;
+        db::export_schema(&remote, &paths).context("export schema")?;
+        println!("exported schema only for '{}'", manifest.name);
+    }
+
+    if db::init_local_db_if_empty(&manifest, &paths)? {
+        println!(
+            "initialized empty local database '{}'",
+            manifest.local_db.name
+        );
+    } else {
+        println!("using existing local database '{}'", manifest.local_db.name);
+    }
+
+    println!(
+        "starting lazy COW server; files and database rows are fetched on demand, not copied up front"
+    );
+
+    let mountpoint = args
+        .mountpoint
+        .unwrap_or_else(|| PathBuf::from("/mnt/wp-cow").join(&manifest.name));
+    let options = RunOptions {
+        mountpoint,
+        http_addr: args.http,
+        skip_php: args.no_php,
+    };
+    run::run_site(manifest, paths, options)
 }
 
 fn init_db(args: NameArgs) -> Result<()> {

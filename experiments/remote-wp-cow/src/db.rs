@@ -88,6 +88,41 @@ pub fn init_local_db(manifest: &Manifest, paths: &ClonePaths) -> Result<()> {
     Ok(())
 }
 
+pub fn init_local_db_if_empty(manifest: &Manifest, paths: &ClonePaths) -> Result<bool> {
+    if local_schema_table_count(manifest)? > 0 {
+        return Ok(false);
+    }
+
+    init_local_db(manifest, paths)?;
+    Ok(true)
+}
+
+pub fn local_schema_table_count(manifest: &Manifest) -> Result<u64> {
+    let sql_text = format!(
+        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '{}';",
+        mysql_string_literal(&manifest.local_db.name)
+    );
+    let output = local_mysql_command(manifest)
+        .arg("--batch")
+        .arg("--skip-column-names")
+        .arg("--execute")
+        .arg(sql_text)
+        .output()
+        .context("query local mysql schema state")?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "local mysql schema state query failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .trim()
+        .parse::<u64>()
+        .with_context(|| format!("parse local table count from {}", stdout.trim()))
+}
+
 pub fn materialize_tables(
     remote: &RemoteClient,
     manifest: &Manifest,
@@ -223,6 +258,10 @@ fn run_mysql_exec(manifest: &Manifest, sql_text: &str) -> Result<()> {
         return Err(anyhow!("local mysql failed with status {}", status));
     }
     Ok(())
+}
+
+fn mysql_string_literal(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
 fn validate_table_name(table: &str) -> Result<()> {

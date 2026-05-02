@@ -56,8 +56,9 @@ docker compose down
 WPCOW_HTTP_PORT=9481 docker compose up -d --force-recreate
 ```
 
-Inside the container, keep `WPCOW_HTTP=0.0.0.0:8080` and set
-`WPCOW_LOCAL_URL=http://localhost:9481`.
+Inside the container, keep `WPCOW_HTTP=0.0.0.0:8080`. `wp-cow-lab-serve`
+derives `WPCOW_LOCAL_URL` from `WPCOW_HTTP_PORT` when the URL is not explicitly
+overridden.
 
 Inside the container, check the lab:
 
@@ -106,7 +107,7 @@ export WPCOW_NAME=example
 export WPCOW_SSH=mysite
 export WPCOW_PATH=/home/user/public_html
 export WPCOW_REMOTE_URL=https://example.com
-export WPCOW_LOCAL_URL=http://localhost:8080
+export WPCOW_LOCAL_URL=http://localhost:9481
 ```
 
 For example, this is accepted:
@@ -115,19 +116,21 @@ For example, this is accepted:
 export WPCOW_SSH='ssh -p18765 -i ~/.ssh/id_siteground user@example.com'
 ```
 
-For a full local WordPress runtime, clone schema, initialize local MariaDB, and
-run the local PHP server:
+For a full local WordPress runtime, use one command:
 
 ```bash
-export WPCOW_SKIP_SCHEMA=0
-wp-cow-lab-clone
-wp-cow-lab-run
+wp-cow-lab-serve
 ```
+
+That is the normal path. It creates or reuses the lazy clone, exports schema
+only if needed, initializes an empty local MariaDB database if needed, mounts
+the lazy filesystem, starts the DB control layer, and starts PHP. It does not
+download media or table rows up front.
 
 Open this on the Mac:
 
 ```text
-http://localhost:8080/
+http://localhost:9481/
 ```
 
 For a filesystem-only smoke test that does not touch the remote DB, skip schema
@@ -183,15 +186,19 @@ docker compose down -v
 ## Typical flow
 
 ```bash
-wp-cow clone \
+wp-cow serve \
+  --name example \
   --ssh user@example.com \
   --path /home/user/public_html \
   --remote-url https://example.com \
-  --local-url http://example.test
-
-wp-cow init-db example
-wp-cow run example --http 127.0.0.1:8080
+  --local-url http://example.test \
+  --mountpoint /mnt/wp-cow/example \
+  --http 127.0.0.1:8080
 ```
+
+`wp-cow serve` is the one-command runtime. It prepares only the metadata needed
+to boot WordPress locally and leaves file contents and database rows lazy until
+WordPress actually asks for them.
 
 The clone state is stored under `~/.wp-cow/clones/<name>/`:
 

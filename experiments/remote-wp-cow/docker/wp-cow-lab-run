@@ -4,11 +4,17 @@ set -euo pipefail
 name="${WPCOW_NAME:-example}"
 mountpoint="${WPCOW_MOUNTPOINT:-/mnt/wp-cow/$name}"
 http="${WPCOW_HTTP:-0.0.0.0:8080}"
+public_url="${WPCOW_LOCAL_URL:-http://localhost:${WPCOW_HTTP_PORT:-${http##*:}}}"
+if [ "$public_url" = "http://localhost:8080" ] && [ "${WPCOW_HTTP_PORT:-8080}" != "8080" ]; then
+  public_url="http://localhost:$WPCOW_HTTP_PORT"
+fi
+public_url="${public_url%/}"
 
 mkdir -p "$mountpoint"
 if [ ! -f "${WPCOW_HOME:-/root/.wp-cow}/clones/$name/db/schema.sql" ]; then
   echo "warning: ${WPCOW_HOME:-/root/.wp-cow}/clones/$name/db/schema.sql is missing" >&2
   echo "WordPress will likely show a database connection error. Run wp-cow-lab-db-init first." >&2
 fi
-echo "running $name at http://localhost:${http##*:}/ from $mountpoint"
+echo "running $name at $public_url/ from $mountpoint"
+echo "container PHP listener: $http"
 exec wp-cow run "$name" --mountpoint "$mountpoint" --http "$http"

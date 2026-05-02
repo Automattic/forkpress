@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+require_env() {
+  local name="$1"
+  if [ -z "${!name:-}" ]; then
+    echo "missing required environment variable: $name" >&2
+    exit 2
+  fi
+}
+
+require_env WPCOW_SSH
+require_env WPCOW_PATH
+require_env WPCOW_REMOTE_URL
+
+name="${WPCOW_NAME:-example}"
+mountpoint="${WPCOW_MOUNTPOINT:-/mnt/wp-cow/$name}"
+http="${WPCOW_HTTP:-0.0.0.0:8080}"
+local_url="${WPCOW_LOCAL_URL:-http://localhost:${WPCOW_HTTP_PORT:-8080}}"
+if [ "$local_url" = "http://localhost:8080" ] && [ "${WPCOW_HTTP_PORT:-8080}" != "8080" ]; then
+  local_url="http://localhost:$WPCOW_HTTP_PORT"
+fi
+ssh_target="$(wp-cow-lab-ssh-target)"
+
+mkdir -p "$mountpoint"
+
+exec wp-cow serve \
+  --name "$name" \
+  --ssh "$ssh_target" \
+  --path "$WPCOW_PATH" \
+  --remote-url "$WPCOW_REMOTE_URL" \
+  --local-url "$local_url" \
+  --mountpoint "$mountpoint" \
+  --http "$http"

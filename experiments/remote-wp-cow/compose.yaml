@@ -22,7 +22,7 @@ services:
       WPCOW_SSH: "${WPCOW_SSH:-}"
       WPCOW_PATH: "${WPCOW_PATH:-}"
       WPCOW_REMOTE_URL: "${WPCOW_REMOTE_URL:-}"
-      WPCOW_LOCAL_URL: "${WPCOW_LOCAL_URL:-http://localhost:8080}"
+      WPCOW_LOCAL_URL: "${WPCOW_LOCAL_URL-}"
       WPCOW_SKIP_SCHEMA: "${WPCOW_SKIP_SCHEMA:-0}"
       WPCOW_NO_PROBE: "${WPCOW_NO_PROBE:-0}"
       WPCOW_DNS1: "${WPCOW_DNS1:-1.1.1.1}"
