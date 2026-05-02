@@ -327,7 +327,7 @@ fn serve_site(args: ServeArgs) -> Result<()> {
         );
     } else {
         println!(
-            "using local WordPress runtime files for '{}'",
+            "runtime sync skipped for '{}'; requested files will be cached on demand",
             manifest.name
         );
     }
@@ -383,7 +383,7 @@ fn serve_site(args: ServeArgs) -> Result<()> {
 }
 
 fn should_sync_runtime(paths: &crate::config::ClonePaths, no_runtime_sync: bool) -> bool {
-    if no_runtime_sync || env_bool("WPCOW_RUNTIME_SYNC", true) == Some(false) {
+    if no_runtime_sync || env_bool("WPCOW_RUNTIME_SYNC", false) == Some(false) {
         return false;
     }
     if env_bool("WPCOW_RUNTIME_SYNC_FORCE", false) == Some(true) {

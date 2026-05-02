@@ -1,9 +1,9 @@
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 
 use crate::config::ClonePaths;
@@ -12,6 +12,11 @@ use crate::remote::{RemoteClient, RemoteEntry};
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct WhiteoutFile {
     deleted: BTreeSet<String>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct MetadataFile {
+    entries: BTreeMap<String, RemoteEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +65,34 @@ impl OverlayStore {
         hasher.update(Self::rel_string(rel));
         let hex = hex::encode(hasher.finalize());
         self.file_cache.join(&hex[0..2]).join(hex)
+    }
+
+    pub fn cached_file_path(&self, rel: &Path) -> Option<PathBuf> {
+        let path = self.cache_path(rel);
+        path.is_file().then_some(path)
+    }
+
+    pub fn cached_entry(&self, rel: &Path) -> Result<Option<RemoteEntry>> {
+        let metadata = self.load_metadata()?;
+        Ok(metadata.entries.get(&Self::rel_string(rel)).cloned())
+    }
+
+    pub fn put_cached_entry(&self, rel: &Path, entry: &RemoteEntry) -> Result<()> {
+        let mut metadata = self.load_metadata()?;
+        metadata
+            .entries
+            .insert(Self::rel_string(rel), entry.clone());
+        self.write_metadata(&metadata)
+    }
+
+    pub fn remove_cached(&self, rel: &Path) -> Result<()> {
+        let path = self.cache_path(rel);
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
+        let mut metadata = self.load_metadata()?;
+        metadata.entries.remove(&Self::rel_string(rel));
+        self.write_metadata(&metadata)
     }
 
     pub fn is_whiteout(&self, rel: &Path) -> Result<bool> {
@@ -161,6 +194,7 @@ impl OverlayStore {
                 cursor += bytes.len() as u64;
             }
             fs::rename(tmp, &cache_path)?;
+            self.put_cached_entry(rel, &entry)?;
             return read_range_from_file(&cache_path, offset as u64, size as usize);
         }
 
@@ -224,15 +258,45 @@ impl OverlayStore {
         file.write_all(b"\n")?;
         Ok(())
     }
+
+    fn metadata_path(&self) -> PathBuf {
+        self.file_cache.join("metadata.json")
+    }
+
+    fn load_metadata(&self) -> Result<MetadataFile> {
+        let path = self.metadata_path();
+        if !path.exists() {
+            return Ok(MetadataFile::default());
+        }
+        let mut json = String::new();
+        File::open(path)?.read_to_string(&mut json)?;
+        Ok(serde_json::from_str(&json)?)
+    }
+
+    fn write_metadata(&self, metadata: &MetadataFile) -> Result<()> {
+        fs::create_dir_all(&self.file_cache)?;
+        let json = serde_json::to_vec_pretty(metadata)?;
+        let tmp = self.metadata_path().with_extension("json.tmp");
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&tmp)?;
+        file.write_all(&json)?;
+        file.write_all(b"\n")?;
+        drop(file);
+        fs::rename(tmp, self.metadata_path())?;
+        Ok(())
+    }
 }
 
 fn read_range_from_file(path: &Path, offset: u64, size: usize) -> Result<Vec<u8>> {
     let mut file = File::open(path)?;
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf)?;
-    let start = offset.min(buf.len() as u64) as usize;
-    let end = (start + size).min(buf.len());
-    Ok(buf[start..end].to_vec())
+    file.seek(SeekFrom::Start(offset))?;
+    let mut buf = vec![0; size];
+    let read = file.read(&mut buf)?;
+    buf.truncate(read);
+    Ok(buf)
 }
 
 #[cfg(unix)]
@@ -284,5 +348,34 @@ mod tests {
             OverlayStore::clean_rel("./wp-config.php").unwrap(),
             PathBuf::from("wp-config.php")
         );
+    }
+
+    #[test]
+    fn stores_cached_remote_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ClonePaths {
+            root: temp.path().to_path_buf(),
+            manifest: temp.path().join("manifest.json"),
+            upper: temp.path().join("upper"),
+            file_cache: temp.path().join("file-cache"),
+            db: temp.path().join("db"),
+            generated: temp.path().join("generated"),
+            run: temp.path().join("run"),
+            whiteouts: temp.path().join("whiteouts.json"),
+        };
+        let store = OverlayStore::new(&paths);
+        let rel = Path::new("wp-includes/version.php");
+        let entry = RemoteEntry {
+            name: "version.php".to_string(),
+            kind: "file".to_string(),
+            size: 123,
+            mode: 0o100644,
+            mtime: 42,
+        };
+
+        store.put_cached_entry(rel, &entry).unwrap();
+        assert_eq!(store.cached_entry(rel).unwrap().unwrap().size, 123);
+        store.remove_cached(rel).unwrap();
+        assert!(store.cached_entry(rel).unwrap().is_none());
     }
 }

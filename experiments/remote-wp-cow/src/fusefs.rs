@@ -117,6 +117,17 @@ impl CowFs {
             }
         }
 
+        if let Some(entry) = self.overlay.cached_entry(rel).map_err(anyhow_to_io)? {
+            self.remote_stat_cache.insert(
+                rel.to_path_buf(),
+                Timed {
+                    value: entry.clone(),
+                    expires_at: Instant::now() + self.remote_cache_ttl,
+                },
+            );
+            return Ok(entry);
+        }
+
         let entry = self.remote.stat(rel)?;
         self.remote_stat_cache.insert(
             rel.to_path_buf(),
@@ -138,6 +149,7 @@ impl CowFs {
         let entries = self.remote.readdir(rel)?;
         let expires_at = Instant::now() + self.remote_cache_ttl;
         for entry in &entries {
+            let _ = self.overlay.put_cached_entry(&rel.join(&entry.name), entry);
             self.remote_stat_cache.insert(
                 rel.join(&entry.name),
                 Timed {
@@ -162,6 +174,7 @@ impl CowFs {
         if let Some(parent) = rel.parent() {
             self.remote_readdir_cache.remove(parent);
         }
+        let _ = self.overlay.remove_cached(rel);
     }
 
     fn attr_from_metadata(&self, ino: u64, metadata: &fs::Metadata) -> FileAttr {
@@ -391,6 +404,9 @@ impl Filesystem for CowFs {
                 let upper = self.overlay.upper_path(&rel).map_err(anyhow_to_io)?;
                 if upper.exists() {
                     let file = File::open(upper)?;
+                    Ok((self.allocate_handle(Handle::Local(file)), flags as u32))
+                } else if let Some(cache_path) = self.overlay.cached_file_path(&rel) {
+                    let file = File::open(cache_path)?;
                     Ok((self.allocate_handle(Handle::Local(file)), flags as u32))
                 } else {
                     Ok((self.allocate_handle(Handle::Remote(rel)), flags as u32))

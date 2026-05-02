@@ -40,42 +40,43 @@ wp-cow-lab-serve
 
 ## Product Shape
 
-The default runtime is not pure lazy FUSE for all files. WordPress core and
-runtime code are small enough to pre-materialize and too latency-sensitive to
-serve file-by-file over SSH. Large user data remains lazy.
+The default runtime is request-driven. It must not assume plugin/theme/runtime
+directories are small: any directory may contain large generated artifacts,
+vendor caches, backups, or media-like data. Files are fetched only when the
+local request path opens them, then remembered in the persistent local cache.
 
 Startup should do:
 
 1. Probe WordPress and remote DB credentials.
 2. Export schema only.
 3. Initialize empty local DB schema.
-4. Pre-materialize a bounded runtime code set.
-5. Start a persistent SSH tunnel for safe remote DB reads when the remote DB is
+4. Start a persistent SSH tunnel for safe remote DB reads when the remote DB is
    reachable over TCP from the SSH host.
-6. Start local PHP immediately with generated local `wp-config.php`, DB drop-in,
+5. Start local PHP immediately with generated local `wp-config.php`, DB drop-in,
    and safety MU plugin.
-7. Serve media and other large user data lazily only when requested.
+6. Serve files lazily and persistently cache only the files touched by requests.
 
-## Runtime Materialization Policy
+## File Materialization Policy
 
-Copy locally:
+Fetch locally on demand:
 
-- Root WordPress PHP files and common root assets.
-- `wp-admin`.
-- `wp-includes`.
-- `wp-content/plugins`.
-- `wp-content/themes`.
-- `wp-content/mu-plugins`.
-- `wp-content/languages`.
-- Top-level `wp-content` drop-in files.
+- Any remote file that WordPress, PHP, or the browser actually opens.
+- Remote directory entries only when a request actually lists that directory.
+- Remote metadata needed for opened/listed files.
 
-Do not copy by default:
+Remember:
 
-- `wp-content/uploads`.
-- Cache directories.
-- Backup directories.
-- SQL dumps and archive files.
-- Arbitrary large data directories under `wp-content`.
+- Cached file bytes in `file-cache/`.
+- Cached remote metadata in `file-cache/metadata.json`.
+- Local mutations separately in `upper/`.
+
+Do not:
+
+- Batch copy runtime directories by default.
+- Copy `wp-content/uploads` up front.
+- Assume plugin/theme directories are small.
+- Re-fetch cached file bytes or metadata on subsequent runs unless explicitly
+  refreshed.
 
 ## DB Policy
 
@@ -95,7 +96,7 @@ The CLI should print phase names and durations:
 - probe
 - schema export
 - local schema init
-- runtime sync
+- file cache hits/misses where practical
 - mount
 - php start
 - first request diagnostics where practical

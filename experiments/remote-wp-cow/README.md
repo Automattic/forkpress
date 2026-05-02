@@ -123,17 +123,16 @@ wp-cow-lab-serve
 ```
 
 That is the normal path. It creates or reuses the lazy clone, exports schema
-only if needed, initializes an empty local MariaDB database if needed,
-pre-materializes the WordPress runtime files, mounts the lazy filesystem, starts
-the DB control layer, and starts PHP. Runtime file sync copies the root PHP
-files, `wp-admin`, `wp-includes`, plugin/theme/mu-plugin/language code, and
-top-level `wp-content` drop-ins. It does not copy `wp-content/uploads` or other
-large content data directories, and it does not download table rows up front.
+only if needed, initializes an empty local MariaDB database if needed, mounts
+the lazy filesystem, starts the DB control layer, and starts PHP. It does not
+download media, runtime directories, or table rows up front.
 
-Runtime file sync is enabled by default because real WordPress boot performs too
-many PHP file reads and stats for pure per-file SSH/FUSE reads to feel usable.
-Set `WPCOW_RUNTIME_SYNC_FORCE=1` to refresh the local runtime copy or
-`WPCOW_RUNTIME_SYNC=0` to return to fully lazy filesystem reads.
+File reads are request-driven. When WordPress opens a remote file, `wp-cow`
+fetches that file into the persistent `file-cache/` and records the remote
+metadata beside it. Later reads and later runs use the local cached copy instead
+of fetching the file or statting it remotely again. Runtime batch sync is
+disabled by default; set `WPCOW_RUNTIME_SYNC=1` only for debugging a bounded
+runtime copy.
 
 The lab also starts a persistent SSH tunnel for remote database reads when the
 remote `DB_HOST` is TCP-reachable from the SSH host. This avoids one SSH/PHP
@@ -182,8 +181,10 @@ cat /mnt/wp-cow/example/wp-config.php
 Remote file contents are cached separately from local mutations in
 `~/.wp-cow/clones/<name>/file-cache`, which is persisted by the Docker
 `wp-cow-state` volume. Files up to `WPCOW_CACHE_MAX_FILE_MB` are cached as whole
-files on first read; larger files are streamed by range. The Docker lab defaults
-that limit to 64 MB. Check or clear the cache with:
+files on first read, and their remote metadata is recorded in
+`file-cache/metadata.json` so later runs do not need to stat those files
+remotely again. Larger files are streamed by range. The Docker lab defaults that
+limit to 64 MB. Check or clear the cache with:
 
 ```bash
 wp-cow-lab-cache status
