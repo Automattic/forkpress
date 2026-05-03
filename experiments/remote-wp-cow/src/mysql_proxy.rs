@@ -109,7 +109,7 @@ impl ProxyBackend {
             if route.backend == "local" {
                 self.local_query(query)
             } else {
-                let result = db::remote_readonly_query(&self.remote, query)?;
+                let result = db::cached_remote_readonly_query(&self.remote, &self.paths, query)?;
                 Ok(ProxyReply::Result(CowQueryResult {
                     ok: result.ok,
                     error: result.error,

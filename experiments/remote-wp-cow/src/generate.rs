@@ -59,6 +59,7 @@ define( 'WPCOW_REMOTE_DB_USER',     {remote_db_user} );
 define( 'WPCOW_REMOTE_DB_PASSWORD', {remote_db_password} );
 define( 'WPCOW_REMOTE_DB_HOST',     {remote_db_host} );
 define( 'WPCOW_QUERY_CACHE_DIR',    {query_cache_dir} );
+define( 'WPCOW_DB_STATE_FILE',      {db_state_file} );
 
 define( 'FS_METHOD', 'direct' );
 define( 'DISABLE_WP_CRON', true );
@@ -102,6 +103,7 @@ require_once ABSPATH . 'wp-settings.php';
             manifest.remote_db_tunnel.host, manifest.remote_db_tunnel.port
         )),
         query_cache_dir = php_string(paths.db.join("query-cache").to_string_lossy().as_ref()),
+        db_state_file = php_string(paths.db.join("state.json").to_string_lossy().as_ref()),
     )
 }
 
@@ -305,18 +307,161 @@ function cow_remote_query_cache_set( $query, $result ) {
 	if ( ! is_dir( dirname( $file ) ) && ! mkdir( dirname( $file ), 0777, true ) && ! is_dir( dirname( $file ) ) ) {
 		return;
 	}
-	$tmp = $file . '.' . getmypid() . '.tmp';
+	$tmp = $file . '.' . getmypid() . '.' . str_replace( array( ' ', '.' ), '', microtime() . uniqid( '', true ) ) . '.tmp';
 	file_put_contents( $tmp, json_encode( array( 'sql' => $query, 'result' => $result ) ) );
 	@rename( $tmp, $file );
 }
 
-function cow_remote_query_cache_clear() {
-	if ( ! cow_remote_query_cache_enabled() || ! is_dir( WPCOW_QUERY_CACHE_DIR ) ) {
-		return;
+function cow_local_state() {
+	static $cached = null;
+	static $cached_mtime = null;
+
+	if ( ! defined( 'WPCOW_DB_STATE_FILE' ) || '' === WPCOW_DB_STATE_FILE || ! is_file( WPCOW_DB_STATE_FILE ) ) {
+		return array(
+			'materialized_tables'      => array(),
+			'dirty_tables'             => array(),
+			'option_bootstrap_tables'  => array(),
+			'option_rows'              => array(),
+			'dirty_option_rows'        => array(),
+		);
 	}
-	foreach ( glob( rtrim( WPCOW_QUERY_CACHE_DIR, '/' ) . '/*.json' ) as $file ) {
-		@unlink( $file );
+
+	$mtime = @filemtime( WPCOW_DB_STATE_FILE );
+	if ( is_array( $cached ) && $cached_mtime === $mtime ) {
+		return $cached;
 	}
+
+	$decoded = json_decode( file_get_contents( WPCOW_DB_STATE_FILE ), true );
+	$state = array(
+		'materialized_tables'      => array(),
+		'dirty_tables'             => array(),
+		'option_bootstrap_tables'  => array(),
+		'option_rows'              => array(),
+		'dirty_option_rows'        => array(),
+	);
+	if ( is_array( $decoded ) ) {
+		foreach ( array( 'materialized_tables', 'dirty_tables', 'option_bootstrap_tables', 'option_rows', 'dirty_option_rows' ) as $key ) {
+			if ( isset( $decoded[ $key ] ) && is_array( $decoded[ $key ] ) ) {
+				foreach ( $decoded[ $key ] as $value ) {
+					$state[ $key ][ strtolower( (string) $value ) ] = true;
+				}
+			}
+		}
+	}
+
+	$cached = $state;
+	$cached_mtime = $mtime;
+	return $cached;
+}
+
+function cow_local_state_tables() {
+	$state = cow_local_state();
+	$tables = array();
+	foreach ( array( 'materialized_tables', 'dirty_tables', 'option_bootstrap_tables' ) as $key ) {
+		foreach ( $state[ $key ] as $table => $_present ) {
+			$tables[ $table ] = true;
+		}
+	}
+	foreach ( array( 'option_rows', 'dirty_option_rows' ) as $key ) {
+		foreach ( $state[ $key ] as $row_key => $_present ) {
+			$parts = explode( ':', (string) $row_key, 2 );
+			if ( '' !== $parts[0] ) {
+				$tables[ strtolower( $parts[0] ) ] = true;
+			}
+		}
+	}
+	return $tables;
+}
+
+function cow_all_tables_in_state_set( $tables, $state_key ) {
+	if ( empty( $tables ) ) {
+		return false;
+	}
+	$state = cow_local_state();
+	foreach ( $tables as $table ) {
+		if ( ! isset( $state[ $state_key ][ strtolower( (string) $table ) ] ) ) {
+			return false;
+		}
+	}
+	return true;
+}
+
+function cow_option_bootstrap_names() {
+	return array(
+		'siteurl',
+		'home',
+		'blogname',
+		'blogdescription',
+		'admin_email',
+		'active_plugins',
+		'template',
+		'stylesheet',
+		'current_theme',
+		'permalink_structure',
+		'rewrite_rules',
+		'sidebars_widgets',
+		'stylesheet_root',
+		'template_root',
+		'upload_path',
+		'upload_url_path',
+	);
+}
+
+function cow_query_matches_option_bootstrap( $query, $tables, $options_table ) {
+	if ( ! in_array( $options_table, $tables, true ) ) {
+		return false;
+	}
+	$state = cow_local_state();
+	if ( ! isset( $state['option_bootstrap_tables'][ strtolower( $options_table ) ] ) ) {
+		return false;
+	}
+
+	$lower = strtolower( $query );
+	if ( false !== strpos( $lower, 'autoload' ) ) {
+		return true;
+	}
+	if ( false !== strpos( $lower, 'option_name' ) ) {
+		foreach ( cow_option_bootstrap_names() as $name ) {
+			if ( false !== strpos( $lower, "'" . $name . "'" ) ) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+function cow_safe_local_read_without_control( $query, $tables, $options_table ) {
+	if ( empty( $tables ) ) {
+		return false;
+	}
+	if ( cow_all_tables_in_state_set( $tables, 'materialized_tables' ) ) {
+		return true;
+	}
+	if ( cow_query_matches_option_bootstrap( $query, $tables, $options_table ) ) {
+		return true;
+	}
+	return false;
+}
+
+function cow_cached_remote_read_is_safe_without_control( $tables ) {
+	if ( empty( $tables ) ) {
+		return false;
+	}
+	$local_tables = cow_local_state_tables();
+	foreach ( $tables as $table ) {
+		if ( isset( $local_tables[ strtolower( (string) $table ) ] ) ) {
+			return false;
+		}
+	}
+	return true;
+}
+
+function cow_options_table_name( $wpdb ) {
+	if ( isset( $wpdb->options ) && '' !== $wpdb->options ) {
+		return $wpdb->options;
+	}
+	global $table_prefix;
+	return (string) $table_prefix . 'options';
 }
 
 class Cow_DB extends wpdb {
@@ -332,9 +477,10 @@ class Cow_DB extends wpdb {
 		$this->last_query = $query;
 
 		$tables = cow_tables_from_sql( $query );
+		$options_table = cow_options_table_name( $this );
 
 		if ( cow_is_write_sql( $query ) ) {
-			if ( in_array( $this->options, $tables, true ) && cow_is_protected_theme_option_write( $query ) ) {
+			if ( in_array( $options_table, $tables, true ) && cow_is_protected_theme_option_write( $query ) ) {
 				$this->rows_affected = 0;
 				$this->last_error = '';
 				return 0;
@@ -349,7 +495,6 @@ class Cow_DB extends wpdb {
 					cow_db_runtime_fail( 'control /row-cow failed: ' . $this->last_error . "\n\nSQL:\n" . $query );
 				}
 				if ( ! empty( $row_cow['handled'] ) || ( isset( $row_cow['backend'] ) && 'local' === $row_cow['backend'] ) ) {
-					cow_remote_query_cache_clear();
 					return parent::query( $query );
 				}
 			}
@@ -358,13 +503,21 @@ class Cow_DB extends wpdb {
 				$this->last_error = isset( $result['error'] ) ? $result['error'] : 'wp-cow materialization failed';
 				cow_db_runtime_fail( 'control /materialize failed: ' . $this->last_error . "\n\nSQL:\n" . $query );
 			}
-			cow_remote_query_cache_clear();
 			return parent::query( $query );
 		}
 
 		if ( cow_is_safe_read_sql( $query ) ) {
 			if ( cow_offline() ) {
 				return parent::query( $query );
+			}
+			if ( cow_safe_local_read_without_control( $query, $tables, $options_table ) ) {
+				return parent::query( $query );
+			}
+			if ( cow_cached_remote_read_is_safe_without_control( $tables ) ) {
+				$cached = cow_remote_query_cache_get( $query );
+				if ( is_array( $cached ) ) {
+					return $this->cow_apply_remote_result( $cached );
+				}
 			}
 			if ( cow_row_cow_enabled() ) {
 				$row_cow = cow_control_request( '/row-cow', array( 'tables' => $tables, 'sql' => $query ) );
@@ -973,6 +1126,7 @@ mod tests {
         assert!(php.contains("WPCOW_CONTROL_URL"));
         assert!(php.contains("WPCOW_REMOTE_DB_HOST"));
         assert!(php.contains("WPCOW_QUERY_CACHE_DIR"));
+        assert!(php.contains("WPCOW_DB_STATE_FILE"));
         assert!(php.contains("wp-cow DB/runtime error"));
         assert!(php.contains("wp-content/db.php"));
         assert!(db_dropin_php().contains("WPCOW_LOCAL_DB_HOST"));
@@ -987,6 +1141,11 @@ mod tests {
         assert!(php.contains("cow_remote_mysqli"));
         assert!(php.contains("cow_remote_query_cache_get"));
         assert!(php.contains("cow_remote_query_cache_set"));
+        assert!(php.contains("cow_cached_remote_read_is_safe_without_control"));
+        assert!(php.contains("cow_safe_local_read_without_control"));
+        assert!(php.contains("cow_query_matches_option_bootstrap"));
+        assert!(php.contains("dirty_tables"));
+        assert!(!php.contains("cow_remote_query_cache_clear"));
         assert!(php.contains("cow_is_protected_theme_option_write"));
         assert!(php.contains("WPCOW_PROTECT_THEME_OPTIONS"));
         assert!(php.contains("cow_db_runtime_fail"));

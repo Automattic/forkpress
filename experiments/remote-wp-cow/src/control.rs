@@ -157,7 +157,7 @@ fn control_response(
                 }));
             }
             let sql = input.sql.ok_or_else(|| anyhow!("missing sql"))?;
-            let result = db::remote_readonly_query(remote, &sql)?;
+            let result = db::cached_remote_readonly_query(remote, paths, &sql)?;
             Ok(json!({
                 "ok": result.ok,
                 "error": result.error,

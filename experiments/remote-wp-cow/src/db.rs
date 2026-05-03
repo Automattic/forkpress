@@ -1,10 +1,12 @@
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::{parse_host_port, ClonePaths, Manifest};
 use crate::remote::{shell_quote, RemoteClient, RemoteQueryResult};
@@ -17,6 +19,8 @@ use crate::sql;
 pub struct DbState {
     #[serde(default)]
     pub materialized_tables: BTreeSet<String>,
+    #[serde(default)]
+    pub dirty_tables: BTreeSet<String>,
     #[serde(default)]
     pub option_bootstrap_tables: BTreeSet<String>,
     #[serde(default)]
@@ -248,7 +252,7 @@ pub fn route_for_tables(
     let expanded = sql::expand_wordpress_groups(&manifest.probe.table_prefix, tables);
     let touches_local = expanded
         .iter()
-        .any(|table| state.materialized_tables.contains(table));
+        .any(|table| table_has_local_state(&state, table));
 
     if touches_local {
         let materialized = materialize_tables(remote, manifest, paths, &expanded)?;
@@ -262,6 +266,10 @@ pub fn route_for_tables(
             materialized: Vec::new(),
         })
     }
+}
+
+fn table_has_local_state(state: &DbState, table: &str) -> bool {
+    state.materialized_tables.contains(table) || state.dirty_tables.contains(table)
 }
 
 pub fn route_for_query(
@@ -312,6 +320,103 @@ pub fn remote_readonly_query(remote: &RemoteClient, sql_text: &str) -> Result<Re
         return Err(anyhow!("refusing to send non-read SQL to remote"));
     }
     remote.remote_query_readonly(sql_text)
+}
+
+pub fn cached_remote_readonly_query(
+    remote: &RemoteClient,
+    paths: &ClonePaths,
+    sql_text: &str,
+) -> Result<RemoteQueryResult> {
+    if let Some(result) = remote_query_cache_get(paths, sql_text)? {
+        return Ok(result);
+    }
+
+    let result = remote_readonly_query(remote, sql_text)?;
+    remote_query_cache_set(paths, sql_text, &result)?;
+    Ok(result)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RemoteQueryCacheEntry {
+    sql: String,
+    result: RemoteQueryResult,
+}
+
+fn remote_query_cache_enabled() -> bool {
+    std::env::var("WPCOW_REMOTE_QUERY_CACHE")
+        .ok()
+        .map(|raw| {
+            !matches!(
+                raw.to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
+        .unwrap_or(true)
+}
+
+fn remote_query_cache_max_rows() -> usize {
+    std::env::var("WPCOW_REMOTE_QUERY_CACHE_MAX_ROWS")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .filter(|rows| *rows > 0)
+        .unwrap_or(5000)
+}
+
+fn remote_query_cache_dir(paths: &ClonePaths) -> PathBuf {
+    paths.db.join("query-cache")
+}
+
+fn remote_query_cache_file(paths: &ClonePaths, sql_text: &str) -> PathBuf {
+    let digest = Sha256::digest(sql_text.as_bytes());
+    remote_query_cache_dir(paths).join(format!("{}.json", hex::encode(digest)))
+}
+
+fn remote_query_cache_get(paths: &ClonePaths, sql_text: &str) -> Result<Option<RemoteQueryResult>> {
+    if !remote_query_cache_enabled() {
+        return Ok(None);
+    }
+    let path = remote_query_cache_file(paths, sql_text);
+    let Ok(bytes) = fs::read(&path) else {
+        return Ok(None);
+    };
+    let entry: RemoteQueryCacheEntry = match serde_json::from_slice(&bytes) {
+        Ok(entry) => entry,
+        Err(_) => return Ok(None),
+    };
+    if entry.sql == sql_text {
+        Ok(Some(entry.result))
+    } else {
+        Ok(None)
+    }
+}
+
+fn remote_query_cache_set(
+    paths: &ClonePaths,
+    sql_text: &str,
+    result: &RemoteQueryResult,
+) -> Result<()> {
+    if !remote_query_cache_enabled() || !result.ok {
+        return Ok(());
+    }
+    if result.rows.len() > remote_query_cache_max_rows() {
+        return Ok(());
+    }
+
+    let dir = remote_query_cache_dir(paths);
+    fs::create_dir_all(&dir)?;
+    let path = remote_query_cache_file(paths, sql_text);
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let tmp = path.with_extension(format!("{}.{}.tmp", std::process::id(), nonce));
+    let entry = RemoteQueryCacheEntry {
+        sql: sql_text.to_string(),
+        result: result.clone(),
+    };
+    fs::write(&tmp, serde_json::to_vec(&entry)?)?;
+    fs::rename(tmp, path)?;
+    Ok(())
 }
 
 pub fn refresh_option_bootstrap_for_offline(
@@ -380,6 +485,7 @@ pub fn row_cow_query(
             pk_values,
             ..
         } => {
+            mark_dirty_table(paths, &table)?;
             mark_dirty_option_rows_for_write(
                 manifest,
                 paths,
@@ -396,6 +502,7 @@ pub fn row_cow_query(
             })
         }
         RowCowExecution::LocalOnlyInsert { table } => {
+            mark_dirty_table(paths, &table)?;
             mark_dirty_option_rows_from_sql(manifest, paths, sql_text, &table)?;
             Ok(RowCowResponse {
                 handled: true,
@@ -438,6 +545,16 @@ pub fn row_cow_query(
             })
         }
     }
+}
+
+fn mark_dirty_table(paths: &ClonePaths, table: &str) -> Result<()> {
+    validate_table_name(table)?;
+    let mut state = load_state(paths)?;
+    if !state.materialized_tables.contains(table) {
+        state.dirty_tables.insert(table.to_string());
+        write_state(paths, &state)?;
+    }
+    Ok(())
 }
 
 fn mark_dirty_option_rows_for_write(
@@ -1746,6 +1863,55 @@ mod tests {
                 &tables,
             ),
             "write fallbacks still need local table promotion before the write executes"
+        );
+    }
+
+    #[test]
+    fn dirty_row_overlay_tables_are_local_state() {
+        let mut state = DbState::default();
+        assert!(!table_has_local_state(&state, "wp_posts"));
+        state.dirty_tables.insert("wp_posts".to_string());
+        assert!(
+            table_has_local_state(&state, "wp_posts"),
+            "complex plugin reads must not route to remote after local row overlays or tombstones"
+        );
+    }
+
+    #[test]
+    fn remote_query_cache_round_trips_safe_read_results() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::config::clone_paths(temp.path(), "example");
+        crate::config::ensure_clone_dirs(&paths).unwrap();
+        let sql = "SELECT ID, post_title FROM wp_posts WHERE post_status = 'publish'";
+
+        let mut row = serde_json::Map::new();
+        row.insert("ID".to_string(), serde_json::Value::String("7".to_string()));
+        row.insert(
+            "post_title".to_string(),
+            serde_json::Value::String("Cached".to_string()),
+        );
+        let result = RemoteQueryResult {
+            ok: true,
+            error: String::new(),
+            rows: vec![row],
+            fields: vec!["ID".to_string(), "post_title".to_string()],
+            affected: 1,
+        };
+
+        remote_query_cache_set(&paths, sql, &result).unwrap();
+        assert_eq!(
+            remote_query_cache_get(&paths, sql)
+                .unwrap()
+                .unwrap()
+                .rows
+                .len(),
+            1
+        );
+        assert!(
+            remote_query_cache_get(&paths, "SELECT ID FROM wp_posts")
+                .unwrap()
+                .is_none(),
+            "cache files are keyed and verified by SQL text"
         );
     }
 }

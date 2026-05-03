@@ -45,6 +45,8 @@ run_exact_test overlay::tests::cached_only_copy_up_uses_materialized_files_witho
 run_exact_test fusefs::tests::offline_readdir_uses_cached_remote_metadata_without_remote
 run_exact_test fusefs::tests::remote_stat_metadata_survives_severed_mode_without_remote
 run_exact_test generate::tests::router_splash_and_progress_smoke_responds_quickly
+run_exact_test db::tests::remote_query_cache_round_trips_safe_read_results
+run_exact_test db::tests::dirty_row_overlay_tables_are_local_state
 run_exact_test row_cow::tests::select_materializes_remote_rows_for_later_offline_reads
 run_exact_test row_cow::tests::local_insert_is_not_sent_to_remote_and_appears_in_merged_select
 run_exact_test row_cow::tests::update_copy_up_fetches_only_affected_primary_keys
@@ -75,6 +77,10 @@ need_pattern src/generate.rs 'will not fall back to the empty local schema' "ins
 need_pattern src/generate.rs 'wp_cow_looks_like_installer' "installer response detector"
 need_pattern src/generate.rs '__wp_cow_installer_guard' "direct installer route guard"
 need_pattern src/generate.rs "'1' !== getenv\\( 'WPCOW_PROXY_FRONTEND' \\)" "local-first frontend default"
+need_pattern src/db.rs 'cached_remote_readonly_query' "Rust remote read cache for MySQL proxy/control"
+need_pattern src/db.rs 'dirty_tables' "dirty row-overlay table routing state"
+need_pattern src/generate.rs 'cow_cached_remote_read_is_safe_without_control' "PHP cached remote read fast path"
+need_pattern src/generate.rs 'cow_safe_local_read_without_control' "PHP local read fast path for materialized runtime data"
 need_pattern src/generate.rs 'function cow_offline' "PHP DB offline mode"
 need_pattern src/db.rs 'set_local_admin_password' "local-only admin password override"
 need_pattern src/row_cow.rs 'LocalOnlyInsert' "local-only content mutation path"
@@ -99,6 +105,7 @@ deny_pattern src/cli.rs 'wordpress_offline_table_names' "full core-table sever m
 deny_pattern src/cli.rs 'prefetch_runtime_files' "sever-triggered runtime prefetch"
 deny_pattern src/run.rs 'WPCOW_PREFETCH_RUNTIME|prefetch_runtime_files|wp-cow-runtime-prefetch' "background runtime prefetch"
 deny_pattern src/run.rs 'tar[[:space:]]+-cf[[:space:]]+-' "recursive remote tar runtime prefetch"
+deny_pattern src/generate.rs 'function cow_remote_query_cache_clear|cow_remote_query_cache_clear\(\);' "global remote query cache invalidation"
 deny_pattern docker/Dockerfile 'rsync|scp[[:space:]]+-r' "eager copy tooling"
 deny_pattern docker/wp-cow-lab-serve 'rsync|scp[[:space:]]+-r' "eager lab serve copy command"
 deny_pattern docker/wp-cow-lab-run 'rsync|scp[[:space:]]+-r' "eager lab run copy command"
