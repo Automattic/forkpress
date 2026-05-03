@@ -204,7 +204,7 @@ function cow_control_request( $path, $payload ) {
 	$body = json_encode( $payload );
 	$timeout = cow_control_timeout_secs();
 
-	if ( function_exists( 'curl_init' ) ) {
+	if ( function_exists( 'curl_init' ) && function_exists( 'curl_exec' ) ) {
 		$ch = curl_init( $url );
 		curl_setopt( $ch, CURLOPT_POST, true );
 		curl_setopt( $ch, CURLOPT_HTTPHEADER, array( 'Content-Type: application/json' ) );

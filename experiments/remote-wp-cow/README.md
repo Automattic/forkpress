@@ -197,6 +197,15 @@ layer by default so the local site can render the same active code as the
 remote site. Set `WPCOW_ENABLE_PLUGINS=0` only when you need to suppress active
 plugins during testing; files still remain lazy and are not copied up front.
 
+Because active plugins are production code, the launched PHP runtime also
+disables common side-effect escape hatches by default: process spawning,
+`mail()`, raw socket clients, and URL-based includes. That is in addition to the
+mu-plugin guards for WordPress mail and HTTP APIs. The generated DB drop-in
+still needs local HTTP for daemon control calls, so direct plugin cURL or URL
+file-wrapper calls are not fully sandboxed yet. Set
+`WPCOW_ALLOW_UNSAFE_PLUGIN_SIDE_EFFECTS=1` only when you intentionally want to
+let plugin code spawn local processes or use raw sockets.
+
 The lab uses bounded request timeouts so a bad remote DB query, unreachable SSH
 host, or slow remote file read should fail visibly instead of leaving the
 browser spinning forever. Adjust the defaults with

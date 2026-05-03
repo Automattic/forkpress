@@ -53,6 +53,7 @@ run_exact_test row_cow::tests::update_copy_up_fetches_only_affected_primary_keys
 run_exact_test row_cow::tests::delete_tombstone_hides_remote_row_from_merged_selects
 run_exact_test run::tests::frankenphp_routes_wp_admin_directory_to_index
 run_exact_test run::tests::frankenphp_routes_installer_paths_through_runtime_guard
+run_exact_test run::tests::web_runtime_disables_common_plugin_side_effect_primitives
 run_exact_test sql::tests::extract_tables_preserves_wordpress_table_case_for_proxy_cow
 run_exact_ignored_test generate::tests::runtime_cow_harness_proves_admin_login_local_mutation_and_offline_refresh
 run_exact_ignored_test generate::tests::production_run_harness_proves_fuse_rust_control_and_offline_refresh
@@ -82,6 +83,9 @@ need_pattern src/db.rs 'dirty_tables' "dirty row-overlay table routing state"
 need_pattern src/generate.rs 'cow_cached_remote_read_is_safe_without_control' "PHP cached remote read fast path"
 need_pattern src/generate.rs 'cow_safe_local_read_without_control' "PHP local read fast path for materialized runtime data"
 need_pattern src/remote.rs 'WPCOW_REMOTE_DB_TUNNEL", false' "remote DB SSH tunnel is opt-in"
+need_pattern src/run.rs 'WPCOW_ALLOW_UNSAFE_PLUGIN_SIDE_EFFECTS' "plugin side-effect escape hatch is explicit"
+need_pattern src/run.rs 'disable_functions' "PHP side-effect functions are disabled by default"
+need_pattern src/run.rs 'stream_socket_client' "raw plugin socket egress is disabled by default"
 need_pattern src/generate.rs 'function cow_offline' "PHP DB offline mode"
 need_pattern src/db.rs 'set_local_admin_password' "local-only admin password override"
 need_pattern src/row_cow.rs 'LocalOnlyInsert' "local-only content mutation path"
@@ -100,6 +104,7 @@ need_pattern .env.example '^WPCOW_HTTP_PORT=9481$' "Docker lab example host HTTP
 need_pattern .env.example '^WPCOW_WEB_SERVER=frankenphp$' "Docker lab example FrankenPHP preference"
 need_pattern .env.example '^WPCOW_REMOTE_DB_TUNNEL=0$' "Docker lab example disables remote DB tunnel by default"
 need_pattern .env.example '^WPCOW_SPLASH=1$' "Docker lab example splash default"
+need_pattern .env.example '^WPCOW_ALLOW_UNSAFE_PLUGIN_SIDE_EFFECTS=0$' "Docker lab example keeps PHP side-effect guards enabled"
 need_pattern .env.example '^WPCOW_LOCAL_ADMIN_PASSWORD=$' "Docker lab example local admin override"
 
 deny_pattern src 'rsync|scp[[:space:]]+-r' "eager source tree copy command"

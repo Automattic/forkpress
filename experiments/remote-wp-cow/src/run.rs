@@ -238,6 +238,31 @@ fn apply_web_server_env(command: &mut Command, paths: &ClonePaths) {
     }
 }
 
+fn php_side_effect_guards_enabled() -> bool {
+    !matches!(
+        std::env::var("WPCOW_ALLOW_UNSAFE_PLUGIN_SIDE_EFFECTS")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn php_disabled_functions() -> &'static str {
+    "exec,passthru,shell_exec,system,proc_open,popen,pcntl_exec,mail,fsockopen,pfsockopen,stream_socket_client"
+}
+
+fn php_safety_ini_entries() -> Vec<(&'static str, String)> {
+    if !php_side_effect_guards_enabled() {
+        return Vec::new();
+    }
+
+    vec![
+        ("disable_functions", php_disabled_functions().to_string()),
+        ("allow_url_include", "0".to_string()),
+    ]
+}
+
 fn start_frankenphp_server(
     paths: &ClonePaths,
     mountpoint: &Path,
@@ -293,12 +318,16 @@ fn start_php_dev_server(paths: &ClonePaths, mountpoint: &Path, http_addr: &str) 
         .arg("opcache.max_accelerated_files=20000")
         .arg("-d")
         .arg("opcache.validate_timestamps=1")
+        .stdin(Stdio::null());
+    for (name, value) in php_safety_ini_entries() {
+        command.arg("-d").arg(format!("{name}={value}"));
+    }
+    command
         .arg("-S")
         .arg(http_addr)
         .arg("-t")
         .arg(mountpoint)
         .arg(paths.generated.join("router.php"))
-        .stdin(Stdio::null())
         .spawn()
         .context("start php built-in server")
 }
@@ -307,6 +336,10 @@ fn frankenphp_caddyfile(_paths: &ClonePaths, mountpoint: &Path, http_addr: &str)
     let threads = env_u64("WPCOW_PHP_WORKERS", 4);
     let max_execution = env_u64("WPCOW_PHP_MAX_EXECUTION_SECS", 90);
     let socket_timeout = env_u64("WPCOW_PHP_SOCKET_TIMEOUT_SECS", 15);
+    let safety_ini = php_safety_ini_entries()
+        .into_iter()
+        .map(|(name, value)| format!("\t\tphp_ini {name} {value}\n"))
+        .collect::<String>();
     let listen = caddy_listen(http_addr);
     let root = caddy_quote(&mountpoint.to_string_lossy());
     let router = format!("/{ROUTER_BASENAME}");
@@ -330,6 +363,7 @@ fn frankenphp_caddyfile(_paths: &ClonePaths, mountpoint: &Path, http_addr: &str)
 		php_ini opcache.max_accelerated_files 20000
 		php_ini opcache.validate_timestamps 1
 		php_ini opcache.revalidate_freq 2
+{safety_ini}
 	}}
 }}
 
@@ -467,6 +501,20 @@ mod tests {
             caddyfile.find("@wpCowInstaller").unwrap() < caddyfile.find("@phpFiles").unwrap(),
             "installer guard must run before the generic PHP file handler"
         );
+    }
+
+    #[test]
+    fn web_runtime_disables_common_plugin_side_effect_primitives() {
+        assert!(php_disabled_functions().contains("stream_socket_client"));
+        assert!(php_disabled_functions().contains("proc_open"));
+        assert!(php_disabled_functions().contains("mail"));
+
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::config::clone_paths(temp.path(), "example");
+        let caddyfile = frankenphp_caddyfile(&paths, Path::new("/tmp/mount"), "127.0.0.1:9481");
+        assert!(caddyfile.contains("php_ini disable_functions"));
+        assert!(caddyfile.contains("stream_socket_client"));
+        assert!(caddyfile.contains("php_ini allow_url_include 0"));
     }
 
     #[test]
