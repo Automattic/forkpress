@@ -33,7 +33,6 @@ RUN install-php-extensions mysqli opcache pdo_mysql \
         mariadb-server \
         openssh-client \
         pkg-config \
-        rsync \
         tini \
         vim-tiny \
     && rm -rf /var/lib/apt/lists/*

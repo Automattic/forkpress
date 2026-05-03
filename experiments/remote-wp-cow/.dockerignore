@@ -1,3 +1,8 @@
 /target/
 /.adversarial-loop/
 /.git/
+/.env
+/.env.*
+!/.env.example
+/*.log
+/.wp-cow/

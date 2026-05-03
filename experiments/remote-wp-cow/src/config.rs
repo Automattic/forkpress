@@ -1,6 +1,8 @@
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
 use std::fs::{self, File, OpenOptions};
+use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -182,6 +184,16 @@ pub fn clone_paths(state_dir: &Path, name: &str) -> ClonePaths {
     }
 }
 
+pub fn ssh_control_path(paths: &ClonePaths) -> PathBuf {
+    let mut hasher = DefaultHasher::new();
+    paths.root.hash(&mut hasher);
+    let hash = hasher.finish();
+    let dir = std::env::var_os("WPCOW_SSH_CONTROL_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    dir.join(format!("wp-cow-ssh-{hash:016x}.sock"))
+}
+
 pub fn offline_marker_path(paths: &ClonePaths) -> PathBuf {
     paths.run.join(OFFLINE_MARKER)
 }
@@ -305,5 +317,19 @@ mod tests {
     fn sanitizes_name() {
         assert_eq!(sanitize_name("Example Site_1"), "example-site-1");
         assert_eq!(sanitize_name("...Cow!!!"), "cow");
+    }
+
+    #[test]
+    fn ssh_control_path_stays_short_for_long_clone_paths() {
+        let paths = clone_paths(
+            Path::new("/tmp/wp-cow-live-acceptance.with-a-long-random-name/state"),
+            "calm-cottage-core-live-with-a-long-name",
+        );
+        let path = ssh_control_path(&paths);
+        assert!(
+            path.to_string_lossy().len() < 100,
+            "OpenSSH Unix-domain control sockets need a short path: {}",
+            path.display()
+        );
     }
 }

@@ -125,6 +125,10 @@ pub trait RowCowBackend {
         pk_values: &[PkValue],
     ) -> Result<usize>;
 
+    fn local_reserve_insert_pk(&mut self, _table: &str, _pk_column: Option<&str>) -> Result<()> {
+        Ok(())
+    }
+
     fn local_tombstones_by_pk(
         &mut self,
         table: &str,
@@ -179,6 +183,9 @@ pub fn execute_row_cow<B: RowCowBackend>(
             })
         }
         RowCowPlan::RowLevel(RowCowOp::Insert(insert)) => {
+            if insert.pk_values.is_empty() {
+                backend.local_reserve_insert_pk(&insert.table, insert.pk_column.as_deref())?;
+            }
             if let Some(pk_column) = &insert.pk_column {
                 backend.local_clear_tombstone_by_pk(&insert.table, pk_column, &insert.pk_values)?;
             }
@@ -193,9 +200,37 @@ pub fn execute_row_cow<B: RowCowBackend>(
 fn execute_select<B: RowCowBackend>(backend: &mut B, select: &RowSelect) -> Result<CowQueryResult> {
     let tombstones =
         backend.local_tombstones_by_pk(&select.table, &select.pk_column, &select.pk_values)?;
-    let remote =
-        backend.remote_select_by_pk(&select.table, &select.pk_column, &select.pk_values)?;
     let local = backend.local_select_by_pk(&select.table, &select.pk_column, &select.pk_values)?;
+    let local_pks = local
+        .rows
+        .iter()
+        .filter_map(|row| row_pk_value(row, &select.pk_column))
+        .collect::<BTreeSet<_>>();
+    let missing_values = select
+        .pk_values
+        .iter()
+        .filter(|value| !tombstones.contains(*value) && !local_pks.contains(*value))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let remote = if missing_values.is_empty() {
+        CowQueryResult::ok(Vec::new(), Vec::new())
+    } else {
+        let remote =
+            backend.remote_select_by_pk(&select.table, &select.pk_column, &missing_values)?;
+        let rows_to_materialize = remote
+            .rows
+            .iter()
+            .filter(|row| {
+                row_pk_value(row, &select.pk_column)
+                    .map(|pk| !tombstones.contains(&pk) && !local_pks.contains(&pk))
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        backend.local_upsert_rows(&select.table, &rows_to_materialize)?;
+        remote
+    };
 
     let mut merged = BTreeMap::<PkValue, Row>::new();
     for row in remote.rows {
@@ -936,6 +971,7 @@ pub fn is_supported_pk_column(column: &str) -> bool {
     [
         "ID",
         "option_id",
+        "option_name",
         "umeta_id",
         "meta_id",
         "term_id",
@@ -989,7 +1025,29 @@ pub fn expected_pk_for_table(table: &str) -> Option<&'static str> {
     None
 }
 
+pub fn auto_increment_pk_for_table(table: &str) -> Option<&'static str> {
+    let pk = expected_pk_for_table(table)?;
+    let lower = table.to_ascii_lowercase();
+    if lower == "term_relationships" || lower.ends_with("_term_relationships") {
+        return None;
+    }
+    Some(pk)
+}
+
+pub fn is_auto_increment_pk_for_table(table: &str, pk_column: &str) -> bool {
+    auto_increment_pk_for_table(table)
+        .map(|expected| expected.eq_ignore_ascii_case(pk_column))
+        .unwrap_or(false)
+}
+
 fn canonical_pk_column(table: &str, column: &str) -> Option<String> {
+    let lower = table.to_ascii_lowercase();
+    if (lower == "options" || lower.ends_with("_options"))
+        && column.eq_ignore_ascii_case("option_name")
+    {
+        return Some("option_name".to_string());
+    }
+
     if let Some(expected) = expected_pk_for_table(table) {
         if expected.eq_ignore_ascii_case(column) {
             return Some(expected.to_string());
@@ -1285,6 +1343,7 @@ mod tests {
         local: BTreeMap<String, BTreeMap<PkValue, Row>>,
         tombstones: BTreeSet<(String, String, PkValue)>,
         remote_calls: Vec<RemoteCall>,
+        reserved_inserts: Vec<(String, Option<String>)>,
     }
 
     impl FakeCowBackend {
@@ -1356,7 +1415,14 @@ mod tests {
         fn local_upsert_rows(&mut self, table: &str, rows: &[Row]) -> Result<usize> {
             let table_rows = self.local.entry(table.to_string()).or_default();
             for row in rows {
-                let pk = row_pk_value(row, expected_pk_for_table(table).unwrap()).unwrap();
+                let pk_column = if (table == "options" || table.ends_with("_options"))
+                    && row_value_ci(row, "option_name").is_some()
+                {
+                    "option_name"
+                } else {
+                    expected_pk_for_table(table).unwrap()
+                };
+                let pk = row_pk_value(row, pk_column).unwrap();
                 table_rows.insert(pk, row.clone());
             }
             Ok(rows.len())
@@ -1415,6 +1481,12 @@ mod tests {
                 }
             }
             Ok(removed)
+        }
+
+        fn local_reserve_insert_pk(&mut self, table: &str, pk_column: Option<&str>) -> Result<()> {
+            self.reserved_inserts
+                .push((table.to_string(), pk_column.map(str::to_string)));
+            Ok(())
         }
 
         fn local_tombstones_by_pk(
@@ -1492,6 +1564,39 @@ mod tests {
                 vec![PkValue("1".to_string()), PkValue("2".to_string())]
             );
         }
+
+        assert_eq!(auto_increment_pk_for_table("wp_posts"), Some("ID"));
+        assert_eq!(auto_increment_pk_for_table("wp_term_relationships"), None);
+    }
+
+    #[test]
+    fn plans_wordpress_options_by_unique_option_name() {
+        let RowCowPlan::RowLevel(RowCowOp::Update(write)) =
+            plan_sql("UPDATE wp_options SET option_value = 'local' WHERE option_name = 'blogname'")
+        else {
+            panic!("options writes by option_name should be row-level safe");
+        };
+        assert_eq!(write.table, "wp_options");
+        assert_eq!(write.pk_column, "option_name");
+        assert_eq!(write.pk_values, vec![PkValue("blogname".to_string())]);
+
+        let RowCowPlan::RowLevel(RowCowOp::Delete(write)) =
+            plan_sql("DELETE FROM wp_options WHERE option_name = '_transient_example'")
+        else {
+            panic!("options deletes by option_name should be row-level safe");
+        };
+        assert_eq!(write.pk_column, "option_name");
+
+        let RowCowPlan::RowLevel(RowCowOp::Select(select)) =
+            plan_sql("SELECT option_value FROM wp_options WHERE option_name = 'siteurl'")
+        else {
+            panic!("options reads by option_name should be row-level safe");
+        };
+        assert_eq!(select.pk_column, "option_name");
+        assert_eq!(
+            select.projection,
+            Projection::Columns(vec!["option_value".to_string()])
+        );
     }
 
     #[test]
@@ -1570,6 +1675,45 @@ mod tests {
     }
 
     #[test]
+    fn options_update_copy_up_fetches_only_named_option() {
+        let mut backend = FakeCowBackend::default();
+        backend.insert_remote(
+            "wp_options",
+            "option_name",
+            "blogname",
+            &[("option_id", "1"), ("option_value", "Remote Name")],
+        );
+        backend.insert_remote(
+            "wp_options",
+            "option_name",
+            "siteurl",
+            &[("option_id", "2"), ("option_value", "https://example.com")],
+        );
+
+        let execution = execute_row_cow(
+            &mut backend,
+            "UPDATE wp_options SET option_value = 'Local Name' WHERE option_name = 'blogname'",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            execution,
+            RowCowExecution::PreparedLocalWrite {
+                pk_column: Some(pk_column),
+                copied_rows: 1,
+                ..
+            } if pk_column == "option_name"
+        ));
+        assert_eq!(
+            backend.remote_select_values(),
+            vec![vec![PkValue("blogname".to_string())]]
+        );
+        assert!(backend.local["wp_options"].contains_key(&PkValue("blogname".to_string())));
+        assert!(!backend.local["wp_options"].contains_key(&PkValue("siteurl".to_string())));
+        backend.assert_no_remote_writes();
+    }
+
+    #[test]
     fn delete_tombstone_hides_remote_row_from_merged_selects() {
         let mut backend = FakeCowBackend::default();
         backend.insert_remote("wp_posts", "ID", "42", &[("post_title", "remote")]);
@@ -1586,6 +1730,77 @@ mod tests {
             panic!("expected row-level select");
         };
         assert!(result.rows.is_empty());
+        backend.assert_no_remote_writes();
+    }
+
+    #[test]
+    fn select_materializes_remote_rows_for_later_offline_reads() {
+        let mut backend = FakeCowBackend::default();
+        backend.insert_remote("wp_posts", "ID", "42", &[("post_title", "remote")]);
+
+        let execution =
+            execute_row_cow(&mut backend, "SELECT * FROM wp_posts WHERE ID = 42").unwrap();
+        let RowCowExecution::Select(result) = execution else {
+            panic!("expected row-level select");
+        };
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0].get("post_title"),
+            Some(&Value::String("remote".to_string()))
+        );
+        assert_eq!(
+            backend.local["wp_posts"][&PkValue("42".to_string())].get("post_title"),
+            Some(&Value::String("remote".to_string())),
+            "row-level reads must materialize remote rows so offline refresh can use local state"
+        );
+        backend.assert_no_remote_writes();
+    }
+
+    #[test]
+    fn repeated_select_uses_materialized_local_row_without_remote_read() {
+        let mut backend = FakeCowBackend::default();
+        backend.insert_remote("wp_posts", "ID", "42", &[("post_title", "remote")]);
+
+        execute_row_cow(&mut backend, "SELECT * FROM wp_posts WHERE ID = 42").unwrap();
+        backend.remote_calls.clear();
+
+        let execution =
+            execute_row_cow(&mut backend, "SELECT * FROM wp_posts WHERE ID = 42").unwrap();
+        let RowCowExecution::Select(result) = execution else {
+            panic!("expected row-level select");
+        };
+
+        assert_eq!(
+            result.rows[0].get("post_title"),
+            Some(&Value::String("remote".to_string()))
+        );
+        assert!(
+            backend.remote_calls.is_empty(),
+            "materialized row-level reads should be served from local COW state"
+        );
+    }
+
+    #[test]
+    fn select_materialization_preserves_local_overlay_rows() {
+        let mut backend = FakeCowBackend::default();
+        backend.insert_remote("wp_posts", "ID", "42", &[("post_title", "remote")]);
+        backend.insert_local("wp_posts", "ID", "42", &[("post_title", "local")]);
+
+        let execution =
+            execute_row_cow(&mut backend, "SELECT * FROM wp_posts WHERE ID = 42").unwrap();
+        let RowCowExecution::Select(result) = execution else {
+            panic!("expected row-level select");
+        };
+
+        assert_eq!(
+            result.rows[0].get("post_title"),
+            Some(&Value::String("local".to_string()))
+        );
+        assert_eq!(
+            backend.local["wp_posts"][&PkValue("42".to_string())].get("post_title"),
+            Some(&Value::String("local".to_string()))
+        );
         backend.assert_no_remote_writes();
     }
 
@@ -1654,6 +1869,25 @@ mod tests {
             .get("wp_posts")
             .unwrap_or(&BTreeMap::new())
             .contains_key(&PkValue("9".to_string())));
+        backend.assert_no_remote_writes();
+    }
+
+    #[test]
+    fn local_insert_without_pk_reserves_auto_increment_before_write() {
+        let mut backend = FakeCowBackend::default();
+        let execution = execute_row_cow(
+            &mut backend,
+            "INSERT INTO wp_posts (post_title) VALUES ('local auto id')",
+        )
+        .unwrap();
+        assert!(matches!(
+            execution,
+            RowCowExecution::LocalOnlyInsert { table } if table == "wp_posts"
+        ));
+        assert_eq!(
+            backend.reserved_inserts,
+            vec![("wp_posts".to_string(), Some("ID".to_string()))]
+        );
         backend.assert_no_remote_writes();
     }
 

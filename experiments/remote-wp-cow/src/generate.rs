@@ -9,8 +9,8 @@ pub const ROUTER_BASENAME: &str = ".wp-cow-router.php";
 
 pub fn write_wordpress_overrides(paths: &ClonePaths, manifest: &Manifest) -> Result<()> {
     fs::create_dir_all(paths.upper.join("wp-content/mu-plugins"))?;
-    write_opaque_dir(paths.upper.join("wp-content/plugins"))?;
-    write_opaque_dir(paths.upper.join("wp-content/languages"))?;
+    remove_opaque_marker(paths.upper.join("wp-content/plugins"))?;
+    remove_opaque_marker(paths.upper.join("wp-content/languages"))?;
     let router = router_php(paths, manifest);
     fs::write(
         paths.upper.join("wp-config.php"),
@@ -26,12 +26,11 @@ pub fn write_wordpress_overrides(paths: &ClonePaths, manifest: &Manifest) -> Res
     Ok(())
 }
 
-fn write_opaque_dir(path: impl AsRef<Path>) -> Result<()> {
-    fs::create_dir_all(path.as_ref())?;
-    fs::write(
-        path.as_ref().join(OPAQUE_MARKER),
-        b"local overlay hides remote lower\n",
-    )?;
+fn remove_opaque_marker(path: impl AsRef<Path>) -> Result<()> {
+    let marker = path.as_ref().join(OPAQUE_MARKER);
+    if marker.exists() {
+        fs::remove_file(marker)?;
+    }
     Ok(())
 }
 
@@ -125,9 +124,47 @@ function cow_is_write_sql( $sql ) {
 	return (bool) preg_match( '/^(INSERT|UPDATE|DELETE|REPLACE|ALTER|CREATE|DROP|TRUNCATE|RENAME|LOAD|LOCK|UNLOCK|GRANT|REVOKE|OPTIMIZE|ANALYZE|REPAIR)\b/i', $sql );
 }
 
+function cow_sql_without_literals_and_comments( $sql ) {
+	return preg_replace(
+		array(
+			'/\/\*.*?\*\//s',
+			'/--[^\n]*(?:\n|$)/',
+			'/#[^\n]*(?:\n|$)/',
+			'/\'(?:\\\\.|\'\'|[^\'\\\\])*\'/s',
+			'/"(?:\\\\.|""|[^"\\\\])*"/s',
+		),
+		' ',
+		$sql
+	);
+}
+
+function cow_select_has_remote_side_effect_clause( $sql ) {
+	$sql = cow_sql_without_literals_and_comments( $sql );
+	return (bool) preg_match( '/\bINTO\b|\bFOR\s+UPDATE\b|\bLOCK\s+IN\s+SHARE\s+MODE\b/i', $sql );
+}
+
 function cow_is_safe_read_sql( $sql ) {
 	$sql = ltrim( preg_replace( '/^\s*(?:\/\*.*?\*\/\s*|--[^\n]*\n\s*|#[^\n]*\n\s*)*/s', '', $sql ) );
-	return (bool) preg_match( '/^(SELECT|SHOW|DESCRIBE|DESC|EXPLAIN)\b/i', $sql );
+	if ( ! preg_match( '/^(SELECT|SHOW|DESCRIBE|DESC|EXPLAIN)\b/i', $sql, $matches ) ) {
+		return false;
+	}
+	if ( 0 === strcasecmp( $matches[1], 'SELECT' ) && cow_select_has_remote_side_effect_clause( $sql ) ) {
+		return false;
+	}
+	return true;
+}
+
+function cow_is_protected_theme_option_write( $sql ) {
+	if ( '0' === getenv( 'WPCOW_PROTECT_THEME_OPTIONS' ) ) {
+		return false;
+	}
+	if ( ! cow_is_write_sql( $sql ) ) {
+		return false;
+	}
+	if ( ! preg_match( '/\boption_name\b/i', $sql ) ) {
+		return false;
+	}
+	return (bool) preg_match( "/'(?:template|stylesheet|current_theme)'/i", $sql );
 }
 
 function cow_tables_from_sql( $sql ) {
@@ -228,6 +265,11 @@ function cow_row_cow_enabled() {
 	return '0' !== getenv( 'WPCOW_ROW_COW' );
 }
 
+function cow_offline() {
+	$value = strtolower( (string) getenv( 'WPCOW_OFFLINE' ) );
+	return in_array( $value, array( '1', 'true', 'yes', 'on' ), true );
+}
+
 function cow_remote_query_cache_file( $query ) {
 	if ( ! cow_remote_query_cache_enabled() ) {
 		return '';
@@ -292,6 +334,14 @@ class Cow_DB extends wpdb {
 		$tables = cow_tables_from_sql( $query );
 
 		if ( cow_is_write_sql( $query ) ) {
+			if ( in_array( $this->options, $tables, true ) && cow_is_protected_theme_option_write( $query ) ) {
+				$this->rows_affected = 0;
+				$this->last_error = '';
+				return 0;
+			}
+			if ( cow_offline() ) {
+				return parent::query( $query );
+			}
 			if ( cow_row_cow_enabled() ) {
 				$row_cow = cow_control_request( '/row-cow', array( 'tables' => $tables, 'sql' => $query ) );
 				if ( empty( $row_cow['ok'] ) ) {
@@ -313,6 +363,9 @@ class Cow_DB extends wpdb {
 		}
 
 		if ( cow_is_safe_read_sql( $query ) ) {
+			if ( cow_offline() ) {
+				return parent::query( $query );
+			}
 			if ( cow_row_cow_enabled() ) {
 				$row_cow = cow_control_request( '/row-cow', array( 'tables' => $tables, 'sql' => $query ) );
 				if ( empty( $row_cow['ok'] ) ) {
@@ -491,10 +544,12 @@ if ( ! defined( 'DISABLE_WP_CRON' ) ) {
 	define( 'DISABLE_WP_CRON', true );
 }
 
-if ( '1' !== getenv( 'WPCOW_ENABLE_PLUGINS' ) ) {
+if ( '0' === getenv( 'WPCOW_ENABLE_PLUGINS' ) ) {
 	add_filter( 'option_active_plugins', '__return_empty_array', PHP_INT_MAX );
 	add_filter( 'site_option_active_sitewide_plugins', '__return_empty_array', PHP_INT_MAX );
 }
+
+add_filter( 'validate_current_theme', '__return_false', PHP_INT_MAX );
 
 add_filter( 'pre_http_request', static function ( $preempt, $args, $url ) {
 	if ( defined( 'WPCOW_ALLOW_OUTBOUND_HTTP' ) && WPCOW_ALLOW_OUTBOUND_HTTP ) {
@@ -577,7 +632,7 @@ function wp_cow_is_frontend_get( $path ) {
 }
 
 function wp_cow_proxy_remote_frontend( $remote_url, $local_url, $path ) {
-	if ( '0' === getenv( 'WPCOW_PROXY_FRONTEND' ) || isset( $_GET['__wp_cow_local'] ) || ! wp_cow_is_frontend_get( $path ) ) {
+	if ( '1' !== getenv( 'WPCOW_PROXY_FRONTEND' ) || isset( $_GET['__wp_cow_local'] ) || ! wp_cow_is_frontend_get( $path ) ) {
 		return false;
 	}
 
@@ -669,12 +724,20 @@ function wp_cow_render_wordpress( $ready_file ) {
 	return true;
 }
 
-if ( in_array( $path, array( '/wp-admin/install.php', '/wp-admin/setup-config.php' ), true ) ) {
+if ( isset( $_GET['__wp_cow_installer_guard'] ) || in_array( $path, array( '/wp-admin/install.php', '/wp-admin/setup-config.php' ), true ) ) {
 	wp_cow_runtime_error_page(
 		'wp-cow did not load the remote site',
 		'WordPress tried to show an installation/setup path. This clone refuses to treat an empty or unavailable database lower layer as a successful site load.',
 		'Check the remote database probe, SSH connectivity, and wp-content/db.php drop-in before retrying.'
 	);
+	return true;
+}
+
+$wp_cow_docroot = rtrim( $_SERVER['DOCUMENT_ROOT'], '/' );
+if ( in_array( $path, array( '/wp-admin', '/wp-admin/' ), true ) && is_file( $wp_cow_docroot . '/wp-admin/index.php' ) ) {
+	$_SERVER['SCRIPT_NAME'] = '/wp-admin/index.php';
+	$_SERVER['SCRIPT_FILENAME'] = $wp_cow_docroot . '/wp-admin/index.php';
+	require $wp_cow_docroot . '/wp-admin/index.php';
 	return true;
 }
 
@@ -838,11 +901,17 @@ pub fn generated_file_paths(root: &Path) -> Vec<std::path::PathBuf> {
 mod tests {
     use super::*;
     use crate::config::{
-        clone_paths, DbProxy, LocalDb, Manifest, Probe, RemoteDbTunnel, MANIFEST_VERSION,
+        clone_paths, ensure_clone_dirs, write_manifest, write_offline_marker, DbProxy, LocalDb,
+        Manifest, OfflineMarker, Probe, RemoteDbTunnel, MANIFEST_VERSION,
     };
+    use std::ffi::OsString;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::process::Command;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, Command, Stdio};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -883,6 +952,14 @@ mod tests {
         }
     }
 
+    fn php_single_quoted_path(path: &Path) -> String {
+        let mut value = path.to_string_lossy().into_owned();
+        if path.is_dir() && !value.ends_with('/') {
+            value.push('/');
+        }
+        value.replace('\\', "\\\\").replace('\'', "\\'")
+    }
+
     #[test]
     fn generated_config_shadows_urls_and_database() {
         let temp = tempfile::tempdir().unwrap();
@@ -905,14 +982,77 @@ mod tests {
     fn db_dropin_blocks_write_classes() {
         let php = db_dropin_php();
         assert!(php.contains("cow_is_write_sql"));
+        assert!(php.contains("cow_select_has_remote_side_effect_clause"));
         assert!(php.contains("/materialize"));
         assert!(php.contains("cow_remote_mysqli"));
         assert!(php.contains("cow_remote_query_cache_get"));
         assert!(php.contains("cow_remote_query_cache_set"));
+        assert!(php.contains("cow_is_protected_theme_option_write"));
+        assert!(php.contains("WPCOW_PROTECT_THEME_OPTIONS"));
         assert!(php.contains("cow_db_runtime_fail"));
         assert!(php.contains("will not fall back to the empty local schema"));
         assert!(php.contains("'sql' => $query"));
         assert!(php.contains("INSERT|REPLACE"));
+    }
+
+    #[test]
+    fn db_dropin_rejects_read_shaped_remote_writes() {
+        if Command::new("php").arg("-v").output().is_err() {
+            eprintln!("skipping generated PHP SQL safety test because php is not on PATH");
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let wp_includes = temp.path().join("wp-includes");
+        fs::create_dir_all(&wp_includes).unwrap();
+        fs::write(
+            wp_includes.join("class-wpdb.php"),
+            "<?php class wpdb { public function __construct() {} }\n",
+        )
+        .unwrap();
+        let db_dropin = temp.path().join("db.php");
+        fs::write(&db_dropin, db_dropin_php()).unwrap();
+        let check = temp.path().join("check.php");
+        let script = format!(
+            r#"<?php
+define( 'ABSPATH', '{}' );
+define( 'WPINC', 'wp-includes' );
+define( 'DB_USER', 'u' );
+define( 'DB_PASSWORD', 'p' );
+define( 'DB_NAME', 'd' );
+define( 'DB_HOST', '127.0.0.1:3306' );
+require '{}';
+$cases = array(
+	'SELECT * FROM wp_posts' => true,
+	"SELECT * FROM wp_posts WHERE post_title = 'FOR UPDATE'" => true,
+	'SELECT * FROM wp_posts /* FOR UPDATE */ WHERE ID = 1' => true,
+	"SELECT * FROM wp_posts INTO OUTFILE '/tmp/wp-cow-leak'" => false,
+	'SELECT * FROM wp_posts WHERE ID = 1 FOR UPDATE' => false,
+	'SELECT * FROM wp_posts WHERE ID = 1 LOCK IN SHARE MODE' => false,
+);
+foreach ( $cases as $sql => $expected ) {{
+	$actual = cow_is_safe_read_sql( $sql );
+	if ( $actual !== $expected ) {{
+		fwrite( STDERR, $sql . ' expected ' . ( $expected ? 'safe' : 'unsafe' ) . ' got ' . ( $actual ? 'safe' : 'unsafe' ) . PHP_EOL );
+		exit( 1 );
+	}}
+}}
+"#,
+            php_single_quoted_path(temp.path()),
+            php_single_quoted_path(&db_dropin)
+        );
+        fs::write(&check, script).unwrap();
+
+        let output = Command::new("php")
+            .arg(&check)
+            .output()
+            .unwrap_or_else(|err| panic!("run PHP SQL safety check: {err}"));
+        assert!(
+            output.status.success(),
+            "PHP SQL safety check failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
@@ -921,8 +1061,42 @@ mod tests {
         assert!(php.contains("pre_wp_mail"));
         assert!(php.contains("X-Robots-Tag"));
         assert!(php.contains("pre_http_request"));
+        assert!(php.contains("validate_current_theme"));
         assert!(php.contains("WPCOW_ENABLE_PLUGINS"));
+        assert!(php.contains("'0' === getenv( 'WPCOW_ENABLE_PLUGINS' )"));
         assert!(php.contains("option_active_plugins"));
+    }
+
+    #[test]
+    fn generated_overrides_keep_remote_runtime_dirs_visible_by_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = clone_paths(temp.path(), "example");
+        ensure_clone_dirs(&paths).unwrap();
+        let plugins = paths.upper.join("wp-content/plugins");
+        let languages = paths.upper.join("wp-content/languages");
+        fs::create_dir_all(&plugins).unwrap();
+        fs::create_dir_all(&languages).unwrap();
+        fs::write(
+            plugins.join(crate::overlay::OPAQUE_MARKER),
+            b"legacy opaque marker\n",
+        )
+        .unwrap();
+        fs::write(
+            languages.join(crate::overlay::OPAQUE_MARKER),
+            b"legacy opaque marker\n",
+        )
+        .unwrap();
+
+        write_wordpress_overrides(&paths, &manifest()).unwrap();
+
+        assert!(
+            !plugins.join(crate::overlay::OPAQUE_MARKER).exists(),
+            "plugin files should remain backed by the lazy remote lower layer by default"
+        );
+        assert!(
+            !languages.join(crate::overlay::OPAQUE_MARKER).exists(),
+            "language files should remain backed by the lazy remote lower layer by default"
+        );
     }
 
     #[test]
@@ -936,6 +1110,7 @@ mod tests {
         assert!(php.contains("wp_cow_proxy_remote_frontend"));
         assert!(php.contains("X-WP-COW-Frontend-Proxy"));
         assert!(php.contains("WordPress tried to show the installation wizard"));
+        assert!(php.contains("__wp_cow_installer_guard"));
         assert!(php.contains("Cache-Control: no-store"));
         assert!(!php.contains("__WPCOW_PROGRESS_FILE__"));
         assert!(!php.contains("__WPCOW_READY_FILE__"));
@@ -1100,6 +1275,565 @@ mod tests {
         let _ = child.wait();
     }
 
+    #[test]
+    #[ignore = "strict harness only: starts temporary MariaDB and PHP servers"]
+    fn runtime_cow_harness_proves_admin_login_local_mutation_and_offline_refresh() {
+        require_command("php");
+        require_command("mariadbd");
+        require_command("mariadb-install-db");
+        require_command("mysql");
+
+        let temp = tempfile::tempdir().unwrap();
+        let mysql_port = free_tcp_port();
+        let mysql = ChildGuard::new(start_mariadb(temp.path(), mysql_port));
+        wait_for_mysql(mysql_port);
+        create_harness_databases(mysql_port);
+
+        let state_dir = temp.path().join("state");
+        let paths = clone_paths(&state_dir, "example");
+        fs::create_dir_all(&paths.generated).unwrap();
+        fs::create_dir_all(&paths.file_cache).unwrap();
+        fs::create_dir_all(&paths.run).unwrap();
+
+        let remote_public = HarnessHttpServer::start("REMOTE PUBLIC BYPASS");
+        let control_port = free_tcp_port();
+        let site_port = free_tcp_port();
+        let mut harness_manifest = manifest();
+        harness_manifest.remote_url = format!("http://127.0.0.1:{}", remote_public.port);
+        harness_manifest.local_url = format!("http://127.0.0.1:{site_port}");
+        harness_manifest.control_url = format!("http://127.0.0.1:{control_port}");
+        harness_manifest.probe.db_name = "remote_wp".to_string();
+        harness_manifest.probe.db_host = format!("127.0.0.1:{mysql_port}");
+        harness_manifest.probe.db_user = "root".to_string();
+        harness_manifest.probe.db_password = String::new();
+        harness_manifest.local_db = LocalDb {
+            name: "local_wp".to_string(),
+            user: "root".to_string(),
+            password: String::new(),
+            host: "127.0.0.1".to_string(),
+            port: mysql_port,
+        };
+        harness_manifest.remote_db_tunnel = RemoteDbTunnel {
+            host: "127.0.0.1".to_string(),
+            port: mysql_port,
+        };
+
+        crate::db::set_local_admin_password(&harness_manifest, Some("admin"), "local-pass")
+            .unwrap();
+
+        let docroot = temp.path().join("docroot");
+        write_runtime_harness_docroot(&docroot, &paths, &harness_manifest);
+        let router = paths.generated.join("router.php");
+        fs::write(&router, router_php(&paths, &harness_manifest)).unwrap();
+
+        let control_docroot = temp.path().join("control");
+        fs::create_dir_all(&control_docroot).unwrap();
+        let control_router = control_docroot.join("control.php");
+        fs::write(&control_router, runtime_harness_control_php()).unwrap();
+        let mut control = ChildGuard::new(start_php_server(
+            &control_docroot,
+            &control_router,
+            control_port,
+            &[("WPCOW_HARNESS_MYSQL_PORT", mysql_port.to_string())],
+        ));
+        wait_for_port(control_port);
+
+        let mut site = ChildGuard::new(start_php_server(
+            &docroot,
+            &router,
+            site_port,
+            &[("WPCOW_SPLASH", "0".to_string())],
+        ));
+        wait_for_port(site_port);
+
+        let first = http_get_nonempty(site_port, "/", Duration::from_secs(5));
+        assert!(
+            first.contains("Remote Harness Page"),
+            "unexpected first page response: {}",
+            first
+        );
+        assert!(
+            !first.contains("REMOTE PUBLIC BYPASS"),
+            "frontend request was served by the remote public proxy instead of local WordPress: {}",
+            first
+        );
+        assert!(
+            !remote_public.was_hit(),
+            "default frontend handling must not call the remote public URL"
+        );
+        assert_eq!(
+            mysql_scalar(
+                mysql_port,
+                "SELECT post_title FROM local_wp.wp_posts WHERE ID=1;"
+            ),
+            "Remote Harness Page",
+            "row-level frontend read must materialize the page locally"
+        );
+
+        let login = http_post(
+            site_port,
+            "/wp-login.php",
+            "log=admin&pwd=local-pass",
+            Duration::from_secs(5),
+        );
+        assert!(
+            login.contains("LOGIN OK"),
+            "local admin password override did not log in: {}",
+            login
+        );
+        let cookie = response_cookie(&login).expect("login response should set an auth cookie");
+        let admin = http_get_with_headers(
+            site_port,
+            "/wp-admin/",
+            &[("Cookie", cookie.as_str())],
+            Duration::from_secs(5),
+        );
+        assert!(
+            admin.contains("WP ADMIN LOCAL DASHBOARD"),
+            "wp-admin did not render after local login: {}",
+            admin
+        );
+        assert_eq!(
+            mysql_scalar(
+                mysql_port,
+                "SELECT user_pass = MD5('remote-pass') FROM remote_wp.wp_users WHERE ID=1;"
+            ),
+            "1",
+            "local admin password override must not change the remote password"
+        );
+        assert_eq!(
+            mysql_scalar(
+                mysql_port,
+                "SELECT user_pass = MD5('local-pass') FROM local_wp.wp_users WHERE ID=1;"
+            ),
+            "1",
+            "local admin password override must update only the local DB"
+        );
+
+        let created = http_post(
+            site_port,
+            "/wp-admin/post-new.php",
+            "title=Local+Only",
+            Duration::from_secs(5),
+        );
+        assert!(
+            created.contains("LOCAL POST CREATED"),
+            "local post creation failed: {}",
+            created
+        );
+        let local_only = http_get_nonempty(site_port, "/local-only-page", Duration::from_secs(5));
+        assert!(
+            local_only.contains("Local Only Harness Page"),
+            "local-only page was not visible locally: {}",
+            local_only
+        );
+        assert_eq!(
+            mysql_scalar(
+                mysql_port,
+                "SELECT COUNT(*) FROM remote_wp.wp_posts WHERE ID=99;"
+            ),
+            "0",
+            "local page creation must not write to remote"
+        );
+        assert_eq!(
+            mysql_scalar(
+                mysql_port,
+                "SELECT COUNT(*) FROM local_wp.wp_posts WHERE ID=99;"
+            ),
+            "1",
+            "local page creation must write to the local overlay"
+        );
+
+        let edited = http_post(
+            site_port,
+            "/wp-admin/post.php",
+            "post_ID=1",
+            Duration::from_secs(5),
+        );
+        assert!(
+            edited.contains("LOCAL POST EDITED"),
+            "local post edit failed: {}",
+            edited
+        );
+        let edited_page = http_get_nonempty(site_port, "/", Duration::from_secs(5));
+        assert!(
+            edited_page.contains("Locally Edited Harness Page"),
+            "edited local page did not render: {}",
+            edited_page
+        );
+        assert_eq!(
+            mysql_scalar(
+                mysql_port,
+                "SELECT post_title FROM remote_wp.wp_posts WHERE ID=1;"
+            ),
+            "Remote Harness Page",
+            "local edit must not change the remote row"
+        );
+
+        site.kill_wait();
+        control.kill_wait();
+        mysql_exec(
+            mysql_port,
+            "UPDATE remote_wp.wp_posts SET post_title='Remote Changed After Sever' WHERE ID=1;",
+        );
+
+        let mut offline_site = ChildGuard::new(start_php_server(
+            &docroot,
+            &router,
+            site_port,
+            &[
+                ("WPCOW_SPLASH", "0".to_string()),
+                ("WPCOW_OFFLINE", "1".to_string()),
+                ("WPCOW_REMOTE_DB_TUNNEL", "0".to_string()),
+            ],
+        ));
+        wait_for_port(site_port);
+        let offline = http_get_nonempty(site_port, "/", Duration::from_secs(5));
+        assert!(
+            offline.contains("Locally Edited Harness Page"),
+            "offline refresh did not use local materialized state: {}",
+            offline
+        );
+        assert!(
+            !offline.contains("Remote Changed After Sever"),
+            "offline refresh read from the remote lower layer: {}",
+            offline
+        );
+
+        offline_site.kill_wait();
+        drop(mysql);
+    }
+
+    #[test]
+    #[ignore = "strict harness only: starts temporary MariaDB, PHP, FUSE, and fake SSH"]
+    fn production_run_harness_proves_fuse_rust_control_and_offline_refresh() {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+
+        require_command("php");
+        require_command("mariadbd");
+        require_command("mariadb-install-db");
+        require_command("mysql");
+        require_command("fusermount3");
+        assert!(
+            Path::new("/dev/fuse").exists(),
+            "strict production harness requires /dev/fuse"
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let mysql_port = free_tcp_port();
+        let mysql = ChildGuard::new(start_mariadb(temp.path(), mysql_port));
+        wait_for_mysql(mysql_port);
+        create_harness_databases(mysql_port);
+
+        let state_dir = temp.path().join("state");
+        let paths = clone_paths(&state_dir, "example");
+        ensure_clone_dirs(&paths).unwrap();
+
+        let remote_public = HarnessHttpServer::start("REMOTE PUBLIC BYPASS");
+        let control_port = free_tcp_port();
+        let site_port = free_tcp_port();
+        let mut harness_manifest = manifest();
+        harness_manifest.ssh = "fake-host".to_string();
+        harness_manifest.remote_url = format!("http://127.0.0.1:{}", remote_public.port);
+        harness_manifest.local_url = format!("http://127.0.0.1:{site_port}");
+        harness_manifest.control_url = format!("http://127.0.0.1:{control_port}");
+        harness_manifest.probe.db_name = "remote_wp".to_string();
+        harness_manifest.probe.db_host = format!("127.0.0.1:{mysql_port}");
+        harness_manifest.probe.db_user = "root".to_string();
+        harness_manifest.probe.db_password = String::new();
+        harness_manifest.local_db = LocalDb {
+            name: "local_wp".to_string(),
+            user: "root".to_string(),
+            password: String::new(),
+            host: "127.0.0.1".to_string(),
+            port: mysql_port,
+        };
+        harness_manifest.remote_db_tunnel = RemoteDbTunnel {
+            host: "127.0.0.1".to_string(),
+            port: mysql_port,
+        };
+        harness_manifest.cache_max_file_bytes = 1024 * 1024;
+        harness_manifest.remote_metadata_cache_ttl_secs = 60;
+
+        let remote_docroot = temp.path().join("remote-docroot");
+        harness_manifest.remote_path = remote_docroot.to_string_lossy().to_string();
+        write_runtime_harness_docroot(&remote_docroot, &paths, &harness_manifest);
+        fs::create_dir_all(remote_docroot.join("wp-content/uploads/2026")).unwrap();
+        fs::write(
+            remote_docroot.join("wp-content/uploads/2026/huge-file.txt"),
+            b"uploads must stay lazy",
+        )
+        .unwrap();
+        write_manifest(&paths.manifest, &harness_manifest).unwrap();
+        write_wordpress_overrides(&paths, &harness_manifest).unwrap();
+        crate::db::set_local_admin_password(&harness_manifest, Some("admin"), "local-pass")
+            .unwrap();
+
+        let fake_bin = temp.path().join("fake-bin");
+        let fake_ssh_log = temp.path().join("fake-ssh.log");
+        install_fake_ssh(&fake_bin, &fake_ssh_log);
+        let _env = EnvVarGuard::set(&[
+            (
+                "PATH",
+                prepend_path(&fake_bin, std::env::var_os("PATH").as_ref()),
+            ),
+            (
+                "WPCOW_FAKE_SSH_LOG",
+                fake_ssh_log.to_string_lossy().into_owned(),
+            ),
+            ("WPCOW_WEB_SERVER", "php".to_string()),
+            ("WPCOW_SPLASH", "0".to_string()),
+            ("WPCOW_PROXY_FRONTEND", "0".to_string()),
+            ("WPCOW_REMOTE_DB_TUNNEL", "0".to_string()),
+            ("WPCOW_REMOTE_FILE_HELPER", "0".to_string()),
+            ("WPCOW_CONTROL_REQUEST_TIMEOUT_SECS", "10".to_string()),
+            ("WPCOW_FUSE_TTL_SECS", "1".to_string()),
+            ("WPCOW_PHP_WORKERS", "1".to_string()),
+        ]);
+
+        let mountpoint = temp.path().join("mount");
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let run_manifest = harness_manifest.clone();
+        let run_paths = paths.clone();
+        let run_mountpoint = mountpoint.clone();
+        let run_shutdown = shutdown.clone();
+        let run_thread = thread::spawn(move || {
+            crate::run::run_site_with_shutdown(
+                run_manifest,
+                run_paths,
+                crate::run::RunOptions {
+                    mountpoint: run_mountpoint,
+                    http_addr: format!("127.0.0.1:{site_port}"),
+                    skip_php: false,
+                },
+                run_shutdown,
+            )
+        });
+        wait_for_port(site_port);
+
+        let first = http_get_nonempty(site_port, "/", Duration::from_secs(10));
+        assert!(
+            first.contains("Remote Harness Page"),
+            "production run did not render the remote page through local WordPress: {}",
+            first
+        );
+        assert!(
+            !remote_public.was_hit(),
+            "production run must not proxy the frontend public URL by default"
+        );
+        assert_eq!(
+            mysql_scalar(
+                mysql_port,
+                "SELECT post_title FROM local_wp.wp_posts WHERE ID=1;"
+            ),
+            "Remote Harness Page",
+            "Rust control row-COW should materialize the rendered page locally"
+        );
+        assert!(
+            cached_file_count(&paths) > 0,
+            "FUSE run should cache requested runtime files"
+        );
+        assert!(
+            !paths.file_cache.join("mirror/wp-content/uploads").exists(),
+            "uploads must not be mirrored or prefetched"
+        );
+        let ssh_log = fs::read_to_string(&fake_ssh_log).unwrap_or_default();
+        assert!(
+            !ssh_log.contains("wp-content/uploads"),
+            "production run should not touch uploads unless requested:\n{}",
+            ssh_log
+        );
+        assert!(
+            !ssh_log.contains("tar -cf -"),
+            "production run must not recursively tar runtime files:\n{}",
+            ssh_log
+        );
+
+        let installer =
+            http_get_nonempty(site_port, "/wp-admin/install.php", Duration::from_secs(5));
+        assert!(
+            installer.starts_with("HTTP/1.1 500"),
+            "installer path must be reported as a runtime failure: {}",
+            installer
+        );
+        assert!(
+            installer.contains("wp-cow did not load the remote site"),
+            "installer path did not use the wp-cow runtime guard: {}",
+            installer
+        );
+
+        let login = http_post(
+            site_port,
+            "/wp-login.php",
+            "log=admin&pwd=local-pass",
+            Duration::from_secs(10),
+        );
+        assert!(
+            login.contains("LOGIN OK"),
+            "local-only admin password did not authenticate through production run: {}",
+            login
+        );
+        let cookie = response_cookie(&login).expect("login response should set an auth cookie");
+        let admin = http_get_with_headers(
+            site_port,
+            "/wp-admin/",
+            &[("Cookie", cookie.as_str())],
+            Duration::from_secs(10),
+        );
+        assert!(
+            admin.contains("WP ADMIN LOCAL DASHBOARD"),
+            "wp-admin did not render after local login through production run: {}",
+            admin
+        );
+        assert_eq!(
+            mysql_scalar(
+                mysql_port,
+                "SELECT user_pass = MD5('remote-pass') FROM remote_wp.wp_users WHERE ID=1;"
+            ),
+            "1",
+            "production local admin override must not update the remote password"
+        );
+        assert_eq!(
+            mysql_scalar(
+                mysql_port,
+                "SELECT user_pass = MD5('local-pass') FROM local_wp.wp_users WHERE ID=1;"
+            ),
+            "1",
+            "production local admin override must update only the local DB"
+        );
+
+        let created = http_post(
+            site_port,
+            "/wp-admin/post-new.php",
+            "title=Local+Only",
+            Duration::from_secs(10),
+        );
+        assert!(
+            created.contains("LOCAL POST CREATED"),
+            "production local post creation failed: {}",
+            created
+        );
+        let local_only = http_get_nonempty(site_port, "/local-only-page", Duration::from_secs(10));
+        assert!(
+            local_only.contains("Local Only Harness Page"),
+            "production local-only page was not visible locally: {}",
+            local_only
+        );
+        assert_eq!(
+            mysql_scalar(
+                mysql_port,
+                "SELECT COUNT(*) FROM remote_wp.wp_posts WHERE ID=99;"
+            ),
+            "0",
+            "production local page creation must not write to remote"
+        );
+        assert_eq!(
+            mysql_scalar(
+                mysql_port,
+                "SELECT COUNT(*) FROM local_wp.wp_posts WHERE ID=99;"
+            ),
+            "1",
+            "production local page creation must write to the local overlay"
+        );
+
+        let edited = http_post(
+            site_port,
+            "/wp-admin/post.php",
+            "post_ID=1",
+            Duration::from_secs(10),
+        );
+        assert!(
+            edited.contains("LOCAL POST EDITED"),
+            "production local post edit failed: {}",
+            edited
+        );
+        let edited_page = http_get_nonempty(site_port, "/", Duration::from_secs(10));
+        assert!(
+            edited_page.contains("Locally Edited Harness Page"),
+            "production edited local page did not render: {}",
+            edited_page
+        );
+        assert_eq!(
+            mysql_scalar(
+                mysql_port,
+                "SELECT post_title FROM remote_wp.wp_posts WHERE ID=1;"
+            ),
+            "Remote Harness Page",
+            "production local edit must not change the remote row"
+        );
+
+        shutdown.store(true, Ordering::SeqCst);
+        match run_thread.join() {
+            Ok(result) => result.unwrap(),
+            Err(_) => panic!("production run thread panicked"),
+        }
+        wait_for_port_closed(site_port);
+
+        write_offline_marker(
+            &paths,
+            &OfflineMarker {
+                severed_at_unix: 1,
+                materialized_tables: vec![
+                    "wp_posts".to_string(),
+                    "wp_users".to_string(),
+                    "wp_usermeta".to_string(),
+                ],
+                admin_user: Some("admin".to_string()),
+            },
+        )
+        .unwrap();
+        mysql_exec(
+            mysql_port,
+            "UPDATE remote_wp.wp_posts SET post_title='Remote Changed After Sever' WHERE ID=1;",
+        );
+        fs::rename(&remote_docroot, temp.path().join("remote-docroot-gone")).unwrap();
+        let ssh_lines_before_offline = read_line_count(&fake_ssh_log);
+
+        let offline_shutdown = Arc::new(AtomicBool::new(false));
+        let offline_manifest = harness_manifest.clone();
+        let offline_paths = paths.clone();
+        let offline_mountpoint = mountpoint.clone();
+        let offline_thread_shutdown = offline_shutdown.clone();
+        let offline_thread = thread::spawn(move || {
+            crate::run::run_site_with_shutdown(
+                offline_manifest,
+                offline_paths,
+                crate::run::RunOptions {
+                    mountpoint: offline_mountpoint,
+                    http_addr: format!("127.0.0.1:{site_port}"),
+                    skip_php: false,
+                },
+                offline_thread_shutdown,
+            )
+        });
+        wait_for_port(site_port);
+        let offline = http_get_nonempty(site_port, "/", Duration::from_secs(10));
+        assert!(
+            offline.contains("Locally Edited Harness Page"),
+            "offline production refresh did not use local materialized state: {}",
+            offline
+        );
+        assert!(
+            !offline.contains("Remote Changed After Sever"),
+            "offline production refresh read from the remote lower layer: {}",
+            offline
+        );
+        assert_eq!(
+            read_line_count(&fake_ssh_log),
+            ssh_lines_before_offline,
+            "offline production run must not invoke SSH"
+        );
+
+        offline_shutdown.store(true, Ordering::SeqCst);
+        match offline_thread.join() {
+            Ok(result) => result.unwrap(),
+            Err(_) => panic!("offline production run thread panicked"),
+        }
+        wait_for_port_closed(site_port);
+        drop(mysql);
+    }
+
     fn free_tcp_port() -> u16 {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         listener.local_addr().unwrap().port()
@@ -1131,5 +1865,770 @@ mod tests {
                 Err(err) => panic!("request {path} failed: {err}"),
             }
         }
+    }
+
+    fn http_get_with_headers(
+        port: u16,
+        path: &str,
+        headers: &[(&str, &str)],
+        timeout: Duration,
+    ) -> String {
+        http_request(port, "GET", path, headers, "", timeout)
+            .unwrap_or_else(|err| panic!("GET {path} failed: {err}"))
+    }
+
+    fn http_post(port: u16, path: &str, body: &str, timeout: Duration) -> String {
+        http_request(
+            port,
+            "POST",
+            path,
+            &[("Content-Type", "application/x-www-form-urlencoded")],
+            body,
+            timeout,
+        )
+        .unwrap_or_else(|err| panic!("POST {path} failed: {err}"))
+    }
+
+    fn http_request(
+        port: u16,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: &str,
+        timeout: Duration,
+    ) -> std::io::Result<String> {
+        let mut stream = TcpStream::connect(("127.0.0.1", port))?;
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
+        let mut request = format!(
+            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: {}\r\n",
+            body.len()
+        );
+        for (name, value) in headers {
+            request.push_str(&format!("{name}: {value}\r\n"));
+        }
+        request.push_str("\r\n");
+        request.push_str(body);
+        stream.write_all(request.as_bytes())?;
+
+        let mut response = String::new();
+        stream.read_to_string(&mut response)?;
+        Ok(response)
+    }
+
+    fn response_cookie(response: &str) -> Option<String> {
+        response.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if !name.eq_ignore_ascii_case("set-cookie") {
+                return None;
+            }
+            value.trim().split(';').next().map(str::to_string)
+        })
+    }
+
+    fn prepend_path(dir: &Path, old_path: Option<&OsString>) -> String {
+        match old_path {
+            Some(old) if !old.is_empty() => format!("{}:{}", dir.display(), old.to_string_lossy()),
+            _ => dir.display().to_string(),
+        }
+    }
+
+    fn install_fake_ssh(bin: &Path, log: &Path) {
+        fs::create_dir_all(bin).unwrap();
+        let script = bin.join("ssh");
+        fs::write(
+            &script,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${WPCOW_FAKE_SSH_LOG:?}"
+
+for arg in "$@"; do
+  if [ "$arg" = "-O" ]; then
+    exit 0
+  fi
+done
+
+for arg in "$@"; do
+  if [ "$arg" = "-MNf" ]; then
+    exit 0
+  fi
+  if [ "$arg" = "-N" ]; then
+    while true; do sleep 60; done
+  fi
+done
+
+last="${!#}"
+if [ "$last" = "fake-host" ]; then
+  exit 0
+fi
+exec bash -lc "$last"
+"#,
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script, perms).unwrap();
+        fs::write(log, b"").unwrap();
+    }
+
+    fn read_line_count(path: &Path) -> usize {
+        fs::read_to_string(path).unwrap_or_default().lines().count()
+    }
+
+    fn cached_file_count(paths: &crate::config::ClonePaths) -> usize {
+        fn visit(path: &Path, count: &mut usize) {
+            let Ok(entries) = fs::read_dir(path) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    visit(&path, count);
+                } else if path.is_file() {
+                    *count += 1;
+                }
+            }
+        }
+
+        let mut count = 0;
+        visit(&paths.file_cache, &mut count);
+        count
+    }
+
+    struct EnvVarGuard {
+        old: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl EnvVarGuard {
+        fn set(vars: &[(&'static str, String)]) -> Self {
+            let old = vars
+                .iter()
+                .map(|(name, _)| (*name, std::env::var_os(name)))
+                .collect::<Vec<_>>();
+            for (name, value) in vars {
+                std::env::set_var(name, value);
+            }
+            Self { old }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            for (name, value) in self.old.drain(..).rev() {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    struct ChildGuard {
+        child: Option<Child>,
+    }
+
+    impl ChildGuard {
+        fn new(child: Child) -> Self {
+            Self { child: Some(child) }
+        }
+
+        fn kill_wait(&mut self) {
+            if let Some(mut child) = self.child.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            self.kill_wait();
+        }
+    }
+
+    struct HarnessHttpServer {
+        port: u16,
+        hit: Arc<AtomicBool>,
+        shutdown: Arc<AtomicBool>,
+        handle: Option<thread::JoinHandle<()>>,
+    }
+
+    impl HarnessHttpServer {
+        fn start(body: &'static str) -> Self {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            listener.set_nonblocking(true).unwrap();
+            let hit = Arc::new(AtomicBool::new(false));
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let thread_hit = hit.clone();
+            let thread_shutdown = shutdown.clone();
+            let handle = thread::spawn(move || {
+                while !thread_shutdown.load(Ordering::SeqCst) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            thread_hit.store(true, Ordering::SeqCst);
+                            let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+                            let mut buf = [0_u8; 1024];
+                            let _ = stream.read(&mut buf);
+                            let response = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                body.len(),
+                                body
+                            );
+                            let _ = stream.write_all(response.as_bytes());
+                        }
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(20));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+            Self {
+                port,
+                hit,
+                shutdown,
+                handle: Some(handle),
+            }
+        }
+
+        fn was_hit(&self) -> bool {
+            self.hit.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for HarnessHttpServer {
+        fn drop(&mut self) {
+            self.shutdown.store(true, Ordering::SeqCst);
+            let _ = TcpStream::connect(("127.0.0.1", self.port));
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    fn require_command(name: &str) {
+        assert!(
+            command_path(name).is_some(),
+            "strict runtime harness requires {name} on PATH"
+        );
+    }
+
+    fn command_path(name: &str) -> Option<PathBuf> {
+        if name.contains('/') {
+            let path = PathBuf::from(name);
+            return path.is_file().then_some(path);
+        }
+        std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|dir| dir.join(name))
+                .find(|path| path.is_file())
+        })
+    }
+
+    fn start_mariadb(temp: &Path, port: u16) -> Child {
+        let datadir = temp.join("mysql-data");
+        let basedir = command_path("mariadbd")
+            .and_then(|path| fs::canonicalize(path).ok())
+            .and_then(|path| {
+                path.parent()
+                    .and_then(|bin| bin.parent())
+                    .map(Path::to_path_buf)
+            })
+            .expect("resolve mariadbd basedir");
+
+        let mut install = Command::new("mariadb-install-db");
+        install
+            .arg(format!("--basedir={}", basedir.display()))
+            .arg(format!("--datadir={}", datadir.display()))
+            .arg("--auth-root-authentication-method=normal")
+            .arg("--skip-test-db");
+        if let Ok(user) = std::env::var("USER") {
+            install.arg(format!("--user={user}"));
+        }
+        let output = install
+            .output()
+            .unwrap_or_else(|err| panic!("run mariadb-install-db: {err}"));
+        assert!(
+            output.status.success(),
+            "mariadb-install-db failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        Command::new("mariadbd")
+            .arg("--no-defaults")
+            .arg(format!("--basedir={}", basedir.display()))
+            .arg(format!("--datadir={}", datadir.display()))
+            .arg(format!("--socket={}", temp.join("mysql.sock").display()))
+            .arg(format!("--port={port}"))
+            .arg("--bind-address=127.0.0.1")
+            .arg(format!("--pid-file={}", temp.join("mysql.pid").display()))
+            .arg("--skip-networking=0")
+            .arg("--skip-grant-tables")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap_or_else(|err| panic!("start mariadbd: {err}"))
+    }
+
+    fn wait_for_mysql(port: u16) {
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(10) {
+            let output = Command::new("mysql")
+                .arg("--protocol=TCP")
+                .arg("-h127.0.0.1")
+                .arg(format!("-P{port}"))
+                .arg("-uroot")
+                .arg("--execute")
+                .arg("SELECT 1;")
+                .output();
+            if matches!(output, Ok(output) if output.status.success()) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        panic!("temporary MariaDB did not become ready on port {port}");
+    }
+
+    fn mysql_exec(port: u16, sql: &str) {
+        let output = Command::new("mysql")
+            .arg("--protocol=TCP")
+            .arg("-h127.0.0.1")
+            .arg(format!("-P{port}"))
+            .arg("-uroot")
+            .arg("--execute")
+            .arg(sql)
+            .output()
+            .unwrap_or_else(|err| panic!("run mysql: {err}"));
+        assert!(
+            output.status.success(),
+            "mysql failed for SQL:\n{sql}\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn mysql_scalar(port: u16, sql: &str) -> String {
+        let output = Command::new("mysql")
+            .arg("--protocol=TCP")
+            .arg("-h127.0.0.1")
+            .arg(format!("-P{port}"))
+            .arg("-uroot")
+            .arg("--batch")
+            .arg("--raw")
+            .arg("--skip-column-names")
+            .arg("--execute")
+            .arg(sql)
+            .output()
+            .unwrap_or_else(|err| panic!("run mysql scalar: {err}"));
+        assert!(
+            output.status.success(),
+            "mysql scalar failed for SQL:\n{sql}\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout)
+            .trim_end_matches(['\r', '\n'])
+            .to_string()
+    }
+
+    fn create_harness_databases(port: u16) {
+        mysql_exec(
+            port,
+            r#"
+CREATE DATABASE remote_wp DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE local_wp DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE TABLE remote_wp.wp_posts (
+  ID bigint unsigned NOT NULL,
+  post_title text NOT NULL,
+  post_content longtext NOT NULL,
+  post_name varchar(200) NOT NULL DEFAULT '',
+  post_status varchar(20) NOT NULL DEFAULT 'publish',
+  post_type varchar(20) NOT NULL DEFAULT 'post',
+  PRIMARY KEY (ID)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE local_wp.wp_posts LIKE remote_wp.wp_posts;
+CREATE TABLE remote_wp.wp_users (
+  ID bigint unsigned NOT NULL,
+  user_login varchar(60) NOT NULL,
+  user_pass varchar(255) NOT NULL,
+  user_nicename varchar(50) NOT NULL DEFAULT '',
+  user_email varchar(100) NOT NULL DEFAULT '',
+  user_registered datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  user_activation_key varchar(255) NOT NULL DEFAULT '',
+  user_status int NOT NULL DEFAULT 0,
+  display_name varchar(250) NOT NULL DEFAULT '',
+  PRIMARY KEY (ID),
+  KEY user_login_key (user_login)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE local_wp.wp_users LIKE remote_wp.wp_users;
+CREATE TABLE remote_wp.wp_usermeta (
+  umeta_id bigint unsigned NOT NULL,
+  user_id bigint unsigned NOT NULL DEFAULT 0,
+  meta_key varchar(255) DEFAULT NULL,
+  meta_value longtext,
+  PRIMARY KEY (umeta_id),
+  KEY user_id (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE local_wp.wp_usermeta LIKE remote_wp.wp_usermeta;
+INSERT INTO remote_wp.wp_posts (ID, post_title, post_content, post_name, post_status, post_type)
+VALUES (1, 'Remote Harness Page', 'remote lower content', 'remote-harness-page', 'publish', 'page');
+INSERT INTO remote_wp.wp_users (ID, user_login, user_pass, user_nicename, user_email, display_name)
+VALUES (1, 'admin', MD5('remote-pass'), 'admin', 'admin@example.test', 'Admin');
+INSERT INTO remote_wp.wp_usermeta (umeta_id, user_id, meta_key, meta_value)
+VALUES (1, 1, 'wp_capabilities', 'a:1:{s:13:"administrator";b:1;}');
+INSERT INTO local_wp.wp_users SELECT * FROM remote_wp.wp_users WHERE ID=1;
+INSERT INTO local_wp.wp_usermeta SELECT * FROM remote_wp.wp_usermeta WHERE user_id=1;
+"#,
+        );
+    }
+
+    fn start_php_server(
+        docroot: &Path,
+        router: &Path,
+        port: u16,
+        envs: &[(&str, String)],
+    ) -> Child {
+        let mut command = Command::new("php");
+        command
+            .env("PHP_CLI_SERVER_WORKERS", "4")
+            .current_dir(docroot)
+            .arg("-S")
+            .arg(format!("127.0.0.1:{port}"))
+            .arg("-t")
+            .arg(docroot)
+            .arg(router)
+            .stdout(Stdio::null())
+            .stderr(if std::env::var_os("WPCOW_HARNESS_PHP_STDERR").is_some() {
+                Stdio::inherit()
+            } else {
+                Stdio::null()
+            });
+        for (name, value) in envs {
+            command.env(name, value);
+        }
+        command
+            .spawn()
+            .unwrap_or_else(|err| panic!("start php server on {port}: {err}"))
+    }
+
+    fn wait_for_port(port: u16) {
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(5) {
+            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        panic!("port {port} did not open");
+    }
+
+    fn wait_for_port_closed(port: u16) {
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(5) {
+            if TcpStream::connect(("127.0.0.1", port)).is_err() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        panic!("port {port} did not close");
+    }
+
+    fn write_runtime_harness_docroot(
+        docroot: &Path,
+        paths: &crate::config::ClonePaths,
+        manifest: &Manifest,
+    ) {
+        fs::create_dir_all(docroot.join("wp-includes")).unwrap();
+        fs::create_dir_all(docroot.join("wp-content")).unwrap();
+        fs::create_dir_all(docroot.join("wp-admin")).unwrap();
+        fs::write(
+            docroot.join("wp-config.php"),
+            wp_config_php(manifest, paths),
+        )
+        .unwrap();
+        fs::write(docroot.join("wp-content/db.php"), db_dropin_php()).unwrap();
+        fs::write(
+            docroot.join("wp-includes/class-wpdb.php"),
+            runtime_harness_wpdb_php(),
+        )
+        .unwrap();
+        fs::write(
+            docroot.join("wp-settings.php"),
+            runtime_harness_settings_php(),
+        )
+        .unwrap();
+        fs::write(
+            docroot.join("index.php"),
+            "<?php require __DIR__ . '/wp-config.php';\n",
+        )
+        .unwrap();
+        fs::write(
+            docroot.join("wp-login.php"),
+            "<?php require __DIR__ . '/wp-config.php';\n",
+        )
+        .unwrap();
+        for name in ["index.php", "post-new.php", "post.php"] {
+            fs::write(
+                docroot.join("wp-admin").join(name),
+                "<?php require dirname(__DIR__) . '/wp-config.php';\n",
+            )
+            .unwrap();
+        }
+    }
+
+    fn runtime_harness_wpdb_php() -> &'static str {
+        r#"<?php
+class wpdb {
+	public $dbh;
+	public $last_error = '';
+	public $last_result = array();
+	public $col_info = array();
+	public $num_rows = 0;
+	public $rows_affected = 0;
+	public $insert_id = 0;
+	public $charset = 'utf8mb4';
+	public $last_query = '';
+
+	public function __construct( $dbuser, $dbpassword, $dbname, $dbhost ) {
+		$host = $dbhost;
+		$port = ini_get( 'mysqli.default_port' );
+		if ( preg_match( '/^(.+):([0-9]+)$/', $dbhost, $matches ) ) {
+			$host = $matches[1];
+			$port = (int) $matches[2];
+		}
+		$this->dbh = mysqli_connect( $host, $dbuser, $dbpassword, $dbname, $port );
+		if ( ! $this->dbh ) {
+			throw new RuntimeException( 'mysqli connect failed: ' . mysqli_connect_error() );
+		}
+		mysqli_set_charset( $this->dbh, $this->charset );
+	}
+
+	public function flush() {
+		$this->last_error = '';
+		$this->last_result = array();
+		$this->col_info = array();
+		$this->num_rows = 0;
+		$this->rows_affected = 0;
+		$this->insert_id = 0;
+	}
+
+	public function query( $query ) {
+		$this->flush();
+		$this->last_query = $query;
+		$result = mysqli_query( $this->dbh, $query );
+		if ( false === $result ) {
+			$this->last_error = mysqli_error( $this->dbh );
+			return false;
+		}
+		if ( true === $result ) {
+			$this->rows_affected = mysqli_affected_rows( $this->dbh );
+			$this->insert_id = mysqli_insert_id( $this->dbh );
+			return $this->rows_affected;
+		}
+		foreach ( mysqli_fetch_fields( $result ) as $field ) {
+			$this->col_info[] = (object) array( 'name' => $field->name );
+		}
+		while ( $row = mysqli_fetch_object( $result ) ) {
+			$this->last_result[] = $row;
+		}
+		$this->num_rows = count( $this->last_result );
+		mysqli_free_result( $result );
+		return $this->num_rows;
+	}
+}
+"#
+    }
+
+    fn runtime_harness_settings_php() -> &'static str {
+        r#"<?php
+if ( ! defined( 'WPINC' ) ) {
+	define( 'WPINC', 'wp-includes' );
+}
+require_once ABSPATH . 'wp-content/db.php';
+if ( isset( $wpdb ) ) {
+	$GLOBALS['wpdb'] = $wpdb;
+}
+
+function wpcow_harness_post( $id ) {
+	global $wpdb;
+	$wpdb->query( 'SELECT * FROM wp_posts WHERE ID = ' . (int) $id );
+	return $wpdb->last_result ? $wpdb->last_result[0] : null;
+}
+
+function wpcow_harness_user() {
+	global $wpdb;
+	$wpdb->query( 'SELECT * FROM wp_users WHERE ID = 1' );
+	return $wpdb->last_result ? $wpdb->last_result[0] : null;
+}
+
+$path = parse_url( $_SERVER['REQUEST_URI'], PHP_URL_PATH );
+
+if ( '/wp-login.php' === $path ) {
+	if ( 'POST' === $_SERVER['REQUEST_METHOD'] ) {
+		$user = wpcow_harness_user();
+		if ( $user && isset( $_POST['log'], $_POST['pwd'] ) && 'admin' === $_POST['log'] && md5( $_POST['pwd'] ) === $user->user_pass ) {
+			setcookie( 'wp_cow_harness_auth', '1', 0, '/' );
+			echo "LOGIN OK\n";
+			return;
+		}
+		http_response_code( 403 );
+		echo "LOGIN FAILED\n";
+		return;
+	}
+	echo "LOGIN FORM\n";
+	return;
+}
+
+if ( in_array( $path, array( '/wp-admin', '/wp-admin/', '/wp-admin/index.php' ), true ) ) {
+	if ( empty( $_COOKIE['wp_cow_harness_auth'] ) ) {
+		http_response_code( 403 );
+		echo "AUTH REQUIRED\n";
+		return;
+	}
+	echo "WP ADMIN LOCAL DASHBOARD\n";
+	return;
+}
+
+if ( '/wp-admin/post-new.php' === $path ) {
+	global $wpdb;
+	$wpdb->query( "INSERT INTO wp_posts (ID, post_title, post_content, post_name, post_status, post_type) VALUES (99, 'Local Only Harness Page', 'local only content', 'local-only-page', 'publish', 'page')" );
+	echo "LOCAL POST CREATED\n";
+	return;
+}
+
+if ( '/wp-admin/post.php' === $path ) {
+	global $wpdb;
+	$wpdb->query( "UPDATE wp_posts SET post_title = 'Locally Edited Harness Page', post_content = 'edited local content' WHERE ID = 1" );
+	echo "LOCAL POST EDITED\n";
+	return;
+}
+
+if ( '/local-only-page' === $path ) {
+	$post = wpcow_harness_post( 99 );
+	if ( ! $post ) {
+		http_response_code( 404 );
+		echo "LOCAL ONLY MISSING\n";
+		return;
+	}
+	echo "<h1>" . htmlspecialchars( $post->post_title, ENT_QUOTES, 'UTF-8' ) . "</h1>\n";
+	echo "<main>" . htmlspecialchars( $post->post_content, ENT_QUOTES, 'UTF-8' ) . "</main>\n";
+	return;
+}
+
+$post = wpcow_harness_post( 1 );
+if ( ! $post ) {
+	http_response_code( 500 );
+	echo "REMOTE PAGE MISSING\n";
+	return;
+}
+echo "<h1>" . htmlspecialchars( $post->post_title, ENT_QUOTES, 'UTF-8' ) . "</h1>\n";
+echo "<main>" . htmlspecialchars( $post->post_content, ENT_QUOTES, 'UTF-8' ) . "</main>\n";
+"#
+    }
+
+    fn runtime_harness_control_php() -> &'static str {
+        r#"<?php
+mysqli_report( MYSQLI_REPORT_OFF );
+
+function hdb( $name ) {
+	static $dbs = array();
+	if ( isset( $dbs[ $name ] ) ) {
+		return $dbs[ $name ];
+	}
+	$port = (int) getenv( 'WPCOW_HARNESS_MYSQL_PORT' );
+	$db = mysqli_connect( '127.0.0.1', 'root', '', $name, $port );
+	if ( ! $db ) {
+		http_response_code( 500 );
+		echo json_encode( array( 'ok' => false, 'error' => mysqli_connect_error() ) );
+		exit;
+	}
+	mysqli_set_charset( $db, 'utf8mb4' );
+	$dbs[ $name ] = $db;
+	return $db;
+}
+
+function hrows( $db, $sql ) {
+	$result = mysqli_query( $db, $sql );
+	if ( false === $result ) {
+		return array();
+	}
+	$rows = array();
+	while ( $row = mysqli_fetch_assoc( $result ) ) {
+		$rows[] = $row;
+	}
+	return $rows;
+}
+
+function hresult( $rows ) {
+	$fields = array();
+	foreach ( $rows as $row ) {
+		foreach ( array_keys( $row ) as $field ) {
+			if ( ! in_array( $field, $fields, true ) ) {
+				$fields[] = $field;
+			}
+		}
+	}
+	return array(
+		'ok' => true,
+		'error' => '',
+		'rows' => array_values( $rows ),
+		'fields' => $fields,
+		'affected' => count( $rows ),
+	);
+}
+
+function hrespond( $payload ) {
+	header( 'Content-Type: application/json' );
+	echo json_encode( $payload );
+	exit;
+}
+
+function hselect_id( $table, $id ) {
+	$remote = hrows( hdb( 'remote_wp' ), "SELECT * FROM `$table` WHERE ID = " . (int) $id );
+	$local = hrows( hdb( 'local_wp' ), "SELECT * FROM `$table` WHERE ID = " . (int) $id );
+	if ( $remote && ! $local ) {
+		mysqli_query( hdb( 'local_wp' ), "REPLACE INTO local_wp.`$table` SELECT * FROM remote_wp.`$table` WHERE ID = " . (int) $id );
+		$local = hrows( hdb( 'local_wp' ), "SELECT * FROM `$table` WHERE ID = " . (int) $id );
+	}
+	$merged = array();
+	foreach ( $remote as $row ) {
+		$merged[ $row['ID'] ] = $row;
+	}
+	foreach ( $local as $row ) {
+		$merged[ $row['ID'] ] = $row;
+	}
+	return array_values( $merged );
+}
+
+$path = parse_url( $_SERVER['REQUEST_URI'], PHP_URL_PATH );
+$payload = json_decode( file_get_contents( 'php://input' ), true );
+$sql = is_array( $payload ) && isset( $payload['sql'] ) ? $payload['sql'] : '';
+
+if ( '/row-cow' === $path ) {
+	if ( preg_match( '/^SELECT\s+\*\s+FROM\s+`?(wp_posts|wp_users)`?\s+WHERE\s+`?ID`?\s*=\s*([0-9]+)/i', $sql, $matches ) ) {
+		hrespond( array( 'ok' => true, 'handled' => true, 'backend' => 'cow', 'result' => hresult( hselect_id( $matches[1], (int) $matches[2] ) ) ) );
+	}
+	if ( preg_match( '/^UPDATE\s+`?(wp_posts|wp_users)`?.*WHERE\s+`?ID`?\s*=\s*([0-9]+)/i', $sql, $matches ) ) {
+		mysqli_query( hdb( 'local_wp' ), "REPLACE INTO local_wp.`{$matches[1]}` SELECT * FROM remote_wp.`{$matches[1]}` WHERE ID = " . (int) $matches[2] );
+		hrespond( array( 'ok' => true, 'handled' => true, 'backend' => 'local' ) );
+	}
+	if ( preg_match( '/^(INSERT|REPLACE)\s+(?:IGNORE\s+)?INTO\s+`?(wp_posts|wp_users)`?/i', $sql ) ) {
+		hrespond( array( 'ok' => true, 'handled' => true, 'backend' => 'local' ) );
+	}
+	hrespond( array( 'ok' => true, 'handled' => false, 'backend' => 'local' ) );
+}
+
+if ( '/route' === $path || '/materialize' === $path ) {
+	hrespond( array( 'ok' => true, 'backend' => 'local', 'materialized' => array() ) );
+}
+
+if ( '/query' === $path ) {
+	hrespond( array( 'ok' => false, 'error' => 'strict harness does not allow fallback remote queries', 'rows' => array(), 'fields' => array(), 'affected' => 0 ) );
+}
+
+hrespond( array( 'ok' => false, 'error' => 'unknown harness control path ' . $path ) );
+"#
     }
 }

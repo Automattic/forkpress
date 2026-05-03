@@ -104,12 +104,56 @@ impl OverlayStore {
         Ok(metadata.entries.get(&Self::rel_string(rel)).cloned())
     }
 
+    pub fn list_cached_metadata_dir(&self, rel: &Path) -> Result<Vec<RemoteEntry>> {
+        let metadata = self.load_metadata()?;
+        let rel = Self::clean_rel(rel)?;
+        let mut out = Vec::new();
+
+        for (entry_rel, entry) in metadata.entries {
+            let entry_path = PathBuf::from(&entry_rel);
+            let parent = entry_path.parent().unwrap_or_else(|| Path::new(""));
+            if parent == rel {
+                out.push(entry);
+            }
+        }
+
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
+    }
+
     pub fn put_cached_entry(&self, rel: &Path, entry: &RemoteEntry) -> Result<()> {
         let mut metadata = self.load_metadata()?;
-        metadata
-            .entries
-            .insert(Self::rel_string(rel), entry.clone());
-        self.write_metadata(&metadata)
+        let rel = Self::clean_rel(rel)?;
+        let mut journal_entries = Vec::new();
+        let rel_string = Self::rel_string(&rel);
+        metadata.entries.insert(rel_string.clone(), entry.clone());
+        journal_entries.push((rel_string, Some(entry.clone())));
+        let mut current = rel.parent();
+        while let Some(parent) = current {
+            if parent.as_os_str().is_empty() {
+                break;
+            }
+            let Some(name) = parent.file_name() else {
+                break;
+            };
+            let parent_string = Self::rel_string(parent);
+            if !metadata.entries.contains_key(&parent_string) {
+                let parent_entry = RemoteEntry {
+                    name: name.to_string_lossy().to_string(),
+                    kind: "dir".to_string(),
+                    size: 0,
+                    mode: 0o40755,
+                    mtime: entry.mtime,
+                };
+                metadata
+                    .entries
+                    .insert(parent_string.clone(), parent_entry.clone());
+                journal_entries.push((parent_string, Some(parent_entry)));
+            }
+            current = parent.parent();
+        }
+        *self.metadata.borrow_mut() = Some(metadata);
+        self.append_metadata_journal(&journal_entries)
     }
 
     pub fn remove_cached(&self, rel: &Path) -> Result<()> {
@@ -118,8 +162,10 @@ impl OverlayStore {
             fs::remove_file(path)?;
         }
         let mut metadata = self.load_metadata()?;
-        metadata.entries.remove(&Self::rel_string(rel));
-        self.write_metadata(&metadata)
+        let rel_string = Self::rel_string(rel);
+        metadata.entries.remove(&rel_string);
+        *self.metadata.borrow_mut() = Some(metadata);
+        self.append_metadata_journal(&[(rel_string, None)])
     }
 
     pub fn is_whiteout(&self, rel: &Path) -> Result<bool> {
@@ -193,6 +239,48 @@ impl OverlayStore {
         Ok(upper)
     }
 
+    pub fn copy_up_cached_only(&self, rel: &Path) -> Result<PathBuf> {
+        let upper = self.upper_path(rel)?;
+        if upper.exists() {
+            return Ok(upper);
+        }
+
+        if let Some(parent) = upper.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        if let Some(cached) = self.cached_file_path(rel) {
+            fs::copy(cached, &upper)?;
+            return Ok(upper);
+        }
+
+        let mirror = self.mirror_path(rel)?;
+        if let Ok(metadata) = fs::symlink_metadata(&mirror) {
+            if metadata.file_type().is_dir() {
+                fs::create_dir_all(&upper)?;
+                return Ok(upper);
+            }
+            if metadata.file_type().is_symlink() {
+                let target = fs::read_link(&mirror)?;
+                std::os::unix::fs::symlink(target, &upper)?;
+                return Ok(upper);
+            }
+        }
+
+        if let Some(entry) = self.cached_entry(rel)? {
+            if entry.kind == "dir" {
+                fs::create_dir_all(&upper)?;
+                return Ok(upper);
+            }
+        }
+
+        Err(anyhow!(
+            "clone is severed and writable lower file is not cached locally: {}",
+            Self::rel_string(rel)
+        ))
+    }
+
+    #[cfg(test)]
     pub fn read_cached_or_remote(
         &self,
         remote: &RemoteClient,
@@ -200,6 +288,18 @@ impl OverlayStore {
         offset: i64,
         size: u32,
         cache_limit: u64,
+    ) -> Result<Vec<u8>> {
+        self.read_cached_or_remote_with_entry(remote, rel, offset, size, cache_limit, None)
+    }
+
+    pub fn read_cached_or_remote_with_entry(
+        &self,
+        remote: &RemoteClient,
+        rel: &Path,
+        offset: i64,
+        size: u32,
+        cache_limit: u64,
+        entry: Option<RemoteEntry>,
     ) -> Result<Vec<u8>> {
         if offset < 0 {
             return Ok(Vec::new());
@@ -210,7 +310,13 @@ impl OverlayStore {
             return read_range_from_file(&cache_path, offset as u64, size as usize);
         }
 
-        let entry = remote.stat(rel)?;
+        let entry = match entry {
+            Some(entry) => entry,
+            None => match self.cached_entry(rel)? {
+                Some(entry) => entry,
+                None => remote.stat(rel)?,
+            },
+        };
         if entry.kind == "file" && entry.size <= cache_limit {
             if let Some(parent) = cache_path.parent() {
                 fs::create_dir_all(parent)?;
@@ -337,6 +443,10 @@ impl OverlayStore {
         self.file_cache.join("metadata.json")
     }
 
+    fn metadata_journal_path(&self) -> PathBuf {
+        self.file_cache.join("metadata.jsonl")
+    }
+
     fn progress_path(&self) -> PathBuf {
         self.file_cache.join("progress.json")
     }
@@ -347,17 +457,20 @@ impl OverlayStore {
         }
         let path = self.metadata_path();
         if !path.exists() {
-            let metadata = MetadataFile::default();
+            let mut metadata = MetadataFile::default();
+            self.apply_metadata_journal(&mut metadata)?;
             *self.metadata.borrow_mut() = Some(metadata.clone());
             return Ok(metadata);
         }
         let mut json = String::new();
         File::open(path)?.read_to_string(&mut json)?;
-        let metadata: MetadataFile = serde_json::from_str(&json)?;
+        let mut metadata: MetadataFile = serde_json::from_str(&json)?;
+        self.apply_metadata_journal(&mut metadata)?;
         *self.metadata.borrow_mut() = Some(metadata.clone());
         Ok(metadata)
     }
 
+    #[allow(dead_code)]
     fn write_metadata(&self, metadata: &MetadataFile) -> Result<()> {
         fs::create_dir_all(&self.file_cache)?;
         let json = serde_json::to_vec_pretty(metadata)?;
@@ -371,7 +484,62 @@ impl OverlayStore {
         file.write_all(b"\n")?;
         drop(file);
         fs::rename(tmp, self.metadata_path())?;
+        let _ = fs::remove_file(self.metadata_journal_path());
         *self.metadata.borrow_mut() = Some(metadata.clone());
+        Ok(())
+    }
+
+    fn apply_metadata_journal(&self, metadata: &mut MetadataFile) -> Result<()> {
+        let path = self.metadata_journal_path();
+        if !path.exists() {
+            return Ok(());
+        }
+
+        let mut jsonl = String::new();
+        File::open(path)?.read_to_string(&mut jsonl)?;
+        for line in jsonl.lines().filter(|line| !line.trim().is_empty()) {
+            let value: serde_json::Value = serde_json::from_str(line)?;
+            let Some(path) = value.get("path").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            match value.get("op").and_then(|value| value.as_str()) {
+                Some("put") => {
+                    let Some(entry) = value.get("entry") else {
+                        continue;
+                    };
+                    metadata
+                        .entries
+                        .insert(path.to_string(), serde_json::from_value(entry.clone())?);
+                }
+                Some("delete") => {
+                    metadata.entries.remove(path);
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn append_metadata_journal(&self, entries: &[(String, Option<RemoteEntry>)]) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        fs::create_dir_all(&self.file_cache)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.metadata_journal_path())?;
+        for (path, entry) in entries {
+            let value = match entry {
+                Some(entry) => {
+                    serde_json::json!({ "op": "put", "path": path, "entry": entry })
+                }
+                None => serde_json::json!({ "op": "delete", "path": path }),
+            };
+            serde_json::to_writer(&mut file, &value)?;
+            file.write_all(b"\n")?;
+        }
         Ok(())
     }
 
@@ -488,7 +656,12 @@ impl MetadataMode for std::fs::Metadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ClonePaths;
+    use crate::config::{ensure_clone_dirs, ClonePaths, Manifest, Probe};
+    use crate::remote::RemoteClient;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     #[test]
     fn stores_whiteouts() {
@@ -548,7 +721,252 @@ mod tests {
 
         store.put_cached_entry(rel, &entry).unwrap();
         assert_eq!(store.cached_entry(rel).unwrap().unwrap().size, 123);
+        let reloaded = OverlayStore::new(&paths);
+        assert_eq!(
+            reloaded.cached_entry(rel).unwrap().unwrap().size,
+            123,
+            "metadata journal must be enough to rebuild cached entries after restart"
+        );
+        assert_eq!(
+            store
+                .cached_entry(Path::new("wp-includes"))
+                .unwrap()
+                .unwrap()
+                .kind,
+            "dir",
+            "offline lookups need cached parent directory metadata"
+        );
         store.remove_cached(rel).unwrap();
         assert!(store.cached_entry(rel).unwrap().is_none());
+        let reloaded = OverlayStore::new(&paths);
+        assert!(reloaded.cached_entry(rel).unwrap().is_none());
+    }
+
+    #[test]
+    fn cached_only_copy_up_uses_materialized_files_without_remote() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::config::clone_paths(temp.path(), "example");
+        ensure_clone_dirs(&paths).unwrap();
+        let store = OverlayStore::new(&paths);
+
+        let rel = Path::new("wp-includes/version.php");
+        let entry = RemoteEntry {
+            name: "version.php".to_string(),
+            kind: "file".to_string(),
+            size: 15,
+            mode: 0o100644,
+            mtime: 42,
+        };
+        let cache_path = store.cache_path(rel);
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(&cache_path, b"cached runtime\n").unwrap();
+        store.put_cached_entry(rel, &entry).unwrap();
+
+        let upper = store.copy_up_cached_only(rel).unwrap();
+        assert_eq!(fs::read(&upper).unwrap(), b"cached runtime\n");
+
+        let mirror_rel = Path::new("wp-admin/index.php");
+        let mirror_path = store.mirror_path(mirror_rel).unwrap();
+        fs::create_dir_all(mirror_path.parent().unwrap()).unwrap();
+        fs::write(&mirror_path, b"mirror runtime\n").unwrap();
+        let upper = store.copy_up_cached_only(mirror_rel).unwrap();
+        assert_eq!(fs::read(&upper).unwrap(), b"mirror runtime\n");
+
+        let dir_rel = Path::new("wp-content/themes/example");
+        store
+            .put_cached_entry(
+                dir_rel,
+                &RemoteEntry {
+                    name: "example".to_string(),
+                    kind: "dir".to_string(),
+                    size: 0,
+                    mode: 0o40755,
+                    mtime: 42,
+                },
+            )
+            .unwrap();
+        assert!(store.copy_up_cached_only(dir_rel).unwrap().is_dir());
+
+        let err = store
+            .copy_up_cached_only(Path::new("wp-content/missing.php"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("clone is severed and writable lower file is not cached locally"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn lazy_remote_file_is_cached_and_survives_remote_loss() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+
+        let old_path = std::env::var_os("PATH");
+        let old_log = std::env::var_os("WPCOW_FAKE_SSH_LOG");
+
+        let temp = tempfile::tempdir().unwrap();
+        let remote_root = temp.path().join("remote");
+        let bin = temp.path().join("bin");
+        let log = temp.path().join("ssh.log");
+        fs::create_dir_all(&remote_root).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(remote_root.join("index.php"), b"remote wordpress").unwrap();
+
+        let fake_ssh = bin.join("ssh");
+        fs::write(
+            &fake_ssh,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+printf 'CALL\n' >> "$WPCOW_FAKE_SSH_LOG"
+cmd="${@: -1}"
+exec bash -lc "$cmd"
+"#,
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&fake_ssh).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&fake_ssh, perms).unwrap();
+
+        let path = match old_path.as_ref() {
+            Some(old) => format!("{}:{}", bin.display(), old.to_string_lossy()),
+            None => bin.display().to_string(),
+        };
+        std::env::set_var("PATH", path);
+        std::env::set_var("WPCOW_FAKE_SSH_LOG", &log);
+
+        let paths = crate::config::clone_paths(temp.path().join("state").as_path(), "example");
+        ensure_clone_dirs(&paths).unwrap();
+        let mut manifest = Manifest::new(
+            "example".to_string(),
+            "fake-host".to_string(),
+            remote_root.to_string_lossy().to_string(),
+            "https://example.com".to_string(),
+            "http://example.test".to_string(),
+            Probe {
+                table_prefix: "wp_".to_string(),
+                ..Probe::default()
+            },
+        );
+        manifest.cache_max_file_bytes = 1024;
+        let remote = RemoteClient::new(manifest, None);
+        let store = OverlayStore::new(&paths);
+        let rel = Path::new("index.php");
+
+        let first = store
+            .read_cached_or_remote(&remote, rel, 0, 1024, 1024)
+            .unwrap();
+        assert_eq!(first, b"remote wordpress");
+        fs::remove_file(remote_root.join("index.php")).unwrap();
+        let ssh_after_first = fs::read_to_string(&log).unwrap().lines().count();
+
+        let second = store
+            .read_cached_or_remote(&remote, rel, 0, 1024, 1024)
+            .unwrap();
+        assert_eq!(second, b"remote wordpress");
+        let ssh_after_second = fs::read_to_string(&log).unwrap().lines().count();
+        assert_eq!(
+            ssh_after_second, ssh_after_first,
+            "cached read must not invoke ssh after the remote file disappears"
+        );
+
+        match old_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        match old_log {
+            Some(value) => std::env::set_var("WPCOW_FAKE_SSH_LOG", value),
+            None => std::env::remove_var("WPCOW_FAKE_SSH_LOG"),
+        }
+    }
+
+    #[test]
+    fn supplied_metadata_skips_remote_stat_before_caching_file() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+
+        let old_path = std::env::var_os("PATH");
+        let old_log = std::env::var_os("WPCOW_FAKE_SSH_LOG");
+        let old_helper = std::env::var_os("WPCOW_REMOTE_FILE_HELPER");
+
+        let temp = tempfile::tempdir().unwrap();
+        let remote_root = temp.path().join("remote");
+        let bin = temp.path().join("bin");
+        let log = temp.path().join("ssh.log");
+        fs::create_dir_all(&remote_root).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(remote_root.join("index.php"), b"remote wordpress").unwrap();
+
+        let fake_ssh = bin.join("ssh");
+        fs::write(
+            &fake_ssh,
+            r#"#!/usr/bin/env bash
+	set -euo pipefail
+	printf 'CALL\n' >> "$WPCOW_FAKE_SSH_LOG"
+	cmd="${@: -1}"
+	exec bash -lc "$cmd"
+	"#,
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&fake_ssh).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&fake_ssh, perms).unwrap();
+
+        let path = match old_path.as_ref() {
+            Some(old) => format!("{}:{}", bin.display(), old.to_string_lossy()),
+            None => bin.display().to_string(),
+        };
+        std::env::set_var("PATH", path);
+        std::env::set_var("WPCOW_FAKE_SSH_LOG", &log);
+        std::env::set_var("WPCOW_REMOTE_FILE_HELPER", "0");
+
+        let paths = crate::config::clone_paths(temp.path().join("state").as_path(), "example");
+        ensure_clone_dirs(&paths).unwrap();
+        let manifest = Manifest::new(
+            "example".to_string(),
+            "fake-host".to_string(),
+            remote_root.to_string_lossy().to_string(),
+            "https://example.com".to_string(),
+            "http://example.test".to_string(),
+            Probe {
+                table_prefix: "wp_".to_string(),
+                ..Probe::default()
+            },
+        );
+        let remote = RemoteClient::new(manifest, None);
+        let store = OverlayStore::new(&paths);
+        let rel = Path::new("index.php");
+        let entry = RemoteEntry {
+            name: "index.php".to_string(),
+            kind: "file".to_string(),
+            size: 16,
+            mode: 0o100644,
+            mtime: 42,
+        };
+
+        let first = store
+            .read_cached_or_remote_with_entry(&remote, rel, 0, 1024, 1024, Some(entry))
+            .unwrap();
+        assert_eq!(first, b"remote wordpress");
+        let ssh_lines = fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .filter(|line| *line == "CALL")
+            .count();
+        assert_eq!(
+            ssh_lines, 1,
+            "FUSE lookup metadata should let the first read fetch file bytes without a second remote stat command"
+        );
+
+        match old_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        match old_log {
+            Some(value) => std::env::set_var("WPCOW_FAKE_SSH_LOG", value),
+            None => std::env::remove_var("WPCOW_FAKE_SSH_LOG"),
+        }
+        match old_helper {
+            Some(value) => std::env::set_var("WPCOW_REMOTE_FILE_HELPER", value),
+            None => std::env::remove_var("WPCOW_REMOTE_FILE_HELPER"),
+        }
     }
 }

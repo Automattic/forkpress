@@ -177,6 +177,7 @@ impl CowFs {
             Err(err) => return Err(err),
         };
         self.remote_missing_cache.remove(rel);
+        let _ = self.overlay.put_cached_entry(rel, &entry);
         self.remote_stat_cache.insert(
             rel.to_path_buf(),
             Timed {
@@ -189,7 +190,10 @@ impl CowFs {
 
     fn remote_readdir(&mut self, rel: &Path) -> io::Result<Vec<RemoteEntry>> {
         if self.offline {
-            return Ok(Vec::new());
+            return self
+                .overlay
+                .list_cached_metadata_dir(rel)
+                .map_err(anyhow_to_io);
         }
 
         if let Some(cached) = self.remote_readdir_cache.get(rel) {
@@ -418,9 +422,7 @@ impl Filesystem for CowFs {
                 if entry.kind == "dir" {
                     return Err(io::Error::from_raw_os_error(ENOTSUP));
                 }
-                self.overlay
-                    .copy_up(&self.remote, &old_rel)
-                    .map_err(anyhow_to_io)?;
+                self.copy_up_for_write(&old_rel)?;
             }
 
             fs::rename(&old_upper, &new_upper)?;
@@ -448,10 +450,7 @@ impl Filesystem for CowFs {
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "unknown inode"))?;
             trace_fuse("open", &rel);
             if wants_write(flags) {
-                let upper = self
-                    .overlay
-                    .copy_up(&self.remote, &rel)
-                    .map_err(anyhow_to_io)?;
+                let upper = self.copy_up_for_write(&rel)?;
                 let mut opts = OpenOptions::new();
                 opts.read(true).write(true).create(true);
                 if flags & libc::O_TRUNC != 0 {
@@ -514,17 +513,20 @@ impl Filesystem for CowFs {
                 }
             }
             Some(Handle::Remote(rel)) => {
+                let rel = rel.clone();
                 if self.offline {
                     return reply.error(ENOENT);
                 }
-                trace_fuse("read-remote", rel);
+                trace_fuse("read-remote", &rel);
+                let entry = self.remote_stat(&rel).ok();
                 self.overlay
-                    .read_cached_or_remote(
+                    .read_cached_or_remote_with_entry(
                         &self.remote,
-                        rel,
+                        &rel,
                         offset,
                         size,
                         self.manifest.cache_max_file_bytes,
+                        entry,
                     )
                     .map_err(anyhow_to_io)
             }
@@ -734,12 +736,29 @@ impl CowFs {
         Ok(entries)
     }
 
+    fn copy_up_for_write(&self, rel: &Path) -> io::Result<PathBuf> {
+        if self.offline {
+            self.overlay
+                .copy_up_cached_only(rel)
+                .map_err(|err| io::Error::new(io::ErrorKind::NotFound, err.to_string()))
+        } else {
+            self.overlay
+                .copy_up(&self.remote, rel)
+                .map_err(anyhow_to_io)
+        }
+    }
+
     fn is_opaque_dir_active(&self, rel: &Path) -> io::Result<bool> {
         let is_opaque = self.overlay.is_opaque_dir(rel).map_err(anyhow_to_io)?;
         if !is_opaque {
             return Ok(false);
         }
-        if rel.starts_with(Path::new("wp-content/plugins")) && env_bool("WPCOW_ENABLE_PLUGINS") {
+        if rel.starts_with(Path::new("wp-content/plugins"))
+            && !env_is_explicit_false("WPCOW_ENABLE_PLUGINS")
+        {
+            return Ok(false);
+        }
+        if rel.starts_with(Path::new("wp-content/languages")) {
             return Ok(false);
         }
         Ok(true)
@@ -759,7 +778,7 @@ impl CowFs {
 
 pub fn mount_foreground(manifest: Manifest, paths: ClonePaths, mountpoint: &Path) -> Result<()> {
     fs::create_dir_all(mountpoint)?;
-    let control_path = paths.run.join("ssh-control.sock");
+    let control_path = config::ssh_control_path(&paths);
     let remote = RemoteClient::new(manifest.clone(), Some(control_path));
     if !config::is_offline(&paths) {
         remote.ensure_master()?;
@@ -817,13 +836,13 @@ fn wants_write(flags: i32) -> bool {
         || flags & libc::O_APPEND != 0
 }
 
-fn env_bool(name: &str) -> bool {
+fn env_is_explicit_false(name: &str) -> bool {
     std::env::var(name)
         .ok()
         .map(|raw| {
             matches!(
                 raw.to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
+                "0" | "false" | "no" | "off"
             )
         })
         .unwrap_or(false)
@@ -846,4 +865,268 @@ fn io_errno(err: &io::Error) -> i32 {
 
 fn anyhow_to_io(err: anyhow::Error) -> io::Error {
     io::Error::new(io::ErrorKind::Other, err.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ensure_clone_dirs, write_offline_marker, Manifest, OfflineMarker, Probe};
+    use std::sync::{Mutex, OnceLock};
+
+    fn test_manifest() -> Manifest {
+        Manifest::new(
+            "example".to_string(),
+            "unreachable-host".to_string(),
+            "/remote/wp".to_string(),
+            "https://example.com".to_string(),
+            "http://example.test".to_string(),
+            Probe {
+                table_prefix: "wp_".to_string(),
+                ..Probe::default()
+            },
+        )
+    }
+
+    #[test]
+    fn offline_write_copy_up_uses_cached_lower_without_remote() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::config::clone_paths(temp.path(), "example");
+        ensure_clone_dirs(&paths).unwrap();
+        write_offline_marker(
+            &paths,
+            &OfflineMarker {
+                severed_at_unix: 1,
+                materialized_tables: Vec::new(),
+                admin_user: None,
+            },
+        )
+        .unwrap();
+
+        let manifest = test_manifest();
+        let store = OverlayStore::new(&paths);
+        let rel = Path::new("wp-admin/index.php");
+        let cache_path = store.cache_path(rel);
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(&cache_path, b"cached admin runtime\n").unwrap();
+        store
+            .put_cached_entry(
+                rel,
+                &RemoteEntry {
+                    name: "index.php".to_string(),
+                    kind: "file".to_string(),
+                    size: 21,
+                    mode: 0o100644,
+                    mtime: 42,
+                },
+            )
+            .unwrap();
+
+        let fs = CowFs::new(manifest.clone(), &paths, RemoteClient::new(manifest, None));
+        let upper = fs.copy_up_for_write(rel).unwrap();
+        assert_eq!(std::fs::read(&upper).unwrap(), b"cached admin runtime\n");
+
+        let err = fs
+            .copy_up_for_write(Path::new("wp-admin/missing.php"))
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(
+            err.to_string()
+                .contains("clone is severed and writable lower file is not cached locally"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn offline_readdir_uses_cached_remote_metadata_without_remote() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::config::clone_paths(temp.path(), "example");
+        ensure_clone_dirs(&paths).unwrap();
+        write_offline_marker(
+            &paths,
+            &OfflineMarker {
+                severed_at_unix: 1,
+                materialized_tables: Vec::new(),
+                admin_user: None,
+            },
+        )
+        .unwrap();
+
+        let manifest = test_manifest();
+        let store = OverlayStore::new(&paths);
+        store
+            .put_cached_entry(
+                Path::new("wp-content/plugins/hello.php"),
+                &RemoteEntry {
+                    name: "hello.php".to_string(),
+                    kind: "file".to_string(),
+                    size: 18,
+                    mode: 0o100644,
+                    mtime: 42,
+                },
+            )
+            .unwrap();
+        store
+            .put_cached_entry(
+                Path::new("wp-content/plugins/sample"),
+                &RemoteEntry {
+                    name: "sample".to_string(),
+                    kind: "dir".to_string(),
+                    size: 0,
+                    mode: 0o40755,
+                    mtime: 42,
+                },
+            )
+            .unwrap();
+
+        let mut fs = CowFs::new(manifest.clone(), &paths, RemoteClient::new(manifest, None));
+        let entries = fs.remote_readdir(Path::new("wp-content/plugins")).unwrap();
+        let names = entries
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            names,
+            vec!["hello.php".to_string(), "sample".to_string()],
+            "offline readdir should use cached remote metadata without touching SSH"
+        );
+    }
+
+    #[test]
+    fn remote_stat_metadata_survives_severed_mode_without_remote() {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let old_path = std::env::var_os("PATH");
+        let old_helper = std::env::var_os("WPCOW_REMOTE_FILE_HELPER");
+
+        let temp = tempfile::tempdir().unwrap();
+        let remote_root = temp.path().join("remote");
+        let fake_bin = temp.path().join("bin");
+        fs::create_dir_all(remote_root.join("wp-content/themes/neve/assets/js/build/modern"))
+            .unwrap();
+        fs::create_dir_all(&fake_bin).unwrap();
+        fs::write(
+            remote_root.join("wp-content/themes/neve/assets/js/build/modern/frontend.js"),
+            b"/* theme build asset */",
+        )
+        .unwrap();
+        let fake_ssh = fake_bin.join("ssh");
+        fs::write(
+            &fake_ssh,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+cmd="${@: -1}"
+exec bash -lc "$cmd"
+"#,
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&fake_ssh).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&fake_ssh, perms).unwrap();
+
+        let path = match old_path.as_ref() {
+            Some(old) => format!("{}:{}", fake_bin.display(), old.to_string_lossy()),
+            None => fake_bin.display().to_string(),
+        };
+        std::env::set_var("PATH", path);
+        std::env::set_var("WPCOW_REMOTE_FILE_HELPER", "0");
+
+        let paths = crate::config::clone_paths(temp.path().join("state").as_path(), "example");
+        ensure_clone_dirs(&paths).unwrap();
+        let manifest = Manifest::new(
+            "example".to_string(),
+            "fake-host".to_string(),
+            remote_root.to_string_lossy().to_string(),
+            "https://example.com".to_string(),
+            "http://example.test".to_string(),
+            Probe {
+                table_prefix: "wp_".to_string(),
+                ..Probe::default()
+            },
+        );
+        let rel = Path::new("wp-content/themes/neve/assets/js/build/modern/frontend.js");
+
+        let mut fs = CowFs::new(
+            manifest.clone(),
+            &paths,
+            RemoteClient::new(manifest.clone(), None),
+        );
+        let entry = fs.remote_stat(rel).unwrap();
+        assert_eq!(entry.size, 23);
+        assert_eq!(
+            OverlayStore::new(&paths)
+                .cached_entry(rel)
+                .unwrap()
+                .unwrap()
+                .size,
+            23,
+            "successful stat-only lookups must persist metadata for later offline theme checks"
+        );
+
+        write_offline_marker(
+            &paths,
+            &OfflineMarker {
+                severed_at_unix: 1,
+                materialized_tables: Vec::new(),
+                admin_user: None,
+            },
+        )
+        .unwrap();
+        fs::remove_file(remote_root.join(rel)).unwrap();
+        let mut offline_fs =
+            CowFs::new(manifest.clone(), &paths, RemoteClient::new(manifest, None));
+        assert_eq!(
+            offline_fs.remote_stat(rel).unwrap().size,
+            23,
+            "severed clones need stat-only metadata without consulting SSH"
+        );
+
+        match old_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        match old_helper {
+            Some(value) => std::env::set_var("WPCOW_REMOTE_FILE_HELPER", value),
+            None => std::env::remove_var("WPCOW_REMOTE_FILE_HELPER"),
+        }
+    }
+
+    #[test]
+    fn legacy_opaque_runtime_markers_stay_transparent_by_default() {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let old = std::env::var_os("WPCOW_ENABLE_PLUGINS");
+        std::env::remove_var("WPCOW_ENABLE_PLUGINS");
+
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::config::clone_paths(temp.path(), "example");
+        ensure_clone_dirs(&paths).unwrap();
+        for rel in ["wp-content/plugins", "wp-content/languages"] {
+            let dir = paths.upper.join(rel);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(crate::overlay::OPAQUE_MARKER), b"legacy marker\n").unwrap();
+        }
+
+        let manifest = test_manifest();
+        let fs = CowFs::new(manifest.clone(), &paths, RemoteClient::new(manifest, None));
+        assert!(!fs
+            .is_opaque_dir_active(Path::new("wp-content/plugins"))
+            .unwrap());
+        assert!(!fs
+            .is_opaque_dir_active(Path::new("wp-content/languages"))
+            .unwrap());
+
+        std::env::set_var("WPCOW_ENABLE_PLUGINS", "0");
+        assert!(fs
+            .is_opaque_dir_active(Path::new("wp-content/plugins"))
+            .unwrap());
+        assert!(!fs
+            .is_opaque_dir_active(Path::new("wp-content/languages"))
+            .unwrap());
+
+        match old {
+            Some(value) => std::env::set_var("WPCOW_ENABLE_PLUGINS", value),
+            None => std::env::remove_var("WPCOW_ENABLE_PLUGINS"),
+        }
+    }
 }

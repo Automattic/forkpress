@@ -1,21 +1,19 @@
 use anyhow::{anyhow, Context, Result};
-use std::collections::BTreeSet;
 use std::fs;
-use std::io::{Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use crate::config::{self, ClonePaths, Manifest};
 use crate::control;
-use crate::db;
 use crate::fusefs;
 use crate::generate::ROUTER_BASENAME;
 use crate::mysql_proxy;
-use crate::remote::{shell_quote, RemoteClient};
+use crate::remote::RemoteClient;
 
 pub struct RunOptions {
     pub mountpoint: PathBuf,
@@ -26,9 +24,27 @@ pub struct RunOptions {
 pub fn run_site(manifest: Manifest, paths: ClonePaths, options: RunOptions) -> Result<()> {
     let shutdown = Arc::new(AtomicBool::new(false));
     install_signal_handler(shutdown.clone())?;
+    run_site_until_shutdown(manifest, paths, options, shutdown)
+}
 
+#[cfg(test)]
+pub(crate) fn run_site_with_shutdown(
+    manifest: Manifest,
+    paths: ClonePaths,
+    options: RunOptions,
+    shutdown: Arc<AtomicBool>,
+) -> Result<()> {
+    run_site_until_shutdown(manifest, paths, options, shutdown)
+}
+
+fn run_site_until_shutdown(
+    manifest: Manifest,
+    paths: ClonePaths,
+    options: RunOptions,
+    shutdown: Arc<AtomicBool>,
+) -> Result<()> {
     let control_addr = control_addr_from_url(&manifest.control_url)?;
-    let remote = RemoteClient::new(manifest.clone(), Some(paths.run.join("ssh-control.sock")));
+    let remote = RemoteClient::new(manifest.clone(), Some(config::ssh_control_path(&paths)));
     let offline = config::is_offline(&paths);
     let mut db_tunnel = if offline {
         eprintln!(
@@ -118,17 +134,6 @@ pub fn run_site(manifest: Manifest, paths: ClonePaths, options: RunOptions) -> R
         )?)
     };
 
-    if !offline && env_bool("WPCOW_PREFETCH_RUNTIME", false) {
-        let warm_manifest = manifest.clone();
-        let warm_paths = paths.clone();
-        let warm_remote = remote.clone();
-        thread::spawn(move || {
-            if let Err(err) = prefetch_runtime_files(&warm_manifest, &warm_paths, &warm_remote) {
-                eprintln!("wp-cow runtime prefetch skipped: {err:#}");
-            }
-        });
-    }
-
     eprintln!(
         "wp-cow running clone '{}' at {} from {}",
         manifest.name,
@@ -182,210 +187,54 @@ pub fn mount_only(manifest: Manifest, paths: ClonePaths, mountpoint: &Path) -> R
     fusefs::mount_foreground(manifest, paths, mountpoint)
 }
 
-pub(crate) fn prefetch_runtime_files(
-    manifest: &Manifest,
-    paths: &ClonePaths,
-    remote: &RemoteClient,
-) -> Result<()> {
-    let mirror = paths.file_cache.join("mirror");
-    fs::create_dir_all(&mirror)?;
-    let stamp = mirror.join(".wp-cow-runtime-prefetch-v3");
-    if stamp.is_file() {
-        return Ok(());
-    }
-
-    let mut rels = [
-        "index.php",
-        "wp-activate.php",
-        "wp-blog-header.php",
-        "wp-comments-post.php",
-        "wp-cron.php",
-        "wp-load.php",
-        "wp-login.php",
-        "wp-mail.php",
-        "wp-settings.php",
-        "wp-signup.php",
-        "wp-trackback.php",
-        "xmlrpc.php",
-        "wp-admin",
-        "wp-includes",
-    ]
-    .into_iter()
-    .map(|rel| rel.to_string())
-    .collect::<Vec<_>>();
-    let mut themes = BTreeSet::new();
-    for option in ["template", "stylesheet"] {
-        if let Some(theme) = db::local_option_value(manifest, option)? {
-            if let Some(theme) = clean_theme_name(&theme) {
-                themes.insert(theme);
-            }
-        }
-    }
-    if themes.is_empty() {
-        for theme in remote_active_theme_names(manifest, remote)? {
-            themes.insert(theme);
-        }
-    }
-    for theme in themes {
-        rels.push(format!("wp-content/themes/{theme}"));
-    }
-
-    eprintln!(
-        "wp-cow warming runtime file cache in background: {}",
-        rels.join(", ")
-    );
-    let _ = write_prefetch_progress(paths, "prefetching-runtime", &rels.join(", "), 0, 0, 0);
-    let remote_paths = rels.iter().map(shell_quote).collect::<Vec<_>>().join(" ");
-    let remote_command = format!(
-        "cd {} && tar -cf - --ignore-failed-read {}",
-        shell_quote(&manifest.remote_path),
-        remote_paths
-    );
-    let mut ssh = remote
-        .command(&remote_command)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("start remote theme tar")?;
-    let mut tar = Command::new("tar")
-        .arg("-C")
-        .arg(&mirror)
-        .arg("-xf")
-        .arg("-")
-        .stdin(Stdio::piped())
-        .spawn()
-        .context("start local theme tar")?;
-
-    {
-        let mut ssh_stdout = ssh.stdout.take().expect("ssh stdout piped");
-        let mut tar_stdin = tar.stdin.take().expect("tar stdin piped");
-        let mut buf = [0_u8; 64 * 1024];
-        let mut bytes = 0_u64;
-        loop {
-            let read = ssh_stdout.read(&mut buf)?;
-            if read == 0 {
-                break;
-            }
-            tar_stdin.write_all(&buf[..read])?;
-            bytes = bytes.saturating_add(read as u64);
-            if bytes == read as u64 || bytes % (1024 * 1024) < read as u64 {
-                let _ = write_prefetch_progress(
-                    paths,
-                    "prefetching-runtime",
-                    &rels.join(", "),
-                    bytes,
-                    0,
-                    bytes,
-                );
-            }
-        }
-    }
-
-    let ssh_output = ssh.wait_with_output()?;
-    let tar_status = tar.wait()?;
-    if !ssh_output.status.success() {
-        return Err(anyhow!(
-            "remote theme tar failed: {}",
-            String::from_utf8_lossy(&ssh_output.stderr)
-        ));
-    }
-    if !tar_status.success() {
-        return Err(anyhow!("local theme tar failed with status {}", tar_status));
-    }
-    fs::write(&stamp, b"ok\n")?;
-    let _ = write_prefetch_progress(paths, "cached", "", 0, 0, 0);
-    Ok(())
-}
-
-fn remote_active_theme_names(
-    manifest: &Manifest,
-    remote: &RemoteClient,
-) -> Result<BTreeSet<String>> {
-    let mut out = BTreeSet::new();
-    let Some(table) = safe_mysql_identifier(&format!("{}options", manifest.probe.table_prefix))
-    else {
-        return Ok(out);
-    };
-    let sql = format!(
-        "SELECT option_name, option_value FROM `{table}` WHERE option_name IN ('template','stylesheet')"
-    );
-    let result = db::remote_readonly_query(remote, &sql)?;
-    if !result.ok {
-        return Ok(out);
-    }
-    for row in result.rows {
-        let Some(value) = row.get("option_value").and_then(|value| value.as_str()) else {
-            continue;
-        };
-        if let Some(theme) = clean_theme_name(value) {
-            out.insert(theme);
-        }
-    }
-    Ok(out)
-}
-
-fn safe_mysql_identifier(value: &str) -> Option<String> {
-    if value.is_empty()
-        || !value
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
-    {
-        return None;
-    }
-    Some(value.to_string())
-}
-
-fn write_prefetch_progress(
-    paths: &ClonePaths,
-    phase: &str,
-    active_path: &str,
-    active_bytes: u64,
-    active_total: u64,
-    bytes_cached: u64,
-) -> Result<()> {
-    fs::create_dir_all(&paths.file_cache)?;
-    let progress = serde_json::json!({
-        "phase": phase,
-        "active_path": active_path,
-        "active_bytes": active_bytes,
-        "active_total": active_total,
-        "files_cached": 0,
-        "bytes_cached": bytes_cached,
-        "last_cached_path": active_path,
-        "updated_at_unix_ms": now_unix_ms(),
-    });
-    let progress_path = paths.file_cache.join("progress.json");
-    let tmp = paths
-        .file_cache
-        .join(format!("progress.json.prefetch.{}.tmp", std::process::id()));
-    fs::write(&tmp, serde_json::to_vec_pretty(&progress)?)?;
-    fs::rename(tmp, progress_path)?;
-    Ok(())
-}
-
-fn clean_theme_name(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.is_empty()
-        || !value
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '.')
-    {
-        return None;
-    }
-    Some(value.to_string())
-}
-
 fn start_web_server(paths: &ClonePaths, mountpoint: &Path, http_addr: &str) -> Result<Child> {
     match std::env::var("WPCOW_WEB_SERVER")
-        .unwrap_or_else(|_| "frankenphp".to_string())
+        .unwrap_or_else(|_| "auto".to_string())
         .to_ascii_lowercase()
         .as_str()
     {
         "php" | "php-dev" | "php-dev-server" => start_php_dev_server(paths, mountpoint, http_addr),
-        "frankenphp" => start_frankenphp_server(paths, mountpoint, http_addr),
+        "auto" | "frankenphp" => {
+            let bin = frankenphp_bin();
+            if command_exists(&bin) {
+                start_frankenphp_server(paths, mountpoint, http_addr)
+            } else {
+                eprintln!("wp-cow FrankenPHP binary '{bin}' was not found; falling back to PHP's development server");
+                start_php_dev_server(paths, mountpoint, http_addr)
+            }
+        }
         other => Err(anyhow!(
-            "unsupported WPCOW_WEB_SERVER={other}; expected frankenphp or php"
+            "unsupported WPCOW_WEB_SERVER={other}; expected auto, frankenphp, or php"
         )),
+    }
+}
+
+fn frankenphp_bin() -> String {
+    std::env::var("WPCOW_FRANKENPHP_BIN").unwrap_or_else(|_| "frankenphp".to_string())
+}
+
+fn command_exists(bin: &str) -> bool {
+    let path = Path::new(bin);
+    if path.components().count() > 1 {
+        return is_executable_file(path);
+    }
+
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|dir| is_executable_file(&dir.join(bin))))
+        .unwrap_or(false)
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+fn apply_web_server_env(command: &mut Command, paths: &ClonePaths) {
+    if config::is_offline(paths) {
+        command
+            .env("WPCOW_OFFLINE", "1")
+            .env("WPCOW_REMOTE_DB_TUNNEL", "0");
     }
 }
 
@@ -400,7 +249,9 @@ fn start_frankenphp_server(
         &caddyfile,
         frankenphp_caddyfile(paths, mountpoint, http_addr),
     )?;
-    Command::new(std::env::var("WPCOW_FRANKENPHP_BIN").unwrap_or_else(|_| "frankenphp".to_string()))
+    let mut command = Command::new(frankenphp_bin());
+    apply_web_server_env(&mut command, paths);
+    command
         .arg("run")
         .arg("--config")
         .arg(&caddyfile)
@@ -412,11 +263,13 @@ fn start_frankenphp_server(
 }
 
 fn start_php_dev_server(paths: &ClonePaths, mountpoint: &Path, http_addr: &str) -> Result<Child> {
-    Command::new("php")
-        .env(
-            "PHP_CLI_SERVER_WORKERS",
-            env_u64("WPCOW_PHP_WORKERS", 4).to_string(),
-        )
+    let mut command = Command::new("php");
+    apply_web_server_env(&mut command, paths);
+    let workers = env_u64("WPCOW_PHP_WORKERS", 4);
+    if workers > 1 {
+        command.env("PHP_CLI_SERVER_WORKERS", workers.to_string());
+    }
+    command
         .arg("-d")
         .arg(format!(
             "max_execution_time={}",
@@ -432,6 +285,14 @@ fn start_php_dev_server(paths: &ClonePaths, mountpoint: &Path, http_addr: &str) 
             "mysqlnd.net_read_timeout={}",
             env_u64("WPCOW_PHP_SOCKET_TIMEOUT_SECS", 15)
         ))
+        .arg("-d")
+        .arg("opcache.enable_cli=1")
+        .arg("-d")
+        .arg("opcache.memory_consumption=192")
+        .arg("-d")
+        .arg("opcache.max_accelerated_files=20000")
+        .arg("-d")
+        .arg("opcache.validate_timestamps=1")
         .arg("-S")
         .arg(http_addr)
         .arg("-t")
@@ -483,6 +344,12 @@ fn frankenphp_caddyfile(_paths: &ClonePaths, mountpoint: &Path, http_addr: &str)
 	@wpAdminIndex path /wp-admin /wp-admin/
 	handle @wpAdminIndex {{
 		rewrite * /wp-admin/index.php
+		php
+	}}
+
+	@wpCowInstaller path /wp-admin/install.php /wp-admin/setup-config.php
+	handle @wpCowInstaller {{
+		rewrite * {router}?__wp_cow_installer_guard=1
 		php
 	}}
 
@@ -564,25 +431,6 @@ fn env_u64(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-fn now_unix_ms() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or_default()
-}
-
-fn env_bool(name: &str, default: bool) -> bool {
-    std::env::var(name)
-        .ok()
-        .map(|raw| {
-            matches!(
-                raw.to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(default)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -605,6 +453,40 @@ mod tests {
         let caddyfile = frankenphp_caddyfile(&paths, Path::new("/tmp/mount"), "127.0.0.1:9481");
         assert!(caddyfile.contains("@wpAdminIndex path /wp-admin /wp-admin/"));
         assert!(caddyfile.contains("rewrite * /wp-admin/index.php"));
+    }
+
+    #[test]
+    fn frankenphp_routes_installer_paths_through_runtime_guard() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::config::clone_paths(temp.path(), "example");
+        let caddyfile = frankenphp_caddyfile(&paths, Path::new("/tmp/mount"), "127.0.0.1:9481");
+        assert!(caddyfile
+            .contains("@wpCowInstaller path /wp-admin/install.php /wp-admin/setup-config.php"));
+        assert!(caddyfile.contains("rewrite * /.wp-cow-router.php?__wp_cow_installer_guard=1"));
+        assert!(
+            caddyfile.find("@wpCowInstaller").unwrap() < caddyfile.find("@phpFiles").unwrap(),
+            "installer guard must run before the generic PHP file handler"
+        );
+    }
+
+    #[test]
+    fn command_exists_requires_an_executable_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let fake = temp.path().join("frankenphp");
+        fs::write(&fake, b"#!/bin/sh\nexit 0\n").unwrap();
+
+        let mut permissions = fs::metadata(&fake).unwrap().permissions();
+        permissions.set_mode(0o644);
+        fs::set_permissions(&fake, permissions).unwrap();
+        assert!(
+            !command_exists(fake.to_str().unwrap()),
+            "a non-executable FrankenPHP file must not suppress the PHP fallback"
+        );
+
+        let mut permissions = fs::metadata(&fake).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake, permissions).unwrap();
+        assert!(command_exists(fake.to_str().unwrap()));
     }
 }
 

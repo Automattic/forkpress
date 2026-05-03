@@ -24,6 +24,16 @@ model, but they should not be read as a proposed final integration shape.
 cargo build
 ```
 
+## Strict harness
+
+```bash
+scripts/strict-harness.sh
+```
+
+The harness runs the full Rust/PHP test suite plus targeted checks for lazy
+file caching, installer blocking, row-level DB write isolation, offline guards,
+FrankenPHP routing, local admin override wiring, and Docker lab port exposure.
+
 ## Docker lab on macOS
 
 Use this when you are on a Mac and want a Linux shell with FUSE, FrankenPHP,
@@ -178,8 +188,12 @@ renders to reuse the program files WordPress just touched. The Docker lab
 defaults `WPCOW_FUSE_TTL_SECS` to `60`; lower values make live remote changes
 visible sooner, while higher values reduce repeated path walking.
 FrankenPHP also enables OPcache for parsed PHP code in the local web runtime.
-`WPCOW_PREFETCH_RUNTIME=1` can still be used for an explicit background warm,
-but it is off by default so normal `serve` remains request-driven.
+There is no recursive runtime warm-up: PHP files, themes, plugins, and uploads
+are fetched only when a request touches them, then cached for repeated reads.
+Remote plugin and language directories stay visible through the lazy lower
+layer by default so the local site can render the same active code as the
+remote site. Set `WPCOW_ENABLE_PLUGINS=0` only when you need to suppress active
+plugins during testing; files still remain lazy and are not copied up front.
 
 The lab uses bounded request timeouts so a bad remote DB query, unreachable SSH
 host, or slow remote file read should fail visibly instead of leaving the
@@ -201,11 +215,13 @@ wp-cow-lab-sever
 wp-cow-lab-run
 ```
 
-`wp-cow-lab-sever` materializes the core WordPress tables into local MariaDB,
-sets the admin password only in the local DB when requested, caches the
-WordPress admin/runtime program files needed for offline admin access, and
-writes `run/offline.json`. After that marker exists, `wp-cow run` does not open
-SSH, does not start the remote DB tunnel, and routes DB reads locally.
+`wp-cow-lab-sever` materializes only the WordPress tables already touched by the
+clone, plus the user tables needed for a requested local admin password
+override. It does not walk or prefetch the remote WordPress tree; pages and
+admin screens you want available offline must be loaded once before severing so
+their PHP files and DB rows are already materialized. It then writes
+`run/offline.json`. After that marker exists, `wp-cow run` does not open SSH,
+does not start the remote DB tunnel, and routes DB reads locally.
 
 Open this on the Mac:
 

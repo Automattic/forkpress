@@ -21,6 +21,8 @@ pub struct DbState {
     pub option_bootstrap_tables: BTreeSet<String>,
     #[serde(default)]
     pub option_rows: BTreeSet<String>,
+    #[serde(default)]
+    pub dirty_option_rows: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -162,25 +164,6 @@ pub fn materialize_tables(
     Ok(changed)
 }
 
-pub fn wordpress_offline_table_names(table_prefix: &str) -> Vec<String> {
-    [
-        "options",
-        "users",
-        "usermeta",
-        "posts",
-        "postmeta",
-        "terms",
-        "term_taxonomy",
-        "term_relationships",
-        "comments",
-        "commentmeta",
-        "links",
-    ]
-    .into_iter()
-    .map(|suffix| format!("{table_prefix}{suffix}"))
-    .collect()
-}
-
 pub fn existing_local_tables(manifest: &Manifest, tables: &[String]) -> Result<Vec<String>> {
     for table in tables {
         validate_table_name(table)?;
@@ -295,9 +278,11 @@ pub fn route_for_query(
         option_bootstrap_table_for_sql(&manifest.probe.table_prefix, sql_text, &expanded)
     {
         if !state.option_bootstrap_tables.contains(&options_table) {
-            materialize_option_bootstrap(remote, manifest, &options_table).with_context(|| {
-                format!("materialize option bootstrap rows for {}", options_table)
-            })?;
+            let excluded = dirty_option_names_for_table(&state, &options_table);
+            materialize_option_bootstrap(remote, manifest, &options_table, &excluded)
+                .with_context(|| {
+                    format!("materialize option bootstrap rows for {}", options_table)
+                })?;
             state.option_bootstrap_tables.insert(options_table);
             write_state(paths, &state)?;
         }
@@ -329,30 +314,31 @@ pub fn remote_readonly_query(remote: &RemoteClient, sql_text: &str) -> Result<Re
     remote.remote_query_readonly(sql_text)
 }
 
-pub fn local_option_value(manifest: &Manifest, name: &str) -> Result<Option<String>> {
+pub fn refresh_option_bootstrap_for_offline(
+    remote: &RemoteClient,
+    manifest: &Manifest,
+    paths: &ClonePaths,
+) -> Result<Vec<String>> {
     let table = format!("{}options", manifest.probe.table_prefix);
     validate_table_name(&table)?;
-    let sql_text = format!(
-        "SELECT option_value FROM {} WHERE option_name='{}' LIMIT 1;",
-        qualified_table(manifest, &table),
-        mysql_string_literal(name)
-    );
-    let output = local_mysql_command(manifest)
-        .arg("--batch")
-        .arg("--raw")
-        .arg("--skip-column-names")
-        .arg("--execute")
-        .arg(sql_text)
-        .output()
-        .context("query local option value")?;
-    if !output.status.success() {
-        return Ok(None);
+
+    let mut state = load_state(paths)?;
+    let excluded = dirty_option_names_for_table(&state, &table);
+    materialize_option_bootstrap(remote, manifest, &table, &excluded)
+        .with_context(|| format!("refresh option bootstrap rows for {}", table))?;
+
+    state.option_bootstrap_tables.insert(table.clone());
+    for name in option_bootstrap_names() {
+        if !excluded.iter().any(|excluded_name| excluded_name == name) {
+            state.option_rows.insert(option_row_key(&table, name));
+        }
     }
-    let value = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .next()
-        .map(|line| line.to_string());
-    Ok(value)
+    write_state(paths, &state)?;
+    Ok(option_bootstrap_names()
+        .iter()
+        .filter(|name| !excluded.iter().any(|excluded_name| excluded_name == *name))
+        .map(|name| (*name).to_string())
+        .collect())
 }
 
 #[derive(Debug, Serialize)]
@@ -388,7 +374,29 @@ pub fn row_cow_query(
             fallback: None,
             result: Some(result),
         }),
-        RowCowExecution::PreparedLocalWrite { .. } | RowCowExecution::LocalOnlyInsert { .. } => {
+        RowCowExecution::PreparedLocalWrite {
+            table,
+            pk_column,
+            pk_values,
+            ..
+        } => {
+            mark_dirty_option_rows_for_write(
+                manifest,
+                paths,
+                &table,
+                pk_column.as_deref(),
+                &pk_values,
+            )?;
+            Ok(RowCowResponse {
+                handled: true,
+                backend: "local".to_string(),
+                materialized: Vec::new(),
+                fallback: None,
+                result: None,
+            })
+        }
+        RowCowExecution::LocalOnlyInsert { table } => {
+            mark_dirty_option_rows_from_sql(manifest, paths, sql_text, &table)?;
             Ok(RowCowResponse {
                 handled: true,
                 backend: "local".to_string(),
@@ -399,10 +407,7 @@ pub fn row_cow_query(
         }
         RowCowExecution::Fallback(plan) => {
             let (fallback, plan_tables) = fallback_name_and_tables(plan);
-            if fallback == "PromoteTable"
-                && !plan_tables.is_empty()
-                && (sql::is_write_sql(sql_text) || sql::is_safe_read_sql(sql_text))
-            {
+            if should_materialize_row_cow_fallback(sql_text, &fallback, &plan_tables) {
                 let materialized = materialize_tables(remote, manifest, paths, &plan_tables)?;
                 return Ok(RowCowResponse {
                     handled: false,
@@ -433,6 +438,59 @@ pub fn row_cow_query(
             })
         }
     }
+}
+
+fn mark_dirty_option_rows_for_write(
+    manifest: &Manifest,
+    paths: &ClonePaths,
+    table: &str,
+    pk_column: Option<&str>,
+    pk_values: &[PkValue],
+) -> Result<()> {
+    let options_table = format!("{}options", manifest.probe.table_prefix);
+    if table != options_table
+        || !pk_column.is_some_and(|column| column.eq_ignore_ascii_case("option_name"))
+    {
+        return Ok(());
+    }
+
+    let mut state = load_state(paths)?;
+    for value in pk_values {
+        state
+            .dirty_option_rows
+            .insert(option_row_key(table, &value.0));
+    }
+    write_state(paths, &state)
+}
+
+fn mark_dirty_option_rows_from_sql(
+    manifest: &Manifest,
+    paths: &ClonePaths,
+    sql_text: &str,
+    table: &str,
+) -> Result<()> {
+    let options_table = format!("{}options", manifest.probe.table_prefix);
+    if table != options_table {
+        return Ok(());
+    }
+    let names = option_write_names_for_sql(sql_text, &options_table, &[options_table.clone()]);
+    if names.is_empty() {
+        return Ok(());
+    }
+
+    let mut state = load_state(paths)?;
+    for name in names {
+        state.dirty_option_rows.insert(option_row_key(table, &name));
+    }
+    write_state(paths, &state)
+}
+
+fn should_materialize_row_cow_fallback(
+    sql_text: &str,
+    fallback: &str,
+    plan_tables: &[String],
+) -> bool {
+    fallback == "PromoteTable" && !plan_tables.is_empty() && sql::is_write_sql(sql_text)
 }
 
 fn fallback_name_and_tables(plan: RowCowPlan) -> (String, Vec<String>) {
@@ -590,6 +648,16 @@ impl RowCowBackend for MysqlRowCowBackend<'_> {
         Ok(pk_values.len())
     }
 
+    fn local_reserve_insert_pk(&mut self, table: &str, pk_column: Option<&str>) -> Result<()> {
+        let Some(pk_column) = pk_column else {
+            return Ok(());
+        };
+        if !row_cow::is_auto_increment_pk_for_table(table, pk_column) {
+            return Ok(());
+        }
+        reserve_local_auto_increment(self.remote, self.manifest, table, pk_column)
+    }
+
     fn local_tombstones_by_pk(
         &mut self,
         table: &str,
@@ -652,6 +720,78 @@ fn remote_query_to_cow_result(result: RemoteQueryResult) -> CowQueryResult {
         rows: result.rows,
         fields: result.fields,
         affected: result.affected,
+    }
+}
+
+fn reserve_local_auto_increment(
+    remote: &RemoteClient,
+    manifest: &Manifest,
+    table: &str,
+    pk_column: &str,
+) -> Result<()> {
+    validate_table_name(table)?;
+    validate_table_name(pk_column)?;
+    let remote_max = remote_max_pk(remote, table, pk_column)
+        .with_context(|| format!("read remote max primary key for {}", table))?;
+    let local_max = local_max_pk(manifest, table, pk_column)
+        .with_context(|| format!("read local max primary key for {}", table))?;
+    let Some(next_id) = remote_max.max(local_max).checked_add(1) else {
+        return Ok(());
+    };
+    if next_id <= 1 {
+        return Ok(());
+    }
+    let sql_text = format!(
+        "ALTER TABLE {} AUTO_INCREMENT = {};",
+        qualified_table(manifest, table),
+        next_id
+    );
+    run_mysql_exec(manifest, &sql_text)
+}
+
+fn remote_max_pk(remote: &RemoteClient, table: &str, pk_column: &str) -> Result<u64> {
+    let sql_text = format!(
+        "SELECT MAX({}) AS max_pk FROM {};",
+        row_cow::quote_identifier(pk_column)?,
+        row_cow::quote_identifier(table)?
+    );
+    let result = remote_readonly_query(remote, &sql_text)?;
+    if !result.ok {
+        return Err(anyhow!(
+            "remote max primary key query failed: {}",
+            result.error
+        ));
+    }
+    max_pk_from_rows(&result.rows, "max_pk")
+}
+
+fn local_max_pk(manifest: &Manifest, table: &str, pk_column: &str) -> Result<u64> {
+    let sql_text = format!(
+        "SELECT MAX({}) AS max_pk FROM {};",
+        row_cow::quote_identifier(pk_column)?,
+        qualified_table(manifest, table)
+    );
+    let result = local_query_result(manifest, &sql_text)?;
+    max_pk_from_rows(&result.rows, "max_pk")
+}
+
+fn max_pk_from_rows(rows: &[Row], field: &str) -> Result<u64> {
+    let Some(value) = rows.first().and_then(|row| row.get(field)) else {
+        return Ok(0);
+    };
+    match value {
+        serde_json::Value::Null => Ok(0),
+        serde_json::Value::Number(number) => Ok(number.as_u64().unwrap_or(0)),
+        serde_json::Value::String(raw) => {
+            let raw = raw.trim();
+            if raw.is_empty() || raw.eq_ignore_ascii_case("null") {
+                Ok(0)
+            } else {
+                raw.parse::<u64>()
+                    .with_context(|| format!("parse max primary key value from {}", raw))
+            }
+        }
+        _ => Ok(0),
     }
 }
 
@@ -940,12 +1080,13 @@ fn materialize_option_bootstrap(
     remote: &RemoteClient,
     manifest: &Manifest,
     table: &str,
+    excluded_names: &[String],
 ) -> Result<()> {
     let probe = &manifest.probe;
     ensure_probe_has_db(probe)?;
     validate_table_name(table)?;
 
-    let where_sql = option_bootstrap_where_sql();
+    let where_sql = option_bootstrap_where_sql_excluding(excluded_names);
     let delete_sql = format!(
         "DELETE FROM {} WHERE {};",
         qualified_table(manifest, table),
@@ -1012,6 +1153,11 @@ fn materialize_option_rows(
     let missing = names
         .iter()
         .filter(|name| !state.option_rows.contains(&option_row_key(table, name)))
+        .filter(|name| {
+            !state
+                .dirty_option_rows
+                .contains(&option_row_key(table, name))
+        })
         .cloned()
         .collect::<Vec<_>>();
     if missing.is_empty() {
@@ -1111,6 +1257,25 @@ fn option_names_for_sql(sql_text: &str, options_table: &str, tables: &[String]) 
     if !sql::is_safe_read_sql(sql_text) || sql::is_write_sql(sql_text) {
         return Vec::new();
     }
+    option_names_for_option_predicate(sql_text, options_table, tables)
+}
+
+fn option_write_names_for_sql(
+    sql_text: &str,
+    options_table: &str,
+    tables: &[String],
+) -> Vec<String> {
+    if !sql::is_write_sql(sql_text) {
+        return Vec::new();
+    }
+    option_names_for_option_predicate(sql_text, options_table, tables)
+}
+
+fn option_names_for_option_predicate(
+    sql_text: &str,
+    options_table: &str,
+    tables: &[String],
+) -> Vec<String> {
     if !tables.iter().any(|table| table == options_table) {
         return Vec::new();
     }
@@ -1149,6 +1314,20 @@ fn option_bootstrap_where_sql() -> String {
     format!("autoload IN ('yes', 'on', 'auto-on', 'auto') OR option_name IN ({names})")
 }
 
+fn option_bootstrap_where_sql_excluding(excluded_names: &[String]) -> String {
+    let base = option_bootstrap_where_sql();
+    if excluded_names.is_empty() {
+        return base;
+    }
+
+    let excluded = excluded_names
+        .iter()
+        .map(|name| format!("'{}'", mysql_string_literal(name)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("({base}) AND option_name NOT IN ({excluded})")
+}
+
 fn option_names_where_sql(names: &[String]) -> String {
     let names = names
         .iter()
@@ -1160,6 +1339,15 @@ fn option_names_where_sql(names: &[String]) -> String {
 
 fn option_row_key(table: &str, name: &str) -> String {
     format!("{table}:{name}")
+}
+
+fn dirty_option_names_for_table(state: &DbState, table: &str) -> Vec<String> {
+    let prefix = format!("{table}:");
+    state
+        .dirty_option_rows
+        .iter()
+        .filter_map(|key| key.strip_prefix(&prefix).map(str::to_string))
+        .collect()
 }
 
 fn option_bootstrap_names() -> &'static [&'static str] {
@@ -1466,6 +1654,37 @@ mod tests {
     }
 
     #[test]
+    fn extracts_dirty_option_write_names() {
+        let tables = vec!["ady_options".to_string()];
+        assert_eq!(
+            option_write_names_for_sql(
+                "UPDATE ady_options SET option_value = 'neve' WHERE option_name = 'template'",
+                "ady_options",
+                &tables,
+            ),
+            vec!["template".to_string()]
+        );
+        assert_eq!(
+            option_write_names_for_sql(
+                "DELETE FROM ady_options WHERE option_name IN ('template', 'stylesheet')",
+                "ady_options",
+                &tables,
+            ),
+            vec!["template".to_string(), "stylesheet".to_string()]
+        );
+    }
+
+    #[test]
+    fn option_bootstrap_refresh_can_preserve_dirty_rows() {
+        let where_sql = option_bootstrap_where_sql_excluding(&[
+            "template".to_string(),
+            "stylesheet".to_string(),
+        ]);
+        assert!(where_sql.contains("autoload IN"));
+        assert!(where_sql.contains("option_name NOT IN ('template', 'stylesheet')"));
+    }
+
+    #[test]
     fn qualifies_local_tables_for_exec_without_selected_database() {
         let manifest = test_manifest();
         assert_eq!(
@@ -1490,6 +1709,43 @@ mod tests {
         assert_eq!(
             sql,
             vec!["DELETE FROM `cow_calm`.`wp_posts` WHERE `ID` IN ('7', '9');"]
+        );
+    }
+
+    #[test]
+    fn parses_max_primary_key_rows_for_auto_increment_reservation() {
+        let mut row = Row::new();
+        row.insert(
+            "max_pk".to_string(),
+            serde_json::Value::String("184".to_string()),
+        );
+        assert_eq!(max_pk_from_rows(&[row], "max_pk").unwrap(), 184);
+
+        let mut null_row = Row::new();
+        null_row.insert("max_pk".to_string(), serde_json::Value::Null);
+        assert_eq!(max_pk_from_rows(&[null_row], "max_pk").unwrap(), 0);
+
+        assert_eq!(max_pk_from_rows(&[], "max_pk").unwrap(), 0);
+    }
+
+    #[test]
+    fn row_cow_safe_read_fallbacks_do_not_promote_tables() {
+        let tables = vec!["ady_options".to_string()];
+        assert!(
+            !should_materialize_row_cow_fallback(
+                "SELECT option_name, option_value FROM ady_options WHERE autoload IN ('yes', 'on')",
+                "PromoteTable",
+                &tables,
+            ),
+            "safe live-lower reads should route to the remote lower layer instead of dumping full tables"
+        );
+        assert!(
+            should_materialize_row_cow_fallback(
+                "UPDATE ady_options SET option_value='x' WHERE autoload='yes'",
+                "PromoteTable",
+                &tables,
+            ),
+            "write fallbacks still need local table promotion before the write executes"
         );
     }
 }

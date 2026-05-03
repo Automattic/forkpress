@@ -2,12 +2,13 @@ use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, Read, Write};
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::config::{Manifest, Probe};
 use crate::overlay::OverlayStore;
@@ -193,11 +194,6 @@ impl RemoteClient {
             remote_port
         );
         let mut command = Command::new("ssh");
-        if let Some(control_path) = &self.control_path {
-            command.arg("-S").arg(control_path);
-            command.arg("-o").arg("ControlMaster=auto");
-            command.arg("-o").arg("ControlPersist=600");
-        }
         self.add_ssh_safety_options(&mut command);
         command
             .arg("-o")
@@ -464,14 +460,7 @@ echo json_encode(array("ok"=>true,"error"=>"","rows"=>$rows,"fields"=>$fields,"a
         helper.stdin.write_all(b"\n")?;
         helper.stdin.flush()?;
 
-        let mut line = String::new();
-        let read = helper.stdout.read_line(&mut line)?;
-        if read == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "remote file helper closed",
-            ));
-        }
+        let line = read_helper_line(&mut helper.stdout)?;
         let response: serde_json::Value = serde_json::from_str(&line)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
         if response.get("ok").and_then(|value| value.as_bool()) == Some(true) {
@@ -509,7 +498,7 @@ echo json_encode(array("ok"=>true,"error"=>"","rows"=>$rows,"fields"=>$fields,"a
         Ok(RemoteFileHelper {
             child,
             stdin,
-            stdout: BufReader::new(stdout),
+            stdout,
         })
     }
 
@@ -552,7 +541,7 @@ echo json_encode(array("ok"=>true,"error"=>"","rows"=>$rows,"fields"=>$fields,"a
 struct RemoteFileHelper {
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    stdout: ChildStdout,
 }
 
 impl Drop for RemoteFileHelper {
@@ -579,6 +568,61 @@ fn decode_helper_data(response: serde_json::Value) -> io::Result<Vec<u8>> {
     BASE64
         .decode(data)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+}
+
+fn read_helper_line(stdout: &mut ChildStdout) -> io::Result<String> {
+    let timeout = Duration::from_secs(remote_file_helper_timeout_secs());
+    let deadline = Instant::now() + timeout;
+    let fd = stdout.as_raw_fd();
+    let mut out = Vec::new();
+
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "remote file helper did not respond within {} seconds",
+                    timeout.as_secs()
+                ),
+            ));
+        }
+
+        let remaining = deadline.saturating_duration_since(now);
+        let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
+        let mut fd_set = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&mut fd_set, 1, timeout_ms) };
+        if ready < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if ready == 0 {
+            continue;
+        }
+        if fd_set.revents & libc::POLLIN == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "remote file helper pipe closed",
+            ));
+        }
+
+        let mut chunk = [0_u8; 8192];
+        let read = stdout.read(&mut chunk)?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "remote file helper closed",
+            ));
+        }
+        out.extend_from_slice(&chunk[..read]);
+        if out.last() == Some(&b'\n') || out.contains(&b'\n') {
+            return String::from_utf8(out)
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err));
+        }
+    }
 }
 
 fn remote_file_helper_enabled() -> bool {
@@ -748,6 +792,13 @@ pub fn shell_quote(value: impl AsRef<OsStr>) -> String {
 
 fn remote_command_timeout_secs() -> u64 {
     env_u64("WPCOW_REMOTE_COMMAND_TIMEOUT_SECS", 20)
+}
+
+fn remote_file_helper_timeout_secs() -> u64 {
+    env_u64(
+        "WPCOW_REMOTE_FILE_HELPER_TIMEOUT_SECS",
+        remote_command_timeout_secs(),
+    )
 }
 
 fn remote_db_query_timeout_secs() -> u64 {

@@ -1,7 +1,8 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Parser, Subcommand};
+use std::collections::{BTreeSet, VecDeque};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::config::{
@@ -10,6 +11,7 @@ use crate::config::{
 };
 use crate::db;
 use crate::generate;
+use crate::overlay::OverlayStore;
 use crate::remote::{probe_wordpress, RemoteClient};
 use crate::run::{self, RunOptions};
 
@@ -216,7 +218,10 @@ fn clone_site(args: CloneArgs) -> Result<()> {
     db::write_state(&paths, &db::DbState::default())?;
 
     if !args.skip_schema && !args.no_probe {
-        let remote = RemoteClient::new(manifest.clone(), Some(paths.run.join("ssh-control.sock")));
+        let remote = RemoteClient::new(
+            manifest.clone(),
+            Some(crate::config::ssh_control_path(&paths)),
+        );
         remote.ensure_master()?;
         db::export_schema(&remote, &paths).context("export schema")?;
     }
@@ -350,7 +355,10 @@ fn serve_site(args: ServeArgs) -> Result<()> {
                 "schema is missing and --no-probe prevents discovering remote DB settings"
             ));
         }
-        let remote = RemoteClient::new(manifest.clone(), Some(paths.run.join("ssh-control.sock")));
+        let remote = RemoteClient::new(
+            manifest.clone(),
+            Some(crate::config::ssh_control_path(&paths)),
+        );
         remote.ensure_master()?;
         db::export_schema(&remote, &paths).context("export schema")?;
         println!(
@@ -404,7 +412,10 @@ fn export_schema(args: NameArgs) -> Result<()> {
     let state_dir = args.state_dir.unwrap_or(default_state_dir()?);
     let paths = clone_paths(&state_dir, &args.name);
     let manifest = load_manifest(&paths.manifest)?;
-    let remote = RemoteClient::new(manifest.clone(), Some(paths.run.join("ssh-control.sock")));
+    let remote = RemoteClient::new(
+        manifest.clone(),
+        Some(crate::config::ssh_control_path(&paths)),
+    );
     remote.ensure_master()?;
     db::export_schema(&remote, &paths)?;
     println!("exported remote schema for '{}'", manifest.name);
@@ -415,7 +426,10 @@ fn materialize(args: MaterializeArgs) -> Result<()> {
     let state_dir = args.state_dir.unwrap_or(default_state_dir()?);
     let paths = clone_paths(&state_dir, &args.name);
     let manifest = load_manifest(&paths.manifest)?;
-    let remote = RemoteClient::new(manifest.clone(), Some(paths.run.join("ssh-control.sock")));
+    let remote = RemoteClient::new(
+        manifest.clone(),
+        Some(crate::config::ssh_control_path(&paths)),
+    );
     remote.ensure_master()?;
     let materialized = db::materialize_tables(&remote, &manifest, &paths, &args.tables)?;
     println!("{}", serde_json::to_string_pretty(&materialized)?);
@@ -427,7 +441,10 @@ fn sever(args: SeverArgs) -> Result<()> {
     let state_dir = args.state_dir.unwrap_or(default_state_dir()?);
     let paths = clone_paths(&state_dir, &args.name);
     let manifest = load_manifest(&paths.manifest)?;
-    let remote = RemoteClient::new(manifest.clone(), Some(paths.run.join("ssh-control.sock")));
+    let remote = RemoteClient::new(
+        manifest.clone(),
+        Some(crate::config::ssh_control_path(&paths)),
+    );
 
     remote.ensure_master()?;
     if !paths.db.join("schema.sql").exists() {
@@ -440,12 +457,27 @@ fn sever(args: SeverArgs) -> Result<()> {
         );
     }
 
-    let requested_tables = db::wordpress_offline_table_names(&manifest.probe.table_prefix);
+    let refreshed_options = db::refresh_option_bootstrap_for_offline(&remote, &manifest, &paths)
+        .context("refresh remote option bootstrap rows for offline use")?;
+    println!(
+        "refreshed {} WordPress option bootstrap rows for local/offline use",
+        refreshed_options.len()
+    );
+
+    let mut requested_tables = db::load_state(&paths)?
+        .materialized_tables
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if args.admin_password.is_some() {
+        requested_tables.insert(format!("{}users", manifest.probe.table_prefix));
+        requested_tables.insert(format!("{}usermeta", manifest.probe.table_prefix));
+    }
+    let requested_tables = requested_tables.into_iter().collect::<Vec<_>>();
     let tables = db::existing_local_tables(&manifest, &requested_tables)?;
     let skipped = requested_tables.len().saturating_sub(tables.len());
     if skipped > 0 {
         println!(
-            "skipping {} WordPress tables that are not present in the local schema",
+            "skipping {} previously materialized WordPress tables that are not present in the local schema",
             skipped
         );
     }
@@ -455,10 +487,6 @@ fn sever(args: SeverArgs) -> Result<()> {
         "materialized {} WordPress tables for local/offline use",
         materialized.len()
     );
-
-    println!("caching WordPress admin/runtime program files for offline use");
-    run::prefetch_runtime_files(&manifest, &paths, &remote)
-        .context("cache WordPress admin/runtime files")?;
 
     let admin = if let Some(password) = args.admin_password.as_deref() {
         let admin = db::set_local_admin_password(&manifest, args.admin_login.as_deref(), password)
@@ -471,6 +499,12 @@ fn sever(args: SeverArgs) -> Result<()> {
     } else {
         None
     };
+
+    if admin.is_some() {
+        let cached = cache_offline_core_runtime(&remote, &manifest, &paths)
+            .context("cache WordPress core/admin runtime for offline login")?;
+        println!("cached {cached} WordPress core/admin runtime files for offline login");
+    }
 
     let marker = OfflineMarker {
         severed_at_unix: SystemTime::now()
@@ -492,6 +526,92 @@ fn sever(args: SeverArgs) -> Result<()> {
         started.elapsed().as_secs_f64()
     );
     Ok(())
+}
+
+fn cache_offline_core_runtime(
+    remote: &RemoteClient,
+    manifest: &Manifest,
+    paths: &crate::config::ClonePaths,
+) -> Result<usize> {
+    let overlay = OverlayStore::new(paths);
+    let mut queue = VecDeque::from([PathBuf::new()]);
+    let mut cached = 0_usize;
+
+    while let Some(dir) = queue.pop_front() {
+        let entries = match remote.readdir(&dir) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "read remote runtime directory {}",
+                        OverlayStore::rel_string(&dir)
+                    )
+                })
+            }
+        };
+
+        for entry in entries {
+            let rel = dir.join(&entry.name);
+            let _ = overlay.put_cached_entry(&rel, &entry);
+
+            if entry.kind == "dir" && should_descend_offline_core_runtime_dir(&rel) {
+                queue.push_back(rel);
+                continue;
+            }
+
+            if !should_cache_offline_core_runtime_file(&rel, &entry.kind) {
+                continue;
+            }
+            if entry.size > manifest.cache_max_file_bytes {
+                continue;
+            }
+
+            overlay
+                .read_cached_or_remote_with_entry(
+                    remote,
+                    &rel,
+                    0,
+                    1,
+                    manifest.cache_max_file_bytes,
+                    Some(entry),
+                )
+                .with_context(|| {
+                    format!(
+                        "cache remote runtime file {}",
+                        OverlayStore::rel_string(&rel)
+                    )
+                })?;
+            cached += 1;
+        }
+    }
+
+    Ok(cached)
+}
+
+fn should_descend_offline_core_runtime_dir(rel: &Path) -> bool {
+    rel == Path::new("wp-admin")
+        || rel.starts_with(Path::new("wp-admin/"))
+        || rel == Path::new("wp-includes")
+        || rel.starts_with(Path::new("wp-includes/"))
+}
+
+fn should_cache_offline_core_runtime_file(rel: &Path, kind: &str) -> bool {
+    if kind != "file" {
+        return false;
+    }
+    if rel.starts_with(Path::new("wp-content")) {
+        return false;
+    }
+    if rel.starts_with(Path::new("wp-admin")) || rel.starts_with(Path::new("wp-includes")) {
+        return true;
+    }
+    let Some(name) = rel.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    rel.parent()
+        .is_none_or(|parent| parent.as_os_str().is_empty())
+        && (name == "index.php" || (name.starts_with("wp-") && name.ends_with(".php")))
 }
 
 fn mount(args: MountArgs) -> Result<()> {
@@ -517,4 +637,47 @@ fn run_clone(args: RunArgs) -> Result<()> {
         skip_php: args.no_php,
     };
     run::run_site(manifest, paths, options)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn offline_core_runtime_cache_is_bounded_to_wordpress_core() {
+        assert!(should_cache_offline_core_runtime_file(
+            Path::new("wp-login.php"),
+            "file"
+        ));
+        assert!(should_cache_offline_core_runtime_file(
+            Path::new("wp-admin/admin.php"),
+            "file"
+        ));
+        assert!(should_cache_offline_core_runtime_file(
+            Path::new("wp-includes/version.php"),
+            "file"
+        ));
+        assert!(should_descend_offline_core_runtime_dir(Path::new(
+            "wp-admin/includes"
+        )));
+        assert!(should_descend_offline_core_runtime_dir(Path::new(
+            "wp-includes/blocks"
+        )));
+
+        assert!(!should_cache_offline_core_runtime_file(
+            Path::new("wp-content/uploads/2026/05/large.mov"),
+            "file"
+        ));
+        assert!(!should_cache_offline_core_runtime_file(
+            Path::new("wp-content/plugins/woocommerce/woocommerce.php"),
+            "file"
+        ));
+        assert!(!should_cache_offline_core_runtime_file(
+            Path::new("wp-content/themes/neve/functions.php"),
+            "file"
+        ));
+        assert!(!should_descend_offline_core_runtime_dir(Path::new(
+            "wp-content/uploads"
+        )));
+    }
 }
