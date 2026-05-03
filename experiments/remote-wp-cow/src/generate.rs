@@ -219,6 +219,10 @@ function cow_remote_query_cache_enabled() {
 	return '0' !== getenv( 'WPCOW_REMOTE_QUERY_CACHE' ) && defined( 'WPCOW_QUERY_CACHE_DIR' ) && '' !== WPCOW_QUERY_CACHE_DIR;
 }
 
+function cow_row_cow_enabled() {
+	return '0' !== getenv( 'WPCOW_ROW_COW' );
+}
+
 function cow_remote_query_cache_file( $query ) {
 	if ( ! cow_remote_query_cache_enabled() ) {
 		return '';
@@ -283,6 +287,17 @@ class Cow_DB extends wpdb {
 		$tables = cow_tables_from_sql( $query );
 
 		if ( cow_is_write_sql( $query ) ) {
+			if ( cow_row_cow_enabled() ) {
+				$row_cow = cow_control_request( '/row-cow', array( 'tables' => $tables, 'sql' => $query ) );
+				if ( empty( $row_cow['ok'] ) ) {
+					$this->last_error = isset( $row_cow['error'] ) ? $row_cow['error'] : 'wp-cow row COW failed';
+					cow_db_runtime_fail( 'control /row-cow failed: ' . $this->last_error . "\n\nSQL:\n" . $query );
+				}
+				if ( ! empty( $row_cow['handled'] ) || ( isset( $row_cow['backend'] ) && 'local' === $row_cow['backend'] ) ) {
+					cow_remote_query_cache_clear();
+					return parent::query( $query );
+				}
+			}
 			$result = cow_control_request( '/materialize', array( 'tables' => $tables ) );
 			if ( empty( $result['ok'] ) ) {
 				$this->last_error = isset( $result['error'] ) ? $result['error'] : 'wp-cow materialization failed';
@@ -293,6 +308,19 @@ class Cow_DB extends wpdb {
 		}
 
 		if ( cow_is_safe_read_sql( $query ) ) {
+			if ( cow_row_cow_enabled() ) {
+				$row_cow = cow_control_request( '/row-cow', array( 'tables' => $tables, 'sql' => $query ) );
+				if ( empty( $row_cow['ok'] ) ) {
+					$this->last_error = isset( $row_cow['error'] ) ? $row_cow['error'] : 'wp-cow row COW failed';
+					cow_db_runtime_fail( 'control /row-cow failed: ' . $this->last_error . "\n\nSQL:\n" . $query );
+				}
+				if ( ! empty( $row_cow['handled'] ) && isset( $row_cow['result'] ) && is_array( $row_cow['result'] ) ) {
+					return $this->cow_apply_remote_result( $row_cow['result'] );
+				}
+				if ( isset( $row_cow['backend'] ) && 'local' === $row_cow['backend'] ) {
+					return parent::query( $query );
+				}
+			}
 			$route = cow_control_request( '/route', array( 'tables' => $tables, 'sql' => $query ) );
 			if ( ! empty( $route['ok'] ) && isset( $route['backend'] ) && 'remote' === $route['backend'] ) {
 				return $this->cow_remote_query( $query );

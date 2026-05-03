@@ -6,6 +6,7 @@ mod fusefs;
 mod generate;
 mod overlay;
 mod remote;
+mod row_cow;
 mod run;
 mod sql;
 

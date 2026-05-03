@@ -127,6 +127,28 @@ fn control_response(
                 json!({ "ok": true, "backend": decision.backend, "materialized": decision.materialized }),
             )
         }
+        "/row-cow" => {
+            if config::is_offline(paths) {
+                return Ok(json!({
+                    "ok": true,
+                    "handled": false,
+                    "backend": "local",
+                    "materialized": [],
+                    "offline": true
+                }));
+            }
+            let sql = input.sql.ok_or_else(|| anyhow!("missing sql"))?;
+            let tables = input.tables.unwrap_or_default();
+            let response = db::row_cow_query(remote, manifest, paths, &sql, &tables)?;
+            Ok(json!({
+                "ok": true,
+                "handled": response.handled,
+                "backend": response.backend,
+                "materialized": response.materialized,
+                "fallback": response.fallback,
+                "result": response.result
+            }))
+        }
         "/query" => {
             if config::is_offline(paths) {
                 return Ok(json!({
