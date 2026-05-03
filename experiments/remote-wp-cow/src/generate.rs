@@ -54,10 +54,6 @@ $table_prefix = {table_prefix};
 
 define( 'WPCOW_CLONE',       {clone_name} );
 define( 'WPCOW_CONTROL_URL', {control_url} );
-define( 'WPCOW_REMOTE_DB_NAME',     {remote_db_name} );
-define( 'WPCOW_REMOTE_DB_USER',     {remote_db_user} );
-define( 'WPCOW_REMOTE_DB_PASSWORD', {remote_db_password} );
-define( 'WPCOW_REMOTE_DB_HOST',     {remote_db_host} );
 define( 'WPCOW_QUERY_CACHE_DIR',    {query_cache_dir} );
 define( 'WPCOW_DB_STATE_FILE',      {db_state_file} );
 
@@ -95,13 +91,6 @@ require_once ABSPATH . 'wp-settings.php';
         table_prefix = php_string(&manifest.probe.table_prefix),
         clone_name = php_string(&manifest.name),
         control_url = php_string(&manifest.control_url),
-        remote_db_name = php_string(&manifest.probe.db_name),
-        remote_db_user = php_string(&manifest.probe.db_user),
-        remote_db_password = php_string(&manifest.probe.db_password),
-        remote_db_host = php_string(&format!(
-            "{}:{}",
-            manifest.remote_db_tunnel.host, manifest.remote_db_tunnel.port
-        )),
         query_cache_dir = php_string(paths.db.join("query-cache").to_string_lossy().as_ref()),
         db_state_file = php_string(paths.db.join("state.json").to_string_lossy().as_ref()),
     )
@@ -465,9 +454,6 @@ function cow_options_table_name( $wpdb ) {
 }
 
 class Cow_DB extends wpdb {
-	private $cow_remote_mysqli = null;
-	private $cow_remote_failed = false;
-
 	public function query( $query ) {
 		if ( ! $query ) {
 			return false;
@@ -552,40 +538,6 @@ class Cow_DB extends wpdb {
 			return $this->cow_apply_remote_result( $cached );
 		}
 
-		$remote = $this->cow_remote_mysqli();
-		if ( $remote instanceof mysqli ) {
-			$result = $remote->query( $query, MYSQLI_STORE_RESULT );
-			if ( false === $result ) {
-				$this->last_error = $remote->error;
-				cow_db_runtime_fail( 'remote mysqli query failed: ' . $this->last_error . "\n\nSQL:\n" . $query );
-			}
-
-			$remote_result = array(
-				'ok'       => true,
-				'error'    => '',
-				'rows'     => array(),
-				'fields'   => array(),
-				'affected' => 0,
-			);
-
-			if ( true === $result ) {
-				$remote_result['affected'] = (int) $remote->affected_rows;
-				cow_remote_query_cache_set( $query, $remote_result );
-				return $this->cow_apply_remote_result( $remote_result );
-			}
-
-			foreach ( $result->fetch_fields() as $field ) {
-				$remote_result['fields'][] = $field->name;
-			}
-			while ( $row = $result->fetch_assoc() ) {
-				$remote_result['rows'][] = $row;
-			}
-			$remote_result['affected'] = count( $remote_result['rows'] );
-
-			cow_remote_query_cache_set( $query, $remote_result );
-			return $this->cow_apply_remote_result( $remote_result );
-		}
-
 		$result = cow_control_request( '/query', array( 'sql' => $query ) );
 		if ( empty( $result['ok'] ) ) {
 			$this->last_error = isset( $result['error'] ) ? $result['error'] : 'wp-cow remote query failed';
@@ -619,59 +571,6 @@ class Cow_DB extends wpdb {
 		return $this->num_rows;
 	}
 
-	private function cow_remote_mysqli() {
-		if ( $this->cow_remote_mysqli instanceof mysqli ) {
-			return $this->cow_remote_mysqli;
-		}
-		if ( $this->cow_remote_failed ) {
-			return null;
-		}
-		if ( '0' === getenv( 'WPCOW_REMOTE_DB_TUNNEL' ) ) {
-			$this->cow_remote_failed = true;
-			return null;
-		}
-
-		if (
-			! defined( 'WPCOW_REMOTE_DB_NAME' ) ||
-			! defined( 'WPCOW_REMOTE_DB_USER' ) ||
-			! defined( 'WPCOW_REMOTE_DB_HOST' ) ||
-			'' === WPCOW_REMOTE_DB_NAME ||
-			'' === WPCOW_REMOTE_DB_USER
-		) {
-			return null;
-		}
-
-		$host = WPCOW_REMOTE_DB_HOST;
-		$port = null;
-		$socket = null;
-		if ( preg_match( '/^(.+):([0-9]+)$/', $host, $matches ) ) {
-			$host = $matches[1];
-			$port = (int) $matches[2];
-		} elseif ( preg_match( '/^([^:]+):(\/.*)$/', $host, $matches ) ) {
-			$host = $matches[1];
-			$socket = $matches[2];
-		}
-
-		if ( function_exists( 'mysqli_report' ) ) {
-			mysqli_report( MYSQLI_REPORT_OFF );
-		}
-
-		$mysqli = mysqli_init();
-		if ( ! $mysqli ) {
-			$this->cow_remote_failed = true;
-			return null;
-		}
-
-		@$mysqli->options( MYSQLI_OPT_CONNECT_TIMEOUT, 2 );
-		if ( ! @$mysqli->real_connect( $host, WPCOW_REMOTE_DB_USER, WPCOW_REMOTE_DB_PASSWORD, WPCOW_REMOTE_DB_NAME, $port, $socket ) ) {
-			$this->cow_remote_failed = true;
-			return null;
-		}
-
-		@$mysqli->set_charset( $this->charset ? $this->charset : 'utf8mb4' );
-		$this->cow_remote_mysqli = $mysqli;
-		return $this->cow_remote_mysqli;
-	}
 }
 
 $wpdb = new Cow_DB( DB_USER, DB_PASSWORD, DB_NAME, defined( 'WPCOW_LOCAL_DB_HOST' ) ? WPCOW_LOCAL_DB_HOST : DB_HOST );
@@ -1124,9 +1023,12 @@ mod tests {
         assert!(php.contains("define( 'WP_HOME',    'http://example.test' );"));
         assert!(php.contains("$table_prefix = 'wp_';"));
         assert!(php.contains("WPCOW_CONTROL_URL"));
-        assert!(php.contains("WPCOW_REMOTE_DB_HOST"));
         assert!(php.contains("WPCOW_QUERY_CACHE_DIR"));
         assert!(php.contains("WPCOW_DB_STATE_FILE"));
+        assert!(!php.contains("WPCOW_REMOTE_DB_NAME"));
+        assert!(!php.contains("WPCOW_REMOTE_DB_USER"));
+        assert!(!php.contains("WPCOW_REMOTE_DB_PASSWORD"));
+        assert!(!php.contains("WPCOW_REMOTE_DB_HOST"));
         assert!(php.contains("wp-cow DB/runtime error"));
         assert!(php.contains("wp-content/db.php"));
         assert!(db_dropin_php().contains("WPCOW_LOCAL_DB_HOST"));
@@ -1138,9 +1040,10 @@ mod tests {
         assert!(php.contains("cow_is_write_sql"));
         assert!(php.contains("cow_select_has_remote_side_effect_clause"));
         assert!(php.contains("/materialize"));
-        assert!(php.contains("cow_remote_mysqli"));
         assert!(php.contains("cow_remote_query_cache_get"));
         assert!(php.contains("cow_remote_query_cache_set"));
+        assert!(!php.contains("cow_remote_mysqli"));
+        assert!(!php.contains("WPCOW_REMOTE_DB_PASSWORD"));
         assert!(php.contains("cow_cached_remote_read_is_safe_without_control"));
         assert!(php.contains("cow_safe_local_read_without_control"));
         assert!(php.contains("cow_query_matches_option_bootstrap"));

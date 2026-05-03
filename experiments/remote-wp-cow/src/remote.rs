@@ -171,7 +171,7 @@ impl RemoteClient {
     }
 
     pub fn start_db_tunnel(&self) -> Result<Option<Child>> {
-        if env_bool("WPCOW_REMOTE_DB_TUNNEL", true) == Some(false) {
+        if env_bool("WPCOW_REMOTE_DB_TUNNEL", false) != Some(true) {
             return Ok(None);
         }
         if self.manifest.probe.db_host.is_empty()

@@ -156,11 +156,12 @@ polling can continue while the warm request is running. Set
 `WPCOW_WEB_SERVER=php` only when you explicitly want the old PHP built-in
 development server fallback.
 
-The lab also starts a persistent SSH tunnel for remote database reads when the
-remote `DB_HOST` is TCP-reachable from the SSH host. This avoids one SSH/PHP
-subprocess per WordPress read query. Write-class SQL is still blocked from the
-remote database and materialized locally first. Set `WPCOW_REMOTE_DB_TUNNEL=0`
-to fall back to daemon-mediated remote reads.
+Remote database reads are mediated by the local daemon by default. Generated
+PHP does not contain the production DB name, user, password, or host, so plugins
+using the normal `DB_*` constants see only the local COW proxy. Write-class SQL
+is blocked from the remote database and materialized locally first.
+`WPCOW_REMOTE_DB_TUNNEL=1` is an opt-in debugging/performance mode for hosts
+where you explicitly accept opening a local SSH tunnel to the remote DB.
 
 `wp-cow run` also starts a local MySQL protocol proxy on the generated `DB_HOST`
 port. Core WordPress still uses the generated `db.php` drop-in with a direct
@@ -181,7 +182,8 @@ Remote read queries that still need the lower database are cached under
 loads reuse local query results instead of crossing SSH/remote MySQL again.
 Set `WPCOW_REMOTE_QUERY_CACHE=0` to disable it or adjust
 `WPCOW_REMOTE_QUERY_CACHE_MAX_ROWS` for large result sets. Local write-class SQL
-clears this cache before executing.
+does not globally clear this cache; cached remote reads are used only while the
+referenced tables have no local overlay state.
 
 The FUSE mount also keeps warmed path metadata live long enough for repeat
 renders to reuse the program files WordPress just touched. The Docker lab

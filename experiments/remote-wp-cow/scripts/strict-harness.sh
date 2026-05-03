@@ -81,6 +81,7 @@ need_pattern src/db.rs 'cached_remote_readonly_query' "Rust remote read cache fo
 need_pattern src/db.rs 'dirty_tables' "dirty row-overlay table routing state"
 need_pattern src/generate.rs 'cow_cached_remote_read_is_safe_without_control' "PHP cached remote read fast path"
 need_pattern src/generate.rs 'cow_safe_local_read_without_control' "PHP local read fast path for materialized runtime data"
+need_pattern src/remote.rs 'WPCOW_REMOTE_DB_TUNNEL", false' "remote DB SSH tunnel is opt-in"
 need_pattern src/generate.rs 'function cow_offline' "PHP DB offline mode"
 need_pattern src/db.rs 'set_local_admin_password' "local-only admin password override"
 need_pattern src/row_cow.rs 'LocalOnlyInsert' "local-only content mutation path"
@@ -97,6 +98,7 @@ need_pattern docker/wp-cow-lab-serve 'wp-cow serve' "Docker one-command serve wr
 need_pattern docker/wp-cow-lab-sever 'WPCOW_LOCAL_ADMIN_PASSWORD' "Docker local admin override wiring"
 need_pattern .env.example '^WPCOW_HTTP_PORT=9481$' "Docker lab example host HTTP port"
 need_pattern .env.example '^WPCOW_WEB_SERVER=frankenphp$' "Docker lab example FrankenPHP preference"
+need_pattern .env.example '^WPCOW_REMOTE_DB_TUNNEL=0$' "Docker lab example disables remote DB tunnel by default"
 need_pattern .env.example '^WPCOW_SPLASH=1$' "Docker lab example splash default"
 need_pattern .env.example '^WPCOW_LOCAL_ADMIN_PASSWORD=$' "Docker lab example local admin override"
 
@@ -106,6 +108,7 @@ deny_pattern src/cli.rs 'prefetch_runtime_files' "sever-triggered runtime prefet
 deny_pattern src/run.rs 'WPCOW_PREFETCH_RUNTIME|prefetch_runtime_files|wp-cow-runtime-prefetch' "background runtime prefetch"
 deny_pattern src/run.rs 'tar[[:space:]]+-cf[[:space:]]+-' "recursive remote tar runtime prefetch"
 deny_pattern src/generate.rs 'function cow_remote_query_cache_clear|cow_remote_query_cache_clear\(\);' "global remote query cache invalidation"
+deny_pattern src/generate.rs "define\\( 'WPCOW_REMOTE_DB_(NAME|USER|PASSWORD|HOST)'|function cow_remote_mysqli|real_connect" "remote DB credentials in generated PHP"
 deny_pattern docker/Dockerfile 'rsync|scp[[:space:]]+-r' "eager copy tooling"
 deny_pattern docker/wp-cow-lab-serve 'rsync|scp[[:space:]]+-r' "eager lab serve copy command"
 deny_pattern docker/wp-cow-lab-run 'rsync|scp[[:space:]]+-r' "eager lab run copy command"
