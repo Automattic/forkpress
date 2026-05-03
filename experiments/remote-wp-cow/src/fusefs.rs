@@ -159,6 +159,14 @@ impl CowFs {
             );
             return Ok(entry);
         }
+        if self.overlay.cached_missing(rel).map_err(anyhow_to_io)? {
+            self.remote_missing_cache
+                .insert(rel.to_path_buf(), Instant::now() + self.remote_cache_ttl);
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "cached remote miss",
+            ));
+        }
 
         if self.offline {
             return Err(io::Error::new(
@@ -172,6 +180,9 @@ impl CowFs {
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
                 self.remote_missing_cache
                     .insert(rel.to_path_buf(), Instant::now() + self.remote_cache_ttl);
+                let _ = self
+                    .overlay
+                    .put_cached_missing(rel, self.remote_cache_ttl.as_secs());
                 return Err(err);
             }
             Err(err) => return Err(err),
@@ -201,8 +212,27 @@ impl CowFs {
                 return Ok(cached.value.clone());
             }
         }
+        if self.overlay.cached_missing(rel).map_err(anyhow_to_io)? {
+            self.remote_missing_cache
+                .insert(rel.to_path_buf(), Instant::now() + self.remote_cache_ttl);
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "cached remote miss",
+            ));
+        }
 
-        let entries = self.remote.readdir(rel)?;
+        let entries = match self.remote.readdir(rel) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                self.remote_missing_cache
+                    .insert(rel.to_path_buf(), Instant::now() + self.remote_cache_ttl);
+                let _ = self
+                    .overlay
+                    .put_cached_missing(rel, self.remote_cache_ttl.as_secs());
+                return Err(err);
+            }
+            Err(err) => return Err(err),
+        };
         let expires_at = Instant::now() + self.remote_cache_ttl;
         for entry in &entries {
             let _ = self.overlay.put_cached_entry(&rel.join(&entry.name), entry);
@@ -1084,6 +1114,95 @@ exec bash -lc "$cmd"
         match old_path {
             Some(value) => std::env::set_var("PATH", value),
             None => std::env::remove_var("PATH"),
+        }
+        match old_helper {
+            Some(value) => std::env::set_var("WPCOW_REMOTE_FILE_HELPER", value),
+            None => std::env::remove_var("WPCOW_REMOTE_FILE_HELPER"),
+        }
+    }
+
+    #[test]
+    fn remote_missing_metadata_survives_daemon_restart() {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let old_path = std::env::var_os("PATH");
+        let old_log = std::env::var_os("WPCOW_FAKE_SSH_LOG");
+        let old_helper = std::env::var_os("WPCOW_REMOTE_FILE_HELPER");
+
+        let temp = tempfile::tempdir().unwrap();
+        let remote_root = temp.path().join("remote");
+        let fake_bin = temp.path().join("bin");
+        let fake_ssh_log = temp.path().join("fake-ssh.log");
+        fs::create_dir_all(&remote_root).unwrap();
+        fs::create_dir_all(&fake_bin).unwrap();
+        fs::write(
+            fake_bin.join("ssh"),
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+printf 'CALL\n' >> "$WPCOW_FAKE_SSH_LOG"
+cmd="${@: -1}"
+exec bash -lc "$cmd"
+"#,
+        )
+        .unwrap();
+        let mut perms = fs::metadata(fake_bin.join("ssh")).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(fake_bin.join("ssh"), perms).unwrap();
+
+        let path = match old_path.as_ref() {
+            Some(old) => format!("{}:{}", fake_bin.display(), old.to_string_lossy()),
+            None => fake_bin.display().to_string(),
+        };
+        std::env::set_var("PATH", path);
+        std::env::set_var("WPCOW_FAKE_SSH_LOG", &fake_ssh_log);
+        std::env::set_var("WPCOW_REMOTE_FILE_HELPER", "0");
+
+        let paths = crate::config::clone_paths(temp.path().join("state").as_path(), "example");
+        ensure_clone_dirs(&paths).unwrap();
+        let mut manifest = Manifest::new(
+            "example".to_string(),
+            "fake-host".to_string(),
+            remote_root.to_string_lossy().to_string(),
+            "https://example.com".to_string(),
+            "http://example.test".to_string(),
+            Probe {
+                table_prefix: "wp_".to_string(),
+                ..Probe::default()
+            },
+        );
+        manifest.remote_metadata_cache_ttl_secs = 3600;
+        let rel = Path::new("wp-content/missing-plugin");
+
+        let mut fs = CowFs::new(
+            manifest.clone(),
+            &paths,
+            RemoteClient::new(manifest.clone(), None),
+        );
+        assert_eq!(
+            fs.remote_stat(rel).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        let ssh_lines_after_first = fs::read_to_string(&fake_ssh_log).unwrap().lines().count();
+
+        let mut reloaded_fs =
+            CowFs::new(manifest.clone(), &paths, RemoteClient::new(manifest, None));
+        assert_eq!(
+            reloaded_fs.remote_stat(rel).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            fs::read_to_string(&fake_ssh_log).unwrap().lines().count(),
+            ssh_lines_after_first,
+            "cached missing metadata should avoid repeated remote stats after restart"
+        );
+
+        match old_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        match old_log {
+            Some(value) => std::env::set_var("WPCOW_FAKE_SSH_LOG", value),
+            None => std::env::remove_var("WPCOW_FAKE_SSH_LOG"),
         }
         match old_helper {
             Some(value) => std::env::set_var("WPCOW_REMOTE_FILE_HELPER", value),

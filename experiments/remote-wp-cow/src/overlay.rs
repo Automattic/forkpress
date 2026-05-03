@@ -23,6 +23,11 @@ struct MetadataFile {
     entries: BTreeMap<String, RemoteEntry>,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct MissingFile {
+    expires_at_unix: BTreeMap<String, u64>,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct CacheProgress {
     phase: String,
@@ -42,6 +47,7 @@ pub struct OverlayStore {
     whiteouts_path: PathBuf,
     whiteouts: RefCell<Option<WhiteoutFile>>,
     metadata: RefCell<Option<MetadataFile>>,
+    missing: RefCell<Option<MissingFile>>,
 }
 
 impl OverlayStore {
@@ -52,6 +58,7 @@ impl OverlayStore {
             whiteouts_path: paths.whiteouts.clone(),
             whiteouts: RefCell::new(None),
             metadata: RefCell::new(None),
+            missing: RefCell::new(None),
         }
     }
 
@@ -104,6 +111,38 @@ impl OverlayStore {
         Ok(metadata.entries.get(&Self::rel_string(rel)).cloned())
     }
 
+    pub fn cached_missing(&self, rel: &Path) -> Result<bool> {
+        let mut missing = self.load_missing()?;
+        let rel_string = Self::rel_string(&Self::clean_rel(rel)?);
+        let now = now_unix_secs();
+        let Some(expires_at) = missing.expires_at_unix.get(&rel_string).copied() else {
+            return Ok(false);
+        };
+        if expires_at > now {
+            return Ok(true);
+        }
+        missing.expires_at_unix.remove(&rel_string);
+        self.write_missing(&missing)?;
+        Ok(false)
+    }
+
+    pub fn put_cached_missing(&self, rel: &Path, ttl_secs: u64) -> Result<()> {
+        let mut missing = self.load_missing()?;
+        let rel_string = Self::rel_string(&Self::clean_rel(rel)?);
+        let expires_at = now_unix_secs().saturating_add(ttl_secs.max(1));
+        missing.expires_at_unix.insert(rel_string, expires_at);
+        self.write_missing(&missing)
+    }
+
+    pub fn remove_cached_missing(&self, rel: &Path) -> Result<()> {
+        let mut missing = self.load_missing()?;
+        let rel_string = Self::rel_string(&Self::clean_rel(rel)?);
+        if missing.expires_at_unix.remove(&rel_string).is_some() {
+            self.write_missing(&missing)?;
+        }
+        Ok(())
+    }
+
     pub fn list_cached_metadata_dir(&self, rel: &Path) -> Result<Vec<RemoteEntry>> {
         let metadata = self.load_metadata()?;
         let rel = Self::clean_rel(rel)?;
@@ -126,6 +165,7 @@ impl OverlayStore {
         let rel = Self::clean_rel(rel)?;
         let mut journal_entries = Vec::new();
         let rel_string = Self::rel_string(&rel);
+        let _ = self.remove_cached_missing(&rel);
         metadata.entries.insert(rel_string.clone(), entry.clone());
         journal_entries.push((rel_string, Some(entry.clone())));
         let mut current = rel.parent();
@@ -161,6 +201,7 @@ impl OverlayStore {
         if path.exists() {
             fs::remove_file(path)?;
         }
+        let _ = self.remove_cached_missing(rel);
         let mut metadata = self.load_metadata()?;
         let rel_string = Self::rel_string(rel);
         metadata.entries.remove(&rel_string);
@@ -447,6 +488,10 @@ impl OverlayStore {
         self.file_cache.join("metadata.jsonl")
     }
 
+    fn missing_path(&self) -> PathBuf {
+        self.file_cache.join("missing.json")
+    }
+
     fn progress_path(&self) -> PathBuf {
         self.file_cache.join("progress.json")
     }
@@ -468,6 +513,40 @@ impl OverlayStore {
         self.apply_metadata_journal(&mut metadata)?;
         *self.metadata.borrow_mut() = Some(metadata.clone());
         Ok(metadata)
+    }
+
+    fn load_missing(&self) -> Result<MissingFile> {
+        if let Some(missing) = self.missing.borrow().as_ref() {
+            return Ok(missing.clone());
+        }
+        let path = self.missing_path();
+        if !path.exists() {
+            let missing = MissingFile::default();
+            *self.missing.borrow_mut() = Some(missing.clone());
+            return Ok(missing);
+        }
+        let mut json = String::new();
+        File::open(path)?.read_to_string(&mut json)?;
+        let missing: MissingFile = serde_json::from_str(&json)?;
+        *self.missing.borrow_mut() = Some(missing.clone());
+        Ok(missing)
+    }
+
+    fn write_missing(&self, missing: &MissingFile) -> Result<()> {
+        fs::create_dir_all(&self.file_cache)?;
+        let json = serde_json::to_vec_pretty(missing)?;
+        let tmp = self.missing_path().with_extension("json.tmp");
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&tmp)?;
+        file.write_all(&json)?;
+        file.write_all(b"\n")?;
+        drop(file);
+        fs::rename(tmp, self.missing_path())?;
+        *self.missing.borrow_mut() = Some(missing.clone());
+        Ok(())
     }
 
     #[allow(dead_code)]
@@ -631,6 +710,13 @@ fn now_unix_ms() -> u128 {
         .unwrap_or_default()
 }
 
+fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
+
 fn read_range_from_file(path: &Path, offset: u64, size: usize) -> Result<Vec<u8>> {
     let mut file = File::open(path)?;
     file.seek(SeekFrom::Start(offset))?;
@@ -740,6 +826,28 @@ mod tests {
         assert!(store.cached_entry(rel).unwrap().is_none());
         let reloaded = OverlayStore::new(&paths);
         assert!(reloaded.cached_entry(rel).unwrap().is_none());
+    }
+
+    #[test]
+    fn stores_cached_remote_missing_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::config::clone_paths(temp.path(), "example");
+        ensure_clone_dirs(&paths).unwrap();
+        let store = OverlayStore::new(&paths);
+        let rel = Path::new("wp-content/missing-plugin");
+
+        assert!(!store.cached_missing(rel).unwrap());
+        store.put_cached_missing(rel, 3600).unwrap();
+        assert!(store.cached_missing(rel).unwrap());
+
+        let reloaded = OverlayStore::new(&paths);
+        assert!(
+            reloaded.cached_missing(rel).unwrap(),
+            "negative remote metadata should survive daemon restarts"
+        );
+
+        store.remove_cached(rel).unwrap();
+        assert!(!store.cached_missing(rel).unwrap());
     }
 
     #[test]

@@ -227,6 +227,13 @@ impl RemoteClient {
     }
 
     pub fn stat(&self, rel: &Path) -> io::Result<RemoteEntry> {
+        let started = Instant::now();
+        let result = self.stat_inner(rel);
+        trace_remote_result("stat", &OverlayStore::rel_string(rel), started, &result);
+        result
+    }
+
+    fn stat_inner(&self, rel: &Path) -> io::Result<RemoteEntry> {
         let full = self.remote_full_path(rel)?;
         if remote_file_helper_enabled() {
             let request = serde_json::json!({
@@ -261,6 +268,13 @@ echo json_encode(array(
     }
 
     pub fn readdir(&self, rel: &Path) -> io::Result<Vec<RemoteEntry>> {
+        let started = Instant::now();
+        let result = self.readdir_inner(rel);
+        trace_remote_result("readdir", &OverlayStore::rel_string(rel), started, &result);
+        result
+    }
+
+    fn readdir_inner(&self, rel: &Path) -> io::Result<Vec<RemoteEntry>> {
         let full = self.remote_full_path(rel)?;
         if remote_file_helper_enabled() {
             let request = serde_json::json!({
@@ -295,6 +309,18 @@ echo json_encode($out);
     }
 
     pub fn read_range(&self, rel: &Path, offset: u64, length: usize) -> io::Result<Vec<u8>> {
+        let started = Instant::now();
+        let result = self.read_range_inner(rel, offset, length);
+        trace_remote_result(
+            "read_range",
+            &format!("{}@{}+{}", OverlayStore::rel_string(rel), offset, length),
+            started,
+            &result,
+        );
+        result
+    }
+
+    fn read_range_inner(&self, rel: &Path, offset: u64, length: usize) -> io::Result<Vec<u8>> {
         let full = self.remote_full_path(rel)?;
         if remote_file_helper_enabled() {
             let request = serde_json::json!({
@@ -319,6 +345,18 @@ echo fread($f,$length);
     }
 
     pub fn read_file(&self, rel: &Path) -> io::Result<Vec<u8>> {
+        let started = Instant::now();
+        let result = self.read_file_inner(rel);
+        trace_remote_result(
+            "read_file",
+            &OverlayStore::rel_string(rel),
+            started,
+            &result,
+        );
+        result
+    }
+
+    fn read_file_inner(&self, rel: &Path) -> io::Result<Vec<u8>> {
         let full = self.remote_full_path(rel)?;
         if remote_file_helper_enabled() {
             let request = serde_json::json!({
@@ -342,6 +380,13 @@ while(!feof($f)){
     }
 
     pub fn readlink(&self, rel: &Path) -> io::Result<String> {
+        let started = Instant::now();
+        let result = self.readlink_inner(rel);
+        trace_remote_result("readlink", &OverlayStore::rel_string(rel), started, &result);
+        result
+    }
+
+    fn readlink_inner(&self, rel: &Path) -> io::Result<String> {
         let full = self.remote_full_path(rel)?;
         if remote_file_helper_enabled() {
             let request = serde_json::json!({
@@ -366,6 +411,13 @@ echo $target;
     }
 
     pub fn remote_query_readonly(&self, sql: &str) -> Result<RemoteQueryResult> {
+        let started = Instant::now();
+        let result = self.remote_query_readonly_inner(sql);
+        trace_remote_result("query", sql, started, &result);
+        result
+    }
+
+    fn remote_query_readonly_inner(&self, sql: &str) -> Result<RemoteQueryResult> {
         let probe = &self.manifest.probe;
         let code = r#"
 $host=$argv[1];$user=$argv[2];$pass=$argv[3];$db=$argv[4];$sql=$argv[5];$timeout=(int)$argv[6];
@@ -627,6 +679,22 @@ fn read_helper_line(stdout: &mut ChildStdout) -> io::Result<String> {
 
 fn remote_file_helper_enabled() -> bool {
     env_bool("WPCOW_REMOTE_FILE_HELPER", true).unwrap_or(true)
+}
+
+fn trace_remote_result<T, E: std::fmt::Display>(
+    op: &str,
+    target: &str,
+    started: Instant,
+    result: &std::result::Result<T, E>,
+) {
+    if std::env::var("WPCOW_TRACE_REMOTE").ok().as_deref() != Some("1") {
+        return;
+    }
+    let elapsed_ms = started.elapsed().as_millis();
+    match result {
+        Ok(_) => eprintln!("wp-cow remote {op} ok {elapsed_ms}ms {target}"),
+        Err(err) => eprintln!("wp-cow remote {op} err {elapsed_ms}ms {target}: {err}"),
+    }
 }
 
 fn remote_file_helper_php() -> &'static str {

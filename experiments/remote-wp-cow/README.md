@@ -183,13 +183,20 @@ loads reuse local query results instead of crossing SSH/remote MySQL again.
 Set `WPCOW_REMOTE_QUERY_CACHE=0` to disable it or adjust
 `WPCOW_REMOTE_QUERY_CACHE_MAX_ROWS` for large result sets. Local write-class SQL
 does not globally clear this cache; cached remote reads are used only while the
-referenced tables have no local overlay state.
+referenced tables have no dirty local overlay state.
 
 The FUSE mount also keeps warmed path metadata live long enough for repeat
 renders to reuse the program files WordPress just touched. The Docker lab
-defaults `WPCOW_FUSE_TTL_SECS` to `60`; lower values make live remote changes
-visible sooner, while higher values reduce repeated path walking.
+defaults `WPCOW_FUSE_TTL_SECS` to `60` for kernel attribute caching and
+`WPCOW_REMOTE_METADATA_CACHE_TTL_SECS` to `3600` for daemon-side remote metadata,
+including negative lookups for files or directories that WordPress probes but
+the remote site does not have. Lower values make live remote changes visible
+sooner, while higher values reduce repeated path walking.
 FrankenPHP also enables OPcache for parsed PHP code in the local web runtime.
+By default `WPCOW_OPCACHE_VALIDATE_TIMESTAMPS=0`, so warmed PHP files do not get
+restatted through FUSE on every render. Restart `wp-cow run` after editing PHP
+program files, or set `WPCOW_OPCACHE_VALIDATE_TIMESTAMPS=1` while actively
+working on plugin/theme code.
 There is no recursive runtime warm-up: PHP files, themes, plugins, and uploads
 are fetched only when a request touches them, then cached for repeated reads.
 Remote plugin and language directories stay visible through the lazy lower
@@ -271,8 +278,11 @@ Remote file contents are cached separately from local mutations in
 `wp-cow-state` volume. Files up to `WPCOW_CACHE_MAX_FILE_MB` are cached as whole
 files on first read, and their remote metadata is recorded in
 `file-cache/metadata.json` so later runs do not need to stat those files
-remotely again. Larger files are streamed by range. The Docker lab defaults that
-limit to 64 MB. Check or clear the cache with:
+remotely again. Negative lookups are recorded in `file-cache/missing.json` for
+the metadata TTL so repeated renders do not keep rechecking absent plugins,
+languages, template directories, or optional WordPress files. Larger files are
+streamed by range. The Docker lab defaults the whole-file cache limit to 64 MB.
+Check or clear the cache with:
 
 ```bash
 wp-cow-lab-cache status

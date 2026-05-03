@@ -263,6 +263,10 @@ fn php_safety_ini_entries() -> Vec<(&'static str, String)> {
     ]
 }
 
+fn opcache_validate_timestamps() -> u64 {
+    env_u64("WPCOW_OPCACHE_VALIDATE_TIMESTAMPS", 0).min(1)
+}
+
 fn start_frankenphp_server(
     paths: &ClonePaths,
     mountpoint: &Path,
@@ -317,7 +321,10 @@ fn start_php_dev_server(paths: &ClonePaths, mountpoint: &Path, http_addr: &str) 
         .arg("-d")
         .arg("opcache.max_accelerated_files=20000")
         .arg("-d")
-        .arg("opcache.validate_timestamps=1")
+        .arg(format!(
+            "opcache.validate_timestamps={}",
+            opcache_validate_timestamps()
+        ))
         .stdin(Stdio::null());
     for (name, value) in php_safety_ini_entries() {
         command.arg("-d").arg(format!("{name}={value}"));
@@ -336,6 +343,7 @@ fn frankenphp_caddyfile(_paths: &ClonePaths, mountpoint: &Path, http_addr: &str)
     let threads = env_u64("WPCOW_PHP_WORKERS", 4);
     let max_execution = env_u64("WPCOW_PHP_MAX_EXECUTION_SECS", 90);
     let socket_timeout = env_u64("WPCOW_PHP_SOCKET_TIMEOUT_SECS", 15);
+    let opcache_validate = opcache_validate_timestamps();
     let safety_ini = php_safety_ini_entries()
         .into_iter()
         .map(|(name, value)| format!("\t\tphp_ini {name} {value}\n"))
@@ -361,7 +369,7 @@ fn frankenphp_caddyfile(_paths: &ClonePaths, mountpoint: &Path, http_addr: &str)
 		php_ini opcache.enable 1
 		php_ini opcache.memory_consumption 192
 		php_ini opcache.max_accelerated_files 20000
-		php_ini opcache.validate_timestamps 1
+		php_ini opcache.validate_timestamps {opcache_validate}
 		php_ini opcache.revalidate_freq 2
 {safety_ini}
 	}}
@@ -515,6 +523,14 @@ mod tests {
         assert!(caddyfile.contains("php_ini disable_functions"));
         assert!(caddyfile.contains("stream_socket_client"));
         assert!(caddyfile.contains("php_ini allow_url_include 0"));
+    }
+
+    #[test]
+    fn web_runtime_defaults_to_no_opcache_timestamp_revalidation() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::config::clone_paths(temp.path(), "example");
+        let caddyfile = frankenphp_caddyfile(&paths, Path::new("/tmp/mount"), "127.0.0.1:9481");
+        assert!(caddyfile.contains("php_ini opcache.validate_timestamps 0"));
     }
 
     #[test]

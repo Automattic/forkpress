@@ -341,9 +341,6 @@ fn plan_select(tokens: &[Token]) -> RowCowPlan {
     if contains_keyword(tokens, "GROUP") || contains_keyword(tokens, "HAVING") {
         return promote(tables, "grouped reads need table promotion");
     }
-    if contains_keyword(tokens, "ORDER") || contains_keyword(tokens, "LIMIT") {
-        return promote(tables, "ordered or limited reads need table promotion");
-    }
     if contains_keyword(tokens, "DISTINCT") {
         return promote(tables, "distinct reads need table promotion");
     }
@@ -366,7 +363,8 @@ fn plan_select(tokens: &[Token]) -> RowCowPlan {
     let Some(where_idx) = find_keyword(tokens, "WHERE") else {
         return promote(vec![table], "SELECT without primary-key predicate");
     };
-    let predicate_tokens = &tokens[where_idx + 1..];
+    let (predicate_tokens, trailing_tokens) =
+        split_select_predicate_and_trailing(&tokens[where_idx + 1..]);
     let Some(predicate) = parse_pk_predicate(predicate_tokens) else {
         return promote(
             vec![table],
@@ -385,6 +383,9 @@ fn plan_select(tokens: &[Token]) -> RowCowPlan {
     let Some(projection) = parse_projection(&tokens[1..from_idx], &table, alias.as_deref()) else {
         return promote(vec![table], "SELECT projection cannot be row-merged safely");
     };
+    if !select_trailing_clauses_are_row_safe(trailing_tokens, predicate.values.len()) {
+        return promote(vec![table], "ordered or limited reads need table promotion");
+    }
 
     RowCowPlan::RowLevel(RowCowOp::Select(RowSelect {
         table,
@@ -392,6 +393,68 @@ fn plan_select(tokens: &[Token]) -> RowCowPlan {
         pk_values: predicate.values,
         projection,
     }))
+}
+
+fn split_select_predicate_and_trailing(tokens: &[Token]) -> (&[Token], &[Token]) {
+    let mut depth = 0_i32;
+    for (idx, token) in tokens.iter().enumerate() {
+        match token_symbol(token) {
+            Some('(') => depth += 1,
+            Some(')') => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 && (token_is(token, "ORDER") || token_is(token, "LIMIT")) {
+            return (&tokens[..idx], &tokens[idx..]);
+        }
+    }
+    (tokens, &[])
+}
+
+fn select_trailing_clauses_are_row_safe(tokens: &[Token], pk_values_len: usize) -> bool {
+    let tokens = trim_statement_semicolons(tokens);
+    if tokens.is_empty() {
+        return true;
+    }
+    if pk_values_len != 1 {
+        return false;
+    }
+
+    let mut idx = 0;
+    if token_is(&tokens[idx], "ORDER") {
+        idx += 1;
+        if !tokens.get(idx).is_some_and(|token| token_is(token, "BY")) {
+            return false;
+        }
+        idx += 1;
+        while idx < tokens.len() && !token_is(&tokens[idx], "LIMIT") {
+            idx += 1;
+        }
+    }
+
+    if idx == tokens.len() {
+        return true;
+    }
+    if !token_is(&tokens[idx], "LIMIT") {
+        return false;
+    }
+    idx += 1;
+
+    let Some(first) = tokens.get(idx).and_then(token_usize) else {
+        return false;
+    };
+    idx += 1;
+    let safe_limit = if tokens.get(idx).and_then(token_symbol) == Some(',') {
+        idx += 1;
+        let Some(count) = tokens.get(idx).and_then(token_usize) else {
+            return false;
+        };
+        idx += 1;
+        first == 0 && count == 1
+    } else {
+        first == 1
+    };
+
+    safe_limit && trim_statement_semicolons(&tokens[idx..]).is_empty()
 }
 
 fn plan_update(tokens: &[Token]) -> RowCowPlan {
@@ -1120,6 +1183,17 @@ fn is_statement_end(token: &Token) -> bool {
     token_symbol(token) == Some(';')
 }
 
+fn trim_statement_semicolons(mut tokens: &[Token]) -> &[Token] {
+    while tokens
+        .last()
+        .and_then(token_symbol)
+        .is_some_and(|symbol| symbol == ';')
+    {
+        tokens = &tokens[..tokens.len() - 1];
+    }
+    tokens
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TokenKind {
     Word,
@@ -1149,6 +1223,14 @@ fn token_symbol(token: &Token) -> Option<char> {
     match token.kind {
         TokenKind::Symbol(ch) => Some(ch),
         _ => None,
+    }
+}
+
+fn token_usize(token: &Token) -> Option<usize> {
+    if matches!(token.kind, TokenKind::Number) {
+        token.text.parse::<usize>().ok()
+    } else {
+        None
     }
 }
 
@@ -1620,6 +1702,25 @@ mod tests {
         };
         assert_eq!(write.table, "wp_posts");
         assert_eq!(write.pk_values, vec![PkValue("1".to_string())]);
+    }
+
+    #[test]
+    fn primary_key_single_row_selects_allow_safe_order_and_limit_clauses() {
+        for sql in [
+            "SELECT * FROM wp_posts WHERE ID = 74 LIMIT 1",
+            "SELECT * FROM wp_posts WHERE ID = 74 LIMIT 0, 1",
+            "SELECT * FROM wp_posts WHERE ID = 74 ORDER BY post_date DESC LIMIT 1",
+        ] {
+            let RowCowPlan::RowLevel(RowCowOp::Select(select)) = plan_sql(sql) else {
+                panic!("{sql} should be row-level safe");
+            };
+            assert_eq!(select.table, "wp_posts");
+            assert_eq!(select.pk_column, "ID");
+            assert_eq!(select.pk_values, vec![PkValue("74".to_string())]);
+        }
+
+        assert_not_row_level("SELECT * FROM wp_posts WHERE ID = 74 LIMIT 1, 1");
+        assert_not_row_level("SELECT * FROM wp_posts WHERE ID IN (74, 75) LIMIT 1");
     }
 
     #[test]

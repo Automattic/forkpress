@@ -44,16 +44,19 @@ run_exact_test cli::tests::offline_core_runtime_cache_is_bounded_to_wordpress_co
 run_exact_test overlay::tests::cached_only_copy_up_uses_materialized_files_without_remote
 run_exact_test fusefs::tests::offline_readdir_uses_cached_remote_metadata_without_remote
 run_exact_test fusefs::tests::remote_stat_metadata_survives_severed_mode_without_remote
+run_exact_test fusefs::tests::remote_missing_metadata_survives_daemon_restart
 run_exact_test generate::tests::router_splash_and_progress_smoke_responds_quickly
 run_exact_test db::tests::remote_query_cache_round_trips_safe_read_results
 run_exact_test db::tests::dirty_row_overlay_tables_are_local_state
 run_exact_test row_cow::tests::select_materializes_remote_rows_for_later_offline_reads
+run_exact_test row_cow::tests::primary_key_single_row_selects_allow_safe_order_and_limit_clauses
 run_exact_test row_cow::tests::local_insert_is_not_sent_to_remote_and_appears_in_merged_select
 run_exact_test row_cow::tests::update_copy_up_fetches_only_affected_primary_keys
 run_exact_test row_cow::tests::delete_tombstone_hides_remote_row_from_merged_selects
 run_exact_test run::tests::frankenphp_routes_wp_admin_directory_to_index
 run_exact_test run::tests::frankenphp_routes_installer_paths_through_runtime_guard
 run_exact_test run::tests::web_runtime_disables_common_plugin_side_effect_primitives
+run_exact_test run::tests::web_runtime_defaults_to_no_opcache_timestamp_revalidation
 run_exact_test sql::tests::extract_tables_preserves_wordpress_table_case_for_proxy_cow
 run_exact_ignored_test generate::tests::runtime_cow_harness_proves_admin_login_local_mutation_and_offline_refresh
 run_exact_ignored_test generate::tests::production_run_harness_proves_fuse_rust_control_and_offline_refresh
@@ -72,7 +75,9 @@ need_pattern src/run.rs '__wp_cow_installer_guard=1' "FrankenPHP installer guard
 need_pattern src/fusefs.rs 'clone is severed and file is not cached locally' "offline cached-file guard"
 need_pattern src/fusefs.rs 'copy_up_cached_only' "offline write-open cached-only copy-up"
 need_pattern src/fusefs.rs 'put_cached_entry\(rel, &entry\)' "FUSE stat metadata persistence"
+need_pattern src/fusefs.rs 'put_cached_missing' "FUSE missing metadata persistence"
 need_pattern src/overlay.rs 'clone is severed and writable lower file is not cached locally' "offline write-open remote guard"
+need_pattern src/overlay.rs 'missing\.json' "persistent missing metadata cache"
 need_pattern src/control.rs 'clone is severed from the remote database' "offline remote-DB guard"
 need_pattern src/generate.rs 'will not fall back to the empty local schema' "installer/runtime failure guard"
 need_pattern src/generate.rs 'wp_cow_looks_like_installer' "installer response detector"
@@ -86,6 +91,7 @@ need_pattern src/remote.rs 'WPCOW_REMOTE_DB_TUNNEL", false' "remote DB SSH tunne
 need_pattern src/run.rs 'WPCOW_ALLOW_UNSAFE_PLUGIN_SIDE_EFFECTS' "plugin side-effect escape hatch is explicit"
 need_pattern src/run.rs 'disable_functions' "PHP side-effect functions are disabled by default"
 need_pattern src/run.rs 'stream_socket_client' "raw plugin socket egress is disabled by default"
+need_pattern src/run.rs 'WPCOW_OPCACHE_VALIDATE_TIMESTAMPS' "OPcache timestamp validation is configurable"
 need_pattern src/generate.rs 'function cow_offline' "PHP DB offline mode"
 need_pattern src/db.rs 'set_local_admin_password' "local-only admin password override"
 need_pattern src/row_cow.rs 'LocalOnlyInsert' "local-only content mutation path"
@@ -105,6 +111,8 @@ need_pattern .env.example '^WPCOW_WEB_SERVER=frankenphp$' "Docker lab example Fr
 need_pattern .env.example '^WPCOW_REMOTE_DB_TUNNEL=0$' "Docker lab example disables remote DB tunnel by default"
 need_pattern .env.example '^WPCOW_SPLASH=1$' "Docker lab example splash default"
 need_pattern .env.example '^WPCOW_ALLOW_UNSAFE_PLUGIN_SIDE_EFFECTS=0$' "Docker lab example keeps PHP side-effect guards enabled"
+need_pattern .env.example '^WPCOW_OPCACHE_VALIDATE_TIMESTAMPS=0$' "Docker lab example keeps warm render OPcache fast path enabled"
+need_pattern .env.example '^WPCOW_REMOTE_METADATA_CACHE_TTL_SECS=3600$' "Docker lab example keeps remote metadata warm long enough for rerenders"
 need_pattern .env.example '^WPCOW_LOCAL_ADMIN_PASSWORD=$' "Docker lab example local admin override"
 
 deny_pattern src 'rsync|scp[[:space:]]+-r' "eager source tree copy command"

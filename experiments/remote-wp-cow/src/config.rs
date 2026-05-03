@@ -12,7 +12,7 @@ use url::Url;
 pub const MANIFEST_VERSION: u32 = 1;
 const OFFLINE_MARKER: &str = "offline.json";
 const DEFAULT_CACHE_MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
-const DEFAULT_REMOTE_METADATA_CACHE_TTL_SECS: u64 = 30;
+const DEFAULT_REMOTE_METADATA_CACHE_TTL_SECS: u64 = 3600;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
@@ -126,7 +126,7 @@ impl Manifest {
             remote_db_tunnel: default_remote_db_tunnel(),
             control_url: "http://127.0.0.1:39070".to_string(),
             cache_max_file_bytes: cache_max_file_bytes_from_env(),
-            remote_metadata_cache_ttl_secs: DEFAULT_REMOTE_METADATA_CACHE_TTL_SECS,
+            remote_metadata_cache_ttl_secs: remote_metadata_cache_ttl_secs_from_env(),
         }
     }
 }
@@ -137,6 +137,14 @@ fn default_cache_max_file_bytes() -> u64 {
 
 fn default_remote_metadata_cache_ttl_secs() -> u64 {
     DEFAULT_REMOTE_METADATA_CACHE_TTL_SECS
+}
+
+fn remote_metadata_cache_ttl_secs_from_env() -> u64 {
+    std::env::var("WPCOW_REMOTE_METADATA_CACHE_TTL_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|ttl| *ttl > 0)
+        .unwrap_or(DEFAULT_REMOTE_METADATA_CACHE_TTL_SECS)
 }
 
 fn default_remote_db_tunnel() -> RemoteDbTunnel {

@@ -432,13 +432,27 @@ function cow_safe_local_read_without_control( $query, $tables, $options_table ) 
 	return false;
 }
 
+function cow_table_has_dirty_state( $table ) {
+	$table = strtolower( (string) $table );
+	$state = cow_local_state();
+	if ( isset( $state['dirty_tables'][ $table ] ) ) {
+		return true;
+	}
+	foreach ( $state['dirty_option_rows'] as $row_key => $_present ) {
+		$parts = explode( ':', (string) $row_key, 2 );
+		if ( $table === strtolower( $parts[0] ) ) {
+			return true;
+		}
+	}
+	return false;
+}
+
 function cow_cached_remote_read_is_safe_without_control( $tables ) {
 	if ( empty( $tables ) ) {
 		return false;
 	}
-	$local_tables = cow_local_state_tables();
 	foreach ( $tables as $table ) {
-		if ( isset( $local_tables[ strtolower( (string) $table ) ] ) ) {
+		if ( cow_table_has_dirty_state( $table ) ) {
 			return false;
 		}
 	}
@@ -1072,6 +1086,7 @@ mod tests {
             "<?php class wpdb { public function __construct() {} }\n",
         )
         .unwrap();
+        let state_file = temp.path().join("state.json");
         let db_dropin = temp.path().join("db.php");
         fs::write(&db_dropin, db_dropin_php()).unwrap();
         let check = temp.path().join("check.php");
@@ -1079,6 +1094,7 @@ mod tests {
             r#"<?php
 define( 'ABSPATH', '{}' );
 define( 'WPINC', 'wp-includes' );
+define( 'WPCOW_DB_STATE_FILE', '{}' );
 define( 'DB_USER', 'u' );
 define( 'DB_PASSWORD', 'p' );
 define( 'DB_NAME', 'd' );
@@ -1099,8 +1115,39 @@ foreach ( $cases as $sql => $expected ) {{
 		exit( 1 );
 	}}
 }}
+file_put_contents(
+	WPCOW_DB_STATE_FILE,
+	json_encode(
+		array(
+			'option_rows'       => array( 'wp_options:siteurl' ),
+			'dirty_tables'      => array(),
+			'dirty_option_rows' => array(),
+		)
+	)
+);
+if ( ! cow_cached_remote_read_is_safe_without_control( array( 'wp_options' ) ) ) {{
+	fwrite( STDERR, 'clean copied rows should not block the remote query cache' . PHP_EOL );
+	exit( 1 );
+}}
+file_put_contents(
+	WPCOW_DB_STATE_FILE,
+	json_encode(
+		array(
+			'option_rows'       => array( 'wp_options:siteurl' ),
+			'dirty_tables'      => array(),
+			'dirty_option_rows' => array( 'wp_options:siteurl' ),
+		)
+	)
+);
+touch( WPCOW_DB_STATE_FILE, time() + 2 );
+clearstatcache( true, WPCOW_DB_STATE_FILE );
+if ( cow_cached_remote_read_is_safe_without_control( array( 'wp_options' ) ) ) {{
+	fwrite( STDERR, 'dirty copied rows must block the remote query cache' . PHP_EOL );
+	exit( 1 );
+}}
 "#,
             php_single_quoted_path(temp.path()),
+            php_single_quoted_path(&state_file),
             php_single_quoted_path(&db_dropin)
         );
         fs::write(&check, script).unwrap();
@@ -1359,6 +1406,7 @@ foreach ( $cases as $sql => $expected ) {{
 
         let remote_public = HarnessHttpServer::start("REMOTE PUBLIC BYPASS");
         let control_port = free_tcp_port();
+        let db_proxy_port = free_tcp_port();
         let site_port = free_tcp_port();
         let mut harness_manifest = manifest();
         harness_manifest.remote_url = format!("http://127.0.0.1:{}", remote_public.port);
@@ -1378,6 +1426,10 @@ foreach ( $cases as $sql => $expected ) {{
         harness_manifest.remote_db_tunnel = RemoteDbTunnel {
             host: "127.0.0.1".to_string(),
             port: mysql_port,
+        };
+        harness_manifest.db_proxy = DbProxy {
+            host: "127.0.0.1".to_string(),
+            port: db_proxy_port,
         };
 
         crate::db::set_local_admin_password(&harness_manifest, Some("admin"), "local-pass")
@@ -1594,6 +1646,7 @@ foreach ( $cases as $sql => $expected ) {{
 
         let remote_public = HarnessHttpServer::start("REMOTE PUBLIC BYPASS");
         let control_port = free_tcp_port();
+        let db_proxy_port = free_tcp_port();
         let site_port = free_tcp_port();
         let mut harness_manifest = manifest();
         harness_manifest.ssh = "fake-host".to_string();
@@ -1614,6 +1667,10 @@ foreach ( $cases as $sql => $expected ) {{
         harness_manifest.remote_db_tunnel = RemoteDbTunnel {
             host: "127.0.0.1".to_string(),
             port: mysql_port,
+        };
+        harness_manifest.db_proxy = DbProxy {
+            host: "127.0.0.1".to_string(),
+            port: db_proxy_port,
         };
         harness_manifest.cache_max_file_bytes = 1024 * 1024;
         harness_manifest.remote_metadata_cache_ttl_secs = 60;
