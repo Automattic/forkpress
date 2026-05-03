@@ -152,6 +152,14 @@ subprocess per WordPress read query. Write-class SQL is still blocked from the
 remote database and materialized locally first. Set `WPCOW_REMOTE_DB_TUNNEL=0`
 to fall back to daemon-mediated remote reads.
 
+`wp-cow run` also starts a local MySQL protocol proxy on the generated `DB_HOST`
+port. Core WordPress still uses the generated `db.php` drop-in with a direct
+local MariaDB connection to avoid recursion, but plugins that open their own
+`mysqli` connection using `DB_HOST` hit the proxy instead of the empty local
+schema. The proxy applies the same row-COW/read-routing/write-blocking rules as
+the drop-in before forwarding anything to local MariaDB or the remote read-only
+lower layer.
+
 On first WordPress boot, `wp-cow` special-cases the options-table bootstrap
 query. It materializes only autoloaded option rows plus core identity/theme/plugin
 option names into the local database, then routes those matching reads locally.
@@ -300,10 +308,12 @@ run/
   - deletions are recorded as whiteouts.
 - Generated local `wp-config.php`, `wp-content/db.php`, and safety MU plugin.
 - Schema import and full-table DB materialization through remote `mysqldump`.
-- A local control HTTP server used by the DB drop-in:
+- A local control HTTP server used by the DB drop-in and MySQL proxy:
   - read queries can be served from the remote DB through daemon-mediated PHP,
   - write-class SQL is never sent to the remote DB,
   - writes materialize affected table groups before executing locally.
+- A local MySQL protocol proxy for code paths that bypass WordPress's `$wpdb`
+  object and connect with the generated `DB_HOST` constant.
 
 ## Requirements
 
@@ -322,6 +332,7 @@ Remote host:
 
 ## Notes
 
-This is an MVP. The DB layer uses a WordPress `db.php` drop-in plus daemon
-control endpoints; it does not yet implement a transparent MySQL protocol
-proxy, row-level overlays, or true point-in-time snapshot support.
+This is an MVP. The DB layer now has both a WordPress `db.php` drop-in and a
+local MySQL protocol proxy, but it is still conservative: complex SQL promotes
+tables instead of attempting unsafe partial merges, and it does not provide true
+point-in-time snapshot support without cooperation from the remote host.

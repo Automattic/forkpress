@@ -43,7 +43,6 @@ wp-cow-lab-serve
 ## Non-Goals
 
 - Perfect visual fidelity for every media asset on first page load.
-- A transparent MySQL protocol proxy.
 - Full production snapshot semantics.
 - Supporting non-Linux runtime hosts.
 
@@ -61,10 +60,12 @@ Startup should do:
 3. Initialize empty local DB schema.
 4. Start a persistent SSH tunnel for safe remote DB reads when the remote DB is
    reachable over TCP from the SSH host.
-5. Start local PHP immediately with generated local `wp-config.php`, DB drop-in,
+5. Start a local MySQL protocol proxy for plugins that bypass `$wpdb` and use
+   the generated `DB_HOST` constant directly.
+6. Start local PHP immediately with generated local `wp-config.php`, DB drop-in,
    and safety MU plugin.
-6. Serve files lazily and persistently cache only the files touched by requests.
-7. For the first dynamic browser request, show a temporary splash page that
+7. Serve files lazily and persistently cache only the files touched by requests.
+8. For the first dynamic browser request, show a temporary splash page that
    polls real file-cache progress while a bypass request warms WordPress.
 
 ## File Materialization Policy

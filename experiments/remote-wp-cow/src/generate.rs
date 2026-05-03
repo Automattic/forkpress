@@ -45,7 +45,8 @@ pub fn wp_config_php(manifest: &Manifest, paths: &ClonePaths) -> String {
 define( 'DB_NAME',     {local_db_name} );
 define( 'DB_USER',     {local_db_user} );
 define( 'DB_PASSWORD', {local_db_password} );
-define( 'DB_HOST',     {local_db_host} );
+define( 'DB_HOST',     {proxy_db_host} );
+define( 'WPCOW_LOCAL_DB_HOST', {local_db_host} );
 
 define( 'WP_HOME',    {local_url} );
 define( 'WP_SITEURL', {local_url} );
@@ -85,6 +86,10 @@ require_once ABSPATH . 'wp-settings.php';
         local_db_host = php_string(&format!(
             "{}:{}",
             manifest.local_db.host, manifest.local_db.port
+        )),
+        proxy_db_host = php_string(&format!(
+            "{}:{}",
+            manifest.db_proxy.host, manifest.db_proxy.port
         )),
         local_url = php_string(&manifest.local_url),
         table_prefix = php_string(&manifest.probe.table_prefix),
@@ -463,7 +468,7 @@ class Cow_DB extends wpdb {
 	}
 }
 
-$wpdb = new Cow_DB( DB_USER, DB_PASSWORD, DB_NAME, DB_HOST );
+$wpdb = new Cow_DB( DB_USER, DB_PASSWORD, DB_NAME, defined( 'WPCOW_LOCAL_DB_HOST' ) ? WPCOW_LOCAL_DB_HOST : DB_HOST );
 "#
 }
 
@@ -832,7 +837,9 @@ pub fn generated_file_paths(root: &Path) -> Vec<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{clone_paths, LocalDb, Manifest, Probe, RemoteDbTunnel, MANIFEST_VERSION};
+    use crate::config::{
+        clone_paths, DbProxy, LocalDb, Manifest, Probe, RemoteDbTunnel, MANIFEST_VERSION,
+    };
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::process::Command;
@@ -862,6 +869,10 @@ mod tests {
                 host: "127.0.0.1".to_string(),
                 port: 33071,
             },
+            db_proxy: DbProxy {
+                host: "127.0.0.1".to_string(),
+                port: 33070,
+            },
             remote_db_tunnel: RemoteDbTunnel {
                 host: "127.0.0.1".to_string(),
                 port: 33072,
@@ -878,6 +889,8 @@ mod tests {
         let paths = clone_paths(temp.path(), "example");
         let php = wp_config_php(&manifest(), &paths);
         assert!(php.contains("define( 'DB_NAME',     'cow_example' );"));
+        assert!(php.contains("define( 'DB_HOST',     '127.0.0.1:33070' );"));
+        assert!(php.contains("define( 'WPCOW_LOCAL_DB_HOST', '127.0.0.1:33071' );"));
         assert!(php.contains("define( 'WP_HOME',    'http://example.test' );"));
         assert!(php.contains("$table_prefix = 'wp_';"));
         assert!(php.contains("WPCOW_CONTROL_URL"));
@@ -885,6 +898,7 @@ mod tests {
         assert!(php.contains("WPCOW_QUERY_CACHE_DIR"));
         assert!(php.contains("wp-cow DB/runtime error"));
         assert!(php.contains("wp-content/db.php"));
+        assert!(db_dropin_php().contains("WPCOW_LOCAL_DB_HOST"));
     }
 
     #[test]

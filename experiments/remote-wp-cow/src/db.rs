@@ -1217,7 +1217,7 @@ fn qualified_table(manifest: &Manifest, table: &str) -> String {
     )
 }
 
-fn run_mysql_exec(manifest: &Manifest, sql_text: &str) -> Result<()> {
+pub(crate) fn run_mysql_exec(manifest: &Manifest, sql_text: &str) -> Result<()> {
     let mut command = local_mysql_command(manifest);
     command.arg("--execute").arg(sql_text);
     let status = command.status().context("run local mysql")?;
@@ -1227,7 +1227,7 @@ fn run_mysql_exec(manifest: &Manifest, sql_text: &str) -> Result<()> {
     Ok(())
 }
 
-fn local_query_result(manifest: &Manifest, sql_text: &str) -> Result<CowQueryResult> {
+pub(crate) fn local_query_result(manifest: &Manifest, sql_text: &str) -> Result<CowQueryResult> {
     let output = local_mysql_command(manifest)
         .arg("--batch")
         .arg("--raw")
@@ -1380,6 +1380,10 @@ mod tests {
                 password: String::new(),
                 host: "127.0.0.1".to_string(),
                 port: 33071,
+            },
+            db_proxy: crate::config::DbProxy {
+                host: "127.0.0.1".to_string(),
+                port: 33070,
             },
             remote_db_tunnel: crate::config::RemoteDbTunnel {
                 host: "127.0.0.1".to_string(),

@@ -23,6 +23,8 @@ pub struct Manifest {
     pub created_at_unix: u64,
     pub probe: Probe,
     pub local_db: LocalDb,
+    #[serde(default = "default_db_proxy")]
+    pub db_proxy: DbProxy,
     #[serde(default = "default_remote_db_tunnel")]
     pub remote_db_tunnel: RemoteDbTunnel,
     pub control_url: String,
@@ -59,6 +61,12 @@ pub struct LocalDb {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteDbTunnel {
+    pub host: String,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbProxy {
     pub host: String,
     pub port: u16,
 }
@@ -112,6 +120,7 @@ impl Manifest {
                 host: "127.0.0.1".to_string(),
                 port: 33071,
             },
+            db_proxy: default_db_proxy(),
             remote_db_tunnel: default_remote_db_tunnel(),
             control_url: "http://127.0.0.1:39070".to_string(),
             cache_max_file_bytes: cache_max_file_bytes_from_env(),
@@ -132,6 +141,13 @@ fn default_remote_db_tunnel() -> RemoteDbTunnel {
     RemoteDbTunnel {
         host: "127.0.0.1".to_string(),
         port: 33072,
+    }
+}
+
+fn default_db_proxy() -> DbProxy {
+    DbProxy {
+        host: "127.0.0.1".to_string(),
+        port: 33070,
     }
 }
 

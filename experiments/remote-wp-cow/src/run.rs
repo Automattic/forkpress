@@ -14,6 +14,7 @@ use crate::control;
 use crate::db;
 use crate::fusefs;
 use crate::generate::ROUTER_BASENAME;
+use crate::mysql_proxy;
 use crate::remote::{shell_quote, RemoteClient};
 
 pub struct RunOptions {
@@ -70,6 +71,21 @@ pub fn run_site(manifest: Manifest, paths: ClonePaths, options: RunOptions) -> R
             control_paths,
             control_remote,
             control_shutdown,
+        )
+    });
+
+    let proxy_addr = format!("{}:{}", manifest.db_proxy.host, manifest.db_proxy.port);
+    let proxy_shutdown = shutdown.clone();
+    let proxy_manifest = manifest.clone();
+    let proxy_paths = paths.clone();
+    let proxy_remote = remote.clone();
+    let proxy_thread = thread::spawn(move || {
+        mysql_proxy::serve_proxy(
+            &proxy_addr,
+            proxy_manifest,
+            proxy_paths,
+            proxy_remote,
+            proxy_shutdown,
         )
     });
 
@@ -143,6 +159,11 @@ pub fn run_site(manifest: Manifest, paths: ClonePaths, options: RunOptions) -> R
     match control_thread.join() {
         Ok(result) => result?,
         Err(_) => return Err(anyhow!("control thread panicked")),
+    }
+
+    match proxy_thread.join() {
+        Ok(result) => result?,
+        Err(_) => return Err(anyhow!("MySQL proxy thread panicked")),
     }
 
     match mount_thread.join() {

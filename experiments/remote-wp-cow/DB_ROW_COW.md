@@ -51,6 +51,12 @@ handles a statement, WordPress continues against the local database or receives
 the merged result. If a write is not row-level safe, the existing table
 promotion/materialization fallback remains the conservative path.
 
+`wp-cow run` also exposes a local MySQL protocol proxy. The generated
+`wp-config.php` points `DB_HOST` at this proxy so plugins that bypass `$wpdb`
+still go through the COW routing layer. The drop-in itself uses
+`WPCOW_LOCAL_DB_HOST` to connect directly to local MariaDB and avoid recursively
+calling the proxy.
+
 Promotion is overlay-preserving. Before importing a full remote table, wp-cow
 dumps the current local upper rows for that table, imports the remote lower
 table, restores the local upper rows, then reapplies tombstones. This keeps

@@ -4,6 +4,7 @@ mod control;
 mod db;
 mod fusefs;
 mod generate;
+mod mysql_proxy;
 mod overlay;
 mod remote;
 mod row_cow;
