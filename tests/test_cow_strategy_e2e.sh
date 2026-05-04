@@ -94,6 +94,47 @@ test -f "$WORK/feature-cow/wp-content/cow-git.txt"
 grep -F "changed through git" "$WORK/feature-cow/wp-content/cow-git.txt" >/dev/null
 test ! -e "$WORK/main/wp-content/cow-git.txt"
 
+git -C "$TMP/checkout" checkout -B git-created origin/main
+printf "created through git\n" > "$TMP/checkout/wordpress/wp-content/git-created.txt"
+printf "\n-- ignored git-created database.sql edit\n" >> "$TMP/checkout/database.sql"
+"$BIN" commit "$TMP/checkout" --message "create cow branch through git"
+test -f "$WORK/git-created/wp-load.php"
+test -f "$WORK/git-created/wp-content/git-created.txt"
+grep -F "created through git" "$WORK/git-created/wp-content/git-created.txt" >/dev/null
+test ! -e "$WORK/main/wp-content/git-created.txt"
+test ! -e "$WORK/git-created/database.sql"
+"$BIN" branch --work-dir "$WORK_DIR" list | grep -F "git-created" >/dev/null
+curl -sS -H "Host: git-created.wp.localhost:$PORT" \
+  "http://127.0.0.1:$PORT/" \
+  -o "$TMP/git-created.html"
+grep -F "Branch: git-created" "$TMP/git-created.html" >/dev/null
+grep -F "Branch not found" "$TMP/git-created.html" && exit 1
+
+git -C "$TMP/checkout" checkout -B bad/slash origin/main
+printf "bad slash branch\n" > "$TMP/checkout/wordpress/wp-content/bad-slash.txt"
+git -C "$TMP/checkout" branch mixed-valid origin/main
+if (
+  cd "$TMP/checkout"
+  git push origin HEAD:refs/heads/bad/slash mixed-valid:refs/heads/mixed-valid
+) > "$TMP/bad-slash.out" 2>&1; then
+  echo "slash branch push unexpectedly succeeded" >&2
+  cat "$TMP/bad-slash.out" >&2
+  exit 1
+fi
+grep -E "unsupported COW branch name|failed to push" "$TMP/bad-slash.out" >/dev/null
+test ! -e "$WORK/bad"
+test ! -e "$WORK/mixed-valid"
+test ! -e "$WORK_DIR/cow/git/refs/heads/bad"
+test ! -e "$WORK_DIR/cow/git/refs/heads/mixed-valid"
+
+git -C "$TMP/checkout" checkout -B git-created-after-reject origin/main
+git -C "$TMP/checkout" reset --hard origin/main
+git -C "$TMP/checkout" clean -fd
+printf "created after reject\n" > "$TMP/checkout/wordpress/wp-content/git-created-after-reject.txt"
+"$BIN" commit "$TMP/checkout" --message "create cow branch after rejected ref"
+test -f "$WORK/git-created-after-reject/wp-content/git-created-after-reject.txt"
+test ! -e "$WORK/git-created-after-reject/wp-content/bad-slash.txt"
+
 "$BIN" agents \
   --work-dir "$WORK_DIR" \
   --remote "http://127.0.0.1:$PORT/site.git" \

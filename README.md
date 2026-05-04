@@ -125,9 +125,13 @@ git fetch origin
 git switch marketing
 ```
 
-Create branches with `forkpress branch create` or `forkpress agents` before
-pushing to them. That lets ForkPress choose the correct COW file view instead
-of accepting an arbitrary new Git ref.
+Create a Git branch from a fetched ForkPress branch and push it. ForkPress will
+materialize the matching COW branch when it receives the new Git ref:
+
+```bash
+git switch -c marketing origin/main
+../forkpress commit -m "create marketing branch"
+```
 
 Edit files under `wordpress/`, then push them back into the materialized COW
 branch:
