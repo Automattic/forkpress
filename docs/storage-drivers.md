@@ -159,6 +159,7 @@ Implemented for COW:
 - `forkpress clone`
 - `forkpress commit`
 - `forkpress pull`
+- Git-created, Git-updated, and Git-deleted preview branches, one branch per push
 - `forkpress agents`
 - WordPress admin/editor previews per branch
 - generated `database.sql` in Git checkouts
