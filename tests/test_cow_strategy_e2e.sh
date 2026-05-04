@@ -20,6 +20,38 @@ cleanup() {
 }
 trap cleanup EXIT
 
+dump_if_exists() {
+  local path="$1"
+  if [ -f "$path" ]; then
+    echo "--- $path ---" >&2
+    tail -n 120 "$path" >&2 || true
+  fi
+}
+
+on_error() {
+  local status=$?
+  echo "FAIL cow materialized strategy e2e at line ${BASH_LINENO[0]}: ${BASH_COMMAND}" >&2
+  dump_if_exists "$TMP/git-created.html"
+  dump_if_exists "$TMP/git-multi-delete.out"
+  dump_if_exists "$TMP/git-delete.out"
+  dump_if_exists "$TMP/git-delete-main.out"
+  dump_if_exists "$TMP/bad-slash.out"
+  if [ -d "$WORK" ]; then
+    echo "--- materialized branches ---" >&2
+    find "$WORK" -maxdepth 1 -mindepth 1 -type d -print >&2 || true
+  fi
+  if [ -d "$WORK_DIR" ]; then
+    echo "--- forkpress logs ---" >&2
+    "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+  fi
+  exit "$status"
+}
+trap on_error ERR
+
+log_step() {
+  echo "==> $*"
+}
+
 branch_host() {
   if [ "$1" = "main" ]; then
     printf 'wp.localhost:%s' "$PORT"
@@ -68,6 +100,7 @@ NODE
   fi
 }
 
+log_step "init COW site"
 "$BIN" init --strategy cow --work-dir "$WORK_DIR" --admin-password admin
 test -d "$WORK/.forkpress"
 test -d "$WORK/main"
@@ -79,9 +112,11 @@ grep -F 'strategy = "cow"' "$WORK_DIR/site.toml" >/dev/null
 grep -F "ForkPress storage capability report" "$TMP/storage-doctor.out" >/dev/null
 "$BIN" storage status --work-dir "$WORK_DIR" > "$TMP/storage-status.out"
 grep -F "ForkPress storage status" "$TMP/storage-status.out" >/dev/null
+log_step "start server"
 "$BIN" serve --work-dir "$WORK_DIR" --port "$PORT" --root-host wp.localhost --workers 1
 "$BIN" server list | grep -F "$WORK_DIR" >/dev/null
 
+log_step "create CLI branch"
 "$BIN" branch --work-dir "$WORK_DIR" create feature-cow > "$TMP/branch-create.out"
 grep -F "feature-cow.wp.localhost:$PORT" "$TMP/branch-create.out" >/dev/null
 test -d "$WORK/feature-cow"
@@ -129,6 +164,7 @@ grep -F "$TITLE" "$TMP/edit.html" >/dev/null
 
 "$BIN" branch --work-dir "$WORK_DIR" list | grep -F "feature-cow" >/dev/null
 
+log_step "clone Git view"
 "$BIN" clone "http://127.0.0.1:$PORT/site.git" "$TMP/checkout"
 test -f "$TMP/checkout/wordpress/wp-load.php"
 test -f "$TMP/checkout/database.sql"
@@ -137,6 +173,7 @@ git -C "$TMP/checkout" fetch origin '+refs/heads/*:refs/remotes/origin/*'
 git -C "$TMP/checkout" checkout -B feature-cow origin/feature-cow
 grep -F "$TITLE" "$TMP/checkout/database.sql" >/dev/null
 echo "changed through git" > "$TMP/checkout/wordpress/wp-content/cow-git.txt"
+log_step "push Git update to existing branch"
 "$BIN" commit "$TMP/checkout" --message "test cow git push"
 test -f "$WORK/feature-cow/wp-content/cow-git.txt"
 grep -F "changed through git" "$WORK/feature-cow/wp-content/cow-git.txt" >/dev/null
@@ -145,6 +182,7 @@ test ! -e "$WORK/main/wp-content/cow-git.txt"
 git -C "$TMP/checkout" checkout -B git-created origin/main
 printf "created through git\n" > "$TMP/checkout/wordpress/wp-content/git-created.txt"
 printf "\n-- ignored git-created database.sql edit\n" >> "$TMP/checkout/database.sql"
+log_step "push Git-created branch"
 "$BIN" commit "$TMP/checkout" --message "create cow branch through git"
 test -f "$WORK/git-created/wp-load.php"
 test -f "$WORK/git-created/wp-content/git-created.txt"
@@ -158,6 +196,43 @@ curl -sS -H "Host: git-created.wp.localhost:$PORT" \
 grep -F "Branch: git-created" "$TMP/git-created.html" >/dev/null
 grep -F "Branch not found" "$TMP/git-created.html" && exit 1
 
+log_step "reject multi-branch Git delete without mutation"
+if git -C "$TMP/checkout" push origin --delete git-created feature-cow > "$TMP/git-multi-delete.out" 2>&1; then
+  echo "multi-branch delete unexpectedly succeeded" >&2
+  cat "$TMP/git-multi-delete.out" >&2
+  exit 1
+fi
+if ! grep -F "ForkPress accepts one branch update per push" "$TMP/git-multi-delete.out" >/dev/null; then
+  grep -E "remote rejected|failed to push|atomic push failed" "$TMP/git-multi-delete.out" >/dev/null || {
+    cat "$TMP/git-multi-delete.out" >&2
+    exit 1
+  }
+fi
+test -d "$WORK/git-created"
+test -d "$WORK/feature-cow"
+
+log_step "delete Git-created branch"
+git -C "$TMP/checkout" push origin --delete git-created > "$TMP/git-delete.out" 2>&1
+test ! -e "$WORK/git-created"
+if "$BIN" branch --work-dir "$WORK_DIR" list | grep -F "git-created" >/dev/null; then
+  echo "git-created branch still listed after remote delete" >&2
+  exit 1
+fi
+curl -sS -H "Host: git-created.wp.localhost:$PORT" \
+  "http://127.0.0.1:$PORT/" \
+  -o "$TMP/git-created-deleted.html"
+grep -F "Branch not found" "$TMP/git-created-deleted.html" >/dev/null
+log_step "reject main branch Git delete"
+if git -C "$TMP/checkout" push origin --delete main > "$TMP/git-delete-main.out" 2>&1; then
+  echo "main branch delete unexpectedly succeeded" >&2
+  cat "$TMP/git-delete-main.out" >&2
+  exit 1
+fi
+grep -F "refusing to delete the main COW branch" "$TMP/git-delete-main.out" >/dev/null
+test -d "$WORK/main"
+git -C "$TMP/checkout" fetch origin main
+
+log_step "reject invalid branch ref without partial mutation"
 git -C "$TMP/checkout" checkout -B bad/slash origin/main
 printf "bad slash branch\n" > "$TMP/checkout/wordpress/wp-content/bad-slash.txt"
 git -C "$TMP/checkout" branch mixed-valid origin/main
@@ -179,10 +254,12 @@ git -C "$TMP/checkout" checkout -B git-created-after-reject origin/main
 git -C "$TMP/checkout" reset --hard origin/main
 git -C "$TMP/checkout" clean -fd
 printf "created after reject\n" > "$TMP/checkout/wordpress/wp-content/git-created-after-reject.txt"
+log_step "create branch after rejected ref"
 "$BIN" commit "$TMP/checkout" --message "create cow branch after rejected ref"
 test -f "$WORK/git-created-after-reject/wp-content/git-created-after-reject.txt"
 test ! -e "$WORK/git-created-after-reject/wp-content/bad-slash.txt"
 
+log_step "reset branch from source"
 "$BIN" branch --work-dir "$WORK_DIR" create reset-source
 "$BIN" branch --work-dir "$WORK_DIR" create reset-target
 echo "source reset file" > "$WORK/reset-source/wp-content/reset-source.txt"
@@ -207,6 +284,7 @@ if "$BIN" branch --work-dir "$WORK_DIR" reset main --from reset-source > "$TMP/r
 fi
 grep -F "refusing to reset main without --force" "$TMP/reset-main.out" >/dev/null
 
+log_step "create agent worktrees"
 "$BIN" agents \
   --work-dir "$WORK_DIR" \
   --remote "http://127.0.0.1:$PORT/site.git" \

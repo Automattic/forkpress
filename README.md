@@ -157,6 +157,16 @@ Preview the pushed file:
 http://marketing.wp.localhost:18080/wp-content/marketing.txt
 ```
 
+Delete the remote Git branch when you want to remove the matching preview
+branch:
+
+```bash
+git push origin --delete marketing
+```
+
+ForkPress accepts one branch update per Git push. Push branch creates, updates,
+and deletes one branch at a time.
+
 `database.sql` is generated for model context. Edits to `database.sql` are
 ignored on push; database changes should happen through WordPress, WP-CLI, or
 another tool operating on the branch's own SQLite database.

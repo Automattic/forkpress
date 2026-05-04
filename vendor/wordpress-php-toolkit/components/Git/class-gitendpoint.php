@@ -56,7 +56,7 @@ class GitEndpoint {
 				$this->respond_with_ls_refs(
 					$git_response,
 					array(
-						'capabilities' => 'report-status report-status-v2 delete-refs side-band-64k ofs-delta atomic object-format=sha1 quiet agent=github/spokes-receive-pack-bff11521ff0f3fc96efd2ba7a18ecebb89dc6949 session-id=26DD:527D3:3A481E46:3BF47E4D:677BF4BA push-options',
+						'capabilities' => 'report-status report-status-v2 delete-refs side-band-64k ofs-delta object-format=sha1 quiet agent=github/spokes-receive-pack-bff11521ff0f3fc96efd2ba7a18ecebb89dc6949 session-id=26DD:527D3:3A481E46:3BF47E4D:677BF4BA push-options',
 					)
 				);
 				break;
@@ -424,14 +424,17 @@ class GitEndpoint {
 
 		// Handle deletion.
 		if ( Commit::is_null_hash( $new_oid ) ) {
+			$git_response->append_sideband_packet_line( "unpack ok\n" );
 			if ( $this->repository->delete_branch( $ref_name ) ) {
-				$git_response->append_packet_line( "ok $ref_name\n" );
+				$git_response->append_sideband_packet_line( "ok $ref_name\n" );
+				$git_response->append_sideband_packet_line( '0000' );
+				$git_response->append_packet_line( '0000' );
 			} else {
 				$git_response->append_error_packet_line( "error $ref_name delete failed\n" );
 				$git_response->append_error_packet_line( '0000' );
 			}
 
-			return false;
+			return true;
 		}
 
 		// Process the incoming pack.
