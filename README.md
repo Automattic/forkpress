@@ -1,769 +1,161 @@
 # ForkPress
 
 ForkPress is a single-binary local WordPress branch runner for agent work.
-The default `branchfs` storage strategy stores a whole site in one `.fp`
-SQLite file, serves each branch on its own local subdomain, and exposes the
-WordPress file tree through Git so multiple agents can work in separate
-directories.
 
-## What You Get
+The product path is now the **COW materialized backend**. On macOS,
+`forkpress init` creates ordinary branch directories beside `.forkpress`, such
+as `./main` and `./marketing`. Each branch is a normal WordPress tree with its
+own SQLite database file, and branch creation uses filesystem copy-on-write
+when the machine can provide it.
 
-- `forkpress init` creates the local site store using the platform default
-  strategy: `cow` on macOS, `branchfs` elsewhere.
-- `forkpress init --strategy cow` creates a no-SQL-overlay branch backend with
-  public branch directories beside `.forkpress`, for example `./main` and
-  `./agent-1`.
-- `forkpress init --strategy cas` creates a Redb-backed content-addressed
-  branch backend under `.forkpress/cas`.
-- `forkpress serve` starts the preview server in the background and attaches
-  any mount-backed storage needed by the site.
-- `forkpress server list` shows running site servers.
-- `forkpress stop` stops the current site's server and detaches mount-backed
-  storage when the site uses it.
-- `forkpress logs --file wp` shows WordPress debug output and fatal errors.
-- `http://wp.localhost:18080/` serves `main`.
-- `http://agent-1.wp.localhost:18080/` serves branch `agent-1`.
-- With `branchfs`, `forkpress clone` clones the site files from
-  `http://wp.localhost:18080/site.git`.
-- With `branchfs`, `forkpress agents` creates 10 branches and 10 Git worktrees
-  by default.
-- With `branchfs`, `forkpress commit` stages, commits, and pushes a worktree so
-  it is previewable.
-- With `branchfs`, `database.sql` appears in every branch checkout as a
-  read-only snapshot of that branch's WordPress tables for model context.
+No Docker, no system PHP, no MySQL daemon, no FUSE service, and no helper
+daemon. The release artifact is one `forkpress` binary per target.
 
-No FUSE, no Docker, no external daemon sidecars, no system PHP. The release
-artifact is one `forkpress` binary per target. Git is still used as the local
-worktree tool.
-
-## Install
-
-Download the archive for your platform from a tagged GitHub release, unpack it,
-and put the `forkpress` binary on your `PATH`.
-
-Release targets:
-
-- `x86_64-unknown-linux-musl`
-- `aarch64-unknown-linux-musl`
-- `x86_64-apple-darwin`
-- `aarch64-apple-darwin`
-
-Example:
-
-```bash
-tar -xzf forkpress-aarch64-apple-darwin.tar.gz
-chmod +x forkpress
-./forkpress --help
-```
-
-## Run A Site
+## Quick Start
 
 Start in an empty project directory:
 
 ```bash
-forkpress init
-forkpress serve
+./forkpress init
+./forkpress serve
 ```
-
-`forkpress init` writes `.forkpress/site.toml`, creates the WordPress admin
-user, and prints a generated password if you did not pass one. `forkpress serve`
-boots the initialized strategy and returns after the server is ready.
-
-On macOS, the default strategy is `cow`: branches are ordinary WordPress
-directories backed by APFS file clones when possible, with a rootless
-sparsebundle fallback when needed. On Linux, the default strategy remains
-`branchfs`, which stores the site in `.forkpress/site.fp` and serves branch
-files through the built-in `branchfs` PHP extension.
-
-For a local throwaway site where you want the Git examples below to work as
-written, choose a known password:
-
-```bash
-forkpress init --admin-password admin
-forkpress serve
-```
-
-To try the materialized COW strategy:
-
-```bash
-forkpress init --strategy cow --admin-password admin
-forkpress serve
-forkpress branch create agent-1
-```
-
-That stores branch files and each branch's SQLite database as ordinary files in
-project-level branch directories: `./main`, `./agent-1`, and so on. It does not
-use SQL overlays. On macOS, the branch directory uses APFS `clonefile` directly
-when possible, or a rootless APFS sparsebundle under `.forkpress/macos-cow` when
-the project volume cannot clone files.
-
-To try the CAS strategy:
-
-```bash
-forkpress init --strategy cas --admin-password admin
-forkpress serve
-forkpress branch create agent-1
-```
-
-That stores content-addressed file blobs and branch manifests in
-`.forkpress/cas/store.redb`. WordPress files are served lazily from that store
-through the built-in `branchfs` PHP extension. Each branch's SQLite database
-directory lives under `.forkpress/cas/branches/<branch>`, with the database at
-`.forkpress/cas/branches/<branch>/.ht.sqlite`.
-
-To verify the embedded OpenZFS engine linked into the binary:
-
-```bash
-forkpress zfs smoke --work-dir .forkpress
-```
-
-List running site servers:
-
-```bash
-forkpress server list
-```
-
-Stop this site's server from the same project directory. If the site uses a
-mount-backed storage view, this also detaches it:
-
-```bash
-forkpress stop
-```
-
-Stop every ForkPress site server started by your user:
-
-```bash
-forkpress stop --all
-```
-
-View WordPress critical errors and PHP fatals:
-
-```bash
-forkpress logs --file wp
-```
-
-Follow new WordPress log output while you reproduce a problem in the browser:
-
-```bash
-forkpress logs --file wp --follow
-```
-
-Print every known log path:
-
-```bash
-forkpress logs --file all --paths
-```
-
-Useful log files:
-
-- `wp`: `.forkpress/logs/wp-debug.log`, WordPress debug output and fatal errors.
-- `php`: `.forkpress/logs/php-errors.log`, PHP `error_log` output.
-- `server`: `.forkpress/logs/php-server.log`, PHP built-in server access/output.
-- `forkpress`: `.forkpress/logs/forkpress-server.log`, background server wrapper.
-- `gc`: `.forkpress/logs/gc.log`, background branch garbage collection.
 
 Open:
 
 ```text
 http://wp.localhost:18080/
-```
-
-WordPress admin opens logged in by default:
-
-```text
 http://wp.localhost:18080/wp-admin/
 ```
 
-Set `FORKPRESS_AUTO_LOGIN=0` before starting the server if you want the normal
-WordPress login form. The example above creates `admin` with password `admin`.
-
-Branch previews use subdomains:
-
-```text
-http://<branch>.wp.localhost:18080/
-```
-
-The WordPress admin bar shows the current branch. Hover `Branch: <name>` to
-filter and switch to another local branch; the menu shows up to 20 matches.
-
-If your resolver does not handle `*.localhost`, add host entries or run
-`forkpress serve --root-host wp.local` and route `wp.local` plus the
-branch subdomains to `127.0.0.1`.
-
-## Architecture Overview
-
-Every ForkPress work directory has `.forkpress/site.toml`, a small manifest
-that records which storage strategy the site uses. Existing sites created
-before the manifest existed are treated as `branchfs` sites when
-`.forkpress/site.fp` is present.
-
-The default strategy is `branchfs`. In that strategy, the durable site artifact
-is `.forkpress/site.fp`: a SQLite database containing the WordPress file tree,
-WordPress database tables, branch metadata, Git-facing file snapshots, users,
-and site config. The downloaded `forkpress` executable carries the PHP runtime,
-WordPress source, ForkPress PHP scripts, the WordPress SQLite integration
-plugin, and the native `branchfs` PHP extension.
-
-This overview uses the same order as most useful architecture docs: first the
-system context, then the building blocks, then the important runtime and storage
-flows. The goal is to make clear what owns state and what is only an interface.
-
-There is no Dolt server in the current `branchfs` architecture. There is also
-no MySQL daemon, FUSE mount, Samba share, Docker service, or long-lived helper
-process besides the optional background ForkPress server you start. WordPress
-still issues MySQL-shaped queries, but the bundled SQLite integration
-translates them to SQLite and stores the data in `.forkpress/site.fp`.
-
-### System Context
-
-```mermaid
-flowchart LR
-    user[Developer or agent] --> cli[forkpress CLI]
-    browser[Browser] --> http[Local HTTP server<br/>wp.localhost:18080]
-    git[Git client] --> smart[Git smart HTTP<br/>/site.git]
-
-    cli --> manifest[.forkpress/site.toml<br/>strategy manifest]
-    manifest --> fp[(.forkpress/site.fp<br/>branchfs site store)]
-    http --> fp
-    smart --> fp
-
-    cli --> worktree[Git worktrees<br/>wordpress/ files]
-    git --> worktree
-```
-
-ForkPress gives different tools different views of the same local site:
-
-- The browser gets a normal WordPress site per branch:
-  `wp.localhost` is `main`, and `<branch>.wp.localhost` is that branch.
-- Git gets a temporary repository synthesized from `.forkpress/site.fp` for
-  `branchfs` sites.
-- Agents get editable worktrees containing `wordpress/` files plus a
-  read-only `database.sql` snapshot for context.
-- WordPress gets a PHP document root at `.forkpress/wproot`, but in the
-  `branchfs` strategy file reads and writes are intercepted and resolved from
-  the current branch in `site.fp`.
-
-### Storage Strategies
-
-ForkPress now treats storage as a site-level strategy:
-
-```text
-.forkpress/
-  site.toml
-```
-
-```toml
-version = 1
-strategy = "branchfs"
-```
-
-The selected strategy is written during `forkpress init` and reused by later
-commands. This keeps future backends from accidentally running BranchFS-specific
-code against a different storage model.
-
-Materialized strategies may also record a file view:
-
-```toml
-version = 1
-strategy = "cow"
-file_view = "reflink"
-```
-
-Run `forkpress doctor storage --work-dir .forkpress` to see whether the current
-branch directory supports file clones. On macOS, `cow` initialization first
-tries APFS `clonefile` in place. If the current volume cannot clone files,
-ForkPress creates a rootless APFS sparsebundle under `.forkpress/macos-cow`,
-mounts it at `.forkpress/macos-cow/mount`, stores the physical COW branch trees
-there, and links public branch directories such as `./main` and `./agent-1` to
-that mounted APFS volume. Full file-copy materialization is the last-resort file
-view. `du` and Finder do not understand APFS clone sharing, so they can make a
-cloned branch look like it consumed a full extra WordPress tree. Use
-`df -h .forkpress/macos-cow/mount` or watch the sparsebundle's allocated size to
-estimate physical growth.
-
-The sparsebundle is an OS mount, so stop the site through ForkPress before
-moving or deleting the work directory:
+The admin opens logged in by default. To use the normal WordPress login form,
+start the server with:
 
 ```bash
-forkpress stop
-rm -rf .forkpress
+FORKPRESS_AUTO_LOGIN=0 ./forkpress serve
 ```
 
-`forkpress stop` stops this site's ForkPress server first, then detaches APFS
-storage when the site has a detachable mount. If macOS reports that another app
-is still using the mount, close terminals or editors pointed at
-`.forkpress/macos-cow/mount` and run `forkpress stop` again. `--force` asks
-macOS for a forced detach.
-
-The explicit storage commands remain available for diagnostics and manual
-cleanup:
+Stop the site server and detach any mount-backed COW storage:
 
 ```bash
-forkpress storage status --work-dir .forkpress
-forkpress storage mount --work-dir .forkpress
-forkpress storage detach --work-dir .forkpress
+./forkpress stop
 ```
 
-For a driver-by-driver comparison, including ZFS portability and Windows notes,
-see [`docs/storage-drivers.md`](docs/storage-drivers.md).
+## Install
 
-Supported strategy values:
+Download the archive for your machine from a release, unpack it, and run the
+binary.
 
-- `branchfs` (default, aliases: `sqlite`, `sqlite-cow`): current production
-  strategy. Files live in BranchFS tables, and WordPress database branches use
-  SQLite COW views, overlays, tombstones, and triggers.
-- `cow` (legacy aliases: `zfs`, `mac-cow`, `materialized-cow`): experimental
-  no-SQL-overlay strategy. Branches are materialized as
-  ordinary WordPress directories beside `.forkpress`, for example `./main` and
-  `./marketing`.
-  Each branch has its own SQLite database file at
-  `wp-content/database/.ht.sqlite`. Branch creation uses the recorded
-  `file_view`: APFS/Btrfs/XFS/ReFS-style file clones where available, macOS
-  APFS sparsebundle storage when needed, and regular copies only as the final
-  fallback. HTTP serving and local branch creation are wired; Git smart HTTP
-  for this strategy is still pending.
-- `cas` (aliases: `redb`, `cas-redb`): experimental content-addressed strategy.
-  `.forkpress/cas/store.redb` stores SHA-256-keyed WordPress file blobs and
-  branch manifests. HTTP serving uses `runtime/router_cas.php` plus the
-  built-in `branchfs` PHP extension to read and write those files lazily from
-  Redb. `.forkpress/cas/wproot` is a virtual document root path for PHP path
-  interception, not a full WordPress copy. Each branch keeps its ordinary
-  SQLite database directory under `.forkpress/cas/branches/<branch>`. Branch
-  creation copies the source manifest in Redb and copies the source branch DB
-  directory. HTTP serving and local branch creation are wired; Git smart HTTP
-  for this strategy is still pending.
+macOS:
 
-### Materialized COW Strategy And Embedded ZFS Engine
+```bash
+case "$(uname -m)" in
+  arm64) TARGET=aarch64-apple-darwin ;;
+  x86_64) TARGET=x86_64-apple-darwin ;;
+  *) echo "Unsupported Mac architecture: $(uname -m)" >&2; exit 1 ;;
+esac
 
-The materialized COW strategy is currently split into two layers:
+curl -L -o forkpress.tar.gz \
+  "https://github.com/Automattic/forkpress/releases/download/<tag>/forkpress-$TARGET.tar.gz"
 
-- Working runtime layer: materialized branch directories in the project
-  directory beside `.forkpress`. WordPress runs against normal files, so post
-  editor loads, uploads, plugin pages, and SQLite writes do not need BranchFS
-  stream wrappers or table-prefix overlays. On macOS, individual branch
-  directories may be symlinks into `.forkpress/macos-cow/mount/branches`, an
-  APFS sparsebundle volume created by ForkPress when the original location has
-  no COW clones.
-- Embedded storage engine layer: Linux and macOS release builds link a
-  ForkPress-specific OpenZFS 2.2.6 userland subset and bundled zlib into the
-  single `forkpress` binary. The current CLI exposes this through
-  `forkpress zfs smoke`; branch import/export still needs to be connected to it.
-
-Current runtime flow:
-
-```mermaid
-flowchart LR
-    cli[forkpress CLI]
-    project[Project directory]
-    state[.forkpress<br/>metadata, runtime, logs]
-    main[./main<br/>WordPress + wp-content/database/.ht.sqlite]
-    feature[./feature<br/>WordPress + wp-content/database/.ht.sqlite]
-    router[runtime/router_cow.php]
-    php[Bundled PHP + WordPress]
-
-    cli --> state
-    cli --> project
-    project --> main
-    project --> feature
-    cli -- branch create --> feature
-    router --> main
-    router --> feature
-    php <--> router
+tar -xzf forkpress.tar.gz
+chmod +x forkpress
+./forkpress --version
 ```
 
-The important property is that a branch write changes only that branch's
-ordinary files. A post save on `feature.wp.localhost` writes to
-`./feature/wp-content/database/.ht.sqlite`; it does not write to `./main` and it
-does not pass through SQL COW views or overlay tables.
+Release targets:
 
-ForkPress now ships the engine without a system ZFS install by native-linking a
-small OpenZFS userland engine into the binary on Linux and macOS targets:
+- `aarch64-apple-darwin`
+- `x86_64-apple-darwin`
+- `aarch64-unknown-linux-musl`
+- `x86_64-unknown-linux-musl`
 
-- The release artifact remains one `forkpress` binary.
-- Cargo fetches the pinned real-zfs/OpenZFS sources at build time, builds a
-  static archive, and links it into the Rust executable.
-- The durable storage is a sparse `.forkpress/zfs/*.img` pool file.
-- The ZFS engine opens that pool image through normal file APIs, so there is no
-  kernel module, FUSE mount, Samba share, Docker service, Node runtime, or
-  system ZFS dependency.
-- The engine currently exposes a small C ABI for pool create/import/export,
-  dataset create, snapshot, clone, logical file write, and logical file read.
-- The project still needs a license review because OpenZFS is CDDL and
-  ForkPress is GPL-2.0.
+## Work With Branches
 
-The browser demo at
-[OpenZFS WebAssembly experiment](https://adamziel.github.io/experiments/real-zfs/)
-proves the primitives are viable: real pools, datasets, snapshots, and clones
-on a file-backed pool. That artifact is not the one ForkPress should embed
-directly because it is Emscripten JS plus a threaded Wasm module that expects a
-browser or Node worker runtime. ForkPress now builds the same OpenZFS subset as
-native static code for Linux and macOS binaries.
+Create a branch:
 
-The target OpenZFS-backed strategy is different from BranchFS:
-
-- one ZFS dataset per ForkPress branch
-- branch creation = snapshot parent + clone snapshot
-- WordPress files and the SQLite database file are versioned together inside
-  the branch dataset
-- no SQL-level overlays, COW views, tombstones, or branch table prefixes
-- Git clone/fetch materializes `wordpress/` and `database.sql` from the ZFS
-  branch dataset
-- Git push writes file changes into the target ZFS dataset and snapshots the
-  result
-
-Because the ZFS pool is inside a normal file and there is no FUSE/kernel
-mount, PHP cannot directly access dataset files. The HTTP backend therefore
-keeps the materialized branch-directory boundary:
-
-```mermaid
-flowchart LR
-    pool[(.forkpress/zfs/pool.img<br/>OpenZFS pool)]
-    engine[embedded OpenZFS engine<br/>static archive in forkpress]
-    cache[./feature<br/>materialized branch]
-    php[Bundled PHP + WordPress]
-    git[Git endpoint]
-
-    pool <--> engine
-    engine --> cache
-    cache --> php
-    php --> cache
-    cache --> engine
-    git <--> engine
+```bash
+./forkpress branch create marketing
 ```
 
-The next integration step is to export the requested branch dataset into the
-materialized branch directory, run WordPress against ordinary files and an
-ordinary SQLite database file, then import changed files and the database file
-back into the dataset under a branch lock. Git should use the same engine path,
-not BranchFS tables.
-
-### Building Blocks
-
-The working backend today is `branchfs`, so the detailed building-block and
-request-flow diagrams below describe that strategy.
-
-```mermaid
-flowchart TB
-    subgraph Binary["forkpress static binary"]
-        rust[Rust CLI<br/>forkpress/src/main.rs]
-        bundle[Runtime payload<br/>embedded into the binary]
-    end
-
-    subgraph Runtime[".forkpress/runtime"]
-        php[Static PHP binary<br/>branchfs built in]
-        router[runtime/router.php]
-        ctl[scripts/branchctl.php<br/>merge/reset/gc/users]
-        gitserver[scripts/git_server/server.php]
-        sqlitewp[WordPress SQLite integration]
-        wp[WordPress source]
-    end
-
-    subgraph Store[".forkpress/site.fp"]
-        meta[branches, users, site_config]
-        files[files, blobs, blob_chunks]
-        fscommits[fs_commits, fs_commit_files]
-        tables[bN_wp_* tables/views]
-    end
-
-    rust --> bundle
-    bundle --> Runtime
-    rust --> php
-    php --> router
-    php --> ctl
-    router --> sqlitewp
-    router --> gitserver
-    router --> wp
-    router --> Store
-    ctl --> Store
-    gitserver --> Store
-```
-
-The important pieces are:
-
-- `forkpress`: Rust wrapper that unpacks the embedded runtime, starts/stops the
-  local PHP server, runs local control scripts, and wraps common Git workflows.
-- Runtime payload: build-time archive embedded into the `forkpress` executable.
-  Cargo builds it from the bundled PHP binary, PHP scripts, WordPress archive,
-  SQLite integration plugin, SQL files, and mu-plugin. On first use, ForkPress
-  unpacks it into `.forkpress/runtime`.
-- `branchfs`: native PHP extension compiled into the bundled PHP binary. It
-  provides the `branchfs://<branch>/path` stream wrapper, file operation
-  interception for WordPress-style absolute paths, and SQLite-backed file store
-  access. It is a PHP extension using SQLite internally, not a separate SQLite
-  loadable extension that users install.
-- `runtime/router.php`: resolves the branch from the host name, activates
-  `branchfs`, sets the branch-specific WordPress table prefix, handles Git
-  smart-HTTP routes, and boots WordPress through branch-scoped paths so OPcache
-  keys compiled PHP per branch.
-- `scripts/branchctl.php` and related scripts: create branches, merge/reset
-  branch state, garbage collect unreachable file blobs, manage users, and repair
-  COW database objects.
-- `scripts/git_server/server.php`: builds a temporary Git repository from
-  BranchFS snapshots for clone/fetch/push. It is a Git protocol adapter, not the
-  source of truth.
-- WordPress SQLite integration: the managed `wp-content/db.php` drop-in loads
-  the bundled plugin. It translates WordPress's MySQL dialect to SQLite/PDO.
-  ForkPress patches that path so writes through branch COW views work.
-
-### SQLite And Extensions
-
-ForkPress does not require users to install a SQLite extension. SQLite is the
-on-disk store and query engine inside `.forkpress/site.fp`, accessed from the
-bundled PHP runtime through PHP's SQLite APIs and PDO SQLite.
-
-The custom native code is `branchfs`, a PHP extension compiled into the bundled
-PHP binary for release builds. In local developer builds, tests may load
-`ext/branchfs.so`, but release archives still ship a single `forkpress`
-executable.
-
-The WordPress SQLite integration plugin is PHP code, not a SQLite extension. It
-parses and rewrites MySQL-flavored WordPress queries into SQLite-compatible SQL.
-ForkPress then relies on ordinary SQLite tables, views, indexes, triggers, and
-transactions to implement branch isolation.
-
-### What Git Means Here
-
-Git is the editing and transport interface for files. It is not where the live
-site is stored.
-
-```mermaid
-sequenceDiagram
-    participant Agent as Agent worktree
-    participant Git as git clone/push
-    participant Server as ForkPress Git endpoint
-    participant Store as site.fp
-
-    Agent->>Git: forkpress clone / git switch branch
-    Git->>Server: upload-pack / info refs
-    Server->>Store: materialize fs_commits + current branch files
-    Store-->>Server: wordpress/ files + database.sql snapshot
-    Server-->>Agent: temporary Git repository
-
-    Agent->>Agent: edit wordpress/ files
-    Agent->>Git: forkpress commit
-    Git->>Server: receive-pack
-    Server->>Store: apply wordpress/ file changes to branch overlay
-    Server->>Store: record fs_commit snapshot
-```
-
-On clone/fetch, ForkPress materializes Git commits from `fs_commits` and the
-current file tree in `site.fp`. Each Git branch corresponds to a ForkPress
-branch. Every commit contains:
-
-- `wordpress/`: editable WordPress files for that branch.
-- `database.sql`: a generated, read-only SQL dump of the branch's WordPress
-  tables for model context.
-
-On push, only files under `wordpress/` are applied back to `site.fp`.
-`database.sql` is intentionally ignored. Database changes should be made by
-loading the branch in WordPress, not by editing SQL dumps.
-
-### What Dolt Means Here
-
-Dolt is not part of the shipped runtime. Earlier design notes may mention a
-Dolt-backed MySQL-compatible branch database, but the current working
-`branchfs` implementation uses SQLite only:
-
-- no `dolt sql-server`
-- no MySQL port
-- no `database/branch` connection syntax
-- no Dolt commits or Dolt merges
-
-BranchFS branch isolation is implemented inside SQLite with per-branch tables,
-views, overlays, tombstones, and control scripts.
-
-### Branch Storage
-
-`site.fp` has two branch-aware storage layers.
-
-```mermaid
-flowchart TB
-    subgraph FileLayer["File layer"]
-        blobs[blobs/blob_chunks<br/>content-addressed file bytes]
-        mainFiles[files rows for main]
-        branchFiles[files rows for feature<br/>overrides and tombstones]
-        resolved[resolved branch tree]
-        commits[fs_commits<br/>snapshots for Git]
-        blobs --> mainFiles
-        blobs --> branchFiles
-        mainFiles --> resolved
-        branchFiles --> resolved
-        resolved --> commits
-    end
-
-    subgraph DbLayer["WordPress database layer"]
-        mainTable[b1_wp_posts<br/>main real table]
-        view[b8_wp_posts<br/>branch COW view]
-        overlay[b8_wp_posts__overlay<br/>branch-local changed rows]
-        tomb[b8_wp_posts__tombstones<br/>branch-local deletes]
-        trig[INSTEAD OF triggers]
-        mainTable --> view
-        overlay --> view
-        tomb --> view
-        trig --> overlay
-        trig --> tomb
-    end
-```
-
-Files are copy-on-write at the path level:
-
-- `blobs` stores file content by hash. Large blobs are split into
-  `blob_chunks`.
-- `files` stores per-branch path metadata. A row with a `blob_hash` overrides
-  the parent. A row with `blob_hash = NULL` is a tombstone delete.
-- `fs_commits` and `fs_commit_files` store full file-tree snapshots used to
-  build Git history and roll back file pushes.
-
-WordPress database tables are copy-on-write at the row level:
-
-- `main` uses real tables named like `b1_wp_posts`.
-- A branch gets logical table names like `b8_wp_posts`.
-- Those branch logical tables are SQLite views over the parent table plus
-  branch-local overlay/tombstone tables.
-- `INSTEAD OF INSERT/UPDATE/DELETE` triggers redirect writes on the view into
-  the branch overlay and tombstones.
-- The SQLite integration's MySQL compatibility tables are updated so WordPress
-  still sees normal WordPress tables and indexes.
-
-This means a branch can edit files, options, posts, users, plugin state, and
-schema without changing `main` or sibling branches. Merging is explicit.
-
-### Request Flow
-
-```mermaid
-sequenceDiagram
-    participant Browser
-    participant Router as router.php
-    participant BranchFS as branchfs extension
-    participant WP as WordPress
-    participant SQLite as SQLite integration/PDO
-    participant Store as site.fp
-
-    Browser->>Router: GET http://feature.wp.localhost:18080/wp-admin/
-    Router->>Store: look up branch id for feature
-    Router->>BranchFS: set db, root, branch; activate interception
-    Router->>WP: require branchfs://feature/index.php
-    WP->>BranchFS: read PHP/theme/plugin files
-    BranchFS->>Store: resolve inherited files + feature overrides
-    WP->>SQLite: run MySQL-shaped wpdb queries with b8_wp_ prefix
-    SQLite->>Store: read/write SQLite COW views and overlays
-    Store-->>Browser: rendered WordPress response
-```
-
-When a branch writes a post or option, WordPress writes to `b8_wp_*` tables for
-that branch. Those names are views, so the write is captured by triggers and
-stored in `b8_wp_*__overlay` or `b8_wp_*__tombstones`. Reads combine inherited
-parent rows with those branch-local rows.
-
-### Local Directory Layout
+That creates:
 
 ```text
-.forkpress/                       # ForkPress metadata and runtime state
-  site.toml                       # storage strategy manifest
-  site.fp                         # branchfs strategy durable site store
-  runtime/                        # unpacked embedded PHP, scripts, WP source
-  wproot/                         # branchfs PHP server document root
-  cow/
-    branches.txt                  # branch list for the admin-bar switcher
-    README.md                     # notes for the cow strategy
-  zfs/
-    engine-smoke.img              # embedded OpenZFS smoke/target-driver pool images
-  macos-cow/
-    branches.sparsebundle/        # optional rootless APFS storage on macOS
-    mount/
-      branches/
-        main/                     # physical storage when using sparsebundle
-        feature/
-  cas/
-    store.redb                    # cas strategy blobs and branch manifests
-    wproot/                       # virtual docroot path; not a full WP tree
-    branches.txt
-    branches/
-      main/                       # cas strategy branch-local SQLite files
-      feature/
-        .ht.sqlite
-  logs/
-    wp-debug.log                  # WordPress fatal/errors
-    php-errors.log                # PHP error_log target
-    php-server.log                # PHP built-in server output
-    forkpress-server.log          # background wrapper output
-    gc.log                        # background branch GC
-  server.pid                      # server process marker
-main/                             # cow strategy main WordPress tree
-  wp-content/database/.ht.sqlite
-feature/                          # cow strategy cloned branch WordPress tree
-  wp-content/database/.ht.sqlite
+.forkpress/        # ForkPress metadata, runtime, logs, COW bookkeeping
+main/              # main WordPress tree
+marketing/         # marketing WordPress tree
 ```
 
-Older experimental COW sites may still have branch directories under
-`.forkpress/cow/branches` or `.forkpress/zfs/branches`; ForkPress keeps loading
-those layouts for compatibility.
+Preview the branch:
 
-Managed WordPress files such as `wp-config.php`, `wp-content/db.php`, the
-SQLite integration plugin, and the `branchfs-wp.php` mu-plugin live in the
-active strategy's file store. For the default `branchfs` strategy that means
-`.forkpress/site.fp`; for `cas` it means the Redb manifest/blob store. On
-runtime upgrades, ForkPress refreshes those managed files so existing sites use
-the SQLite adapter bundled with the current binary.
+```text
+http://marketing.wp.localhost:18080/
+http://marketing.wp.localhost:18080/wp-admin/
+```
 
-## Work On One Branch
+The WordPress admin bar shows `Branch: <name>`. Hover it to filter and switch
+between local branches.
 
-This Git checkout workflow currently applies to the default `branchfs` strategy.
-For `cow` and `cas` strategy sites, use browser/admin branch previews and
-`forkpress branch create` while Git smart HTTP is being wired to those stores.
+## Git Workflow
 
-From the same project directory:
+ForkPress exposes a Git smart-HTTP view at:
+
+```text
+http://wp.localhost:18080/site.git
+```
+
+Clone it:
 
 ```bash
-forkpress branch create agent-1
-forkpress clone http://admin:admin@wp.localhost:18080/site.git site
+./forkpress clone http://wp.localhost:18080/site.git site
 cd site
-git switch agent-1
 ```
 
 The checkout has this shape:
 
 ```text
 site/
-  database.sql        # read-only branch database snapshot
+  database.sql        # read-only snapshot of the current branch DB
   wordpress/          # editable WordPress files
 ```
 
-Make a file change under `wordpress/`, then publish it back to ForkPress:
+Switch to a ForkPress branch:
 
 ```bash
-printf "hello from agent-1\n" > wordpress/wp-content/agent-1.txt
-forkpress commit -m "agent-1 file change"
+git fetch origin
+git switch marketing
 ```
 
-Preview the branch:
+Create branches with `forkpress branch create` or `forkpress agents` before
+pushing to them. That lets ForkPress choose the correct COW file view instead
+of accepting an arbitrary new Git ref.
+
+Edit files under `wordpress/`, then push them back into the materialized COW
+branch:
+
+```bash
+printf "hello from marketing\n" > wordpress/wp-content/marketing.txt
+../forkpress commit -m "marketing file change"
+```
+
+Preview the pushed file:
 
 ```text
-http://agent-1.wp.localhost:18080/wp-content/agent-1.txt
+http://marketing.wp.localhost:18080/wp-content/marketing.txt
 ```
 
-Open the branch admin without logging in:
+`database.sql` is generated for model context. Edits to `database.sql` are
+ignored on push; database changes should happen through WordPress, WP-CLI, or
+another tool operating on the branch's own SQLite database.
 
-```text
-http://agent-1.wp.localhost:18080/wp-admin/
-```
+## Run Agents
 
-Pull newer branch state into the checkout:
+With the site server running:
 
 ```bash
-forkpress pull
+./forkpress agents
 ```
 
-## Run 10 Agents
-
-With the site server running, create 10 branches and 10 Git worktrees:
-
-```bash
-forkpress agents \
-  --remote http://admin:admin@wp.localhost:18080/site.git
-```
-
-This creates:
+This creates ten ForkPress branches and ten Git worktrees:
 
 ```text
 forkpress-agents/site
@@ -773,74 +165,206 @@ forkpress-agents/agent-2
 forkpress-agents/agent-10
 ```
 
-Each `agent-N` directory is a Git worktree on its own ForkPress branch.
+Each `agent-N` worktree is checked out on its matching ForkPress branch.
+
+Create fewer or differently named worktrees:
+
+```bash
+./forkpress agents --count 3 --prefix experiment
+```
 
 After an agent edits files:
 
 ```bash
-cd forkpress-agents/agent-1
-forkpress commit -m "agent 1 changes"
+cd forkpress-agents/experiment-1
+../../forkpress commit -m "experiment 1 changes"
 ```
 
 Preview it at:
 
 ```text
-http://agent-1.wp.localhost:18080/
+http://experiment-1.wp.localhost:18080/
 ```
 
-Create fewer or differently named worktrees:
+## Logs And Debugging
+
+Show WordPress critical errors and PHP fatals:
 
 ```bash
-forkpress agents \
-  --remote http://admin:admin@wp.localhost:18080/site.git \
-  --count 3 \
-  --prefix experiment
+./forkpress logs --file wp
 ```
+
+Follow new WordPress log output while reproducing a browser problem:
+
+```bash
+./forkpress logs --file wp --follow
+```
+
+Print every known log path:
+
+```bash
+./forkpress logs --file all --paths
+```
+
+Useful log files:
+
+- `wp`: `.forkpress/logs/wp-debug.log`
+- `php`: `.forkpress/logs/php-errors.log`
+- `server`: `.forkpress/logs/php-server.log`
+- `forkpress`: `.forkpress/logs/forkpress-server.log`
+- `gc`: `.forkpress/logs/gc.log`
+
+## How COW Storage Works
+
+ForkPress records the selected storage strategy in `.forkpress/site.toml`:
+
+```toml
+version = 1
+strategy = "cow"
+file_view = "reflink"
+```
+
+The COW backend has three layers:
+
+```mermaid
+flowchart TB
+    cli[forkpress CLI]
+    server[Local PHP server<br/>wp.localhost:18080]
+    git[Git smart HTTP<br/>/site.git]
+
+    subgraph Project["Project directory"]
+        main[./main<br/>WordPress files<br/>wp-content/database/.ht.sqlite]
+        branch[./marketing<br/>WordPress files<br/>wp-content/database/.ht.sqlite]
+        meta[.forkpress<br/>runtime, logs, site.toml]
+    end
+
+    cowgit[.forkpress/cow/git<br/>Git adapter object store]
+    macos[.forkpress/macos-cow<br/>optional APFS sparsebundle]
+
+    cli --> meta
+    cli -- branch create --> branch
+    server --> main
+    server --> branch
+    git <--> cowgit
+    cowgit <--> main
+    cowgit <--> branch
+    macos -. physical storage when needed .-> main
+    macos -. physical storage when needed .-> branch
+```
+
+The durable WordPress state for a branch is the branch directory itself. A post
+save on `marketing.wp.localhost` writes to:
+
+```text
+./marketing/wp-content/database/.ht.sqlite
+```
+
+It does not write to `./main`, and it does not use SQL views, overlay tables,
+or branch table prefixes.
+
+### File View Cascade
+
+On macOS, ForkPress tries the cheapest ordinary-file view first:
+
+1. **APFS `clonefile` in the project directory.** New branches share unchanged
+   file blocks with the source branch. Writes to a branch path do not mutate the
+   source path.
+2. **Rootless APFS sparsebundle.** If the project volume cannot clone files,
+   ForkPress creates `.forkpress/macos-cow/branches.sparsebundle`, mounts it at
+   `.forkpress/macos-cow/mount`, stores the physical branch trees there, and
+   exposes public branch directories like `./main` and `./marketing`.
+3. **Full file copy.** This is the final fallback when COW storage is not
+   available.
+
+Inspect the selected file view:
+
+```bash
+./forkpress storage status
+./forkpress doctor storage
+```
+
+If a sparsebundle is attached, stop through ForkPress before deleting or moving
+the project:
+
+```bash
+./forkpress stop
+rm -rf .forkpress main marketing
+```
+
+If macOS reports the storage is busy, close terminals or editors inside
+`.forkpress/macos-cow/mount` and run `./forkpress stop` again. Use
+`./forkpress stop --force` only for cleanup after normal detach reports a busy
+mount.
+
+### Git Is An Interface
+
+Git is not the source of truth. It is an editing and transport view over the
+COW branch directories.
+
+```mermaid
+sequenceDiagram
+    participant Agent as Agent worktree
+    participant Git as Git smart HTTP
+    participant Store as .forkpress/cow/git
+    participant Branch as ./marketing
+
+    Agent->>Git: clone/fetch
+    Git->>Branch: snapshot wordpress/ files + database.sql
+    Git->>Store: update Git objects/refs
+    Store-->>Agent: Git branch
+
+    Agent->>Agent: edit wordpress/ files
+    Agent->>Git: forkpress commit
+    Git->>Store: receive pushed commit
+    Git->>Branch: apply wordpress/ changes
+```
+
+Before every Git request, ForkPress snapshots each branch directory into the
+Git adapter store. After a push, ForkPress applies only `wordpress/` changes
+back to the target branch directory. The branch's SQLite database remains
+branch-local and is never overwritten by `database.sql`.
+
+## Other Strategies
+
+`branchfs` remains in the repo as the older SQLite-backed strategy. It stores a
+whole site in `.forkpress/site.fp` and uses the PHP `branchfs` extension plus
+SQLite COW views for branch isolation.
+
+`cas` remains experimental. It stores file blobs and manifests in Redb and
+serves WordPress files lazily through the `branchfs` PHP extension.
+
+The embedded ZFS experiment is disabled in the product path for now. The code
+is still in the repo for research, but release builds do not build it unless a
+developer explicitly opts in with `FORKPRESS_ENABLE_EMBEDDED_ZFS=1`, and the
+CLI smoke command is hidden behind `FORKPRESS_ENABLE_ZFS_CLI=1`.
 
 ## Commands
 
-- `forkpress init` creates `.forkpress/site.toml` and initializes the platform
-  default strategy. On macOS this is `cow`; elsewhere it is `branchfs`.
-- `forkpress init --admin-password admin` uses a known local admin password,
-  which is useful for throwaway Git examples.
-- `forkpress init --strategy cow --admin-password admin` creates a no-SQL-overlay
-  materialized site with branch directories beside `.forkpress`, choosing a
-  COW-capable file view when the platform supports one.
-- `forkpress init --strategy cas --admin-password admin` creates a
-  Redb-backed content-addressed site under `.forkpress/cas`.
-- `forkpress doctor storage --work-dir .forkpress` probes file clone support
-  and prints the recommended materialized branch file view.
-- `forkpress storage status|mount|detach --work-dir .forkpress` diagnoses or
-  manually manages detachable storage used by the `cow` strategy on macOS.
-- `forkpress zfs smoke --work-dir .forkpress` verifies the embedded OpenZFS
-  engine by creating a pool image, writing and reading a logical file,
-  snapshotting, cloning, exporting, importing, and reading from the clone.
-- `forkpress serve` boots WordPress if needed, starts the HTTP server in the
-  background, and attaches mount-backed storage when needed. For `branchfs`,
-  Git smart HTTP is served from `.forkpress/site.fp`; for `cow` and `cas`, Git
-  smart HTTP is not wired yet.
-- `forkpress start` is the lower-level foreground server command.
-- `forkpress start --background` and `forkpress server start` are compatibility
-  commands equivalent to background serving.
-- `forkpress server list` shows running ForkPress site servers.
-- `forkpress stop [--work-dir .forkpress]` stops one site server and detaches
-  mount-backed storage. `forkpress stop --all` stops every running ForkPress
-  site server in the registry.
-- `forkpress logs [--file wp|php|server|forkpress|gc|all] [-n 80] [--follow]`
-  prints local site logs. Use `--paths` to list log locations.
-- `forkpress branch create <name> [--from main]` creates a ForkPress branch
-  from the local site control command.
-- `forkpress git branch create <name> [--from main]` is a compatibility alias
-  for local branch creation.
-- `forkpress clone <remote> [dir]` wraps `git clone`.
+- `forkpress init` initializes a site. On macOS the default strategy is `cow`.
+- `forkpress init --strategy cow --admin-password admin` creates a COW site
+  with a known local admin password.
+- `forkpress serve` starts the server in the background.
+- `forkpress start` starts the server in the foreground.
+- `forkpress stop` stops this site's server and detaches mount-backed storage.
+- `forkpress stop --all` stops every running ForkPress site server for your
+  user.
+- `forkpress server list` lists running site servers.
+- `forkpress branch list` lists local branches.
+- `forkpress branch create <name> [--from main]` creates a COW branch.
+- `forkpress branch show <name>` prints the branch directory, database, file
+  count, and Git ref path.
+- `forkpress branch delete <name>` removes a COW branch. `main` cannot be
+  deleted.
+- `forkpress clone [remote] [dir]` wraps `git clone`.
+- `forkpress agents [dir] --count 10 --prefix agent` creates agent branches
+  and worktrees.
 - `forkpress commit -m "message"` stages, commits, and pushes the current Git
   branch back into ForkPress.
 - `forkpress pull` wraps `git pull --rebase --autostash`.
-- `forkpress user add/list/remove/verify` manages Git push users.
-
-`database.sql` in Git checkouts is for model context only. Edits to
-`database.sql` are ignored on push; database writes should happen through the
-running WordPress preview.
+- `forkpress logs --file wp|php|server|forkpress|gc|all` prints logs.
+- `forkpress storage status|mount|detach` diagnoses or manually manages
+  detachable COW storage.
+- `forkpress doctor storage` probes local filesystem clone support.
 
 ## Build From Source
 
@@ -859,7 +383,7 @@ For fast Rust-only checks without rebuilding PHP:
 FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress
 ```
 
-PHP unit tests still use the local development extension:
+PHP unit tests:
 
 ```bash
 make test-all
@@ -870,8 +394,8 @@ make test-all
 Push a version tag:
 
 ```bash
-git tag v0.1.11
-git push origin v0.1.11
+git tag v0.1.13
+git push origin v0.1.13
 ```
 
-The release workflow builds and uploads the four target archives listed above.
+The release workflow builds and uploads the target archives listed above.

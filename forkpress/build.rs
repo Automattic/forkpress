@@ -16,8 +16,13 @@ fn main() -> Result<()> {
         .parent()
         .context("forkpress crate should live directly under the repo root")?;
     let target = env::var("TARGET").context("TARGET env var missing (set by cargo)")?;
+    println!("cargo:rerun-if-env-changed=FORKPRESS_ENABLE_EMBEDDED_ZFS");
+    println!("cargo:rerun-if-env-changed=FORKPRESS_DISABLE_EMBEDDED_ZFS");
 
-    if supports_embedded_zfs(&target) && env::var_os("FORKPRESS_DISABLE_EMBEDDED_ZFS").is_none() {
+    if supports_embedded_zfs(&target)
+        && env::var_os("FORKPRESS_ENABLE_EMBEDDED_ZFS").is_some()
+        && env::var_os("FORKPRESS_DISABLE_EMBEDDED_ZFS").is_none()
+    {
         build_embedded_zfs(repo_root, &target)?;
         println!("cargo:rustc-cfg=forkpress_embedded_zfs");
     } else {
@@ -160,6 +165,7 @@ fn build_embedded_zfs(repo_root: &Path, target: &str) -> Result<()> {
         target_env_key("AR", target)
     );
     println!("cargo:rerun-if-env-changed=FORKPRESS_DISABLE_EMBEDDED_ZFS");
+    println!("cargo:rerun-if-env-changed=FORKPRESS_ENABLE_EMBEDDED_ZFS");
 
     let status = Command::new("make")
         .arg("-f")

@@ -82,6 +82,7 @@ enum Commands {
     /// Rebuild a .fp from a directory tree produced by `forkpress export`.
     Import(ImportArgs),
     /// Inspect and smoke-test the embedded ZFS engine.
+    #[command(hide = true)]
     Zfs(ZfsArgs),
 }
 
@@ -693,6 +694,7 @@ struct Layout {
     cow_dir: PathBuf,
     cow_branches_dir: PathBuf,
     cow_branch_list: PathBuf,
+    cow_git_dir: PathBuf,
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     macos_cow_dir: PathBuf,
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -1199,6 +1201,11 @@ fn import_command(args: ImportArgs) -> Result<i32> {
 }
 
 fn zfs_command(args: ZfsArgs) -> Result<i32> {
+    if std::env::var_os("FORKPRESS_ENABLE_ZFS_CLI").is_none() {
+        bail!(
+            "the embedded ZFS experiment is disabled; set FORKPRESS_ENABLE_ZFS_CLI=1 to run this developer-only command"
+        );
+    }
     match args.command {
         ZfsCommand::Smoke(args) => {
             let layout = Layout::new(args.work_dir)?;
@@ -1670,7 +1677,10 @@ fn start_command(args: StartArgs) -> Result<i32> {
             println!("DB access:  database.sql in each git branch checkout (read-only snapshot)");
         }
         StorageStrategy::Cow => {
-            println!("Git remote: not available for cow strategy yet");
+            println!(
+                "Git remote: http://{}:{}/site.git",
+                args.root_host, args.port
+            );
             println!("DB access:  wp-content/database/.ht.sqlite inside each materialized branch");
         }
         StorageStrategy::Cas => {
@@ -2468,15 +2478,35 @@ fn agents_command(args: AgentsArgs) -> Result<i32> {
     auth.validate()?;
 
     let layout = Layout::new(args.shared.work_dir.clone())?;
-    ensure_branchfs_strategy(&layout, "agents")?;
+    let strategy = require_initialized_strategy(&layout, "agents")?;
+    if strategy == StorageStrategy::Cas {
+        bail!("agents is not available for cas strategy yet");
+    }
     prepare_runtime(&layout)?;
     let runtime = PortableRuntime::from_layout(&layout);
 
-    if !layout.site_fp.exists() || !layout.bootstrap_marker.exists() {
-        bail!(
-            "no bootstrapped site found in {}. Run `forkpress serve` first",
-            layout.work_dir.display()
-        );
+    match strategy {
+        StorageStrategy::Branchfs => {
+            if !layout.site_fp.exists() || !layout.bootstrap_marker.exists() {
+                bail!(
+                    "no bootstrapped site found in {}. Run `forkpress serve` first",
+                    layout.work_dir.display()
+                );
+            }
+        }
+        StorageStrategy::Cow => {
+            ensure_cow_file_view_ready(&layout)?;
+            if !cow_branch_root(&layout, "main")
+                .join("wp-load.php")
+                .is_file()
+            {
+                bail!(
+                    "no COW main branch found in {}. Run `forkpress init` first",
+                    layout.work_dir.display()
+                );
+            }
+        }
+        StorageStrategy::Cas => unreachable!(),
     }
 
     let root_dir = absolutize(args.dir)?;
@@ -2500,7 +2530,15 @@ fn agents_command(args: AgentsArgs) -> Result<i32> {
 
     for index in 1..=args.count {
         let branch = format!("{}-{}", args.prefix, index);
-        ensure_branch_exists(&layout, &runtime, &args.shared, &branch, &args.from, &auth)?;
+        match strategy {
+            StorageStrategy::Branchfs => {
+                ensure_branch_exists(&layout, &runtime, &args.shared, &branch, &args.from, &auth)?;
+            }
+            StorageStrategy::Cow => {
+                ensure_cow_branch_exists(&layout, &runtime, &args.shared, &branch, &args.from)?;
+            }
+            StorageStrategy::Cas => unreachable!(),
+        }
     }
 
     run_git(
@@ -2726,6 +2764,11 @@ fn cow_branch_command(
             }
             Ok(0)
         }
+        "show" | "status" => {
+            let branch = args.args.get(1).map(String::as_str).unwrap_or("main");
+            show_cow_branch(&layout, branch)?;
+            Ok(0)
+        }
         "create" => {
             let Some(branch) = args.args.get(1) else {
                 bail!("branch create requires a branch name");
@@ -2745,6 +2788,13 @@ fn cow_branch_command(
                 }
             }
             create_cow_branch(&layout, &runtime, &args.shared, branch, &from)?;
+            Ok(0)
+        }
+        "delete" | "rm" => {
+            let Some(branch) = args.args.get(1) else {
+                bail!("branch delete requires a branch name");
+            };
+            delete_cow_branch(&layout, branch)?;
             Ok(0)
         }
         other => bail!("cow branch subcommand is not implemented yet: {other}"),
@@ -2899,6 +2949,7 @@ impl Layout {
             (primary_cow_dir.clone(), project_dir.clone())
         };
         let cow_branch_list = cow_dir.join("branches.txt");
+        let cow_git_dir = cow_dir.join("git");
 
         Ok(Self {
             project_dir,
@@ -2909,6 +2960,7 @@ impl Layout {
             cow_dir,
             cow_branches_dir,
             cow_branch_list,
+            cow_git_dir,
             macos_cow_dir: work_dir.join("macos-cow"),
             macos_cow_image: work_dir.join("macos-cow/branches.sparsebundle"),
             macos_cow_mount: work_dir.join("macos-cow/mount"),
@@ -3043,32 +3095,11 @@ Stop asks macOS to detach the sparsebundle after stopping this site's ForkPress
 server. Use `--force` only when normal detach reports a busy mount and you have
 closed terminals/editors that were using `.forkpress/macos-cow/mount`.
 
-The forkpress binary now includes an embedded OpenZFS userland engine on Linux
-and macOS targets. Cargo builds the same OpenZFS 2.2.6 subset used by the
-real-zfs experiment, plus bundled zlib, into a static archive and links it into
-the single `forkpress` executable. There is no system ZFS install, kernel
-module, FUSE mount, Node runtime, Docker service, dynamic library, or sidecar
-daemon.
-
-Run `forkpress zfs smoke --work-dir .forkpress` to verify the linked engine.
-The smoke test creates a file-backed pool image, creates a dataset, writes and
-reads a logical file through the DMU, snapshots the dataset, clones the
-snapshot, exports the pool, imports it again, and reads from the clone.
-
-The design target is:
-
-- one ZFS dataset per ForkPress branch
-- branch creation = snapshot parent + clone snapshot
-- WordPress files and the SQLite database file live inside the active dataset
-- Git clone/fetch materializes `wordpress/` and `database.sql` from the selected
-  dataset, not from BranchFS SQL overlays
-- Git push writes files into the target dataset and snapshots the result
-
-Because the pool lives inside a normal file and there is no mount layer, PHP
-will not read dataset contents directly. ForkPress should materialize a branch
-dataset into `./<branch>` for HTTP, run WordPress against that ordinary
-directory, then import changed files and the SQLite database back into the
-dataset under a branch lock.
+Git smart HTTP is available at `http://wp.localhost:18080/site.git`. The Git
+adapter stores protocol objects under `.forkpress/cow/git`, snapshots branch
+directories before clone/fetch/push, and applies pushed `wordpress/` file
+changes back to the target branch directory. `database.sql` in Git checkouts is
+generated from the branch SQLite database and ignored on push.
 ";
     fs::write(layout.cow_dir.join("README.md"), notes).with_context(|| {
         format!(
@@ -3894,6 +3925,124 @@ fn create_cow_branch(
     Ok(())
 }
 
+fn ensure_cow_branch_exists(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    branch: &str,
+    from: &str,
+) -> Result<()> {
+    let file_view = read_site_manifest(layout)?
+        .and_then(|manifest| manifest.file_view)
+        .unwrap_or(FileViewStrategy::Copy);
+    let public_root = cow_branch_root(layout, branch);
+    let storage_root = cow_branch_storage_root(layout, branch, file_view);
+    if public_root.join("wp-load.php").is_file() || storage_root.join("wp-load.php").is_file() {
+        println!("forkpress: reusing existing branch {branch}");
+        return Ok(());
+    }
+    create_cow_branch(layout, runtime, shared, branch, from)
+}
+
+fn show_cow_branch(layout: &Layout, branch: &str) -> Result<()> {
+    validate_branch_name(branch)?;
+    let file_view = read_site_manifest(layout)?
+        .and_then(|manifest| manifest.file_view)
+        .unwrap_or(FileViewStrategy::Copy);
+    let public_root = cow_branch_root(layout, branch);
+    let storage_root = cow_branch_storage_root(layout, branch, file_view);
+    let root = if public_root.join("wp-load.php").is_file() {
+        public_root
+    } else {
+        storage_root
+    };
+    if !root.join("wp-load.php").is_file() {
+        bail!("branch does not exist: {branch}");
+    }
+    let db = root.join("wp-content/database/.ht.sqlite");
+    println!("forkpress cow branch {branch}");
+    println!("  root:      {}", root.display());
+    println!("  database:  {}", db.display());
+    println!("  files:     {}", count_regular_files(&root)?);
+    println!("  file view: {}", file_view.as_str());
+    println!(
+        "  git ref:   {}",
+        layout.cow_git_dir.join("refs/heads").join(branch).display()
+    );
+    Ok(())
+}
+
+fn delete_cow_branch(layout: &Layout, branch: &str) -> Result<()> {
+    validate_branch_name(branch)?;
+    if branch == "main" {
+        bail!("cannot delete the main branch");
+    }
+    let file_view = read_site_manifest(layout)?
+        .and_then(|manifest| manifest.file_view)
+        .unwrap_or(FileViewStrategy::Copy);
+    let public_root = cow_branch_root(layout, branch);
+    let storage_root = cow_branch_storage_root(layout, branch, file_view);
+
+    let mut removed = false;
+    match fs::symlink_metadata(&public_root) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            fs::remove_file(&public_root)
+                .with_context(|| format!("failed to remove {}", public_root.display()))?;
+            removed = true;
+        }
+        Ok(meta) if meta.is_dir() => {
+            fs::remove_dir_all(&public_root)
+                .with_context(|| format!("failed to remove {}", public_root.display()))?;
+            removed = true;
+        }
+        Ok(_) => bail!("{} is not a branch directory", public_root.display()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("failed to inspect {}", public_root.display()));
+        }
+    }
+
+    if storage_root != public_root && storage_root.exists() {
+        fs::remove_dir_all(&storage_root)
+            .with_context(|| format!("failed to remove {}", storage_root.display()))?;
+        removed = true;
+    }
+
+    let git_ref = layout.cow_git_dir.join("refs/heads").join(branch);
+    if git_ref.exists() {
+        fs::remove_file(&git_ref)
+            .with_context(|| format!("failed to remove {}", git_ref.display()))?;
+    }
+
+    write_cow_branch_list(layout)?;
+    if removed {
+        println!("forkpress: deleted COW branch '{branch}'");
+    } else {
+        println!("forkpress: no COW branch named '{branch}'");
+    }
+    Ok(())
+}
+
+fn count_regular_files(root: &Path) -> Result<usize> {
+    let mut count = 0usize;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in
+            fs::read_dir(&dir).with_context(|| format!("failed to read {}", dir.display()))?
+        {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                stack.push(entry.path());
+            } else if file_type.is_file() {
+                count += 1;
+            }
+        }
+    }
+    Ok(count)
+}
+
 fn ensure_cas_bootstrapped(
     layout: &Layout,
     runtime: &PortableRuntime,
@@ -4545,7 +4694,9 @@ fn start_cow_php_server(
         .arg(&layout.cow_branches_dir)
         .arg(layout.runtime_dir.join("runtime/router_cow.php"))
         .env("FORKPRESS_BRANCHES_DIR", &layout.cow_branches_dir)
+        .env("FORKPRESS_COW_DIR", &layout.cow_dir)
         .env("FORKPRESS_COW_BRANCHES_DIR", &layout.cow_branches_dir)
+        .env("FORKPRESS_COW_GIT_DIR", &layout.cow_git_dir)
         .env("FORKPRESS_BRANCH_LIST", &layout.cow_branch_list)
         .env("FORKPRESS_PLAIN_STRATEGY", "cow")
         .env("FORKPRESS_ROOT_HOST", &args.root_host)
