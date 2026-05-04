@@ -4,7 +4,7 @@ use fuser::{
     ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request,
 };
 use libc::{EIO, ENOENT, ENOTSUP};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io;
@@ -42,6 +42,7 @@ pub struct CowFs {
     remote_stat_cache: HashMap<PathBuf, Timed<RemoteEntry>>,
     remote_missing_cache: HashMap<PathBuf, Instant>,
     remote_readdir_cache: HashMap<PathBuf, Timed<Vec<RemoteEntry>>>,
+    runtime_prefetch_dirs: HashSet<PathBuf>,
     remote_cache_ttl: Duration,
     kernel_cache_ttl: Duration,
     offline: bool,
@@ -73,6 +74,7 @@ impl CowFs {
             remote_stat_cache: HashMap::new(),
             remote_missing_cache: HashMap::new(),
             remote_readdir_cache: HashMap::new(),
+            runtime_prefetch_dirs: HashSet::new(),
             remote_cache_ttl,
             kernel_cache_ttl,
             offline,
@@ -175,8 +177,13 @@ impl CowFs {
             ));
         }
 
-        let entry = match self.remote.stat(rel) {
-            Ok(entry) => entry,
+        let max_prefetch = if should_prefetch_bytes_during_stat(rel) {
+            remote_stat_prefetch_max_bytes().min(self.manifest.cache_max_file_bytes)
+        } else {
+            0
+        };
+        let stat = match self.remote.stat_prefetch(rel, max_prefetch) {
+            Ok(stat) => stat,
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
                 self.remote_missing_cache
                     .insert(rel.to_path_buf(), Instant::now() + self.remote_cache_ttl);
@@ -187,8 +194,14 @@ impl CowFs {
             }
             Err(err) => return Err(err),
         };
+        let entry = stat.entry;
         self.remote_missing_cache.remove(rel);
-        let _ = self.overlay.put_cached_entry(rel, &entry);
+        if let Some(bytes) = stat.data {
+            let _ = self.overlay.put_cached_file_bytes(rel, &entry, &bytes);
+        } else {
+            let _ = self.overlay.put_cached_entry(rel, &entry);
+        }
+        self.prefetch_runtime_siblings(rel);
         self.remote_stat_cache.insert(
             rel.to_path_buf(),
             Timed {
@@ -197,6 +210,41 @@ impl CowFs {
             },
         );
         Ok(entry)
+    }
+
+    fn prefetch_runtime_siblings(&mut self, rel: &Path) {
+        if self.offline || !should_prefetch_bytes_during_stat(rel) {
+            return;
+        }
+        let dir = rel.parent().unwrap_or_else(|| Path::new("")).to_path_buf();
+        if !should_prefetch_runtime_sibling_dir(&dir) {
+            return;
+        }
+        if !self.runtime_prefetch_dirs.insert(dir.clone()) {
+            return;
+        }
+        let max_file = remote_stat_prefetch_max_bytes().min(self.manifest.cache_max_file_bytes);
+        let max_total = runtime_sibling_prefetch_max_bytes();
+        let Ok(files) = self.remote.prefetch_dir(&dir, max_file, max_total) else {
+            return;
+        };
+        for stat in files {
+            let child = dir.join(&stat.entry.name);
+            if let Some(bytes) = stat.data {
+                let _ = self
+                    .overlay
+                    .put_cached_file_bytes(&child, &stat.entry, &bytes);
+            } else {
+                let _ = self.overlay.put_cached_entry(&child, &stat.entry);
+            }
+            self.remote_stat_cache.insert(
+                child,
+                Timed {
+                    value: stat.entry,
+                    expires_at: Instant::now() + self.remote_cache_ttl,
+                },
+            );
+        }
     }
 
     fn remote_readdir(&mut self, rel: &Path) -> io::Result<Vec<RemoteEntry>> {
@@ -885,6 +933,28 @@ fn env_u64(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+fn remote_stat_prefetch_max_bytes() -> u64 {
+    env_u64("WPCOW_REMOTE_STAT_PREFETCH_MAX_KB", 0).saturating_mul(1024)
+}
+
+fn runtime_sibling_prefetch_max_bytes() -> u64 {
+    env_u64("WPCOW_RUNTIME_SIBLING_PREFETCH_MAX_MB", 0).saturating_mul(1024 * 1024)
+}
+
+fn should_prefetch_bytes_during_stat(rel: &Path) -> bool {
+    matches!(
+        rel.extension().and_then(|ext| ext.to_str()),
+        Some("php" | "json" | "mo")
+    )
+}
+
+fn should_prefetch_runtime_sibling_dir(dir: &Path) -> bool {
+    !(dir.as_os_str().is_empty()
+        || dir == Path::new("wp-includes")
+        || dir == Path::new("wp-admin")
+        || dir == Path::new("wp-admin/includes"))
+}
+
 fn io_errno(err: &io::Error) -> i32 {
     match err.kind() {
         io::ErrorKind::NotFound => ENOENT,
@@ -1247,5 +1317,25 @@ exec bash -lc "$cmd"
             Some(value) => std::env::set_var("WPCOW_ENABLE_PLUGINS", value),
             None => std::env::remove_var("WPCOW_ENABLE_PLUGINS"),
         }
+    }
+
+    #[test]
+    fn stat_prefetch_is_limited_to_runtime_read_files() {
+        assert!(should_prefetch_bytes_during_stat(Path::new("wp-load.php")));
+        assert!(should_prefetch_bytes_during_stat(Path::new(
+            "wp-includes/theme.json"
+        )));
+        assert!(!should_prefetch_bytes_during_stat(Path::new(
+            "wp-content/themes/neve/style-main-new.min.css"
+        )));
+        assert!(!should_prefetch_bytes_during_stat(Path::new(
+            "wp-content/uploads/2026/05/hero.jpg"
+        )));
+        assert!(!should_prefetch_runtime_sibling_dir(Path::new(
+            "wp-includes"
+        )));
+        assert!(should_prefetch_runtime_sibling_dir(Path::new(
+            "wp-includes/rest-api/endpoints"
+        )));
     }
 }

@@ -23,10 +23,17 @@ pub struct RemoteEntry {
 }
 
 #[derive(Debug, Clone)]
+pub struct RemoteStat {
+    pub entry: RemoteEntry,
+    pub data: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone)]
 pub struct RemoteClient {
     manifest: Manifest,
     control_path: Option<PathBuf>,
     file_helper: Arc<Mutex<Option<RemoteFileHelper>>>,
+    db_helper: Arc<Mutex<Option<RemoteDbHelper>>>,
 }
 
 impl RemoteClient {
@@ -35,6 +42,7 @@ impl RemoteClient {
             manifest,
             control_path,
             file_helper: Arc::new(Mutex::new(None)),
+            db_helper: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -234,16 +242,46 @@ impl RemoteClient {
     }
 
     fn stat_inner(&self, rel: &Path) -> io::Result<RemoteEntry> {
+        self.stat_prefetch_inner(rel, 0).map(|stat| stat.entry)
+    }
+
+    pub fn stat_prefetch(&self, rel: &Path, max_file_bytes: u64) -> io::Result<RemoteStat> {
+        let started = Instant::now();
+        let result = self.stat_prefetch_inner(rel, max_file_bytes);
+        trace_remote_result(
+            "stat_prefetch",
+            &format!("{}<= {}", OverlayStore::rel_string(rel), max_file_bytes),
+            started,
+            &result,
+        );
+        result
+    }
+
+    fn stat_prefetch_inner(&self, rel: &Path, max_file_bytes: u64) -> io::Result<RemoteStat> {
         let full = self.remote_full_path(rel)?;
         if remote_file_helper_enabled() {
             let request = serde_json::json!({
                 "op": "stat",
                 "path": full,
+                "max_file_bytes": max_file_bytes,
             });
             if let Ok(response) = self.file_helper_request(request) {
                 if let Some(entry) = response.get("entry") {
-                    return serde_json::from_value(entry.clone())
-                        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err));
+                    let entry: RemoteEntry = serde_json::from_value(entry.clone())
+                        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+                    let data = if response.get("data").is_some() {
+                        match decode_helper_data(response) {
+                            Ok(bytes)
+                                if entry.kind == "file" && bytes.len() as u64 == entry.size =>
+                            {
+                                Some(bytes)
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    return Ok(RemoteStat { entry, data });
                 }
             }
         }
@@ -263,8 +301,9 @@ echo json_encode(array(
 ));
 "#;
         let bytes = self.php_eval(code, &[full])?;
-        serde_json::from_slice(&bytes)
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+        let entry = serde_json::from_slice(&bytes)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        Ok(RemoteStat { entry, data: None })
     }
 
     pub fn readdir(&self, rel: &Path) -> io::Result<Vec<RemoteEntry>> {
@@ -306,6 +345,70 @@ echo json_encode($out);
         let bytes = self.php_eval(code, &[full])?;
         serde_json::from_slice(&bytes)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+    }
+
+    pub fn prefetch_dir(
+        &self,
+        rel: &Path,
+        max_file_bytes: u64,
+        max_total_bytes: u64,
+    ) -> io::Result<Vec<RemoteStat>> {
+        let started = Instant::now();
+        let result = self.prefetch_dir_inner(rel, max_file_bytes, max_total_bytes);
+        trace_remote_result(
+            "prefetch_dir",
+            &format!(
+                "{}<= file:{} total:{}",
+                OverlayStore::rel_string(rel),
+                max_file_bytes,
+                max_total_bytes
+            ),
+            started,
+            &result,
+        );
+        result
+    }
+
+    fn prefetch_dir_inner(
+        &self,
+        rel: &Path,
+        max_file_bytes: u64,
+        max_total_bytes: u64,
+    ) -> io::Result<Vec<RemoteStat>> {
+        if max_file_bytes == 0 || max_total_bytes == 0 || !remote_file_helper_enabled() {
+            return Ok(Vec::new());
+        }
+        let full = self.remote_full_path(rel)?;
+        let request = serde_json::json!({
+            "op": "prefetch_dir",
+            "path": full,
+            "max_file_bytes": max_file_bytes,
+            "max_total_bytes": max_total_bytes,
+        });
+        let response = self.file_helper_request(request)?;
+        let mut out = Vec::new();
+        let Some(files) = response.get("files").and_then(|value| value.as_array()) else {
+            return Ok(out);
+        };
+        for file in files {
+            let Some(entry_value) = file.get("entry") else {
+                continue;
+            };
+            let entry: RemoteEntry = serde_json::from_value(entry_value.clone())
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+            let data = if file.get("data").is_some() {
+                match decode_helper_data(file.clone()) {
+                    Ok(bytes) if entry.kind == "file" && bytes.len() as u64 == entry.size => {
+                        Some(bytes)
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            out.push(RemoteStat { entry, data });
+        }
+        Ok(out)
     }
 
     pub fn read_range(&self, rel: &Path, offset: u64, length: usize) -> io::Result<Vec<u8>> {
@@ -418,6 +521,21 @@ echo $target;
     }
 
     fn remote_query_readonly_inner(&self, sql: &str) -> Result<RemoteQueryResult> {
+        if remote_db_helper_enabled() {
+            if let Ok(result) = self.db_helper_query(sql) {
+                if result.ok || !is_remote_db_connection_lost(&result.error) {
+                    return Ok(result);
+                }
+                if let Ok(retry) = self.reset_db_helper_and_retry(sql) {
+                    return Ok(retry);
+                }
+            }
+        }
+
+        self.remote_query_readonly_oneshot(sql)
+    }
+
+    fn remote_query_readonly_oneshot(&self, sql: &str) -> Result<RemoteQueryResult> {
         let probe = &self.manifest.probe;
         let code = r#"
 $host=$argv[1];$user=$argv[2];$pass=$argv[3];$db=$argv[4];$sql=$argv[5];$timeout=(int)$argv[6];
@@ -473,6 +591,68 @@ echo json_encode(array("ok"=>true,"error"=>"","rows"=>$rows,"fields"=>$fields,"a
         Ok(result)
     }
 
+    fn db_helper_query(&self, sql: &str) -> Result<RemoteQueryResult> {
+        let mut last_error = None;
+        for _ in 0..2 {
+            match self.db_helper_query_once(sql) {
+                Ok(response) => return Ok(response),
+                Err(err) => {
+                    last_error = Some(err);
+                    let mut helper = self
+                        .db_helper
+                        .lock()
+                        .map_err(|_| anyhow!("remote DB helper lock"))?;
+                    reset_db_helper(&mut helper);
+                }
+            }
+        }
+        Err(last_error.unwrap_or_else(|| anyhow!("remote DB helper failed")))
+    }
+
+    fn reset_db_helper_and_retry(&self, sql: &str) -> Result<RemoteQueryResult> {
+        {
+            let mut helper = self
+                .db_helper
+                .lock()
+                .map_err(|_| anyhow!("remote DB helper lock"))?;
+            reset_db_helper(&mut helper);
+        }
+        self.db_helper_query(sql)
+    }
+
+    fn db_helper_query_once(&self, sql: &str) -> Result<RemoteQueryResult> {
+        let mut helper = self
+            .db_helper
+            .lock()
+            .map_err(|_| anyhow!("remote DB helper lock"))?;
+        if helper.is_none() {
+            *helper = Some(self.start_db_helper()?);
+        }
+        let helper = helper
+            .as_mut()
+            .ok_or_else(|| anyhow!("remote DB helper missing"))?;
+        let request = serde_json::to_vec(&serde_json::json!({ "sql": sql }))?;
+        helper.stdin.write_all(&request)?;
+        helper.stdin.write_all(b"\n")?;
+        helper.stdin.flush()?;
+
+        let timeout = Duration::from_secs(remote_db_query_timeout_secs().saturating_add(2));
+        let line = read_helper_line(&mut helper.stdout, timeout, "remote DB helper")?;
+        let response: serde_json::Value = serde_json::from_str(&line)?;
+        if response
+            .get("ok")
+            .and_then(|value| value.as_bool())
+            .is_none()
+        {
+            let error = response
+                .get("error")
+                .and_then(|value| value.as_str())
+                .unwrap_or("remote DB helper response missing ok");
+            return Err(anyhow!(error.to_string()));
+        }
+        Ok(serde_json::from_value(response)?)
+    }
+
     fn file_helper_request(&self, request: serde_json::Value) -> io::Result<serde_json::Value> {
         let mut last_error = None;
         for _ in 0..2 {
@@ -512,7 +692,11 @@ echo json_encode(array("ok"=>true,"error"=>"","rows"=>$rows,"fields"=>$fields,"a
         helper.stdin.write_all(b"\n")?;
         helper.stdin.flush()?;
 
-        let line = read_helper_line(&mut helper.stdout)?;
+        let line = read_helper_line(
+            &mut helper.stdout,
+            Duration::from_secs(remote_file_helper_timeout_secs()),
+            "remote file helper",
+        )?;
         let response: serde_json::Value = serde_json::from_str(&line)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
         if response.get("ok").and_then(|value| value.as_bool()) == Some(true) {
@@ -548,6 +732,40 @@ echo json_encode(array("ok"=>true,"error"=>"","rows"=>$rows,"fields"=>$fields,"a
             .take()
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "file helper stdout"))?;
         Ok(RemoteFileHelper {
+            child,
+            stdin,
+            stdout,
+        })
+    }
+
+    fn start_db_helper(&self) -> io::Result<RemoteDbHelper> {
+        let probe = &self.manifest.probe;
+        let mut remote_command = format!("php -r {} --", shell_quote(remote_db_helper_php()));
+        for arg in [
+            probe.db_host.clone(),
+            probe.db_user.clone(),
+            probe.db_password.clone(),
+            probe.db_name.clone(),
+            remote_db_query_timeout_secs().to_string(),
+        ] {
+            remote_command.push(' ');
+            remote_command.push_str(&shell_quote(arg));
+        }
+        let mut command = self.ssh_command(&remote_command, 0);
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "DB helper stdin"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "DB helper stdout"))?;
+        Ok(RemoteDbHelper {
             child,
             stdin,
             stdout,
@@ -596,6 +814,13 @@ struct RemoteFileHelper {
     stdout: ChildStdout,
 }
 
+#[derive(Debug)]
+struct RemoteDbHelper {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: ChildStdout,
+}
+
 impl Drop for RemoteFileHelper {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -603,7 +828,21 @@ impl Drop for RemoteFileHelper {
     }
 }
 
+impl Drop for RemoteDbHelper {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 fn reset_file_helper(helper: &mut Option<RemoteFileHelper>) {
+    if let Some(mut helper) = helper.take() {
+        let _ = helper.child.kill();
+        let _ = helper.child.wait();
+    }
+}
+
+fn reset_db_helper(helper: &mut Option<RemoteDbHelper>) {
     if let Some(mut helper) = helper.take() {
         let _ = helper.child.kill();
         let _ = helper.child.wait();
@@ -622,8 +861,11 @@ fn decode_helper_data(response: serde_json::Value) -> io::Result<Vec<u8>> {
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
 }
 
-fn read_helper_line(stdout: &mut ChildStdout) -> io::Result<String> {
-    let timeout = Duration::from_secs(remote_file_helper_timeout_secs());
+fn read_helper_line(
+    stdout: &mut ChildStdout,
+    timeout: Duration,
+    label: &str,
+) -> io::Result<String> {
     let deadline = Instant::now() + timeout;
     let fd = stdout.as_raw_fd();
     let mut out = Vec::new();
@@ -634,7 +876,8 @@ fn read_helper_line(stdout: &mut ChildStdout) -> io::Result<String> {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!(
-                    "remote file helper did not respond within {} seconds",
+                    "{} did not respond within {} seconds",
+                    label,
                     timeout.as_secs()
                 ),
             ));
@@ -657,7 +900,7 @@ fn read_helper_line(stdout: &mut ChildStdout) -> io::Result<String> {
         if fd_set.revents & libc::POLLIN == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
-                "remote file helper pipe closed",
+                format!("{label} pipe closed"),
             ));
         }
 
@@ -666,7 +909,7 @@ fn read_helper_line(stdout: &mut ChildStdout) -> io::Result<String> {
         if read == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
-                "remote file helper closed",
+                format!("{label} closed"),
             ));
         }
         out.extend_from_slice(&chunk[..read]);
@@ -679,6 +922,18 @@ fn read_helper_line(stdout: &mut ChildStdout) -> io::Result<String> {
 
 fn remote_file_helper_enabled() -> bool {
     env_bool("WPCOW_REMOTE_FILE_HELPER", true).unwrap_or(true)
+}
+
+fn remote_db_helper_enabled() -> bool {
+    env_bool("WPCOW_REMOTE_DB_HELPER", true).unwrap_or(true)
+}
+
+fn is_remote_db_connection_lost(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("server has gone away")
+        || error.contains("lost connection")
+        || error.contains("error while sending")
+        || error.contains("connection was killed")
 }
 
 fn trace_remote_result<T, E: std::fmt::Display>(
@@ -716,17 +971,27 @@ while (($line = fgets(STDIN)) !== false) {
  $op = isset($request["op"]) ? $request["op"] : "";
  $path = isset($request["path"]) ? $request["path"] : "";
  if ($op === "stat") {
+  $max_file_bytes = isset($request["max_file_bytes"]) ? max(0, (int)$request["max_file_bytes"]) : 0;
   clearstatcache(true, $path);
   $s = @lstat($path);
   if ($s === false) { wpcow_not_found(); continue; }
   $kind = is_link($path) ? "symlink" : (is_dir($path) ? "dir" : (is_file($path) ? "file" : "other"));
-  wpcow_send(array("ok"=>true,"entry"=>array(
+  $entry = array(
    "name"=>basename($path),
    "kind"=>$kind,
    "size"=>(int)$s["size"],
    "mode"=>(int)$s["mode"],
    "mtime"=>(int)$s["mtime"]
-  )));
+  );
+  $payload = array("ok"=>true,"entry"=>$entry);
+  if ($max_file_bytes > 0 && $kind === "file" && (int)$s["size"] <= $max_file_bytes) {
+   $data = @file_get_contents($path);
+   if ($data !== false && strlen($data) === (int)$s["size"]) {
+    $payload["data"] = base64_encode($data);
+    $payload["size"] = strlen($data);
+   }
+  }
+  wpcow_send($payload);
   continue;
  }
  if ($op === "readdir") {
@@ -741,6 +1006,35 @@ while (($line = fgets(STDIN)) !== false) {
    $out[] = array("name"=>$name,"kind"=>$kind,"size"=>(int)$s["size"],"mode"=>(int)$s["mode"],"mtime"=>(int)$s["mtime"]);
   }
   wpcow_send(array("ok"=>true,"entries"=>$out));
+  continue;
+ }
+ if ($op === "prefetch_dir") {
+  if (!is_dir($path)) { wpcow_not_found(); continue; }
+  $max_file_bytes = isset($request["max_file_bytes"]) ? max(0, (int)$request["max_file_bytes"]) : 0;
+  $max_total_bytes = isset($request["max_total_bytes"]) ? max(0, (int)$request["max_total_bytes"]) : 0;
+  $total = 0;
+  $out = array();
+  foreach (scandir($path) as $name) {
+   if ($name === "." || $name === "..") { continue; }
+   $ext = strtolower(pathinfo($name, PATHINFO_EXTENSION));
+   if ($ext !== "php" && $ext !== "json" && $ext !== "mo") { continue; }
+   $child = $path . DIRECTORY_SEPARATOR . $name;
+   $s = @lstat($child);
+   if ($s === false || !is_file($child)) { continue; }
+   $size = (int)$s["size"];
+   if ($size > $max_file_bytes || $size + $total > $max_total_bytes) { continue; }
+   $data = @file_get_contents($child);
+   if ($data === false || strlen($data) !== $size) { continue; }
+   $total += $size;
+   $out[] = array("entry"=>array(
+    "name"=>$name,
+    "kind"=>"file",
+    "size"=>$size,
+    "mode"=>(int)$s["mode"],
+    "mtime"=>(int)$s["mtime"]
+   ),"data"=>base64_encode($data));
+  }
+  wpcow_send(array("ok"=>true,"files"=>$out,"bytes"=>$total));
   continue;
  }
  if ($op === "read_file") {
@@ -768,6 +1062,63 @@ while (($line = fgets(STDIN)) !== false) {
   continue;
  }
  wpcow_send(array("ok"=>false,"error"=>"unknown op"));
+}
+"#
+}
+
+fn remote_db_helper_php() -> &'static str {
+    r#"
+error_reporting(0);
+$host=$argv[1];$user=$argv[2];$pass=$argv[3];$db=$argv[4];$timeout=(int)$argv[5];
+if($timeout<1){$timeout=10;}
+@set_time_limit(0);
+if(function_exists("mysqli_report")){mysqli_report(MYSQLI_REPORT_OFF);}
+$port=null;$socket=null;
+if(preg_match('/^(.+):([0-9]+)$/',$host,$m)){
+ $host=$m[1];$port=(int)$m[2];
+} elseif(preg_match('/^([^:]+):(\/.*)$/',$host,$m)){
+ $host=$m[1];$socket=$m[2];
+}
+$mysqli=mysqli_init();
+@$mysqli->options(MYSQLI_OPT_CONNECT_TIMEOUT, min(5,$timeout));
+if(!@$mysqli->real_connect($host,$user,$pass,$db,$port,$socket)){
+ echo json_encode(array("ok"=>false,"error"=>mysqli_connect_error(),"rows"=>array(),"fields"=>array(),"affected"=>0)), "\n";
+ flush();
+ exit(0);
+}
+@$mysqli->set_charset("utf8mb4");
+@$mysqli->query("SET SESSION max_execution_time=".max(1,$timeout * 1000));
+@$mysqli->query("SET SESSION max_statement_time=".max(1,$timeout));
+while (($line = fgets(STDIN)) !== false) {
+ $request = json_decode($line, true);
+ if (!is_array($request) || !isset($request["sql"])) {
+  echo json_encode(array("ok"=>false,"error"=>"invalid request","rows"=>array(),"fields"=>array(),"affected"=>0)), "\n";
+  flush();
+  continue;
+ }
+ $sql = $request["sql"];
+ if(!preg_match('/^\s*(SELECT|SHOW|DESCRIBE|DESC|EXPLAIN)\b/i',$sql)){
+  echo json_encode(array("ok"=>false,"error"=>"WPCOW_REFUSED_WRITE","rows"=>array(),"fields"=>array(),"affected"=>0)), "\n";
+  flush();
+  continue;
+ }
+ $res=$mysqli->query($sql, MYSQLI_STORE_RESULT);
+ if($res===false){
+  echo json_encode(array("ok"=>false,"error"=>$mysqli->error,"rows"=>array(),"fields"=>array(),"affected"=>0)), "\n";
+  flush();
+  continue;
+ }
+ if($res===true){
+  echo json_encode(array("ok"=>true,"error"=>"","rows"=>array(),"fields"=>array(),"affected"=>$mysqli->affected_rows)), "\n";
+  flush();
+  continue;
+ }
+ $fields=array();
+ foreach($res->fetch_fields() as $field){$fields[]=$field->name;}
+ $rows=array();
+ while($row=$res->fetch_assoc()){$rows[]=$row;}
+ echo json_encode(array("ok"=>true,"error"=>"","rows"=>$rows,"fields"=>$fields,"affected"=>count($rows))), "\n";
+ flush();
 }
 "#
 }
@@ -919,6 +1270,12 @@ fn remote_db_tcp_target(db_host: &str) -> Option<(String, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     #[test]
     fn quotes_shell_strings() {
@@ -938,5 +1295,176 @@ mod tests {
             Some(("db.example.com".to_string(), 3307))
         );
         assert_eq!(remote_db_tcp_target("localhost:/tmp/mysql.sock"), None);
+    }
+
+    #[test]
+    fn classifies_remote_db_connection_loss_errors() {
+        assert!(is_remote_db_connection_lost("MySQL server has gone away"));
+        assert!(is_remote_db_connection_lost(
+            "Lost connection to MySQL server during query"
+        ));
+        assert!(!is_remote_db_connection_lost("Unknown column 'x'"));
+    }
+
+    #[test]
+    #[ignore = "strict harness only: mutates process SSH helper env"]
+    fn stat_prefetch_returns_small_file_bytes_from_helper() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+
+        let old_path = std::env::var_os("PATH");
+        let old_helper = std::env::var_os("WPCOW_REMOTE_FILE_HELPER");
+        let old_timeout = std::env::var_os("WPCOW_REMOTE_FILE_HELPER_TIMEOUT_SECS");
+
+        let temp = tempfile::tempdir().unwrap();
+        let remote_root = temp.path().join("remote");
+        let bin = temp.path().join("bin");
+        fs::create_dir_all(&remote_root).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(remote_root.join("index.php"), b"<?php echo 'remote';").unwrap();
+
+        let fake_ssh = bin.join("ssh");
+        fs::write(
+            &fake_ssh,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+cmd="${@: -1}"
+exec bash -lc "$cmd"
+"#,
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&fake_ssh).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&fake_ssh, perms).unwrap();
+
+        let path = match old_path.as_ref() {
+            Some(old) => format!("{}:{}", bin.display(), old.to_string_lossy()),
+            None => bin.display().to_string(),
+        };
+        std::env::set_var("PATH", path);
+        std::env::set_var("WPCOW_REMOTE_FILE_HELPER", "1");
+        std::env::set_var("WPCOW_REMOTE_FILE_HELPER_TIMEOUT_SECS", "5");
+
+        let manifest = Manifest::new(
+            "example".to_string(),
+            "fake-host".to_string(),
+            remote_root.to_string_lossy().to_string(),
+            "https://example.com".to_string(),
+            "http://example.test".to_string(),
+            Probe {
+                table_prefix: "wp_".to_string(),
+                ..Probe::default()
+            },
+        );
+        let remote = RemoteClient::new(manifest, None);
+
+        let prefetched = remote
+            .stat_prefetch(Path::new("index.php"), 1024)
+            .expect("stat prefetch");
+        assert_eq!(prefetched.entry.size, 20);
+        assert_eq!(
+            prefetched.data.as_deref(),
+            Some(&b"<?php echo 'remote';"[..])
+        );
+
+        let metadata_only = remote
+            .stat_prefetch(Path::new("index.php"), 4)
+            .expect("stat without prefetch");
+        assert_eq!(metadata_only.entry.size, 20);
+        assert!(
+            metadata_only.data.is_none(),
+            "files above the stat-prefetch limit should remain read-through"
+        );
+
+        match old_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        match old_helper {
+            Some(value) => std::env::set_var("WPCOW_REMOTE_FILE_HELPER", value),
+            None => std::env::remove_var("WPCOW_REMOTE_FILE_HELPER"),
+        }
+        match old_timeout {
+            Some(value) => std::env::set_var("WPCOW_REMOTE_FILE_HELPER_TIMEOUT_SECS", value),
+            None => std::env::remove_var("WPCOW_REMOTE_FILE_HELPER_TIMEOUT_SECS"),
+        }
+    }
+
+    #[test]
+    #[ignore = "strict harness only: mutates process SSH helper env"]
+    fn prefetch_dir_batches_only_runtime_file_types() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+
+        let old_path = std::env::var_os("PATH");
+        let old_helper = std::env::var_os("WPCOW_REMOTE_FILE_HELPER");
+        let old_timeout = std::env::var_os("WPCOW_REMOTE_FILE_HELPER_TIMEOUT_SECS");
+
+        let temp = tempfile::tempdir().unwrap();
+        let remote_root = temp.path().join("remote");
+        let runtime_dir = remote_root.join("wp-content/plugins/example/includes");
+        let bin = temp.path().join("bin");
+        fs::create_dir_all(&runtime_dir).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(runtime_dir.join("a.php"), b"<?php // a").unwrap();
+        fs::write(runtime_dir.join("b.json"), b"{\"ok\":true}").unwrap();
+        fs::write(runtime_dir.join("style.css"), b"body{}").unwrap();
+
+        let fake_ssh = bin.join("ssh");
+        fs::write(
+            &fake_ssh,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+cmd="${@: -1}"
+exec bash -lc "$cmd"
+"#,
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&fake_ssh).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&fake_ssh, perms).unwrap();
+
+        let path = match old_path.as_ref() {
+            Some(old) => format!("{}:{}", bin.display(), old.to_string_lossy()),
+            None => bin.display().to_string(),
+        };
+        std::env::set_var("PATH", path);
+        std::env::set_var("WPCOW_REMOTE_FILE_HELPER", "1");
+        std::env::set_var("WPCOW_REMOTE_FILE_HELPER_TIMEOUT_SECS", "5");
+
+        let manifest = Manifest::new(
+            "example".to_string(),
+            "fake-host".to_string(),
+            remote_root.to_string_lossy().to_string(),
+            "https://example.com".to_string(),
+            "http://example.test".to_string(),
+            Probe {
+                table_prefix: "wp_".to_string(),
+                ..Probe::default()
+            },
+        );
+        let remote = RemoteClient::new(manifest, None);
+        let files = remote
+            .prefetch_dir(Path::new("wp-content/plugins/example/includes"), 1024, 4096)
+            .expect("prefetch dir");
+        let names = files
+            .iter()
+            .map(|stat| stat.entry.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"a.php"));
+        assert!(names.contains(&"b.json"));
+        assert!(!names.contains(&"style.css"));
+        assert_eq!(files.iter().filter(|stat| stat.data.is_some()).count(), 2);
+
+        match old_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        match old_helper {
+            Some(value) => std::env::set_var("WPCOW_REMOTE_FILE_HELPER", value),
+            None => std::env::remove_var("WPCOW_REMOTE_FILE_HELPER"),
+        }
+        match old_timeout {
+            Some(value) => std::env::set_var("WPCOW_REMOTE_FILE_HELPER_TIMEOUT_SECS", value),
+            None => std::env::remove_var("WPCOW_REMOTE_FILE_HELPER_TIMEOUT_SECS"),
+        }
     }
 }

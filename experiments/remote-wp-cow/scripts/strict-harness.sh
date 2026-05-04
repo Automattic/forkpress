@@ -40,11 +40,15 @@ cargo test --locked
 
 echo "== targeted behavior proofs =="
 run_exact_test overlay::tests::lazy_remote_file_is_cached_and_survives_remote_loss
+run_exact_test overlay::tests::stat_prefetched_bytes_are_reused_without_remote_read
+run_exact_ignored_test remote::tests::stat_prefetch_returns_small_file_bytes_from_helper
+run_exact_ignored_test remote::tests::prefetch_dir_batches_only_runtime_file_types
 run_exact_test cli::tests::offline_core_runtime_cache_is_bounded_to_wordpress_core
 run_exact_test overlay::tests::cached_only_copy_up_uses_materialized_files_without_remote
 run_exact_test fusefs::tests::offline_readdir_uses_cached_remote_metadata_without_remote
 run_exact_test fusefs::tests::remote_stat_metadata_survives_severed_mode_without_remote
 run_exact_test fusefs::tests::remote_missing_metadata_survives_daemon_restart
+run_exact_test fusefs::tests::stat_prefetch_is_limited_to_runtime_read_files
 run_exact_test generate::tests::router_splash_and_progress_smoke_responds_quickly
 run_exact_test db::tests::remote_query_cache_round_trips_safe_read_results
 run_exact_test db::tests::dirty_row_overlay_tables_are_local_state
@@ -88,6 +92,17 @@ need_pattern src/db.rs 'dirty_tables' "dirty row-overlay table routing state"
 need_pattern src/generate.rs 'cow_cached_remote_read_is_safe_without_control' "PHP cached remote read fast path"
 need_pattern src/generate.rs 'cow_safe_local_read_without_control' "PHP local read fast path for materialized runtime data"
 need_pattern src/remote.rs 'WPCOW_REMOTE_DB_TUNNEL", false' "remote DB SSH tunnel is opt-in"
+need_pattern src/remote.rs 'WPCOW_REMOTE_DB_HELPER", true' "remote DB lower reads use persistent helper by default"
+need_pattern src/remote.rs 'remote_db_helper_php' "remote DB helper keeps one read-only mysqli session open"
+need_pattern src/remote.rs 'is_remote_db_connection_lost' "remote DB helper reconnects after idle connection loss"
+need_pattern src/remote.rs 'WPCOW_REFUSED_WRITE' "remote DB helper refuses write-shaped SQL"
+need_pattern src/fusefs.rs 'WPCOW_REMOTE_STAT_PREFETCH_MAX_KB' "FUSE stat path can prefetch small file bytes"
+need_pattern src/fusefs.rs 'WPCOW_RUNTIME_SIBLING_PREFETCH_MAX_MB' "FUSE batches same-directory runtime files with a byte cap"
+need_pattern src/remote.rs '\$op === "prefetch_dir"' "remote file helper supports bounded directory batch reads"
+need_pattern src/overlay.rs 'put_cached_file_bytes' "stat-prefetched file bytes are stored in the normal file cache"
+need_pattern scripts/live-site-acceptance.sh 'WPCOW_REMOTE_DB_HELPER="\$\{WPCOW_REMOTE_DB_HELPER:-1\}"' "live acceptance runs through persistent remote DB helper"
+need_pattern scripts/live-site-acceptance.sh 'WPCOW_REMOTE_STAT_PREFETCH_MAX_KB="\$\{WPCOW_REMOTE_STAT_PREFETCH_MAX_KB:-0\}"' "live acceptance keeps experimental stat prefetch off by default"
+need_pattern scripts/live-site-acceptance.sh 'WPCOW_RUNTIME_SIBLING_PREFETCH_MAX_MB="\$\{WPCOW_RUNTIME_SIBLING_PREFETCH_MAX_MB:-0\}"' "live acceptance keeps experimental sibling prefetch off by default"
 need_pattern src/run.rs 'WPCOW_ALLOW_UNSAFE_PLUGIN_SIDE_EFFECTS' "plugin side-effect escape hatch is explicit"
 need_pattern src/run.rs 'disable_functions' "PHP side-effect functions are disabled by default"
 need_pattern src/run.rs 'stream_socket_client' "raw plugin socket egress is disabled by default"
@@ -101,6 +116,9 @@ need_pattern src/generate.rs 'install_fake_ssh' "strict harness fake SSH remote"
 need_pattern src/generate.rs 'read_line_count\(&fake_ssh_log\)' "strict harness offline no-SSH assertion"
 need_pattern compose.yaml '\$\{WPCOW_HTTP_PORT:-8080\}:8080' "Docker host HTTP port exposure"
 need_pattern compose.yaml 'WPCOW_HTTP: 0\.0\.0\.0:8080' "Docker in-container HTTP listener"
+need_pattern compose.yaml 'WPCOW_REMOTE_DB_HELPER: "\$\{WPCOW_REMOTE_DB_HELPER:-1\}"' "Docker compose defaults persistent DB helper on"
+need_pattern compose.yaml 'WPCOW_REMOTE_STAT_PREFETCH_MAX_KB: "\$\{WPCOW_REMOTE_STAT_PREFETCH_MAX_KB:-0\}"' "Docker compose defaults experimental stat prefetch off"
+need_pattern compose.yaml 'WPCOW_RUNTIME_SIBLING_PREFETCH_MAX_MB: "\$\{WPCOW_RUNTIME_SIBLING_PREFETCH_MAX_MB:-0\}"' "Docker compose defaults experimental sibling prefetch off"
 need_pattern .dockerignore '^/target/$' "Docker build context target exclusion"
 need_pattern .dockerignore '^/\.env$' "Docker build context local env exclusion"
 need_pattern .dockerignore '^!/\.env\.example$' "Docker build context env example inclusion"
@@ -109,9 +127,12 @@ need_pattern docker/wp-cow-lab-sever 'WPCOW_LOCAL_ADMIN_PASSWORD' "Docker local 
 need_pattern .env.example '^WPCOW_HTTP_PORT=9481$' "Docker lab example host HTTP port"
 need_pattern .env.example '^WPCOW_WEB_SERVER=frankenphp$' "Docker lab example FrankenPHP preference"
 need_pattern .env.example '^WPCOW_REMOTE_DB_TUNNEL=0$' "Docker lab example disables remote DB tunnel by default"
+need_pattern .env.example '^WPCOW_REMOTE_DB_HELPER=1$' "Docker lab example uses persistent remote DB helper"
 need_pattern .env.example '^WPCOW_SPLASH=1$' "Docker lab example splash default"
 need_pattern .env.example '^WPCOW_ALLOW_UNSAFE_PLUGIN_SIDE_EFFECTS=0$' "Docker lab example keeps PHP side-effect guards enabled"
 need_pattern .env.example '^WPCOW_OPCACHE_VALIDATE_TIMESTAMPS=0$' "Docker lab example keeps warm render OPcache fast path enabled"
+need_pattern .env.example '^WPCOW_REMOTE_STAT_PREFETCH_MAX_KB=0$' "Docker lab example keeps experimental stat prefetch off by default"
+need_pattern .env.example '^WPCOW_RUNTIME_SIBLING_PREFETCH_MAX_MB=0$' "Docker lab example keeps experimental sibling prefetch off by default"
 need_pattern .env.example '^WPCOW_REMOTE_METADATA_CACHE_TTL_SECS=3600$' "Docker lab example keeps remote metadata warm long enough for rerenders"
 need_pattern .env.example '^WPCOW_LOCAL_ADMIN_PASSWORD=$' "Docker lab example local admin override"
 

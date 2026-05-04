@@ -160,6 +160,9 @@ Remote database reads are mediated by the local daemon by default. Generated
 PHP does not contain the production DB name, user, password, or host, so plugins
 using the normal `DB_*` constants see only the local COW proxy. Write-class SQL
 is blocked from the remote database and materialized locally first.
+`WPCOW_REMOTE_DB_HELPER=1` keeps a read-only PHP/MySQL helper open over SSH so a
+cold render does not spawn a fresh remote PHP process for every safe lower-layer
+read.
 `WPCOW_REMOTE_DB_TUNNEL=1` is an opt-in debugging/performance mode for hosts
 where you explicitly accept opening a local SSH tunnel to the remote DB.
 
@@ -199,6 +202,14 @@ program files, or set `WPCOW_OPCACHE_VALIDATE_TIMESTAMPS=1` while actively
 working on plugin/theme code.
 There is no recursive runtime warm-up: PHP files, themes, plugins, and uploads
 are fetched only when a request touches them, then cached for repeated reads.
+There are experimental cold-start knobs for hosts where batch reads beat
+single-file SSH round trips. Set `WPCOW_REMOTE_STAT_PREFETCH_MAX_KB` to prefetch
+PHP/JSON/translation file bytes during stat, and
+`WPCOW_RUNTIME_SIBLING_PREFETCH_MAX_MB` to batch same-directory runtime siblings.
+Both default to `0` because the real SiteGround trace showed broad prefetching
+can make cold start worse when WordPress stats assets it will not read during
+render. These knobs never recurse into uploads and never fetch CSS, JS, or media
+unless the browser asks for them.
 Remote plugin and language directories stay visible through the lazy lower
 layer by default so the local site can render the same active code as the
 remote site. Set `WPCOW_ENABLE_PLUGINS=0` only when you need to suppress active
@@ -276,12 +287,13 @@ cat /mnt/wp-cow/example/wp-config.php
 Remote file contents are cached separately from local mutations in
 `~/.wp-cow/clones/<name>/file-cache`, which is persisted by the Docker
 `wp-cow-state` volume. Files up to `WPCOW_CACHE_MAX_FILE_MB` are cached as whole
-files on first read, and their remote metadata is recorded in
+files on first touch/read, and their remote metadata is recorded in
 `file-cache/metadata.json` so later runs do not need to stat those files
 remotely again. Negative lookups are recorded in `file-cache/missing.json` for
 the metadata TTL so repeated renders do not keep rechecking absent plugins,
 languages, template directories, or optional WordPress files. Larger files are
-streamed by range. The Docker lab defaults the whole-file cache limit to 64 MB.
+streamed by range. The Docker lab defaults the whole-file cache limit to 64 MB
+and leaves experimental cold-start prefetch knobs off unless explicitly enabled.
 Check or clear the cache with:
 
 ```bash

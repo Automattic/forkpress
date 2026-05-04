@@ -196,6 +196,43 @@ impl OverlayStore {
         self.append_metadata_journal(&journal_entries)
     }
 
+    pub fn put_cached_file_bytes(
+        &self,
+        rel: &Path,
+        entry: &RemoteEntry,
+        bytes: &[u8],
+    ) -> Result<()> {
+        if entry.kind != "file" {
+            return self.put_cached_entry(rel, entry);
+        }
+        let rel = Self::clean_rel(rel)?;
+        let rel_string = Self::rel_string(&rel);
+        let actual_size = bytes.len() as u64;
+        if actual_size != entry.size {
+            return Err(anyhow!(
+                "remote file changed while prefetching {}: stat size {}, read size {}",
+                rel_string,
+                entry.size,
+                actual_size
+            ));
+        }
+
+        let cache_path = self.cache_path(&rel);
+        if !cache_path.exists() {
+            if let Some(parent) = cache_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let tmp = self.cache_tmp_path(&cache_path);
+            let mut out = File::create(&tmp)?;
+            out.write_all(bytes)?;
+            drop(out);
+            fs::rename(tmp, &cache_path)?;
+            let _ = self.finish_cache_progress(&rel_string, entry.size);
+        }
+
+        self.put_cached_entry(&rel, entry)
+    }
+
     pub fn remove_cached(&self, rel: &Path) -> Result<()> {
         let path = self.cache_path(rel);
         if path.exists() {
@@ -1071,6 +1108,61 @@ exec bash -lc "$cmd"
         match old_log {
             Some(value) => std::env::set_var("WPCOW_FAKE_SSH_LOG", value),
             None => std::env::remove_var("WPCOW_FAKE_SSH_LOG"),
+        }
+        match old_helper {
+            Some(value) => std::env::set_var("WPCOW_REMOTE_FILE_HELPER", value),
+            None => std::env::remove_var("WPCOW_REMOTE_FILE_HELPER"),
+        }
+    }
+
+    #[test]
+    fn stat_prefetched_bytes_are_reused_without_remote_read() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+
+        let old_path = std::env::var_os("PATH");
+        let old_helper = std::env::var_os("WPCOW_REMOTE_FILE_HELPER");
+
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::config::clone_paths(temp.path().join("state").as_path(), "example");
+        ensure_clone_dirs(&paths).unwrap();
+        let store = OverlayStore::new(&paths);
+        let rel = Path::new("wp-content/themes/example/style.css");
+        let entry = RemoteEntry {
+            name: "style.css".to_string(),
+            kind: "file".to_string(),
+            size: 17,
+            mode: 0o100644,
+            mtime: 42,
+        };
+        store
+            .put_cached_file_bytes(rel, &entry, b"body{color:black}")
+            .unwrap();
+
+        std::env::set_var("PATH", temp.path().join("missing-bin"));
+        std::env::set_var("WPCOW_REMOTE_FILE_HELPER", "0");
+        let remote = RemoteClient::new(
+            Manifest::new(
+                "example".to_string(),
+                "unreachable-host".to_string(),
+                "/remote/wp".to_string(),
+                "https://example.com".to_string(),
+                "http://example.test".to_string(),
+                Probe {
+                    table_prefix: "wp_".to_string(),
+                    ..Probe::default()
+                },
+            ),
+            None,
+        );
+        let bytes = store
+            .read_cached_or_remote_with_entry(&remote, rel, 0, 1024, 1024, Some(entry.clone()))
+            .unwrap();
+        assert_eq!(bytes, b"body{color:black}");
+        assert_eq!(store.cached_entry(rel).unwrap().unwrap().size, 17);
+
+        match old_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
         }
         match old_helper {
             Some(value) => std::env::set_var("WPCOW_REMOTE_FILE_HELPER", value),
