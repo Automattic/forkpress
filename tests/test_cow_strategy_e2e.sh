@@ -81,4 +81,28 @@ grep -F "$TITLE" "$TMP/edit.html" >/dev/null
 
 "$BIN" branch --work-dir "$WORK_DIR" list | grep -F "feature-cow" >/dev/null
 
+"$BIN" clone "http://127.0.0.1:$PORT/site.git" "$TMP/checkout"
+test -f "$TMP/checkout/wordpress/wp-load.php"
+test -f "$TMP/checkout/database.sql"
+
+git -C "$TMP/checkout" fetch origin '+refs/heads/*:refs/remotes/origin/*'
+git -C "$TMP/checkout" checkout -B feature-cow origin/feature-cow
+grep -F "$TITLE" "$TMP/checkout/database.sql" >/dev/null
+echo "changed through git" > "$TMP/checkout/wordpress/wp-content/cow-git.txt"
+"$BIN" commit "$TMP/checkout" --message "test cow git push"
+test -f "$WORK/feature-cow/wp-content/cow-git.txt"
+grep -F "changed through git" "$WORK/feature-cow/wp-content/cow-git.txt" >/dev/null
+test ! -e "$WORK/main/wp-content/cow-git.txt"
+
+"$BIN" agents \
+  --work-dir "$WORK_DIR" \
+  --remote "http://127.0.0.1:$PORT/site.git" \
+  --count 2 \
+  --prefix cowagent \
+  "$TMP/agents"
+test -f "$WORK/cowagent-1/wp-load.php"
+test -f "$WORK/cowagent-2/wp-load.php"
+test -d "$TMP/agents/cowagent-1/wordpress"
+test -d "$TMP/agents/cowagent-2/wordpress"
+
 echo "PASS cow materialized strategy e2e"

@@ -60,9 +60,12 @@ $uri = $_SERVER['REQUEST_URI'] ?? '/';
 $path = parse_url($uri, PHP_URL_PATH) ?: '/';
 $query = parse_url($uri, PHP_URL_QUERY) ?: '';
 
-if (preg_match('|^/([a-zA-Z0-9_\-]+)\.git(/.*)?$|', $path)) {
-    http_response_code(501);
-    echo "Git smart HTTP is not wired for the $strategy_label strategy yet\n";
+if (preg_match('|^/([a-zA-Z0-9_\-]+)\.git(/.*)?$|', $path, $git_match)) {
+    $git_path = $git_match[2] ?? '/';
+    $cow_dir = getenv('FORKPRESS_COW_DIR') ?: dirname(rtrim($branches_dir, '/'));
+    $git_repo_dir = getenv('FORKPRESS_COW_GIT_DIR') ?: rtrim($cow_dir, '/') . '/git';
+    require_once __DIR__ . '/../scripts/git_server/cow_server.php';
+    cow_git_server_handle($branches_dir, $git_repo_dir, $git_path, $query);
     return true;
 }
 
