@@ -14,6 +14,7 @@ use crate::generate;
 use crate::overlay::OverlayStore;
 use crate::remote::{probe_wordpress, RemoteClient};
 use crate::run::{self, RunOptions};
+use crate::runtime_cache;
 
 #[derive(Debug, Parser)]
 #[command(name = "wp-cow")]
@@ -306,7 +307,8 @@ fn serve_site(args: ServeArgs) -> Result<()> {
             && (should_probe
                 || manifest.probe.db_name.is_empty()
                 || manifest.probe.db_host.is_empty()
-                || manifest.probe.db_user.is_empty())
+                || manifest.probe.db_user.is_empty()
+                || (manifest.probe.template.is_empty() && manifest.probe.stylesheet.is_empty()))
         {
             manifest.probe = probe_wordpress(&manifest.ssh, &manifest.remote_path)?;
             changed = true;
@@ -342,7 +344,7 @@ fn serve_site(args: ServeArgs) -> Result<()> {
         );
     }
     println!(
-        "runtime/plugin/theme/upload trees stay lazy for '{}'; requested files will be cached on demand",
+        "runtime code is cached in a bounded pack for '{}'; uploads/media remain lazy and are cached on demand",
         manifest.name
     );
 
@@ -379,6 +381,28 @@ fn serve_site(args: ServeArgs) -> Result<()> {
         println!(
             "using existing local database '{}' ({:.2}s)",
             manifest.local_db.name,
+            phase_started.elapsed().as_secs_f64()
+        );
+    }
+
+    if materialize_options_table_enabled() {
+        let phase_started = Instant::now();
+        let remote = RemoteClient::new(
+            manifest.clone(),
+            Some(crate::config::ssh_control_path(&paths)),
+        );
+        remote.ensure_master()?;
+        let options_table = format!("{}options", manifest.probe.table_prefix);
+        let materialized = db::materialize_tables(
+            &remote,
+            &manifest,
+            &paths,
+            std::slice::from_ref(&options_table),
+        )
+        .context("materialize WordPress options table")?;
+        println!(
+            "materialized {} WordPress options table(s) for local plugin/runtime reads in {:.2}s",
+            materialized.len(),
             phase_started.elapsed().as_secs_f64()
         );
     }
@@ -501,9 +525,18 @@ fn sever(args: SeverArgs) -> Result<()> {
     };
 
     if admin.is_some() {
-        let cached = cache_offline_core_runtime(&remote, &manifest, &paths)
-            .context("cache WordPress core/admin runtime for offline login")?;
-        println!("cached {cached} WordPress core/admin runtime files for offline login");
+        let warmed = runtime_cache::warm_runtime_code_cache_with_admin(&remote, &manifest, &paths)
+            .context("cache WordPress runtime code for offline login")?;
+        if warmed.files > 0 {
+            println!(
+                "cached {} bounded runtime code files for offline login",
+                warmed.files
+            );
+        } else {
+            let cached = cache_offline_core_runtime(&remote, &manifest, &paths)
+                .context("cache WordPress core/admin runtime for offline login")?;
+            println!("cached {cached} WordPress core/admin runtime files for offline login");
+        }
     }
 
     let marker = OfflineMarker {
@@ -637,6 +670,18 @@ fn run_clone(args: RunArgs) -> Result<()> {
         skip_php: args.no_php,
     };
     run::run_site(manifest, paths, options)
+}
+
+fn materialize_options_table_enabled() -> bool {
+    std::env::var("WPCOW_MATERIALIZE_OPTIONS_TABLE")
+        .ok()
+        .map(|raw| {
+            matches!(
+                raw.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(true)
 }
 
 #[cfg(test)]

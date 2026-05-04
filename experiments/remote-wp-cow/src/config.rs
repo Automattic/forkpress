@@ -49,6 +49,14 @@ pub struct Probe {
     pub db_password: String,
     pub siteurl: String,
     pub home: String,
+    #[serde(default)]
+    pub template: String,
+    #[serde(default)]
+    pub stylesheet: String,
+    #[serde(default)]
+    pub active_plugins: Vec<String>,
+    #[serde(default)]
+    pub active_sitewide_plugins: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -9,6 +9,7 @@ mod overlay;
 mod remote;
 mod row_cow;
 mod run;
+mod runtime_cache;
 mod sql;
 
 fn main() -> anyhow::Result<()> {

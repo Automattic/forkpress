@@ -47,6 +47,7 @@ pub struct OverlayStore {
     whiteouts_path: PathBuf,
     whiteouts: RefCell<Option<WhiteoutFile>>,
     metadata: RefCell<Option<MetadataFile>>,
+    metadata_journal_len: RefCell<u64>,
     missing: RefCell<Option<MissingFile>>,
 }
 
@@ -58,6 +59,7 @@ impl OverlayStore {
             whiteouts_path: paths.whiteouts.clone(),
             whiteouts: RefCell::new(None),
             metadata: RefCell::new(None),
+            metadata_journal_len: RefCell::new(0),
             missing: RefCell::new(None),
         }
     }
@@ -202,6 +204,25 @@ impl OverlayStore {
         entry: &RemoteEntry,
         bytes: &[u8],
     ) -> Result<()> {
+        self.put_cached_file_bytes_inner(rel, entry, bytes, true)
+    }
+
+    pub fn put_cached_file_bytes_without_progress(
+        &self,
+        rel: &Path,
+        entry: &RemoteEntry,
+        bytes: &[u8],
+    ) -> Result<()> {
+        self.put_cached_file_bytes_inner(rel, entry, bytes, false)
+    }
+
+    fn put_cached_file_bytes_inner(
+        &self,
+        rel: &Path,
+        entry: &RemoteEntry,
+        bytes: &[u8],
+        update_progress: bool,
+    ) -> Result<()> {
         if entry.kind != "file" {
             return self.put_cached_entry(rel, entry);
         }
@@ -227,10 +248,27 @@ impl OverlayStore {
             out.write_all(bytes)?;
             drop(out);
             fs::rename(tmp, &cache_path)?;
-            let _ = self.finish_cache_progress(&rel_string, entry.size);
+            if update_progress {
+                let _ = self.finish_cache_progress(&rel_string, entry.size);
+            }
         }
 
         self.put_cached_entry(&rel, entry)
+    }
+
+    pub fn note_cache_fetch(
+        &self,
+        rel: &Path,
+        phase: &str,
+        active_bytes: u64,
+        active_total: u64,
+    ) -> Result<()> {
+        self.write_cache_progress(
+            &Self::rel_string(&Self::clean_rel(rel)?),
+            phase,
+            active_bytes,
+            active_total,
+        )
     }
 
     pub fn remove_cached(&self, rel: &Path) -> Result<()> {
@@ -534,7 +572,16 @@ impl OverlayStore {
     }
 
     fn load_metadata(&self) -> Result<MetadataFile> {
-        if let Some(metadata) = self.metadata.borrow().as_ref() {
+        let journal_len = self.metadata_journal_len_on_disk();
+        let cached_metadata = { self.metadata.borrow().clone() };
+        if let Some(metadata) = cached_metadata {
+            if *self.metadata_journal_len.borrow() == journal_len {
+                return Ok(metadata);
+            }
+            let mut metadata = metadata;
+            self.apply_metadata_journal(&mut metadata)?;
+            *self.metadata.borrow_mut() = Some(metadata.clone());
+            *self.metadata_journal_len.borrow_mut() = journal_len;
             return Ok(metadata.clone());
         }
         let path = self.metadata_path();
@@ -542,6 +589,7 @@ impl OverlayStore {
             let mut metadata = MetadataFile::default();
             self.apply_metadata_journal(&mut metadata)?;
             *self.metadata.borrow_mut() = Some(metadata.clone());
+            *self.metadata_journal_len.borrow_mut() = journal_len;
             return Ok(metadata);
         }
         let mut json = String::new();
@@ -549,6 +597,7 @@ impl OverlayStore {
         let mut metadata: MetadataFile = serde_json::from_str(&json)?;
         self.apply_metadata_journal(&mut metadata)?;
         *self.metadata.borrow_mut() = Some(metadata.clone());
+        *self.metadata_journal_len.borrow_mut() = journal_len;
         Ok(metadata)
     }
 
@@ -602,7 +651,14 @@ impl OverlayStore {
         fs::rename(tmp, self.metadata_path())?;
         let _ = fs::remove_file(self.metadata_journal_path());
         *self.metadata.borrow_mut() = Some(metadata.clone());
+        *self.metadata_journal_len.borrow_mut() = 0;
         Ok(())
+    }
+
+    fn metadata_journal_len_on_disk(&self) -> u64 {
+        fs::metadata(self.metadata_journal_path())
+            .map(|metadata| metadata.len())
+            .unwrap_or(0)
     }
 
     fn apply_metadata_journal(&self, metadata: &mut MetadataFile) -> Result<()> {
@@ -656,6 +712,8 @@ impl OverlayStore {
             serde_json::to_writer(&mut file, &value)?;
             file.write_all(b"\n")?;
         }
+        drop(file);
+        *self.metadata_journal_len.borrow_mut() = self.metadata_journal_len_on_disk();
         Ok(())
     }
 
@@ -863,6 +921,49 @@ mod tests {
         assert!(store.cached_entry(rel).unwrap().is_none());
         let reloaded = OverlayStore::new(&paths);
         assert!(reloaded.cached_entry(rel).unwrap().is_none());
+    }
+
+    #[test]
+    fn cached_metadata_refreshes_when_another_overlay_appends_journal() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ClonePaths {
+            root: temp.path().to_path_buf(),
+            manifest: temp.path().join("manifest.json"),
+            upper: temp.path().join("upper"),
+            file_cache: temp.path().join("file-cache"),
+            db: temp.path().join("db"),
+            generated: temp.path().join("generated"),
+            run: temp.path().join("run"),
+            whiteouts: temp.path().join("whiteouts.json"),
+        };
+        let mounted_view = OverlayStore::new(&paths);
+        assert!(mounted_view
+            .cached_entry(Path::new("wp-includes/load.php"))
+            .unwrap()
+            .is_none());
+
+        let pack_writer = OverlayStore::new(&paths);
+        let entry = RemoteEntry {
+            name: "load.php".to_string(),
+            kind: "file".to_string(),
+            size: 12,
+            mode: 0o100644,
+            mtime: 123,
+        };
+        pack_writer
+            .put_cached_file_bytes_without_progress(
+                Path::new("wp-includes/load.php"),
+                &entry,
+                b"<?php // ok\n",
+            )
+            .unwrap();
+
+        let loaded = mounted_view
+            .cached_entry(Path::new("wp-includes/load.php"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.name, "load.php");
+        assert_eq!(loaded.size, 12);
     }
 
     #[test]

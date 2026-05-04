@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -26,6 +26,28 @@ pub struct RemoteEntry {
 pub struct RemoteStat {
     pub entry: RemoteEntry,
     pub data: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeCodePackLimits {
+    pub max_file_bytes: u64,
+    pub max_total_bytes: u64,
+    pub max_files: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeCodePackFile {
+    pub rel: PathBuf,
+    pub entry: RemoteEntry,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RuntimeCodePackSummary {
+    pub files: u64,
+    pub bytes: u64,
+    pub skipped: u64,
+    pub capped: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -511,6 +533,130 @@ echo $target;
 "#;
         let bytes = self.php_eval(code, &[full])?;
         Ok(String::from_utf8_lossy(&bytes).to_string())
+    }
+
+    pub fn runtime_code_pack<F>(
+        &self,
+        roots: &[PathBuf],
+        limits: RuntimeCodePackLimits,
+        mut on_file: F,
+    ) -> Result<RuntimeCodePackSummary>
+    where
+        F: FnMut(RuntimeCodePackFile) -> Result<()>,
+    {
+        let started = Instant::now();
+        let result = self.runtime_code_pack_inner(roots, limits, &mut on_file);
+        trace_remote_result(
+            "runtime_code_pack",
+            &format!("{} roots", roots.len()),
+            started,
+            &result,
+        );
+        result
+    }
+
+    fn runtime_code_pack_inner<F>(
+        &self,
+        roots: &[PathBuf],
+        limits: RuntimeCodePackLimits,
+        on_file: &mut F,
+    ) -> Result<RuntimeCodePackSummary>
+    where
+        F: FnMut(RuntimeCodePackFile) -> Result<()>,
+    {
+        if limits.max_file_bytes == 0 || limits.max_total_bytes == 0 || limits.max_files == 0 {
+            return Ok(RuntimeCodePackSummary::default());
+        }
+
+        let roots = roots
+            .iter()
+            .map(|root| {
+                OverlayStore::clean_rel(root)
+                    .map(|clean| OverlayStore::rel_string(&clean))
+                    .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        if roots.is_empty() {
+            return Ok(RuntimeCodePackSummary::default());
+        }
+
+        let mut remote_command = format!("php -r {} --", shell_quote(runtime_code_pack_php()));
+        for arg in [
+            self.manifest.remote_path.clone(),
+            serde_json::to_string(&roots)?,
+            limits.max_file_bytes.to_string(),
+            limits.max_total_bytes.to_string(),
+            limits.max_files.to_string(),
+        ] {
+            remote_command.push(' ');
+            remote_command.push_str(&shell_quote(arg));
+        }
+
+        let mut command = self.ssh_command(&remote_command, runtime_code_pack_timeout_secs());
+        let mut child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("start remote runtime code pack")?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("runtime code pack stdout"))?;
+
+        let mut summary = RuntimeCodePackSummary::default();
+        for line in BufReader::new(stdout).lines() {
+            let line = line.context("read remote runtime code pack")?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let value: serde_json::Value = serde_json::from_str(&line)
+                .with_context(|| format!("decode remote runtime code pack line: {line}"))?;
+            match value.get("type").and_then(|value| value.as_str()) {
+                Some("file") => {
+                    let rel = value
+                        .get("path")
+                        .and_then(|value| value.as_str())
+                        .ok_or_else(|| anyhow!("runtime code pack file missing path"))?;
+                    let entry: RemoteEntry = serde_json::from_value(
+                        value
+                            .get("entry")
+                            .cloned()
+                            .ok_or_else(|| anyhow!("runtime code pack file missing entry"))?,
+                    )?;
+                    let bytes = decode_helper_data(value.clone())?;
+                    if entry.kind == "file" && bytes.len() as u64 == entry.size {
+                        on_file(RuntimeCodePackFile {
+                            rel: PathBuf::from(rel),
+                            entry,
+                            bytes,
+                        })?;
+                    }
+                }
+                Some("summary") => {
+                    summary = serde_json::from_value(value.clone())?;
+                }
+                Some("error") => {
+                    let error = value
+                        .get("error")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("remote runtime code pack failed");
+                    return Err(anyhow!(error.to_string()));
+                }
+                _ => {}
+            }
+        }
+
+        let output = child.wait_with_output()?;
+        if !output.status.success() {
+            return Err(anyhow!(
+                "remote runtime code pack exited with status {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+
+        Ok(summary)
     }
 
     pub fn remote_query_readonly(&self, sql: &str) -> Result<RemoteQueryResult> {
@@ -1118,8 +1264,116 @@ while (($line = fgets(STDIN)) !== false) {
  $rows=array();
  while($row=$res->fetch_assoc()){$rows[]=$row;}
  echo json_encode(array("ok"=>true,"error"=>"","rows"=>$rows,"fields"=>$fields,"affected"=>count($rows))), "\n";
+flush();
+}
+"#
+}
+
+fn runtime_code_pack_php() -> &'static str {
+    r#"
+error_reporting(0);
+$base = rtrim($argv[1], "/");
+$roots = json_decode($argv[2], true);
+$max_file_bytes = max(0, (int)$argv[3]);
+$max_total_bytes = max(0, (int)$argv[4]);
+$max_files = max(0, (int)$argv[5]);
+$total = 0;
+$files = 0;
+$skipped = 0;
+$capped = false;
+if (!is_array($roots)) { $roots = array(); }
+function wpcow_pack_send($payload) {
+ echo json_encode($payload), "\n";
  flush();
 }
+function wpcow_pack_clean($rel) {
+ $rel = str_replace("\\", "/", (string)$rel);
+ $rel = trim($rel, "/");
+ if ($rel === "") { return false; }
+ $parts = array();
+ foreach (explode("/", $rel) as $part) {
+  if ($part === "" || $part === ".") { continue; }
+  if ($part === "..") { return false; }
+  $parts[] = $part;
+ }
+ return implode("/", $parts);
+}
+function wpcow_pack_allowed_ext($rel) {
+ $ext = strtolower(pathinfo($rel, PATHINFO_EXTENSION));
+ return in_array($ext, array("php", "inc", "phtml", "json", "mo"), true);
+}
+function wpcow_pack_excluded($rel) {
+ return $rel === "wp-config.php" || strpos($rel . "/", "wp-content/uploads/") === 0;
+}
+function wpcow_pack_entry($path, $name, $size, $mtime) {
+ $mode = 0100644;
+ $stat = @lstat($path);
+ if (is_array($stat)) { $mode = (int)$stat["mode"]; }
+ return array("name"=>$name,"kind"=>"file","size"=>$size,"mode"=>$mode,"mtime"=>$mtime);
+}
+function wpcow_pack_file($rel, $path) {
+ global $max_file_bytes, $max_total_bytes, $max_files, $total, $files, $skipped, $capped;
+ if ($capped) { return; }
+ if (wpcow_pack_excluded($rel) || !wpcow_pack_allowed_ext($rel)) { $skipped++; return; }
+ clearstatcache(true, $path);
+ if (!is_file($path)) { $skipped++; return; }
+ $size = filesize($path);
+ if ($size === false) { $skipped++; return; }
+ $size = (int)$size;
+ if ($size > $max_file_bytes) { $skipped++; return; }
+ if ($files >= $max_files || $total + $size > $max_total_bytes) { $capped = true; return; }
+ $data = @file_get_contents($path);
+ if ($data === false || strlen($data) !== $size) { $skipped++; return; }
+ $mtime = @filemtime($path);
+ if ($mtime === false) { $mtime = 0; }
+ $files++;
+ $total += $size;
+ wpcow_pack_send(array(
+  "type"=>"file",
+  "path"=>$rel,
+  "entry"=>wpcow_pack_entry($path, basename($path), $size, (int)$mtime),
+  "data"=>base64_encode($data)
+ ));
+}
+function wpcow_pack_dir($rel, $path) {
+ global $capped;
+ $stack = array(array($rel, $path));
+ while (!$capped && !empty($stack)) {
+  $item = array_pop($stack);
+  $dir_rel = $item[0];
+  $dir_path = $item[1];
+  if (wpcow_pack_excluded($dir_rel) || !is_dir($dir_path)) { continue; }
+  $names = @scandir($dir_path);
+  if (!is_array($names)) { continue; }
+  rsort($names, SORT_STRING);
+  foreach ($names as $name) {
+   if ($name === "." || $name === "..") { continue; }
+   $child_rel = $dir_rel === "" ? $name : $dir_rel . "/" . $name;
+   $child_path = $dir_path . DIRECTORY_SEPARATOR . $name;
+   if (wpcow_pack_excluded($child_rel)) { continue; }
+   if (is_dir($child_path) && !is_link($child_path)) {
+    $stack[] = array($child_rel, $child_path);
+   } elseif (is_file($child_path)) {
+    wpcow_pack_file($child_rel, $child_path);
+    if ($capped) { break; }
+   }
+  }
+ }
+}
+foreach ($roots as $root) {
+ if ($capped) { break; }
+ $rel = wpcow_pack_clean($root);
+ if ($rel === false) { $skipped++; continue; }
+ $path = $base . "/" . $rel;
+ if (is_file($path)) {
+  wpcow_pack_file($rel, $path);
+ } elseif (is_dir($path)) {
+  wpcow_pack_dir($rel, $path);
+ } else {
+  $skipped++;
+ }
+}
+wpcow_pack_send(array("type"=>"summary","files"=>$files,"bytes"=>$total,"skipped"=>$skipped,"capped"=>$capped));
 "#
 }
 
@@ -1154,7 +1408,11 @@ $out = array(
     'db_user' => defined('DB_USER') ? DB_USER : '',
     'db_password' => defined('DB_PASSWORD') ? DB_PASSWORD : '',
     'siteurl' => function_exists('get_option') ? get_option('siteurl') : '',
-    'home' => function_exists('get_option') ? get_option('home') : ''
+    'home' => function_exists('get_option') ? get_option('home') : '',
+    'template' => function_exists('get_template') ? get_template() : (function_exists('get_option') ? get_option('template') : ''),
+    'stylesheet' => function_exists('get_stylesheet') ? get_stylesheet() : (function_exists('get_option') ? get_option('stylesheet') : ''),
+    'active_plugins' => function_exists('get_option') && is_array(get_option('active_plugins')) ? array_values(get_option('active_plugins')) : array(),
+    'active_sitewide_plugins' => function_exists('get_site_option') && is_array(get_site_option('active_sitewide_plugins')) ? array_keys(get_site_option('active_sitewide_plugins')) : array()
 );
 echo json_encode($out);
 "#;
@@ -1224,6 +1482,10 @@ fn remote_db_query_timeout_secs() -> u64 {
     env_u64("WPCOW_REMOTE_DB_QUERY_TIMEOUT_SECS", 10)
 }
 
+fn runtime_code_pack_timeout_secs() -> u64 {
+    env_u64("WPCOW_RUNTIME_CODE_PACK_TIMEOUT_SECS", 180)
+}
+
 fn ssh_connect_timeout_secs() -> u64 {
     env_u64("WPCOW_SSH_CONNECT_TIMEOUT_SECS", 8)
 }
@@ -1272,7 +1534,7 @@ mod tests {
     use super::*;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::{Mutex, OnceLock};
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -1465,6 +1727,121 @@ exec bash -lc "$cmd"
         match old_timeout {
             Some(value) => std::env::set_var("WPCOW_REMOTE_FILE_HELPER_TIMEOUT_SECS", value),
             None => std::env::remove_var("WPCOW_REMOTE_FILE_HELPER_TIMEOUT_SECS"),
+        }
+    }
+
+    #[test]
+    #[ignore = "strict harness only: mutates process SSH helper env"]
+    fn runtime_code_pack_streams_bounded_runtime_files() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+
+        let old_path = std::env::var_os("PATH");
+        let old_timeout = std::env::var_os("WPCOW_RUNTIME_CODE_PACK_TIMEOUT_SECS");
+
+        let temp = tempfile::tempdir().unwrap();
+        let remote_root = temp.path().join("remote");
+        let bin = temp.path().join("bin");
+        fs::create_dir_all(remote_root.join("wp-includes")).unwrap();
+        fs::create_dir_all(remote_root.join("wp-content/uploads/2026/05")).unwrap();
+        fs::create_dir_all(remote_root.join("wp-content/plugins/example/assets")).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(remote_root.join("index.php"), b"<?php echo 'index';").unwrap();
+        fs::write(remote_root.join("wp-config.php"), b"<?php // prod creds").unwrap();
+        fs::write(remote_root.join("wp-includes/load.php"), b"<?php // load").unwrap();
+        fs::write(remote_root.join("wp-includes/blocks.json"), b"{}").unwrap();
+        fs::write(
+            remote_root.join("wp-content/uploads/2026/05/huge.php"),
+            b"<?php // not runtime",
+        )
+        .unwrap();
+        fs::write(
+            remote_root.join("wp-content/plugins/example/example.php"),
+            b"<?php // plugin",
+        )
+        .unwrap();
+        fs::write(
+            remote_root.join("wp-content/plugins/example/assets/style.css"),
+            b"body{}",
+        )
+        .unwrap();
+
+        let fake_ssh = bin.join("ssh");
+        fs::write(
+            &fake_ssh,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+cmd="${@: -1}"
+exec bash -lc "$cmd"
+"#,
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&fake_ssh).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&fake_ssh, perms).unwrap();
+
+        let path = match old_path.as_ref() {
+            Some(old) => format!("{}:{}", bin.display(), old.to_string_lossy()),
+            None => bin.display().to_string(),
+        };
+        std::env::set_var("PATH", path);
+        std::env::set_var("WPCOW_RUNTIME_CODE_PACK_TIMEOUT_SECS", "10");
+
+        let manifest = Manifest::new(
+            "example".to_string(),
+            "fake-host".to_string(),
+            remote_root.to_string_lossy().to_string(),
+            "https://example.com".to_string(),
+            "http://example.test".to_string(),
+            Probe {
+                table_prefix: "wp_".to_string(),
+                ..Probe::default()
+            },
+        );
+        let remote = RemoteClient::new(manifest, None);
+        let mut files = Vec::new();
+        let summary = remote
+            .runtime_code_pack(
+                &[
+                    PathBuf::from("index.php"),
+                    PathBuf::from("wp-config.php"),
+                    PathBuf::from("wp-includes"),
+                    PathBuf::from("wp-content/plugins/example"),
+                    PathBuf::from("wp-content/uploads"),
+                ],
+                RuntimeCodePackLimits {
+                    max_file_bytes: 1024,
+                    max_total_bytes: 8192,
+                    max_files: 100,
+                },
+                |file| {
+                    files.push((file.rel, file.entry.name, file.bytes));
+                    Ok(())
+                },
+            )
+            .expect("runtime code pack");
+
+        let paths = files
+            .iter()
+            .map(|(rel, _, _)| rel.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert!(paths.contains(&"index.php".to_string()));
+        assert!(paths.contains(&"wp-includes/load.php".to_string()));
+        assert!(paths.contains(&"wp-includes/blocks.json".to_string()));
+        assert!(paths.contains(&"wp-content/plugins/example/example.php".to_string()));
+        assert!(!paths.contains(&"wp-config.php".to_string()));
+        assert!(!paths
+            .iter()
+            .any(|path| path.starts_with("wp-content/uploads/")));
+        assert!(!paths.iter().any(|path| path.ends_with(".css")));
+        assert_eq!(summary.files as usize, files.len());
+
+        match old_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        match old_timeout {
+            Some(value) => std::env::set_var("WPCOW_RUNTIME_CODE_PACK_TIMEOUT_SECS", value),
+            None => std::env::remove_var("WPCOW_RUNTIME_CODE_PACK_TIMEOUT_SECS"),
         }
     }
 }

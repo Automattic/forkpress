@@ -41,9 +41,13 @@ cargo test --locked
 echo "== targeted behavior proofs =="
 run_exact_test overlay::tests::lazy_remote_file_is_cached_and_survives_remote_loss
 run_exact_test overlay::tests::stat_prefetched_bytes_are_reused_without_remote_read
+run_exact_test overlay::tests::cached_metadata_refreshes_when_another_overlay_appends_journal
 run_exact_ignored_test remote::tests::stat_prefetch_returns_small_file_bytes_from_helper
 run_exact_ignored_test remote::tests::prefetch_dir_batches_only_runtime_file_types
+run_exact_ignored_test remote::tests::runtime_code_pack_streams_bounded_runtime_files
 run_exact_test cli::tests::offline_core_runtime_cache_is_bounded_to_wordpress_core
+run_exact_test runtime_cache::tests::runtime_code_roots_are_bounded_to_core_theme_and_active_plugins
+run_exact_test runtime_cache::tests::runtime_code_roots_respect_disabled_plugins
 run_exact_test overlay::tests::cached_only_copy_up_uses_materialized_files_without_remote
 run_exact_test fusefs::tests::offline_readdir_uses_cached_remote_metadata_without_remote
 run_exact_test fusefs::tests::remote_stat_metadata_survives_severed_mode_without_remote
@@ -67,6 +71,7 @@ run_exact_ignored_test generate::tests::production_run_harness_proves_fuse_rust_
 
 echo "== implementation invariants =="
 need_pattern src/cli.rs 'Command::Serve' "one-command serve subcommand"
+need_pattern src/cli.rs 'WPCOW_MATERIALIZE_OPTIONS_TABLE' "serve materializes bounded WordPress options table for plugin bootstrap"
 need_pattern src/cli.rs 'Command::Sever' "sever/offline subcommand"
 need_pattern src/cli.rs 'cache_offline_core_runtime' "offline login/admin core runtime cache"
 need_pattern src/cli.rs 'wp-content/uploads' "offline core runtime cache excludes uploads"
@@ -96,16 +101,27 @@ need_pattern src/remote.rs 'WPCOW_REMOTE_DB_HELPER", true' "remote DB lower read
 need_pattern src/remote.rs 'remote_db_helper_php' "remote DB helper keeps one read-only mysqli session open"
 need_pattern src/remote.rs 'is_remote_db_connection_lost' "remote DB helper reconnects after idle connection loss"
 need_pattern src/remote.rs 'WPCOW_REFUSED_WRITE' "remote DB helper refuses write-shaped SQL"
+need_pattern src/remote.rs 'runtime_code_pack_php' "remote runtime code pack streams bounded executable files"
+need_pattern src/runtime_cache.rs 'warm_runtime_code_cache' "one-command runtime code warmup"
+need_pattern src/runtime_cache.rs 'WPCOW_RUNTIME_CODE_PACK_MAX_MB' "runtime code cache has a byte cap"
+need_pattern src/runtime_cache.rs 'warm_runtime_code_cache_with_admin' "sever path explicitly warms admin runtime"
+need_pattern src/runtime_cache.rs 'wp-content/uploads' "runtime code cache excludes uploads"
+need_pattern src/runtime_cache.rs 'active_plugins' "runtime code cache includes active plugin roots"
+need_pattern src/cli.rs 'uploads/media remain lazy' "serve explains media remains lazy after runtime code pack"
 need_pattern src/fusefs.rs 'WPCOW_REMOTE_STAT_PREFETCH_MAX_KB' "FUSE stat path can prefetch small file bytes"
 need_pattern src/fusefs.rs 'WPCOW_RUNTIME_SIBLING_PREFETCH_MAX_MB' "FUSE batches same-directory runtime files with a byte cap"
 need_pattern src/remote.rs '\$op === "prefetch_dir"' "remote file helper supports bounded directory batch reads"
 need_pattern src/overlay.rs 'put_cached_file_bytes' "stat-prefetched file bytes are stored in the normal file cache"
+need_pattern src/overlay.rs 'metadata_journal_len_on_disk' "mounted FUSE metadata view refreshes runtime cache journal writes"
 need_pattern scripts/live-site-acceptance.sh 'WPCOW_REMOTE_DB_HELPER="\$\{WPCOW_REMOTE_DB_HELPER:-1\}"' "live acceptance runs through persistent remote DB helper"
+need_pattern scripts/live-site-acceptance.sh 'WPCOW_RUNTIME_CODE_PACK="\$\{WPCOW_RUNTIME_CODE_PACK:-1\}"' "live acceptance runs through bounded runtime code cache"
+need_pattern scripts/live-site-acceptance.sh 'WPCOW_MATERIALIZE_OPTIONS_TABLE="\$\{WPCOW_MATERIALIZE_OPTIONS_TABLE:-1\}"' "live acceptance materializes options table"
 need_pattern scripts/live-site-acceptance.sh 'WPCOW_REMOTE_STAT_PREFETCH_MAX_KB="\$\{WPCOW_REMOTE_STAT_PREFETCH_MAX_KB:-0\}"' "live acceptance keeps experimental stat prefetch off by default"
 need_pattern scripts/live-site-acceptance.sh 'WPCOW_RUNTIME_SIBLING_PREFETCH_MAX_MB="\$\{WPCOW_RUNTIME_SIBLING_PREFETCH_MAX_MB:-0\}"' "live acceptance keeps experimental sibling prefetch off by default"
 need_pattern src/run.rs 'WPCOW_ALLOW_UNSAFE_PLUGIN_SIDE_EFFECTS' "plugin side-effect escape hatch is explicit"
 need_pattern src/run.rs 'disable_functions' "PHP side-effect functions are disabled by default"
 need_pattern src/run.rs 'stream_socket_client' "raw plugin socket egress is disabled by default"
+need_pattern src/run.rs 'curl_exec' "direct plugin cURL egress is disabled by default"
 need_pattern src/run.rs 'WPCOW_OPCACHE_VALIDATE_TIMESTAMPS' "OPcache timestamp validation is configurable"
 need_pattern src/generate.rs 'function cow_offline' "PHP DB offline mode"
 need_pattern src/db.rs 'set_local_admin_password' "local-only admin password override"
@@ -117,6 +133,9 @@ need_pattern src/generate.rs 'read_line_count\(&fake_ssh_log\)' "strict harness 
 need_pattern compose.yaml '\$\{WPCOW_HTTP_PORT:-8080\}:8080' "Docker host HTTP port exposure"
 need_pattern compose.yaml 'WPCOW_HTTP: 0\.0\.0\.0:8080' "Docker in-container HTTP listener"
 need_pattern compose.yaml 'WPCOW_REMOTE_DB_HELPER: "\$\{WPCOW_REMOTE_DB_HELPER:-1\}"' "Docker compose defaults persistent DB helper on"
+need_pattern compose.yaml 'WPCOW_RUNTIME_CODE_PACK: "\$\{WPCOW_RUNTIME_CODE_PACK:-1\}"' "Docker compose defaults bounded runtime code cache on"
+need_pattern compose.yaml 'WPCOW_RUNTIME_CODE_PACK_INCLUDE_ADMIN: "\$\{WPCOW_RUNTIME_CODE_PACK_INCLUDE_ADMIN:-0\}"' "Docker compose keeps admin pack out of frontend warmup"
+need_pattern compose.yaml 'WPCOW_MATERIALIZE_OPTIONS_TABLE: "\$\{WPCOW_MATERIALIZE_OPTIONS_TABLE:-1\}"' "Docker compose defaults options table materialization on"
 need_pattern compose.yaml 'WPCOW_REMOTE_STAT_PREFETCH_MAX_KB: "\$\{WPCOW_REMOTE_STAT_PREFETCH_MAX_KB:-0\}"' "Docker compose defaults experimental stat prefetch off"
 need_pattern compose.yaml 'WPCOW_RUNTIME_SIBLING_PREFETCH_MAX_MB: "\$\{WPCOW_RUNTIME_SIBLING_PREFETCH_MAX_MB:-0\}"' "Docker compose defaults experimental sibling prefetch off"
 need_pattern .dockerignore '^/target/$' "Docker build context target exclusion"
@@ -128,6 +147,12 @@ need_pattern .env.example '^WPCOW_HTTP_PORT=9481$' "Docker lab example host HTTP
 need_pattern .env.example '^WPCOW_WEB_SERVER=frankenphp$' "Docker lab example FrankenPHP preference"
 need_pattern .env.example '^WPCOW_REMOTE_DB_TUNNEL=0$' "Docker lab example disables remote DB tunnel by default"
 need_pattern .env.example '^WPCOW_REMOTE_DB_HELPER=1$' "Docker lab example uses persistent remote DB helper"
+need_pattern .env.example '^WPCOW_RUNTIME_CODE_PACK=1$' "Docker lab example uses bounded runtime code cache"
+need_pattern .env.example '^WPCOW_RUNTIME_CODE_PACK_MAX_MB=256$' "Docker lab example caps runtime code cache"
+need_pattern .env.example '^WPCOW_RUNTIME_CODE_PACK_MAX_FILES=20000$' "Docker lab example allows large active plugin sets within cap"
+need_pattern .env.example '^WPCOW_RUNTIME_CODE_PACK_INCLUDE_ADMIN=0$' "Docker lab example keeps admin pack out of frontend warmup"
+need_pattern .env.example '^WPCOW_MATERIALIZE_OPTIONS_TABLE=1$' "Docker lab example materializes options table"
+need_pattern .env.example '^WPCOW_ENABLE_PLUGINS=0$' "Docker lab example keeps arbitrary production plugins disabled by default"
 need_pattern .env.example '^WPCOW_SPLASH=1$' "Docker lab example splash default"
 need_pattern .env.example '^WPCOW_ALLOW_UNSAFE_PLUGIN_SIDE_EFFECTS=0$' "Docker lab example keeps PHP side-effect guards enabled"
 need_pattern .env.example '^WPCOW_OPCACHE_VALIDATE_TIMESTAMPS=0$' "Docker lab example keeps warm render OPcache fast path enabled"

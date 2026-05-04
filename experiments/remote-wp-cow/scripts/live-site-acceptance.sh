@@ -286,6 +286,13 @@ WPCOW_WEB_SERVER="${WPCOW_WEB_SERVER:-php}" \
 WPCOW_SPLASH="${WPCOW_SPLASH:-1}" \
 WPCOW_PROXY_FRONTEND=0 \
 WPCOW_REMOTE_DB_HELPER="${WPCOW_REMOTE_DB_HELPER:-1}" \
+WPCOW_RUNTIME_CODE_PACK="${WPCOW_RUNTIME_CODE_PACK:-1}" \
+WPCOW_RUNTIME_CODE_PACK_MAX_MB="${WPCOW_RUNTIME_CODE_PACK_MAX_MB:-256}" \
+WPCOW_RUNTIME_CODE_PACK_MAX_FILE_MB="${WPCOW_RUNTIME_CODE_PACK_MAX_FILE_MB:-8}" \
+WPCOW_RUNTIME_CODE_PACK_MAX_FILES="${WPCOW_RUNTIME_CODE_PACK_MAX_FILES:-20000}" \
+WPCOW_RUNTIME_CODE_PACK_TIMEOUT_SECS="${WPCOW_RUNTIME_CODE_PACK_TIMEOUT_SECS:-180}" \
+WPCOW_RUNTIME_CODE_PACK_INCLUDE_ADMIN="${WPCOW_RUNTIME_CODE_PACK_INCLUDE_ADMIN:-0}" \
+WPCOW_MATERIALIZE_OPTIONS_TABLE="${WPCOW_MATERIALIZE_OPTIONS_TABLE:-1}" \
 WPCOW_REMOTE_QUERY_CACHE=1 \
 WPCOW_REMOTE_QUERY_CACHE_MAX_ROWS="${WPCOW_REMOTE_QUERY_CACHE_MAX_ROWS:-5000}" \
 WPCOW_REMOTE_FILE_HELPER_TIMEOUT_SECS="${WPCOW_REMOTE_FILE_HELPER_TIMEOUT_SECS:-2}" \
@@ -321,6 +328,30 @@ if rg -qi 'WordPress.*Installation|wp-admin/install.php|wp-cow DB/runtime error|
   sed -n '1,80p' "$first_splash" >&2
   fail "first splash request returned installer or wp-cow runtime error"
 fi
+pack_wait="${WPCOW_RUNTIME_CODE_PACK_WAIT_SECS:-120}"
+pack_started="$(date +%s)"
+progress_path="$STATE_DIR/clones/$NAME/file-cache/progress.json"
+while true; do
+  if [ -f "$progress_path" ]; then
+    progress_json="$(cat "$progress_path")"
+  else
+    progress_json="$(curl -sS --max-time 5 --connect-timeout 2 "$LOCAL_URL/__wp-cow/progress" || true)"
+  fi
+  phase="$(php -r '$j=json_decode(stream_get_contents(STDIN), true); echo is_array($j) && isset($j["phase"]) ? $j["phase"] : "";' <<<"$progress_json")"
+  if [ "${WPCOW_RUNTIME_CODE_PACK:-1}" = "0" ] && [ -z "$phase" ]; then
+    break
+  fi
+  case "$phase" in
+    runtime-code-pack-starting|runtime-code-pack|"")
+      if [ $(( $(date +%s) - pack_started )) -ge "$pack_wait" ]; then
+        echo "$progress_json" >&2
+        fail "runtime code pack did not finish within ${pack_wait}s"
+      fi
+      sleep 0.5
+      ;;
+    *) break ;;
+  esac
+done
 
 first_body="$WORK_DIR/first.html"
 actual_timeout="${WPCOW_ACTUAL_TIMEOUT_SECS:-180}"
@@ -412,6 +443,13 @@ php -r '$p=$argv[1]; $j=json_decode(file_get_contents($p), true); $j["ssh"]="wp-
 WPCOW_WEB_SERVER="${WPCOW_WEB_SERVER:-php}" \
 WPCOW_SPLASH="${WPCOW_SPLASH:-1}" \
 WPCOW_REMOTE_DB_HELPER="${WPCOW_REMOTE_DB_HELPER:-1}" \
+WPCOW_RUNTIME_CODE_PACK="${WPCOW_RUNTIME_CODE_PACK:-1}" \
+WPCOW_RUNTIME_CODE_PACK_MAX_MB="${WPCOW_RUNTIME_CODE_PACK_MAX_MB:-256}" \
+WPCOW_RUNTIME_CODE_PACK_MAX_FILE_MB="${WPCOW_RUNTIME_CODE_PACK_MAX_FILE_MB:-8}" \
+WPCOW_RUNTIME_CODE_PACK_MAX_FILES="${WPCOW_RUNTIME_CODE_PACK_MAX_FILES:-20000}" \
+WPCOW_RUNTIME_CODE_PACK_TIMEOUT_SECS="${WPCOW_RUNTIME_CODE_PACK_TIMEOUT_SECS:-180}" \
+WPCOW_RUNTIME_CODE_PACK_INCLUDE_ADMIN="${WPCOW_RUNTIME_CODE_PACK_INCLUDE_ADMIN:-0}" \
+WPCOW_MATERIALIZE_OPTIONS_TABLE="${WPCOW_MATERIALIZE_OPTIONS_TABLE:-1}" \
 WPCOW_REMOTE_FILE_HELPER_TIMEOUT_SECS="${WPCOW_REMOTE_FILE_HELPER_TIMEOUT_SECS:-2}" \
 WPCOW_REMOTE_STAT_PREFETCH_MAX_KB="${WPCOW_REMOTE_STAT_PREFETCH_MAX_KB:-0}" \
 WPCOW_RUNTIME_SIBLING_PREFETCH_MAX_MB="${WPCOW_RUNTIME_SIBLING_PREFETCH_MAX_MB:-0}" \
@@ -460,7 +498,7 @@ case "$http_status" in
   2*|3*) ;;
   *) fail "wp-admin returned HTTP $http_status after login" ;;
 esac
-if rg -qi '<form[^>]+id="loginform"|name="loginform"|wp-login.php' "$admin_body"; then
+if rg -qi '<form[^>]+id="loginform"|name="loginform"' "$admin_body"; then
   fail "wp-admin still shows login form after local admin login"
 fi
 

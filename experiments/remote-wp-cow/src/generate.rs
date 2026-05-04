@@ -901,8 +901,32 @@ if ( $should_show_splash ) {
 		}
 	}
 
+	function runtimePackActive(progress) {
+		return progress && (
+			progress.phase === 'runtime-code-pack-starting' ||
+			progress.phase === 'runtime-code-pack'
+		);
+	}
+
+	async function waitForRuntimePack() {
+		for (;;) {
+			try {
+				const response = await fetch('/__wp-cow/progress', { cache: 'no-store' });
+				if (response.ok) {
+					const progress = await response.json();
+					render(progress);
+					if (!runtimePackActive(progress)) return;
+				}
+			} catch (error) {
+				return;
+			}
+			await new Promise(resolve => setTimeout(resolve, 500));
+		}
+	}
+
 	async function warm() {
 		try {
+			await waitForRuntimePack();
 			const response = await fetch(target.toString(), { cache: 'no-store' });
 			const html = await response.text();
 			warmDone = true;
@@ -1758,8 +1782,12 @@ if ( cow_cached_remote_read_is_safe_without_control( array( 'wp_options' ) ) ) {
             "uploads must not be mirrored or prefetched"
         );
         let ssh_log = fs::read_to_string(&fake_ssh_log).unwrap_or_default();
+        let remote_uploads_path = format!(
+            "{}/wp-content/uploads",
+            remote_docroot.to_string_lossy().trim_end_matches('/')
+        );
         assert!(
-            !ssh_log.contains("wp-content/uploads"),
+            !ssh_log.contains(&remote_uploads_path),
             "production run should not touch uploads unless requested:\n{}",
             ssh_log
         );

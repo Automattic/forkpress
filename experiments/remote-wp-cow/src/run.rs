@@ -14,6 +14,7 @@ use crate::fusefs;
 use crate::generate::ROUTER_BASENAME;
 use crate::mysql_proxy;
 use crate::remote::RemoteClient;
+use crate::runtime_cache;
 
 pub struct RunOptions {
     pub mountpoint: PathBuf,
@@ -75,6 +76,34 @@ fn run_site_until_shutdown(
             }
         }
     };
+    if !offline && runtime_cache::runtime_code_pack_enabled() {
+        runtime_cache::mark_runtime_code_cache_starting(&paths);
+        let warm_manifest = manifest.clone();
+        let warm_paths = paths.clone();
+        let warm_remote = remote.clone();
+        thread::spawn(move || {
+            match runtime_cache::warm_runtime_code_cache(&warm_remote, &warm_manifest, &warm_paths)
+            {
+                Ok(summary) => {
+                    eprintln!(
+                        "wp-cow cached {} bounded runtime code files ({:.1} MB); uploads/media remain lazy",
+                        summary.files,
+                        summary.bytes as f64 / (1024.0 * 1024.0)
+                    );
+                    if summary.capped {
+                        eprintln!(
+                            "wp-cow runtime code cache hit its configured cap; remaining runtime files stay lazy"
+                        );
+                    }
+                }
+                Err(err) => {
+                    runtime_cache::mark_runtime_code_cache_failed(&warm_paths);
+                    eprintln!("wp-cow runtime code cache failed: {err:#}");
+                    eprintln!("wp-cow continuing with lazy per-file remote reads");
+                }
+            }
+        });
+    }
 
     let control_shutdown = shutdown.clone();
     let control_manifest = manifest.clone();
@@ -249,7 +278,7 @@ fn php_side_effect_guards_enabled() -> bool {
 }
 
 fn php_disabled_functions() -> &'static str {
-    "exec,passthru,shell_exec,system,proc_open,popen,pcntl_exec,mail,fsockopen,pfsockopen,stream_socket_client"
+    "exec,passthru,shell_exec,system,proc_open,popen,pcntl_exec,mail,fsockopen,pfsockopen,stream_socket_client,curl_exec,curl_multi_exec"
 }
 
 fn php_safety_ini_entries() -> Vec<(&'static str, String)> {
@@ -514,6 +543,7 @@ mod tests {
     #[test]
     fn web_runtime_disables_common_plugin_side_effect_primitives() {
         assert!(php_disabled_functions().contains("stream_socket_client"));
+        assert!(php_disabled_functions().contains("curl_exec"));
         assert!(php_disabled_functions().contains("proc_open"));
         assert!(php_disabled_functions().contains("mail"));
 
