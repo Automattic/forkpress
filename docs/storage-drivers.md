@@ -10,6 +10,9 @@ The distribution constraint still stands: one `forkpress` binary per target,
 with no Docker runtime, system PHP, MySQL daemon, FUSE service, helper daemon,
 or installed database server.
 
+For the native-mount/lazy-overlay evaluation, see
+[`docs/lazy-overlay-cow.md`](lazy-overlay-cow.md).
+
 ## Driver Summary
 
 | Driver | Status | Use it for | Main gaps |
@@ -73,6 +76,10 @@ and applies pushed `wordpress/` file changes back to the branch directory.
 
 ForkPress prefers ordinary paths because editors, shells, PHP, WP-CLI, backup
 tools, and debuggers already know how to work with them.
+
+This is APFS/file-level COW, not namespace-lazy overlay COW. New branches share
+unchanged file contents through `clonefile`, but ForkPress still creates a full
+directory namespace for each branch.
 
 On macOS, `forkpress init` chooses the first working file view:
 
