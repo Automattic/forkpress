@@ -159,6 +159,9 @@ force-updated refs do not leave their old Git-only snapshots behind forever.
 If a pushed tree includes `wordpress/wp-config.php`, ForkPress rewrites its
 SQLite path and debug-log constants back to the target branch before that
 snapshot is published.
+The `forkpress commit` wrapper fetches the normalized ref after a successful
+push and fast-forwards the local checkout when the server-published commit is a
+descendant of the pushed commit.
 
 Existing-branch pushes are staged into a fresh COW clone of the branch's
 physical storage root, then published with a rename. If applying the pushed
