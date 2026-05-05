@@ -112,6 +112,7 @@ $git = $tmp . '/git';
 mkdir($branches . '/main/wp-content/database', 0777, true);
 file_put_contents($branches . '/main/wp-load.php', "<?php\n");
 file_put_contents($branches . '/main/wp-content/pushed.txt', "old\n");
+file_put_contents($branches . '/main/wp-content/database/wp-debug.log', "local log\n");
 $db = new SQLite3($branches . '/main/wp-content/database/.ht.sqlite');
 $db->exec('CREATE TABLE wp_options (option_id INTEGER PRIMARY KEY, option_name TEXT, option_value TEXT)');
 $db->exec("INSERT INTO wp_options (option_name, option_value) VALUES ('blogname', 'ForkPress')");
@@ -134,6 +135,7 @@ $pushed_tip = $repo->commit([
     'updates' => [
         'database.sql' => "-- user-edited database.sql should not persist\n",
         'wordpress/wp-content/pushed.txt' => "new\n",
+        'wordpress/wp-content/database/pushed-private.txt' => "private\n",
     ],
 ]);
 $repo->set_branch_tip('refs/heads/main', $pushed_tip);
@@ -144,6 +146,9 @@ assert_same(file_get_contents($branches . '/main/wp-content/pushed.txt'), "new\n
 $resynced_database = $repo->read_object_by_path('database.sql', $resynced_tip)->consume_all();
 assert_true(!str_contains($resynced_database, 'user-edited database.sql'), 'push resync discards edited database.sql from Git ref');
 assert_true(str_contains($resynced_database, 'ForkPress'), 'push resync regenerates database.sql from branch SQLite');
+assert_true(!in_array('wordpress/wp-content/database/wp-debug.log', cow_git_list_commit_paths($repo, $resynced_tip), true), 'push resync keeps database directory out of Git ref');
+assert_same(file_get_contents($branches . '/main/wp-content/database/wp-debug.log'), "local log\n", 'push apply preserves local database directory files');
+assert_true(!file_exists($branches . '/main/wp-content/database/pushed-private.txt'), 'push apply ignores pushed database directory files');
 cow_git_remove_tree($tmp);
 
 $tmp = sys_get_temp_dir() . '/forkpress-cow-git-config-rewrite-' . getmypid() . '-' . bin2hex(random_bytes(4));
