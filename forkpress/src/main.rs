@@ -1712,13 +1712,21 @@ mod storage_strategy_tests {
         let layout = Layout::new(work_dir).unwrap();
         fs::create_dir_all(&layout.project_dir).unwrap();
         fs::create_dir_all(&layout.cow_dir).unwrap();
+        fs::create_dir_all(&layout.cow_branches_dir).unwrap();
         fs::create_dir_all(layout.project_dir.join(".forkpress-reset-stage-feature")).unwrap();
         fs::create_dir_all(layout.project_dir.join(".forkpress-delete-public-feature")).unwrap();
         fs::create_dir_all(layout.cow_dir.join(".forkpress-new-feature")).unwrap();
+        fs::create_dir_all(layout.project_dir.join(".forkpress-update-stage-feature")).unwrap();
+        fs::create_dir_all(
+            layout
+                .cow_branches_dir
+                .join(".forkpress-update-backup-feature"),
+        )
+        .unwrap();
         fs::create_dir_all(layout.project_dir.join("not-a-leftover")).unwrap();
 
         let entries = cow_stale_operation_entries(&layout).unwrap();
-        assert_eq!(entries.len(), 3);
+        assert_eq!(entries.len(), 5);
         assert!(
             entries
                 .iter()
@@ -1733,6 +1741,16 @@ mod storage_strategy_tests {
             entries
                 .iter()
                 .any(|path| path.ends_with(".forkpress-new-feature"))
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|path| path.ends_with(".forkpress-update-stage-feature"))
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|path| path.ends_with(".forkpress-update-backup-feature"))
         );
 
         fs::remove_dir_all(root).unwrap();
@@ -4710,7 +4728,11 @@ fn count_regular_files(root: &Path) -> Result<usize> {
 }
 
 fn cow_stale_operation_entries(layout: &Layout) -> Result<Vec<PathBuf>> {
-    let mut roots = vec![layout.project_dir.clone(), layout.cow_dir.clone()];
+    let mut roots = vec![
+        layout.project_dir.clone(),
+        layout.cow_dir.clone(),
+        layout.cow_branches_dir.clone(),
+    ];
     if layout.macos_cow_branches_dir.exists() {
         roots.push(layout.macos_cow_branches_dir.clone());
     }
@@ -4726,6 +4748,7 @@ fn cow_stale_operation_entries(layout: &Layout) -> Result<Vec<PathBuf>> {
             if name.starts_with(".forkpress-reset-")
                 || name.starts_with(".forkpress-delete-")
                 || name.starts_with(".forkpress-new-")
+                || name.starts_with(".forkpress-update-")
             {
                 entries.push(entry.path());
             }
