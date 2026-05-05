@@ -1107,11 +1107,14 @@ function cow_git_should_export_relative_path(string $rel): bool {
 function cow_git_apply_wp_files(GitRepository $repo, string $branch_root, array $wp_files): void {
     foreach ($wp_files as $rel => $blob_hash) {
         $target = $branch_root . '/' . $rel;
-        if (is_file($target) && cow_git_file_blob_hash($target) === $blob_hash) {
+        if (is_file($target) && !is_link($target) && cow_git_file_blob_hash($target) === $blob_hash) {
             continue;
         }
         $parent = dirname($target);
-        cow_git_mkdir($parent);
+        cow_git_prepare_directory_path($branch_root, $parent);
+        if ((is_dir($target) && !is_link($target)) || is_link($target)) {
+            cow_git_remove_tree($target);
+        }
         if (file_put_contents($target, $repo->read_object($blob_hash)->consume_all()) === false) {
             throw new \RuntimeException("failed to write $target");
         }
@@ -1126,6 +1129,23 @@ function cow_git_apply_wp_files(GitRepository $repo, string $branch_root, array 
         }
     }
     cow_git_remove_empty_dirs($branch_root);
+}
+
+function cow_git_prepare_directory_path(string $branch_root, string $path): void {
+    $root = rtrim($branch_root, "/\\");
+    $path = rtrim($path, "/\\");
+    if ($path === '' || $path === $root || (is_dir($path) && !is_link($path))) {
+        return;
+    }
+
+    $parent = dirname($path);
+    if ($parent !== $path) {
+        cow_git_prepare_directory_path($root, $parent);
+    }
+    if (file_exists($path) || is_link($path)) {
+        cow_git_remove_tree($path);
+    }
+    cow_git_mkdir($path);
 }
 
 function cow_git_file_blob_hash(string $path): string {
