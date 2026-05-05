@@ -668,9 +668,18 @@ impl OverlayStore {
         }
 
         let mut jsonl = String::new();
-        File::open(path)?.read_to_string(&mut jsonl)?;
+        File::open(&path)?.read_to_string(&mut jsonl)?;
         for line in jsonl.lines().filter(|line| !line.trim().is_empty()) {
-            let value: serde_json::Value = serde_json::from_str(line)?;
+            let value: serde_json::Value = match serde_json::from_str(line) {
+                Ok(value) => value,
+                Err(err) => {
+                    eprintln!(
+                        "wp-cow ignoring truncated cache metadata journal entry at {}: {err}",
+                        path.display()
+                    );
+                    continue;
+                }
+            };
             let Some(path) = value.get("path").and_then(|value| value.as_str()) else {
                 continue;
             };
@@ -921,6 +930,39 @@ mod tests {
         assert!(store.cached_entry(rel).unwrap().is_none());
         let reloaded = OverlayStore::new(&paths);
         assert!(reloaded.cached_entry(rel).unwrap().is_none());
+    }
+
+    #[test]
+    fn ignores_truncated_final_metadata_journal_line() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::config::clone_paths(temp.path(), "example");
+        ensure_clone_dirs(&paths).unwrap();
+        let store = OverlayStore::new(&paths);
+        let rel = Path::new("index.php");
+        let entry = RemoteEntry {
+            name: "index.php".to_string(),
+            kind: "file".to_string(),
+            size: 405,
+            mode: 0o100644,
+            mtime: 42,
+        };
+
+        store.put_cached_entry(rel, &entry).unwrap();
+        let mut journal = OpenOptions::new()
+            .append(true)
+            .open(store.metadata_journal_path())
+            .unwrap();
+        journal
+            .write_all(b"{\"entry\":{\"kind\":\"file\",\"mode\":33188")
+            .unwrap();
+        drop(journal);
+
+        let reloaded = OverlayStore::new(&paths);
+        assert_eq!(
+            reloaded.cached_entry(rel).unwrap().unwrap().size,
+            405,
+            "a crash during cache metadata append must not poison the whole lazy filesystem"
+        );
     }
 
     #[test]

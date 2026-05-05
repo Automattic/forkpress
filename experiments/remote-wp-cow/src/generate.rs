@@ -49,10 +49,31 @@ define( 'DB_PASSWORD', {local_db_password} );
 define( 'DB_HOST',     {proxy_db_host} );
 define( 'WPCOW_LOCAL_DB_HOST', {local_db_host} );
 
-define( 'WP_HOME',    {local_url} );
-define( 'WP_SITEURL', {local_url} );
-
 $table_prefix = {table_prefix};
+
+$wp_cow_local_url = {local_url};
+$wp_cow_local_scheme = strtolower( (string) parse_url( $wp_cow_local_url, PHP_URL_SCHEME ) );
+$wp_cow_local_host = strtolower( (string) parse_url( $wp_cow_local_url, PHP_URL_HOST ) );
+
+if ( ! empty( $_SERVER['HTTP_X_FORWARDED_HOST'] ) ) {{
+	$wp_cow_forwarded_host = trim( explode( ',', $_SERVER['HTTP_X_FORWARDED_HOST'] )[0] );
+	if ( '' !== $wp_cow_forwarded_host ) {{
+		$_SERVER['HTTP_HOST'] = $wp_cow_forwarded_host;
+	}}
+}}
+
+$wp_cow_request_host = strtolower( preg_replace( '/:\d+$/', '', (string) ( $_SERVER['HTTP_HOST'] ?? '' ) ) );
+if (
+	( ! empty( $_SERVER['HTTP_X_FORWARDED_PROTO'] ) && in_array( 'https', array_map( 'trim', explode( ',', strtolower( $_SERVER['HTTP_X_FORWARDED_PROTO'] ) ) ), true ) ) ||
+	( ! empty( $_SERVER['HTTP_X_FORWARDED_SSL'] ) && 'on' === strtolower( $_SERVER['HTTP_X_FORWARDED_SSL'] ) ) ||
+	( 'https' === $wp_cow_local_scheme && '' !== $wp_cow_local_host && $wp_cow_local_host === $wp_cow_request_host )
+) {{
+	$_SERVER['HTTPS'] = 'on';
+	$_SERVER['SERVER_PORT'] = '443';
+}}
+
+define( 'WP_HOME',    $wp_cow_local_url );
+define( 'WP_SITEURL', $wp_cow_local_url );
 
 define( 'WPCOW_CLONE',       {clone_name} );
 define( 'WPCOW_CONTROL_URL', {control_url} );
@@ -1176,7 +1197,12 @@ mod tests {
         assert!(php.contains("define( 'DB_NAME',     'cow_example' );"));
         assert!(php.contains("define( 'DB_HOST',     '127.0.0.1:33070' );"));
         assert!(php.contains("define( 'WPCOW_LOCAL_DB_HOST', '127.0.0.1:33071' );"));
-        assert!(php.contains("define( 'WP_HOME',    'http://example.test' );"));
+        assert!(php.contains("$wp_cow_local_url = 'http://example.test';"));
+        assert!(php.contains("define( 'WP_HOME',    $wp_cow_local_url );"));
+        assert!(php.contains("HTTP_X_FORWARDED_PROTO"));
+        assert!(php.contains("$_SERVER['HTTPS'] = 'on';"));
+        assert!(php.contains("$wp_cow_local_host === $wp_cow_request_host"));
+        assert!(php.contains("HTTP_X_FORWARDED_HOST"));
         assert!(php.contains("$table_prefix = 'wp_';"));
         assert!(php.contains("WPCOW_CONTROL_URL"));
         assert!(php.contains("WPCOW_QUERY_CACHE_DIR"));
