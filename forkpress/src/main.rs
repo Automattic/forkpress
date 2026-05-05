@@ -2942,9 +2942,48 @@ fn push_command(args: PushArgs) -> Result<i32> {
             OsString::from(format!("HEAD:refs/heads/{branch}")),
         ],
     )?;
+    sync_pushed_branch(&repo, &args.remote_name, &branch)?;
 
     println!("forkpress: {branch} is now previewable over HTTP");
     Ok(0)
+}
+
+fn sync_pushed_branch(repo: &std::path::Path, remote_name: &str, branch: &str) -> Result<()> {
+    let remote_ref = format!("refs/remotes/{remote_name}/{branch}");
+    run_git(
+        Some(repo),
+        [
+            OsString::from("fetch"),
+            OsString::from("--prune"),
+            OsString::from(remote_name),
+            OsString::from(format!("+refs/heads/{branch}:{remote_ref}")),
+        ],
+    )?;
+
+    let head = git_stdout(repo, ["rev-parse", "HEAD"])?;
+    let remote_head = git_stdout(repo, ["rev-parse", remote_ref.as_str()])?;
+    if head == remote_head {
+        return Ok(());
+    }
+
+    if git_is_ancestor(repo, "HEAD", &remote_ref)? {
+        run_git(
+            Some(repo),
+            [
+                OsString::from("reset"),
+                OsString::from("--hard"),
+                OsString::from(&remote_ref),
+            ],
+        )?;
+        println!("forkpress: fast-forwarded {branch} to the server-normalized Git ref");
+    } else {
+        eprintln!(
+            "forkpress: pushed {branch}, but the server-normalized Git ref is not a fast-forward; run forkpress pull in {}",
+            repo.display()
+        );
+    }
+
+    Ok(())
 }
 
 fn ensure_git_identity(repo: &std::path::Path) -> Result<()> {
@@ -5693,6 +5732,24 @@ fn git_ref_exists(repo: &std::path::Path, reference: &str) -> Result<bool> {
         .status()
         .with_context(|| format!("failed to inspect git ref {reference}"))?;
     Ok(status.success())
+}
+
+fn git_is_ancestor(repo: &std::path::Path, ancestor: &str, descendant: &str) -> Result<bool> {
+    let status = Command::new("git")
+        .arg("merge-base")
+        .arg("--is-ancestor")
+        .arg(ancestor)
+        .arg(descendant)
+        .current_dir(repo)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .with_context(|| format!("failed to compare git refs {ancestor} and {descendant}"))?;
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => bail!("git merge-base exited with status {status}"),
+    }
 }
 
 fn wait_for_tcp(host: &str, port: u16, timeout: Duration) -> Result<()> {
