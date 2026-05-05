@@ -147,6 +147,9 @@ never exported through Git and are not removed during Git apply. When apply
 succeeds, the adapter immediately snapshots the branch again so the remote ref
 matches ForkPress' source of truth. This removes pushed `database.sql` edits or
 other non-exported paths from the Git view without waiting for the next fetch.
+If a pushed tree includes `wordpress/wp-config.php`, ForkPress rewrites its
+SQLite path and debug-log constants back to the target branch before that
+snapshot is published.
 
 When a push creates a new Git ref, the adapter materializes the matching COW
 branch before applying the pushed `wordpress/` tree. It chooses the closest
