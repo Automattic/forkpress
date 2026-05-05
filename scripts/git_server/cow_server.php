@@ -1083,7 +1083,7 @@ function cow_git_should_export_relative_path(string $rel): bool {
     if (preg_match('#(^|/)\\.git(/|$)#', $rel)) {
         return false;
     }
-    if (preg_match('#^wp-content/database/\\.ht\\.sqlite(?:-(?:wal|shm))?$#', $rel)) {
+    if ($rel === 'wp-content/database' || str_starts_with($rel, 'wp-content/database/')) {
         return false;
     }
     return true;
