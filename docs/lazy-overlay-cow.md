@@ -108,8 +108,9 @@ architecture. Known gaps:
 - Branch reset is now one operation for materialized COW branches: ForkPress
   stages a fresh COW clone of the source branch, hot-copies the source SQLite
   database with SQLite backup, then publishes it over the target branch.
-- Long-running branch operations need stronger coordination with active
-  WordPress writes.
+- ForkPress-served WordPress requests now take a shared operation lock, and
+  branch mutations take the same lock exclusively. Direct filesystem writes
+  from editors, shells, and other tools still bypass that advisory lock.
 - Sparsebundle detach can still be blocked by terminals, editors, or processes
   holding files open under the mounted path.
 - Linux and Windows do not have macOS COW parity yet.

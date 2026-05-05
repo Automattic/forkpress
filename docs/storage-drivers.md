@@ -144,6 +144,14 @@ existing ForkPress branch from Git history, clones that branch using the
 selected file view, then writes only files whose blob hash differs from the
 pushed tree so unchanged APFS clones keep sharing extents.
 
+ForkPress-served WordPress requests and branch mutations coordinate through
+`.forkpress/cow/operations.lock`: HTTP requests take a shared `flock`, while
+branch create/reset/delete and Git apply take it exclusively. That prevents
+ForkPress from publishing or removing a materialized branch tree while an
+active ForkPress-served request is reading or writing it. Direct filesystem
+writes from editors, shells, and other tools do not automatically honor this
+advisory lock.
+
 ## Branch Operations
 
 Implemented for COW:
@@ -169,8 +177,8 @@ Still future work:
 - semantic database merge between branches;
 - COW-specific garbage collection/compaction beyond ordinary filesystem
   cleanup;
-- stronger long-running branch locks around branch clone/export during active
-  WordPress writes;
+- filesystem-level coordination for direct external writes that bypass the
+  ForkPress HTTP server;
 - Windows and Linux COW parity.
 
 ## ZFS Status
