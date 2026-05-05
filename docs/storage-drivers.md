@@ -143,7 +143,9 @@ sequenceDiagram
 
 Before each Git request, the adapter snapshots the current branch directories
 into `.forkpress/cow/git`. This means direct edits in `./main` or
-`./marketing` become visible to Git on the next clone/fetch.
+`./marketing` become visible to Git on the next clone/fetch. If a materialized
+branch directory has disappeared, the matching Git ref is pruned during that
+snapshot pass.
 
 After a push, the adapter applies the pushed `wordpress/` tree to the target
 branch directory, except for private runtime paths such as
