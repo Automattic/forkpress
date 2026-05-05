@@ -173,7 +173,9 @@ another tool operating on the branch's own SQLite database.
 `wordpress/wp-content/database/` is private runtime state and is not part of the
 Git view; ForkPress ignores pushed files under that path.
 After a push, ForkPress immediately re-snapshots the branch so the remote Git
-ref reflects the generated `database.sql`, not a user-edited copy.
+ref reflects the generated `database.sql`, not a user-edited copy. Successful
+push cleanup also prunes unreachable loose objects from `.forkpress/cow/git`,
+including Git snapshots left behind by deleted or force-updated preview refs.
 
 ## Run Agents
 
