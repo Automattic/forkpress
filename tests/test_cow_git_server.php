@@ -68,5 +68,43 @@ if (@symlink($storage . '/git-created', $branches . '/git-created')) {
 }
 cow_git_remove_tree($tmp);
 
+$tmp = sys_get_temp_dir() . '/forkpress-cow-git-sync-' . getmypid() . '-' . bin2hex(random_bytes(4));
+$branches = $tmp . '/branches';
+$git = $tmp . '/git';
+mkdir($branches . '/main/wp-content/database', 0777, true);
+file_put_contents($branches . '/main/wp-load.php', "<?php\n");
+file_put_contents($branches . '/main/wp-content/sync.txt', "one\n");
+$db = new SQLite3($branches . '/main/wp-content/database/.ht.sqlite');
+$db->exec('CREATE TABLE wp_options (option_id INTEGER PRIMARY KEY, option_name TEXT, option_value TEXT)');
+$db->exec("INSERT INTO wp_options (option_name, option_value) VALUES ('siteurl', 'http://wp.localhost')");
+$db->close();
+
+$fs = WordPress\Filesystem\LocalFilesystem::create($git);
+$repo = new WordPress\Git\GitRepository($fs, ['default_branch' => 'main']);
+$repo->set_config_value(['user', 'name'], 'ForkPress COW');
+$repo->set_config_value(['user', 'email'], 'forkpress-cow@local');
+cow_git_sync_repository($repo, $branches);
+$first_tip = $repo->get_branch_tip('refs/heads/main');
+cow_git_sync_repository($repo, $branches);
+$second_tip = $repo->get_branch_tip('refs/heads/main');
+assert_same($second_tip, $first_tip, 'unchanged COW Git snapshot keeps branch ref stable');
+
+file_put_contents($branches . '/main/wp-content/sync.txt', "two\n");
+cow_git_sync_repository($repo, $branches);
+$file_tip = $repo->get_branch_tip('refs/heads/main');
+assert_true($file_tip !== $second_tip, 'file change advances COW Git snapshot ref');
+cow_git_sync_repository($repo, $branches);
+assert_same($repo->get_branch_tip('refs/heads/main'), $file_tip, 'unchanged file snapshot remains stable after advancing');
+
+$db = new SQLite3($branches . '/main/wp-content/database/.ht.sqlite');
+$db->exec("INSERT INTO wp_options (option_name, option_value) VALUES ('blogname', 'ForkPress')");
+$db->close();
+cow_git_sync_repository($repo, $branches);
+$db_tip = $repo->get_branch_tip('refs/heads/main');
+assert_true($db_tip !== $file_tip, 'database snapshot change advances COW Git snapshot ref');
+cow_git_sync_repository($repo, $branches);
+assert_same($repo->get_branch_tip('refs/heads/main'), $db_tip, 'unchanged database snapshot remains stable after advancing');
+cow_git_remove_tree($tmp);
+
 echo "\n=== COW Git server tests: $pass passed, $fail failed ===\n";
 exit($fail ? 1 : 0);
