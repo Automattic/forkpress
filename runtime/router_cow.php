@@ -33,6 +33,50 @@ $uri = $_SERVER['REQUEST_URI'] ?? '/';
 $path = parse_url($uri, PHP_URL_PATH) ?: '/';
 $query = parse_url($uri, PHP_URL_QUERY) ?: '';
 
+function forkpress_cow_normalize_request_path(string $path): ?string {
+    $decoded = $path;
+    for ($i = 0; $i < 4; $i++) {
+        $next = rawurldecode($decoded);
+        if ($next === $decoded) {
+            break;
+        }
+        $decoded = $next;
+    }
+
+    if ($decoded === '' || $decoded[0] !== '/') {
+        $decoded = '/' . $decoded;
+    }
+    if (strpos($decoded, "\0") !== false) {
+        return null;
+    }
+
+    $decoded = str_replace('\\', '/', $decoded);
+    $trailing_slash = str_ends_with($decoded, '/');
+    $segments = [];
+    foreach (explode('/', $decoded) as $segment) {
+        if ($segment === '' || $segment === '.') {
+            continue;
+        }
+        if ($segment === '..') {
+            return null;
+        }
+        $segments[] = $segment;
+    }
+
+    $normalized = '/' . implode('/', $segments);
+    if ($trailing_slash && $normalized !== '/') {
+        $normalized .= '/';
+    }
+    return $normalized;
+}
+
+$path = forkpress_cow_normalize_request_path($path);
+if ($path === null) {
+    http_response_code(404);
+    echo "Not found\n";
+    return true;
+}
+
 $branch = 'main';
 if ($host_noport === $root_host_lc || $host_noport === '' || $host_noport === '127.0.0.1' || $host_noport === 'localhost') {
     $branch = 'main';
@@ -109,6 +153,18 @@ if (!is_dir($branch_root)) {
     return true;
 }
 
+function forkpress_cow_path_is_inside_branch(string $branch_root, string $path): bool {
+    $root_real = realpath($branch_root);
+    $path_real = realpath($path);
+    if ($root_real === false || $path_real === false) {
+        return false;
+    }
+
+    $root_real = rtrim(str_replace('\\', '/', $root_real), '/');
+    $path_real = str_replace('\\', '/', $path_real);
+    return $path_real === $root_real || str_starts_with($path_real, $root_real . '/');
+}
+
 $_SERVER['FORKPRESS_BRANCH'] = $branch;
 putenv('FORKPRESS_BRANCH=' . $branch);
 header('X-ForkPress-Branch: ' . $branch);
@@ -163,6 +219,11 @@ function forkpress_cow_prepare_php_request(string $path, string $branch_root): v
 }
 
 if (file_exists($full_path) && !is_dir($full_path)) {
+    if (!forkpress_cow_path_is_inside_branch($branch_root, $full_path)) {
+        http_response_code(404);
+        echo "Not found\n";
+        return true;
+    }
     if (strtolower(pathinfo($full_path, PATHINFO_EXTENSION)) === 'php') {
         forkpress_cow_prepare_php_request($full_path, $branch_root);
         require $full_path;
@@ -175,12 +236,22 @@ if (file_exists($full_path) && !is_dir($full_path)) {
 if (is_dir($full_path)) {
     $index = rtrim($full_path, '/') . '/index.php';
     if (file_exists($index)) {
+        if (!forkpress_cow_path_is_inside_branch($branch_root, $index)) {
+            http_response_code(404);
+            echo "Not found\n";
+            return true;
+        }
         forkpress_cow_prepare_php_request($index, $branch_root);
         require $index;
         return true;
     }
 }
 
+if (!forkpress_cow_path_is_inside_branch($branch_root, $branch_root . '/index.php')) {
+    http_response_code(404);
+    echo "Not found\n";
+    return true;
+}
 forkpress_cow_prepare_php_request($branch_root . '/index.php', $branch_root);
 require $branch_root . '/index.php';
 return true;
