@@ -289,6 +289,7 @@ function cow_git_send_receive_pack_rejections(array $ref_messages): void {
 
 function cow_git_sync_repository(GitRepository $repo, string $branches_dir): void {
     $branches = cow_git_branch_names($branches_dir);
+    cow_git_prune_missing_branch_refs($repo, $branches);
     foreach ($branches as $branch) {
         $branch_root = $branches_dir . '/' . $branch;
         $ref = "refs/heads/$branch";
@@ -333,6 +334,20 @@ function cow_git_sync_repository(GitRepository $repo, string $branches_dir): voi
         $repo->set_branch_tip($ref, $head);
     }
     $repo->set_branch_tip('HEAD', "ref: refs/heads/main\n");
+}
+
+function cow_git_prune_missing_branch_refs(GitRepository $repo, array $branches): void {
+    $live = array_fill_keys($branches, true);
+    foreach ($repo->list_refs(['refs/heads/']) as $ref => $_tip) {
+        if (strncmp($ref, 'refs/heads/', 11) !== 0) {
+            continue;
+        }
+        $branch = substr($ref, 11);
+        if (!cow_git_valid_branch_name($branch) || isset($live[$branch])) {
+            continue;
+        }
+        $repo->delete_branch($ref);
+    }
 }
 
 function cow_git_commit_matches_updates(GitRepository $repo, string $tip, array $updates): bool {
