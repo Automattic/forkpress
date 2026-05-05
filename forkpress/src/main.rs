@@ -22,6 +22,7 @@ const RUNTIME_BUNDLE: &[u8] = include_bytes!(env!("FORKPRESS_RUNTIME_BUNDLE"));
 const RUNTIME_BUNDLE_ID: &str = env!("FORKPRESS_RUNTIME_BUNDLE_ID");
 const STARTUP_WARNING_FILTER: &str = "Missing arginfo";
 const SERVER_REGISTRY_FILE: &str = "servers.tsv";
+const FORKPRESS_COW_PARENT_LIFECYCLE_LOCK: &str = "FORKPRESS_COW_PARENT_LIFECYCLE_LOCK";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -235,6 +236,8 @@ enum StorageCommand {
     Mount(StorageMountArgs),
     /// Detach this site's mount-backed storage so the work dir can be moved or deleted.
     Detach(StorageDetachArgs),
+    /// Compact detached macOS APFS sparsebundle storage.
+    Compact(StorageCompactArgs),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -266,6 +269,25 @@ struct StorageDetachArgs {
     timeout: u64,
 
     /// Force detach. Use only after normal detach reports that the mount is busy.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+struct StorageCompactArgs {
+    /// ForkPress site state directory.
+    #[arg(long, default_value = ".forkpress")]
+    work_dir: PathBuf,
+
+    /// Do not stop this site's ForkPress server before compacting storage.
+    #[arg(long)]
+    keep_server: bool,
+
+    /// Seconds to wait when stopping the matching site server.
+    #[arg(long, default_value_t = 10)]
+    timeout: u64,
+
+    /// Force detach before compacting. Use only after normal detach reports that the mount is busy.
     #[arg(long)]
     force: bool,
 }
@@ -745,6 +767,42 @@ struct ServerRegistrationGuard {
     layout: Layout,
 }
 
+#[cfg(unix)]
+struct CowLifecycleLock {
+    file: File,
+}
+
+#[cfg(unix)]
+impl Drop for CowLifecycleLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+struct CowLifecycleLock;
+
+#[cfg(unix)]
+struct ServerRegistryLock {
+    file: File,
+}
+
+#[cfg(unix)]
+impl Drop for ServerRegistryLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+struct ServerRegistryLock;
+
 impl ChildGuard {
     fn id(&self) -> u32 {
         self.child.id()
@@ -1009,6 +1067,7 @@ fn storage_command(args: StorageArgs) -> Result<i32> {
         StorageCommand::Status(args) => storage_status_command(args),
         StorageCommand::Mount(args) => storage_mount_command(args),
         StorageCommand::Detach(args) => storage_detach_command(args),
+        StorageCommand::Compact(args) => storage_compact_command(args),
     }
 }
 
@@ -1023,6 +1082,9 @@ fn storage_status_command(args: StorageStatusArgs) -> Result<i32> {
         println!("  strategy:  {}", manifest.strategy.as_str());
         if let Some(file_view) = manifest.file_view {
             println!("  file view: {}", file_view.as_str());
+        }
+        if manifest.strategy == StorageStrategy::Cow {
+            print_cow_storage_status(&layout, manifest.file_view)?;
         }
     } else {
         println!("  site:      not initialized");
@@ -1044,6 +1106,50 @@ fn storage_status_command(args: StorageStatusArgs) -> Result<i32> {
     Ok(0)
 }
 
+fn print_cow_storage_status(layout: &Layout, file_view: Option<FileViewStrategy>) -> Result<()> {
+    println!("  project:   {}", layout.project_dir.display());
+    let sparsebundle_detached = file_view == Some(FileViewStrategy::MacosApfsSparsebundle)
+        && !layout.macos_cow_branches_dir.exists();
+    if sparsebundle_detached {
+        println!("  branches:  unavailable while sparsebundle is detached");
+    } else {
+        println!("  branches:  {}", cow_branch_names(layout)?.len());
+    }
+    println!("  public:    {}", layout.cow_branches_dir.display());
+    if file_view == Some(FileViewStrategy::MacosApfsSparsebundle) {
+        println!("  storage:   {}", layout.macos_cow_branches_dir.display());
+    } else {
+        println!("  storage:   {}", layout.cow_branches_dir.display());
+    }
+    println!(
+        "  lock:      {}",
+        layout.cow_dir.join("operations.lock").display()
+    );
+    println!(
+        "  lifecycle: {}",
+        layout.cow_dir.join("lifecycle.lock").display()
+    );
+
+    if sparsebundle_detached {
+        println!("  leftovers: unavailable while sparsebundle is detached");
+    } else {
+        let leftovers = cow_stale_operation_entries(layout)?;
+        if leftovers.is_empty() {
+            println!("  leftovers: none");
+        } else {
+            println!("  leftovers: {}", leftovers.len());
+            for path in leftovers.iter().take(5) {
+                println!("    {}", path.display());
+            }
+            if leftovers.len() > 5 {
+                println!("    ... {} more", leftovers.len() - 5);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn storage_mount_command(args: StorageMountArgs) -> Result<i32> {
     let layout = Layout::new(args.work_dir)?;
     let strategy = require_initialized_strategy(&layout, "storage mount")?;
@@ -1055,6 +1161,7 @@ fn storage_mount_command(args: StorageMountArgs) -> Result<i32> {
         return Ok(0);
     }
 
+    let _lock = lock_cow_operations(&layout)?;
     let file_view = ensure_cow_file_view_ready(&layout)?;
     match file_view {
         FileViewStrategy::MacosApfsSparsebundle => {
@@ -1079,13 +1186,12 @@ fn storage_mount_command(args: StorageMountArgs) -> Result<i32> {
 fn storage_detach_command(args: StorageDetachArgs) -> Result<i32> {
     let layout = Layout::new(args.work_dir)?;
 
-    if !args.keep_server {
-        if let Some(record) = running_record_for_work_dir(&layout.work_dir)? {
-            stop_server_record(&record, Duration::from_secs(args.timeout))?;
-        }
-    }
-
-    if !detach_storage_for_layout_if_present(&layout, args.force)? {
+    if !detach_storage_for_layout_if_present(
+        &layout,
+        args.force,
+        args.keep_server,
+        Duration::from_secs(args.timeout),
+    )? {
         println!(
             "forkpress: no detachable storage found for {}",
             layout.work_dir.display()
@@ -1095,7 +1201,44 @@ fn storage_detach_command(args: StorageDetachArgs) -> Result<i32> {
     Ok(0)
 }
 
-fn detach_storage_for_layout_if_present(layout: &Layout, force: bool) -> Result<bool> {
+fn storage_compact_command(args: StorageCompactArgs) -> Result<i32> {
+    let layout = Layout::new(args.work_dir)?;
+    let strategy = require_initialized_strategy(&layout, "storage compact")?;
+    if strategy != StorageStrategy::Cow {
+        println!(
+            "forkpress: no compactable COW storage for strategy = \"{}\"",
+            strategy.as_str()
+        );
+        return Ok(0);
+    }
+
+    let manifest = read_site_manifest(&layout)?;
+    let has_macos_cow = manifest.as_ref().and_then(|manifest| manifest.file_view)
+        == Some(FileViewStrategy::MacosApfsSparsebundle)
+        || layout.macos_cow_image.exists();
+    if !has_macos_cow {
+        println!("forkpress: storage file view does not use a compactable sparsebundle");
+        return Ok(0);
+    }
+
+    with_stopped_cow_server_for_storage(
+        &layout,
+        args.keep_server,
+        Duration::from_secs(args.timeout),
+        || {
+            detach_macos_apfs_sparsebundle_file_view(&layout, args.force, false)?;
+            compact_macos_apfs_sparsebundle_file_view(&layout)
+        },
+    )?;
+    Ok(0)
+}
+
+fn detach_storage_for_layout_if_present(
+    layout: &Layout,
+    force: bool,
+    keep_server: bool,
+    timeout: Duration,
+) -> Result<bool> {
     let manifest = read_site_manifest(layout)?;
     let has_macos_cow = manifest.as_ref().and_then(|manifest| manifest.file_view)
         == Some(FileViewStrategy::MacosApfsSparsebundle)
@@ -1106,8 +1249,40 @@ fn detach_storage_for_layout_if_present(layout: &Layout, force: bool) -> Result<
         return Ok(false);
     }
 
-    detach_macos_apfs_sparsebundle_file_view(layout, force)?;
+    with_stopped_cow_server_for_storage(layout, keep_server, timeout, || {
+        detach_macos_apfs_sparsebundle_file_view(layout, force, true)
+    })?;
     Ok(true)
+}
+
+fn with_stopped_cow_server_for_storage<T>(
+    layout: &Layout,
+    keep_server: bool,
+    timeout: Duration,
+    action: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let mut action = Some(action);
+    loop {
+        let _lifecycle_lock = lock_cow_lifecycle(layout)?;
+        let _lock = lock_cow_operations(layout)?;
+        if let Some(record) = running_record_for_work_dir(&layout.work_dir)? {
+            drop(_lock);
+            drop(_lifecycle_lock);
+            if keep_server {
+                bail!(
+                    "server pid {} started for {} while preparing storage. Stop it first or omit --keep-server.",
+                    record.pid,
+                    layout.work_dir.display()
+                );
+            }
+            stop_server_record(&record, timeout)?;
+            continue;
+        }
+
+        return action
+            .take()
+            .expect("storage lifecycle action already consumed")();
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1502,6 +1677,65 @@ mod storage_strategy_tests {
         };
         assert!(args.force);
         assert!(args.keep_server);
+
+        let compact = Cli::try_parse_from([
+            "forkpress",
+            "storage",
+            "compact",
+            "--work-dir",
+            ".forkpress",
+            "--force",
+            "--keep-server",
+        ])
+        .unwrap();
+        let Commands::Storage(StorageArgs {
+            command: StorageCommand::Compact(args),
+        }) = compact.command
+        else {
+            panic!("expected storage compact command");
+        };
+        assert!(args.force);
+        assert!(args.keep_server);
+    }
+
+    #[test]
+    fn cow_stale_operation_entries_reports_top_level_leftovers() {
+        let root = std::env::temp_dir().join(format!(
+            "forkpress-cow-leftovers-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let work_dir = root.join(".forkpress");
+        let layout = Layout::new(work_dir).unwrap();
+        fs::create_dir_all(&layout.project_dir).unwrap();
+        fs::create_dir_all(&layout.cow_dir).unwrap();
+        fs::create_dir_all(layout.project_dir.join(".forkpress-reset-stage-feature")).unwrap();
+        fs::create_dir_all(layout.project_dir.join(".forkpress-delete-public-feature")).unwrap();
+        fs::create_dir_all(layout.cow_dir.join(".forkpress-new-feature")).unwrap();
+        fs::create_dir_all(layout.project_dir.join("not-a-leftover")).unwrap();
+
+        let entries = cow_stale_operation_entries(&layout).unwrap();
+        assert_eq!(entries.len(), 3);
+        assert!(
+            entries
+                .iter()
+                .any(|path| path.ends_with(".forkpress-reset-stage-feature"))
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|path| path.ends_with(".forkpress-delete-public-feature"))
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|path| path.ends_with(".forkpress-new-feature"))
+        );
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1641,22 +1875,49 @@ fn start_command(args: StartArgs) -> Result<i32> {
     let runtime = PortableRuntime::from_layout(&layout);
 
     let workers = args.workers.unwrap_or_else(default_worker_count);
-    let mut php = match strategy {
+    let (mut php, registration) = match strategy {
         StorageStrategy::Branchfs => {
             ensure_bootstrapped(&layout, &runtime, &args)?;
-            start_php_server(&layout, &runtime, &args, workers)?
+            (start_php_server(&layout, &runtime, &args, workers)?, None)
         }
         StorageStrategy::Cow => {
+            let parent_holds_lifecycle_lock =
+                std::env::var_os(FORKPRESS_COW_PARENT_LIFECYCLE_LOCK).is_some();
+            let _lifecycle_lock = if parent_holds_lifecycle_lock {
+                None
+            } else {
+                Some(lock_cow_lifecycle(&layout)?)
+            };
+            let _lock = lock_cow_operations(&layout)?;
+            if let Some(record) = running_record_for_work_dir(&layout.work_dir)? {
+                bail!(
+                    "server already running for {} as pid {} at http://{}:{}/",
+                    layout.work_dir.display(),
+                    record.pid,
+                    record.root_host,
+                    record.port
+                );
+            }
             ensure_cow_bootstrapped(&layout, &runtime, &args)?;
-            start_cow_php_server(&layout, &runtime, &args, workers)?
+            let php = start_cow_php_server(&layout, &runtime, &args, workers)?;
+            let registration =
+                register_running_server(&layout, &args, std::process::id(), Some(php.id()))?;
+            drop(_lock);
+            drop(_lifecycle_lock);
+            (php, Some(registration))
         }
         StorageStrategy::Cas => {
             ensure_cas_bootstrapped(&layout, &runtime, &args)?;
-            start_cas_php_server(&layout, &runtime, &args, workers)?
+            (
+                start_cas_php_server(&layout, &runtime, &args, workers)?,
+                None,
+            )
         }
     };
-    let _registration =
-        register_running_server(&layout, &args, std::process::id(), Some(php.id()))?;
+    let _registration = match registration {
+        Some(registration) => registration,
+        None => register_running_server(&layout, &args, std::process::id(), Some(php.id()))?,
+    };
 
     if workers > 1 {
         println!("PHP workers: {} (PHP_CLI_SERVER_WORKERS)", workers);
@@ -1760,7 +2021,7 @@ fn start_command(args: StartArgs) -> Result<i32> {
 
     drop(php);
     drop(_registration);
-    detach_storage_for_layout_if_present(&layout, false)?;
+    detach_storage_for_layout_if_present(&layout, false, false, Duration::from_secs(10))?;
 
     Ok(0)
 }
@@ -1768,6 +2029,12 @@ fn start_command(args: StartArgs) -> Result<i32> {
 fn start_background_command(args: StartArgs) -> Result<i32> {
     let layout = Layout::new(args.shared.work_dir.clone())?;
     fs::create_dir_all(&layout.logs_dir)?;
+    let strategy = initialized_storage_strategy(&layout)?.unwrap_or(StorageStrategy::Branchfs);
+    let _cow_lifecycle_lock = if strategy == StorageStrategy::Cow {
+        Some(lock_cow_lifecycle(&layout)?)
+    } else {
+        None
+    };
     ensure_ports_available(&args)?;
 
     if let Some(record) = running_record_for_work_dir(&layout.work_dir)? {
@@ -1784,6 +2051,9 @@ fn start_background_command(args: StartArgs) -> Result<i32> {
     let mut command = Command::new(current_exe);
     command.arg("start");
     append_start_args(&mut command, &args, &layout);
+    if _cow_lifecycle_lock.is_some() {
+        command.env(FORKPRESS_COW_PARENT_LIFECYCLE_LOCK, "1");
+    }
 
     let log = OpenOptions::new()
         .create(true)
@@ -1965,7 +2235,12 @@ fn server_stop_command(args: ServerStopArgs) -> Result<i32> {
     }
 
     for layout in detach_layouts {
-        detach_storage_for_layout_if_present(&layout, args.force)?;
+        detach_storage_for_layout_if_present(
+            &layout,
+            args.force,
+            false,
+            Duration::from_secs(args.timeout),
+        )?;
     }
 
     Ok(0)
@@ -2000,6 +2275,7 @@ fn register_running_server(
         )
     })?;
 
+    let _registry_lock = lock_server_registry()?;
     let mut records = read_server_registry()?;
     records.retain(|record| {
         record.pid != pid && record.work_dir != layout.work_dir && record_process_exists(record)
@@ -2028,6 +2304,7 @@ fn unregister_running_server(layout: &Layout, pid: u32) -> Result<()> {
         }
     }
 
+    let _registry_lock = lock_server_registry()?;
     let mut records = read_server_registry()?;
     let original_len = records.len();
     records.retain(|record| record.pid != pid);
@@ -2044,10 +2321,38 @@ fn running_record_for_work_dir(work_dir: &std::path::Path) -> Result<Option<Serv
 }
 
 fn live_server_records() -> Result<Vec<ServerRecord>> {
+    let _registry_lock = lock_server_registry()?;
     let records = read_server_registry()?;
     let live: Vec<ServerRecord> = records.into_iter().filter(record_process_exists).collect();
     write_server_registry(&live)?;
     Ok(live)
+}
+
+#[cfg(unix)]
+fn lock_server_registry() -> Result<ServerRegistryLock> {
+    use std::os::fd::AsRawFd;
+
+    let path = server_registry_lock_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    let status = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    if status != 0 {
+        bail!("failed to lock {}", path.display());
+    }
+    Ok(ServerRegistryLock { file })
+}
+
+#[cfg(not(unix))]
+fn lock_server_registry() -> Result<ServerRegistryLock> {
+    Ok(ServerRegistryLock)
 }
 
 fn read_server_registry() -> Result<Vec<ServerRecord>> {
@@ -2144,6 +2449,10 @@ fn server_registry_path() -> PathBuf {
         "forkpress-{}-{SERVER_REGISTRY_FILE}",
         std::env::var("USER").unwrap_or_else(|_| "user".to_string())
     ))
+}
+
+fn server_registry_lock_path() -> PathBuf {
+    server_registry_path().with_extension("tsv.lock")
 }
 
 fn read_pid_file(path: &std::path::Path) -> Result<Option<u32>> {
@@ -2363,6 +2672,7 @@ fn git_command(args: GitPassthrough) -> Result<i32> {
                     bail!("cow local branch creation does not use --user/--password");
                 }
                 let _lock = lock_cow_operations(&layout)?;
+                ensure_cow_file_view_ready(&layout)?;
                 create_cow_branch(&layout, &runtime, &args.shared, branch, &create_args.from)?;
                 println!("forkpress: branch {branch} ready");
                 return Ok(0);
@@ -2496,6 +2806,7 @@ fn agents_command(args: AgentsArgs) -> Result<i32> {
             }
         }
         StorageStrategy::Cow => {
+            let _lock = lock_cow_operations(&layout)?;
             ensure_cow_file_view_ready(&layout)?;
             if !cow_branch_root(&layout, "main")
                 .join("wp-load.php")
@@ -2538,6 +2849,7 @@ fn agents_command(args: AgentsArgs) -> Result<i32> {
         }
         StorageStrategy::Cow => {
             let _lock = lock_cow_operations(&layout)?;
+            ensure_cow_file_view_ready(&layout)?;
             for index in 1..=args.count {
                 let branch = format!("{}-{}", args.prefix, index);
                 ensure_cow_branch_exists(&layout, &runtime, &args.shared, &branch, &args.from)?;
@@ -2761,6 +3073,7 @@ fn cow_branch_command(
     layout: Layout,
     runtime: PortableRuntime,
 ) -> Result<i32> {
+    let _lock = lock_cow_operations(&layout)?;
     ensure_cow_file_view_ready(&layout)?;
     match args.args[0].as_str() {
         "list" => {
@@ -2792,7 +3105,6 @@ fn cow_branch_command(
                     other => bail!("unsupported argument for `forkpress branch create`: {other}"),
                 }
             }
-            let _lock = lock_cow_operations(&layout)?;
             create_cow_branch(&layout, &runtime, &args.shared, branch, &from)?;
             Ok(0)
         }
@@ -2822,7 +3134,6 @@ fn cow_branch_command(
             let Some(from) = from else {
                 bail!("branch reset requires --from <branch>");
             };
-            let _lock = lock_cow_operations(&layout)?;
             reset_cow_branch(&layout, &runtime, &args.shared, branch, &from, force)?;
             Ok(0)
         }
@@ -2830,7 +3141,6 @@ fn cow_branch_command(
             let Some(branch) = args.args.get(1) else {
                 bail!("branch delete requires a branch name");
             };
-            let _lock = lock_cow_operations(&layout)?;
             delete_cow_branch(&layout, branch)?;
             Ok(0)
         }
@@ -3127,6 +3437,8 @@ Manage mount-backed COW storage through ForkPress:
 - `forkpress stop`
 - `forkpress storage status --work-dir .forkpress` for diagnostics
 - `forkpress storage mount|detach --work-dir .forkpress` for manual cleanup
+- `forkpress storage compact --work-dir .forkpress` to detach and compact the
+  sparsebundle after deleting branches
 
 Stop asks macOS to detach the sparsebundle after stopping this site's ForkPress
 server. Use `--force` only when normal detach reports a busy mount and you have
@@ -3586,7 +3898,10 @@ fn macos_mount_info(mount: &Path) -> Result<Option<MacosMountInfo>> {
     }
     let stat = unsafe { stat.assume_init() };
     let mounted_on = c_char_array_to_string(&stat.f_mntonname);
-    if Path::new(&mounted_on) != mount {
+    let mounted_on_path = PathBuf::from(&mounted_on);
+    let mounted_on_canonical = fs::canonicalize(&mounted_on_path).unwrap_or(mounted_on_path);
+    let mount_canonical = fs::canonicalize(&mount).unwrap_or_else(|_| mount.clone());
+    if mounted_on_canonical != mount_canonical {
         return Ok(None);
     }
 
@@ -3603,7 +3918,11 @@ fn c_char_array_to_string(buf: &[libc::c_char]) -> String {
 }
 
 #[cfg(target_os = "macos")]
-fn detach_macos_apfs_sparsebundle_file_view(layout: &Layout, force: bool) -> Result<()> {
+fn detach_macos_apfs_sparsebundle_file_view(
+    layout: &Layout,
+    force: bool,
+    print_remove_site_hint: bool,
+) -> Result<()> {
     let Some(info) = macos_mount_info(&layout.macos_cow_mount)? else {
         println!(
             "forkpress: COW storage is already detached for {}",
@@ -3656,7 +3975,9 @@ fn detach_macos_apfs_sparsebundle_file_view(layout: &Layout, force: bool) -> Res
         "forkpress: detached COW storage mounted at {}",
         layout.macos_cow_mount.display()
     );
-    println!("Remove site: rm -rf {}", shell_quote_path(&layout.work_dir));
+    if print_remove_site_hint {
+        println!("Remove site: rm -rf {}", shell_quote_path(&layout.work_dir));
+    }
     println!(
         "Attach again: forkpress storage mount --work-dir {}",
         shell_quote_path(&layout.work_dir)
@@ -3665,8 +3986,60 @@ fn detach_macos_apfs_sparsebundle_file_view(layout: &Layout, force: bool) -> Res
 }
 
 #[cfg(not(target_os = "macos"))]
-fn detach_macos_apfs_sparsebundle_file_view(_layout: &Layout, _force: bool) -> Result<()> {
+fn detach_macos_apfs_sparsebundle_file_view(
+    _layout: &Layout,
+    _force: bool,
+    _print_remove_site_hint: bool,
+) -> Result<()> {
     bail!("macOS APFS sparsebundle detach is only available on macOS")
+}
+
+#[cfg(target_os = "macos")]
+fn compact_macos_apfs_sparsebundle_file_view(layout: &Layout) -> Result<()> {
+    if !layout.macos_cow_image.exists() {
+        println!(
+            "forkpress: no APFS sparsebundle found at {}",
+            layout.macos_cow_image.display()
+        );
+        return Ok(());
+    }
+    if macos_mount_info(&layout.macos_cow_mount)?.is_some() {
+        bail!(
+            "COW storage is still attached at {}. Run `forkpress stop --work-dir {}` before compacting.",
+            layout.macos_cow_mount.display(),
+            shell_quote_path(&layout.work_dir)
+        );
+    }
+
+    let output = hdiutil_output([
+        OsString::from("compact"),
+        layout.macos_cow_image.as_os_str().to_owned(),
+    ])?;
+    if !output.status.success() {
+        bail!("{}", hdiutil_failure_message(&output));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for line in stdout.lines().chain(stderr.lines()) {
+        if !line.trim().is_empty() {
+            println!("  {line}");
+        }
+    }
+    println!(
+        "forkpress: compacted COW sparsebundle {}",
+        layout.macos_cow_image.display()
+    );
+    println!(
+        "Attach again: forkpress storage mount --work-dir {}",
+        shell_quote_path(&layout.work_dir)
+    );
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn compact_macos_apfs_sparsebundle_file_view(_layout: &Layout) -> Result<()> {
+    bail!("macOS APFS sparsebundle compact is only available on macOS")
 }
 
 #[cfg(target_os = "macos")]
@@ -4240,6 +4613,31 @@ fn lock_cow_operations(_layout: &Layout) -> Result<CowOperationLock> {
     Ok(CowOperationLock)
 }
 
+#[cfg(unix)]
+fn lock_cow_lifecycle(layout: &Layout) -> Result<CowLifecycleLock> {
+    use std::os::fd::AsRawFd;
+
+    fs::create_dir_all(&layout.cow_dir)
+        .with_context(|| format!("failed to create {}", layout.cow_dir.display()))?;
+    let path = layout.cow_dir.join("lifecycle.lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    let status = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    if status != 0 {
+        bail!("failed to lock {}", path.display());
+    }
+    Ok(CowLifecycleLock { file })
+}
+
+#[cfg(not(unix))]
+fn lock_cow_lifecycle(_layout: &Layout) -> Result<CowLifecycleLock> {
+    Ok(CowLifecycleLock)
+}
+
 fn delete_cow_branch(layout: &Layout, branch: &str) -> Result<()> {
     validate_branch_name(branch)?;
     if branch == "main" {
@@ -4309,6 +4707,33 @@ fn count_regular_files(root: &Path) -> Result<usize> {
         }
     }
     Ok(count)
+}
+
+fn cow_stale_operation_entries(layout: &Layout) -> Result<Vec<PathBuf>> {
+    let mut roots = vec![layout.project_dir.clone(), layout.cow_dir.clone()];
+    if layout.macos_cow_branches_dir.exists() {
+        roots.push(layout.macos_cow_branches_dir.clone());
+    }
+
+    let mut entries = Vec::new();
+    for root in roots {
+        let Ok(read_dir) = fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in read_dir {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(".forkpress-reset-")
+                || name.starts_with(".forkpress-delete-")
+                || name.starts_with(".forkpress-new-")
+            {
+                entries.push(entry.path());
+            }
+        }
+    }
+    entries.sort();
+    entries.dedup();
+    Ok(entries)
 }
 
 fn ensure_cas_bootstrapped(
