@@ -96,6 +96,15 @@ http_body() {
   esac
 }
 
+deny_runtime_error_body() {
+  local file="$1"
+  local label="$2"
+  if rg -qi 'Fatal error|There has been a critical error|WordPress &rsaquo; Error|WordPress.*Installation|wp-admin/install.php|wp-cow DB/runtime error|wp-cow did not load the remote site' "$file"; then
+    sed -n '1,100p' "$file" >&2
+    fail "$label returned installer, fatal error, or wp-cow runtime error"
+  fi
+}
+
 mysql_exec() {
   mysql --protocol=TCP -h127.0.0.1 -P33071 -uroot "$@"
 }
@@ -298,6 +307,10 @@ WPCOW_REMOTE_QUERY_CACHE_MAX_ROWS="${WPCOW_REMOTE_QUERY_CACHE_MAX_ROWS:-5000}" \
 WPCOW_REMOTE_FILE_HELPER_TIMEOUT_SECS="${WPCOW_REMOTE_FILE_HELPER_TIMEOUT_SECS:-2}" \
 WPCOW_REMOTE_STAT_PREFETCH_MAX_KB="${WPCOW_REMOTE_STAT_PREFETCH_MAX_KB:-0}" \
 WPCOW_RUNTIME_SIBLING_PREFETCH_MAX_MB="${WPCOW_RUNTIME_SIBLING_PREFETCH_MAX_MB:-0}" \
+WPCOW_PLUGIN_MODE="${WPCOW_PLUGIN_MODE:-auto}" \
+WPCOW_PLUGIN_ADMISSION="${WPCOW_PLUGIN_ADMISSION:-1}" \
+WPCOW_PLUGIN_ADMISSION_DELAY_SECS="${WPCOW_PLUGIN_ADMISSION_DELAY_SECS:-20}" \
+WPCOW_PLUGIN_ADMISSION_TIMEOUT_SECS="${WPCOW_PLUGIN_ADMISSION_TIMEOUT_SECS:-15}" \
 WPCOW_PHP_WORKERS="${WPCOW_PHP_WORKERS:-1}" \
 HOME="$SSH_HOME" \
 "$WP_COW_BIN" serve \
@@ -324,10 +337,7 @@ http_body "$LOCAL_URL/" "$first_splash" 10 || {
   tail -n 200 "$SERVE_LOG" >&2 || true
   fail "first splash/progress request failed"
 }
-if rg -qi 'WordPress.*Installation|wp-admin/install.php|wp-cow DB/runtime error|wp-cow did not load the remote site' "$first_splash"; then
-  sed -n '1,80p' "$first_splash" >&2
-  fail "first splash request returned installer or wp-cow runtime error"
-fi
+deny_runtime_error_body "$first_splash" "first splash request"
 pack_wait="${WPCOW_RUNTIME_CODE_PACK_WAIT_SECS:-120}"
 pack_started="$(date +%s)"
 progress_path="$STATE_DIR/clones/$NAME/file-cache/progress.json"
@@ -359,10 +369,7 @@ http_body "$LOCAL_URL/?__wp_cow_bypass_splash=1" "$first_body" "$actual_timeout"
   tail -n 200 "$SERVE_LOG" >&2 || true
   fail "first WordPress request failed"
 }
-if rg -qi 'WordPress.*Installation|wp-admin/install.php|wp-cow DB/runtime error|wp-cow did not load the remote site' "$first_body"; then
-  sed -n '1,80p' "$first_body" >&2
-  fail "first request returned installer or wp-cow runtime error"
-fi
+deny_runtime_error_body "$first_body" "first request"
 if [ -n "$EXPECT_TEXT" ]; then
   rg -q "$EXPECT_TEXT" "$first_body" || fail "first response did not contain WPCOW_EXPECT_TEXT=$EXPECT_TEXT"
 fi
@@ -370,6 +377,7 @@ fi
 second_body="$WORK_DIR/second.html"
 http_body "$LOCAL_URL/?__wp_cow_bypass_splash=1" "$second_body" "${WPCOW_SECOND_TIMEOUT_SECS:-60}" ||
   fail "second cached WordPress request failed"
+deny_runtime_error_body "$second_body" "second cached WordPress request"
 
 php_create="$WORK_DIR/create-local-page.php"
 cat > "$php_create" <<'PHP'
@@ -407,6 +415,7 @@ post_id="$(sed -n 's/^WPCOW_POST_ID=//p' "$WORK_DIR/create-local-page.out" | tai
 local_body="$WORK_DIR/local-page.html"
 http_body "$LOCAL_URL/?p=$post_id&__wp_cow_bypass_splash=1" "$local_body" 30 ||
   fail "local-only page did not render"
+deny_runtime_error_body "$local_body" "local-only page request"
 rg -q "$TITLE" "$local_body" || fail "local-only page response did not contain its title"
 
 after_remote="$(remote_post_count "$TITLE" | tr -d '[:space:]')"
@@ -453,6 +462,10 @@ WPCOW_MATERIALIZE_OPTIONS_TABLE="${WPCOW_MATERIALIZE_OPTIONS_TABLE:-1}" \
 WPCOW_REMOTE_FILE_HELPER_TIMEOUT_SECS="${WPCOW_REMOTE_FILE_HELPER_TIMEOUT_SECS:-2}" \
 WPCOW_REMOTE_STAT_PREFETCH_MAX_KB="${WPCOW_REMOTE_STAT_PREFETCH_MAX_KB:-0}" \
 WPCOW_RUNTIME_SIBLING_PREFETCH_MAX_MB="${WPCOW_RUNTIME_SIBLING_PREFETCH_MAX_MB:-0}" \
+WPCOW_PLUGIN_MODE="${WPCOW_PLUGIN_MODE:-auto}" \
+WPCOW_PLUGIN_ADMISSION="${WPCOW_PLUGIN_ADMISSION:-1}" \
+WPCOW_PLUGIN_ADMISSION_DELAY_SECS="${WPCOW_PLUGIN_ADMISSION_DELAY_SECS:-20}" \
+WPCOW_PLUGIN_ADMISSION_TIMEOUT_SECS="${WPCOW_PLUGIN_ADMISSION_TIMEOUT_SECS:-15}" \
 WPCOW_PHP_WORKERS="${WPCOW_PHP_WORKERS:-1}" \
 HOME="$SSH_HOME" \
 "$WP_COW_BIN" run "$NAME" \
@@ -469,6 +482,7 @@ wait_for_tcp "$host" "$port" 30 || {
 offline_body="$WORK_DIR/offline-local-page.html"
 http_body "$LOCAL_URL/?p=$post_id&__wp_cow_bypass_splash=1" "$offline_body" 30 ||
   fail "offline local-only page did not render"
+deny_runtime_error_body "$offline_body" "offline local-only page request"
 rg -q "$TITLE" "$offline_body" || fail "offline refresh did not use local materialized post"
 
 login_body="$WORK_DIR/login.html"
@@ -486,6 +500,7 @@ case "$login_status" in
   2*|3*) ;;
   *) fail "local admin login returned HTTP $login_status" ;;
 esac
+deny_runtime_error_body "$login_body" "local admin login"
 rg -q 'wordpress_logged_in' "$COOKIE_JAR" || fail "local admin login did not set wordpress_logged_in cookie"
 
 admin_body="$WORK_DIR/admin.html"
@@ -500,6 +515,11 @@ case "$http_status" in
 esac
 if rg -qi '<form[^>]+id="loginform"|name="loginform"' "$admin_body"; then
   fail "wp-admin still shows login form after local admin login"
+fi
+deny_runtime_error_body "$admin_body" "wp-admin"
+if ! rg -q 'id="wpbody-content"|id="dashboard-widgets"|wp-admin-bar' "$admin_body"; then
+  sed -n '1,120p' "$admin_body" >&2
+  fail "wp-admin response did not look like an authenticated dashboard"
 fi
 
 cache_files="$(find "$STATE_DIR/clones/$NAME/file-cache" -type f | wc -l | tr -d ' ')"

@@ -4,6 +4,7 @@ use std::path::Path;
 
 use crate::config::{ClonePaths, Manifest};
 use crate::overlay::OPAQUE_MARKER;
+use crate::plugin_policy;
 
 pub const ROUTER_BASENAME: &str = ".wp-cow-router.php";
 
@@ -23,6 +24,7 @@ pub fn write_wordpress_overrides(paths: &ClonePaths, manifest: &Manifest) -> Res
         safety_mu_plugin_php(),
     )?;
     fs::write(paths.generated.join("router.php"), router)?;
+    plugin_policy::write_initial_policy(paths, manifest)?;
     Ok(())
 }
 
@@ -56,6 +58,7 @@ define( 'WPCOW_CLONE',       {clone_name} );
 define( 'WPCOW_CONTROL_URL', {control_url} );
 define( 'WPCOW_QUERY_CACHE_DIR',    {query_cache_dir} );
 define( 'WPCOW_DB_STATE_FILE',      {db_state_file} );
+define( 'WPCOW_PLUGIN_POLICY_FILE', {plugin_policy_file} );
 
 define( 'FS_METHOD', 'direct' );
 define( 'DISABLE_WP_CRON', true );
@@ -93,6 +96,8 @@ require_once ABSPATH . 'wp-settings.php';
         control_url = php_string(&manifest.control_url),
         query_cache_dir = php_string(paths.db.join("query-cache").to_string_lossy().as_ref()),
         db_state_file = php_string(paths.db.join("state.json").to_string_lossy().as_ref()),
+        plugin_policy_file =
+            php_string(plugin_policy::policy_path(paths).to_string_lossy().as_ref()),
     )
 }
 
@@ -610,10 +615,123 @@ if ( ! defined( 'DISABLE_WP_CRON' ) ) {
 	define( 'DISABLE_WP_CRON', true );
 }
 
-if ( '0' === getenv( 'WPCOW_ENABLE_PLUGINS' ) ) {
-	add_filter( 'option_active_plugins', '__return_empty_array', PHP_INT_MAX );
-	add_filter( 'site_option_active_sitewide_plugins', '__return_empty_array', PHP_INT_MAX );
+function wp_cow_plugin_mode() {
+	$mode = strtolower( trim( (string) getenv( 'WPCOW_PLUGIN_MODE' ) ) );
+	if ( '' !== $mode ) {
+		return $mode;
+	}
+
+	$legacy = strtolower( trim( (string) getenv( 'WPCOW_ENABLE_PLUGINS' ) ) );
+	if ( in_array( $legacy, array( '1', 'true', 'yes', 'on', 'full', 'enabled' ), true ) ) {
+		return 'full';
+	}
+	if ( in_array( $legacy, array( '0', 'false', 'no', 'off', 'none', 'disabled', 'disable' ), true ) ) {
+		return 'off';
+	}
+
+	return 'auto';
 }
+
+function wp_cow_plugin_policy_file() {
+	$env = (string) getenv( 'WPCOW_PLUGIN_POLICY_FILE' );
+	if ( '' !== $env ) {
+		return $env;
+	}
+	if ( defined( 'WPCOW_PLUGIN_POLICY_FILE' ) ) {
+		return WPCOW_PLUGIN_POLICY_FILE;
+	}
+	return '';
+}
+
+function wp_cow_plugin_policy() {
+	static $policy = null;
+	if ( null !== $policy ) {
+		return $policy;
+	}
+
+	$policy = array( 'allow' => array() );
+	$file   = wp_cow_plugin_policy_file();
+	if ( '' === $file || ! is_readable( $file ) ) {
+		return $policy;
+	}
+
+	$decoded = json_decode( (string) file_get_contents( $file ), true );
+	if ( is_array( $decoded ) ) {
+		$policy = array_merge( $policy, $decoded );
+	}
+
+	return $policy;
+}
+
+function wp_cow_allowed_plugins() {
+	$policy  = wp_cow_plugin_policy();
+	$allowed = isset( $policy['allow'] ) && is_array( $policy['allow'] ) ? $policy['allow'] : array();
+	$out     = array();
+	foreach ( $allowed as $plugin ) {
+		$plugin = ltrim( (string) $plugin, '/' );
+		if ( '' !== $plugin ) {
+			$out[ $plugin ] = true;
+		}
+	}
+	return $out;
+}
+
+function wp_cow_filter_active_plugins( $plugins ) {
+	$mode = wp_cow_plugin_mode();
+	if ( in_array( $mode, array( 'full', 'on', 'enabled', '1', 'true', 'yes' ), true ) ) {
+		return $plugins;
+	}
+	if ( in_array( $mode, array( 'off', 'none', 'disabled', 'disable', '0', 'false', 'no' ), true ) ) {
+		return array();
+	}
+	if ( ! is_array( $plugins ) ) {
+		return array();
+	}
+
+	$allowed = wp_cow_allowed_plugins();
+	if ( empty( $allowed ) ) {
+		return array();
+	}
+
+	$filtered = array();
+	foreach ( $plugins as $plugin ) {
+		$plugin = ltrim( (string) $plugin, '/' );
+		if ( isset( $allowed[ $plugin ] ) ) {
+			$filtered[] = $plugin;
+		}
+	}
+	return $filtered;
+}
+
+function wp_cow_filter_sitewide_plugins( $plugins ) {
+	$mode = wp_cow_plugin_mode();
+	if ( in_array( $mode, array( 'full', 'on', 'enabled', '1', 'true', 'yes' ), true ) ) {
+		return $plugins;
+	}
+	if ( in_array( $mode, array( 'off', 'none', 'disabled', 'disable', '0', 'false', 'no' ), true ) ) {
+		return array();
+	}
+	if ( ! is_array( $plugins ) ) {
+		return array();
+	}
+
+	$allowed = wp_cow_allowed_plugins();
+	if ( empty( $allowed ) ) {
+		return array();
+	}
+
+	$filtered = array();
+	foreach ( $plugins as $plugin => $value ) {
+		$plugin = ltrim( (string) $plugin, '/' );
+		if ( isset( $allowed[ $plugin ] ) ) {
+			$filtered[ $plugin ] = $value;
+		}
+	}
+	return $filtered;
+}
+
+add_filter( 'option_active_plugins', 'wp_cow_filter_active_plugins', PHP_INT_MAX );
+add_filter( 'site_option_active_sitewide_plugins', 'wp_cow_filter_sitewide_plugins', PHP_INT_MAX );
 
 add_filter( 'validate_current_theme', '__return_false', PHP_INT_MAX );
 
@@ -1063,6 +1181,7 @@ mod tests {
         assert!(php.contains("WPCOW_CONTROL_URL"));
         assert!(php.contains("WPCOW_QUERY_CACHE_DIR"));
         assert!(php.contains("WPCOW_DB_STATE_FILE"));
+        assert!(php.contains("WPCOW_PLUGIN_POLICY_FILE"));
         assert!(!php.contains("WPCOW_REMOTE_DB_NAME"));
         assert!(!php.contains("WPCOW_REMOTE_DB_USER"));
         assert!(!php.contains("WPCOW_REMOTE_DB_PASSWORD"));
@@ -1196,8 +1315,88 @@ if ( cow_cached_remote_read_is_safe_without_control( array( 'wp_options' ) ) ) {
         assert!(php.contains("pre_http_request"));
         assert!(php.contains("validate_current_theme"));
         assert!(php.contains("WPCOW_ENABLE_PLUGINS"));
-        assert!(php.contains("'0' === getenv( 'WPCOW_ENABLE_PLUGINS' )"));
+        assert!(php.contains("WPCOW_PLUGIN_POLICY_FILE"));
+        assert!(php.contains("wp_cow_filter_active_plugins"));
+        assert!(php.contains("wp_cow_allowed_plugins"));
         assert!(php.contains("option_active_plugins"));
+    }
+
+    #[test]
+    fn safety_plugin_auto_mode_allows_only_policy_admitted_plugins() {
+        if Command::new("php").arg("-v").output().is_err() {
+            eprintln!("skipping generated PHP plugin policy test because php is not on PATH");
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let safety = temp.path().join("wp-cow-safety.php");
+        let policy = temp.path().join("plugin-policy.json");
+        let check = temp.path().join("check.php");
+        fs::write(&safety, safety_mu_plugin_php()).unwrap();
+        fs::write(
+            &policy,
+            r#"{"version":1,"mode":"auto","active":["akismet/akismet.php","woocommerce/woocommerce.php"],"allow":["woocommerce/woocommerce.php"],"quarantine":{"akismet/akismet.php":"timeout"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            &check,
+            format!(
+                r#"<?php
+$filters = array();
+function add_filter( $tag, $callback, $priority = 10, $accepted_args = 1 ) {{
+	global $filters;
+	$filters[ $tag ] = $callback;
+}}
+function add_action( $tag, $callback, $priority = 10, $accepted_args = 1 ) {{
+	add_filter( $tag, $callback, $priority, $accepted_args );
+}}
+function __return_false() {{ return false; }}
+class WP_Error {{
+	public function __construct( $code, $message ) {{}}
+}}
+putenv( 'WPCOW_PLUGIN_MODE=auto' );
+putenv( 'WPCOW_ENABLE_PLUGINS=0' );
+putenv( 'WPCOW_PLUGIN_POLICY_FILE={policy}' );
+require '{safety}';
+$active = call_user_func(
+	$filters['option_active_plugins'],
+	array( 'akismet/akismet.php', 'woocommerce/woocommerce.php' )
+);
+if ( array_values( $active ) !== array( 'woocommerce/woocommerce.php' ) ) {{
+	fwrite( STDERR, 'unexpected active plugin filter: ' . json_encode( $active ) . PHP_EOL );
+	exit( 1 );
+}}
+$sitewide = call_user_func(
+	$filters['site_option_active_sitewide_plugins'],
+	array( 'akismet/akismet.php' => 1, 'woocommerce/woocommerce.php' => 2 )
+);
+if ( $sitewide !== array( 'woocommerce/woocommerce.php' => 2 ) ) {{
+	fwrite( STDERR, 'unexpected sitewide plugin filter: ' . json_encode( $sitewide ) . PHP_EOL );
+	exit( 1 );
+}}
+putenv( 'WPCOW_PLUGIN_MODE=full' );
+$full = call_user_func(
+	$filters['option_active_plugins'],
+	array( 'akismet/akismet.php', 'woocommerce/woocommerce.php' )
+);
+if ( array_values( $full ) !== array( 'akismet/akismet.php', 'woocommerce/woocommerce.php' ) ) {{
+	fwrite( STDERR, 'full mode did not preserve plugins: ' . json_encode( $full ) . PHP_EOL );
+	exit( 1 );
+}}
+"#,
+                policy = php_single_quoted_path(&policy),
+                safety = php_single_quoted_path(&safety)
+            ),
+        )
+        .unwrap();
+
+        let output = Command::new("php").arg(&check).output().unwrap();
+        assert!(
+            output.status.success(),
+            "PHP plugin policy check failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
@@ -1222,6 +1421,10 @@ if ( cow_cached_remote_read_is_safe_without_control( array( 'wp_options' ) ) ) {
 
         write_wordpress_overrides(&paths, &manifest()).unwrap();
 
+        assert!(
+            crate::plugin_policy::policy_path(&paths).is_file(),
+            "generated overrides should create the initial plugin admission policy"
+        );
         assert!(
             !plugins.join(crate::overlay::OPAQUE_MARKER).exists(),
             "plugin files should remain backed by the lazy remote lower layer by default"

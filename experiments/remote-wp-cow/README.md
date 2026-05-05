@@ -211,18 +211,26 @@ can make cold start worse when WordPress stats assets it will not read during
 render. These knobs never recurse into uploads and never fetch CSS, JS, or media
 unless the browser asks for them.
 Remote plugin and language directories stay visible through the lazy lower
-layer by default so the local site can render the same active code as the
-remote site. Set `WPCOW_ENABLE_PLUGINS=0` only when you need to suppress active
-plugins during testing; files still remain lazy and are not copied up front.
+layer, but plugin execution defaults to policy mode. With
+`WPCOW_PLUGIN_MODE=auto`, the generated safety mu-plugin starts with no
+production plugins enabled. After the first successful local render, the daemon
+tries active plugins one at a time using a bounded PHP smoke boot
+(`WPCOW_PLUGIN_ADMISSION_TIMEOUT_SECS`) and records the result in
+`run/plugin-policy.json`. Admitted plugins are enabled on later requests;
+failing plugins are quarantined locally. Set `WPCOW_PLUGIN_MODE=off` to suppress
+all plugins, or `WPCOW_PLUGIN_MODE=full` / `WPCOW_ENABLE_PLUGINS=1` only when
+you intentionally want every active production plugin to run in the clone.
 
 Because active plugins are production code, the launched PHP runtime also
 disables common side-effect escape hatches by default: process spawning,
 `mail()`, raw socket clients, and URL-based includes. That is in addition to the
-mu-plugin guards for WordPress mail and HTTP APIs. The generated DB drop-in
-still needs local HTTP for daemon control calls, so direct plugin cURL or URL
-file-wrapper calls are not fully sandboxed yet. Set
+mu-plugin guards for WordPress mail and HTTP APIs. The disabled PHP function
+list is configurable with `WPCOW_PHP_DISABLE_FUNCTIONS`; set it to `0` only for
+debugging. The generated DB drop-in still needs local HTTP for daemon control
+calls, so this is not a kernel sandbox. Set
 `WPCOW_ALLOW_UNSAFE_PLUGIN_SIDE_EFFECTS=1` only when you intentionally want to
-let plugin code spawn local processes or use raw sockets.
+let plugin code spawn local processes, send raw socket traffic, or bypass these
+PHP-level guards.
 
 The lab uses bounded request timeouts so a bad remote DB query, unreachable SSH
 host, or slow remote file read should fail visibly instead of leaving the

@@ -200,7 +200,18 @@ fn runtime_code_pack_include_admin() -> bool {
 }
 
 fn plugins_enabled_for_runtime() -> bool {
-    env_bool("WPCOW_ENABLE_PLUGINS", true)
+    let mode = std::env::var("WPCOW_PLUGIN_MODE")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if !mode.is_empty() {
+        return matches!(
+            mode.as_str(),
+            "full" | "on" | "enabled" | "1" | "true" | "yes"
+        );
+    }
+
+    env_bool("WPCOW_ENABLE_PLUGINS", false)
 }
 
 fn runtime_code_pack_max_bytes() -> u64 {
@@ -245,8 +256,9 @@ mod tests {
     fn runtime_code_roots_are_bounded_to_core_theme_and_active_plugins() {
         let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let old_plugins = std::env::var_os("WPCOW_ENABLE_PLUGINS");
+        let old_mode = std::env::var_os("WPCOW_PLUGIN_MODE");
         let old_admin = std::env::var_os("WPCOW_RUNTIME_CODE_PACK_INCLUDE_ADMIN");
-        std::env::set_var("WPCOW_ENABLE_PLUGINS", "1");
+        std::env::set_var("WPCOW_PLUGIN_MODE", "full");
         std::env::set_var("WPCOW_RUNTIME_CODE_PACK_INCLUDE_ADMIN", "1");
 
         let manifest = Manifest::new(
@@ -289,6 +301,10 @@ mod tests {
             Some(value) => std::env::set_var("WPCOW_ENABLE_PLUGINS", value),
             None => std::env::remove_var("WPCOW_ENABLE_PLUGINS"),
         }
+        match old_mode {
+            Some(value) => std::env::set_var("WPCOW_PLUGIN_MODE", value),
+            None => std::env::remove_var("WPCOW_PLUGIN_MODE"),
+        }
         match old_admin {
             Some(value) => std::env::set_var("WPCOW_RUNTIME_CODE_PACK_INCLUDE_ADMIN", value),
             None => std::env::remove_var("WPCOW_RUNTIME_CODE_PACK_INCLUDE_ADMIN"),
@@ -299,6 +315,8 @@ mod tests {
     fn runtime_code_roots_respect_disabled_plugins() {
         let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let old_plugins = std::env::var_os("WPCOW_ENABLE_PLUGINS");
+        let old_mode = std::env::var_os("WPCOW_PLUGIN_MODE");
+        std::env::remove_var("WPCOW_PLUGIN_MODE");
         std::env::set_var("WPCOW_ENABLE_PLUGINS", "0");
 
         let manifest = Manifest::new(
@@ -321,6 +339,10 @@ mod tests {
         match old_plugins {
             Some(value) => std::env::set_var("WPCOW_ENABLE_PLUGINS", value),
             None => std::env::remove_var("WPCOW_ENABLE_PLUGINS"),
+        }
+        match old_mode {
+            Some(value) => std::env::set_var("WPCOW_PLUGIN_MODE", value),
+            None => std::env::remove_var("WPCOW_PLUGIN_MODE"),
         }
     }
 }

@@ -46,6 +46,8 @@ run_exact_ignored_test remote::tests::stat_prefetch_returns_small_file_bytes_fro
 run_exact_ignored_test remote::tests::prefetch_dir_batches_only_runtime_file_types
 run_exact_ignored_test remote::tests::runtime_code_pack_streams_bounded_runtime_files
 run_exact_test cli::tests::offline_core_runtime_cache_is_bounded_to_wordpress_core
+run_exact_test plugin_policy::tests::policy_starts_auto_with_no_allowed_plugins
+run_exact_test plugin_policy::tests::candidate_policy_allows_one_extra_plugin
 run_exact_test runtime_cache::tests::runtime_code_roots_are_bounded_to_core_theme_and_active_plugins
 run_exact_test runtime_cache::tests::runtime_code_roots_respect_disabled_plugins
 run_exact_test overlay::tests::cached_only_copy_up_uses_materialized_files_without_remote
@@ -107,6 +109,10 @@ need_pattern src/runtime_cache.rs 'WPCOW_RUNTIME_CODE_PACK_MAX_MB' "runtime code
 need_pattern src/runtime_cache.rs 'warm_runtime_code_cache_with_admin' "sever path explicitly warms admin runtime"
 need_pattern src/runtime_cache.rs 'wp-content/uploads' "runtime code cache excludes uploads"
 need_pattern src/runtime_cache.rs 'active_plugins' "runtime code cache includes active plugin roots"
+need_pattern src/plugin_policy.rs 'PluginPolicy' "plugin admission policy state"
+need_pattern src/run.rs 'WPCOW_PLUGIN_ADMISSION_TIMEOUT_SECS' "bounded plugin admission timeout"
+need_pattern src/run.rs 'WPCOW_PLUGIN_POLICY_FILE' "candidate plugin policy smoke override"
+need_pattern src/generate.rs 'WPCOW_PLUGIN_POLICY_FILE' "generated plugin policy path"
 need_pattern src/cli.rs 'uploads/media remain lazy' "serve explains media remains lazy after runtime code pack"
 need_pattern src/fusefs.rs 'WPCOW_REMOTE_STAT_PREFETCH_MAX_KB' "FUSE stat path can prefetch small file bytes"
 need_pattern src/fusefs.rs 'WPCOW_RUNTIME_SIBLING_PREFETCH_MAX_MB' "FUSE batches same-directory runtime files with a byte cap"
@@ -136,6 +142,8 @@ need_pattern compose.yaml 'WPCOW_REMOTE_DB_HELPER: "\$\{WPCOW_REMOTE_DB_HELPER:-
 need_pattern compose.yaml 'WPCOW_RUNTIME_CODE_PACK: "\$\{WPCOW_RUNTIME_CODE_PACK:-1\}"' "Docker compose defaults bounded runtime code cache on"
 need_pattern compose.yaml 'WPCOW_RUNTIME_CODE_PACK_INCLUDE_ADMIN: "\$\{WPCOW_RUNTIME_CODE_PACK_INCLUDE_ADMIN:-0\}"' "Docker compose keeps admin pack out of frontend warmup"
 need_pattern compose.yaml 'WPCOW_MATERIALIZE_OPTIONS_TABLE: "\$\{WPCOW_MATERIALIZE_OPTIONS_TABLE:-1\}"' "Docker compose defaults options table materialization on"
+need_pattern compose.yaml 'WPCOW_PLUGIN_MODE: "\$\{WPCOW_PLUGIN_MODE:-auto\}"' "Docker compose defaults plugin admission mode"
+need_pattern compose.yaml 'WPCOW_PLUGIN_ADMISSION: "\$\{WPCOW_PLUGIN_ADMISSION:-1\}"' "Docker compose defaults plugin admission on"
 need_pattern compose.yaml 'WPCOW_REMOTE_STAT_PREFETCH_MAX_KB: "\$\{WPCOW_REMOTE_STAT_PREFETCH_MAX_KB:-0\}"' "Docker compose defaults experimental stat prefetch off"
 need_pattern compose.yaml 'WPCOW_RUNTIME_SIBLING_PREFETCH_MAX_MB: "\$\{WPCOW_RUNTIME_SIBLING_PREFETCH_MAX_MB:-0\}"' "Docker compose defaults experimental sibling prefetch off"
 need_pattern .dockerignore '^/target/$' "Docker build context target exclusion"
@@ -153,6 +161,8 @@ need_pattern .env.example '^WPCOW_RUNTIME_CODE_PACK_MAX_FILES=20000$' "Docker la
 need_pattern .env.example '^WPCOW_RUNTIME_CODE_PACK_INCLUDE_ADMIN=0$' "Docker lab example keeps admin pack out of frontend warmup"
 need_pattern .env.example '^WPCOW_MATERIALIZE_OPTIONS_TABLE=1$' "Docker lab example materializes options table"
 need_pattern .env.example '^WPCOW_ENABLE_PLUGINS=0$' "Docker lab example keeps arbitrary production plugins disabled by default"
+need_pattern .env.example '^WPCOW_PLUGIN_MODE=auto$' "Docker lab example plugin admission mode"
+need_pattern .env.example '^WPCOW_PLUGIN_ADMISSION=1$' "Docker lab example plugin admission enabled"
 need_pattern .env.example '^WPCOW_SPLASH=1$' "Docker lab example splash default"
 need_pattern .env.example '^WPCOW_ALLOW_UNSAFE_PLUGIN_SIDE_EFFECTS=0$' "Docker lab example keeps PHP side-effect guards enabled"
 need_pattern .env.example '^WPCOW_OPCACHE_VALIDATE_TIMESTAMPS=0$' "Docker lab example keeps warm render OPcache fast path enabled"

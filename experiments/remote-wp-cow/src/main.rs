@@ -6,6 +6,7 @@ mod fusefs;
 mod generate;
 mod mysql_proxy;
 mod overlay;
+mod plugin_policy;
 mod remote;
 mod row_cow;
 mod run;
