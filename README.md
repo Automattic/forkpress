@@ -286,6 +286,13 @@ save on `marketing.wp.localhost` writes to:
 It does not write to `./main`, and it does not use SQL views, overlay tables,
 or branch table prefixes.
 
+ForkPress-served WordPress requests take a shared advisory lock at
+`.forkpress/cow/operations.lock`. COW mutations such as branch create, reset,
+delete, and Git apply take the same lock exclusively, so ForkPress does not
+publish or remove a branch tree while one of its own HTTP requests is active.
+Direct shell/editor writes to `./main` or `./marketing` are normal filesystem
+writes and do not participate in that lock.
+
 ### File View Cascade
 
 On macOS, ForkPress tries the cheapest ordinary-file view first:

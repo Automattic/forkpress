@@ -29,6 +29,10 @@ $host_noport = preg_replace('/:\d+$/', '', $host);
 $host_noport = strtolower($host_noport);
 $root_host_lc = strtolower($root_host);
 
+$uri = $_SERVER['REQUEST_URI'] ?? '/';
+$path = parse_url($uri, PHP_URL_PATH) ?: '/';
+$query = parse_url($uri, PHP_URL_QUERY) ?: '';
+
 $branch = 'main';
 if ($host_noport === $root_host_lc || $host_noport === '' || $host_noport === '127.0.0.1' || $host_noport === 'localhost') {
     $branch = 'main';
@@ -45,21 +49,6 @@ if (!preg_match('/^[a-zA-Z0-9_\-]{1,63}$/', $branch)) {
     return true;
 }
 
-$branch_root = rtrim($branches_dir, '/') . '/' . $branch;
-if (!is_dir($branch_root)) {
-    http_response_code(404);
-    echo "Branch not found: " . htmlspecialchars($branch, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . "\n";
-    return true;
-}
-
-$_SERVER['FORKPRESS_BRANCH'] = $branch;
-putenv('FORKPRESS_BRANCH=' . $branch);
-header('X-ForkPress-Branch: ' . $branch);
-
-$uri = $_SERVER['REQUEST_URI'] ?? '/';
-$path = parse_url($uri, PHP_URL_PATH) ?: '/';
-$query = parse_url($uri, PHP_URL_QUERY) ?: '';
-
 if (preg_match('|^/([a-zA-Z0-9_\-]+)\.git(/.*)?$|', $path, $git_match)) {
     $git_path = $git_match[2] ?? '/';
     $cow_dir = getenv('FORKPRESS_COW_DIR') ?: dirname(rtrim($branches_dir, '/'));
@@ -72,6 +61,57 @@ if (preg_match('|^/([a-zA-Z0-9_\-]+)\.git(/.*)?$|', $path, $git_match)) {
     cow_git_server_handle($branches_dir, $git_repo_dir, $git_path, $query, $storage_branches_dir, $branch_list, $file_view, $debug_log);
     return true;
 }
+
+function forkpress_cow_acquire_request_lock(): bool {
+    $cow_dir = getenv('FORKPRESS_COW_DIR') ?: '';
+    if ($cow_dir === '') {
+        return true;
+    }
+
+    $lock_path = rtrim($cow_dir, "/\\") . '/operations.lock';
+    $lock_dir = dirname($lock_path);
+    if (!is_dir($lock_dir) && !@mkdir($lock_dir, 0755, true) && !is_dir($lock_dir)) {
+        http_response_code(503);
+        echo "ForkPress COW operation lock unavailable\n";
+        return false;
+    }
+
+    $handle = @fopen($lock_path, 'c');
+    if (!$handle) {
+        http_response_code(503);
+        echo "ForkPress COW operation lock unavailable\n";
+        return false;
+    }
+
+    if (!flock($handle, LOCK_SH)) {
+        fclose($handle);
+        http_response_code(503);
+        echo "ForkPress COW operation lock unavailable\n";
+        return false;
+    }
+
+    register_shutdown_function(static function() use ($handle): void {
+        flock($handle, LOCK_UN);
+        fclose($handle);
+    });
+
+    return true;
+}
+
+if (!forkpress_cow_acquire_request_lock()) {
+    return true;
+}
+
+$branch_root = rtrim($branches_dir, '/') . '/' . $branch;
+if (!is_dir($branch_root)) {
+    http_response_code(404);
+    echo "Branch not found: " . htmlspecialchars($branch, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . "\n";
+    return true;
+}
+
+$_SERVER['FORKPRESS_BRANCH'] = $branch;
+putenv('FORKPRESS_BRANCH=' . $branch);
+header('X-ForkPress-Branch: ' . $branch);
 
 if ($path === '/plugins.php'
     && !file_exists($branch_root . '/plugins.php')
