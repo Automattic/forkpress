@@ -114,6 +114,51 @@ cow_git_remove_tree($branches . '/feature');
 cow_git_sync_repository($repo, $branches);
 assert_true(!$repo->branch_exists('refs/heads/feature'), 'sync prunes Git ref when materialized branch disappears');
 assert_true($repo->branch_exists('refs/heads/main'), 'sync keeps Git ref for existing main branch');
+
+$orphan_blob = $repo->add_object('blob', "orphan\n");
+$orphan_path = $git . '/' . $repo->get_storage_path($orphan_blob);
+assert_true(is_file($orphan_path), 'test setup creates unreachable loose Git object');
+$gc = cow_git_prune_unreachable_objects($repo, $git);
+assert_true($gc['scanned'] >= 1, 'COW Git GC scans loose objects');
+assert_true($gc['deleted'] >= 1, 'COW Git GC deletes unreachable loose object');
+assert_true(!file_exists($orphan_path), 'COW Git GC removes unreachable loose object file');
+assert_true(is_file($git . '/' . $repo->get_storage_path($repo->get_branch_tip('refs/heads/main'))), 'COW Git GC keeps reachable branch tip');
+$orphan_blob = $repo->add_object('blob', "orphan after corruption\n");
+$orphan_path = $git . '/' . $repo->get_storage_path($orphan_blob);
+$main_tip_path = $git . '/' . $repo->get_storage_path($repo->get_branch_tip('refs/heads/main'));
+unlink($main_tip_path);
+$failed = false;
+try {
+    cow_git_prune_unreachable_objects($repo, $git);
+} catch (Throwable $e) {
+    $failed = true;
+}
+assert_true($failed, 'COW Git GC aborts when a reachable commit is missing');
+assert_true(is_file($orphan_path), 'failed COW Git GC leaves unreachable objects untouched');
+cow_git_remove_tree($tmp);
+
+$tmp = sys_get_temp_dir() . '/forkpress-cow-git-delete-gc-' . getmypid() . '-' . bin2hex(random_bytes(4));
+$branches = $tmp . '/branches';
+$git = $tmp . '/git';
+mkdir($branches . '/main', 0777, true);
+mkdir($branches . '/feature', 0777, true);
+file_put_contents($branches . '/main/wp-load.php', "<?php\n");
+file_put_contents($branches . '/feature/wp-load.php', "<?php\n");
+file_put_contents($branches . '/feature/wp-content-feature.txt', "feature-only\n");
+
+$fs = WordPress\Filesystem\LocalFilesystem::create($git);
+$repo = new WordPress\Git\GitRepository($fs, ['default_branch' => 'main']);
+$repo->set_config_value(['user', 'name'], 'ForkPress COW');
+$repo->set_config_value(['user', 'email'], 'forkpress-cow@local');
+cow_git_sync_repository($repo, $branches);
+$feature_tip = $repo->get_branch_tip('refs/heads/feature');
+$feature_tip_path = $git . '/' . $repo->get_storage_path($feature_tip);
+assert_true(is_file($feature_tip_path), 'test setup creates feature branch Git tip');
+$repo->delete_branch('refs/heads/feature');
+cow_git_apply_push_to_branches($repo, $git, $branches, $branches, null, 'file-copy', '', ['feature' => $feature_tip]);
+assert_true(!is_dir($branches . '/feature'), 'Git branch deletion removes materialized COW branch');
+assert_true(!$repo->branch_exists('refs/heads/feature'), 'Git branch deletion leaves no COW Git ref');
+assert_true(!file_exists($feature_tip_path), 'Git branch deletion prunes unreachable COW Git commit object');
 cow_git_remove_tree($tmp);
 
 $tmp = sys_get_temp_dir() . '/forkpress-cow-git-push-resync-' . getmypid() . '-' . bin2hex(random_bytes(4));

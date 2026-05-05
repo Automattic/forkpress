@@ -153,7 +153,9 @@ branch directory, except for private runtime paths such as
 is not removed during Git apply. When apply succeeds, the adapter immediately
 snapshots the branch again so the remote ref matches ForkPress' source of truth.
 This removes pushed `database.sql` edits or other non-exported paths from the Git
-view without waiting for the next fetch.
+view without waiting for the next fetch. The same successful push cleanup prunes
+unreachable loose objects from `.forkpress/cow/git`, so deleted branches and
+force-updated refs do not leave their old Git-only snapshots behind forever.
 If a pushed tree includes `wordpress/wp-config.php`, ForkPress rewrites its
 SQLite path and debug-log constants back to the target branch before that
 snapshot is published.
@@ -200,8 +202,8 @@ Implemented for COW:
 Still future work:
 
 - semantic database merge between branches;
-- content-aware garbage collection beyond ordinary branch deletion and
-  sparsebundle compaction;
+- broader content-aware garbage collection for non-Git COW storage state beyond
+  ordinary branch deletion, COW Git object pruning, and sparsebundle compaction;
 - filesystem-level coordination for direct external writes that bypass the
   ForkPress HTTP server;
 - Windows and Linux COW parity.

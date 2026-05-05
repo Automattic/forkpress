@@ -396,6 +396,11 @@ function cow_git_apply_push_to_branches(
         $pre_receive_refs
     );
     cow_git_sync_repository($repo, $branches_dir);
+    try {
+        cow_git_prune_unreachable_objects($repo, $git_repo_dir);
+    } catch (\Throwable $e) {
+        error_log("COW Git object prune skipped: " . $e->getMessage());
+    }
 }
 
 function cow_git_apply_all_refs_to_branches(
@@ -1202,6 +1207,117 @@ function cow_git_walk_tree(GitRepository $repo, string $tree_hash, string $prefi
             cow_git_walk_tree($repo, $entry->hash, $full_path, $result);
         } else {
             $result[$full_path] = $entry->hash;
+        }
+    }
+}
+
+function cow_git_prune_unreachable_objects(GitRepository $repo, string $git_repo_dir): array {
+    $reachable = cow_git_collect_reachable_objects($repo);
+    $scanned = 0;
+    $deleted = 0;
+    $object_root = rtrim($git_repo_dir, "/\\") . '/objects';
+
+    if (!is_dir($object_root)) {
+        return ['scanned' => 0, 'deleted' => 0, 'kept' => 0];
+    }
+
+    foreach (scandir($object_root) ?: [] as $fanout) {
+        if (!preg_match('/^[0-9a-f]{2}$/', $fanout)) {
+            continue;
+        }
+        $dir = $object_root . '/' . $fanout;
+        if (!is_dir($dir)) {
+            continue;
+        }
+        foreach (scandir($dir) ?: [] as $leaf) {
+            if (!preg_match('/^[0-9a-f]{38}$/', $leaf)) {
+                continue;
+            }
+            $oid = $fanout . $leaf;
+            ++$scanned;
+            if (isset($reachable[$oid])) {
+                continue;
+            }
+            $path = $dir . '/' . $leaf;
+            if (!is_file($path)) {
+                continue;
+            }
+            if (!@unlink($path) && file_exists($path)) {
+                throw new \RuntimeException("failed to prune unreachable COW Git object $oid");
+            }
+            ++$deleted;
+        }
+        @rmdir($dir);
+    }
+
+    return ['scanned' => $scanned, 'deleted' => $deleted, 'kept' => $scanned - $deleted];
+}
+
+function cow_git_collect_reachable_objects(GitRepository $repo): array {
+    $reachable = [];
+    $tips = [];
+    foreach ($repo->list_refs(['refs/heads/']) as $ref => $tip) {
+        if (strncmp($ref, 'refs/heads/', 11) !== 0 || !preg_match('/^[0-9a-f]{40}$/', $tip)) {
+            continue;
+        }
+        $tips[$tip] = true;
+    }
+
+    try {
+        $head = $repo->get_branch_tip('HEAD');
+        if (preg_match('/^[0-9a-f]{40}$/', $head)) {
+            $tips[$head] = true;
+        }
+    } catch (\Throwable $_e) {
+        // A missing HEAD should not keep a valid refs/heads/* graph from being pruned.
+    }
+
+    foreach (array_keys($tips) as $tip) {
+        cow_git_mark_reachable_commit($repo, $tip, $reachable);
+    }
+    return $reachable;
+}
+
+function cow_git_mark_reachable_commit(GitRepository $repo, string $commit_hash, array &$reachable): void {
+    if (Commit::is_null_hash($commit_hash) || isset($reachable[$commit_hash])) {
+        return;
+    }
+    if (!$repo->has_object($commit_hash)) {
+        throw new \RuntimeException("cannot prune COW Git store with missing reachable commit $commit_hash");
+    }
+
+    $reachable[$commit_hash] = true;
+    $commit = $repo->read_object($commit_hash)->as_commit();
+    if (!Commit::is_null_hash($commit->tree)) {
+        cow_git_mark_reachable_tree($repo, $commit->tree, $reachable);
+    }
+    foreach ($commit->parents as $parent) {
+        cow_git_mark_reachable_commit($repo, $parent, $reachable);
+    }
+}
+
+function cow_git_mark_reachable_tree(GitRepository $repo, string $tree_hash, array &$reachable): void {
+    if (Commit::is_null_hash($tree_hash) || isset($reachable[$tree_hash])) {
+        return;
+    }
+    if (!$repo->has_object($tree_hash)) {
+        throw new \RuntimeException("cannot prune COW Git store with missing reachable tree $tree_hash");
+    }
+
+    $reachable[$tree_hash] = true;
+    $tree = $repo->read_object($tree_hash)->as_tree();
+    foreach ($tree->entries as $entry) {
+        $bucket = $entry->get_mode_bucket();
+        if (isset($reachable[$entry->hash]) || $bucket === TreeEntry::FILE_MODE_COMMIT) {
+            continue;
+        }
+        if ($bucket === TreeEntry::FILE_MODE_DIRECTORY) {
+            cow_git_mark_reachable_tree($repo, $entry->hash, $reachable);
+        } else {
+            if (!$repo->has_object($entry->hash)) {
+                throw new \RuntimeException("cannot prune COW Git store with missing reachable object {$entry->hash}");
+            }
+            $reachable[$entry->hash] = true;
         }
     }
 }
