@@ -36,6 +36,9 @@ on_error() {
   dump_if_exists "$TMP/git-delete.out"
   dump_if_exists "$TMP/git-delete-main.out"
   dump_if_exists "$TMP/bad-slash.out"
+  dump_if_exists "$TMP/storage-status-final.out"
+  dump_if_exists "$TMP/storage-compact.out"
+  dump_if_exists "$TMP/storage-status-detached.out"
   if [ -d "$WORK" ]; then
     echo "--- materialized branches ---" >&2
     find "$WORK" -maxdepth 1 -mindepth 1 -type d -print >&2 || true
@@ -295,5 +298,22 @@ test -f "$WORK/cowagent-1/wp-load.php"
 test -f "$WORK/cowagent-2/wp-load.php"
 test -d "$TMP/agents/cowagent-1/wordpress"
 test -d "$TMP/agents/cowagent-2/wordpress"
+
+log_step "storage lifecycle diagnostics"
+"$BIN" storage status --work-dir "$WORK_DIR" > "$TMP/storage-status-final.out"
+grep -F "  public:" "$TMP/storage-status-final.out" >/dev/null
+grep -F "  storage:" "$TMP/storage-status-final.out" >/dev/null
+grep -F "  lock:" "$TMP/storage-status-final.out" >/dev/null
+grep -F "  leftovers:" "$TMP/storage-status-final.out" >/dev/null
+"$BIN" storage compact --work-dir "$WORK_DIR" > "$TMP/storage-compact.out"
+if grep -F 'file_view = "macos-apfs-sparsebundle"' "$WORK_DIR/site.toml" >/dev/null; then
+  grep -F "forkpress: compacted COW sparsebundle" "$TMP/storage-compact.out" >/dev/null
+  "$BIN" storage status --work-dir "$WORK_DIR" > "$TMP/storage-status-detached.out"
+  grep -F "  attached:  no" "$TMP/storage-status-detached.out" >/dev/null
+  grep -F "  branches:  unavailable while sparsebundle is detached" "$TMP/storage-status-detached.out" >/dev/null
+  grep -F "  leftovers: unavailable while sparsebundle is detached" "$TMP/storage-status-detached.out" >/dev/null
+else
+  grep -F "forkpress: storage file view does not use a compactable sparsebundle" "$TMP/storage-compact.out" >/dev/null
+fi
 
 echo "PASS cow materialized strategy e2e"

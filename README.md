@@ -314,6 +314,10 @@ Inspect the selected file view:
 ./forkpress doctor storage
 ```
 
+`storage status` also reports branch count, the public branch root, the physical
+storage root, the COW lifecycle locks, and any leftover staging directories from
+interrupted branch operations.
+
 If a sparsebundle is attached, stop through ForkPress before deleting or moving
 the project:
 
@@ -321,6 +325,17 @@ the project:
 ./forkpress stop
 rm -rf .forkpress main marketing
 ```
+
+On sparsebundle-backed sites, reclaim free space inside the image after branch
+churn:
+
+```bash
+./forkpress storage compact
+```
+
+Compaction stops this site's server, detaches the sparsebundle, runs
+`hdiutil compact`, and leaves storage detached. Run `./forkpress serve` or
+`./forkpress storage mount` to attach it again.
 
 If macOS reports the storage is busy, close terminals or editors inside
 `.forkpress/macos-cow/mount` and run `./forkpress stop` again. Use
@@ -395,7 +410,7 @@ CLI smoke command is hidden behind `FORKPRESS_ENABLE_ZFS_CLI=1`.
   branch back into ForkPress.
 - `forkpress pull` wraps `git pull --rebase --autostash`.
 - `forkpress logs --file wp|php|server|forkpress|gc|all` prints logs.
-- `forkpress storage status|mount|detach` diagnoses or manually manages
+- `forkpress storage status|mount|detach|compact` diagnoses or manually manages
   detachable COW storage.
 - `forkpress doctor storage` probes local filesystem clone support.
 

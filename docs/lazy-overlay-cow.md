@@ -114,8 +114,9 @@ architecture. Known gaps:
 - Sparsebundle detach can still be blocked by terminals, editors, or processes
   holding files open under the mounted path.
 - Linux and Windows do not have macOS COW parity yet.
-- There is no storage garbage collection beyond ordinary branch deletion and
-  filesystem cleanup.
+- There is no content-aware storage garbage collection beyond ordinary branch
+  deletion. Sparsebundle-backed sites can reclaim detached free space with
+  `forkpress storage compact`.
 - `du`, Finder, and disk analyzers can over-count APFS clones unless they report
   unique allocated extents.
 
