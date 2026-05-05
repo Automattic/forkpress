@@ -203,5 +203,39 @@ assert_true(str_contains($git_config, $main_debug), 'push resync exports rewritt
 assert_true(!str_contains($git_config, $feature_debug), 'push resync removes source debug log from Git ref');
 cow_git_remove_tree($tmp);
 
+$tmp = sys_get_temp_dir() . '/forkpress-cow-git-atomic-update-' . getmypid() . '-' . bin2hex(random_bytes(4));
+$branches = $tmp . '/branches';
+$git = $tmp . '/git';
+mkdir($branches . '/main/wp-content', 0777, true);
+file_put_contents($branches . '/main/wp-load.php', "<?php\n");
+file_put_contents($branches . '/main/wp-content/keep.txt', "keep\n");
+file_put_contents($branches . '/main/wp-content/conflict', "original\n");
+
+$fs = WordPress\Filesystem\LocalFilesystem::create($git);
+$repo = new WordPress\Git\GitRepository($fs, ['default_branch' => 'main']);
+$repo->set_config_value(['user', 'name'], 'ForkPress COW');
+$repo->set_config_value(['user', 'email'], 'forkpress-cow@local');
+$nested_blob = $repo->add_object('blob', "nested\n");
+$failed = false;
+try {
+    cow_git_apply_existing_branch_update(
+        $repo,
+        $branches,
+        $branches,
+        'main',
+        ['wp-content/conflict/nested.txt' => $nested_blob],
+        'file-copy',
+        ''
+    );
+} catch (Throwable $e) {
+    $failed = true;
+}
+assert_true($failed, 'existing branch staged update reports path conflict failure');
+assert_same(file_get_contents($branches . '/main/wp-content/conflict'), "original\n", 'failed staged update keeps original conflicting file');
+assert_same(file_get_contents($branches . '/main/wp-content/keep.txt'), "keep\n", 'failed staged update keeps unrelated file');
+assert_true(!file_exists($branches . '/main/wp-content/conflict/nested.txt'), 'failed staged update does not publish nested conflict path');
+assert_same(glob($branches . '/.forkpress-update-*') ?: [], [], 'failed staged update cleans temporary directories');
+cow_git_remove_tree($tmp);
+
 echo "\n=== COW Git server tests: $pass passed, $fail failed ===\n";
 exit($fail ? 1 : 0);

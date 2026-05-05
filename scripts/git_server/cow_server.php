@@ -424,6 +424,9 @@ function cow_git_apply_all_refs_to_branches(
         if ($tip === '' || Commit::is_null_hash($tip)) {
             continue;
         }
+        if (array_key_exists($name, $pre_receive_refs) && $pre_receive_refs[$name] === $tip) {
+            continue;
+        }
 
         $all_files = [];
         cow_git_walk_tree($repo, $repo->read_object($tip)->as_commit()->tree, '', $all_files);
@@ -458,8 +461,15 @@ function cow_git_apply_all_refs_to_branches(
             continue;
         }
 
-        cow_git_apply_wp_files($repo, $branch_root, $wp_files);
-        cow_git_rewrite_wp_config($branch_root, $debug_log);
+        cow_git_apply_existing_branch_update(
+            $repo,
+            $branches_dir,
+            $storage_branches_dir,
+            $name,
+            $wp_files,
+            $file_view,
+            $debug_log
+        );
     }
 }
 
@@ -548,12 +558,16 @@ function cow_git_stage_delete_path(string $path, string $branch, string $label):
 }
 
 function cow_git_delete_backup_path(string $path, string $branch, string $label): string {
+    return cow_git_unique_branch_temp_path(dirname($path), 'delete-' . $label, $branch);
+}
+
+function cow_git_unique_branch_temp_path(string $parent, string $prefix, string $branch): string {
     $safe_branch = preg_replace('/[^A-Za-z0-9_-]/', '-', $branch) ?: 'branch';
     do {
-        $backup = dirname($path) . '/.forkpress-delete-' . $label . '-' . $safe_branch
+        $path = rtrim($parent, "/\\") . '/.forkpress-' . $prefix . '-' . $safe_branch
             . '-' . getmypid() . '-' . bin2hex(random_bytes(4));
-    } while (file_exists($backup) || is_link($backup));
-    return $backup;
+    } while (file_exists($path) || is_link($path));
+    return $path;
 }
 
 function cow_git_restore_staged_branch_deletes(array $staged): void {
@@ -733,6 +747,65 @@ function cow_git_create_branch_for_ref(
     }
 }
 
+function cow_git_apply_existing_branch_update(
+    GitRepository $repo,
+    string $branches_dir,
+    string $storage_branches_dir,
+    string $branch,
+    array $wp_files,
+    string $file_view,
+    string $debug_log
+): void {
+    $public_root = rtrim($branches_dir, "/\\") . '/' . $branch;
+    $storage_root = cow_git_branch_storage_root($storage_branches_dir, $branches_dir, $branch);
+    if (!is_dir($public_root) || !is_dir($storage_root)) {
+        throw new \RuntimeException("target branch '$branch' does not exist");
+    }
+
+    $parent = dirname($storage_root);
+    $stage = cow_git_unique_branch_temp_path($parent, 'update-stage', $branch);
+    $backup = cow_git_unique_branch_temp_path($parent, 'update-backup', $branch);
+    $failed = cow_git_unique_branch_temp_path($parent, 'update-failed', $branch);
+    $moved_to_backup = false;
+    $published_stage = false;
+
+    try {
+        cow_git_clone_branch_tree($storage_root, $stage, $file_view);
+        cow_git_apply_wp_files($repo, $stage, $wp_files);
+        cow_git_rewrite_wp_config_for_root($stage, $public_root, $debug_log);
+
+        if (!@rename($storage_root, $backup)) {
+            throw new \RuntimeException("failed to stage current branch '$branch' for update");
+        }
+        $moved_to_backup = true;
+
+        if (!@rename($stage, $storage_root)) {
+            throw new \RuntimeException("failed to publish staged update for branch '$branch'");
+        }
+        $published_stage = true;
+    } catch (\Throwable $e) {
+        if ($published_stage && (file_exists($storage_root) || is_link($storage_root))) {
+            if (!@rename($storage_root, $failed)) {
+                cow_git_remove_tree($storage_root);
+            }
+        }
+        if (
+            $moved_to_backup
+            && (file_exists($backup) || is_link($backup))
+            && !file_exists($storage_root)
+            && !is_link($storage_root)
+            && !@rename($backup, $storage_root)
+        ) {
+            error_log("ForkPress COW failed to restore branch '$branch' from update backup $backup");
+        }
+        cow_git_remove_tree($failed);
+        cow_git_remove_tree($stage);
+        throw $e;
+    }
+
+    cow_git_remove_tree($backup);
+}
+
 function cow_git_select_source_branch(
     GitRepository $repo,
     string $tip,
@@ -861,14 +934,19 @@ function cow_git_clone_tree_with_platform_tool(string $source, string $dest): bo
 }
 
 function cow_git_rewrite_wp_config(string $branch_root, string $debug_log): void {
-    $config_path = rtrim($branch_root, "/\\") . '/wp-config.php';
+    cow_git_rewrite_wp_config_for_root($branch_root, $branch_root, $debug_log);
+}
+
+function cow_git_rewrite_wp_config_for_root(string $config_root, string $runtime_root, string $debug_log): void {
+    $config_path = rtrim($config_root, "/\\") . '/wp-config.php';
     if (!is_file($config_path)) {
         return;
     }
-    $db_dir = rtrim($branch_root, "/\\") . '/wp-content/database';
+    $config_db_dir = rtrim($config_root, "/\\") . '/wp-content/database';
+    $db_dir = rtrim($runtime_root, "/\\") . '/wp-content/database';
     $db_file = '.ht.sqlite';
     $db_path = $db_dir . '/' . $db_file;
-    cow_git_mkdir($db_dir);
+    cow_git_mkdir($config_db_dir);
 
     $config = file_get_contents($config_path);
     if ($config === false) {
@@ -884,7 +962,9 @@ function cow_git_rewrite_wp_config(string $branch_root, string $debug_log): void
     foreach ($replacements as $pattern => $replacement) {
         $config = preg_replace($pattern, $replacement, $config, 1);
     }
-    file_put_contents($config_path, $config);
+    if (file_put_contents($config_path, $config) === false) {
+        throw new \RuntimeException("failed to write $config_path");
+    }
 }
 
 function cow_git_php_single_quoted(string $value): string {
@@ -1017,13 +1097,17 @@ function cow_git_apply_wp_files(GitRepository $repo, string $branch_root, array 
         }
         $parent = dirname($target);
         cow_git_mkdir($parent);
-        file_put_contents($target, $repo->read_object($blob_hash)->consume_all());
+        if (file_put_contents($target, $repo->read_object($blob_hash)->consume_all()) === false) {
+            throw new \RuntimeException("failed to write $target");
+        }
     }
 
     $current = cow_git_collect_branch_files($branch_root);
     foreach ($current as $rel => $path) {
         if (!isset($wp_files[$rel]) && is_file($path)) {
-            unlink($path);
+            if (!unlink($path)) {
+                throw new \RuntimeException("failed to remove $path");
+            }
         }
     }
     cow_git_remove_empty_dirs($branch_root);
@@ -1246,7 +1330,7 @@ function cow_git_mkdir(string $path): void {
     if ($path === '' || is_dir($path)) {
         return;
     }
-    if (!mkdir($path, 0755, true) && !is_dir($path)) {
+    if (!@mkdir($path, 0755, true) && !is_dir($path)) {
         throw new \RuntimeException("failed to create directory $path");
     }
 }
