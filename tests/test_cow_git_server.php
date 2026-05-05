@@ -225,12 +225,19 @@ mkdir($branches . '/main/wp-content', 0777, true);
 file_put_contents($branches . '/main/wp-load.php', "<?php\n");
 file_put_contents($branches . '/main/wp-content/keep.txt', "keep\n");
 file_put_contents($branches . '/main/wp-content/conflict', "original\n");
+mkdir($branches . '/main/wp-content/dir-to-file', 0777, true);
+file_put_contents($branches . '/main/wp-content/dir-to-file/old.txt', "old\n");
+$external = $tmp . '/external';
+mkdir($external . '/linked-dir', 0777, true);
+file_put_contents($external . '/linked-file.txt', "external file\n");
+file_put_contents($external . '/linked-dir/old.txt', "external dir\n");
+$symlink_replacement_supported = @symlink($external . '/linked-file.txt', $branches . '/main/wp-content/link-file')
+    && @symlink($external . '/linked-dir', $branches . '/main/wp-content/link-parent');
 
 $fs = WordPress\Filesystem\LocalFilesystem::create($git);
 $repo = new WordPress\Git\GitRepository($fs, ['default_branch' => 'main']);
 $repo->set_config_value(['user', 'name'], 'ForkPress COW');
 $repo->set_config_value(['user', 'email'], 'forkpress-cow@local');
-$nested_blob = $repo->add_object('blob', "nested\n");
 $failed = false;
 try {
     cow_git_apply_existing_branch_update(
@@ -238,18 +245,59 @@ try {
         $branches,
         $branches,
         'main',
-        ['wp-content/conflict/nested.txt' => $nested_blob],
+        ['wp-content/missing-object.txt' => str_repeat('f', 40)],
         'file-copy',
         ''
     );
 } catch (Throwable $e) {
     $failed = true;
 }
-assert_true($failed, 'existing branch staged update reports path conflict failure');
-assert_same(file_get_contents($branches . '/main/wp-content/conflict'), "original\n", 'failed staged update keeps original conflicting file');
+assert_true($failed, 'existing branch staged update reports apply failure');
+assert_same(file_get_contents($branches . '/main/wp-content/conflict'), "original\n", 'failed staged update keeps original file');
 assert_same(file_get_contents($branches . '/main/wp-content/keep.txt'), "keep\n", 'failed staged update keeps unrelated file');
-assert_true(!file_exists($branches . '/main/wp-content/conflict/nested.txt'), 'failed staged update does not publish nested conflict path');
+assert_true(!file_exists($branches . '/main/wp-content/missing-object.txt'), 'failed staged update does not publish failed write path');
 assert_same(glob($branches . '/.forkpress-update-*') ?: [], [], 'failed staged update cleans temporary directories');
+
+$wp_load_blob = $repo->add_object('blob', "<?php\n");
+$keep_blob = $repo->add_object('blob', "keep\n");
+$nested_blob = $repo->add_object('blob', "nested\n");
+$flat_blob = $repo->add_object('blob', "flat\n");
+$link_file_blob = $repo->add_object('blob', "real file\n");
+$link_nested_blob = $repo->add_object('blob', "real nested\n");
+$replacement_files = [
+    'wp-load.php' => $wp_load_blob,
+    'wp-content/keep.txt' => $keep_blob,
+    'wp-content/conflict/nested.txt' => $nested_blob,
+    'wp-content/dir-to-file' => $flat_blob,
+];
+if ($symlink_replacement_supported) {
+    $replacement_files['wp-content/link-file'] = $link_file_blob;
+    $replacement_files['wp-content/link-parent/nested.txt'] = $link_nested_blob;
+}
+cow_git_apply_existing_branch_update(
+    $repo,
+    $branches,
+    $branches,
+    'main',
+    $replacement_files,
+    'file-copy',
+    ''
+);
+assert_same(file_get_contents($branches . '/main/wp-content/conflict/nested.txt'), "nested\n", 'existing branch update replaces file with directory');
+assert_same(file_get_contents($branches . '/main/wp-content/dir-to-file'), "flat\n", 'existing branch update replaces directory with file');
+assert_true(!file_exists($branches . '/main/wp-content/dir-to-file/old.txt'), 'directory-to-file replacement removes old child file');
+if ($symlink_replacement_supported) {
+    assert_true(!is_link($branches . '/main/wp-content/link-file'), 'existing branch update replaces symlinked file with real file');
+    assert_same(file_get_contents($branches . '/main/wp-content/link-file'), "real file\n", 'symlinked file replacement writes branch-local file');
+    assert_same(file_get_contents($external . '/linked-file.txt'), "external file\n", 'symlinked file replacement leaves external target unchanged');
+    assert_true(!is_link($branches . '/main/wp-content/link-parent'), 'existing branch update replaces symlinked parent with real directory');
+    assert_same(file_get_contents($branches . '/main/wp-content/link-parent/nested.txt'), "real nested\n", 'symlinked parent replacement writes branch-local nested file');
+    assert_same(file_get_contents($external . '/linked-dir/old.txt'), "external dir\n", 'symlinked parent replacement leaves external directory unchanged');
+} else {
+    echo "  SKIP: symlink replacement test\n";
+}
+assert_same(file_get_contents($branches . '/main/wp-content/keep.txt'), "keep\n", 'path replacement update keeps unrelated file');
+assert_same(glob($branches . '/.forkpress-update-*') ?: [], [], 'successful staged update cleans temporary directories');
 cow_git_remove_tree($tmp);
 
 echo "\n=== COW Git server tests: $pass passed, $fail failed ===\n";
