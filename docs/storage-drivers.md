@@ -138,10 +138,11 @@ After a push, the adapter applies the pushed `wordpress/` tree to the target
 branch directory. Database files under `wp-content/database/.ht.sqlite*` are
 never exported through Git and are not removed during Git apply.
 
-New branches should be created through `forkpress branch create` or
-`forkpress agents`, not by pushing an arbitrary new Git ref. The CLI path can
-select APFS clonefile or sparsebundle-backed storage before the branch becomes
-visible to Git.
+When a push creates a new Git ref, the adapter materializes the matching COW
+branch before applying the pushed `wordpress/` tree. It chooses the closest
+existing ForkPress branch from Git history, clones that branch using the
+selected file view, then writes only files whose blob hash differs from the
+pushed tree so unchanged APFS clones keep sharing extents.
 
 ## Branch Operations
 

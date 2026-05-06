@@ -4672,6 +4672,14 @@ fn start_cow_php_server(
     args: &StartArgs,
     workers: usize,
 ) -> Result<ChildGuard> {
+    let file_view = read_site_manifest(layout)?
+        .and_then(|manifest| manifest.file_view)
+        .unwrap_or(FileViewStrategy::Copy);
+    let storage_branches_dir = match file_view {
+        FileViewStrategy::MacosApfsSparsebundle => layout.macos_cow_branches_dir.clone(),
+        FileViewStrategy::Reflink | FileViewStrategy::Copy => layout.cow_branches_dir.clone(),
+    };
+
     let log = OpenOptions::new()
         .create(true)
         .append(true)
@@ -4696,8 +4704,11 @@ fn start_cow_php_server(
         .env("FORKPRESS_BRANCHES_DIR", &layout.cow_branches_dir)
         .env("FORKPRESS_COW_DIR", &layout.cow_dir)
         .env("FORKPRESS_COW_BRANCHES_DIR", &layout.cow_branches_dir)
+        .env("FORKPRESS_COW_STORAGE_BRANCHES_DIR", &storage_branches_dir)
         .env("FORKPRESS_COW_GIT_DIR", &layout.cow_git_dir)
+        .env("FORKPRESS_COW_FILE_VIEW", file_view.as_str())
         .env("FORKPRESS_BRANCH_LIST", &layout.cow_branch_list)
+        .env("FORKPRESS_DEBUG_LOG", &layout.debug_log)
         .env("FORKPRESS_PLAIN_STRATEGY", "cow")
         .env("FORKPRESS_ROOT_HOST", &args.root_host)
         .stdout(Stdio::from(log))

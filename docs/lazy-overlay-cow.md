@@ -103,9 +103,8 @@ architecture. Known gaps:
 - There is no semantic database merge between branches. Each branch has a
   branch-local SQLite file, and Git exports `database.sql` as a read-only
   snapshot.
-- Git cannot yet create new COW branches by pushing new refs. The CLI creates
-  branches first so ForkPress can choose APFS clonefile or sparsebundle-backed
-  storage before the branch becomes visible.
+- Git-created COW branches now work for simple branch pushes, but branch
+  creation is still materialized APFS COW rather than lazy namespace COW.
 - Branch rollback/reset should become one operation that handles files and the
   branch-local database together.
 - Long-running branch operations need stronger coordination with active
