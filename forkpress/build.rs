@@ -61,24 +61,32 @@ fn main() -> Result<()> {
         bail!("missing {} (required for runtime bundle)", path.display());
     }
 
-    println!("cargo:rerun-if-changed={}", dist_dir.display());
     for rel in [
-        "scripts",
-        "sql",
         "vendor",
         "wp-plugin",
-        "runtime/router.php",
         "runtime/router_cow.php",
-        "runtime/router_cas.php",
-        "runtime/bootstrap_wp.php",
         "runtime/bootstrap_cow_wp.php",
-        "runtime/bootstrap_cas_wp.php",
-        "runtime/managed_wp_files.php",
-        "runtime/refresh_wp_files.php",
         "runtime/wp.zip",
+        "scripts/git_server/autoload.php",
+        "scripts/git_server/cow_server.php",
     ] {
         println!("cargo:rerun-if-changed={}", repo_root.join(rel).display());
     }
+    if dev_experiments {
+        for rel in [
+            "scripts",
+            "sql",
+            "runtime/router.php",
+            "runtime/router_cas.php",
+            "runtime/bootstrap_wp.php",
+            "runtime/bootstrap_cas_wp.php",
+            "runtime/managed_wp_files.php",
+            "runtime/refresh_wp_files.php",
+        ] {
+            println!("cargo:rerun-if-changed={}", repo_root.join(rel).display());
+        }
+    }
+    println!("cargo:rerun-if-changed={}", dist_dir.display());
 
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
     let bundle_path = out_dir.join("forkpress-runtime.tar.gz");
@@ -392,7 +400,6 @@ fn build_bundle(
     let encoder = GzEncoder::new(file, Compression::default());
     let mut tar = Builder::new(encoder);
 
-    add_tree(&mut tar, repo_root, "sql")?;
     add_tree(&mut tar, repo_root, "vendor")?;
     add_tree(&mut tar, repo_root, "wp-plugin")?;
     add_file(&mut tar, repo_root, "runtime/router_cow.php")?;
@@ -401,6 +408,7 @@ fn build_bundle(
 
     if dev_experiments {
         add_tree(&mut tar, repo_root, "scripts")?;
+        add_tree(&mut tar, repo_root, "sql")?;
         add_file(&mut tar, repo_root, "runtime/router.php")?;
         add_file(&mut tar, repo_root, "runtime/router_cas.php")?;
         add_file(&mut tar, repo_root, "runtime/bootstrap_wp.php")?;

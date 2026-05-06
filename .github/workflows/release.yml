@@ -7,13 +7,13 @@ on:
   pull_request:
     paths:
       - 'forkpress/**'
-      - 'ext/**'
-      - 'runtime/**'
-      - 'scripts/**'
-      - 'sql/**'
+      - 'runtime/router_cow.php'
+      - 'runtime/bootstrap_cow_wp.php'
+      - 'runtime/wp.zip'
+      - 'scripts/build-dist.sh'
+      - 'scripts/git_server/**'
       - 'wp-plugin/**'
       - 'vendor/**'
-      - 'scripts/build-dist.sh'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/release.yml'
