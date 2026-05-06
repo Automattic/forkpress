@@ -28,8 +28,20 @@ fi
 # BUILD_DIR and DIST_DIR can be overridden to isolate per-target state
 # (e.g. running cross-target builds back-to-back, or from inside a container
 # that should not scribble on the host's .build/).
-DIST_DIR="${FORKPRESS_DIST_DIR:-$REPO_ROOT/dist/$TRIPLE}"
-BUILD_DIR="${FORKPRESS_BUILD_DIR:-$REPO_ROOT/.build/$TRIPLE}"
+PROFILE="${FORKPRESS_RUNTIME_PROFILE:-production}"
+case "$PROFILE" in
+  production|dev) ;;
+  *) echo "unsupported FORKPRESS_RUNTIME_PROFILE: $PROFILE" >&2; exit 1 ;;
+esac
+
+if [ "$PROFILE" = "dev" ]; then
+  DIST_NAME="$TRIPLE-dev"
+else
+  DIST_NAME="$TRIPLE"
+fi
+
+DIST_DIR="${FORKPRESS_DIST_DIR:-$REPO_ROOT/dist/$DIST_NAME}"
+BUILD_DIR="${FORKPRESS_BUILD_DIR:-$REPO_ROOT/.build/$DIST_NAME}"
 SPC_DIR="$BUILD_DIR/static-php-cli"
 CAS_TARGET_DIR="$BUILD_DIR/cas-ffi-target"
 CAS_LIB_DIR="$CAS_TARGET_DIR/$TRIPLE/release"
@@ -44,31 +56,37 @@ EXTENSIONS="bcmath,ctype,curl,dom,exif,fileinfo,filter,mbstring,openssl,pcntl,pd
 
 mkdir -p "$DIST_DIR/bin"
 
-echo "==> Building Rust CAS static library for PHP branchfs"
-cargo build --release --target "$TRIPLE" -p forkpress-cas-ffi --target-dir "$CAS_TARGET_DIR"
-CAS_STATIC_LIB="$CAS_LIB_DIR/libforkpress_cas_ffi.a"
-if [ ! -f "$CAS_STATIC_LIB" ]; then
-  echo "ERROR: expected CAS static library was not built: $CAS_STATIC_LIB" >&2
-  exit 1
+if [ "$PROFILE" = "dev" ]; then
+  echo "==> Building Rust CAS static library for experimental PHP branchfs"
+  cargo build --release --target "$TRIPLE" -p forkpress-cas-ffi --target-dir "$CAS_TARGET_DIR"
+  CAS_STATIC_LIB="$CAS_LIB_DIR/libforkpress_cas_ffi.a"
+  if [ ! -f "$CAS_STATIC_LIB" ]; then
+    echo "ERROR: expected CAS static library was not built: $CAS_STATIC_LIB" >&2
+    exit 1
+  fi
+  export FORKPRESS_CAS_LIB_DIR="$CAS_LIB_DIR"
+  export SPC_EXTRA_LIBS="${SPC_EXTRA_LIBS:-} $CAS_STATIC_LIB"
 fi
-export FORKPRESS_CAS_LIB_DIR="$CAS_LIB_DIR"
-export SPC_EXTRA_LIBS="${SPC_EXTRA_LIBS:-} $CAS_STATIC_LIB"
 
 # --- 1. Static PHP via static-php-cli --------------------------------------
-# Build branchfs directly into the php binary as a builtin extension.
-#
-# On fully-static Linux PHP (musl), dlopen does not work, so there's no way
-# to load an external branchfs.so at runtime. Rather than maintain two
-# separate integration paths (dylib load on mac, builtin on Linux), we build
-# branchfs into PHP itself on every platform via static-php-cli's patch hook
-# (scripts/spc-patch-branchfs.php). The php binary thereby carries branchfs
-# natively — no `-d extension=...` flag, no separate .so in the dist/ layout.
+# Production builds a plain static PHP CLI for the materialized COW runtime.
+# The dev profile additionally builds branchfs into PHP as a builtin extension
+# because fully-static Linux PHP cannot dlopen an external branchfs.so.
 
 NEED_PHP_BUILD=1
 if [ -x "$SPC_DIR/buildroot/bin/php" ]; then
-  if "$SPC_DIR/buildroot/bin/php" -r 'exit(extension_loaded("branchfs") && function_exists("branchfs_set_cas_store") ? 0 : 1);' >/dev/null 2>&1; then
+  if [ "$PROFILE" = "dev" ]; then
+    PHP_READY_CHECK='exit(extension_loaded("branchfs") && function_exists("branchfs_set_cas_store") ? 0 : 1);'
+  else
+    PHP_READY_CHECK='exit(extension_loaded("branchfs") ? 1 : 0);'
+  fi
+  if "$SPC_DIR/buildroot/bin/php" -r "$PHP_READY_CHECK" >/dev/null 2>&1; then
     NEED_PHP_BUILD=0
-    for dep in "$CAS_STATIC_LIB" "$REPO_ROOT/ext/branchfs.c" "$REPO_ROOT/ext/branchfs.h" "$REPO_ROOT/scripts/spc-patch-branchfs.php"; do
+    deps=( "$REPO_ROOT/scripts/build-dist.sh" )
+    if [ "$PROFILE" = "dev" ]; then
+      deps+=( "$CAS_STATIC_LIB" "$REPO_ROOT/ext/branchfs.c" "$REPO_ROOT/ext/branchfs.h" "$REPO_ROOT/scripts/spc-patch-branchfs.php" )
+    fi
+    for dep in "${deps[@]}"; do
       if [ "$dep" -nt "$SPC_DIR/buildroot/bin/php" ]; then
         NEED_PHP_BUILD=1
         break
@@ -117,34 +135,45 @@ if [ "$NEED_PHP_BUILD" = "1" ]; then
   "${SPC_RUN[@]+"${SPC_RUN[@]}"}" ./bin/spc doctor --auto-fix
   "${SPC_RUN[@]+"${SPC_RUN[@]}"}" ./bin/spc download --for-extensions="$EXTENSIONS" --with-php=8.3
 
-  # Register branchfs as a builtin extension in spc's ext.json so its
-  # --enable-branchfs flag is passed to PHP's configure.
-  php -r '
+  if [ "$PROFILE" = "dev" ]; then
+    # Register branchfs as a builtin extension in spc's ext.json so its
+    # --enable-branchfs flag is passed to PHP's configure.
+    php -r '
 $p = "config/ext.json";
 $c = json_decode(file_get_contents($p), true);
 $c["branchfs"] = ["type" => "builtin"];
 file_put_contents($p, json_encode($c, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
 '
 
-  # The patch script injects branchfs source into php-src/ext/branchfs/ and
-  # re-runs ./buildconf --force so the new extension is visible to configure.
-  # Using the hook (rather than manual pre-extraction) is robust against spc
-  # re-extracting php-src during the build phase.
-  "${SPC_RUN[@]+"${SPC_RUN[@]}"}" ./bin/spc build \
-    --with-added-patch="$REPO_ROOT/scripts/spc-patch-branchfs.php" \
-    "$EXTENSIONS,branchfs" --build-cli
+    # The patch script injects branchfs source into php-src/ext/branchfs/ and
+    # re-runs ./buildconf --force so the new extension is visible to configure.
+    # Using the hook (rather than manual pre-extraction) is robust against spc
+    # re-extracting php-src during the build phase.
+    "${SPC_RUN[@]+"${SPC_RUN[@]}"}" ./bin/spc build \
+      --with-added-patch="$REPO_ROOT/scripts/spc-patch-branchfs.php" \
+      "$EXTENSIONS,branchfs" --build-cli
+  else
+    "${SPC_RUN[@]+"${SPC_RUN[@]}"}" ./bin/spc build "$EXTENSIONS" --build-cli
+  fi
   cd "$REPO_ROOT"
 fi
 
 install -m 0755 "$SPC_DIR/buildroot/bin/php" "$DIST_DIR/bin/php"
 
-# Sanity-check that branchfs is actually compiled into the php binary.
+# Sanity-check that the PHP runtime matches the selected profile.
 _php_modules=$("$DIST_DIR/bin/php" -m 2>&1 || true)
-if ! printf '%s\n' "$_php_modules" | grep -qi '^branchfs$'; then
-  echo "ERROR: branchfs is not a loaded extension in the built php binary." >&2
-  echo "       php -m output:" >&2
-  printf '%s\n' "$_php_modules" | sed 's/^/         /' >&2
-  exit 1
+if [ "$PROFILE" = "dev" ]; then
+  if ! printf '%s\n' "$_php_modules" | grep -qi '^branchfs$'; then
+    echo "ERROR: branchfs is not a loaded extension in the dev PHP binary." >&2
+    echo "       php -m output:" >&2
+    printf '%s\n' "$_php_modules" | sed 's/^/         /' >&2
+    exit 1
+  fi
+else
+  if printf '%s\n' "$_php_modules" | grep -qi '^branchfs$'; then
+    echo "ERROR: production PHP binary unexpectedly includes experimental branchfs." >&2
+    exit 1
+  fi
 fi
 
 # --- 2. Ad-hoc codesign (Apple Silicon refuses unsigned ARM64 binaries) ----
@@ -154,7 +183,7 @@ if [ "$UNAME_S" = "Darwin" ]; then
 fi
 
 echo
-echo "dist/$TRIPLE/ ready:"
+echo "dist/$DIST_NAME/ ready:"
 ls -lh "$DIST_DIR/bin/php"
 echo
 echo "Next: cargo build --release"

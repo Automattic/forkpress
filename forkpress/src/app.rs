@@ -15,7 +15,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zip::ZipArchive;
 
+#[cfg(feature = "dev-experiments")]
 use forkpress_cas_store as cas_store;
+#[cfg(feature = "dev-experiments")]
 mod zfs_engine;
 
 const RUNTIME_BUNDLE: &[u8] = include_bytes!(env!("FORKPRESS_RUNTIME_BUNDLE"));
@@ -69,6 +71,7 @@ enum Commands {
     /// Alias for `branch`.
     Branchctl(BranchPassthrough),
     /// Manage authentication users (add/list/remove/verify/auth-enabled).
+    #[cfg(feature = "dev-experiments")]
     User(UserPassthrough),
     /// Show WordPress, PHP, server, and maintenance logs.
     Logs(LogsArgs),
@@ -77,12 +80,16 @@ enum Commands {
     /// Inspect, mount, and detach mount-backed site storage.
     Storage(StorageArgs),
     /// Consistent hot-copy of a running .fp file via SQLite VACUUM INTO.
+    #[cfg(feature = "dev-experiments")]
     Backup(BackupArgs),
     /// Write a .fp file to a portable directory tree (files + SQL + manifest).
+    #[cfg(feature = "dev-experiments")]
     Export(ExportArgs),
     /// Rebuild a .fp from a directory tree produced by `forkpress export`.
+    #[cfg(feature = "dev-experiments")]
     Import(ImportArgs),
     /// Inspect and smoke-test the embedded ZFS engine.
+    #[cfg(feature = "dev-experiments")]
     #[command(hide = true)]
     Zfs(ZfsArgs),
 }
@@ -94,6 +101,7 @@ struct InitArgs {
 
     /// Storage strategy for this site. Existing sites keep their initialized
     /// strategy; this flag is only used by `forkpress init`.
+    #[cfg(feature = "dev-experiments")]
     #[arg(long, value_enum, default_value_t = default_storage_strategy())]
     strategy: StorageStrategy,
 
@@ -311,10 +319,7 @@ enum LogSelection {
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 enum StorageStrategy {
-    /// Current single-file SQLite store: BranchFS files plus COW WordPress DB views.
-    #[value(alias = "sqlite", alias = "sqlite-cow")]
-    Branchfs,
-    /// Experimental materialized COW store: normal branch directories with COW file views.
+    /// Materialized COW store: normal branch directories with COW file views.
     #[value(
         name = "cow",
         alias = "zfs",
@@ -323,7 +328,12 @@ enum StorageStrategy {
         alias = "materialized-cow"
     )]
     Cow,
+    /// Experimental single-file SQLite store: BranchFS files plus COW WordPress DB views.
+    #[cfg(feature = "dev-experiments")]
+    #[value(alias = "sqlite", alias = "sqlite-cow")]
+    Branchfs,
     /// Experimental Redb-backed content-addressed file store with branch manifests.
+    #[cfg(feature = "dev-experiments")]
     #[value(alias = "redb", alias = "cas-redb")]
     Cas,
 }
@@ -364,36 +374,45 @@ impl FileViewStrategy {
 impl StorageStrategy {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Branchfs => "branchfs",
             Self::Cow => "cow",
+            #[cfg(feature = "dev-experiments")]
+            Self::Branchfs => "branchfs",
+            #[cfg(feature = "dev-experiments")]
             Self::Cas => "cas",
         }
     }
 
+    #[cfg(feature = "dev-experiments")]
     fn display_name(self) -> &'static str {
         match self {
-            Self::Branchfs => "branchfs/sqlite",
             Self::Cow => "cow/materialized",
+            #[cfg(feature = "dev-experiments")]
+            Self::Branchfs => "branchfs/sqlite",
+            #[cfg(feature = "dev-experiments")]
             Self::Cas => "cas/redb",
         }
     }
 
     fn from_manifest_value(value: &str) -> Result<Self> {
         match value.trim() {
-            "branchfs" | "sqlite" | "sqlite-cow" => Ok(Self::Branchfs),
             "cow" | "zfs" | "mac-cow" | "materialized" | "materialized-cow" => Ok(Self::Cow),
+            #[cfg(feature = "dev-experiments")]
+            "branchfs" | "sqlite" | "sqlite-cow" => Ok(Self::Branchfs),
+            #[cfg(feature = "dev-experiments")]
             "cas" | "redb" | "cas-redb" => Ok(Self::Cas),
+            #[cfg(not(feature = "dev-experiments"))]
+            "branchfs" | "sqlite" | "sqlite-cow" | "cas" | "redb" | "cas-redb" => bail!(
+                "storage strategy \"{}\" is experimental; use forkpress-dev to open this site",
+                value.trim()
+            ),
             other => bail!("unknown storage strategy in site manifest: {other}"),
         }
     }
 }
 
+#[cfg(feature = "dev-experiments")]
 fn default_storage_strategy() -> StorageStrategy {
-    if cfg!(target_os = "macos") {
-        StorageStrategy::Cow
-    } else {
-        StorageStrategy::Branchfs
-    }
+    StorageStrategy::Cow
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -436,7 +455,7 @@ impl SiteManifest {
         }
 
         Ok(Self {
-            strategy: strategy.unwrap_or(StorageStrategy::Branchfs),
+            strategy: strategy.unwrap_or(StorageStrategy::Cow),
             file_view,
         })
     }
@@ -566,6 +585,7 @@ struct StartArgs {
     /// Accepts `<N>s`, `<N>m`, or `<N>h` (e.g. `--gc-interval 1h`,
     /// `--gc-interval 300s`). Omit, pass `0`, or pass an invalid value to
     /// disable. Inline GC on branch delete still runs regardless.
+    #[cfg(feature = "dev-experiments")]
     #[arg(long)]
     gc_interval: Option<String>,
 
@@ -622,6 +642,7 @@ struct ServerStopArgs {
 /// zero (the caller treats `None` as "feature disabled", so `--gc-interval 0`
 /// is equivalent to not passing the flag). Compound forms like `1h30m` are
 /// NOT supported — the user-facing docs promise only a single-unit suffix.
+#[cfg(feature = "dev-experiments")]
 fn parse_duration(s: &str) -> Option<Duration> {
     let s = s.trim();
     if s.is_empty() {
@@ -648,7 +669,7 @@ fn parse_duration(s: &str) -> Option<Duration> {
     Some(Duration::from_secs(total))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "dev-experiments"))]
 mod duration_tests {
     use super::*;
 
@@ -725,10 +746,15 @@ struct Layout {
     macos_cow_mount: PathBuf,
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     macos_cow_branches_dir: PathBuf,
+    #[cfg(feature = "dev-experiments")]
     cas_dir: PathBuf,
+    #[cfg(feature = "dev-experiments")]
     cas_store: PathBuf,
+    #[cfg(feature = "dev-experiments")]
     cas_wp_root: PathBuf,
+    #[cfg(feature = "dev-experiments")]
     cas_branches_dir: PathBuf,
+    #[cfg(feature = "dev-experiments")]
     cas_branch_list: PathBuf,
     wp_root: PathBuf,
     debug_log: PathBuf,
@@ -737,7 +763,9 @@ struct Layout {
     forkpress_server_log: PathBuf,
     server_pid_file: PathBuf,
     runtime_ready_marker: PathBuf,
+    #[cfg(feature = "dev-experiments")]
     bootstrap_marker: PathBuf,
+    #[cfg(feature = "dev-experiments")]
     managed_files_marker: PathBuf,
 }
 
@@ -824,7 +852,7 @@ impl Drop for ChildGuard {
     }
 }
 
-fn main() {
+pub(crate) fn main() {
     let code = match run() {
         Ok(code) => code,
         Err(err) => {
@@ -849,13 +877,18 @@ fn run() -> Result<i32> {
         Commands::Push(args) | Commands::Commit(args) => push_command(args),
         Commands::Git(args) => git_command(args),
         Commands::Branch(args) | Commands::Branchctl(args) => branch_command(args),
+        #[cfg(feature = "dev-experiments")]
         Commands::User(args) => user_command(args),
         Commands::Logs(args) => logs_command(args),
         Commands::Doctor(args) => doctor_command(args),
         Commands::Storage(args) => storage_command(args),
+        #[cfg(feature = "dev-experiments")]
         Commands::Backup(args) => backup_command(args),
+        #[cfg(feature = "dev-experiments")]
         Commands::Export(args) => export_command(args),
+        #[cfg(feature = "dev-experiments")]
         Commands::Import(args) => import_command(args),
+        #[cfg(feature = "dev-experiments")]
         Commands::Zfs(args) => zfs_command(args),
     }
 }
@@ -900,17 +933,31 @@ fn init_command(args: InitArgs) -> Result<i32> {
         );
     }
 
-    match args.strategy {
+    match init_storage_strategy(&args) {
+        #[cfg(feature = "dev-experiments")]
         StorageStrategy::Branchfs => {
             prepare_runtime(&layout)?;
             let runtime = PortableRuntime::from_layout(&layout);
             init_branchfs_site(args, layout, runtime)
         }
         StorageStrategy::Cow => init_cow_site(args, layout),
+        #[cfg(feature = "dev-experiments")]
         StorageStrategy::Cas => init_cas_site(args, layout),
     }
 }
 
+fn init_storage_strategy(_args: &InitArgs) -> StorageStrategy {
+    #[cfg(feature = "dev-experiments")]
+    {
+        _args.strategy
+    }
+    #[cfg(not(feature = "dev-experiments"))]
+    {
+        StorageStrategy::Cow
+    }
+}
+
+#[cfg(feature = "dev-experiments")]
 fn init_branchfs_site(args: InitArgs, layout: Layout, runtime: PortableRuntime) -> Result<i32> {
     let mut script_args: Vec<std::ffi::OsString> = vec![layout.site_fp.as_os_str().to_owned()];
     if let Some(pw) = &args.admin_password {
@@ -962,6 +1009,7 @@ fn init_cow_site(args: InitArgs, layout: Layout) -> Result<i32> {
     Ok(0)
 }
 
+#[cfg(feature = "dev-experiments")]
 fn init_cas_site(args: InitArgs, layout: Layout) -> Result<i32> {
     prepare_runtime(&layout)?;
     let runtime = PortableRuntime::from_layout(&layout);
@@ -983,6 +1031,7 @@ fn init_cas_site(args: InitArgs, layout: Layout) -> Result<i32> {
     Ok(0)
 }
 
+#[cfg(feature = "dev-experiments")]
 fn user_command(args: UserPassthrough) -> Result<i32> {
     if args.args.is_empty() {
         bail!("user requires a subcommand, e.g. `forkpress user add alice s3cret --role write`");
@@ -1336,6 +1385,7 @@ fn print_macos_cow_storage_status(layout: &Layout) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "dev-experiments")]
 fn backup_command(args: BackupArgs) -> Result<i32> {
     let layout = Layout::new(args.shared.work_dir.clone())?;
     if args.source.is_none() {
@@ -1357,6 +1407,7 @@ fn backup_command(args: BackupArgs) -> Result<i32> {
     Ok(0)
 }
 
+#[cfg(feature = "dev-experiments")]
 fn export_command(args: ExportArgs) -> Result<i32> {
     let layout = Layout::new(args.shared.work_dir.clone())?;
     if args.source.is_none() {
@@ -1378,6 +1429,7 @@ fn export_command(args: ExportArgs) -> Result<i32> {
     Ok(0)
 }
 
+#[cfg(feature = "dev-experiments")]
 fn import_command(args: ImportArgs) -> Result<i32> {
     let layout = Layout::new(args.shared.work_dir.clone())?;
     prepare_runtime(&layout)?;
@@ -1398,6 +1450,7 @@ fn import_command(args: ImportArgs) -> Result<i32> {
     Ok(0)
 }
 
+#[cfg(feature = "dev-experiments")]
 fn zfs_command(args: ZfsArgs) -> Result<i32> {
     if std::env::var_os("FORKPRESS_ENABLE_ZFS_CLI").is_none() {
         bail!(
@@ -1603,6 +1656,7 @@ mod storage_strategy_tests {
     use super::*;
 
     #[test]
+    #[cfg(feature = "dev-experiments")]
     fn manifest_parses_branchfs_and_aliases() {
         let manifest = SiteManifest::parse("version = 1\nstrategy = \"sqlite\"\n").unwrap();
         assert_eq!(manifest.strategy, StorageStrategy::Branchfs);
@@ -1624,6 +1678,17 @@ mod storage_strategy_tests {
     }
 
     #[test]
+    #[cfg(not(feature = "dev-experiments"))]
+    fn production_manifest_rejects_experimental_strategies() {
+        let err = SiteManifest::parse("strategy = \"cas\"\n").unwrap_err();
+        assert!(err.to_string().contains("forkpress-dev"));
+
+        let err = SiteManifest::parse("strategy = \"branchfs\"\n").unwrap_err();
+        assert!(err.to_string().contains("forkpress-dev"));
+    }
+
+    #[test]
+    #[cfg(feature = "dev-experiments")]
     fn cli_accepts_cow_strategy_aliases() {
         for strategy in ["cow", "mac-cow", "zfs"] {
             let cli = Cli::try_parse_from([
@@ -1643,12 +1708,19 @@ mod storage_strategy_tests {
     }
 
     #[test]
+    #[cfg(feature = "dev-experiments")]
     fn cli_init_uses_platform_default_strategy() {
         let cli = Cli::try_parse_from(["forkpress", "init"]).unwrap();
         let Commands::Init(args) = cli.command else {
             panic!("expected init command");
         };
         assert_eq!(args.strategy, default_storage_strategy());
+    }
+
+    #[test]
+    #[cfg(not(feature = "dev-experiments"))]
+    fn production_cli_does_not_expose_strategy_selector() {
+        assert!(Cli::try_parse_from(["forkpress", "init", "--strategy", "cow"]).is_err());
     }
 
     #[test]
@@ -1951,6 +2023,7 @@ mod storage_strategy_tests {
     }
 
     #[test]
+    #[cfg(feature = "dev-experiments")]
     fn manifest_parses_cas() {
         let manifest = SiteManifest::parse("strategy = \"cas\"\n").unwrap();
         assert_eq!(manifest.strategy, StorageStrategy::Cas);
@@ -2069,7 +2142,7 @@ fn start_command(args: StartArgs) -> Result<i32> {
     }
 
     let layout = Layout::new(args.shared.work_dir.clone())?;
-    let strategy = initialized_storage_strategy(&layout)?.unwrap_or(StorageStrategy::Branchfs);
+    let strategy = initialized_storage_strategy(&layout)?.unwrap_or(StorageStrategy::Cow);
     prepare_runtime(&layout)?;
     ensure_ports_available(&args)?;
 
@@ -2077,6 +2150,7 @@ fn start_command(args: StartArgs) -> Result<i32> {
 
     let workers = args.workers.unwrap_or_else(default_worker_count);
     let (mut php, registration) = match strategy {
+        #[cfg(feature = "dev-experiments")]
         StorageStrategy::Branchfs => {
             ensure_bootstrapped(&layout, &runtime, &args)?;
             (start_php_server(&layout, &runtime, &args, workers)?, None)
@@ -2107,6 +2181,7 @@ fn start_command(args: StartArgs) -> Result<i32> {
             drop(_lifecycle_lock);
             (php, Some(registration))
         }
+        #[cfg(feature = "dev-experiments")]
         StorageStrategy::Cas => {
             ensure_cas_bootstrapped(&layout, &runtime, &args)?;
             (
@@ -2131,6 +2206,7 @@ fn start_command(args: StartArgs) -> Result<i32> {
         args.root_host, args.port
     );
     match strategy {
+        #[cfg(feature = "dev-experiments")]
         StorageStrategy::Branchfs => {
             println!(
                 "Git remote: http://{}:{}/site.git",
@@ -2145,6 +2221,7 @@ fn start_command(args: StartArgs) -> Result<i32> {
             );
             println!("DB access:  wp-content/database/.ht.sqlite inside each materialized branch");
         }
+        #[cfg(feature = "dev-experiments")]
         StorageStrategy::Cas => {
             println!("Git remote: not available for cas strategy yet");
             println!("DB access:  .forkpress/cas/branches/<branch>/.ht.sqlite");
@@ -2172,8 +2249,9 @@ fn start_command(args: StartArgs) -> Result<i32> {
     })
     .context("failed to install Ctrl+C handler")?;
 
-    // Optional background GC. Off by default; enabled with --gc-interval.
-    // Inline GC on branch delete runs regardless of this flag.
+    // Optional legacy BranchFS background GC. COW branch deletion and Git
+    // object cleanup run inline and do not use this loop.
+    #[cfg(feature = "dev-experiments")]
     let gc_thread = if let Some(interval_raw) = args.gc_interval.as_deref() {
         match parse_duration(interval_raw) {
             Some(interval) => {
@@ -2197,6 +2275,8 @@ fn start_command(args: StartArgs) -> Result<i32> {
     } else {
         None
     };
+    #[cfg(not(feature = "dev-experiments"))]
+    let gc_thread: Option<std::thread::JoinHandle<()>> = None;
 
     loop {
         if stop.load(Ordering::SeqCst) {
@@ -2230,7 +2310,7 @@ fn start_command(args: StartArgs) -> Result<i32> {
 fn start_background_command(args: StartArgs) -> Result<i32> {
     let layout = Layout::new(args.shared.work_dir.clone())?;
     fs::create_dir_all(&layout.logs_dir)?;
-    let strategy = initialized_storage_strategy(&layout)?.unwrap_or(StorageStrategy::Branchfs);
+    let strategy = initialized_storage_strategy(&layout)?.unwrap_or(StorageStrategy::Cow);
     let _cow_lifecycle_lock = if strategy == StorageStrategy::Cow {
         Some(lock_cow_lifecycle(&layout)?)
     } else {
@@ -2348,6 +2428,7 @@ fn append_start_args(command: &mut Command, args: &StartArgs, layout: &Layout) {
     if let Some(workers) = args.workers {
         command.arg("--workers").arg(workers.to_string());
     }
+    #[cfg(feature = "dev-experiments")]
     if let Some(gc_interval) = &args.gc_interval {
         command.arg("--gc-interval").arg(gc_interval);
     }
@@ -2879,6 +2960,7 @@ fn git_command(args: GitPassthrough) -> Result<i32> {
                 println!("forkpress: branch {branch} ready");
                 return Ok(0);
             }
+            #[cfg(feature = "dev-experiments")]
             StorageStrategy::Cas => {
                 if create_args.auth.user.is_some() {
                     bail!("cas local branch creation does not use --user/--password");
@@ -2887,24 +2969,26 @@ fn git_command(args: GitPassthrough) -> Result<i32> {
                 println!("forkpress: branch {branch} ready");
                 return Ok(0);
             }
-            StorageStrategy::Branchfs => {}
+            #[cfg(feature = "dev-experiments")]
+            StorageStrategy::Branchfs => {
+                if !layout.site_fp.exists() || !layout.bootstrap_marker.exists() {
+                    bail!(
+                        "no bootstrapped site found in {}. Run `forkpress serve` first",
+                        layout.work_dir.display()
+                    );
+                }
+                ensure_branch_exists(
+                    &layout,
+                    &runtime,
+                    &args.shared,
+                    branch,
+                    &create_args.from,
+                    &create_args.auth,
+                )?;
+                println!("forkpress: branch {branch} ready");
+                return Ok(0);
+            }
         }
-        if !layout.site_fp.exists() || !layout.bootstrap_marker.exists() {
-            bail!(
-                "no bootstrapped site found in {}. Run `forkpress serve` first",
-                layout.work_dir.display()
-            );
-        }
-        ensure_branch_exists(
-            &layout,
-            &runtime,
-            &args.shared,
-            branch,
-            &create_args.from,
-            &create_args.auth,
-        )?;
-        println!("forkpress: branch {branch} ready");
-        return Ok(0);
     }
 
     ensure_git_available()?;
@@ -2927,6 +3011,7 @@ impl BranchAuth {
         Ok(())
     }
 
+    #[cfg(feature = "dev-experiments")]
     fn append_to(&self, command: &mut Command) {
         if let (Some(user), Some(password)) = (&self.user, &self.password) {
             command
@@ -2992,6 +3077,7 @@ fn agents_command(args: AgentsArgs) -> Result<i32> {
 
     let layout = Layout::new(args.shared.work_dir.clone())?;
     let strategy = require_initialized_strategy(&layout, "agents")?;
+    #[cfg(feature = "dev-experiments")]
     if strategy == StorageStrategy::Cas {
         bail!("agents is not available for cas strategy yet");
     }
@@ -2999,6 +3085,7 @@ fn agents_command(args: AgentsArgs) -> Result<i32> {
     let runtime = PortableRuntime::from_layout(&layout);
 
     match strategy {
+        #[cfg(feature = "dev-experiments")]
         StorageStrategy::Branchfs => {
             if !layout.site_fp.exists() || !layout.bootstrap_marker.exists() {
                 bail!(
@@ -3020,6 +3107,7 @@ fn agents_command(args: AgentsArgs) -> Result<i32> {
                 );
             }
         }
+        #[cfg(feature = "dev-experiments")]
         StorageStrategy::Cas => unreachable!(),
     }
 
@@ -3043,6 +3131,7 @@ fn agents_command(args: AgentsArgs) -> Result<i32> {
     }
 
     match strategy {
+        #[cfg(feature = "dev-experiments")]
         StorageStrategy::Branchfs => {
             for index in 1..=args.count {
                 let branch = format!("{}-{}", args.prefix, index);
@@ -3057,6 +3146,7 @@ fn agents_command(args: AgentsArgs) -> Result<i32> {
                 ensure_cow_branch_exists(&layout, &runtime, &args.shared, &branch, &args.from)?;
             }
         }
+        #[cfg(feature = "dev-experiments")]
         StorageStrategy::Cas => unreachable!(),
     }
 
@@ -3236,6 +3326,7 @@ fn git_config_is_set(repo: &std::path::Path, key: &str) -> Result<bool> {
 /// `scripts/branchctl.php gc` via the bundled PHP and appends stdout/stderr
 /// to a dedicated log file (separate from php-server.log so one stream's
 /// rotation doesn't clobber the other).
+#[cfg(feature = "dev-experiments")]
 fn run_background_gc(
     stop: Arc<AtomicBool>,
     interval: Duration,
@@ -3263,6 +3354,7 @@ fn run_background_gc(
     }
 }
 
+#[cfg(feature = "dev-experiments")]
 fn run_gc_once(
     layout: &Layout,
     runtime: &PortableRuntime,
@@ -3302,36 +3394,38 @@ fn branch_command(args: BranchPassthrough) -> Result<i32> {
 
     match strategy {
         StorageStrategy::Cow => return cow_branch_command(args, layout, runtime),
+        #[cfg(feature = "dev-experiments")]
         StorageStrategy::Cas => return cas_branch_command(args, layout, runtime),
-        StorageStrategy::Branchfs => {}
+        #[cfg(feature = "dev-experiments")]
+        StorageStrategy::Branchfs => {
+            if !layout.site_fp.exists() || !layout.bootstrap_marker.exists() {
+                bail!(
+                    "no bootstrapped site found in {}. Run `forkpress serve` first",
+                    layout.work_dir.display()
+                );
+            }
+
+            let (root_host, port) = branchctl_url_hint(&layout)?;
+            let mut command = php_base_command(&layout, &runtime, &args.shared);
+            command.arg(layout.runtime_dir.join("scripts/branchctl.php"));
+            for arg in &args.args {
+                command.arg(arg);
+            }
+            command.env("BRANCHFS_DB", &layout.site_fp);
+            command.env("BRANCHFS_SQLITE_WP_DB", &layout.site_fp);
+            command.env("BRANCHFS_ROOT_HOST", &root_host);
+            command.env("PORT", &port);
+            command.env("FORKPRESS_LOCAL_CTL", "1");
+
+            let output = command
+                .output()
+                .context("failed to run branch command via bundled php")?;
+
+            write_filtered_output(&output.stdout, &output.stderr)?;
+
+            Ok(output.status.code().unwrap_or(1))
+        }
     }
-
-    if !layout.site_fp.exists() || !layout.bootstrap_marker.exists() {
-        bail!(
-            "no bootstrapped site found in {}. Run `forkpress serve` first",
-            layout.work_dir.display()
-        );
-    }
-
-    let (root_host, port) = branchctl_url_hint(&layout)?;
-    let mut command = php_base_command(&layout, &runtime, &args.shared);
-    command.arg(layout.runtime_dir.join("scripts/branchctl.php"));
-    for arg in &args.args {
-        command.arg(arg);
-    }
-    command.env("BRANCHFS_DB", &layout.site_fp);
-    command.env("BRANCHFS_SQLITE_WP_DB", &layout.site_fp);
-    command.env("BRANCHFS_ROOT_HOST", &root_host);
-    command.env("PORT", &port);
-    command.env("FORKPRESS_LOCAL_CTL", "1");
-
-    let output = command
-        .output()
-        .context("failed to run branch command via bundled php")?;
-
-    write_filtered_output(&output.stdout, &output.stderr)?;
-
-    Ok(output.status.code().unwrap_or(1))
 }
 
 fn cow_branch_command(
@@ -3414,6 +3508,7 @@ fn cow_branch_command(
     }
 }
 
+#[cfg(feature = "dev-experiments")]
 fn cas_branch_command(
     args: BranchPassthrough,
     layout: Layout,
@@ -3466,6 +3561,7 @@ fn default_git_remote() -> String {
     "http://wp.localhost:18080/site.git".to_string()
 }
 
+#[cfg(feature = "dev-experiments")]
 fn ensure_branch_exists(
     layout: &Layout,
     runtime: &PortableRuntime,
@@ -3578,10 +3674,15 @@ impl Layout {
             macos_cow_image: work_dir.join("macos-cow/branches.sparsebundle"),
             macos_cow_mount: work_dir.join("macos-cow/mount"),
             macos_cow_branches_dir: work_dir.join("macos-cow/mount/branches"),
+            #[cfg(feature = "dev-experiments")]
             cas_dir: work_dir.join("cas"),
+            #[cfg(feature = "dev-experiments")]
             cas_store: work_dir.join("cas/store.redb"),
+            #[cfg(feature = "dev-experiments")]
             cas_wp_root: work_dir.join("cas/wproot"),
+            #[cfg(feature = "dev-experiments")]
             cas_branches_dir: work_dir.join("cas/branches"),
+            #[cfg(feature = "dev-experiments")]
             cas_branch_list: work_dir.join("cas/branches.txt"),
             wp_root: work_dir.join("wproot"),
             debug_log: work_dir.join("logs/wp-debug.log"),
@@ -3590,7 +3691,9 @@ impl Layout {
             forkpress_server_log: work_dir.join("logs/forkpress-server.log"),
             server_pid_file: work_dir.join("server.pid"),
             runtime_ready_marker: work_dir.join("runtime/.forkpress-runtime-ready"),
+            #[cfg(feature = "dev-experiments")]
             bootstrap_marker: work_dir.join(".forkpress-bootstrap-complete"),
+            #[cfg(feature = "dev-experiments")]
             managed_files_marker: work_dir.join(".forkpress-managed-files-version"),
             work_dir,
         })
@@ -3638,7 +3741,13 @@ fn initialized_storage_strategy(layout: &Layout) -> Result<Option<StorageStrateg
     // Back-compat: sites created before the manifest existed are the original
     // BranchFS/SQLite strategy and can be detected from site.fp.
     if layout.site_fp.exists() {
+        #[cfg(feature = "dev-experiments")]
         return Ok(Some(StorageStrategy::Branchfs));
+        #[cfg(not(feature = "dev-experiments"))]
+        bail!(
+            "legacy BranchFS site detected at {}; use forkpress-dev to open experimental or legacy storage",
+            layout.site_fp.display()
+        );
     }
 
     Ok(None)
@@ -3653,6 +3762,7 @@ fn require_initialized_strategy(layout: &Layout, command: &str) -> Result<Storag
     })
 }
 
+#[cfg(feature = "dev-experiments")]
 fn ensure_branchfs_strategy(layout: &Layout, command: &str) -> Result<()> {
     let strategy = require_initialized_strategy(layout, command)?;
     if strategy != StorageStrategy::Branchfs {
@@ -3661,6 +3771,7 @@ fn ensure_branchfs_strategy(layout: &Layout, command: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "dev-experiments")]
 fn bail_strategy_unsupported(command: &str, strategy: StorageStrategy) -> Result<()> {
     bail!(
         "{command} is not implemented for the {} storage strategy yet. This site was initialized with strategy = \"{}\".",
@@ -3724,6 +3835,7 @@ generated from the branch SQLite database and ignored on push.
     })
 }
 
+#[cfg(feature = "dev-experiments")]
 fn write_cas_notes(layout: &Layout) -> Result<()> {
     fs::create_dir_all(&layout.cas_dir)
         .with_context(|| format!("failed to create {}", layout.cas_dir.display()))?;
@@ -3887,6 +3999,7 @@ fn ensure_cow_bootstrapped(
     let file_view = ensure_cow_file_view_ready(layout)?;
     let init_args = InitArgs {
         shared: args.shared.clone(),
+        #[cfg(feature = "dev-experiments")]
         strategy: StorageStrategy::Cow,
         site_title: args.site_title.clone(),
         root_host: args.root_host.clone(),
@@ -4527,6 +4640,7 @@ fn cow_branch_names(layout: &Layout) -> Result<Vec<String>> {
     Ok(names)
 }
 
+#[cfg(feature = "dev-experiments")]
 fn plain_branch_names(branches_dir: &Path) -> Result<Vec<String>> {
     let mut names = Vec::new();
     let Ok(entries) = fs::read_dir(branches_dir) else {
@@ -5099,6 +5213,7 @@ fn cow_stale_operation_entries(layout: &Layout) -> Result<Vec<PathBuf>> {
     Ok(entries)
 }
 
+#[cfg(feature = "dev-experiments")]
 fn ensure_cas_bootstrapped(
     layout: &Layout,
     runtime: &PortableRuntime,
@@ -5117,6 +5232,7 @@ fn ensure_cas_bootstrapped(
     Ok(())
 }
 
+#[cfg(feature = "dev-experiments")]
 fn ensure_cas_main_branch(
     layout: &Layout,
     runtime: &PortableRuntime,
@@ -5157,10 +5273,12 @@ fn ensure_cas_main_branch(
     Ok(())
 }
 
+#[cfg(feature = "dev-experiments")]
 fn cas_branch_root(layout: &Layout, branch: &str) -> PathBuf {
     layout.cas_branches_dir.join(branch)
 }
 
+#[cfg(feature = "dev-experiments")]
 fn install_cas_managed_wp_files(layout: &Layout, branch_root: &Path) -> Result<()> {
     let wp_content = branch_root.join("wp-content");
     fs::create_dir_all(wp_content.join("plugins"))
@@ -5205,6 +5323,7 @@ fn install_cas_managed_wp_files(layout: &Layout, branch_root: &Path) -> Result<(
     })
 }
 
+#[cfg(feature = "dev-experiments")]
 fn run_cas_bootstrap_script(
     layout: &Layout,
     runtime: &PortableRuntime,
@@ -5230,6 +5349,7 @@ fn run_cas_bootstrap_script(
     )
 }
 
+#[cfg(feature = "dev-experiments")]
 fn cas_sqlite_dropin() -> &'static str {
     r#"<?php
 /**
@@ -5255,6 +5375,7 @@ require_once $sqlite_plugin_implementation_folder_path . '/wp-includes/sqlite/db
 "#
 }
 
+#[cfg(feature = "dev-experiments")]
 fn cas_wp_config() -> &'static str {
     r#"<?php
 $forkpress_branch = getenv('FORKPRESS_BRANCH') ?: ($_SERVER['FORKPRESS_BRANCH'] ?? 'main');
@@ -5318,10 +5439,12 @@ require_once ABSPATH . 'wp-settings.php';
 "#
 }
 
+#[cfg(feature = "dev-experiments")]
 fn cas_branch_names(layout: &Layout) -> Result<Vec<String>> {
     plain_branch_names(&layout.cas_branches_dir)
 }
 
+#[cfg(feature = "dev-experiments")]
 fn write_cas_branch_list(layout: &Layout) -> Result<()> {
     fs::create_dir_all(&layout.cas_dir)
         .with_context(|| format!("failed to create {}", layout.cas_dir.display()))?;
@@ -5334,6 +5457,7 @@ fn write_cas_branch_list(layout: &Layout) -> Result<()> {
         .with_context(|| format!("failed to write {}", layout.cas_branch_list.display()))
 }
 
+#[cfg(feature = "dev-experiments")]
 fn create_cas_branch(
     layout: &Layout,
     runtime: &PortableRuntime,
@@ -5529,6 +5653,7 @@ fn try_clone_file(_source: &Path, _dest: &Path) -> Result<()> {
     bail!("platform file clone unsupported")
 }
 
+#[cfg(feature = "dev-experiments")]
 fn ensure_bootstrapped(layout: &Layout, runtime: &PortableRuntime, args: &StartArgs) -> Result<()> {
     write_site_manifest_if_missing(layout, SiteManifest::new(StorageStrategy::Branchfs))?;
 
@@ -5583,10 +5708,12 @@ fn ensure_bootstrapped(layout: &Layout, runtime: &PortableRuntime, args: &StartA
     Ok(())
 }
 
+#[cfg(feature = "dev-experiments")]
 fn managed_files_marker_contents() -> String {
     format!("forkpress-managed-files {RUNTIME_BUNDLE_ID}\n")
 }
 
+#[cfg(feature = "dev-experiments")]
 fn write_managed_files_marker(layout: &Layout) -> Result<()> {
     fs::write(
         &layout.managed_files_marker,
@@ -5595,6 +5722,7 @@ fn write_managed_files_marker(layout: &Layout) -> Result<()> {
     .with_context(|| format!("failed to write {}", layout.managed_files_marker.display()))
 }
 
+#[cfg(feature = "dev-experiments")]
 fn refresh_managed_wp_files_if_needed(
     layout: &Layout,
     runtime: &PortableRuntime,
@@ -5628,6 +5756,7 @@ fn refresh_managed_wp_files_if_needed(
     Ok(())
 }
 
+#[cfg(feature = "dev-experiments")]
 fn run_branchctl_migrations_quiet(
     layout: &Layout,
     runtime: &PortableRuntime,
@@ -5655,6 +5784,7 @@ fn run_branchctl_migrations_quiet(
     Ok(())
 }
 
+#[cfg(feature = "dev-experiments")]
 fn start_php_server(
     layout: &Layout,
     runtime: &PortableRuntime,
@@ -5797,6 +5927,7 @@ fn start_cow_php_server(
     Ok(guard)
 }
 
+#[cfg(feature = "dev-experiments")]
 fn start_cas_php_server(
     layout: &Layout,
     runtime: &PortableRuntime,
@@ -5857,8 +5988,6 @@ fn start_cas_php_server(
 }
 
 fn php_base_command(_layout: &Layout, runtime: &PortableRuntime, shared: &SharedPaths) -> Command {
-    // branchfs is compiled into the php binary as a builtin extension
-    // (see scripts/build-dist.sh), so no -d extension=... flag is needed.
     let mut command = php_command(runtime, shared);
     command
         .arg("-d")

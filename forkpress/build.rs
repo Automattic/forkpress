@@ -16,17 +16,17 @@ fn main() -> Result<()> {
         .parent()
         .context("forkpress crate should live directly under the repo root")?;
     let target = env::var("TARGET").context("TARGET env var missing (set by cargo)")?;
+    let dev_experiments = env::var_os("CARGO_FEATURE_DEV_EXPERIMENTS").is_some();
     println!("cargo:rerun-if-env-changed=FORKPRESS_ENABLE_EMBEDDED_ZFS");
     println!("cargo:rerun-if-env-changed=FORKPRESS_DISABLE_EMBEDDED_ZFS");
 
     if supports_embedded_zfs(&target)
+        && dev_experiments
         && env::var_os("FORKPRESS_ENABLE_EMBEDDED_ZFS").is_some()
         && env::var_os("FORKPRESS_DISABLE_EMBEDDED_ZFS").is_none()
     {
         build_embedded_zfs(repo_root, &target)?;
         println!("cargo:rustc-cfg=forkpress_embedded_zfs");
-    } else {
-        println!("cargo:warning=embedded ZFS engine is disabled for target {target}");
     }
 
     // Allow skipping the dist build entirely for `cargo check` runs:
@@ -39,12 +39,18 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let dist_dir = repo_root.join("dist").join(&target);
+    let dist_name = if dev_experiments {
+        format!("{target}-dev")
+    } else {
+        target.clone()
+    };
+    let dist_dir = repo_root.join("dist").join(&dist_name);
     if !dist_dir.is_dir() {
         bail!(
-            "dist/{target}/ not found at {}.\n\n\
+            "dist/{dist_name}/ not found at {}.\n\n\
              Build the bundled runtime first:\n\n    scripts/build-dist.sh\n\n\
-             This produces a per-target directory containing php and branchfs.so.",
+             For forkpress-dev, use:\n\n    FORKPRESS_RUNTIME_PROFILE=dev scripts/build-dist.sh\n\n\
+             This produces a per-target directory containing php.",
             dist_dir.display()
         );
     }
@@ -76,7 +82,7 @@ fn main() -> Result<()> {
 
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
     let bundle_path = out_dir.join("forkpress-runtime.tar.gz");
-    build_bundle(repo_root, &dist_dir, &bundle_path)?;
+    build_bundle(repo_root, &dist_dir, &bundle_path, dev_experiments)?;
     let bundle_hash = fnv1a_hex(&fs::read(&bundle_path).with_context(|| {
         format!(
             "failed to read generated runtime bundle at {}",
@@ -375,25 +381,36 @@ fn find_tool(candidates: &[&str]) -> String {
     candidates.last().copied().unwrap_or("cc").to_string()
 }
 
-fn build_bundle(repo_root: &Path, dist_dir: &Path, out: &Path) -> Result<()> {
+fn build_bundle(
+    repo_root: &Path,
+    dist_dir: &Path,
+    out: &Path,
+    dev_experiments: bool,
+) -> Result<()> {
     let file = File::create(out)
         .with_context(|| format!("failed to create runtime bundle at {}", out.display()))?;
     let encoder = GzEncoder::new(file, Compression::default());
     let mut tar = Builder::new(encoder);
 
-    add_tree(&mut tar, repo_root, "scripts")?;
     add_tree(&mut tar, repo_root, "sql")?;
     add_tree(&mut tar, repo_root, "vendor")?;
     add_tree(&mut tar, repo_root, "wp-plugin")?;
-    add_file(&mut tar, repo_root, "runtime/router.php")?;
     add_file(&mut tar, repo_root, "runtime/router_cow.php")?;
-    add_file(&mut tar, repo_root, "runtime/router_cas.php")?;
-    add_file(&mut tar, repo_root, "runtime/bootstrap_wp.php")?;
     add_file(&mut tar, repo_root, "runtime/bootstrap_cow_wp.php")?;
-    add_file(&mut tar, repo_root, "runtime/bootstrap_cas_wp.php")?;
-    add_file(&mut tar, repo_root, "runtime/managed_wp_files.php")?;
-    add_file(&mut tar, repo_root, "runtime/refresh_wp_files.php")?;
     add_file(&mut tar, repo_root, "runtime/wp.zip")?;
+
+    if dev_experiments {
+        add_tree(&mut tar, repo_root, "scripts")?;
+        add_file(&mut tar, repo_root, "runtime/router.php")?;
+        add_file(&mut tar, repo_root, "runtime/router_cas.php")?;
+        add_file(&mut tar, repo_root, "runtime/bootstrap_wp.php")?;
+        add_file(&mut tar, repo_root, "runtime/bootstrap_cas_wp.php")?;
+        add_file(&mut tar, repo_root, "runtime/managed_wp_files.php")?;
+        add_file(&mut tar, repo_root, "runtime/refresh_wp_files.php")?;
+    } else {
+        add_file(&mut tar, repo_root, "scripts/git_server/autoload.php")?;
+        add_file(&mut tar, repo_root, "scripts/git_server/cow_server.php")?;
+    }
 
     add_file_as(
         &mut tar,

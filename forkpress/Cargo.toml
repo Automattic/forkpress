@@ -3,13 +3,27 @@ name = "forkpress"
 version = "0.1.13-cow.1"
 edition = "2024"
 build = "build.rs"
+autobins = false
+
+[features]
+default = []
+dev-experiments = ["dep:forkpress-cas-store"]
+
+[[bin]]
+name = "forkpress"
+path = "src/bin/forkpress.rs"
+
+[[bin]]
+name = "forkpress-dev"
+path = "src/bin/forkpress-dev.rs"
+required-features = ["dev-experiments"]
 
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 ctrlc = "3.5"
 flate2 = "1.1"
-forkpress-cas-store = { path = "../crates/cas-store" }
+forkpress-cas-store = { path = "../crates/cas-store", optional = true }
 libc = "0.2"
 num_cpus = "1.16"
 tar = "0.4"
