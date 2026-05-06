@@ -768,6 +768,18 @@ function wp_cow_is_remote_or_local_home_url( $url ) {
 	return false;
 }
 
+function wp_cow_localize_remote_urls_in_text( $text ) {
+	$remote = wp_cow_remote_home_url();
+	$local  = wp_cow_local_home_url();
+	if ( '' === $remote || '' === $local || false === strpos( (string) $text, '://' ) ) {
+		return $text;
+	}
+	foreach ( wp_cow_url_variants( $remote ) as $variant ) {
+		$text = str_replace( $variant, $local, (string) $text );
+	}
+	return $text;
+}
+
 function wp_cow_filter_active_plugins( $plugins ) {
 	$mode = wp_cow_plugin_mode();
 	if ( in_array( $mode, array( 'full', 'on', 'enabled', '1', 'true', 'yes' ), true ) ) {
@@ -1181,6 +1193,7 @@ function wp_cow_siteground_lazyload_content_images( $html ) {
 }
 
 add_filter( 'the_content', 'wp_cow_siteground_lazyload_content_images', PHP_INT_MAX );
+add_filter( 'the_content', 'wp_cow_localize_remote_urls_in_text', PHP_INT_MAX - 1 );
 add_action( 'wp_enqueue_scripts', 'wp_cow_enqueue_siteground_lazysizes', 1 );
 
 function wp_cow_local_asset_http_response( $url ) {
@@ -1830,6 +1843,7 @@ if ( cow_cached_remote_read_is_safe_without_control( array( 'wp_options' ) ) ) {
         assert!(php.contains("wp_cow_allowed_plugins"));
         assert!(php.contains("$quarantined"));
         assert!(php.contains("wp_cow_rewrite_remote_url_to_local"));
+        assert!(php.contains("wp_cow_localize_remote_urls_in_text"));
         assert!(php.contains("nav_menu_link_attributes"));
         assert!(php.contains("nav_menu_css_class"));
         assert!(php.contains("wp_enqueue_emoji_styles"));
@@ -1978,11 +1992,12 @@ define( 'ABSPATH', '{docroot}' . '/' );
 		fwrite( STDERR, 'local SG cache generation was not disabled' . PHP_EOL );
 		exit( 1 );
 	}}
-	$content = '<figure class="wp-block-image size-large"><img fetchpriority="high" decoding="async" width="600" height="600" src="https://example.test/wp-content/uploads/2019/12/photo.jpg" alt="" class="wp-image-45" srcset="https://example.test/wp-content/uploads/2019/12/photo.jpg 600w" sizes="(max-width: 600px) 100vw, 600px" /></figure>';
+	$content = '<figure class="wp-block-image size-large"><img fetchpriority="high" decoding="async" width="600" height="600" src="https://example.test/wp-content/uploads/2019/12/photo.jpg" alt="" class="wp-image-45" srcset="https://example.test/wp-content/uploads/2019/12/photo.jpg 600w" sizes="(max-width: 600px) 100vw, 600px" /></figure><p><a href="http://example.test/adventures/">Browse</a></p>';
 	$lazy_content = apply_test_filter( 'the_content', $content );
 	if (
 		false === strpos( $lazy_content, 'src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"' ) ||
 		false === strpos( $lazy_content, 'data-src="https://local.test/wp-content/uploads/2019/12/photo.jpg"' ) ||
+		false === strpos( $lazy_content, 'href="https://local.test/adventures/"' ) ||
 		false === strpos( $lazy_content, 'class="wp-image-45 lazyload"' ) ||
 		false !== strpos( $lazy_content, 'width="600"' ) ||
 		false !== strpos( $lazy_content, 'srcset=' )
