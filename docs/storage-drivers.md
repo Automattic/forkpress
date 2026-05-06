@@ -118,7 +118,12 @@ wordpress/
 
 `database.sql` is generated from the branch-local SQLite database and is
 read-only from ForkPress' perspective. Pushing a modified `database.sql` does
-not mutate WordPress database state.
+not mutate WordPress database state. The snapshot includes user tables, table
+rows, explicit indexes, triggers, and views. SQLite internal tables and
+ForkPress SQLite-driver metadata are omitted. Credential-shaped columns and
+key/value rows, such as WordPress password hashes, session tokens, application
+passwords, and plugin API tokens, are redacted before the snapshot is written
+into the Git view.
 
 The live SQLite directory, `wordpress/wp-content/database/`, is private runtime
 state and is not part of the Git view. ForkPress omits that directory when it

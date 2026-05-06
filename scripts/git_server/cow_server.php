@@ -1338,8 +1338,8 @@ function cow_git_dump_branch_database(string $branch_root, string $branch): stri
     $result = $db->query(
         "SELECT name, sql FROM sqlite_master
          WHERE type='table'
-           AND name LIKE 'wp\\_%' ESCAPE '\\'
            AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'
+           AND name NOT LIKE '\\_wp\\_sqlite\\_%' ESCAPE '\\'
          ORDER BY name"
     );
     while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
@@ -1367,13 +1367,53 @@ function cow_git_dump_branch_database(string $branch_root, string $branch): stri
             foreach ($columns as $column) {
                 $col = (string)$column['name'];
                 $names[] = cow_git_sql_ident($col);
-                $values[] = cow_git_sql_literal($data[$col] ?? null);
+                $values[] = cow_git_sql_literal(
+                    cow_git_redact_database_snapshot_value($name, $data, $col, $data[$col] ?? null)
+                );
             }
             $out .= 'INSERT INTO ' . cow_git_sql_ident($name)
                 . ' (' . implode(', ', $names) . ') VALUES ('
                 . implode(', ', $values) . ");\n";
         }
         $out .= "\n";
+    }
+
+    $schema_objects = [];
+    $result = $db->query(
+        "SELECT type, name, sql FROM sqlite_master
+         WHERE type IN ('view', 'index', 'trigger')
+           AND sql IS NOT NULL
+           AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'
+           AND name NOT LIKE '\\_wp\\_sqlite\\_%' ESCAPE '\\'
+         ORDER BY CASE type
+             WHEN 'view' THEN 1
+             WHEN 'index' THEN 2
+             WHEN 'trigger' THEN 3
+             ELSE 4
+           END, name"
+    );
+    while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+        $schema_objects[] = $row;
+    }
+
+    foreach ($schema_objects as $object) {
+        $type = strtolower((string)$object['type']);
+        $name = (string)$object['name'];
+        $sql = trim((string)$object['sql']);
+        if ($sql === '') {
+            continue;
+        }
+        $drop_type = match ($type) {
+            'view' => 'VIEW',
+            'index' => 'INDEX',
+            'trigger' => 'TRIGGER',
+            default => null,
+        };
+        if ($drop_type === null) {
+            continue;
+        }
+        $out .= 'DROP ' . $drop_type . ' IF EXISTS ' . cow_git_sql_ident($name) . ";\n";
+        $out .= $sql . ";\n\n";
     }
     $db->close();
 
@@ -1388,6 +1428,81 @@ function cow_git_table_columns(SQLite3 $db, string $table): array {
         $columns[] = $row;
     }
     return $columns;
+}
+
+function cow_git_redact_database_snapshot_value(string $table, array $row, string $column, $value) {
+    if ($value === null) {
+        return null;
+    }
+
+    if (cow_git_database_name_is_sensitive($column)) {
+        return '[forkpress redacted]';
+    }
+
+    $table_key = cow_git_database_name_key($table);
+    $column_key = cow_git_database_name_key($column);
+    if (preg_match('/(^|_)wp_users$/', $table_key)
+        && in_array($column_key, ['user_pass', 'user_activation_key'], true)
+    ) {
+        return '[forkpress redacted]';
+    }
+
+    foreach (['option_name', 'meta_key', 'name', 'key', 'setting', 'setting_name', 'config_key'] as $key_column) {
+        if (!array_key_exists($key_column, $row)) {
+            continue;
+        }
+        if (!cow_git_database_name_is_sensitive((string)$row[$key_column])) {
+            continue;
+        }
+        if (cow_git_database_column_is_keyish($column_key) || cow_git_database_column_is_identifier($column_key)) {
+            continue;
+        }
+        return '[forkpress redacted]';
+    }
+
+    return $value;
+}
+
+function cow_git_database_name_is_sensitive(string $name): bool {
+    $key = cow_git_database_name_key($name);
+    if ($key === '') {
+        return false;
+    }
+    if (in_array($key, [
+        'application_passwords',
+        'session_tokens',
+        'user_activation_key',
+        'user_pass',
+    ], true)) {
+        return true;
+    }
+
+    return (bool)preg_match(
+        '/(^|_)(access_token|api_key|apikey|client_secret|consumer_key|consumer_secret|oauth|pass|passwd|password|passphrase|private_key|pwd|refresh_token|salt|secret|session|session_token|sessions|token)(_|$)/',
+        $key
+    );
+}
+
+function cow_git_database_column_is_keyish(string $column_key): bool {
+    return in_array($column_key, [
+        'config_key',
+        'key',
+        'meta_key',
+        'name',
+        'option_name',
+        'setting',
+        'setting_name',
+    ], true);
+}
+
+function cow_git_database_column_is_identifier(string $column_key): bool {
+    return $column_key === 'id' || str_ends_with($column_key, '_id');
+}
+
+function cow_git_database_name_key(string $name): string {
+    $key = strtolower($name);
+    $key = preg_replace('/[^a-z0-9]+/', '_', $key) ?? '';
+    return trim($key, '_');
 }
 
 function cow_git_sql_ident(string $identifier): string {

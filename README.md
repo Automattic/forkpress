@@ -170,6 +170,11 @@ and deletes one branch at a time.
 `database.sql` is generated for model context. Edits to `database.sql` are
 ignored on push; database changes should happen through WordPress, WP-CLI, or
 another tool operating on the branch's own SQLite database.
+The snapshot includes user tables, table rows, explicit indexes, triggers, and
+views, while omitting SQLite and ForkPress driver internals. Credential-shaped
+columns and key/value rows, such as WordPress password hashes, session tokens,
+application passwords, and plugin API tokens, are redacted before the snapshot
+is written into the Git view.
 `wordpress/wp-content/database/` is private runtime state and is not part of the
 Git view; ForkPress ignores pushed files under that path.
 After a push, ForkPress immediately re-snapshots the branch so the remote Git

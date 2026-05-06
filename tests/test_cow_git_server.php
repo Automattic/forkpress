@@ -161,6 +161,49 @@ assert_true(!$repo->branch_exists('refs/heads/feature'), 'Git branch deletion le
 assert_true(!file_exists($feature_tip_path), 'Git branch deletion prunes unreachable COW Git commit object');
 cow_git_remove_tree($tmp);
 
+$tmp = sys_get_temp_dir() . '/forkpress-cow-db-dump-schema-' . getmypid() . '-' . bin2hex(random_bytes(4));
+$branch_root = $tmp . '/main';
+mkdir($branch_root . '/wp-content/database', 0777, true);
+$db = new SQLite3($branch_root . '/wp-content/database/.ht.sqlite');
+$db->exec('CREATE TABLE wp_options (option_id INTEGER PRIMARY KEY, option_name TEXT, option_value TEXT)');
+$db->exec('CREATE TABLE wp_users (ID INTEGER PRIMARY KEY, user_login TEXT, user_pass TEXT, user_activation_key TEXT)');
+$db->exec('CREATE TABLE wp_usermeta (umeta_id INTEGER PRIMARY KEY, user_id INTEGER, meta_key TEXT, meta_value TEXT)');
+$db->exec('CREATE TABLE custom_plugin_state (id INTEGER PRIMARY KEY, note TEXT, access_token TEXT)');
+$db->exec('CREATE TABLE _wp_sqlite_driver_state (id INTEGER PRIMARY KEY, note TEXT)');
+$sensitive_values = [
+    'option' => 'fp-test-' . bin2hex(random_bytes(16)),
+    'user_pass' => 'fp-test-' . bin2hex(random_bytes(16)),
+    'activation' => 'fp-test-' . bin2hex(random_bytes(16)),
+    'session' => 'fp-test-' . bin2hex(random_bytes(16)),
+    'plugin' => 'fp-test-' . bin2hex(random_bytes(16)),
+];
+$db->exec("INSERT INTO wp_options (option_name, option_value) VALUES ('blogname', 'ForkPress')");
+$db->exec("INSERT INTO wp_options (option_name, option_value) VALUES ('plugin_api_token', '" . SQLite3::escapeString($sensitive_values['option']) . "')");
+$db->exec("INSERT INTO wp_users (user_login, user_pass, user_activation_key) VALUES ('admin', '" . SQLite3::escapeString($sensitive_values['user_pass']) . "', '" . SQLite3::escapeString($sensitive_values['activation']) . "')");
+$db->exec("INSERT INTO wp_usermeta (user_id, meta_key, meta_value) VALUES (1, 'session_tokens', '" . SQLite3::escapeString($sensitive_values['session']) . "')");
+$db->exec("INSERT INTO custom_plugin_state (note, access_token) VALUES ('plugin data', '" . SQLite3::escapeString($sensitive_values['plugin']) . "')");
+$db->exec('CREATE INDEX wp_options_name_idx ON wp_options(option_name)');
+$db->exec('CREATE VIEW wp_options_names AS SELECT option_name FROM wp_options');
+$db->exec("CREATE TRIGGER wp_options_ai AFTER INSERT ON wp_options BEGIN INSERT INTO custom_plugin_state (note) VALUES ('triggered'); END");
+$db->close();
+$dump = cow_git_dump_branch_database($branch_root, 'main');
+assert_true(str_contains($dump, 'CREATE TABLE wp_options'), 'database.sql includes WordPress table DDL');
+assert_true(str_contains($dump, 'CREATE TABLE custom_plugin_state'), 'database.sql includes non-wp plugin table DDL');
+assert_true(str_contains($dump, 'INSERT INTO "custom_plugin_state"'), 'database.sql includes non-wp plugin table rows');
+assert_true(str_contains($dump, "'admin'"), 'database.sql preserves non-secret user context');
+assert_true(str_contains($dump, "'ForkPress'"), 'database.sql preserves non-secret option values');
+assert_true(str_contains($dump, "'[forkpress redacted]'"), 'database.sql redacts credential-shaped values');
+assert_true(!str_contains($dump, $sensitive_values['user_pass']), 'database.sql redacts WordPress password hashes');
+assert_true(!str_contains($dump, $sensitive_values['activation']), 'database.sql redacts WordPress activation keys');
+assert_true(!str_contains($dump, $sensitive_values['session']), 'database.sql redacts session tokens');
+assert_true(!str_contains($dump, $sensitive_values['option']), 'database.sql redacts sensitive option values');
+assert_true(!str_contains($dump, $sensitive_values['plugin']), 'database.sql redacts plugin token columns');
+assert_true(str_contains($dump, 'CREATE INDEX wp_options_name_idx'), 'database.sql includes explicit indexes');
+assert_true(str_contains($dump, 'CREATE VIEW wp_options_names'), 'database.sql includes views');
+assert_true(str_contains($dump, 'CREATE TRIGGER wp_options_ai'), 'database.sql includes triggers');
+assert_true(!str_contains($dump, '_wp_sqlite_driver_state'), 'database.sql excludes SQLite driver internals');
+cow_git_remove_tree($tmp);
+
 $tmp = sys_get_temp_dir() . '/forkpress-cow-git-push-resync-' . getmypid() . '-' . bin2hex(random_bytes(4));
 $branches = $tmp . '/branches';
 $git = $tmp . '/git';
