@@ -100,6 +100,13 @@ sites, watch the sparsebundle's allocated size or run:
 df -h .forkpress/macos-cow/mount
 ```
 
+Use `forkpress storage status` for the selected file view, public branch root,
+physical storage root, branch count when attached, lifecycle lock paths, and
+leftover staging directories from interrupted branch operations. On
+sparsebundle-backed sites, `forkpress storage compact` stops this site's
+server, detaches the sparsebundle, runs `hdiutil compact`, and leaves storage
+detached so macOS can release unused bands.
+
 ## Git Adapter
 
 The Git checkout always exposes:
@@ -175,8 +182,8 @@ Implemented for COW:
 Still future work:
 
 - semantic database merge between branches;
-- COW-specific garbage collection/compaction beyond ordinary filesystem
-  cleanup;
+- content-aware garbage collection beyond ordinary branch deletion and
+  sparsebundle compaction;
 - filesystem-level coordination for direct external writes that bypass the
   ForkPress HTTP server;
 - Windows and Linux COW parity.
