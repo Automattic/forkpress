@@ -44,16 +44,36 @@ function cow_git_server_handle(
     $branch_list_path = $branch_list_path ?: dirname($git_repo_dir) . '/branches.txt';
 
     cow_git_mkdir(dirname($git_repo_dir));
+    $operation_lock = null;
+    $operation_lock_path = dirname($branch_list_path) . '/operations.lock';
+    $operation_lock = fopen($operation_lock_path, 'c');
+    if (!$operation_lock) {
+        http_response_code(500);
+        echo "Cannot open COW branch operation lock\n";
+        return;
+    }
+    if (!flock($operation_lock, LOCK_EX)) {
+        http_response_code(500);
+        echo "Cannot lock COW branch operations\n";
+        fclose($operation_lock);
+        return;
+    }
+
     $lock_path = $git_repo_dir . '.lock';
     $lock = fopen($lock_path, 'c');
     if (!$lock) {
         http_response_code(500);
         echo "Cannot open COW git lock\n";
+        flock($operation_lock, LOCK_UN);
+        fclose($operation_lock);
         return;
     }
     if (!flock($lock, LOCK_EX)) {
         http_response_code(500);
         echo "Cannot lock COW git store\n";
+        fclose($lock);
+        flock($operation_lock, LOCK_UN);
+        fclose($operation_lock);
         return;
     }
 
@@ -121,6 +141,10 @@ function cow_git_server_handle(
     } finally {
         flock($lock, LOCK_UN);
         fclose($lock);
+        if ($operation_lock) {
+            flock($operation_lock, LOCK_UN);
+            fclose($operation_lock);
+        }
     }
 }
 

@@ -105,8 +105,9 @@ architecture. Known gaps:
   snapshot.
 - Git-created COW branches now work for simple branch pushes, but branch
   creation is still materialized APFS COW rather than lazy namespace COW.
-- Branch rollback/reset should become one operation that handles files and the
-  branch-local database together.
+- Branch reset is now one operation for materialized COW branches: ForkPress
+  stages a fresh COW clone of the source branch, hot-copies the source SQLite
+  database with SQLite backup, then publishes it over the target branch.
 - Long-running branch operations need stronger coordination with active
   WordPress writes.
 - Sparsebundle detach can still be blocked by terminals, editors, or processes

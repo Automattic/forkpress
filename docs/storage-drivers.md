@@ -153,6 +153,7 @@ Implemented for COW:
 - `forkpress stop`
 - `forkpress branch list`
 - `forkpress branch create <name> [--from main]`
+- `forkpress branch reset <name> --from <source>`
 - `forkpress branch show <name>`
 - `forkpress branch delete <name>`
 - `forkpress clone`
@@ -165,7 +166,6 @@ Implemented for COW:
 Still future work:
 
 - semantic database merge between branches;
-- branch rollback/reset for both files and database together;
 - COW-specific garbage collection/compaction beyond ordinary filesystem
   cleanup;
 - stronger long-running branch locks around branch clone/export during active

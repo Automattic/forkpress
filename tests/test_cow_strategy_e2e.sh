@@ -20,6 +20,54 @@ cleanup() {
 }
 trap cleanup EXIT
 
+branch_host() {
+  if [ "$1" = "main" ]; then
+    printf 'wp.localhost:%s' "$PORT"
+  else
+    printf '%s.wp.localhost:%s' "$1" "$PORT"
+  fi
+}
+
+create_branch_post() {
+  local branch="$1"
+  local title="$2"
+  local host
+  host="$(branch_host "$branch")"
+  local html="$TMP/${branch}-post-new.html"
+  local json="$TMP/${branch}-rest-save.json"
+
+  curl -sS -H "Host: $host" \
+    "http://127.0.0.1:$PORT/wp-admin/post-new.php" \
+    -o "$html"
+
+  local nonce
+  nonce="$(node - <<'NODE' "$html"
+const fs = require('fs');
+const html = fs.readFileSync(process.argv[2], 'utf8');
+const match = html.match(/wp\.apiFetch\.createNonceMiddleware\(\s*"([^"]+)"\s*\)/)
+  || html.match(/var wpApiSettings = .*?"nonce":"([^"]+)"/s);
+if (!match) process.exit(2);
+console.log(match[1]);
+NODE
+)"
+
+  local http
+  http="$(
+    curl -sS -o "$json" -w '%{http_code}' \
+      -H "Host: $host" \
+      -H "Content-Type: application/json" \
+      -H "X-WP-Nonce: $nonce" \
+      --data "{\"title\":\"$title\",\"content\":\"Saved from ForkPress COW reset e2e\",\"status\":\"publish\"}" \
+      "http://127.0.0.1:$PORT/index.php?rest_route=/wp/v2/posts"
+  )"
+  if [ "$http" != "201" ]; then
+    echo "REST save on $branch returned $http" >&2
+    cat "$json" >&2
+    "$BIN" logs --work-dir "$WORK_DIR" --file all -n 160 >&2 || true
+    exit 1
+  fi
+}
+
 "$BIN" init --strategy cow --work-dir "$WORK_DIR" --admin-password admin
 test -d "$WORK/.forkpress"
 test -d "$WORK/main"
@@ -134,6 +182,30 @@ printf "created after reject\n" > "$TMP/checkout/wordpress/wp-content/git-create
 "$BIN" commit "$TMP/checkout" --message "create cow branch after rejected ref"
 test -f "$WORK/git-created-after-reject/wp-content/git-created-after-reject.txt"
 test ! -e "$WORK/git-created-after-reject/wp-content/bad-slash.txt"
+
+"$BIN" branch --work-dir "$WORK_DIR" create reset-source
+"$BIN" branch --work-dir "$WORK_DIR" create reset-target
+echo "source reset file" > "$WORK/reset-source/wp-content/reset-source.txt"
+echo "target reset file" > "$WORK/reset-target/wp-content/reset-target.txt"
+RESET_SOURCE_TITLE="Reset source $(date +%s)"
+RESET_TARGET_TITLE="Reset target $(date +%s)"
+create_branch_post reset-source "$RESET_SOURCE_TITLE"
+create_branch_post reset-target "$RESET_TARGET_TITLE"
+"$BIN" branch --work-dir "$WORK_DIR" reset reset-target --from reset-source > "$TMP/reset.out"
+grep -F "reset COW branch 'reset-target' from 'reset-source'" "$TMP/reset.out" >/dev/null
+test -f "$WORK/reset-target/wp-content/reset-source.txt"
+test ! -e "$WORK/reset-target/wp-content/reset-target.txt"
+curl -sS -H "Host: reset-target.wp.localhost:$PORT" \
+  "http://127.0.0.1:$PORT/wp-admin/edit.php" \
+  -o "$TMP/reset-target-edit.html"
+grep -F "$RESET_SOURCE_TITLE" "$TMP/reset-target-edit.html" >/dev/null
+grep -F "$RESET_TARGET_TITLE" "$TMP/reset-target-edit.html" && exit 1
+if "$BIN" branch --work-dir "$WORK_DIR" reset main --from reset-source > "$TMP/reset-main.out" 2>&1; then
+  echo "reset main without --force unexpectedly succeeded" >&2
+  cat "$TMP/reset-main.out" >&2
+  exit 1
+fi
+grep -F "refusing to reset main without --force" "$TMP/reset-main.out" >/dev/null
 
 "$BIN" agents \
   --work-dir "$WORK_DIR" \

@@ -95,6 +95,16 @@ http://marketing.wp.localhost:18080/wp-admin/
 The WordPress admin bar shows `Branch: <name>`. Hover it to filter and switch
 between local branches.
 
+Reset a branch back to another branch:
+
+```bash
+./forkpress branch reset marketing --from main
+```
+
+That replaces `./marketing` with a fresh COW clone of `./main`, including the
+branch-local SQLite database. ForkPress refuses to reset `main` unless you pass
+`--force`.
+
 ## Git Workflow
 
 ForkPress exposes a Git smart-HTTP view at:
@@ -355,6 +365,8 @@ CLI smoke command is hidden behind `FORKPRESS_ENABLE_ZFS_CLI=1`.
 - `forkpress server list` lists running site servers.
 - `forkpress branch list` lists local branches.
 - `forkpress branch create <name> [--from main]` creates a COW branch.
+- `forkpress branch reset <name> --from <source>` replaces one COW branch with
+  the files and SQLite database from another branch.
 - `forkpress branch show <name>` prints the branch directory, database, file
   count, and Git ref path.
 - `forkpress branch delete <name>` removes a COW branch. `main` cannot be

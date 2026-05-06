@@ -2362,6 +2362,7 @@ fn git_command(args: GitPassthrough) -> Result<i32> {
                 if create_args.auth.user.is_some() {
                     bail!("cow local branch creation does not use --user/--password");
                 }
+                let _lock = lock_cow_operations(&layout)?;
                 create_cow_branch(&layout, &runtime, &args.shared, branch, &create_args.from)?;
                 println!("forkpress: branch {branch} ready");
                 return Ok(0);
@@ -2528,17 +2529,21 @@ fn agents_command(args: AgentsArgs) -> Result<i32> {
         )?;
     }
 
-    for index in 1..=args.count {
-        let branch = format!("{}-{}", args.prefix, index);
-        match strategy {
-            StorageStrategy::Branchfs => {
+    match strategy {
+        StorageStrategy::Branchfs => {
+            for index in 1..=args.count {
+                let branch = format!("{}-{}", args.prefix, index);
                 ensure_branch_exists(&layout, &runtime, &args.shared, &branch, &args.from, &auth)?;
             }
-            StorageStrategy::Cow => {
+        }
+        StorageStrategy::Cow => {
+            let _lock = lock_cow_operations(&layout)?;
+            for index in 1..=args.count {
+                let branch = format!("{}-{}", args.prefix, index);
                 ensure_cow_branch_exists(&layout, &runtime, &args.shared, &branch, &args.from)?;
             }
-            StorageStrategy::Cas => unreachable!(),
         }
+        StorageStrategy::Cas => unreachable!(),
     }
 
     run_git(
@@ -2787,13 +2792,45 @@ fn cow_branch_command(
                     other => bail!("unsupported argument for `forkpress branch create`: {other}"),
                 }
             }
+            let _lock = lock_cow_operations(&layout)?;
             create_cow_branch(&layout, &runtime, &args.shared, branch, &from)?;
+            Ok(0)
+        }
+        "reset" | "rollback" => {
+            let Some(branch) = args.args.get(1) else {
+                bail!("branch reset requires a branch name");
+            };
+            let mut from: Option<String> = None;
+            let mut force = false;
+            let mut index = 2;
+            while index < args.args.len() {
+                match args.args[index].as_str() {
+                    "--from" => {
+                        let Some(value) = args.args.get(index + 1) else {
+                            bail!("--from requires a branch name");
+                        };
+                        from = Some(value.clone());
+                        index += 2;
+                    }
+                    "--force" => {
+                        force = true;
+                        index += 1;
+                    }
+                    other => bail!("unsupported argument for `forkpress branch reset`: {other}"),
+                }
+            }
+            let Some(from) = from else {
+                bail!("branch reset requires --from <branch>");
+            };
+            let _lock = lock_cow_operations(&layout)?;
+            reset_cow_branch(&layout, &runtime, &args.shared, branch, &from, force)?;
             Ok(0)
         }
         "delete" | "rm" => {
             let Some(branch) = args.args.get(1) else {
                 bail!("branch delete requires a branch name");
             };
+            let _lock = lock_cow_operations(&layout)?;
             delete_cow_branch(&layout, branch)?;
             Ok(0)
         }
@@ -3970,6 +4007,237 @@ fn show_cow_branch(layout: &Layout, branch: &str) -> Result<()> {
         layout.cow_git_dir.join("refs/heads").join(branch).display()
     );
     Ok(())
+}
+
+fn reset_cow_branch(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    branch: &str,
+    from: &str,
+    force: bool,
+) -> Result<()> {
+    validate_branch_name(branch)?;
+    validate_branch_name(from)?;
+    if branch == from {
+        bail!("cannot reset a branch from itself");
+    }
+    if branch == "main" && !force {
+        bail!("refusing to reset main without --force");
+    }
+
+    let file_view = read_site_manifest(layout)?
+        .and_then(|manifest| manifest.file_view)
+        .unwrap_or(FileViewStrategy::Copy);
+    let source = cow_branch_storage_root(layout, from, file_view);
+    let target = cow_branch_storage_root(layout, branch, file_view);
+    if !source.join("wp-load.php").is_file() {
+        bail!("source branch does not exist: {from}");
+    }
+    if !target.join("wp-load.php").is_file() {
+        bail!("target branch does not exist: {branch}");
+    }
+
+    let source_db = cow_sqlite_db_path(&source);
+    if !source_db.is_file() {
+        bail!(
+            "source branch database does not exist: {}",
+            source_db.display()
+        );
+    }
+
+    let parent = target.parent().ok_or_else(|| {
+        anyhow!(
+            "target branch has no parent directory: {}",
+            target.display()
+        )
+    })?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    let staging = unique_cow_operation_dir(parent, "reset-stage", branch);
+    let backup = unique_cow_operation_dir(parent, "reset-backup", branch);
+    if path_exists_no_follow(&staging) || path_exists_no_follow(&backup) {
+        bail!("temporary reset path already exists");
+    }
+
+    let stage_result = (|| -> Result<()> {
+        if cow_branch_copies_require_cow(layout)? {
+            copy_tree_cow_required(&source, &staging)?;
+        } else {
+            copy_tree_cow(&source, &staging)?;
+        }
+
+        let staged_db = cow_sqlite_db_path(&staging);
+        remove_sqlite_file_and_sidecars(&staged_db)?;
+        hot_copy_sqlite_database(layout, runtime, shared, &source_db, &staged_db)?;
+        Ok(())
+    })();
+
+    if let Err(err) = stage_result {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(err).context("failed to stage COW branch reset");
+    }
+
+    let mut target_moved_to_backup = false;
+    let mut staging_published = false;
+    let publish = (|| -> Result<()> {
+        fs::rename(&target, &backup).with_context(|| {
+            format!(
+                "failed to move current branch {} to {}",
+                target.display(),
+                backup.display()
+            )
+        })?;
+        target_moved_to_backup = true;
+        fs::rename(&staging, &target).with_context(|| {
+            format!(
+                "failed to publish reset branch {} to {}",
+                staging.display(),
+                target.display()
+            )
+        })?;
+        staging_published = true;
+
+        let public_root = ensure_cow_public_branch_root(layout, branch, &target, file_view)?;
+        run_cow_bootstrap_script(layout, runtime, shared, &public_root, "ForkPress", "admin")?;
+        write_cow_branch_list(layout)?;
+        Ok(())
+    })();
+
+    if let Err(err) = publish {
+        let failed = unique_cow_operation_dir(parent, "reset-failed", branch);
+        if staging_published && path_exists_no_follow(&target) {
+            match fs::rename(&target, &failed) {
+                Ok(()) => {}
+                Err(_) => {
+                    let _ = fs::remove_dir_all(&target);
+                }
+            }
+        }
+        if target_moved_to_backup
+            && path_exists_no_follow(&backup)
+            && !path_exists_no_follow(&target)
+        {
+            let _ = fs::rename(&backup, &target);
+        }
+        let _ = fs::remove_dir_all(&failed);
+        let _ = fs::remove_dir_all(&staging);
+        return Err(err).context("failed to reset COW branch; restored previous branch contents");
+    }
+
+    if let Err(err) = fs::remove_dir_all(&backup) {
+        eprintln!(
+            "forkpress: warning: reset succeeded but failed to remove old branch backup {}: {err}",
+            backup.display()
+        );
+    }
+
+    println!("forkpress: reset COW branch '{branch}' from '{from}'");
+    Ok(())
+}
+
+fn cow_sqlite_db_path(branch_root: &Path) -> PathBuf {
+    branch_root.join("wp-content/database/.ht.sqlite")
+}
+
+fn sqlite_sidecar_path(db: &Path, suffix: &str) -> PathBuf {
+    let mut value = db.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+fn remove_sqlite_file_and_sidecars(db: &Path) -> Result<()> {
+    for path in [
+        db.to_path_buf(),
+        sqlite_sidecar_path(db, "-wal"),
+        sqlite_sidecar_path(db, "-shm"),
+    ] {
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_file() => {
+                fs::remove_file(&path)
+                    .with_context(|| format!("failed to remove {}", path.display()))?;
+            }
+            Ok(_) => bail!("{} is not a regular SQLite file", path.display()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err).with_context(|| format!("failed to inspect {}", path.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn hot_copy_sqlite_database(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    source_db: &Path,
+    dest_db: &Path,
+) -> Result<()> {
+    if let Some(parent) = dest_db.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    run_php_script(
+        layout,
+        runtime,
+        shared,
+        "scripts/backup.php",
+        [source_db.as_os_str(), dest_db.as_os_str()],
+    )
+}
+
+fn unique_cow_operation_dir(parent: &Path, operation: &str, branch: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    parent.join(format!(
+        ".forkpress-{operation}-{branch}-{}-{nanos}",
+        std::process::id()
+    ))
+}
+
+#[cfg(unix)]
+struct CowOperationLock {
+    file: File,
+}
+
+#[cfg(unix)]
+impl Drop for CowOperationLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn lock_cow_operations(layout: &Layout) -> Result<CowOperationLock> {
+    use std::os::fd::AsRawFd;
+
+    fs::create_dir_all(&layout.cow_dir)
+        .with_context(|| format!("failed to create {}", layout.cow_dir.display()))?;
+    let path = layout.cow_dir.join("operations.lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    let status = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    if status != 0 {
+        bail!("failed to lock {}", path.display());
+    }
+    Ok(CowOperationLock { file })
+}
+
+#[cfg(not(unix))]
+struct CowOperationLock;
+
+#[cfg(not(unix))]
+fn lock_cow_operations(_layout: &Layout) -> Result<CowOperationLock> {
+    Ok(CowOperationLock)
 }
 
 fn delete_cow_branch(layout: &Layout, branch: &str) -> Result<()> {
