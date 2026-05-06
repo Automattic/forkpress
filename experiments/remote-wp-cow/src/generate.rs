@@ -76,6 +76,7 @@ define( 'WP_HOME',    $wp_cow_local_url );
 define( 'WP_SITEURL', $wp_cow_local_url );
 
 define( 'WPCOW_CLONE',       {clone_name} );
+define( 'WPCOW_REMOTE_URL',  {remote_url} );
 define( 'WPCOW_CONTROL_URL', {control_url} );
 define( 'WPCOW_QUERY_CACHE_DIR',    {query_cache_dir} );
 define( 'WPCOW_DB_STATE_FILE',      {db_state_file} );
@@ -112,6 +113,7 @@ require_once ABSPATH . 'wp-settings.php';
             manifest.db_proxy.host, manifest.db_proxy.port
         )),
         local_url = php_string(&manifest.local_url),
+        remote_url = php_string(&manifest.remote_url),
         table_prefix = php_string(&manifest.probe.table_prefix),
         clone_name = php_string(&manifest.name),
         control_url = php_string(&manifest.control_url),
@@ -706,6 +708,66 @@ function wp_cow_allowed_plugins() {
 	return $out;
 }
 
+function wp_cow_local_home_url() {
+	if ( defined( 'WP_HOME' ) ) {
+		return rtrim( (string) WP_HOME, '/' );
+	}
+	if ( function_exists( 'home_url' ) ) {
+		return rtrim( (string) home_url( '/' ), '/' );
+	}
+	return '';
+}
+
+function wp_cow_remote_home_url() {
+	if ( defined( 'WPCOW_REMOTE_URL' ) ) {
+		return rtrim( (string) WPCOW_REMOTE_URL, '/' );
+	}
+	return '';
+}
+
+function wp_cow_url_variants( $url ) {
+	$url = rtrim( (string) $url, '/' );
+	if ( '' === $url ) {
+		return array();
+	}
+	$variants = array( $url );
+	if ( 0 === strpos( $url, 'https://' ) ) {
+		$variants[] = 'http://' . substr( $url, 8 );
+	} elseif ( 0 === strpos( $url, 'http://' ) ) {
+		$variants[] = 'https://' . substr( $url, 7 );
+	}
+	return array_values( array_unique( $variants ) );
+}
+
+function wp_cow_rewrite_remote_url_to_local( $url ) {
+	$url    = (string) $url;
+	$remote = wp_cow_remote_home_url();
+	$local  = wp_cow_local_home_url();
+	if ( '' === $url || '' === $remote || '' === $local ) {
+		return $url;
+	}
+
+	foreach ( wp_cow_url_variants( $remote ) as $variant ) {
+		if ( 0 === strpos( rtrim( $url, '/' ), $variant ) ) {
+			return $local . substr( $url, strlen( $variant ) );
+		}
+	}
+	return $url;
+}
+
+function wp_cow_is_remote_or_local_home_url( $url ) {
+	$url = rtrim( (string) $url, '/' );
+	if ( '' === $url ) {
+		return false;
+	}
+	foreach ( array_merge( wp_cow_url_variants( wp_cow_remote_home_url() ), wp_cow_url_variants( wp_cow_local_home_url() ) ) as $variant ) {
+		if ( $url === $variant ) {
+			return true;
+		}
+	}
+	return false;
+}
+
 function wp_cow_filter_active_plugins( $plugins ) {
 	$mode = wp_cow_plugin_mode();
 	if ( in_array( $mode, array( 'full', 'on', 'enabled', '1', 'true', 'yes' ), true ) ) {
@@ -762,6 +824,63 @@ function wp_cow_filter_sitewide_plugins( $plugins ) {
 
 add_filter( 'option_active_plugins', 'wp_cow_filter_active_plugins', PHP_INT_MAX );
 add_filter( 'site_option_active_sitewide_plugins', 'wp_cow_filter_sitewide_plugins', PHP_INT_MAX );
+
+add_action(
+	'init',
+	static function () {
+		remove_action( 'wp_head', 'print_emoji_detection_script', 7 );
+		remove_action( 'wp_enqueue_scripts', 'wp_enqueue_emoji_styles' );
+		remove_action( 'wp_print_styles', 'print_emoji_styles' );
+		remove_action( 'admin_print_scripts', 'print_emoji_detection_script' );
+		remove_action( 'admin_print_styles', 'print_emoji_styles' );
+		remove_filter( 'the_content_feed', 'wp_staticize_emoji' );
+		remove_filter( 'comment_text_rss', 'wp_staticize_emoji' );
+		remove_filter( 'wp_mail', 'wp_staticize_emoji_for_email' );
+	},
+	0
+);
+add_filter( 'emoji_svg_url', '__return_false', PHP_INT_MAX );
+
+add_filter(
+	'nav_menu_link_attributes',
+	static function ( $atts, $item = null ) {
+		if ( isset( $atts['href'] ) ) {
+			$atts['href'] = wp_cow_rewrite_remote_url_to_local( $atts['href'] );
+		}
+		if (
+			is_object( $item ) &&
+			isset( $item->url ) &&
+			function_exists( 'is_front_page' ) &&
+			is_front_page() &&
+			wp_cow_is_remote_or_local_home_url( $item->url )
+		) {
+			$atts['aria-current'] = 'page';
+		}
+		return $atts;
+	},
+	PHP_INT_MAX,
+	2
+);
+
+add_filter(
+	'nav_menu_css_class',
+	static function ( $classes, $item = null ) {
+		if (
+			is_object( $item ) &&
+			isset( $item->url ) &&
+			function_exists( 'is_front_page' ) &&
+			is_front_page() &&
+			wp_cow_is_remote_or_local_home_url( $item->url )
+		) {
+			$classes = is_array( $classes ) ? $classes : array();
+			$classes = array_merge( $classes, array( 'current-menu-item', 'current_page_item', 'menu-item-home', 'nv-active' ) );
+			$classes = array_values( array_unique( $classes ) );
+		}
+		return $classes;
+	},
+	PHP_INT_MAX,
+	2
+);
 
 add_filter( 'validate_current_theme', '__return_false', PHP_INT_MAX );
 add_filter( 'should_load_block_assets_on_demand', '__return_false', PHP_INT_MAX );
@@ -901,6 +1020,44 @@ function wp_cow_find_siteground_combined_css() {
 	return $asset;
 }
 
+function wp_cow_siteground_localized_css_file( $file ) {
+	$file   = (string) $file;
+	$remote = wp_cow_remote_home_url();
+	$local  = wp_cow_local_home_url();
+	if ( '' === $remote || '' === $local || ! is_file( $file ) || ! is_readable( $file ) ) {
+		return $file;
+	}
+
+	$dir    = dirname( $file );
+	$target = $dir . '/wp-cow-localized-' . basename( $file );
+	$source_mtime = (int) @filemtime( $file );
+	if ( is_file( $target ) && is_readable( $target ) && (int) @filemtime( $target ) >= $source_mtime ) {
+		return $target;
+	}
+
+	$css = file_get_contents( $file );
+	if ( false === $css ) {
+		return $file;
+	}
+
+	$localized = $css;
+	foreach ( wp_cow_url_variants( $remote ) as $variant ) {
+		$localized = str_replace( $variant, $local, $localized );
+	}
+	if ( $localized === $css ) {
+		return $file;
+	}
+
+	$tmp = $target . '.tmp.' . getmypid();
+	if ( false === @file_put_contents( $tmp, $localized ) ) {
+		return $file;
+	}
+	@rename( $tmp, $target );
+	@unlink( $tmp );
+
+	return is_file( $target ) && is_readable( $target ) ? $target : $file;
+}
+
 add_action(
 	'wp_enqueue_scripts',
 	static function () {
@@ -915,11 +1072,116 @@ add_action(
 
 		$basename = basename( $file );
 		$handle   = preg_replace( '/\.css$/', '', $basename );
-		$url      = content_url( 'uploads/siteground-optimizer-assets/' . $basename );
+		$asset    = wp_cow_siteground_localized_css_file( $file );
+		$url      = content_url( 'uploads/siteground-optimizer-assets/' . basename( $asset ) );
+		if ( function_exists( 'wp_dequeue_style' ) ) {
+			wp_dequeue_style( $handle );
+		}
+		if ( function_exists( 'wp_deregister_style' ) ) {
+			wp_deregister_style( $handle );
+		}
 		wp_enqueue_style( $handle, $url, array(), null );
 	},
 	0
 );
+
+function wp_cow_siteground_lazyload_images_enabled() {
+	$enabled = strtolower( trim( (string) getenv( 'WPCOW_SITEGROUND_LAZYLOAD_IMAGES' ) ) );
+	if ( in_array( $enabled, array( '0', 'false', 'no', 'off', 'disabled' ), true ) ) {
+		return false;
+	}
+	if ( in_array( $enabled, array( '1', 'true', 'yes', 'on', 'enabled' ), true ) ) {
+		return true;
+	}
+	return false !== wp_cow_find_siteground_combined_css() && false !== wp_cow_siteground_lazysizes_path();
+}
+
+function wp_cow_siteground_lazysizes_path() {
+	static $path = null;
+	if ( null !== $path ) {
+		return $path;
+	}
+
+	$content_dir = defined( 'WP_CONTENT_DIR' ) ? WP_CONTENT_DIR : ABSPATH . 'wp-content';
+	$candidate   = rtrim( $content_dir, '/' ) . '/plugins/sg-cachepress/assets/js/lazysizes.min.js';
+	if ( is_file( $candidate ) && is_readable( $candidate ) ) {
+		$path = $candidate;
+		return $path;
+	}
+
+	$path = false;
+	return $path;
+}
+
+function wp_cow_enqueue_siteground_lazysizes() {
+	if ( ! wp_cow_siteground_lazyload_images_enabled() || ! function_exists( 'wp_enqueue_script' ) || ! function_exists( 'content_url' ) ) {
+		return;
+	}
+
+	$handle = 'siteground-optimizer-lazy-sizes-js';
+	$url    = content_url( 'plugins/sg-cachepress/assets/js/lazysizes.min.js' );
+	wp_enqueue_script( $handle, $url, array(), null, true );
+
+	if ( function_exists( 'wp_script_add_data' ) ) {
+		wp_script_add_data( $handle, 'strategy', 'defer' );
+	}
+}
+
+function wp_cow_siteground_img_placeholder() {
+	return 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+}
+
+function wp_cow_siteground_lazyload_img_tag( $tag ) {
+	$tag = (string) $tag;
+	if ( false === stripos( $tag, 'wp-content/uploads/' ) || false !== stripos( $tag, 'data-src=' ) ) {
+		return $tag;
+	}
+	if ( ! preg_match( '/\ssrc=([\'"])(.*?)\1/i', $tag, $matches ) ) {
+		return $tag;
+	}
+
+	$src = html_entity_decode( $matches[2], ENT_QUOTES, 'UTF-8' );
+	if ( false === stripos( $src, '/wp-content/uploads/' ) ) {
+		return $tag;
+	}
+
+	$tag = preg_replace( '/\s(?:width|height|srcset|sizes|fetchpriority)=([\'"]).*?\1/i', '', $tag );
+	$local_src = wp_cow_rewrite_remote_url_to_local( $src );
+	$tag = preg_replace(
+		'/\ssrc=([\'"]).*?\1/i',
+		' src="' . wp_cow_siteground_img_placeholder() . '" data-src="' . htmlspecialchars( $local_src, ENT_QUOTES, 'UTF-8' ) . '"',
+		$tag,
+		1
+	);
+
+	if ( preg_match( '/\sclass=([\'"])(.*?)\1/i', $tag, $class_matches ) ) {
+		if ( false === strpos( ' ' . $class_matches[2] . ' ', ' lazyload ' ) ) {
+			$classes = trim( $class_matches[2] . ' lazyload' );
+			$tag = preg_replace( '/\sclass=([\'"]).*?\1/i', ' class="' . htmlspecialchars( $classes, ENT_QUOTES, 'UTF-8' ) . '"', $tag, 1 );
+		}
+	} else {
+		$tag = preg_replace( '/\/?>$/', ' class="lazyload"$0', $tag, 1 );
+	}
+
+	return $tag;
+}
+
+function wp_cow_siteground_lazyload_content_images( $html ) {
+	if ( ! wp_cow_siteground_lazyload_images_enabled() || false === stripos( (string) $html, '<img' ) ) {
+		return $html;
+	}
+
+	return preg_replace_callback(
+		'/<img\b[^>]*\bwp-image-\d+[^>]*>/i',
+		static function ( $matches ) {
+			return wp_cow_siteground_lazyload_img_tag( $matches[0] );
+		},
+		(string) $html
+	);
+}
+
+add_filter( 'the_content', 'wp_cow_siteground_lazyload_content_images', PHP_INT_MAX );
+add_action( 'wp_enqueue_scripts', 'wp_cow_enqueue_siteground_lazysizes', 1 );
 
 function wp_cow_local_asset_http_response( $url ) {
 	$parts = parse_url( (string) $url );
@@ -1423,6 +1685,7 @@ mod tests {
         assert!(php.contains("$_SERVER['HTTPS'] = 'on';"));
         assert!(php.contains("$wp_cow_local_host === $wp_cow_request_host"));
         assert!(php.contains("HTTP_X_FORWARDED_HOST"));
+        assert!(php.contains("define( 'WPCOW_REMOTE_URL',  'https://example.com' );"));
         assert!(php.contains("$table_prefix = 'wp_';"));
         assert!(php.contains("WPCOW_CONTROL_URL"));
         assert!(php.contains("WPCOW_QUERY_CACHE_DIR"));
@@ -1566,12 +1829,21 @@ if ( cow_cached_remote_read_is_safe_without_control( array( 'wp_options' ) ) ) {
         assert!(php.contains("wp_cow_filter_active_plugins"));
         assert!(php.contains("wp_cow_allowed_plugins"));
         assert!(php.contains("$quarantined"));
+        assert!(php.contains("wp_cow_rewrite_remote_url_to_local"));
+        assert!(php.contains("nav_menu_link_attributes"));
+        assert!(php.contains("nav_menu_css_class"));
+        assert!(php.contains("wp_enqueue_emoji_styles"));
+        assert!(php.contains("print_emoji_detection_script"));
         assert!(php.contains("option_active_plugins"));
         assert!(php.contains("siteground_optimizer_combine_css"));
         assert!(php.contains("siteground_optimizer_file_caching"));
         assert!(php.contains("siteground_optimizer_optimize_css"));
         assert!(php.contains("wp_cow_find_siteground_combined_css"));
         assert!(php.contains("WPCOW_SITEGROUND_COMBINED_CSS"));
+        assert!(php.contains("wp_cow_siteground_lazyload_content_images"));
+        assert!(php.contains("wp_cow_enqueue_siteground_lazysizes"));
+        assert!(php.contains("lazysizes.min.js"));
+        assert!(php.contains("WPCOW_SITEGROUND_LAZYLOAD_IMAGES"));
         assert!(php.contains("should_load_block_assets_on_demand"));
         assert!(php.contains("should_load_separate_core_block_assets"));
     }
@@ -1590,6 +1862,9 @@ if ( cow_cached_remote_read_is_safe_without_control( array( 'wp_options' ) ) ) {
         let sg_asset = docroot
             .join("wp-content/uploads/siteground-optimizer-assets")
             .join("siteground-optimizer-combined-css-abc123.css");
+        let lazy_asset = docroot
+            .join("wp-content/plugins/sg-cachepress/assets/js")
+            .join("lazysizes.min.js");
         let check = temp.path().join("check.php");
         fs::create_dir_all(asset.parent().unwrap()).unwrap();
         fs::write(&asset, b"body{color:#123}").unwrap();
@@ -1597,38 +1872,72 @@ if ( cow_cached_remote_read_is_safe_without_control( array( 'wp_options' ) ) ) {
         fs::write(
             &sg_asset,
             [
-                b"#wp-block-themeisle-blocks-advanced-columns-a241f2a5{min-height:800px}"
+                b"#wp-block-themeisle-blocks-advanced-columns-a241f2a5{min-height:800px;--background:url(https://example.test/wp-content/uploads/hero.jpg)}"
                     .as_slice(),
                 vec![b' '; 2048].as_slice(),
             ]
             .concat(),
         )
         .unwrap();
+        fs::create_dir_all(lazy_asset.parent().unwrap()).unwrap();
+        fs::write(&lazy_asset, b"/*! lazysizes */").unwrap();
         fs::write(&safety, safety_mu_plugin_php()).unwrap();
         fs::write(
             &check,
             format!(
                 r#"<?php
-$filters = array();
-function add_filter( $tag, $callback, $priority = 10, $accepted_args = 1 ) {{
-	global $filters;
-	$filters[ $tag ] = $callback;
-}}
-function add_action( $tag, $callback, $priority = 10, $accepted_args = 1 ) {{
-	add_filter( $tag, $callback, $priority, $accepted_args );
-}}
-function __return_false() {{ return false; }}
-function content_url( $path = '' ) {{ return 'https://example.test/wp-content/' . ltrim( $path, '/' ); }}
-function get_queried_object_id() {{ return 84; }}
-function get_post( $id ) {{
+	$filters = array();
+	function add_filter( $tag, $callback, $priority = 10, $accepted_args = 1 ) {{
+		global $filters;
+		$filters[ $tag ][] = $callback;
+	}}
+	function add_action( $tag, $callback, $priority = 10, $accepted_args = 1 ) {{
+		add_filter( $tag, $callback, $priority, $accepted_args );
+	}}
+	function apply_test_filter( $tag, $value ) {{
+		global $filters;
+		$args = func_get_args();
+		array_shift( $args );
+		if ( empty( $filters[ $tag ] ) ) {{
+			return $value;
+		}}
+		foreach ( $filters[ $tag ] as $callback ) {{
+			$args[0] = $value;
+			$value = call_user_func_array( $callback, $args );
+		}}
+		return $value;
+	}}
+	function do_test_action( $tag ) {{
+		global $filters;
+		if ( empty( $filters[ $tag ] ) ) {{
+			return;
+		}}
+		foreach ( $filters[ $tag ] as $callback ) {{
+			call_user_func( $callback );
+		}}
+	}}
+	function __return_false() {{ return false; }}
+	define( 'WP_HOME', 'https://local.test' );
+	define( 'WPCOW_REMOTE_URL', 'https://example.test' );
+	function content_url( $path = '' ) {{ return WP_HOME . '/wp-content/' . ltrim( $path, '/' ); }}
+	function get_queried_object_id() {{ return 84; }}
+	function get_post( $id ) {{
 	return (object) array(
 		'post_content' => '<!-- wp:themeisle-blocks/advanced-columns {{"id":"wp-block-themeisle-blocks-advanced-columns-a241f2a5"}} /-->',
 	);
 }}
-function wp_enqueue_style( $handle, $src, $deps = array(), $ver = false ) {{
-	global $enqueued;
-	$enqueued[ $handle ] = $src;
-}}
+	function wp_enqueue_style( $handle, $src, $deps = array(), $ver = false ) {{
+		global $enqueued;
+		$enqueued[ $handle ] = $src;
+	}}
+	function wp_enqueue_script( $handle, $src, $deps = array(), $ver = false, $in_footer = false ) {{
+		global $enqueued_scripts;
+		$enqueued_scripts[ $handle ] = $src;
+	}}
+	function wp_script_add_data( $handle, $key, $value ) {{
+		global $script_data;
+		$script_data[ $handle ][ $key ] = $value;
+	}}
 class WP_Error {{
 	public $code;
 	public $message;
@@ -1638,38 +1947,65 @@ class WP_Error {{
 	}}
 }}
 define( 'ABSPATH', '{docroot}' . '/' );
-putenv( 'WPCOW_SITEGROUND_COMBINED_CSS=siteground-optimizer-combined-css-abc123.css' );
-require '{safety}';
-$enqueued = array();
-call_user_func( $filters['wp_enqueue_scripts'] );
-if (
-	empty( $enqueued['siteground-optimizer-combined-css-abc123'] ) ||
-	false === strpos( $enqueued['siteground-optimizer-combined-css-abc123'], '/wp-content/uploads/siteground-optimizer-assets/siteground-optimizer-combined-css-abc123.css' )
+	putenv( 'WPCOW_SITEGROUND_COMBINED_CSS=siteground-optimizer-combined-css-abc123.css' );
+	require '{safety}';
+	$enqueued = array();
+	$enqueued_scripts = array();
+	$script_data = array();
+	do_test_action( 'wp_enqueue_scripts' );
+	if (
+		empty( $enqueued['siteground-optimizer-combined-css-abc123'] ) ||
+		false === strpos( $enqueued['siteground-optimizer-combined-css-abc123'], '/wp-content/uploads/siteground-optimizer-assets/wp-cow-localized-siteground-optimizer-combined-css-abc123.css' )
+	) {{
+		fwrite( STDERR, 'existing SG combined CSS was not preserved: ' . json_encode( $enqueued ) . PHP_EOL );
+		exit( 1 );
+	}}
+	$localized_css = '{docroot}' . '/wp-content/uploads/siteground-optimizer-assets/wp-cow-localized-siteground-optimizer-combined-css-abc123.css';
+	if ( ! is_file( $localized_css ) || false === strpos( file_get_contents( $localized_css ), 'https://local.test/wp-content/uploads/hero.jpg' ) ) {{
+		fwrite( STDERR, 'SG combined CSS URLs were not localized' . PHP_EOL );
+		exit( 1 );
+	}}
+	if (
+		empty( $enqueued_scripts['siteground-optimizer-lazy-sizes-js'] ) ||
+		false === strpos( $enqueued_scripts['siteground-optimizer-lazy-sizes-js'], '/wp-content/plugins/sg-cachepress/assets/js/lazysizes.min.js' ) ||
+		'defer' !== $script_data['siteground-optimizer-lazy-sizes-js']['strategy']
+	) {{
+		fwrite( STDERR, 'SG lazysizes runtime was not enqueued: ' . json_encode( array( $enqueued_scripts, $script_data ) ) . PHP_EOL );
+		exit( 1 );
+	}}
+	$cache_option = apply_test_filter( 'pre_option_siteground_optimizer_combine_css', 1 );
+	if ( 0 !== $cache_option ) {{
+		fwrite( STDERR, 'local SG cache generation was not disabled' . PHP_EOL );
+		exit( 1 );
+	}}
+	$content = '<figure class="wp-block-image size-large"><img fetchpriority="high" decoding="async" width="600" height="600" src="https://example.test/wp-content/uploads/2019/12/photo.jpg" alt="" class="wp-image-45" srcset="https://example.test/wp-content/uploads/2019/12/photo.jpg 600w" sizes="(max-width: 600px) 100vw, 600px" /></figure>';
+	$lazy_content = apply_test_filter( 'the_content', $content );
+	if (
+		false === strpos( $lazy_content, 'src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"' ) ||
+		false === strpos( $lazy_content, 'data-src="https://local.test/wp-content/uploads/2019/12/photo.jpg"' ) ||
+		false === strpos( $lazy_content, 'class="wp-image-45 lazyload"' ) ||
+		false !== strpos( $lazy_content, 'width="600"' ) ||
+		false !== strpos( $lazy_content, 'srcset=' )
 ) {{
-	fwrite( STDERR, 'existing SG combined CSS was not preserved: ' . json_encode( $enqueued ) . PHP_EOL );
+	fwrite( STDERR, 'SG lazyload placeholder shape was not preserved: ' . $lazy_content . PHP_EOL );
 	exit( 1 );
 }}
-$cache_option = call_user_func( $filters['pre_option_siteground_optimizer_combine_css'], 1 );
-if ( 0 !== $cache_option ) {{
-	fwrite( STDERR, 'local SG cache generation was not disabled' . PHP_EOL );
-	exit( 1 );
-}}
-$response = call_user_func(
-	$filters['pre_http_request'],
-	false,
-	array( 'method' => 'GET' ),
-	'https://example.test/wp-content/themes/neve/style.css?ver=1'
-);
+	$response = apply_test_filter(
+		'pre_http_request',
+		false,
+		array( 'method' => 'GET' ),
+		'https://local.test/wp-content/themes/neve/style.css?ver=1'
+	);
 if ( ! is_array( $response ) || 'body{{color:#123}}' !== $response['body'] || 200 !== $response['response']['code'] ) {{
 	fwrite( STDERR, 'local asset response failed: ' . json_encode( $response ) . PHP_EOL );
 	exit( 1 );
 }}
-$blocked = call_user_func(
-	$filters['pre_http_request'],
-	false,
-	array( 'method' => 'GET' ),
-	'https://api.example.test/side-effect'
-);
+	$blocked = apply_test_filter(
+		'pre_http_request',
+		false,
+		array( 'method' => 'GET' ),
+		'https://api.example.test/side-effect'
+	);
 if ( ! $blocked instanceof WP_Error ) {{
 	fwrite( STDERR, 'external request was not blocked' . PHP_EOL );
 	exit( 1 );
@@ -1720,9 +2056,12 @@ function add_action( $tag, $callback, $priority = 10, $accepted_args = 1 ) {{
 	add_filter( $tag, $callback, $priority, $accepted_args );
 }}
 function __return_false() {{ return false; }}
+function is_front_page() {{ return true; }}
 class WP_Error {{
 	public function __construct( $code, $message ) {{}}
 }}
+define( 'WP_HOME', 'http://local.test' );
+define( 'WPCOW_REMOTE_URL', 'https://remote.test' );
 putenv( 'WPCOW_PLUGIN_MODE=auto' );
 putenv( 'WPCOW_ENABLE_PLUGINS=0' );
 putenv( 'WPCOW_PLUGIN_POLICY_FILE={policy}' );
@@ -1741,6 +2080,19 @@ $sitewide = call_user_func(
 );
 if ( $sitewide !== array( 'woocommerce/woocommerce.php' => 2 ) ) {{
 	fwrite( STDERR, 'unexpected sitewide plugin filter: ' . json_encode( $sitewide ) . PHP_EOL );
+	exit( 1 );
+}}
+$item = (object) array( 'url' => 'http://remote.test/' );
+$classes = call_user_func( $filters['nav_menu_css_class'], array( 'menu-item' ), $item );
+foreach ( array( 'current-menu-item', 'current_page_item', 'menu-item-home', 'nv-active' ) as $expected_class ) {{
+	if ( ! in_array( $expected_class, $classes, true ) ) {{
+		fwrite( STDERR, 'missing active nav class: ' . $expected_class . ' from ' . json_encode( $classes ) . PHP_EOL );
+		exit( 1 );
+	}}
+}}
+$atts = call_user_func( $filters['nav_menu_link_attributes'], array( 'href' => 'http://remote.test/' ), $item );
+if ( 'http://local.test/' !== $atts['href'] || 'page' !== $atts['aria-current'] ) {{
+	fwrite( STDERR, 'remote home nav link was not localized/current: ' . json_encode( $atts ) . PHP_EOL );
 	exit( 1 );
 }}
 putenv( 'WPCOW_PLUGIN_MODE=full' );
