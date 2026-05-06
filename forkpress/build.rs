@@ -49,11 +49,10 @@ fn main() -> Result<()> {
         );
     }
 
-    for required in ["bin/php"] {
-        let path = dist_dir.join(required);
-        if !path.is_file() {
-            bail!("missing {} (required for runtime bundle)", path.display());
-        }
+    let required = "bin/php";
+    let path = dist_dir.join(required);
+    if !path.is_file() {
+        bail!("missing {} (required for runtime bundle)", path.display());
     }
 
     println!("cargo:rerun-if-changed={}", dist_dir.display());
