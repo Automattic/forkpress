@@ -151,6 +151,11 @@ If a pushed tree includes `wordpress/wp-config.php`, ForkPress rewrites its
 SQLite path and debug-log constants back to the target branch before that
 snapshot is published.
 
+Existing-branch pushes are staged into a fresh COW clone of the branch's
+physical storage root, then published with a rename. If applying the pushed
+tree fails, ForkPress removes the staged tree and leaves the previous branch
+directory in place.
+
 When a push creates a new Git ref, the adapter materializes the matching COW
 branch before applying the pushed `wordpress/` tree. It chooses the closest
 existing ForkPress branch from Git history, clones that branch using the
