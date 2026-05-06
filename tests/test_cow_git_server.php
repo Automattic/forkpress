@@ -69,6 +69,36 @@ $commands = cow_git_parse_push_commands($reserved);
 $rejections = cow_git_push_command_rejections($commands);
 assert_true(str_contains($rejections['refs/heads/www'] ?? '', 'reserved'), 'reserved COW branch names are rejected before mutation');
 
+$tmp = sys_get_temp_dir() . '/forkpress-cow-git-lock-' . getmypid() . '-' . bin2hex(random_bytes(4));
+mkdir($tmp, 0777, true);
+$lock_path = $tmp . '/operations.lock';
+$shared_holder = fopen($lock_path, 'c');
+assert_true(is_resource($shared_holder), 'test opened COW operation lock');
+if (is_resource($shared_holder)) {
+    assert_true(flock($shared_holder, LOCK_SH), 'test holds shared COW operation lock');
+    assert_same(cow_git_operation_lock_mode('/git-upload-pack'), LOCK_SH, 'upload-pack uses a shared COW operation lock');
+    assert_same(cow_git_operation_lock_mode('/info/refs'), LOCK_SH, 'Git ref advertisement uses a shared COW operation lock');
+    assert_same(cow_git_operation_lock_mode('/git-receive-pack'), LOCK_EX, 'receive-pack uses an exclusive COW operation lock');
+
+    $read_lock = fopen($lock_path, 'c');
+    assert_true(is_resource($read_lock), 'test opened second read lock');
+    if (is_resource($read_lock)) {
+        assert_true(flock($read_lock, cow_git_operation_lock_mode('/git-upload-pack') | LOCK_NB), 'read-only Git requests can share the operation lock');
+        fclose($read_lock);
+    }
+
+    $write_lock = fopen($lock_path, 'c');
+    assert_true(is_resource($write_lock), 'test opened write lock');
+    if (is_resource($write_lock)) {
+        assert_true(!flock($write_lock, cow_git_operation_lock_mode('/git-receive-pack') | LOCK_NB), 'receive-pack waits behind shared operation readers');
+        fclose($write_lock);
+    }
+
+    flock($shared_holder, LOCK_UN);
+    fclose($shared_holder);
+}
+cow_git_remove_tree($tmp);
+
 $tmp = sys_get_temp_dir() . '/forkpress-cow-git-server-' . getmypid() . '-' . bin2hex(random_bytes(4));
 $branches = $tmp . '/public';
 $storage = $tmp . '/storage';

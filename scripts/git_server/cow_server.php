@@ -43,6 +43,7 @@ function cow_git_server_handle(
 
     $storage_branches_dir = rtrim($storage_branches_dir ?: $branches_dir, "/\\");
     $branch_list_path = $branch_list_path ?: dirname($git_repo_dir) . '/branches.txt';
+    $is_post_receive = ($git_path === '/git-receive-pack');
 
     cow_git_mkdir(dirname($git_repo_dir));
     $operation_lock = null;
@@ -53,7 +54,7 @@ function cow_git_server_handle(
         echo "Cannot open COW branch operation lock\n";
         return;
     }
-    if (!flock($operation_lock, LOCK_EX)) {
+    if (!flock($operation_lock, cow_git_operation_lock_mode($git_path))) {
         http_response_code(500);
         echo "Cannot lock COW branch operations\n";
         fclose($operation_lock);
@@ -92,7 +93,6 @@ function cow_git_server_handle(
             $endpoint_path .= '?' . $query_string;
         }
 
-        $is_post_receive = ($git_path === '/git-receive-pack');
         $pre_receive_refs = $is_post_receive ? cow_git_capture_all_head_refs($git_repo_dir) : [];
         if ($is_post_receive) {
             ob_start();
@@ -166,6 +166,10 @@ function cow_git_server_handle(
             fclose($operation_lock);
         }
     }
+}
+
+function cow_git_operation_lock_mode(string $git_path): int {
+    return $git_path === '/git-receive-pack' ? LOCK_EX : LOCK_SH;
 }
 
 function cow_git_parse_push_commands(string $request_bytes): array {
