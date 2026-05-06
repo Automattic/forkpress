@@ -271,6 +271,14 @@ impl OverlayStore {
         )
     }
 
+    pub fn note_cache_file_finished(&self, rel: &Path, phase: &str, size: u64) -> Result<()> {
+        self.finish_cache_progress_with_phase(
+            &Self::rel_string(&Self::clean_rel(rel)?),
+            phase,
+            size,
+        )
+    }
+
     pub fn remove_cached(&self, rel: &Path) -> Result<()> {
         let path = self.cache_path(rel);
         if path.exists() {
@@ -737,7 +745,13 @@ impl OverlayStore {
         }
         let mut json = String::new();
         File::open(path)?.read_to_string(&mut json)?;
-        Ok(serde_json::from_str(&json)?)
+        Ok(
+            serde_json::from_str(&json).unwrap_or_else(|_| CacheProgress {
+                phase: "idle".to_string(),
+                updated_at_unix_ms: now_unix_ms(),
+                ..CacheProgress::default()
+            }),
+        )
     }
 
     fn write_progress(&self, progress: &CacheProgress) -> Result<()> {
@@ -794,8 +808,12 @@ impl OverlayStore {
     }
 
     fn finish_cache_progress(&self, rel: &str, size: u64) -> Result<()> {
+        self.finish_cache_progress_with_phase(rel, "cached", size)
+    }
+
+    fn finish_cache_progress_with_phase(&self, rel: &str, phase: &str, size: u64) -> Result<()> {
         let mut progress = self.load_progress()?;
-        progress.phase = "cached".to_string();
+        progress.phase = phase.to_string();
         progress.active_path.clear();
         progress.active_bytes = 0;
         progress.active_total = 0;
@@ -963,6 +981,25 @@ mod tests {
             405,
             "a crash during cache metadata append must not poison the whole lazy filesystem"
         );
+    }
+
+    #[test]
+    fn ignores_malformed_cache_progress_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::config::clone_paths(temp.path(), "example");
+        ensure_clone_dirs(&paths).unwrap();
+        let store = OverlayStore::new(&paths);
+        fs::write(store.progress_path(), b"{\"phase\":\"fetching\"\ntrailing").unwrap();
+
+        store
+            .note_cache_file_finished(Path::new("wp-settings.php"), "runtime-code-pack", 123)
+            .unwrap();
+
+        let progress = store.load_progress().unwrap();
+        assert_eq!(progress.phase, "runtime-code-pack");
+        assert_eq!(progress.files_cached, 1);
+        assert_eq!(progress.bytes_cached, 123);
+        assert_eq!(progress.last_cached_path, "wp-settings.php");
     }
 
     #[test]

@@ -76,6 +76,8 @@ fn warm_runtime_code_cache_inner(
                 file.entry.size,
                 file.entry.size,
             );
+            let _ =
+                overlay.note_cache_file_finished(&file.rel, "runtime-code-pack", file.entry.size);
             Ok(())
         })
         .context("cache remote runtime code pack")?;

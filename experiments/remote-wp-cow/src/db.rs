@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use mysql::prelude::Queryable;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -1533,45 +1534,67 @@ pub(crate) fn run_mysql_exec(manifest: &Manifest, sql_text: &str) -> Result<()> 
 }
 
 pub(crate) fn local_query_result(manifest: &Manifest, sql_text: &str) -> Result<CowQueryResult> {
-    let output = local_mysql_command(manifest)
-        .arg("--batch")
-        .arg("--raw")
-        .arg("--execute")
-        .arg(sql_text)
-        .output()
-        .context("run local mysql query")?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "local mysql query failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut lines = stdout.lines();
-    let Some(header) = lines.next() else {
-        return Ok(CowQueryResult::ok(Vec::new(), Vec::new()));
-    };
-    let fields = header
-        .split('\t')
-        .map(|field| field.to_string())
+    let mut conn = local_mysql_conn(manifest)?;
+    let result = conn
+        .query_iter(sql_text)
+        .with_context(|| format!("run local mysql query: {sql_text}"))?;
+    let fields = result
+        .columns()
+        .as_ref()
+        .iter()
+        .map(|column| column.name_str().to_string())
         .collect::<Vec<_>>();
     let mut rows = Vec::new();
-    for line in lines {
-        let values = line.split('\t').collect::<Vec<_>>();
+    for row in result {
+        let row = row.context("read local mysql row")?;
+        let values = row.unwrap();
         let mut row = Row::new();
         for (idx, field) in fields.iter().enumerate() {
-            let value = values.get(idx).copied().unwrap_or_default();
-            if value == "NULL" {
-                row.insert(field.clone(), serde_json::Value::Null);
-            } else {
-                row.insert(field.clone(), serde_json::Value::String(value.to_string()));
-            }
+            let value = values.get(idx).cloned().unwrap_or(mysql::Value::NULL);
+            row.insert(field.clone(), mysql_value_to_json(value));
         }
         rows.push(row);
     }
 
     Ok(CowQueryResult::ok(rows, fields))
+}
+
+fn local_mysql_conn(manifest: &Manifest) -> Result<mysql::Conn> {
+    let mut builder = mysql::OptsBuilder::new()
+        .ip_or_hostname(Some(manifest.local_db.host.clone()))
+        .tcp_port(manifest.local_db.port)
+        .user(Some(manifest.local_db.user.clone()))
+        .db_name(Some(manifest.local_db.name.clone()));
+    if !manifest.local_db.password.is_empty() {
+        builder = builder.pass(Some(manifest.local_db.password.clone()));
+    }
+    mysql::Conn::new(builder).context("connect to local mysql")
+}
+
+fn mysql_value_to_json(value: mysql::Value) -> serde_json::Value {
+    match value {
+        mysql::Value::NULL => serde_json::Value::Null,
+        mysql::Value::Bytes(bytes) => {
+            serde_json::Value::String(String::from_utf8_lossy(&bytes).into())
+        }
+        mysql::Value::Int(value) => serde_json::Value::String(value.to_string()),
+        mysql::Value::UInt(value) => serde_json::Value::String(value.to_string()),
+        mysql::Value::Float(value) => serde_json::Value::String(value.to_string()),
+        mysql::Value::Double(value) => serde_json::Value::String(value.to_string()),
+        mysql::Value::Date(year, month, day, hour, minute, second, micros) => {
+            serde_json::Value::String(format!(
+                "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}.{:06}",
+                micros
+            ))
+        }
+        mysql::Value::Time(negative, days, hours, minutes, seconds, micros) => {
+            let sign = if negative { "-" } else { "" };
+            serde_json::Value::String(format!(
+                "{sign}{days} {hours:02}:{minutes:02}:{seconds:02}.{:06}",
+                micros
+            ))
+        }
+    }
 }
 
 fn mysql_string_literal(value: &str) -> String {
@@ -1843,6 +1866,17 @@ mod tests {
         assert_eq!(max_pk_from_rows(&[null_row], "max_pk").unwrap(), 0);
 
         assert_eq!(max_pk_from_rows(&[], "max_pk").unwrap(), 0);
+    }
+
+    #[test]
+    fn mysql_value_conversion_preserves_multiline_wordpress_content() {
+        let value = mysql_value_to_json(mysql::Value::Bytes(
+            b"before\n<h1>About</h1>\nafter\tTabbed".to_vec(),
+        ));
+        assert_eq!(
+            value,
+            serde_json::Value::String("before\n<h1>About</h1>\nafter\tTabbed".to_string())
+        );
     }
 
     #[test]

@@ -755,10 +755,90 @@ add_filter( 'option_active_plugins', 'wp_cow_filter_active_plugins', PHP_INT_MAX
 add_filter( 'site_option_active_sitewide_plugins', 'wp_cow_filter_sitewide_plugins', PHP_INT_MAX );
 
 add_filter( 'validate_current_theme', '__return_false', PHP_INT_MAX );
+add_filter( 'should_load_block_assets_on_demand', '__return_false', PHP_INT_MAX );
+add_filter( 'should_load_separate_core_block_assets', '__return_false', PHP_INT_MAX );
+
+function wp_cow_disable_local_cache_generation( $value = false ) {
+	return 0;
+}
+
+foreach (
+	array(
+		'siteground_optimizer_combine_css',
+		'siteground_optimizer_combine_javascript',
+		'siteground_optimizer_dns_prefetch',
+		'siteground_optimizer_file_caching',
+		'siteground_optimizer_fix_insecure_content',
+		'siteground_optimizer_optimize_css',
+		'siteground_optimizer_optimize_html',
+		'siteground_optimizer_optimize_javascript',
+		'siteground_optimizer_optimize_javascript_async',
+		'siteground_optimizer_optimize_web_fonts',
+		'siteground_optimizer_preload_combined_css',
+	) as $wp_cow_cache_option
+) {
+	add_filter( 'pre_option_' . $wp_cow_cache_option, 'wp_cow_disable_local_cache_generation', PHP_INT_MAX );
+}
+unset( $wp_cow_cache_option );
+
+function wp_cow_local_asset_http_response( $url ) {
+	$parts = parse_url( (string) $url );
+	if ( ! is_array( $parts ) || empty( $parts['path'] ) ) {
+		return false;
+	}
+
+	$path = rawurldecode( (string) $parts['path'] );
+	if ( false !== strpos( $path, "\0" ) || false !== strpos( $path, '..' ) ) {
+		return false;
+	}
+	if ( 0 !== strpos( $path, '/wp-content/' ) && 0 !== strpos( $path, '/wp-includes/' ) ) {
+		return false;
+	}
+
+	$file = ABSPATH . ltrim( $path, '/' );
+	$real_base = realpath( ABSPATH );
+	$real_file = realpath( $file );
+	if ( false === $real_base || false === $real_file || 0 !== strpos( $real_file, rtrim( $real_base, DIRECTORY_SEPARATOR ) . DIRECTORY_SEPARATOR ) ) {
+		return false;
+	}
+	if ( ! is_file( $real_file ) || ! is_readable( $real_file ) ) {
+		return false;
+	}
+
+	$max_mb = (int) getenv( 'WPCOW_LOCAL_HTTP_ASSET_MAX_MB' );
+	if ( $max_mb < 1 ) {
+		$max_mb = 8;
+	}
+	$size = filesize( $real_file );
+	if ( false === $size || $size > $max_mb * 1024 * 1024 ) {
+		return false;
+	}
+
+	$body = file_get_contents( $real_file );
+	if ( false === $body ) {
+		return false;
+	}
+
+	return array(
+		'headers'  => array(),
+		'body'     => $body,
+		'response' => array(
+			'code'    => 200,
+			'message' => 'OK',
+		),
+		'cookies'  => array(),
+		'filename' => null,
+	);
+}
 
 add_filter( 'pre_http_request', static function ( $preempt, $args, $url ) {
 	if ( defined( 'WPCOW_ALLOW_OUTBOUND_HTTP' ) && WPCOW_ALLOW_OUTBOUND_HTTP ) {
 		return $preempt;
+	}
+
+	$local_asset = wp_cow_local_asset_http_response( $url );
+	if ( false !== $local_asset ) {
+		return $local_asset;
 	}
 
 	return new WP_Error( 'wp_cow_blocked_http', 'Outbound HTTP is blocked in this wp-cow clone.' );
@@ -1339,12 +1419,97 @@ if ( cow_cached_remote_read_is_safe_without_control( array( 'wp_options' ) ) ) {
         assert!(php.contains("pre_wp_mail"));
         assert!(php.contains("X-Robots-Tag"));
         assert!(php.contains("pre_http_request"));
+        assert!(php.contains("wp_cow_local_asset_http_response"));
         assert!(php.contains("validate_current_theme"));
         assert!(php.contains("WPCOW_ENABLE_PLUGINS"));
         assert!(php.contains("WPCOW_PLUGIN_POLICY_FILE"));
         assert!(php.contains("wp_cow_filter_active_plugins"));
         assert!(php.contains("wp_cow_allowed_plugins"));
         assert!(php.contains("option_active_plugins"));
+        assert!(php.contains("siteground_optimizer_combine_css"));
+        assert!(php.contains("siteground_optimizer_file_caching"));
+        assert!(php.contains("siteground_optimizer_optimize_css"));
+        assert!(php.contains("should_load_block_assets_on_demand"));
+        assert!(php.contains("should_load_separate_core_block_assets"));
+    }
+
+    #[test]
+    fn safety_plugin_serves_local_assets_to_wp_http_without_network() {
+        if Command::new("php").arg("-v").output().is_err() {
+            eprintln!("skipping generated PHP local asset HTTP test because php is not on PATH");
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let safety = temp.path().join("wp-cow-safety.php");
+        let docroot = temp.path().join("site");
+        let asset = docroot.join("wp-content/themes/neve/style.css");
+        let check = temp.path().join("check.php");
+        fs::create_dir_all(asset.parent().unwrap()).unwrap();
+        fs::write(&asset, b"body{color:#123}").unwrap();
+        fs::write(&safety, safety_mu_plugin_php()).unwrap();
+        fs::write(
+            &check,
+            format!(
+                r#"<?php
+$filters = array();
+function add_filter( $tag, $callback, $priority = 10, $accepted_args = 1 ) {{
+	global $filters;
+	$filters[ $tag ] = $callback;
+}}
+function add_action( $tag, $callback, $priority = 10, $accepted_args = 1 ) {{
+	add_filter( $tag, $callback, $priority, $accepted_args );
+}}
+function __return_false() {{ return false; }}
+class WP_Error {{
+	public $code;
+	public $message;
+	public function __construct( $code, $message ) {{
+		$this->code    = $code;
+		$this->message = $message;
+	}}
+}}
+define( 'ABSPATH', '{docroot}' . '/' );
+require '{safety}';
+$cache_option = call_user_func( $filters['pre_option_siteground_optimizer_combine_css'], 1 );
+if ( 0 !== $cache_option ) {{
+	fwrite( STDERR, 'local SG cache generation was not disabled' . PHP_EOL );
+	exit( 1 );
+}}
+$response = call_user_func(
+	$filters['pre_http_request'],
+	false,
+	array( 'method' => 'GET' ),
+	'https://example.test/wp-content/themes/neve/style.css?ver=1'
+);
+if ( ! is_array( $response ) || 'body{{color:#123}}' !== $response['body'] || 200 !== $response['response']['code'] ) {{
+	fwrite( STDERR, 'local asset response failed: ' . json_encode( $response ) . PHP_EOL );
+	exit( 1 );
+}}
+$blocked = call_user_func(
+	$filters['pre_http_request'],
+	false,
+	array( 'method' => 'GET' ),
+	'https://api.example.test/side-effect'
+);
+if ( ! $blocked instanceof WP_Error ) {{
+	fwrite( STDERR, 'external request was not blocked' . PHP_EOL );
+	exit( 1 );
+}}
+"#,
+                docroot = php_single_quoted_path(&docroot),
+                safety = php_single_quoted_path(&safety)
+            ),
+        )
+        .unwrap();
+
+        let output = Command::new("php").arg(&check).output().unwrap();
+        assert!(
+            output.status.success(),
+            "local asset HTTP shim failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

@@ -605,13 +605,30 @@ echo $target;
             .ok_or_else(|| anyhow!("runtime code pack stdout"))?;
 
         let mut summary = RuntimeCodePackSummary::default();
+        let mut partial_stream = false;
         for line in BufReader::new(stdout).lines() {
             let line = line.context("read remote runtime code pack")?;
             if line.trim().is_empty() {
                 continue;
             }
-            let value: serde_json::Value = serde_json::from_str(&line)
-                .with_context(|| format!("decode remote runtime code pack line: {line}"))?;
+            let value: serde_json::Value = match serde_json::from_str(&line) {
+                Ok(value) => value,
+                Err(err) => {
+                    if summary.files > 0 {
+                        summary.capped = true;
+                        partial_stream = true;
+                        trace_remote_result::<(), _>(
+                            "runtime_code_pack_partial_line",
+                            &format!("{} cached files", summary.files),
+                            Instant::now(),
+                            &Err(err),
+                        );
+                        break;
+                    }
+                    return Err(err)
+                        .with_context(|| format!("decode remote runtime code pack line: {line}"));
+                }
+            };
             match value.get("type").and_then(|value| value.as_str()) {
                 Some("file") => {
                     let rel = value
@@ -626,6 +643,8 @@ echo $target;
                     )?;
                     let bytes = decode_helper_data(value.clone())?;
                     if entry.kind == "file" && bytes.len() as u64 == entry.size {
+                        summary.files = summary.files.saturating_add(1);
+                        summary.bytes = summary.bytes.saturating_add(entry.size);
                         on_file(RuntimeCodePackFile {
                             rel: PathBuf::from(rel),
                             entry,
@@ -648,7 +667,7 @@ echo $target;
         }
 
         let output = child.wait_with_output()?;
-        if !output.status.success() {
+        if !output.status.success() && !(partial_stream && summary.files > 0) {
             return Err(anyhow!(
                 "remote runtime code pack exited with status {}: {}",
                 output.status,
