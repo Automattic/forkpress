@@ -9,6 +9,7 @@
  */
 
 error_reporting(E_ALL & ~E_WARNING & ~E_NOTICE & ~E_DEPRECATED);
+set_time_limit(300);
 
 $store = getenv('FORKPRESS_CAS_STORE');
 $wp_root = getenv('FORKPRESS_CAS_WP_ROOT');
