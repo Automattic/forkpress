@@ -170,6 +170,8 @@ and deletes one branch at a time.
 `database.sql` is generated for model context. Edits to `database.sql` are
 ignored on push; database changes should happen through WordPress, WP-CLI, or
 another tool operating on the branch's own SQLite database.
+`wordpress/wp-content/database/` is private runtime state and is not part of the
+Git view; ForkPress ignores pushed files under that path.
 After a push, ForkPress immediately re-snapshots the branch so the remote Git
 ref reflects the generated `database.sql`, not a user-edited copy.
 
@@ -369,8 +371,9 @@ sequenceDiagram
 
 Before every Git request, ForkPress snapshots each branch directory into the
 Git adapter store. After a push, ForkPress applies only `wordpress/` changes
-back to the target branch directory. The branch's SQLite database remains
-branch-local and is never overwritten by `database.sql`.
+back to the target branch directory, excluding private runtime paths such as
+`wp-content/database/`. The branch's SQLite database remains branch-local and is
+never overwritten by `database.sql`.
 
 ## Other Strategies
 

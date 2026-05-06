@@ -120,6 +120,10 @@ wordpress/
 read-only from ForkPress' perspective. Pushing a modified `database.sql` does
 not mutate WordPress database state.
 
+The live SQLite directory, `wordpress/wp-content/database/`, is private runtime
+state and is not part of the Git view. ForkPress omits that directory when it
+snapshots branches and ignores pushed files under that path.
+
 ```mermaid
 sequenceDiagram
     participant CLI as forkpress clone/fetch
@@ -142,11 +146,12 @@ into `.forkpress/cow/git`. This means direct edits in `./main` or
 `./marketing` become visible to Git on the next clone/fetch.
 
 After a push, the adapter applies the pushed `wordpress/` tree to the target
-branch directory. Database files under `wp-content/database/.ht.sqlite*` are
-never exported through Git and are not removed during Git apply. When apply
-succeeds, the adapter immediately snapshots the branch again so the remote ref
-matches ForkPress' source of truth. This removes pushed `database.sql` edits or
-other non-exported paths from the Git view without waiting for the next fetch.
+branch directory, except for private runtime paths such as
+`wp-content/database/`. The database directory is never exported through Git and
+is not removed during Git apply. When apply succeeds, the adapter immediately
+snapshots the branch again so the remote ref matches ForkPress' source of truth.
+This removes pushed `database.sql` edits or other non-exported paths from the Git
+view without waiting for the next fetch.
 If a pushed tree includes `wordpress/wp-config.php`, ForkPress rewrites its
 SQLite path and debug-log constants back to the target branch before that
 snapshot is published.

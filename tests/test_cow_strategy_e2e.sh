@@ -171,15 +171,20 @@ log_step "clone Git view"
 "$BIN" clone "http://127.0.0.1:$PORT/site.git" "$TMP/checkout"
 test -f "$TMP/checkout/wordpress/wp-load.php"
 test -f "$TMP/checkout/database.sql"
+test ! -e "$TMP/checkout/wordpress/wp-content/database/.ht.sqlite"
+test ! -e "$TMP/checkout/wordpress/wp-content/database/wp-debug.log"
 
 git -C "$TMP/checkout" fetch origin '+refs/heads/*:refs/remotes/origin/*'
 git -C "$TMP/checkout" checkout -B feature-cow origin/feature-cow
 grep -F "$TITLE" "$TMP/checkout/database.sql" >/dev/null
 echo "changed through git" > "$TMP/checkout/wordpress/wp-content/cow-git.txt"
+mkdir -p "$TMP/checkout/wordpress/wp-content/database"
+echo "private through git" > "$TMP/checkout/wordpress/wp-content/database/pushed-private.txt"
 log_step "push Git update to existing branch"
 "$BIN" commit "$TMP/checkout" --message "test cow git push"
 test -f "$WORK/feature-cow/wp-content/cow-git.txt"
 grep -F "changed through git" "$WORK/feature-cow/wp-content/cow-git.txt" >/dev/null
+test ! -e "$WORK/feature-cow/wp-content/database/pushed-private.txt"
 test ! -e "$WORK/main/wp-content/cow-git.txt"
 
 git -C "$TMP/checkout" checkout -B git-created origin/main
