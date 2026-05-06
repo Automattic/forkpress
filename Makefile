@@ -87,6 +87,7 @@ test-all: ext/branchfs.so
 	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_cow_backtick_ddl.php
 	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_gc.php
 	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_push_auth.php
+	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_cow_git_server.php
 	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_branchctl_local_auth.php
 
 clean:

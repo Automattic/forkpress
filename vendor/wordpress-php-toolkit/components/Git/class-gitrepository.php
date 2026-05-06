@@ -291,7 +291,8 @@ class GitRepository {
 	public function delete_branch( $branch_name ) {
 		$path = $this->resolve_branch_file_path( $branch_name );
 
-		return $this->fs->rm( $path );
+		$this->fs->rm( $path );
+		return true;
 	}
 
 	public function checkout( $branch_name_or_commit_hash ) {
