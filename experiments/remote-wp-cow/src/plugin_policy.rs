@@ -45,6 +45,8 @@ impl PluginPolicy {
         );
         self.quarantine
             .retain(|plugin, _| active_set.contains(plugin));
+        let quarantined: BTreeSet<_> = self.quarantine.keys().cloned().collect();
+        self.allow.retain(|allowed| !quarantined.contains(allowed));
         self
     }
 
@@ -223,6 +225,32 @@ mod tests {
                 .get("akismet/akismet.php")
                 .map(String::as_str),
             Some("timeout")
+        );
+    }
+
+    #[test]
+    fn existing_policy_never_allows_quarantined_plugins() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("plugin-policy.json");
+        let mut policy =
+            PluginPolicy::new(&["seo/seo.php".to_string(), "visual/visual.php".to_string()]);
+        policy.allow_plugin("seo/seo.php");
+        policy.allow_plugin("visual/visual.php");
+        policy
+            .quarantine
+            .insert("seo/seo.php".to_string(), "timed out".to_string());
+        write_policy_atomic(&path, &policy).unwrap();
+
+        let loaded = load_policy_or_new(
+            &path,
+            &["seo/seo.php".to_string(), "visual/visual.php".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(loaded.allow, vec!["visual/visual.php"]);
+        assert_eq!(
+            loaded.quarantine.get("seo/seo.php").map(String::as_str),
+            Some("timed out")
         );
     }
 

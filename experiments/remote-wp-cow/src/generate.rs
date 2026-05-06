@@ -685,12 +685,21 @@ function wp_cow_plugin_policy() {
 }
 
 function wp_cow_allowed_plugins() {
-	$policy  = wp_cow_plugin_policy();
-	$allowed = isset( $policy['allow'] ) && is_array( $policy['allow'] ) ? $policy['allow'] : array();
-	$out     = array();
-	foreach ( $allowed as $plugin ) {
+	$policy      = wp_cow_plugin_policy();
+	$allowed     = isset( $policy['allow'] ) && is_array( $policy['allow'] ) ? $policy['allow'] : array();
+	$quarantine  = isset( $policy['quarantine'] ) && is_array( $policy['quarantine'] ) ? $policy['quarantine'] : array();
+	$quarantined = array();
+	foreach ( $quarantine as $plugin => $reason ) {
 		$plugin = ltrim( (string) $plugin, '/' );
 		if ( '' !== $plugin ) {
+			$quarantined[ $plugin ] = true;
+		}
+	}
+
+	$out = array();
+	foreach ( $allowed as $plugin ) {
+		$plugin = ltrim( (string) $plugin, '/' );
+		if ( '' !== $plugin && ! isset( $quarantined[ $plugin ] ) ) {
 			$out[ $plugin ] = true;
 		}
 	}
@@ -780,6 +789,137 @@ foreach (
 	add_filter( 'pre_option_' . $wp_cow_cache_option, 'wp_cow_disable_local_cache_generation', PHP_INT_MAX );
 }
 unset( $wp_cow_cache_option );
+
+function wp_cow_siteground_combined_css_markers() {
+	$post_id = function_exists( 'get_queried_object_id' ) ? (int) get_queried_object_id() : 0;
+	if ( $post_id <= 0 || ! function_exists( 'get_post' ) ) {
+		return array();
+	}
+
+	$post = get_post( $post_id );
+	if ( ! is_object( $post ) || empty( $post->post_content ) ) {
+		return array();
+	}
+
+	preg_match_all( '/wp-block-themeisle-blocks-[a-z0-9-]+-[a-f0-9]{8}/i', (string) $post->post_content, $matches );
+	if ( empty( $matches[0] ) ) {
+		return array();
+	}
+
+	return array_values( array_unique( array_slice( $matches[0], 0, 20 ) ) );
+}
+
+function wp_cow_configured_siteground_combined_css() {
+	$basename = basename( (string) getenv( 'WPCOW_SITEGROUND_COMBINED_CSS' ) );
+	if ( '' === $basename || ! preg_match( '/^siteground-optimizer-combined-css-[a-f0-9]+\.css$/', $basename ) ) {
+		return false;
+	}
+
+	$file = ABSPATH . 'wp-content/uploads/siteground-optimizer-assets/' . $basename;
+	if ( ! is_file( $file ) || ! is_readable( $file ) ) {
+		return false;
+	}
+
+	$size = filesize( $file );
+	if ( false === $size || $size < 1024 || $size > 2 * 1024 * 1024 ) {
+		return false;
+	}
+
+	return $file;
+}
+
+function wp_cow_find_siteground_combined_css() {
+	static $asset = null;
+	if ( null !== $asset ) {
+		return $asset;
+	}
+
+	$asset = false;
+	$configured = wp_cow_configured_siteground_combined_css();
+	if ( false !== $configured ) {
+		$asset = $configured;
+		return $asset;
+	}
+
+	$scan = strtolower( trim( (string) getenv( 'WPCOW_SITEGROUND_COMBINED_CSS_SCAN' ) ) );
+	if ( ! in_array( $scan, array( '1', 'true', 'yes', 'on' ), true ) ) {
+		return false;
+	}
+
+	$dir   = ABSPATH . 'wp-content/uploads/siteground-optimizer-assets';
+	if ( ! is_dir( $dir ) || ! is_readable( $dir ) ) {
+		return false;
+	}
+
+	$files = glob( $dir . '/siteground-optimizer-combined-css-*.css' );
+	if ( ! is_array( $files ) || empty( $files ) ) {
+		return false;
+	}
+
+	usort(
+		$files,
+		static function ( $a, $b ) {
+			return (int) @filemtime( $b ) <=> (int) @filemtime( $a );
+		}
+	);
+
+	$markers = wp_cow_siteground_combined_css_markers();
+	$fallback = false;
+
+	foreach ( $files as $file ) {
+		if ( ! is_file( $file ) || ! is_readable( $file ) ) {
+			continue;
+		}
+
+		$size = filesize( $file );
+		if ( false === $size || $size < 1024 || $size > 2 * 1024 * 1024 ) {
+			continue;
+		}
+
+		if ( false === $fallback ) {
+			$fallback = $file;
+		}
+
+		if ( empty( $markers ) ) {
+			continue;
+		}
+
+		$css = file_get_contents( $file );
+		if ( false === $css ) {
+			continue;
+		}
+
+		foreach ( $markers as $marker ) {
+			if ( false !== strpos( $css, $marker ) ) {
+				$asset = $file;
+				return $asset;
+			}
+		}
+	}
+
+	$asset = $fallback;
+	return $asset;
+}
+
+add_action(
+	'wp_enqueue_scripts',
+	static function () {
+		if ( ! function_exists( 'wp_enqueue_style' ) || ! function_exists( 'content_url' ) ) {
+			return;
+		}
+
+		$file = wp_cow_find_siteground_combined_css();
+		if ( false === $file ) {
+			return;
+		}
+
+		$basename = basename( $file );
+		$handle   = preg_replace( '/\.css$/', '', $basename );
+		$url      = content_url( 'uploads/siteground-optimizer-assets/' . $basename );
+		wp_enqueue_style( $handle, $url, array(), null );
+	},
+	0
+);
 
 function wp_cow_local_asset_http_response( $url ) {
 	$parts = parse_url( (string) $url );
@@ -1425,10 +1565,13 @@ if ( cow_cached_remote_read_is_safe_without_control( array( 'wp_options' ) ) ) {
         assert!(php.contains("WPCOW_PLUGIN_POLICY_FILE"));
         assert!(php.contains("wp_cow_filter_active_plugins"));
         assert!(php.contains("wp_cow_allowed_plugins"));
+        assert!(php.contains("$quarantined"));
         assert!(php.contains("option_active_plugins"));
         assert!(php.contains("siteground_optimizer_combine_css"));
         assert!(php.contains("siteground_optimizer_file_caching"));
         assert!(php.contains("siteground_optimizer_optimize_css"));
+        assert!(php.contains("wp_cow_find_siteground_combined_css"));
+        assert!(php.contains("WPCOW_SITEGROUND_COMBINED_CSS"));
         assert!(php.contains("should_load_block_assets_on_demand"));
         assert!(php.contains("should_load_separate_core_block_assets"));
     }
@@ -1444,9 +1587,23 @@ if ( cow_cached_remote_read_is_safe_without_control( array( 'wp_options' ) ) ) {
         let safety = temp.path().join("wp-cow-safety.php");
         let docroot = temp.path().join("site");
         let asset = docroot.join("wp-content/themes/neve/style.css");
+        let sg_asset = docroot
+            .join("wp-content/uploads/siteground-optimizer-assets")
+            .join("siteground-optimizer-combined-css-abc123.css");
         let check = temp.path().join("check.php");
         fs::create_dir_all(asset.parent().unwrap()).unwrap();
         fs::write(&asset, b"body{color:#123}").unwrap();
+        fs::create_dir_all(sg_asset.parent().unwrap()).unwrap();
+        fs::write(
+            &sg_asset,
+            [
+                b"#wp-block-themeisle-blocks-advanced-columns-a241f2a5{min-height:800px}"
+                    .as_slice(),
+                vec![b' '; 2048].as_slice(),
+            ]
+            .concat(),
+        )
+        .unwrap();
         fs::write(&safety, safety_mu_plugin_php()).unwrap();
         fs::write(
             &check,
@@ -1461,6 +1618,17 @@ function add_action( $tag, $callback, $priority = 10, $accepted_args = 1 ) {{
 	add_filter( $tag, $callback, $priority, $accepted_args );
 }}
 function __return_false() {{ return false; }}
+function content_url( $path = '' ) {{ return 'https://example.test/wp-content/' . ltrim( $path, '/' ); }}
+function get_queried_object_id() {{ return 84; }}
+function get_post( $id ) {{
+	return (object) array(
+		'post_content' => '<!-- wp:themeisle-blocks/advanced-columns {{"id":"wp-block-themeisle-blocks-advanced-columns-a241f2a5"}} /-->',
+	);
+}}
+function wp_enqueue_style( $handle, $src, $deps = array(), $ver = false ) {{
+	global $enqueued;
+	$enqueued[ $handle ] = $src;
+}}
 class WP_Error {{
 	public $code;
 	public $message;
@@ -1470,7 +1638,17 @@ class WP_Error {{
 	}}
 }}
 define( 'ABSPATH', '{docroot}' . '/' );
+putenv( 'WPCOW_SITEGROUND_COMBINED_CSS=siteground-optimizer-combined-css-abc123.css' );
 require '{safety}';
+$enqueued = array();
+call_user_func( $filters['wp_enqueue_scripts'] );
+if (
+	empty( $enqueued['siteground-optimizer-combined-css-abc123'] ) ||
+	false === strpos( $enqueued['siteground-optimizer-combined-css-abc123'], '/wp-content/uploads/siteground-optimizer-assets/siteground-optimizer-combined-css-abc123.css' )
+) {{
+	fwrite( STDERR, 'existing SG combined CSS was not preserved: ' . json_encode( $enqueued ) . PHP_EOL );
+	exit( 1 );
+}}
 $cache_option = call_user_func( $filters['pre_option_siteground_optimizer_combine_css'], 1 );
 if ( 0 !== $cache_option ) {{
 	fwrite( STDERR, 'local SG cache generation was not disabled' . PHP_EOL );
@@ -1526,7 +1704,7 @@ if ( ! $blocked instanceof WP_Error ) {{
         fs::write(&safety, safety_mu_plugin_php()).unwrap();
         fs::write(
             &policy,
-            r#"{"version":1,"mode":"auto","active":["akismet/akismet.php","woocommerce/woocommerce.php"],"allow":["woocommerce/woocommerce.php"],"quarantine":{"akismet/akismet.php":"timeout"}}"#,
+            r#"{"version":1,"mode":"auto","active":["akismet/akismet.php","woocommerce/woocommerce.php"],"allow":["akismet/akismet.php","woocommerce/woocommerce.php"],"quarantine":{"akismet/akismet.php":"timeout"}}"#,
         )
         .unwrap();
         fs::write(
