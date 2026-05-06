@@ -28,6 +28,27 @@ require_once __DIR__ . '/../scripts/git_server/cow_server.php';
 
 echo "=== COW Git server receive-pack parsing ===\n";
 
+$signed_commit_bytes = implode("\n", [
+    'tree ' . str_repeat('a', 40),
+    'author Jan <jan@example.com> 1710000000 +0000',
+    'committer Jan <jan@example.com> 1710000000 +0000',
+    'gpgsig -----BEGIN SSH SIGNATURE-----',
+    ' ',
+    ' signed-payload',
+    ' -----END SSH SIGNATURE-----',
+    '',
+    'signed commit',
+    '',
+]);
+$signed_commit = WordPress\Git\Protocol\Parser\CommitParser::parse($signed_commit_bytes);
+assert_same($signed_commit->tree, str_repeat('a', 40), 'signed commit tree parsed');
+assert_same(
+    $signed_commit->gpgsig,
+    "-----BEGIN SSH SIGNATURE-----\n\nsigned-payload\n-----END SSH SIGNATURE-----",
+    'signed commit gpgsig continuation lines parsed'
+);
+assert_same($signed_commit->message, "signed commit\n", 'signed commit message parsed after signature');
+
 $old = str_repeat('1', 40);
 $new = str_repeat('2', 40);
 $zero = str_repeat('0', 40);
