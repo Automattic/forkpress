@@ -104,7 +104,7 @@ NODE
 }
 
 log_step "init COW site"
-"$BIN" init --strategy cow --work-dir "$WORK_DIR" --admin-password admin
+"$BIN" init --work-dir "$WORK_DIR" --admin-password admin
 test -d "$WORK/.forkpress"
 test -d "$WORK/main"
 test -f "$WORK/main/wp-load.php"

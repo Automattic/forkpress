@@ -67,8 +67,10 @@ fn main() -> Result<()> {
         "runtime/router_cow.php",
         "runtime/bootstrap_cow_wp.php",
         "runtime/wp.zip",
+        "scripts/backup.php",
         "scripts/git_server/autoload.php",
         "scripts/git_server/cow_server.php",
+        "scripts/sqlite_retry.php",
     ] {
         println!("cargo:rerun-if-changed={}", repo_root.join(rel).display());
     }
@@ -416,8 +418,10 @@ fn build_bundle(
         add_file(&mut tar, repo_root, "runtime/managed_wp_files.php")?;
         add_file(&mut tar, repo_root, "runtime/refresh_wp_files.php")?;
     } else {
+        add_file(&mut tar, repo_root, "scripts/backup.php")?;
         add_file(&mut tar, repo_root, "scripts/git_server/autoload.php")?;
         add_file(&mut tar, repo_root, "scripts/git_server/cow_server.php")?;
+        add_file(&mut tar, repo_root, "scripts/sqlite_retry.php")?;
     }
 
     add_file_as(
