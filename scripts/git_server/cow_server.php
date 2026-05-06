@@ -459,6 +459,7 @@ function cow_git_apply_all_refs_to_branches(
         }
 
         cow_git_apply_wp_files($repo, $branch_root, $wp_files);
+        cow_git_rewrite_wp_config($branch_root, $debug_log);
     }
 }
 

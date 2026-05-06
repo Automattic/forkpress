@@ -146,5 +146,62 @@ assert_true(!str_contains($resynced_database, 'user-edited database.sql'), 'push
 assert_true(str_contains($resynced_database, 'ForkPress'), 'push resync regenerates database.sql from branch SQLite');
 cow_git_remove_tree($tmp);
 
+$tmp = sys_get_temp_dir() . '/forkpress-cow-git-config-rewrite-' . getmypid() . '-' . bin2hex(random_bytes(4));
+$branches = $tmp . '/branches';
+$git = $tmp . '/git';
+mkdir($branches . '/main/wp-content/database', 0777, true);
+mkdir($branches . '/feature/wp-content/database', 0777, true);
+file_put_contents($branches . '/main/wp-load.php', "<?php\n");
+file_put_contents($branches . '/feature/wp-load.php', "<?php\n");
+$main_db = $branches . '/main/wp-content/database/.ht.sqlite';
+$feature_db = $branches . '/feature/wp-content/database/.ht.sqlite';
+$main_debug = $branches . '/main/wp-content/database/wp-debug.log';
+$feature_debug = $branches . '/feature/wp-content/database/wp-debug.log';
+$main_config = "<?php\n"
+    . "define('FQDB',    '" . cow_git_php_single_quoted($main_db) . "');\n"
+    . "define('DB_DIR',  '" . cow_git_php_single_quoted(dirname($main_db)) . "');\n"
+    . "define('DB_FILE', '.ht.sqlite');\n"
+    . "define('WP_DEBUG_LOG', '" . cow_git_php_single_quoted($main_debug) . "');\n";
+$feature_config = "<?php\n"
+    . "define('FQDB',    '" . cow_git_php_single_quoted($feature_db) . "');\n"
+    . "define('DB_DIR',  '" . cow_git_php_single_quoted(dirname($feature_db)) . "');\n"
+    . "define('DB_FILE', '.ht.sqlite');\n"
+    . "define('WP_DEBUG_LOG', '" . cow_git_php_single_quoted($feature_debug) . "');\n";
+file_put_contents($branches . '/main/wp-config.php', $main_config);
+file_put_contents($branches . '/feature/wp-config.php', $feature_config);
+
+$fs = WordPress\Filesystem\LocalFilesystem::create($git);
+$repo = new WordPress\Git\GitRepository($fs, ['default_branch' => 'main']);
+$repo->set_config_value(['user', 'name'], 'ForkPress COW');
+$repo->set_config_value(['user', 'email'], 'forkpress-cow@local');
+cow_git_sync_repository($repo, $branches);
+$main_tip = $repo->get_branch_tip('refs/heads/main');
+$repo->checkout('refs/heads/main');
+$pushed_tip = $repo->commit([
+    'commit' => [
+        'message' => 'push config from another branch',
+        'author' => 'ForkPress Test <forkpress-test@local>',
+        'committer' => 'ForkPress Test <forkpress-test@local>',
+        'parents' => [$main_tip],
+    ],
+    'updates' => [
+        'wordpress/wp-config.php' => $feature_config,
+    ],
+]);
+$repo->set_branch_tip('refs/heads/main', $pushed_tip);
+cow_git_apply_push_to_branches($repo, $git, $branches, $branches, null, 'file-copy', $main_debug, ['main' => $main_tip]);
+$rewritten_config = file_get_contents($branches . '/main/wp-config.php');
+assert_true(str_contains($rewritten_config, $main_db), 'existing branch push rewrites wp-config.php to target database path');
+assert_true(!str_contains($rewritten_config, $feature_db), 'existing branch push does not keep source branch database path');
+assert_true(str_contains($rewritten_config, $main_debug), 'existing branch push rewrites wp-config.php to target debug log');
+assert_true(!str_contains($rewritten_config, $feature_debug), 'existing branch push does not keep source branch debug log');
+$rewritten_tip = $repo->get_branch_tip('refs/heads/main');
+$git_config = $repo->read_object_by_path('wordpress/wp-config.php', $rewritten_tip)->consume_all();
+assert_true(str_contains($git_config, $main_db), 'push resync exports rewritten target wp-config.php');
+assert_true(!str_contains($git_config, $feature_db), 'push resync removes source wp-config.php database path from Git ref');
+assert_true(str_contains($git_config, $main_debug), 'push resync exports rewritten target debug log');
+assert_true(!str_contains($git_config, $feature_debug), 'push resync removes source debug log from Git ref');
+cow_git_remove_tree($tmp);
+
 echo "\n=== COW Git server tests: $pass passed, $fail failed ===\n";
 exit($fail ? 1 : 0);
