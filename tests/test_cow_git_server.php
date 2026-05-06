@@ -104,6 +104,16 @@ $db_tip = $repo->get_branch_tip('refs/heads/main');
 assert_true($db_tip !== $file_tip, 'database snapshot change advances COW Git snapshot ref');
 cow_git_sync_repository($repo, $branches);
 assert_same($repo->get_branch_tip('refs/heads/main'), $db_tip, 'unchanged database snapshot remains stable after advancing');
+
+mkdir($branches . '/feature/wp-content/database', 0777, true);
+file_put_contents($branches . '/feature/wp-load.php', "<?php\n");
+file_put_contents($branches . '/feature/wp-content/sync.txt', "feature\n");
+cow_git_sync_repository($repo, $branches);
+assert_true($repo->branch_exists('refs/heads/feature'), 'sync creates Git ref for materialized branch');
+cow_git_remove_tree($branches . '/feature');
+cow_git_sync_repository($repo, $branches);
+assert_true(!$repo->branch_exists('refs/heads/feature'), 'sync prunes Git ref when materialized branch disappears');
+assert_true($repo->branch_exists('refs/heads/main'), 'sync keeps Git ref for existing main branch');
 cow_git_remove_tree($tmp);
 
 $tmp = sys_get_temp_dir() . '/forkpress-cow-git-push-resync-' . getmypid() . '-' . bin2hex(random_bytes(4));
