@@ -301,6 +301,10 @@ function cow_git_sync_repository(GitRepository $repo, string $branches_dir): voi
         $updates['database.sql'] = cow_git_dump_branch_database($branch_root, $branch);
 
         $tip = $repo->get_branch_tip($ref);
+        if (cow_git_commit_matches_updates($repo, $tip, $updates)) {
+            continue;
+        }
+
         $deletes = [];
         $parents = [];
         if (!Commit::is_null_hash($tip) && $repo->has_object($tip)) {
@@ -329,6 +333,31 @@ function cow_git_sync_repository(GitRepository $repo, string $branches_dir): voi
         $repo->set_branch_tip($ref, $head);
     }
     $repo->set_branch_tip('HEAD', "ref: refs/heads/main\n");
+}
+
+function cow_git_commit_matches_updates(GitRepository $repo, string $tip, array $updates): bool {
+    if (Commit::is_null_hash($tip) || !$repo->has_object($tip)) {
+        return false;
+    }
+
+    $commit = $repo->read_object($tip)->as_commit();
+    if (Commit::is_null_hash($commit->tree) || !$repo->has_object($commit->tree)) {
+        return false;
+    }
+
+    $existing = [];
+    cow_git_walk_tree($repo, $commit->tree, '', $existing);
+    if (count($existing) !== count($updates)) {
+        return false;
+    }
+
+    foreach ($updates as $path => $contents) {
+        if (!isset($existing[$path]) || $existing[$path] !== cow_git_blob_hash((string)$contents)) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 function cow_git_apply_all_refs_to_branches(
@@ -981,6 +1010,10 @@ function cow_git_file_blob_hash(string $path): string {
     if ($contents === false) {
         throw new \RuntimeException("failed to read $path");
     }
+    return cow_git_blob_hash($contents);
+}
+
+function cow_git_blob_hash(string $contents): string {
     return sha1('blob ' . strlen($contents) . "\0" . $contents);
 }
 
