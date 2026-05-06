@@ -1,10 +1,9 @@
 # Storage Driver Notes
 
-Status: 2026-05-04
+Status: 2026-05-06
 
-ForkPress is focused on the **COW materialized driver** on macOS. Other
-drivers remain in the repo either for compatibility or research, but they are
-not the product path.
+ForkPress production builds are focused on the **COW materialized driver**.
+Other drivers are compiled only into `forkpress-dev`.
 
 The distribution constraint still stands: one `forkpress` binary per target,
 with no Docker runtime, system PHP, MySQL daemon, FUSE service, helper daemon,
@@ -17,10 +16,10 @@ For the native-mount/lazy-overlay evaluation, see
 
 | Driver | Status | Use it for | Main gaps |
 | --- | --- | --- | --- |
-| COW materialized | Product path on macOS. `strategy = "cow"`. | Normal WordPress directories, branch-local SQLite databases, Git clone/fetch/push, agent worktrees. | macOS is the primary supported target. Merge/reset semantics for database state are still explicit future work. |
-| BranchFS + SQLite COW | Compatibility backend. `strategy = "branchfs"`. | Older `.forkpress/site.fp` sites and Linux default while COW is Mac-first. | Complex SQL overlay surface: WordPress MySQL-shaped queries pass through SQLite translation plus branch views/triggers. |
-| CAS + Redb manifests | Experimental. `strategy = "cas"`. | Lazy file-store research using Redb and the PHP `branchfs` extension. | Git smart HTTP, locking, GC, and production durability are not complete. |
-| Embedded OpenZFS engine | Disabled product feature. Code remains in-tree. | Research only. Build with `FORKPRESS_ENABLE_EMBEDDED_ZFS=1`; CLI smoke is hidden behind `FORKPRESS_ENABLE_ZFS_CLI=1`. | Not connected to branch operations. License/portability/product-shape questions remain. |
+| COW materialized | Production path. `strategy = "cow"` in the manifest. | Normal WordPress directories, branch-local SQLite databases, Git clone/fetch/push, agent worktrees. | Semantic database merge between branches is still future work. |
+| BranchFS + SQLite COW | Dev experiment. `forkpress-dev init --strategy branchfs`. | Older `.forkpress/site.fp` sites and compatibility research. | Complex SQL overlay surface: WordPress MySQL-shaped queries pass through SQLite translation plus branch views/triggers. |
+| CAS + Redb manifests | Dev experiment. `forkpress-dev init --strategy cas`. | Lazy file-store research using Redb and the PHP `branchfs` extension. | Git smart HTTP, locking, GC, and production durability are not complete. |
+| Embedded OpenZFS engine | Dev experiment. Code lives under explicit experiment paths. | Research only. Build `forkpress-dev` with `FORKPRESS_ENABLE_EMBEDDED_ZFS=1`; CLI smoke is hidden behind `FORKPRESS_ENABLE_ZFS_CLI=1`. | Not connected to branch operations. License/portability/product-shape questions remain. |
 
 ## COW Materialized Model
 
@@ -81,12 +80,13 @@ This is APFS/file-level COW, not namespace-lazy overlay COW. New branches share
 unchanged file contents through `clonefile`, but ForkPress still creates a full
 directory namespace for each branch.
 
-On macOS, `forkpress init` chooses the first working file view:
+`forkpress init` chooses the first working file view:
 
-1. **APFS clonefile in place.** The branch directories live directly in the
-   project directory. Branch creation uses `clonefile`, so unchanged blocks are
-   shared until a branch writes to them.
-2. **Rootless APFS sparsebundle.** If the project volume cannot clone files,
+1. **Native file clone in place.** The branch directories live directly in the
+   project directory. Branch creation uses APFS `clonefile` on macOS and Linux
+   `FICLONE` reflinks on Linux, so unchanged blocks are shared until a branch
+   writes to them.
+2. **Rootless APFS sparsebundle on macOS.** If the project volume cannot clone files,
    ForkPress creates `.forkpress/macos-cow/branches.sparsebundle`, mounts it at
    `.forkpress/macos-cow/mount`, and symlinks public branch directories to the
    APFS-backed physical branch trees.
@@ -214,19 +214,19 @@ Still future work:
   ordinary branch deletion, COW Git object pruning, and sparsebundle compaction;
 - filesystem-level coordination for direct external writes that bypass the
   ForkPress HTTP server;
-- Windows and Linux COW parity.
+- Windows support.
 
 ## ZFS Status
 
-The embedded ZFS work is parked. The C code, shims, and Rust FFI are still in
-the repo so we do not lose the research, but it is not built in normal release
-or developer builds.
+The embedded ZFS work is parked under `forkpress/experiments/zfs-engine` and
+`forkpress/src/experiments/zfs_engine.rs`. It is not built into production.
 
 To opt into that research path locally:
 
 ```bash
-FORKPRESS_ENABLE_EMBEDDED_ZFS=1 cargo build -p forkpress
-FORKPRESS_ENABLE_ZFS_CLI=1 ./target/debug/forkpress zfs smoke
+make dist-dev
+FORKPRESS_ENABLE_EMBEDDED_ZFS=1 cargo build -p forkpress --features dev-experiments --bin forkpress-dev
+FORKPRESS_ENABLE_ZFS_CLI=1 ./target/debug/forkpress-dev zfs smoke
 ```
 
 Do not document or present ZFS as a user-facing storage option until it is

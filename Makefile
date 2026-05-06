@@ -60,7 +60,7 @@ else ifeq ($(UNAME_S)-$(UNAME_M),Linux-aarch64)
 FORKPRESS_TARGET ?= aarch64-unknown-linux-musl
 endif
 
-.PHONY: all clean test test-compat init-db test-all forkpress dist
+.PHONY: all clean test test-compat init-db test-all forkpress forkpress-dev dist dist-dev
 
 all: ext/branchfs.so
 
@@ -95,13 +95,22 @@ test-all: ext/branchfs.so
 clean:
 	rm -f ext/branchfs.so /tmp/branchfs_test*.db /tmp/branchfs_wp*.db
 
-# Build the per-target runtime bundle (php + branchfs builtin) consumed by
-# forkpress. First-time build compiles static PHP from source and takes
-# ~3-5 minutes on Apple Silicon; subsequent runs reuse the cached PHP.
+# Build the per-target production runtime bundle consumed by forkpress.
+# First-time build compiles static PHP from source and takes ~3-5 minutes on
+# Apple Silicon; subsequent runs reuse the cached PHP.
 dist:
 	FORKPRESS_TARGET=$(FORKPRESS_TARGET) scripts/build-dist.sh
+
+# Build the dev runtime bundle with experimental BranchFS/CAS support.
+dist-dev:
+	FORKPRESS_RUNTIME_PROFILE=dev FORKPRESS_TARGET=$(FORKPRESS_TARGET) scripts/build-dist.sh
 
 # Build the shippable forkpress binary for FORKPRESS_TARGET. Requires `dist`
 # to have run at least once for the same target.
 forkpress:
-	cargo build --release --target $(FORKPRESS_TARGET) -p forkpress
+	cargo build --release --target $(FORKPRESS_TARGET) -p forkpress --bin forkpress
+
+# Build the developer binary with experimental strategies. Requires `dist-dev`
+# to have run at least once for the same target.
+forkpress-dev:
+	cargo build --release --target $(FORKPRESS_TARGET) -p forkpress --features dev-experiments --bin forkpress-dev

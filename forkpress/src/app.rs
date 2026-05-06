@@ -1097,7 +1097,7 @@ fn doctor_storage_command(args: DoctorStorageArgs) -> Result<i32> {
     {
         println!("  macOS APFS sparsebundle: available through hdiutil");
         println!(
-            "  recommendation: forkpress init --strategy cow will create {} and mount it at {}",
+            "  recommendation: forkpress init will create {} and mount it at {}",
             layout.macos_cow_image.display(),
             layout.macos_cow_mount.display()
         );
@@ -1105,8 +1105,7 @@ fn doctor_storage_command(args: DoctorStorageArgs) -> Result<i32> {
 
     #[cfg(not(target_os = "macos"))]
     {
-        println!("  recommendation: no platform-specific COW fallback implemented yet");
-        println!("  final fallback: file-copy materialization");
+        println!("  recommendation: file-copy materialization");
     }
 
     Ok(0)

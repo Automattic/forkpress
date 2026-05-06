@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Build the per-target runtime bundle (php + branchfs builtin) consumed by
-# forkpress at build time. Produces dist/<triple>/ ready for
+# Build the per-target runtime bundle consumed by forkpress at build time.
+# Produces dist/<triple>/ or dist/<triple>-dev/ ready for
 # `cargo build --release` to embed.
 #
 # Builds the bundled runtime for the host by default. CI passes
@@ -186,4 +186,8 @@ echo
 echo "dist/$DIST_NAME/ ready:"
 ls -lh "$DIST_DIR/bin/php"
 echo
-echo "Next: cargo build --release"
+if [ "$PROFILE" = "dev" ]; then
+  echo "Next: cargo build --release -p forkpress --features dev-experiments --bin forkpress-dev"
+else
+  echo "Next: cargo build --release -p forkpress --bin forkpress"
+fi

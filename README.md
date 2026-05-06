@@ -2,11 +2,11 @@
 
 ForkPress is a single-binary local WordPress branch runner for agent work.
 
-The product path is now the **COW materialized backend**. On macOS,
-`forkpress init` creates ordinary branch directories beside `.forkpress`, such
-as `./main` and `./marketing`. Each branch is a normal WordPress tree with its
-own SQLite database file, and branch creation uses filesystem copy-on-write
-when the machine can provide it.
+The product path is now the **COW materialized backend**. `forkpress init`
+creates ordinary branch directories beside `.forkpress`, such as `./main` and
+`./marketing`. Each branch is a normal WordPress tree with its own SQLite
+database file, and branch creation uses filesystem copy-on-write when the
+machine can provide it.
 
 No Docker, no system PHP, no MySQL daemon, no FUSE service, and no helper
 daemon. The release artifact is one `forkpress` binary per target.
@@ -309,12 +309,13 @@ writes and do not participate in that lock.
 
 ### File View Cascade
 
-On macOS, ForkPress tries the cheapest ordinary-file view first:
+ForkPress tries the cheapest ordinary-file view first:
 
-1. **APFS `clonefile` in the project directory.** New branches share unchanged
-   file blocks with the source branch. Writes to a branch path do not mutate the
-   source path.
-2. **Rootless APFS sparsebundle.** If the project volume cannot clone files,
+1. **Native filesystem cloning in the project directory.** On macOS this uses
+   APFS `clonefile`; on Linux this uses `FICLONE` reflinks. New branches share
+   unchanged file blocks with the source branch. Writes to a branch path do not
+   mutate the source path.
+2. **Rootless APFS sparsebundle on macOS.** If the project volume cannot clone files,
    ForkPress creates `.forkpress/macos-cow/branches.sparsebundle`, mounts it at
    `.forkpress/macos-cow/mount`, stores the physical branch trees there, and
    exposes public branch directories like `./main` and `./marketing`.
@@ -385,25 +386,30 @@ back to the target branch directory, excluding private runtime paths such as
 `wp-content/database/`. The branch's SQLite database remains branch-local and is
 never overwritten by `database.sql`.
 
-## Other Strategies
+## Production And Dev Builds
 
-`branchfs` remains in the repo as the older SQLite-backed strategy. It stores a
-whole site in `.forkpress/site.fp` and uses the PHP `branchfs` extension plus
-SQLite COW views for branch isolation.
+The production binary is `forkpress`. It only exposes the materialized COW
+strategy and its file-view cascade:
 
-`cas` remains experimental. It stores file blobs and manifests in Redb and
-serves WordPress files lazily through the `branchfs` PHP extension.
+- macOS APFS `clonefile`;
+- macOS APFS sparsebundle fallback;
+- Linux `FICLONE` reflinks;
+- full file-copy fallback.
 
-The embedded ZFS experiment is disabled in the product path for now. The code
-is still in the repo for research, but release builds do not build it unless a
-developer explicitly opts in with `FORKPRESS_ENABLE_EMBEDDED_ZFS=1`, and the
-CLI smoke command is hidden behind `FORKPRESS_ENABLE_ZFS_CLI=1`.
+Experimental storage work is compiled into `forkpress-dev`, not `forkpress`.
+The dev binary enables:
+
+- the older BranchFS/SQLite strategy;
+- the Redb CAS manifest strategy;
+- hidden embedded-ZFS smoke tooling. The native ZFS engine still requires an
+  explicit `FORKPRESS_ENABLE_EMBEDDED_ZFS=1` build because it fetches and links
+  the external OpenZFS experiment.
 
 ## Commands
 
 - `forkpress init` initializes a site. On macOS the default strategy is `cow`.
-- `forkpress init --strategy cow --admin-password admin` creates a COW site
-  with a known local admin password.
+- `forkpress init --admin-password admin` creates a COW site with a known
+  local admin password.
 - `forkpress serve` starts the server in the background.
 - `forkpress start` starts the server in the foreground.
 - `forkpress stop` stops this site's server and detaches mount-backed storage.
@@ -436,14 +442,25 @@ make dist
 make forkpress
 ```
 
-`make dist` builds a static PHP runtime with the `branchfs` extension compiled
-in. `make forkpress` embeds that runtime and the PHP/WordPress assets into the
-Rust binary.
+`make dist` builds the production static PHP runtime. `make forkpress` embeds
+that runtime and the PHP/WordPress assets into the production Rust binary.
+
+Developer experiment build:
+
+```bash
+make dist-dev
+make forkpress-dev
+```
+
+`make dist-dev` adds the experimental BranchFS/CAS PHP runtime support, and
+`make forkpress-dev` builds the Rust binary with the `dev-experiments` Cargo
+feature.
 
 For fast Rust-only checks without rebuilding PHP:
 
 ```bash
 FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress
+FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress --features dev-experiments --bin forkpress-dev
 ```
 
 PHP unit tests:
