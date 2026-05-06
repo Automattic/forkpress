@@ -176,6 +176,9 @@ After a push, ForkPress immediately re-snapshots the branch so the remote Git
 ref reflects the generated `database.sql`, not a user-edited copy. Successful
 push cleanup also prunes unreachable loose objects from `.forkpress/cow/git`,
 including Git snapshots left behind by deleted or force-updated preview refs.
+`forkpress commit` fetches that normalized ref and fast-forwards your checkout
+when possible, so generated files and ignored private runtime paths do not leave
+the worktree one commit behind the preview server.
 
 ## Run Agents
 

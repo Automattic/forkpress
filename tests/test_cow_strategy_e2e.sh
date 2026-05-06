@@ -186,6 +186,14 @@ test -f "$WORK/feature-cow/wp-content/cow-git.txt"
 grep -F "changed through git" "$WORK/feature-cow/wp-content/cow-git.txt" >/dev/null
 test ! -e "$WORK/feature-cow/wp-content/database/pushed-private.txt"
 test ! -e "$WORK/main/wp-content/cow-git.txt"
+test "$(git -C "$TMP/checkout" rev-parse HEAD)" = "$(git -C "$TMP/checkout" rev-parse refs/remotes/origin/feature-cow)"
+STATUS="$(git -C "$TMP/checkout" status --porcelain)"
+if [ -n "$STATUS" ]; then
+  echo "forkpress commit left feature-cow checkout dirty after server normalization:" >&2
+  echo "$STATUS" >&2
+  exit 1
+fi
+test ! -e "$TMP/checkout/wordpress/wp-content/database/pushed-private.txt"
 
 git -C "$TMP/checkout" checkout -B git-created origin/main
 printf "created through git\n" > "$TMP/checkout/wordpress/wp-content/git-created.txt"
@@ -197,6 +205,17 @@ test -f "$WORK/git-created/wp-content/git-created.txt"
 grep -F "created through git" "$WORK/git-created/wp-content/git-created.txt" >/dev/null
 test ! -e "$WORK/main/wp-content/git-created.txt"
 test ! -e "$WORK/git-created/database.sql"
+test "$(git -C "$TMP/checkout" rev-parse HEAD)" = "$(git -C "$TMP/checkout" rev-parse refs/remotes/origin/git-created)"
+STATUS="$(git -C "$TMP/checkout" status --porcelain)"
+if [ -n "$STATUS" ]; then
+  echo "forkpress commit left git-created checkout dirty after server normalization:" >&2
+  echo "$STATUS" >&2
+  exit 1
+fi
+if grep -F "ignored git-created database.sql edit" "$TMP/checkout/database.sql" >/dev/null; then
+  echo "forkpress commit left local database.sql edit behind after server normalization" >&2
+  exit 1
+fi
 "$BIN" branch --work-dir "$WORK_DIR" list | grep -F "git-created" >/dev/null
 curl -sS -H "Host: git-created.wp.localhost:$PORT" \
   "http://127.0.0.1:$PORT/" \
