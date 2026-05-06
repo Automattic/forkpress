@@ -99,7 +99,16 @@ function cow_git_server_handle(
         }
 
         $request_bytes = file_get_contents('php://input');
-        $push_commands = $is_post_receive ? cow_git_parse_push_commands($request_bytes) : [];
+        $push_commands = [];
+        if ($is_post_receive) {
+            $push_parse = cow_git_parse_push_commands_result($request_bytes);
+            if (!$push_parse['ok']) {
+                cow_git_close_receive_pack_buffer();
+                cow_git_send_receive_pack_error($push_parse['error']);
+                return;
+            }
+            $push_commands = $push_parse['commands'];
+        }
         if ($is_post_receive && cow_git_reject_push_commands_if_needed($push_commands)) {
             return;
         }
@@ -160,9 +169,15 @@ function cow_git_server_handle(
 }
 
 function cow_git_parse_push_commands(string $request_bytes): array {
+    $result = cow_git_parse_push_commands_result($request_bytes);
+    return $result['commands'];
+}
+
+function cow_git_parse_push_commands_result(string $request_bytes): array {
     $commands = [];
     $offset = 0;
     $length = strlen($request_bytes);
+    $saw_delimiter = false;
 
     while ($offset + 4 <= $length) {
         $marker = substr($request_bytes, $offset, 4);
@@ -170,11 +185,16 @@ function cow_git_parse_push_commands(string $request_bytes): array {
             break;
         }
         if (!preg_match('/^[0-9a-f]{4}$/', $marker)) {
-            break;
+            return [
+                'ok' => false,
+                'error' => 'malformed receive-pack packet length',
+                'commands' => $commands,
+            ];
         }
 
         $offset += 4;
         if ($marker === '0000') {
+            $saw_delimiter = true;
             break;
         }
         if ($marker === '0001' || $marker === '0002') {
@@ -183,7 +203,11 @@ function cow_git_parse_push_commands(string $request_bytes): array {
 
         $packet_length = hexdec($marker) - 4;
         if ($packet_length < 0 || $offset + $packet_length > $length) {
-            break;
+            return [
+                'ok' => false,
+                'error' => 'truncated receive-pack packet',
+                'commands' => $commands,
+            ];
         }
 
         $payload = substr($request_bytes, $offset, $packet_length);
@@ -202,7 +226,11 @@ function cow_git_parse_push_commands(string $request_bytes): array {
             }
 
             if (!preg_match('/^([0-9a-f]{40}) ([0-9a-f]{40}) (.+)$/', $line, $matches)) {
-                continue;
+                return [
+                    'ok' => false,
+                    'error' => 'malformed receive-pack command',
+                    'commands' => $commands,
+                ];
             }
 
             $commands[] = [
@@ -214,7 +242,27 @@ function cow_git_parse_push_commands(string $request_bytes): array {
         }
     }
 
-    return $commands;
+    if (!$saw_delimiter && $offset < $length && substr($request_bytes, $offset, 4) !== 'PACK') {
+        return [
+            'ok' => false,
+            'error' => 'unterminated receive-pack command list',
+            'commands' => $commands,
+        ];
+    }
+
+    if (!$commands) {
+        return [
+            'ok' => false,
+            'error' => 'empty receive-pack command list',
+            'commands' => [],
+        ];
+    }
+
+    return [
+        'ok' => true,
+        'error' => '',
+        'commands' => $commands,
+    ];
 }
 
 function cow_git_reject_push_commands_if_needed(array $commands): bool {
@@ -246,7 +294,7 @@ function cow_git_push_command_rejections(array $commands): array {
         $branch = substr($ref, strlen('refs/heads/'));
         if (!cow_git_valid_branch_name($branch)) {
             return [
-                $ref => 'unsupported COW branch name; use 1-63 ASCII letters, numbers, underscores, or hyphens',
+                $ref => 'unsupported COW branch name; use 1-63 ASCII letters, numbers, underscores, or hyphens and avoid reserved routing names',
             ];
         }
 
@@ -256,6 +304,27 @@ function cow_git_push_command_rejections(array $commands): array {
     }
 
     return [];
+}
+
+function cow_git_send_receive_pack_error(string $message): void {
+    http_response_code(200);
+    header('Content-Type: application/x-git-receive-pack-result');
+    header('Cache-Control: no-cache');
+
+    $message = substr(str_replace(["\n", "\r"], ' ', $message), 0, 500);
+    $git_response = new GitProtocolEncoderPipe();
+    $git_response->append_sideband_packet_line("unpack error $message\n");
+    $git_response->append_sideband_packet_line('0000');
+    $git_response->append_packet_line('0000');
+    $git_response->close_writing();
+
+    while (true) {
+        $available = $git_response->pull(65536);
+        if ($available === 0 && $git_response->reached_end_of_data()) {
+            break;
+        }
+        echo $git_response->consume($available);
+    }
 }
 
 function cow_git_close_receive_pack_buffer(): void {
@@ -287,9 +356,18 @@ function cow_git_send_receive_pack_rejections(array $ref_messages): void {
     }
 }
 
-function cow_git_sync_repository(GitRepository $repo, string $branches_dir): void {
+function cow_git_sync_repository(GitRepository $repo, string $branches_dir, ?array $only_branches = null): void {
     $branches = cow_git_branch_names($branches_dir);
-    cow_git_prune_missing_branch_refs($repo, $branches);
+    cow_git_prune_missing_branch_refs($repo, $branches, $only_branches);
+    $live = array_fill_keys($branches, true);
+    if (!isset($live['main'])) {
+        $repo->set_branch_tip('refs/heads/main', Commit::NULL_HASH);
+        $repo->set_branch_tip('HEAD', "ref: refs/heads/main\n");
+    }
+    if ($only_branches !== null) {
+        $allowed = array_fill_keys($only_branches, true);
+        $branches = array_values(array_filter($branches, static fn($branch) => isset($allowed[$branch])));
+    }
     foreach ($branches as $branch) {
         $branch_root = $branches_dir . '/' . $branch;
         $ref = "refs/heads/$branch";
@@ -336,14 +414,22 @@ function cow_git_sync_repository(GitRepository $repo, string $branches_dir): voi
     $repo->set_branch_tip('HEAD', "ref: refs/heads/main\n");
 }
 
-function cow_git_prune_missing_branch_refs(GitRepository $repo, array $branches): void {
+function cow_git_prune_missing_branch_refs(GitRepository $repo, array $branches, ?array $only_branches = null): void {
     $live = array_fill_keys($branches, true);
+    $only = $only_branches === null ? null : array_fill_keys($only_branches, true);
     foreach ($repo->list_refs(['refs/heads/']) as $ref => $_tip) {
         if (strncmp($ref, 'refs/heads/', 11) !== 0) {
             continue;
         }
         $branch = substr($ref, 11);
         if (!cow_git_valid_branch_name($branch) || isset($live[$branch])) {
+            continue;
+        }
+        if ($branch === 'main') {
+            $repo->set_branch_tip('refs/heads/main', Commit::NULL_HASH);
+            continue;
+        }
+        if ($only !== null && !isset($only[$branch])) {
             continue;
         }
         $repo->delete_branch($ref);
@@ -361,13 +447,16 @@ function cow_git_commit_matches_updates(GitRepository $repo, string $tip, array 
     }
 
     $existing = [];
-    cow_git_walk_tree($repo, $commit->tree, '', $existing);
+    cow_git_walk_tree_entries($repo, $commit->tree, '', $existing);
     if (count($existing) !== count($updates)) {
         return false;
     }
 
     foreach ($updates as $path => $contents) {
-        if (!isset($existing[$path]) || $existing[$path] !== cow_git_blob_hash((string)$contents)) {
+        if (!isset($existing[$path])
+            || $existing[$path]['mode'] !== TreeEntry::FILE_MODE_REGULAR_NON_EXECUTABLE
+            || $existing[$path]['hash'] !== cow_git_blob_hash((string)$contents)
+        ) {
             return false;
         }
     }
@@ -385,17 +474,31 @@ function cow_git_apply_push_to_branches(
     string $debug_log,
     array $pre_receive_refs = []
 ): void {
-    cow_git_apply_all_refs_to_branches(
-        $repo,
-        $git_repo_dir,
-        $branches_dir,
-        $storage_branches_dir,
-        $branch_list_path,
-        $file_view,
-        $debug_log,
-        $pre_receive_refs
-    );
-    cow_git_sync_repository($repo, $branches_dir);
+    $transaction = cow_git_new_apply_transaction($branches_dir, $storage_branches_dir, $branch_list_path);
+    try {
+        $changed_branches = cow_git_apply_all_refs_to_branches(
+            $repo,
+            $git_repo_dir,
+            $branches_dir,
+            $storage_branches_dir,
+            $branch_list_path,
+            $file_view,
+            $debug_log,
+            $pre_receive_refs,
+            $transaction
+        );
+        $branches_to_sync = array_values(array_filter($changed_branches, static function($branch) use ($branches_dir) {
+            return is_dir(rtrim($branches_dir, "/\\") . '/' . $branch);
+        }));
+        if ($branches_to_sync) {
+            cow_git_sync_repository($repo, $branches_dir, $branches_to_sync);
+        }
+        cow_git_commit_apply_transaction($transaction);
+    } catch (\Throwable $e) {
+        cow_git_rollback_apply_transaction($transaction);
+        cow_git_write_branch_list($branches_dir, $branch_list_path);
+        throw $e;
+    }
     try {
         cow_git_prune_unreachable_objects($repo, $git_repo_dir);
     } catch (\Throwable $e) {
@@ -411,16 +514,29 @@ function cow_git_apply_all_refs_to_branches(
     ?string $branch_list_path,
     string $file_view,
     string $debug_log,
-    array $pre_receive_refs = []
-): void {
+    array $pre_receive_refs = [],
+    ?array &$transaction = null
+): array {
     $refs_dir = rtrim($git_repo_dir, "/\\") . '/refs/heads';
     if (!is_dir($refs_dir)) {
-        return;
+        return [];
     }
 
     cow_git_reject_unsupported_head_refs($git_repo_dir, $pre_receive_refs);
     $current_refs = cow_git_capture_head_refs($git_repo_dir);
-    cow_git_delete_removed_branches(
+    $changed_branches = [];
+    foreach ($pre_receive_refs as $branch => $old_tip) {
+        if (cow_git_valid_branch_name($branch) && (!array_key_exists($branch, $current_refs) || $current_refs[$branch] !== $old_tip)) {
+            $changed_branches[$branch] = true;
+        }
+    }
+    foreach ($current_refs as $branch => $tip) {
+        if (cow_git_valid_branch_name($branch) && (!array_key_exists($branch, $pre_receive_refs) || $pre_receive_refs[$branch] !== $tip)) {
+            $changed_branches[$branch] = true;
+        }
+    }
+
+    $staged_deletes = cow_git_delete_removed_branches(
         $git_repo_dir,
         $branches_dir,
         $storage_branches_dir,
@@ -428,6 +544,9 @@ function cow_git_apply_all_refs_to_branches(
         $pre_receive_refs,
         $current_refs
     );
+    if ($transaction !== null && $staged_deletes) {
+        $transaction['deletes'] = array_merge($transaction['deletes'], $staged_deletes);
+    }
     $existing_branches = cow_git_branch_names($branches_dir);
     foreach (scandir($refs_dir) as $name) {
         if ($name === '.' || $name === '..') {
@@ -464,7 +583,7 @@ function cow_git_apply_all_refs_to_branches(
 
         $branch_root = rtrim($branches_dir, "/\\") . '/' . $name;
         if (!is_dir($branch_root)) {
-            $branch_root = cow_git_create_branch_for_ref(
+            $created = cow_git_create_branch_for_ref(
                 $repo,
                 $branches_dir,
                 $storage_branches_dir,
@@ -477,20 +596,29 @@ function cow_git_apply_all_refs_to_branches(
                 $pre_receive_refs,
                 $existing_branches
             );
+            if ($transaction !== null) {
+                $transaction['created'][] = $created;
+            }
             $existing_branches[] = $name;
             continue;
         }
 
-        cow_git_apply_existing_branch_update(
+        $updated = cow_git_apply_existing_branch_update(
             $repo,
             $branches_dir,
             $storage_branches_dir,
             $name,
             $wp_files,
             $file_view,
-            $debug_log
+            $debug_log,
+            $transaction !== null
         );
+        if ($transaction !== null && $updated !== null) {
+            $transaction['updates'][] = $updated;
+        }
     }
+
+    return array_keys($changed_branches);
 }
 
 function cow_git_delete_removed_branches(
@@ -500,7 +628,7 @@ function cow_git_delete_removed_branches(
     ?string $branch_list_path,
     array $pre_receive_refs,
     array $current_refs
-): void {
+): array {
     foreach ($pre_receive_refs as $branch => $_old_tip) {
         if (!cow_git_valid_branch_name($branch) || array_key_exists($branch, $current_refs)) {
             continue;
@@ -521,7 +649,7 @@ function cow_git_delete_removed_branches(
         }
 
         if (!$staged) {
-            return;
+            return [];
         }
 
         cow_git_write_branch_list($branches_dir, $branch_list_path);
@@ -530,10 +658,10 @@ function cow_git_delete_removed_branches(
         throw $e;
     }
 
-    foreach ($staged as $branch => $entries) {
-        cow_git_discard_staged_branch_delete($entries);
+    foreach (array_keys($staged) as $branch) {
         error_log("ForkPress COW git deleted branch '$branch'");
     }
+    return $staged;
 }
 
 function cow_git_stage_delete_branch_tree(string $branches_dir, string $storage_branches_dir, string $branch): array {
@@ -606,6 +734,12 @@ function cow_git_restore_staged_branch_deletes(array $staged): void {
 function cow_git_discard_staged_branch_delete(array $entries): void {
     foreach ($entries as $entry) {
         cow_git_remove_tree($entry['backup']);
+    }
+}
+
+function cow_git_discard_staged_branch_deletes(array $staged): void {
+    foreach ($staged as $entries) {
+        cow_git_discard_staged_branch_delete($entries);
     }
 }
 
@@ -705,7 +839,7 @@ function cow_git_create_branch_for_ref(
     array $wp_files,
     array $pre_receive_refs,
     array $existing_branches
-): string {
+): array {
     if ($branch === 'HEAD') {
         throw new \RuntimeException("refusing to create reserved branch '$branch'");
     }
@@ -717,6 +851,13 @@ function cow_git_create_branch_for_ref(
     if ($source === null) {
         throw new \RuntimeException(
             "cannot infer a source ForkPress branch for git-created branch '$branch'; fetch from /site.git and branch from an existing ref first"
+        );
+    }
+    $source_tip = $pre_receive_refs[$source] ?? $repo->get_branch_tip("refs/heads/$source");
+    $pushed_history = cow_git_commit_distances($repo, $tip, 4096);
+    if (!isset($pushed_history[$source_tip])) {
+        throw new \RuntimeException(
+            "refusing to create branch '$branch' from stale source '$source'; fetch the latest ForkPress Git refs and branch from the current '$source' tip"
         );
     }
     $source_root = cow_git_branch_storage_root($storage_branches_dir, $branches_dir, $source);
@@ -754,7 +895,12 @@ function cow_git_create_branch_for_ref(
         cow_git_rewrite_wp_config($dest_public, $debug_log);
         cow_git_write_branch_list($branches_dir, $branch_list_path);
         error_log("ForkPress COW git created branch '$branch' from '$source'");
-        return $dest_public;
+        return [
+            'branch' => $branch,
+            'public' => $dest_public,
+            'storage' => $dest_storage,
+            'linked_public' => $linked_public,
+        ];
     } catch (\Throwable $e) {
         cow_git_remove_tree($tmp);
         if ($linked_public && (file_exists($dest_public) || is_link($dest_public))) {
@@ -774,8 +920,9 @@ function cow_git_apply_existing_branch_update(
     string $branch,
     array $wp_files,
     string $file_view,
-    string $debug_log
-): void {
+    string $debug_log,
+    bool $keep_backup = false
+): ?array {
     $public_root = rtrim($branches_dir, "/\\") . '/' . $branch;
     $storage_root = cow_git_branch_storage_root($storage_branches_dir, $branches_dir, $branch);
     if (!is_dir($public_root) || !is_dir($storage_root)) {
@@ -823,7 +970,65 @@ function cow_git_apply_existing_branch_update(
         throw $e;
     }
 
+    if ($keep_backup) {
+        return [
+            'branch' => $branch,
+            'storage' => $storage_root,
+            'backup' => $backup,
+            'failed' => $failed,
+        ];
+    }
+
     cow_git_remove_tree($backup);
+    return null;
+}
+
+function cow_git_new_apply_transaction(string $branches_dir, string $storage_branches_dir, ?string $branch_list_path): array {
+    return [
+        'branches_dir' => $branches_dir,
+        'storage_branches_dir' => $storage_branches_dir,
+        'branch_list_path' => $branch_list_path,
+        'created' => [],
+        'updates' => [],
+        'deletes' => [],
+    ];
+}
+
+function cow_git_commit_apply_transaction(array $transaction): void {
+    foreach ($transaction['updates'] as $update) {
+        cow_git_remove_tree($update['backup']);
+    }
+    cow_git_discard_staged_branch_deletes($transaction['deletes']);
+}
+
+function cow_git_rollback_apply_transaction(array $transaction): void {
+    foreach (array_reverse($transaction['updates']) as $update) {
+        $storage = $update['storage'];
+        $backup = $update['backup'];
+        $failed = $update['failed'];
+        if (file_exists($storage) || is_link($storage)) {
+            if (!@rename($storage, $failed)) {
+                cow_git_remove_tree($storage);
+            }
+        }
+        if ((file_exists($backup) || is_link($backup)) && !file_exists($storage) && !is_link($storage)) {
+            if (!@rename($backup, $storage)) {
+                error_log("ForkPress COW failed to restore branch '{$update['branch']}' from update backup $backup");
+            }
+        }
+        cow_git_remove_tree($failed);
+    }
+
+    foreach (array_reverse($transaction['created']) as $created) {
+        if ($created['linked_public'] && (file_exists($created['public']) || is_link($created['public']))) {
+            cow_git_remove_tree($created['public']);
+        }
+        if (file_exists($created['storage']) || is_link($created['storage'])) {
+            cow_git_remove_tree($created['storage']);
+        }
+    }
+
+    cow_git_restore_staged_branch_deletes($transaction['deletes']);
 }
 
 function cow_git_select_source_branch(
@@ -974,17 +1179,28 @@ function cow_git_rewrite_wp_config_for_root(string $config_root, string $runtime
     }
     $debug_log = $debug_log !== '' ? $debug_log : $db_dir . '/wp-debug.log';
     $replacements = [
-        "/define\\(\\s*'FQDB'\\s*,\\s*'[^']*'\\s*\\);/" => "define('FQDB',    '" . cow_git_php_single_quoted($db_path) . "');",
-        "/define\\(\\s*'DB_DIR'\\s*,\\s*'[^']*'\\s*\\);/" => "define('DB_DIR',  '" . cow_git_php_single_quoted($db_dir) . "');",
-        "/define\\(\\s*'DB_FILE'\\s*,\\s*'[^']*'\\s*\\);/" => "define('DB_FILE', '" . cow_git_php_single_quoted($db_file) . "');",
-        "/define\\(\\s*'WP_DEBUG_LOG'\\s*,\\s*'[^']*'\\s*\\);/" => "define('WP_DEBUG_LOG', '" . cow_git_php_single_quoted($debug_log) . "');",
+        'FQDB' => "define('FQDB',    '" . cow_git_php_single_quoted($db_path) . "');",
+        'DB_DIR' => "define('DB_DIR',  '" . cow_git_php_single_quoted($db_dir) . "');",
+        'DB_FILE' => "define('DB_FILE', '" . cow_git_php_single_quoted($db_file) . "');",
+        'WP_DEBUG_LOG' => "define('WP_DEBUG_LOG', '" . cow_git_php_single_quoted($debug_log) . "');",
     ];
-    foreach ($replacements as $pattern => $replacement) {
-        $config = preg_replace($pattern, $replacement, $config, 1);
+    foreach ($replacements as $constant => $replacement) {
+        $pattern = cow_git_wp_config_define_pattern($constant);
+        $count = 0;
+        $rewritten = preg_replace($pattern, $replacement, $config, 1, $count);
+        if ($rewritten === null || $count !== 1) {
+            throw new \RuntimeException("failed to normalize managed wp-config.php constant $constant in $config_path");
+        }
+        $config = $rewritten;
     }
     if (file_put_contents($config_path, $config) === false) {
         throw new \RuntimeException("failed to write $config_path");
     }
+}
+
+function cow_git_wp_config_define_pattern(string $constant): string {
+    $quoted = preg_quote($constant, '/');
+    return '/define\(\s*([\'"])' . $quoted . '\1\s*,\s*([\'"])(?:\\\\.|(?!\2).)*\2\s*\);/';
 }
 
 function cow_git_php_single_quoted(string $value): string {
@@ -1103,20 +1319,25 @@ function cow_git_should_export_relative_path(string $rel): bool {
     if (preg_match('#(^|/)\\.git(/|$)#', $rel)) {
         return false;
     }
-    if ($rel === 'wp-content/database' || str_starts_with($rel, 'wp-content/database/')) {
+    if (cow_git_is_reserved_database_relative_path($rel)) {
         return false;
     }
     return true;
 }
 
+function cow_git_is_reserved_database_relative_path(string $rel): bool {
+    $key = strtolower(ltrim(str_replace('\\', '/', $rel), '/'));
+    return $key === 'wp-content/database' || str_starts_with($key, 'wp-content/database/');
+}
+
 function cow_git_apply_wp_files(GitRepository $repo, string $branch_root, array $wp_files): void {
     foreach ($wp_files as $rel => $blob_hash) {
         $target = $branch_root . '/' . $rel;
+        $parent = dirname($target);
+        cow_git_prepare_directory_path($branch_root, $parent);
         if (is_file($target) && !is_link($target) && cow_git_file_blob_hash($target) === $blob_hash) {
             continue;
         }
-        $parent = dirname($target);
-        cow_git_prepare_directory_path($branch_root, $parent);
         if ((is_dir($target) && !is_link($target)) || is_link($target)) {
             cow_git_remove_tree($target);
         }
@@ -1178,7 +1399,7 @@ function cow_git_remove_empty_dirs(string $root): void {
         if ($entry->isDir()) {
             $dir = $entry->getPathname();
             $rel = str_replace('\\', '/', substr($dir, strlen(rtrim($root, "/\\")) + 1));
-            if ($rel === 'wp-content/database' || str_starts_with($rel, 'wp-content/database/')) {
+            if (cow_git_is_reserved_database_relative_path($rel)) {
                 continue;
             }
             $dirs[] = $dir;
@@ -1207,6 +1428,21 @@ function cow_git_walk_tree(GitRepository $repo, string $tree_hash, string $prefi
             cow_git_walk_tree($repo, $entry->hash, $full_path, $result);
         } else {
             $result[$full_path] = $entry->hash;
+        }
+    }
+}
+
+function cow_git_walk_tree_entries(GitRepository $repo, string $tree_hash, string $prefix, array &$result): void {
+    $tree = $repo->read_object($tree_hash)->as_tree();
+    foreach ($tree->entries as $name => $entry) {
+        $full_path = $prefix === '' ? $name : $prefix . '/' . $name;
+        if ($entry->get_mode_bucket() === TreeEntry::FILE_MODE_DIRECTORY) {
+            cow_git_walk_tree_entries($repo, $entry->hash, $full_path, $result);
+        } else {
+            $result[$full_path] = [
+                'hash' => $entry->hash,
+                'mode' => $entry->get_mode_bucket(),
+            ];
         }
     }
 }
@@ -1335,15 +1571,20 @@ function cow_git_dump_branch_database(string $branch_root, string $branch): stri
     $db = new SQLite3($db_path, SQLITE3_OPEN_READONLY);
     $db->busyTimeout(5000);
     $tables = [];
-    $result = $db->query(
+    $table_names = [];
+    $result = @$db->query(
         "SELECT name, sql FROM sqlite_master
          WHERE type='table'
            AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'
            AND name NOT LIKE '\\_wp\\_sqlite\\_%' ESCAPE '\\'
          ORDER BY name"
     );
+    if ($result === false) {
+        throw new \RuntimeException("failed to read SQLite schema from $db_path");
+    }
     while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
         $tables[] = $row;
+        $table_names[(string)$row['name']] = true;
     }
 
     foreach ($tables as $table) {
@@ -1360,7 +1601,10 @@ function cow_git_dump_branch_database(string $branch_root, string $branch): stri
             $out .= "\n";
             continue;
         }
-        $select = $db->query('SELECT * FROM ' . cow_git_sql_ident($name));
+        $select = @$db->query('SELECT * FROM ' . cow_git_sql_ident($name));
+        if ($select === false) {
+            throw new \RuntimeException("failed to dump SQLite table $name from $db_path");
+        }
         while ($select && ($data = $select->fetchArray(SQLITE3_ASSOC))) {
             $names = [];
             $values = [];
@@ -1379,8 +1623,8 @@ function cow_git_dump_branch_database(string $branch_root, string $branch): stri
     }
 
     $schema_objects = [];
-    $result = $db->query(
-        "SELECT type, name, sql FROM sqlite_master
+    $result = @$db->query(
+        "SELECT type, name, tbl_name, sql FROM sqlite_master
          WHERE type IN ('view', 'index', 'trigger')
            AND sql IS NOT NULL
            AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'
@@ -1392,6 +1636,9 @@ function cow_git_dump_branch_database(string $branch_root, string $branch): stri
              ELSE 4
            END, name"
     );
+    if ($result === false) {
+        throw new \RuntimeException("failed to read SQLite schema objects from $db_path");
+    }
     while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
         $schema_objects[] = $row;
     }
@@ -1399,8 +1646,15 @@ function cow_git_dump_branch_database(string $branch_root, string $branch): stri
     foreach ($schema_objects as $object) {
         $type = strtolower((string)$object['type']);
         $name = (string)$object['name'];
+        $table_name = (string)$object['tbl_name'];
         $sql = trim((string)$object['sql']);
         if ($sql === '') {
+            continue;
+        }
+        if (($type === 'index' || $type === 'trigger') && !isset($table_names[$table_name])) {
+            continue;
+        }
+        if (cow_git_schema_sql_mentions_internal_table($sql)) {
             continue;
         }
         $drop_type = match ($type) {
@@ -1421,9 +1675,16 @@ function cow_git_dump_branch_database(string $branch_root, string $branch): stri
     return $out;
 }
 
+function cow_git_schema_sql_mentions_internal_table(string $sql): bool {
+    return (bool)preg_match('/(?:^|[^A-Za-z0-9_])["`\\[]?_wp_sqlite_/i', $sql);
+}
+
 function cow_git_table_columns(SQLite3 $db, string $table): array {
     $columns = [];
-    $result = $db->query('PRAGMA table_info(' . cow_git_sql_ident($table) . ')');
+    $result = @$db->query('PRAGMA table_info(' . cow_git_sql_ident($table) . ')');
+    if ($result === false) {
+        throw new \RuntimeException("failed to read SQLite columns for $table");
+    }
     while ($result && ($row = $result->fetchArray(SQLITE3_ASSOC))) {
         $columns[] = $row;
     }
@@ -1468,8 +1729,15 @@ function cow_git_database_name_is_sensitive(string $name): bool {
     if ($key === '') {
         return false;
     }
+    if (cow_git_database_column_is_keyish($key)) {
+        return false;
+    }
     if (in_array($key, [
+        'api_keys',
+        'auth_key',
         'application_passwords',
+        'license_key',
+        'refresh_tokens',
         'session_tokens',
         'user_activation_key',
         'user_pass',
@@ -1477,9 +1745,12 @@ function cow_git_database_name_is_sensitive(string $name): bool {
         return true;
     }
 
-    return (bool)preg_match(
-        '/(^|_)(access_token|api_key|apikey|client_secret|consumer_key|consumer_secret|oauth|pass|passwd|password|passphrase|private_key|pwd|refresh_token|salt|secret|session|session_token|sessions|token)(_|$)/',
-        $key
+    return (bool)(
+        preg_match(
+            '/(^|_)(access_tokens?|api_keys?|apikeys?|auth_keys?|client_secrets?|consumer_keys?|consumer_secrets?|license_keys?|oauth|pass|passwd|passwords?|passphrases?|private_keys?|pwd|refresh_tokens?|salts?|secrets?|sessions?|session_tokens?|tokens?)(_|$)/',
+            $key
+        )
+        || preg_match('/(^|_)[a-z0-9]+_keys?(_|$)/', $key)
     );
 }
 
@@ -1566,7 +1837,16 @@ function cow_git_branch_names(string $branches_dir): array {
 }
 
 function cow_git_valid_branch_name(string $branch): bool {
-    return (bool)preg_match('/^[A-Za-z0-9_-]{1,63}$/', $branch);
+    return (bool)preg_match('/^[A-Za-z0-9_-]{1,63}$/', $branch)
+        && !cow_git_reserved_branch_name($branch);
+}
+
+function cow_git_reserved_branch_name(string $branch): bool {
+    return in_array(strtolower($branch), cow_git_reserved_branch_names(), true);
+}
+
+function cow_git_reserved_branch_names(): array {
+    return ['www', 'admin', 'api', 'mail', 'localhost', 'wp'];
 }
 
 function cow_git_copy_tree(string $source, string $dest): void {
@@ -1587,7 +1867,9 @@ function cow_git_copy_tree(string $source, string $dest): void {
             cow_git_mkdir($target);
         } elseif ($entry->isFile()) {
             cow_git_mkdir(dirname($target));
-            copy($entry->getPathname(), $target);
+            if (!@copy($entry->getPathname(), $target)) {
+                throw new \RuntimeException("failed to copy {$entry->getPathname()} to $target");
+            }
         }
     }
 }
