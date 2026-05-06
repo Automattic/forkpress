@@ -115,7 +115,7 @@ function cow_git_server_handle(
 
         if ($is_post_receive) {
             try {
-                cow_git_apply_all_refs_to_branches(
+                cow_git_apply_push_to_branches(
                     $repo,
                     $git_repo_dir,
                     $branches_dir,
@@ -358,6 +358,29 @@ function cow_git_commit_matches_updates(GitRepository $repo, string $tip, array 
     }
 
     return true;
+}
+
+function cow_git_apply_push_to_branches(
+    GitRepository $repo,
+    string $git_repo_dir,
+    string $branches_dir,
+    string $storage_branches_dir,
+    ?string $branch_list_path,
+    string $file_view,
+    string $debug_log,
+    array $pre_receive_refs = []
+): void {
+    cow_git_apply_all_refs_to_branches(
+        $repo,
+        $git_repo_dir,
+        $branches_dir,
+        $storage_branches_dir,
+        $branch_list_path,
+        $file_view,
+        $debug_log,
+        $pre_receive_refs
+    );
+    cow_git_sync_repository($repo, $branches_dir);
 }
 
 function cow_git_apply_all_refs_to_branches(

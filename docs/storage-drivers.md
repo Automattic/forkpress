@@ -143,7 +143,10 @@ into `.forkpress/cow/git`. This means direct edits in `./main` or
 
 After a push, the adapter applies the pushed `wordpress/` tree to the target
 branch directory. Database files under `wp-content/database/.ht.sqlite*` are
-never exported through Git and are not removed during Git apply.
+never exported through Git and are not removed during Git apply. When apply
+succeeds, the adapter immediately snapshots the branch again so the remote ref
+matches ForkPress' source of truth. This removes pushed `database.sql` edits or
+other non-exported paths from the Git view without waiting for the next fetch.
 
 When a push creates a new Git ref, the adapter materializes the matching COW
 branch before applying the pushed `wordpress/` tree. It chooses the closest

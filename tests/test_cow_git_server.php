@@ -106,5 +106,45 @@ cow_git_sync_repository($repo, $branches);
 assert_same($repo->get_branch_tip('refs/heads/main'), $db_tip, 'unchanged database snapshot remains stable after advancing');
 cow_git_remove_tree($tmp);
 
+$tmp = sys_get_temp_dir() . '/forkpress-cow-git-push-resync-' . getmypid() . '-' . bin2hex(random_bytes(4));
+$branches = $tmp . '/branches';
+$git = $tmp . '/git';
+mkdir($branches . '/main/wp-content/database', 0777, true);
+file_put_contents($branches . '/main/wp-load.php', "<?php\n");
+file_put_contents($branches . '/main/wp-content/pushed.txt', "old\n");
+$db = new SQLite3($branches . '/main/wp-content/database/.ht.sqlite');
+$db->exec('CREATE TABLE wp_options (option_id INTEGER PRIMARY KEY, option_name TEXT, option_value TEXT)');
+$db->exec("INSERT INTO wp_options (option_name, option_value) VALUES ('blogname', 'ForkPress')");
+$db->close();
+
+$fs = WordPress\Filesystem\LocalFilesystem::create($git);
+$repo = new WordPress\Git\GitRepository($fs, ['default_branch' => 'main']);
+$repo->set_config_value(['user', 'name'], 'ForkPress COW');
+$repo->set_config_value(['user', 'email'], 'forkpress-cow@local');
+cow_git_sync_repository($repo, $branches);
+$base_tip = $repo->get_branch_tip('refs/heads/main');
+$repo->checkout('refs/heads/main');
+$pushed_tip = $repo->commit([
+    'commit' => [
+        'message' => 'push edited database snapshot',
+        'author' => 'ForkPress Test <forkpress-test@local>',
+        'committer' => 'ForkPress Test <forkpress-test@local>',
+        'parents' => [$base_tip],
+    ],
+    'updates' => [
+        'database.sql' => "-- user-edited database.sql should not persist\n",
+        'wordpress/wp-content/pushed.txt' => "new\n",
+    ],
+]);
+$repo->set_branch_tip('refs/heads/main', $pushed_tip);
+cow_git_apply_push_to_branches($repo, $git, $branches, $branches, null, 'file-copy', '', ['main' => $base_tip]);
+$resynced_tip = $repo->get_branch_tip('refs/heads/main');
+assert_true($resynced_tip !== $pushed_tip, 'push apply immediately resyncs ref when database.sql was edited');
+assert_same(file_get_contents($branches . '/main/wp-content/pushed.txt'), "new\n", 'push apply keeps wordpress file changes');
+$resynced_database = $repo->read_object_by_path('database.sql', $resynced_tip)->consume_all();
+assert_true(!str_contains($resynced_database, 'user-edited database.sql'), 'push resync discards edited database.sql from Git ref');
+assert_true(str_contains($resynced_database, 'ForkPress'), 'push resync regenerates database.sql from branch SQLite');
+cow_git_remove_tree($tmp);
+
 echo "\n=== COW Git server tests: $pass passed, $fail failed ===\n";
 exit($fail ? 1 : 0);
