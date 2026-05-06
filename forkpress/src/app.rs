@@ -4581,7 +4581,7 @@ fn run_cow_bootstrap_script(
                 .as_os_str(),
             layout
                 .runtime_dir
-                .join("wp-plugin/branchfs-wp.php")
+                .join("wp-plugin/forkpress-wp.php")
                 .as_os_str(),
             layout.debug_log.as_os_str(),
             OsStr::new(admin_password),
@@ -5303,13 +5303,13 @@ fn install_cas_managed_wp_files(layout: &Layout, branch_root: &Path) -> Result<(
     )?;
 
     fs::copy(
-        layout.runtime_dir.join("wp-plugin/branchfs-wp.php"),
-        wp_content.join("mu-plugins/branchfs-wp.php"),
+        layout.runtime_dir.join("wp-plugin/forkpress-wp.php"),
+        wp_content.join("mu-plugins/forkpress-wp.php"),
     )
     .with_context(|| {
         format!(
             "failed to install {}",
-            wp_content.join("mu-plugins/branchfs-wp.php").display()
+            wp_content.join("mu-plugins/forkpress-wp.php").display()
         )
     })?;
 
@@ -5691,7 +5691,7 @@ fn ensure_bootstrapped(layout: &Layout, runtime: &PortableRuntime, args: &StartA
                 OsStr::new(&args.site_title),
                 layout
                     .runtime_dir
-                    .join("wp-plugin/branchfs-wp.php")
+                    .join("wp-plugin/forkpress-wp.php")
                     .as_os_str(),
                 layout.debug_log.as_os_str(),
             ],
@@ -5747,7 +5747,7 @@ fn refresh_managed_wp_files_if_needed(
             OsStr::new(&args.site_title),
             layout
                 .runtime_dir
-                .join("wp-plugin/branchfs-wp.php")
+                .join("wp-plugin/forkpress-wp.php")
                 .as_os_str(),
             layout.debug_log.as_os_str(),
         ],

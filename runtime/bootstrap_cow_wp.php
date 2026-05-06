@@ -109,7 +109,7 @@ PHP;
 file_put_contents($wp_content . '/db.php', $dropin);
 
 if ($mu_plugin !== '' && file_exists($mu_plugin)) {
-    copy($mu_plugin, $wp_content . '/mu-plugins/branchfs-wp.php');
+    copy($mu_plugin, $wp_content . '/mu-plugins/forkpress-wp.php');
 }
 
 $config = <<<'PHP'

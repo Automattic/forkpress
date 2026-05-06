@@ -186,7 +186,7 @@ function forkpress_write_mu_plugin(?string $mu_plugin): void {
 
     @mkdir('branchfs://main/wp-content/mu-plugins', 0755, true);
     file_put_contents(
-        'branchfs://main/wp-content/mu-plugins/branchfs-wp.php',
+        'branchfs://main/wp-content/mu-plugins/forkpress-wp.php',
         file_get_contents($mu_plugin)
     );
     echo "  mu-plugin installed\n";

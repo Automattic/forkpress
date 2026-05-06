@@ -1,18 +1,17 @@
 <?php
 /**
- * Plugin Name: BranchFS WordPress Integration
- * Description: Integrates BranchFS branch-scoped preview with WordPress.
- *              Redirects uploads, adjusts filesystem operations, and provides
- *              branch-aware admin UI hints.
+ * Plugin Name: ForkPress WordPress Integration
+ * Description: Integrates ForkPress branch previews with WordPress.
+ *              Handles local preview auth and branch-aware admin UI hints.
  * Version: 0.1.0
  */
 
 if (!defined('ABSPATH')) exit;
 
 /**
- * Redirect uploaded files into branchfs:// store.
- * Uses the pre_move_uploaded_file hook (WP 5.7+) to intercept uploads
- * before they hit the real filesystem.
+ * Redirect uploaded files through BranchFS when the experimental BranchFS
+ * runtime is active. Materialized COW branches fall through to WordPress'
+ * ordinary filesystem handling.
  */
 add_filter('pre_move_uploaded_file', function ($move_new_file, $file, $new_file, $type) {
     if (!function_exists('branchfs_is_active') || !branchfs_is_active()) {
@@ -49,9 +48,8 @@ add_filter('pre_move_uploaded_file', function ($move_new_file, $file, $new_file,
 }, 10, 4);
 
 /**
- * Override the WordPress filesystem method to 'direct' when branchfs is active.
- * This ensures WP uses PHP file functions (which we intercept) rather than
- * FTP/SSH methods.
+ * Override the WordPress filesystem method to 'direct' when BranchFS is active.
+ * This ensures WordPress uses PHP file functions rather than FTP/SSH methods.
  */
 add_filter('filesystem_method', function ($method) {
     if (function_exists('branchfs_is_active') && branchfs_is_active()) {
@@ -220,7 +218,7 @@ add_action('init', function () {
     }
 }, 1);
 
-function forkpress_branchfs_db_path(): ?string {
+function forkpress_db_path(): ?string {
     $path = getenv('BRANCHFS_DB');
     if (is_string($path) && $path !== '') {
         return $path;
@@ -274,7 +272,7 @@ function forkpress_local_branches(string $current_branch): array {
         }
     }
 
-    $db_path = forkpress_branchfs_db_path();
+    $db_path = forkpress_db_path();
     if (!$db_path || !class_exists('SQLite3') || !is_readable($db_path)) {
         return [$current_branch];
     }
@@ -312,10 +310,10 @@ add_action('admin_bar_menu', function ($wp_admin_bar) {
     }
 
     $wp_admin_bar->add_node([
-        'id'    => 'branchfs-indicator',
+        'id'    => 'forkpress-branch-indicator',
         'title' => 'Branch: ' . esc_html($branch),
         'href'  => forkpress_branch_url($branch),
-        'meta'  => ['class' => 'branchfs-branch-indicator'],
+        'meta'  => ['class' => 'forkpress-branch-indicator'],
     ]);
 }, 100);
 
@@ -326,14 +324,14 @@ function forkpress_branch_switcher_assets(): void {
     }
 
     echo '<style>
-        #wpadminbar #wp-admin-bar-branchfs-indicator > .ab-item {
+        #wpadminbar #wp-admin-bar-forkpress-branch-indicator > .ab-item {
             background: #2271b1 !important;
             color: #fff !important;
         }
-        #wpadminbar #wp-admin-bar-branchfs-indicator {
+        #wpadminbar #wp-admin-bar-forkpress-branch-indicator {
             position: relative;
         }
-        #wpadminbar .branchfs-switcher-panel {
+        #wpadminbar .forkpress-switcher-panel {
             background: #1d2327;
             border: 1px solid #3c434a;
             box-shadow: 0 8px 20px rgba(0, 0, 0, 0.28);
@@ -347,11 +345,11 @@ function forkpress_branch_switcher_assets(): void {
             width: 280px;
             z-index: 99999;
         }
-        #wpadminbar #wp-admin-bar-branchfs-indicator:hover .branchfs-switcher-panel,
-        #wpadminbar #wp-admin-bar-branchfs-indicator.branchfs-switcher-open .branchfs-switcher-panel {
+        #wpadminbar #wp-admin-bar-forkpress-branch-indicator:hover .forkpress-switcher-panel,
+        #wpadminbar #wp-admin-bar-forkpress-branch-indicator.forkpress-switcher-open .forkpress-switcher-panel {
             display: block;
         }
-        #wpadminbar .branchfs-switcher-filter {
+        #wpadminbar .forkpress-switcher-filter {
             background: #fff;
             border: 1px solid #8c8f94;
             border-radius: 3px;
@@ -364,11 +362,11 @@ function forkpress_branch_switcher_assets(): void {
             padding: 4px 8px;
             width: 100%;
         }
-        #wpadminbar .branchfs-switcher-list {
+        #wpadminbar .forkpress-switcher-list {
             max-height: 360px;
             overflow: auto;
         }
-        #wpadminbar .branchfs-switcher-branch {
+        #wpadminbar .forkpress-switcher-branch {
             border-radius: 3px;
             box-sizing: border-box;
             color: #f0f0f1 !important;
@@ -381,17 +379,17 @@ function forkpress_branch_switcher_assets(): void {
             text-overflow: ellipsis;
             white-space: nowrap;
         }
-        #wpadminbar .branchfs-switcher-branch:hover,
-        #wpadminbar .branchfs-switcher-branch:focus {
+        #wpadminbar .forkpress-switcher-branch:hover,
+        #wpadminbar .forkpress-switcher-branch:focus {
             background: #2c3338;
             color: #fff !important;
             outline: none;
         }
-        #wpadminbar .branchfs-switcher-branch.is-current {
+        #wpadminbar .forkpress-switcher-branch.is-current {
             background: #2271b1;
             color: #fff !important;
         }
-        #wpadminbar .branchfs-switcher-empty {
+        #wpadminbar .forkpress-switcher-empty {
             color: #c3c4c7;
             font-size: 13px;
             line-height: 1.4;
@@ -429,19 +427,19 @@ function forkpress_render_branch_switcher(): void {
     ?>
     <script>
     (function () {
-        var item = document.getElementById('wp-admin-bar-branchfs-indicator');
-        if (!item || item.querySelector('.branchfs-switcher-panel')) {
+        var item = document.getElementById('wp-admin-bar-forkpress-branch-indicator');
+        if (!item || item.querySelector('.forkpress-switcher-panel')) {
             return;
         }
 
         var branches = <?php echo $json; ?>;
         var panel = document.createElement('div');
-        panel.className = 'branchfs-switcher-panel';
-        panel.innerHTML = '<input class="branchfs-switcher-filter" type="search" autocomplete="off" placeholder="Filter branches" aria-label="Filter branches"><div class="branchfs-switcher-list" role="menu"></div>';
+        panel.className = 'forkpress-switcher-panel';
+        panel.innerHTML = '<input class="forkpress-switcher-filter" type="search" autocomplete="off" placeholder="Filter branches" aria-label="Filter branches"><div class="forkpress-switcher-list" role="menu"></div>';
         item.appendChild(panel);
 
-        var input = panel.querySelector('.branchfs-switcher-filter');
-        var list = panel.querySelector('.branchfs-switcher-list');
+        var input = panel.querySelector('.forkpress-switcher-filter');
+        var list = panel.querySelector('.forkpress-switcher-list');
 
         function render() {
             var query = input.value.toLowerCase();
@@ -452,7 +450,7 @@ function forkpress_render_branch_switcher(): void {
             list.innerHTML = '';
             if (!matches.length) {
                 var empty = document.createElement('div');
-                empty.className = 'branchfs-switcher-empty';
+                empty.className = 'forkpress-switcher-empty';
                 empty.textContent = 'No branches';
                 list.appendChild(empty);
                 return;
@@ -460,7 +458,7 @@ function forkpress_render_branch_switcher(): void {
 
             matches.forEach(function (branch) {
                 var link = document.createElement('a');
-                link.className = 'branchfs-switcher-branch' + (branch.current ? ' is-current' : '');
+                link.className = 'forkpress-switcher-branch' + (branch.current ? ' is-current' : '');
                 link.href = branch.url;
                 link.role = 'menuitem';
                 link.textContent = branch.name;
@@ -469,11 +467,11 @@ function forkpress_render_branch_switcher(): void {
         }
 
         item.addEventListener('mouseenter', function () {
-            item.classList.add('branchfs-switcher-open');
+            item.classList.add('forkpress-switcher-open');
             window.setTimeout(function () { input.focus(); }, 0);
         });
         item.addEventListener('mouseleave', function () {
-            item.classList.remove('branchfs-switcher-open');
+            item.classList.remove('forkpress-switcher-open');
         });
         panel.addEventListener('click', function (event) {
             event.stopPropagation();

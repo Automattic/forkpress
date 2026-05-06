@@ -198,7 +198,7 @@ echo "  wp-config.php written ($written bytes, table_prefix=$table_prefix)\n";
 if ($mu_plugin && file_exists($mu_plugin)) {
     @mkdir("branchfs://main/wp-content/mu-plugins", 0755, true);
     file_put_contents(
-        "branchfs://main/wp-content/mu-plugins/branchfs-wp.php",
+        "branchfs://main/wp-content/mu-plugins/forkpress-wp.php",
         file_get_contents($mu_plugin)
     );
     echo "  mu-plugin installed\n";
