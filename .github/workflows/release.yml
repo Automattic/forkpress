@@ -71,15 +71,15 @@ jobs:
               'ext/branchfs.c',
               'ext/branchfs.h',
               'forkpress/build.rs',
-              'forkpress/zfs-engine/Makefile',
-              'forkpress/zfs-engine/forkpress_zfs.c',
-              'forkpress/zfs-engine/include/libintl.h',
-              'forkpress/zfs-engine/include/sys/endian.h',
-              'forkpress/zfs-engine/include/sys/simd.h',
-              'forkpress/zfs-engine/include/sys/stdtypes.h',
-              'forkpress/zfs-engine/include/sys/sysmacros.h',
-              'forkpress/zfs-engine/include/sys/types32.h',
-              'forkpress/zfs-engine/include/sys/uio.h'
+              'forkpress/experiments/zfs-engine/Makefile',
+              'forkpress/experiments/zfs-engine/forkpress_zfs.c',
+              'forkpress/experiments/zfs-engine/include/libintl.h',
+              'forkpress/experiments/zfs-engine/include/sys/endian.h',
+              'forkpress/experiments/zfs-engine/include/sys/simd.h',
+              'forkpress/experiments/zfs-engine/include/sys/stdtypes.h',
+              'forkpress/experiments/zfs-engine/include/sys/sysmacros.h',
+              'forkpress/experiments/zfs-engine/include/sys/types32.h',
+              'forkpress/experiments/zfs-engine/include/sys/uio.h'
             ) }}
 
       - uses: dtolnay/rust-toolchain@stable

@@ -18,6 +18,7 @@ use zip::ZipArchive;
 #[cfg(feature = "dev-experiments")]
 use forkpress_cas_store as cas_store;
 #[cfg(feature = "dev-experiments")]
+#[path = "experiments/zfs_engine.rs"]
 mod zfs_engine;
 
 const RUNTIME_BUNDLE: &[u8] = include_bytes!(env!("FORKPRESS_RUNTIME_BUNDLE"));

@@ -114,7 +114,7 @@ fn fnv1a_hex(bytes: &[u8]) -> String {
 }
 
 fn build_embedded_zfs(repo_root: &Path, target: &str) -> Result<()> {
-    let engine_dir = repo_root.join("forkpress/zfs-engine");
+    let engine_dir = repo_root.join("forkpress/experiments/zfs-engine");
     let work_root = repo_root.join(".build/zfs-engine");
     let target_build = work_root.join(target);
     fs::create_dir_all(&target_build)
