@@ -1261,11 +1261,34 @@ fn with_stopped_cow_server_for_storage<T>(
     timeout: Duration,
     action: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
+    with_stopped_cow_server_for_storage_impl(
+        layout,
+        keep_server,
+        timeout,
+        running_record_for_work_dir,
+        stop_server_record,
+        action,
+    )
+}
+
+fn with_stopped_cow_server_for_storage_impl<T, FindRunning, StopRunning, Action>(
+    layout: &Layout,
+    keep_server: bool,
+    timeout: Duration,
+    mut find_running: FindRunning,
+    mut stop_running: StopRunning,
+    action: Action,
+) -> Result<T>
+where
+    FindRunning: FnMut(&Path) -> Result<Option<ServerRecord>>,
+    StopRunning: FnMut(&ServerRecord, Duration) -> Result<()>,
+    Action: FnOnce() -> Result<T>,
+{
     let mut action = Some(action);
     loop {
         let _lifecycle_lock = lock_cow_lifecycle(layout)?;
         let _lock = lock_cow_operations(layout)?;
-        if let Some(record) = running_record_for_work_dir(&layout.work_dir)? {
+        if let Some(record) = find_running(&layout.work_dir)? {
             drop(_lock);
             drop(_lifecycle_lock);
             if keep_server {
@@ -1275,7 +1298,7 @@ fn with_stopped_cow_server_for_storage<T>(
                     layout.work_dir.display()
                 );
             }
-            stop_server_record(&record, timeout)?;
+            stop_running(&record, timeout)?;
             continue;
         }
 
@@ -1696,6 +1719,99 @@ mod storage_strategy_tests {
         };
         assert!(args.force);
         assert!(args.keep_server);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cow_storage_lifecycle_waits_for_background_start_lock() {
+        let root = std::env::temp_dir().join(format!(
+            "forkpress-cow-lifecycle-wait-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let layout = Layout::new(root.join(".forkpress")).unwrap();
+        fs::create_dir_all(&layout.cow_dir).unwrap();
+        let start_lock = lock_cow_lifecycle(&layout).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let thread_layout = layout.clone();
+
+        let handle = std::thread::spawn(move || {
+            with_stopped_cow_server_for_storage_impl(
+                &thread_layout,
+                false,
+                Duration::from_millis(10),
+                |_| Ok(None),
+                |_, _| Ok(()),
+                || {
+                    tx.send(()).unwrap();
+                    Ok(())
+                },
+            )
+            .unwrap();
+        });
+
+        assert!(rx.recv_timeout(Duration::from_millis(150)).is_err());
+        drop(start_lock);
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        handle.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cow_storage_lifecycle_stops_registered_server_before_action() {
+        let root = std::env::temp_dir().join(format!(
+            "forkpress-cow-lifecycle-stop-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let layout = Layout::new(root.join(".forkpress")).unwrap();
+        fs::create_dir_all(&layout.cow_dir).unwrap();
+        let record = ServerRecord {
+            pid: 12345,
+            child_pid: None,
+            work_dir: layout.work_dir.clone(),
+            host: "127.0.0.1".to_string(),
+            port: 18080,
+            root_host: "wp.localhost".to_string(),
+            log: layout.forkpress_server_log.clone(),
+        };
+        let lookups = std::cell::Cell::new(0);
+        let stopped = std::cell::Cell::new(false);
+
+        with_stopped_cow_server_for_storage_impl(
+            &layout,
+            false,
+            Duration::from_secs(3),
+            |work_dir| {
+                assert_eq!(work_dir, layout.work_dir);
+                let count = lookups.get();
+                lookups.set(count + 1);
+                if count == 0 {
+                    Ok(Some(record.clone()))
+                } else {
+                    Ok(None)
+                }
+            },
+            |stopped_record, timeout| {
+                assert_eq!(stopped_record, &record);
+                assert_eq!(timeout, Duration::from_secs(3));
+                stopped.set(true);
+                Ok(())
+            },
+            || {
+                assert!(stopped.get());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(lookups.get(), 2);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
