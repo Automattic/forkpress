@@ -8,7 +8,7 @@
  * back to the installation wizard.
  */
 
-require_once __DIR__ . '/../experiments/branchfs/scripts/cow_helpers.php';
+require_once __DIR__ . '/../scripts/cow_helpers.php';
 
 $pass = 0;
 $fail = 0;

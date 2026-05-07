@@ -21,7 +21,7 @@ $ROOT = '/tmp/branchfs_merge_root_' . getmypid();
 @unlink($DB);
 
 $db = new SQLite3($DB);
-$db->exec(file_get_contents(__DIR__ . '/../experiments/branchfs/schema.sql'));
+$db->exec(file_get_contents(__DIR__ . '/../schema.sql'));
 $db->close();
 
 branchfs_set_db($DB);
@@ -93,8 +93,8 @@ file_put_contents('branchfs://feature-a/readme.txt', "feature edit\n");
 
 echo "=== merge: default (abort) strategy refuses on conflict ===\n";
 $cmd = escapeshellcmd(PHP_BINARY)
-     . ' -d extension=' . escapeshellarg(realpath(__DIR__ . '/../experiments/branchfs/php-ext/branchfs.so'))
-     . ' ' . escapeshellarg(__DIR__ . '/../experiments/branchfs/scripts/merge.php')
+     . ' -d extension=' . escapeshellarg(realpath(__DIR__ . '/../php-ext/branchfs.so'))
+     . ' ' . escapeshellarg(__DIR__ . '/../scripts/merge.php')
      . ' feature-a main ' . escapeshellarg($DB);
 $output = [];
 $rc = 0;
@@ -144,8 +144,8 @@ file_put_contents('branchfs://feature-b/note.txt', "feature only edit\n");
 // Target main is still at "base note" for this path
 
 $cmd2 = escapeshellcmd(PHP_BINARY)
-      . ' -d extension=' . escapeshellarg(realpath(__DIR__ . '/../experiments/branchfs/php-ext/branchfs.so'))
-      . ' ' . escapeshellarg(__DIR__ . '/../experiments/branchfs/scripts/merge.php')
+      . ' -d extension=' . escapeshellarg(realpath(__DIR__ . '/../php-ext/branchfs.so'))
+      . ' ' . escapeshellarg(__DIR__ . '/../scripts/merge.php')
       . ' feature-b main ' . escapeshellarg($DB);
 $output = [];
 $rc = 0;

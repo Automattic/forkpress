@@ -24,11 +24,13 @@ macOS release targets link only against `libSystem`:
 ## Repository Layout
 
 - `forkpress/` contains the Rust CLI.
-- `experiments/branchfs/` contains the experimental BranchFS schema and PHP extension.
-- `scripts/` contains bundled PHP operations.
-- `runtime/` contains the PHP built-in-server router, WordPress bootstrap, and
-  the WordPress archive embedded into the binary.
-- `tests/` contains PHP unit tests.
+- `runtime/` contains production COW runtime files and the WordPress archive
+  embedded into the binary.
+- `scripts/` contains production/shared build, SQLite, Git, and COW helpers.
+- `tests/` contains production COW PHP tests.
+- `experiments/branchfs/` contains the experimental BranchFS schema, PHP
+  extension, runtime files, scripts, Git adapter, and tests.
+- `experiments/cas/` contains CAS experiment code and tests.
 
 ## Branch Workflow
 

@@ -14,8 +14,8 @@ function assert_true($cond, $msg) {
     else       { echo "  FAIL: $msg\n"; $fail++; }
 }
 
-require_once __DIR__ . '/../scripts/git/autoload.php';
-require_once __DIR__ . '/../experiments/branchfs/git/server.php';
+require_once __DIR__ . '/../../../scripts/git/autoload.php';
+require_once __DIR__ . '/../git/server.php';
 
 // Save & clear env state between sub-tests
 $restore_env = function() {

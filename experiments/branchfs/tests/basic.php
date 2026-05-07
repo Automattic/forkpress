@@ -38,7 +38,7 @@ assert_true(function_exists('branchfs_activate'), 'branchfs_activate exists');
 echo "\n# Database initialization\n";
 // Create schema
 $db = new SQLite3($DB);
-$schema = file_get_contents(__DIR__ . '/../experiments/branchfs/schema.sql');
+$schema = file_get_contents(__DIR__ . '/../schema.sql');
 $db->exec($schema);
 $db->close();
 

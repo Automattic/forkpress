@@ -18,7 +18,7 @@ $ROOT = '/tmp/branchfs_rp_root_' . getmypid();
 
 // Initialize schema
 $db = new SQLite3($DB);
-$db->exec(file_get_contents(__DIR__ . '/../experiments/branchfs/schema.sql'));
+$db->exec(file_get_contents(__DIR__ . '/../schema.sql'));
 $db->close();
 
 branchfs_set_db($DB);

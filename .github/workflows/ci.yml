@@ -49,7 +49,7 @@ jobs:
         run: cargo build --release --target x86_64-unknown-linux-musl -p forkpress --bin forkpress
 
       - name: COW strategy e2e
-        run: tests/test_cow_strategy_e2e.sh target/x86_64-unknown-linux-musl/release/forkpress
+        run: tests/cow/e2e.sh target/x86_64-unknown-linux-musl/release/forkpress
 
       - name: Build dev dist bundle
         run: scripts/build-dist.sh
@@ -62,7 +62,7 @@ jobs:
         run: cargo build --release --target x86_64-unknown-linux-musl -p forkpress --features dev-experiments --bin forkpress-dev
 
       - name: CAS strategy e2e (dev)
-        run: tests/test_cas_strategy_e2e.sh target/x86_64-unknown-linux-musl/release/forkpress-dev
+        run: experiments/cas/tests/e2e.sh target/x86_64-unknown-linux-musl/release/forkpress-dev
 
   mac-cow-e2e:
     name: mac-cow-e2e ${{ matrix.target }}
@@ -103,6 +103,6 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }} -p forkpress --bin forkpress
 
       - name: COW strategy e2e through APFS sparsebundle
-        run: tests/test_cow_strategy_e2e.sh target/${{ matrix.target }}/release/forkpress
+        run: tests/cow/e2e.sh target/${{ matrix.target }}/release/forkpress
         env:
           FORKPRESS_FORCE_MACOS_APFS_SPARSEBUNDLE: "1"

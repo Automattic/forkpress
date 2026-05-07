@@ -467,8 +467,15 @@ FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress --features dev-experi
 PHP unit tests:
 
 ```bash
+make test-cow
+make test-branchfs
 make test-all
 ```
+
+`tests/` contains production COW tests. BranchFS and CAS experiment tests live
+with their experiment code under `experiments/`. There are no generic PHP tests
+shared by both storage families yet; common behavior is covered through the COW
+and experiment-specific suites.
 
 ## Publish
 
