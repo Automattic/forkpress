@@ -54,7 +54,7 @@ function cow_git_server_handle(
         echo "Cannot open COW branch operation lock\n";
         return;
     }
-    if (!flock($operation_lock, cow_git_operation_lock_mode($git_path))) {
+    if (!flock($operation_lock, LOCK_EX)) {
         http_response_code(500);
         echo "Cannot lock COW branch operations\n";
         fclose($operation_lock);
@@ -166,10 +166,6 @@ function cow_git_server_handle(
             fclose($operation_lock);
         }
     }
-}
-
-function cow_git_operation_lock_mode(string $git_path): int {
-    return $git_path === '/git-receive-pack' ? LOCK_EX : LOCK_SH;
 }
 
 function cow_git_parse_push_commands(string $request_bytes): array {

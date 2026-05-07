@@ -76,21 +76,18 @@ $shared_holder = fopen($lock_path, 'c');
 assert_true(is_resource($shared_holder), 'test opened COW operation lock');
 if (is_resource($shared_holder)) {
     assert_true(flock($shared_holder, LOCK_SH), 'test holds shared COW operation lock');
-    assert_same(cow_git_operation_lock_mode('/git-upload-pack'), LOCK_SH, 'upload-pack uses a shared COW operation lock');
-    assert_same(cow_git_operation_lock_mode('/info/refs'), LOCK_SH, 'Git ref advertisement uses a shared COW operation lock');
-    assert_same(cow_git_operation_lock_mode('/git-receive-pack'), LOCK_EX, 'receive-pack uses an exclusive COW operation lock');
 
     $read_lock = fopen($lock_path, 'c');
     assert_true(is_resource($read_lock), 'test opened second read lock');
     if (is_resource($read_lock)) {
-        assert_true(flock($read_lock, cow_git_operation_lock_mode('/git-upload-pack') | LOCK_NB), 'read-only Git requests can share the operation lock');
+        assert_true(!flock($read_lock, LOCK_EX | LOCK_NB), 'read-only Git requests wait behind shared operation readers');
         fclose($read_lock);
     }
 
     $write_lock = fopen($lock_path, 'c');
     assert_true(is_resource($write_lock), 'test opened write lock');
     if (is_resource($write_lock)) {
-        assert_true(!flock($write_lock, cow_git_operation_lock_mode('/git-receive-pack') | LOCK_NB), 'receive-pack waits behind shared operation readers');
+        assert_true(!flock($write_lock, LOCK_EX | LOCK_NB), 'receive-pack waits behind shared operation readers');
         fclose($write_lock);
     }
 
