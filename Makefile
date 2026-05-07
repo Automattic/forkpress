@@ -44,7 +44,7 @@ SQLITE_LIBS := -lsqlite3
 endif
 
 CC      ?= gcc
-CFLAGS  := -fPIC -shared -O2 -Wall -DCOMPILE_DL_BRANCHFS -DHAVE_CONFIG_H=0 $(SQLITE_CFLAGS)
+CFLAGS  := -fPIC -O2 -Wall -DCOMPILE_DL_BRANCHFS -DHAVE_CONFIG_H=0 $(SQLITE_CFLAGS)
 INCLUDES := $(PHP_EXTRA_INCS)
 LDFLAGS := $(SQLITE_LIBS)
 BRANCHFS_EXT_DIR := experiments/branchfs/php-ext
@@ -54,6 +54,10 @@ COW_TEST_DIR := tests/cow
 RUSTUP ?= $(shell command -v rustup 2>/dev/null)
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
+PHP_EXT_LDFLAGS := -shared
+ifeq ($(UNAME_S),Darwin)
+PHP_EXT_LDFLAGS := -bundle -undefined dynamic_lookup
+endif
 ifeq ($(UNAME_S)-$(UNAME_M),Darwin-arm64)
 FORKPRESS_TARGET ?= aarch64-apple-darwin
 else ifeq ($(UNAME_S)-$(UNAME_M),Darwin-x86_64)
@@ -69,7 +73,7 @@ endif
 all: $(BRANCHFS_EXT_SO)
 
 $(BRANCHFS_EXT_SO): $(BRANCHFS_EXT_DIR)/branchfs.c $(BRANCHFS_EXT_DIR)/branchfs.h
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $(BRANCHFS_EXT_DIR)/branchfs.c $(LDFLAGS)
+	$(CC) $(CFLAGS) $(INCLUDES) $(PHP_EXT_LDFLAGS) -o $@ $(BRANCHFS_EXT_DIR)/branchfs.c $(LDFLAGS)
 
 init-db: $(BRANCHFS_EXT_SO)
 	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" experiments/branchfs/scripts/init_db.php
