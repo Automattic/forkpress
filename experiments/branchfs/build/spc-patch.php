@@ -7,7 +7,7 @@
  * and re-runs ./buildconf --force so PHP's configure script picks up the new
  * extension and honors --enable-branchfs.
  *
- * Invoked via: spc build --with-added-patch=scripts/spc-patch-branchfs.php
+ * Invoked via: spc build --with-added-patch=experiments/branchfs/build/spc-patch.php
  */
 
 // @phpstan-ignore-next-line -- runs inside spc's BuilderBase method via require
@@ -15,7 +15,7 @@ if ($this->getPatchPoint() !== 'after-php-extract') {
     return;
 }
 
-$repo_root = realpath(__DIR__ . '/..');
+$repo_root = realpath(__DIR__ . '/../../..');
 if ($repo_root === false) {
     throw new RuntimeException('forkpress patch: cannot resolve repo root');
 }
@@ -43,7 +43,7 @@ foreach (['branchfs.c', 'branchfs.h'] as $file) {
 }
 
 $config_m4 = <<<'M4'
-dnl Injected by forkpress scripts/spc-patch-branchfs.php.
+dnl Injected by forkpress experiments/branchfs/build/spc-patch.php.
 dnl Registers branchfs as a builtin PHP extension. sqlite3 symbols are
 dnl already linked into the PHP binary (via --with-sqlite3), so branchfs
 dnl just #includes <sqlite3.h> and reuses them. The CAS backend links the

@@ -13,13 +13,13 @@
  * Fallback: if SQLite3::backup isn't available (older PHP) we use
  * `VACUUM INTO` which still produces a correct backup but blocks writers.
  *
- * Usage: php scripts/backup.php <source.fp> <dest.fp>
+ * Usage: php sqlite_backup.php <source.sqlite> <dest.sqlite>
  */
 
 require_once __DIR__ . '/sqlite_retry.php';
 
 if ($argc < 3) {
-    fwrite(STDERR, "Usage: php backup.php <source.fp> <dest.fp>\n");
+    fwrite(STDERR, "Usage: php sqlite_backup.php <source.sqlite> <dest.sqlite>\n");
     exit(1);
 }
 

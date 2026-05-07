@@ -3,7 +3,7 @@
  * TODO3 #12 audit trail + hostile-review finding #2 (audit binding).
  *
  * Audit-log helpers. `audit_log_write` binds the row to a Principal that
- * was resolved at CLI startup (see scripts/principal.php) — NOT to the
+ * was resolved at CLI startup (see principal.php) — NOT to the
  * freely-forgeable FORKPRESS_ACTOR env var as before.
  *
  * Failure semantics (finding #2): an audit-log write failure is NOT

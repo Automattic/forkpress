@@ -101,7 +101,7 @@ if (preg_match('|^/([a-zA-Z0-9_\-]+)\.git(/.*)?$|', $path, $git_match)) {
     $branch_list = getenv('FORKPRESS_BRANCH_LIST') ?: rtrim($cow_dir, '/') . '/branches.txt';
     $file_view = getenv('FORKPRESS_COW_FILE_VIEW') ?: 'file-copy';
     $debug_log = getenv('FORKPRESS_DEBUG_LOG') ?: '';
-    require_once dirname(__DIR__, 2) . '/scripts/git_server/cow_server.php';
+    require_once dirname(__DIR__, 2) . '/scripts/cow/git_server.php';
     cow_git_server_handle($branches_dir, $git_repo_dir, $git_path, $query, $storage_branches_dir, $branch_list, $file_view, $debug_log);
     return true;
 }

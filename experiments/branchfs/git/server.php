@@ -10,7 +10,7 @@
  * Expected $_SERVER vars: REQUEST_METHOD, REQUEST_URI, HTTP_HOST
  */
 
-require_once __DIR__ . '/autoload.php';
+require_once dirname(__DIR__, 3) . '/scripts/git/autoload.php';
 
 use WordPress\Filesystem\LocalFilesystem;
 use WordPress\Git\GitEndpoint;
@@ -186,7 +186,7 @@ function git_fs_restore_from_commit(SQLite3 $db, int $branch_id, int $commit_id)
     // TODO3 #5: under delta encoding, the target commit's raw rows only
     // hold changes since the previous commit. Use the chain walker so
     // restore sees the full materialized tree.
-    require_once __DIR__ . '/../fs_commit_helpers.php';
+    require_once __DIR__ . '/../scripts/fs_commit_helpers.php';
     $tree = fs_materialize_commit_tree($db, $commit_id);
     $db->exec('BEGIN IMMEDIATE');
     try {
@@ -380,7 +380,7 @@ function git_build_repository(string $repo_dir, SQLite3 $sqlite): void {
         $parent_git_hash = null;
         $tip_hash = null;
 
-        require_once __DIR__ . '/../fs_commit_helpers.php';
+        require_once __DIR__ . '/../scripts/fs_commit_helpers.php';
         foreach ($fs_commits as $fc) {
             $fc_id = (int)$fc['id'];
 

@@ -1,7 +1,7 @@
 <?php
 /**
  * forkpress import — rebuild a .fp from the directory tree produced by
- * scripts/export.php.
+ * experiments/branchfs/scripts/export.php.
  *
  * Steps:
  *   1. init_db.php creates a fresh .fp with schema + seeded 'main' branch.
@@ -11,7 +11,7 @@
  *      via the branchfs:// stream wrapper.
  *   4. Apply branches/<name>/db.sql to restore b{id}_wp_* tables.
  *
- * Usage: php scripts/import.php <export-dir> <new.fp>
+ * Usage: php import.php <export-dir> <new.fp>
  */
 
 if ($argc < 3) {

@@ -970,7 +970,7 @@ fn init_branchfs_site(args: InitArgs, layout: Layout, runtime: PortableRuntime) 
         &layout,
         &runtime,
         &args.shared,
-        "scripts/init_db.php",
+        "experiments/branchfs/scripts/init_db.php",
         script_args.iter().map(|s| s.as_os_str()),
     )?;
     write_site_manifest(&layout, SiteManifest::new(StorageStrategy::Branchfs))?;
@@ -1043,7 +1043,11 @@ fn user_command(args: UserPassthrough) -> Result<i32> {
     let runtime = PortableRuntime::from_layout(&layout);
 
     let mut command = php_base_command(&layout, &runtime, &args.shared);
-    command.arg(layout.runtime_dir.join("scripts/user_admin.php"));
+    command.arg(
+        layout
+            .runtime_dir
+            .join("experiments/branchfs/scripts/user_admin.php"),
+    );
     for arg in &args.args {
         command.arg(arg);
     }
@@ -1401,7 +1405,7 @@ fn backup_command(args: BackupArgs) -> Result<i32> {
         &layout,
         &runtime,
         &args.shared,
-        "scripts/backup.php",
+        "scripts/shared/sqlite_backup.php",
         [src.as_os_str(), args.dest.as_os_str()],
     )?;
     Ok(0)
@@ -1423,7 +1427,7 @@ fn export_command(args: ExportArgs) -> Result<i32> {
         &layout,
         &runtime,
         &args.shared,
-        "scripts/export.php",
+        "experiments/branchfs/scripts/export.php",
         [src.as_os_str(), args.output_dir.as_os_str()],
     )?;
     Ok(0)
@@ -1444,7 +1448,7 @@ fn import_command(args: ImportArgs) -> Result<i32> {
         &layout,
         &runtime,
         &args.shared,
-        "scripts/import.php",
+        "experiments/branchfs/scripts/import.php",
         [args.input_dir.as_os_str(), args.dest.as_os_str()],
     )?;
     Ok(0)
@@ -3323,9 +3327,9 @@ fn git_config_is_set(repo: &std::path::Path, key: &str) -> Result<bool> {
 }
 
 /// Background GC loop. Runs until `stop` flips true. Each tick invokes
-/// `scripts/branchctl.php gc` via the bundled PHP and appends stdout/stderr
-/// to a dedicated log file (separate from php-server.log so one stream's
-/// rotation doesn't clobber the other).
+/// `experiments/branchfs/scripts/branchctl.php gc` via the bundled PHP and
+/// appends stdout/stderr to a dedicated log file, separate from php-server.log
+/// so one stream's rotation doesn't clobber the other.
 #[cfg(feature = "dev-experiments")]
 fn run_background_gc(
     stop: Arc<AtomicBool>,
@@ -3369,12 +3373,16 @@ fn run_gc_once(
     let log_err = log.try_clone()?;
 
     let mut cmd = php_base_command(layout, runtime, shared);
-    cmd.arg(layout.runtime_dir.join("scripts/branchctl.php"))
-        .arg("gc")
-        .env("BRANCHFS_DB", &layout.site_fp)
-        .env("BRANCHFS_SQLITE_WP_DB", &layout.site_fp)
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_err));
+    cmd.arg(
+        layout
+            .runtime_dir
+            .join("experiments/branchfs/scripts/branchctl.php"),
+    )
+    .arg("gc")
+    .env("BRANCHFS_DB", &layout.site_fp)
+    .env("BRANCHFS_SQLITE_WP_DB", &layout.site_fp)
+    .stdout(Stdio::from(log))
+    .stderr(Stdio::from(log_err));
     let status = cmd.status().context("failed to spawn branchctl gc")?;
     if !status.success() {
         bail!("branchctl gc exited with {status}");
@@ -3407,7 +3415,11 @@ fn branch_command(args: BranchPassthrough) -> Result<i32> {
 
             let (root_host, port) = branchctl_url_hint(&layout)?;
             let mut command = php_base_command(&layout, &runtime, &args.shared);
-            command.arg(layout.runtime_dir.join("scripts/branchctl.php"));
+            command.arg(
+                layout
+                    .runtime_dir
+                    .join("experiments/branchfs/scripts/branchctl.php"),
+            );
             for arg in &args.args {
                 command.arg(arg);
             }
@@ -3573,7 +3585,11 @@ fn ensure_branch_exists(
     let (root_host, port) = branchctl_url_hint(layout)?;
     let mut command = php_base_command(layout, runtime, shared);
     command
-        .arg(layout.runtime_dir.join("scripts/branchctl.php"))
+        .arg(
+            layout
+                .runtime_dir
+                .join("experiments/branchfs/scripts/branchctl.php"),
+        )
         .arg("create")
         .arg(branch)
         .arg("--from")
@@ -5024,7 +5040,7 @@ fn hot_copy_sqlite_database(
         layout,
         runtime,
         shared,
-        "scripts/backup.php",
+        "scripts/shared/sqlite_backup.php",
         [source_db.as_os_str(), dest_db.as_os_str()],
     )
 }
@@ -5677,7 +5693,7 @@ fn ensure_bootstrapped(layout: &Layout, runtime: &PortableRuntime, args: &StartA
             layout,
             runtime,
             &args.shared,
-            "scripts/init_db.php",
+            "experiments/branchfs/scripts/init_db.php",
             [layout.site_fp.as_os_str()],
         )?;
     }
@@ -5687,7 +5703,7 @@ fn ensure_bootstrapped(layout: &Layout, runtime: &PortableRuntime, args: &StartA
             layout,
             runtime,
             &args.shared,
-            "scripts/import_wp.php",
+            "experiments/branchfs/scripts/import_wp.php",
             [
                 layout.runtime_dir.join("runtime/wp-src").as_os_str(),
                 layout.site_fp.as_os_str(),
@@ -5787,7 +5803,11 @@ fn run_branchctl_migrations_quiet(
 ) -> Result<()> {
     let mut command = php_base_command(layout, runtime, shared);
     command
-        .arg(layout.runtime_dir.join("scripts/branchctl.php"))
+        .arg(
+            layout
+                .runtime_dir
+                .join("experiments/branchfs/scripts/branchctl.php"),
+        )
         .arg("list")
         .env("BRANCHFS_DB", &layout.site_fp)
         .env("BRANCHFS_SQLITE_WP_DB", &layout.site_fp)

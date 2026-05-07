@@ -60,7 +60,7 @@ if (!extension_loaded('branchfs')) {
 }
 
 require_once __DIR__ . '/opcache.php';
-require_once __DIR__ . '/sqlite_retry.php';
+require_once dirname(__DIR__, 3) . '/scripts/shared/sqlite_retry.php';
 // Shared with branchctl.php: provides cow_install_parent_triggers etc.,
 // used to recreate parent-side ancestor-capture triggers around schema
 // rebuilds in this script.

@@ -57,7 +57,7 @@ Workflow:
   commit   snapshots the branch's current file tree into fs_commits.
   log      shows commit history for <name>.
   diff     per-file add/del/mod counts between two branch overlays.
-  merge    runs scripts/merge.php: 3-way file merge only (DB merge not implemented).
+  merge    runs merge.php: 3-way file merge only (DB merge not implemented).
   reset    hard-resets <name>'s file overlay to a specific commit hash.
            Refuses if uncommitted file-side changes exist unless --force.
   rollback shortcut: resets to the previous commit on <name>.
@@ -529,7 +529,7 @@ SQL);
 
 // TODO3 #12 `audit_log_write` lives in audit_helpers.php — first slice of
 // the TODO3 #16 branchctl.php split. More command-specific helpers will
-// migrate into scripts/branchctl/ as the refactor continues.
+// migrate into command-specific files as the refactor continues.
 require_once __DIR__ . '/audit_helpers.php';
 
 function fs_branch_id(SQLite3 $db, string $name): int {
@@ -2463,10 +2463,10 @@ case 'merge': {
 
     $merge_script = __DIR__ . '/merge.php';
     if (!file_exists($merge_script)) {
-        fwrite(STDERR, "branchctl: scripts/merge.php not found next to branchctl.php\n");
+        fwrite(STDERR, "branchctl: merge.php not found next to branchctl.php\n");
         exit(5);
     }
-    echo "branchctl: invoking scripts/merge.php (3-way file + DB merge)...\n";
+    echo "branchctl: invoking merge.php (3-way file + DB merge)...\n";
 
     $argv_forward = [
         escapeshellarg($from),
@@ -2487,7 +2487,7 @@ case 'merge': {
         }
         $argv_forward[] = '--on-id-collision=' . $oic;
     }
-    $so = realpath(__DIR__ . '/../experiments/branchfs/php-ext/branchfs.so');
+    $so = realpath(__DIR__ . '/../php-ext/branchfs.so');
     $php_bin = PHP_BINARY;
     $ext_flag = $so ? '-d extension=' . escapeshellarg($so) : '';
     $cmdline = sprintf(
@@ -2837,11 +2837,11 @@ case '_ddl': {
     }
     require_once __DIR__ . '/branched_pdo.php';
     try {
-        // BranchedPDO::connect + BootstrapBranchedPDO::ensure is the
+        // BranchedPDO::open + BootstrapBranchedPDO::ensure is the
         // sanctioned entry point. ensure() runs BranchedPDO::assert_branched
         // so any raw-PDO regression in this path is caught immediately
         // (finding #5 — assert_branched had zero production callers).
-        $pdo = BranchedPDO::connect($DB_PATH, $branch);
+        $pdo = BranchedPDO::open($DB_PATH, $branch);
         BootstrapBranchedPDO::ensure($pdo, $DB_PATH, $branch);
         $pdo->exec((string)$sql);
     } catch (\Throwable $e) {

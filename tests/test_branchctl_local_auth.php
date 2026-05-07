@@ -28,11 +28,11 @@ $DB = '/tmp/branchfs_local_auth_' . getmypid() . '.db';
 $php = escapeshellcmd(PHP_BINARY);
 $ext = escapeshellarg(realpath(__DIR__ . '/../experiments/branchfs/php-ext/branchfs.so'));
 $init = $php . ' -d extension=' . $ext
-      . ' ' . escapeshellarg(__DIR__ . '/../scripts/init_db.php')
+      . ' ' . escapeshellarg(__DIR__ . '/../experiments/branchfs/scripts/init_db.php')
       . ' ' . escapeshellarg($DB)
       . ' --admin-password admin';
 $branchctl = $php . ' -d extension=' . $ext
-           . ' ' . escapeshellarg(__DIR__ . '/../scripts/branchctl.php');
+           . ' ' . escapeshellarg(__DIR__ . '/../experiments/branchfs/scripts/branchctl.php');
 
 echo "=== branchctl local auth tests ===\n\n";
 

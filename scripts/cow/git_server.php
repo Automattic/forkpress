@@ -11,7 +11,7 @@
  * and is ignored on push.
  */
 
-require_once __DIR__ . '/autoload.php';
+require_once __DIR__ . '/../git/autoload.php';
 
 use WordPress\Filesystem\LocalFilesystem;
 use WordPress\Git\GitEndpoint;

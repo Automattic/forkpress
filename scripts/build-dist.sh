@@ -84,7 +84,7 @@ if [ -x "$SPC_DIR/buildroot/bin/php" ]; then
     NEED_PHP_BUILD=0
     deps=( "$REPO_ROOT/scripts/build-dist.sh" )
     if [ "$PROFILE" = "dev" ]; then
-      deps+=( "$CAS_STATIC_LIB" "$REPO_ROOT/experiments/branchfs/php-ext/branchfs.c" "$REPO_ROOT/experiments/branchfs/php-ext/branchfs.h" "$REPO_ROOT/scripts/spc-patch-branchfs.php" )
+      deps+=( "$CAS_STATIC_LIB" "$REPO_ROOT/experiments/branchfs/php-ext/branchfs.c" "$REPO_ROOT/experiments/branchfs/php-ext/branchfs.h" "$REPO_ROOT/experiments/branchfs/build/spc-patch.php" )
     fi
     for dep in "${deps[@]}"; do
       if [ "$dep" -nt "$SPC_DIR/buildroot/bin/php" ]; then
@@ -150,7 +150,7 @@ file_put_contents($p, json_encode($c, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES
     # Using the hook (rather than manual pre-extraction) is robust against spc
     # re-extracting php-src during the build phase.
     "${SPC_RUN[@]+"${SPC_RUN[@]}"}" ./bin/spc build \
-      --with-added-patch="$REPO_ROOT/scripts/spc-patch-branchfs.php" \
+      --with-added-patch="$REPO_ROOT/experiments/branchfs/build/spc-patch.php" \
       "$EXTENSIONS,branchfs" --build-cli
   else
     "${SPC_RUN[@]+"${SPC_RUN[@]}"}" ./bin/spc build "$EXTENSIONS" --build-cli

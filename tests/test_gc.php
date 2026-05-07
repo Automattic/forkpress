@@ -53,7 +53,7 @@ assert_true($blobs_after_delete === $blobs_before_delete,
 // Dry-run first.
 $branchctl = escapeshellcmd(PHP_BINARY)
            . ' -d extension=' . escapeshellarg(realpath(__DIR__ . '/../experiments/branchfs/php-ext/branchfs.so'))
-           . ' ' . escapeshellarg(__DIR__ . '/../scripts/branchctl.php');
+           . ' ' . escapeshellarg(__DIR__ . '/../experiments/branchfs/scripts/branchctl.php');
 $out = [];
 $rc  = 0;
 exec("BRANCHFS_DB=" . escapeshellarg($DB) . " $branchctl gc --dry-run 2>&1", $out, $rc);

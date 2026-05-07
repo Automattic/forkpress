@@ -5,7 +5,7 @@
  * Usage (drop-in for `new PDO`):
  *
  *     require_once __DIR__ . '/branched_pdo.php';
- *     $pdo = BranchedPDO::connect('/path/to/site.fp', 'feature');
+ *     $pdo = BranchedPDO::open('/path/to/site.fp', 'feature');
  *     $pdo->exec("ALTER TABLE b{id}_wp_posts ADD COLUMN seo_title TEXT");
  *     $pdo->exec("CREATE INDEX idx_x ON b{id}_wp_posts(post_type)");
  *
@@ -66,9 +66,9 @@ class BranchedPDO extends PDO
         parent::exec('PRAGMA wal_autocheckpoint = 500');
     }
 
-    /** Convenience factory: `BranchedPDO::connect($fp, $branch)`. */
-    public static function connect(string $site_fp, string $branch,
-                                   array $options = []): self
+    /** Convenience factory: `BranchedPDO::open($fp, $branch)`. */
+    public static function open(string $site_fp, string $branch,
+                                array $options = []): self
     {
         return new self('sqlite:' . $site_fp, null, null, $options ?: null,
                         $branch, $site_fp);
@@ -440,7 +440,7 @@ class BranchedPDO extends PDO
      *
      *  Typical bootstrap:
      *  ```
-     *  $pdo = BranchedPDO::connect($site_fp, $branch);
+     *  $pdo = BranchedPDO::open($site_fp, $branch);
      *  BranchedPDO::assert_branched($pdo, $site_fp);   // no-op here
      *  // ... pass $pdo to WP_SQLite_Connection or plugin code ...
      *  ```
@@ -459,7 +459,7 @@ class BranchedPDO extends PDO
         $fp_hint = $site_fp !== '' ? " '$site_fp'" : '';
         $msg = "BranchedPDO: raw PDO instance detected on$fp_hint. "
              . "COW DDL interception will silently miss. "
-             . "Use BranchedPDO::connect(\$site_fp, \$branch) instead of "
+             . "Use BranchedPDO::open(\$site_fp, \$branch) instead of "
              . "`new PDO('sqlite:…')`.";
         @error_log($msg);
         if (getenv('FORKPRESS_STRICT_PDO') === '1') {
@@ -524,7 +524,7 @@ class BootstrapBranchedPDO
      */
     public static function open(string $site_fp, string $branch = 'main'): BranchedPDO
     {
-        $pdo = BranchedPDO::connect($site_fp, $branch);
+        $pdo = BranchedPDO::open($site_fp, $branch);
         self::ensure($pdo, $site_fp, $branch);
         return $pdo;
     }

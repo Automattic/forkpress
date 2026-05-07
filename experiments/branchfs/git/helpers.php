@@ -57,7 +57,7 @@ function git_fs_find_commit_by_hash(SQLite3 $db, int $branch_id, string $commit_
     return $row ?: null;
 }
 
-require_once __DIR__ . '/../fs_commit_helpers.php';
+require_once __DIR__ . '/../scripts/fs_commit_helpers.php';
 
 function git_fs_digest_of_commit(SQLite3 $db, int $commit_id): string {
     // TODO3 #5: walk the commit chain so digests over delta-encoded

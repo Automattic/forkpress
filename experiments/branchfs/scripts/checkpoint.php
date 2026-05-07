@@ -8,7 +8,7 @@
  * shared memory (-shm) file.
  *
  * Usage:
- *   php scripts/checkpoint.php <site.fp>
+ *   php checkpoint.php <site.fp>
  *
  * Exit codes:
  *   0 success (prints busy / log / checkpointed frame counts)

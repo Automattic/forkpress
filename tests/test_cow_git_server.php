@@ -24,7 +24,7 @@ function consume_git_response($git_response): string {
     return $out;
 }
 
-require_once __DIR__ . '/../scripts/git_server/cow_server.php';
+require_once __DIR__ . '/../scripts/cow/git_server.php';
 
 echo "=== COW Git server receive-pack parsing ===\n";
 

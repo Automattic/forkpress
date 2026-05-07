@@ -70,7 +70,7 @@ $(BRANCHFS_EXT_SO): $(BRANCHFS_EXT_DIR)/branchfs.c $(BRANCHFS_EXT_DIR)/branchfs.
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $(BRANCHFS_EXT_DIR)/branchfs.c $(LDFLAGS)
 
 init-db: $(BRANCHFS_EXT_SO)
-	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" scripts/init_db.php
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" experiments/branchfs/scripts/init_db.php
 
 test: $(BRANCHFS_EXT_SO)
 	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" tests/test_basic.php

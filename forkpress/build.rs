@@ -67,16 +67,20 @@ fn main() -> Result<()> {
         "runtime/cow/router.php",
         "runtime/cow/bootstrap_wp.php",
         "runtime/wp.zip",
-        "scripts/backup.php",
-        "scripts/git_server/autoload.php",
-        "scripts/git_server/cow_server.php",
-        "scripts/sqlite_retry.php",
+        "scripts/cow/git_server.php",
+        "scripts/git/autoload.php",
+        "scripts/shared/sqlite_backup.php",
+        "scripts/shared/sqlite_retry.php",
     ] {
         println!("cargo:rerun-if-changed={}", repo_root.join(rel).display());
     }
     if dev_experiments {
         for rel in [
-            "scripts",
+            "scripts/cow",
+            "scripts/git",
+            "scripts/shared",
+            "experiments/branchfs/git",
+            "experiments/branchfs/scripts",
             "experiments/branchfs/schema.sql",
             "experiments/wp-plugin",
             "experiments/branchfs/runtime/router.php",
@@ -415,7 +419,11 @@ fn build_bundle(
     add_file(&mut tar, repo_root, "runtime/wp.zip")?;
 
     if dev_experiments {
-        add_tree(&mut tar, repo_root, "scripts")?;
+        add_tree(&mut tar, repo_root, "scripts/cow")?;
+        add_tree(&mut tar, repo_root, "scripts/git")?;
+        add_tree(&mut tar, repo_root, "scripts/shared")?;
+        add_tree(&mut tar, repo_root, "experiments/branchfs/git")?;
+        add_tree(&mut tar, repo_root, "experiments/branchfs/scripts")?;
         add_file(&mut tar, repo_root, "experiments/branchfs/schema.sql")?;
         add_file(
             &mut tar,
@@ -444,10 +452,10 @@ fn build_bundle(
             "experiments/cas/runtime/bootstrap_wp.php",
         )?;
     } else {
-        add_file(&mut tar, repo_root, "scripts/backup.php")?;
-        add_file(&mut tar, repo_root, "scripts/git_server/autoload.php")?;
-        add_file(&mut tar, repo_root, "scripts/git_server/cow_server.php")?;
-        add_file(&mut tar, repo_root, "scripts/sqlite_retry.php")?;
+        add_file(&mut tar, repo_root, "scripts/cow/git_server.php")?;
+        add_file(&mut tar, repo_root, "scripts/git/autoload.php")?;
+        add_file(&mut tar, repo_root, "scripts/shared/sqlite_backup.php")?;
+        add_file(&mut tar, repo_root, "scripts/shared/sqlite_retry.php")?;
     }
 
     add_file_as(

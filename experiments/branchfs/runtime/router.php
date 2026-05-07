@@ -74,8 +74,8 @@ $GLOBALS['_branchfs_table_prefix'] = "b{$_fp_branch_id}_wp_";
 // Drain pending OPcache invalidations from out-of-process writers
 // (branchctl merge/reset/rollback). Each request pops any queued URLs
 // and calls opcache_invalidate() so bytecode compiled before a merge
-// is discarded before the next require. See scripts/opcache.php.
-require_once dirname(__DIR__, 3) . '/scripts/opcache.php';
+// is discarded before the next require. See experiments/branchfs/scripts/opcache.php.
+require_once dirname(__DIR__) . '/scripts/opcache.php';
 try {
     $_fp_opcache_db = new SQLite3($db_path, SQLITE3_OPEN_READWRITE);
     $_fp_opcache_db->busyTimeout(2000);
@@ -110,7 +110,7 @@ $query = parse_url($uri, PHP_URL_QUERY) ?: '';
 if (preg_match('|^/([a-zA-Z0-9_\-]+)\.git(/.*)?$|', $path, $git_match)) {
     $git_site = $git_match[1];
     $git_path = $git_match[2] ?? '/';
-    require_once dirname(__DIR__, 3) . '/scripts/git_server/server.php';
+    require_once dirname(__DIR__) . '/git/server.php';
     git_server_handle($db_path, $wp_root, $git_path, $query);
     return true;
 }
