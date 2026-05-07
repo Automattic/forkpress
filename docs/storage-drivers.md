@@ -218,8 +218,8 @@ Still future work:
 
 ## ZFS Status
 
-The embedded ZFS work is parked under `forkpress/experiments/zfs-engine` and
-`forkpress/src/experiments/zfs_engine.rs`. It is not built into production.
+The embedded ZFS work is parked under `experiments/zfs-engine`. It is not built
+into production.
 
 To opt into that research path locally:
 
