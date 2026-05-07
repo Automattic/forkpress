@@ -294,22 +294,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "forkpress"
-version = "0.1.13-cow.1"
-dependencies = [
- "anyhow",
- "clap",
- "ctrlc",
- "flate2",
- "forkpress-cas-store",
- "libc",
- "num_cpus",
- "tar",
- "walkdir",
- "zip",
-]
-
-[[package]]
 name = "forkpress-cas-ffi"
 version = "0.1.0"
 dependencies = [
@@ -325,6 +309,22 @@ dependencies = [
  "anyhow",
  "redb",
  "sha2",
+]
+
+[[package]]
+name = "forkpress-cli"
+version = "0.1.13-cow.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ctrlc",
+ "flate2",
+ "forkpress-cas-store",
+ "libc",
+ "num_cpus",
+ "tar",
+ "walkdir",
+ "zip",
 ]
 
 [[package]]

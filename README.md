@@ -460,8 +460,8 @@ feature. The production wrapper rejects `dev-experiments`; use
 For fast Rust-only checks without rebuilding PHP:
 
 ```bash
-FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress
-FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress --features dev-experiments --bin forkpress-dev
+FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli
+FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli --features dev-experiments --bin forkpress-dev
 ```
 
 PHP unit tests:
@@ -472,10 +472,11 @@ make test-branchfs
 make test-all
 ```
 
-`tests/` contains production COW tests. BranchFS and CAS experiment tests live
-with their experiment code under `experiments/`. There are no generic PHP tests
-shared by both storage families yet; common behavior is covered through the COW
-and experiment-specific suites.
+`tests/` contains production COW tests. Experimental Rust crates live under
+`crates/experiments/`; BranchFS and CAS runtime/test fixtures live with their
+experiment code under `experiments/`. There are no generic PHP tests shared by
+both storage families yet; common behavior is covered through the COW and
+experiment-specific suites.
 
 ## Publish
 

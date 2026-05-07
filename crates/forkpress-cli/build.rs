@@ -12,9 +12,7 @@ fn main() -> Result<()> {
     println!("cargo:rustc-check-cfg=cfg(forkpress_embedded_zfs)");
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
-    let repo_root = manifest_dir
-        .parent()
-        .context("forkpress crate should live directly under the repo root")?;
+    let repo_root = find_repo_root(&manifest_dir)?;
     let target = env::var("TARGET").context("TARGET env var missing (set by cargo)")?;
     let dev_experiments = env::var_os("CARGO_FEATURE_DEV_EXPERIMENTS").is_some();
     println!("cargo:rerun-if-env-changed=FORKPRESS_ENABLE_EMBEDDED_ZFS");
@@ -30,7 +28,7 @@ fn main() -> Result<()> {
     }
 
     // Allow skipping the dist build entirely for `cargo check` runs:
-    //   FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo check -p forkpress
+    //   FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo check -p forkpress-cli
     if env::var_os("FORKPRESS_RUNTIME_BUNDLE").is_some() {
         println!(
             "cargo:rustc-env=FORKPRESS_RUNTIME_BUNDLE_ID={}-external",
@@ -126,6 +124,15 @@ fn fnv1a_hex(bytes: &[u8]) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("{hash:016x}")
+}
+
+fn find_repo_root(manifest_dir: &Path) -> Result<&Path> {
+    manifest_dir
+        .ancestors()
+        .find(|path| {
+            path.join("runtime/wp.zip").is_file() && path.join("scripts/build-dist.sh").is_file()
+        })
+        .context("failed to locate ForkPress repository root from CARGO_MANIFEST_DIR")
 }
 
 fn build_embedded_zfs(repo_root: &Path, target: &str) -> Result<()> {

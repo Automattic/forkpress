@@ -225,7 +225,7 @@ To opt into that research path locally:
 
 ```bash
 make dist-dev
-FORKPRESS_ENABLE_EMBEDDED_ZFS=1 cargo build -p forkpress --features dev-experiments --bin forkpress-dev
+FORKPRESS_ENABLE_EMBEDDED_ZFS=1 cargo build -p forkpress-cli --features dev-experiments --bin forkpress-dev
 FORKPRESS_ENABLE_ZFS_CLI=1 ./target/debug/forkpress-dev zfs smoke
 ```
 

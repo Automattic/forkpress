@@ -23,14 +23,15 @@ macOS release targets link only against `libSystem`:
 
 ## Repository Layout
 
-- `forkpress/` contains the Rust CLI.
+- `crates/forkpress-cli/` contains the Rust CLI package.
+- `crates/experiments/` contains experimental Rust crates.
 - `runtime/` contains production COW runtime files and the WordPress archive
   embedded into the binary.
 - `scripts/` contains production/shared build, SQLite, Git, and COW helpers.
 - `tests/` contains production COW PHP tests.
 - `experiments/branchfs/` contains the experimental BranchFS schema, PHP
   extension, runtime files, scripts, Git adapter, and tests.
-- `experiments/cas/` contains CAS experiment code and tests.
+- `experiments/cas/` contains CAS experiment runtime files and tests.
 
 ## Branch Workflow
 
@@ -47,7 +48,7 @@ The issue #2 workflow is Git/worktree based:
 Run Rust tests with:
 
 ```bash
-FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress
+FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli
 ```
 
 Run PHP unit tests with:

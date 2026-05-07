@@ -187,7 +187,7 @@ echo "dist/$DIST_NAME/ ready:"
 ls -lh "$DIST_DIR/bin/php"
 echo
 if [ "$PROFILE" = "dev" ]; then
-  echo "Next: cargo build --release -p forkpress --features dev-experiments --bin forkpress-dev"
+  echo "Next: cargo build --release -p forkpress-cli --features dev-experiments --bin forkpress-dev"
 else
-  echo "Next: cargo build --release -p forkpress --bin forkpress"
+  echo "Next: cargo build --release -p forkpress-cli --bin forkpress"
 fi

@@ -3,7 +3,7 @@ name: ci
 on:
   pull_request:
     paths:
-      - 'forkpress/**'
+      - 'crates/**'
       - 'experiments/**'
       - 'runtime/**'
       - 'scripts/**'
@@ -34,10 +34,10 @@ jobs:
           targets: x86_64-unknown-linux-musl
 
       - name: Rust unit tests
-        run: FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress --bin forkpress
+        run: FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli --bin forkpress
 
       - name: Rust unit tests (dev experiments)
-        run: FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress --features dev-experiments --bin forkpress-dev
+        run: FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli --features dev-experiments --bin forkpress-dev
 
       - name: Build production dist bundle
         run: scripts/build-dist.sh
@@ -46,7 +46,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
 
       - name: Build forkpress
-        run: cargo build --release --target x86_64-unknown-linux-musl -p forkpress --bin forkpress
+        run: cargo build --release --target x86_64-unknown-linux-musl -p forkpress-cli --bin forkpress
 
       - name: COW strategy e2e
         run: tests/cow/e2e.sh target/x86_64-unknown-linux-musl/release/forkpress
@@ -59,7 +59,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
 
       - name: Build forkpress-dev
-        run: cargo build --release --target x86_64-unknown-linux-musl -p forkpress --features dev-experiments --bin forkpress-dev
+        run: cargo build --release --target x86_64-unknown-linux-musl -p forkpress-cli --features dev-experiments --bin forkpress-dev
 
       - name: CAS strategy e2e (dev)
         run: experiments/cas/tests/e2e.sh target/x86_64-unknown-linux-musl/release/forkpress-dev
@@ -83,10 +83,10 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Rust unit tests
-        run: FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test --target ${{ matrix.target }} -p forkpress --bin forkpress
+        run: FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test --target ${{ matrix.target }} -p forkpress-cli --bin forkpress
 
       - name: Rust unit tests (dev experiments)
-        run: FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test --target ${{ matrix.target }} -p forkpress --features dev-experiments --bin forkpress-dev
+        run: FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test --target ${{ matrix.target }} -p forkpress-cli --features dev-experiments --bin forkpress-dev
 
       - name: Install runtime build tools
         run: |
@@ -100,7 +100,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
 
       - name: Build forkpress
-        run: cargo build --release --target ${{ matrix.target }} -p forkpress --bin forkpress
+        run: cargo build --release --target ${{ matrix.target }} -p forkpress-cli --bin forkpress
 
       - name: COW strategy e2e through APFS sparsebundle
         run: tests/cow/e2e.sh target/${{ matrix.target }}/release/forkpress

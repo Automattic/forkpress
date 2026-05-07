@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
-      - 'forkpress/**'
+      - 'crates/**'
       - 'runtime/cow/**'
       - 'runtime/wp.zip'
       - 'scripts/build-dist.sh'
@@ -68,7 +68,7 @@ jobs:
           key: >-
             build-${{ matrix.target }}-${{ hashFiles(
               'scripts/build-dist.sh',
-              'forkpress/build.rs'
+              'crates/forkpress-cli/build.rs'
             ) }}
 
       - uses: dtolnay/rust-toolchain@stable
@@ -82,7 +82,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
 
       - name: Build forkpress
-        run: cargo build --release --target ${{ matrix.target }} -p forkpress --bin forkpress
+        run: cargo build --release --target ${{ matrix.target }} -p forkpress-cli --bin forkpress
 
       - name: Package
         run: |

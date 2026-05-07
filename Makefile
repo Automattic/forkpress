@@ -120,9 +120,9 @@ dist-dev:
 # Build the shippable forkpress binary for FORKPRESS_TARGET. Requires `dist`
 # to have run at least once for the same target.
 forkpress:
-	cargo build --release --target $(FORKPRESS_TARGET) -p forkpress --bin forkpress
+	cargo build --release --target $(FORKPRESS_TARGET) -p forkpress-cli --bin forkpress
 
 # Build the developer binary with experimental strategies. Requires `dist-dev`
 # to have run at least once for the same target.
 forkpress-dev:
-	cargo build --release --target $(FORKPRESS_TARGET) -p forkpress --features dev-experiments --bin forkpress-dev
+	cargo build --release --target $(FORKPRESS_TARGET) -p forkpress-cli --features dev-experiments --bin forkpress-dev
