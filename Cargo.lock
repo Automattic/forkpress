@@ -322,6 +322,7 @@ dependencies = [
  "forkpress-cas-store",
  "forkpress-core",
  "forkpress-runtime",
+ "forkpress-storage",
  "libc",
  "num_cpus",
  "tar",
@@ -346,6 +347,16 @@ dependencies = [
  "forkpress-core",
  "tar",
  "zip",
+]
+
+[[package]]
+name = "forkpress-storage"
+version = "0.1.13-cow.1"
+dependencies = [
+ "anyhow",
+ "forkpress-core",
+ "forkpress-runtime",
+ "libc",
 ]
 
 [[package]]
