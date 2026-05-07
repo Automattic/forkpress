@@ -802,6 +802,25 @@ static int parse_branchfs_url(const char *url, char *branch, size_t branch_len,
 /* Forward declaration — defined later alongside the function overrides. */
 static int branchfs_canonicalize(const char *in, char *out, size_t out_len);
 
+static int branchfs_path_under_root(const char *abs_path, const char *root,
+    char *rel_path, size_t rel_len)
+{
+    size_t root_len = strlen(root);
+    if (strncmp(abs_path, root, root_len) != 0) return 0;
+
+    if (abs_path[root_len] == '/') {
+        snprintf(rel_path, rel_len, "%s", abs_path + root_len + 1);
+    } else if (abs_path[root_len] == '\0') {
+        rel_path[0] = '\0';
+    } else {
+        return 0;
+    }
+
+    size_t pl = strlen(rel_path);
+    while (pl > 0 && rel_path[pl - 1] == '/') rel_path[--pl] = '\0';
+    return 1;
+}
+
 static int resolve_to_wp_relative(const char *filename, char *rel_path, size_t rel_len) {
     if (!BRANCHFS_G(wp_root) || !BRANCHFS_G(active)) return 0;
 
@@ -836,7 +855,7 @@ static int resolve_to_wp_relative(const char *filename, char *rel_path, size_t r
         abs_in = filename;
     } else {
         char cwd[BRANCHFS_MAX_PATH];
-        if (getcwd(cwd, sizeof(cwd)) == NULL) return 0;
+        if (VCWD_GETCWD(cwd, sizeof(cwd)) == NULL) return 0;
         snprintf(joined, sizeof(joined), "%s/%s", cwd, filename);
         abs_in = joined;
     }
@@ -847,20 +866,17 @@ static int resolve_to_wp_relative(const char *filename, char *rel_path, size_t r
     char abs_path[BRANCHFS_MAX_PATH];
     if (!branchfs_canonicalize(abs_in, abs_path, sizeof(abs_path))) return 0;
 
-    size_t root_len = strlen(BRANCHFS_G(wp_root));
-    if (strncmp(abs_path, BRANCHFS_G(wp_root), root_len) != 0) return 0;
+    char root_path[BRANCHFS_MAX_PATH];
+    if (!branchfs_canonicalize(BRANCHFS_G(wp_root), root_path, sizeof(root_path))) return 0;
+    if (branchfs_path_under_root(abs_path, root_path, rel_path, rel_len)) return 1;
 
-    if (abs_path[root_len] == '/') {
-        snprintf(rel_path, rel_len, "%s", abs_path + root_len + 1);
-    } else if (abs_path[root_len] == '\0') {
-        rel_path[0] = '\0';
-    } else {
-        return 0;
+    char root_real[BRANCHFS_MAX_PATH];
+    if (VCWD_REALPATH(BRANCHFS_G(wp_root), root_real) != NULL &&
+        strcmp(root_real, root_path) != 0 &&
+        branchfs_path_under_root(abs_path, root_real, rel_path, rel_len)) {
+        return 1;
     }
-
-    size_t pl = strlen(rel_path);
-    while (pl > 0 && rel_path[pl - 1] == '/') rel_path[--pl] = '\0';
-    return 1;
+    return 0;
 }
 
 /* Check if path should be excluded from interception (e.g., the SQLite DB itself) */
