@@ -12,13 +12,18 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
+use forkpress_core::path_exists_no_follow;
+#[cfg(feature = "dev-experiments")]
+use forkpress_core::validate_branch_name;
 use forkpress_core::{
     FileViewStrategy, Layout, SharedPaths, SiteManifest, StorageStrategy, absolutize,
-    initialized_storage_strategy, path_exists_no_follow, read_site_manifest,
-    require_initialized_strategy, validate_branch_name, write_site_manifest,
-    write_site_manifest_if_missing,
+    initialized_storage_strategy, read_site_manifest, require_initialized_strategy,
+    write_site_manifest, write_site_manifest_if_missing,
 };
 use forkpress_git::{
     add_agent_worktree, default_commit_message, default_git_remote, ensure_git_available,
@@ -32,22 +37,29 @@ use forkpress_runtime::{
     PortableRuntime, php_base_command, prepare_runtime as prepare_embedded_runtime,
 };
 use forkpress_server::{
-    ChildGuard, ServerRecord, ServerStartInfo, escape_registry_field, format_server_record_line,
-    live_server_records, parse_server_record_line, read_pid_file, register_running_server,
-    running_record_for_work_dir, stop_server_record, tcp_port_open, unescape_registry_field,
+    ChildGuard, ServerRecord, ServerStartInfo, live_server_records, read_pid_file,
+    register_running_server, running_record_for_work_dir, stop_server_record, tcp_port_open,
     wait_for_tcp,
+};
+#[cfg(test)]
+use forkpress_server::{
+    escape_registry_field, format_server_record_line, parse_server_record_line,
+    unescape_registry_field,
 };
 use forkpress_storage::{
     CowSiteInit, compact_macos_apfs_sparsebundle_file_view, cow_branch_names, cow_branch_root,
-    cow_stale_operation_entries, create_cow_branch, delete_cow_branch,
-    detach_macos_apfs_sparsebundle_file_view, ensure_cow_branch_exists, ensure_cow_file_view_ready,
-    ensure_cow_main_branch, invalidate_cow_git_ref, lock_cow_lifecycle, lock_cow_operations,
-    prepare_cow_file_view, print_cow_storage_status, print_macos_cow_storage_status,
-    probe_reflink_dir, reset_cow_branch, rollback_failed_reset_publish, show_cow_branch,
+    create_cow_branch, delete_cow_branch, detach_macos_apfs_sparsebundle_file_view,
+    ensure_cow_branch_exists, ensure_cow_file_view_ready, ensure_cow_main_branch,
+    lock_cow_lifecycle, lock_cow_operations, prepare_cow_file_view, print_cow_storage_status,
+    print_macos_cow_storage_status, probe_reflink_dir, reset_cow_branch, show_cow_branch,
     write_cow_branch_list, write_cow_strategy_notes,
 };
 #[cfg(feature = "dev-experiments")]
 use forkpress_storage::{copy_tree_cow, plain_branch_names};
+#[cfg(test)]
+use forkpress_storage::{
+    cow_stale_operation_entries, invalidate_cow_git_ref, rollback_failed_reset_publish,
+};
 
 #[cfg(feature = "dev-experiments")]
 use forkpress_cas_store as cas_store;
@@ -152,6 +164,7 @@ struct InitArgs {
     admin_password: Option<String>,
 }
 
+#[cfg(feature = "dev-experiments")]
 #[derive(Args, Debug, Clone)]
 struct UserPassthrough {
     #[command(flatten)]
@@ -161,6 +174,7 @@ struct UserPassthrough {
     args: Vec<String>,
 }
 
+#[cfg(feature = "dev-experiments")]
 #[derive(Args, Debug, Clone)]
 struct BackupArgs {
     #[command(flatten)]
@@ -171,6 +185,7 @@ struct BackupArgs {
     dest: PathBuf,
 }
 
+#[cfg(feature = "dev-experiments")]
 #[derive(Args, Debug, Clone)]
 struct ExportArgs {
     #[command(flatten)]
@@ -181,6 +196,7 @@ struct ExportArgs {
     output_dir: PathBuf,
 }
 
+#[cfg(feature = "dev-experiments")]
 #[derive(Args, Debug, Clone)]
 struct ImportArgs {
     #[command(flatten)]
@@ -191,18 +207,21 @@ struct ImportArgs {
     dest: PathBuf,
 }
 
+#[cfg(feature = "dev-experiments")]
 #[derive(Args, Debug, Clone)]
 struct ZfsArgs {
     #[command(subcommand)]
     command: ZfsCommand,
 }
 
+#[cfg(feature = "dev-experiments")]
 #[derive(Subcommand, Debug, Clone)]
 enum ZfsCommand {
     /// Create/import/export a file-backed pool, then snapshot and clone a dataset.
     Smoke(ZfsSmokeArgs),
 }
 
+#[cfg(feature = "dev-experiments")]
 #[derive(Args, Debug, Clone)]
 struct ZfsSmokeArgs {
     /// ForkPress site state directory. The smoke pool image is written under zfs/.
@@ -2480,9 +2499,9 @@ fn branch_command(args: BranchPassthrough) -> Result<i32> {
     let runtime = PortableRuntime::from_layout(&layout);
 
     match strategy {
-        StorageStrategy::Cow => return cow_branch_command(args, layout, runtime),
+        StorageStrategy::Cow => cow_branch_command(args, layout, runtime),
         #[cfg(feature = "dev-experiments")]
-        StorageStrategy::Cas => return cas_branch_command(args, layout, runtime),
+        StorageStrategy::Cas => cas_branch_command(args, layout, runtime),
         #[cfg(feature = "dev-experiments")]
         StorageStrategy::Branchfs => {
             if !layout.site_fp.exists() || !layout.bootstrap_marker.exists() {
