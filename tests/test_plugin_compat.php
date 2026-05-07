@@ -28,7 +28,7 @@ echo "WP Root: $WP_ROOT\n\n";
 
 // Initialize database
 $db = new SQLite3($DB);
-$schema = file_get_contents(__DIR__ . '/../sql/schema.sql');
+$schema = file_get_contents(__DIR__ . '/../experiments/branchfs/schema.sql');
 $db->exec($schema);
 $db->close();
 

@@ -7,7 +7,6 @@ on:
       - 'experiments/**'
       - 'runtime/**'
       - 'scripts/**'
-      - 'sql/**'
       - 'tests/**'
       - 'wp-plugin/**'
       - 'vendor/**'

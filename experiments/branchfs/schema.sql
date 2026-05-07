@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS blobs (
 -- Chunked storage for large blobs. Each chunk is a 1 MB slice of the blob
 -- content, keyed by (blob_hash, chunk_no). chunk_no starts at 0 and is
 -- contiguous. Only present for blobs whose blobs.data IS NULL.
--- See experiments/php-ext-branchfs/branchfs.c::store_write_file.
+-- See experiments/branchfs/php-ext/branchfs.c::store_write_file.
 CREATE TABLE IF NOT EXISTS blob_chunks (
     blob_hash TEXT NOT NULL,
     chunk_no  INTEGER NOT NULL,

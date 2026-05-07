@@ -22,7 +22,7 @@ echo "WP Root: $WP_ROOT (virtual, not on disk)\n\n";
 
 // Initialize database with schema
 $sqlite = new SQLite3($DB);
-$sqlite->exec(file_get_contents(__DIR__ . '/../sql/schema.sql'));
+$sqlite->exec(file_get_contents(__DIR__ . '/../experiments/branchfs/schema.sql'));
 $sqlite->close();
 
 // Configure branchfs

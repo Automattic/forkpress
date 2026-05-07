@@ -77,7 +77,7 @@ fn main() -> Result<()> {
     if dev_experiments {
         for rel in [
             "scripts",
-            "sql",
+            "experiments/branchfs/schema.sql",
             "experiments/wp-plugin",
             "runtime/router.php",
             "runtime/router_cas.php",
@@ -416,7 +416,7 @@ fn build_bundle(
 
     if dev_experiments {
         add_tree(&mut tar, repo_root, "scripts")?;
-        add_tree(&mut tar, repo_root, "sql")?;
+        add_file(&mut tar, repo_root, "experiments/branchfs/schema.sql")?;
         add_file(&mut tar, repo_root, "runtime/router.php")?;
         add_file(&mut tar, repo_root, "runtime/router_cas.php")?;
         add_file(&mut tar, repo_root, "runtime/bootstrap_wp.php")?;

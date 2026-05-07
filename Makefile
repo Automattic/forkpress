@@ -47,7 +47,7 @@ CC      ?= gcc
 CFLAGS  := -fPIC -shared -O2 -Wall -DCOMPILE_DL_BRANCHFS -DHAVE_CONFIG_H=0 $(SQLITE_CFLAGS)
 INCLUDES := $(PHP_EXTRA_INCS)
 LDFLAGS := $(SQLITE_LIBS)
-BRANCHFS_EXT_DIR := experiments/php-ext-branchfs
+BRANCHFS_EXT_DIR := experiments/branchfs/php-ext
 BRANCHFS_EXT_SO := $(BRANCHFS_EXT_DIR)/branchfs.so
 RUSTUP ?= $(shell command -v rustup 2>/dev/null)
 UNAME_S := $(shell uname -s)

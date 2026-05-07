@@ -18,7 +18,7 @@ $ROOT = '/tmp/branchfs_gc_root_' . getmypid();
 @unlink($DB);
 
 $db = new SQLite3($DB);
-$db->exec(file_get_contents(__DIR__ . '/../sql/schema.sql'));
+$db->exec(file_get_contents(__DIR__ . '/../experiments/branchfs/schema.sql'));
 $db->close();
 
 branchfs_set_db($DB);
@@ -52,7 +52,7 @@ assert_true($blobs_after_delete === $blobs_before_delete,
 
 // Dry-run first.
 $branchctl = escapeshellcmd(PHP_BINARY)
-           . ' -d extension=' . escapeshellarg(realpath(__DIR__ . '/../experiments/php-ext-branchfs/branchfs.so'))
+           . ' -d extension=' . escapeshellarg(realpath(__DIR__ . '/../experiments/branchfs/php-ext/branchfs.so'))
            . ' ' . escapeshellarg(__DIR__ . '/../scripts/branchctl.php');
 $out = [];
 $rc  = 0;

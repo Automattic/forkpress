@@ -21,7 +21,7 @@ $ROOT = '/tmp/branchfs_oc_root_' . getmypid();
 @unlink($DB);
 
 $db = new SQLite3($DB);
-$db->exec(file_get_contents(__DIR__ . '/../sql/schema.sql'));
+$db->exec(file_get_contents(__DIR__ . '/../experiments/branchfs/schema.sql'));
 $db->close();
 
 branchfs_set_db($DB);

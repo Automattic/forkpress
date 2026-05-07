@@ -11,7 +11,7 @@
  */
 
 $db_path = $argv[1] ?? __DIR__ . '/../branchfs.db';
-$schema_path = __DIR__ . '/../sql/schema.sql';
+$schema_path = __DIR__ . '/../experiments/branchfs/schema.sql';
 
 // Parse optional --admin-password flag.
 $admin_pw_arg = null;

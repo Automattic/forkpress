@@ -84,7 +84,7 @@ if [ -x "$SPC_DIR/buildroot/bin/php" ]; then
     NEED_PHP_BUILD=0
     deps=( "$REPO_ROOT/scripts/build-dist.sh" )
     if [ "$PROFILE" = "dev" ]; then
-      deps+=( "$CAS_STATIC_LIB" "$REPO_ROOT/experiments/php-ext-branchfs/branchfs.c" "$REPO_ROOT/experiments/php-ext-branchfs/branchfs.h" "$REPO_ROOT/scripts/spc-patch-branchfs.php" )
+      deps+=( "$CAS_STATIC_LIB" "$REPO_ROOT/experiments/branchfs/php-ext/branchfs.c" "$REPO_ROOT/experiments/branchfs/php-ext/branchfs.h" "$REPO_ROOT/scripts/spc-patch-branchfs.php" )
     fi
     for dep in "${deps[@]}"; do
       if [ "$dep" -nt "$SPC_DIR/buildroot/bin/php" ]; then
