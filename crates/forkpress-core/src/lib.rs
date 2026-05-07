@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail};
-use clap::ValueEnum;
+use clap::{Args, ValueEnum};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -186,6 +186,15 @@ pub struct Layout {
     pub bootstrap_marker: PathBuf,
     #[cfg(feature = "dev-experiments")]
     pub managed_files_marker: PathBuf,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SharedPaths {
+    #[arg(long, default_value = ".forkpress")]
+    pub work_dir: PathBuf,
+
+    #[arg(long)]
+    pub php_bin: Option<PathBuf>,
 }
 
 impl Layout {

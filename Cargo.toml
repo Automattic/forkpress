@@ -2,6 +2,7 @@
 members = [
     "crates/forkpress-cli",
     "crates/forkpress-core",
+    "crates/forkpress-runtime",
     "experiments/cas/crates/cas-store",
     "experiments/cas/crates/cas-ffi",
 ]

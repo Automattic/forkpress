@@ -321,6 +321,7 @@ dependencies = [
  "flate2",
  "forkpress-cas-store",
  "forkpress-core",
+ "forkpress-runtime",
  "libc",
  "num_cpus",
  "tar",
@@ -334,6 +335,17 @@ version = "0.1.13-cow.1"
 dependencies = [
  "anyhow",
  "clap",
+]
+
+[[package]]
+name = "forkpress-runtime"
+version = "0.1.13-cow.1"
+dependencies = [
+ "anyhow",
+ "flate2",
+ "forkpress-core",
+ "tar",
+ "zip",
 ]
 
 [[package]]
