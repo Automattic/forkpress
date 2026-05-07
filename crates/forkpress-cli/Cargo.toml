@@ -26,6 +26,7 @@ flate2 = "1.1"
 forkpress-core = { path = "../forkpress-core" }
 forkpress-runtime = { path = "../forkpress-runtime" }
 forkpress-storage = { path = "../forkpress-storage" }
+forkpress-server = { path = "../forkpress-server" }
 forkpress-cas-store = { path = "../../experiments/cas/crates/cas-store", optional = true }
 libc = "0.2"
 num_cpus = "1.16"

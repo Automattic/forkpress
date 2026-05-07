@@ -1,0 +1,12 @@
+[package]
+name = "forkpress-server"
+version = "0.1.13-cow.1"
+edition = "2024"
+
+[features]
+default = []
+
+[dependencies]
+anyhow = "1.0"
+forkpress-core = { path = "../forkpress-core" }
+libc = "0.2"

@@ -5,9 +5,8 @@ use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -25,6 +24,12 @@ use forkpress_runtime::run_php_script;
 use forkpress_runtime::write_filtered_output;
 use forkpress_runtime::{
     PortableRuntime, php_base_command, prepare_runtime as prepare_embedded_runtime,
+};
+use forkpress_server::{
+    ChildGuard, ServerRecord, ServerStartInfo, escape_registry_field, format_server_record_line,
+    live_server_records, parse_server_record_line, read_pid_file, register_running_server,
+    running_record_for_work_dir, stop_server_record, tcp_port_open, unescape_registry_field,
+    wait_for_tcp,
 };
 use forkpress_storage::{
     CowSiteInit, compact_macos_apfs_sparsebundle_file_view, cow_branch_names, cow_branch_root,
@@ -46,7 +51,6 @@ mod zfs_engine;
 
 const RUNTIME_BUNDLE: &[u8] = include_bytes!(env!("FORKPRESS_RUNTIME_BUNDLE"));
 const RUNTIME_BUNDLE_ID: &str = env!("FORKPRESS_RUNTIME_BUNDLE_ID");
-const SERVER_REGISTRY_FILE: &str = "servers.tsv";
 const FORKPRESS_COW_PARENT_LIFECYCLE_LOCK: &str = "FORKPRESS_COW_PARENT_LIFECYCLE_LOCK";
 
 #[derive(Parser, Debug)]
@@ -588,66 +592,6 @@ struct BranchPassthrough {
 
     #[arg(trailing_var_arg = true, allow_hyphen_values = true, action = ArgAction::Append)]
     args: Vec<String>,
-}
-
-struct ChildGuard {
-    name: &'static str,
-    child: Child,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ServerRecord {
-    pid: u32,
-    child_pid: Option<u32>,
-    work_dir: PathBuf,
-    host: String,
-    port: u16,
-    root_host: String,
-    log: PathBuf,
-}
-
-struct ServerRegistrationGuard {
-    pid: u32,
-    layout: Layout,
-}
-
-#[cfg(unix)]
-struct ServerRegistryLock {
-    file: File,
-}
-
-#[cfg(not(unix))]
-struct ServerRegistryLock;
-
-#[cfg(unix)]
-impl Drop for ServerRegistryLock {
-    fn drop(&mut self) {
-        use std::os::fd::AsRawFd;
-        unsafe {
-            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
-        }
-    }
-}
-
-impl ChildGuard {
-    fn id(&self) -> u32 {
-        self.child.id()
-    }
-
-    fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
-        self.child
-            .try_wait()
-            .with_context(|| format!("failed to poll {}", self.name))
-    }
-}
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        if self.child.try_wait().ok().flatten().is_none() {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
-    }
 }
 
 pub(crate) fn main() {
@@ -1759,8 +1703,12 @@ fn start_command(args: StartArgs) -> Result<i32> {
             }
             ensure_cow_bootstrapped(&layout, &runtime, &args)?;
             let php = start_cow_php_server(&layout, &runtime, &args, workers)?;
-            let registration =
-                register_running_server(&layout, &args, std::process::id(), Some(php.id()))?;
+            let registration = register_running_server(
+                &layout,
+                &server_start_info(&args),
+                std::process::id(),
+                Some(php.id()),
+            )?;
             drop(_lock);
             drop(_lifecycle_lock);
             (php, Some(registration))
@@ -1776,7 +1724,12 @@ fn start_command(args: StartArgs) -> Result<i32> {
     };
     let _registration = match registration {
         Some(registration) => registration,
-        None => register_running_server(&layout, &args, std::process::id(), Some(php.id()))?,
+        None => register_running_server(
+            &layout,
+            &server_start_info(&args),
+            std::process::id(),
+            Some(php.id()),
+        )?,
     };
 
     if workers > 1 {
@@ -2018,6 +1971,14 @@ fn append_start_args(command: &mut Command, args: &StartArgs, layout: &Layout) {
     }
 }
 
+fn server_start_info(args: &StartArgs) -> ServerStartInfo {
+    ServerStartInfo {
+        host: args.host.clone(),
+        port: args.port,
+        root_host: args.root_host.clone(),
+    }
+}
+
 fn server_command(args: ServerArgs) -> Result<i32> {
     match args.command {
         ServerCommand::Start(mut args) => {
@@ -2118,390 +2079,6 @@ fn push_unique_detach_layout(layouts: &mut Vec<Layout>, layout: Layout) {
     {
         layouts.push(layout);
     }
-}
-
-impl Drop for ServerRegistrationGuard {
-    fn drop(&mut self) {
-        let _ = unregister_running_server(&self.layout, self.pid);
-    }
-}
-
-fn register_running_server(
-    layout: &Layout,
-    args: &StartArgs,
-    pid: u32,
-    child_pid: Option<u32>,
-) -> Result<ServerRegistrationGuard> {
-    fs::create_dir_all(&layout.logs_dir)?;
-    fs::write(&layout.server_pid_file, format!("{pid}\n")).with_context(|| {
-        format!(
-            "failed to write server pid file {}",
-            layout.server_pid_file.display()
-        )
-    })?;
-
-    let _registry_lock = lock_server_registry()?;
-    let mut records = read_server_registry()?;
-    records.retain(|record| {
-        record.pid != pid && record.work_dir != layout.work_dir && record_process_exists(record)
-    });
-    records.push(ServerRecord {
-        pid,
-        child_pid,
-        work_dir: layout.work_dir.clone(),
-        host: args.host.clone(),
-        port: args.port,
-        root_host: args.root_host.clone(),
-        log: layout.forkpress_server_log.clone(),
-    });
-    write_server_registry(&records)?;
-
-    Ok(ServerRegistrationGuard {
-        pid,
-        layout: layout.clone(),
-    })
-}
-
-fn unregister_running_server(layout: &Layout, pid: u32) -> Result<()> {
-    if let Some(current_pid) = read_pid_file(&layout.server_pid_file)?
-        && current_pid == pid
-    {
-        let _ = fs::remove_file(&layout.server_pid_file);
-    }
-
-    let _registry_lock = lock_server_registry()?;
-    let mut records = read_server_registry()?;
-    let original_len = records.len();
-    records.retain(|record| record.pid != pid);
-    if records.len() != original_len {
-        write_server_registry(&records)?;
-    }
-    Ok(())
-}
-
-fn running_record_for_work_dir(work_dir: &std::path::Path) -> Result<Option<ServerRecord>> {
-    Ok(live_server_records()?
-        .into_iter()
-        .find(|record| record.work_dir == work_dir))
-}
-
-fn live_server_records() -> Result<Vec<ServerRecord>> {
-    let _registry_lock = lock_server_registry()?;
-    let records = read_server_registry()?;
-    let live: Vec<ServerRecord> = records.into_iter().filter(record_process_exists).collect();
-    write_server_registry(&live)?;
-    Ok(live)
-}
-
-#[cfg(unix)]
-fn lock_server_registry() -> Result<ServerRegistryLock> {
-    use std::os::fd::AsRawFd;
-
-    let path = server_registry_lock_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&path)
-        .with_context(|| format!("failed to open {}", path.display()))?;
-    let status = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-    if status != 0 {
-        bail!("failed to lock {}", path.display());
-    }
-    Ok(ServerRegistryLock { file })
-}
-
-#[cfg(not(unix))]
-fn lock_server_registry() -> Result<ServerRegistryLock> {
-    Ok(ServerRegistryLock)
-}
-
-fn read_server_registry() -> Result<Vec<ServerRecord>> {
-    let path = server_registry_path();
-    let Ok(raw) = fs::read_to_string(&path) else {
-        return Ok(Vec::new());
-    };
-
-    let mut records = Vec::new();
-    for line in raw.lines() {
-        if let Some(record) = parse_server_record_line(line) {
-            records.push(record);
-        }
-    }
-    Ok(records)
-}
-
-fn write_server_registry(records: &[ServerRecord]) -> Result<()> {
-    let path = server_registry_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-
-    let mut out = String::new();
-    for record in records {
-        out.push_str(&format_server_record_line(record));
-        out.push('\n');
-    }
-
-    fs::write(&path, out).with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(())
-}
-
-fn parse_server_record_line(line: &str) -> Option<ServerRecord> {
-    let fields: Vec<&str> = line.split('\t').collect();
-    if fields.len() != 6 && fields.len() != 7 {
-        return None;
-    }
-    let pid = fields[0].parse::<u32>().ok()?;
-    let port = fields[3].parse::<u16>().ok()?;
-    let child_pid = if fields.len() == 7 && !fields[6].is_empty() {
-        Some(fields[6].parse::<u32>().ok()?)
-    } else {
-        None
-    };
-
-    Some(ServerRecord {
-        pid,
-        child_pid,
-        work_dir: PathBuf::from(unescape_registry_field(fields[1])),
-        host: unescape_registry_field(fields[2]),
-        port,
-        root_host: unescape_registry_field(fields[4]),
-        log: PathBuf::from(unescape_registry_field(fields[5])),
-    })
-}
-
-fn format_server_record_line(record: &ServerRecord) -> String {
-    let mut out = String::new();
-    out.push_str(&record.pid.to_string());
-    out.push('\t');
-    out.push_str(&escape_registry_field(&record.work_dir.to_string_lossy()));
-    out.push('\t');
-    out.push_str(&escape_registry_field(&record.host));
-    out.push('\t');
-    out.push_str(&record.port.to_string());
-    out.push('\t');
-    out.push_str(&escape_registry_field(&record.root_host));
-    out.push('\t');
-    out.push_str(&escape_registry_field(&record.log.to_string_lossy()));
-    out.push('\t');
-    if let Some(child_pid) = record.child_pid {
-        out.push_str(&child_pid.to_string());
-    }
-    out
-}
-
-fn server_registry_path() -> PathBuf {
-    if let Some(dir) = std::env::var_os("FORKPRESS_STATE_DIR") {
-        return PathBuf::from(dir).join(SERVER_REGISTRY_FILE);
-    }
-    if let Some(dir) = std::env::var_os("XDG_STATE_HOME") {
-        return PathBuf::from(dir)
-            .join("forkpress")
-            .join(SERVER_REGISTRY_FILE);
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home)
-            .join(".local/state/forkpress")
-            .join(SERVER_REGISTRY_FILE);
-    }
-    std::env::temp_dir().join(format!(
-        "forkpress-{}-{SERVER_REGISTRY_FILE}",
-        std::env::var("USER").unwrap_or_else(|_| "user".to_string())
-    ))
-}
-
-fn server_registry_lock_path() -> PathBuf {
-    server_registry_path().with_extension("tsv.lock")
-}
-
-fn read_pid_file(path: &std::path::Path) -> Result<Option<u32>> {
-    let Ok(raw) = fs::read_to_string(path) else {
-        return Ok(None);
-    };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    let pid = trimmed
-        .parse::<u32>()
-        .with_context(|| format!("invalid pid in {}", path.display()))?;
-    Ok(Some(pid))
-}
-
-fn stop_server_record(record: &ServerRecord, timeout: Duration) -> Result<()> {
-    if !record_process_exists(record) {
-        println!("forkpress: pid {} is no longer running", record.pid);
-        let layout = Layout::new(record.work_dir.clone())?;
-        let _ = unregister_running_server(&layout, record.pid);
-        return Ok(());
-    }
-
-    signal_server_record(record, libc::SIGINT)?;
-    if !wait_for_record_exit(record, timeout) {
-        signal_server_record(record, libc::SIGTERM)?;
-        if !wait_for_record_exit(record, Duration::from_secs(2)) {
-            signal_server_record(record, libc::SIGKILL)?;
-            let _ = wait_for_record_exit(record, Duration::from_secs(2));
-        }
-    }
-
-    let layout = Layout::new(record.work_dir.clone())?;
-    let _ = unregister_running_server(&layout, record.pid);
-
-    if record_process_exists(record) {
-        bail!("failed to stop server pid {}", record.pid);
-    }
-
-    if tcp_port_open(&record.host, record.port) {
-        eprintln!(
-            "forkpress: warning: {}:{} is still accepting connections; another process may own the port",
-            record.host, record.port
-        );
-    }
-
-    println!(
-        "forkpress: stopped server pid {} for http://{}:{}/",
-        record.pid, record.root_host, record.port
-    );
-    Ok(())
-}
-
-fn wait_for_record_exit(record: &ServerRecord, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if !record_process_exists(record) {
-            return true;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    !record_process_exists(record)
-}
-
-fn record_process_exists(record: &ServerRecord) -> bool {
-    process_exists(record.pid) || record.child_pid.map(process_exists).unwrap_or(false)
-}
-
-fn process_exists(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    if rc == 0 {
-        return true;
-    }
-    matches!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::EPERM)
-    )
-}
-
-fn signal_server_record(record: &ServerRecord, signal: i32) -> Result<()> {
-    let mut signaled_group = false;
-    if process_exists(record.pid) {
-        if process_group_id(record.pid) == Some(record.pid) {
-            signal_process_group(record.pid, signal)?;
-            signaled_group = true;
-        } else {
-            signal_process(record.pid, signal)?;
-        }
-    }
-
-    if let Some(child_pid) = record.child_pid
-        && process_exists(child_pid)
-        && !signaled_group
-    {
-        if process_group_id(child_pid) == Some(record.pid) {
-            signal_process_group(record.pid, signal)?;
-        } else {
-            signal_process(child_pid, signal)?;
-        }
-    }
-
-    Ok(())
-}
-
-fn process_group_id(pid: u32) -> Option<u32> {
-    if pid == 0 {
-        return None;
-    }
-    let pgid = unsafe { libc::getpgid(pid as libc::pid_t) };
-    if pgid < 0 { None } else { Some(pgid as u32) }
-}
-
-fn signal_process_group(pgid: u32, signal: i32) -> Result<()> {
-    if pgid == 0 {
-        return Ok(());
-    }
-    let rc = unsafe { libc::kill(-(pgid as libc::pid_t), signal) };
-    if rc == 0 {
-        return Ok(());
-    }
-    if matches!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::ESRCH)
-    ) {
-        return Ok(());
-    }
-    Err(std::io::Error::last_os_error())
-        .with_context(|| format!("failed to signal process group {pgid}"))
-}
-
-fn signal_process(pid: u32, signal: i32) -> Result<()> {
-    let rc = unsafe { libc::kill(pid as libc::pid_t, signal) };
-    if rc == 0 {
-        return Ok(());
-    }
-    if matches!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::ESRCH)
-    ) {
-        return Ok(());
-    }
-    Err(std::io::Error::last_os_error()).with_context(|| format!("failed to signal process {pid}"))
-}
-
-fn escape_registry_field(field: &str) -> String {
-    let mut escaped = String::new();
-    for ch in field.chars() {
-        match ch {
-            '\\' => escaped.push_str("\\\\"),
-            '\t' => escaped.push_str("\\t"),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            other => escaped.push(other),
-        }
-    }
-    escaped
-}
-
-fn unescape_registry_field(field: &str) -> String {
-    let mut out = String::new();
-    let mut chars = field.chars();
-    while let Some(ch) = chars.next() {
-        if ch != '\\' {
-            out.push(ch);
-            continue;
-        }
-        match chars.next() {
-            Some('\\') => out.push('\\'),
-            Some('t') => out.push('\t'),
-            Some('n') => out.push('\n'),
-            Some('r') => out.push('\r'),
-            Some(other) => {
-                out.push('\\');
-                out.push(other);
-            }
-            None => out.push('\\'),
-        }
-    }
-    out
 }
 
 fn shell_quote_path(path: &std::path::Path) -> String {
@@ -4141,28 +3718,6 @@ fn git_is_ancestor(repo: &std::path::Path, ancestor: &str, descendant: &str) -> 
         Some(1) => Ok(false),
         _ => bail!("git merge-base exited with status {status}"),
     }
-}
-
-fn wait_for_tcp(host: &str, port: u16, timeout: Duration) -> Result<()> {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if tcp_port_open(host, port) {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(250));
-    }
-    bail!("timed out waiting for {host}:{port}");
-}
-
-fn tcp_port_open(host: &str, port: u16) -> bool {
-    let addrs = (host, port).to_socket_addrs();
-    let Ok(addrs) = addrs else {
-        return false;
-    };
-
-    addrs
-        .into_iter()
-        .any(|addr| TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok())
 }
 
 #[cfg(test)]
