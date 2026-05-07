@@ -42,16 +42,16 @@ class CommitParser {
 		if ( ! $this->bytes ) {
 			return false;
 		}
-		$offset    = 0;
-		$bytes_len = strlen( $this->bytes );
+		$offset     = 0;
+		$bytes_len  = strlen( $this->bytes );
+		$field_type = null;
 
 		while ( $offset < $bytes_len ) {
 			// Find length of line.
 			$line_len = strcspn( $this->bytes, "\n", $offset );
 			$line     = substr( $this->bytes, $offset, $line_len );
 
-			// Skip empty lines.
-			if ( strspn( $line, " \t" ) === strlen( $line ) ) {
+			if ( '' === $line ) {
 				// The rest is commit message.
 				$this->commit->message = substr( $this->bytes, $offset + $line_len + 1 );
 				$this->commit->hash    = sha1(
@@ -63,9 +63,19 @@ class CommitParser {
 				return true;
 			}
 
+			if ( isset( $line[0] ) && ' ' === $line[0] ) {
+				if ( null === $field_type || ! property_exists( $this->commit, $field_type ) ) {
+					throw new GitException( 'Unexpected commit field continuation' );
+				}
+				$this->commit->$field_type .= "\n" . substr( $line, 1 );
+				$offset += $line_len + 1;
+				continue;
+			}
+
 			$type_len = strcspn( $line, ' ' );
 			$type     = substr( $line, 0, $type_len );
 			$value    = substr( $line, $type_len + 1 );
+			$field_type = $type;
 
 			if ( 'author' === $type ) {
 				$author_date_starts        = strpos( $value, '>' ) + 1;

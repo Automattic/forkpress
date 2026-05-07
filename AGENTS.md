@@ -4,12 +4,16 @@
 
 - Rust is the only native binary language.
 - PHP is used only for WordPress/runtime integration scripts.
-- `static-php-cli` builds PHP with the `branchfs` extension compiled in.
+- `static-php-cli` builds production PHP without experimental extensions.
+- `static-php-cli` builds dev PHP with the experimental `branchfs` extension
+  compiled in for `forkpress-dev`.
 
 ## Product Shape
 
-ForkPress ships as one static `forkpress` binary per target. Do not add daemons,
-shared libraries, FUSE mounts, Docker runtime dependencies, or service sidecars.
+ForkPress production ships as one static `forkpress` binary per target. The
+developer build is a separate `forkpress-dev` binary that includes experiments.
+Do not add daemons, shared libraries, FUSE mounts, Docker runtime dependencies,
+or service sidecars.
 
 Linux release targets use musl:
 
@@ -23,12 +27,25 @@ macOS release targets link only against `libSystem`:
 
 ## Repository Layout
 
-- `forkpress/` contains the Rust CLI.
-- `ext/` contains the PHP `branchfs` extension.
-- `scripts/` contains bundled PHP operations.
-- `runtime/` contains the PHP built-in-server router, WordPress bootstrap, and
-  the WordPress archive embedded into the binary.
-- `tests/` contains PHP unit tests.
+- `crates/forkpress-cli/` contains the Rust binaries and command routing.
+- `crates/forkpress-core/` contains shared layout, manifest, path, and storage
+  strategy types.
+- `crates/forkpress-storage/` contains production COW branch storage:
+  APFS clonefile, APFS sparsebundle, Linux `FICLONE`, and file-copy fallback.
+- `crates/forkpress-runtime/` contains embedded PHP/WordPress runtime
+  preparation and PHP script execution.
+- `crates/forkpress-server/` contains the server process registry, stop/list
+  helpers, and TCP readiness helpers.
+- `crates/forkpress-git/` contains Git command, ref, worktree, and push-sync
+  helpers.
+- `runtime/` contains production COW runtime files and the WordPress archive
+  embedded into the binary.
+- `scripts/` contains production/shared build, SQLite, Git, and COW helpers.
+- `tests/` contains production COW PHP tests.
+- `experiments/branchfs/` contains the experimental BranchFS schema, PHP
+  extension, runtime files, scripts, Git adapter, and tests.
+- `experiments/cas/` contains CAS experiment runtime files, Rust crates, and
+  tests.
 
 ## Branch Workflow
 
@@ -45,7 +62,9 @@ The issue #2 workflow is Git/worktree based:
 Run Rust tests with:
 
 ```bash
-FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress
+cargo test --workspace --exclude forkpress-cli
+FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli
+FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli --features dev-experiments --bin forkpress-dev
 ```
 
 Run PHP unit tests with:

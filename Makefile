@@ -44,12 +44,20 @@ SQLITE_LIBS := -lsqlite3
 endif
 
 CC      ?= gcc
-CFLAGS  := -fPIC -shared -O2 -Wall -DCOMPILE_DL_BRANCHFS -DHAVE_CONFIG_H=0 $(SQLITE_CFLAGS)
+CFLAGS  := -fPIC -O2 -Wall -DCOMPILE_DL_BRANCHFS -DHAVE_CONFIG_H=0 $(SQLITE_CFLAGS)
 INCLUDES := $(PHP_EXTRA_INCS)
 LDFLAGS := $(SQLITE_LIBS)
+BRANCHFS_EXT_DIR := experiments/branchfs/php-ext
+BRANCHFS_EXT_SO := $(BRANCHFS_EXT_DIR)/branchfs.so
+BRANCHFS_TEST_DIR := experiments/branchfs/tests
+COW_TEST_DIR := tests/cow
 RUSTUP ?= $(shell command -v rustup 2>/dev/null)
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
+PHP_EXT_LDFLAGS := -shared
+ifeq ($(UNAME_S),Darwin)
+PHP_EXT_LDFLAGS := -bundle -undefined dynamic_lookup
+endif
 ifeq ($(UNAME_S)-$(UNAME_M),Darwin-arm64)
 FORKPRESS_TARGET ?= aarch64-apple-darwin
 else ifeq ($(UNAME_S)-$(UNAME_M),Darwin-x86_64)
@@ -60,48 +68,61 @@ else ifeq ($(UNAME_S)-$(UNAME_M),Linux-aarch64)
 FORKPRESS_TARGET ?= aarch64-unknown-linux-musl
 endif
 
-.PHONY: all clean test test-compat init-db test-all forkpress dist
+.PHONY: all clean test test-compat test-branchfs test-cow init-db test-all forkpress forkpress-dev dist dist-dev
 
-all: ext/branchfs.so
+all: $(BRANCHFS_EXT_SO)
 
-ext/branchfs.so: ext/branchfs.c ext/branchfs.h
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ ext/branchfs.c $(LDFLAGS)
+$(BRANCHFS_EXT_SO): $(BRANCHFS_EXT_DIR)/branchfs.c $(BRANCHFS_EXT_DIR)/branchfs.h
+	$(CC) $(CFLAGS) $(INCLUDES) $(PHP_EXT_LDFLAGS) -o $@ $(BRANCHFS_EXT_DIR)/branchfs.c $(LDFLAGS)
 
-init-db: ext/branchfs.so
-	php -d "extension=$(CURDIR)/ext/branchfs.so" scripts/init_db.php
+init-db: $(BRANCHFS_EXT_SO)
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" experiments/branchfs/scripts/init_db.php
 
-test: ext/branchfs.so
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_basic.php
+test: $(BRANCHFS_EXT_SO)
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" $(BRANCHFS_TEST_DIR)/basic.php
 
-test-compat: ext/branchfs.so
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_plugin_compat.php
+test-compat: $(BRANCHFS_EXT_SO)
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" $(BRANCHFS_TEST_DIR)/plugin_compat.php
 
-test-all: ext/branchfs.so
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_basic.php
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_plugin_compat.php
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_wp_boot.php
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_realpath.php
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_syscall_overrides.php
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_opcache_keys.php
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_merge.php
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_cow_backtick_ddl.php
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_gc.php
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_push_auth.php
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_cow_git_server.php
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_cow_router_paths.php
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_cow_router_lock.php
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_branchctl_local_auth.php
+test-branchfs: $(BRANCHFS_EXT_SO)
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" $(BRANCHFS_TEST_DIR)/basic.php
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" $(BRANCHFS_TEST_DIR)/plugin_compat.php
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" $(BRANCHFS_TEST_DIR)/wp_boot.php
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" $(BRANCHFS_TEST_DIR)/realpath.php
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" $(BRANCHFS_TEST_DIR)/syscall_overrides.php
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" $(BRANCHFS_TEST_DIR)/opcache_keys.php
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" $(BRANCHFS_TEST_DIR)/merge.php
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" $(BRANCHFS_TEST_DIR)/db_cow_backtick_ddl.php
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" $(BRANCHFS_TEST_DIR)/gc.php
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" $(BRANCHFS_TEST_DIR)/push_auth.php
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" $(BRANCHFS_TEST_DIR)/branchctl_local_auth.php
+
+test-cow:
+	php $(COW_TEST_DIR)/git_server.php
+	php $(COW_TEST_DIR)/router_paths.php
+	php $(COW_TEST_DIR)/router_lock.php
+
+test-all: test-branchfs test-cow
 
 clean:
-	rm -f ext/branchfs.so /tmp/branchfs_test*.db /tmp/branchfs_wp*.db
+	rm -f $(BRANCHFS_EXT_SO) /tmp/branchfs_test*.db /tmp/branchfs_wp*.db
 
-# Build the per-target runtime bundle (php + branchfs builtin) consumed by
-# forkpress. First-time build compiles static PHP from source and takes
-# ~3-5 minutes on Apple Silicon; subsequent runs reuse the cached PHP.
+# Build the per-target production runtime bundle consumed by forkpress.
+# First-time build compiles static PHP from source and takes ~3-5 minutes on
+# Apple Silicon; subsequent runs reuse the cached PHP.
 dist:
 	FORKPRESS_TARGET=$(FORKPRESS_TARGET) scripts/build-dist.sh
+
+# Build the dev runtime bundle with experimental BranchFS/CAS support.
+dist-dev:
+	FORKPRESS_RUNTIME_PROFILE=dev FORKPRESS_TARGET=$(FORKPRESS_TARGET) scripts/build-dist.sh
 
 # Build the shippable forkpress binary for FORKPRESS_TARGET. Requires `dist`
 # to have run at least once for the same target.
 forkpress:
-	cargo build --release --target $(FORKPRESS_TARGET) -p forkpress
+	cargo build --release --target $(FORKPRESS_TARGET) -p forkpress-cli --bin forkpress
+
+# Build the developer binary with experimental strategies. Requires `dist-dev`
+# to have run at least once for the same target.
+forkpress-dev:
+	cargo build --release --target $(FORKPRESS_TARGET) -p forkpress-cli --features dev-experiments --bin forkpress-dev

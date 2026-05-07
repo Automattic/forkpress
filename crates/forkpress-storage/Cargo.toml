@@ -1,0 +1,13 @@
+[package]
+name = "forkpress-storage"
+version = "0.1.13-cow.1"
+edition = "2024"
+
+[features]
+default = []
+
+[dependencies]
+anyhow = "1.0"
+forkpress-core = { path = "../forkpress-core" }
+forkpress-runtime = { path = "../forkpress-runtime" }
+libc = "0.2"

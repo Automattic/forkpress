@@ -294,22 +294,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "forkpress"
-version = "0.1.13-cow.1"
-dependencies = [
- "anyhow",
- "clap",
- "ctrlc",
- "flate2",
- "forkpress-cas-store",
- "libc",
- "num_cpus",
- "tar",
- "walkdir",
- "zip",
-]
-
-[[package]]
 name = "forkpress-cas-ffi"
 version = "0.1.0"
 dependencies = [
@@ -325,6 +309,72 @@ dependencies = [
  "anyhow",
  "redb",
  "sha2",
+]
+
+[[package]]
+name = "forkpress-cli"
+version = "0.1.13-cow.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ctrlc",
+ "flate2",
+ "forkpress-cas-store",
+ "forkpress-core",
+ "forkpress-git",
+ "forkpress-runtime",
+ "forkpress-server",
+ "forkpress-storage",
+ "libc",
+ "num_cpus",
+ "tar",
+ "walkdir",
+ "zip",
+]
+
+[[package]]
+name = "forkpress-core"
+version = "0.1.13-cow.1"
+dependencies = [
+ "anyhow",
+ "clap",
+]
+
+[[package]]
+name = "forkpress-git"
+version = "0.1.13-cow.1"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
+name = "forkpress-runtime"
+version = "0.1.13-cow.1"
+dependencies = [
+ "anyhow",
+ "flate2",
+ "forkpress-core",
+ "tar",
+ "zip",
+]
+
+[[package]]
+name = "forkpress-server"
+version = "0.1.13-cow.1"
+dependencies = [
+ "anyhow",
+ "forkpress-core",
+ "libc",
+]
+
+[[package]]
+name = "forkpress-storage"
+version = "0.1.13-cow.1"
+dependencies = [
+ "anyhow",
+ "forkpress-core",
+ "forkpress-runtime",
+ "libc",
 ]
 
 [[package]]

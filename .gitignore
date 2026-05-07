@@ -1,4 +1,4 @@
-ext/branchfs.so
+experiments/branchfs/php-ext/branchfs.so
 *.o
 *.lo
 *.la
