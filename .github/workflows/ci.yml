@@ -33,6 +33,11 @@ jobs:
         with:
           targets: x86_64-unknown-linux-musl
 
+      - name: Rust unit tests (workspace crates)
+        run: |
+          cargo test --workspace --exclude forkpress-cli
+          cargo test -p forkpress-core --features dev-experiments
+
       - name: Rust unit tests
         run: FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli --bin forkpress
 
@@ -81,6 +86,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Rust unit tests (workspace crates)
+        run: |
+          cargo test --target ${{ matrix.target }} --workspace --exclude forkpress-cli
+          cargo test --target ${{ matrix.target }} -p forkpress-core --features dev-experiments
 
       - name: Rust unit tests
         run: FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test --target ${{ matrix.target }} -p forkpress-cli --bin forkpress

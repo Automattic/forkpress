@@ -405,6 +405,25 @@ The dev binary enables:
   explicit `FORKPRESS_ENABLE_EMBEDDED_ZFS=1` build because it fetches and links
   the external OpenZFS experiment.
 
+## Repository Layout
+
+Production Rust packages live under `crates/`:
+
+- `forkpress-cli`: binaries and high-level command routing;
+- `forkpress-core`: shared layout, manifest, path, and strategy types;
+- `forkpress-storage`: production COW branch storage, including APFS
+  `clonefile`, APFS sparsebundle, Linux `FICLONE`, and file-copy fallback;
+- `forkpress-runtime`: embedded PHP/WordPress runtime preparation and PHP
+  script execution;
+- `forkpress-server`: server registry, stop/list, and TCP readiness helpers;
+- `forkpress-git`: Git command, ref, worktree, and push-sync helpers.
+
+Production PHP runtime files live in `runtime/`, production/shared helper
+scripts live in `scripts/`, and production COW PHP tests live in `tests/`.
+Experiment-specific code lives under `experiments/`, including BranchFS, CAS
+Rust crates, the experiment WordPress plugin, and the embedded-ZFS smoke
+tooling.
+
 ## Commands
 
 - `forkpress init` initializes a site. On macOS the default strategy is `cow`.
@@ -460,6 +479,8 @@ feature. The production wrapper rejects `dev-experiments`; use
 For fast Rust-only checks without rebuilding PHP:
 
 ```bash
+cargo test --workspace --exclude forkpress-cli
+cargo test -p forkpress-core --features dev-experiments
 FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli
 FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli --features dev-experiments --bin forkpress-dev
 ```
