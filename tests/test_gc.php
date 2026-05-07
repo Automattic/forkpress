@@ -52,7 +52,7 @@ assert_true($blobs_after_delete === $blobs_before_delete,
 
 // Dry-run first.
 $branchctl = escapeshellcmd(PHP_BINARY)
-           . ' -d extension=' . escapeshellarg(realpath(__DIR__ . '/../ext/branchfs.so'))
+           . ' -d extension=' . escapeshellarg(realpath(__DIR__ . '/../experiments/php-ext-branchfs/branchfs.so'))
            . ' ' . escapeshellarg(__DIR__ . '/../scripts/branchctl.php');
 $out = [];
 $rc  = 0;

@@ -3,7 +3,7 @@
  * static-php-cli patch hook: inject branchfs as a builtin PHP extension.
  *
  * Runs at the `after-php-extract` patch point (see BuilderBase::emitPatchPoint).
- * Copies our ext/branchfs.{c,h} into php-src/ext/branchfs/, writes a config.m4,
+ * Copies our experiments/php-ext-branchfs/branchfs.{c,h} into php-src/ext/branchfs/, writes a config.m4,
  * and re-runs ./buildconf --force so PHP's configure script picks up the new
  * extension and honors --enable-branchfs.
  *
@@ -19,6 +19,7 @@ $repo_root = realpath(__DIR__ . '/..');
 if ($repo_root === false) {
     throw new RuntimeException('forkpress patch: cannot resolve repo root');
 }
+$source_dir = $repo_root . '/experiments/php-ext-branchfs';
 
 $php_src = SOURCE_PATH . '/php-src';
 $dest    = $php_src . '/ext/branchfs';
@@ -32,7 +33,7 @@ if (!is_dir($dest) && !mkdir($dest, 0755, true) && !is_dir($dest)) {
 }
 
 foreach (['branchfs.c', 'branchfs.h'] as $file) {
-    $src = "{$repo_root}/ext/{$file}";
+    $src = "{$source_dir}/{$file}";
     if (!is_file($src)) {
         throw new RuntimeException("forkpress patch: missing source {$src}");
     }

@@ -2487,7 +2487,7 @@ case 'merge': {
         }
         $argv_forward[] = '--on-id-collision=' . $oic;
     }
-    $so = realpath(__DIR__ . '/../ext/branchfs.so');
+    $so = realpath(__DIR__ . '/../experiments/php-ext-branchfs/branchfs.so');
     $php_bin = PHP_BINARY;
     $ext_flag = $so ? '-d extension=' . escapeshellarg($so) : '';
     $cmdline = sprintf(

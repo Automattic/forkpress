@@ -93,7 +93,7 @@ file_put_contents('branchfs://feature-a/readme.txt', "feature edit\n");
 
 echo "=== merge: default (abort) strategy refuses on conflict ===\n";
 $cmd = escapeshellcmd(PHP_BINARY)
-     . ' -d extension=' . escapeshellarg(realpath(__DIR__ . '/../ext/branchfs.so'))
+     . ' -d extension=' . escapeshellarg(realpath(__DIR__ . '/../experiments/php-ext-branchfs/branchfs.so'))
      . ' ' . escapeshellarg(__DIR__ . '/../scripts/merge.php')
      . ' feature-a main ' . escapeshellarg($DB);
 $output = [];
@@ -144,7 +144,7 @@ file_put_contents('branchfs://feature-b/note.txt', "feature only edit\n");
 // Target main is still at "base note" for this path
 
 $cmd2 = escapeshellcmd(PHP_BINARY)
-      . ' -d extension=' . escapeshellarg(realpath(__DIR__ . '/../ext/branchfs.so'))
+      . ' -d extension=' . escapeshellarg(realpath(__DIR__ . '/../experiments/php-ext-branchfs/branchfs.so'))
       . ' ' . escapeshellarg(__DIR__ . '/../scripts/merge.php')
       . ' feature-b main ' . escapeshellarg($DB);
 $output = [];

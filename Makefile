@@ -47,6 +47,8 @@ CC      ?= gcc
 CFLAGS  := -fPIC -shared -O2 -Wall -DCOMPILE_DL_BRANCHFS -DHAVE_CONFIG_H=0 $(SQLITE_CFLAGS)
 INCLUDES := $(PHP_EXTRA_INCS)
 LDFLAGS := $(SQLITE_LIBS)
+BRANCHFS_EXT_DIR := experiments/php-ext-branchfs
+BRANCHFS_EXT_SO := $(BRANCHFS_EXT_DIR)/branchfs.so
 RUSTUP ?= $(shell command -v rustup 2>/dev/null)
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
@@ -62,38 +64,38 @@ endif
 
 .PHONY: all clean test test-compat init-db test-all forkpress forkpress-dev dist dist-dev
 
-all: ext/branchfs.so
+all: $(BRANCHFS_EXT_SO)
 
-ext/branchfs.so: ext/branchfs.c ext/branchfs.h
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ ext/branchfs.c $(LDFLAGS)
+$(BRANCHFS_EXT_SO): $(BRANCHFS_EXT_DIR)/branchfs.c $(BRANCHFS_EXT_DIR)/branchfs.h
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $(BRANCHFS_EXT_DIR)/branchfs.c $(LDFLAGS)
 
-init-db: ext/branchfs.so
-	php -d "extension=$(CURDIR)/ext/branchfs.so" scripts/init_db.php
+init-db: $(BRANCHFS_EXT_SO)
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" scripts/init_db.php
 
-test: ext/branchfs.so
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_basic.php
+test: $(BRANCHFS_EXT_SO)
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" tests/test_basic.php
 
-test-compat: ext/branchfs.so
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_plugin_compat.php
+test-compat: $(BRANCHFS_EXT_SO)
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" tests/test_plugin_compat.php
 
-test-all: ext/branchfs.so
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_basic.php
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_plugin_compat.php
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_wp_boot.php
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_realpath.php
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_syscall_overrides.php
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_opcache_keys.php
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_merge.php
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_cow_backtick_ddl.php
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_gc.php
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_push_auth.php
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_cow_git_server.php
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_cow_router_paths.php
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_cow_router_lock.php
-	php -d "extension=$(CURDIR)/ext/branchfs.so" tests/test_branchctl_local_auth.php
+test-all: $(BRANCHFS_EXT_SO)
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" tests/test_basic.php
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" tests/test_plugin_compat.php
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" tests/test_wp_boot.php
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" tests/test_realpath.php
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" tests/test_syscall_overrides.php
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" tests/test_opcache_keys.php
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" tests/test_merge.php
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" tests/test_cow_backtick_ddl.php
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" tests/test_gc.php
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" tests/test_push_auth.php
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" tests/test_cow_git_server.php
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" tests/test_cow_router_paths.php
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" tests/test_cow_router_lock.php
+	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" tests/test_branchctl_local_auth.php
 
 clean:
-	rm -f ext/branchfs.so /tmp/branchfs_test*.db /tmp/branchfs_wp*.db
+	rm -f $(BRANCHFS_EXT_SO) /tmp/branchfs_test*.db /tmp/branchfs_wp*.db
 
 # Build the per-target production runtime bundle consumed by forkpress.
 # First-time build compiles static PHP from source and takes ~3-5 minutes on

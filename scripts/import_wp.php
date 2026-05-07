@@ -18,7 +18,7 @@ if (!is_dir($wp_dir)) {
 }
 
 if (!extension_loaded('branchfs')) {
-    die("import_wp:branchfs extension not loaded. Use: php -d extension=ext/branchfs.so\n");
+    die("import_wp:branchfs extension not loaded. Use: php -d extension=experiments/php-ext-branchfs/branchfs.so\n");
 }
 
 branchfs_set_db($db_path);

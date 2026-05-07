@@ -26,7 +26,7 @@ $DB = '/tmp/branchfs_local_auth_' . getmypid() . '.db';
 @unlink($DB . '-shm');
 
 $php = escapeshellcmd(PHP_BINARY);
-$ext = escapeshellarg(realpath(__DIR__ . '/../ext/branchfs.so'));
+$ext = escapeshellarg(realpath(__DIR__ . '/../experiments/php-ext-branchfs/branchfs.so'));
 $init = $php . ' -d extension=' . $ext
       . ' ' . escapeshellarg(__DIR__ . '/../scripts/init_db.php')
       . ' ' . escapeshellarg($DB)
