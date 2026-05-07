@@ -5313,6 +5313,21 @@ fn install_cas_managed_wp_files(layout: &Layout, branch_root: &Path) -> Result<(
         )
     })?;
 
+    fs::copy(
+        layout
+            .runtime_dir
+            .join("wp-plugin/forkpress-experiments-wp.php"),
+        wp_content.join("mu-plugins/forkpress-experiments-wp.php"),
+    )
+    .with_context(|| {
+        format!(
+            "failed to install {}",
+            wp_content
+                .join("mu-plugins/forkpress-experiments-wp.php")
+                .display()
+        )
+    })?;
+
     fs::write(wp_content.join("db.php"), cas_sqlite_dropin())
         .with_context(|| format!("failed to write {}", wp_content.join("db.php").display()))?;
     fs::write(branch_root.join("wp-config.php"), cas_wp_config()).with_context(|| {
@@ -5694,6 +5709,10 @@ fn ensure_bootstrapped(layout: &Layout, runtime: &PortableRuntime, args: &StartA
                     .join("wp-plugin/forkpress-wp.php")
                     .as_os_str(),
                 layout.debug_log.as_os_str(),
+                layout
+                    .runtime_dir
+                    .join("wp-plugin/forkpress-experiments-wp.php")
+                    .as_os_str(),
             ],
         )?;
 
@@ -5750,6 +5769,10 @@ fn refresh_managed_wp_files_if_needed(
                 .join("wp-plugin/forkpress-wp.php")
                 .as_os_str(),
             layout.debug_log.as_os_str(),
+            layout
+                .runtime_dir
+                .join("wp-plugin/forkpress-experiments-wp.php")
+                .as_os_str(),
         ],
     )?;
     write_managed_files_marker(layout)?;
@@ -5816,6 +5839,7 @@ fn start_php_server(
         .env("BRANCHFS_SQLITE_WP_DB", &layout.site_fp)
         .env("BRANCHFS_WP_ROOT", &layout.wp_root)
         .env("BRANCHFS_ROOT_HOST", &args.root_host)
+        .env("FORKPRESS_ROOT_HOST", &args.root_host)
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
 

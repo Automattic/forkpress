@@ -5,17 +5,18 @@
  * Writes wp-config.php and mu-plugin into the store,
  * then installs WordPress via wp_install().
  *
- * Usage: php bootstrap_wp.php <db-path> <wp-root> <site-title> <mu-plugin-path> <debug-log>
+ * Usage: php bootstrap_wp.php <db-path> <wp-root> <site-title> <mu-plugin-path> <debug-log> [experiment-mu-plugin-path]
  * Env:   WP_TABLE_PREFIX  — table prefix for WordPress tables (default: b1_wp_)
  */
 
 error_reporting(E_ALL & ~E_WARNING & ~E_NOTICE);
 
-$db_path    = $argv[1] ?? die("Usage: php bootstrap_wp.php <db-path> <wp-root> <site-title> <mu-plugin> <debug-log>\n");
-$wp_root    = rtrim($argv[2], '/');
-$site_title = $argv[3] ?? 'ForkPress';
-$mu_plugin  = $argv[4] ?? null;
-$debug_log  = $argv[5] ?? '/tmp/wp-debug.log';
+$db_path              = $argv[1] ?? die("Usage: php bootstrap_wp.php <db-path> <wp-root> <site-title> <mu-plugin> <debug-log> [experiment-mu-plugin]\n");
+$wp_root              = rtrim($argv[2], '/');
+$site_title           = $argv[3] ?? 'ForkPress';
+$mu_plugin            = $argv[4] ?? null;
+$debug_log            = $argv[5] ?? '/tmp/wp-debug.log';
+$experiment_mu_plugin = $argv[6] ?? null;
 
 $table_prefix = getenv('WP_TABLE_PREFIX') ?: 'b1_wp_';
 
@@ -194,14 +195,21 @@ $written = file_put_contents("branchfs://main/wp-config.php", $config);
 if ($written === false) die("ERROR: Could not write wp-config.php\n");
 echo "  wp-config.php written ($written bytes, table_prefix=$table_prefix)\n";
 
-// --- Write mu-plugin ---
-if ($mu_plugin && file_exists($mu_plugin)) {
+// --- Write mu-plugins ---
+$mu_plugins = [
+    'forkpress-wp.php' => $mu_plugin,
+    'forkpress-experiments-wp.php' => $experiment_mu_plugin,
+];
+foreach ($mu_plugins as $filename => $source) {
+    if (!$source || !file_exists($source)) {
+        continue;
+    }
     @mkdir("branchfs://main/wp-content/mu-plugins", 0755, true);
     file_put_contents(
-        "branchfs://main/wp-content/mu-plugins/forkpress-wp.php",
-        file_get_contents($mu_plugin)
+        "branchfs://main/wp-content/mu-plugins/$filename",
+        file_get_contents($source)
     );
-    echo "  mu-plugin installed\n";
+    echo "  mu-plugin $filename installed\n";
 }
 
 install_sqlite_integration(dirname(__DIR__) . '/vendor');

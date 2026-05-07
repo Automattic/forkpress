@@ -63,7 +63,7 @@ fn main() -> Result<()> {
 
     for rel in [
         "vendor",
-        "wp-plugin",
+        "wp-plugin/forkpress-wp.php",
         "runtime/router_cow.php",
         "runtime/bootstrap_cow_wp.php",
         "runtime/wp.zip",
@@ -78,6 +78,7 @@ fn main() -> Result<()> {
         for rel in [
             "scripts",
             "sql",
+            "wp-plugin",
             "runtime/router.php",
             "runtime/router_cas.php",
             "runtime/bootstrap_wp.php",
@@ -403,7 +404,11 @@ fn build_bundle(
     let mut tar = Builder::new(encoder);
 
     add_tree(&mut tar, repo_root, "vendor")?;
-    add_tree(&mut tar, repo_root, "wp-plugin")?;
+    if dev_experiments {
+        add_tree(&mut tar, repo_root, "wp-plugin")?;
+    } else {
+        add_file(&mut tar, repo_root, "wp-plugin/forkpress-wp.php")?;
+    }
     add_file(&mut tar, repo_root, "runtime/router_cow.php")?;
     add_file(&mut tar, repo_root, "runtime/bootstrap_cow_wp.php")?;
     add_file(&mut tar, repo_root, "runtime/wp.zip")?;

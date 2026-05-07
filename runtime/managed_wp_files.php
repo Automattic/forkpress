@@ -179,17 +179,23 @@ CFG;
     echo "  wp-config.php written ($written bytes, table_prefix=$table_prefix)\n";
 }
 
-function forkpress_write_mu_plugin(?string $mu_plugin): void {
-    if (!$mu_plugin || !file_exists($mu_plugin)) {
-        return;
-    }
+function forkpress_write_mu_plugins(?string $mu_plugin, ?string $experiment_mu_plugin): void {
+    $mu_plugins = [
+        'forkpress-wp.php' => $mu_plugin,
+        'forkpress-experiments-wp.php' => $experiment_mu_plugin,
+    ];
+    foreach ($mu_plugins as $filename => $source) {
+        if (!$source || !file_exists($source)) {
+            continue;
+        }
 
-    @mkdir('branchfs://main/wp-content/mu-plugins', 0755, true);
-    file_put_contents(
-        'branchfs://main/wp-content/mu-plugins/forkpress-wp.php',
-        file_get_contents($mu_plugin)
-    );
-    echo "  mu-plugin installed\n";
+        forkpress_branchfs_mkdir_p('branchfs://main/wp-content/mu-plugins');
+        file_put_contents(
+            'branchfs://main/wp-content/mu-plugins/' . $filename,
+            file_get_contents($source)
+        );
+        echo "  mu-plugin $filename installed\n";
+    }
 }
 
 function forkpress_write_managed_wp_files(
@@ -198,9 +204,10 @@ function forkpress_write_managed_wp_files(
     string $site_title,
     ?string $mu_plugin,
     string $debug_log,
-    string $table_prefix
+    string $table_prefix,
+    ?string $experiment_mu_plugin = null
 ): void {
     forkpress_write_wp_config($db_path, $debug_log, $table_prefix);
-    forkpress_write_mu_plugin($mu_plugin);
+    forkpress_write_mu_plugins($mu_plugin, $experiment_mu_plugin);
     forkpress_install_sqlite_integration(dirname(__DIR__) . '/vendor');
 }
