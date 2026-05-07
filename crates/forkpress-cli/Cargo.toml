@@ -7,7 +7,7 @@ autobins = false
 
 [features]
 default = []
-dev-experiments = ["dep:forkpress-cas-store"]
+dev-experiments = ["dep:forkpress-cas-store", "forkpress-core/dev-experiments"]
 
 [[bin]]
 name = "forkpress"
@@ -23,6 +23,7 @@ anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 ctrlc = "3.5"
 flate2 = "1.1"
+forkpress-core = { path = "../forkpress-core" }
 forkpress-cas-store = { path = "../../experiments/cas/crates/cas-store", optional = true }
 libc = "0.2"
 num_cpus = "1.16"

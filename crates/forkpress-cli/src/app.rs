@@ -15,6 +15,13 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zip::ZipArchive;
 
+use forkpress_core::{
+    FileViewStrategy, Layout, SiteManifest, StorageStrategy, absolutize,
+    initialized_storage_strategy, path_exists_no_follow, read_site_manifest,
+    require_initialized_strategy, validate_branch_name, write_site_manifest,
+    write_site_manifest_if_missing,
+};
+
 #[cfg(feature = "dev-experiments")]
 use forkpress_cas_store as cas_store;
 #[cfg(feature = "dev-experiments")]
@@ -318,159 +325,9 @@ enum LogSelection {
     All,
 }
 
-#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
-enum StorageStrategy {
-    /// Materialized COW store: normal branch directories with COW file views.
-    #[value(
-        name = "cow",
-        alias = "zfs",
-        alias = "mac-cow",
-        alias = "materialized",
-        alias = "materialized-cow"
-    )]
-    Cow,
-    /// Experimental single-file SQLite store: BranchFS files plus COW WordPress DB views.
-    #[cfg(feature = "dev-experiments")]
-    #[value(alias = "sqlite", alias = "sqlite-cow")]
-    Branchfs,
-    /// Experimental Redb-backed content-addressed file store with branch manifests.
-    #[cfg(feature = "dev-experiments")]
-    #[value(alias = "redb", alias = "cas-redb")]
-    Cas,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FileViewStrategy {
-    /// Materialized directories whose file contents are cloned by the host FS.
-    Reflink,
-    /// macOS rootless APFS sparsebundle mounted under .forkpress.
-    MacosApfsSparsebundle,
-    /// Last-resort full copies.
-    Copy,
-}
-
-impl FileViewStrategy {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Reflink => "reflink",
-            Self::MacosApfsSparsebundle => "macos-apfs-sparsebundle",
-            Self::Copy => "file-copy",
-        }
-    }
-
-    fn from_manifest_value(value: &str) -> Result<Self> {
-        match value.trim() {
-            "reflink" | "clonefile" | "ficlone" => Ok(Self::Reflink),
-            "macos-apfs-sparsebundle" | "apfs-sparsebundle" => Ok(Self::MacosApfsSparsebundle),
-            "file-copy" | "copy" => Ok(Self::Copy),
-            other => bail!("unknown file_view strategy in site manifest: {other}"),
-        }
-    }
-
-    fn requires_cow(self) -> bool {
-        self != Self::Copy
-    }
-}
-
-impl StorageStrategy {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Cow => "cow",
-            #[cfg(feature = "dev-experiments")]
-            Self::Branchfs => "branchfs",
-            #[cfg(feature = "dev-experiments")]
-            Self::Cas => "cas",
-        }
-    }
-
-    #[cfg(feature = "dev-experiments")]
-    fn display_name(self) -> &'static str {
-        match self {
-            Self::Cow => "cow/materialized",
-            #[cfg(feature = "dev-experiments")]
-            Self::Branchfs => "branchfs/sqlite",
-            #[cfg(feature = "dev-experiments")]
-            Self::Cas => "cas/redb",
-        }
-    }
-
-    fn from_manifest_value(value: &str) -> Result<Self> {
-        match value.trim() {
-            "cow" | "zfs" | "mac-cow" | "materialized" | "materialized-cow" => Ok(Self::Cow),
-            #[cfg(feature = "dev-experiments")]
-            "branchfs" | "sqlite" | "sqlite-cow" => Ok(Self::Branchfs),
-            #[cfg(feature = "dev-experiments")]
-            "cas" | "redb" | "cas-redb" => Ok(Self::Cas),
-            #[cfg(not(feature = "dev-experiments"))]
-            "branchfs" | "sqlite" | "sqlite-cow" | "cas" | "redb" | "cas-redb" => bail!(
-                "storage strategy \"{}\" is experimental; use forkpress-dev to open this site",
-                value.trim()
-            ),
-            other => bail!("unknown storage strategy in site manifest: {other}"),
-        }
-    }
-}
-
 #[cfg(feature = "dev-experiments")]
 fn default_storage_strategy() -> StorageStrategy {
     StorageStrategy::Cow
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SiteManifest {
-    strategy: StorageStrategy,
-    file_view: Option<FileViewStrategy>,
-}
-
-impl SiteManifest {
-    fn new(strategy: StorageStrategy) -> Self {
-        Self {
-            strategy,
-            file_view: None,
-        }
-    }
-
-    fn with_file_view(mut self, file_view: FileViewStrategy) -> Self {
-        self.file_view = Some(file_view);
-        self
-    }
-
-    fn parse(contents: &str) -> Result<Self> {
-        let mut strategy = None;
-        let mut file_view = None;
-        for raw_line in contents.lines() {
-            let line = raw_line.split('#').next().unwrap_or("").trim();
-            if line.is_empty() {
-                continue;
-            }
-            let Some((key, value)) = line.split_once('=') else {
-                continue;
-            };
-            let key = key.trim();
-            let value = value.trim().trim_matches('"');
-            if key == "strategy" {
-                strategy = Some(StorageStrategy::from_manifest_value(value)?);
-            } else if key == "file_view" {
-                file_view = Some(FileViewStrategy::from_manifest_value(value)?);
-            }
-        }
-
-        Ok(Self {
-            strategy: strategy.unwrap_or(StorageStrategy::Cow),
-            file_view,
-        })
-    }
-
-    fn render(&self) -> String {
-        let mut rendered = format!(
-            "# ForkPress site manifest\nversion = 1\nstrategy = \"{}\"\n",
-            self.strategy.as_str()
-        );
-        if let Some(file_view) = self.file_view {
-            rendered.push_str(&format!("file_view = \"{}\"\n", file_view.as_str()));
-        }
-        rendered
-    }
 }
 
 #[derive(Args, Debug, Clone)]
@@ -725,49 +582,6 @@ struct BranchPassthrough {
 
     #[arg(trailing_var_arg = true, allow_hyphen_values = true, action = ArgAction::Append)]
     args: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-struct Layout {
-    work_dir: PathBuf,
-    project_dir: PathBuf,
-    runtime_dir: PathBuf,
-    logs_dir: PathBuf,
-    site_manifest: PathBuf,
-    site_fp: PathBuf,
-    cow_dir: PathBuf,
-    cow_branches_dir: PathBuf,
-    cow_branch_list: PathBuf,
-    cow_git_dir: PathBuf,
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    macos_cow_dir: PathBuf,
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    macos_cow_image: PathBuf,
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    macos_cow_mount: PathBuf,
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    macos_cow_branches_dir: PathBuf,
-    #[cfg(feature = "dev-experiments")]
-    cas_dir: PathBuf,
-    #[cfg(feature = "dev-experiments")]
-    cas_store: PathBuf,
-    #[cfg(feature = "dev-experiments")]
-    cas_wp_root: PathBuf,
-    #[cfg(feature = "dev-experiments")]
-    cas_branches_dir: PathBuf,
-    #[cfg(feature = "dev-experiments")]
-    cas_branch_list: PathBuf,
-    wp_root: PathBuf,
-    debug_log: PathBuf,
-    php_error_log: PathBuf,
-    php_server_log: PathBuf,
-    forkpress_server_log: PathBuf,
-    server_pid_file: PathBuf,
-    runtime_ready_marker: PathBuf,
-    #[cfg(feature = "dev-experiments")]
-    bootstrap_marker: PathBuf,
-    #[cfg(feature = "dev-experiments")]
-    managed_files_marker: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -1661,38 +1475,6 @@ mod storage_strategy_tests {
 
     #[test]
     #[cfg(feature = "dev-experiments")]
-    fn manifest_parses_branchfs_and_aliases() {
-        let manifest = SiteManifest::parse("version = 1\nstrategy = \"sqlite\"\n").unwrap();
-        assert_eq!(manifest.strategy, StorageStrategy::Branchfs);
-
-        let manifest = SiteManifest::parse("strategy = \"sqlite-cow\"\n").unwrap();
-        assert_eq!(manifest.strategy, StorageStrategy::Branchfs);
-    }
-
-    #[test]
-    fn manifest_parses_cow_and_legacy_aliases() {
-        let manifest = SiteManifest::parse("strategy = \"zfs\"\n").unwrap();
-        assert_eq!(manifest.strategy, StorageStrategy::Cow);
-
-        let manifest = SiteManifest::parse("strategy = \"cow\"\n").unwrap();
-        assert_eq!(manifest.strategy, StorageStrategy::Cow);
-
-        let manifest = SiteManifest::parse("strategy = \"mac-cow\"\n").unwrap();
-        assert_eq!(manifest.strategy, StorageStrategy::Cow);
-    }
-
-    #[test]
-    #[cfg(not(feature = "dev-experiments"))]
-    fn production_manifest_rejects_experimental_strategies() {
-        let err = SiteManifest::parse("strategy = \"cas\"\n").unwrap_err();
-        assert!(err.to_string().contains("forkpress-dev"));
-
-        let err = SiteManifest::parse("strategy = \"branchfs\"\n").unwrap_err();
-        assert!(err.to_string().contains("forkpress-dev"));
-    }
-
-    #[test]
-    #[cfg(feature = "dev-experiments")]
     fn cli_accepts_cow_strategy_aliases() {
         for strategy in ["cow", "mac-cow", "zfs"] {
             let cli = Cli::try_parse_from([
@@ -2009,127 +1791,6 @@ mod storage_strategy_tests {
         );
 
         fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn manifest_parses_file_view() {
-        let manifest =
-            SiteManifest::parse("strategy = \"cow\"\nfile_view = \"macos-apfs-sparsebundle\"\n")
-                .unwrap();
-        assert_eq!(manifest.strategy, StorageStrategy::Cow);
-        assert_eq!(
-            manifest.file_view,
-            Some(FileViewStrategy::MacosApfsSparsebundle)
-        );
-
-        let manifest = SiteManifest::parse("strategy = \"cow\"\nfile_view = \"copy\"\n").unwrap();
-        assert_eq!(manifest.file_view, Some(FileViewStrategy::Copy));
-    }
-
-    #[test]
-    #[cfg(feature = "dev-experiments")]
-    fn manifest_parses_cas() {
-        let manifest = SiteManifest::parse("strategy = \"cas\"\n").unwrap();
-        assert_eq!(manifest.strategy, StorageStrategy::Cas);
-        let alias = SiteManifest::parse("strategy = \"redb\"\n").unwrap();
-        assert_eq!(alias.strategy, StorageStrategy::Cas);
-    }
-
-    #[test]
-    fn manifest_render_round_trips() {
-        let rendered = SiteManifest::new(StorageStrategy::Cow)
-            .with_file_view(FileViewStrategy::Reflink)
-            .render();
-        let parsed = SiteManifest::parse(&rendered).unwrap();
-        assert!(rendered.contains("strategy = \"cow\""));
-        assert_eq!(parsed.strategy, StorageStrategy::Cow);
-        assert_eq!(parsed.file_view, Some(FileViewStrategy::Reflink));
-    }
-
-    #[test]
-    fn cow_branch_names_are_dns_label_safe() {
-        assert!(validate_branch_name("feature-1").is_ok());
-        assert!(validate_branch_name("agent_2").is_ok());
-        assert!(validate_branch_name("").is_err());
-        assert!(validate_branch_name("has.dot").is_err());
-        assert!(validate_branch_name("../main").is_err());
-        assert!(validate_branch_name(&"a".repeat(64)).is_err());
-        for reserved in ["www", "admin", "api", "mail", "localhost", "wp"] {
-            assert!(validate_branch_name(reserved).is_err());
-            assert!(validate_branch_name(&reserved.to_ascii_uppercase()).is_err());
-        }
-    }
-
-    #[test]
-    fn layout_uses_cow_dir_for_new_sites_and_legacy_zfs_for_existing_sites() {
-        let root = std::env::temp_dir().join(format!(
-            "forkpress-layout-test-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let new_project = root.join("new-project");
-        let new_site = new_project.join(".forkpress");
-        let new_layout = Layout::new(new_site.clone()).unwrap();
-        assert_eq!(
-            new_layout.cow_dir,
-            absolutize(new_site.clone()).unwrap().join("cow")
-        );
-        assert_eq!(
-            new_layout.project_dir,
-            absolutize(new_project.clone()).unwrap()
-        );
-        assert_eq!(
-            new_layout.cow_branches_dir,
-            absolutize(new_project).unwrap()
-        );
-        fs::create_dir_all(new_site.join("cow")).unwrap();
-        fs::write(new_site.join("cow/branches.txt"), b"main\n").unwrap();
-        let new_layout_with_branch_list = Layout::new(new_site.clone()).unwrap();
-        assert_eq!(
-            new_layout_with_branch_list.cow_branches_dir,
-            new_layout.cow_branches_dir
-        );
-
-        let legacy_cow_site = root.join("legacy-cow/.forkpress");
-        fs::create_dir_all(legacy_cow_site.join("cow/branches")).unwrap();
-        let legacy_cow_layout = Layout::new(legacy_cow_site.clone()).unwrap();
-        assert_eq!(
-            legacy_cow_layout.cow_dir,
-            absolutize(legacy_cow_site.clone()).unwrap().join("cow")
-        );
-        assert_eq!(
-            legacy_cow_layout.cow_branches_dir,
-            absolutize(legacy_cow_site).unwrap().join("cow/branches")
-        );
-
-        let legacy_site = root.join("legacy-zfs/.forkpress");
-        fs::create_dir_all(legacy_site.join("zfs/branches")).unwrap();
-        let legacy_layout = Layout::new(legacy_site.clone()).unwrap();
-        assert_eq!(
-            legacy_layout.cow_dir,
-            absolutize(legacy_site).unwrap().join("zfs")
-        );
-        assert_eq!(
-            legacy_layout.cow_branches_dir,
-            legacy_layout.cow_dir.join("branches")
-        );
-
-        let zfs_smoke_site = root.join("zfs-smoke-only/.forkpress");
-        fs::create_dir_all(zfs_smoke_site.join("zfs")).unwrap();
-        fs::write(zfs_smoke_site.join("zfs/engine-smoke.img"), b"").unwrap();
-        let zfs_smoke_layout = Layout::new(zfs_smoke_site.clone()).unwrap();
-        assert_eq!(
-            zfs_smoke_layout.cow_dir,
-            absolutize(zfs_smoke_site.clone()).unwrap().join("cow")
-        );
-        assert_eq!(
-            zfs_smoke_layout.cow_branches_dir,
-            absolutize(root.join("zfs-smoke-only")).unwrap()
-        );
-        let _ = fs::remove_dir_all(root);
     }
 }
 
@@ -3655,67 +3316,6 @@ fn add_agent_worktree(
     }
 }
 
-impl Layout {
-    fn new(work_dir: PathBuf) -> Result<Self> {
-        let work_dir = absolutize(work_dir)?;
-        let project_dir = work_dir
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| work_dir.clone());
-        let primary_cow_dir = work_dir.join("cow");
-        let legacy_cow_dir = work_dir.join("zfs");
-        let legacy_primary_has_cow_data = path_exists_no_follow(&primary_cow_dir.join("branches"));
-        let legacy_zfs_has_cow_data = path_exists_no_follow(&legacy_cow_dir.join("branches"));
-        let (cow_dir, cow_branches_dir) = if legacy_primary_has_cow_data {
-            (primary_cow_dir.clone(), primary_cow_dir.join("branches"))
-        } else if legacy_zfs_has_cow_data {
-            (legacy_cow_dir.clone(), legacy_cow_dir.join("branches"))
-        } else {
-            (primary_cow_dir.clone(), project_dir.clone())
-        };
-        let cow_branch_list = cow_dir.join("branches.txt");
-        let cow_git_dir = cow_dir.join("git");
-
-        Ok(Self {
-            project_dir,
-            runtime_dir: work_dir.join("runtime"),
-            logs_dir: work_dir.join("logs"),
-            site_manifest: work_dir.join("site.toml"),
-            site_fp: work_dir.join("site.fp"),
-            cow_dir,
-            cow_branches_dir,
-            cow_branch_list,
-            cow_git_dir,
-            macos_cow_dir: work_dir.join("macos-cow"),
-            macos_cow_image: work_dir.join("macos-cow/branches.sparsebundle"),
-            macos_cow_mount: work_dir.join("macos-cow/mount"),
-            macos_cow_branches_dir: work_dir.join("macos-cow/mount/branches"),
-            #[cfg(feature = "dev-experiments")]
-            cas_dir: work_dir.join("cas"),
-            #[cfg(feature = "dev-experiments")]
-            cas_store: work_dir.join("cas/store.redb"),
-            #[cfg(feature = "dev-experiments")]
-            cas_wp_root: work_dir.join("cas/wproot"),
-            #[cfg(feature = "dev-experiments")]
-            cas_branches_dir: work_dir.join("cas/branches"),
-            #[cfg(feature = "dev-experiments")]
-            cas_branch_list: work_dir.join("cas/branches.txt"),
-            wp_root: work_dir.join("wproot"),
-            debug_log: work_dir.join("logs/wp-debug.log"),
-            php_error_log: work_dir.join("logs/php-errors.log"),
-            php_server_log: work_dir.join("logs/php-server.log"),
-            forkpress_server_log: work_dir.join("logs/forkpress-server.log"),
-            server_pid_file: work_dir.join("server.pid"),
-            runtime_ready_marker: work_dir.join("runtime/.forkpress-runtime-ready"),
-            #[cfg(feature = "dev-experiments")]
-            bootstrap_marker: work_dir.join(".forkpress-bootstrap-complete"),
-            #[cfg(feature = "dev-experiments")]
-            managed_files_marker: work_dir.join(".forkpress-managed-files-version"),
-            work_dir,
-        })
-    }
-}
-
 impl PortableRuntime {
     fn from_layout(layout: &Layout) -> Self {
         let root = layout.runtime_dir.join("portable-runtime");
@@ -3723,59 +3323,6 @@ impl PortableRuntime {
             php: root.join("bin/php"),
         }
     }
-}
-
-fn read_site_manifest(layout: &Layout) -> Result<Option<SiteManifest>> {
-    if !layout.site_manifest.is_file() {
-        return Ok(None);
-    }
-    let contents = fs::read_to_string(&layout.site_manifest)
-        .with_context(|| format!("failed to read {}", layout.site_manifest.display()))?;
-    SiteManifest::parse(&contents)
-        .with_context(|| format!("failed to parse {}", layout.site_manifest.display()))
-        .map(Some)
-}
-
-fn write_site_manifest(layout: &Layout, manifest: SiteManifest) -> Result<()> {
-    fs::create_dir_all(&layout.work_dir)?;
-    fs::write(&layout.site_manifest, manifest.render())
-        .with_context(|| format!("failed to write {}", layout.site_manifest.display()))
-}
-
-fn write_site_manifest_if_missing(layout: &Layout, manifest: SiteManifest) -> Result<()> {
-    if read_site_manifest(layout)?.is_none() {
-        write_site_manifest(layout, manifest)?;
-    }
-    Ok(())
-}
-
-fn initialized_storage_strategy(layout: &Layout) -> Result<Option<StorageStrategy>> {
-    if let Some(manifest) = read_site_manifest(layout)? {
-        return Ok(Some(manifest.strategy));
-    }
-
-    // Back-compat: sites created before the manifest existed are the original
-    // BranchFS/SQLite strategy and can be detected from site.fp.
-    if layout.site_fp.exists() {
-        #[cfg(feature = "dev-experiments")]
-        return Ok(Some(StorageStrategy::Branchfs));
-        #[cfg(not(feature = "dev-experiments"))]
-        bail!(
-            "legacy BranchFS site detected at {}; use forkpress-dev to open experimental or legacy storage",
-            layout.site_fp.display()
-        );
-    }
-
-    Ok(None)
-}
-
-fn require_initialized_strategy(layout: &Layout, command: &str) -> Result<StorageStrategy> {
-    initialized_storage_strategy(layout)?.ok_or_else(|| {
-        anyhow!(
-            "{command}: no ForkPress site found in {}. Run `forkpress init` first.",
-            layout.work_dir.display()
-        )
-    })
 }
 
 #[cfg(feature = "dev-experiments")]
@@ -3884,41 +3431,6 @@ strategy yet.
             layout.cas_dir.join("README.md").display()
         )
     })
-}
-
-fn absolutize(path: PathBuf) -> Result<PathBuf> {
-    // Make the path absolute and normalize `.` / `..` components. We can't use
-    // std::fs::canonicalize because the directory may not exist yet (first run).
-    // A literal `./` survives a naive join (e.g. `cwd + "./.forkpress"` becomes
-    // `cwd/./.forkpress`), and branchfs's prefix matching does not treat that
-    // as equal to `cwd/.forkpress`, so this normalization is load-bearing.
-    let raw = if path.is_absolute() {
-        path
-    } else {
-        std::env::current_dir()
-            .context("failed to read current working directory")?
-            .join(path)
-    };
-
-    let mut out = PathBuf::new();
-    for comp in raw.components() {
-        match comp {
-            std::path::Component::ParentDir => {
-                out.pop();
-            }
-            std::path::Component::CurDir => {}
-            other => out.push(other.as_os_str()),
-        }
-    }
-    Ok(out)
-}
-
-fn path_exists_no_follow(path: &Path) -> bool {
-    match fs::symlink_metadata(path) {
-        Ok(_) => true,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
-        Err(_) => true,
-    }
 }
 
 fn prepare_runtime(layout: &Layout) -> Result<()> {
@@ -4607,25 +4119,6 @@ fn run_cow_bootstrap_script(
 
 fn cow_branch_root(layout: &Layout, branch: &str) -> PathBuf {
     layout.cow_branches_dir.join(branch)
-}
-
-fn validate_branch_name(branch: &str) -> Result<()> {
-    let valid = !branch.is_empty()
-        && branch.len() <= 63
-        && branch
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-');
-    if !valid || reserved_branch_name(branch) {
-        bail!("invalid branch name: {branch}");
-    }
-    Ok(())
-}
-
-fn reserved_branch_name(branch: &str) -> bool {
-    matches!(
-        branch.to_ascii_lowercase().as_str(),
-        "www" | "admin" | "api" | "mail" | "localhost" | "wp"
-    )
 }
 
 fn cow_branch_names(layout: &Layout) -> Result<Vec<String>> {

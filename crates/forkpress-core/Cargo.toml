@@ -1,0 +1,12 @@
+[package]
+name = "forkpress-core"
+version = "0.1.13-cow.1"
+edition = "2024"
+
+[features]
+default = []
+dev-experiments = []
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }

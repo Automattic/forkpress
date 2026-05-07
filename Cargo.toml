@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/forkpress-cli",
+    "crates/forkpress-core",
     "experiments/cas/crates/cas-store",
     "experiments/cas/crates/cas-ffi",
 ]

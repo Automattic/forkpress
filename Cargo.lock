@@ -320,11 +320,20 @@ dependencies = [
  "ctrlc",
  "flate2",
  "forkpress-cas-store",
+ "forkpress-core",
  "libc",
  "num_cpus",
  "tar",
  "walkdir",
  "zip",
+]
+
+[[package]]
+name = "forkpress-core"
+version = "0.1.13-cow.1"
+dependencies = [
+ "anyhow",
+ "clap",
 ]
 
 [[package]]
