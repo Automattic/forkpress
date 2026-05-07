@@ -408,8 +408,7 @@ class GitEndpoint {
 			return false;
 		}
 
-		$old_oid = $header['old_oid'];
-		// @TODO: Verify the old_oid is the ref_name tip.
+		$old_oid = $header['old_oid'] ?: Commit::NULL_HASH;
 		$new_oid  = $header['new_oid'];
 		$ref_name = $header['ref_name'];
 
@@ -419,6 +418,18 @@ class GitEndpoint {
 			$git_response->append_error_packet_line( '0000' );
 
 			// @TODO: Throw / catch?
+			return false;
+		}
+
+		$current_oid = $this->repository->branch_exists( $ref_name )
+			? $this->repository->get_branch_tip( $ref_name )
+			: Commit::NULL_HASH;
+		if ( $old_oid !== $current_oid ) {
+			$git_response->append_sideband_packet_line( "unpack ok\n" );
+			$git_response->append_sideband_packet_line( "ng $ref_name stale ref; expected $current_oid\n" );
+			$git_response->append_sideband_packet_line( '0000' );
+			$git_response->append_packet_line( '0000' );
+
 			return false;
 		}
 
@@ -488,7 +499,7 @@ class GitEndpoint {
 					}
 
 					return array(
-						'old_oid'      => $matches[1],
+						'old_oid'      => $matches[1] ?? Commit::NULL_HASH,
 						'new_oid'      => $matches[2],
 						'ref_name'     => $matches[3],
 						'capabilities' => explode( ' ', trim( $matches[4] ) ),

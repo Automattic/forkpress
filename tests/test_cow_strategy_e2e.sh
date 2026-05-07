@@ -206,6 +206,7 @@ grep -F "created through git" "$WORK/git-created/wp-content/git-created.txt" >/d
 test ! -e "$WORK/main/wp-content/git-created.txt"
 test ! -e "$WORK/git-created/database.sql"
 test "$(git -C "$TMP/checkout" rev-parse HEAD)" = "$(git -C "$TMP/checkout" rev-parse refs/remotes/origin/git-created)"
+test "$(git -C "$TMP/checkout" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}')" = "origin/git-created"
 STATUS="$(git -C "$TMP/checkout" status --porcelain)"
 if [ -n "$STATUS" ]; then
   echo "forkpress commit left git-created checkout dirty after server normalization:" >&2

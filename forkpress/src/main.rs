@@ -1261,11 +1261,34 @@ fn with_stopped_cow_server_for_storage<T>(
     timeout: Duration,
     action: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
+    with_stopped_cow_server_for_storage_impl(
+        layout,
+        keep_server,
+        timeout,
+        running_record_for_work_dir,
+        stop_server_record,
+        action,
+    )
+}
+
+fn with_stopped_cow_server_for_storage_impl<T, FindRunning, StopRunning, Action>(
+    layout: &Layout,
+    keep_server: bool,
+    timeout: Duration,
+    mut find_running: FindRunning,
+    mut stop_running: StopRunning,
+    action: Action,
+) -> Result<T>
+where
+    FindRunning: FnMut(&Path) -> Result<Option<ServerRecord>>,
+    StopRunning: FnMut(&ServerRecord, Duration) -> Result<()>,
+    Action: FnOnce() -> Result<T>,
+{
     let mut action = Some(action);
     loop {
         let _lifecycle_lock = lock_cow_lifecycle(layout)?;
         let _lock = lock_cow_operations(layout)?;
-        if let Some(record) = running_record_for_work_dir(&layout.work_dir)? {
+        if let Some(record) = find_running(&layout.work_dir)? {
             drop(_lock);
             drop(_lifecycle_lock);
             if keep_server {
@@ -1275,7 +1298,7 @@ fn with_stopped_cow_server_for_storage<T>(
                     layout.work_dir.display()
                 );
             }
-            stop_server_record(&record, timeout)?;
+            stop_running(&record, timeout)?;
             continue;
         }
 
@@ -1698,6 +1721,99 @@ mod storage_strategy_tests {
         assert!(args.keep_server);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn cow_storage_lifecycle_waits_for_background_start_lock() {
+        let root = std::env::temp_dir().join(format!(
+            "forkpress-cow-lifecycle-wait-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let layout = Layout::new(root.join(".forkpress")).unwrap();
+        fs::create_dir_all(&layout.cow_dir).unwrap();
+        let start_lock = lock_cow_lifecycle(&layout).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let thread_layout = layout.clone();
+
+        let handle = std::thread::spawn(move || {
+            with_stopped_cow_server_for_storage_impl(
+                &thread_layout,
+                false,
+                Duration::from_millis(10),
+                |_| Ok(None),
+                |_, _| Ok(()),
+                || {
+                    tx.send(()).unwrap();
+                    Ok(())
+                },
+            )
+            .unwrap();
+        });
+
+        assert!(rx.recv_timeout(Duration::from_millis(150)).is_err());
+        drop(start_lock);
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        handle.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cow_storage_lifecycle_stops_registered_server_before_action() {
+        let root = std::env::temp_dir().join(format!(
+            "forkpress-cow-lifecycle-stop-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let layout = Layout::new(root.join(".forkpress")).unwrap();
+        fs::create_dir_all(&layout.cow_dir).unwrap();
+        let record = ServerRecord {
+            pid: 12345,
+            child_pid: None,
+            work_dir: layout.work_dir.clone(),
+            host: "127.0.0.1".to_string(),
+            port: 18080,
+            root_host: "wp.localhost".to_string(),
+            log: layout.forkpress_server_log.clone(),
+        };
+        let lookups = std::cell::Cell::new(0);
+        let stopped = std::cell::Cell::new(false);
+
+        with_stopped_cow_server_for_storage_impl(
+            &layout,
+            false,
+            Duration::from_secs(3),
+            |work_dir| {
+                assert_eq!(work_dir, layout.work_dir);
+                let count = lookups.get();
+                lookups.set(count + 1);
+                if count == 0 {
+                    Ok(Some(record.clone()))
+                } else {
+                    Ok(None)
+                }
+            },
+            |stopped_record, timeout| {
+                assert_eq!(stopped_record, &record);
+                assert_eq!(timeout, Duration::from_secs(3));
+                stopped.set(true);
+                Ok(())
+            },
+            || {
+                assert!(stopped.get());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(lookups.get(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn cow_stale_operation_entries_reports_top_level_leftovers() {
         let root = std::env::temp_dir().join(format!(
@@ -1757,6 +1873,69 @@ mod storage_strategy_tests {
     }
 
     #[test]
+    fn reset_rollback_reports_restore_outcome() {
+        let root = std::env::temp_dir().join(format!(
+            "forkpress-reset-rollback-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let target = root.join("branch");
+        let backup = root.join(".forkpress-reset-backup-branch");
+        let staging = root.join(".forkpress-reset-stage-branch");
+        let failed = root.join(".forkpress-reset-failed-branch");
+        fs::create_dir_all(&backup).unwrap();
+        fs::write(backup.join("wp-load.php"), b"<?php\n").unwrap();
+        fs::create_dir_all(&staging).unwrap();
+
+        let message = rollback_failed_reset_publish(
+            "branch", &target, &backup, &staging, &failed, true, false,
+        );
+        assert!(message.contains("restored previous branch contents"));
+        assert!(target.join("wp-load.php").is_file());
+        assert!(!path_exists_no_follow(&backup));
+        assert!(!path_exists_no_follow(&staging));
+
+        fs::remove_dir_all(&target).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        fs::create_dir_all(&backup).unwrap();
+        let message = rollback_failed_reset_publish(
+            "branch", &target, &backup, &staging, &failed, true, false,
+        );
+        assert!(message.contains("rollback incomplete"));
+        assert!(message.contains("backup remains"));
+        assert!(path_exists_no_follow(&backup));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reset_marks_cow_git_ref_stale() {
+        let root = std::env::temp_dir().join(format!(
+            "forkpress-reset-ref-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let layout = Layout::new(root.join(".forkpress")).unwrap();
+        let ref_path = layout.cow_git_dir.join("refs/heads/feature");
+        fs::create_dir_all(ref_path.parent().unwrap()).unwrap();
+        fs::write(&ref_path, "1111111111111111111111111111111111111111\n").unwrap();
+
+        invalidate_cow_git_ref(&layout, "feature").unwrap();
+        assert_eq!(
+            fs::read_to_string(&ref_path).unwrap(),
+            "0000000000000000000000000000000000000000\n"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn manifest_parses_file_view() {
         let manifest =
             SiteManifest::parse("strategy = \"cow\"\nfile_view = \"macos-apfs-sparsebundle\"\n")
@@ -1798,6 +1977,10 @@ mod storage_strategy_tests {
         assert!(validate_branch_name("has.dot").is_err());
         assert!(validate_branch_name("../main").is_err());
         assert!(validate_branch_name(&"a".repeat(64)).is_err());
+        for reserved in ["www", "admin", "api", "mail", "localhost", "wp"] {
+            assert!(validate_branch_name(reserved).is_err());
+            assert!(validate_branch_name(&reserved.to_ascii_uppercase()).is_err());
+        }
     }
 
     #[test]
@@ -2229,18 +2412,17 @@ fn server_stop_command(args: ServerStopArgs) -> Result<i32> {
     } else {
         let layout = Layout::new(args.work_dir.clone())?;
         push_unique_detach_layout(&mut detach_layouts, layout.clone());
-        if let Some(pid) = read_pid_file(&layout.server_pid_file)? {
-            if let Some(record) = records.iter().find(|record| record.pid == pid).cloned() {
-                targets.push(record);
-            }
+        if let Some(pid) = read_pid_file(&layout.server_pid_file)?
+            && let Some(record) = records.iter().find(|record| record.pid == pid).cloned()
+        {
+            targets.push(record);
         }
-        if targets.is_empty() {
-            if let Some(record) = records
+        if targets.is_empty()
+            && let Some(record) = records
                 .into_iter()
                 .find(|record| record.work_dir == layout.work_dir)
-            {
-                targets.push(record);
-            }
+        {
+            targets.push(record);
         }
     }
 
@@ -2316,10 +2498,10 @@ fn register_running_server(
 }
 
 fn unregister_running_server(layout: &Layout, pid: u32) -> Result<()> {
-    if let Some(current_pid) = read_pid_file(&layout.server_pid_file)? {
-        if current_pid == pid {
-            let _ = fs::remove_file(&layout.server_pid_file);
-        }
+    if let Some(current_pid) = read_pid_file(&layout.server_pid_file)?
+        && current_pid == pid
+    {
+        let _ = fs::remove_file(&layout.server_pid_file);
     }
 
     let _registry_lock = lock_server_registry()?;
@@ -2359,6 +2541,7 @@ fn lock_server_registry() -> Result<ServerRegistryLock> {
         .create(true)
         .read(true)
         .write(true)
+        .truncate(false)
         .open(&path)
         .with_context(|| format!("failed to open {}", path.display()))?;
     let status = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
@@ -2565,13 +2748,14 @@ fn signal_server_record(record: &ServerRecord, signal: i32) -> Result<()> {
         }
     }
 
-    if let Some(child_pid) = record.child_pid {
-        if process_exists(child_pid) && !signaled_group {
-            if process_group_id(child_pid) == Some(record.pid) {
-                signal_process_group(record.pid, signal)?;
-            } else {
-                signal_process(child_pid, signal)?;
-            }
+    if let Some(child_pid) = record.child_pid
+        && process_exists(child_pid)
+        && !signaled_group
+    {
+        if process_group_id(child_pid) == Some(record.pid) {
+            signal_process_group(record.pid, signal)?;
+        } else {
+            signal_process(child_pid, signal)?;
         }
     }
 
@@ -2950,6 +3134,7 @@ fn push_command(args: PushArgs) -> Result<i32> {
 
 fn sync_pushed_branch(repo: &std::path::Path, remote_name: &str, branch: &str) -> Result<()> {
     let remote_ref = format!("refs/remotes/{remote_name}/{branch}");
+    let upstream = format!("{remote_name}/{branch}");
     run_git(
         Some(repo),
         [
@@ -2959,6 +3144,7 @@ fn sync_pushed_branch(repo: &std::path::Path, remote_name: &str, branch: &str) -
             OsString::from(format!("+refs/heads/{branch}:{remote_ref}")),
         ],
     )?;
+    set_pushed_branch_upstream(repo, branch, &upstream)?;
 
     let head = git_stdout(repo, ["rev-parse", "HEAD"])?;
     let remote_head = git_stdout(repo, ["rev-parse", remote_ref.as_str()])?;
@@ -2967,6 +3153,7 @@ fn sync_pushed_branch(repo: &std::path::Path, remote_name: &str, branch: &str) -
     }
 
     if git_is_ancestor(repo, "HEAD", &remote_ref)? {
+        ensure_clean_before_server_normalized_reset(repo)?;
         run_git(
             Some(repo),
             [
@@ -2984,6 +3171,28 @@ fn sync_pushed_branch(repo: &std::path::Path, remote_name: &str, branch: &str) -
     }
 
     Ok(())
+}
+
+fn set_pushed_branch_upstream(repo: &std::path::Path, branch: &str, upstream: &str) -> Result<()> {
+    run_git(
+        Some(repo),
+        [
+            OsString::from("branch"),
+            OsString::from(format!("--set-upstream-to={upstream}")),
+            OsString::from(branch),
+        ],
+    )
+    .with_context(|| format!("failed to set upstream for {branch} to {upstream}"))
+}
+
+fn ensure_clean_before_server_normalized_reset(repo: &std::path::Path) -> Result<()> {
+    let status = git_stdout(repo, ["status", "--porcelain"])?;
+    if status.trim().is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "server-normalized Git ref is a fast-forward, but the checkout changed before reset; refusing to overwrite local changes"
+    );
 }
 
 fn ensure_git_identity(repo: &std::path::Path) -> Result<()> {
@@ -3732,11 +3941,11 @@ fn ensure_cow_file_view_ready(layout: &Layout) -> Result<FileViewStrategy> {
     }
 
     let file_view = prepare_cow_file_view(layout)?;
-    if let Some(existing) = manifest.as_mut() {
-        if existing.strategy == StorageStrategy::Cow {
-            existing.file_view = Some(file_view);
-            write_site_manifest(layout, existing.clone())?;
-        }
+    if let Some(existing) = manifest.as_mut()
+        && existing.strategy == StorageStrategy::Cow
+    {
+        existing.file_view = Some(file_view);
+        write_site_manifest(layout, existing.clone())?;
     }
     Ok(file_view)
 }
@@ -4277,10 +4486,17 @@ fn validate_branch_name(branch: &str) -> Result<()> {
         && branch
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-');
-    if !valid {
+    if !valid || reserved_branch_name(branch) {
         bail!("invalid branch name: {branch}");
     }
     Ok(())
+}
+
+fn reserved_branch_name(branch: &str) -> bool {
+    matches!(
+        branch.to_ascii_lowercase().as_str(),
+        "www" | "admin" | "api" | "mail" | "localhost" | "wp"
+    )
 }
 
 fn cow_branch_names(layout: &Layout) -> Result<Vec<String>> {
@@ -4535,23 +4751,16 @@ fn reset_cow_branch(
 
     if let Err(err) = publish {
         let failed = unique_cow_operation_dir(parent, "reset-failed", branch);
-        if staging_published && path_exists_no_follow(&target) {
-            match fs::rename(&target, &failed) {
-                Ok(()) => {}
-                Err(_) => {
-                    let _ = fs::remove_dir_all(&target);
-                }
-            }
-        }
-        if target_moved_to_backup
-            && path_exists_no_follow(&backup)
-            && !path_exists_no_follow(&target)
-        {
-            let _ = fs::rename(&backup, &target);
-        }
-        let _ = fs::remove_dir_all(&failed);
-        let _ = fs::remove_dir_all(&staging);
-        return Err(err).context("failed to reset COW branch; restored previous branch contents");
+        let rollback = rollback_failed_reset_publish(
+            branch,
+            &target,
+            &backup,
+            &staging,
+            &failed,
+            target_moved_to_backup,
+            staging_published,
+        );
+        return Err(err).context(format!("failed to reset COW branch; {rollback}"));
     }
 
     if let Err(err) = fs::remove_dir_all(&backup) {
@@ -4560,9 +4769,99 @@ fn reset_cow_branch(
             backup.display()
         );
     }
+    invalidate_cow_git_ref(layout, branch)?;
 
     println!("forkpress: reset COW branch '{branch}' from '{from}'");
     Ok(())
+}
+
+fn rollback_failed_reset_publish(
+    branch: &str,
+    target: &Path,
+    backup: &Path,
+    staging: &Path,
+    failed: &Path,
+    target_moved_to_backup: bool,
+    staging_published: bool,
+) -> String {
+    let mut notes = Vec::new();
+    let mut errors = Vec::new();
+
+    if staging_published && path_exists_no_follow(target) {
+        match fs::rename(target, failed) {
+            Ok(()) => notes.push(format!("moved failed published tree to {}", failed.display())),
+            Err(rename_err) => match fs::remove_dir_all(target) {
+                Ok(()) => notes.push(format!(
+                    "removed failed published tree from {} after rename failed",
+                    target.display()
+                )),
+                Err(remove_err) => errors.push(format!(
+                    "failed to move published tree {} to {} ({rename_err}); also failed to remove it ({remove_err})",
+                    target.display(),
+                    failed.display()
+                )),
+            },
+        }
+    }
+
+    if target_moved_to_backup && path_exists_no_follow(backup) {
+        if path_exists_no_follow(target) {
+            errors.push(format!(
+                "previous branch backup remains at {} because target still exists at {}",
+                backup.display(),
+                target.display()
+            ));
+        } else {
+            match fs::rename(backup, target) {
+                Ok(()) => notes.push(format!("restored previous branch contents for '{branch}'")),
+                Err(err) => errors.push(format!(
+                    "failed to restore previous branch backup {} to {} ({err})",
+                    backup.display(),
+                    target.display()
+                )),
+            }
+        }
+    } else if target_moved_to_backup {
+        errors.push(format!(
+            "previous branch backup is missing from {}",
+            backup.display()
+        ));
+    }
+
+    for path in [failed, staging] {
+        if path_exists_no_follow(path)
+            && let Err(err) = fs::remove_dir_all(path)
+        {
+            errors.push(format!(
+                "failed to remove temporary path {} ({err})",
+                path.display()
+            ));
+        }
+    }
+
+    if errors.is_empty() {
+        if notes.is_empty() {
+            "no published reset changes needed rollback".to_string()
+        } else {
+            notes.join("; ")
+        }
+    } else {
+        format!(
+            "rollback incomplete: {}; {}",
+            errors.join("; "),
+            notes.join("; ")
+        )
+    }
+}
+
+fn invalidate_cow_git_ref(layout: &Layout, branch: &str) -> Result<()> {
+    let ref_path = layout.cow_git_dir.join("refs/heads").join(branch);
+    if let Some(parent) = ref_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(&ref_path, "0000000000000000000000000000000000000000\n")
+        .with_context(|| format!("failed to mark COW Git ref stale at {}", ref_path.display()))
 }
 
 fn cow_sqlite_db_path(branch_root: &Path) -> PathBuf {
@@ -4653,6 +4952,7 @@ fn lock_cow_operations(layout: &Layout) -> Result<CowOperationLock> {
         .create(true)
         .read(true)
         .write(true)
+        .truncate(false)
         .open(&path)
         .with_context(|| format!("failed to open {}", path.display()))?;
     let status = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
@@ -4681,6 +4981,7 @@ fn lock_cow_lifecycle(layout: &Layout) -> Result<CowLifecycleLock> {
         .create(true)
         .read(true)
         .write(true)
+        .truncate(false)
         .open(&path)
         .with_context(|| format!("failed to open {}", path.display()))?;
     let status = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
@@ -5466,6 +5767,7 @@ fn start_cow_php_server(
         .env("FORKPRESS_DEBUG_LOG", &layout.debug_log)
         .env("FORKPRESS_PLAIN_STRATEGY", "cow")
         .env("FORKPRESS_ROOT_HOST", &args.root_host)
+        .env_remove(FORKPRESS_COW_PARENT_LIFECYCLE_LOCK)
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
 

@@ -130,6 +130,17 @@ if (@symlink($secret, $main . '/link-secret')) {
     $response = router_request($child, $branches, $cow, $router, '/link-safe');
     assert_same($response['status'], 200, 'internal symlink request returns 200');
     assert_same($response['body'], "safe\n", 'internal symlink request serves branch-local target');
+
+    $external_dir = $tmp . '/external-dir';
+    mkdir($external_dir, 0777, true);
+    file_put_contents($external_dir . '/hidden.txt', "hidden\n");
+    @symlink($external_dir, $main . '/link-dir');
+    foreach (['/link-dir', '/link-dir/'] as $uri) {
+        $response = router_request($child, $branches, $cow, $router, $uri);
+        assert_same($response['status'], 404, "external symlinked directory request returns 404 for $uri");
+        assert_true(!str_contains($response['body'], 'INDEX'), "external symlinked directory request does not fall through to front controller for $uri");
+        assert_true(!str_contains($response['body'], 'hidden'), "external symlinked directory request does not disclose target files for $uri");
+    }
 } else {
     echo "  SKIP: symlink containment tests\n";
 }

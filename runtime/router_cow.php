@@ -177,6 +177,7 @@ if ($path === '/plugins.php'
 }
 
 $full_path = $branch_root . $path;
+$requested_path = $full_path;
 if (substr($path, -1) === '/') {
     $full_path .= 'index.php';
 }
@@ -245,6 +246,13 @@ if (is_dir($full_path)) {
         require $index;
         return true;
     }
+}
+
+if ((file_exists($requested_path) || is_link($requested_path))
+    && !forkpress_cow_path_is_inside_branch($branch_root, $requested_path)) {
+    http_response_code(404);
+    echo "Not found\n";
+    return true;
 }
 
 if (!forkpress_cow_path_is_inside_branch($branch_root, $branch_root . '/index.php')) {
