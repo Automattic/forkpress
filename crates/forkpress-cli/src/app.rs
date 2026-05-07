@@ -2,7 +2,9 @@
 use anyhow::anyhow;
 use anyhow::{Context, Result, bail};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
-use std::ffi::{OsStr, OsString};
+#[cfg(feature = "dev-experiments")]
+use std::ffi::OsStr;
+use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -17,6 +19,10 @@ use forkpress_core::{
     initialized_storage_strategy, path_exists_no_follow, read_site_manifest,
     require_initialized_strategy, validate_branch_name, write_site_manifest,
     write_site_manifest_if_missing,
+};
+use forkpress_git::{
+    add_agent_worktree, default_commit_message, default_git_remote, ensure_git_available,
+    ensure_git_identity, ensure_git_repository, git_stdout, run_git, sync_pushed_branch,
 };
 #[cfg(feature = "dev-experiments")]
 use forkpress_runtime::run_php_script;
@@ -2399,106 +2405,6 @@ fn push_command(args: PushArgs) -> Result<i32> {
     Ok(0)
 }
 
-fn sync_pushed_branch(repo: &std::path::Path, remote_name: &str, branch: &str) -> Result<()> {
-    let remote_ref = format!("refs/remotes/{remote_name}/{branch}");
-    let upstream = format!("{remote_name}/{branch}");
-    run_git(
-        Some(repo),
-        [
-            OsString::from("fetch"),
-            OsString::from("--prune"),
-            OsString::from(remote_name),
-            OsString::from(format!("+refs/heads/{branch}:{remote_ref}")),
-        ],
-    )?;
-    set_pushed_branch_upstream(repo, branch, &upstream)?;
-
-    let head = git_stdout(repo, ["rev-parse", "HEAD"])?;
-    let remote_head = git_stdout(repo, ["rev-parse", remote_ref.as_str()])?;
-    if head == remote_head {
-        return Ok(());
-    }
-
-    if git_is_ancestor(repo, "HEAD", &remote_ref)? {
-        ensure_clean_before_server_normalized_reset(repo)?;
-        run_git(
-            Some(repo),
-            [
-                OsString::from("reset"),
-                OsString::from("--hard"),
-                OsString::from(&remote_ref),
-            ],
-        )?;
-        println!("forkpress: fast-forwarded {branch} to the server-normalized Git ref");
-    } else {
-        eprintln!(
-            "forkpress: pushed {branch}, but the server-normalized Git ref is not a fast-forward; run forkpress pull in {}",
-            repo.display()
-        );
-    }
-
-    Ok(())
-}
-
-fn set_pushed_branch_upstream(repo: &std::path::Path, branch: &str, upstream: &str) -> Result<()> {
-    run_git(
-        Some(repo),
-        [
-            OsString::from("branch"),
-            OsString::from(format!("--set-upstream-to={upstream}")),
-            OsString::from(branch),
-        ],
-    )
-    .with_context(|| format!("failed to set upstream for {branch} to {upstream}"))
-}
-
-fn ensure_clean_before_server_normalized_reset(repo: &std::path::Path) -> Result<()> {
-    let status = git_stdout(repo, ["status", "--porcelain"])?;
-    if status.trim().is_empty() {
-        return Ok(());
-    }
-    bail!(
-        "server-normalized Git ref is a fast-forward, but the checkout changed before reset; refusing to overwrite local changes"
-    );
-}
-
-fn ensure_git_identity(repo: &std::path::Path) -> Result<()> {
-    if !git_config_is_set(repo, "user.name")? {
-        run_git(
-            Some(repo),
-            [
-                OsString::from("config"),
-                OsString::from("user.name"),
-                OsString::from("ForkPress Agent"),
-            ],
-        )?;
-    }
-    if !git_config_is_set(repo, "user.email")? {
-        run_git(
-            Some(repo),
-            [
-                OsString::from("config"),
-                OsString::from("user.email"),
-                OsString::from("forkpress-agent@local"),
-            ],
-        )?;
-    }
-    Ok(())
-}
-
-fn git_config_is_set(repo: &std::path::Path, key: &str) -> Result<bool> {
-    let status = Command::new("git")
-        .arg("config")
-        .arg("--get")
-        .arg(key)
-        .current_dir(repo)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .with_context(|| format!("failed to inspect git config {key}"))?;
-    Ok(status.success())
-}
-
 /// Background GC loop. Runs until `stop` flips true. Each tick invokes
 /// `experiments/branchfs/scripts/branchctl.php gc` via the bundled PHP and
 /// appends stdout/stderr to a dedicated log file, separate from php-server.log
@@ -2739,14 +2645,6 @@ fn branchctl_url_hint(layout: &Layout) -> Result<(String, String)> {
     Ok(("wp.localhost".to_string(), "18080".to_string()))
 }
 
-fn default_commit_message(branch: &str) -> String {
-    format!("forkpress: update {branch}")
-}
-
-fn default_git_remote() -> String {
-    "http://wp.localhost:18080/site.git".to_string()
-}
-
 #[cfg(feature = "dev-experiments")]
 fn ensure_branch_exists(
     layout: &Layout,
@@ -2795,38 +2693,6 @@ fn ensure_branch_exists(
         "branchctl create {branch} exited with status {}",
         output.status
     );
-}
-
-fn add_agent_worktree(
-    repo: &std::path::Path,
-    remote_name: &str,
-    branch: &str,
-    path: &std::path::Path,
-) -> Result<()> {
-    if git_ref_exists(repo, &format!("refs/heads/{branch}"))? {
-        run_git(
-            Some(repo),
-            [
-                OsString::from("worktree"),
-                OsString::from("add"),
-                path.as_os_str().to_owned(),
-                OsString::from(branch),
-            ],
-        )
-    } else {
-        run_git(
-            Some(repo),
-            [
-                OsString::from("worktree"),
-                OsString::from("add"),
-                OsString::from("--track"),
-                OsString::from("-b"),
-                OsString::from(branch),
-                path.as_os_str().to_owned(),
-                OsString::from(format!("{remote_name}/{branch}")),
-            ],
-        )
-    }
 }
 
 #[cfg(feature = "dev-experiments")]
@@ -3585,139 +3451,6 @@ fn start_cas_php_server(
         );
     }
     Ok(guard)
-}
-
-fn ensure_git_available() -> Result<()> {
-    let status = Command::new("git")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .context("failed to execute `git --version`")?;
-    if !status.success() {
-        bail!("git is required for this command");
-    }
-    Ok(())
-}
-
-fn ensure_git_repository(repo: &std::path::Path) -> Result<()> {
-    let status = Command::new("git")
-        .arg("rev-parse")
-        .arg("--git-dir")
-        .current_dir(repo)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .with_context(|| format!("failed to inspect git checkout at {}", repo.display()))?;
-    if status.success() {
-        Ok(())
-    } else {
-        bail!("not a git checkout: {}", repo.display());
-    }
-}
-
-fn run_git<I, S>(cwd: Option<&std::path::Path>, args: I) -> Result<()>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    let args_vec: Vec<OsString> = args
-        .into_iter()
-        .map(|arg| arg.as_ref().to_owned())
-        .collect();
-    let mut command = Command::new("git");
-    command
-        .args(&args_vec)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-    if let Some(dir) = cwd {
-        command.current_dir(dir);
-    }
-
-    let status = command.status().with_context(|| {
-        format!(
-            "failed to run git {}",
-            args_vec
-                .iter()
-                .map(|arg| arg.to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-                .join(" ")
-        )
-    })?;
-    if !status.success() {
-        bail!("git exited with status {status}");
-    }
-    Ok(())
-}
-
-fn git_stdout<I, S>(cwd: &std::path::Path, args: I) -> Result<String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    let args_vec: Vec<OsString> = args
-        .into_iter()
-        .map(|arg| arg.as_ref().to_owned())
-        .collect();
-    let output = Command::new("git")
-        .args(&args_vec)
-        .current_dir(cwd)
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to run git {}",
-                args_vec
-                    .iter()
-                    .map(|arg| arg.to_string_lossy().into_owned())
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            )
-        })?;
-    if !output.status.success() {
-        bail!(
-            "git {} exited with status {}",
-            args_vec
-                .iter()
-                .map(|arg| arg.to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-                .join(" "),
-            output.status
-        );
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-fn git_ref_exists(repo: &std::path::Path, reference: &str) -> Result<bool> {
-    let status = Command::new("git")
-        .arg("rev-parse")
-        .arg("--verify")
-        .arg("--quiet")
-        .arg(reference)
-        .current_dir(repo)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .with_context(|| format!("failed to inspect git ref {reference}"))?;
-    Ok(status.success())
-}
-
-fn git_is_ancestor(repo: &std::path::Path, ancestor: &str, descendant: &str) -> Result<bool> {
-    let status = Command::new("git")
-        .arg("merge-base")
-        .arg("--is-ancestor")
-        .arg(ancestor)
-        .arg(descendant)
-        .current_dir(repo)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .with_context(|| format!("failed to compare git refs {ancestor} and {descendant}"))?;
-    match status.code() {
-        Some(0) => Ok(true),
-        Some(1) => Ok(false),
-        _ => bail!("git merge-base exited with status {status}"),
-    }
 }
 
 #[cfg(test)]

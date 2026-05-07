@@ -321,6 +321,7 @@ dependencies = [
  "flate2",
  "forkpress-cas-store",
  "forkpress-core",
+ "forkpress-git",
  "forkpress-runtime",
  "forkpress-server",
  "forkpress-storage",
@@ -337,6 +338,13 @@ version = "0.1.13-cow.1"
 dependencies = [
  "anyhow",
  "clap",
+]
+
+[[package]]
+name = "forkpress-git"
+version = "0.1.13-cow.1"
+dependencies = [
+ "anyhow",
 ]
 
 [[package]]

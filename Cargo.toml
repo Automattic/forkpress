@@ -5,6 +5,7 @@ members = [
     "crates/forkpress-runtime",
     "crates/forkpress-storage",
     "crates/forkpress-server",
+    "crates/forkpress-git",
     "experiments/cas/crates/cas-store",
     "experiments/cas/crates/cas-ffi",
 ]
