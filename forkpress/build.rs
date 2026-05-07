@@ -78,7 +78,7 @@ fn main() -> Result<()> {
         for rel in [
             "scripts",
             "sql",
-            "wp-plugin",
+            "experiments/wp-plugin",
             "runtime/router.php",
             "runtime/router_cas.php",
             "runtime/bootstrap_wp.php",
@@ -406,6 +406,7 @@ fn build_bundle(
     add_tree(&mut tar, repo_root, "vendor")?;
     if dev_experiments {
         add_tree(&mut tar, repo_root, "wp-plugin")?;
+        add_tree(&mut tar, repo_root, "experiments/wp-plugin")?;
     } else {
         add_file(&mut tar, repo_root, "wp-plugin/forkpress-wp.php")?;
     }

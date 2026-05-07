@@ -5316,7 +5316,7 @@ fn install_cas_managed_wp_files(layout: &Layout, branch_root: &Path) -> Result<(
     fs::copy(
         layout
             .runtime_dir
-            .join("wp-plugin/forkpress-experiments-wp.php"),
+            .join("experiments/wp-plugin/forkpress-experiments-wp.php"),
         wp_content.join("mu-plugins/forkpress-experiments-wp.php"),
     )
     .with_context(|| {
@@ -5711,7 +5711,7 @@ fn ensure_bootstrapped(layout: &Layout, runtime: &PortableRuntime, args: &StartA
                 layout.debug_log.as_os_str(),
                 layout
                     .runtime_dir
-                    .join("wp-plugin/forkpress-experiments-wp.php")
+                    .join("experiments/wp-plugin/forkpress-experiments-wp.php")
                     .as_os_str(),
             ],
         )?;
@@ -5771,7 +5771,7 @@ fn refresh_managed_wp_files_if_needed(
             layout.debug_log.as_os_str(),
             layout
                 .runtime_dir
-                .join("wp-plugin/forkpress-experiments-wp.php")
+                .join("experiments/wp-plugin/forkpress-experiments-wp.php")
                 .as_os_str(),
         ],
     )?;
