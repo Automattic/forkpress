@@ -24,14 +24,14 @@ macOS release targets link only against `libSystem`:
 ## Repository Layout
 
 - `crates/forkpress-cli/` contains the Rust CLI package.
-- `crates/experiments/` contains experimental Rust crates.
 - `runtime/` contains production COW runtime files and the WordPress archive
   embedded into the binary.
 - `scripts/` contains production/shared build, SQLite, Git, and COW helpers.
 - `tests/` contains production COW PHP tests.
 - `experiments/branchfs/` contains the experimental BranchFS schema, PHP
   extension, runtime files, scripts, Git adapter, and tests.
-- `experiments/cas/` contains CAS experiment runtime files and tests.
+- `experiments/cas/` contains CAS experiment runtime files, Rust crates, and
+  tests.
 
 ## Branch Workflow
 

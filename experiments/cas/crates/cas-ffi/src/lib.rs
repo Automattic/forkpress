@@ -30,7 +30,11 @@ fn result_code(result: anyhow::Result<impl Sized>) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fp_cas_open(path: *const c_char) -> *mut FpCasHandle {
+/// # Safety
+///
+/// `path` must be null or a valid NUL-terminated C string for the duration of
+/// the call.
+pub unsafe extern "C" fn fp_cas_open(path: *const c_char) -> *mut FpCasHandle {
     let Some(path) = cstr_to_str(path) else {
         return ptr::null_mut();
     };
@@ -40,7 +44,11 @@ pub extern "C" fn fp_cas_open(path: *const c_char) -> *mut FpCasHandle {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fp_cas_close(handle: *mut FpCasHandle) {
+/// # Safety
+///
+/// `handle` must be null or a pointer returned by `fp_cas_open` that has not
+/// already been closed.
+pub unsafe extern "C" fn fp_cas_close(handle: *mut FpCasHandle) {
     if !handle.is_null() {
         unsafe {
             drop(Box::from_raw(handle));
@@ -49,7 +57,11 @@ pub extern "C" fn fp_cas_close(handle: *mut FpCasHandle) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fp_cas_free(ptr: *mut u8, len: size_t) {
+/// # Safety
+///
+/// `ptr` and `len` must match a buffer previously returned by this library and
+/// not yet freed.
+pub unsafe extern "C" fn fp_cas_free(ptr: *mut u8, len: size_t) {
     if !ptr.is_null() {
         unsafe {
             drop(Vec::from_raw_parts(ptr, len, len));
@@ -58,7 +70,14 @@ pub extern "C" fn fp_cas_free(ptr: *mut u8, len: size_t) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fp_cas_branch_exists(handle: *mut FpCasHandle, branch: *const c_char) -> c_int {
+/// # Safety
+///
+/// `handle` must be null or a live handle from `fp_cas_open`; `branch` must be
+/// null or a valid NUL-terminated C string for the duration of the call.
+pub unsafe extern "C" fn fp_cas_branch_exists(
+    handle: *mut FpCasHandle,
+    branch: *const c_char,
+) -> c_int {
     let Some(branch) = cstr_to_str(branch) else {
         return 0;
     };
@@ -69,7 +88,12 @@ pub extern "C" fn fp_cas_branch_exists(handle: *mut FpCasHandle, branch: *const 
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fp_cas_create_branch(
+/// # Safety
+///
+/// `handle` must be null or a live handle from `fp_cas_open`; `branch` and
+/// `parent` must be null or valid NUL-terminated C strings for the duration of
+/// the call.
+pub unsafe extern "C" fn fp_cas_create_branch(
     handle: *mut FpCasHandle,
     branch: *const c_char,
     parent: *const c_char,
@@ -95,7 +119,12 @@ pub extern "C" fn fp_cas_create_branch(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fp_cas_read_file(
+/// # Safety
+///
+/// `handle` must be null or a live handle from `fp_cas_open`; string pointers
+/// must be valid NUL-terminated C strings; `out_data` and `out_len` must be
+/// valid writable pointers.
+pub unsafe extern "C" fn fp_cas_read_file(
     handle: *mut FpCasHandle,
     branch: *const c_char,
     path: *const c_char,
@@ -126,7 +155,12 @@ pub extern "C" fn fp_cas_read_file(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fp_cas_write_file(
+/// # Safety
+///
+/// `handle` must be null or a live handle from `fp_cas_open`; string pointers
+/// must be valid NUL-terminated C strings; `data` must point to `len` readable
+/// bytes unless `len` is zero.
+pub unsafe extern "C" fn fp_cas_write_file(
     handle: *mut FpCasHandle,
     branch: *const c_char,
     path: *const c_char,
@@ -156,7 +190,11 @@ pub extern "C" fn fp_cas_write_file(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fp_cas_mkdir(
+/// # Safety
+///
+/// `handle` must be null or a live handle from `fp_cas_open`; string pointers
+/// must be valid NUL-terminated C strings for the duration of the call.
+pub unsafe extern "C" fn fp_cas_mkdir(
     handle: *mut FpCasHandle,
     branch: *const c_char,
     path: *const c_char,
@@ -171,7 +209,11 @@ pub extern "C" fn fp_cas_mkdir(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fp_cas_unlink(
+/// # Safety
+///
+/// `handle` must be null or a live handle from `fp_cas_open`; string pointers
+/// must be valid NUL-terminated C strings for the duration of the call.
+pub unsafe extern "C" fn fp_cas_unlink(
     handle: *mut FpCasHandle,
     branch: *const c_char,
     path: *const c_char,
@@ -186,7 +228,11 @@ pub extern "C" fn fp_cas_unlink(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fp_cas_rename(
+/// # Safety
+///
+/// `handle` must be null or a live handle from `fp_cas_open`; string pointers
+/// must be valid NUL-terminated C strings for the duration of the call.
+pub unsafe extern "C" fn fp_cas_rename(
     handle: *mut FpCasHandle,
     branch: *const c_char,
     from: *const c_char,
@@ -204,7 +250,12 @@ pub extern "C" fn fp_cas_rename(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fp_cas_stat(
+/// # Safety
+///
+/// `handle` must be null or a live handle from `fp_cas_open`; string pointers
+/// must be valid NUL-terminated C strings; `out_is_dir` and `out_len` must be
+/// valid writable pointers.
+pub unsafe extern "C" fn fp_cas_stat(
     handle: *mut FpCasHandle,
     branch: *const c_char,
     path: *const c_char,
@@ -231,7 +282,12 @@ pub extern "C" fn fp_cas_stat(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fp_cas_list_dir(
+/// # Safety
+///
+/// `handle` must be null or a live handle from `fp_cas_open`; string pointers
+/// must be valid NUL-terminated C strings; `out_data` and `out_len` must be
+/// valid writable pointers.
+pub unsafe extern "C" fn fp_cas_list_dir(
     handle: *mut FpCasHandle,
     branch: *const c_char,
     path: *const c_char,
@@ -292,46 +348,48 @@ mod tests {
         let dir = CString::new("wp-content").unwrap();
         let data = b"hello from cas ffi";
 
-        let handle = fp_cas_open(store_c.as_ptr());
-        assert!(!handle.is_null());
-        assert_eq!(fp_cas_create_branch(handle, branch.as_ptr(), parent), 0);
-        assert_eq!(
-            fp_cas_write_file(
-                handle,
-                branch.as_ptr(),
-                path.as_ptr(),
-                data.as_ptr(),
-                data.len()
-            ),
-            0
-        );
+        unsafe {
+            let handle = fp_cas_open(store_c.as_ptr());
+            assert!(!handle.is_null());
+            assert_eq!(fp_cas_create_branch(handle, branch.as_ptr(), parent), 0);
+            assert_eq!(
+                fp_cas_write_file(
+                    handle,
+                    branch.as_ptr(),
+                    path.as_ptr(),
+                    data.as_ptr(),
+                    data.len()
+                ),
+                0
+            );
 
-        let mut out_ptr: *mut u8 = ptr::null_mut();
-        let mut out_len: size_t = 0;
-        assert_eq!(
-            fp_cas_read_file(
-                handle,
-                branch.as_ptr(),
-                path.as_ptr(),
-                &mut out_ptr,
-                &mut out_len
-            ),
-            0
-        );
-        assert_eq!(out_len, data.len());
-        let out = unsafe { std::slice::from_raw_parts(out_ptr, out_len) };
-        assert_eq!(out, data);
-        fp_cas_free(out_ptr, out_len);
+            let mut out_ptr: *mut u8 = ptr::null_mut();
+            let mut out_len: size_t = 0;
+            assert_eq!(
+                fp_cas_read_file(
+                    handle,
+                    branch.as_ptr(),
+                    path.as_ptr(),
+                    &mut out_ptr,
+                    &mut out_len
+                ),
+                0
+            );
+            assert_eq!(out_len, data.len());
+            let out = std::slice::from_raw_parts(out_ptr, out_len);
+            assert_eq!(out, data);
+            fp_cas_free(out_ptr, out_len);
 
-        let mut is_dir: c_int = 0;
-        let mut len: size_t = 0;
-        assert_eq!(
-            fp_cas_stat(handle, branch.as_ptr(), dir.as_ptr(), &mut is_dir, &mut len),
-            0
-        );
-        assert_eq!(is_dir, 1);
+            let mut is_dir: c_int = 0;
+            let mut len: size_t = 0;
+            assert_eq!(
+                fp_cas_stat(handle, branch.as_ptr(), dir.as_ptr(), &mut is_dir, &mut len),
+                0
+            );
+            assert_eq!(is_dir, 1);
 
-        fp_cas_close(handle);
+            fp_cas_close(handle);
+        }
         let _ = std::fs::remove_file(store);
     }
 }

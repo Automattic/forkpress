@@ -472,11 +472,10 @@ make test-branchfs
 make test-all
 ```
 
-`tests/` contains production COW tests. Experimental Rust crates live under
-`crates/experiments/`; BranchFS and CAS runtime/test fixtures live with their
-experiment code under `experiments/`. There are no generic PHP tests shared by
-both storage families yet; common behavior is covered through the COW and
-experiment-specific suites.
+`tests/` contains production COW tests. Experiment-specific runtime files,
+Rust crates, and tests live with their experiment code under `experiments/`.
+There are no generic PHP tests shared by both storage families yet; common
+behavior is covered through the COW and experiment-specific suites.
 
 ## Publish
 

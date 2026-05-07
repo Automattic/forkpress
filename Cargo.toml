@@ -1,8 +1,8 @@
 [workspace]
 members = [
     "crates/forkpress-cli",
-    "crates/experiments/cas-store",
-    "crates/experiments/cas-ffi",
+    "experiments/cas/crates/cas-store",
+    "experiments/cas/crates/cas-ffi",
 ]
 default-members = ["crates/forkpress-cli"]
 resolver = "2"
