@@ -7,8 +7,7 @@ on:
   pull_request:
     paths:
       - 'forkpress/**'
-      - 'runtime/router_cow.php'
-      - 'runtime/bootstrap_cow_wp.php'
+      - 'runtime/cow/**'
       - 'runtime/wp.zip'
       - 'scripts/backup.php'
       - 'scripts/build-dist.sh'

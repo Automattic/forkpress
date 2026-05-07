@@ -212,7 +212,7 @@ foreach ($mu_plugins as $filename => $source) {
     echo "  mu-plugin $filename installed\n";
 }
 
-install_sqlite_integration(dirname(__DIR__) . '/vendor');
+install_sqlite_integration(dirname(__DIR__, 3) . '/vendor');
 
 // --- Install WordPress ---
 branchfs_set_branch('main');

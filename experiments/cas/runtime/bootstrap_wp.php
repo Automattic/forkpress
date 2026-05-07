@@ -3,7 +3,7 @@
  * Bootstrap a lazy Redb-backed CAS WordPress branch.
  *
  * Usage:
- *   php bootstrap_cas_wp.php <store.redb> <wp-root> <db-base> <branch> <site-title> <debug-log> [admin-password]
+ *   php bootstrap_wp.php <store.redb> <wp-root> <db-base> <branch> <site-title> <debug-log> [admin-password]
  */
 
 error_reporting(E_ALL & ~E_WARNING & ~E_NOTICE);

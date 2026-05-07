@@ -209,5 +209,5 @@ function forkpress_write_managed_wp_files(
 ): void {
     forkpress_write_wp_config($db_path, $debug_log, $table_prefix);
     forkpress_write_mu_plugins($mu_plugin, $experiment_mu_plugin);
-    forkpress_install_sqlite_integration(dirname(__DIR__) . '/vendor');
+    forkpress_install_sqlite_integration(dirname(__DIR__, 3) . '/vendor');
 }

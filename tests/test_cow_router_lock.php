@@ -40,7 +40,7 @@ $main = $branches . '/main';
 $entered = $tmp . '/router-entered.txt';
 $started = $tmp . '/request-started.txt';
 $child = $tmp . '/request.php';
-$router = realpath(__DIR__ . '/../runtime/router_cow.php');
+$router = realpath(__DIR__ . '/../runtime/cow/router.php');
 assert_true($router !== false, 'router fixture exists');
 register_shutdown_function(static function() use ($tmp): void {
     rm_tree($tmp);

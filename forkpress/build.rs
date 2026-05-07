@@ -64,8 +64,8 @@ fn main() -> Result<()> {
     for rel in [
         "vendor",
         "wp-plugin/forkpress-wp.php",
-        "runtime/router_cow.php",
-        "runtime/bootstrap_cow_wp.php",
+        "runtime/cow/router.php",
+        "runtime/cow/bootstrap_wp.php",
         "runtime/wp.zip",
         "scripts/backup.php",
         "scripts/git_server/autoload.php",
@@ -79,12 +79,12 @@ fn main() -> Result<()> {
             "scripts",
             "experiments/branchfs/schema.sql",
             "experiments/wp-plugin",
-            "runtime/router.php",
-            "runtime/router_cas.php",
-            "runtime/bootstrap_wp.php",
-            "runtime/bootstrap_cas_wp.php",
-            "runtime/managed_wp_files.php",
-            "runtime/refresh_wp_files.php",
+            "experiments/branchfs/runtime/router.php",
+            "experiments/branchfs/runtime/bootstrap_wp.php",
+            "experiments/branchfs/runtime/managed_wp_files.php",
+            "experiments/branchfs/runtime/refresh_wp_files.php",
+            "experiments/cas/runtime/router.php",
+            "experiments/cas/runtime/bootstrap_wp.php",
         ] {
             println!("cargo:rerun-if-changed={}", repo_root.join(rel).display());
         }
@@ -410,19 +410,39 @@ fn build_bundle(
     } else {
         add_file(&mut tar, repo_root, "wp-plugin/forkpress-wp.php")?;
     }
-    add_file(&mut tar, repo_root, "runtime/router_cow.php")?;
-    add_file(&mut tar, repo_root, "runtime/bootstrap_cow_wp.php")?;
+    add_file(&mut tar, repo_root, "runtime/cow/router.php")?;
+    add_file(&mut tar, repo_root, "runtime/cow/bootstrap_wp.php")?;
     add_file(&mut tar, repo_root, "runtime/wp.zip")?;
 
     if dev_experiments {
         add_tree(&mut tar, repo_root, "scripts")?;
         add_file(&mut tar, repo_root, "experiments/branchfs/schema.sql")?;
-        add_file(&mut tar, repo_root, "runtime/router.php")?;
-        add_file(&mut tar, repo_root, "runtime/router_cas.php")?;
-        add_file(&mut tar, repo_root, "runtime/bootstrap_wp.php")?;
-        add_file(&mut tar, repo_root, "runtime/bootstrap_cas_wp.php")?;
-        add_file(&mut tar, repo_root, "runtime/managed_wp_files.php")?;
-        add_file(&mut tar, repo_root, "runtime/refresh_wp_files.php")?;
+        add_file(
+            &mut tar,
+            repo_root,
+            "experiments/branchfs/runtime/router.php",
+        )?;
+        add_file(
+            &mut tar,
+            repo_root,
+            "experiments/branchfs/runtime/bootstrap_wp.php",
+        )?;
+        add_file(
+            &mut tar,
+            repo_root,
+            "experiments/branchfs/runtime/managed_wp_files.php",
+        )?;
+        add_file(
+            &mut tar,
+            repo_root,
+            "experiments/branchfs/runtime/refresh_wp_files.php",
+        )?;
+        add_file(&mut tar, repo_root, "experiments/cas/runtime/router.php")?;
+        add_file(
+            &mut tar,
+            repo_root,
+            "experiments/cas/runtime/bootstrap_wp.php",
+        )?;
     } else {
         add_file(&mut tar, repo_root, "scripts/backup.php")?;
         add_file(&mut tar, repo_root, "scripts/git_server/autoload.php")?;

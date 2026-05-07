@@ -3,7 +3,7 @@
  * Bootstrap a plain-filesystem WordPress branch for materialized ForkPress strategies.
  *
  * Usage:
- *   php bootstrap_cow_wp.php <branch-root> <site-title> <sqlite-plugin-source> <mu-plugin> <debug-log> [admin-password]
+ *   php bootstrap_wp.php <branch-root> <site-title> <sqlite-plugin-source> <mu-plugin> <debug-log> [admin-password]
  */
 
 error_reporting(E_ALL & ~E_WARNING & ~E_NOTICE);

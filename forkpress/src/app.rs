@@ -4571,7 +4571,7 @@ fn run_cow_bootstrap_script(
         layout,
         runtime,
         shared,
-        "runtime/bootstrap_cow_wp.php",
+        "runtime/cow/bootstrap_wp.php",
         [
             branch_root.as_os_str(),
             OsStr::new(site_title),
@@ -5351,7 +5351,7 @@ fn run_cas_bootstrap_script(
         layout,
         runtime,
         shared,
-        "runtime/bootstrap_cas_wp.php",
+        "experiments/cas/runtime/bootstrap_wp.php",
         [
             layout.cas_store.as_os_str(),
             layout.cas_wp_root.as_os_str(),
@@ -5699,7 +5699,7 @@ fn ensure_bootstrapped(layout: &Layout, runtime: &PortableRuntime, args: &StartA
             layout,
             runtime,
             &args.shared,
-            "runtime/bootstrap_wp.php",
+            "experiments/branchfs/runtime/bootstrap_wp.php",
             [
                 layout.site_fp.as_os_str(),
                 layout.wp_root.as_os_str(),
@@ -5759,7 +5759,7 @@ fn refresh_managed_wp_files_if_needed(
         layout,
         runtime,
         &args.shared,
-        "runtime/refresh_wp_files.php",
+        "experiments/branchfs/runtime/refresh_wp_files.php",
         [
             layout.site_fp.as_os_str(),
             layout.wp_root.as_os_str(),
@@ -5834,7 +5834,11 @@ fn start_php_server(
         .arg(format!("{}:{}", args.host, args.port))
         .arg("-t")
         .arg(&layout.wp_root)
-        .arg(layout.runtime_dir.join("runtime/router.php"))
+        .arg(
+            layout
+                .runtime_dir
+                .join("experiments/branchfs/runtime/router.php"),
+        )
         .env("BRANCHFS_DB", &layout.site_fp)
         .env("BRANCHFS_SQLITE_WP_DB", &layout.site_fp)
         .env("BRANCHFS_WP_ROOT", &layout.wp_root)
@@ -5910,7 +5914,7 @@ fn start_cow_php_server(
         .arg(format!("{}:{}", args.host, args.port))
         .arg("-t")
         .arg(&layout.cow_branches_dir)
-        .arg(layout.runtime_dir.join("runtime/router_cow.php"))
+        .arg(layout.runtime_dir.join("runtime/cow/router.php"))
         .env("FORKPRESS_BRANCHES_DIR", &layout.cow_branches_dir)
         .env("FORKPRESS_COW_DIR", &layout.cow_dir)
         .env("FORKPRESS_COW_BRANCHES_DIR", &layout.cow_branches_dir)
@@ -5978,7 +5982,11 @@ fn start_cas_php_server(
         .arg(format!("{}:{}", args.host, args.port))
         .arg("-t")
         .arg(&layout.cas_wp_root)
-        .arg(layout.runtime_dir.join("runtime/router_cas.php"))
+        .arg(
+            layout
+                .runtime_dir
+                .join("experiments/cas/runtime/router.php"),
+        )
         .env("FORKPRESS_CAS_STORE", &layout.cas_store)
         .env("FORKPRESS_CAS_WP_ROOT", &layout.cas_wp_root)
         .env("FORKPRESS_CAS_DB_BASE", &layout.cas_branches_dir)
