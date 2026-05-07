@@ -454,7 +454,8 @@ make forkpress-dev
 
 `make dist-dev` adds the experimental BranchFS/CAS PHP runtime support, and
 `make forkpress-dev` builds the Rust binary with the `dev-experiments` Cargo
-feature.
+feature. The production wrapper rejects `dev-experiments`; use
+`--bin forkpress-dev` whenever that feature is enabled.
 
 For fast Rust-only checks without rebuilding PHP:
 
