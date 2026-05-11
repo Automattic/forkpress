@@ -36,6 +36,9 @@ Windows Dev Drive volumes have a 50 GB minimum.
 
 The installer also:
 
+- runs visible prerequisite checks before mutating Dev Drive storage, including
+  Windows build, Dev Drive PowerShell support, RAM, free disk space, protected
+  VHDX storage, and mount-folder safety;
 - installs `forkpress.exe` and setup scripts under `%ProgramFiles%\ForkPress`;
 - adds that directory to the current user's `PATH`;
 - installs the Microsoft Visual C++ Redistributable needed by the official PHP
@@ -90,6 +93,9 @@ marketing\wp-load.php  until one side writes
 - The installer path is designed for Windows 11 systems with Dev Drive support.
   Older Windows builds fail with a clear update/reboot message instead of
   falling back to a huge copy.
+- The Dev Drive setup path needs at least 8 GB RAM and 50 GB free space on the
+  drive that stores the ForkPress VHDX. These are checked before the installer
+  creates or attaches storage.
 - The current Windows package ships an x64 binary. Windows 11 on Arm64 is
   allowed by the installer and runs it through Windows x64 emulation.
 - Release builds can Authenticode-sign `forkpress.exe` and `ForkPressSetup.exe`

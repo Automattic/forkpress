@@ -152,3 +152,7 @@ jobs:
           )) {
             [scriptblock]::Create((Get-Content -Raw $script)) | Out-Null
           }
+
+      - name: Windows installer error-surface checks
+        shell: pwsh
+        run: tests/windows/installer-error-surface.ps1

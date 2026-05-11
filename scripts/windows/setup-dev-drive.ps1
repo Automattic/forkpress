@@ -15,6 +15,7 @@ param(
     [string] $MountPath = "$env:USERPROFILE\ForkPressDevDrive",
     [UInt32] $SizeGB = 128,
     [switch] $AttachOnly,
+    [switch] $PreflightOnly,
     [switch] $SkipAutoMount,
     [switch] $AllowPlainReFS,
     [string] $AutoMountUserId = '',
@@ -306,6 +307,179 @@ function Test-ForkPressVhdMountedAtPath {
     }
 }
 
+function Get-ForkPressMinimumMemoryBytes {
+    # Microsoft documents Dev Drive as requiring 8 GB. Use decimal GB so normal
+    # 8 GB laptops are not rejected because Windows reports slightly under 8 GiB.
+    return [UInt64]8000000000
+}
+
+function Format-ForkPressDecimalGB {
+    param([UInt64] $Bytes)
+
+    return ('{0:N1} GB' -f ($Bytes / 1000000000))
+}
+
+function New-ForkPressPreflightResult {
+    param(
+        [string] $Name,
+        [bool] $Passed,
+        [string] $Details
+    )
+
+    [pscustomobject]@{
+        Name = $Name
+        Passed = $Passed
+        Details = $Details
+    }
+}
+
+function Write-ForkPressPreflightResult {
+    param([object] $Result)
+
+    if ($Result.Passed) {
+        Write-Host ("  [OK]   {0}: {1}" -f $Result.Name, $Result.Details) -ForegroundColor Green
+    } else {
+        Write-Host ("  [FAIL] {0}: {1}" -f $Result.Name, $Result.Details) -ForegroundColor Red
+    }
+}
+
+function Invoke-ForkPressDevDrivePreflight {
+    param(
+        [string] $VhdPath,
+        [string] $MountPath,
+        [UInt32] $SizeGB,
+        [switch] $AttachOnly,
+        [switch] $SkipAutoMount,
+        [switch] $AllowPlainReFS
+    )
+
+    Write-Step 'Running Windows prerequisite checks'
+    $results = @()
+
+    $isAdmin = Test-Administrator
+    $results += New-ForkPressPreflightResult `
+        -Name 'Administrator' `
+        -Passed $isAdmin `
+        -Details $(if ($isAdmin) { 'setup is running elevated' } else { 'right-click ForkPressSetup.exe and choose Run as administrator' })
+
+    $sizeOk = $AttachOnly -or $SizeGB -ge 50
+    $results += New-ForkPressPreflightResult `
+        -Name 'Dev Drive size' `
+        -Passed $sizeOk `
+        -Details $(if ($sizeOk) { "$SizeGB GB VHDX maximum requested" } else { 'Dev Drive volumes must be at least 50 GB' })
+
+    if (-not $SkipAutoMount) {
+        try {
+            Assert-AutoMountVhdPathIsProtected -VhdPath $VhdPath
+            $results += New-ForkPressPreflightResult `
+                -Name 'Protected storage path' `
+                -Passed $true `
+                -Details "VHDX will live under $env:ProgramData\ForkPress"
+        } catch {
+            $results += New-ForkPressPreflightResult `
+                -Name 'Protected storage path' `
+                -Passed $false `
+                -Details $_.Exception.Message
+        }
+    }
+
+    if (-not $AllowPlainReFS) {
+        try {
+            $formatVolume = Get-Command Format-Volume -ErrorAction Stop
+            $hasDevDrive = $formatVolume.Parameters.ContainsKey('DevDrive')
+            $results += New-ForkPressPreflightResult `
+                -Name 'Dev Drive PowerShell support' `
+                -Passed $hasDevDrive `
+                -Details $(if ($hasDevDrive) { 'Format-Volume supports -DevDrive' } else { 'update Windows 11, reboot, then run ForkPress Setup again' })
+        } catch {
+            $results += New-ForkPressPreflightResult `
+                -Name 'Dev Drive PowerShell support' `
+                -Passed $false `
+                -Details 'Format-Volume is unavailable; update Windows 11, reboot, then run ForkPress Setup again'
+        }
+
+        try {
+            $os = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+            $build = [int] $os.CurrentBuildNumber
+            $ubr = if ($os.UBR -ne $null) { [int] $os.UBR } else { 0 }
+            $buildOk = $build -gt 22621 -or ($build -eq 22621 -and $ubr -ge 2338)
+            $results += New-ForkPressPreflightResult `
+                -Name 'Windows build' `
+                -Passed $buildOk `
+                -Details $(if ($buildOk) { "current build is $build.$ubr" } else { "needs Windows 11 build 22621.2338 or newer; current build is $build.$ubr" })
+        } catch {
+            $results += New-ForkPressPreflightResult `
+                -Name 'Windows build' `
+                -Passed $false `
+                -Details "could not read Windows build: $($_.Exception.Message)"
+        }
+    }
+
+    if (-not $AttachOnly) {
+        try {
+            $memory = Get-CimInstance Win32_ComputerSystem
+            $totalMemory = [UInt64] $memory.TotalPhysicalMemory
+            $minimumMemory = Get-ForkPressMinimumMemoryBytes
+            $memoryOk = $totalMemory -ge $minimumMemory
+            $results += New-ForkPressPreflightResult `
+                -Name 'Memory' `
+                -Passed $memoryOk `
+                -Details $(if ($memoryOk) { "$(Format-ForkPressDecimalGB $totalMemory) detected; 8.0 GB minimum" } else { "$(Format-ForkPressDecimalGB $totalMemory) detected; ForkPress Dev Drive setup needs at least 8.0 GB" })
+        } catch {
+            $results += New-ForkPressPreflightResult `
+                -Name 'Memory' `
+                -Passed $false `
+                -Details "could not read installed memory: $($_.Exception.Message)"
+        }
+
+        try {
+            $hostDriveName = [System.IO.Path]::GetPathRoot($VhdPath).Substring(0, 1)
+            $hostDrive = Get-PSDrive -Name $hostDriveName -ErrorAction Stop
+            $freeOk = $hostDrive.Free -ge 50GB
+            $results += New-ForkPressPreflightResult `
+                -Name 'Free disk space' `
+                -Passed $freeOk `
+                -Details $(if ($freeOk) { "$(Format-ForkPressDecimalGB ([UInt64] $hostDrive.Free)) free on $($hostDrive.Name):; 50 GB minimum" } else { "$(Format-ForkPressDecimalGB ([UInt64] $hostDrive.Free)) free on $($hostDrive.Name):; ForkPress needs at least 50 GB" })
+        } catch {
+            $results += New-ForkPressPreflightResult `
+                -Name 'Free disk space' `
+                -Passed $false `
+                -Details "could not inspect VHDX host drive: $($_.Exception.Message)"
+        }
+    }
+
+    try {
+        if (Test-Path -LiteralPath $MountPath) {
+            $existing = Get-ChildItem -LiteralPath $MountPath -Force -ErrorAction SilentlyContinue | Select-Object -First 1
+            $mountOk = -not $existing -or (Test-ForkPressVhdMountedAtPath -VhdPath $VhdPath -MountPath $MountPath)
+            $results += New-ForkPressPreflightResult `
+                -Name 'Mount folder' `
+                -Passed $mountOk `
+                -Details $(if ($mountOk) { "$MountPath is ready" } else { "$MountPath is not empty and is not the ForkPress Dev Drive" })
+        } else {
+            $results += New-ForkPressPreflightResult `
+                -Name 'Mount folder' `
+                -Passed $true `
+                -Details "$MountPath will be created"
+        }
+    } catch {
+        $results += New-ForkPressPreflightResult `
+            -Name 'Mount folder' `
+            -Passed $false `
+            -Details "could not inspect mount folder: $($_.Exception.Message)"
+    }
+
+    foreach ($result in $results) {
+        Write-ForkPressPreflightResult -Result $result
+    }
+
+    $failures = @($results | Where-Object { -not $_.Passed })
+    if ($failures.Count -gt 0) {
+        $details = ($failures | ForEach-Object { " - $($_.Name): $($_.Details)" }) -join "`n"
+        throw "ForkPress setup cannot continue because prerequisite checks failed:`n$details"
+    }
+}
+
 function Register-ForkPressDevDriveAutoMount {
     param(
         [string] $VhdPath,
@@ -348,19 +522,12 @@ if (`$partition -and @(`$partition.AccessPaths) -notcontains `$mountPath) {
 }
 
 $transcriptStarted = $false
+$setupExitCode = 0
 try {
-    if (-not (Test-Administrator)) {
-        throw 'ForkPress Dev Drive setup must run from an elevated PowerShell session. Use ForkPressSetup.exe for the guided installer flow.'
-    }
-
     if ($LogPath) {
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $LogPath) | Out-Null
         Start-Transcript -Path $LogPath -Append | Out-Null
         $transcriptStarted = $true
-    }
-
-    if (-not $AttachOnly -and $SizeGB -lt 50) {
-        throw 'Dev Drive volumes must be at least 50 GB.'
     }
 
     $VhdPath = [System.IO.Path]::GetFullPath($VhdPath)
@@ -368,6 +535,29 @@ try {
     if (-not $MountPath.EndsWith('\')) {
         $MountPath = "$MountPath\"
     }
+
+    Invoke-ForkPressDevDrivePreflight `
+        -VhdPath $VhdPath `
+        -MountPath $MountPath `
+        -SizeGB $SizeGB `
+        -AttachOnly:$AttachOnly `
+        -SkipAutoMount:$SkipAutoMount `
+        -AllowPlainReFS:$AllowPlainReFS
+
+    if ($PreflightOnly) {
+        Write-Host ''
+        Write-Host 'ForkPress prerequisite checks passed.'
+        return
+    }
+
+    if (-not (Test-Administrator)) {
+        throw 'ForkPress Dev Drive setup must run from an elevated PowerShell session. Use ForkPressSetup.exe for the guided installer flow.'
+    }
+
+    if (-not $AttachOnly -and $SizeGB -lt 50) {
+        throw 'Dev Drive volumes must be at least 50 GB.'
+    }
+
     if (-not $SkipAutoMount) {
         Assert-AutoMountVhdPathIsProtected -VhdPath $VhdPath
     }
@@ -388,7 +578,7 @@ try {
 
     if (-not $AttachOnly) {
         $memory = Get-CimInstance Win32_ComputerSystem
-        if ([UInt64] $memory.TotalPhysicalMemory -lt 8GB) {
+        if ([UInt64] $memory.TotalPhysicalMemory -lt (Get-ForkPressMinimumMemoryBytes)) {
             throw 'ForkPress Dev Drive setup needs at least 8 GB of RAM.'
         }
 
@@ -507,8 +697,27 @@ create vdisk file="$VhdPath" maximum=$sizeMB type=expandable
     Write-Host "  VHDX:  $VhdPath"
     Write-Host "  Mount: $MountPath"
     Write-Host ''
+} catch {
+    $message = "$_"
+    if ($_.Exception -and $_.Exception.Message) {
+        $message = $_.Exception.Message
+    }
+
+    Write-Host ''
+    Write-Host 'ForkPress Dev Drive setup cannot continue.' -ForegroundColor Red
+    Write-Host ''
+    Write-Host $message -ForegroundColor Red
+    if ($LogPath) {
+        Write-Host ''
+        Write-Host "Log file: $LogPath"
+    }
+    $setupExitCode = 1
 } finally {
     if ($transcriptStarted) {
         Stop-Transcript | Out-Null
     }
+}
+
+if ($setupExitCode -ne 0) {
+    exit $setupExitCode
 }

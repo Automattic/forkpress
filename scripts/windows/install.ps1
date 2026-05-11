@@ -14,10 +14,13 @@ param(
     [switch] $AllowPlainReFS,
     [switch] $FailOnRebootRequired,
     [switch] $SkipAutoMount,
-    [switch] $SkipDevDrive
+    [switch] $SkipDevDrive,
+    [switch] $NoPauseOnError
 )
 
 $ErrorActionPreference = 'Stop'
+$script:ForkPressInstallLogPath = Join-Path $env:TEMP 'forkpress-install.log'
+$script:ForkPressTranscriptStarted = $false
 
 function Write-Step {
     param([string] $Message)
@@ -92,6 +95,65 @@ function ConvertTo-PowerShellSingleQuotedString {
     return "'$($Value -replace "'", "''")'"
 }
 
+function Start-ForkPressInstallLog {
+    param([string] $LogPath)
+
+    if ($script:ForkPressTranscriptStarted) {
+        return
+    }
+
+    $script:ForkPressInstallLogPath = $LogPath
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $LogPath) | Out-Null
+    Start-Transcript -Path $LogPath -Append | Out-Null
+    $script:ForkPressTranscriptStarted = $true
+}
+
+function Stop-ForkPressInstallLog {
+    if (-not $script:ForkPressTranscriptStarted) {
+        return
+    }
+
+    try {
+        Stop-Transcript | Out-Null
+    } catch {
+        # The installer is already handling another outcome. Do not hide it.
+    }
+    $script:ForkPressTranscriptStarted = $false
+}
+
+function Write-ForkPressFatalError {
+    param([System.Management.Automation.ErrorRecord] $ErrorRecord)
+
+    $message = "$ErrorRecord"
+    if ($ErrorRecord.Exception -and $ErrorRecord.Exception.Message) {
+        $message = $ErrorRecord.Exception.Message
+    }
+
+    Write-Host ''
+    Write-Host 'ForkPress setup cannot continue.' -ForegroundColor Red
+    Write-Host ''
+    Write-Host $message -ForegroundColor Red
+    Write-Host ''
+    Write-Host 'Nothing has been written to your WordPress site. Fix the issue above, then run ForkPressSetup.exe again.'
+    Write-Host "Log file: $script:ForkPressInstallLogPath"
+}
+
+function Wait-ForkPressErrorAcknowledgement {
+    if ($NoPauseOnError -or -not [Environment]::UserInteractive) {
+        return
+    }
+
+    Write-Host ''
+    Read-Host 'Press Enter to close this ForkPress setup window' | Out-Null
+}
+
+trap {
+    Write-ForkPressFatalError -ErrorRecord $_
+    Stop-ForkPressInstallLog
+    Wait-ForkPressErrorAcknowledgement
+    exit 1
+}
+
 function Register-ForkPressSetupResume {
     param(
         [string] $InstallScript,
@@ -103,7 +165,8 @@ function Register-ForkPressSetupResume {
         [UInt32] $SizeGB,
         [switch] $AllowPlainReFS,
         [switch] $FailOnRebootRequired,
-        [switch] $SkipAutoMount
+        [switch] $SkipAutoMount,
+        [switch] $NoPauseOnError
     )
 
     $args = @(
@@ -125,6 +188,9 @@ function Register-ForkPressSetupResume {
     }
     if ($SkipAutoMount) {
         $args += '-SkipAutoMount'
+    }
+    if ($NoPauseOnError) {
+        $args += '-NoPauseOnError'
     }
     $powerShellPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $resumeCommand = "Start-Process -FilePath $(ConvertTo-PowerShellSingleQuotedString $powerShellPath) -Verb RunAs -ArgumentList $(ConvertTo-PowerShellSingleQuotedString ($args -join ' '))"
@@ -150,10 +216,6 @@ function Show-ForkPressRebootPrompt {
 Write-Host 'ForkPress Windows Setup'
 Write-Host 'This installs ForkPress and prepares native Windows COW storage.'
 
-if (-not $SkipDevDrive -and -not (Test-Administrator)) {
-    throw 'ForkPress setup must run elevated to create a Windows Dev Drive. Use ForkPressSetup.exe for the guided installer flow.'
-}
-
 $SourceRoot = [System.IO.Path]::GetFullPath($SourceRoot)
 $InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
 $VhdPath = [System.IO.Path]::GetFullPath($VhdPath)
@@ -162,6 +224,8 @@ $currentUserId = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 $binDir = Join-Path $InstallRoot 'bin'
 $logDir = Join-Path $InstallRoot 'Logs'
 $scriptsDir = Join-Path $InstallRoot 'scripts\windows'
+$powerShellPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+Start-ForkPressInstallLog -LogPath (Join-Path $logDir 'install.log')
 $forkpressSource = Join-Path $SourceRoot 'forkpress.exe'
 if (-not (Test-Path -LiteralPath $forkpressSource)) {
     $forkpressSource = Join-Path $SourceRoot 'bin\forkpress.exe'
@@ -171,6 +235,32 @@ if (-not (Test-Path -LiteralPath $forkpressSource)) {
 }
 if (-not (Test-Path -LiteralPath $forkpressSource)) {
     throw "Could not find forkpress.exe under $SourceRoot"
+}
+
+if (-not $SkipDevDrive) {
+    Write-Step 'Checking Windows prerequisites'
+    $preflightScript = Join-Path $PSScriptRoot 'setup-dev-drive.ps1'
+    $preflightArgs = @(
+        '-NoProfile',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', $preflightScript,
+        '-VhdPath', $VhdPath,
+        '-MountPath', $MountPath,
+        '-SizeGB', "$SizeGB",
+        '-AutoMountUserId', $currentUserId,
+        '-LogPath', (Join-Path $logDir 'setup-dev-drive.log'),
+        '-PreflightOnly'
+    )
+    if ($AllowPlainReFS) {
+        $preflightArgs += '-AllowPlainReFS'
+    }
+    if ($SkipAutoMount) {
+        $preflightArgs += '-SkipAutoMount'
+    }
+    & $powerShellPath @preflightArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw 'ForkPress setup prerequisites failed. The failing check is shown above in red.'
+    }
 }
 
 Write-Step 'Installing files'
@@ -211,7 +301,8 @@ if (Test-VcRedistInstalled) {
             -SizeGB $SizeGB `
             -AllowPlainReFS:$AllowPlainReFS `
             -FailOnRebootRequired:$FailOnRebootRequired `
-            -SkipAutoMount:$SkipAutoMount
+            -SkipAutoMount:$SkipAutoMount `
+            -NoPauseOnError:$NoPauseOnError
         Write-Host ''
         Write-Host 'Windows needs a restart before ForkPress setup can finish.'
         Write-Host 'Setup will resume automatically after you sign in again.'
@@ -219,6 +310,7 @@ if (Test-VcRedistInstalled) {
             throw 'Windows requested a restart before ForkPress setup could finish.'
         }
         Show-ForkPressRebootPrompt
+        Stop-ForkPressInstallLog
         exit 0
     }
 }
@@ -226,7 +318,6 @@ if (Test-VcRedistInstalled) {
 if (-not $SkipDevDrive) {
     Write-Step 'Preparing ForkPress Dev Drive'
     $setupScript = Join-Path $scriptsDir 'setup-dev-drive.ps1'
-    $powerShellPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $setupArgs = @(
         '-NoProfile',
         '-ExecutionPolicy', 'Bypass',
@@ -294,3 +385,4 @@ Write-Host "  Dev Drive: $MountPath"
 Write-Host "  Site: $siteDir"
 Write-Host ''
 Write-Host 'Open "Start ForkPress Site" from your desktop or Start Menu.'
+Stop-ForkPressInstallLog

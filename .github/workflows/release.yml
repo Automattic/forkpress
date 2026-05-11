@@ -188,6 +188,7 @@ jobs:
               -SizeGB 50 `
               -AllowPlainReFS `
               -FailOnRebootRequired `
+              -NoPauseOnError `
               -SkipAutoMount
             if ($LASTEXITCODE -ne 0) {
               throw "Packaged install.ps1 failed with exit code $LASTEXITCODE"

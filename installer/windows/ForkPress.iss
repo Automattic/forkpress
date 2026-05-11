@@ -44,16 +44,16 @@ begin
     '" -SourceRoot "' + ExpandConstant('{app}') +
     '" -InstallRoot "' + ExpandConstant('{app}') + '"';
 
-  WizardForm.StatusLabel.Caption := 'Preparing ForkPress Dev Drive storage...';
+  WizardForm.StatusLabel.Caption := 'Checking Windows prerequisites and preparing ForkPress storage...';
   if not Exec(PowerShell, Parameters, '', SW_SHOW, ewWaitUntilTerminated, ResultCode) then
   begin
-    MsgBox('ForkPress setup could not start. Run ForkPressSetup.exe again, or see ' + ExpandConstant('{app}\Logs') + ' for details.', mbError, MB_OK);
+    MsgBox('ForkPress setup could not start. Run ForkPressSetup.exe again. If the PowerShell setup window opened, read the red error there before closing it. Logs are written under ' + ExpandConstant('{app}\Logs') + '.', mbError, MB_OK);
     Abort;
   end;
 
   if ResultCode <> 0 then
   begin
-    MsgBox('ForkPress setup failed with exit code ' + IntToStr(ResultCode) + '. See ' + ExpandConstant('{app}\Logs') + ' for details.', mbError, MB_OK);
+    MsgBox('ForkPress setup stopped before it finished. The PowerShell setup window shows the failing prerequisite or command in red and waits for Enter before closing. Logs are written under ' + ExpandConstant('{app}\Logs') + '.', mbError, MB_OK);
     Abort;
   end;
 end;
