@@ -312,14 +312,18 @@ writes and do not participate in that lock.
 ForkPress tries the cheapest ordinary-file view first:
 
 1. **Native filesystem cloning in the project directory.** On macOS this uses
-   APFS `clonefile`; on Linux this uses `FICLONE` reflinks. New branches share
-   unchanged file blocks with the source branch. Writes to a branch path do not
-   mutate the source path.
+   APFS `clonefile`; on Linux this uses `FICLONE` reflinks; on Windows this
+   uses ReFS block cloning when the project lives on a ReFS/Dev Drive volume.
+   New branches share unchanged file blocks with the source branch. Writes to a
+   branch path do not mutate the source path.
 2. **Rootless APFS sparsebundle on macOS.** If the project volume cannot clone files,
    ForkPress creates `.forkpress/macos-cow/branches.sparsebundle`, mounts it at
    `.forkpress/macos-cow/mount`, stores the physical branch trees there, and
    exposes public branch directories like `./main` and `./marketing`.
-3. **Full file copy.** This is the final fallback when COW storage is not
+3. **Guided ReFS Dev Drive setup on Windows.** If a Windows project is not on
+   clone-capable storage, run `scripts/windows/setup-dev-drive.ps1` once and
+   create ForkPress projects under `%USERPROFILE%\ForkPressDevDrive`.
+4. **Full file copy.** This is the final fallback when COW storage is not
    available.
 
 Inspect the selected file view:
@@ -412,7 +416,8 @@ Production Rust packages live under `crates/`:
 - `forkpress-cli`: binaries and high-level command routing;
 - `forkpress-core`: shared layout, manifest, path, and strategy types;
 - `forkpress-storage`: production COW branch storage, including APFS
-  `clonefile`, APFS sparsebundle, Linux `FICLONE`, and file-copy fallback;
+  `clonefile`, APFS sparsebundle, Linux `FICLONE`, Windows ReFS block cloning,
+  and file-copy fallback;
 - `forkpress-runtime`: embedded PHP/WordPress runtime preparation and PHP
   script execution;
 - `forkpress-server`: server registry, stop/list, and TCP readiness helpers;
