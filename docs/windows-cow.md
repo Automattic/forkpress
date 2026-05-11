@@ -90,6 +90,8 @@ marketing\wp-load.php  until one side writes
 - The installer path is designed for Windows 11 systems with Dev Drive support.
   Older Windows builds fail with a clear update/reboot message instead of
   falling back to a huge copy.
+- The current Windows package ships an x64 binary. Windows 11 on Arm64 is
+  allowed by the installer and runs it through Windows x64 emulation.
 - Release builds can Authenticode-sign `forkpress.exe` and `ForkPressSetup.exe`
   when `WINDOWS_CODESIGN_CERT_BASE64` and `WINDOWS_CODESIGN_PASSWORD` are set in
   GitHub Actions secrets. Without those secrets, PR builds produce unsigned

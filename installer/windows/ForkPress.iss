@@ -10,8 +10,8 @@
 AppId={{7E38BFD2-1426-4C58-A541-9C76E4379E03}
 AppName={#AppName}
 AppVersion={#AppVersion}
-ArchitecturesAllowed=x64
-ArchitecturesInstallIn64BitMode=x64
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
 DefaultDirName={autopf}\ForkPress
 DefaultGroupName=ForkPress
 DisableProgramGroupPage=yes
