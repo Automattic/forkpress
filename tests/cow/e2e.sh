@@ -123,8 +123,29 @@ log_step "create CLI branch"
 "$BIN" branch --work-dir "$WORK_DIR" create feature-cow > "$TMP/branch-create.out"
 grep -F "feature-cow.wp.localhost:$PORT" "$TMP/branch-create.out" >/dev/null
 test -d "$WORK/feature-cow"
+"$BIN" branchctl --work-dir "$WORK_DIR" show feature-cow > "$TMP/branch-show.out"
+grep -F "forkpress cow branch feature-cow" "$TMP/branch-show.out" >/dev/null
+grep -F "  database:  " "$TMP/branch-show.out" >/dev/null
+grep -F "  git ref:   " "$TMP/branch-show.out" >/dev/null
 echo "feature only" > "$WORK/feature-cow/wp-content/forkpress-branch.txt"
 test ! -e "$WORK/main/wp-content/forkpress-branch.txt"
+
+log_step "create and delete local branch through aliases"
+"$BIN" git --work-dir "$WORK_DIR" branch create git-local --from main > "$TMP/git-local-create.out"
+grep -F "forkpress: branch git-local ready" "$TMP/git-local-create.out" >/dev/null
+test -f "$WORK/git-local/wp-load.php"
+"$BIN" branchctl --work-dir "$WORK_DIR" list | grep -F "git-local" >/dev/null
+"$BIN" branchctl --work-dir "$WORK_DIR" status git-local > "$TMP/git-local-status.out"
+grep -F "forkpress cow branch git-local" "$TMP/git-local-status.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" delete git-local > "$TMP/git-local-delete.out"
+grep -F "deleted COW branch 'git-local'" "$TMP/git-local-delete.out" >/dev/null
+test ! -e "$WORK/git-local"
+if "$BIN" branchctl --work-dir "$WORK_DIR" delete main > "$TMP/delete-main.out" 2>&1; then
+  echo "delete main unexpectedly succeeded" >&2
+  cat "$TMP/delete-main.out" >&2
+  exit 1
+fi
+grep -F "cannot delete the main branch" "$TMP/delete-main.out" >/dev/null
 
 curl -sS -H "Host: feature-cow.wp.localhost:$PORT" \
   "http://127.0.0.1:$PORT/wp-admin/post-new.php" \
@@ -173,6 +194,7 @@ test -f "$TMP/checkout/wordpress/wp-load.php"
 test -f "$TMP/checkout/database.sql"
 test ! -e "$TMP/checkout/wordpress/wp-content/database/.ht.sqlite"
 test ! -e "$TMP/checkout/wordpress/wp-content/database/wp-debug.log"
+"$BIN" pull "$TMP/checkout"
 
 git -C "$TMP/checkout" fetch origin '+refs/heads/*:refs/remotes/origin/*'
 git -C "$TMP/checkout" checkout -B feature-cow origin/feature-cow
@@ -181,7 +203,7 @@ echo "changed through git" > "$TMP/checkout/wordpress/wp-content/cow-git.txt"
 mkdir -p "$TMP/checkout/wordpress/wp-content/database"
 echo "private through git" > "$TMP/checkout/wordpress/wp-content/database/pushed-private.txt"
 log_step "push Git update to existing branch"
-"$BIN" commit "$TMP/checkout" --message "test cow git push"
+"$BIN" push "$TMP/checkout" --message "test cow git push"
 test -f "$WORK/feature-cow/wp-content/cow-git.txt"
 grep -F "changed through git" "$WORK/feature-cow/wp-content/cow-git.txt" >/dev/null
 test ! -e "$WORK/feature-cow/wp-content/database/pushed-private.txt"
@@ -339,6 +361,15 @@ if grep -F 'file_view = "macos-apfs-sparsebundle"' "$WORK_DIR/site.toml" >/dev/n
   grep -F "  leftovers: unavailable while sparsebundle is detached" "$TMP/storage-status-detached.out" >/dev/null
 else
   grep -F "forkpress: storage file view does not use a compactable sparsebundle" "$TMP/storage-compact.out" >/dev/null
+fi
+
+log_step "stop server through server subcommand"
+"$BIN" server stop --work-dir "$WORK_DIR" > "$TMP/server-stop.out"
+if "$BIN" server list | grep -F "$WORK_DIR" >/dev/null; then
+  echo "server still listed after server stop" >&2
+  cat "$TMP/server-stop.out" >&2
+  "$BIN" server list >&2 || true
+  exit 1
 fi
 
 echo "PASS cow materialized strategy e2e"
