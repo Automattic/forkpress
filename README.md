@@ -9,7 +9,8 @@ database file, and branch creation uses filesystem copy-on-write when the
 machine can provide it.
 
 No Docker, no system PHP, no MySQL daemon, no FUSE service, and no helper
-daemon. The release artifact is one `forkpress` binary per target.
+daemon. The release artifact is one `forkpress` binary on macOS/Linux and a
+click-through installer on Windows.
 
 ## Quick Start
 
@@ -45,6 +46,22 @@ Stop the site server and detach any mount-backed COW storage:
 Download the archive for your machine from a release, unpack it, and run the
 binary.
 
+Windows:
+
+1. Download `ForkPressSetup.exe` from a release.
+2. Open it and follow the prompts.
+3. Accept the Windows permission prompt.
+4. Reboot only if Windows asks.
+5. Open **Start ForkPress Site** from the desktop or Start Menu.
+
+The Windows installer installs protected program files under
+`%ProgramFiles%\ForkPress`, creates a ReFS Dev Drive VHDX at
+`%ProgramData%\ForkPress\Storage\forkpress-dev-drive.vhdx`, mounts it at
+`%USERPROFILE%\ForkPressDevDrive`, adds `forkpress.exe` to the user PATH, creates
+`%USERPROFILE%\ForkPressDevDrive\Sites\My ForkPress Site`, runs `forkpress init`
+there, and creates shortcuts. It does not require WSL, Docker, FUSE, WinFsp, or
+manual Windows feature setup.
+
 macOS:
 
 ```bash
@@ -64,6 +81,7 @@ chmod +x forkpress
 
 Release targets:
 
+- `x86_64-pc-windows-msvc`
 - `aarch64-apple-darwin`
 - `x86_64-apple-darwin`
 - `aarch64-unknown-linux-musl`
@@ -321,8 +339,8 @@ ForkPress tries the cheapest ordinary-file view first:
    `.forkpress/macos-cow/mount`, stores the physical branch trees there, and
    exposes public branch directories like `./main` and `./marketing`.
 3. **Guided ReFS Dev Drive setup on Windows.** If a Windows project is not on
-   clone-capable storage, run `scripts/windows/setup-dev-drive.ps1` once and
-   create ForkPress projects under `%USERPROFILE%\ForkPressDevDrive`.
+   clone-capable storage, the Windows installer runs the Dev Drive setup flow
+   and creates ForkPress shortcuts into `%USERPROFILE%\ForkPressDevDrive`.
 4. **Full file copy.** This is the final fallback when COW storage is not
    available.
 

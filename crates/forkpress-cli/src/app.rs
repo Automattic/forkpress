@@ -885,7 +885,7 @@ fn doctor_storage_command(args: DoctorStorageArgs) -> Result<i32> {
     #[cfg(target_os = "windows")]
     {
         println!("  Windows ReFS Dev Drive: recommended before file-copy fallback");
-        println!("  setup: scripts\\windows\\setup-dev-drive.ps1 creates a ReFS Dev Drive VHDX");
+        println!("  setup: run ForkPressSetup.exe to create a ReFS Dev Drive VHDX");
         println!(
             "  recommendation: create/open a ForkPress project on that Dev Drive, then rerun forkpress init"
         );
