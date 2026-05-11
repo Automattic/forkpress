@@ -1,24 +1,32 @@
 <#
 .SYNOPSIS
-Creates a ForkPress ReFS Dev Drive VHDX for copy-on-write branch storage.
+Creates and attaches the ForkPress ReFS Dev Drive VHDX.
 
 .DESCRIPTION
-This script is intended for a bare Windows laptop setup flow. If it is not
-already elevated, it relaunches itself with a UAC prompt. It creates a dynamic
-VHDX under the current user's LocalAppData folder, attaches it, formats it as
-ReFS/Dev Drive when the OS supports Dev Drive formatting, and mounts it at a
-normal user-visible folder.
+This script is the elevated storage setup used by the Windows installer. It is
+idempotent: an existing VHDX is reused only after the mounted volume is verified
+as ReFS/Dev Drive storage. It also registers a logon scheduled task so the VHDX
+is reattached after reboot.
 #>
 
 [CmdletBinding()]
 param(
-    [string] $VhdPath = "$env:LOCALAPPDATA\ForkPress\Storage\forkpress-dev-drive.vhdx",
+    [string] $VhdPath = "$env:ProgramData\ForkPress\Storage\forkpress-dev-drive.vhdx",
     [string] $MountPath = "$env:USERPROFILE\ForkPressDevDrive",
     [UInt32] $SizeGB = 128,
-    [switch] $EnableProjFS
+    [switch] $AttachOnly,
+    [switch] $SkipAutoMount,
+    [switch] $AllowPlainReFS,
+    [string] $AutoMountUserId = '',
+    [string] $LogPath = "$env:LOCALAPPDATA\ForkPress\Logs\setup-dev-drive.log"
 )
 
 $ErrorActionPreference = 'Stop'
+
+function Write-Step {
+    param([string] $Message)
+    Write-Host "==> $Message"
+}
 
 function Test-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -41,99 +49,466 @@ function Invoke-DiskPartScript {
     }
 }
 
-if (-not (Test-Administrator)) {
-    $startArgs = @(
-        '-NoProfile',
-        '-ExecutionPolicy', 'Bypass',
-        '-File', "`"$PSCommandPath`"",
-        '-VhdPath', "`"$VhdPath`"",
-        '-MountPath', "`"$MountPath`"",
-        '-SizeGB', "$SizeGB"
+function Invoke-CheckedNativeCommand {
+    param(
+        [string] $FilePath,
+        [string[]] $Arguments = @()
     )
-    if ($EnableProjFS) {
-        $startArgs += '-EnableProjFS'
+
+    $output = & $FilePath @Arguments 2>&1
+    $exitCode = $LASTEXITCODE
+    if ($output) {
+        $output | ForEach-Object { Write-Host $_ }
     }
-    Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $startArgs
-    exit
+    if ($exitCode -ne 0) {
+        throw "$FilePath $($Arguments -join ' ') failed with exit code $exitCode`n$($output -join "`n")"
+    }
+    return @($output | ForEach-Object { "$_" })
 }
 
-if ($SizeGB -lt 50) {
-    throw 'Dev Drive volumes must be at least 50 GB.'
+function ConvertTo-PowerShellEncodedCommand {
+    param([string] $Command)
+
+    return [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Command))
 }
 
-$VhdPath = [System.IO.Path]::GetFullPath($VhdPath)
-$MountPath = [System.IO.Path]::GetFullPath($MountPath)
-if (-not $MountPath.EndsWith('\')) {
-    $MountPath = "$MountPath\"
+function ConvertTo-PowerShellSingleQuotedString {
+    param([string] $Value)
+
+    return "'$($Value -replace "'", "''")'"
 }
 
-New-Item -ItemType Directory -Force -Path (Split-Path -Parent $VhdPath) | Out-Null
-New-Item -ItemType Directory -Force -Path $MountPath | Out-Null
+function Test-TrustedDevDriveQuery {
+    param([string[]] $QueryOutput)
 
-if ($EnableProjFS) {
-    $feature = Get-WindowsOptionalFeature -Online -FeatureName Client-ProjFS
-    if ($feature.State -ne 'Enabled') {
-        $result = Enable-WindowsOptionalFeature -Online -FeatureName Client-ProjFS -NoRestart
-        if ($result.RestartNeeded) {
-            Write-Host 'Windows enabled ProjFS and requested a reboot.'
+    $queryText = (($QueryOutput | ForEach-Object { "$_" }) -join "`n").ToLowerInvariant()
+    if ($queryText -match 'not\s+(a\s+)?(trusted\s+)?(dev drive|developer volume)' -or
+        $queryText -match 'untrusted') {
+        return $false
+    }
+
+    if ($queryText -match 'this\s+is\s+a\s+trusted\s+(dev drive|developer volume)') {
+        return $true
+    }
+
+    if ($queryText -match '(dev drive|developer volume)\s*:\s*(yes|true)' -and
+        $queryText -match 'trusted\s*:\s*(yes|true)') {
+        return $true
+    }
+
+    return $false
+}
+
+function Assert-ForkPressTrustedDevDrive {
+    param([string] $MountPath)
+
+    $query = Invoke-CheckedNativeCommand -FilePath 'fsutil.exe' -Arguments @('devdrv', 'query', $MountPath)
+    if (-not (Test-TrustedDevDriveQuery -QueryOutput $query)) {
+        throw "Windows did not report $MountPath as a trusted Dev Drive. Remove the VHDX and run ForkPress Setup again, or rerun with -AllowPlainReFS only for local testing."
+    }
+}
+
+function Protect-ForkPressVhdPath {
+    param([string] $VhdPath)
+
+    $protectedRoot = [System.IO.Path]::GetFullPath((Join-Path $env:ProgramData 'ForkPress'))
+    $protectedRootPrefix = $protectedRoot.TrimEnd('\') + '\'
+    $storageDir = Split-Path -Parent $VhdPath
+    $storageDir = [System.IO.Path]::GetFullPath($storageDir)
+    $vhdExistsBeforeProtection = Test-Path -LiteralPath $VhdPath
+    if ($vhdExistsBeforeProtection) {
+        $item = Get-Item -LiteralPath $VhdPath -Force
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "Refusing to use reparse-point VHDX path: $VhdPath"
+        }
+        if (-not (Test-ForkPressProtectedAcl -Path $VhdPath)) {
+            throw "Refusing to reuse an existing ForkPress VHDX that was not already protected: $VhdPath. Remove it as an administrator and run setup again."
+        }
+    }
+
+    $directoriesToProtect = @()
+    if ($storageDir.Equals($protectedRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        $storageDir.StartsWith($protectedRootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        $directoriesToProtect += $protectedRoot
+    }
+    $directoriesToProtect += $storageDir
+
+    foreach ($directory in $directoriesToProtect) {
+        if (Test-Path -LiteralPath $directory) {
+            $item = Get-Item -LiteralPath $directory -Force
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw "Refusing to use reparse-point directory for ForkPress VHDX storage: $directory"
+            }
+        }
+        New-Item -ItemType Directory -Force -Path $directory | Out-Null
+        $item = Get-Item -LiteralPath $directory -Force
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "Refusing to use reparse-point directory for ForkPress VHDX storage: $directory"
+        }
+        Set-ForkPressProtectedAcl -Path $directory -Container
+    }
+
+    if (Test-Path -LiteralPath $VhdPath) {
+        $item = Get-Item -LiteralPath $VhdPath -Force
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "Refusing to use reparse-point VHDX path: $VhdPath"
+        }
+        Set-ForkPressProtectedAcl -Path $VhdPath
+    }
+}
+
+function Set-ForkPressProtectedAcl {
+    param(
+        [string] $Path,
+        [switch] $Container
+    )
+
+    $acl = Get-Acl -LiteralPath $Path
+    $acl.SetAccessRuleProtection($true, $false)
+    $administratorsSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+    $acl.SetOwner($administratorsSid)
+    foreach ($rule in @($acl.Access)) {
+        $acl.RemoveAccessRuleSpecific($rule) | Out-Null
+    }
+
+    $inheritanceFlags = [System.Security.AccessControl.InheritanceFlags]::None
+    if ($Container) {
+        $inheritanceFlags = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+    }
+    $propagationFlags = [System.Security.AccessControl.PropagationFlags]::None
+    $rights = [System.Security.AccessControl.FileSystemRights]::FullControl
+    $allow = [System.Security.AccessControl.AccessControlType]::Allow
+    foreach ($sidValue in @('S-1-5-18', 'S-1-5-32-544')) {
+        $sid = [System.Security.Principal.SecurityIdentifier]::new($sidValue)
+        $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+            $sid,
+            $rights,
+            $inheritanceFlags,
+            $propagationFlags,
+            $allow
+        )
+        $acl.AddAccessRule($rule)
+    }
+    Set-Acl -LiteralPath $Path -AclObject $acl
+    Assert-ForkPressProtectedAcl -Path $Path
+}
+
+function ConvertTo-SidValue {
+    param([System.Security.Principal.IdentityReference] $Identity)
+
+    try {
+        return $Identity.Translate([System.Security.Principal.SecurityIdentifier]).Value
+    } catch {
+        return $Identity.Value
+    }
+}
+
+function Convert-OwnerToSidValue {
+    param([string] $Owner)
+
+    if ($Owner -match '^S-\d-') {
+        return $Owner
+    }
+    try {
+        return ([System.Security.Principal.NTAccount]::new($Owner)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+    } catch {
+        return $Owner
+    }
+}
+
+function Assert-ForkPressProtectedAcl {
+    param([string] $Path)
+
+    $allowed = @('S-1-5-18', 'S-1-5-32-544')
+    $acl = Get-Acl -LiteralPath $Path
+    $ownerSid = Convert-OwnerToSidValue -Owner $acl.Owner
+    if ($allowed -notcontains $ownerSid) {
+        throw "Protected ForkPress path has unexpected owner ${ownerSid}: $Path"
+    }
+    foreach ($rule in @($acl.Access)) {
+        $sid = ConvertTo-SidValue -Identity $rule.IdentityReference
+        if ($allowed -notcontains $sid -or
+            $rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow -or
+            (($rule.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -ne [System.Security.AccessControl.FileSystemRights]::FullControl)) {
+            throw "Protected ForkPress path has unexpected ACL entry $($rule.IdentityReference): $Path"
         }
     }
 }
 
-if (-not (Test-Path -LiteralPath $VhdPath)) {
-    $sizeMB = [UInt64] $SizeGB * 1024
-    Invoke-DiskPartScript @"
+function Test-ForkPressProtectedAcl {
+    param([string] $Path)
+
+    try {
+        Assert-ForkPressProtectedAcl -Path $Path
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Assert-AutoMountVhdPathIsProtected {
+    param([string] $VhdPath)
+
+    $protectedRoot = [System.IO.Path]::GetFullPath((Join-Path $env:ProgramData 'ForkPress'))
+    $protectedRootPrefix = $protectedRoot.TrimEnd('\') + '\'
+    $fullVhdPath = [System.IO.Path]::GetFullPath($VhdPath)
+    if (-not ($fullVhdPath.StartsWith($protectedRootPrefix, [StringComparison]::OrdinalIgnoreCase))) {
+        throw "Persistent auto-mount requires the VHDX to live under protected storage: $protectedRoot"
+    }
+}
+
+function Grant-ForkPressDevDriveAccess {
+    param(
+        [string] $MountPath,
+        [string] $UserId
+    )
+
+    Invoke-CheckedNativeCommand -FilePath 'icacls.exe' -Arguments @(
+        $MountPath,
+        '/grant',
+        "${UserId}:(OI)(CI)F"
+    ) | Out-Null
+}
+
+function Wait-DiskImageDisk {
+    param([string] $ImagePath)
+
+    $deadline = (Get-Date).AddSeconds(15)
+    do {
+        $disk = Get-DiskImage -ImagePath $ImagePath | Get-Disk -ErrorAction SilentlyContinue
+        if ($disk) {
+            return $disk
+        }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+
+    throw "Timed out waiting for attached VHDX disk: $ImagePath"
+}
+
+function Test-ForkPressVhdMountedAtPath {
+    param(
+        [string] $VhdPath,
+        [string] $MountPath
+    )
+
+    try {
+        $image = Get-DiskImage -ImagePath $VhdPath -ErrorAction Stop
+        if (-not $image.Attached) {
+            return $false
+        }
+        $disk = $image | Get-Disk -ErrorAction Stop
+        $paths = Get-Partition -DiskNumber $disk.Number |
+            ForEach-Object { $_.AccessPaths } |
+            Where-Object { $_ }
+        return $paths -contains $MountPath
+    } catch {
+        return $false
+    }
+}
+
+function Register-ForkPressDevDriveAutoMount {
+    param(
+        [string] $VhdPath,
+        [string] $MountPath,
+        [string] $AutoMountUserId
+    )
+
+    Write-Step 'Registering Dev Drive auto-mount'
+    $vhdLiteral = ConvertTo-PowerShellSingleQuotedString $VhdPath
+    $mountLiteral = ConvertTo-PowerShellSingleQuotedString $MountPath
+    $attachCommand = @"
+`$ErrorActionPreference = 'Stop'
+`$vhdPath = $vhdLiteral
+`$mountPath = $mountLiteral
+`$image = Get-DiskImage -ImagePath `$vhdPath -ErrorAction SilentlyContinue
+if (-not `$image -or -not `$image.Attached) {
+    Mount-DiskImage -ImagePath `$vhdPath -ErrorAction Stop | Out-Null
+}
+`$disk = Get-DiskImage -ImagePath `$vhdPath | Get-Disk -ErrorAction Stop
+`$partition = Get-Partition -DiskNumber `$disk.Number | Where-Object { `$_.Type -ne 'Reserved' } | Select-Object -First 1
+if (`$partition -and @(`$partition.AccessPaths) -notcontains `$mountPath) {
+    Add-PartitionAccessPath -DiskNumber `$disk.Number -PartitionNumber `$partition.PartitionNumber -AccessPath `$mountPath
+}
+"@
+    $encodedCommand = ConvertTo-PowerShellEncodedCommand $attachCommand
+    $powerShellPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $action = New-ScheduledTaskAction -Execute $powerShellPath -Argument "-NoProfile -ExecutionPolicy Bypass -EncodedCommand $encodedCommand"
+    $trigger = New-ScheduledTaskTrigger -AtLogOn
+    if ([string]::IsNullOrWhiteSpace($AutoMountUserId)) {
+        $AutoMountUserId = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    }
+    $principal = New-ScheduledTaskPrincipal -UserId $AutoMountUserId -LogonType Interactive -RunLevel Highest
+    Register-ScheduledTask `
+        -TaskName 'ForkPress Attach Dev Drive' `
+        -Action $action `
+        -Trigger $trigger `
+        -Principal $principal `
+        -Description 'Attach the ForkPress Dev Drive VHDX at user logon.' `
+        -Force | Out-Null
+}
+
+$transcriptStarted = $false
+try {
+    if (-not (Test-Administrator)) {
+        throw 'ForkPress Dev Drive setup must run from an elevated PowerShell session. Use ForkPressSetup.exe for the guided installer flow.'
+    }
+
+    if ($LogPath) {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $LogPath) | Out-Null
+        Start-Transcript -Path $LogPath -Append | Out-Null
+        $transcriptStarted = $true
+    }
+
+    if (-not $AttachOnly -and $SizeGB -lt 50) {
+        throw 'Dev Drive volumes must be at least 50 GB.'
+    }
+
+    $VhdPath = [System.IO.Path]::GetFullPath($VhdPath)
+    $MountPath = [System.IO.Path]::GetFullPath($MountPath)
+    if (-not $MountPath.EndsWith('\')) {
+        $MountPath = "$MountPath\"
+    }
+    if (-not $SkipAutoMount) {
+        Assert-AutoMountVhdPathIsProtected -VhdPath $VhdPath
+    }
+
+    if (-not $AllowPlainReFS) {
+        $formatVolume = Get-Command Format-Volume -ErrorAction Stop
+        if (-not $formatVolume.Parameters.ContainsKey('DevDrive')) {
+            throw 'This Windows build does not expose Format-Volume -DevDrive. Update Windows 11, reboot, then run ForkPress Setup again.'
+        }
+
+        $os = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+        $build = [int] $os.CurrentBuildNumber
+        $ubr = if ($os.UBR -ne $null) { [int] $os.UBR } else { 0 }
+        if ($build -lt 22621 -or ($build -eq 22621 -and $ubr -lt 2338)) {
+            throw "ForkPress Dev Drive setup needs Windows 11 build 22621.2338 or newer. Current build is $build.$ubr."
+        }
+    }
+
+    if (-not $AttachOnly) {
+        $memory = Get-CimInstance Win32_ComputerSystem
+        if ([UInt64] $memory.TotalPhysicalMemory -lt 8GB) {
+            throw 'ForkPress Dev Drive setup needs at least 8 GB of RAM.'
+        }
+
+        $hostDrive = Get-PSDrive -Name ([System.IO.Path]::GetPathRoot($VhdPath).Substring(0, 1))
+        if ($hostDrive.Free -lt 50GB) {
+            throw "ForkPress Dev Drive setup needs at least 50 GB free on $($hostDrive.Name):."
+        }
+    }
+
+    Protect-ForkPressVhdPath -VhdPath $VhdPath
+    if (Test-Path -LiteralPath $MountPath) {
+        $existing = Get-ChildItem -LiteralPath $MountPath -Force -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($existing -and -not (Test-ForkPressVhdMountedAtPath -VhdPath $VhdPath -MountPath $MountPath)) {
+            throw "Mount path $MountPath is not empty and is not the ForkPress Dev Drive. Choose an empty folder or remove its contents."
+        }
+    } else {
+        New-Item -ItemType Directory -Force -Path $MountPath | Out-Null
+    }
+
+    if (-not $AllowPlainReFS) {
+        Write-Step 'Enabling Windows Dev Drive support'
+        Invoke-CheckedNativeCommand -FilePath 'fsutil.exe' -Arguments @('devdrv', 'enable', '/allowAv') | Out-Null
+    }
+
+    if (-not (Test-Path -LiteralPath $VhdPath)) {
+        if ($AttachOnly) {
+            throw "No ForkPress VHDX exists at $VhdPath."
+        }
+        Write-Step 'Creating dynamic VHDX'
+        $sizeMB = [UInt64] $SizeGB * 1024
+        Invoke-DiskPartScript @"
 create vdisk file="$VhdPath" maximum=$sizeMB type=expandable
 "@
-}
-
-$image = Get-DiskImage -ImagePath $VhdPath -ErrorAction SilentlyContinue
-if (-not $image -or -not $image.Attached) {
-    Mount-DiskImage -ImagePath $VhdPath -ErrorAction Stop | Out-Null
-}
-
-$disk = Get-DiskImage -ImagePath $VhdPath | Get-Disk
-if ($disk.PartitionStyle -eq 'RAW') {
-    Initialize-Disk -Number $disk.Number -PartitionStyle GPT | Out-Null
-    $partition = New-Partition -DiskNumber $disk.Number -UseMaximumSize
-} else {
-    $partition = Get-Partition -DiskNumber $disk.Number |
-        Where-Object { $_.Type -ne 'Reserved' } |
-        Select-Object -First 1
-}
-
-if (-not $partition) {
-    throw "No usable partition found on $VhdPath"
-}
-
-$volume = $partition | Get-Volume -ErrorAction SilentlyContinue
-if (-not $volume -or -not $volume.FileSystem) {
-    $formatParams = @{
-        Partition = $partition
-        FileSystem = 'ReFS'
-        NewFileSystemLabel = 'ForkPress'
-        Confirm = $false
+        Set-ForkPressProtectedAcl -Path $VhdPath
     }
-    if ((Get-Command Format-Volume).Parameters.ContainsKey('DevDrive')) {
-        $formatParams['DevDrive'] = $true
+
+    Write-Step 'Attaching VHDX'
+    $image = Get-DiskImage -ImagePath $VhdPath -ErrorAction SilentlyContinue
+    if (-not $image -or -not $image.Attached) {
+        Mount-DiskImage -ImagePath $VhdPath -ErrorAction Stop | Out-Null
     }
-    Format-Volume @formatParams | Out-Null
-}
 
-$partition = Get-Partition -DiskNumber $disk.Number -PartitionNumber $partition.PartitionNumber
-$paths = @($partition.AccessPaths)
-if ($paths -notcontains $MountPath) {
-    Add-PartitionAccessPath `
-        -DiskNumber $disk.Number `
-        -PartitionNumber $partition.PartitionNumber `
-        -AccessPath $MountPath
-}
+    $disk = Wait-DiskImageDisk $VhdPath
+    if ($disk.IsOffline) {
+        Set-Disk -Number $disk.Number -IsOffline $false
+    }
+    if ($disk.IsReadOnly) {
+        Set-Disk -Number $disk.Number -IsReadOnly $false
+    }
 
-Write-Host ''
-Write-Host 'ForkPress Dev Drive is ready.'
-Write-Host "  VHDX:  $VhdPath"
-Write-Host "  Mount: $MountPath"
-Write-Host ''
-Write-Host 'Create or move ForkPress projects under that mount path, then run:'
-Write-Host "  cd `"$MountPath`""
-Write-Host '  forkpress init'
+    if ($disk.PartitionStyle -eq 'RAW') {
+        if ($AttachOnly) {
+            throw "The ForkPress VHDX exists but is not initialized: $VhdPath"
+        }
+        Write-Step 'Initializing VHDX'
+        Initialize-Disk -Number $disk.Number -PartitionStyle GPT | Out-Null
+        $partition = New-Partition -DiskNumber $disk.Number -UseMaximumSize
+    } else {
+        $partition = Get-Partition -DiskNumber $disk.Number |
+            Where-Object { $_.Type -ne 'Reserved' } |
+            Select-Object -First 1
+    }
+
+    if (-not $partition) {
+        throw "No usable partition found on $VhdPath"
+    }
+
+    $volume = $partition | Get-Volume -ErrorAction SilentlyContinue
+    if (-not $volume -or -not $volume.FileSystem) {
+        if ($AttachOnly) {
+            throw "The ForkPress VHDX partition exists but is not formatted: $VhdPath"
+        }
+        Write-Step 'Formatting as Dev Drive'
+        $formatParams = @{
+            Partition = $partition
+            FileSystem = 'ReFS'
+            NewFileSystemLabel = 'ForkPress'
+            Confirm = $false
+        }
+        if (-not $AllowPlainReFS) {
+            $formatParams['DevDrive'] = $true
+        }
+        Format-Volume @formatParams | Out-Null
+    } elseif ($volume.FileSystem -ne 'ReFS') {
+        throw "Existing ForkPress VHDX is formatted as $($volume.FileSystem), not ReFS. Remove $VhdPath and run setup again."
+    }
+
+    $partition = Get-Partition -DiskNumber $disk.Number -PartitionNumber $partition.PartitionNumber
+    $paths = @($partition.AccessPaths)
+    if ($paths -notcontains $MountPath) {
+        Write-Step 'Mounting Dev Drive folder'
+        Add-PartitionAccessPath `
+            -DiskNumber $disk.Number `
+            -PartitionNumber $partition.PartitionNumber `
+            -AccessPath $MountPath
+    }
+
+    if (-not $AllowPlainReFS) {
+        Write-Step 'Trusting Dev Drive'
+        Invoke-CheckedNativeCommand -FilePath 'fsutil.exe' -Arguments @('devdrv', 'trust', '/f', $MountPath) | Out-Null
+        Assert-ForkPressTrustedDevDrive -MountPath $MountPath
+    }
+
+    if ([string]::IsNullOrWhiteSpace($AutoMountUserId)) {
+        $AutoMountUserId = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    }
+    Write-Step 'Granting user access to Dev Drive'
+    Grant-ForkPressDevDriveAccess -MountPath $MountPath -UserId $AutoMountUserId
+
+    if (-not $SkipAutoMount) {
+        Register-ForkPressDevDriveAutoMount -VhdPath $VhdPath -MountPath $MountPath -AutoMountUserId $AutoMountUserId
+    }
+
+    Write-Host ''
+    Write-Host 'ForkPress Dev Drive is ready.'
+    Write-Host "  VHDX:  $VhdPath"
+    Write-Host "  Mount: $MountPath"
+    Write-Host ''
+} finally {
+    if ($transcriptStarted) {
+        Stop-Transcript | Out-Null
+    }
+}

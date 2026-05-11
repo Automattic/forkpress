@@ -53,7 +53,11 @@ fn main() -> Result<()> {
         );
     }
 
-    let required = "bin/php";
+    let required = if target.contains("windows") {
+        "bin/php.exe"
+    } else {
+        "bin/php"
+    };
     let path = dist_dir.join(required);
     if !path.is_file() {
         bail!("missing {} (required for runtime bundle)", path.display());
@@ -465,11 +469,7 @@ fn build_bundle(
         add_file(&mut tar, repo_root, "scripts/shared/sqlite_retry.php")?;
     }
 
-    add_file_as(
-        &mut tar,
-        &dist_dir.join("bin/php"),
-        "portable-runtime/bin/php",
-    )?;
+    add_tree_as(&mut tar, &dist_dir.join("bin"), "portable-runtime/bin")?;
 
     tar.finish()?;
     let encoder = tar.into_inner()?;
@@ -495,13 +495,30 @@ fn add_tree(tar: &mut Builder<GzEncoder<File>>, repo_root: &Path, rel: &str) -> 
     Ok(())
 }
 
-fn add_file(tar: &mut Builder<GzEncoder<File>>, repo_root: &Path, rel: &str) -> Result<()> {
-    let path = repo_root.join(rel);
-    tar.append_path_with_name(&path, rel)?;
+fn add_tree_as(
+    tar: &mut Builder<GzEncoder<File>>,
+    source_root: &Path,
+    dest_root: &str,
+) -> Result<()> {
+    for entry in WalkDir::new(source_root) {
+        let entry = entry?;
+        let path = entry.path();
+        let rel_path = path.strip_prefix(source_root).with_context(|| {
+            format!("{} is not under {}", path.display(), source_root.display())
+        })?;
+        let dest_path = Path::new(dest_root).join(rel_path);
+
+        if entry.file_type().is_dir() {
+            tar.append_dir(&dest_path, path)?;
+        } else if entry.file_type().is_file() {
+            tar.append_path_with_name(path, &dest_path)?;
+        }
+    }
     Ok(())
 }
 
-fn add_file_as(tar: &mut Builder<GzEncoder<File>>, source: &Path, dest: &str) -> Result<()> {
-    tar.append_path_with_name(source, dest)?;
+fn add_file(tar: &mut Builder<GzEncoder<File>>, repo_root: &Path, rel: &str) -> Result<()> {
+    let path = repo_root.join(rel);
+    tar.append_path_with_name(&path, rel)?;
     Ok(())
 }

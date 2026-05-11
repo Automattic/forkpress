@@ -10,13 +10,14 @@ Windows path is native ReFS block cloning on a Dev Drive.
 
 For a fresh Windows laptop:
 
-1. Install ForkPress.
-2. Run the Windows setup flow once and accept the UAC prompt.
-3. If Windows asks for a reboot after enabling optional components, reboot.
-4. Open the ForkPress Dev Drive folder.
-5. Run `forkpress init`.
+1. Download `ForkPressSetup.exe`.
+2. Open it.
+3. Accept the Windows permission prompt.
+4. Reboot only if Windows asks.
+5. Open **Start ForkPress Site** from the desktop or Start Menu.
 
-The script backing that setup flow is:
+The installer runs the same storage setup script a developer can run manually
+from an elevated PowerShell session:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\windows\setup-dev-drive.ps1
@@ -25,13 +26,31 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\setup-dev-drive.ps1
 By default it creates:
 
 ```text
-%LOCALAPPDATA%\ForkPress\Storage\forkpress-dev-drive.vhdx
+%ProgramData%\ForkPress\Storage\forkpress-dev-drive.vhdx
 %USERPROFILE%\ForkPressDevDrive\
 ```
 
 The VHDX is dynamic, so the file grows with real data rather than immediately
 allocating the configured maximum size. The default maximum is 128 GB because
 Windows Dev Drive volumes have a 50 GB minimum.
+
+The installer also:
+
+- installs `forkpress.exe` and setup scripts under `%ProgramFiles%\ForkPress`;
+- adds that directory to the current user's `PATH`;
+- installs the Microsoft Visual C++ Redistributable needed by the official PHP
+  for Windows runtime from the redistributable bundled in the ForkPress package;
+- registers a scheduled task that reattaches the VHDX after logon;
+- creates `%USERPROFILE%\ForkPressDevDrive\Sites\My ForkPress Site`;
+- runs `forkpress init` in that site folder;
+- creates **Start ForkPress Site**, **ForkPress Shell**, and **ForkPress Dev
+  Drive** shortcuts.
+
+The elevated Dev Drive path does not execute PowerShell scripts from
+user-writable storage. The installer runs from an elevated Program Files install,
+the VHDX backing file lives under admin-writable ProgramData storage, and the
+logon auto-mount task stores a fixed command instead of pointing at a mutable
+script file.
 
 ## Storage Cascade
 
@@ -42,8 +61,9 @@ name:
    in place.
 2. On Windows, the clone primitive is ReFS block cloning through
    `FSCTL_DUPLICATE_EXTENTS_TO_FILE`.
-3. If the current Windows directory cannot clone files, guide the user to the
-   Dev Drive setup flow before treating full copy as acceptable.
+3. If the current Windows directory cannot clone files, fail closed and tell the
+   user to run ForkPress Setup. Windows should not silently initialize a large
+   full-copy site on NTFS.
 4. ProjFS remains the next Windows-native lazy namespace candidate, but it is
    an optional Windows component and needs a separate provider implementation.
 5. Full file copy is the terminal fallback, not the first fallback.
@@ -64,12 +84,16 @@ marketing\wp-load.php  until one side writes
 
 ## Current Boundaries
 
-- The first Windows implementation supports materialized COW, not lazy
+- The Windows implementation supports materialized COW, not lazy
   namespace COW. Branch creation still walks the source tree and creates a full
   directory namespace.
-- The Dev Drive setup script is the install-time building block. A release
-  installer should call the same flow rather than asking users to paste
-  PowerShell.
+- The installer path is designed for Windows 11 systems with Dev Drive support.
+  Older Windows builds fail with a clear update/reboot message instead of
+  falling back to a huge copy.
+- Release builds can Authenticode-sign `forkpress.exe` and `ForkPressSetup.exe`
+  when `WINDOWS_CODESIGN_CERT_BASE64` and `WINDOWS_CODESIGN_PASSWORD` are set in
+  GitHub Actions secrets. Without those secrets, PR builds produce unsigned
+  smoke-tested artifacts.
 - ProjFS support is not implemented yet.
 - Semantic database merge is separate from the file storage strategy.
 

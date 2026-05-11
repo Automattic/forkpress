@@ -46,8 +46,8 @@ clone). On macOS, if the current location cannot clone files, ForkPress creates
 a rootless APFS sparsebundle under `.forkpress/macos-cow`, mounts it at
 `.forkpress/macos-cow/mount`, and links each public branch directory, such as
 `./main`, into that APFS volume. On Windows, put the site on a ReFS Dev Drive
-or run `scripts/windows/setup-dev-drive.ps1` once to create one. A regular full
-copy is only the last-resort file view.
+created by `ForkPressSetup.exe`. A regular full copy is only the last-resort
+file view on platforms where ForkPress can make that tradeoff explicit.
 
 APFS clone sharing is not visible to tools that add up path sizes. `du`, Finder,
 and many disk analyzers can count shared clone extents once for every branch, so
@@ -176,6 +176,13 @@ pub fn prepare_cow_file_view(layout: &Layout) -> Result<FileViewStrategy> {
         return Ok(FileViewStrategy::Reflink);
     }
 
+    #[cfg(target_os = "windows")]
+    {
+        bail!(
+            "Windows COW storage requires ReFS block cloning. Run ForkPress Setup to create a Dev Drive, then create the site under %USERPROFILE%\\ForkPressDevDrive."
+        );
+    }
+
     #[cfg(target_os = "macos")]
     {
         match prepare_macos_apfs_sparsebundle_file_view(layout) {
@@ -187,7 +194,10 @@ pub fn prepare_cow_file_view(layout: &Layout) -> Result<FileViewStrategy> {
         }
     }
 
-    Ok(FileViewStrategy::Copy)
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(FileViewStrategy::Copy)
+    }
 }
 
 pub fn ensure_cow_file_view_ready(layout: &Layout) -> Result<FileViewStrategy> {

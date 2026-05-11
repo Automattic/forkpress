@@ -31,7 +31,8 @@ macOS release targets link only against `libSystem`:
 - `crates/forkpress-core/` contains shared layout, manifest, path, and storage
   strategy types.
 - `crates/forkpress-storage/` contains production COW branch storage:
-  APFS clonefile, APFS sparsebundle, Linux `FICLONE`, and file-copy fallback.
+  APFS clonefile, APFS sparsebundle, Linux `FICLONE`, Windows ReFS block clone,
+  and file-copy fallback.
 - `crates/forkpress-runtime/` contains embedded PHP/WordPress runtime
   preparation and PHP script execution.
 - `crates/forkpress-server/` contains the server process registry, stop/list
@@ -41,6 +42,8 @@ macOS release targets link only against `libSystem`:
 - `runtime/` contains production COW runtime files and the WordPress archive
   embedded into the binary.
 - `scripts/` contains production/shared build, SQLite, Git, and COW helpers.
+- `scripts/windows/` and `installer/windows/` contain the Windows runtime bundle
+  and click-through setup packaging.
 - `tests/` contains production COW PHP tests.
 - `experiments/branchfs/` contains the experimental BranchFS schema, PHP
   extension, runtime files, scripts, Git adapter, and tests.

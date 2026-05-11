@@ -94,11 +94,11 @@ directory namespace for each branch.
    `.forkpress/macos-cow/mount`, and symlinks public branch directories to the
    APFS-backed physical branch trees.
 3. **Guided ReFS Dev Drive setup on Windows.** If a Windows project is not on
-   clone-capable storage, use `scripts/windows/setup-dev-drive.ps1` once. It
-   prompts for elevation, creates a dynamic VHDX under `%LOCALAPPDATA%`, formats
-   it as ReFS/Dev Drive when the OS supports Dev Drive formatting, and mounts it
-   at `%USERPROFILE%\ForkPressDevDrive`. Projects created there can use the
-   native file clone tier.
+   clone-capable storage, the Windows installer prompts for elevation, creates a
+   dynamic VHDX under `%ProgramData%`, formats it as ReFS/Dev Drive, registers
+   logon auto-mount, mounts it at `%USERPROFILE%\ForkPressDevDrive`, creates the
+   first site, and initializes ForkPress there. Projects created there can use
+   the native file clone tier.
 4. **Full file copy.** This is the last-resort fallback.
 
 `du`, Finder, and many disk analyzers can over-count cloned files because they
@@ -223,8 +223,7 @@ Still future work:
   ordinary branch deletion, COW Git object pruning, and sparsebundle compaction;
 - filesystem-level coordination for direct external writes that bypass the
   ForkPress HTTP server;
-- installer integration that runs the Windows Dev Drive setup flow before
-  `forkpress init` chooses file-copy fallback;
+- real-machine validation for the signed Windows installer path;
 - ProjFS or another native lazy branch namespace for Windows when materialized
   ReFS COW is not enough.
 
