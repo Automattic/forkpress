@@ -1,14 +1,21 @@
 use anyhow::{Context, Result, anyhow, bail};
 #[cfg(target_os = "macos")]
 use std::ffi::CString;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
+#[cfg(target_os = "macos")]
+use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
+#[cfg(target_os = "windows")]
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(target_os = "macos")]
+use forkpress_core::absolutize;
 use forkpress_core::{
-    FileViewStrategy, Layout, SharedPaths, StorageStrategy, absolutize, path_exists_no_follow,
+    FileViewStrategy, Layout, SharedPaths, StorageStrategy, path_exists_no_follow,
     read_site_manifest, validate_branch_name, write_site_manifest,
 };
 use forkpress_runtime::{PortableRuntime, run_php_script};
@@ -34,11 +41,13 @@ streams, SQL COW views, tombstones, triggers, or per-branch table prefixes.
 
 Branch creation uses the file view recorded in `.forkpress/site.toml`.
 ForkPress first tries materialized COW branch directories with host filesystem
-clone primitives (Linux `FICLONE`, macOS `clonefile`). On macOS, if the current
-location cannot clone files, ForkPress creates a rootless APFS sparsebundle
-under `.forkpress/macos-cow`, mounts it at `.forkpress/macos-cow/mount`, and
-links each public branch directory, such as `./main`, into that APFS volume. A
-regular full copy is only the last-resort file view.
+clone primitives (Linux `FICLONE`, macOS `clonefile`, Windows ReFS block
+clone). On macOS, if the current location cannot clone files, ForkPress creates
+a rootless APFS sparsebundle under `.forkpress/macos-cow`, mounts it at
+`.forkpress/macos-cow/mount`, and links each public branch directory, such as
+`./main`, into that APFS volume. On Windows, put the site on a ReFS Dev Drive
+or run `scripts/windows/setup-dev-drive.ps1` once to create one. A regular full
+copy is only the last-resort file view.
 
 APFS clone sharing is not visible to tools that add up path sizes. `du`, Finder,
 and many disk analyzers can count shared clone extents once for every branch, so
@@ -715,7 +724,8 @@ pub fn probe_reflink_dir(dir: &Path) -> Result<bool> {
     let result = (|| -> Result<bool> {
         let source = probe_dir.join("source.txt");
         let dest = probe_dir.join("dest.txt");
-        fs::write(&source, b"canonical")
+        let source_bytes = reflink_probe_bytes();
+        fs::write(&source, &source_bytes)
             .with_context(|| format!("failed to write {}", source.display()))?;
 
         if try_clone_file(&source, &dest).is_err() {
@@ -726,11 +736,27 @@ pub fn probe_reflink_dir(dir: &Path) -> Result<bool> {
             .with_context(|| format!("failed to write {}", dest.display()))?;
         let canonical =
             fs::read(&source).with_context(|| format!("failed to read {}", source.display()))?;
-        Ok(canonical == b"canonical")
+        Ok(canonical == source_bytes)
     })();
 
     let _ = fs::remove_dir_all(&probe_dir);
     result
+}
+
+fn reflink_probe_bytes() -> Vec<u8> {
+    #[cfg(target_os = "windows")]
+    {
+        let mut bytes = vec![0; (WINDOWS_REFS_CLONE_ALIGNMENT * 2) as usize];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = (index % 251) as u8;
+        }
+        bytes
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        b"canonical".to_vec()
+    }
 }
 
 #[cfg(unix)]
@@ -1404,6 +1430,10 @@ enum TreeCloneMode {
     RequireCow,
 }
 
+const WINDOWS_REFS_CLONE_ALIGNMENT: u64 = 64 * 1024;
+#[cfg(target_os = "windows")]
+const WINDOWS_REFS_MAX_CLONE_CHUNK: u64 = 1024 * 1024 * 1024;
+
 fn copy_tree_cow_mode(source: &Path, dest: &Path, mode: TreeCloneMode) -> Result<()> {
     if !source.is_dir() {
         bail!("source directory not found: {}", source.display());
@@ -1494,15 +1524,138 @@ fn try_clone_file(source: &Path, dest: &Path) -> Result<()> {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(target_os = "windows")]
+fn try_clone_file(source: &Path, dest: &Path) -> Result<()> {
+    let mut src = File::open(source)?;
+    let mut dst = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(dest)?;
+    let source_len = src.metadata()?.len();
+    dst.set_len(source_len)?;
+
+    let (clone_len, tail_len) = windows_refs_clone_plan(source_len);
+    if clone_len > 0
+        && let Err(err) = windows_refs_duplicate_extents(&src, &dst, clone_len)
+    {
+        let _ = fs::remove_file(dest);
+        return Err(err);
+    }
+
+    if tail_len > 0
+        && let Err(err) = windows_copy_uncloned_tail(&mut src, &mut dst, clone_len, tail_len)
+    {
+        let _ = fs::remove_file(dest);
+        return Err(err);
+    }
+
+    Ok(())
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn windows_refs_clone_plan(file_len: u64) -> (u64, u64) {
+    let clone_len = file_len / WINDOWS_REFS_CLONE_ALIGNMENT * WINDOWS_REFS_CLONE_ALIGNMENT;
+    let tail_len = file_len - clone_len;
+    (clone_len, tail_len)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_refs_duplicate_extents(source: &File, dest: &File, clone_len: u64) -> Result<()> {
+    use std::ffi::c_void;
+    use std::mem::size_of;
+    use std::os::windows::io::AsRawHandle;
+
+    const FSCTL_DUPLICATE_EXTENTS_TO_FILE: u32 = 0x0009_8344;
+
+    #[repr(C)]
+    struct DuplicateExtentsData {
+        file_handle: *mut c_void,
+        source_file_offset: i64,
+        target_file_offset: i64,
+        byte_count: i64,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn DeviceIoControl(
+            h_device: *mut c_void,
+            dw_io_control_code: u32,
+            lp_in_buffer: *mut c_void,
+            n_in_buffer_size: u32,
+            lp_out_buffer: *mut c_void,
+            n_out_buffer_size: u32,
+            lp_bytes_returned: *mut u32,
+            lp_overlapped: *mut c_void,
+        ) -> i32;
+    }
+
+    let mut offset = 0;
+    while offset < clone_len {
+        let chunk_len = (clone_len - offset).min(WINDOWS_REFS_MAX_CLONE_CHUNK);
+        let mut request = DuplicateExtentsData {
+            file_handle: source.as_raw_handle(),
+            source_file_offset: i64::try_from(offset)
+                .context("source offset exceeds Windows LARGE_INTEGER range")?,
+            target_file_offset: i64::try_from(offset)
+                .context("target offset exceeds Windows LARGE_INTEGER range")?,
+            byte_count: i64::try_from(chunk_len)
+                .context("clone length exceeds Windows LARGE_INTEGER range")?,
+        };
+        let mut bytes_returned = 0u32;
+        let ok = unsafe {
+            DeviceIoControl(
+                dest.as_raw_handle(),
+                FSCTL_DUPLICATE_EXTENTS_TO_FILE,
+                &mut request as *mut _ as *mut c_void,
+                size_of::<DuplicateExtentsData>() as u32,
+                std::ptr::null_mut(),
+                0,
+                &mut bytes_returned,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("FSCTL_DUPLICATE_EXTENTS_TO_FILE failed");
+        }
+        offset += chunk_len;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_copy_uncloned_tail(
+    source: &mut File,
+    dest: &mut File,
+    offset: u64,
+    tail_len: u64,
+) -> Result<()> {
+    source.seek(SeekFrom::Start(offset))?;
+    dest.seek(SeekFrom::Start(offset))?;
+
+    let mut remaining = tail_len;
+    let mut buffer = vec![0; WINDOWS_REFS_CLONE_ALIGNMENT as usize];
+    while remaining > 0 {
+        let read_len = remaining.min(buffer.len() as u64) as usize;
+        source.read_exact(&mut buffer[..read_len])?;
+        dest.write_all(&buffer[..read_len])?;
+        remaining -= read_len as u64;
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn try_clone_file(_source: &Path, _dest: &Path) -> Result<()> {
     bail!("platform file clone unsupported")
 }
 
+#[cfg(target_os = "macos")]
 fn shell_quote_path(path: &std::path::Path) -> String {
     shell_quote(&path.to_string_lossy())
 }
 
+#[cfg(target_os = "macos")]
 fn shell_quote(value: &str) -> String {
     if value
         .chars()
@@ -1554,5 +1707,32 @@ mod tests {
         assert!(path_exists_no_follow(&backup));
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn windows_refs_clone_plan_keeps_unaligned_tail_out_of_ioctl() {
+        assert_eq!(windows_refs_clone_plan(0), (0, 0));
+        assert_eq!(windows_refs_clone_plan(1), (0, 1));
+        assert_eq!(
+            windows_refs_clone_plan(WINDOWS_REFS_CLONE_ALIGNMENT - 1),
+            (0, WINDOWS_REFS_CLONE_ALIGNMENT - 1)
+        );
+        assert_eq!(
+            windows_refs_clone_plan(WINDOWS_REFS_CLONE_ALIGNMENT),
+            (WINDOWS_REFS_CLONE_ALIGNMENT, 0)
+        );
+        assert_eq!(
+            windows_refs_clone_plan(WINDOWS_REFS_CLONE_ALIGNMENT + 3),
+            (WINDOWS_REFS_CLONE_ALIGNMENT, 3)
+        );
+    }
+
+    #[test]
+    fn windows_refs_probe_bytes_are_large_enough_for_block_clone() {
+        let bytes = reflink_probe_bytes();
+        #[cfg(target_os = "windows")]
+        assert_eq!(bytes.len() as u64, WINDOWS_REFS_CLONE_ALIGNMENT * 2);
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(bytes, b"canonical");
     }
 }
