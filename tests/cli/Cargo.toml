@@ -1,0 +1,10 @@
+[package]
+name = "forkpress-e2e-tests"
+version = "0.1.13-cow.1"
+edition = "2024"
+publish = false
+
+[dev-dependencies]
+assert_cmd = "2.1"
+libc = "0.2"
+tempfile = "3.23"
