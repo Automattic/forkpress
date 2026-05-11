@@ -3,18 +3,19 @@ name: ci
 on:
   pull_request:
     paths:
-      - 'crates/**'
-      - 'experiments/**'
-      - 'runtime/**'
-      - 'scripts/**'
-      - 'tests/**'
-      - 'wp-plugin/**'
-      - 'vendor/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/ci.yml'
+      - "crates/**"
+      - "experiments/**"
+      - "runtime/**"
+      - "scripts/**"
+      - "installer/**"
+      - "tests/**"
+      - "wp-plugin/**"
+      - "vendor/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/ci.yml"
   push:
-    branches: ['trunk']
+    branches: ["trunk"]
 
 jobs:
   linux-cow-e2e:
@@ -116,3 +117,38 @@ jobs:
         run: tests/cow/e2e.sh target/${{ matrix.target }}/release/forkpress
         env:
           FORKPRESS_FORCE_MACOS_APFS_SPARSEBUNDLE: "1"
+
+  windows-cow-check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust unit tests (workspace crates)
+        shell: pwsh
+        run: |
+          cargo test --target x86_64-pc-windows-msvc --workspace --exclude forkpress-cli
+
+      - name: Rust unit tests (CLI)
+        shell: pwsh
+        run: |
+          $bundle = Join-Path $pwd 'empty-runtime.tar.gz'
+          Set-Content -Path $bundle -Value '' -NoNewline
+          $env:FORKPRESS_RUNTIME_BUNDLE = $bundle
+          cargo test --target x86_64-pc-windows-msvc -p forkpress-cli --bin forkpress
+
+      - name: Windows script syntax
+        shell: pwsh
+        run: |
+          foreach ($script in @(
+            'scripts/windows/build-dist.ps1',
+            'scripts/windows/install.ps1',
+            'scripts/windows/setup-dev-drive.ps1',
+            'scripts/windows/package.ps1',
+            'scripts/windows/sign.ps1'
+          )) {
+            [scriptblock]::Create((Get-Content -Raw $script)) | Out-Null
+          }

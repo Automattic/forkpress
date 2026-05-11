@@ -19,7 +19,29 @@ impl PortableRuntime {
     pub fn from_layout(layout: &Layout) -> Self {
         let root = layout.runtime_dir.join("portable-runtime");
         Self {
-            php: root.join("bin/php"),
+            php: root.join("bin").join(bundled_php_name()),
+        }
+    }
+}
+
+fn bundled_php_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "php.exe"
+    } else {
+        "php"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundled_php_name_matches_target_platform() {
+        if cfg!(target_os = "windows") {
+            assert_eq!(bundled_php_name(), "php.exe");
+        } else {
+            assert_eq!(bundled_php_name(), "php");
         }
     }
 }

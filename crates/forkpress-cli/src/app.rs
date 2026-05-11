@@ -882,7 +882,16 @@ fn doctor_storage_command(args: DoctorStorageArgs) -> Result<i32> {
         );
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        println!("  Windows ReFS Dev Drive: recommended before file-copy fallback");
+        println!("  setup: run ForkPressSetup.exe to create a ReFS Dev Drive VHDX");
+        println!(
+            "  recommendation: create/open a ForkPress project on that Dev Drive, then rerun forkpress init"
+        );
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         println!("  recommendation: file-copy materialization");
     }

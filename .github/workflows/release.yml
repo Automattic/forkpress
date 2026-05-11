@@ -2,22 +2,24 @@ name: release
 
 on:
   push:
-    tags: ['v*']
+    tags: ["v*"]
   workflow_dispatch:
   pull_request:
     paths:
-      - 'crates/**'
-      - 'runtime/cow/**'
-      - 'runtime/wp.zip'
-      - 'scripts/build-dist.sh'
-      - 'scripts/cow/**'
-      - 'scripts/git/**'
-      - 'scripts/shared/**'
-      - 'wp-plugin/**'
-      - 'vendor/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/release.yml'
+      - "crates/**"
+      - "runtime/cow/**"
+      - "runtime/wp.zip"
+      - "scripts/build-dist.sh"
+      - "scripts/windows/**"
+      - "scripts/cow/**"
+      - "scripts/git/**"
+      - "scripts/shared/**"
+      - "installer/windows/**"
+      - "wp-plugin/**"
+      - "vendor/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/release.yml"
 
 jobs:
   build:
@@ -38,7 +40,13 @@ jobs:
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             os: linux
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            os: windows
     runs-on: ${{ matrix.runner }}
+    env:
+      WINDOWS_CODESIGN_CERT_BASE64: ${{ secrets.WINDOWS_CODESIGN_CERT_BASE64 }}
+      WINDOWS_CODESIGN_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
 
@@ -57,6 +65,12 @@ jobs:
             build-essential clang curl git pkg-config unzip \
             musl-tools php-cli composer re2c bison
 
+      - name: Install toolchain (windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+
       # Static PHP builds are slow (3-5 min of compilation). Cache the whole
       # .build/ directory so we skip the clone, composer install, downloads,
       # and the PHP/lib compilation when inputs haven't changed. Cache key
@@ -68,6 +82,7 @@ jobs:
           key: >-
             build-${{ matrix.target }}-${{ hashFiles(
               'scripts/build-dist.sh',
+              'scripts/windows/build-dist.ps1',
               'crates/forkpress-cli/build.rs'
             ) }}
 
@@ -76,23 +91,126 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build production dist bundle
+        if: matrix.os != 'windows'
         run: scripts/build-dist.sh
         env:
           FORKPRESS_TARGET: ${{ matrix.target }}
           GITHUB_TOKEN: ${{ github.token }}
 
+      - name: Build production dist bundle (windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: scripts/windows/build-dist.ps1
+        env:
+          FORKPRESS_TARGET: ${{ matrix.target }}
+
       - name: Build forkpress
         run: cargo build --release --target ${{ matrix.target }} -p forkpress-cli --bin forkpress
 
+      - name: Require signing for tagged Windows releases
+        if: matrix.os == 'windows' && startsWith(github.ref, 'refs/tags/v') && env.WINDOWS_CODESIGN_CERT_BASE64 == ''
+        shell: pwsh
+        run: |
+          throw 'Tagged Windows releases require WINDOWS_CODESIGN_CERT_BASE64 and WINDOWS_CODESIGN_PASSWORD secrets.'
+
+      - name: Sign forkpress.exe (windows)
+        if: matrix.os == 'windows' && env.WINDOWS_CODESIGN_CERT_BASE64 != ''
+        shell: pwsh
+        run: scripts/windows/sign.ps1 -Files "target/${{ matrix.target }}/release/forkpress.exe"
+
       - name: Package
+        if: matrix.os != 'windows'
         run: |
           cd target/${{ matrix.target }}/release
           tar -czf ${{ github.workspace }}/forkpress-${{ matrix.target }}.tar.gz forkpress
 
+      - name: Package (windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP 'forkpress-windows-package'
+          scripts/windows/package.ps1 `
+            -ForkPressExe "target/${{ matrix.target }}/release/forkpress.exe" `
+            -Output "forkpress-${{ matrix.target }}.zip" `
+            -StageDir $stage `
+            -KeepStage
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & $iscc installer/windows/ForkPress.iss `
+            /DSourceDir="$stage" `
+            /DAppVersion="${{ github.ref_name }}" `
+            /O"${{ github.workspace }}"
+
+      - name: Sign installer (windows)
+        if: matrix.os == 'windows' && env.WINDOWS_CODESIGN_CERT_BASE64 != ''
+        shell: pwsh
+        run: scripts/windows/sign.ps1 -Files ForkPressSetup.exe
+
+      - name: Smoke packaged Windows artifact
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $zip = "forkpress-${{ matrix.target }}.zip"
+          if (-not (Test-Path -LiteralPath $zip)) {
+            throw "Missing $zip"
+          }
+          if (-not (Test-Path -LiteralPath 'ForkPressSetup.exe')) {
+            throw 'Missing ForkPressSetup.exe'
+          }
+          $extract = Join-Path $env:RUNNER_TEMP 'forkpress-zip-smoke'
+          Remove-Item -Recurse -Force -LiteralPath $extract -ErrorAction SilentlyContinue
+          Expand-Archive -LiteralPath $zip -DestinationPath $extract
+          foreach ($required in @(
+            'forkpress.exe',
+            'scripts/windows/install.ps1',
+            'scripts/windows/setup-dev-drive.ps1',
+            'vendor/vc_redist.x64.exe'
+          )) {
+            if (-not (Test-Path -LiteralPath (Join-Path $extract $required))) {
+              throw "Packaged artifact is missing $required"
+            }
+          }
+          & (Join-Path $extract 'forkpress.exe') --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "Packaged forkpress.exe failed with exit code $LASTEXITCODE"
+          }
+          $installRoot = Join-Path $env:RUNNER_TEMP 'forkpress-install-smoke'
+          $mountPath = Join-Path $env:RUNNER_TEMP 'ForkPressDevDriveSmoke'
+          $vhdPath = Join-Path $env:RUNNER_TEMP 'forkpress-smoke.vhdx'
+          Remove-Item -Recurse -Force -LiteralPath $installRoot, $mountPath -ErrorAction SilentlyContinue
+          Remove-Item -Force -LiteralPath $vhdPath -ErrorAction SilentlyContinue
+          try {
+            & (Join-Path $extract 'scripts/windows/install.ps1') `
+              -SourceRoot $extract `
+              -InstallRoot $installRoot `
+              -VhdPath $vhdPath `
+              -MountPath $mountPath `
+              -SiteName 'CI Smoke Site' `
+              -SizeGB 50 `
+              -AllowPlainReFS `
+              -FailOnRebootRequired `
+              -SkipAutoMount
+            if ($LASTEXITCODE -ne 0) {
+              throw "Packaged install.ps1 failed with exit code $LASTEXITCODE"
+            }
+            $siteWorkDir = Join-Path $mountPath 'Sites/CI Smoke Site/.forkpress'
+            if (-not (Test-Path -LiteralPath (Join-Path $siteWorkDir 'site.toml'))) {
+              throw 'Packaged install did not create an initialized ForkPress site.'
+            }
+            & (Join-Path $installRoot 'bin/forkpress.exe') storage status --work-dir $siteWorkDir
+            if ($LASTEXITCODE -ne 0) {
+              throw "Installed forkpress.exe storage status failed with exit code $LASTEXITCODE"
+            }
+          } finally {
+            Dismount-DiskImage -ImagePath $vhdPath -ErrorAction SilentlyContinue | Out-Null
+          }
+
       - uses: actions/upload-artifact@v4
         with:
           name: forkpress-${{ matrix.target }}
-          path: forkpress-${{ matrix.target }}.tar.gz
+          path: |
+            forkpress-${{ matrix.target }}.tar.gz
+            forkpress-${{ matrix.target }}.zip
+            ForkPressSetup.exe
           retention-days: 14
 
   release:
@@ -109,5 +227,8 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          files: forkpress-*.tar.gz
+          files: |
+            forkpress-*.tar.gz
+            forkpress-*.zip
+            ForkPressSetup.exe
           generate_release_notes: true

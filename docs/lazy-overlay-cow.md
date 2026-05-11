@@ -1,6 +1,6 @@
 # Lazy Overlay COW Options
 
-Status: 2026-05-04
+Status: 2026-05-11
 
 This note records the current storage decision. ForkPress is staying with the
 macOS APFS COW file view for now. Native lazy overlay filesystems are useful
@@ -16,8 +16,9 @@ Use the current **materialized COW** strategy:
 
 - `forkpress init` creates `.forkpress/` and `./main`;
 - `forkpress branch create marketing` creates `./marketing`;
-- file contents are cloned with APFS `clonefile` on macOS and `FICLONE`
-  reflinks on Linux when possible;
+- file contents are cloned with APFS `clonefile` on macOS, `FICLONE`
+  reflinks on Linux, and ReFS block cloning on Windows Dev Drive/ReFS volumes
+  when possible;
 - branch-local SQLite databases are normal files;
 - the sparsebundle fallback is still allowed when the project directory is not
   on an APFS volume that supports file clones.
@@ -87,7 +88,7 @@ be correct enough for PHP, Git, editors, and shell tools.
 
 | Approach | User flow | Requirements | Runtime footprint | Benefits | Downsides | Fit now |
 | --- | --- | --- | --- | --- | --- | --- |
-| Materialized COW | Download one binary, run `./forkpress init`, `./forkpress serve`. | macOS APFS `clonefile`, Linux `FICLONE`, APFS sparsebundle fallback, or full file copy. | One ForkPress process while serving. Optional mounted sparsebundle managed by `serve`/`stop`. | Normal directories, normal files, no install prompts, good editor/PHP/Git compatibility, branch writes do not affect parents. | Branch creation walks every file. Every branch has a materialized namespace. `du` can over-count cloned files. | Product path. |
+| Materialized COW | Download one binary on macOS/Linux and run `forkpress init`, or run `ForkPressSetup.exe` on Windows and open **Start ForkPress Site**. | macOS APFS `clonefile`, Linux `FICLONE`, Windows ReFS block clone, APFS sparsebundle fallback, Windows ReFS Dev Drive setup, or full file copy. | One ForkPress process while serving. Optional mounted sparsebundle or Dev Drive VHDX managed by the OS. | Normal directories, normal files, no WSL/Docker/FUSE dependency, good editor/PHP/Git compatibility, branch writes do not affect parents. | Branch creation walks every file. Every branch has a materialized namespace. `du`, Finder, and Explorer can over-count cloned files. | Product path. |
 | Embedded loopback NFS lazy overlay | `forkpress serve` starts an in-process local NFS server and mounts branch views. | macOS built-in NFS client. Mount may require `sudo` or a privileged helper depending mount location and options. | ForkPress process must stay alive as filesystem server. Mounted volume lifecycle must be managed. | Keeps one-binary story better than FUSE/FSKit. Can expose lazy branch directories to normal tools. | NFSv4 server implementation is substantial. File locking, cache invalidation, xattrs, permissions, rename semantics, and SQLite safety are high risk. | Best future experiment if lazy mounts become necessary. |
 | macFUSE lazy overlay | Install/approve macFUSE, then run ForkPress mount. | Third-party macFUSE install and system extension approval. | ForkPress or helper process implements the filesystem through FUSE. | Familiar userspace filesystem model. Faster to prototype than NFS or FSKit. | Breaks no-dependency product shape. User approval/install friction. Kernel/system extension issues vary by macOS version. | Prototype only, not product path. |
 | Apple FSKit lazy overlay | Install a signed app/extension, enable filesystem extension, then mount. | macOS FSKit support, app extension bundle, `Info.plist`, entitlements such as FSKit module entitlement, code signing, likely notarization. | App extension plus container app/helper. Mount managed through macOS filesystem extension infrastructure. | Native Apple-supported userspace filesystem route. No macFUSE dependency. Integrates with system mount tooling. | Not a single Rust binary. Requires Apple packaging, signing, entitlements, and extension approval flow. Still must implement overlay semantics ourselves. | Too much for this milestone. Do not pursue now. |
@@ -114,7 +115,11 @@ architecture. Known gaps:
   from editors, shells, and other tools still bypass that advisory lock.
 - Sparsebundle detach can still be blocked by terminals, editors, or processes
   holding files open under the mounted path.
-- Windows does not have COW parity yet.
+- Windows supports the native materialized COW tier when the project lives on a
+  ReFS/Dev Drive volume. The release workflow builds a Windows installer and zip
+  package, smoke-tests the package, and signs artifacts when code-signing secrets
+  are configured. A native lazy branch namespace such as ProjFS remains a future
+  experiment.
 - There is no content-aware storage garbage collection beyond ordinary branch
   deletion. Sparsebundle-backed sites can reclaim detached free space with
   `forkpress storage compact`.

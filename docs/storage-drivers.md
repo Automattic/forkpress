@@ -1,6 +1,6 @@
 # Storage Driver Notes
 
-Status: 2026-05-06
+Status: 2026-05-11
 
 ForkPress production builds are focused on the **COW materialized driver**.
 Other drivers are compiled only into `forkpress-dev`.
@@ -11,6 +11,8 @@ or installed database server.
 
 For the native-mount/lazy-overlay evaluation, see
 [`docs/lazy-overlay-cow.md`](lazy-overlay-cow.md).
+For the Windows ReFS/Dev Drive setup flow, see
+[`docs/windows-cow.md`](windows-cow.md).
 
 ## Driver Summary
 
@@ -84,13 +86,20 @@ directory namespace for each branch.
 
 1. **Native file clone in place.** The branch directories live directly in the
    project directory. Branch creation uses APFS `clonefile` on macOS and Linux
-   `FICLONE` reflinks on Linux, so unchanged blocks are shared until a branch
-   writes to them.
+   `FICLONE` reflinks on Linux. On Windows, ForkPress uses ReFS block cloning
+   when the project directory is on a ReFS/Dev Drive volume. Unchanged blocks
+   are shared until a branch writes to them.
 2. **Rootless APFS sparsebundle on macOS.** If the project volume cannot clone files,
    ForkPress creates `.forkpress/macos-cow/branches.sparsebundle`, mounts it at
    `.forkpress/macos-cow/mount`, and symlinks public branch directories to the
    APFS-backed physical branch trees.
-3. **Full file copy.** This is the last-resort fallback.
+3. **Guided ReFS Dev Drive setup on Windows.** If a Windows project is not on
+   clone-capable storage, the Windows installer prompts for elevation, creates a
+   dynamic VHDX under `%ProgramData%`, formats it as ReFS/Dev Drive, registers
+   logon auto-mount, mounts it at `%USERPROFILE%\ForkPressDevDrive`, creates the
+   first site, and initializes ForkPress there. Projects created there can use
+   the native file clone tier.
+4. **Full file copy.** This is the last-resort fallback.
 
 `du`, Finder, and many disk analyzers can over-count cloned files because they
 sum path sizes rather than unique allocated extents. On sparsebundle-backed
@@ -214,7 +223,9 @@ Still future work:
   ordinary branch deletion, COW Git object pruning, and sparsebundle compaction;
 - filesystem-level coordination for direct external writes that bypass the
   ForkPress HTTP server;
-- Windows support.
+- real-machine validation for the signed Windows installer path;
+- ProjFS or another native lazy branch namespace for Windows when materialized
+  ReFS COW is not enough.
 
 ## ZFS Status
 

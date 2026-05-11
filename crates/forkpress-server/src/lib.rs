@@ -1,8 +1,12 @@
 use anyhow::{Context, Result, bail};
 use forkpress_core::Layout;
-use std::fs::{self, File, OpenOptions};
+use std::fs;
+#[cfg(unix)]
+use std::fs::{File, OpenOptions};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::process::Command;
 use std::process::{Child, ExitStatus};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -34,6 +38,13 @@ pub struct ServerStartInfo {
 pub struct ServerRegistrationGuard {
     pid: u32,
     layout: Layout,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerSignal {
+    Interrupt,
+    Terminate,
+    Kill,
 }
 
 #[cfg(unix)]
@@ -170,11 +181,11 @@ pub fn stop_server_record(record: &ServerRecord, timeout: Duration) -> Result<()
         return Ok(());
     }
 
-    signal_server_record(record, libc::SIGINT)?;
+    signal_server_record(record, ServerSignal::Interrupt)?;
     if !wait_for_record_exit(record, timeout) {
-        signal_server_record(record, libc::SIGTERM)?;
+        signal_server_record(record, ServerSignal::Terminate)?;
         if !wait_for_record_exit(record, Duration::from_secs(2)) {
-            signal_server_record(record, libc::SIGKILL)?;
+            signal_server_record(record, ServerSignal::Kill)?;
             let _ = wait_for_record_exit(record, Duration::from_secs(2));
         }
     }
@@ -367,6 +378,12 @@ fn server_registry_path() -> PathBuf {
     if let Some(dir) = std::env::var_os("FORKPRESS_STATE_DIR") {
         return PathBuf::from(dir).join(SERVER_REGISTRY_FILE);
     }
+    #[cfg(windows)]
+    if let Some(dir) = std::env::var_os("LOCALAPPDATA") {
+        return PathBuf::from(dir)
+            .join("ForkPress")
+            .join(SERVER_REGISTRY_FILE);
+    }
     if let Some(dir) = std::env::var_os("XDG_STATE_HOME") {
         return PathBuf::from(dir)
             .join("forkpress")
@@ -379,10 +396,13 @@ fn server_registry_path() -> PathBuf {
     }
     std::env::temp_dir().join(format!(
         "forkpress-{}-{SERVER_REGISTRY_FILE}",
-        std::env::var("USER").unwrap_or_else(|_| "user".to_string())
+        std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or_else(|_| "user".to_string())
     ))
 }
 
+#[cfg(unix)]
 fn server_registry_lock_path() -> PathBuf {
     server_registry_path().with_extension("tsv.lock")
 }
@@ -402,6 +422,7 @@ fn record_process_exists(record: &ServerRecord) -> bool {
     process_exists(record.pid) || record.child_pid.map(process_exists).unwrap_or(false)
 }
 
+#[cfg(unix)]
 fn process_exists(pid: u32) -> bool {
     if pid == 0 {
         return false;
@@ -416,7 +437,38 @@ fn process_exists(pid: u32) -> bool {
     )
 }
 
-fn signal_server_record(record: &ServerRecord, signal: i32) -> Result<()> {
+#[cfg(windows)]
+fn process_exists(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+
+    use std::ffi::c_void;
+
+    const ERROR_ACCESS_DENIED: u32 = 5;
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn OpenProcess(
+            dw_desired_access: u32,
+            b_inherit_handle: i32,
+            dw_process_id: u32,
+        ) -> *mut c_void;
+        fn CloseHandle(h_object: *mut c_void) -> i32;
+        fn GetLastError() -> u32;
+    }
+
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return unsafe { GetLastError() } == ERROR_ACCESS_DENIED;
+    }
+    let _ = unsafe { CloseHandle(handle) };
+    true
+}
+
+#[cfg(unix)]
+fn signal_server_record(record: &ServerRecord, signal: ServerSignal) -> Result<()> {
     let mut signaled_group = false;
     if process_exists(record.pid) {
         if process_group_id(record.pid) == Some(record.pid) {
@@ -441,6 +493,20 @@ fn signal_server_record(record: &ServerRecord, signal: i32) -> Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn signal_server_record(record: &ServerRecord, signal: ServerSignal) -> Result<()> {
+    if let Some(child_pid) = record.child_pid
+        && process_exists(child_pid)
+    {
+        signal_process(child_pid, signal)?;
+    }
+    if process_exists(record.pid) {
+        signal_process(record.pid, signal)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn process_group_id(pid: u32) -> Option<u32> {
     if pid == 0 {
         return None;
@@ -449,11 +515,12 @@ fn process_group_id(pid: u32) -> Option<u32> {
     if pgid < 0 { None } else { Some(pgid as u32) }
 }
 
-fn signal_process_group(pgid: u32, signal: i32) -> Result<()> {
+#[cfg(unix)]
+fn signal_process_group(pgid: u32, signal: ServerSignal) -> Result<()> {
     if pgid == 0 {
         return Ok(());
     }
-    let rc = unsafe { libc::kill(-(pgid as libc::pid_t), signal) };
+    let rc = unsafe { libc::kill(-(pgid as libc::pid_t), unix_signal(signal)) };
     if rc == 0 {
         return Ok(());
     }
@@ -467,8 +534,9 @@ fn signal_process_group(pgid: u32, signal: i32) -> Result<()> {
         .with_context(|| format!("failed to signal process group {pgid}"))
 }
 
-fn signal_process(pid: u32, signal: i32) -> Result<()> {
-    let rc = unsafe { libc::kill(pid as libc::pid_t, signal) };
+#[cfg(unix)]
+fn signal_process(pid: u32, signal: ServerSignal) -> Result<()> {
+    let rc = unsafe { libc::kill(pid as libc::pid_t, unix_signal(signal)) };
     if rc == 0 {
         return Ok(());
     }
@@ -479,6 +547,55 @@ fn signal_process(pid: u32, signal: i32) -> Result<()> {
         return Ok(());
     }
     Err(std::io::Error::last_os_error()).with_context(|| format!("failed to signal process {pid}"))
+}
+
+#[cfg(unix)]
+fn unix_signal(signal: ServerSignal) -> i32 {
+    match signal {
+        ServerSignal::Interrupt => libc::SIGINT,
+        ServerSignal::Terminate => libc::SIGTERM,
+        ServerSignal::Kill => libc::SIGKILL,
+    }
+}
+
+#[cfg(windows)]
+fn signal_process(pid: u32, signal: ServerSignal) -> Result<()> {
+    let mut command = Command::new("taskkill");
+    command.arg("/PID").arg(pid.to_string()).arg("/T");
+    if signal == ServerSignal::Kill {
+        command.arg("/F");
+    }
+    let output = command.output().context("failed to run taskkill")?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}\n{stderr}").to_ascii_lowercase();
+    if combined.contains("not found")
+        || combined.contains("not running")
+        || combined.contains("no running instance")
+    {
+        return Ok(());
+    }
+    bail!(
+        "taskkill failed for pid {} with status {}{}{}{}{}",
+        pid,
+        output.status,
+        if stdout.trim().is_empty() {
+            ""
+        } else {
+            "\nstdout:\n"
+        },
+        stdout.trim(),
+        if stderr.trim().is_empty() {
+            ""
+        } else {
+            "\nstderr:\n"
+        },
+        stderr.trim()
+    )
 }
 
 #[cfg(test)]
