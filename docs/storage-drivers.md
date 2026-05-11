@@ -199,8 +199,11 @@ Implemented for COW:
 - `forkpress branch reset <name> --from <source>`
 - `forkpress branch show <name>`
 - `forkpress branch delete <name>`
+- `forkpress branchctl ...` as an alias for `forkpress branch ...`
 - `forkpress clone`
-- `forkpress commit`
+- `forkpress git branch create <name> [--from main]`
+- `forkpress push`
+- `forkpress commit` as an alias for `forkpress push`
 - `forkpress pull`
 - Git-created, Git-updated, and Git-deleted preview branches, one branch per push
 - `forkpress agents`

@@ -434,7 +434,7 @@ tooling.
 - `forkpress stop` stops this site's server and detaches mount-backed storage.
 - `forkpress stop --all` stops every running ForkPress site server for your
   user.
-- `forkpress server list` lists running site servers.
+- `forkpress server start|list|stop` manages background site servers.
 - `forkpress branch list` lists local branches.
 - `forkpress branch create <name> [--from main]` creates a COW branch.
 - `forkpress branch reset <name> --from <source>` replaces one COW branch with
@@ -443,11 +443,15 @@ tooling.
   count, and Git ref path.
 - `forkpress branch delete <name>` removes a COW branch. `main` cannot be
   deleted.
+- `forkpress branchctl ...` is an alias for `forkpress branch ...`.
 - `forkpress clone [remote] [dir]` wraps `git clone`.
+- `forkpress git <args>` passes through to Git, with
+  `forkpress git branch create <name> [--from main]` handled locally.
 - `forkpress agents [dir] --count 10 --prefix agent` creates agent branches
   and worktrees.
-- `forkpress commit -m "message"` stages, commits, and pushes the current Git
+- `forkpress push -m "message"` stages, commits, and pushes the current Git
   branch back into ForkPress.
+- `forkpress commit -m "message"` is an alias for `forkpress push`.
 - `forkpress pull` wraps `git pull --rebase --autostash`.
 - `forkpress logs --file wp|php|server|forkpress|gc|all` prints logs.
 - `forkpress storage status|mount|detach|compact` diagnoses or manually manages
@@ -481,8 +485,21 @@ For fast Rust-only checks without rebuilding PHP:
 ```bash
 cargo test --workspace --exclude forkpress-cli
 cargo test -p forkpress-core --features dev-experiments
-FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli
+FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli --bin forkpress
 FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli --features dev-experiments --bin forkpress-dev
+```
+
+Production e2e tests run against a built `forkpress` binary. `test-prod-cli`
+runs the Cargo-managed CLI suite across the production command surface, aliases,
+validation paths, server lifecycle, branch operations, Git checkout flow, logs,
+doctor, storage, and agents. `test-prod-e2e` runs that suite plus the full COW
+runtime shell e2e.
+
+```bash
+make dist
+make forkpress
+make test-prod-cli
+make test-prod-e2e
 ```
 
 PHP unit tests:

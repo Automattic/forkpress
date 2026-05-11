@@ -53,6 +53,11 @@ jobs:
       - name: Build forkpress
         run: cargo build --release --target x86_64-unknown-linux-musl -p forkpress-cli --bin forkpress
 
+      - name: Production CLI e2e
+        run: cargo test -p forkpress-e2e-tests --test production_cli -- --ignored --nocapture
+        env:
+          FORKPRESS_E2E_BIN: target/x86_64-unknown-linux-musl/release/forkpress
+
       - name: COW strategy e2e
         run: tests/cow/e2e.sh target/x86_64-unknown-linux-musl/release/forkpress
 
@@ -111,6 +116,11 @@ jobs:
 
       - name: Build forkpress
         run: cargo build --release --target ${{ matrix.target }} -p forkpress-cli --bin forkpress
+
+      - name: Production CLI e2e
+        run: cargo test -p forkpress-e2e-tests --test production_cli -- --ignored --nocapture
+        env:
+          FORKPRESS_E2E_BIN: target/${{ matrix.target }}/release/forkpress
 
       - name: COW strategy e2e through APFS sparsebundle
         run: tests/cow/e2e.sh target/${{ matrix.target }}/release/forkpress

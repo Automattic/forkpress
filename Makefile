@@ -68,7 +68,7 @@ else ifeq ($(UNAME_S)-$(UNAME_M),Linux-aarch64)
 FORKPRESS_TARGET ?= aarch64-unknown-linux-musl
 endif
 
-.PHONY: all clean test test-compat test-branchfs test-cow init-db test-all forkpress forkpress-dev dist dist-dev
+.PHONY: all clean test test-compat test-branchfs test-prod-cli test-prod-e2e test-cow init-db test-all forkpress forkpress-dev dist dist-dev
 
 all: $(BRANCHFS_EXT_SO)
 
@@ -101,6 +101,13 @@ test-cow:
 	php $(COW_TEST_DIR)/git_server.php
 	php $(COW_TEST_DIR)/router_paths.php
 	php $(COW_TEST_DIR)/router_lock.php
+
+test-prod-cli:
+	FORKPRESS_E2E_BIN=target/$(FORKPRESS_TARGET)/release/forkpress \
+		cargo test -p forkpress-e2e-tests --test production_cli -- --ignored --nocapture
+
+test-prod-e2e: test-prod-cli
+	$(COW_TEST_DIR)/e2e.sh target/$(FORKPRESS_TARGET)/release/forkpress
 
 test-all: test-branchfs test-cow
 
