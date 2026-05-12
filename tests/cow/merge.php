@@ -855,6 +855,46 @@ SQL);
     cow_merge_databases($keyless_base, $keyless_source, $keyless_target, $metadata, 'feature-keyless', 'main');
     assert_same((int)scalar($keyless_target, "SELECT COUNT(*) FROM plugin_keyless WHERE label = 'Source keyless'"), 1, 'rerunning keyless merge does not duplicate the source insert');
 
+    $keyless_conflict_base = $tmp . '/keyless-conflict-base.sqlite';
+    $keyless_conflict_source = $tmp . '/keyless-conflict-source.sqlite';
+    $keyless_conflict_target = $tmp . '/keyless-conflict-target.sqlite';
+    create_base_db($keyless_conflict_base);
+    copy($keyless_conflict_base, $keyless_conflict_source);
+    copy($keyless_conflict_base, $keyless_conflict_target);
+
+    $db = open_db($keyless_conflict_source);
+    $db->exec("UPDATE plugin_keyless SET value = 'source keyless conflict' WHERE rowid = 1");
+    $db->close();
+
+    $db = open_db($keyless_conflict_target);
+    $db->exec("UPDATE plugin_keyless SET value = 'target keyless conflict' WHERE rowid = 1");
+    $db->close();
+
+    $result = cow_merge_databases($keyless_conflict_base, $keyless_conflict_source, $keyless_conflict_target, $metadata, 'feature-keyless-conflict', 'main');
+    assert_same($result['status'], 'completed_with_conflicts', 'keyless same-cell conflict is recorded');
+    $keyless_cell_conflict_id = (int)scalar($metadata, "SELECT c.id FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_keyless' AND c.column_name = 'value' AND r.source_branch = 'feature-keyless-conflict' ORDER BY c.id DESC LIMIT 1");
+    $keyless_dry_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $keyless_cell_conflict_id,
+        'source',
+        false,
+        'Preview keyless source cell.',
+        'cow-test'
+    );
+    assert_same($keyless_dry_resolution['status'], 'validated', 'dry-run keyless cell resolution validates sidecar target identity');
+    assert_same(scalar($keyless_conflict_target, "SELECT value FROM plugin_keyless WHERE rowid = 1"), 'target keyless conflict', 'dry-run keyless cell resolution does not mutate target');
+    $keyless_source_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $keyless_cell_conflict_id,
+        'source',
+        true,
+        'Apply keyless source cell.',
+        'cow-test'
+    );
+    assert_same($keyless_source_resolution['status'], 'applied', 'source keyless cell resolution records applied status');
+    assert_same(scalar($keyless_conflict_target, "SELECT value FROM plugin_keyless WHERE rowid = 1"), 'source keyless conflict', 'source keyless cell resolution updates target through sidecar identity');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $keyless_cell_conflict_id AND table_name = 'plugin_keyless' AND column_name = 'value' AND choice = 'source' AND applied = 1"), 1, 'keyless cell resolution is auditable');
+
     $capture_db = $tmp . '/capture.sqlite';
     $capture_feature = $tmp . '/capture-feature.sqlite';
     $capture_metadata = $tmp . '/.forkpress/cow/merge/capture-metadata.sqlite';
@@ -927,6 +967,19 @@ SQL);
     assert_same((int)scalar($reuse_target, "SELECT COUNT(*) FROM plugin_keyless WHERE label = 'Reused rowid source' AND value = 'new logical row'"), 1, 'source rowid reuse is inserted as a new logical row');
     assert_same((int)scalar($reuse_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_keyless' AND conflict_type = 'row-source-deleted'"), 1, 'old no-PK row deletion conflict is recorded separately from the new insert');
     assert_same((int)scalar($reuse_metadata, "SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'feature-reuse' AND table_name = 'plugin_keyless' AND rowid = 1 AND deleted_at IS NOT NULL"), 1, 'merge-base identity lookup does not reactivate deleted no-PK generations');
+    $keyless_delete_conflict_id = (int)scalar($reuse_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_keyless' AND conflict_type = 'row-source-deleted' ORDER BY id DESC LIMIT 1");
+    $keyless_delete_resolution = cow_merge_resolve_conflict(
+        $reuse_metadata,
+        $keyless_delete_conflict_id,
+        'source',
+        true,
+        'Apply source keyless deletion.',
+        'cow-test'
+    );
+    assert_same($keyless_delete_resolution['status'], 'applied', 'source keyless delete resolution records applied status');
+    assert_same((int)scalar($reuse_target, "SELECT COUNT(*) FROM plugin_keyless WHERE label = 'Base keyless'"), 0, 'source keyless delete resolution removes the target old row by logical identity');
+    assert_same((int)scalar($reuse_target, "SELECT COUNT(*) FROM plugin_keyless WHERE label = 'Reused rowid source' AND value = 'new logical row'"), 1, 'source keyless delete resolution leaves the reused logical row intact');
+    assert_same((int)scalar($reuse_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $keyless_delete_conflict_id AND table_name = 'plugin_keyless' AND choice = 'source' AND applied = 1"), 1, 'keyless delete resolution is auditable');
 
     if (!function_exists('add_action')) {
         function add_action($tag, $callback, $priority = 10, $accepted_args = 1) {

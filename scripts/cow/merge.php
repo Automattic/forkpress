@@ -2981,6 +2981,89 @@ function cow_merge_select_current_row(SQLite3 $db, string $table, array $identit
     return $row ?: null;
 }
 
+function cow_merge_lookup_active_rowid_by_identity(SQLite3 $meta, string $branch, string $table, array $identity): ?int {
+    $stmt = $meta->prepare(
+        'SELECT rowid FROM merge_row_identities ' .
+        'WHERE branch_name = :branch_name AND table_name = :table_name AND logical_identity = :logical_identity'
+    );
+    if (!$stmt) {
+        throw new RuntimeException('failed to prepare row identity lookup: ' . $meta->lastErrorMsg());
+    }
+    cow_merge_bind($stmt, ':branch_name', $branch);
+    cow_merge_bind($stmt, ':table_name', $table);
+    cow_merge_bind($stmt, ':logical_identity', cow_merge_plain_json($identity));
+    $res = $stmt->execute();
+    if (!$res) {
+        throw new RuntimeException('failed to look up active row identity: ' . $meta->lastErrorMsg());
+    }
+    $row = $res->fetchArray(SQLITE3_ASSOC);
+    if ($row) {
+        return (int)$row['rowid'];
+    }
+
+    $scan = $meta->prepare(
+        'SELECT rowid, logical_identity FROM merge_row_identities ' .
+        'WHERE branch_name = :branch_name AND table_name = :table_name'
+    );
+    if (!$scan) {
+        throw new RuntimeException('failed to prepare row identity scan: ' . $meta->lastErrorMsg());
+    }
+    cow_merge_bind($scan, ':branch_name', $branch);
+    cow_merge_bind($scan, ':table_name', $table);
+    $res = $scan->execute();
+    if (!$res) {
+        throw new RuntimeException('failed to scan active row identities: ' . $meta->lastErrorMsg());
+    }
+    while ($candidate = $res->fetchArray(SQLITE3_ASSOC)) {
+        $candidate_identity = json_decode((string)$candidate['logical_identity'], true);
+        if (is_array($candidate_identity) && cow_merge_values_equal($candidate_identity, $identity)) {
+            return (int)$candidate['rowid'];
+        }
+    }
+
+    $history = $meta->prepare(
+        'SELECT rowid FROM merge_row_identity_history ' .
+        'WHERE branch_name = :branch_name AND table_name = :table_name AND logical_identity = :logical_identity AND deleted_at IS NULL ' .
+        'ORDER BY updated_at DESC, id DESC LIMIT 1'
+    );
+    if (!$history) {
+        throw new RuntimeException('failed to prepare row identity history lookup: ' . $meta->lastErrorMsg());
+    }
+    cow_merge_bind($history, ':branch_name', $branch);
+    cow_merge_bind($history, ':table_name', $table);
+    cow_merge_bind($history, ':logical_identity', cow_merge_plain_json($identity));
+    $res = $history->execute();
+    if (!$res) {
+        throw new RuntimeException('failed to look up row identity history: ' . $meta->lastErrorMsg());
+    }
+    $row = $res->fetchArray(SQLITE3_ASSOC);
+    if ($row) {
+        return (int)$row['rowid'];
+    }
+
+    $history_scan = $meta->prepare(
+        'SELECT rowid, logical_identity FROM merge_row_identity_history ' .
+        'WHERE branch_name = :branch_name AND table_name = :table_name AND deleted_at IS NULL ' .
+        'ORDER BY updated_at DESC, id DESC'
+    );
+    if (!$history_scan) {
+        throw new RuntimeException('failed to prepare row identity history scan: ' . $meta->lastErrorMsg());
+    }
+    cow_merge_bind($history_scan, ':branch_name', $branch);
+    cow_merge_bind($history_scan, ':table_name', $table);
+    $res = $history_scan->execute();
+    if (!$res) {
+        throw new RuntimeException('failed to scan row identity history: ' . $meta->lastErrorMsg());
+    }
+    while ($candidate = $res->fetchArray(SQLITE3_ASSOC)) {
+        $candidate_identity = json_decode((string)$candidate['logical_identity'], true);
+        if (is_array($candidate_identity) && cow_merge_values_equal($candidate_identity, $identity)) {
+            return (int)$candidate['rowid'];
+        }
+    }
+    return null;
+}
+
 function cow_merge_update_single_cell(SQLite3 $db, string $table, array $identity, array $pk_cols, string $column, mixed $value): void {
     $where_values = [];
     $where = cow_merge_where_clause($identity, $pk_cols, $where_values);
@@ -3057,7 +3140,7 @@ function cow_merge_resolve_conflict(
         cow_merge_ensure_metadata($meta);
         $stmt = $meta->prepare(
             'SELECT c.id, c.run_id, c.table_name, c.row_identity, c.column_name, c.conflict_type, ' .
-            'c.source_payload, c.target_payload, r.source_db, r.target_db ' .
+            'c.source_payload, c.target_payload, r.source_db, r.target_db, r.target_branch ' .
             'FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.id = :id'
         );
         if (!$stmt) {
@@ -3193,16 +3276,27 @@ function cow_merge_resolve_conflict(
 
         $target = cow_merge_open_db($target_db, SQLITE3_OPEN_READWRITE);
         $pk_cols = cow_merge_pk_cols($target, $table);
-        if (!$pk_cols) {
-            throw new InvalidArgumentException('resolve-conflict currently requires an explicit primary key on the target table');
-        }
-        foreach ($pk_cols as $pk_col) {
-            if (!array_key_exists($pk_col, $identity)) {
-                throw new RuntimeException("conflict #$conflict_id row identity does not include primary key column $pk_col");
+        $target_branch = (string)$conflict['target_branch'];
+        $where_identity = $identity;
+        if ($pk_cols) {
+            foreach ($pk_cols as $pk_col) {
+                if (!array_key_exists($pk_col, $identity)) {
+                    throw new RuntimeException("conflict #$conflict_id row identity does not include primary key column $pk_col");
+                }
+            }
+        } else {
+            $target_rowid = cow_merge_lookup_active_rowid_by_identity($meta, $target_branch, $table, $identity);
+            if ($target_rowid === null) {
+                $where_identity = [];
+            } else {
+                $where_identity = ['rowid' => $target_rowid];
             }
         }
         if ($conflict_type === 'cell-conflict') {
-            $current_value = cow_merge_select_current_cell($target, $table, $identity, $pk_cols, $column);
+            if (!$pk_cols && !array_key_exists('rowid', $where_identity)) {
+                throw new RuntimeException("cannot resolve $table.$column conflict because the target row no longer exists");
+            }
+            $current_value = cow_merge_select_current_cell($target, $table, $where_identity, $pk_cols, $column);
             if (!cow_merge_values_equal($current_value, $target_value)) {
                 throw new RuntimeException('target cell no longer matches the audited conflict target value; rerun merge-audit before resolving');
             }
@@ -3216,7 +3310,9 @@ function cow_merge_resolve_conflict(
             if ($conflict_type === 'row-source-deleted' && !is_array($target_value)) {
                 throw new RuntimeException("row conflict #$conflict_id does not contain a target row payload");
             }
-            $current_value = cow_merge_select_current_row($target, $table, $identity, $pk_cols);
+            $current_value = $pk_cols || array_key_exists('rowid', $where_identity)
+                ? cow_merge_select_current_row($target, $table, $where_identity, $pk_cols)
+                : null;
             if ($conflict_type === 'row-target-deleted') {
                 if ($current_value !== null) {
                     throw new RuntimeException('target row no longer matches the audited conflict target value; rerun merge-audit before resolving');
@@ -3237,15 +3333,30 @@ function cow_merge_resolve_conflict(
             try {
                 if ($choice === 'source') {
                     if ($conflict_type === 'cell-conflict') {
-                        cow_merge_update_single_cell($target, $table, $identity, $pk_cols, $column, $source_value);
+                        cow_merge_update_single_cell($target, $table, $where_identity, $pk_cols, $column, $source_value);
+                        if (!$pk_cols) {
+                            $updated_row = cow_merge_select_current_row($target, $table, $where_identity, $pk_cols);
+                            if ($updated_row !== null) {
+                                cow_merge_remember_row_identity($meta, (int)$conflict['run_id'], $target_branch, $table, (int)$where_identity['rowid'], $identity, $updated_row);
+                            }
+                        }
                     } elseif ($conflict_type === 'row-source-deleted') {
-                        cow_merge_delete_row($target, $table, $identity, $pk_cols);
+                        cow_merge_delete_row($target, $table, $where_identity, $pk_cols);
+                        if (!$pk_cols) {
+                            cow_merge_forget_row_identity($meta, (int)$conflict['run_id'], $target_branch, $table, (int)$where_identity['rowid']);
+                        }
                     } elseif ($conflict_type === 'row-target-deleted') {
                         $columns = cow_merge_table_columns($target, $table);
-                        cow_merge_insert_row($target, $table, $source_value, $columns);
+                        $new_rowid = cow_merge_insert_row($target, $table, $source_value, $columns);
+                        if (!$pk_cols) {
+                            cow_merge_remember_row_identity($meta, (int)$conflict['run_id'], $target_branch, $table, $new_rowid, $identity, $source_value);
+                        }
                     } else {
                         $columns = cow_merge_table_columns($target, $table);
-                        cow_merge_update_row($target, $table, $identity, $pk_cols, $source_value, $columns);
+                        cow_merge_update_row($target, $table, $where_identity, $pk_cols, $source_value, $columns);
+                        if (!$pk_cols) {
+                            cow_merge_remember_row_identity($meta, (int)$conflict['run_id'], $target_branch, $table, (int)$where_identity['rowid'], $identity, $source_value);
+                        }
                     }
                 }
                 $resolution_id = cow_merge_record_resolution(
