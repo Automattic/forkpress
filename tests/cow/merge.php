@@ -320,6 +320,16 @@ try {
     assert_same(count($applied_resolution_audit['decisions']), 0, 'resolution status filter omits decision records');
     assert_same(count($applied_resolution_audit['resolutions']), 1, 'resolution status filter returns applied resolution records');
     assert_same($applied_resolution_audit['resolutions'][0]['status'], 'applied', 'applied resolution status filter matches resolution rows');
+    $applied_resolution_default_records_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, [
+        'records' => 'all',
+        'resolution_status' => 'applied',
+        'group_by' => 'status',
+    ]);
+    assert_same($applied_resolution_default_records_audit['filters']['records'], 'resolutions', 'resolution status filter normalizes default CLI records to resolutions');
+    assert_same(count($applied_resolution_default_records_audit['conflicts']), 0, 'resolution status filter with CLI-style defaults omits conflict records');
+    assert_same(count($applied_resolution_default_records_audit['decisions']), 0, 'resolution status filter with CLI-style defaults omits decision records');
+    assert_same(count($applied_resolution_default_records_audit['resolutions']), 1, 'resolution status filter with CLI-style defaults returns applied resolutions');
+    assert_true(count(array_filter($applied_resolution_default_records_audit['resolution_groups'], fn($row) => $row['group_key'] === 'applied')) === 1, 'resolution status grouping works through CLI-style default records');
     $validated_resolution_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['records' => 'resolutions', 'resolution_status' => 'validated']);
     assert_same(count($validated_resolution_audit['resolutions']), 1, 'validated resolution status filter returns validated resolution records');
     assert_same($validated_resolution_audit['resolutions'][0]['status'], 'validated', 'validated resolution status filter matches resolution rows');

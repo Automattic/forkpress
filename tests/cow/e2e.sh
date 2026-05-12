@@ -44,6 +44,7 @@ on_error() {
   dump_if_exists "$TMP/keyless-resolve.out"
   dump_if_exists "$TMP/keyless-resolution-review.out"
   dump_if_exists "$TMP/keyless-resolution-audit.out"
+  dump_if_exists "$TMP/keyless-resolution-status.json"
   dump_if_exists "$TMP/merge-audit.out"
   dump_if_exists "$TMP/merge-audit.json"
   dump_if_exists "$TMP/merge-target-kept-files.out"
@@ -467,6 +468,8 @@ grep -F "record:    resolution #$KEYLESS_RESOLUTION_ID" "$TMP/keyless-resolution
 grep -F "wp_forkpress_e2e_keyless" "$TMP/keyless-resolution-audit.out" >/dev/null
 grep -F "review=needs-action" "$TMP/keyless-resolution-audit.out" >/dev/null
 grep -F "E2E follow-up on runtime keyless resolution" "$TMP/keyless-resolution-audit.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --resolution-status validated --group-by status --limit 8 > "$TMP/keyless-resolution-status.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["records"] ?? null) === "resolutions") && (($data["filters"]["resolution_status"] ?? null) === "validated") && (($data["filters"]["group_by"] ?? null) === "status"); $has_resolution = false; foreach (($data["resolutions"] ?? []) as $row) { if ((int)($row["id"] ?? 0) === (int)$argv[2] && ($row["status"] ?? null) === "validated") $has_resolution = true; } $has_group = false; foreach (($data["resolution_groups"] ?? []) as $group) { if (($group["group_key"] ?? null) === "validated" && (int)($group["resolution_count"] ?? 0) > 0) $has_group = true; } exit($ok && $has_resolution && $has_group ? 0 : 1);' "$TMP/keyless-resolution-status.json" "$KEYLESS_RESOLUTION_ID"
 
 log_step "create agent worktrees"
 "$BIN" agents \
