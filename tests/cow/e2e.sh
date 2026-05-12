@@ -41,6 +41,7 @@ on_error() {
   dump_if_exists "$TMP/keyless-main-after-merge.json"
   dump_if_exists "$TMP/keyless-merge.out"
   dump_if_exists "$TMP/keyless-conflicts.out"
+  dump_if_exists "$TMP/keyless-review-queue.json"
   dump_if_exists "$TMP/keyless-resolve.out"
   dump_if_exists "$TMP/keyless-resolution-review.out"
   dump_if_exists "$TMP/keyless-resolution-audit.out"
@@ -453,6 +454,8 @@ if [ "$KEYLESS_CONFLICT_ID" = "0" ]; then
   echo "missing keyless row-source-deleted conflict id" >&2
   exit 1
 fi
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --review --review-status unreviewed --records conflicts --scope db --limit 8 > "$TMP/keyless-review-queue.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["review"] ?? false) === true) && (($data["filters"]["review_status"] ?? null) === "unreviewed") && (($data["filters"]["records"] ?? null) === "conflicts") && (($data["filters"]["scope"] ?? null) === "db") && empty($data["decisions"] ?? []) && empty($data["resolutions"] ?? []); $has_conflict = false; foreach (($data["conflicts"] ?? []) as $row) { if (($row["review_status"] ?? null) !== null) $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[2] && ($row["table_name"] ?? null) === "wp_forkpress_e2e_keyless" && ($row["conflict_type"] ?? null) === "row-source-deleted") $has_conflict = true; } exit($ok && $has_conflict ? 0 : 1);' "$TMP/keyless-review-queue.json" "$KEYLESS_CONFLICT_ID"
 "$BIN" branch --work-dir "$WORK_DIR" merge-resolve conflict "$KEYLESS_CONFLICT_ID" --choice target --apply --note "Keep runtime target row for e2e" --reviewer cow-e2e > "$TMP/keyless-resolve.out"
 grep -F "forkpress: validated COW merge conflict resolution" "$TMP/keyless-resolve.out" >/dev/null
 grep -F "applied:   yes" "$TMP/keyless-resolve.out" >/dev/null

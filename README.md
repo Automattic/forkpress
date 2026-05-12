@@ -477,7 +477,8 @@ tooling.
   focuses the report on preserved target/trunk-side decisions.
   `--review-status unreviewed` is audit-only and returns records that have no
   review note yet; `pending`, `needs-action`, and `reviewed` match the latest
-  recorded review annotation.
+  recorded review annotation. For an active database conflict queue, combine
+  `--review --review-status unreviewed --records conflicts --scope db`.
 - `forkpress branch merge-review conflict|decision|resolution <id> --status pending|needs-action|reviewed --note <text>`
   `[--reviewer NAME]` appends a review note to an auditable merge conflict,
   decision, or deterministic resolution record.

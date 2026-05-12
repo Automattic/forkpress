@@ -506,6 +506,22 @@ try {
     ));
     assert_same($reviewed_rows[0]['review_status'], 'reviewed', 'merge audit JSON exposes latest conflict review status');
     assert_same($reviewed_rows[0]['review_note'], 'Target value is intentional after manual review.', 'merge audit JSON exposes latest conflict review note');
+
+    $review_queue_base = $tmp . '/review-queue-base.sqlite';
+    $review_queue_source = $tmp . '/review-queue-source.sqlite';
+    $review_queue_target = $tmp . '/review-queue-target.sqlite';
+    create_base_db($review_queue_base);
+    copy($review_queue_base, $review_queue_source);
+    copy($review_queue_base, $review_queue_target);
+    $db = open_db($review_queue_source);
+    $db->exec("UPDATE plugin_items SET value = 'source review queue conflict' WHERE item_id = 'alpha'");
+    $db->close();
+    $db = open_db($review_queue_target);
+    $db->exec("UPDATE plugin_items SET value = 'target review queue conflict' WHERE item_id = 'alpha'");
+    $db->close();
+    cow_merge_databases($review_queue_base, $review_queue_source, $review_queue_target, $metadata, 'feature-review-queue', 'main');
+    $review_queue_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND conflict_type = 'cell-conflict' ORDER BY id DESC LIMIT 1");
+
     ob_start();
     cow_merge_print_audit_text($reviewed_audit);
     $audit_text = ob_get_clean();
@@ -515,6 +531,21 @@ try {
     $review_audit = cow_merge_audit_report($metadata, null, 10, ['review' => '1']);
     assert_same($review_audit['filters']['review'], true, 'merge audit JSON report includes the review shortcut filter');
     assert_true(count($review_audit['conflicts']) >= 2, 'review audit includes revisitable merge conflicts');
+    $unreviewed_review_queue_audit = cow_merge_audit_report($metadata, null, 10, [
+        'review' => '1',
+        'review_status' => 'unreviewed',
+        'records' => 'conflicts',
+        'scope' => 'db',
+    ]);
+    assert_same($unreviewed_review_queue_audit['filters']['review'], true, 'review queue audit preserves the review shortcut filter');
+    assert_same($unreviewed_review_queue_audit['filters']['review_status'], 'unreviewed', 'review queue audit preserves the unreviewed filter');
+    assert_same($unreviewed_review_queue_audit['filters']['records'], 'conflicts', 'review queue audit can focus on conflict records');
+    assert_same($unreviewed_review_queue_audit['filters']['scope'], 'db', 'review queue audit can focus on database records');
+    assert_same(count($unreviewed_review_queue_audit['decisions']), 0, 'review queue conflict audit omits decisions');
+    assert_same(count($unreviewed_review_queue_audit['resolutions']), 0, 'review queue conflict audit omits resolutions');
+    $unreviewed_review_queue_ids = array_map(fn($row) => (int)$row['id'], $unreviewed_review_queue_audit['conflicts']);
+    assert_true(in_array($review_queue_conflict_id, $unreviewed_review_queue_ids, true), 'review queue audit returns unreviewed DB conflicts');
+    assert_true(!in_array($reviewed_conflict_id, $unreviewed_review_queue_ids, true), 'review queue audit excludes reviewed conflicts');
     $reviewed_status_audit = cow_merge_audit_report($metadata, null, 10, ['review_status' => 'reviewed']);
     assert_same($reviewed_status_audit['filters']['review_status'], 'reviewed', 'merge audit JSON report includes review status filter');
     assert_true(count($reviewed_status_audit['conflicts']) >= 1, 'review status filter returns reviewed conflicts');
