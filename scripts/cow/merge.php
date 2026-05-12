@@ -446,6 +446,34 @@ function cow_merge_index_sql_map(SQLite3 $db): array {
     return $indexes;
 }
 
+function cow_merge_table_sql(SQLite3 $db, string $table): ?string {
+    $stmt = $db->prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = :name");
+    if (!$stmt) {
+        throw new RuntimeException("failed to prepare table schema lookup for $table: " . $db->lastErrorMsg());
+    }
+    cow_merge_bind($stmt, ':name', $table);
+    $res = $stmt->execute();
+    if (!$res) {
+        throw new RuntimeException("failed to read table schema for $table: " . $db->lastErrorMsg());
+    }
+    $row = $res->fetchArray(SQLITE3_ASSOC);
+    return $row ? (string)$row['sql'] : null;
+}
+
+function cow_merge_index_sql(SQLite3 $db, string $index): ?string {
+    $stmt = $db->prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = :name AND sql IS NOT NULL");
+    if (!$stmt) {
+        throw new RuntimeException("failed to prepare index schema lookup for $index: " . $db->lastErrorMsg());
+    }
+    cow_merge_bind($stmt, ':name', $index);
+    $res = $stmt->execute();
+    if (!$res) {
+        throw new RuntimeException("failed to read index schema for $index: " . $db->lastErrorMsg());
+    }
+    $row = $res->fetchArray(SQLITE3_ASSOC);
+    return $row ? (string)$row['sql'] : null;
+}
+
 function cow_merge_table_columns(SQLite3 $db, string $table): array {
     $columns = [];
     $res = $db->query('PRAGMA table_info(' . cow_merge_quote_ident($table) . ')');
@@ -3123,6 +3151,203 @@ function cow_merge_record_resolution(
     return (int)$meta->lastInsertRowID();
 }
 
+function cow_merge_schema_column_payload(mixed $payload): ?array {
+    if (!is_array($payload)) {
+        return null;
+    }
+    if (isset($payload['column']) && is_array($payload['column'])) {
+        return $payload['column'];
+    }
+    if (isset($payload['name'])) {
+        return $payload;
+    }
+    return null;
+}
+
+function cow_merge_schema_column_definition_payload(mixed $payload): ?string {
+    if (is_array($payload) && isset($payload['definition']) && is_string($payload['definition'])) {
+        return $payload['definition'];
+    }
+    return null;
+}
+
+function cow_merge_schema_index_sql_payload(mixed $payload): ?string {
+    if (is_string($payload)) {
+        return $payload;
+    }
+    if (is_array($payload) && isset($payload['sql']) && is_string($payload['sql'])) {
+        return $payload['sql'];
+    }
+    return null;
+}
+
+function cow_merge_resolve_schema_conflict(
+    SQLite3 $meta,
+    array $conflict,
+    string $metadata_db,
+    int $conflict_id,
+    string $choice,
+    bool $apply,
+    string $note,
+    string $reviewer
+): array {
+    $table = (string)$conflict['table_name'];
+    $object = (string)($conflict['column_name'] ?? '');
+    $conflict_type = (string)$conflict['conflict_type'];
+    $source_db = (string)$conflict['source_db'];
+    $target_db = (string)$conflict['target_db'];
+    if (!is_file($source_db)) {
+        throw new RuntimeException("source database for conflict #$conflict_id does not exist: $source_db");
+    }
+    if (!is_file($target_db)) {
+        throw new RuntimeException("target database for conflict #$conflict_id does not exist: $target_db");
+    }
+
+    $source_payload = cow_merge_decode_payload_json((string)$conflict['source_payload'], 'source');
+    $target_payload = cow_merge_decode_payload_json((string)$conflict['target_payload'], 'target');
+    $source = cow_merge_open_db($source_db, SQLITE3_OPEN_READONLY);
+    $target = cow_merge_open_db($target_db, SQLITE3_OPEN_READWRITE);
+    try {
+        $previous = null;
+        $resolved = $choice === 'source' ? $source_payload : $target_payload;
+        $apply_source = null;
+
+        if (in_array($conflict_type, ['schema-source-changed', 'schema-column-conflict'], true) && $object !== '') {
+            $source_column = cow_merge_schema_column_payload($source_payload);
+            if ($source_column === null) {
+                throw new RuntimeException("schema conflict #$conflict_id does not contain a source column payload");
+            }
+            $source_columns = cow_merge_columns_by_name(cow_merge_table_info($source, $table));
+            $current_source_column = $source_columns[strtolower($object)] ?? null;
+            if ($current_source_column === null || !cow_merge_column_signatures_equal($current_source_column, $source_column)) {
+                throw new RuntimeException('source column no longer matches the audited conflict source value; rerun merge before resolving');
+            }
+
+            $target_columns = cow_merge_columns_by_name(cow_merge_table_info($target, $table));
+            $current_target_column = $target_columns[strtolower($object)] ?? null;
+            $previous = $current_target_column;
+            if ($target_payload !== null && is_array($target_payload) && isset($target_payload['name'])) {
+                if ($current_target_column === null || !cow_merge_column_signatures_equal($current_target_column, $target_payload)) {
+                    throw new RuntimeException('target column no longer matches the audited conflict target value; rerun merge-audit before resolving');
+                }
+            } elseif ($target_payload === null) {
+                if ($current_target_column !== null) {
+                    throw new RuntimeException('target column no longer matches the audited missing-column target value; rerun merge-audit before resolving');
+                }
+            } else {
+                $current_target_sql = cow_merge_table_sql($target, $table);
+                if (!cow_merge_values_equal($current_target_sql, $target_payload)) {
+                    throw new RuntimeException('target table schema no longer matches the audited conflict target value; rerun merge-audit before resolving');
+                }
+            }
+
+            if ($choice === 'source') {
+                if ($current_target_column !== null) {
+                    throw new InvalidArgumentException('source schema resolution can only apply source-added columns that are still missing from target');
+                }
+                $source_table_sql = cow_merge_table_sql($source, $table);
+                if ($source_table_sql === null) {
+                    throw new RuntimeException("source table for conflict #$conflict_id no longer exists: $table");
+                }
+                $definition = cow_merge_schema_column_definition_payload($source_payload)
+                    ?? cow_merge_column_definition_from_create_sql($source_table_sql, $object);
+                if ($definition === null || !cow_merge_column_definition_is_safe_to_add($definition, $source_column)) {
+                    throw new InvalidArgumentException('source schema resolution can only apply columns that are safe for ALTER TABLE ADD COLUMN');
+                }
+                $resolved = ['column' => $source_column, 'definition' => $definition];
+                $apply_source = function () use ($target, $table, $definition): void {
+                    $sql = 'ALTER TABLE ' . cow_merge_quote_ident($table) . ' ADD COLUMN ' . $definition;
+                    if (!$target->exec($sql)) {
+                        throw new RuntimeException('failed to apply source column schema resolution: ' . $target->lastErrorMsg());
+                    }
+                };
+            }
+        } elseif ($conflict_type === 'schema-source-added-index' && $object !== '') {
+            $source_sql = cow_merge_schema_index_sql_payload($source_payload);
+            if ($source_sql === null) {
+                throw new RuntimeException("schema conflict #$conflict_id does not contain a source index SQL payload");
+            }
+            $current_source_sql = cow_merge_index_sql($source, $object);
+            if ($current_source_sql !== $source_sql) {
+                throw new RuntimeException('source index no longer matches the audited conflict source value; rerun merge before resolving');
+            }
+            $current_target_sql = cow_merge_index_sql($target, $object);
+            $previous = $current_target_sql;
+            if ($target_payload === null) {
+                if ($current_target_sql !== null) {
+                    throw new RuntimeException('target index no longer matches the audited missing-index target value; rerun merge-audit before resolving');
+                }
+            } elseif (!cow_merge_values_equal($current_target_sql, $target_payload)) {
+                throw new RuntimeException('target index no longer matches the audited conflict target value; rerun merge-audit before resolving');
+            }
+            if ($choice === 'source') {
+                $resolved = $source_sql;
+                $apply_source = function () use ($target, $source_sql): void {
+                    if (!$target->exec($source_sql)) {
+                        throw new RuntimeException('failed to apply source index schema resolution: ' . $target->lastErrorMsg());
+                    }
+                };
+            }
+        } else {
+            if ($choice === 'source') {
+                throw new InvalidArgumentException('source schema resolution currently supports source-added columns and source-added indexes only');
+            }
+            $current_target_sql = $object === '' ? cow_merge_table_sql($target, $table) : cow_merge_index_sql($target, $object);
+            $previous = $current_target_sql;
+            if (!cow_merge_values_equal($current_target_sql, $target_payload)) {
+                throw new RuntimeException('target schema no longer matches the audited conflict target value; rerun merge-audit before resolving');
+            }
+        }
+
+        if ($apply) {
+            $meta->exec('BEGIN IMMEDIATE');
+            $target->exec('BEGIN IMMEDIATE');
+            try {
+                if ($choice === 'source' && $apply_source !== null) {
+                    $apply_source();
+                }
+                $resolution_id = cow_merge_record_resolution(
+                    $meta,
+                    $conflict_id,
+                    $choice,
+                    true,
+                    $note,
+                    $reviewer,
+                    $target_db,
+                    $table,
+                    '',
+                    $object,
+                    $previous,
+                    $resolved
+                );
+                $target->exec('COMMIT');
+                $meta->exec('COMMIT');
+            } catch (Throwable $e) {
+                $target->exec('ROLLBACK');
+                $meta->exec('ROLLBACK');
+                throw $e;
+            }
+        } else {
+            $resolution_id = null;
+        }
+
+        return [
+            'metadata_db' => $metadata_db,
+            'conflict_id' => $conflict_id,
+            'resolution_id' => $resolution_id,
+            'choice' => $choice,
+            'applied' => $apply,
+            'status' => $apply && $choice === 'source' ? 'applied' : 'validated',
+            'target_db' => $target_db,
+            'table_name' => $table,
+            'column_name' => $object,
+        ];
+    } finally {
+        $source->close();
+        $target->close();
+    }
+}
+
 function cow_merge_resolve_conflict(
     string $metadata_db,
     int $conflict_id,
@@ -3254,6 +3479,18 @@ function cow_merge_resolve_conflict(
                 'table_name' => $table,
                 'column_name' => 'path',
             ];
+        }
+        if (str_starts_with($conflict_type, 'schema-')) {
+            return cow_merge_resolve_schema_conflict(
+                $meta,
+                $conflict,
+                $metadata_db,
+                $conflict_id,
+                $choice,
+                $apply,
+                $note,
+                $reviewer
+            );
         }
         $row_conflict_types = ['row-insert-collision', 'row-target-deleted', 'row-source-deleted'];
         if ($conflict_type !== 'cell-conflict' && !in_array($conflict_type, $row_conflict_types, true)) {

@@ -826,6 +826,100 @@ SQL);
     assert_same($result['status'], 'completed_with_conflicts', 'incompatible same-name schema additions remain conflicts');
     assert_same(column_type($schema_conflict_target, 'plugin_items', 'extra'), 'INTEGER', 'target schema wins incompatible same-name column addition');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_items' AND column_name = 'extra' AND conflict_type = 'schema-column-conflict'"), 1, 'incompatible schema addition conflict is auditable');
+    $schema_target_resolution_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND column_name = 'extra' AND conflict_type = 'schema-column-conflict' ORDER BY id DESC LIMIT 1");
+    $schema_target_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_target_resolution_id,
+        'target',
+        true,
+        'Keep target schema type.',
+        'test'
+    );
+    assert_same($schema_target_resolution['status'], 'validated', 'target schema conflict resolution validates current target schema');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_target_resolution_id AND table_name = 'plugin_items' AND column_name = 'extra' AND choice = 'target' AND applied = 1"), 1, 'target schema resolution is auditable');
+
+    $schema_resolve_base = $tmp . '/schema-resolve-base.sqlite';
+    $schema_resolve_source = $tmp . '/schema-resolve-source.sqlite';
+    $schema_resolve_target = $tmp . '/schema-resolve-target.sqlite';
+    create_base_db($schema_resolve_base);
+    copy($schema_resolve_base, $schema_resolve_source);
+    copy($schema_resolve_base, $schema_resolve_target);
+
+    $db = open_db($schema_resolve_source);
+    $db->exec('ALTER TABLE plugin_items ADD COLUMN review_note TEXT DEFAULT NULL');
+    $db->exec('CREATE INDEX plugin_items_review_idx ON plugin_items(review_note)');
+    $source_columns = cow_merge_columns_by_name(cow_merge_table_info($db, 'plugin_items'));
+    $source_index_sql = cow_merge_index_sql($db, 'plugin_items_review_idx');
+    $db->close();
+
+    $db = open_db($schema_resolve_target);
+    $target_table_sql = cow_merge_table_sql($db, 'plugin_items');
+    $db->close();
+
+    $manual_meta = cow_merge_open_db($metadata, SQLITE3_OPEN_READWRITE | SQLITE3_OPEN_CREATE);
+    cow_merge_ensure_metadata($manual_meta);
+    $manual_run_id = cow_merge_start_run($manual_meta, 'feature-schema-resolution', 'main', $schema_resolve_base, $schema_resolve_source, $schema_resolve_target);
+    cow_merge_record_schema_conflict(
+        $manual_meta,
+        $manual_run_id,
+        'plugin_items',
+        'review_note',
+        'schema-source-changed',
+        $target_table_sql,
+        ['column' => $source_columns['review_note'], 'definition' => 'review_note TEXT DEFAULT NULL', 'error' => 'simulated earlier apply failure'],
+        $target_table_sql,
+        $target_table_sql,
+        'simulated source-added column conflict'
+    );
+    cow_merge_record_schema_conflict(
+        $manual_meta,
+        $manual_run_id,
+        'plugin_items',
+        'plugin_items_review_idx',
+        'schema-source-added-index',
+        null,
+        ['sql' => $source_index_sql, 'error' => 'simulated earlier apply failure'],
+        null,
+        null,
+        'simulated source-added index conflict'
+    );
+    cow_merge_finish_run($manual_meta, $manual_run_id, 'completed_with_conflicts');
+    $manual_meta->close();
+
+    $schema_column_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND column_name = 'review_note' AND conflict_type = 'schema-source-changed' ORDER BY id DESC LIMIT 1");
+    $schema_column_dry = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_column_conflict_id,
+        'source',
+        false,
+        'Preview safe source column.',
+        'test'
+    );
+    assert_same($schema_column_dry['status'], 'validated', 'dry-run schema column source resolution validates target preconditions');
+    assert_same(column_type($schema_resolve_target, 'plugin_items', 'review_note'), null, 'dry-run schema column resolution does not mutate target schema');
+    $schema_column_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_column_conflict_id,
+        'source',
+        true,
+        'Apply safe source column.',
+        'test'
+    );
+    assert_same($schema_column_resolution['status'], 'applied', 'source schema column resolution records applied status');
+    assert_same(column_type($schema_resolve_target, 'plugin_items', 'review_note'), 'TEXT', 'source schema column resolution applies audited safe column');
+
+    $schema_index_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND column_name = 'plugin_items_review_idx' AND conflict_type = 'schema-source-added-index' ORDER BY id DESC LIMIT 1");
+    $schema_index_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_index_conflict_id,
+        'source',
+        true,
+        'Apply safe source index.',
+        'test'
+    );
+    assert_same($schema_index_resolution['status'], 'applied', 'source schema index resolution records applied status');
+    assert_same((int)scalar($schema_resolve_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_items_review_idx'"), 1, 'source schema index resolution applies audited source index');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id IN ($schema_column_conflict_id, $schema_index_conflict_id) AND choice = 'source' AND applied = 1"), 2, 'source schema resolutions are auditable');
 
     $keyless_base = $tmp . '/keyless-base.sqlite';
     $keyless_source = $tmp . '/keyless-source.sqlite';
