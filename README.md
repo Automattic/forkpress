@@ -507,9 +507,13 @@ tooling.
   decision, or deterministic resolution record.
 - `forkpress branch merge-resolve conflict <id> --choice source|target [--apply]`
   `[--note TEXT] [--reviewer NAME]` validates an audited DB cell, row
-  insert-collision, row-target-deleted, row-source-deleted, or filesystem path
-  conflict, plus validation-gated schema conflicts. DB conflicts work for
+  insert-collision, row-unique-collision, row-target-deleted,
+  row-source-deleted, or filesystem path conflict, plus validation-gated
+  schema conflicts. DB conflicts work for
   explicit primary keys and no-primary-key tables with sidecar row identity.
+  `row-unique-collision` source choices replace the still-matching target row
+  that owns the colliding unique key; target remains the default choice unless
+  a reviewer applies a source resolution.
   Schema source choices can apply safe source-added columns, indexes, views,
   and triggers; source index/view/trigger rewrites or drops; source table drops
   that do not leave dependent target views invalid or implicitly remove target

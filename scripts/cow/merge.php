@@ -1324,7 +1324,7 @@ function cow_merge_unique_indexes(SQLite3 $db, string $table): array {
     return $indexes;
 }
 
-function cow_merge_find_unique_collision(SQLite3 $target, string $table, array $source_row): ?array {
+function cow_merge_find_unique_collision(SQLite3 $target, string $table, array $source_row, bool $include_rowid = false): ?array {
     foreach (cow_merge_unique_indexes($target, $table) as $index) {
         $values = [];
         $clauses = [];
@@ -1340,7 +1340,8 @@ function cow_merge_find_unique_collision(SQLite3 $target, string $table, array $
             continue;
         }
 
-        $stmt = $target->prepare('SELECT * FROM ' . cow_merge_quote_ident($table) . ' WHERE ' . implode(' AND ', $clauses) . ' LIMIT 1');
+        $select = $include_rowid ? 'rowid AS __forkpress_merge_rowid, *' : '*';
+        $stmt = $target->prepare('SELECT ' . $select . ' FROM ' . cow_merge_quote_ident($table) . ' WHERE ' . implode(' AND ', $clauses) . ' LIMIT 1');
         if (!$stmt) {
             throw new RuntimeException("failed to prepare unique collision lookup on $table: " . $target->lastErrorMsg());
         }
@@ -1353,7 +1354,13 @@ function cow_merge_find_unique_collision(SQLite3 $target, string $table, array $
         }
         $row = $res->fetchArray(SQLITE3_ASSOC);
         if ($row) {
-            return ['index' => $index['name'], 'columns' => $index['columns'], 'row' => $row];
+            $rowid = $row['__forkpress_merge_rowid'] ?? null;
+            unset($row['__forkpress_merge_rowid']);
+            $collision = ['index' => $index['name'], 'columns' => $index['columns'], 'row' => $row];
+            if ($include_rowid && $rowid !== null) {
+                $collision['rowid'] = (int)$rowid;
+            }
+            return $collision;
         }
     }
     return null;
@@ -4242,9 +4249,9 @@ function cow_merge_resolve_conflict(
                 $reviewer
             );
         }
-        $row_conflict_types = ['row-insert-collision', 'row-target-deleted', 'row-source-deleted'];
+        $row_conflict_types = ['row-insert-collision', 'row-unique-collision', 'row-target-deleted', 'row-source-deleted'];
         if ($conflict_type !== 'cell-conflict' && !in_array($conflict_type, $row_conflict_types, true)) {
-            throw new InvalidArgumentException('resolve-conflict currently supports DB cell-conflict, row-insert-collision, row-target-deleted, and row-source-deleted records only');
+            throw new InvalidArgumentException('resolve-conflict currently supports DB cell-conflict, row-insert-collision, row-unique-collision, row-target-deleted, and row-source-deleted records only');
         }
         if ($conflict_type === 'cell-conflict' && $column === '') {
             throw new InvalidArgumentException('cell conflict resolution requires a column name');
@@ -4288,7 +4295,8 @@ function cow_merge_resolve_conflict(
                 throw new RuntimeException('target cell no longer matches the audited conflict target value; rerun merge-audit before resolving');
             }
         } else {
-            if ($conflict_type === 'row-insert-collision' && (!is_array($source_value) || !is_array($target_value))) {
+            $unique_collision_where_identity = null;
+            if (in_array($conflict_type, ['row-insert-collision', 'row-unique-collision'], true) && (!is_array($source_value) || !is_array($target_value))) {
                 throw new RuntimeException("row conflict #$conflict_id does not contain row payloads");
             }
             if ($conflict_type === 'row-target-deleted' && !is_array($source_value)) {
@@ -4297,9 +4305,39 @@ function cow_merge_resolve_conflict(
             if ($conflict_type === 'row-source-deleted' && !is_array($target_value)) {
                 throw new RuntimeException("row conflict #$conflict_id does not contain a target row payload");
             }
-            $current_value = $pk_cols || array_key_exists('rowid', $where_identity)
-                ? cow_merge_select_current_row($target, $table, $where_identity, $pk_cols)
-                : null;
+            if ($conflict_type === 'row-unique-collision') {
+                $unique_collision = cow_merge_find_unique_collision($target, $table, $source_value, true);
+                if ($unique_collision === null) {
+                    throw new RuntimeException('target row no longer matches the audited unique collision; rerun merge-audit before resolving');
+                }
+                $current_value = $unique_collision['row'];
+                if ($pk_cols) {
+                    $unique_collision_where_identity = [];
+                    foreach ($pk_cols as $pk_col) {
+                        if (!array_key_exists($pk_col, $current_value)) {
+                            throw new RuntimeException("current $table unique collision row does not include primary key column $pk_col");
+                        }
+                        $unique_collision_where_identity[$pk_col] = $current_value[$pk_col];
+                    }
+                    $source_identity_current = cow_merge_select_current_row($target, $table, $identity, $pk_cols);
+                    if ($source_identity_current !== null && !cow_merge_row_values_equal($source_identity_current, $current_value, cow_merge_all_columns(array_keys($source_identity_current), array_keys($current_value)))) {
+                        throw new RuntimeException('source row identity already exists in target; rerun merge-audit before resolving unique collision');
+                    }
+                } else {
+                    if (!isset($unique_collision['rowid'])) {
+                        throw new RuntimeException("cannot resolve $table unique collision because the target rowid is unavailable");
+                    }
+                    $unique_collision_where_identity = ['rowid' => (int)$unique_collision['rowid']];
+                }
+                $row_columns = cow_merge_all_columns(array_keys($target_value), array_keys($current_value));
+                if (!cow_merge_row_values_equal($current_value, $target_value, $row_columns)) {
+                    throw new RuntimeException('target row no longer matches the audited conflict target value; rerun merge-audit before resolving');
+                }
+            } else {
+                $current_value = $pk_cols || array_key_exists('rowid', $where_identity)
+                    ? cow_merge_select_current_row($target, $table, $where_identity, $pk_cols)
+                    : null;
+            }
             if ($conflict_type === 'row-target-deleted') {
                 if ($current_value !== null) {
                     throw new RuntimeException('target row no longer matches the audited conflict target value; rerun merge-audit before resolving');
@@ -4334,6 +4372,19 @@ function cow_merge_resolve_conflict(
                         }
                     } elseif ($conflict_type === 'row-target-deleted') {
                         $columns = cow_merge_table_columns($target, $table);
+                        $new_rowid = cow_merge_insert_row($target, $table, $source_value, $columns);
+                        if (!$pk_cols) {
+                            cow_merge_remember_row_identity($meta, (int)$conflict['run_id'], $target_branch, $table, $new_rowid, $identity, $source_value);
+                        }
+                    } elseif ($conflict_type === 'row-unique-collision') {
+                        $columns = cow_merge_table_columns($target, $table);
+                        if (!is_array($unique_collision_where_identity)) {
+                            throw new RuntimeException("cannot resolve $table unique collision because the target identity is unavailable");
+                        }
+                        cow_merge_delete_row($target, $table, $unique_collision_where_identity, $pk_cols);
+                        if (!$pk_cols) {
+                            cow_merge_forget_row_identity($meta, (int)$conflict['run_id'], $target_branch, $table, (int)$unique_collision_where_identity['rowid']);
+                        }
                         $new_rowid = cow_merge_insert_row($target, $table, $source_value, $columns);
                         if (!$pk_cols) {
                             cow_merge_remember_row_identity($meta, (int)$conflict['run_id'], $target_branch, $table, $new_rowid, $identity, $source_value);

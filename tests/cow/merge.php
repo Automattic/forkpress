@@ -180,6 +180,7 @@ try {
     $unique_base = $tmp . '/unique-base.sqlite';
     $unique_source = $tmp . '/unique-source.sqlite';
     $unique_target = $tmp . '/unique-target.sqlite';
+    $unique_metadata = $tmp . '/.forkpress/cow/merge/unique-metadata.sqlite';
     create_base_db($unique_base);
     copy($unique_base, $unique_source);
     copy($unique_base, $unique_target);
@@ -194,20 +195,44 @@ try {
     $db = open_db($unique_target);
     $db->exec("INSERT INTO plugin_unique_rows (id, slug, value) VALUES (200, 'shared-slug', 'target row')");
     $db->close();
-    $unique_result = cow_merge_databases($unique_base, $unique_source, $unique_target, $metadata, 'feature-unique', 'main');
+    $unique_result = cow_merge_databases($unique_base, $unique_source, $unique_target, $unique_metadata, 'feature-unique', 'main');
     assert_same($unique_result['status'], 'completed_with_conflicts', 'source insert colliding with target unique key is audited instead of aborting');
     assert_same((int)scalar($unique_target, "SELECT COUNT(*) FROM plugin_unique_rows WHERE slug = 'shared-slug'"), 1, 'target unique row remains singular after collision');
     assert_same(scalar($unique_target, "SELECT value FROM plugin_unique_rows WHERE slug = 'shared-slug'"), 'target row', 'target unique row wins by default');
     assert_same(
-        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_unique_rows' AND conflict_type = 'row-unique-collision'"),
+        (int)scalar($unique_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_unique_rows' AND conflict_type = 'row-unique-collision'"),
         1,
         'unique-key row collision is recorded as a conflict'
     );
     assert_same(
-        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_unique_rows' AND decision = 'target-wins' AND reason LIKE 'source inserted row collides with target unique index%'"),
+        (int)scalar($unique_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_unique_rows' AND decision = 'target-wins' AND reason LIKE 'source inserted row collides with target unique index%'"),
         1,
         'unique-key row collision records an auditable target-wins decision'
     );
+    $unique_conflict_id = (int)scalar($unique_metadata, "SELECT c.id FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_unique_rows' AND c.conflict_type = 'row-unique-collision' AND r.source_branch = 'feature-unique' ORDER BY c.id DESC LIMIT 1");
+    $unique_dry_resolution = cow_merge_resolve_conflict(
+        $unique_metadata,
+        $unique_conflict_id,
+        'source',
+        false,
+        'Preview unique source row.',
+        'cow-test'
+    );
+    assert_same($unique_dry_resolution['status'], 'validated', 'dry-run unique collision source resolution validates the audited target collision');
+    assert_same(scalar($unique_target, "SELECT value FROM plugin_unique_rows WHERE slug = 'shared-slug'"), 'target row', 'dry-run unique collision resolution does not mutate target');
+    $unique_source_resolution = cow_merge_resolve_conflict(
+        $unique_metadata,
+        $unique_conflict_id,
+        'source',
+        true,
+        'Apply unique source row.',
+        'cow-test'
+    );
+    assert_same($unique_source_resolution['status'], 'applied', 'source unique collision resolution records applied status');
+    assert_same((int)scalar($unique_target, "SELECT COUNT(*) FROM plugin_unique_rows WHERE slug = 'shared-slug'"), 1, 'source unique collision resolution keeps the unique key singular');
+    assert_same((int)scalar($unique_target, "SELECT id FROM plugin_unique_rows WHERE slug = 'shared-slug'"), 100, 'source unique collision resolution inserts the audited source row identity');
+    assert_same(scalar($unique_target, "SELECT value FROM plugin_unique_rows WHERE slug = 'shared-slug'"), 'source row', 'source unique collision resolution replaces the target row payload');
+    assert_same((int)scalar($unique_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $unique_conflict_id AND table_name = 'plugin_unique_rows' AND choice = 'source' AND applied = 1"), 1, 'source unique collision resolution is auditable');
 
     $target_only_base = $tmp . '/target-only-base.sqlite';
     $target_only_source = $tmp . '/target-only-source.sqlite';
@@ -2152,6 +2177,51 @@ SQL);
     assert_same($keyless_source_resolution['status'], 'applied', 'source keyless cell resolution records applied status');
     assert_same(scalar($keyless_conflict_target, "SELECT value FROM plugin_keyless WHERE rowid = 1"), 'source keyless conflict', 'source keyless cell resolution updates target through sidecar identity');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $keyless_cell_conflict_id AND table_name = 'plugin_keyless' AND column_name = 'value' AND choice = 'source' AND applied = 1"), 1, 'keyless cell resolution is auditable');
+
+    $keyless_unique_base = $tmp . '/keyless-unique-base.sqlite';
+    $keyless_unique_source = $tmp . '/keyless-unique-source.sqlite';
+    $keyless_unique_target = $tmp . '/keyless-unique-target.sqlite';
+    $keyless_unique_metadata = $tmp . '/.forkpress/cow/merge/keyless-unique-metadata.sqlite';
+    create_base_db($keyless_unique_base);
+    copy($keyless_unique_base, $keyless_unique_source);
+    copy($keyless_unique_base, $keyless_unique_target);
+    foreach ([$keyless_unique_base, $keyless_unique_source, $keyless_unique_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_keyless_unique (slug TEXT UNIQUE, value TEXT)');
+        $db->close();
+    }
+    cow_merge_capture_row_identities($keyless_unique_base, $keyless_unique_metadata, 'main');
+    cow_merge_capture_row_identities($keyless_unique_source, $keyless_unique_metadata, 'feature-keyless-unique', 'main');
+
+    $db = open_db($keyless_unique_source);
+    $db->exec("INSERT INTO plugin_keyless_unique (slug, value) VALUES ('shared-keyless-slug', 'source unique keyless')");
+    $db->close();
+    cow_merge_capture_row_identities($keyless_unique_source, $keyless_unique_metadata, 'feature-keyless-unique', 'main');
+
+    $db = open_db($keyless_unique_target);
+    $db->exec("INSERT INTO plugin_keyless_unique (slug, value) VALUES ('shared-keyless-slug', 'target unique keyless')");
+    $db->close();
+    cow_merge_capture_row_identities($keyless_unique_target, $keyless_unique_metadata, 'main');
+
+    $result = cow_merge_databases($keyless_unique_base, $keyless_unique_source, $keyless_unique_target, $keyless_unique_metadata, 'feature-keyless-unique', 'main');
+    assert_same($result['status'], 'completed_with_conflicts', 'keyless source insert colliding with target unique key is audited');
+    assert_same(scalar($keyless_unique_target, "SELECT value FROM plugin_keyless_unique WHERE slug = 'shared-keyless-slug'"), 'target unique keyless', 'target keyless unique row wins by default');
+    $keyless_unique_conflict_id = (int)scalar($keyless_unique_metadata, "SELECT c.id FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_keyless_unique' AND c.conflict_type = 'row-unique-collision' AND r.source_branch = 'feature-keyless-unique' ORDER BY c.id DESC LIMIT 1");
+    $keyless_unique_conflict_identity = scalar($keyless_unique_metadata, "SELECT row_identity FROM merge_conflicts WHERE id = $keyless_unique_conflict_id");
+    $keyless_unique_resolution = cow_merge_resolve_conflict(
+        $keyless_unique_metadata,
+        $keyless_unique_conflict_id,
+        'source',
+        true,
+        'Apply source keyless unique row.',
+        'cow-test'
+    );
+    assert_same($keyless_unique_resolution['status'], 'applied', 'source keyless unique collision resolution records applied status');
+    assert_same((int)scalar($keyless_unique_target, "SELECT COUNT(*) FROM plugin_keyless_unique WHERE slug = 'shared-keyless-slug'"), 1, 'source keyless unique collision resolution keeps the unique key singular');
+    assert_same(scalar($keyless_unique_target, "SELECT value FROM plugin_keyless_unique WHERE slug = 'shared-keyless-slug'"), 'source unique keyless', 'source keyless unique collision resolution replaces target row payload');
+    $keyless_unique_rowid = (int)scalar($keyless_unique_target, "SELECT rowid FROM plugin_keyless_unique WHERE slug = 'shared-keyless-slug'");
+    $keyless_unique_plain_identity = cow_merge_plain_json(cow_merge_decode_payload_json($keyless_unique_conflict_identity, 'keyless unique row identity'));
+    assert_same(scalar($keyless_unique_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_keyless_unique' AND rowid = $keyless_unique_rowid"), $keyless_unique_plain_identity, 'source keyless unique collision resolution moves the source sidecar identity to target');
 
     $capture_db = $tmp . '/capture.sqlite';
     $capture_feature = $tmp . '/capture-feature.sqlite';
