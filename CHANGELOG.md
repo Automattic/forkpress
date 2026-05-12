@@ -8,3 +8,4 @@
 - Added `forkpress branch merge-review` metadata annotations for conflict and decision audit records.
 - Added `forkpress branch merge-audit --review-status pending|needs-action|reviewed` to filter audit records by their latest review annotation.
 - Added `forkpress branch merge-resolve conflict <id> --choice source|target` as the first validation-gated deterministic resolver for DB cell conflicts, row insert collisions, row delete/update conflicts, no-primary-key table conflicts backed by sidecar row identity, safe filesystem path conflicts, and safe source-added column/index schema conflicts, with applied resolutions recorded in merge metadata.
+- Applied COW merge conflict resolutions now append a `reviewed` annotation to the resolved conflict audit record.

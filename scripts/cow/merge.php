@@ -2922,21 +2922,7 @@ function cow_merge_review_record(
             throw new InvalidArgumentException("$record_type #$record_id does not exist in merge metadata");
         }
 
-        $stmt = $meta->prepare(
-            'INSERT INTO merge_review_notes (record_type, record_id, status, note, reviewer) ' .
-            'VALUES (:record_type, :record_id, :status, :note, :reviewer)'
-        );
-        if (!$stmt) {
-            throw new RuntimeException('failed to prepare review note insert: ' . $meta->lastErrorMsg());
-        }
-        cow_merge_bind($stmt, ':record_type', $record_type);
-        cow_merge_bind($stmt, ':record_id', $record_id);
-        cow_merge_bind($stmt, ':status', $status);
-        cow_merge_bind($stmt, ':note', $note);
-        cow_merge_bind($stmt, ':reviewer', $reviewer);
-        if (!$stmt->execute()) {
-            throw new RuntimeException('failed to record review note: ' . $meta->lastErrorMsg());
-        }
+        $review_note_id = cow_merge_insert_review_note($meta, $record_type, $record_id, $status, $note, $reviewer);
         return [
             'metadata_db' => $metadata_db,
             'record_type' => $record_type,
@@ -2944,11 +2930,41 @@ function cow_merge_review_record(
             'status' => $status,
             'note' => $note,
             'reviewer' => $reviewer,
-            'review_note_id' => $meta->lastInsertRowID(),
+            'review_note_id' => $review_note_id,
         ];
     } finally {
         $meta->close();
     }
+}
+
+function cow_merge_insert_review_note(
+    SQLite3 $meta,
+    string $record_type,
+    int $record_id,
+    string $status,
+    string $note,
+    string $reviewer
+): int {
+    $stmt = $meta->prepare(
+        'INSERT INTO merge_review_notes (record_type, record_id, status, note, reviewer) ' .
+        'VALUES (:record_type, :record_id, :status, :note, :reviewer)'
+    );
+    if (!$stmt) {
+        throw new RuntimeException('failed to prepare review note insert: ' . $meta->lastErrorMsg());
+    }
+    cow_merge_bind($stmt, ':record_type', $record_type);
+    cow_merge_bind($stmt, ':record_id', $record_id);
+    cow_merge_bind($stmt, ':status', $status);
+    cow_merge_bind($stmt, ':note', $note);
+    cow_merge_bind($stmt, ':reviewer', $reviewer);
+    if (!$stmt->execute()) {
+        throw new RuntimeException('failed to record review note: ' . $meta->lastErrorMsg());
+    }
+    return (int)$meta->lastInsertRowID();
+}
+
+function cow_merge_resolution_review_note(string $choice, string $note): string {
+    return "Resolved with $choice choice: $note";
 }
 
 function cow_merge_resolution_choice(?string $value): string {
@@ -3320,6 +3336,14 @@ function cow_merge_resolve_schema_conflict(
                     $previous,
                     $resolved
                 );
+                cow_merge_insert_review_note(
+                    $meta,
+                    'conflict',
+                    $conflict_id,
+                    'reviewed',
+                    cow_merge_resolution_review_note($choice, $note),
+                    $reviewer
+                );
                 $target->exec('COMMIT');
                 $meta->exec('COMMIT');
             } catch (Throwable $e) {
@@ -3444,6 +3468,14 @@ function cow_merge_resolve_conflict(
                         'path',
                         cow_merge_file_path_payload($path, $current_value),
                         cow_merge_file_path_payload($path, $resolved_value)
+                    );
+                    cow_merge_insert_review_note(
+                        $meta,
+                        'conflict',
+                        $conflict_id,
+                        'reviewed',
+                        cow_merge_resolution_review_note($choice, $note),
+                        $reviewer
                     );
                     $meta->exec('COMMIT');
                     $file_tx_committed = true;
@@ -3609,6 +3641,14 @@ function cow_merge_resolve_conflict(
                     $conflict_type === 'cell-conflict' ? $column : '',
                     $current_value,
                     $resolved_value
+                );
+                cow_merge_insert_review_note(
+                    $meta,
+                    'conflict',
+                    $conflict_id,
+                    'reviewed',
+                    cow_merge_resolution_review_note($choice, $note),
+                    $reviewer
                 );
                 $target->exec('COMMIT');
                 $meta->exec('COMMIT');

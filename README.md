@@ -476,7 +476,7 @@ tooling.
   conflict, plus safe source-added column/index schema conflicts. DB conflicts
   work for explicit primary keys and no-primary-key tables with sidecar row
   identity. With `--apply`, ForkPress records the deterministic resolution in
-  merge metadata.
+  merge metadata and appends a reviewed annotation to the conflict audit record.
 - `forkpress branch show <name>` prints the branch directory, database, file
   count, and Git ref path.
 - `forkpress branch delete <name>` removes a COW branch. `main` cannot be

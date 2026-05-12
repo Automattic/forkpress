@@ -227,6 +227,7 @@ try {
     assert_same($source_resolution['status'], 'applied', 'source conflict resolution records applied status');
     assert_same(scalar($conflict_target, "SELECT post_title FROM wp_posts WHERE ID = 1"), 'Source title', 'source conflict resolution applies audited source cell value');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $title_conflict_id AND choice = 'source' AND applied = 1"), 1, 'source conflict resolution is auditable');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_review_notes WHERE record_type = 'conflict' AND record_id = $title_conflict_id AND status = 'reviewed' AND note LIKE 'Resolved with source choice:%'"), 1, 'applied source conflict resolution appends a reviewed note');
     assert_throws(
         fn() => cow_merge_resolve_conflict($metadata, $title_conflict_id, 'source', true, 'Try stale source apply.', 'cow-test'),
         'target cell no longer matches',
@@ -244,6 +245,7 @@ try {
     assert_same($target_resolution['status'], 'validated', 'target conflict resolution records validated status');
     assert_same(scalar($conflict_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_test'"), 'a:1:{s:5:"color";s:3:"red";}', 'target conflict resolution leaves target DB unchanged');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $option_conflict_id AND choice = 'target' AND applied = 1"), 1, 'target conflict resolution is auditable');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_review_notes WHERE record_type = 'conflict' AND record_id = $option_conflict_id AND status = 'reviewed' AND note LIKE 'Resolved with target choice:%'"), 1, 'applied target conflict resolution appends a reviewed note');
     $resolution_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10);
     assert_same(count($resolution_audit['resolutions']), 2, 'merge audit report exports deterministic resolution records');
 
@@ -388,8 +390,9 @@ try {
     assert_true(count($review_audit['conflicts']) >= 2, 'review audit includes revisitable merge conflicts');
     $reviewed_status_audit = cow_merge_audit_report($metadata, null, 10, ['review_status' => 'reviewed']);
     assert_same($reviewed_status_audit['filters']['review_status'], 'reviewed', 'merge audit JSON report includes review status filter');
-    assert_same(count($reviewed_status_audit['conflicts']), 1, 'review status filter returns reviewed conflicts');
-    assert_same((int)$reviewed_status_audit['conflicts'][0]['id'], $reviewed_conflict_id, 'review status filter returns the annotated conflict');
+    assert_true(count($reviewed_status_audit['conflicts']) >= 1, 'review status filter returns reviewed conflicts');
+    $reviewed_status_ids = array_map(fn($row) => (int)$row['id'], $reviewed_status_audit['conflicts']);
+    assert_true(in_array($reviewed_conflict_id, $reviewed_status_ids, true), 'review status filter returns the annotated conflict');
     assert_same(count($reviewed_status_audit['decisions']), 0, 'review status filter omits unannotated decisions');
     $needs_action_status_audit = cow_merge_audit_report($metadata, null, 10, ['review_status' => 'needs-action']);
     assert_same(count($needs_action_status_audit['conflicts']), 0, 'review status filter excludes other latest statuses');
