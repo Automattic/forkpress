@@ -473,6 +473,31 @@ SQL);
     assert_true(str_contains($whole_audit_text, 'failure=') && str_contains($whole_audit_text, 'forced whole-branch file failure'), 'merge audit text prints failed-run reason');
     assert_same((int)scalar($whole_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE decision = 'source-applied'"), 0, 'whole-branch rollback does not leave source-applied decisions for rolled-back changes');
 
+    $rollback_artifact_metadata = $tmp . '/.forkpress/cow/merge/rollback-failure-artifact.sqlite';
+    $artifact_path = cow_merge_record_rollback_failure_artifact(
+        $rollback_artifact_metadata,
+        123,
+        'feature-rollback-artifact',
+        'main',
+        '/tmp/base.sqlite',
+        '/tmp/source.sqlite',
+        '/tmp/target.sqlite',
+        'original merge failure',
+        'restore snapshot failure'
+    );
+    assert_true(is_string($artifact_path) && is_file($artifact_path), 'rollback failure records a JSONL artifact outside the metadata database');
+    $artifact_lines = file($artifact_path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    assert_true(is_array($artifact_lines) && count($artifact_lines) === 1, 'rollback failure artifact contains one JSONL record');
+    $artifact_record = json_decode($artifact_lines[0], true);
+    assert_same($artifact_record['rollback_failure'], 'restore snapshot failure', 'rollback failure artifact preserves rollback failure reason');
+    assert_same((int)scalar($rollback_artifact_metadata, "SELECT COUNT(*) FROM merge_rollback_failures WHERE source_branch = 'feature-rollback-artifact'"), 1, 'rollback failure is queryable in merge metadata when available');
+    $rollback_failure_audit = cow_merge_audit_report($rollback_artifact_metadata, null, 5);
+    assert_same(count($rollback_failure_audit['rollback_failures']), 1, 'merge audit JSON report exposes rollback failure artifacts');
+    ob_start();
+    cow_merge_print_audit_text($rollback_failure_audit);
+    $rollback_failure_text = ob_get_clean();
+    assert_true(str_contains($rollback_failure_text, 'rollback-failures:') && str_contains($rollback_failure_text, 'restore snapshot failure'), 'merge audit text prints rollback failure artifacts');
+
     $schema_base = $tmp . '/schema-base.sqlite';
     $schema_source = $tmp . '/schema-source.sqlite';
     $schema_target = $tmp . '/schema-target.sqlite';

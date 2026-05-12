@@ -1287,6 +1287,22 @@ CREATE TABLE IF NOT EXISTS merge_autoincrement_bands (
     UNIQUE(branch_name, table_name)
 )
 SQL);
+    $meta->exec(<<<'SQL'
+CREATE TABLE IF NOT EXISTS merge_rollback_failures (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER,
+    source_branch TEXT NOT NULL,
+    target_branch TEXT NOT NULL,
+    base_db TEXT NOT NULL,
+    source_db TEXT NOT NULL,
+    target_db TEXT NOT NULL,
+    original_failure TEXT NOT NULL,
+    rollback_failure TEXT NOT NULL,
+    artifact_path TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(run_id) REFERENCES merge_runs(id)
+)
+SQL);
 }
 
 function cow_merge_ensure_metadata_column(SQLite3 $meta, string $table, string $column, string $definition): void {
@@ -1311,6 +1327,73 @@ function cow_merge_failure_reason(Throwable $e): string {
         $reason = get_class($e);
     }
     return strlen($reason) > 4096 ? substr($reason, 0, 4093) . '...' : $reason;
+}
+
+function cow_merge_rollback_failure_artifact_path(string $metadata_db): string {
+    return dirname($metadata_db) . '/rollback-failures.jsonl';
+}
+
+function cow_merge_record_rollback_failure_artifact(
+    string $metadata_db,
+    ?int $run_id,
+    string $source_branch,
+    string $target_branch,
+    string $base_db,
+    string $source_db,
+    string $target_db,
+    string $original_failure,
+    string $rollback_failure
+): ?string {
+    $artifact_path = cow_merge_rollback_failure_artifact_path($metadata_db);
+    $record = [
+        'created_at' => gmdate('c'),
+        'run_id' => $run_id,
+        'source_branch' => $source_branch,
+        'target_branch' => $target_branch,
+        'base_db' => $base_db,
+        'source_db' => $source_db,
+        'target_db' => $target_db,
+        'original_failure' => $original_failure,
+        'rollback_failure' => $rollback_failure,
+    ];
+    $json = json_encode($record, JSON_UNESCAPED_SLASHES);
+    if (!is_string($json)) {
+        $json = '{"created_at":"' . gmdate('c') . '","rollback_failure":"failed to encode rollback failure artifact"}';
+    }
+    $artifact_written = false;
+    $dir = dirname($artifact_path);
+    if ((is_dir($dir) || @mkdir($dir, 0777, true)) && @file_put_contents($artifact_path, $json . "\n", FILE_APPEND | LOCK_EX) !== false) {
+        $artifact_written = true;
+    }
+
+    try {
+        $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READWRITE | SQLITE3_OPEN_CREATE);
+        cow_merge_ensure_metadata($meta);
+        $stmt = $meta->prepare(
+            'INSERT INTO merge_rollback_failures ' .
+            '(run_id, source_branch, target_branch, base_db, source_db, target_db, original_failure, rollback_failure, artifact_path) ' .
+            'VALUES (:run_id, :source_branch, :target_branch, :base_db, :source_db, :target_db, :original_failure, :rollback_failure, :artifact_path)'
+        );
+        cow_merge_bind($stmt, ':run_id', $run_id);
+        cow_merge_bind($stmt, ':source_branch', $source_branch);
+        cow_merge_bind($stmt, ':target_branch', $target_branch);
+        cow_merge_bind($stmt, ':base_db', $base_db);
+        cow_merge_bind($stmt, ':source_db', $source_db);
+        cow_merge_bind($stmt, ':target_db', $target_db);
+        cow_merge_bind($stmt, ':original_failure', $original_failure);
+        cow_merge_bind($stmt, ':rollback_failure', $rollback_failure);
+        cow_merge_bind($stmt, ':artifact_path', $artifact_written ? $artifact_path : null);
+        if (!$stmt->execute()) {
+            throw new RuntimeException('failed to record rollback failure: ' . $meta->lastErrorMsg());
+        }
+        $meta->close();
+    } catch (Throwable $metadata_error) {
+        if (isset($meta) && $meta instanceof SQLite3) {
+            $meta->close();
+        }
+    }
+
+    return $artifact_written ? $artifact_path : null;
 }
 
 function cow_merge_start_run(
@@ -2941,6 +3024,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
         'decisions' => [],
         'autoincrement_bands' => [],
         'row_identity_summary' => [],
+        'rollback_failures' => [],
     ];
     if (!is_file($metadata_db)) {
         return $report;
@@ -3026,6 +3110,21 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
                 $filter_params
             );
         }
+
+        if ($filters['records'] !== 'decisions') {
+            $rollback_filter = $run_id === null ? '' : 'WHERE run_id = :run_id';
+            $rollback_params = [':limit' => $limit];
+            if ($run_id !== null) {
+                $rollback_params[':run_id'] = $run_id;
+            }
+            $report['rollback_failures'] = cow_merge_audit_table_rows(
+                $db,
+                'merge_rollback_failures',
+                "SELECT id, run_id, source_branch, target_branch, original_failure, rollback_failure, artifact_path, created_at " .
+                "FROM merge_rollback_failures $rollback_filter ORDER BY id DESC LIMIT :limit",
+                $rollback_params
+            );
+        }
     } finally {
         $db->close();
     }
@@ -3069,18 +3168,20 @@ function cow_merge_print_audit_text(array $report): void {
         echo "  status:    no metadata database\n";
         return;
     }
-    if (!$report['runs']) {
+    if (!$report['runs'] && !$report['rollback_failures']) {
         echo "  status:    no audit runs\n";
         return;
     }
 
-    echo "runs:\n";
-    foreach ($report['runs'] as $run) {
-        $finished = $run['finished_at'] !== null && $run['finished_at'] !== '' ? (string)$run['finished_at'] : 'running';
-        echo "  #{$run['id']} {$run['status']} {$run['source_branch']} -> {$run['target_branch']} policy={$run['policy']} started={$run['started_at']} finished=$finished\n";
-        echo "     decisions={$run['decision_count']} target-wins={$run['target_wins_count']} source-applied={$run['source_applied_count']} id-bands={$run['id_band_decision_count']} conflicts={$run['conflict_count']}\n";
-        if ((string)$run['status'] === 'failed' && isset($run['failure_reason']) && (string)$run['failure_reason'] !== '') {
-            echo "     failure=" . cow_merge_audit_truncate((string)$run['failure_reason'], 240) . "\n";
+    if ($report['runs']) {
+        echo "runs:\n";
+        foreach ($report['runs'] as $run) {
+            $finished = $run['finished_at'] !== null && $run['finished_at'] !== '' ? (string)$run['finished_at'] : 'running';
+            echo "  #{$run['id']} {$run['status']} {$run['source_branch']} -> {$run['target_branch']} policy={$run['policy']} started={$run['started_at']} finished=$finished\n";
+            echo "     decisions={$run['decision_count']} target-wins={$run['target_wins_count']} source-applied={$run['source_applied_count']} id-bands={$run['id_band_decision_count']} conflicts={$run['conflict_count']}\n";
+            if ((string)$run['status'] === 'failed' && isset($run['failure_reason']) && (string)$run['failure_reason'] !== '') {
+                echo "     failure=" . cow_merge_audit_truncate((string)$run['failure_reason'], 240) . "\n";
+            }
         }
     }
 
@@ -3102,6 +3203,19 @@ function cow_merge_print_audit_text(array $report): void {
             echo "  #{$decision['id']} run={$decision['run_id']} {$decision['decision']} $object\n";
             echo "     reason={$decision['reason']}\n";
             echo "     chosen={$decision['chosen_preview']}\n";
+        }
+    }
+
+    if ($report['rollback_failures']) {
+        echo "rollback-failures:\n";
+        foreach ($report['rollback_failures'] as $failure) {
+            $run = $failure['run_id'] !== null && $failure['run_id'] !== '' ? "run={$failure['run_id']}" : 'run=unknown';
+            echo "  #{$failure['id']} $run {$failure['source_branch']} -> {$failure['target_branch']} created={$failure['created_at']}\n";
+            echo "     original=" . cow_merge_audit_truncate((string)$failure['original_failure'], 240) . "\n";
+            echo "     rollback=" . cow_merge_audit_truncate((string)$failure['rollback_failure'], 240) . "\n";
+            if (($failure['artifact_path'] ?? null) !== null && (string)$failure['artifact_path'] !== '') {
+                echo "     artifact={$failure['artifact_path']}\n";
+            }
         }
     }
 
@@ -3746,8 +3860,10 @@ function cow_merge_branch_state(
         $metadata_snapshot = cow_merge_snapshot_sqlite_db($metadata_db);
     }
 
+    $attempted_run_id = null;
     try {
         $result = cow_merge_databases($base_db, $source_db, $target_db, $metadata_db, $source_branch, $target_branch);
+        $attempted_run_id = (int)$result['run_id'];
         $result['db_applied'] = $result['applied'];
         $result['db_conflicts'] = $result['conflicts'];
         $result['file_applied'] = 0;
@@ -3779,6 +3895,17 @@ function cow_merge_branch_state(
                     cow_merge_failure_reason($e)
                 );
             } catch (Throwable $rollback_error) {
+                cow_merge_record_rollback_failure_artifact(
+                    $metadata_db,
+                    $attempted_run_id,
+                    $source_branch,
+                    $target_branch,
+                    $base_db,
+                    $source_db,
+                    $target_db,
+                    cow_merge_failure_reason($e),
+                    cow_merge_failure_reason($rollback_error)
+                );
                 throw new RuntimeException(
                     $e->getMessage() . '; whole-branch rollback failed: ' . $rollback_error->getMessage(),
                     0,
