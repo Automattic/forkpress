@@ -18,7 +18,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "  php merge.php audit --metadata-db <path> [--format text|json] [--limit N] [--run ID]\n");
     fwrite(STDERR, "    [--scope all|db|files] [--records all|conflicts|decisions] [--path <path>] [--path-prefix <prefix>]\n");
     fwrite(STDERR, "    [--scope all|db|files] [--records all|conflicts|decisions] [--conflict-type TYPE] [--decision DECISION]\n");
-    fwrite(STDERR, "    [--id-band-skips]\n");
+    fwrite(STDERR, "    [--id-band-skips] [--review]\n");
 }
 
 const COW_MERGE_AUTOINCREMENT_BAND_SIZE = 1000000;
@@ -2738,6 +2738,18 @@ function cow_merge_audit_file_path_filter(?string $value, string $name): ?string
 
 function cow_merge_audit_apply_shortcuts(array $filters): array {
     $id_band_skips = (string)($filters['id_band_skips'] ?? '') === '1';
+    $review = (string)($filters['review'] ?? '') === '1';
+    if ($id_band_skips && $review) {
+        throw new InvalidArgumentException('--id-band-skips cannot be combined with --review');
+    }
+    if ($review) {
+        if (($filters['decision'] ?? null) !== null) {
+            throw new InvalidArgumentException('--review cannot be combined with --decision');
+        }
+        if (($filters['conflict_type'] ?? null) !== null) {
+            throw new InvalidArgumentException('--review cannot be combined with --conflict-type');
+        }
+    }
     if (!$id_band_skips) {
         return $filters;
     }
@@ -2784,6 +2796,7 @@ function cow_merge_audit_filters(array $filters = []): array {
         'path' => $path,
         'path_prefix' => $path_prefix,
         'id_band_skips' => (string)($filters['id_band_skips'] ?? '') === '1',
+        'review' => (string)($filters['review'] ?? '') === '1',
     ];
 }
 
@@ -2864,6 +2877,12 @@ function cow_merge_audit_where_sql(
         $params[':decision'] = $filters['decision'];
     }
 
+    if (($filters['review'] ?? false) === true) {
+        if ($record_type === 'decisions') {
+            $clauses[] = $prefix . "decision = 'id-band-skipped'";
+        }
+    }
+
     return [
         $clauses ? 'WHERE ' . implode(' AND ', $clauses) : '',
         $params,
@@ -2883,6 +2902,11 @@ function cow_merge_audit_count_sql(array $filters, string $record_type, string $
     }
     if ($record_type === 'decisions' && $filters['decision'] !== null) {
         $conditions[] = $alias . ".decision = '" . SQLite3::escapeString($filters['decision']) . "'";
+    }
+    if (($filters['review'] ?? false) === true) {
+        if ($record_type === 'decisions') {
+            $conditions[] = $alias . ".decision = 'id-band-skipped'";
+        }
     }
     if ($filters['path'] !== null) {
         $conditions[] = $alias . ".table_name = '__files__'";
@@ -3188,6 +3212,9 @@ function cow_merge_audit_filter_label(array $filters): string {
     }
     if (($filters['id_band_skips'] ?? false) === true) {
         $parts[] = 'id-band-skips';
+    }
+    if (($filters['review'] ?? false) === true) {
+        $parts[] = 'review';
     }
     return implode(' ', $parts);
 }
@@ -3971,7 +3998,7 @@ function cow_merge_parse_cli(array $argv, array $required, int $start_index = 1)
             throw new InvalidArgumentException("unexpected argument: $arg");
         }
         $key = substr($arg, 2);
-        if ($key === 'id-band-skips' && (!isset($argv[$i + 1]) || str_starts_with($argv[$i + 1], '--'))) {
+        if (($key === 'id-band-skips' || $key === 'review') && (!isset($argv[$i + 1]) || str_starts_with($argv[$i + 1], '--'))) {
             $args[$key] = '1';
             continue;
         }
@@ -4079,6 +4106,7 @@ if (realpath($argv[0] ?? '') === __FILE__) {
                     'path' => $args['path'] ?? null,
                     'path_prefix' => $args['path-prefix'] ?? null,
                     'id_band_skips' => $args['id-band-skips'] ?? null,
+                    'review' => $args['review'] ?? null,
                 ]
             );
             if ($format === 'json') {
