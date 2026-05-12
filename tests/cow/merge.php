@@ -195,11 +195,29 @@ try {
     assert_same(count($audit['runs']), 1, 'merge audit report can focus on one run');
     assert_same((int)$audit['runs'][0]['conflict_count'], 2, 'merge audit run summary includes conflict count');
     assert_same(count($audit['conflicts']), 2, 'merge audit report exports conflict records for a run');
+    $reviewed_conflict_id = (int)$audit['conflicts'][0]['id'];
+    $review_result = cow_merge_review_record(
+        $metadata,
+        'conflict',
+        $reviewed_conflict_id,
+        'reviewed',
+        'Target value is intentional after manual review.',
+        'cow-test'
+    );
+    assert_same($review_result['record_id'], $reviewed_conflict_id, 'review note records the selected conflict id');
+    $reviewed_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10);
+    $reviewed_rows = array_values(array_filter(
+        $reviewed_audit['conflicts'],
+        fn($row) => (int)$row['id'] === $reviewed_conflict_id
+    ));
+    assert_same($reviewed_rows[0]['review_status'], 'reviewed', 'merge audit JSON exposes latest conflict review status');
+    assert_same($reviewed_rows[0]['review_note'], 'Target value is intentional after manual review.', 'merge audit JSON exposes latest conflict review note');
     ob_start();
-    cow_merge_print_audit_text($audit);
+    cow_merge_print_audit_text($reviewed_audit);
     $audit_text = ob_get_clean();
     assert_true(str_contains($audit_text, 'target-wins'), 'merge audit text includes automatic target-wins decisions');
     assert_true(str_contains($audit_text, 'wp_posts'), 'merge audit text identifies affected tables');
+    assert_true(str_contains($audit_text, 'review=reviewed') && str_contains($audit_text, 'Target value is intentional'), 'merge audit text includes review annotations');
     $review_audit = cow_merge_audit_report($metadata, null, 10, ['review' => '1']);
     assert_same($review_audit['filters']['review'], true, 'merge audit JSON report includes the review shortcut filter');
     assert_true(count($review_audit['conflicts']) >= 2, 'review audit includes revisitable merge conflicts');

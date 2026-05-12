@@ -467,6 +467,8 @@ tooling.
   `[--conflict-type TYPE] [--decision DECISION] [--path PATH]`
   `[--path-prefix PREFIX] [--id-band-skips] [--review]` prints the COW merge audit log
   without opening the raw metadata database.
+- `forkpress branch merge-review conflict|decision <id> --status pending|needs-action|reviewed --note <text>`
+  `[--reviewer NAME]` appends a review note to an auditable merge conflict or decision.
 - `forkpress branch show <name>` prints the branch directory, database, file
   count, and Git ref path.
 - `forkpress branch delete <name>` removes a COW branch. `main` cannot be

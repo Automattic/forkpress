@@ -19,6 +19,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "    [--scope all|db|files] [--records all|conflicts|decisions] [--path <path>] [--path-prefix <prefix>]\n");
     fwrite(STDERR, "    [--scope all|db|files] [--records all|conflicts|decisions] [--conflict-type TYPE] [--decision DECISION]\n");
     fwrite(STDERR, "    [--id-band-skips] [--review]\n");
+    fwrite(STDERR, "  php merge.php review-record --metadata-db <path> --record conflict|decision --id ID --status pending|needs-action|reviewed --note TEXT [--reviewer NAME]\n");
 }
 
 const COW_MERGE_AUTOINCREMENT_BAND_SIZE = 1000000;
@@ -1304,6 +1305,18 @@ CREATE TABLE IF NOT EXISTS merge_rollback_failures (
     FOREIGN KEY(run_id) REFERENCES merge_runs(id)
 )
 SQL);
+    $meta->exec(<<<'SQL'
+CREATE TABLE IF NOT EXISTS merge_review_notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    record_type TEXT NOT NULL CHECK(record_type IN ('conflict', 'decision')),
+    record_id INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending', 'needs-action', 'reviewed')),
+    note TEXT NOT NULL,
+    reviewer TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)
+SQL);
+    $meta->exec('CREATE INDEX IF NOT EXISTS merge_review_notes_record_idx ON merge_review_notes(record_type, record_id, id)');
 }
 
 function cow_merge_ensure_metadata_column(SQLite3 $meta, string $table, string $column, string $definition): void {
@@ -2736,6 +2749,96 @@ function cow_merge_audit_file_path_filter(?string $value, string $name): ?string
     return $path;
 }
 
+function cow_merge_review_record_type(?string $value): string {
+    if ($value !== 'conflict' && $value !== 'decision') {
+        throw new InvalidArgumentException('--record must be conflict or decision');
+    }
+    return $value;
+}
+
+function cow_merge_review_record_id(?string $value): int {
+    if ($value === null || $value === '' || !ctype_digit($value) || (int)$value < 1) {
+        throw new InvalidArgumentException('--id must be a positive integer');
+    }
+    return (int)$value;
+}
+
+function cow_merge_review_status(?string $value): string {
+    if (!in_array($value, ['pending', 'needs-action', 'reviewed'], true)) {
+        throw new InvalidArgumentException('--status must be pending, needs-action, or reviewed');
+    }
+    return (string)$value;
+}
+
+function cow_merge_review_text(?string $value, string $name): string {
+    if ($value === null) {
+        throw new InvalidArgumentException("--$name is required");
+    }
+    if (str_contains($value, "\0")) {
+        throw new InvalidArgumentException("--$name must not contain NUL bytes");
+    }
+    $value = trim($value);
+    if ($value === '') {
+        throw new InvalidArgumentException("--$name must not be empty");
+    }
+    if (strlen($value) > 4096) {
+        throw new InvalidArgumentException("--$name must be 4096 bytes or shorter");
+    }
+    return $value;
+}
+
+function cow_merge_review_record(
+    string $metadata_db,
+    string $record_type,
+    int $record_id,
+    string $status,
+    string $note,
+    string $reviewer
+): array {
+    cow_merge_mkdir_p(dirname($metadata_db));
+    $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READWRITE | SQLITE3_OPEN_CREATE);
+    try {
+        cow_merge_ensure_metadata($meta);
+        $table = $record_type === 'conflict' ? 'merge_conflicts' : 'merge_decisions';
+        $stmt = $meta->prepare("SELECT id FROM $table WHERE id = :id");
+        if (!$stmt) {
+            throw new RuntimeException("failed to prepare $record_type lookup: " . $meta->lastErrorMsg());
+        }
+        cow_merge_bind($stmt, ':id', $record_id);
+        $res = $stmt->execute();
+        if (!$res || !$res->fetchArray(SQLITE3_ASSOC)) {
+            throw new InvalidArgumentException("$record_type #$record_id does not exist in merge metadata");
+        }
+
+        $stmt = $meta->prepare(
+            'INSERT INTO merge_review_notes (record_type, record_id, status, note, reviewer) ' .
+            'VALUES (:record_type, :record_id, :status, :note, :reviewer)'
+        );
+        if (!$stmt) {
+            throw new RuntimeException('failed to prepare review note insert: ' . $meta->lastErrorMsg());
+        }
+        cow_merge_bind($stmt, ':record_type', $record_type);
+        cow_merge_bind($stmt, ':record_id', $record_id);
+        cow_merge_bind($stmt, ':status', $status);
+        cow_merge_bind($stmt, ':note', $note);
+        cow_merge_bind($stmt, ':reviewer', $reviewer);
+        if (!$stmt->execute()) {
+            throw new RuntimeException('failed to record review note: ' . $meta->lastErrorMsg());
+        }
+        return [
+            'metadata_db' => $metadata_db,
+            'record_type' => $record_type,
+            'record_id' => $record_id,
+            'status' => $status,
+            'note' => $note,
+            'reviewer' => $reviewer,
+            'review_note_id' => $meta->lastInsertRowID(),
+        ];
+    } finally {
+        $meta->close();
+    }
+}
+
 function cow_merge_audit_apply_shortcuts(array $filters): array {
     $id_band_skips = (string)($filters['id_band_skips'] ?? '') === '1';
     $review = (string)($filters['review'] ?? '') === '1';
@@ -3092,6 +3195,19 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
         if (!cow_merge_audit_has_table($db, 'merge_runs')) {
             return $report;
         }
+        $review_notes_exist = cow_merge_audit_has_table($db, 'merge_review_notes');
+        $conflict_review_select = $review_notes_exist
+            ? ", (SELECT rn.status FROM merge_review_notes rn WHERE rn.record_type = 'conflict' AND rn.record_id = merge_conflicts.id ORDER BY rn.id DESC LIMIT 1) AS review_status, " .
+              "(SELECT rn.note FROM merge_review_notes rn WHERE rn.record_type = 'conflict' AND rn.record_id = merge_conflicts.id ORDER BY rn.id DESC LIMIT 1) AS review_note, " .
+              "(SELECT rn.reviewer FROM merge_review_notes rn WHERE rn.record_type = 'conflict' AND rn.record_id = merge_conflicts.id ORDER BY rn.id DESC LIMIT 1) AS review_reviewer, " .
+              "(SELECT rn.created_at FROM merge_review_notes rn WHERE rn.record_type = 'conflict' AND rn.record_id = merge_conflicts.id ORDER BY rn.id DESC LIMIT 1) AS reviewed_at"
+            : ', NULL AS review_status, NULL AS review_note, NULL AS review_reviewer, NULL AS reviewed_at';
+        $decision_review_select = $review_notes_exist
+            ? ", (SELECT rn.status FROM merge_review_notes rn WHERE rn.record_type = 'decision' AND rn.record_id = merge_decisions.id ORDER BY rn.id DESC LIMIT 1) AS review_status, " .
+              "(SELECT rn.note FROM merge_review_notes rn WHERE rn.record_type = 'decision' AND rn.record_id = merge_decisions.id ORDER BY rn.id DESC LIMIT 1) AS review_note, " .
+              "(SELECT rn.reviewer FROM merge_review_notes rn WHERE rn.record_type = 'decision' AND rn.record_id = merge_decisions.id ORDER BY rn.id DESC LIMIT 1) AS review_reviewer, " .
+              "(SELECT rn.created_at FROM merge_review_notes rn WHERE rn.record_type = 'decision' AND rn.record_id = merge_decisions.id ORDER BY rn.id DESC LIMIT 1) AS reviewed_at"
+            : ', NULL AS review_status, NULL AS review_note, NULL AS review_reviewer, NULL AS reviewed_at';
         $failure_reason_select = cow_merge_audit_has_column($db, 'merge_runs', 'failure_reason')
             ? 'r.failure_reason'
             : 'NULL AS failure_reason';
@@ -3124,7 +3240,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
                 $db,
                 'merge_conflicts',
                 "SELECT id, run_id, table_name, row_identity, column_name, conflict_type, resolver, resolved_at, created_at, " .
-                "base_payload, source_payload, target_payload, chosen_payload " .
+                "base_payload, source_payload, target_payload, chosen_payload$conflict_review_select " .
                 "FROM merge_conflicts $conflict_filter ORDER BY id DESC LIMIT :limit",
                 $conflict_params
             ));
@@ -3137,7 +3253,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
                 $db,
                 'merge_decisions',
                 "SELECT id, run_id, table_name, row_identity, column_name, decision, reason, created_at, " .
-                "base_payload, source_payload, target_payload, chosen_payload " .
+                "base_payload, source_payload, target_payload, chosen_payload$decision_review_select " .
                 "FROM merge_decisions $decision_filter ORDER BY id DESC LIMIT :limit",
                 $decision_params
             ));
@@ -3252,6 +3368,10 @@ function cow_merge_print_audit_text(array $report): void {
         foreach ($report['conflicts'] as $conflict) {
             $object = cow_merge_audit_object_label($conflict);
             echo "  #{$conflict['id']} run={$conflict['run_id']} {$conflict['conflict_type']} $object resolver={$conflict['resolver']} resolved_at={$conflict['resolved_at']}\n";
+            if (($conflict['review_status'] ?? null) !== null && (string)$conflict['review_status'] !== '') {
+                echo "     review={$conflict['review_status']} reviewer={$conflict['review_reviewer']} at={$conflict['reviewed_at']}\n";
+                echo "     note=" . cow_merge_audit_truncate((string)$conflict['review_note'], 240) . "\n";
+            }
             echo "     source={$conflict['source_preview']}\n";
             echo "     target={$conflict['target_preview']}\n";
             echo "     chosen={$conflict['chosen_preview']}\n";
@@ -3263,6 +3383,10 @@ function cow_merge_print_audit_text(array $report): void {
         foreach ($report['decisions'] as $decision) {
             $object = cow_merge_audit_object_label($decision);
             echo "  #{$decision['id']} run={$decision['run_id']} {$decision['decision']} $object\n";
+            if (($decision['review_status'] ?? null) !== null && (string)$decision['review_status'] !== '') {
+                echo "     review={$decision['review_status']} reviewer={$decision['review_reviewer']} at={$decision['reviewed_at']}\n";
+                echo "     note=" . cow_merge_audit_truncate((string)$decision['review_note'], 240) . "\n";
+            }
             echo "     reason={$decision['reason']}\n";
             echo "     chosen={$decision['chosen_preview']}\n";
         }
@@ -4117,6 +4241,26 @@ if (realpath($argv[0] ?? '') === __FILE__) {
                 echo $encoded . "\n";
             } else {
                 cow_merge_print_audit_text($report);
+            }
+            exit(0);
+        }
+        if ($command === 'review-record') {
+            $args = cow_merge_parse_cli($argv, ['metadata-db', 'record', 'id', 'status', 'note'], 2);
+            $result = cow_merge_review_record(
+                $args['metadata-db'],
+                cow_merge_review_record_type($args['record'] ?? null),
+                cow_merge_review_record_id($args['id'] ?? null),
+                cow_merge_review_status($args['status'] ?? null),
+                cow_merge_review_text($args['note'] ?? null, 'note'),
+                cow_merge_review_text($args['reviewer'] ?? 'user', 'reviewer')
+            );
+            if (($args['quiet'] ?? '0') !== '1') {
+                echo "forkpress: recorded COW merge review note\n";
+                echo "  note:      {$result['review_note_id']}\n";
+                echo "  record:    {$result['record_type']} #{$result['record_id']}\n";
+                echo "  status:    {$result['status']}\n";
+                echo "  reviewer:  {$result['reviewer']}\n";
+                echo "  metadata:  {$result['metadata_db']}\n";
             }
             exit(0);
         }

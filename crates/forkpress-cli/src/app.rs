@@ -52,7 +52,8 @@ use forkpress_storage::{
     inspect_cow_merge_audit, list_remote_sites, lock_cow_lifecycle, lock_cow_operations,
     merge_cow_branch, prepare_cow_file_view, print_cow_storage_status,
     print_macos_cow_storage_status, probe_reflink_dir, probe_remote_site, reset_cow_branch,
-    show_cow_branch, write_cow_branch_list, write_cow_strategy_notes,
+    review_cow_merge_audit_record, show_cow_branch, write_cow_branch_list,
+    write_cow_strategy_notes,
 };
 #[cfg(feature = "dev-experiments")]
 use forkpress_storage::{copy_tree_cow, plain_branch_names};
@@ -2969,6 +2970,63 @@ fn cow_branch_command(
             )?;
             Ok(0)
         }
+        "merge-review" => {
+            let Some(record_type) = args.args.get(1) else {
+                bail!("branch merge-review requires conflict or decision");
+            };
+            let Some(record_id) = args.args.get(2) else {
+                bail!("branch merge-review requires a record id");
+            };
+            let mut status: Option<String> = None;
+            let mut note: Option<String> = None;
+            let mut reviewer: Option<String> = None;
+            let mut index = 3;
+            while index < args.args.len() {
+                match args.args[index].as_str() {
+                    "--status" => {
+                        let Some(value) = args.args.get(index + 1) else {
+                            bail!("--status requires pending, needs-action, or reviewed");
+                        };
+                        status = Some(value.clone());
+                        index += 2;
+                    }
+                    "--note" => {
+                        let Some(value) = args.args.get(index + 1) else {
+                            bail!("--note requires text");
+                        };
+                        note = Some(value.clone());
+                        index += 2;
+                    }
+                    "--reviewer" => {
+                        let Some(value) = args.args.get(index + 1) else {
+                            bail!("--reviewer requires a name");
+                        };
+                        reviewer = Some(value.clone());
+                        index += 2;
+                    }
+                    other => {
+                        bail!("unsupported argument for `forkpress branch merge-review`: {other}")
+                    }
+                }
+            }
+            let Some(status) = status else {
+                bail!("branch merge-review requires --status pending|needs-action|reviewed");
+            };
+            let Some(note) = note else {
+                bail!("branch merge-review requires --note <text>");
+            };
+            review_cow_merge_audit_record(
+                &layout,
+                &runtime,
+                &args.shared,
+                record_type,
+                record_id,
+                &status,
+                &note,
+                reviewer.as_deref(),
+            )?;
+            Ok(0)
+        }
         "delete" | "rm" => {
             let Some(branch) = args.args.get(1) else {
                 bail!("branch delete requires a branch name");
@@ -3983,6 +4041,43 @@ mod git_helper_tests {
         assert_eq!(
             args.args,
             vec!["merge-audit".to_string(), "--review".to_string()]
+        );
+    }
+
+    #[test]
+    fn parses_branch_merge_review_args() {
+        let cli = Cli::try_parse_from([
+            "forkpress",
+            "branch",
+            "--work-dir",
+            ".forkpress",
+            "merge-review",
+            "conflict",
+            "12",
+            "--status",
+            "reviewed",
+            "--note",
+            "Keep target content",
+            "--reviewer",
+            "alice",
+        ])
+        .unwrap();
+        let Commands::Branch(args) = cli.command else {
+            panic!("expected branch command");
+        };
+        assert_eq!(
+            args.args,
+            vec![
+                "merge-review".to_string(),
+                "conflict".to_string(),
+                "12".to_string(),
+                "--status".to_string(),
+                "reviewed".to_string(),
+                "--note".to_string(),
+                "Keep target content".to_string(),
+                "--reviewer".to_string(),
+                "alice".to_string(),
+            ]
         );
     }
 

@@ -916,6 +916,43 @@ pub fn inspect_cow_merge_audit(
     )
 }
 
+pub fn review_cow_merge_audit_record(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    record_type: &str,
+    record_id: &str,
+    status: &str,
+    note: &str,
+    reviewer: Option<&str>,
+) -> Result<()> {
+    let metadata_db = cow_merge_metadata_db_path(layout);
+    let mut args: Vec<OsString> = vec![
+        "review-record".into(),
+        "--metadata-db".into(),
+        metadata_db.as_os_str().to_os_string(),
+        "--record".into(),
+        record_type.into(),
+        "--id".into(),
+        record_id.into(),
+        "--status".into(),
+        status.into(),
+        "--note".into(),
+        note.into(),
+    ];
+    if let Some(reviewer) = reviewer {
+        args.push("--reviewer".into());
+        args.push(reviewer.into());
+    }
+    run_php_script(
+        layout,
+        runtime,
+        shared,
+        "scripts/cow/merge.php",
+        args.iter().map(|arg| arg.as_os_str()),
+    )
+}
+
 pub fn rollback_failed_reset_publish(
     branch: &str,
     target: &Path,
