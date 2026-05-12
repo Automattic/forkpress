@@ -41,6 +41,9 @@ on_error() {
   dump_if_exists "$TMP/keyless-main-after-merge.json"
   dump_if_exists "$TMP/keyless-merge.out"
   dump_if_exists "$TMP/keyless-conflicts.out"
+  dump_if_exists "$TMP/keyless-resolve.out"
+  dump_if_exists "$TMP/keyless-resolution-review.out"
+  dump_if_exists "$TMP/keyless-resolution-audit.out"
   dump_if_exists "$TMP/merge-audit.out"
   dump_if_exists "$TMP/merge-audit.json"
   dump_if_exists "$TMP/bad-slash.out"
@@ -425,6 +428,32 @@ php -r '$data = json_decode(file_get_contents($argv[1]), true); $old = 0; $new =
 php -r '$db = new SQLite3($argv[1]); $conflicts = (int)$db->querySingle("SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '\''wp_forkpress_e2e_keyless'\'' AND conflict_type = '\''row-source-deleted'\''"); exit($conflicts > 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
 "$BIN" branch --work-dir "$WORK_DIR" merge-audit --scope db --records conflicts --conflict-type row-source-deleted --limit 8 > "$TMP/keyless-conflicts.out"
 grep -F "wp_forkpress_e2e_keyless" "$TMP/keyless-conflicts.out" >/dev/null
+KEYLESS_CONFLICT_ID="$(
+  php -r '$db = new SQLite3($argv[1]); echo (int)$db->querySingle("SELECT id FROM merge_conflicts WHERE table_name = '\''wp_forkpress_e2e_keyless'\'' AND conflict_type = '\''row-source-deleted'\'' ORDER BY id DESC LIMIT 1");' \
+    "$WORK_DIR/cow/merge/metadata.sqlite"
+)"
+if [ "$KEYLESS_CONFLICT_ID" = "0" ]; then
+  echo "missing keyless row-source-deleted conflict id" >&2
+  exit 1
+fi
+"$BIN" branch --work-dir "$WORK_DIR" merge-resolve conflict "$KEYLESS_CONFLICT_ID" --choice target --apply --note "Keep runtime target row for e2e" --reviewer cow-e2e > "$TMP/keyless-resolve.out"
+grep -F "forkpress: validated COW merge conflict resolution" "$TMP/keyless-resolve.out" >/dev/null
+grep -F "applied:   yes" "$TMP/keyless-resolve.out" >/dev/null
+KEYLESS_RESOLUTION_ID="$(
+  php -r '$db = new SQLite3($argv[1]); echo (int)$db->querySingle("SELECT id FROM merge_resolutions WHERE conflict_id = " . (int)$argv[2] . " ORDER BY id DESC LIMIT 1");' \
+    "$WORK_DIR/cow/merge/metadata.sqlite" "$KEYLESS_CONFLICT_ID"
+)"
+if [ "$KEYLESS_RESOLUTION_ID" = "0" ]; then
+  echo "missing keyless deterministic resolution id" >&2
+  exit 1
+fi
+"$BIN" branch --work-dir "$WORK_DIR" merge-review resolution "$KEYLESS_RESOLUTION_ID" --status needs-action --note "E2E follow-up on runtime keyless resolution" --reviewer cow-e2e > "$TMP/keyless-resolution-review.out"
+grep -F "forkpress: recorded COW merge review note" "$TMP/keyless-resolution-review.out" >/dev/null
+grep -F "record:    resolution #$KEYLESS_RESOLUTION_ID" "$TMP/keyless-resolution-review.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --records resolutions --review-status needs-action --limit 8 > "$TMP/keyless-resolution-audit.out"
+grep -F "wp_forkpress_e2e_keyless" "$TMP/keyless-resolution-audit.out" >/dev/null
+grep -F "review=needs-action" "$TMP/keyless-resolution-audit.out" >/dev/null
+grep -F "E2E follow-up on runtime keyless resolution" "$TMP/keyless-resolution-audit.out" >/dev/null
 
 log_step "create agent worktrees"
 "$BIN" agents \
