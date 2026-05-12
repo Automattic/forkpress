@@ -14,6 +14,7 @@
 - Added `forkpress branch merge-audit --records conflicts --group-by table|type|path|severity` to summarize reviewable conflict records for UI and assistant triage.
 - Added `forkpress branch merge-audit --records decisions --group-by table|type|path` to summarize automatic merge decisions for UI and assistant triage.
 - Broadened validation-gated schema conflict resolution to source index rewrites/drops and compatible table rebuilds that preserve target rows while applying audited source non-primary-key column definitions.
+- Broadened compatible schema table rebuild resolution to preserve target explicit indexes and triggers, while continuing to block rebuilds when target views depend on the table.
 
 ## known-good/cow-mergeback-mvp-2026-05-12
 

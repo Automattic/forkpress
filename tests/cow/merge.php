@@ -941,6 +941,85 @@ SQL);
     assert_same(scalar($schema_rebuild_target, "SELECT value FROM plugin_items WHERE item_id = 'alpha'"), 'target preserved', 'source table rebuild preserves target row data');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_rebuild_conflict_id AND table_name = 'plugin_items' AND choice = 'source' AND applied = 1"), 1, 'source table rebuild schema resolution is auditable');
 
+    $schema_rebuild_dep_base = $tmp . '/schema-rebuild-dep-base.sqlite';
+    $schema_rebuild_dep_source = $tmp . '/schema-rebuild-dep-source.sqlite';
+    $schema_rebuild_dep_target = $tmp . '/schema-rebuild-dep-target.sqlite';
+    create_base_db($schema_rebuild_dep_base);
+    copy($schema_rebuild_dep_base, $schema_rebuild_dep_source);
+    copy($schema_rebuild_dep_base, $schema_rebuild_dep_target);
+
+    $db = open_db($schema_rebuild_dep_source);
+    $db->exec('CREATE TABLE plugin_items_new (item_id TEXT PRIMARY KEY, label TEXT, value INTEGER)');
+    $db->exec('INSERT INTO plugin_items_new (item_id, label, value) SELECT item_id, label, value FROM plugin_items');
+    $db->exec('DROP TABLE plugin_items');
+    $db->exec('ALTER TABLE plugin_items_new RENAME TO plugin_items');
+    $db->close();
+
+    $db = open_db($schema_rebuild_dep_target);
+    $db->exec('CREATE TABLE plugin_item_audit (item_id TEXT)');
+    $db->exec('CREATE INDEX plugin_items_dep_label_idx ON plugin_items(label)');
+    $db->exec('CREATE TRIGGER plugin_items_dep_insert AFTER INSERT ON plugin_items BEGIN INSERT INTO plugin_item_audit (item_id) VALUES (NEW.item_id); END');
+    $db->exec('CREATE TABLE plugin_items_new (item_id TEXT PRIMARY KEY, label TEXT, value REAL)');
+    $db->exec('INSERT INTO plugin_items_new (item_id, label, value) SELECT item_id, label, value FROM plugin_items');
+    $db->exec('DROP TABLE plugin_items');
+    $db->exec('ALTER TABLE plugin_items_new RENAME TO plugin_items');
+    $db->exec('CREATE INDEX plugin_items_dep_label_idx ON plugin_items(label)');
+    $db->exec('CREATE TRIGGER plugin_items_dep_insert AFTER INSERT ON plugin_items BEGIN INSERT INTO plugin_item_audit (item_id) VALUES (NEW.item_id); END');
+    $db->close();
+
+    $result = cow_merge_databases($schema_rebuild_dep_base, $schema_rebuild_dep_source, $schema_rebuild_dep_target, $metadata, 'feature-schema-rebuild-deps', 'main');
+    assert_same($result['status'], 'completed_with_conflicts', 'table rewrite with target dependents remains a schema conflict before resolution');
+    $schema_rebuild_dep_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND column_name IS NULL AND conflict_type = 'schema-conflict' ORDER BY id DESC LIMIT 1");
+    $schema_rebuild_dep_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_rebuild_dep_conflict_id,
+        'source',
+        true,
+        'Apply source table schema and preserve target dependents.',
+        'test'
+    );
+    assert_same($schema_rebuild_dep_resolution['status'], 'applied', 'source table rebuild with target dependents records applied status');
+    assert_same(column_type($schema_rebuild_dep_target, 'plugin_items', 'value'), 'INTEGER', 'source table rebuild with target dependents applies audited source schema');
+    assert_same((int)scalar($schema_rebuild_dep_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_items_dep_label_idx'"), 1, 'source table rebuild recreates target explicit index');
+    assert_same((int)scalar($schema_rebuild_dep_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_items_dep_insert'"), 1, 'source table rebuild recreates target trigger');
+    $db = open_db($schema_rebuild_dep_target);
+    $db->exec("INSERT INTO plugin_items (item_id, label, value) VALUES ('beta', 'Beta', 42)");
+    $db->close();
+    assert_same(scalar($schema_rebuild_dep_target, "SELECT item_id FROM plugin_item_audit WHERE item_id = 'beta'"), 'beta', 'recreated target trigger still fires after schema rebuild');
+
+    $schema_rebuild_view_base = $tmp . '/schema-rebuild-view-base.sqlite';
+    $schema_rebuild_view_source = $tmp . '/schema-rebuild-view-source.sqlite';
+    $schema_rebuild_view_target = $tmp . '/schema-rebuild-view-target.sqlite';
+    create_base_db($schema_rebuild_view_base);
+    copy($schema_rebuild_view_base, $schema_rebuild_view_source);
+    copy($schema_rebuild_view_base, $schema_rebuild_view_target);
+
+    $db = open_db($schema_rebuild_view_source);
+    $db->exec('CREATE TABLE plugin_items_new (item_id TEXT PRIMARY KEY, label TEXT, value INTEGER)');
+    $db->exec('INSERT INTO plugin_items_new (item_id, label, value) SELECT item_id, label, value FROM plugin_items');
+    $db->exec('DROP TABLE plugin_items');
+    $db->exec('ALTER TABLE plugin_items_new RENAME TO plugin_items');
+    $db->close();
+
+    $db = open_db($schema_rebuild_view_target);
+    $db->exec('CREATE VIEW plugin_items_view AS SELECT item_id, label FROM plugin_items');
+    $db->exec('CREATE TABLE plugin_items_new (item_id TEXT PRIMARY KEY, label TEXT, value REAL)');
+    $db->exec('INSERT INTO plugin_items_new (item_id, label, value) SELECT item_id, label, value FROM plugin_items');
+    $db->exec('DROP VIEW plugin_items_view');
+    $db->exec('DROP TABLE plugin_items');
+    $db->exec('ALTER TABLE plugin_items_new RENAME TO plugin_items');
+    $db->exec('CREATE VIEW plugin_items_view AS SELECT item_id, label FROM plugin_items');
+    $db->close();
+
+    $result = cow_merge_databases($schema_rebuild_view_base, $schema_rebuild_view_source, $schema_rebuild_view_target, $metadata, 'feature-schema-rebuild-view', 'main');
+    assert_same($result['status'], 'completed_with_conflicts', 'table rewrite with dependent target view remains a schema conflict');
+    $schema_rebuild_view_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND column_name IS NULL AND conflict_type = 'schema-conflict' ORDER BY id DESC LIMIT 1");
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $schema_rebuild_view_conflict_id, 'source', true, 'Try source table schema with dependent view.', 'test'),
+        'dependent target views',
+        'source table rebuild is blocked while target views depend on the table'
+    );
+
     $schema_resolve_base = $tmp . '/schema-resolve-base.sqlite';
     $schema_resolve_source = $tmp . '/schema-resolve-source.sqlite';
     $schema_resolve_target = $tmp . '/schema-resolve-target.sqlite';

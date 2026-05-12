@@ -3293,10 +3293,10 @@ function cow_merge_table_rebuild_supported(array $source_columns, array $target_
     return true;
 }
 
-function cow_merge_table_explicit_dependents(SQLite3 $db, string $table): array {
+function cow_merge_table_rebuild_dependencies(SQLite3 $db, string $table): array {
     $dependents = [];
     $stmt = $db->prepare(
-        "SELECT type, name FROM sqlite_master " .
+        "SELECT type, name, sql FROM sqlite_master " .
         "WHERE tbl_name = :table AND type IN ('index', 'trigger') AND sql IS NOT NULL ORDER BY type, name"
     );
     if (!$stmt) {
@@ -3308,19 +3308,54 @@ function cow_merge_table_explicit_dependents(SQLite3 $db, string $table): array 
         throw new RuntimeException("failed to read table dependents for $table: " . $db->lastErrorMsg());
     }
     while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
-        $dependents[] = (string)$row['type'] . ':' . (string)$row['name'];
+        $dependents[] = [
+            'type' => (string)$row['type'],
+            'name' => (string)$row['name'],
+            'sql' => (string)$row['sql'],
+        ];
     }
     return $dependents;
+}
+
+function cow_merge_sql_references_table(string $sql, string $table): bool {
+    $table = preg_quote($table, '/');
+    $identifier = '(?:"' . $table . '"|`' . $table . '`|\[' . $table . '\]|\'' . $table . '\'|(?<![A-Za-z0-9_])' . $table . '(?![A-Za-z0-9_]))';
+    $patterns = [
+        '/\b(?:FROM|JOIN|UPDATE|INTO)\s+(?:(?:"main"|"temp"|main|temp)\s*\.\s*)?' . $identifier . '/i',
+        '/\bTABLE\s+(?:(?:"main"|"temp"|main|temp)\s*\.\s*)?' . $identifier . '/i',
+    ];
+    foreach ($patterns as $pattern) {
+        if (preg_match($pattern, $sql)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function cow_merge_table_dependent_views(SQLite3 $db, string $table): array {
+    $views = [];
+    $res = $db->query("SELECT name, sql FROM sqlite_master WHERE type = 'view' AND sql IS NOT NULL ORDER BY name");
+    if (!$res) {
+        throw new RuntimeException("failed to read view dependencies for $table: " . $db->lastErrorMsg());
+    }
+    while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+        $sql = (string)$row['sql'];
+        if (cow_merge_sql_references_table($sql, $table)) {
+            $views[] = (string)$row['name'];
+        }
+    }
+    return $views;
 }
 
 function cow_merge_apply_source_table_rebuild(SQLite3 $target, string $table, string $source_sql, array $source_columns, array $target_columns): void {
     if (!cow_merge_table_rebuild_supported($source_columns, $target_columns)) {
         throw new InvalidArgumentException('source schema resolution can only rebuild tables with the same column order and unchanged primary key columns');
     }
-    $dependents = cow_merge_table_explicit_dependents($target, $table);
-    if ($dependents) {
-        throw new InvalidArgumentException('source schema table rebuild is blocked by explicit target indexes/triggers: ' . implode(', ', $dependents));
+    $dependent_views = cow_merge_table_dependent_views($target, $table);
+    if ($dependent_views) {
+        throw new InvalidArgumentException('source schema table rebuild is blocked by dependent target views: ' . implode(', ', $dependent_views));
     }
+    $dependencies = cow_merge_table_rebuild_dependencies($target, $table);
     $tmp_table = '__forkpress_merge_rebuild_' . bin2hex(random_bytes(8));
     $create_sql = cow_merge_create_table_sql_for_name($source_sql, $tmp_table);
     if ($create_sql === null) {
@@ -3346,6 +3381,14 @@ function cow_merge_apply_source_table_rebuild(SQLite3 $target, string $table, st
         }
         if (!$target->exec('ALTER TABLE ' . cow_merge_quote_ident($tmp_table) . ' RENAME TO ' . cow_merge_quote_ident($table))) {
             throw new RuntimeException('failed to rename rebuilt table: ' . $target->lastErrorMsg());
+        }
+        foreach ($dependencies as $dependency) {
+            if (!$target->exec((string)$dependency['sql'])) {
+                throw new RuntimeException(
+                    'failed to recreate target ' . $dependency['type'] . ' ' . $dependency['name'] .
+                    ' after schema rebuild: ' . $target->lastErrorMsg()
+                );
+            }
         }
         $target->exec('RELEASE forkpress_schema_rebuild');
     } catch (Throwable $e) {
