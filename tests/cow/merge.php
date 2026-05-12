@@ -591,6 +591,37 @@ try {
         'cow-test'
     );
 
+    $needs_action_transition_base = $tmp . '/needs-action-transition-base.sqlite';
+    $needs_action_transition_source = $tmp . '/needs-action-transition-source.sqlite';
+    $needs_action_transition_target = $tmp . '/needs-action-transition-target.sqlite';
+    create_base_db($needs_action_transition_base);
+    copy($needs_action_transition_base, $needs_action_transition_source);
+    copy($needs_action_transition_base, $needs_action_transition_target);
+    $db = open_db($needs_action_transition_source);
+    $db->exec("UPDATE plugin_items SET value = 'source needs-action queue conflict' WHERE item_id = 'alpha'");
+    $db->close();
+    $db = open_db($needs_action_transition_target);
+    $db->exec("UPDATE plugin_items SET value = 'target needs-action queue conflict' WHERE item_id = 'alpha'");
+    $db->close();
+    cow_merge_databases($needs_action_transition_base, $needs_action_transition_source, $needs_action_transition_target, $metadata, 'feature-needs-action-transition', 'main');
+    $needs_action_transition_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND conflict_type = 'cell-conflict' ORDER BY id DESC LIMIT 1");
+    cow_merge_review_record(
+        $metadata,
+        'conflict',
+        $needs_action_transition_conflict_id,
+        'pending',
+        'Initial needs-action transition review.',
+        'cow-test'
+    );
+    cow_merge_review_record(
+        $metadata,
+        'conflict',
+        $needs_action_transition_conflict_id,
+        'needs-action',
+        'Escalated for owner follow-up.',
+        'cow-test'
+    );
+
     ob_start();
     cow_merge_print_audit_text($reviewed_audit);
     $audit_text = ob_get_clean();
@@ -631,12 +662,34 @@ try {
     $pending_review_queue_ids = array_map(fn($row) => (int)$row['id'], $pending_review_queue_audit['conflicts']);
     assert_true(in_array($status_transition_conflict_id, $pending_review_queue_ids, true), 'pending review queue returns conflicts whose latest note is pending');
     assert_true(!in_array($reviewed_conflict_id, $pending_review_queue_ids, true), 'pending review queue excludes reviewed conflicts');
+    assert_true(!in_array($needs_action_transition_conflict_id, $pending_review_queue_ids, true), 'pending review queue follows latest review status');
     $status_transition_rows = array_values(array_filter(
         $pending_review_queue_audit['conflicts'],
         fn($row) => (int)$row['id'] === $status_transition_conflict_id
     ));
     assert_same($status_transition_rows[0]['review_status'], 'pending', 'pending review queue exposes the latest review status');
     assert_same($status_transition_rows[0]['review_note'], 'Re-opened for a second reviewer.', 'pending review queue exposes the latest review note');
+    $needs_action_review_queue_audit = cow_merge_audit_report($metadata, null, 10, [
+        'review' => '1',
+        'review_status' => 'needs-action',
+        'records' => 'conflicts',
+        'scope' => 'db',
+    ]);
+    assert_same($needs_action_review_queue_audit['filters']['review'], true, 'needs-action review queue preserves the review shortcut filter');
+    assert_same($needs_action_review_queue_audit['filters']['review_status'], 'needs-action', 'needs-action review queue preserves the needs-action filter');
+    assert_same($needs_action_review_queue_audit['filters']['records'], 'conflicts', 'needs-action review queue can focus on conflict records');
+    assert_same($needs_action_review_queue_audit['filters']['scope'], 'db', 'needs-action review queue can focus on database records');
+    assert_same(count($needs_action_review_queue_audit['decisions']), 0, 'needs-action conflict queue omits decisions');
+    assert_same(count($needs_action_review_queue_audit['resolutions']), 0, 'needs-action conflict queue omits resolutions');
+    $needs_action_review_queue_ids = array_map(fn($row) => (int)$row['id'], $needs_action_review_queue_audit['conflicts']);
+    assert_true(in_array($needs_action_transition_conflict_id, $needs_action_review_queue_ids, true), 'needs-action review queue returns conflicts whose latest note is needs-action');
+    assert_true(!in_array($status_transition_conflict_id, $needs_action_review_queue_ids, true), 'needs-action review queue excludes pending conflicts');
+    $needs_action_transition_rows = array_values(array_filter(
+        $needs_action_review_queue_audit['conflicts'],
+        fn($row) => (int)$row['id'] === $needs_action_transition_conflict_id
+    ));
+    assert_same($needs_action_transition_rows[0]['review_status'], 'needs-action', 'needs-action review queue exposes the latest review status');
+    assert_same($needs_action_transition_rows[0]['review_note'], 'Escalated for owner follow-up.', 'needs-action review queue exposes the latest review note');
     $reviewed_status_audit = cow_merge_audit_report($metadata, null, 10, ['review_status' => 'reviewed']);
     assert_same($reviewed_status_audit['filters']['review_status'], 'reviewed', 'merge audit JSON report includes review status filter');
     assert_true(count($reviewed_status_audit['conflicts']) >= 1, 'review status filter returns reviewed conflicts');
@@ -654,7 +707,9 @@ try {
     $unreviewed_conflict_ids = array_map(fn($row) => (int)$row['id'], $unreviewed_status_audit['conflicts']);
     assert_true(!in_array($reviewed_conflict_id, $unreviewed_conflict_ids, true), 'unreviewed filter excludes reviewed conflicts');
     $needs_action_status_audit = cow_merge_audit_report($metadata, null, 10, ['review_status' => 'needs-action']);
-    assert_same(count($needs_action_status_audit['conflicts']), 0, 'review status filter excludes other latest statuses');
+    $needs_action_status_ids = array_map(fn($row) => (int)$row['id'], $needs_action_status_audit['conflicts']);
+    assert_true(in_array($needs_action_transition_conflict_id, $needs_action_status_ids, true), 'review status filter returns needs-action conflicts');
+    assert_true(!in_array($status_transition_conflict_id, $needs_action_status_ids, true), 'review status filter excludes other latest statuses');
     $missing_review_status_audit = cow_merge_audit_report($tmp . '/missing-review-status.sqlite', null, 5, ['review_status' => 'reviewed']);
     assert_same($missing_review_status_audit['metadata_exists'], false, 'review status filter handles missing metadata');
     ob_start();
@@ -685,6 +740,20 @@ try {
     assert_same(count($reviewed_resolution_audit['resolutions']), 1, 'review status filter returns annotated resolution records');
     assert_same($reviewed_resolution_audit['resolutions'][0]['review_status'], 'needs-action', 'merge audit JSON exposes latest resolution review status');
     assert_same($reviewed_resolution_audit['resolutions'][0]['review_note'], 'Follow up with content owner after source resolution.', 'merge audit JSON exposes latest resolution review note');
+    $needs_action_resolution_queue_audit = cow_merge_audit_report($metadata, null, 10, [
+        'review' => '1',
+        'review_status' => 'needs-action',
+        'records' => 'resolutions',
+        'scope' => 'db',
+    ]);
+    assert_same($needs_action_resolution_queue_audit['filters']['review'], true, 'needs-action resolution queue preserves the review shortcut filter');
+    assert_same($needs_action_resolution_queue_audit['filters']['review_status'], 'needs-action', 'needs-action resolution queue preserves the needs-action filter');
+    assert_same($needs_action_resolution_queue_audit['filters']['records'], 'resolutions', 'needs-action resolution queue can focus on resolution records');
+    assert_same($needs_action_resolution_queue_audit['filters']['scope'], 'db', 'needs-action resolution queue can focus on database records');
+    assert_same(count($needs_action_resolution_queue_audit['conflicts']), 0, 'needs-action resolution queue omits conflicts');
+    assert_same(count($needs_action_resolution_queue_audit['decisions']), 0, 'needs-action resolution queue omits decisions');
+    assert_same(count($needs_action_resolution_queue_audit['resolutions']), 1, 'needs-action resolution queue returns annotated DB resolution records');
+    assert_same((int)$needs_action_resolution_queue_audit['resolutions'][0]['id'], $resolution_review_id, 'needs-action resolution queue returns the annotated resolution id');
     $unreviewed_resolution_audit = cow_merge_audit_report($metadata, null, 10, ['records' => 'resolutions', 'review_status' => 'unreviewed']);
     assert_true(count($unreviewed_resolution_audit['resolutions']) >= 1, 'unreviewed filter returns resolution records with no review note');
     $unreviewed_resolution_ids = array_map(fn($row) => (int)$row['id'], $unreviewed_resolution_audit['resolutions']);

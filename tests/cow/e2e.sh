@@ -45,12 +45,15 @@ on_error() {
   dump_if_exists "$TMP/keyless-resolve.out"
   dump_if_exists "$TMP/keyless-resolution-review.out"
   dump_if_exists "$TMP/keyless-resolution-audit.out"
+  dump_if_exists "$TMP/keyless-resolution-needs-action-queue.json"
   dump_if_exists "$TMP/keyless-unreviewed-resolution-queue.json"
   dump_if_exists "$TMP/keyless-resolution-status.json"
   dump_if_exists "$TMP/merge-audit.out"
   dump_if_exists "$TMP/merge-audit.json"
   dump_if_exists "$TMP/file-conflict-pending.out"
   dump_if_exists "$TMP/file-conflict-pending-queue.json"
+  dump_if_exists "$TMP/file-conflict-needs-action.out"
+  dump_if_exists "$TMP/file-conflict-needs-action-queue.json"
   dump_if_exists "$TMP/merge-db-decision-review-queue.json"
   dump_if_exists "$TMP/merge-db-decision-reviewed.out"
   dump_if_exists "$TMP/merge-db-decision-reviewed.json"
@@ -465,6 +468,11 @@ grep -F "forkpress: recorded COW merge review note" "$TMP/file-conflict-pending.
 grep -F "status:    pending" "$TMP/file-conflict-pending.out" >/dev/null
 "$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --review --review-status pending --records conflicts --scope files --limit 12 > "$TMP/file-conflict-pending-queue.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["review"] ?? false) === true) && (($data["filters"]["review_status"] ?? null) === "pending") && (($data["filters"]["records"] ?? null) === "conflicts") && (($data["filters"]["scope"] ?? null) === "files") && empty($data["decisions"] ?? []) && empty($data["resolutions"] ?? []); $has_pending = false; foreach (($data["conflicts"] ?? []) as $row) { if (($row["table_name"] ?? null) !== "__files__") $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[3]) $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[2] && ($row["review_status"] ?? null) === "pending" && ($row["review_note"] ?? null) === "E2E pending file conflict follow-up") $has_pending = true; } exit($ok && $has_pending ? 0 : 1);' "$TMP/file-conflict-pending-queue.json" "$REVIEWED_FILE_CONFLICT_ID" "$UNREVIEWED_FILE_CONFLICT_ID"
+"$BIN" branch --work-dir "$WORK_DIR" merge-review conflict "$REVIEWED_FILE_CONFLICT_ID" --status needs-action --note "E2E needs-action file conflict follow-up" --reviewer cow-e2e > "$TMP/file-conflict-needs-action.out"
+grep -F "forkpress: recorded COW merge review note" "$TMP/file-conflict-needs-action.out" >/dev/null
+grep -F "status:    needs-action" "$TMP/file-conflict-needs-action.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --review --review-status needs-action --records conflicts --scope files --limit 12 > "$TMP/file-conflict-needs-action-queue.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["review"] ?? false) === true) && (($data["filters"]["review_status"] ?? null) === "needs-action") && (($data["filters"]["records"] ?? null) === "conflicts") && (($data["filters"]["scope"] ?? null) === "files") && empty($data["decisions"] ?? []) && empty($data["resolutions"] ?? []); $has_needs_action = false; foreach (($data["conflicts"] ?? []) as $row) { if (($row["table_name"] ?? null) !== "__files__") $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[3]) $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[2] && ($row["review_status"] ?? null) === "needs-action" && ($row["review_note"] ?? null) === "E2E needs-action file conflict follow-up") $has_needs_action = true; } exit($ok && $has_needs_action ? 0 : 1);' "$TMP/file-conflict-needs-action-queue.json" "$REVIEWED_FILE_CONFLICT_ID" "$UNREVIEWED_FILE_CONFLICT_ID"
 "$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --review --review-status unreviewed --records conflicts --scope files --limit 12 > "$TMP/file-conflict-review-queue.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["review"] ?? false) === true) && (($data["filters"]["review_status"] ?? null) === "unreviewed") && (($data["filters"]["records"] ?? null) === "conflicts") && (($data["filters"]["scope"] ?? null) === "files") && empty($data["decisions"] ?? []) && empty($data["resolutions"] ?? []); $has_unreviewed = false; foreach (($data["conflicts"] ?? []) as $row) { if (($row["review_status"] ?? null) !== null) $ok = false; if (($row["table_name"] ?? null) !== "__files__") $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[2]) $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[3] && ($row["conflict_type"] ?? null) === "file-conflict") $has_unreviewed = true; } exit($ok && $has_unreviewed ? 0 : 1);' "$TMP/file-conflict-review-queue.json" "$REVIEWED_FILE_CONFLICT_ID" "$UNREVIEWED_FILE_CONFLICT_ID"
 "$BIN" branch --work-dir "$WORK_DIR" merge-resolve conflict "$REVIEWED_FILE_CONFLICT_ID" --choice source --apply --note "E2E apply source file one" --reviewer cow-e2e > "$TMP/file-resolve-one.out"
@@ -585,6 +593,8 @@ grep -F "record:    resolution #$KEYLESS_RESOLUTION_ID" "$TMP/keyless-resolution
 grep -F "wp_forkpress_e2e_keyless" "$TMP/keyless-resolution-audit.out" >/dev/null
 grep -F "review=needs-action" "$TMP/keyless-resolution-audit.out" >/dev/null
 grep -F "E2E follow-up on runtime keyless resolution" "$TMP/keyless-resolution-audit.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --review --review-status needs-action --records resolutions --scope db --limit 8 > "$TMP/keyless-resolution-needs-action-queue.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["review"] ?? false) === true) && (($data["filters"]["review_status"] ?? null) === "needs-action") && (($data["filters"]["records"] ?? null) === "resolutions") && (($data["filters"]["scope"] ?? null) === "db") && empty($data["conflicts"] ?? []) && empty($data["decisions"] ?? []); $has_resolution = false; foreach (($data["resolutions"] ?? []) as $row) { if (($row["table_name"] ?? null) === "__files__") $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[2] && ($row["review_status"] ?? null) === "needs-action" && ($row["review_note"] ?? null) === "E2E follow-up on runtime keyless resolution") $has_resolution = true; } exit($ok && $has_resolution ? 0 : 1);' "$TMP/keyless-resolution-needs-action-queue.json" "$KEYLESS_RESOLUTION_ID"
 "$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --resolution-status validated --group-by status --limit 8 > "$TMP/keyless-resolution-status.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["records"] ?? null) === "resolutions") && (($data["filters"]["resolution_status"] ?? null) === "validated") && (($data["filters"]["group_by"] ?? null) === "status"); $has_resolution = false; foreach (($data["resolutions"] ?? []) as $row) { if ((int)($row["id"] ?? 0) === (int)$argv[2] && ($row["status"] ?? null) === "validated") $has_resolution = true; } $has_group = false; foreach (($data["resolution_groups"] ?? []) as $group) { if (($group["group_key"] ?? null) === "validated" && (int)($group["resolution_count"] ?? 0) > 0) $has_group = true; } exit($ok && $has_resolution && $has_group ? 0 : 1);' "$TMP/keyless-resolution-status.json" "$KEYLESS_RESOLUTION_ID"
 

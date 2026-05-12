@@ -40,6 +40,7 @@
 - Added COW audit coverage and docs for explicit database decision review queues combining `--review`, `--review-status unreviewed`, `--records decisions`, and DB scope.
 - Added COW audit coverage and docs for filesystem conflict and deterministic resolution review queues combining `--review`, `--review-status unreviewed`, file scope, and explicit record types.
 - Added COW audit coverage and docs for pending reviewer queues, including status transitions where the latest review note controls filtering.
+- Added COW audit coverage and docs for needs-action reviewer queues across conflict and deterministic resolution follow-up workflows.
 - Updated the automatic mergeback loop runner to pass a configurable Codex reasoning-effort setting and to include the changelog/known-good tag policy in every worker prompt.
 
 ## known-good/cow-mergeback-audit-completeness-2026-05-12

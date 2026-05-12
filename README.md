@@ -482,6 +482,8 @@ tooling.
   Use the same `--records` and `--scope` shape with `--review-status pending`
   or `--review-status needs-action` to revisit annotated follow-up queues;
   later review notes supersede earlier notes for filtering.
+  `needs-action` queues are intended for records that require owner follow-up
+  before they can be marked reviewed.
   For unreviewed deterministic resolution follow-up, use
   `--review --review-status unreviewed --records resolutions --scope db`.
   Use `--scope files` with `--records conflicts` or `--records resolutions`
