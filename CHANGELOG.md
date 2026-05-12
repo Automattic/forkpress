@@ -33,6 +33,7 @@
 - Added runtime-backed COW e2e coverage for `forkpress branch merge-audit --resolution-status validated` normalizing default CLI records to deterministic resolution audit output.
 - Added runtime-backed COW e2e coverage for deterministic resolution records being reviewed through `forkpress branch merge-review resolution`.
 - Added `forkpress branch merge-audit --review-status unreviewed` to isolate conflicts, decisions, and resolutions that have no review note yet.
+- Added runtime-backed COW e2e coverage for `forkpress branch merge-audit --review-status unreviewed` returning unannotated audit records through the real CLI.
 - Updated the automatic mergeback loop runner to pass a configurable Codex reasoning-effort setting and to include the changelog/known-good tag policy in every worker prompt.
 
 ## known-good/cow-mergeback-audit-completeness-2026-05-12

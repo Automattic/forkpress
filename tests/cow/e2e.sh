@@ -47,6 +47,7 @@ on_error() {
   dump_if_exists "$TMP/keyless-resolution-status.json"
   dump_if_exists "$TMP/merge-audit.out"
   dump_if_exists "$TMP/merge-audit.json"
+  dump_if_exists "$TMP/merge-unreviewed.json"
   dump_if_exists "$TMP/merge-target-kept-files.out"
   dump_if_exists "$TMP/merge-target-kept.json"
   dump_if_exists "$TMP/bad-slash.out"
@@ -379,6 +380,8 @@ grep -F "target-kept" "$TMP/merge-target-kept-files.out" >/dev/null
 grep -F "wp-content/main-target-file.txt" "$TMP/merge-target-kept-files.out" >/dev/null
 "$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --target-kept --group-by type --limit 12 > "$TMP/merge-target-kept.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); $decisions = $data["decisions"] ?? []; $groups = $data["decision_groups"] ?? []; $ok = is_array($data) && (($data["filters"]["target_kept"] ?? false) === true) && (($data["filters"]["records"] ?? null) === "decisions") && (($data["filters"]["decision"] ?? null) === "target-kept") && count($decisions) > 0; $has_db = false; foreach ($decisions as $row) { if (($row["decision"] ?? null) !== "target-kept") $ok = false; if (($row["table_name"] ?? null) === "forkpress_e2e_target_kept") $has_db = true; } $has_group = false; foreach ($groups as $group) { if (($group["group_key"] ?? null) === "target-kept" && (int)($group["decision_count"] ?? 0) > 0) $has_group = true; } exit($ok && $has_db && $has_group ? 0 : 1);' "$TMP/merge-target-kept.json"
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --review-status unreviewed --scope files --path-prefix wp-content/main-target-file.txt --limit 8 > "$TMP/merge-unreviewed.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $decisions = $data["decisions"] ?? []; $ok = is_array($data) && (($data["filters"]["records"] ?? null) === "all") && (($data["filters"]["review_status"] ?? null) === "unreviewed"); $has_file = false; foreach ($decisions as $row) { if (($row["review_status"] ?? null) !== null) $ok = false; if (($row["table_name"] ?? null) === "__files__" && ($row["decision"] ?? null) === "target-kept" && str_contains((string)($row["target_preview"] ?? ""), "wp-content/main-target-file.txt")) $has_file = true; } exit($ok && $has_file ? 0 : 1);' "$TMP/merge-unreviewed.json"
 
 log_step "merge runtime-tracked no-PK rowid reuse"
 mkdir -p "$WORK/main/wp-content/mu-plugins"
