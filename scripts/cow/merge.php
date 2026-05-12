@@ -1290,6 +1290,75 @@ function cow_merge_insert_row(SQLite3 $target, string $table, array $row, array 
     return (int)$target->lastInsertRowID();
 }
 
+function cow_merge_unique_indexes(SQLite3 $db, string $table): array {
+    $indexes = [];
+    $res = $db->query('PRAGMA index_list(' . cow_merge_quote_ident($table) . ')');
+    if (!$res) {
+        return [];
+    }
+    while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+        if ((int)($row['unique'] ?? 0) !== 1 || (int)($row['partial'] ?? 0) === 1) {
+            continue;
+        }
+        $name = (string)($row['name'] ?? '');
+        if ($name === '') {
+            continue;
+        }
+        $info = $db->query("PRAGMA index_info('" . SQLite3::escapeString($name) . "')");
+        if (!$info) {
+            continue;
+        }
+        $columns = [];
+        while ($column = $info->fetchArray(SQLITE3_ASSOC)) {
+            $column_name = $column['name'] ?? null;
+            if (!is_string($column_name) || $column_name === '') {
+                $columns = [];
+                break;
+            }
+            $columns[] = $column_name;
+        }
+        if ($columns) {
+            $indexes[] = ['name' => $name, 'columns' => $columns];
+        }
+    }
+    return $indexes;
+}
+
+function cow_merge_find_unique_collision(SQLite3 $target, string $table, array $source_row): ?array {
+    foreach (cow_merge_unique_indexes($target, $table) as $index) {
+        $values = [];
+        $clauses = [];
+        foreach ($index['columns'] as $column) {
+            if (!array_key_exists($column, $source_row) || $source_row[$column] === null) {
+                $clauses = [];
+                break;
+            }
+            $clauses[] = cow_merge_quote_ident($column) . ' = ?';
+            $values[] = $source_row[$column];
+        }
+        if (!$clauses) {
+            continue;
+        }
+
+        $stmt = $target->prepare('SELECT * FROM ' . cow_merge_quote_ident($table) . ' WHERE ' . implode(' AND ', $clauses) . ' LIMIT 1');
+        if (!$stmt) {
+            throw new RuntimeException("failed to prepare unique collision lookup on $table: " . $target->lastErrorMsg());
+        }
+        foreach ($values as $i => $value) {
+            cow_merge_bind($stmt, $i + 1, $value);
+        }
+        $res = $stmt->execute();
+        if (!$res) {
+            throw new RuntimeException("failed to query unique collision lookup on $table: " . $target->lastErrorMsg());
+        }
+        $row = $res->fetchArray(SQLITE3_ASSOC);
+        if ($row) {
+            return ['index' => $index['name'], 'columns' => $index['columns'], 'row' => $row];
+        }
+    }
+    return null;
+}
+
 function cow_merge_update_row(
     SQLite3 $target,
     string $table,
@@ -5929,6 +5998,36 @@ function cow_merge_table_rows(
         }
 
         if ($base_row === null && $source_row !== null && $target_row === null) {
+            $unique_collision = cow_merge_find_unique_collision($target, $table, $source_row);
+            if ($unique_collision !== null) {
+                cow_merge_record_conflict(
+                    $meta,
+                    $run_id,
+                    $table,
+                    $key,
+                    null,
+                    'row-unique-collision',
+                    null,
+                    $source_row,
+                    $unique_collision['row'],
+                    $unique_collision['row']
+                );
+                cow_merge_record_decision(
+                    $meta,
+                    $run_id,
+                    $table,
+                    $key,
+                    null,
+                    'target-wins',
+                    'source inserted row collides with target unique index ' . $unique_collision['index'],
+                    null,
+                    $source_row,
+                    $unique_collision['row'],
+                    $unique_collision['row']
+                );
+                $conflicts++;
+                continue;
+            }
             $new_rowid = cow_merge_insert_row($target, $table, $source_row, $columns);
             if (!$pk_cols) {
                 cow_merge_remember_row_identity($meta, $run_id, $target_branch, $table, $new_rowid, $identity, $source_row);

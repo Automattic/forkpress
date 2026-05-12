@@ -36,6 +36,14 @@ on_error() {
   dump_if_exists "$TMP/autoinc-feature-insert.json"
   dump_if_exists "$TMP/branch-post-edit.html"
   dump_if_exists "$TMP/branch-post-frontend.html"
+  dump_if_exists "$TMP/band-merge-source-post-new.html"
+  dump_if_exists "$TMP/band-merge-source-rest-save.json"
+  dump_if_exists "$TMP/band-merge-target-post-new.html"
+  dump_if_exists "$TMP/band-merge-target-rest-save.json"
+  dump_if_exists "$TMP/merge-band-posts.out"
+  dump_if_exists "$TMP/band-merge-target-edit.html"
+  dump_if_exists "$TMP/band-merge-target-source-post.html"
+  dump_if_exists "$TMP/band-merge-source-decision-queue.json"
   dump_if_exists "$TMP/git-multi-delete.out"
   dump_if_exists "$TMP/git-delete.out"
   dump_if_exists "$TMP/git-delete-main.out"
@@ -453,6 +461,50 @@ if "$BIN" branch --work-dir "$WORK_DIR" reset main --from reset-source > "$TMP/r
   exit 1
 fi
 grep -F "refusing to reset main without --force" "$TMP/reset-main.out" >/dev/null
+
+log_step "merge independently banded WordPress posts"
+"$BIN" branch --work-dir "$WORK_DIR" create band-merge-source > "$TMP/band-merge-source-create.out"
+"$BIN" branch --work-dir "$WORK_DIR" create band-merge-target > "$TMP/band-merge-target-create.out"
+grep -F "band-merge-source.wp.localhost:$PORT" "$TMP/band-merge-source-create.out" >/dev/null
+grep -F "band-merge-target.wp.localhost:$PORT" "$TMP/band-merge-target-create.out" >/dev/null
+BAND_SOURCE_TITLE="Band source $(date +%s)"
+BAND_TARGET_TITLE="Band target $(date +%s)"
+create_branch_post band-merge-source "$BAND_SOURCE_TITLE"
+create_branch_post band-merge-target "$BAND_TARGET_TITLE"
+BAND_SOURCE_POST_ID="$(php -r '$data = json_decode(file_get_contents($argv[1]), true); echo (int)($data["id"] ?? 0);' "$TMP/band-merge-source-rest-save.json")"
+BAND_TARGET_POST_ID="$(php -r '$data = json_decode(file_get_contents($argv[1]), true); echo (int)($data["id"] ?? 0);' "$TMP/band-merge-target-rest-save.json")"
+if [ "$BAND_SOURCE_POST_ID" = "0" ] || [ "$BAND_TARGET_POST_ID" = "0" ] || [ "$BAND_SOURCE_POST_ID" = "$BAND_TARGET_POST_ID" ]; then
+  echo "banded source/target post IDs were not distinct: source=$BAND_SOURCE_POST_ID target=$BAND_TARGET_POST_ID" >&2
+  exit 1
+fi
+php -r '$meta = new SQLite3($argv[1]); $source_id = (int)$argv[2]; $target_id = (int)$argv[3]; $source = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''band-merge-source'\'' AND table_name = '\''wp_posts'\''", true); $target = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''band-merge-target'\'' AND table_name = '\''wp_posts'\''", true); $ok = $source && $target && (int)$source["band_start"] !== (int)$target["band_start"] && $source_id >= (int)$source["band_start"] && $source_id <= (int)$source["band_end"] && $target_id >= (int)$target["band_start"] && $target_id <= (int)$target["band_end"]; exit($ok ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite" "$BAND_SOURCE_POST_ID" "$BAND_TARGET_POST_ID"
+"$BIN" branch --work-dir "$WORK_DIR" merge band-merge-source --into band-merge-target > "$TMP/merge-band-posts.out"
+grep -F "forkpress: merged band-merge-source into band-merge-target" "$TMP/merge-band-posts.out" >/dev/null
+grep -F "status:    completed_with_conflicts" "$TMP/merge-band-posts.out" >/dev/null
+curl -sS -H "Host: band-merge-target.wp.localhost:$PORT" \
+  "http://127.0.0.1:$PORT/wp-admin/edit.php" \
+  -o "$TMP/band-merge-target-edit.html"
+grep -F "$BAND_SOURCE_TITLE" "$TMP/band-merge-target-edit.html" >/dev/null
+grep -F "$BAND_TARGET_TITLE" "$TMP/band-merge-target-edit.html" >/dev/null
+curl -sSL -H "Host: band-merge-target.wp.localhost:$PORT" \
+  "http://127.0.0.1:$PORT/?p=$BAND_SOURCE_POST_ID" \
+  -o "$TMP/band-merge-target-source-post.html"
+grep -F "$BAND_SOURCE_TITLE" "$TMP/band-merge-target-source-post.html" >/dev/null
+php -r '$db = new SQLite3($argv[1]); $source_id = (int)$argv[2]; $target_id = (int)$argv[3]; $source_title = $db->querySingle("SELECT post_title FROM wp_posts WHERE ID = $source_id"); $target_title = $db->querySingle("SELECT post_title FROM wp_posts WHERE ID = $target_id"); exit($source_title === $argv[4] && $target_title === $argv[5] ? 0 : 1);' "$WORK/band-merge-target/wp-content/database/.ht.sqlite" "$BAND_SOURCE_POST_ID" "$BAND_TARGET_POST_ID" "$BAND_SOURCE_TITLE" "$BAND_TARGET_TITLE"
+BAND_SOURCE_POST_DECISION_ID="$(
+  php -r 'require_once getcwd() . "/scripts/cow/merge.php"; $db = new SQLite3($argv[1]); $identity = cow_merge_identity_json(["ID" => (int)$argv[2]]); $stmt = $db->prepare("SELECT id FROM merge_decisions WHERE table_name = '\''wp_posts'\'' AND row_identity = :identity AND decision = '\''source-applied'\'' ORDER BY id DESC LIMIT 1"); $stmt->bindValue(":identity", $identity, SQLITE3_TEXT); echo (int)$stmt->execute()->fetchArray(SQLITE3_NUM)[0];' \
+    "$WORK_DIR/cow/merge/metadata.sqlite" "$BAND_SOURCE_POST_ID"
+)"
+BAND_TARGET_POST_DECISION_ID="$(
+  php -r 'require_once getcwd() . "/scripts/cow/merge.php"; $db = new SQLite3($argv[1]); $identity = cow_merge_identity_json(["ID" => (int)$argv[2]]); $stmt = $db->prepare("SELECT id FROM merge_decisions WHERE table_name = '\''wp_posts'\'' AND row_identity = :identity AND decision = '\''target-kept'\'' ORDER BY id DESC LIMIT 1"); $stmt->bindValue(":identity", $identity, SQLITE3_TEXT); echo (int)$stmt->execute()->fetchArray(SQLITE3_NUM)[0];' \
+    "$WORK_DIR/cow/merge/metadata.sqlite" "$BAND_TARGET_POST_ID"
+)"
+if [ "$BAND_SOURCE_POST_DECISION_ID" = "0" ] || [ "$BAND_TARGET_POST_DECISION_ID" = "0" ]; then
+  echo "missing banded post merge audit decisions: source=$BAND_SOURCE_POST_DECISION_ID target=$BAND_TARGET_POST_DECISION_ID" >&2
+  exit 1
+fi
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --review --review-status unreviewed --records decisions --scope db --limit 80 > "$TMP/band-merge-source-decision-queue.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["review"] ?? false) === true) && (($data["filters"]["review_status"] ?? null) === "unreviewed") && (($data["filters"]["records"] ?? null) === "decisions") && (($data["filters"]["scope"] ?? null) === "db"); $has_source = false; foreach (($data["decisions"] ?? []) as $row) { if (($row["review_status"] ?? null) !== null) $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[2] && ($row["table_name"] ?? null) === "wp_posts" && ($row["decision"] ?? null) === "source-applied") $has_source = true; } exit($ok && $has_source ? 0 : 1);' "$TMP/band-merge-source-decision-queue.json" "$BAND_SOURCE_POST_DECISION_ID"
 
 log_step "merge branch into main"
 php -r '$db = new SQLite3($argv[1]); $db->exec("CREATE TABLE IF NOT EXISTS forkpress_e2e_target_kept (id INTEGER PRIMARY KEY, label TEXT NOT NULL)");' "$WORK/main/wp-content/database/.ht.sqlite"

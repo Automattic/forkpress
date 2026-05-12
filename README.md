@@ -464,6 +464,13 @@ tooling.
   plugin tables that use SQLite `AUTOINCREMENT`.
 - `forkpress branch reset <name> --from <source>` replaces one COW branch with
   the files and SQLite database from another branch.
+- `forkpress branch merge <source> --into <target>` merges one materialized COW
+  branch into another branch. WordPress and plugin tables are merged
+  generically from SQLite state; branch-time AUTOINCREMENT bands keep
+  independently created rows, such as posts saved through wp-admin or REST,
+  from colliding across branches. If a clean source insert collides with a
+  target-side unique key, the target row is kept and the choice is recorded as
+  an auditable `row-unique-collision`.
 - `forkpress branch merge-audit [--format text|json] [--run ID]`
   `[--scope all|db|files] [--records all|conflicts|decisions|resolutions]`
   `[--conflict-type TYPE] [--decision DECISION] [--path PATH]`

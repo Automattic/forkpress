@@ -177,6 +177,38 @@ try {
         'independent target cell preservation is auditable'
     );
 
+    $unique_base = $tmp . '/unique-base.sqlite';
+    $unique_source = $tmp . '/unique-source.sqlite';
+    $unique_target = $tmp . '/unique-target.sqlite';
+    create_base_db($unique_base);
+    copy($unique_base, $unique_source);
+    copy($unique_base, $unique_target);
+    foreach ([$unique_base, $unique_source, $unique_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_unique_rows (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT UNIQUE, value TEXT)');
+        $db->close();
+    }
+    $db = open_db($unique_source);
+    $db->exec("INSERT INTO plugin_unique_rows (id, slug, value) VALUES (100, 'shared-slug', 'source row')");
+    $db->close();
+    $db = open_db($unique_target);
+    $db->exec("INSERT INTO plugin_unique_rows (id, slug, value) VALUES (200, 'shared-slug', 'target row')");
+    $db->close();
+    $unique_result = cow_merge_databases($unique_base, $unique_source, $unique_target, $metadata, 'feature-unique', 'main');
+    assert_same($unique_result['status'], 'completed_with_conflicts', 'source insert colliding with target unique key is audited instead of aborting');
+    assert_same((int)scalar($unique_target, "SELECT COUNT(*) FROM plugin_unique_rows WHERE slug = 'shared-slug'"), 1, 'target unique row remains singular after collision');
+    assert_same(scalar($unique_target, "SELECT value FROM plugin_unique_rows WHERE slug = 'shared-slug'"), 'target row', 'target unique row wins by default');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_unique_rows' AND conflict_type = 'row-unique-collision'"),
+        1,
+        'unique-key row collision is recorded as a conflict'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_unique_rows' AND decision = 'target-wins' AND reason LIKE 'source inserted row collides with target unique index%'"),
+        1,
+        'unique-key row collision records an auditable target-wins decision'
+    );
+
     $target_only_base = $tmp . '/target-only-base.sqlite';
     $target_only_source = $tmp . '/target-only-source.sqlite';
     $target_only_target = $tmp . '/target-only-target.sqlite';
@@ -320,7 +352,7 @@ try {
     cow_merge_databases($conflict_base, $conflict_source, $conflict_target, $metadata, 'feature-conflict', 'main');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_posts' AND column_name = 'post_title'"), 1, 'rerunning the same conflict does not duplicate conflict records');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_options' AND column_name = 'option_value'"), 1, 'serialized-cell conflict is auditable without repeated noise');
-    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE decision = 'target-wins'"), 4, 'target-wins decisions are recorded for each conflicting run');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE decision = 'target-wins' AND table_name IN ('wp_posts', 'wp_options')"), 4, 'target-wins decisions are recorded for each conflicting run');
     $audit = cow_merge_audit_report($metadata, $conflict_run_id, 10);
     assert_same($audit['metadata_exists'], true, 'merge audit report reads existing metadata');
     assert_same(count($audit['runs']), 1, 'merge audit report can focus on one run');

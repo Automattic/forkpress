@@ -43,6 +43,8 @@
 - Added COW audit coverage and docs for needs-action reviewer queues across conflict and deterministic resolution follow-up workflows.
 - Added COW audit coverage and docs for reviewed closure reports across conflict, decision, and deterministic resolution review workflows.
 - Added runtime-backed COW e2e coverage for WordPress admin/REST post saves and arbitrary plugin AUTOINCREMENT inserts using branch-time ID bands.
+- Added runtime-backed COW e2e coverage for merging independently banded WordPress-created posts between branches without ID collisions, including reviewable source-applied and target-kept audit decisions.
+- Fixed generic COW SQLite mergeback so source-inserted rows that collide with target-side unique indexes are audited as target-wins `row-unique-collision` conflicts instead of aborting the merge.
 - Updated the automatic mergeback loop runner to pass a configurable Codex reasoning-effort setting and to include the changelog/known-good tag policy in every worker prompt.
 
 ## known-good/cow-mergeback-audit-completeness-2026-05-12
