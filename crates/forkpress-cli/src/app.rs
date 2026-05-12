@@ -2872,6 +2872,7 @@ fn cow_branch_command(
             let mut path: Option<String> = None;
             let mut path_prefix: Option<String> = None;
             let mut id_band_skips = false;
+            let mut target_kept = false;
             let mut review = false;
             let mut review_status: Option<String> = None;
             let mut resolution_status: Option<String> = None;
@@ -2946,6 +2947,10 @@ fn cow_branch_command(
                         id_band_skips = true;
                         index += 1;
                     }
+                    "--target-kept" => {
+                        target_kept = true;
+                        index += 1;
+                    }
                     "--review" => {
                         review = true;
                         index += 1;
@@ -2992,6 +2997,7 @@ fn cow_branch_command(
                 path.as_deref(),
                 path_prefix.as_deref(),
                 id_band_skips,
+                target_kept,
                 review,
                 review_status.as_deref(),
                 resolution_status.as_deref(),
@@ -4112,6 +4118,26 @@ mod git_helper_tests {
         assert_eq!(
             args.args,
             vec!["merge-audit".to_string(), "--id-band-skips".to_string()]
+        );
+    }
+
+    #[test]
+    fn parses_branch_merge_audit_target_kept_shortcut() {
+        let cli = Cli::try_parse_from([
+            "forkpress",
+            "branch",
+            "--work-dir",
+            ".forkpress",
+            "merge-audit",
+            "--target-kept",
+        ])
+        .unwrap();
+        let Commands::Branch(args) = cli.command else {
+            panic!("expected branch command");
+        };
+        assert_eq!(
+            args.args,
+            vec!["merge-audit".to_string(), "--target-kept".to_string()]
         );
     }
 

@@ -1960,6 +1960,21 @@ SQL);
     cow_merge_print_audit_text($skip_audit);
     $skip_audit_text = ob_get_clean();
     assert_true(str_contains($skip_audit_text, 'id-band-skips'), 'ID-band skip shortcut is visible in text audit filters');
+
+    $target_kept_audit = cow_merge_audit_report($metadata, null, 10, ['target_kept' => '1']);
+    assert_same($target_kept_audit['filters']['records'], 'decisions', 'target-kept shortcut selects decision records');
+    assert_same($target_kept_audit['filters']['decision'], 'target-kept', 'target-kept shortcut selects preserved target decisions');
+    assert_same(count($target_kept_audit['conflicts']), 0, 'target-kept shortcut omits conflict records');
+    assert_same(count($target_kept_audit['autoincrement_bands']), 0, 'target-kept shortcut omits band summary rows');
+    assert_same(count($target_kept_audit['row_identity_summary']), 0, 'target-kept shortcut omits row identity summary rows');
+    assert_true(count($target_kept_audit['decisions']) >= 1, 'target-kept shortcut returns preserved target decisions');
+    assert_same(count(array_filter($target_kept_audit['decisions'], fn($row) => $row['decision'] === 'target-kept')), count($target_kept_audit['decisions']), 'target-kept shortcut returns only target-kept decisions');
+    $target_kept_group_audit = cow_merge_audit_report($metadata, null, 10, ['target_kept' => '1', 'group_by' => 'type']);
+    assert_true(count(array_filter($target_kept_group_audit['decision_groups'], fn($row) => $row['group_key'] === 'target-kept')) >= 1, 'target-kept shortcut can group preserved target decisions');
+    ob_start();
+    cow_merge_print_audit_text($target_kept_audit);
+    $target_kept_audit_text = ob_get_clean();
+    assert_true(str_contains($target_kept_audit_text, 'target-kept'), 'target-kept shortcut is visible in text audit filters');
 } finally {
     remove_tree($tmp);
 }

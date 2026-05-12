@@ -18,7 +18,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "  php merge.php audit --metadata-db <path> [--format text|json] [--limit N] [--run ID]\n");
     fwrite(STDERR, "    [--scope all|db|files] [--records all|conflicts|decisions|resolutions] [--path <path>] [--path-prefix <prefix>]\n");
     fwrite(STDERR, "    [--scope all|db|files] [--records all|conflicts|decisions|resolutions] [--conflict-type TYPE] [--decision DECISION]\n");
-    fwrite(STDERR, "    [--id-band-skips] [--review] [--review-status pending|needs-action|reviewed]\n");
+    fwrite(STDERR, "    [--id-band-skips] [--target-kept] [--review] [--review-status pending|needs-action|reviewed]\n");
     fwrite(STDERR, "    [--resolution-status validated|applied] [--group-by none|table|status|path|type|severity]\n");
     fwrite(STDERR, "    --group-by supports resolutions by table/status/path, conflicts by table/type/path/severity, and decisions by table/type/path.\n");
     fwrite(STDERR, "  php merge.php review-record --metadata-db <path> --record conflict|decision|resolution --id ID --status pending|needs-action|reviewed --note TEXT [--reviewer NAME]\n");
@@ -4328,14 +4328,24 @@ function cow_merge_resolve_conflict(
 
 function cow_merge_audit_apply_shortcuts(array $filters): array {
     $id_band_skips = (string)($filters['id_band_skips'] ?? '') === '1';
+    $target_kept = (string)($filters['target_kept'] ?? '') === '1';
     $review = (string)($filters['review'] ?? '') === '1';
     $resolution_status = ($filters['resolution_status'] ?? null) !== null && (string)$filters['resolution_status'] !== '';
     $group_by = (string)($filters['group_by'] ?? 'none');
+    if ($id_band_skips && $target_kept) {
+        throw new InvalidArgumentException('--id-band-skips cannot be combined with --target-kept');
+    }
     if ($id_band_skips && $review) {
         throw new InvalidArgumentException('--id-band-skips cannot be combined with --review');
     }
+    if ($target_kept && $review) {
+        throw new InvalidArgumentException('--target-kept cannot be combined with --review');
+    }
     if ($id_band_skips && $resolution_status) {
         throw new InvalidArgumentException('--id-band-skips cannot be combined with --resolution-status');
+    }
+    if ($target_kept && $resolution_status) {
+        throw new InvalidArgumentException('--target-kept cannot be combined with --resolution-status');
     }
     if ($review) {
         if (($filters['decision'] ?? null) !== null) {
@@ -4363,6 +4373,9 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
         if (($filters['review_status'] ?? null) !== null) {
             throw new InvalidArgumentException('--resolution-status cannot be combined with --review-status');
         }
+    }
+    if ($target_kept && ($filters['records'] ?? null) === null) {
+        $filters['records'] = 'decisions';
     }
     if ($group_by !== '' && $group_by !== 'none') {
         if (($filters['records'] ?? null) === null) {
@@ -4397,6 +4410,22 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
         }
     }
     if (!$id_band_skips) {
+        if (!$target_kept) {
+            return $filters;
+        }
+        if (($filters['records'] ?? null) === null) {
+            $filters['records'] = 'decisions';
+        } elseif (($filters['records'] ?? null) !== 'decisions') {
+            throw new InvalidArgumentException('--target-kept can only be combined with --records decisions');
+        }
+        if (($filters['decision'] ?? null) === null) {
+            $filters['decision'] = 'target-kept';
+        } elseif (($filters['decision'] ?? null) !== 'target-kept') {
+            throw new InvalidArgumentException('--target-kept cannot be combined with another --decision value');
+        }
+        if (($filters['conflict_type'] ?? null) !== null) {
+            throw new InvalidArgumentException('--target-kept cannot be combined with --conflict-type');
+        }
         return $filters;
     }
     if (($filters['scope'] ?? null) === null) {
@@ -4442,6 +4471,7 @@ function cow_merge_audit_filters(array $filters = []): array {
         'path' => $path,
         'path_prefix' => $path_prefix,
         'id_band_skips' => (string)($filters['id_band_skips'] ?? '') === '1',
+        'target_kept' => (string)($filters['target_kept'] ?? '') === '1',
         'review' => (string)($filters['review'] ?? '') === '1',
         'review_status' => cow_merge_audit_review_status_filter($filters['review_status'] ?? null),
         'resolution_status' => cow_merge_audit_resolution_status_filter($filters['resolution_status'] ?? null),
@@ -5018,7 +5048,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
         if ($run_id !== null) {
             $filter_params[':run_id'] = $run_id;
         }
-        if ($filters['scope'] !== 'files' && $filters['records'] !== 'conflicts' && !$filters['id_band_skips']) {
+        if ($filters['scope'] !== 'files' && $filters['records'] !== 'conflicts' && !$filters['id_band_skips'] && !$filters['target_kept']) {
             $band_filter = $run_id === null ? '' : 'WHERE allocated_run_id = :run_id OR last_seen_run_id = :run_id';
             $report['autoincrement_bands'] = cow_merge_audit_table_rows(
                 $db,
@@ -5086,6 +5116,9 @@ function cow_merge_audit_filter_label(array $filters): string {
     }
     if (($filters['id_band_skips'] ?? false) === true) {
         $parts[] = 'id-band-skips';
+    }
+    if (($filters['target_kept'] ?? false) === true) {
+        $parts[] = 'target-kept';
     }
     if (($filters['review'] ?? false) === true) {
         $parts[] = 'review';
@@ -6262,7 +6295,7 @@ function cow_merge_parse_cli(array $argv, array $required, int $start_index = 1)
             throw new InvalidArgumentException("unexpected argument: $arg");
         }
         $key = substr($arg, 2);
-        if (($key === 'id-band-skips' || $key === 'review' || $key === 'apply') && (!isset($argv[$i + 1]) || str_starts_with($argv[$i + 1], '--'))) {
+        if (($key === 'id-band-skips' || $key === 'target-kept' || $key === 'review' || $key === 'apply') && (!isset($argv[$i + 1]) || str_starts_with($argv[$i + 1], '--'))) {
             $args[$key] = '1';
             continue;
         }
@@ -6370,6 +6403,7 @@ if (realpath($argv[0] ?? '') === __FILE__) {
                     'path' => $args['path'] ?? null,
                     'path_prefix' => $args['path-prefix'] ?? null,
                     'id_band_skips' => $args['id-band-skips'] ?? null,
+                    'target_kept' => $args['target-kept'] ?? null,
                     'review' => $args['review'] ?? null,
                     'review_status' => $args['review-status'] ?? null,
                     'resolution_status' => $args['resolution-status'] ?? null,

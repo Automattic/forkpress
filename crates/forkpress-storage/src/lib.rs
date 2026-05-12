@@ -865,6 +865,7 @@ pub fn inspect_cow_merge_audit(
     path: Option<&str>,
     path_prefix: Option<&str>,
     id_band_skips: bool,
+    target_kept: bool,
     review: bool,
     review_status: Option<&str>,
     resolution_status: Option<&str>,
@@ -906,6 +907,9 @@ pub fn inspect_cow_merge_audit(
     }
     if id_band_skips {
         args.push("--id-band-skips".into());
+    }
+    if target_kept {
+        args.push("--target-kept".into());
     }
     if review {
         args.push("--review".into());
