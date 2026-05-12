@@ -35,6 +35,14 @@ on_error() {
   dump_if_exists "$TMP/git-multi-delete.out"
   dump_if_exists "$TMP/git-delete.out"
   dump_if_exists "$TMP/git-delete-main.out"
+  dump_if_exists "$TMP/keyless-init.json"
+  dump_if_exists "$TMP/keyless-source-reuse.json"
+  dump_if_exists "$TMP/keyless-target-edit.json"
+  dump_if_exists "$TMP/keyless-main-after-merge.json"
+  dump_if_exists "$TMP/keyless-merge.out"
+  dump_if_exists "$TMP/keyless-conflicts.out"
+  dump_if_exists "$TMP/merge-audit.out"
+  dump_if_exists "$TMP/merge-audit.json"
   dump_if_exists "$TMP/bad-slash.out"
   dump_if_exists "$TMP/storage-status-final.out"
   dump_if_exists "$TMP/storage-compact.out"
@@ -99,6 +107,27 @@ NODE
     echo "REST save on $branch returned $http" >&2
     cat "$json" >&2
     "$BIN" logs --work-dir "$WORK_DIR" --file all -n 160 >&2 || true
+    exit 1
+  fi
+}
+
+keyless_runtime_request() {
+  local branch="$1"
+  local action="$2"
+  local out="$3"
+  local host
+  host="$(branch_host "$branch")"
+
+  local http
+  http="$(
+    curl -sS -o "$out" -w '%{http_code}' \
+      -H "Host: $host" \
+      "http://127.0.0.1:$PORT/?forkpress_e2e_keyless=$action"
+  )"
+  if [ "$http" != "200" ]; then
+    echo "keyless runtime action $action on $branch returned $http" >&2
+    cat "$out" >&2
+    "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
     exit 1
   fi
 }
@@ -311,6 +340,91 @@ if "$BIN" branch --work-dir "$WORK_DIR" reset main --from reset-source > "$TMP/r
   exit 1
 fi
 grep -F "refusing to reset main without --force" "$TMP/reset-main.out" >/dev/null
+
+log_step "merge branch into main"
+"$BIN" branch --work-dir "$WORK_DIR" create merge-source
+MERGE_TITLE="Merge source $(date +%s)"
+create_branch_post merge-source "$MERGE_TITLE"
+echo "merged through branch merge" > "$WORK/merge-source/wp-content/merge-source-file.txt"
+"$BIN" branch --work-dir "$WORK_DIR" merge merge-source --into main > "$TMP/merge.out"
+grep -F "forkpress: merged merge-source into main" "$TMP/merge.out" >/dev/null
+grep -F "status:    completed" "$TMP/merge.out" >/dev/null
+test -f "$WORK/main/wp-content/merge-source-file.txt"
+grep -F "merged through branch merge" "$WORK/main/wp-content/merge-source-file.txt" >/dev/null
+curl -sS -H "Host: wp.localhost:$PORT" \
+  "http://127.0.0.1:$PORT/wp-admin/edit.php" \
+  -o "$TMP/main-after-merge-edit.html"
+grep -F "$MERGE_TITLE" "$TMP/main-after-merge-edit.html" >/dev/null
+test -f "$WORK_DIR/cow/merge/metadata.sqlite"
+php -r '$db = new SQLite3($argv[1]); $count = (int)$db->querySingle("SELECT COUNT(*) FROM merge_runs WHERE source_branch = '\''merge-source'\'' AND target_branch = '\''main'\'' AND status = '\''completed'\''"); exit($count > 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --limit 8 > "$TMP/merge-audit.out"
+grep -F "forkpress: COW merge audit" "$TMP/merge-audit.out" >/dev/null
+grep -F "merge-source -> main" "$TMP/merge-audit.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --limit 3 > "$TMP/merge-audit.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && !empty($data["runs"]) ? 0 : 1);' "$TMP/merge-audit.json"
+
+log_step "merge runtime-tracked no-PK rowid reuse"
+mkdir -p "$WORK/main/wp-content/mu-plugins"
+cat > "$WORK/main/wp-content/mu-plugins/forkpress-e2e-keyless.php" <<'PHP'
+<?php
+add_action('init', function () {
+    if (!isset($_GET['forkpress_e2e_keyless'])) {
+        return;
+    }
+
+    global $wpdb;
+    $action = sanitize_key(wp_unslash($_GET['forkpress_e2e_keyless']));
+    $table = $wpdb->prefix . 'forkpress_e2e_keyless';
+    if (!preg_match('/^[A-Za-z0-9_]+$/', $table)) {
+        wp_send_json_error(['error' => 'unsafe table name'], 500);
+    }
+    $quoted = '"' . str_replace('"', '""', $table) . '"';
+
+    $query = static function (string $sql) use ($wpdb): void {
+        $result = $wpdb->query($sql);
+        if ($result === false) {
+            wp_send_json_error(['error' => $wpdb->last_error ?: 'query failed'], 500);
+        }
+    };
+
+    if ($action === 'init') {
+        $query("DROP TABLE IF EXISTS $quoted");
+        $query("CREATE TABLE $quoted (label TEXT, value TEXT)");
+        $query($wpdb->prepare("INSERT INTO $quoted (label, value) VALUES (%s, %s)", 'Base keyless runtime', 'base'));
+    } elseif ($action === 'source-reuse') {
+        $query("DELETE FROM $quoted WHERE rowid = 1");
+        $query($wpdb->prepare("INSERT INTO $quoted (label, value) VALUES (%s, %s)", 'Runtime reused source row', 'new logical row'));
+    } elseif ($action === 'target-edit') {
+        $query($wpdb->prepare("UPDATE $quoted SET value = %s WHERE rowid = 1", 'target kept old row'));
+    } elseif ($action !== 'inspect') {
+        wp_send_json_error(['error' => 'unknown action'], 400);
+    }
+
+    $rows = $wpdb->get_results("SELECT rowid, label, value FROM $quoted ORDER BY rowid", ARRAY_A);
+    if (!is_array($rows)) {
+        wp_send_json_error(['error' => $wpdb->last_error ?: 'select failed'], 500);
+    }
+    wp_send_json(['action' => $action, 'rows' => $rows]);
+}, 20);
+PHP
+
+keyless_runtime_request main init "$TMP/keyless-init.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(($data["rows"][0]["rowid"] ?? null) == 1 && ($data["rows"][0]["label"] ?? null) === "Base keyless runtime" ? 0 : 1);' "$TMP/keyless-init.json"
+"$BIN" branch --work-dir "$WORK_DIR" create keyless-reuse > "$TMP/keyless-create.out"
+grep -F "keyless-reuse.wp.localhost:$PORT" "$TMP/keyless-create.out" >/dev/null
+keyless_runtime_request keyless-reuse source-reuse "$TMP/keyless-source-reuse.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(count($data["rows"] ?? []) === 1 && ($data["rows"][0]["rowid"] ?? null) == 1 && ($data["rows"][0]["label"] ?? null) === "Runtime reused source row" ? 0 : 1);' "$TMP/keyless-source-reuse.json"
+php -r '$db = new SQLite3($argv[1]); $runs = (int)$db->querySingle("SELECT COUNT(*) FROM merge_runs WHERE source_branch = '\''keyless-reuse'\'' AND policy = '\''runtime-row-identity-tracking'\'' AND status = '\''identity_tracked'\''"); $history = (int)$db->querySingle("SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = '\''keyless-reuse'\'' AND table_name = '\''wp_forkpress_e2e_keyless'\'' AND rowid = 1"); exit($runs > 0 && $history >= 2 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
+keyless_runtime_request main target-edit "$TMP/keyless-target-edit.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(($data["rows"][0]["rowid"] ?? null) == 1 && ($data["rows"][0]["value"] ?? null) === "target kept old row" ? 0 : 1);' "$TMP/keyless-target-edit.json"
+"$BIN" branch --work-dir "$WORK_DIR" merge keyless-reuse --into main > "$TMP/keyless-merge.out"
+grep -F "forkpress: merged keyless-reuse into main" "$TMP/keyless-merge.out" >/dev/null
+grep -F "status:    completed_with_conflicts" "$TMP/keyless-merge.out" >/dev/null
+keyless_runtime_request main inspect "$TMP/keyless-main-after-merge.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $old = 0; $new = 0; foreach (($data["rows"] ?? []) as $row) { if (($row["label"] ?? null) === "Base keyless runtime" && ($row["value"] ?? null) === "target kept old row") $old++; if (($row["label"] ?? null) === "Runtime reused source row" && ($row["value"] ?? null) === "new logical row") $new++; } exit($old === 1 && $new === 1 ? 0 : 1);' "$TMP/keyless-main-after-merge.json"
+php -r '$db = new SQLite3($argv[1]); $conflicts = (int)$db->querySingle("SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '\''wp_forkpress_e2e_keyless'\'' AND conflict_type = '\''row-source-deleted'\''"); exit($conflicts > 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --scope db --records conflicts --conflict-type row-source-deleted --limit 8 > "$TMP/keyless-conflicts.out"
+grep -F "wp_forkpress_e2e_keyless" "$TMP/keyless-conflicts.out" >/dev/null
 
 log_step "create agent worktrees"
 "$BIN" agents \

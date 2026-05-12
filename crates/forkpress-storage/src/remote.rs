@@ -252,6 +252,7 @@ pub fn branch_remote_site(
         &options.branch,
         &manifest.cache_root,
         &format!("remote site '{}'", manifest.name),
+        None,
         options.url_hint,
     )?;
     Ok(RemoteBranchReport {

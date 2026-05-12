@@ -164,6 +164,185 @@ function forkpress_db_path(): ?string {
     return null;
 }
 
+function forkpress_cow_sqlite_identifier(string $name): string {
+    return '"' . str_replace('"', '""', $name) . '"';
+}
+
+function forkpress_cow_sqlite_pdo(): ?PDO {
+    global $wpdb;
+
+    try {
+        if (!isset($wpdb) || !is_object($wpdb) || !isset($wpdb->dbh) || !is_object($wpdb->dbh)) {
+            return null;
+        }
+        if (!method_exists($wpdb->dbh, 'get_connection')) {
+            return null;
+        }
+        $connection = $wpdb->dbh->get_connection();
+        if (!is_object($connection) || !method_exists($connection, 'get_pdo')) {
+            return null;
+        }
+        $pdo = $connection->get_pdo();
+        return $pdo instanceof PDO ? $pdo : null;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+function forkpress_cow_keyless_tables(PDO $pdo): array {
+    $stmt = $pdo->query("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name");
+    $tables = [];
+    foreach ($stmt ? $stmt->fetchAll(PDO::FETCH_COLUMN) : [] as $table) {
+        if (!is_string($table) || $table === '') {
+            continue;
+        }
+        $info = $pdo->query('PRAGMA table_info(' . forkpress_cow_sqlite_identifier($table) . ')');
+        if (!$info) {
+            continue;
+        }
+        $has_pk = false;
+        foreach ($info->fetchAll(PDO::FETCH_ASSOC) as $column) {
+            if ((int)($column['pk'] ?? 0) > 0) {
+                $has_pk = true;
+                break;
+            }
+        }
+        if (!$has_pk) {
+            $tables[] = $table;
+        }
+    }
+    return $tables;
+}
+
+function forkpress_cow_prepare_row_identity_tracking(PDO $pdo, bool $clear_events): void {
+    $pdo->exec(
+        'CREATE TEMP TABLE IF NOT EXISTS forkpress_row_identity_events (' .
+        'id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT NOT NULL, op TEXT NOT NULL, rowid INTEGER NOT NULL)'
+    );
+    if ($clear_events) {
+        $pdo->exec('DELETE FROM temp.forkpress_row_identity_events');
+    }
+
+    foreach (forkpress_cow_keyless_tables($pdo) as $table) {
+        $hash = substr(hash('sha256', $table), 0, 24);
+        $quoted_table = forkpress_cow_sqlite_identifier($table);
+        $table_literal = $pdo->quote($table);
+        $insert_trigger = forkpress_cow_sqlite_identifier('forkpress_rid_' . $hash . '_ai');
+        $delete_trigger = forkpress_cow_sqlite_identifier('forkpress_rid_' . $hash . '_ad');
+        $pdo->exec(
+            "CREATE TEMP TRIGGER IF NOT EXISTS $insert_trigger AFTER INSERT ON $quoted_table " .
+            "BEGIN INSERT INTO forkpress_row_identity_events(table_name, op, rowid) VALUES ($table_literal, 'insert', new.rowid); END"
+        );
+        $pdo->exec(
+            "CREATE TEMP TRIGGER IF NOT EXISTS $delete_trigger AFTER DELETE ON $quoted_table " .
+            "BEGIN INSERT INTO forkpress_row_identity_events(table_name, op, rowid) VALUES ($table_literal, 'delete', old.rowid); END"
+        );
+    }
+}
+
+function forkpress_cow_refresh_row_identity_tracking(): void {
+    $pdo = forkpress_cow_sqlite_pdo();
+    if (!$pdo) {
+        return;
+    }
+
+    forkpress_cow_prepare_row_identity_tracking($pdo, false);
+}
+
+function forkpress_cow_query_is_table_ddl(string $query): bool {
+    return (bool) preg_match('/^\s*(?:CREATE|DROP|ALTER)\s+(?:TEMP(?:ORARY)?\s+)?TABLE\b/i', $query);
+}
+
+function forkpress_cow_row_identity_query_filter($query) {
+    if (!is_string($query)) {
+        return $query;
+    }
+
+    try {
+        if (
+            !empty($GLOBALS['forkpress_cow_row_identity_refresh_pending']) &&
+            !forkpress_cow_query_is_table_ddl($query)
+        ) {
+            forkpress_cow_refresh_row_identity_tracking();
+            $GLOBALS['forkpress_cow_row_identity_refresh_pending'] = false;
+        }
+
+        if (forkpress_cow_query_is_table_ddl($query)) {
+            $GLOBALS['forkpress_cow_row_identity_schema_changed'] = true;
+            $GLOBALS['forkpress_cow_row_identity_refresh_pending'] = true;
+        }
+    } catch (Throwable $e) {
+        error_log('ForkPress row identity tracking refresh failed: ' . $e->getMessage());
+    }
+
+    return $query;
+}
+
+function forkpress_cow_flush_row_identity_events(): void {
+    $metadata_db = getenv('FORKPRESS_COW_MERGE_METADATA_DB');
+    $helper = getenv('FORKPRESS_COW_MERGE_HELPER');
+    $branch = forkpress_current_branch();
+    $db_path = forkpress_db_path();
+    if (!$metadata_db || !$helper || !$branch || !$db_path || !is_readable($helper)) {
+        return;
+    }
+
+    $pdo = forkpress_cow_sqlite_pdo();
+    if (!$pdo) {
+        return;
+    }
+
+    try {
+        $stmt = $pdo->query(
+            "SELECT id, table_name, op, rowid FROM temp.forkpress_row_identity_events ORDER BY id"
+        );
+        $events = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
+        if (!$events && empty($GLOBALS['forkpress_cow_row_identity_schema_changed'])) {
+            return;
+        }
+        require_once $helper;
+        if (function_exists('cow_merge_track_row_identity_events')) {
+            cow_merge_track_row_identity_events($db_path, $metadata_db, $branch, $events);
+            $pdo->exec('DELETE FROM temp.forkpress_row_identity_events');
+            $GLOBALS['forkpress_cow_row_identity_schema_changed'] = false;
+            $GLOBALS['forkpress_cow_row_identity_refresh_pending'] = false;
+        }
+    } catch (Throwable $e) {
+        error_log('ForkPress row identity tracking failed: ' . $e->getMessage());
+    }
+}
+
+function forkpress_cow_install_row_identity_tracking(): void {
+    static $installed = false;
+    if ($installed || forkpress_env_is_disabled('FORKPRESS_COW_ROW_IDENTITY_TRACKING')) {
+        return;
+    }
+
+    $metadata_db = getenv('FORKPRESS_COW_MERGE_METADATA_DB');
+    $helper = getenv('FORKPRESS_COW_MERGE_HELPER');
+    if (!$metadata_db || !$helper || !forkpress_current_branch() || !forkpress_db_path()) {
+        return;
+    }
+
+    $pdo = forkpress_cow_sqlite_pdo();
+    if (!$pdo) {
+        return;
+    }
+
+    try {
+        forkpress_cow_prepare_row_identity_tracking($pdo, true);
+        $installed = true;
+        if (function_exists('add_filter')) {
+            add_filter('query', 'forkpress_cow_row_identity_query_filter', PHP_INT_MAX);
+        }
+        register_shutdown_function('forkpress_cow_flush_row_identity_events');
+    } catch (Throwable $e) {
+        error_log('ForkPress row identity tracking setup failed: ' . $e->getMessage());
+    }
+}
+
+forkpress_cow_install_row_identity_tracking();
+
 function forkpress_branch_url(string $branch): string {
     $root_host = null;
     if (function_exists('forkpress_experiment_root_host')) {

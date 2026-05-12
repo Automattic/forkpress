@@ -99,6 +99,7 @@ test-branchfs: $(BRANCHFS_EXT_SO)
 
 test-cow:
 	php $(COW_TEST_DIR)/git_server.php
+	php $(COW_TEST_DIR)/merge.php
 	php $(COW_TEST_DIR)/router_paths.php
 	php $(COW_TEST_DIR)/router_lock.php
 

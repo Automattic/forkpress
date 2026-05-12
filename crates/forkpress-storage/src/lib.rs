@@ -1,9 +1,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 #[cfg(target_os = "macos")]
 use std::ffi::CString;
-use std::ffi::OsStr;
-#[cfg(target_os = "macos")]
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 #[cfg(target_os = "windows")]
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -356,6 +354,7 @@ pub fn create_cow_branch(
         branch,
         &source,
         &format!("COW branch '{from}'"),
+        Some(from),
         url_hint,
     )
 }
@@ -367,6 +366,7 @@ pub fn create_cow_branch_from_tree(
     branch: &str,
     source: &Path,
     source_label: &str,
+    seed_branch: Option<&str>,
     url_hint: Option<(String, String)>,
 ) -> Result<()> {
     validate_branch_name(branch)?;
@@ -394,6 +394,16 @@ pub fn create_cow_branch_from_tree(
     }
     let branch_root = ensure_cow_public_branch_root(layout, branch, &dest, file_view)?;
     run_cow_bootstrap_script(layout, runtime, shared, &branch_root, "ForkPress", "admin")?;
+    let source_db = cow_sqlite_db_path(source);
+    if source_db.is_file() {
+        record_cow_merge_base_snapshot(layout, runtime, shared, branch, &source_db)?;
+    }
+    let branch_db = cow_sqlite_db_path(&branch_root);
+    if branch_db.is_file() {
+        allocate_cow_autoincrement_bands(layout, runtime, shared, branch, &branch_db)?;
+        capture_cow_row_identities(layout, runtime, shared, branch, &branch_db, seed_branch)?;
+    }
+    record_cow_file_merge_base_snapshot(layout, runtime, shared, branch, &branch_root)?;
     write_cow_branch_list(layout)?;
     println!("forkpress: COW cloned {source_label} -> '{branch}'");
     if let Some((root_host, port)) = url_hint {
@@ -567,10 +577,325 @@ pub fn reset_cow_branch(
             backup.display()
         );
     }
+    record_cow_merge_base_snapshot(layout, runtime, shared, branch, &source_db)?;
+    let target_db = cow_sqlite_db_path(&target);
+    if target_db.is_file() {
+        allocate_cow_autoincrement_bands(layout, runtime, shared, branch, &target_db)?;
+        capture_cow_row_identities(layout, runtime, shared, branch, &target_db, Some(from))?;
+    }
+    record_cow_file_merge_base_snapshot(layout, runtime, shared, branch, &target)?;
     invalidate_cow_git_ref(layout, branch)?;
 
     println!("forkpress: reset COW branch '{branch}' from '{from}'");
     Ok(())
+}
+
+pub fn cow_merge_metadata_db_path(layout: &Layout) -> PathBuf {
+    layout.cow_dir.join("merge/metadata.sqlite")
+}
+
+pub fn cow_merge_base_db_path(layout: &Layout, branch: &str) -> Result<PathBuf> {
+    validate_branch_name(branch)?;
+    Ok(layout
+        .cow_dir
+        .join("merge/bases")
+        .join(format!("{branch}.sqlite")))
+}
+
+pub fn cow_merge_file_base_path(layout: &Layout, branch: &str) -> Result<PathBuf> {
+    validate_branch_name(branch)?;
+    Ok(layout
+        .cow_dir
+        .join("merge/file-bases")
+        .join(format!("{branch}.json")))
+}
+
+fn capture_cow_row_identities(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    branch: &str,
+    db: &Path,
+    seed_branch: Option<&str>,
+) -> Result<()> {
+    let metadata_db = cow_merge_metadata_db_path(layout);
+    let mut args: Vec<OsString> = vec![
+        "capture-identities".into(),
+        "--db".into(),
+        db.as_os_str().to_os_string(),
+        "--metadata-db".into(),
+        metadata_db.as_os_str().to_os_string(),
+        "--branch".into(),
+        branch.into(),
+        "--quiet".into(),
+        "1".into(),
+    ];
+    if let Some(seed_branch) = seed_branch {
+        args.push("--seed-branch".into());
+        args.push(seed_branch.into());
+    }
+    run_php_script(
+        layout,
+        runtime,
+        shared,
+        "scripts/cow/merge.php",
+        args.iter().map(|arg| arg.as_os_str()),
+    )
+}
+
+fn allocate_cow_autoincrement_bands(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    branch: &str,
+    db: &Path,
+) -> Result<()> {
+    let metadata_db = cow_merge_metadata_db_path(layout);
+    let args: Vec<OsString> = vec![
+        "allocate-id-bands".into(),
+        "--db".into(),
+        db.as_os_str().to_os_string(),
+        "--metadata-db".into(),
+        metadata_db.as_os_str().to_os_string(),
+        "--branch".into(),
+        branch.into(),
+        "--quiet".into(),
+        "1".into(),
+    ];
+    run_php_script(
+        layout,
+        runtime,
+        shared,
+        "scripts/cow/merge.php",
+        args.iter().map(|arg| arg.as_os_str()),
+    )
+}
+
+fn record_cow_merge_base_snapshot(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    branch: &str,
+    source_db: &Path,
+) -> Result<()> {
+    let dest = cow_merge_base_db_path(layout, branch)?;
+    let parent = dest.parent().ok_or_else(|| {
+        anyhow!(
+            "merge base path has no parent directory: {}",
+            dest.display()
+        )
+    })?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let tmp_db = parent.join(format!(
+        ".{branch}.merge-base-{}-{nanos}.sqlite",
+        std::process::id()
+    ));
+    remove_sqlite_file_and_sidecars(&tmp_db)?;
+    hot_copy_sqlite_database(layout, runtime, shared, source_db, &tmp_db)
+        .with_context(|| format!("failed to capture merge base for branch '{branch}'"))?;
+    remove_sqlite_file_and_sidecars(&dest)?;
+    fs::rename(&tmp_db, &dest).with_context(|| {
+        format!(
+            "failed to publish merge base snapshot {} to {}",
+            tmp_db.display(),
+            dest.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn record_cow_file_merge_base_snapshot(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    branch: &str,
+    branch_root: &Path,
+) -> Result<()> {
+    let dest = cow_merge_file_base_path(layout, branch)?;
+    let parent = dest.parent().ok_or_else(|| {
+        anyhow!(
+            "filesystem merge base path has no parent directory: {}",
+            dest.display()
+        )
+    })?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let tmp = parent.join(format!(
+        ".{branch}.file-merge-base-{}-{nanos}.json",
+        std::process::id()
+    ));
+    let args: Vec<OsString> = vec![
+        "capture-files".into(),
+        "--root".into(),
+        branch_root.as_os_str().to_os_string(),
+        "--file-base".into(),
+        tmp.as_os_str().to_os_string(),
+        "--quiet".into(),
+        "1".into(),
+    ];
+    run_php_script(
+        layout,
+        runtime,
+        shared,
+        "scripts/cow/merge.php",
+        args.iter().map(|arg| arg.as_os_str()),
+    )
+    .with_context(|| format!("failed to capture filesystem merge base for branch '{branch}'"))?;
+    if dest.exists() {
+        fs::remove_file(&dest).with_context(|| format!("failed to replace {}", dest.display()))?;
+    }
+    fs::rename(&tmp, &dest).with_context(|| {
+        format!(
+            "failed to publish filesystem merge base {} to {}",
+            tmp.display(),
+            dest.display()
+        )
+    })?;
+    Ok(())
+}
+
+pub fn merge_cow_branch(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    source: &str,
+    target: &str,
+) -> Result<()> {
+    validate_branch_name(source)?;
+    validate_branch_name(target)?;
+    if source == target {
+        bail!("cannot merge a branch into itself");
+    }
+
+    let file_view = read_site_manifest(layout)?
+        .and_then(|manifest| manifest.file_view)
+        .unwrap_or(FileViewStrategy::Copy);
+    let source_root = cow_branch_storage_root(layout, source, file_view);
+    let target_root = cow_branch_storage_root(layout, target, file_view);
+    if !source_root.join("wp-load.php").is_file() {
+        bail!("source branch does not exist: {source}");
+    }
+    if !target_root.join("wp-load.php").is_file() {
+        bail!("target branch does not exist: {target}");
+    }
+
+    let source_db = cow_sqlite_db_path(&source_root);
+    let target_db = cow_sqlite_db_path(&target_root);
+    let base_db = cow_merge_base_db_path(layout, source)?;
+    let base_files = cow_merge_file_base_path(layout, source)?;
+    if !source_db.is_file() {
+        bail!(
+            "source branch database does not exist: {}",
+            source_db.display()
+        );
+    }
+    if !target_db.is_file() {
+        bail!(
+            "target branch database does not exist: {}",
+            target_db.display()
+        );
+    }
+    if !base_db.is_file() {
+        bail!(
+            "no merge base snapshot found for branch '{source}' at {}. Recreate or reset the branch before merging.",
+            base_db.display()
+        );
+    }
+    if !base_files.is_file() {
+        bail!(
+            "no filesystem merge base found for branch '{source}' at {}. Recreate or reset the branch before merging.",
+            base_files.display()
+        );
+    }
+
+    let metadata_db = cow_merge_metadata_db_path(layout);
+    let args: Vec<OsString> = vec![
+        "--base-db".into(),
+        base_db.as_os_str().to_os_string(),
+        "--source-db".into(),
+        source_db.as_os_str().to_os_string(),
+        "--target-db".into(),
+        target_db.as_os_str().to_os_string(),
+        "--metadata-db".into(),
+        metadata_db.as_os_str().to_os_string(),
+        "--source".into(),
+        source.into(),
+        "--target".into(),
+        target.into(),
+        "--base-files".into(),
+        base_files.as_os_str().to_os_string(),
+        "--source-root".into(),
+        source_root.as_os_str().to_os_string(),
+        "--target-root".into(),
+        target_root.as_os_str().to_os_string(),
+    ];
+    run_php_script(
+        layout,
+        runtime,
+        shared,
+        "scripts/cow/merge.php",
+        args.iter().map(|arg| arg.as_os_str()),
+    )?;
+    record_cow_merge_base_snapshot(layout, runtime, shared, source, &source_db)?;
+    record_cow_file_merge_base_snapshot(layout, runtime, shared, source, &source_root)?;
+    invalidate_cow_git_ref(layout, target)?;
+    Ok(())
+}
+
+pub fn inspect_cow_merge_audit(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    format: &str,
+    limit: &str,
+    run_id: Option<&str>,
+    scope: &str,
+    records: &str,
+    conflict_type: Option<&str>,
+    decision: Option<&str>,
+) -> Result<()> {
+    let metadata_db = cow_merge_metadata_db_path(layout);
+    let mut args: Vec<OsString> = vec![
+        "audit".into(),
+        "--metadata-db".into(),
+        metadata_db.as_os_str().to_os_string(),
+        "--format".into(),
+        format.into(),
+        "--limit".into(),
+        limit.into(),
+        "--scope".into(),
+        scope.into(),
+        "--records".into(),
+        records.into(),
+    ];
+    if let Some(run_id) = run_id {
+        args.push("--run".into());
+        args.push(run_id.into());
+    }
+    if let Some(conflict_type) = conflict_type {
+        args.push("--conflict-type".into());
+        args.push(conflict_type.into());
+    }
+    if let Some(decision) = decision {
+        args.push("--decision".into());
+        args.push(decision.into());
+    }
+    run_php_script(
+        layout,
+        runtime,
+        shared,
+        "scripts/cow/merge.php",
+        args.iter().map(|arg| arg.as_os_str()),
+    )
 }
 
 pub fn rollback_failed_reset_publish(

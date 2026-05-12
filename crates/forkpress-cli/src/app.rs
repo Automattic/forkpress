@@ -49,9 +49,10 @@ use forkpress_storage::{
     compact_macos_apfs_sparsebundle_file_view, cow_branch_names, cow_branch_root,
     create_cow_branch, delete_cow_branch, detach_macos_apfs_sparsebundle_file_view,
     ensure_cow_branch_exists, ensure_cow_file_view_ready, ensure_cow_main_branch,
-    list_remote_sites, lock_cow_lifecycle, lock_cow_operations, prepare_cow_file_view,
-    print_cow_storage_status, print_macos_cow_storage_status, probe_reflink_dir, probe_remote_site,
-    reset_cow_branch, show_cow_branch, write_cow_branch_list, write_cow_strategy_notes,
+    inspect_cow_merge_audit, list_remote_sites, lock_cow_lifecycle, lock_cow_operations,
+    merge_cow_branch, prepare_cow_file_view, print_cow_storage_status,
+    print_macos_cow_storage_status, probe_reflink_dir, probe_remote_site, reset_cow_branch,
+    show_cow_branch, write_cow_branch_list, write_cow_strategy_notes,
 };
 #[cfg(feature = "dev-experiments")]
 use forkpress_storage::{copy_tree_cow, plain_branch_names};
@@ -2835,6 +2836,109 @@ fn cow_branch_command(
             reset_cow_branch(&layout, &runtime, &args.shared, branch, &from, force)?;
             Ok(0)
         }
+        "merge" => {
+            let Some(source) = args.args.get(1) else {
+                bail!("branch merge requires a source branch name");
+            };
+            let mut target: Option<String> = None;
+            let mut index = 2;
+            while index < args.args.len() {
+                match args.args[index].as_str() {
+                    "--into" => {
+                        let Some(value) = args.args.get(index + 1) else {
+                            bail!("--into requires a branch name");
+                        };
+                        target = Some(value.clone());
+                        index += 2;
+                    }
+                    other => bail!("unsupported argument for `forkpress branch merge`: {other}"),
+                }
+            }
+            let Some(target) = target else {
+                bail!("branch merge requires --into <branch>");
+            };
+            merge_cow_branch(&layout, &runtime, &args.shared, source, &target)?;
+            Ok(0)
+        }
+        "merge-audit" | "audit" => {
+            let mut format = "text".to_string();
+            let mut limit = "20".to_string();
+            let mut run_id: Option<String> = None;
+            let mut scope = "all".to_string();
+            let mut records = "all".to_string();
+            let mut conflict_type: Option<String> = None;
+            let mut decision: Option<String> = None;
+            let mut index = 1;
+            while index < args.args.len() {
+                match args.args[index].as_str() {
+                    "--format" => {
+                        let Some(value) = args.args.get(index + 1) else {
+                            bail!("--format requires text or json");
+                        };
+                        format = value.clone();
+                        index += 2;
+                    }
+                    "--limit" => {
+                        let Some(value) = args.args.get(index + 1) else {
+                            bail!("--limit requires a value");
+                        };
+                        limit = value.clone();
+                        index += 2;
+                    }
+                    "--run" => {
+                        let Some(value) = args.args.get(index + 1) else {
+                            bail!("--run requires a merge run id");
+                        };
+                        run_id = Some(value.clone());
+                        index += 2;
+                    }
+                    "--scope" => {
+                        let Some(value) = args.args.get(index + 1) else {
+                            bail!("--scope requires all, db, or files");
+                        };
+                        scope = value.clone();
+                        index += 2;
+                    }
+                    "--records" => {
+                        let Some(value) = args.args.get(index + 1) else {
+                            bail!("--records requires all, conflicts, or decisions");
+                        };
+                        records = value.clone();
+                        index += 2;
+                    }
+                    "--conflict-type" => {
+                        let Some(value) = args.args.get(index + 1) else {
+                            bail!("--conflict-type requires a value");
+                        };
+                        conflict_type = Some(value.clone());
+                        index += 2;
+                    }
+                    "--decision" => {
+                        let Some(value) = args.args.get(index + 1) else {
+                            bail!("--decision requires a value");
+                        };
+                        decision = Some(value.clone());
+                        index += 2;
+                    }
+                    other => {
+                        bail!("unsupported argument for `forkpress branch merge-audit`: {other}")
+                    }
+                }
+            }
+            inspect_cow_merge_audit(
+                &layout,
+                &runtime,
+                &args.shared,
+                &format,
+                &limit,
+                run_id.as_deref(),
+                &scope,
+                &records,
+                conflict_type.as_deref(),
+                decision.as_deref(),
+            )?;
+            Ok(0)
+        }
         "delete" | "rm" => {
             let Some(branch) = args.args.get(1) else {
                 bail!("branch delete requires a branch name");
@@ -3601,6 +3705,14 @@ fn start_cow_php_server(
         .env("FORKPRESS_COW_STORAGE_BRANCHES_DIR", &storage_branches_dir)
         .env("FORKPRESS_COW_GIT_DIR", &layout.cow_git_dir)
         .env("FORKPRESS_COW_FILE_VIEW", file_view.as_str())
+        .env(
+            "FORKPRESS_COW_MERGE_METADATA_DB",
+            forkpress_storage::cow_merge_metadata_db_path(layout),
+        )
+        .env(
+            "FORKPRESS_COW_MERGE_HELPER",
+            layout.runtime_dir.join("scripts/cow/merge.php"),
+        )
         .env("FORKPRESS_BRANCH_LIST", &layout.cow_branch_list)
         .env("FORKPRESS_DEBUG_LOG", &layout.debug_log)
         .env("FORKPRESS_PLAIN_STRATEGY", "cow")
@@ -3757,6 +3869,47 @@ mod git_helper_tests {
         assert_eq!(parsed.from, "main");
         assert_eq!(parsed.auth.user.as_deref(), Some("admin"));
         assert_eq!(parsed.auth.password.as_deref(), Some("admin"));
+    }
+
+    #[test]
+    fn parses_branch_merge_audit_passthrough_args() {
+        let cli = Cli::try_parse_from([
+            "forkpress",
+            "branch",
+            "--work-dir",
+            ".forkpress",
+            "merge-audit",
+            "--format",
+            "json",
+            "--run",
+            "7",
+            "--scope",
+            "files",
+            "--records",
+            "conflicts",
+            "--conflict-type",
+            "file-unsafe-symlink",
+        ])
+        .unwrap();
+        let Commands::Branch(args) = cli.command else {
+            panic!("expected branch command");
+        };
+        assert_eq!(
+            args.args,
+            vec![
+                "merge-audit".to_string(),
+                "--format".to_string(),
+                "json".to_string(),
+                "--run".to_string(),
+                "7".to_string(),
+                "--scope".to_string(),
+                "files".to_string(),
+                "--records".to_string(),
+                "conflicts".to_string(),
+                "--conflict-type".to_string(),
+                "file-unsafe-symlink".to_string(),
+            ]
+        );
     }
 
     #[test]
