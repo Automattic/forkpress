@@ -247,6 +247,25 @@ try {
     assert_same(count($reviewed_db_decision_audit['decisions']), 1, 'review status filter returns annotated DB decisions');
     assert_same((int)$reviewed_db_decision_audit['decisions'][0]['id'], $reviewed_db_decision_id, 'reviewed DB decision filter returns the annotated decision');
     assert_same($reviewed_db_decision_audit['decisions'][0]['review_note'], 'Target-only plugin value is intentional.', 'merge audit JSON exposes latest DB decision review note');
+    $reviewed_db_decision_closure_audit = cow_merge_audit_report($metadata, null, 10, [
+        'review' => '1',
+        'review_status' => 'reviewed',
+        'records' => 'decisions',
+        'scope' => 'db',
+    ]);
+    assert_same($reviewed_db_decision_closure_audit['filters']['review'], true, 'reviewed DB decision closure report preserves the review shortcut filter');
+    assert_same($reviewed_db_decision_closure_audit['filters']['review_status'], 'reviewed', 'reviewed DB decision closure report preserves the reviewed filter');
+    assert_same($reviewed_db_decision_closure_audit['filters']['records'], 'decisions', 'reviewed DB decision closure report focuses on decision records');
+    assert_same($reviewed_db_decision_closure_audit['filters']['scope'], 'db', 'reviewed DB decision closure report focuses on database records');
+    assert_same(count($reviewed_db_decision_closure_audit['conflicts']), 0, 'reviewed DB decision closure report omits conflicts');
+    assert_same(count($reviewed_db_decision_closure_audit['resolutions']), 0, 'reviewed DB decision closure report omits resolutions');
+    $reviewed_db_decision_closure_ids = array_map(fn($row) => (int)$row['id'], $reviewed_db_decision_closure_audit['decisions']);
+    assert_true(in_array($reviewed_db_decision_id, $reviewed_db_decision_closure_ids, true), 'reviewed DB decision closure report returns reviewed DB decisions');
+    assert_true(!in_array($unreviewed_db_decision_id, $reviewed_db_decision_closure_ids, true), 'reviewed DB decision closure report excludes unreviewed DB decisions');
+    foreach ($reviewed_db_decision_closure_audit['decisions'] as $row) {
+        assert_same($row['review_status'], 'reviewed', 'reviewed DB decision closure report returns only reviewed decisions');
+        assert_true($row['table_name'] !== '__files__', 'reviewed DB decision closure report excludes file records');
+    }
 
     $empty_table_base = $tmp . '/empty-table-base.sqlite';
     $empty_table_source = $tmp . '/empty-table-source.sqlite';
@@ -701,6 +720,26 @@ try {
     foreach ($reviewed_status_audit['decisions'] as $row) {
         assert_same($row['review_status'], 'reviewed', 'review status filter omits unannotated decisions');
     }
+    $reviewed_conflict_closure_audit = cow_merge_audit_report($metadata, null, 10, [
+        'review' => '1',
+        'review_status' => 'reviewed',
+        'records' => 'conflicts',
+        'scope' => 'db',
+    ]);
+    assert_same($reviewed_conflict_closure_audit['filters']['review'], true, 'reviewed conflict closure report preserves the review shortcut filter');
+    assert_same($reviewed_conflict_closure_audit['filters']['review_status'], 'reviewed', 'reviewed conflict closure report preserves the reviewed filter');
+    assert_same($reviewed_conflict_closure_audit['filters']['records'], 'conflicts', 'reviewed conflict closure report focuses on conflict records');
+    assert_same($reviewed_conflict_closure_audit['filters']['scope'], 'db', 'reviewed conflict closure report focuses on database records');
+    assert_same(count($reviewed_conflict_closure_audit['decisions']), 0, 'reviewed conflict closure report omits decisions');
+    assert_same(count($reviewed_conflict_closure_audit['resolutions']), 0, 'reviewed conflict closure report omits resolutions');
+    $reviewed_conflict_closure_ids = array_map(fn($row) => (int)$row['id'], $reviewed_conflict_closure_audit['conflicts']);
+    assert_true(in_array($reviewed_conflict_id, $reviewed_conflict_closure_ids, true), 'reviewed conflict closure report returns reviewed DB conflicts');
+    assert_true(!in_array($review_queue_conflict_id, $reviewed_conflict_closure_ids, true), 'reviewed conflict closure report excludes unreviewed DB conflicts');
+    assert_true(!in_array($status_transition_conflict_id, $reviewed_conflict_closure_ids, true), 'reviewed conflict closure report follows latest review status');
+    foreach ($reviewed_conflict_closure_audit['conflicts'] as $row) {
+        assert_same($row['review_status'], 'reviewed', 'reviewed conflict closure report returns only reviewed conflicts');
+        assert_true($row['table_name'] !== '__files__', 'reviewed conflict closure report excludes file records');
+    }
     $unreviewed_status_audit = cow_merge_audit_report($metadata, null, 10, ['review_status' => 'unreviewed']);
     assert_same($unreviewed_status_audit['filters']['review_status'], 'unreviewed', 'merge audit JSON report includes unreviewed filter');
     assert_true(count($unreviewed_status_audit['decisions']) >= 1, 'unreviewed filter returns decisions with no review note');
@@ -781,6 +820,32 @@ try {
     cow_merge_print_audit_text($reviewed_resolution_audit);
     $reviewed_resolution_text = ob_get_clean();
     assert_true(str_contains($reviewed_resolution_text, 'review=needs-action') && str_contains($reviewed_resolution_text, 'Follow up with content owner'), 'merge audit text includes resolution review annotations');
+    cow_merge_review_record(
+        $metadata,
+        'resolution',
+        $resolution_review_id,
+        'reviewed',
+        'Owner accepted source resolution.',
+        'cow-test'
+    );
+    $reviewed_resolution_closure_audit = cow_merge_audit_report($metadata, null, 10, [
+        'review' => '1',
+        'review_status' => 'reviewed',
+        'records' => 'resolutions',
+        'scope' => 'db',
+    ]);
+    assert_same($reviewed_resolution_closure_audit['filters']['review'], true, 'reviewed resolution closure report preserves the review shortcut filter');
+    assert_same($reviewed_resolution_closure_audit['filters']['review_status'], 'reviewed', 'reviewed resolution closure report preserves the reviewed filter');
+    assert_same($reviewed_resolution_closure_audit['filters']['records'], 'resolutions', 'reviewed resolution closure report focuses on resolution records');
+    assert_same($reviewed_resolution_closure_audit['filters']['scope'], 'db', 'reviewed resolution closure report focuses on database records');
+    assert_same(count($reviewed_resolution_closure_audit['conflicts']), 0, 'reviewed resolution closure report omits conflicts');
+    assert_same(count($reviewed_resolution_closure_audit['decisions']), 0, 'reviewed resolution closure report omits decisions');
+    $reviewed_resolution_closure_ids = array_map(fn($row) => (int)$row['id'], $reviewed_resolution_closure_audit['resolutions']);
+    assert_true(in_array($resolution_review_id, $reviewed_resolution_closure_ids, true), 'reviewed resolution closure report returns reviewed DB resolutions');
+    foreach ($reviewed_resolution_closure_audit['resolutions'] as $row) {
+        assert_same($row['review_status'], 'reviewed', 'reviewed resolution closure report returns only reviewed resolutions');
+        assert_true($row['table_name'] !== '__files__', 'reviewed resolution closure report excludes file records');
+    }
     $missing_audit = cow_merge_audit_report($tmp . '/missing-metadata.sqlite', null, 5);
     assert_same($missing_audit['metadata_exists'], false, 'merge audit report handles missing metadata');
     $legacy_metadata = $tmp . '/legacy-metadata.sqlite';
