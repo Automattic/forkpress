@@ -3019,8 +3019,9 @@ function cow_merge_resolve_conflict(
         if ($table === '__files__') {
             throw new InvalidArgumentException('filesystem conflicts are not supported by resolve-conflict yet');
         }
-        if ($conflict_type !== 'cell-conflict' && $conflict_type !== 'row-insert-collision') {
-            throw new InvalidArgumentException('resolve-conflict currently supports DB cell-conflict and row-insert-collision records only');
+        $row_conflict_types = ['row-insert-collision', 'row-target-deleted', 'row-source-deleted'];
+        if ($conflict_type !== 'cell-conflict' && !in_array($conflict_type, $row_conflict_types, true)) {
+            throw new InvalidArgumentException('resolve-conflict currently supports DB cell-conflict, row-insert-collision, row-target-deleted, and row-source-deleted records only');
         }
         if ($conflict_type === 'cell-conflict' && $column === '') {
             throw new InvalidArgumentException('cell conflict resolution requires a column name');
@@ -3053,16 +3054,27 @@ function cow_merge_resolve_conflict(
                 throw new RuntimeException('target cell no longer matches the audited conflict target value; rerun merge-audit before resolving');
             }
         } else {
-            if (!is_array($source_value) || !is_array($target_value)) {
+            if ($conflict_type === 'row-insert-collision' && (!is_array($source_value) || !is_array($target_value))) {
                 throw new RuntimeException("row conflict #$conflict_id does not contain row payloads");
             }
-            $current_value = cow_merge_select_current_row($target, $table, $identity, $pk_cols);
-            if ($current_value === null) {
-                throw new RuntimeException("cannot resolve $table row conflict because the target row no longer exists");
+            if ($conflict_type === 'row-target-deleted' && !is_array($source_value)) {
+                throw new RuntimeException("row conflict #$conflict_id does not contain a source row payload");
             }
-            $row_columns = cow_merge_all_columns(array_keys($target_value), array_keys($current_value));
-            if (!cow_merge_row_values_equal($current_value, $target_value, $row_columns)) {
-                throw new RuntimeException('target row no longer matches the audited conflict target value; rerun merge-audit before resolving');
+            if ($conflict_type === 'row-source-deleted' && !is_array($target_value)) {
+                throw new RuntimeException("row conflict #$conflict_id does not contain a target row payload");
+            }
+            $current_value = cow_merge_select_current_row($target, $table, $identity, $pk_cols);
+            if ($conflict_type === 'row-target-deleted') {
+                if ($current_value !== null) {
+                    throw new RuntimeException('target row no longer matches the audited conflict target value; rerun merge-audit before resolving');
+                }
+            } elseif ($current_value === null) {
+                throw new RuntimeException("cannot resolve $table row conflict because the target row no longer exists");
+            } else {
+                $row_columns = cow_merge_all_columns(array_keys($target_value), array_keys($current_value));
+                if (!cow_merge_row_values_equal($current_value, $target_value, $row_columns)) {
+                    throw new RuntimeException('target row no longer matches the audited conflict target value; rerun merge-audit before resolving');
+                }
             }
         }
 
@@ -3073,6 +3085,11 @@ function cow_merge_resolve_conflict(
                 if ($choice === 'source') {
                     if ($conflict_type === 'cell-conflict') {
                         cow_merge_update_single_cell($target, $table, $identity, $pk_cols, $column, $source_value);
+                    } elseif ($conflict_type === 'row-source-deleted') {
+                        cow_merge_delete_row($target, $table, $identity, $pk_cols);
+                    } elseif ($conflict_type === 'row-target-deleted') {
+                        $columns = cow_merge_table_columns($target, $table);
+                        cow_merge_insert_row($target, $table, $source_value, $columns);
                     } else {
                         $columns = cow_merge_table_columns($target, $table);
                         cow_merge_update_row($target, $table, $identity, $pk_cols, $source_value, $columns);

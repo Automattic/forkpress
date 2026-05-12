@@ -291,6 +291,75 @@ try {
         'stale row conflict resolution is blocked when target row has changed since audit'
     );
 
+    $row_target_deleted_base = $tmp . '/row-target-deleted-base.sqlite';
+    $row_target_deleted_source = $tmp . '/row-target-deleted-source.sqlite';
+    $row_target_deleted_target = $tmp . '/row-target-deleted-target.sqlite';
+    create_base_db($row_target_deleted_base);
+    copy($row_target_deleted_base, $row_target_deleted_source);
+    copy($row_target_deleted_base, $row_target_deleted_target);
+    $db = open_db($row_target_deleted_source);
+    $db->exec("UPDATE plugin_items SET label = 'Source kept row', value = 'source changed row' WHERE item_id = 'alpha'");
+    $db->close();
+    $db = open_db($row_target_deleted_target);
+    $db->exec("DELETE FROM plugin_items WHERE item_id = 'alpha'");
+    $db->close();
+    cow_merge_databases($row_target_deleted_base, $row_target_deleted_source, $row_target_deleted_target, $metadata, 'feature-row-target-deleted', 'main');
+    $row_target_deleted_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND conflict_type = 'row-target-deleted' ORDER BY id DESC LIMIT 1");
+    assert_same((int)scalar($row_target_deleted_target, "SELECT COUNT(*) FROM plugin_items WHERE item_id = 'alpha'"), 0, 'target deletion wins before explicit source row restore');
+    $row_restore_dry = cow_merge_resolve_conflict(
+        $metadata,
+        $row_target_deleted_id,
+        'source',
+        false,
+        'Preview audited source row restore.',
+        'cow-test'
+    );
+    assert_same($row_restore_dry['status'], 'validated', 'dry-run target-deleted row resolution validates missing target precondition');
+    assert_same((int)scalar($row_target_deleted_target, "SELECT COUNT(*) FROM plugin_items WHERE item_id = 'alpha'"), 0, 'dry-run row restore does not mutate target DB');
+    $row_restore_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $row_target_deleted_id,
+        'source',
+        true,
+        'Restore audited source row.',
+        'cow-test'
+    );
+    assert_same($row_restore_resolution['status'], 'applied', 'source row restore records applied status');
+    assert_same(scalar($row_target_deleted_target, "SELECT value FROM plugin_items WHERE item_id = 'alpha'"), 'source changed row', 'source row restore inserts the audited source row');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $row_target_deleted_id AND choice = 'source' AND applied = 1 AND column_name = ''"), 1, 'row restore resolution is auditable');
+
+    $row_source_deleted_base = $tmp . '/row-source-deleted-base.sqlite';
+    $row_source_deleted_source = $tmp . '/row-source-deleted-source.sqlite';
+    $row_source_deleted_target = $tmp . '/row-source-deleted-target.sqlite';
+    create_base_db($row_source_deleted_base);
+    copy($row_source_deleted_base, $row_source_deleted_source);
+    copy($row_source_deleted_base, $row_source_deleted_target);
+    $db = open_db($row_source_deleted_source);
+    $db->exec("DELETE FROM plugin_items WHERE item_id = 'alpha'");
+    $db->close();
+    $db = open_db($row_source_deleted_target);
+    $db->exec("UPDATE plugin_items SET value = 'target changed row' WHERE item_id = 'alpha'");
+    $db->close();
+    cow_merge_databases($row_source_deleted_base, $row_source_deleted_source, $row_source_deleted_target, $metadata, 'feature-row-source-deleted', 'main');
+    $row_source_deleted_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND conflict_type = 'row-source-deleted' ORDER BY id DESC LIMIT 1");
+    assert_same(scalar($row_source_deleted_target, "SELECT value FROM plugin_items WHERE item_id = 'alpha'"), 'target changed row', 'target row wins before explicit source deletion');
+    $row_delete_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $row_source_deleted_id,
+        'source',
+        true,
+        'Apply audited source deletion.',
+        'cow-test'
+    );
+    assert_same($row_delete_resolution['status'], 'applied', 'source row deletion records applied status');
+    assert_same((int)scalar($row_source_deleted_target, "SELECT COUNT(*) FROM plugin_items WHERE item_id = 'alpha'"), 0, 'source row deletion removes the current target row after validation');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $row_source_deleted_id AND choice = 'source' AND applied = 1 AND column_name = ''"), 1, 'row deletion resolution is auditable');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $row_source_deleted_id, 'target', true, 'Try stale keep after deletion.', 'cow-test'),
+        'target row no longer exists',
+        'stale source-deleted row resolution is blocked after the target row was removed'
+    );
+
     $reviewed_conflict_id = (int)$audit['conflicts'][0]['id'];
     $review_result = cow_merge_review_record(
         $metadata,
