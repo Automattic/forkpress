@@ -862,6 +862,8 @@ pub fn inspect_cow_merge_audit(
     records: &str,
     conflict_type: Option<&str>,
     decision: Option<&str>,
+    path: Option<&str>,
+    path_prefix: Option<&str>,
 ) -> Result<()> {
     let metadata_db = cow_merge_metadata_db_path(layout);
     let mut args: Vec<OsString> = vec![
@@ -888,6 +890,14 @@ pub fn inspect_cow_merge_audit(
     if let Some(decision) = decision {
         args.push("--decision".into());
         args.push(decision.into());
+    }
+    if let Some(path) = path {
+        args.push("--path".into());
+        args.push(path.into());
+    }
+    if let Some(path_prefix) = path_prefix {
+        args.push("--path-prefix".into());
+        args.push(path_prefix.into());
     }
     run_php_script(
         layout,

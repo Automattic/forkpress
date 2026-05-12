@@ -16,6 +16,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "  php merge.php track-identity-events --db <path> --metadata-db <path> --branch <branch> --events-json <json>\n");
     fwrite(STDERR, "  php merge.php allocate-id-bands --db <path> --metadata-db <path> --branch <branch>\n");
     fwrite(STDERR, "  php merge.php audit --metadata-db <path> [--format text|json] [--limit N] [--run ID]\n");
+    fwrite(STDERR, "    [--scope all|db|files] [--records all|conflicts|decisions] [--path <path>] [--path-prefix <prefix>]\n");
     fwrite(STDERR, "    [--scope all|db|files] [--records all|conflicts|decisions] [--conflict-type TYPE] [--decision DECISION]\n");
 }
 
@@ -2545,13 +2546,75 @@ function cow_merge_audit_filter_text(?string $value, string $name): ?string {
     return $value;
 }
 
+function cow_merge_audit_file_path_filter(?string $value, string $name): ?string {
+    if ($value === null || $value === '') {
+        return null;
+    }
+    if (str_contains($value, "\0")) {
+        throw new InvalidArgumentException("--$name must not contain NUL bytes");
+    }
+    $path = cow_merge_path_to_unix($value);
+    $path = ltrim($path, '/');
+    if ($path === '' || $path === '.' || str_contains($path, '/../') || str_starts_with($path, '../')) {
+        throw new InvalidArgumentException("--$name must be a relative merge path");
+    }
+    return $path;
+}
+
 function cow_merge_audit_filters(array $filters = []): array {
+    $scope = cow_merge_audit_scope($filters['scope'] ?? null);
+    $path = cow_merge_audit_file_path_filter($filters['path'] ?? null, 'path');
+    $path_prefix = cow_merge_audit_file_path_filter($filters['path_prefix'] ?? null, 'path-prefix');
+    if ($path !== null && $path_prefix !== null) {
+        throw new InvalidArgumentException('--path and --path-prefix cannot be used together');
+    }
+    if ($scope === 'db' && ($path !== null || $path_prefix !== null)) {
+        throw new InvalidArgumentException('--path and --path-prefix require file audit scope');
+    }
     return [
-        'scope' => cow_merge_audit_scope($filters['scope'] ?? null),
+        'scope' => $scope,
         'records' => cow_merge_audit_records($filters['records'] ?? null),
         'conflict_type' => cow_merge_audit_filter_text($filters['conflict_type'] ?? null, 'conflict-type'),
         'decision' => cow_merge_audit_filter_text($filters['decision'] ?? null, 'decision'),
+        'path' => $path,
+        'path_prefix' => $path_prefix,
     ];
+}
+
+function cow_merge_file_path_from_identity(?string $identity_json): ?string {
+    if ($identity_json === null || $identity_json === '') {
+        return null;
+    }
+    $decoded = json_decode($identity_json, true);
+    if (!is_array($decoded) || !array_key_exists('path', $decoded)) {
+        return null;
+    }
+    $path = cow_merge_audit_decode_payload($decoded['path']);
+    return is_string($path) ? $path : null;
+}
+
+function cow_merge_audit_file_path_has_prefix(?string $identity_json, ?string $path_prefix): int {
+    if ($path_prefix === null || $path_prefix === '') {
+        return 0;
+    }
+    $path = cow_merge_file_path_from_identity($identity_json);
+    if ($path === null) {
+        return 0;
+    }
+    return ($path === $path_prefix || str_starts_with($path, rtrim($path_prefix, '/') . '/')) ? 1 : 0;
+}
+
+function cow_merge_audit_register_functions(SQLite3 $db): void {
+    if (!$db->createFunction(
+        'forkpress_file_path_has_prefix',
+        fn($identity_json, $path_prefix) => cow_merge_audit_file_path_has_prefix(
+            is_string($identity_json) ? $identity_json : null,
+            is_string($path_prefix) ? $path_prefix : null
+        ),
+        2
+    )) {
+        throw new RuntimeException('failed to register audit path-prefix filter');
+    }
 }
 
 function cow_merge_audit_where_sql(
@@ -2573,6 +2636,16 @@ function cow_merge_audit_where_sql(
         $clauses[] = $prefix . "table_name = '__files__'";
     } elseif ($filters['scope'] === 'db') {
         $clauses[] = $prefix . "table_name <> '__files__'";
+    }
+
+    if ($filters['path'] !== null) {
+        $clauses[] = $prefix . "table_name = '__files__'";
+        $clauses[] = $prefix . 'row_identity = :file_path_identity';
+        $params[':file_path_identity'] = cow_merge_file_identity_json($filters['path']);
+    } elseif ($filters['path_prefix'] !== null) {
+        $clauses[] = $prefix . "table_name = '__files__'";
+        $clauses[] = 'forkpress_file_path_has_prefix(' . $prefix . 'row_identity, :file_path_prefix) = 1';
+        $params[':file_path_prefix'] = $filters['path_prefix'];
     }
 
     if ($record_type === 'conflicts' && $filters['conflict_type'] !== null) {
@@ -2604,6 +2677,13 @@ function cow_merge_audit_count_sql(array $filters, string $record_type, string $
     }
     if ($record_type === 'decisions' && $filters['decision'] !== null) {
         $conditions[] = $alias . ".decision = '" . SQLite3::escapeString($filters['decision']) . "'";
+    }
+    if ($filters['path'] !== null) {
+        $conditions[] = $alias . ".table_name = '__files__'";
+        $conditions[] = $alias . ".row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json($filters['path'])) . "'";
+    } elseif ($filters['path_prefix'] !== null) {
+        $conditions[] = $alias . ".table_name = '__files__'";
+        $conditions[] = "forkpress_file_path_has_prefix(" . $alias . ".row_identity, '" . SQLite3::escapeString($filters['path_prefix']) . "') = 1";
     }
     return $conditions ? ' AND ' . implode(' AND ', $conditions) : '';
 }
@@ -2777,6 +2857,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
 
     $db = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READONLY);
     try {
+        cow_merge_audit_register_functions($db);
         if (!cow_merge_audit_has_table($db, 'merge_runs')) {
             return $report;
         }
@@ -2873,7 +2954,7 @@ function cow_merge_audit_object_label(array $row): string {
 
 function cow_merge_audit_filter_label(array $filters): string {
     $parts = [];
-    foreach (['scope', 'records', 'conflict_type', 'decision'] as $key) {
+    foreach (['scope', 'records', 'conflict_type', 'decision', 'path', 'path_prefix'] as $key) {
         $value = $filters[$key] ?? null;
         if ($value === null || $value === '') {
             continue;
@@ -3738,6 +3819,8 @@ if (realpath($argv[0] ?? '') === __FILE__) {
                     'records' => $args['records'] ?? null,
                     'conflict_type' => $args['conflict-type'] ?? null,
                     'decision' => $args['decision'] ?? null,
+                    'path' => $args['path'] ?? null,
+                    'path_prefix' => $args['path-prefix'] ?? null,
                 ]
             );
             if ($format === 'json') {

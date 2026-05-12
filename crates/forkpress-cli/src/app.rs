@@ -2868,6 +2868,8 @@ fn cow_branch_command(
             let mut records = "all".to_string();
             let mut conflict_type: Option<String> = None;
             let mut decision: Option<String> = None;
+            let mut path: Option<String> = None;
+            let mut path_prefix: Option<String> = None;
             let mut index = 1;
             while index < args.args.len() {
                 match args.args[index].as_str() {
@@ -2920,6 +2922,20 @@ fn cow_branch_command(
                         decision = Some(value.clone());
                         index += 2;
                     }
+                    "--path" => {
+                        let Some(value) = args.args.get(index + 1) else {
+                            bail!("--path requires a relative file path");
+                        };
+                        path = Some(value.clone());
+                        index += 2;
+                    }
+                    "--path-prefix" => {
+                        let Some(value) = args.args.get(index + 1) else {
+                            bail!("--path-prefix requires a relative file path prefix");
+                        };
+                        path_prefix = Some(value.clone());
+                        index += 2;
+                    }
                     other => {
                         bail!("unsupported argument for `forkpress branch merge-audit`: {other}")
                     }
@@ -2936,6 +2952,8 @@ fn cow_branch_command(
                 &records,
                 conflict_type.as_deref(),
                 decision.as_deref(),
+                path.as_deref(),
+                path_prefix.as_deref(),
             )?;
             Ok(0)
         }
@@ -3889,6 +3907,8 @@ mod git_helper_tests {
             "conflicts",
             "--conflict-type",
             "file-unsafe-symlink",
+            "--path-prefix",
+            "wp-content/uploads",
         ])
         .unwrap();
         let Commands::Branch(args) = cli.command else {
@@ -3908,6 +3928,8 @@ mod git_helper_tests {
                 "conflicts".to_string(),
                 "--conflict-type".to_string(),
                 "file-unsafe-symlink".to_string(),
+                "--path-prefix".to_string(),
+                "wp-content/uploads".to_string(),
             ]
         );
     }

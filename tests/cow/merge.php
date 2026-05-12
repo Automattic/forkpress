@@ -319,6 +319,30 @@ SQL);
     assert_true(str_contains($unsafe_symlink_text, 'filters:   scope=files records=conflicts conflict-type=file-unsafe-symlink'), 'merge audit text prints active file conflict filters');
     assert_true(str_contains($unsafe_symlink_text, 'file-unsafe-symlink'), 'filtered file audit text includes matching file conflict type');
     assert_true(!str_contains($unsafe_symlink_text, 'decisions:'), 'filtered file conflict audit text omits decisions section');
+    $exact_path_audit = cow_merge_audit_report($metadata, null, 10, [
+        'records' => 'conflicts',
+        'path' => 'wp-content/uploads/absolute-link.txt',
+    ]);
+    assert_same($exact_path_audit['filters']['path'], 'wp-content/uploads/absolute-link.txt', 'merge audit JSON report includes exact file path filter');
+    assert_same(count($exact_path_audit['conflicts']), 1, 'merge audit can filter filesystem conflicts by exact path');
+    assert_same($exact_path_audit['conflicts'][0]['row_identity'], cow_merge_file_identity_json('wp-content/uploads/absolute-link.txt'), 'exact path audit filter returns the requested file identity');
+    $path_prefix_audit = cow_merge_audit_report($metadata, null, 10, [
+        'scope' => 'files',
+        'records' => 'decisions',
+        'decision' => 'source-applied',
+        'path_prefix' => 'wp-content/uploads/links',
+    ]);
+    assert_same($path_prefix_audit['filters']['path_prefix'], 'wp-content/uploads/links', 'merge audit JSON report includes file path prefix filter');
+    assert_true(count($path_prefix_audit['decisions']) >= 1, 'merge audit can filter filesystem decisions by path prefix');
+    assert_same(
+        count(array_filter($path_prefix_audit['decisions'], fn($row) => $row['row_identity'] === cow_merge_file_identity_json('wp-content/uploads/links/source-link.txt'))),
+        1,
+        'path-prefix audit filter returns matching file identities'
+    );
+    ob_start();
+    cow_merge_print_audit_text($path_prefix_audit);
+    $path_prefix_text = ob_get_clean();
+    assert_true(str_contains($path_prefix_text, 'path-prefix=wp-content/uploads/links'), 'merge audit text prints active file path prefix filters');
 
     $rollback_base_root = $tmp . '/files-rollback-base';
     $rollback_source_root = $tmp . '/files-rollback-source';
