@@ -16,6 +16,28 @@
 - Broadened validation-gated schema conflict resolution to source index rewrites/drops and compatible table rebuilds that preserve target rows while applying audited source non-primary-key column definitions.
 - Broadened compatible schema table rebuild resolution to preserve target explicit indexes, triggers, and dependent views when those views validate before and after the rebuild.
 
+## known-good/cow-mergeback-schema-resolver-2026-05-12
+
+Verified as a major known-good checkpoint for the post-MVP COW mergeback schema resolver and audit triage layer:
+
+- `merge-audit` grouping for deterministic resolutions, reviewable conflicts, and automatic decisions.
+- Validation-gated schema resolution for source index rewrites, source index drops, and compatible table rebuilds.
+- Compatible table rebuilds preserve target rows while applying audited source schema, and preserve target explicit indexes, triggers, and dependent views when they validate before and after the rebuild.
+- Schema resolution remains plugin-declaration-free and keeps audit/resolution records in ForkPress-owned `.forkpress/cow/merge` metadata.
+
+Verification for the tag included:
+
+- Fresh temporary runtime-bundle debug build of `target/debug/forkpress`.
+- `tests/cow/e2e.sh target/debug/forkpress`.
+- `php -l scripts/cow/merge.php`.
+- `php -l tests/cow/merge.php`.
+- `php tests/cow/merge.php`.
+- `bash -n tests/cow/e2e.sh`.
+- `cargo fmt --check`.
+- `cargo test -p forkpress-storage`.
+- `FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli`.
+- `FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli --features dev-experiments --bin forkpress-dev`.
+
 ## known-good/cow-mergeback-mvp-2026-05-12
 
 Verified as a major known-good checkpoint for the production materialized COW mergeback MVP:
