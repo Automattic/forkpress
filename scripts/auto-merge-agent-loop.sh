@@ -5,6 +5,7 @@ REPO="${FORKPRESS_LOOP_REPO:-Automattic/forkpress}"
 ISSUE="${FORKPRESS_LOOP_ISSUE:-39}"
 SLEEP_SECONDS="${FORKPRESS_LOOP_SLEEP_SECONDS:-15}"
 CODEX_BIN="${CODEX_BIN:-codex}"
+CODEX_REASONING_EFFORT="${CODEX_REASONING_EFFORT:-high}"
 WORKDIR="${FORKPRESS_LOOP_WORKDIR:-}"
 LOG_DIR="${FORKPRESS_LOOP_LOG_DIR:-}"
 SANDBOX="${CODEX_SANDBOX:-danger-full-access}"
@@ -22,6 +23,7 @@ fi
 mkdir -p "$LOG_DIR"
 
 top_args=()
+top_args+=(-c "model_reasoning_effort=\"$CODEX_REASONING_EFFORT\"")
 if [[ "$ENABLE_SEARCH" != "0" ]]; then
   top_args+=(--search)
 fi
@@ -76,6 +78,11 @@ Hard constraints:
 - Commit coherent, verified local checkpoints often. Prefer small commits after
   tests pass, and do not leave a successful run with a large dirty worktree
   unless the remaining dirty state is called out as a blocker.
+- Maintain a human-readable changelog of work since the last known-good tag;
+  use `CHANGELOG.md` if it exists, otherwise create it.
+- Create annotated `known-good/...` Git tags only for major verified stable
+  states, never for every commit. Tag after relevant verification passes, and
+  record the tag name plus covered changes in the changelog and issue comment.
 
 Before exiting for any reason, append a comment to the coordination issue with:
 - Current state
