@@ -3671,10 +3671,38 @@ function cow_merge_resolve_schema_conflict(
                     }
                 };
             }
+        } elseif ($conflict_type === 'schema-source-dropped-table' && $object === '') {
+            if ($source_payload !== null) {
+                throw new RuntimeException("schema conflict #$conflict_id has an unexpected source table payload");
+            }
+            $current_source_sql = cow_merge_table_sql($source, $table);
+            if ($current_source_sql !== null) {
+                throw new RuntimeException('source table no longer matches the audited dropped-table source value; rerun merge before resolving');
+            }
+            $current_target_sql = cow_merge_table_sql($target, $table);
+            $previous = $current_target_sql;
+            if (!cow_merge_values_equal($current_target_sql, $target_payload)) {
+                throw new RuntimeException('target table schema no longer matches the audited conflict target value; rerun merge-audit before resolving');
+            }
+            if ($choice === 'source') {
+                $dependent_views = cow_merge_table_dependent_views($target, $table);
+                if ($dependent_views) {
+                    $names = implode(', ', array_map(fn($view) => (string)$view['name'], $dependent_views));
+                    throw new InvalidArgumentException("source table drop resolution cannot leave dependent target views invalid: $names");
+                }
+                $resolved = null;
+                $apply_source = function () use ($target, $table): void {
+                    if (cow_merge_table_sql($target, $table) !== null) {
+                        if (!$target->exec('DROP TABLE ' . cow_merge_quote_ident($table))) {
+                            throw new RuntimeException('failed to apply source table drop schema resolution: ' . $target->lastErrorMsg());
+                        }
+                    }
+                };
+            }
         } else {
             if ($choice === 'source') {
                 if ($conflict_type !== 'schema-conflict' || $object !== '') {
-                    throw new InvalidArgumentException('source schema resolution currently supports source-added columns/indexes/views/triggers, index/view/trigger rewrites or drops, and compatible table rebuilds only');
+                    throw new InvalidArgumentException('source schema resolution currently supports source-added columns/indexes/views/triggers, index/view/trigger rewrites or drops, source table drops without dependent target views, and compatible table rebuilds only');
                 }
                 if (!is_string($source_payload)) {
                     throw new RuntimeException("schema conflict #$conflict_id does not contain a source table SQL payload");
@@ -5595,6 +5623,21 @@ function cow_merge_databases(
             $target_sql = $target_tables[$table] ?? null;
 
             if ($source_sql === null) {
+                if ($base_sql !== null && $target_sql !== null) {
+                    cow_merge_record_schema_conflict(
+                        $meta,
+                        $run_id,
+                        $table,
+                        null,
+                        'schema-source-dropped-table',
+                        $base_sql,
+                        null,
+                        $target_sql,
+                        $target_sql,
+                        'source dropped a table; automatic table drops are not applied'
+                    );
+                    $conflicts++;
+                }
                 continue;
             }
             if ($target_sql === null && $base_sql === null) {
