@@ -593,6 +593,25 @@ try {
     assert_true(count($unreviewed_resolution_audit['resolutions']) >= 1, 'unreviewed filter returns resolution records with no review note');
     $unreviewed_resolution_ids = array_map(fn($row) => (int)$row['id'], $unreviewed_resolution_audit['resolutions']);
     assert_true(!in_array($resolution_review_id, $unreviewed_resolution_ids, true), 'unreviewed filter excludes reviewed resolution records');
+    $unreviewed_resolution_queue_audit = cow_merge_audit_report($metadata, null, 10, [
+        'review' => '1',
+        'review_status' => 'unreviewed',
+        'records' => 'resolutions',
+        'scope' => 'db',
+    ]);
+    assert_same($unreviewed_resolution_queue_audit['filters']['review'], true, 'resolution review queue audit preserves the review shortcut filter');
+    assert_same($unreviewed_resolution_queue_audit['filters']['review_status'], 'unreviewed', 'resolution review queue audit preserves the unreviewed filter');
+    assert_same($unreviewed_resolution_queue_audit['filters']['records'], 'resolutions', 'resolution review queue audit can focus on resolution records');
+    assert_same($unreviewed_resolution_queue_audit['filters']['scope'], 'db', 'resolution review queue audit can focus on database records');
+    assert_same(count($unreviewed_resolution_queue_audit['conflicts']), 0, 'resolution review queue omits conflicts');
+    assert_same(count($unreviewed_resolution_queue_audit['decisions']), 0, 'resolution review queue omits decisions');
+    assert_true(count($unreviewed_resolution_queue_audit['resolutions']) >= 1, 'resolution review queue returns unreviewed DB resolutions');
+    $unreviewed_resolution_queue_ids = array_map(fn($row) => (int)$row['id'], $unreviewed_resolution_queue_audit['resolutions']);
+    assert_true(!in_array($resolution_review_id, $unreviewed_resolution_queue_ids, true), 'resolution review queue excludes reviewed resolutions');
+    foreach ($unreviewed_resolution_queue_audit['resolutions'] as $row) {
+        assert_same($row['review_status'], null, 'resolution review queue returns only unreviewed records');
+        assert_true($row['table_name'] !== '__files__', 'database resolution review queue excludes file records');
+    }
     ob_start();
     cow_merge_print_audit_text($reviewed_resolution_audit);
     $reviewed_resolution_text = ob_get_clean();

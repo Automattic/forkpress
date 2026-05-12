@@ -45,6 +45,7 @@ on_error() {
   dump_if_exists "$TMP/keyless-resolve.out"
   dump_if_exists "$TMP/keyless-resolution-review.out"
   dump_if_exists "$TMP/keyless-resolution-audit.out"
+  dump_if_exists "$TMP/keyless-unreviewed-resolution-queue.json"
   dump_if_exists "$TMP/keyless-resolution-status.json"
   dump_if_exists "$TMP/merge-audit.out"
   dump_if_exists "$TMP/merge-audit.json"
@@ -467,6 +468,8 @@ if [ "$KEYLESS_RESOLUTION_ID" = "0" ]; then
   echo "missing keyless deterministic resolution id" >&2
   exit 1
 fi
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --review --review-status unreviewed --records resolutions --scope db --limit 8 > "$TMP/keyless-unreviewed-resolution-queue.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["review"] ?? false) === true) && (($data["filters"]["review_status"] ?? null) === "unreviewed") && (($data["filters"]["records"] ?? null) === "resolutions") && (($data["filters"]["scope"] ?? null) === "db") && empty($data["conflicts"] ?? []) && empty($data["decisions"] ?? []); $has_resolution = false; foreach (($data["resolutions"] ?? []) as $row) { if (($row["review_status"] ?? null) !== null) $ok = false; if (($row["table_name"] ?? null) === "__files__") $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[2] && ($row["table_name"] ?? null) === "wp_forkpress_e2e_keyless") $has_resolution = true; } exit($ok && $has_resolution ? 0 : 1);' "$TMP/keyless-unreviewed-resolution-queue.json" "$KEYLESS_RESOLUTION_ID"
 "$BIN" branch --work-dir "$WORK_DIR" merge-review resolution "$KEYLESS_RESOLUTION_ID" --status needs-action --note "E2E follow-up on runtime keyless resolution" --reviewer cow-e2e > "$TMP/keyless-resolution-review.out"
 grep -F "forkpress: recorded COW merge review note" "$TMP/keyless-resolution-review.out" >/dev/null
 grep -F "record:    resolution #$KEYLESS_RESOLUTION_ID" "$TMP/keyless-resolution-review.out" >/dev/null
