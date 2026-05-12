@@ -484,9 +484,10 @@ tooling.
   explicit primary keys and no-primary-key tables with sidecar row identity.
   Schema source choices can apply safe source-added columns, indexes, views,
   and triggers; source index/view/trigger rewrites or drops; source table drops
-  that do not leave dependent target views invalid; and compatible table
-  rebuilds that preserve target rows and target indexes/triggers while changing
-  audited non-primary-key column definitions. Compatible rebuilds also preserve
+  that do not leave dependent target views invalid or implicitly remove target
+  indexes/triggers; and compatible table rebuilds that preserve target rows and
+  target indexes/triggers while changing audited non-primary-key column
+  definitions. Compatible rebuilds also preserve
   dependent target views when those views validate before and after the rebuild.
   With `--apply`,
   ForkPress records the deterministic resolution in merge metadata and appends

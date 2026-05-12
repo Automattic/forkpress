@@ -1378,6 +1378,46 @@ SQL);
         'dependent target views',
         'source table drop resolution refuses to leave target views invalid'
     );
+
+    $schema_table_drop_deps_base = $tmp . '/schema-table-drop-deps-base.sqlite';
+    $schema_table_drop_deps_source = $tmp . '/schema-table-drop-deps-source.sqlite';
+    $schema_table_drop_deps_target = $tmp . '/schema-table-drop-deps-target.sqlite';
+    create_base_db($schema_table_drop_deps_base);
+    $db = open_db($schema_table_drop_deps_base);
+    $db->exec('CREATE TABLE plugin_table_drop_deps (item_id TEXT PRIMARY KEY, label TEXT)');
+    $db->exec('CREATE TABLE plugin_table_drop_deps_audit (item_id TEXT)');
+    $db->exec('CREATE INDEX plugin_table_drop_deps_label_idx ON plugin_table_drop_deps(label)');
+    $db->exec('CREATE TRIGGER plugin_table_drop_deps_insert AFTER INSERT ON plugin_table_drop_deps BEGIN INSERT INTO plugin_table_drop_deps_audit (item_id) VALUES (NEW.item_id); END');
+    $db->close();
+    copy($schema_table_drop_deps_base, $schema_table_drop_deps_source);
+    copy($schema_table_drop_deps_base, $schema_table_drop_deps_target);
+
+    $db = open_db($schema_table_drop_deps_source);
+    $db->exec('DROP TABLE plugin_table_drop_deps');
+    $db->close();
+
+    $result = cow_merge_databases($schema_table_drop_deps_base, $schema_table_drop_deps_source, $schema_table_drop_deps_target, $metadata, 'feature-table-drop-deps', 'main');
+    assert_same($result['status'], 'completed_with_conflicts', 'source table drop with dependent target index and trigger remains reviewable');
+    $schema_table_drop_deps_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_table_drop_deps' AND column_name IS NULL AND conflict_type = 'schema-source-dropped-table' ORDER BY id DESC LIMIT 1");
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $schema_table_drop_deps_conflict_id, 'source', true, 'Try source table drop with dependent schema.', 'test'),
+        'dependent target schema objects',
+        'source table drop resolution refuses to implicitly remove target indexes or triggers'
+    );
+    $schema_table_drop_deps_index_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_table_drop_deps_label_idx' AND conflict_type = 'schema-source-dropped-index' ORDER BY id DESC LIMIT 1");
+    cow_merge_resolve_conflict($metadata, $schema_table_drop_deps_index_conflict_id, 'source', true, 'Apply source dependent index drop.', 'test');
+    $schema_table_drop_deps_trigger_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_table_drop_deps_insert' AND conflict_type = 'schema-source-dropped-trigger' ORDER BY id DESC LIMIT 1");
+    cow_merge_resolve_conflict($metadata, $schema_table_drop_deps_trigger_conflict_id, 'source', true, 'Apply source dependent trigger drop.', 'test');
+    $schema_table_drop_deps_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_table_drop_deps_conflict_id,
+        'source',
+        true,
+        'Apply source table drop after dependent schema resolution.',
+        'test'
+    );
+    assert_same($schema_table_drop_deps_resolution['status'], 'applied', 'source table drop resolution can apply after dependent schema objects are resolved');
+    assert_same((int)scalar($schema_table_drop_deps_target, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'plugin_table_drop_deps'"), 0, 'source table drop removes table after dependent index and trigger are resolved');
     assert_same((int)scalar($schema_table_drop_view_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_table_drop_view'"), 1, 'blocked source table drop preserves target table');
     assert_same((int)scalar($schema_table_drop_view_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_table_drop_view_live'"), 1, 'blocked source table drop preserves dependent target view');
 

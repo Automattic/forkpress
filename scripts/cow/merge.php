@@ -3690,6 +3690,11 @@ function cow_merge_resolve_schema_conflict(
                     $names = implode(', ', array_map(fn($view) => (string)$view['name'], $dependent_views));
                     throw new InvalidArgumentException("source table drop resolution cannot leave dependent target views invalid: $names");
                 }
+                $dependent_schema = cow_merge_table_rebuild_dependencies($target, $table);
+                if ($dependent_schema) {
+                    $names = implode(', ', array_map(fn($dependency) => (string)$dependency['type'] . ' ' . (string)$dependency['name'], $dependent_schema));
+                    throw new InvalidArgumentException("source table drop resolution cannot implicitly remove dependent target schema objects; resolve or remove them first: $names");
+                }
                 $resolved = null;
                 $apply_source = function () use ($target, $table): void {
                     if (cow_merge_table_sql($target, $table) !== null) {
