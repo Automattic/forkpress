@@ -2783,7 +2783,32 @@ function cow_merge_files(
             $source = $source_entries[$path] ?? null;
             $target = $target_entries[$path] ?? null;
 
-            if (cow_merge_file_entries_equal($source, $base) || cow_merge_file_entries_equal($source, $target)) {
+            if (cow_merge_file_entries_equal($source, $base)) {
+                if (!cow_merge_file_entries_equal($target, $base)) {
+                    if ($base === null && $target !== null) {
+                        $reason = 'target added filesystem path while source did not have it';
+                    } elseif ($base !== null && $target === null) {
+                        $reason = 'target deleted filesystem path while source did not change it';
+                    } else {
+                        $reason = 'target changed filesystem path while source did not change it';
+                    }
+                    cow_merge_record_decision(
+                        $meta,
+                        $run_id,
+                        '__files__',
+                        cow_merge_file_identity_json($path),
+                        'path',
+                        'target-kept',
+                        $reason,
+                        cow_merge_file_path_payload($path, $base),
+                        cow_merge_file_path_payload($path, $source),
+                        cow_merge_file_path_payload($path, $target),
+                        cow_merge_file_path_payload($path, $target)
+                    );
+                }
+                continue;
+            }
+            if (cow_merge_file_entries_equal($source, $target)) {
                 continue;
             }
 

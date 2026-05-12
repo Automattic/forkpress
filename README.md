@@ -499,6 +499,8 @@ tooling.
   auditable alongside schema changes.
   Target-only schema additions and rewrites are preserved and recorded as
   `target-kept` decisions so clean trunk/main-side DDL remains auditable.
+  Target-only filesystem additions, deletions, and path changes are also
+  preserved and recorded as `target-kept` decisions.
   Compatible rebuilds also preserve
   dependent target views when those views validate before and after the rebuild.
   Source view rewrites preserve transitive dependent target views and their
