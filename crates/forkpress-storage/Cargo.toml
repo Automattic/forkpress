@@ -8,6 +8,7 @@ default = []
 
 [dependencies]
 anyhow = "1.0"
+flate2 = "1.1"
 forkpress-core = { path = "../forkpress-core" }
 forkpress-runtime = { path = "../forkpress-runtime" }
 libc = "0.2"

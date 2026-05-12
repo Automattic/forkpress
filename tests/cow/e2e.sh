@@ -233,7 +233,7 @@ test -d "$WORK/.forkpress"
 test -d "$WORK/main"
 test -f "$WORK/main/wp-load.php"
 test ! -e "$WORK/.forkpress/cow/branches/main"
-grep -E 'file_view = "(reflink|file-copy|macos-apfs-sparsebundle)"' "$WORK_DIR/site.toml" >/dev/null
+grep -E 'file_view = "(reflink|file-copy|macos-apfs-sparsebundle|linux-xfs-loop)"' "$WORK_DIR/site.toml" >/dev/null
 grep -F 'strategy = "cow"' "$WORK_DIR/site.toml" >/dev/null
 "$BIN" doctor storage --work-dir "$WORK_DIR" > "$TMP/storage-doctor.out"
 grep -F "ForkPress storage capability report" "$TMP/storage-doctor.out" >/dev/null

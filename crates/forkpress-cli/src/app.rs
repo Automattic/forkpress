@@ -55,6 +55,15 @@ use forkpress_storage::{
     resolve_cow_merge_conflict, review_cow_merge_audit_record, show_cow_branch,
     write_cow_branch_list, write_cow_strategy_notes,
 };
+use forkpress_storage::{
+    CowSiteInit, compact_macos_apfs_sparsebundle_file_view, cow_branch_names, cow_branch_root,
+    create_cow_branch, delete_cow_branch, detach_linux_xfs_loop_file_view,
+    detach_macos_apfs_sparsebundle_file_view, ensure_cow_branch_exists, ensure_cow_file_view_ready,
+    ensure_cow_main_branch, lock_cow_lifecycle, lock_cow_operations, prepare_cow_file_view,
+    print_cow_storage_status, print_linux_xfs_loop_storage_status, print_macos_cow_storage_status,
+    probe_reflink_dir, reset_cow_branch, show_cow_branch, write_cow_branch_list,
+    write_cow_strategy_notes,
+};
 #[cfg(feature = "dev-experiments")]
 use forkpress_storage::{copy_tree_cow, plain_branch_names};
 #[cfg(test)]
@@ -939,6 +948,11 @@ fn doctor_storage_command(args: DoctorStorageArgs) -> Result<i32> {
                     "  measurement:  `du` can overcount APFS clone sharing; compare `df -h {}` before/after branch creation",
                     layout.macos_cow_mount.display()
                 );
+            } else if file_view == FileViewStrategy::LinuxXfsLoop {
+                println!(
+                    "  measurement:  `du` can overcount XFS reflink sharing; compare `df -h {}` before/after branch creation",
+                    layout.linux_xfs_mount.display()
+                );
             }
         }
     }
@@ -970,7 +984,17 @@ fn doctor_storage_command(args: DoctorStorageArgs) -> Result<i32> {
         );
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "linux")]
+    {
+        println!("  Linux XFS loop volume: available through direct loop/mount syscalls");
+        println!("  image: {}", layout.linux_xfs_image.display());
+        println!("  mount: {}", layout.linux_xfs_mount.display());
+        println!(
+            "  recommendation: forkpress init will mount one shared XFS volume for all ForkPress sites if this process has loop and mount privileges"
+        );
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         println!("  recommendation: file-copy materialization");
     }
@@ -1010,6 +1034,9 @@ fn storage_status_command(args: StorageStatusArgs) -> Result<i32> {
         Some(FileViewStrategy::MacosApfsSparsebundle) => {
             print_macos_cow_storage_status(&layout)?;
         }
+        Some(FileViewStrategy::LinuxXfsLoop) => {
+            print_linux_xfs_loop_storage_status(&layout)?;
+        }
         _ => {
             if layout.macos_cow_image.exists() || layout.macos_cow_mount.exists() {
                 print_macos_cow_storage_status(&layout)?;
@@ -1042,6 +1069,14 @@ fn storage_mount_command(args: StorageMountArgs) -> Result<i32> {
                 layout.macos_cow_mount.display()
             );
             println!("Branch roots: {}", layout.cow_branches_dir.display());
+        }
+        FileViewStrategy::LinuxXfsLoop => {
+            println!(
+                "forkpress: shared Linux XFS COW storage mounted at {}",
+                layout.linux_xfs_mount.display()
+            );
+            println!("Branch roots: {}", layout.cow_branches_dir.display());
+            println!("Storage roots: {}", layout.linux_xfs_branches_dir.display());
         }
         FileViewStrategy::Reflink | FileViewStrategy::Copy => {
             println!(
@@ -1111,19 +1146,45 @@ fn detach_storage_for_layout_if_present(
     timeout: Duration,
 ) -> Result<bool> {
     let manifest = read_site_manifest(layout)?;
+    let has_linux_xfs = manifest.as_ref().and_then(|manifest| manifest.file_view)
+        == Some(FileViewStrategy::LinuxXfsLoop);
     let has_macos_cow = manifest.as_ref().and_then(|manifest| manifest.file_view)
         == Some(FileViewStrategy::MacosApfsSparsebundle)
         || layout.macos_cow_image.exists()
         || layout.macos_cow_mount.exists();
 
-    if !has_macos_cow {
+    if !has_macos_cow && !has_linux_xfs {
         return Ok(false);
     }
 
     with_stopped_cow_server_for_storage(layout, keep_server, timeout, || {
-        detach_macos_apfs_sparsebundle_file_view(layout, force, true)
+        if has_linux_xfs {
+            ensure_no_other_linux_xfs_servers(layout)?;
+            detach_linux_xfs_loop_file_view(layout, force, true)
+        } else {
+            detach_macos_apfs_sparsebundle_file_view(layout, force, true)
+        }
     })?;
     Ok(true)
+}
+
+fn ensure_no_other_linux_xfs_servers(layout: &Layout) -> Result<()> {
+    for record in live_server_records()? {
+        if record.work_dir == layout.work_dir {
+            continue;
+        }
+        let other_layout = Layout::new(record.work_dir.clone())?;
+        if read_site_manifest(&other_layout)?.and_then(|manifest| manifest.file_view)
+            == Some(FileViewStrategy::LinuxXfsLoop)
+        {
+            bail!(
+                "shared Linux XFS COW storage is still used by server pid {} at {}. Stop all ForkPress sites before detaching the shared volume.",
+                record.pid,
+                other_layout.work_dir.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn with_stopped_cow_server_for_storage<T>(
@@ -4020,6 +4081,7 @@ fn start_cow_php_server(
         .unwrap_or(FileViewStrategy::Copy);
     let storage_branches_dir = match file_view {
         FileViewStrategy::MacosApfsSparsebundle => layout.macos_cow_branches_dir.clone(),
+        FileViewStrategy::LinuxXfsLoop => layout.linux_xfs_branches_dir.clone(),
         FileViewStrategy::Reflink | FileViewStrategy::Copy => layout.cow_branches_dir.clone(),
     };
 
