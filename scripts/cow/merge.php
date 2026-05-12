@@ -2907,6 +2907,24 @@ function cow_merge_select_current_cell(SQLite3 $db, string $table, array $identi
     return $row['value'] ?? null;
 }
 
+function cow_merge_select_current_row(SQLite3 $db, string $table, array $identity, array $pk_cols): ?array {
+    $where_values = [];
+    $where = cow_merge_where_clause($identity, $pk_cols, $where_values);
+    $stmt = $db->prepare('SELECT * FROM ' . cow_merge_quote_ident($table) . ' WHERE ' . $where);
+    if (!$stmt) {
+        throw new RuntimeException("failed to prepare current row lookup for $table: " . $db->lastErrorMsg());
+    }
+    foreach ($where_values as $i => $value) {
+        cow_merge_bind($stmt, $i + 1, $value);
+    }
+    $res = $stmt->execute();
+    if (!$res) {
+        throw new RuntimeException("failed to read current row for $table: " . $db->lastErrorMsg());
+    }
+    $row = $res->fetchArray(SQLITE3_ASSOC);
+    return $row ?: null;
+}
+
 function cow_merge_update_single_cell(SQLite3 $db, string $table, array $identity, array $pk_cols, string $column, mixed $value): void {
     $where_values = [];
     $where = cow_merge_where_clause($identity, $pk_cols, $where_values);
@@ -2997,11 +3015,15 @@ function cow_merge_resolve_conflict(
         }
         $table = (string)$conflict['table_name'];
         $column = (string)($conflict['column_name'] ?? '');
+        $conflict_type = (string)$conflict['conflict_type'];
         if ($table === '__files__') {
             throw new InvalidArgumentException('filesystem conflicts are not supported by resolve-conflict yet');
         }
-        if ((string)$conflict['conflict_type'] !== 'cell-conflict' || $column === '') {
-            throw new InvalidArgumentException('resolve-conflict currently supports DB cell-conflict records only');
+        if ($conflict_type !== 'cell-conflict' && $conflict_type !== 'row-insert-collision') {
+            throw new InvalidArgumentException('resolve-conflict currently supports DB cell-conflict and row-insert-collision records only');
+        }
+        if ($conflict_type === 'cell-conflict' && $column === '') {
+            throw new InvalidArgumentException('cell conflict resolution requires a column name');
         }
         $target_db = (string)$conflict['target_db'];
         if (!is_file($target_db)) {
@@ -3025,9 +3047,23 @@ function cow_merge_resolve_conflict(
                 throw new RuntimeException("conflict #$conflict_id row identity does not include primary key column $pk_col");
             }
         }
-        $current_value = cow_merge_select_current_cell($target, $table, $identity, $pk_cols, $column);
-        if (!cow_merge_values_equal($current_value, $target_value)) {
-            throw new RuntimeException('target cell no longer matches the audited conflict target value; rerun merge-audit before resolving');
+        if ($conflict_type === 'cell-conflict') {
+            $current_value = cow_merge_select_current_cell($target, $table, $identity, $pk_cols, $column);
+            if (!cow_merge_values_equal($current_value, $target_value)) {
+                throw new RuntimeException('target cell no longer matches the audited conflict target value; rerun merge-audit before resolving');
+            }
+        } else {
+            if (!is_array($source_value) || !is_array($target_value)) {
+                throw new RuntimeException("row conflict #$conflict_id does not contain row payloads");
+            }
+            $current_value = cow_merge_select_current_row($target, $table, $identity, $pk_cols);
+            if ($current_value === null) {
+                throw new RuntimeException("cannot resolve $table row conflict because the target row no longer exists");
+            }
+            $row_columns = cow_merge_all_columns(array_keys($target_value), array_keys($current_value));
+            if (!cow_merge_row_values_equal($current_value, $target_value, $row_columns)) {
+                throw new RuntimeException('target row no longer matches the audited conflict target value; rerun merge-audit before resolving');
+            }
         }
 
         if ($apply) {
@@ -3035,7 +3071,12 @@ function cow_merge_resolve_conflict(
             $target->exec('BEGIN IMMEDIATE');
             try {
                 if ($choice === 'source') {
-                    cow_merge_update_single_cell($target, $table, $identity, $pk_cols, $column, $source_value);
+                    if ($conflict_type === 'cell-conflict') {
+                        cow_merge_update_single_cell($target, $table, $identity, $pk_cols, $column, $source_value);
+                    } else {
+                        $columns = cow_merge_table_columns($target, $table);
+                        cow_merge_update_row($target, $table, $identity, $pk_cols, $source_value, $columns);
+                    }
                 }
                 $resolution_id = cow_merge_record_resolution(
                     $meta,
@@ -3047,7 +3088,7 @@ function cow_merge_resolve_conflict(
                     $target_db,
                     $table,
                     (string)$conflict['row_identity'],
-                    $column,
+                    $conflict_type === 'cell-conflict' ? $column : '',
                     $current_value,
                     $resolved_value
                 );
@@ -3071,7 +3112,7 @@ function cow_merge_resolve_conflict(
             'status' => $apply && $choice === 'source' ? 'applied' : 'validated',
             'target_db' => $target_db,
             'table_name' => $table,
-            'column_name' => $column,
+            'column_name' => $conflict_type === 'cell-conflict' ? $column : null,
         ];
     } finally {
         if ($target instanceof SQLite3) {

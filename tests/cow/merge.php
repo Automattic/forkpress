@@ -246,6 +246,51 @@ try {
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $option_conflict_id AND choice = 'target' AND applied = 1"), 1, 'target conflict resolution is auditable');
     $resolution_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10);
     assert_same(count($resolution_audit['resolutions']), 2, 'merge audit report exports deterministic resolution records');
+
+    $row_conflict_base = $tmp . '/row-conflict-base.sqlite';
+    $row_conflict_source = $tmp . '/row-conflict-source.sqlite';
+    $row_conflict_target = $tmp . '/row-conflict-target.sqlite';
+    create_base_db($row_conflict_base);
+    copy($row_conflict_base, $row_conflict_source);
+    copy($row_conflict_base, $row_conflict_target);
+    $db = open_db($row_conflict_source);
+    $db->exec("INSERT INTO plugin_items (item_id, label, value) VALUES ('collision', 'Source label', 'source row')");
+    $db->close();
+    $db = open_db($row_conflict_target);
+    $db->exec("INSERT INTO plugin_items (item_id, label, value) VALUES ('collision', 'Target label', 'target row')");
+    $db->close();
+    $row_conflict_result = cow_merge_databases($row_conflict_base, $row_conflict_source, $row_conflict_target, $metadata, 'feature-row-conflict', 'main');
+    assert_same($row_conflict_result['status'], 'completed_with_conflicts', 'same-PK row insert collision is recorded as a conflict');
+    assert_same(scalar($row_conflict_target, "SELECT value FROM plugin_items WHERE item_id = 'collision'"), 'target row', 'target row wins before explicit row conflict resolution');
+    $row_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND conflict_type = 'row-insert-collision'");
+    $row_dry_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $row_conflict_id,
+        'source',
+        false,
+        'Preview source row resolution.',
+        'cow-test'
+    );
+    assert_same($row_dry_resolution['status'], 'validated', 'dry-run row conflict resolution validates target row preconditions');
+    assert_same(scalar($row_conflict_target, "SELECT label FROM plugin_items WHERE item_id = 'collision'"), 'Target label', 'dry-run row resolution does not mutate target row');
+    $row_source_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $row_conflict_id,
+        'source',
+        true,
+        'Apply audited source row.',
+        'cow-test'
+    );
+    assert_same($row_source_resolution['status'], 'applied', 'source row conflict resolution records applied status');
+    assert_same(scalar($row_conflict_target, "SELECT label FROM plugin_items WHERE item_id = 'collision'"), 'Source label', 'source row conflict resolution applies audited source row values');
+    assert_same(scalar($row_conflict_target, "SELECT value FROM plugin_items WHERE item_id = 'collision'"), 'source row', 'source row conflict resolution updates the full audited source row');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $row_conflict_id AND choice = 'source' AND applied = 1 AND column_name = ''"), 1, 'row conflict resolution is auditable without a column name');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $row_conflict_id, 'target', true, 'Try stale target keep.', 'cow-test'),
+        'target row no longer matches',
+        'stale row conflict resolution is blocked when target row has changed since audit'
+    );
+
     $reviewed_conflict_id = (int)$audit['conflicts'][0]['id'];
     $review_result = cow_merge_review_record(
         $metadata,
