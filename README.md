@@ -472,8 +472,9 @@ tooling.
   `[--reviewer NAME]` appends a review note to an auditable merge conflict or decision.
 - `forkpress branch merge-resolve conflict <id> --choice source|target [--apply]`
   `[--note TEXT] [--reviewer NAME]` validates an audited explicit-PK DB cell,
-  row insert-collision, row-target-deleted, or row-source-deleted conflict and,
-  with `--apply`, records the deterministic resolution in merge metadata.
+  row insert-collision, row-target-deleted, row-source-deleted, or filesystem
+  path conflict and, with `--apply`, records the deterministic resolution in
+  merge metadata.
 - `forkpress branch show <name>` prints the branch directory, database, file
   count, and Git ref path.
 - `forkpress branch delete <name>` removes a COW branch. `main` cannot be

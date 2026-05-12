@@ -2279,6 +2279,12 @@ function cow_merge_delete_dir_entry(string $target_root, string $path): void {
     }
 }
 
+function cow_merge_branch_root_from_db_path(string $db): string {
+    $database_dir = dirname($db);
+    $wp_content_dir = dirname($database_dir);
+    return dirname($wp_content_dir);
+}
+
 function cow_merge_remove_tree(string $path): void {
     if (!file_exists($path) && !is_link($path)) {
         return;
@@ -2422,6 +2428,56 @@ function cow_merge_file_transaction_cleanup(array $tx): void {
             // A stale temp backup is less harmful than masking the merge result
             // or the original rollback failure.
         }
+    }
+}
+
+function cow_merge_file_entry_without_path(?array $entry): ?array {
+    if ($entry === null) {
+        return null;
+    }
+    unset($entry['path']);
+    return $entry;
+}
+
+function cow_merge_validate_current_file_entry(string $root, string $path, ?array $expected, string $label): ?array {
+    $entries = cow_merge_file_manifest_for_root($root)['entries'];
+    $current = $entries[$path] ?? null;
+    if (!cow_merge_file_entries_equal($current, $expected)) {
+        throw new RuntimeException("$label filesystem path no longer matches the audited conflict payload; rerun merge-audit before resolving");
+    }
+    return $current;
+}
+
+function cow_merge_apply_file_resolution(
+    string $source_root,
+    string $target_root,
+    string $path,
+    ?array $source,
+    ?array $target
+): void {
+    if ($source !== null && !cow_merge_file_entry_auto_applicable($path, null, $source, $target)) {
+        [$type, $reason] = cow_merge_file_unsupported_source_conflict($path, $source);
+        throw new RuntimeException("cannot apply source filesystem conflict $path ($type): $reason");
+    }
+
+    if ($source === null) {
+        if (($target['type'] ?? null) === 'dir') {
+            cow_merge_delete_dir_entry($target_root, $path);
+        } else {
+            cow_merge_delete_file_entry($target_root, $path);
+        }
+        return;
+    }
+
+    $source_type = $source['type'] ?? null;
+    if ($source_type === 'dir') {
+        cow_merge_apply_dir_entry($source_root, $target_root, $path, $source);
+    } elseif ($source_type === 'symlink') {
+        cow_merge_apply_symlink_entry($source_root, $target_root, $path, $source);
+    } elseif ($source_type === 'file') {
+        cow_merge_copy_file_entry($source_root, $target_root, $path, $source);
+    } else {
+        throw new RuntimeException("cannot apply unsupported source filesystem entry for $path");
     }
 }
 
@@ -3001,7 +3057,7 @@ function cow_merge_resolve_conflict(
         cow_merge_ensure_metadata($meta);
         $stmt = $meta->prepare(
             'SELECT c.id, c.run_id, c.table_name, c.row_identity, c.column_name, c.conflict_type, ' .
-            'c.source_payload, c.target_payload, r.target_db ' .
+            'c.source_payload, c.target_payload, r.source_db, r.target_db ' .
             'FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.id = :id'
         );
         if (!$stmt) {
@@ -3017,7 +3073,104 @@ function cow_merge_resolve_conflict(
         $column = (string)($conflict['column_name'] ?? '');
         $conflict_type = (string)$conflict['conflict_type'];
         if ($table === '__files__') {
-            throw new InvalidArgumentException('filesystem conflicts are not supported by resolve-conflict yet');
+            $file_conflict_types = [
+                'file-conflict',
+                'file-add-collision',
+                'file-target-deleted',
+                'file-source-deleted',
+                'file-directory-delete-conflict',
+                'file-unsafe-symlink',
+                'file-unsupported-source-change',
+            ];
+            if (!in_array($conflict_type, $file_conflict_types, true)) {
+                throw new InvalidArgumentException('resolve-conflict does not support this filesystem conflict type yet');
+            }
+            $identity = cow_merge_decode_payload_json((string)$conflict['row_identity'], 'file identity');
+            if (!is_array($identity) || !isset($identity['path']) || !is_string($identity['path'])) {
+                throw new RuntimeException("invalid filesystem identity for conflict #$conflict_id");
+            }
+            $path = $identity['path'];
+            if (cow_merge_file_is_excluded($path)) {
+                throw new RuntimeException("refusing to resolve ForkPress-managed filesystem path: $path");
+            }
+            $source_payload = cow_merge_decode_payload_json((string)$conflict['source_payload'], 'source');
+            $target_payload = cow_merge_decode_payload_json((string)$conflict['target_payload'], 'target');
+            $source_value = cow_merge_file_entry_without_path(is_array($source_payload) ? $source_payload : null);
+            $target_value = cow_merge_file_entry_without_path(is_array($target_payload) ? $target_payload : null);
+            $source_db = (string)$conflict['source_db'];
+            $target_db = (string)$conflict['target_db'];
+            $source_root = cow_merge_branch_root_from_db_path($source_db);
+            $target_root = cow_merge_branch_root_from_db_path($target_db);
+            if (!is_dir($source_root)) {
+                throw new RuntimeException("source root for conflict #$conflict_id does not exist: $source_root");
+            }
+            if (!is_dir($target_root)) {
+                throw new RuntimeException("target root for conflict #$conflict_id does not exist: $target_root");
+            }
+
+            $current_value = cow_merge_validate_current_file_entry($target_root, $path, $target_value, 'target');
+            if ($choice === 'source' && $source_value !== null) {
+                cow_merge_validate_current_file_entry($source_root, $path, $source_value, 'source');
+            }
+            $resolved_value = $choice === 'source' ? $source_value : $target_value;
+
+            if ($apply) {
+                $meta->exec('BEGIN IMMEDIATE');
+                $file_tx = cow_merge_file_transaction_begin();
+                $file_tx_committed = false;
+                try {
+                    if ($choice === 'source') {
+                        cow_merge_file_transaction_snapshot_path($file_tx, $target_root, $path);
+                        cow_merge_apply_file_resolution($source_root, $target_root, $path, $source_value, $target_value);
+                    }
+                    $resolution_id = cow_merge_record_resolution(
+                        $meta,
+                        $conflict_id,
+                        $choice,
+                        true,
+                        $note,
+                        $reviewer,
+                        $target_db,
+                        $table,
+                        (string)$conflict['row_identity'],
+                        'path',
+                        cow_merge_file_path_payload($path, $current_value),
+                        cow_merge_file_path_payload($path, $resolved_value)
+                    );
+                    $meta->exec('COMMIT');
+                    $file_tx_committed = true;
+                } catch (Throwable $e) {
+                    @$meta->exec('ROLLBACK');
+                    if (!$file_tx_committed) {
+                        try {
+                            cow_merge_file_transaction_restore($file_tx, $target_root);
+                        } catch (Throwable $rollback_error) {
+                            throw new RuntimeException(
+                                $e->getMessage() . '; filesystem rollback failed: ' . $rollback_error->getMessage(),
+                                0,
+                                $e
+                            );
+                        }
+                    }
+                    throw $e;
+                } finally {
+                    cow_merge_file_transaction_cleanup($file_tx);
+                }
+            } else {
+                $resolution_id = null;
+            }
+
+            return [
+                'metadata_db' => $metadata_db,
+                'conflict_id' => $conflict_id,
+                'resolution_id' => $resolution_id,
+                'choice' => $choice,
+                'applied' => $apply,
+                'status' => $apply && $choice === 'source' ? 'applied' : 'validated',
+                'target_db' => $target_db,
+                'table_name' => $table,
+                'column_name' => 'path',
+            ];
         }
         $row_conflict_types = ['row-insert-collision', 'row-target-deleted', 'row-source-deleted'];
         if ($conflict_type !== 'cell-conflict' && !in_array($conflict_type, $row_conflict_types, true)) {
