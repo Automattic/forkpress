@@ -757,10 +757,18 @@ function cow_merge_keyless_branch_identity(string $branch, string $table, int $r
     ];
 }
 
-function cow_merge_keyless_runtime_identity(string $branch, string $table, int $rowid, array $row, int $run_id, int $event_id): array {
+function cow_merge_keyless_runtime_identity(
+    string $branch,
+    string $table,
+    int $rowid,
+    array $row,
+    int $run_id,
+    int $event_id,
+    string $origin = 'runtime-insert'
+): array {
     return [
         'sidecar' => 'keyless-row',
-        'origin' => 'runtime-insert',
+        'origin' => $origin,
         'branch' => $branch,
         'table' => $table,
         'rowid' => $rowid,
@@ -1500,10 +1508,41 @@ function cow_merge_normalize_identity_events(array $events): array {
             'table_name' => $table,
             'op' => $op,
             'rowid' => (int)$rowid,
+            'row' => cow_merge_decode_identity_event_row($event['row'] ?? $event['row_payload'] ?? null),
         ];
     }
     usort($out, fn($a, $b) => $a['id'] <=> $b['id']);
     return $out;
+}
+
+function cow_merge_decode_identity_event_row(mixed $payload): ?array {
+    if (is_array($payload)) {
+        return $payload;
+    }
+    if (!is_string($payload) || $payload === '') {
+        return null;
+    }
+    $decoded = json_decode($payload, true);
+    if (!is_array($decoded)) {
+        return null;
+    }
+
+    $row = [];
+    foreach ($decoded as $column => $envelope) {
+        if (!is_string($column) || !is_array($envelope)) {
+            continue;
+        }
+        $type = $envelope['type'] ?? null;
+        $value = $envelope['value'] ?? null;
+        $row[$column] = match ($type) {
+            'null' => null,
+            'integer' => is_numeric($value) ? (int)$value : $value,
+            'real' => is_numeric($value) ? (float)$value : $value,
+            'blob' => is_string($value) ? (hex2bin($value) ?: '') : '',
+            default => is_scalar($value) || $value === null ? $value : (string)json_encode($value),
+        };
+    }
+    return $row;
 }
 
 function cow_merge_track_row_identity_events(
@@ -1539,6 +1578,12 @@ function cow_merge_track_row_identity_events(
             $tracked++;
             if ($op === 'delete') {
                 $identity = cow_merge_forget_row_identity($meta, $run_id, $branch, $table, $rowid);
+                if ($identity === null && is_array($event['row'])) {
+                    $identity = cow_merge_keyless_runtime_identity($branch, $table, $rowid, $event['row'], $run_id, (int)$event['id'], 'runtime-delete');
+                    cow_merge_remember_row_identity($meta, $run_id, $branch, $table, $rowid, $identity, $event['row']);
+                    cow_merge_forget_row_identity($meta, $run_id, $branch, $table, $rowid);
+                    $created++;
+                }
                 if ($identity !== null) {
                     cow_merge_record_decision(
                         $meta,
@@ -1550,7 +1595,7 @@ function cow_merge_track_row_identity_events(
                         'runtime observed deletion of a no-primary-key row',
                         null,
                         null,
-                        ['rowid' => $rowid],
+                        is_array($event['row']) ? $event['row'] : ['rowid' => $rowid],
                         null
                     );
                 }
@@ -1558,7 +1603,11 @@ function cow_merge_track_row_identity_events(
                 continue;
             }
 
-            $entry = cow_merge_load_keyless_physical_row($db, $table, $rowid);
+            $event_row = is_array($event['row']) ? $event['row'] : null;
+            $entry = $event_row === null ? cow_merge_load_keyless_physical_row($db, $table, $rowid) : [
+                'rowid' => $rowid,
+                'row' => $event_row,
+            ];
             if ($entry === null) {
                 continue;
             }

@@ -595,8 +595,8 @@ SQL);
         $reuse_metadata,
         'feature-reuse',
         [
-            ['id' => 1, 'table_name' => 'plugin_keyless', 'op' => 'delete', 'rowid' => 1],
-            ['id' => 2, 'table_name' => 'plugin_keyless', 'op' => 'insert', 'rowid' => 1],
+            ['id' => 1, 'table_name' => 'plugin_keyless', 'op' => 'delete', 'rowid' => 1, 'row' => ['label' => 'Base keyless', 'value' => 'base']],
+            ['id' => 2, 'table_name' => 'plugin_keyless', 'op' => 'insert', 'rowid' => 1, 'row' => ['label' => 'Reused rowid source', 'value' => 'new logical row']],
         ]
     );
     assert_same($result['status'], 'identity_tracked', 'runtime row identity events are auditable');
@@ -604,6 +604,11 @@ SQL);
     assert_true(is_string($old_reuse_identity) && is_string($new_reuse_identity) && $old_reuse_identity !== $new_reuse_identity, 'rowid reuse receives a new logical identity');
     assert_same((int)scalar($reuse_metadata, "SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'feature-reuse' AND table_name = 'plugin_keyless' AND rowid = 1"), 2, 'row identity history keeps both generations for a reused rowid');
     assert_same((int)scalar($reuse_metadata, "SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'feature-reuse' AND table_name = 'plugin_keyless' AND rowid = 1 AND deleted_at IS NOT NULL"), 1, 'deleted no-PK row identity generation is tombstoned');
+    assert_same(
+        scalar($reuse_metadata, "SELECT row_hash FROM merge_row_identity_history WHERE branch_name = 'feature-reuse' AND table_name = 'plugin_keyless' AND rowid = 1 AND deleted_at IS NOT NULL"),
+        cow_merge_row_hash(['label' => 'Base keyless', 'value' => 'base']),
+        'runtime delete event preserves the deleted no-PK row snapshot instead of hashing the later rowid reuse'
+    );
 
     $db = open_db($reuse_target);
     $db->exec("UPDATE plugin_keyless SET value = 'target kept old row' WHERE rowid = 1");
@@ -687,10 +692,20 @@ SQL);
     $GLOBALS['wpdb']->query("INSERT INTO plugin_runtime_keyless (label, value) VALUES ('Second runtime row', 'reused')");
     $runtime_event_count = (int) $runtime_ddl_pdo->query('SELECT COUNT(*) FROM temp.forkpress_row_identity_events')->fetchColumn();
     assert_same($runtime_event_count, 3, 'runtime row identity triggers refresh after CREATE TABLE in the same request');
+    assert_same(
+        (string) $runtime_ddl_pdo->query("SELECT row_payload FROM temp.forkpress_row_identity_events WHERE op = 'delete' ORDER BY id LIMIT 1")->fetchColumn(),
+        '{"label":{"type":"text","value":"First runtime row"},"value":{"type":"text","value":"base"}}',
+        'runtime delete trigger records the deleted no-PK row snapshot'
+    );
     forkpress_cow_flush_row_identity_events();
     assert_same((int)scalar($runtime_ddl_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'runtime-ddl' AND policy = 'runtime-row-identity-tracking' AND status = 'identity_tracked'"), 1, 'runtime DDL refresh flush is auditable');
     assert_same((int)scalar($runtime_ddl_metadata, "SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'runtime-ddl' AND table_name = 'plugin_runtime_keyless' AND rowid = 1"), 2, 'runtime DDL rowid reuse keeps separate logical generations');
     assert_same((int)scalar($runtime_ddl_metadata, "SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'runtime-ddl' AND table_name = 'plugin_runtime_keyless' AND rowid = 1 AND deleted_at IS NOT NULL"), 1, 'runtime DDL deleted generation is tombstoned');
+    assert_same(
+        scalar($runtime_ddl_metadata, "SELECT row_hash FROM merge_row_identity_history WHERE branch_name = 'runtime-ddl' AND table_name = 'plugin_runtime_keyless' AND rowid = 1 AND deleted_at IS NOT NULL"),
+        cow_merge_row_hash(['label' => 'First runtime row', 'value' => 'base']),
+        'runtime DDL delete+reuse preserves the deleted row content in identity history'
+    );
 
     $band_base = $tmp . '/band-base.sqlite';
     $band_feature_a = $tmp . '/band-feature-a.sqlite';

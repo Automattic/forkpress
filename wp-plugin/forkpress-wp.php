@@ -214,11 +214,65 @@ function forkpress_cow_keyless_tables(PDO $pdo): array {
     return $tables;
 }
 
+function forkpress_cow_sqlite_json_available(PDO $pdo): bool {
+    static $available = null;
+    if ($available !== null) {
+        return $available;
+    }
+
+    try {
+        $stmt = $pdo->query("SELECT json_object('ok', 1)");
+        $available = $stmt !== false && $stmt->fetchColumn() === '{"ok":1}';
+    } catch (Throwable $e) {
+        $available = false;
+    }
+    return $available;
+}
+
+function forkpress_cow_row_identity_payload_expr(PDO $pdo, string $table, string $row_alias): string {
+    if (!forkpress_cow_sqlite_json_available($pdo)) {
+        return 'NULL';
+    }
+
+    $info = $pdo->query('PRAGMA table_info(' . forkpress_cow_sqlite_identifier($table) . ')');
+    if (!$info) {
+        return 'NULL';
+    }
+
+    $parts = [];
+    foreach ($info->fetchAll(PDO::FETCH_ASSOC) as $column) {
+        $name = $column['name'] ?? null;
+        if (!is_string($name) || $name === '') {
+            continue;
+        }
+        $value = $row_alias . '.' . forkpress_cow_sqlite_identifier($name);
+        $encoded_value = "CASE typeof($value) WHEN 'blob' THEN hex($value) ELSE $value END";
+        $parts[] = $pdo->quote($name);
+        $parts[] = "json_object('type', typeof($value), 'value', $encoded_value)";
+    }
+
+    if (!$parts) {
+        return "json_object()";
+    }
+    return 'json_object(' . implode(', ', $parts) . ')';
+}
+
 function forkpress_cow_prepare_row_identity_tracking(PDO $pdo, bool $clear_events): void {
     $pdo->exec(
         'CREATE TEMP TABLE IF NOT EXISTS forkpress_row_identity_events (' .
-        'id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT NOT NULL, op TEXT NOT NULL, rowid INTEGER NOT NULL)'
+        'id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT NOT NULL, op TEXT NOT NULL, rowid INTEGER NOT NULL, row_payload TEXT)'
     );
+    $columns = $pdo->query('PRAGMA temp.table_info(forkpress_row_identity_events)');
+    $has_payload = false;
+    foreach ($columns ? $columns->fetchAll(PDO::FETCH_ASSOC) : [] as $column) {
+        if (($column['name'] ?? null) === 'row_payload') {
+            $has_payload = true;
+            break;
+        }
+    }
+    if (!$has_payload) {
+        $pdo->exec('ALTER TABLE temp.forkpress_row_identity_events ADD COLUMN row_payload TEXT');
+    }
     if ($clear_events) {
         $pdo->exec('DELETE FROM temp.forkpress_row_identity_events');
     }
@@ -227,15 +281,17 @@ function forkpress_cow_prepare_row_identity_tracking(PDO $pdo, bool $clear_event
         $hash = substr(hash('sha256', $table), 0, 24);
         $quoted_table = forkpress_cow_sqlite_identifier($table);
         $table_literal = $pdo->quote($table);
+        $insert_payload = forkpress_cow_row_identity_payload_expr($pdo, $table, 'new');
+        $delete_payload = forkpress_cow_row_identity_payload_expr($pdo, $table, 'old');
         $insert_trigger = forkpress_cow_sqlite_identifier('forkpress_rid_' . $hash . '_ai');
         $delete_trigger = forkpress_cow_sqlite_identifier('forkpress_rid_' . $hash . '_ad');
         $pdo->exec(
             "CREATE TEMP TRIGGER IF NOT EXISTS $insert_trigger AFTER INSERT ON $quoted_table " .
-            "BEGIN INSERT INTO forkpress_row_identity_events(table_name, op, rowid) VALUES ($table_literal, 'insert', new.rowid); END"
+            "BEGIN INSERT INTO forkpress_row_identity_events(table_name, op, rowid, row_payload) VALUES ($table_literal, 'insert', new.rowid, $insert_payload); END"
         );
         $pdo->exec(
             "CREATE TEMP TRIGGER IF NOT EXISTS $delete_trigger AFTER DELETE ON $quoted_table " .
-            "BEGIN INSERT INTO forkpress_row_identity_events(table_name, op, rowid) VALUES ($table_literal, 'delete', old.rowid); END"
+            "BEGIN INSERT INTO forkpress_row_identity_events(table_name, op, rowid, row_payload) VALUES ($table_literal, 'delete', old.rowid, $delete_payload); END"
         );
     }
 }
@@ -294,7 +350,7 @@ function forkpress_cow_flush_row_identity_events(): void {
 
     try {
         $stmt = $pdo->query(
-            "SELECT id, table_name, op, rowid FROM temp.forkpress_row_identity_events ORDER BY id"
+            "SELECT id, table_name, op, rowid, row_payload FROM temp.forkpress_row_identity_events ORDER BY id"
         );
         $events = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
         if (!$events && empty($GLOBALS['forkpress_cow_row_identity_schema_changed'])) {
