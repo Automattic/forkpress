@@ -492,6 +492,8 @@ tooling.
   source rows after validating that the target table is still absent, then
   restore source indexes/triggers that were removed as a side effect of the
   target table drop.
+  Source-added table creation is recorded as a schema-level source-applied
+  decision even when the table has no rows.
   Compatible rebuilds also preserve
   dependent target views when those views validate before and after the rebuild.
   Source view rewrites preserve transitive dependent target views and their

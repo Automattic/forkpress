@@ -172,6 +172,24 @@ try {
     assert_same(scalar($target, "SELECT value FROM plugin_items WHERE item_id = 'alpha'"), 'source plugin value', 'plugin table with explicit PK merges generically');
     assert_true(file_exists($metadata), 'merge metadata database is created outside the WordPress DB');
 
+    $empty_table_base = $tmp . '/empty-table-base.sqlite';
+    $empty_table_source = $tmp . '/empty-table-source.sqlite';
+    $empty_table_target = $tmp . '/empty-table-target.sqlite';
+    create_base_db($empty_table_base);
+    copy($empty_table_base, $empty_table_source);
+    copy($empty_table_base, $empty_table_target);
+    $db = open_db($empty_table_source);
+    $db->exec('CREATE TABLE plugin_empty_source_table (item_id TEXT PRIMARY KEY, label TEXT)');
+    $db->close();
+    $empty_table_result = cow_merge_databases($empty_table_base, $empty_table_source, $empty_table_target, $metadata, 'feature-empty-table', 'main');
+    assert_same($empty_table_result['status'], 'completed', 'source-added empty table merges cleanly');
+    assert_same((int)scalar($empty_table_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_empty_source_table'"), 1, 'source-added empty table is created on target');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_empty_source_table' AND column_name IS NULL AND row_identity IS NULL AND decision = 'source-applied'"),
+        1,
+        'source-added empty table creation is auditable even without row decisions'
+    );
+
     $conflict_base = $tmp . '/conflict-base.sqlite';
     $conflict_source = $tmp . '/conflict-source.sqlite';
     $conflict_target = $tmp . '/conflict-target.sqlite';

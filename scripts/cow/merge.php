@@ -5200,12 +5200,25 @@ function cow_merge_apply_source_table(
     if (!$target->exec($ddl)) {
         throw new RuntimeException("failed to create target table $table: " . $target->lastErrorMsg());
     }
+    cow_merge_record_decision(
+        $meta,
+        $run_id,
+        $table,
+        null,
+        null,
+        'source-applied',
+        'source added table and target had no table',
+        null,
+        $ddl,
+        null,
+        $ddl
+    );
     $columns = cow_merge_table_columns($source, $table);
     $pk_cols = cow_merge_pk_cols($source, $table);
     $rows = $pk_cols
         ? cow_merge_load_rows($source, $table, $pk_cols)
         : cow_merge_keyless_rows_for_branch($source, $meta, $run_id, $source_branch, $table, []);
-    $applied = 0;
+    $applied = 1;
     foreach ($rows as $identity_json => $entry) {
         $new_rowid = cow_merge_insert_row($target, $table, $entry['row'], $columns);
         if (!$pk_cols) {

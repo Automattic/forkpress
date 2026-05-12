@@ -23,6 +23,7 @@
 - Tightened source table drop resolution so dependent target indexes/triggers must be resolved explicitly before the table drop can apply, preserving auditable resolution history for those schema objects.
 - Added validation-gated source resolution for target-dropped SQLite tables, restoring the audited source table and rows only when the target table is still absent.
 - Extended target-dropped table source resolution to restore source-side indexes and triggers removed by the target table drop, with the applied dependency SQL captured in resolution metadata.
+- Added schema-level audit decisions for source-added table creation, including empty plugin tables that have no row-level merge decisions.
 - Added runtime-backed COW e2e coverage for deterministic resolution records being reviewed through `forkpress branch merge-review resolution`.
 - Updated the automatic mergeback loop runner to pass a configurable Codex reasoning-effort setting and to include the changelog/known-good tag policy in every worker prompt.
 
