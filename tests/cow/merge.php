@@ -1437,6 +1437,9 @@ SQL);
     create_base_db($schema_table_target_drop_base);
     $db = open_db($schema_table_target_drop_base);
     $db->exec('CREATE TABLE plugin_table_target_drop (item_id TEXT PRIMARY KEY, label TEXT)');
+    $db->exec('CREATE INDEX plugin_table_target_drop_label_idx ON plugin_table_target_drop(label)');
+    $db->exec('CREATE TABLE plugin_table_target_drop_audit (item_id TEXT, label TEXT)');
+    $db->exec("CREATE TRIGGER plugin_table_target_drop_insert AFTER INSERT ON plugin_table_target_drop BEGIN INSERT INTO plugin_table_target_drop_audit (item_id, label) VALUES (NEW.item_id, NEW.label); END");
     $db->exec("INSERT INTO plugin_table_target_drop (item_id, label) VALUES ('alpha', 'Alpha')");
     $db->close();
     copy($schema_table_target_drop_base, $schema_table_target_drop_source);
@@ -1474,6 +1477,18 @@ SQL);
     assert_same($schema_table_target_drop_resolution['status'], 'applied', 'source table restore schema resolution records applied status');
     assert_same((int)scalar($schema_table_target_drop_target, "SELECT COUNT(*) FROM plugin_table_target_drop"), 2, 'source table restore copies audited source rows into the target table');
     assert_same(scalar($schema_table_target_drop_target, "SELECT label FROM plugin_table_target_drop WHERE item_id = 'beta'"), 'Beta', 'source table restore includes source-only rows');
+    assert_same((int)scalar($schema_table_target_drop_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_table_target_drop_label_idx'"), 1, 'source table restore recreates source table index removed by the target table drop');
+    assert_same((int)scalar($schema_table_target_drop_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_table_target_drop_insert'"), 1, 'source table restore recreates source table trigger removed by the target table drop');
+    $db = open_db($schema_table_target_drop_target);
+    $db->exec("INSERT INTO plugin_table_target_drop (item_id, label) VALUES ('gamma', 'Gamma')");
+    $db->close();
+    assert_same(scalar($schema_table_target_drop_target, "SELECT label FROM plugin_table_target_drop_audit WHERE item_id = 'gamma'"), 'Gamma', 'recreated source table trigger fires after target-dropped table restore');
+    $schema_table_target_drop_payload = cow_merge_decode_payload_json(
+        (string)scalar($metadata, "SELECT resolved_payload FROM merge_resolutions WHERE conflict_id = $schema_table_target_drop_conflict_id ORDER BY id DESC LIMIT 1"),
+        'target-dropped table resolution'
+    );
+    assert_same($schema_table_target_drop_payload['indexes'][0]['name'] ?? null, 'plugin_table_target_drop_label_idx', 'source table restore resolution records restored source index SQL');
+    assert_same($schema_table_target_drop_payload['triggers'][0]['name'] ?? null, 'plugin_table_target_drop_insert', 'source table restore resolution records restored source trigger SQL');
 
     $schema_table_drop_view_base = $tmp . '/schema-table-drop-view-base.sqlite';
     $schema_table_drop_view_source = $tmp . '/schema-table-drop-view-source.sqlite';

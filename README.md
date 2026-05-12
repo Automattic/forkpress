@@ -489,7 +489,9 @@ tooling.
   source kept; and compatible table rebuilds that preserve target rows and
   target indexes/triggers while changing audited non-primary-key column
   definitions. Source table restores recreate the audited source table and copy
-  source rows after validating that the target table is still absent.
+  source rows after validating that the target table is still absent, then
+  restore source indexes/triggers that were removed as a side effect of the
+  target table drop.
   Compatible rebuilds also preserve
   dependent target views when those views validate before and after the rebuild.
   Source view rewrites preserve transitive dependent target views and their

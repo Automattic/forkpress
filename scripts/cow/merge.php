@@ -520,6 +520,62 @@ function cow_merge_schema_object_sql(SQLite3 $db, string $type, string $name): ?
     return $row ? (string)$row['sql'] : null;
 }
 
+function cow_merge_source_table_restore_payload(SQLite3 $source, string $table, string $table_sql): array {
+    $indexes = [];
+    foreach (cow_merge_index_sql_map($source) as $name => $entry) {
+        if ((string)$entry['table'] === $table) {
+            $indexes[] = [
+                'name' => (string)$name,
+                'sql' => (string)$entry['sql'],
+            ];
+        }
+    }
+    $triggers = [];
+    foreach (cow_merge_schema_object_sql_map($source, 'trigger') as $name => $entry) {
+        if ((string)$entry['table'] === $table) {
+            $triggers[] = [
+                'name' => (string)$name,
+                'sql' => (string)$entry['sql'],
+            ];
+        }
+    }
+    return [
+        'table_sql' => $table_sql,
+        'indexes' => $indexes,
+        'triggers' => $triggers,
+    ];
+}
+
+function cow_merge_normalize_source_table_restore_payload(mixed $payload): array {
+    if (is_string($payload)) {
+        return [
+            'table_sql' => $payload,
+            'indexes' => [],
+            'triggers' => [],
+        ];
+    }
+    if (!is_array($payload) || !isset($payload['table_sql']) || !is_string($payload['table_sql'])) {
+        throw new RuntimeException('schema conflict does not contain a source table restore payload');
+    }
+    $normalized = [
+        'table_sql' => $payload['table_sql'],
+        'indexes' => [],
+        'triggers' => [],
+    ];
+    foreach (['indexes', 'triggers'] as $key) {
+        foreach (($payload[$key] ?? []) as $entry) {
+            if (!is_array($entry) || !isset($entry['name'], $entry['sql']) || !is_string($entry['name']) || !is_string($entry['sql'])) {
+                throw new RuntimeException("schema conflict contains an invalid source table $key payload");
+            }
+            $normalized[$key][] = [
+                'name' => $entry['name'],
+                'sql' => $entry['sql'],
+            ];
+        }
+    }
+    return $normalized;
+}
+
 function cow_merge_table_columns(SQLite3 $db, string $table): array {
     $columns = [];
     $res = $db->query('PRAGMA table_info(' . cow_merge_quote_ident($table) . ')');
@@ -3772,15 +3828,23 @@ function cow_merge_resolve_schema_conflict(
                 };
             }
         } elseif ($conflict_type === 'schema-target-dropped-table' && $object === '') {
-            if (!is_string($source_payload)) {
-                throw new RuntimeException("schema conflict #$conflict_id does not contain a source table payload");
-            }
+            $restore_payload = cow_merge_normalize_source_table_restore_payload($source_payload);
             if ($target_payload !== null) {
                 throw new RuntimeException("schema conflict #$conflict_id has an unexpected target table payload");
             }
             $current_source_sql = cow_merge_table_sql($source, $table);
-            if (!cow_merge_values_equal($current_source_sql, $source_payload)) {
+            if (!cow_merge_values_equal($current_source_sql, $restore_payload['table_sql'])) {
                 throw new RuntimeException('source table schema no longer matches the audited conflict source value; rerun merge before resolving');
+            }
+            foreach ($restore_payload['indexes'] as $index) {
+                if (!cow_merge_values_equal(cow_merge_index_sql($source, (string)$index['name']), (string)$index['sql'])) {
+                    throw new RuntimeException('source table index no longer matches the audited conflict source value; rerun merge before resolving');
+                }
+            }
+            foreach ($restore_payload['triggers'] as $trigger) {
+                if (!cow_merge_values_equal(cow_merge_schema_object_sql($source, 'trigger', (string)$trigger['name']), (string)$trigger['sql'])) {
+                    throw new RuntimeException('source table trigger no longer matches the audited conflict source value; rerun merge before resolving');
+                }
             }
             $current_target_sql = cow_merge_table_sql($target, $table);
             $previous = $current_target_sql;
@@ -3790,8 +3854,8 @@ function cow_merge_resolve_schema_conflict(
             if ($choice === 'source') {
                 $source_branch = (string)$conflict['source_branch'];
                 $target_branch = (string)$conflict['target_branch'];
-                $resolved = $source_payload;
-                $apply_source = function () use ($source, $target, $meta, $conflict, $source_branch, $target_branch, $table, $source_payload): void {
+                $resolved = $restore_payload;
+                $apply_source = function () use ($source, $target, $meta, $conflict, $source_branch, $target_branch, $table, $restore_payload): void {
                     cow_merge_restore_source_table(
                         $source,
                         $target,
@@ -3800,7 +3864,7 @@ function cow_merge_resolve_schema_conflict(
                         $source_branch,
                         $target_branch,
                         $table,
-                        $source_payload
+                        $restore_payload
                     );
                 };
             }
@@ -5173,11 +5237,12 @@ function cow_merge_restore_source_table(
     string $source_branch,
     string $target_branch,
     string $table,
-    string $ddl
+    array $restore_payload
 ): int {
     if (cow_merge_table_sql($target, $table) !== null) {
         throw new RuntimeException("target table already exists during source table restore: $table");
     }
+    $ddl = (string)$restore_payload['table_sql'];
     if (!$target->exec($ddl)) {
         throw new RuntimeException("failed to restore target table $table: " . $target->lastErrorMsg());
     }
@@ -5193,6 +5258,22 @@ function cow_merge_restore_source_table(
             cow_merge_remember_row_identity($meta, $run_id, $target_branch, $table, $new_rowid, $entry['identity'], $entry['row']);
         }
         $restored++;
+    }
+    foreach ($restore_payload['indexes'] as $index) {
+        if (cow_merge_index_sql($target, (string)$index['name']) !== null) {
+            throw new RuntimeException('target index already exists during source table restore: ' . $index['name']);
+        }
+        if (!$target->exec((string)$index['sql'])) {
+            throw new RuntimeException('failed to restore source table index ' . $index['name'] . ': ' . $target->lastErrorMsg());
+        }
+    }
+    foreach ($restore_payload['triggers'] as $trigger) {
+        if (cow_merge_schema_object_sql($target, 'trigger', (string)$trigger['name']) !== null) {
+            throw new RuntimeException('target trigger already exists during source table restore: ' . $trigger['name']);
+        }
+        if (!$target->exec((string)$trigger['sql'])) {
+            throw new RuntimeException('failed to restore source table trigger ' . $trigger['name'] . ': ' . $target->lastErrorMsg());
+        }
     }
     return $restored;
 }
@@ -5815,7 +5896,18 @@ function cow_merge_databases(
                 continue;
             }
             if ($target_sql === null) {
-                cow_merge_record_schema_conflict($meta, $run_id, $table, null, 'schema-target-dropped-table', $base_sql, $source_sql, null, null, 'target dropped table while source kept or changed it');
+                cow_merge_record_schema_conflict(
+                    $meta,
+                    $run_id,
+                    $table,
+                    null,
+                    'schema-target-dropped-table',
+                    $base_sql,
+                    cow_merge_source_table_restore_payload($source, $table, $source_sql),
+                    null,
+                    null,
+                    'target dropped table while source kept or changed it'
+                );
                 $conflicts++;
                 continue;
             }
