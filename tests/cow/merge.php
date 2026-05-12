@@ -181,13 +181,22 @@ try {
     $db = open_db($empty_table_source);
     $db->exec('CREATE TABLE plugin_empty_source_table (item_id TEXT PRIMARY KEY, label TEXT)');
     $db->close();
+    $db = open_db($empty_table_target);
+    $db->exec('CREATE TABLE plugin_target_only_table (item_id TEXT PRIMARY KEY, label TEXT)');
+    $db->close();
     $empty_table_result = cow_merge_databases($empty_table_base, $empty_table_source, $empty_table_target, $metadata, 'feature-empty-table', 'main');
     assert_same($empty_table_result['status'], 'completed', 'source-added empty table merges cleanly');
     assert_same((int)scalar($empty_table_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_empty_source_table'"), 1, 'source-added empty table is created on target');
+    assert_same((int)scalar($empty_table_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_target_only_table'"), 1, 'target-added table is preserved');
     assert_same(
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_empty_source_table' AND column_name IS NULL AND row_identity IS NULL AND decision = 'source-applied'"),
         1,
         'source-added empty table creation is auditable even without row decisions'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_target_only_table' AND column_name IS NULL AND row_identity IS NULL AND decision = 'target-kept'"),
+        1,
+        'target-added table preservation is auditable'
     );
 
     $conflict_base = $tmp . '/conflict-base.sqlite';
@@ -906,6 +915,7 @@ SQL);
 
     $db = open_db($schema_target);
     $db->exec('ALTER TABLE plugin_items ADD COLUMN target_note TEXT');
+    $db->exec('CREATE INDEX plugin_items_target_note_idx ON plugin_items(target_note)');
     $db->exec("UPDATE plugin_items SET target_note = 'target-only schema value' WHERE item_id = 'alpha'");
     $db->close();
 
@@ -916,6 +926,8 @@ SQL);
     assert_same((int)scalar($schema_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_items_label_idx'"), 1, 'source-added index is created on target');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_items' AND column_name = 'extra' AND row_identity IS NULL AND decision = 'source-applied'"), 1, 'source-added column decision is auditable');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_items' AND column_name = 'plugin_items_label_idx' AND decision = 'source-applied'"), 1, 'source-added index decision is auditable');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_items' AND column_name = 'target_note' AND decision = 'target-kept'"), 1, 'target-added column preservation is auditable');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_items' AND column_name = 'plugin_items_target_note_idx' AND decision = 'target-kept'"), 1, 'target-added index preservation is auditable');
 
     $schema_conflict_base = $tmp . '/schema-conflict-base.sqlite';
     $schema_conflict_source = $tmp . '/schema-conflict-source.sqlite';
@@ -1236,17 +1248,26 @@ SQL);
     $db->exec('CREATE VIEW plugin_items_source_view AS SELECT item_id, label FROM plugin_items');
     $db->exec('CREATE TRIGGER plugin_items_source_insert AFTER INSERT ON plugin_items BEGIN INSERT INTO plugin_item_audit (item_id) VALUES (NEW.item_id); END');
     $db->close();
+    $db = open_db($schema_object_target);
+    $db->exec('CREATE VIEW plugin_items_target_view AS SELECT item_id, value FROM plugin_items');
+    $db->exec('CREATE TRIGGER plugin_items_target_insert AFTER INSERT ON plugin_items BEGIN INSERT INTO plugin_item_audit (item_id) VALUES (NEW.item_id || \':target\'); END');
+    $db->close();
 
     $result = cow_merge_databases($schema_object_base, $schema_object_source, $schema_object_target, $metadata, 'feature-schema-object', 'main');
     assert_same($result['status'], 'completed', 'source-added views and triggers merge cleanly');
     assert_same((int)scalar($schema_object_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_source_view'"), 1, 'source-added view is created on target');
     assert_same((int)scalar($schema_object_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_items_source_insert'"), 1, 'source-added trigger is created on target');
+    assert_same((int)scalar($schema_object_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_target_view'"), 1, 'target-added view is preserved');
+    assert_same((int)scalar($schema_object_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_items_target_insert'"), 1, 'target-added trigger is preserved');
     $db = open_db($schema_object_target);
     $db->exec("INSERT INTO plugin_items (item_id, label, value) VALUES ('gamma', 'Gamma', 'view trigger')");
     $db->close();
     assert_same(scalar($schema_object_target, "SELECT label FROM plugin_items_source_view WHERE item_id = 'gamma'"), 'Gamma', 'source-added view remains queryable after merge');
     assert_same(scalar($schema_object_target, "SELECT item_id FROM plugin_item_audit WHERE item_id = 'gamma'"), 'gamma', 'source-added trigger fires after merge');
+    assert_same(scalar($schema_object_target, "SELECT value FROM plugin_items_target_view WHERE item_id = 'gamma'"), 'view trigger', 'target-added view remains queryable after merge');
+    assert_same(scalar($schema_object_target, "SELECT item_id FROM plugin_item_audit WHERE item_id = 'gamma:target'"), 'gamma:target', 'target-added trigger fires after merge');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE column_name IN ('plugin_items_source_view', 'plugin_items_source_insert') AND decision = 'source-applied'"), 2, 'source-added view and trigger decisions are auditable');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE column_name IN ('plugin_items_target_view', 'plugin_items_target_insert') AND decision = 'target-kept'"), 2, 'target-added view and trigger preservation decisions are auditable');
 
     $schema_view_rewrite_base = $tmp . '/schema-view-rewrite-base.sqlite';
     $schema_view_rewrite_source = $tmp . '/schema-view-rewrite-source.sqlite';

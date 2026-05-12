@@ -4879,6 +4879,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
         $conflict_count_filter = cow_merge_audit_count_sql($filters, 'conflicts', 'c', $review_notes_exist);
         $target_wins_filter = cow_merge_audit_named_decision_count_sql($filters, 'd', 'target-wins', $review_notes_exist);
         $source_applied_filter = cow_merge_audit_named_decision_count_sql($filters, 'd', 'source-applied', $review_notes_exist);
+        $target_kept_filter = cow_merge_audit_named_decision_count_sql($filters, 'd', 'target-kept', $review_notes_exist);
         $id_band_filter = cow_merge_audit_count_sql($filters, 'decisions', 'd', $review_notes_exist);
         $run_where = $run_id === null ? '' : 'WHERE r.id = :run_id';
         $run_params = [':limit' => $limit];
@@ -4892,6 +4893,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
             "(SELECT COUNT(*) FROM merge_conflicts c WHERE c.run_id = r.id$conflict_count_filter) AS conflict_count, " .
             "(SELECT COUNT(*) FROM merge_decisions d WHERE d.run_id = r.id AND d.decision = 'target-wins'$target_wins_filter) AS target_wins_count, " .
             "(SELECT COUNT(*) FROM merge_decisions d WHERE d.run_id = r.id AND d.decision = 'source-applied'$source_applied_filter) AS source_applied_count, " .
+            "(SELECT COUNT(*) FROM merge_decisions d WHERE d.run_id = r.id AND d.decision = 'target-kept'$target_kept_filter) AS target_kept_count, " .
             "(SELECT COUNT(*) FROM merge_decisions d WHERE d.run_id = r.id AND d.decision LIKE 'id-band-%'$id_band_filter) AS id_band_decision_count " .
             "FROM merge_runs r $run_where ORDER BY r.id DESC LIMIT :limit",
             $run_params
@@ -4948,6 +4950,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
                     "SELECT :group_by AS group_by, $group_expr AS group_key, COUNT(*) AS decision_count, " .
                     "SUM(CASE WHEN d.decision = 'target-wins' THEN 1 ELSE 0 END) AS target_wins_count, " .
                     "SUM(CASE WHEN d.decision = 'source-applied' THEN 1 ELSE 0 END) AS source_applied_count, " .
+                    "SUM(CASE WHEN d.decision = 'target-kept' THEN 1 ELSE 0 END) AS target_kept_count, " .
                     "SUM(CASE WHEN d.decision = 'id-band-skipped' THEN 1 ELSE 0 END) AS id_band_skipped_count, " .
                     "SUM(CASE WHEN d.table_name = '__files__' THEN 1 ELSE 0 END) AS file_count, " .
                     "SUM(CASE WHEN d.table_name <> '__files__' THEN 1 ELSE 0 END) AS db_count " .
@@ -5086,7 +5089,7 @@ function cow_merge_print_audit_text(array $report): void {
         foreach ($report['runs'] as $run) {
             $finished = $run['finished_at'] !== null && $run['finished_at'] !== '' ? (string)$run['finished_at'] : 'running';
             echo "  #{$run['id']} {$run['status']} {$run['source_branch']} -> {$run['target_branch']} policy={$run['policy']} started={$run['started_at']} finished=$finished\n";
-            echo "     decisions={$run['decision_count']} target-wins={$run['target_wins_count']} source-applied={$run['source_applied_count']} id-bands={$run['id_band_decision_count']} conflicts={$run['conflict_count']}\n";
+            echo "     decisions={$run['decision_count']} target-wins={$run['target_wins_count']} source-applied={$run['source_applied_count']} target-kept={$run['target_kept_count']} id-bands={$run['id_band_decision_count']} conflicts={$run['conflict_count']}\n";
             if ((string)$run['status'] === 'failed' && isset($run['failure_reason']) && (string)$run['failure_reason'] !== '') {
                 echo "     failure=" . cow_merge_audit_truncate((string)$run['failure_reason'], 240) . "\n";
             }
@@ -5132,7 +5135,7 @@ function cow_merge_print_audit_text(array $report): void {
     if ($report['decision_groups']) {
         echo "decision-groups:\n";
         foreach ($report['decision_groups'] as $group) {
-            echo "  {$group['group_by']}={$group['group_key']} decisions={$group['decision_count']} target-wins={$group['target_wins_count']} source-applied={$group['source_applied_count']} id-band-skipped={$group['id_band_skipped_count']} files={$group['file_count']} db={$group['db_count']}\n";
+            echo "  {$group['group_by']}={$group['group_key']} decisions={$group['decision_count']} target-wins={$group['target_wins_count']} source-applied={$group['source_applied_count']} target-kept={$group['target_kept_count']} id-band-skipped={$group['id_band_skipped_count']} files={$group['file_count']} db={$group['db_count']}\n";
         }
     }
 
@@ -5357,6 +5360,7 @@ function cow_merge_apply_safe_table_schema_changes(
     }
 
     $base_by_name = cow_merge_columns_by_name($base_columns);
+    $source_by_name = cow_merge_columns_by_name($source_columns);
     $target_by_name = cow_merge_columns_by_name($target_columns);
     $columns_to_add = [];
     foreach ($source_columns as $source_column) {
@@ -5448,6 +5452,26 @@ function cow_merge_apply_safe_table_schema_changes(
             ['column' => $column, 'definition' => $definition]
         );
     }
+    foreach ($target_columns as $target_column) {
+        $name_key = strtolower((string)$target_column['name']);
+        if (isset($base_by_name[$name_key]) || isset($source_by_name[$name_key])) {
+            continue;
+        }
+        $definition = cow_merge_column_definition_from_create_sql($target_sql, (string)$target_column['name']);
+        cow_merge_record_decision(
+            $meta,
+            $run_id,
+            $table,
+            null,
+            (string)$target_column['name'],
+            'target-kept',
+            'target added a table column that source did not have',
+            null,
+            null,
+            ['column' => $target_column, 'definition' => $definition],
+            ['column' => $target_column, 'definition' => $definition]
+        );
+    }
     return ['merged' => true, 'applied' => count($columns_to_add), 'conflicts' => 0];
 }
 
@@ -5491,6 +5515,20 @@ function cow_merge_apply_index_schema_changes(
                     'source dropped an index; automatic index drops are not applied'
                 );
                 $conflicts++;
+            } elseif ($target_sql !== null) {
+                cow_merge_record_decision(
+                    $meta,
+                    $run_id,
+                    $table,
+                    null,
+                    $index,
+                    'target-kept',
+                    'target added an index while source did not have it',
+                    null,
+                    null,
+                    $target_sql,
+                    $target_sql
+                );
             }
             continue;
         }
@@ -5528,6 +5566,21 @@ function cow_merge_apply_index_schema_changes(
             continue;
         }
         if ($source_sql === $base_sql) {
+            if ($target_sql !== $base_sql) {
+                cow_merge_record_decision(
+                    $meta,
+                    $run_id,
+                    $table,
+                    null,
+                    $index,
+                    'target-kept',
+                    'target changed an index while source did not change it',
+                    $base_sql,
+                    $source_sql,
+                    $target_sql,
+                    $target_sql
+                );
+            }
             continue;
         }
         if ($target_sql === $base_sql) {
@@ -5608,6 +5661,20 @@ function cow_merge_apply_schema_object_changes(
                     "source dropped a $type; automatic $type drops are not applied"
                 );
                 $conflicts++;
+            } elseif ($target_sql !== null) {
+                cow_merge_record_decision(
+                    $meta,
+                    $run_id,
+                    $table,
+                    null,
+                    $name,
+                    'target-kept',
+                    "target added a $type while source did not have it",
+                    null,
+                    null,
+                    $target_sql,
+                    $target_sql
+                );
             }
             continue;
         }
@@ -5645,6 +5712,21 @@ function cow_merge_apply_schema_object_changes(
             continue;
         }
         if ($source_sql === $base_sql) {
+            if ($target_sql !== $base_sql) {
+                cow_merge_record_decision(
+                    $meta,
+                    $run_id,
+                    $table,
+                    null,
+                    $name,
+                    'target-kept',
+                    "target changed a $type while source did not change it",
+                    $base_sql,
+                    $source_sql,
+                    $target_sql,
+                    $target_sql
+                );
+            }
             continue;
         }
         if ($target_sql === $base_sql) {
@@ -5901,6 +5983,20 @@ function cow_merge_databases(
                         'source dropped a table; automatic table drops are not applied'
                     );
                     $conflicts++;
+                } elseif ($base_sql === null && $target_sql !== null) {
+                    cow_merge_record_decision(
+                        $meta,
+                        $run_id,
+                        $table,
+                        null,
+                        null,
+                        'target-kept',
+                        'target added table while source did not have it',
+                        null,
+                        null,
+                        $target_sql,
+                        $target_sql
+                    );
                 }
                 continue;
             }
@@ -5941,6 +6037,20 @@ function cow_merge_databases(
                 if (!$schema_result['merged']) {
                     continue;
                 }
+            } elseif ($base_sql !== null && $source_sql === $base_sql && $target_sql !== $base_sql) {
+                cow_merge_record_decision(
+                    $meta,
+                    $run_id,
+                    $table,
+                    null,
+                    null,
+                    'target-kept',
+                    'target changed table schema while source did not change it',
+                    $base_sql,
+                    $source_sql,
+                    $target_sql,
+                    $target_sql
+                );
             }
 
             $result = cow_merge_table_rows($base, $source, $target, $meta, $run_id, $source_branch, $target_branch, $table);

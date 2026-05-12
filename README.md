@@ -494,6 +494,8 @@ tooling.
   target table drop.
   Source-added table creation is recorded as a schema-level source-applied
   decision even when the table has no rows.
+  Target-only schema additions and rewrites are preserved and recorded as
+  `target-kept` decisions so clean trunk/main-side DDL remains auditable.
   Compatible rebuilds also preserve
   dependent target views when those views validate before and after the rebuild.
   Source view rewrites preserve transitive dependent target views and their
