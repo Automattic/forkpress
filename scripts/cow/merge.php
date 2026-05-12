@@ -3341,10 +3341,26 @@ function cow_merge_table_dependent_views(SQLite3 $db, string $table): array {
     while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
         $sql = (string)$row['sql'];
         if (cow_merge_sql_references_table($sql, $table)) {
-            $views[] = (string)$row['name'];
+            $views[] = [
+                'name' => (string)$row['name'],
+                'sql' => $sql,
+            ];
         }
     }
     return $views;
+}
+
+function cow_merge_validate_views(SQLite3 $db, array $views, string $context): void {
+    foreach ($views as $view) {
+        $name = is_array($view) ? (string)$view['name'] : (string)$view;
+        $res = @$db->query('SELECT * FROM ' . cow_merge_quote_ident($name) . ' LIMIT 0');
+        if (!$res) {
+            throw new InvalidArgumentException(
+                'source schema table rebuild cannot preserve target view ' . $name .
+                " during $context validation: " . $db->lastErrorMsg()
+            );
+        }
+    }
 }
 
 function cow_merge_apply_source_table_rebuild(SQLite3 $target, string $table, string $source_sql, array $source_columns, array $target_columns): void {
@@ -3352,9 +3368,7 @@ function cow_merge_apply_source_table_rebuild(SQLite3 $target, string $table, st
         throw new InvalidArgumentException('source schema resolution can only rebuild tables with the same column order and unchanged primary key columns');
     }
     $dependent_views = cow_merge_table_dependent_views($target, $table);
-    if ($dependent_views) {
-        throw new InvalidArgumentException('source schema table rebuild is blocked by dependent target views: ' . implode(', ', $dependent_views));
-    }
+    cow_merge_validate_views($target, $dependent_views, 'pre-rebuild');
     $dependencies = cow_merge_table_rebuild_dependencies($target, $table);
     $tmp_table = '__forkpress_merge_rebuild_' . bin2hex(random_bytes(8));
     $create_sql = cow_merge_create_table_sql_for_name($source_sql, $tmp_table);
@@ -3376,6 +3390,11 @@ function cow_merge_apply_source_table_rebuild(SQLite3 $target, string $table, st
         if (!$target->exec($copy_sql)) {
             throw new RuntimeException('failed to copy rows into rebuilt table: ' . $target->lastErrorMsg());
         }
+        foreach ($dependent_views as $view) {
+            if (!$target->exec('DROP VIEW ' . cow_merge_quote_ident((string)$view['name']))) {
+                throw new RuntimeException('failed to drop target view ' . $view['name'] . ' during schema rebuild: ' . $target->lastErrorMsg());
+            }
+        }
         if (!$target->exec('DROP TABLE ' . cow_merge_quote_ident($table))) {
             throw new RuntimeException('failed to drop old table during schema rebuild: ' . $target->lastErrorMsg());
         }
@@ -3390,6 +3409,12 @@ function cow_merge_apply_source_table_rebuild(SQLite3 $target, string $table, st
                 );
             }
         }
+        foreach ($dependent_views as $view) {
+            if (!$target->exec((string)$view['sql'])) {
+                throw new RuntimeException('failed to recreate target view ' . $view['name'] . ' after schema rebuild: ' . $target->lastErrorMsg());
+            }
+        }
+        cow_merge_validate_views($target, $dependent_views, 'post-rebuild');
         $target->exec('RELEASE forkpress_schema_rebuild');
     } catch (Throwable $e) {
         $target->exec('ROLLBACK TO forkpress_schema_rebuild');

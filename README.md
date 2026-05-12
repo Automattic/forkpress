@@ -484,9 +484,10 @@ tooling.
   Schema source choices can apply safe source-added columns/indexes, source
   index rewrites or drops, and compatible table rebuilds that preserve target
   rows and target indexes/triggers while changing audited non-primary-key
-  column definitions. Rebuilds remain blocked when target views depend on the
-  table. With `--apply`, ForkPress records the deterministic resolution in
-  merge metadata and appends a reviewed annotation to the conflict audit record.
+  column definitions. Compatible rebuilds also preserve dependent target views
+  when those views validate before and after the rebuild. With `--apply`,
+  ForkPress records the deterministic resolution in merge metadata and appends
+  a reviewed annotation to the conflict audit record.
 - `forkpress branch show <name>` prints the branch directory, database, file
   count, and Git ref path.
 - `forkpress branch delete <name>` removes a COW branch. `main` cannot be

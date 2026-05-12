@@ -1012,13 +1012,20 @@ SQL);
     $db->close();
 
     $result = cow_merge_databases($schema_rebuild_view_base, $schema_rebuild_view_source, $schema_rebuild_view_target, $metadata, 'feature-schema-rebuild-view', 'main');
-    assert_same($result['status'], 'completed_with_conflicts', 'table rewrite with dependent target view remains a schema conflict');
+    assert_same($result['status'], 'completed_with_conflicts', 'table rewrite with dependent target view remains a schema conflict before resolution');
     $schema_rebuild_view_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND column_name IS NULL AND conflict_type = 'schema-conflict' ORDER BY id DESC LIMIT 1");
-    assert_throws(
-        fn() => cow_merge_resolve_conflict($metadata, $schema_rebuild_view_conflict_id, 'source', true, 'Try source table schema with dependent view.', 'test'),
-        'dependent target views',
-        'source table rebuild is blocked while target views depend on the table'
+    $schema_rebuild_view_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_rebuild_view_conflict_id,
+        'source',
+        true,
+        'Apply source table schema and preserve target view.',
+        'test'
     );
+    assert_same($schema_rebuild_view_resolution['status'], 'applied', 'source table rebuild with target view records applied status');
+    assert_same(column_type($schema_rebuild_view_target, 'plugin_items', 'value'), 'INTEGER', 'source table rebuild with target view applies audited source schema');
+    assert_same((int)scalar($schema_rebuild_view_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_view'"), 1, 'source table rebuild preserves target view');
+    assert_same(scalar($schema_rebuild_view_target, "SELECT label FROM plugin_items_view WHERE item_id = 'alpha'"), 'Alpha', 'preserved target view remains queryable after schema rebuild');
 
     $schema_resolve_base = $tmp . '/schema-resolve-base.sqlite';
     $schema_resolve_source = $tmp . '/schema-resolve-source.sqlite';
