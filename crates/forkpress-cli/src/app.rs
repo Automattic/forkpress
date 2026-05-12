@@ -2873,6 +2873,7 @@ fn cow_branch_command(
             let mut path_prefix: Option<String> = None;
             let mut id_band_skips = false;
             let mut review = false;
+            let mut review_status: Option<String> = None;
             let mut index = 1;
             while index < args.args.len() {
                 match args.args[index].as_str() {
@@ -2947,6 +2948,13 @@ fn cow_branch_command(
                         review = true;
                         index += 1;
                     }
+                    "--review-status" => {
+                        let Some(value) = args.args.get(index + 1) else {
+                            bail!("--review-status requires pending, needs-action, or reviewed");
+                        };
+                        review_status = Some(value.clone());
+                        index += 2;
+                    }
                     other => {
                         bail!("unsupported argument for `forkpress branch merge-audit`: {other}")
                     }
@@ -2967,6 +2975,7 @@ fn cow_branch_command(
                 path_prefix.as_deref(),
                 id_band_skips,
                 review,
+                review_status.as_deref(),
             )?;
             Ok(0)
         }
@@ -4033,6 +4042,8 @@ mod git_helper_tests {
             ".forkpress",
             "merge-audit",
             "--review",
+            "--review-status",
+            "needs-action",
         ])
         .unwrap();
         let Commands::Branch(args) = cli.command else {
@@ -4040,7 +4051,12 @@ mod git_helper_tests {
         };
         assert_eq!(
             args.args,
-            vec!["merge-audit".to_string(), "--review".to_string()]
+            vec![
+                "merge-audit".to_string(),
+                "--review".to_string(),
+                "--review-status".to_string(),
+                "needs-action".to_string(),
+            ]
         );
     }
 

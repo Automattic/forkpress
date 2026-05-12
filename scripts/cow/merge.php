@@ -18,7 +18,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "  php merge.php audit --metadata-db <path> [--format text|json] [--limit N] [--run ID]\n");
     fwrite(STDERR, "    [--scope all|db|files] [--records all|conflicts|decisions] [--path <path>] [--path-prefix <prefix>]\n");
     fwrite(STDERR, "    [--scope all|db|files] [--records all|conflicts|decisions] [--conflict-type TYPE] [--decision DECISION]\n");
-    fwrite(STDERR, "    [--id-band-skips] [--review]\n");
+    fwrite(STDERR, "    [--id-band-skips] [--review] [--review-status pending|needs-action|reviewed]\n");
     fwrite(STDERR, "  php merge.php review-record --metadata-db <path> --record conflict|decision --id ID --status pending|needs-action|reviewed --note TEXT [--reviewer NAME]\n");
 }
 
@@ -2734,6 +2734,13 @@ function cow_merge_audit_filter_text(?string $value, string $name): ?string {
     return $value;
 }
 
+function cow_merge_audit_review_status_filter(?string $value): ?string {
+    if ($value === null || $value === '') {
+        return null;
+    }
+    return cow_merge_review_status($value);
+}
+
 function cow_merge_audit_file_path_filter(?string $value, string $name): ?string {
     if ($value === null || $value === '') {
         return null;
@@ -2900,6 +2907,7 @@ function cow_merge_audit_filters(array $filters = []): array {
         'path_prefix' => $path_prefix,
         'id_band_skips' => (string)($filters['id_band_skips'] ?? '') === '1',
         'review' => (string)($filters['review'] ?? '') === '1',
+        'review_status' => cow_merge_audit_review_status_filter($filters['review_status'] ?? null),
     ];
 }
 
@@ -2943,7 +2951,8 @@ function cow_merge_audit_where_sql(
     ?int $run_id,
     array $filters,
     string $record_type,
-    string $alias = ''
+    string $alias = '',
+    bool $review_notes_exist = true
 ): array {
     $prefix = $alias === '' ? '' : $alias . '.';
     $clauses = [];
@@ -2986,6 +2995,19 @@ function cow_merge_audit_where_sql(
         }
     }
 
+    if (($filters['review_status'] ?? null) !== null) {
+        if (!$review_notes_exist) {
+            $clauses[] = '0 = 1';
+        } else {
+            $note_type = $record_type === 'conflicts' ? 'conflict' : 'decision';
+            $outer_table = $record_type === 'conflicts' ? 'merge_conflicts' : 'merge_decisions';
+            $outer_id = $alias === '' ? $outer_table . '.id' : $prefix . 'id';
+            $clauses[] = "(SELECT rn.status FROM merge_review_notes rn WHERE rn.record_type = '$note_type' AND rn.record_id = " .
+                $outer_id . ' ORDER BY rn.id DESC LIMIT 1) = :review_status';
+            $params[':review_status'] = $filters['review_status'];
+        }
+    }
+
     return [
         $clauses ? 'WHERE ' . implode(' AND ', $clauses) : '',
         $params,
@@ -2993,7 +3015,7 @@ function cow_merge_audit_where_sql(
     ];
 }
 
-function cow_merge_audit_count_sql(array $filters, string $record_type, string $alias): string {
+function cow_merge_audit_count_sql(array $filters, string $record_type, string $alias, bool $review_notes_exist = true): string {
     $conditions = [];
     if ($filters['scope'] === 'files') {
         $conditions[] = $alias . ".table_name = '__files__'";
@@ -3011,6 +3033,15 @@ function cow_merge_audit_count_sql(array $filters, string $record_type, string $
             $conditions[] = $alias . ".decision = 'id-band-skipped'";
         }
     }
+    if (($filters['review_status'] ?? null) !== null) {
+        if (!$review_notes_exist) {
+            $conditions[] = '0 = 1';
+        } else {
+            $note_type = $record_type === 'conflicts' ? 'conflict' : 'decision';
+            $conditions[] = "(SELECT rn.status FROM merge_review_notes rn WHERE rn.record_type = '$note_type' AND rn.record_id = " .
+                $alias . ".id ORDER BY rn.id DESC LIMIT 1) = '" . SQLite3::escapeString($filters['review_status']) . "'";
+        }
+    }
     if ($filters['path'] !== null) {
         $conditions[] = $alias . ".table_name = '__files__'";
         $conditions[] = $alias . ".row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json($filters['path'])) . "'";
@@ -3021,12 +3052,12 @@ function cow_merge_audit_count_sql(array $filters, string $record_type, string $
     return $conditions ? ' AND ' . implode(' AND ', $conditions) : '';
 }
 
-function cow_merge_audit_named_decision_count_sql(array $filters, string $alias, string $decision): string {
+function cow_merge_audit_named_decision_count_sql(array $filters, string $alias, string $decision, bool $review_notes_exist = true): string {
     if ($filters['decision'] !== null && $filters['decision'] !== $decision) {
         return ' AND 0';
     }
     $filters['decision'] = null;
-    return cow_merge_audit_count_sql($filters, 'decisions', $alias);
+    return cow_merge_audit_count_sql($filters, 'decisions', $alias, $review_notes_exist);
 }
 
 function cow_merge_fetch_rows(SQLite3 $db, string $sql, array $params = []): array {
@@ -3211,11 +3242,11 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
         $failure_reason_select = cow_merge_audit_has_column($db, 'merge_runs', 'failure_reason')
             ? 'r.failure_reason'
             : 'NULL AS failure_reason';
-        $decision_count_filter = cow_merge_audit_count_sql($filters, 'decisions', 'd');
-        $conflict_count_filter = cow_merge_audit_count_sql($filters, 'conflicts', 'c');
-        $target_wins_filter = cow_merge_audit_named_decision_count_sql($filters, 'd', 'target-wins');
-        $source_applied_filter = cow_merge_audit_named_decision_count_sql($filters, 'd', 'source-applied');
-        $id_band_filter = cow_merge_audit_count_sql($filters, 'decisions', 'd');
+        $decision_count_filter = cow_merge_audit_count_sql($filters, 'decisions', 'd', $review_notes_exist);
+        $conflict_count_filter = cow_merge_audit_count_sql($filters, 'conflicts', 'c', $review_notes_exist);
+        $target_wins_filter = cow_merge_audit_named_decision_count_sql($filters, 'd', 'target-wins', $review_notes_exist);
+        $source_applied_filter = cow_merge_audit_named_decision_count_sql($filters, 'd', 'source-applied', $review_notes_exist);
+        $id_band_filter = cow_merge_audit_count_sql($filters, 'decisions', 'd', $review_notes_exist);
         $run_where = $run_id === null ? '' : 'WHERE r.id = :run_id';
         $run_params = [':limit' => $limit];
         if ($run_id !== null) {
@@ -3233,7 +3264,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
             $run_params
         );
 
-        [$conflict_filter, $conflict_params] = cow_merge_audit_where_sql($run_id, $filters, 'conflicts');
+        [$conflict_filter, $conflict_params] = cow_merge_audit_where_sql($run_id, $filters, 'conflicts', '', $review_notes_exist);
         $conflict_params[':limit'] = $limit;
         if ($filters['records'] !== 'decisions') {
             $report['conflicts'] = cow_merge_audit_add_payload_previews(cow_merge_audit_table_rows(
@@ -3246,7 +3277,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
             ));
         }
 
-        [$decision_filter, $decision_params] = cow_merge_audit_where_sql($run_id, $filters, 'decisions');
+        [$decision_filter, $decision_params] = cow_merge_audit_where_sql($run_id, $filters, 'decisions', '', $review_notes_exist);
         $decision_params[':limit'] = $limit;
         if ($filters['records'] !== 'conflicts') {
             $report['decisions'] = cow_merge_audit_add_payload_previews(cow_merge_audit_table_rows(
@@ -3316,7 +3347,7 @@ function cow_merge_audit_object_label(array $row): string {
 
 function cow_merge_audit_filter_label(array $filters): string {
     $parts = [];
-    foreach (['scope', 'records', 'conflict_type', 'decision', 'path', 'path_prefix'] as $key) {
+    foreach (['scope', 'records', 'conflict_type', 'decision', 'path', 'path_prefix', 'review_status'] as $key) {
         $value = $filters[$key] ?? null;
         if ($value === null || $value === '') {
             continue;
@@ -4231,6 +4262,7 @@ if (realpath($argv[0] ?? '') === __FILE__) {
                     'path_prefix' => $args['path-prefix'] ?? null,
                     'id_band_skips' => $args['id-band-skips'] ?? null,
                     'review' => $args['review'] ?? null,
+                    'review_status' => $args['review-status'] ?? null,
                 ]
             );
             if ($format === 'json') {

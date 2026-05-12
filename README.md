@@ -465,7 +465,8 @@ tooling.
 - `forkpress branch merge-audit [--format text|json] [--run ID]`
   `[--scope all|db|files] [--records all|conflicts|decisions]`
   `[--conflict-type TYPE] [--decision DECISION] [--path PATH]`
-  `[--path-prefix PREFIX] [--id-band-skips] [--review]` prints the COW merge audit log
+  `[--path-prefix PREFIX] [--id-band-skips] [--review]`
+  `[--review-status pending|needs-action|reviewed]` prints the COW merge audit log
   without opening the raw metadata database.
 - `forkpress branch merge-review conflict|decision <id> --status pending|needs-action|reviewed --note <text>`
   `[--reviewer NAME]` appends a review note to an auditable merge conflict or decision.
