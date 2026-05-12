@@ -32,6 +32,10 @@ on_error() {
   local status=$?
   echo "FAIL cow materialized strategy e2e at line ${BASH_LINENO[0]}: ${BASH_COMMAND}" >&2
   dump_if_exists "$TMP/git-created.html"
+  dump_if_exists "$TMP/autoinc-main-init.json"
+  dump_if_exists "$TMP/autoinc-feature-insert.json"
+  dump_if_exists "$TMP/branch-post-edit.html"
+  dump_if_exists "$TMP/branch-post-frontend.html"
   dump_if_exists "$TMP/git-multi-delete.out"
   dump_if_exists "$TMP/git-delete.out"
   dump_if_exists "$TMP/git-delete-main.out"
@@ -131,6 +135,27 @@ NODE
   fi
 }
 
+autoinc_runtime_request() {
+  local branch="$1"
+  local action="$2"
+  local out="$3"
+  local host
+  host="$(branch_host "$branch")"
+
+  local http
+  http="$(
+    curl -sS -o "$out" -w '%{http_code}' \
+      -H "Host: $host" \
+      "http://127.0.0.1:$PORT/?forkpress_e2e_autoinc=$action"
+  )"
+  if [ "$http" != "200" ]; then
+    echo "AUTOINCREMENT runtime action $action on $branch returned $http" >&2
+    cat "$out" >&2
+    "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+    exit 1
+  fi
+}
+
 keyless_runtime_request() {
   local branch="$1"
   local action="$2"
@@ -168,12 +193,62 @@ log_step "start server"
 "$BIN" serve --work-dir "$WORK_DIR" --port "$PORT" --root-host wp.localhost --workers 1
 "$BIN" server list | grep -F "$WORK_DIR" >/dev/null
 
+log_step "install runtime AUTOINCREMENT probe"
+mkdir -p "$WORK/main/wp-content/mu-plugins"
+cat > "$WORK/main/wp-content/mu-plugins/forkpress-e2e-autoinc.php" <<'PHP'
+<?php
+add_action('init', function () {
+    if (!isset($_GET['forkpress_e2e_autoinc'])) {
+        return;
+    }
+
+    global $wpdb;
+    $action = sanitize_key(wp_unslash($_GET['forkpress_e2e_autoinc']));
+    $table = $wpdb->prefix . 'forkpress_e2e_autoinc';
+    if (!preg_match('/^[A-Za-z0-9_]+$/', $table)) {
+        wp_send_json_error(['error' => 'unsafe table name'], 500);
+    }
+    $quoted = '`' . str_replace('`', '``', $table) . '`';
+
+    $query = static function (string $sql) use ($wpdb): void {
+        $result = $wpdb->query($sql);
+        if ($result === false) {
+            wp_send_json_error(['error' => $wpdb->last_error ?: 'query failed'], 500);
+        }
+    };
+
+    if ($action === 'init') {
+        $query("DROP TABLE IF EXISTS $quoted");
+        $query("CREATE TABLE $quoted (id bigint(20) unsigned NOT NULL AUTO_INCREMENT, label text NOT NULL, PRIMARY KEY (id))");
+        $query($wpdb->prepare("INSERT INTO $quoted (label) VALUES (%s)", 'Base runtime plugin row'));
+    } elseif ($action === 'insert') {
+        $query($wpdb->prepare("INSERT INTO $quoted (label) VALUES (%s)", 'Branch runtime plugin row'));
+    } elseif ($action !== 'inspect') {
+        wp_send_json_error(['error' => 'unknown action'], 400);
+    }
+
+    $rows = $wpdb->get_results("SELECT id, label FROM $quoted ORDER BY id", ARRAY_A);
+    if (!is_array($rows)) {
+        wp_send_json_error(['error' => $wpdb->last_error ?: 'select failed'], 500);
+    }
+    $max_id = (int)$wpdb->get_var("SELECT COALESCE(MAX(id), 0) FROM $quoted");
+    $seq = (int)$wpdb->get_var($wpdb->prepare("SELECT seq FROM sqlite_sequence WHERE name = %s", $table));
+    wp_send_json(['action' => $action, 'rows' => $rows, 'max_id' => $max_id, 'seq' => $seq]);
+}, 20);
+PHP
+
+autoinc_runtime_request main init "$TMP/autoinc-main-init.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(($data["max_id"] ?? null) === 1 ? 0 : 1);' "$TMP/autoinc-main-init.json"
+
 log_step "create CLI branch"
 "$BIN" branch --work-dir "$WORK_DIR" create feature-cow > "$TMP/branch-create.out"
 grep -F "feature-cow.wp.localhost:$PORT" "$TMP/branch-create.out" >/dev/null
 test -d "$WORK/feature-cow"
 echo "feature only" > "$WORK/feature-cow/wp-content/forkpress-branch.txt"
 test ! -e "$WORK/main/wp-content/forkpress-branch.txt"
+php -r '$meta = new SQLite3($argv[1]); $branch = new SQLite3($argv[2]); $band = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''feature-cow'\'' AND table_name = '\''wp_forkpress_e2e_autoinc'\''", true); $seq = (int)$branch->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''wp_forkpress_e2e_autoinc'\''"); exit($band && (int)$band["band_start"] >= 1000000 && $seq === (int)$band["band_start"] - 1 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite" "$WORK/feature-cow/wp-content/database/.ht.sqlite"
+autoinc_runtime_request feature-cow insert "$TMP/autoinc-feature-insert.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $meta = new SQLite3($argv[2]); $branch = new SQLite3($argv[3]); $max = (int)($data["max_id"] ?? 0); $band = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''feature-cow'\'' AND table_name = '\''wp_forkpress_e2e_autoinc'\''", true); $seq = (int)$branch->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''wp_forkpress_e2e_autoinc'\''"); exit($band && $max >= (int)$band["band_start"] && $max <= (int)$band["band_end"] && $seq === $max ? 0 : 1);' "$TMP/autoinc-feature-insert.json" "$WORK_DIR/cow/merge/metadata.sqlite" "$WORK/feature-cow/wp-content/database/.ht.sqlite"
 
 curl -sS -H "Host: feature-cow.wp.localhost:$PORT" \
   "http://127.0.0.1:$PORT/wp-admin/post-new.php" \
@@ -208,6 +283,24 @@ if [ "$HTTP" != "201" ]; then
   "$BIN" logs --work-dir "$WORK_DIR" --file all -n 160 >&2 || true
   exit 1
 fi
+POST_ID="$(php -r '$data = json_decode(file_get_contents($argv[1]), true); echo (int)($data["id"] ?? 0);' "$TMP/rest-save.json")"
+if [ "$POST_ID" -lt 1000000 ] || [ "$POST_ID" -gt 1999999 ]; then
+  echo "REST save used post ID outside the first branch AUTOINCREMENT band: $POST_ID" >&2
+  cat "$TMP/rest-save.json" >&2
+  exit 1
+fi
+php -r '$meta = new SQLite3($argv[1]); $branch = new SQLite3($argv[2]); $band = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''feature-cow'\'' AND table_name = '\''wp_posts'\''", true); $id = (int)$argv[3]; $seq = (int)$branch->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''wp_posts'\''"); exit($band && $id >= (int)$band["band_start"] && $id <= (int)$band["band_end"] && $seq >= $id && $seq <= (int)$band["band_end"] ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite" "$WORK/feature-cow/wp-content/database/.ht.sqlite" "$POST_ID"
+
+curl -sS -H "Host: feature-cow.wp.localhost:$PORT" \
+  "http://127.0.0.1:$PORT/wp-admin/post.php?post=$POST_ID&action=edit" \
+  -o "$TMP/branch-post-edit.html"
+grep -F "$TITLE" "$TMP/branch-post-edit.html" >/dev/null
+grep -F 'id="menu-posts"' "$TMP/branch-post-edit.html" >/dev/null
+
+curl -sSL -H "Host: feature-cow.wp.localhost:$PORT" \
+  "http://127.0.0.1:$PORT/?p=$POST_ID" \
+  -o "$TMP/branch-post-frontend.html"
+grep -F "$TITLE" "$TMP/branch-post-frontend.html" >/dev/null
 
 curl -sS -H "Host: feature-cow.wp.localhost:$PORT" \
   "http://127.0.0.1:$PORT/wp-admin/edit.php" \

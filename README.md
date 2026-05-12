@@ -459,7 +459,9 @@ tooling.
   user.
 - `forkpress server list` lists running site servers.
 - `forkpress branch list` lists local branches.
-- `forkpress branch create <name> [--from main]` creates a COW branch.
+- `forkpress branch create <name> [--from main]` creates a COW branch and
+  reserves moderate AUTOINCREMENT ID bands for WordPress core and arbitrary
+  plugin tables that use SQLite `AUTOINCREMENT`.
 - `forkpress branch reset <name> --from <source>` replaces one COW branch with
   the files and SQLite database from another branch.
 - `forkpress branch merge-audit [--format text|json] [--run ID]`
