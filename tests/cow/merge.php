@@ -248,6 +248,20 @@ try {
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_review_notes WHERE record_type = 'conflict' AND record_id = $option_conflict_id AND status = 'reviewed' AND note LIKE 'Resolved with target choice:%'"), 1, 'applied target conflict resolution appends a reviewed note');
     $resolution_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10);
     assert_same(count($resolution_audit['resolutions']), 2, 'merge audit report exports deterministic resolution records');
+    $applied_resolution_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['resolution_status' => 'applied']);
+    assert_same($applied_resolution_audit['filters']['records'], 'resolutions', 'resolution status filter defaults audit records to resolutions');
+    assert_same($applied_resolution_audit['filters']['resolution_status'], 'applied', 'merge audit JSON report includes resolution status filter');
+    assert_same(count($applied_resolution_audit['conflicts']), 0, 'resolution status filter omits conflict records');
+    assert_same(count($applied_resolution_audit['decisions']), 0, 'resolution status filter omits decision records');
+    assert_same(count($applied_resolution_audit['resolutions']), 1, 'resolution status filter returns applied resolution records');
+    assert_same($applied_resolution_audit['resolutions'][0]['status'], 'applied', 'applied resolution status filter matches resolution rows');
+    $validated_resolution_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['records' => 'resolutions', 'resolution_status' => 'validated']);
+    assert_same(count($validated_resolution_audit['resolutions']), 1, 'validated resolution status filter returns validated resolution records');
+    assert_same($validated_resolution_audit['resolutions'][0]['status'], 'validated', 'validated resolution status filter matches resolution rows');
+    ob_start();
+    cow_merge_print_audit_text($applied_resolution_audit);
+    $resolution_status_text = ob_get_clean();
+    assert_true(str_contains($resolution_status_text, 'records=resolutions resolution-status=applied'), 'resolution status filter is visible in text filters');
 
     $row_conflict_base = $tmp . '/row-conflict-base.sqlite';
     $row_conflict_source = $tmp . '/row-conflict-source.sqlite';

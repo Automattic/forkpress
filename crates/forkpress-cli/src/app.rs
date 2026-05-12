@@ -2874,6 +2874,7 @@ fn cow_branch_command(
             let mut id_band_skips = false;
             let mut review = false;
             let mut review_status: Option<String> = None;
+            let mut resolution_status: Option<String> = None;
             let mut index = 1;
             while index < args.args.len() {
                 match args.args[index].as_str() {
@@ -2955,6 +2956,13 @@ fn cow_branch_command(
                         review_status = Some(value.clone());
                         index += 2;
                     }
+                    "--resolution-status" => {
+                        let Some(value) = args.args.get(index + 1) else {
+                            bail!("--resolution-status requires validated or applied");
+                        };
+                        resolution_status = Some(value.clone());
+                        index += 2;
+                    }
                     other => {
                         bail!("unsupported argument for `forkpress branch merge-audit`: {other}")
                     }
@@ -2976,6 +2984,7 @@ fn cow_branch_command(
                 id_band_skips,
                 review,
                 review_status.as_deref(),
+                resolution_status.as_deref(),
             )?;
             Ok(0)
         }
@@ -4118,6 +4127,35 @@ mod git_helper_tests {
                 "--review".to_string(),
                 "--review-status".to_string(),
                 "needs-action".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_branch_merge_audit_resolution_status_filter() {
+        let cli = Cli::try_parse_from([
+            "forkpress",
+            "branch",
+            "--work-dir",
+            ".forkpress",
+            "merge-audit",
+            "--records",
+            "resolutions",
+            "--resolution-status",
+            "applied",
+        ])
+        .unwrap();
+        let Commands::Branch(args) = cli.command else {
+            panic!("expected branch command");
+        };
+        assert_eq!(
+            args.args,
+            vec![
+                "merge-audit".to_string(),
+                "--records".to_string(),
+                "resolutions".to_string(),
+                "--resolution-status".to_string(),
+                "applied".to_string(),
             ]
         );
     }

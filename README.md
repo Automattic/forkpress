@@ -463,11 +463,13 @@ tooling.
 - `forkpress branch reset <name> --from <source>` replaces one COW branch with
   the files and SQLite database from another branch.
 - `forkpress branch merge-audit [--format text|json] [--run ID]`
-  `[--scope all|db|files] [--records all|conflicts|decisions]`
+  `[--scope all|db|files] [--records all|conflicts|decisions|resolutions]`
   `[--conflict-type TYPE] [--decision DECISION] [--path PATH]`
   `[--path-prefix PREFIX] [--id-band-skips] [--review]`
-  `[--review-status pending|needs-action|reviewed]` prints the COW merge audit log
-  without opening the raw metadata database.
+  `[--review-status pending|needs-action|reviewed]`
+  `[--resolution-status validated|applied]` prints the COW merge audit log
+  without opening the raw metadata database. `--records resolutions` focuses
+  the report on deterministic conflict resolution records.
 - `forkpress branch merge-review conflict|decision <id> --status pending|needs-action|reviewed --note <text>`
   `[--reviewer NAME]` appends a review note to an auditable merge conflict or decision.
 - `forkpress branch merge-resolve conflict <id> --choice source|target [--apply]`

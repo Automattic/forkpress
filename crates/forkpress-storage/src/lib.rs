@@ -867,6 +867,7 @@ pub fn inspect_cow_merge_audit(
     id_band_skips: bool,
     review: bool,
     review_status: Option<&str>,
+    resolution_status: Option<&str>,
 ) -> Result<()> {
     let metadata_db = cow_merge_metadata_db_path(layout);
     let mut args: Vec<OsString> = vec![
@@ -911,6 +912,10 @@ pub fn inspect_cow_merge_audit(
     if let Some(review_status) = review_status {
         args.push("--review-status".into());
         args.push(review_status.into());
+    }
+    if let Some(resolution_status) = resolution_status {
+        args.push("--resolution-status".into());
+        args.push(resolution_status.into());
     }
     run_php_script(
         layout,
