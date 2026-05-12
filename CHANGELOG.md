@@ -17,6 +17,7 @@
 - Broadened validation-gated schema conflict resolution to source index rewrites/drops and compatible table rebuilds that preserve target rows while applying audited source non-primary-key column definitions.
 - Broadened compatible schema table rebuild resolution to preserve target explicit indexes, triggers, and dependent views when those views validate before and after the rebuild.
 - Added generic COW schema merge/audit handling for SQLite views and triggers, including clean source-added object application and validation-gated resolution for audited source rewrites or drops.
+- Tightened source view resolution so view rewrites preserve dependent target views/triggers when they validate, while source view drops are blocked until dependent target views/triggers are resolved.
 - Added auditable COW handling for source-dropped SQLite tables, with validation-gated source resolution when no dependent target views would be left invalid.
 - Tightened source table drop resolution so dependent target indexes/triggers must be resolved explicitly before the table drop can apply, preserving auditable resolution history for those schema objects.
 - Added runtime-backed COW e2e coverage for deterministic resolution records being reviewed through `forkpress branch merge-review resolution`.

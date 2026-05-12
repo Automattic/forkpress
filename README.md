@@ -489,6 +489,9 @@ tooling.
   target indexes/triggers while changing audited non-primary-key column
   definitions. Compatible rebuilds also preserve
   dependent target views when those views validate before and after the rebuild.
+  Source view rewrites preserve dependent target views and triggers when they
+  validate before and after the rewrite; source view drops are blocked while
+  dependent target views or triggers still reference the dropped view.
   With `--apply`,
   ForkPress records the deterministic resolution in merge metadata and appends
   a reviewed annotation to the conflict audit record.

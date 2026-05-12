@@ -3409,17 +3409,21 @@ function cow_merge_sql_references_table(string $sql, string $table): bool {
     return false;
 }
 
-function cow_merge_table_dependent_views(SQLite3 $db, string $table): array {
+function cow_merge_table_dependent_views(SQLite3 $db, string $table, ?string $exclude_view = null): array {
     $views = [];
     $res = $db->query("SELECT name, sql FROM sqlite_master WHERE type = 'view' AND sql IS NOT NULL ORDER BY name");
     if (!$res) {
         throw new RuntimeException("failed to read view dependencies for $table: " . $db->lastErrorMsg());
     }
     while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+        $name = (string)$row['name'];
+        if ($exclude_view !== null && strcasecmp($name, $exclude_view) === 0) {
+            continue;
+        }
         $sql = (string)$row['sql'];
         if (cow_merge_sql_references_table($sql, $table)) {
             $views[] = [
-                'name' => (string)$row['name'],
+                'name' => $name,
                 'sql' => $sql,
             ];
         }
@@ -3433,7 +3437,7 @@ function cow_merge_validate_views(SQLite3 $db, array $views, string $context): v
         $res = @$db->query('SELECT * FROM ' . cow_merge_quote_ident($name) . ' LIMIT 0');
         if (!$res) {
             throw new InvalidArgumentException(
-                'source schema table rebuild cannot preserve target view ' . $name .
+                'source schema resolution cannot preserve target view ' . $name .
                 " during $context validation: " . $db->lastErrorMsg()
             );
         }
@@ -3496,6 +3500,58 @@ function cow_merge_apply_source_table_rebuild(SQLite3 $target, string $table, st
     } catch (Throwable $e) {
         $target->exec('ROLLBACK TO forkpress_schema_rebuild');
         $target->exec('RELEASE forkpress_schema_rebuild');
+        throw $e;
+    }
+}
+
+function cow_merge_apply_source_view_schema_resolution(SQLite3 $target, string $view, ?string $source_sql): void {
+    $dependent_views = cow_merge_table_dependent_views($target, $view, $view);
+    $dependencies = cow_merge_table_rebuild_dependencies($target, $view);
+    if ($source_sql === null && $dependent_views) {
+        $names = implode(', ', array_map(fn($dependency) => (string)$dependency['name'], $dependent_views));
+        throw new InvalidArgumentException("source view drop resolution cannot leave dependent target views invalid: $names");
+    }
+    if ($source_sql === null && $dependencies) {
+        $names = implode(', ', array_map(fn($dependency) => (string)$dependency['type'] . ' ' . (string)$dependency['name'], $dependencies));
+        throw new InvalidArgumentException("source view drop resolution cannot implicitly remove dependent target schema objects; resolve or remove them first: $names");
+    }
+    cow_merge_validate_views($target, $dependent_views, 'pre-view-resolution');
+    $target->exec('SAVEPOINT forkpress_view_resolution');
+    try {
+        foreach ($dependent_views as $dependency) {
+            if (!$target->exec('DROP VIEW ' . cow_merge_quote_ident((string)$dependency['name']))) {
+                throw new RuntimeException('failed to drop dependent target view ' . $dependency['name'] . ' during view schema resolution: ' . $target->lastErrorMsg());
+            }
+        }
+        if (cow_merge_schema_object_sql($target, 'view', $view) !== null) {
+            if (!$target->exec('DROP VIEW ' . cow_merge_quote_ident($view))) {
+                throw new RuntimeException('failed to drop target view during schema resolution: ' . $target->lastErrorMsg());
+            }
+        }
+        if ($source_sql !== null && !$target->exec($source_sql)) {
+            throw new RuntimeException('failed to apply source view schema resolution: ' . $target->lastErrorMsg());
+        }
+        foreach ($dependencies as $dependency) {
+            if (!$target->exec((string)$dependency['sql'])) {
+                throw new RuntimeException(
+                    'failed to recreate dependent target ' . $dependency['type'] . ' ' . $dependency['name'] .
+                    ' after view schema resolution: ' . $target->lastErrorMsg()
+                );
+            }
+        }
+        foreach ($dependent_views as $dependency) {
+            if (!$target->exec((string)$dependency['sql'])) {
+                throw new RuntimeException('failed to recreate dependent target view ' . $dependency['name'] . ' after view schema resolution: ' . $target->lastErrorMsg());
+            }
+        }
+        if ($source_sql !== null) {
+            cow_merge_validate_views($target, [['name' => $view, 'sql' => $source_sql]], 'post-view-resolution');
+        }
+        cow_merge_validate_views($target, $dependent_views, 'post-view-resolution');
+        $target->exec('RELEASE forkpress_view_resolution');
+    } catch (Throwable $e) {
+        $target->exec('ROLLBACK TO forkpress_view_resolution');
+        $target->exec('RELEASE forkpress_view_resolution');
         throw $e;
     }
 }
@@ -3660,14 +3716,18 @@ function cow_merge_resolve_schema_conflict(
             if ($choice === 'source') {
                 $resolved = $source_sql;
                 $apply_source = function () use ($target, $type, $object, $source_sql): void {
-                    if (cow_merge_schema_object_sql($target, $type, $object) !== null) {
-                        $drop_sql = 'DROP ' . strtoupper($type) . ' ' . cow_merge_quote_ident($object);
-                        if (!$target->exec($drop_sql)) {
-                            throw new RuntimeException("failed to drop target $type during schema resolution: " . $target->lastErrorMsg());
+                    if ($type === 'view') {
+                        cow_merge_apply_source_view_schema_resolution($target, $object, $source_sql);
+                    } else {
+                        if (cow_merge_schema_object_sql($target, $type, $object) !== null) {
+                            $drop_sql = 'DROP ' . strtoupper($type) . ' ' . cow_merge_quote_ident($object);
+                            if (!$target->exec($drop_sql)) {
+                                throw new RuntimeException("failed to drop target $type during schema resolution: " . $target->lastErrorMsg());
+                            }
                         }
-                    }
-                    if ($source_sql !== null && !$target->exec($source_sql)) {
-                        throw new RuntimeException("failed to apply source $type schema resolution: " . $target->lastErrorMsg());
+                        if ($source_sql !== null && !$target->exec($source_sql)) {
+                            throw new RuntimeException("failed to apply source $type schema resolution: " . $target->lastErrorMsg());
+                        }
                     }
                 };
             }

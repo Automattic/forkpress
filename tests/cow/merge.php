@@ -1260,6 +1260,76 @@ SQL);
     assert_true(str_contains((string)scalar($schema_view_rewrite_target, "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_review_view'"), 'value'), 'source view rewrite replaces target view definition');
     assert_same(scalar($schema_view_rewrite_target, "SELECT value FROM plugin_items_review_view WHERE item_id = 'alpha'"), 'base', 'rewritten source view remains queryable');
 
+    $schema_view_dep_base = $tmp . '/schema-view-dep-base.sqlite';
+    $schema_view_dep_source = $tmp . '/schema-view-dep-source.sqlite';
+    $schema_view_dep_target = $tmp . '/schema-view-dep-target.sqlite';
+    create_base_db($schema_view_dep_base);
+    $db = open_db($schema_view_dep_base);
+    $db->exec('CREATE VIEW plugin_items_dep_base AS SELECT item_id, label FROM plugin_items');
+    $db->close();
+    copy($schema_view_dep_base, $schema_view_dep_source);
+    copy($schema_view_dep_base, $schema_view_dep_target);
+
+    $db = open_db($schema_view_dep_source);
+    $db->exec('DROP VIEW plugin_items_dep_base');
+    $db->exec('CREATE VIEW plugin_items_dep_base AS SELECT item_id, label, value FROM plugin_items');
+    $db->close();
+
+    $db = open_db($schema_view_dep_target);
+    $db->exec('CREATE TABLE plugin_items_dep_insert_audit (item_id TEXT, label TEXT)');
+    $db->exec('CREATE VIEW plugin_items_dep_child AS SELECT label FROM plugin_items_dep_base');
+    $db->exec('CREATE TRIGGER plugin_items_dep_base_insert INSTEAD OF INSERT ON plugin_items_dep_base BEGIN INSERT INTO plugin_items_dep_insert_audit (item_id, label) VALUES (NEW.item_id, NEW.label); END');
+    $db->close();
+
+    $result = cow_merge_databases($schema_view_dep_base, $schema_view_dep_source, $schema_view_dep_target, $metadata, 'feature-view-dependency', 'main');
+    assert_same($result['status'], 'completed_with_conflicts', 'source-changed view with target dependent view remains a schema conflict');
+    $schema_view_dep_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_items_dep_base' AND conflict_type = 'schema-source-changed-view' ORDER BY id DESC LIMIT 1");
+    $schema_view_dep_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_view_dep_conflict_id,
+        'source',
+        true,
+        'Apply source view rewrite and preserve dependent target view.',
+        'test'
+    );
+    assert_same($schema_view_dep_resolution['status'], 'applied', 'source view rewrite with dependent target view records applied status');
+    assert_same((int)scalar($schema_view_dep_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_dep_child'"), 1, 'source view rewrite recreates dependent target view');
+    assert_same((int)scalar($schema_view_dep_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_items_dep_base_insert'"), 1, 'source view rewrite recreates dependent target trigger');
+    assert_same(scalar($schema_view_dep_target, "SELECT label FROM plugin_items_dep_child WHERE label = 'Alpha'"), 'Alpha', 'dependent target view remains queryable after source view rewrite');
+    $db = open_db($schema_view_dep_target);
+    $db->exec("INSERT INTO plugin_items_dep_base (item_id, label, value) VALUES ('from-view', 'From View', 'triggered')");
+    $db->close();
+    assert_same(scalar($schema_view_dep_target, "SELECT label FROM plugin_items_dep_insert_audit WHERE item_id = 'from-view'"), 'From View', 'dependent target trigger still fires after source view rewrite');
+
+    $schema_view_drop_dep_base = $tmp . '/schema-view-drop-dep-base.sqlite';
+    $schema_view_drop_dep_source = $tmp . '/schema-view-drop-dep-source.sqlite';
+    $schema_view_drop_dep_target = $tmp . '/schema-view-drop-dep-target.sqlite';
+    create_base_db($schema_view_drop_dep_base);
+    $db = open_db($schema_view_drop_dep_base);
+    $db->exec('CREATE VIEW plugin_items_drop_base AS SELECT item_id, label FROM plugin_items');
+    $db->close();
+    copy($schema_view_drop_dep_base, $schema_view_drop_dep_source);
+    copy($schema_view_drop_dep_base, $schema_view_drop_dep_target);
+
+    $db = open_db($schema_view_drop_dep_source);
+    $db->exec('DROP VIEW plugin_items_drop_base');
+    $db->close();
+
+    $db = open_db($schema_view_drop_dep_target);
+    $db->exec('CREATE VIEW plugin_items_drop_child AS SELECT label FROM plugin_items_drop_base');
+    $db->close();
+
+    $result = cow_merge_databases($schema_view_drop_dep_base, $schema_view_drop_dep_source, $schema_view_drop_dep_target, $metadata, 'feature-view-drop-dependency', 'main');
+    assert_same($result['status'], 'completed_with_conflicts', 'source-dropped view with target dependent view remains a schema conflict');
+    $schema_view_drop_dep_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_items_drop_base' AND conflict_type = 'schema-source-dropped-view' ORDER BY id DESC LIMIT 1");
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $schema_view_drop_dep_conflict_id, 'source', true, 'Try source view drop with dependent view.', 'test'),
+        'dependent target views',
+        'source view drop resolution refuses to leave dependent target views invalid'
+    );
+    assert_same((int)scalar($schema_view_drop_dep_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_drop_base'"), 1, 'blocked source view drop preserves target view');
+    assert_same((int)scalar($schema_view_drop_dep_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_drop_child'"), 1, 'blocked source view drop preserves dependent target view');
+
     $schema_trigger_drop_base = $tmp . '/schema-trigger-drop-base.sqlite';
     $schema_trigger_drop_source = $tmp . '/schema-trigger-drop-source.sqlite';
     $schema_trigger_drop_target = $tmp . '/schema-trigger-drop-target.sqlite';
