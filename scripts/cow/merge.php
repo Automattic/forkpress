@@ -624,6 +624,57 @@ function cow_merge_create_table_body(string $ddl): ?string {
     return null;
 }
 
+function cow_merge_create_table_parts(string $ddl): ?array {
+    $start = strpos($ddl, '(');
+    if ($start === false) {
+        return null;
+    }
+    $depth = 0;
+    $quote = null;
+    $len = strlen($ddl);
+    for ($i = $start; $i < $len; $i++) {
+        $ch = $ddl[$i];
+        if ($quote !== null) {
+            if ($quote === '[' && $ch === ']') {
+                $quote = null;
+            } elseif ($ch === $quote) {
+                if ($i + 1 < $len && $ddl[$i + 1] === $quote && ($quote === '"' || $quote === "'" || $quote === '`')) {
+                    $i++;
+                } else {
+                    $quote = null;
+                }
+            }
+            continue;
+        }
+        if ($ch === '"' || $ch === "'" || $ch === '`' || $ch === '[') {
+            $quote = $ch;
+            continue;
+        }
+        if ($ch === '(') {
+            $depth++;
+            continue;
+        }
+        if ($ch === ')') {
+            $depth--;
+            if ($depth === 0) {
+                return [
+                    'body' => substr($ddl, $start + 1, $i - $start - 1),
+                    'suffix' => substr($ddl, $i + 1),
+                ];
+            }
+        }
+    }
+    return null;
+}
+
+function cow_merge_create_table_sql_for_name(string $ddl, string $table): ?string {
+    $parts = cow_merge_create_table_parts($ddl);
+    if ($parts === null) {
+        return null;
+    }
+    return 'CREATE TABLE ' . cow_merge_quote_ident($table) . ' (' . $parts['body'] . ')' . $parts['suffix'];
+}
+
 function cow_merge_read_identifier(string $sql): ?array {
     $sql = ltrim($sql);
     if ($sql === '') {
@@ -3217,6 +3268,93 @@ function cow_merge_schema_index_sql_payload(mixed $payload): ?string {
     return null;
 }
 
+function cow_merge_table_column_names(array $columns): array {
+    return array_map(fn($column) => strtolower((string)$column['name']), $columns);
+}
+
+function cow_merge_table_rebuild_supported(array $source_columns, array $target_columns): bool {
+    if (cow_merge_table_column_names($source_columns) !== cow_merge_table_column_names($target_columns)) {
+        return false;
+    }
+    foreach ($source_columns as $i => $source_column) {
+        $target_column = $target_columns[$i] ?? null;
+        if (!is_array($target_column)) {
+            return false;
+        }
+        $source_pk = (int)$source_column['pk'];
+        $target_pk = (int)$target_column['pk'];
+        if ($source_pk !== $target_pk) {
+            return false;
+        }
+        if ($source_pk !== 0 && !cow_merge_column_signatures_equal($source_column, $target_column)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function cow_merge_table_explicit_dependents(SQLite3 $db, string $table): array {
+    $dependents = [];
+    $stmt = $db->prepare(
+        "SELECT type, name FROM sqlite_master " .
+        "WHERE tbl_name = :table AND type IN ('index', 'trigger') AND sql IS NOT NULL ORDER BY type, name"
+    );
+    if (!$stmt) {
+        throw new RuntimeException("failed to prepare table dependent lookup for $table: " . $db->lastErrorMsg());
+    }
+    cow_merge_bind($stmt, ':table', $table);
+    $res = $stmt->execute();
+    if (!$res) {
+        throw new RuntimeException("failed to read table dependents for $table: " . $db->lastErrorMsg());
+    }
+    while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+        $dependents[] = (string)$row['type'] . ':' . (string)$row['name'];
+    }
+    return $dependents;
+}
+
+function cow_merge_apply_source_table_rebuild(SQLite3 $target, string $table, string $source_sql, array $source_columns, array $target_columns): void {
+    if (!cow_merge_table_rebuild_supported($source_columns, $target_columns)) {
+        throw new InvalidArgumentException('source schema resolution can only rebuild tables with the same column order and unchanged primary key columns');
+    }
+    $dependents = cow_merge_table_explicit_dependents($target, $table);
+    if ($dependents) {
+        throw new InvalidArgumentException('source schema table rebuild is blocked by explicit target indexes/triggers: ' . implode(', ', $dependents));
+    }
+    $tmp_table = '__forkpress_merge_rebuild_' . bin2hex(random_bytes(8));
+    $create_sql = cow_merge_create_table_sql_for_name($source_sql, $tmp_table);
+    if ($create_sql === null) {
+        throw new InvalidArgumentException('source schema resolution could not parse the audited source CREATE TABLE statement');
+    }
+    $columns = array_map(fn($column) => (string)$column['name'], $source_columns);
+    if (!$columns) {
+        throw new InvalidArgumentException('source schema resolution cannot rebuild a table with no columns');
+    }
+    $quoted_columns = implode(', ', array_map('cow_merge_quote_ident', $columns));
+    $target->exec('SAVEPOINT forkpress_schema_rebuild');
+    try {
+        if (!$target->exec($create_sql)) {
+            throw new RuntimeException('failed to create rebuilt table: ' . $target->lastErrorMsg());
+        }
+        $copy_sql = 'INSERT INTO ' . cow_merge_quote_ident($tmp_table) . ' (' . $quoted_columns . ') ' .
+            'SELECT ' . $quoted_columns . ' FROM ' . cow_merge_quote_ident($table);
+        if (!$target->exec($copy_sql)) {
+            throw new RuntimeException('failed to copy rows into rebuilt table: ' . $target->lastErrorMsg());
+        }
+        if (!$target->exec('DROP TABLE ' . cow_merge_quote_ident($table))) {
+            throw new RuntimeException('failed to drop old table during schema rebuild: ' . $target->lastErrorMsg());
+        }
+        if (!$target->exec('ALTER TABLE ' . cow_merge_quote_ident($tmp_table) . ' RENAME TO ' . cow_merge_quote_ident($table))) {
+            throw new RuntimeException('failed to rename rebuilt table: ' . $target->lastErrorMsg());
+        }
+        $target->exec('RELEASE forkpress_schema_rebuild');
+    } catch (Throwable $e) {
+        $target->exec('ROLLBACK TO forkpress_schema_rebuild');
+        $target->exec('RELEASE forkpress_schema_rebuild');
+        throw $e;
+    }
+}
+
 function cow_merge_resolve_schema_conflict(
     SQLite3 $meta,
     array $conflict,
@@ -3278,33 +3416,47 @@ function cow_merge_resolve_schema_conflict(
             }
 
             if ($choice === 'source') {
-                if ($current_target_column !== null) {
-                    throw new InvalidArgumentException('source schema resolution can only apply source-added columns that are still missing from target');
-                }
                 $source_table_sql = cow_merge_table_sql($source, $table);
                 if ($source_table_sql === null) {
                     throw new RuntimeException("source table for conflict #$conflict_id no longer exists: $table");
                 }
-                $definition = cow_merge_schema_column_definition_payload($source_payload)
-                    ?? cow_merge_column_definition_from_create_sql($source_table_sql, $object);
-                if ($definition === null || !cow_merge_column_definition_is_safe_to_add($definition, $source_column)) {
-                    throw new InvalidArgumentException('source schema resolution can only apply columns that are safe for ALTER TABLE ADD COLUMN');
-                }
-                $resolved = ['column' => $source_column, 'definition' => $definition];
-                $apply_source = function () use ($target, $table, $definition): void {
-                    $sql = 'ALTER TABLE ' . cow_merge_quote_ident($table) . ' ADD COLUMN ' . $definition;
-                    if (!$target->exec($sql)) {
-                        throw new RuntimeException('failed to apply source column schema resolution: ' . $target->lastErrorMsg());
+                if ($current_target_column === null) {
+                    $definition = cow_merge_schema_column_definition_payload($source_payload)
+                        ?? cow_merge_column_definition_from_create_sql($source_table_sql, $object);
+                    if ($definition === null || !cow_merge_column_definition_is_safe_to_add($definition, $source_column)) {
+                        throw new InvalidArgumentException('source schema resolution can only apply columns that are safe for ALTER TABLE ADD COLUMN');
                     }
-                };
+                    $resolved = ['column' => $source_column, 'definition' => $definition];
+                    $apply_source = function () use ($target, $table, $definition): void {
+                        $sql = 'ALTER TABLE ' . cow_merge_quote_ident($table) . ' ADD COLUMN ' . $definition;
+                        if (!$target->exec($sql)) {
+                            throw new RuntimeException('failed to apply source column schema resolution: ' . $target->lastErrorMsg());
+                        }
+                    };
+                } else {
+                    $target_table_sql = cow_merge_table_sql($target, $table);
+                    if ($target_table_sql === null) {
+                        throw new RuntimeException("target table for conflict #$conflict_id no longer exists: $table");
+                    }
+                    $source_columns = cow_merge_table_info($source, $table);
+                    $target_columns = cow_merge_table_info($target, $table);
+                    if (!cow_merge_table_rebuild_supported($source_columns, $target_columns)) {
+                        throw new InvalidArgumentException('source schema resolution can only rebuild tables with the same column order and unchanged primary key columns');
+                    }
+                    $resolved = ['table_sql' => $source_table_sql, 'column' => $source_column];
+                    $previous = $target_table_sql;
+                    $apply_source = function () use ($target, $table, $source_table_sql, $source_columns, $target_columns): void {
+                        cow_merge_apply_source_table_rebuild($target, $table, $source_table_sql, $source_columns, $target_columns);
+                    };
+                }
             }
-        } elseif ($conflict_type === 'schema-source-added-index' && $object !== '') {
+        } elseif (in_array($conflict_type, ['schema-source-added-index', 'schema-source-changed-index', 'schema-index-conflict', 'schema-source-dropped-index'], true) && $object !== '') {
             $source_sql = cow_merge_schema_index_sql_payload($source_payload);
-            if ($source_sql === null) {
+            if ($source_sql === null && $conflict_type !== 'schema-source-dropped-index') {
                 throw new RuntimeException("schema conflict #$conflict_id does not contain a source index SQL payload");
             }
             $current_source_sql = cow_merge_index_sql($source, $object);
-            if ($current_source_sql !== $source_sql) {
+            if (!cow_merge_values_equal($current_source_sql, $source_sql)) {
                 throw new RuntimeException('source index no longer matches the audited conflict source value; rerun merge before resolving');
             }
             $current_target_sql = cow_merge_index_sql($target, $object);
@@ -3318,20 +3470,49 @@ function cow_merge_resolve_schema_conflict(
             }
             if ($choice === 'source') {
                 $resolved = $source_sql;
-                $apply_source = function () use ($target, $source_sql): void {
-                    if (!$target->exec($source_sql)) {
+                $apply_source = function () use ($target, $object, $source_sql): void {
+                    if (cow_merge_index_sql($target, $object) !== null) {
+                        if (!$target->exec('DROP INDEX ' . cow_merge_quote_ident($object))) {
+                            throw new RuntimeException('failed to drop target index during schema resolution: ' . $target->lastErrorMsg());
+                        }
+                    }
+                    if ($source_sql !== null && !$target->exec($source_sql)) {
                         throw new RuntimeException('failed to apply source index schema resolution: ' . $target->lastErrorMsg());
                     }
                 };
             }
         } else {
             if ($choice === 'source') {
-                throw new InvalidArgumentException('source schema resolution currently supports source-added columns and source-added indexes only');
-            }
-            $current_target_sql = $object === '' ? cow_merge_table_sql($target, $table) : cow_merge_index_sql($target, $object);
-            $previous = $current_target_sql;
-            if (!cow_merge_values_equal($current_target_sql, $target_payload)) {
-                throw new RuntimeException('target schema no longer matches the audited conflict target value; rerun merge-audit before resolving');
+                if ($conflict_type !== 'schema-conflict' || $object !== '') {
+                    throw new InvalidArgumentException('source schema resolution currently supports source-added columns/indexes, index rewrites/drops, and compatible table rebuilds only');
+                }
+                if (!is_string($source_payload)) {
+                    throw new RuntimeException("schema conflict #$conflict_id does not contain a source table SQL payload");
+                }
+                $current_source_sql = cow_merge_table_sql($source, $table);
+                if (!cow_merge_values_equal($current_source_sql, $source_payload)) {
+                    throw new RuntimeException('source table schema no longer matches the audited conflict source value; rerun merge before resolving');
+                }
+                $current_target_sql = cow_merge_table_sql($target, $table);
+                $previous = $current_target_sql;
+                if (!cow_merge_values_equal($current_target_sql, $target_payload)) {
+                    throw new RuntimeException('target table schema no longer matches the audited conflict target value; rerun merge-audit before resolving');
+                }
+                $source_columns = cow_merge_table_info($source, $table);
+                $target_columns = cow_merge_table_info($target, $table);
+                if (!cow_merge_table_rebuild_supported($source_columns, $target_columns)) {
+                    throw new InvalidArgumentException('source schema resolution can only rebuild tables with the same column order and unchanged primary key columns');
+                }
+                $resolved = $source_payload;
+                $apply_source = function () use ($target, $table, $source_payload, $source_columns, $target_columns): void {
+                    cow_merge_apply_source_table_rebuild($target, $table, $source_payload, $source_columns, $target_columns);
+                };
+            } else {
+                $current_target_sql = $object === '' ? cow_merge_table_sql($target, $table) : cow_merge_index_sql($target, $object);
+                $previous = $current_target_sql;
+                if (!cow_merge_values_equal($current_target_sql, $target_payload)) {
+                    throw new RuntimeException('target schema no longer matches the audited conflict target value; rerun merge-audit before resolving');
+                }
             }
         }
 

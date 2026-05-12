@@ -479,10 +479,13 @@ tooling.
 - `forkpress branch merge-resolve conflict <id> --choice source|target [--apply]`
   `[--note TEXT] [--reviewer NAME]` validates an audited DB cell, row
   insert-collision, row-target-deleted, row-source-deleted, or filesystem path
-  conflict, plus safe source-added column/index schema conflicts. DB conflicts
-  work for explicit primary keys and no-primary-key tables with sidecar row
-  identity. With `--apply`, ForkPress records the deterministic resolution in
-  merge metadata and appends a reviewed annotation to the conflict audit record.
+  conflict, plus validation-gated schema conflicts. DB conflicts work for
+  explicit primary keys and no-primary-key tables with sidecar row identity.
+  Schema source choices can apply safe source-added columns/indexes, source
+  index rewrites or drops, and compatible table rebuilds that preserve target
+  rows while changing audited non-primary-key column definitions. With
+  `--apply`, ForkPress records the deterministic resolution in merge metadata
+  and appends a reviewed annotation to the conflict audit record.
 - `forkpress branch show <name>` prints the branch directory, database, file
   count, and Git ref path.
 - `forkpress branch delete <name>` removes a COW branch. `main` cannot be

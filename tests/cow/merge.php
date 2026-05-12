@@ -893,6 +893,54 @@ SQL);
     assert_same($schema_target_resolution['status'], 'validated', 'target schema conflict resolution validates current target schema');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_target_resolution_id AND table_name = 'plugin_items' AND column_name = 'extra' AND choice = 'target' AND applied = 1"), 1, 'target schema resolution is auditable');
 
+    $schema_rebuild_base = $tmp . '/schema-rebuild-base.sqlite';
+    $schema_rebuild_source = $tmp . '/schema-rebuild-source.sqlite';
+    $schema_rebuild_target = $tmp . '/schema-rebuild-target.sqlite';
+    create_base_db($schema_rebuild_base);
+    copy($schema_rebuild_base, $schema_rebuild_source);
+    copy($schema_rebuild_base, $schema_rebuild_target);
+
+    $db = open_db($schema_rebuild_source);
+    $db->exec('CREATE TABLE plugin_items_new (item_id TEXT PRIMARY KEY, label TEXT, value INTEGER)');
+    $db->exec('INSERT INTO plugin_items_new (item_id, label, value) SELECT item_id, label, value FROM plugin_items');
+    $db->exec('DROP TABLE plugin_items');
+    $db->exec('ALTER TABLE plugin_items_new RENAME TO plugin_items');
+    $db->close();
+
+    $db = open_db($schema_rebuild_target);
+    $db->exec("UPDATE plugin_items SET value = 'target preserved' WHERE item_id = 'alpha'");
+    $db->exec('CREATE TABLE plugin_items_new (item_id TEXT PRIMARY KEY, label TEXT, value REAL)');
+    $db->exec('INSERT INTO plugin_items_new (item_id, label, value) SELECT item_id, label, value FROM plugin_items');
+    $db->exec('DROP TABLE plugin_items');
+    $db->exec('ALTER TABLE plugin_items_new RENAME TO plugin_items');
+    $db->close();
+
+    $result = cow_merge_databases($schema_rebuild_base, $schema_rebuild_source, $schema_rebuild_target, $metadata, 'feature-schema-rebuild', 'main');
+    assert_same($result['status'], 'completed_with_conflicts', 'incompatible table column rewrite remains a schema conflict');
+    $schema_rebuild_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND column_name IS NULL AND conflict_type = 'schema-conflict' ORDER BY id DESC LIMIT 1");
+    $schema_rebuild_dry = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_rebuild_conflict_id,
+        'source',
+        false,
+        'Preview table rebuild.',
+        'test'
+    );
+    assert_same($schema_rebuild_dry['status'], 'validated', 'dry-run table rebuild schema resolution validates current schemas');
+    assert_same(column_type($schema_rebuild_target, 'plugin_items', 'value'), 'REAL', 'dry-run table rebuild does not mutate target schema');
+    $schema_rebuild_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_rebuild_conflict_id,
+        'source',
+        true,
+        'Apply source table schema with preserved target rows.',
+        'test'
+    );
+    assert_same($schema_rebuild_resolution['status'], 'applied', 'source table rebuild schema resolution records applied status');
+    assert_same(column_type($schema_rebuild_target, 'plugin_items', 'value'), 'INTEGER', 'source table rebuild applies audited source column definition');
+    assert_same(scalar($schema_rebuild_target, "SELECT value FROM plugin_items WHERE item_id = 'alpha'"), 'target preserved', 'source table rebuild preserves target row data');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_rebuild_conflict_id AND table_name = 'plugin_items' AND choice = 'source' AND applied = 1"), 1, 'source table rebuild schema resolution is auditable');
+
     $schema_resolve_base = $tmp . '/schema-resolve-base.sqlite';
     $schema_resolve_source = $tmp . '/schema-resolve-source.sqlite';
     $schema_resolve_target = $tmp . '/schema-resolve-target.sqlite';
@@ -975,6 +1023,63 @@ SQL);
     assert_same($schema_index_resolution['status'], 'applied', 'source schema index resolution records applied status');
     assert_same((int)scalar($schema_resolve_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_items_review_idx'"), 1, 'source schema index resolution applies audited source index');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id IN ($schema_column_conflict_id, $schema_index_conflict_id) AND choice = 'source' AND applied = 1"), 2, 'source schema resolutions are auditable');
+
+    $schema_index_rewrite_base = $tmp . '/schema-index-rewrite-base.sqlite';
+    $schema_index_rewrite_source = $tmp . '/schema-index-rewrite-source.sqlite';
+    $schema_index_rewrite_target = $tmp . '/schema-index-rewrite-target.sqlite';
+    create_base_db($schema_index_rewrite_base);
+    $db = open_db($schema_index_rewrite_base);
+    $db->exec('CREATE INDEX plugin_items_label_idx ON plugin_items(label)');
+    $db->close();
+    copy($schema_index_rewrite_base, $schema_index_rewrite_source);
+    copy($schema_index_rewrite_base, $schema_index_rewrite_target);
+
+    $db = open_db($schema_index_rewrite_source);
+    $db->exec('DROP INDEX plugin_items_label_idx');
+    $db->exec('CREATE INDEX plugin_items_label_idx ON plugin_items(value)');
+    $db->close();
+
+    $result = cow_merge_databases($schema_index_rewrite_base, $schema_index_rewrite_source, $schema_index_rewrite_target, $metadata, 'feature-index-rewrite', 'main');
+    assert_same($result['status'], 'completed_with_conflicts', 'source-changed index remains a schema conflict');
+    $schema_index_rewrite_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND column_name = 'plugin_items_label_idx' AND conflict_type = 'schema-source-changed-index' ORDER BY id DESC LIMIT 1");
+    $schema_index_rewrite_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_index_rewrite_conflict_id,
+        'source',
+        true,
+        'Apply source index rewrite.',
+        'test'
+    );
+    assert_same($schema_index_rewrite_resolution['status'], 'applied', 'source index rewrite resolution records applied status');
+    assert_true(str_contains((string)scalar($schema_index_rewrite_target, "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'plugin_items_label_idx'"), '(value)'), 'source index rewrite replaces target index definition');
+
+    $schema_index_drop_base = $tmp . '/schema-index-drop-base.sqlite';
+    $schema_index_drop_source = $tmp . '/schema-index-drop-source.sqlite';
+    $schema_index_drop_target = $tmp . '/schema-index-drop-target.sqlite';
+    create_base_db($schema_index_drop_base);
+    $db = open_db($schema_index_drop_base);
+    $db->exec('CREATE INDEX plugin_items_drop_idx ON plugin_items(label)');
+    $db->close();
+    copy($schema_index_drop_base, $schema_index_drop_source);
+    copy($schema_index_drop_base, $schema_index_drop_target);
+
+    $db = open_db($schema_index_drop_source);
+    $db->exec('DROP INDEX plugin_items_drop_idx');
+    $db->close();
+
+    $result = cow_merge_databases($schema_index_drop_base, $schema_index_drop_source, $schema_index_drop_target, $metadata, 'feature-index-drop', 'main');
+    assert_same($result['status'], 'completed_with_conflicts', 'source-dropped index remains a schema conflict');
+    $schema_index_drop_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND column_name = 'plugin_items_drop_idx' AND conflict_type = 'schema-source-dropped-index' ORDER BY id DESC LIMIT 1");
+    $schema_index_drop_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_index_drop_conflict_id,
+        'source',
+        true,
+        'Apply source index drop.',
+        'test'
+    );
+    assert_same($schema_index_drop_resolution['status'], 'applied', 'source index drop resolution records applied status');
+    assert_same(scalar($schema_index_drop_target, "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'plugin_items_drop_idx'"), null, 'source index drop resolution removes target index');
 
     $keyless_base = $tmp . '/keyless-base.sqlite';
     $keyless_source = $tmp . '/keyless-source.sqlite';
