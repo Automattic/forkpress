@@ -12,6 +12,7 @@
 - Added `forkpress branch merge-audit --records resolutions --resolution-status validated|applied` to inspect deterministic conflict resolution records directly.
 - Added `forkpress branch merge-audit --records resolutions --group-by table|status|path` to summarize deterministic resolution records for UI and assistant review.
 - Added `forkpress branch merge-audit --records conflicts --group-by table|type|path|severity` to summarize reviewable conflict records for UI and assistant triage.
+- Added `forkpress branch merge-audit --records decisions --group-by table|type|path` to summarize automatic merge decisions for UI and assistant triage.
 
 ## known-good/cow-mergeback-mvp-2026-05-12
 

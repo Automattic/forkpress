@@ -472,7 +472,8 @@ tooling.
   the report on deterministic conflict resolution records; `--group-by` adds
   compact resolution summaries for UI or assistant review. With
   `--records conflicts`, `--group-by` can summarize conflicts by table, type,
-  path, or severity class.
+  path, or severity class. With `--records decisions`, `--group-by` can
+  summarize automatic decisions by table, type, or path.
 - `forkpress branch merge-review conflict|decision <id> --status pending|needs-action|reviewed --note <text>`
   `[--reviewer NAME]` appends a review note to an auditable merge conflict or decision.
 - `forkpress branch merge-resolve conflict <id> --choice source|target [--apply]`

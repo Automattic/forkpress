@@ -4205,6 +4205,35 @@ mod git_helper_tests {
     }
 
     #[test]
+    fn parses_branch_merge_audit_decision_grouping() {
+        let cli = Cli::try_parse_from([
+            "forkpress",
+            "branch",
+            "--work-dir",
+            ".forkpress",
+            "merge-audit",
+            "--records",
+            "decisions",
+            "--group-by",
+            "type",
+        ])
+        .unwrap();
+        let Commands::Branch(args) = cli.command else {
+            panic!("expected branch command");
+        };
+        assert_eq!(
+            args.args,
+            vec![
+                "merge-audit".to_string(),
+                "--records".to_string(),
+                "decisions".to_string(),
+                "--group-by".to_string(),
+                "type".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn parses_branch_merge_review_args() {
         let cli = Cli::try_parse_from([
             "forkpress",

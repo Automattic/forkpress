@@ -287,6 +287,19 @@ try {
     cow_merge_print_audit_text($grouped_conflict_audit);
     $conflict_group_text = ob_get_clean();
     assert_true(str_contains($conflict_group_text, 'group-by=severity') && str_contains($conflict_group_text, 'conflict-groups:'), 'conflict grouping is visible in text audit output');
+    $grouped_decision_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['records' => 'decisions', 'group_by' => 'type']);
+    assert_same($grouped_decision_audit['filters']['group_by'], 'type', 'merge audit JSON report includes decision grouping filter');
+    assert_same(count($grouped_decision_audit['conflict_groups']), 0, 'decision grouping does not populate conflict groups');
+    assert_same(count($grouped_decision_audit['resolution_groups']), 0, 'decision grouping does not populate resolution groups');
+    $decision_group_counts = [];
+    foreach ($grouped_decision_audit['decision_groups'] as $group) {
+        $decision_group_counts[$group['group_key']] = (int)$group['decision_count'];
+    }
+    assert_same($decision_group_counts['target-wins'] ?? 0, 2, 'decision grouping counts target-wins decisions by type');
+    ob_start();
+    cow_merge_print_audit_text($grouped_decision_audit);
+    $decision_group_text = ob_get_clean();
+    assert_true(str_contains($decision_group_text, 'group-by=type') && str_contains($decision_group_text, 'decision-groups:'), 'decision grouping is visible in text audit output');
 
     $row_conflict_base = $tmp . '/row-conflict-base.sqlite';
     $row_conflict_source = $tmp . '/row-conflict-source.sqlite';

@@ -20,6 +20,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "    [--scope all|db|files] [--records all|conflicts|decisions|resolutions] [--conflict-type TYPE] [--decision DECISION]\n");
     fwrite(STDERR, "    [--id-band-skips] [--review] [--review-status pending|needs-action|reviewed]\n");
     fwrite(STDERR, "    [--resolution-status validated|applied] [--group-by none|table|status|path|type|severity]\n");
+    fwrite(STDERR, "    --group-by supports resolutions by table/status/path, conflicts by table/type/path/severity, and decisions by table/type/path.\n");
     fwrite(STDERR, "  php merge.php review-record --metadata-db <path> --record conflict|decision --id ID --status pending|needs-action|reviewed --note TEXT [--reviewer NAME]\n");
     fwrite(STDERR, "  php merge.php resolve-conflict --metadata-db <path> --id ID --choice source|target [--apply] [--note TEXT] [--reviewer NAME]\n");
 }
@@ -3740,8 +3741,8 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
     if ($group_by !== '' && $group_by !== 'none') {
         if (($filters['records'] ?? null) === null) {
             $filters['records'] = 'resolutions';
-        } elseif (!in_array(($filters['records'] ?? null), ['conflicts', 'resolutions'], true)) {
-            throw new InvalidArgumentException('--group-by can only be combined with --records conflicts or resolutions');
+        } elseif (!in_array(($filters['records'] ?? null), ['conflicts', 'decisions', 'resolutions'], true)) {
+            throw new InvalidArgumentException('--group-by can only be combined with --records conflicts, decisions, or resolutions');
         }
         $records = (string)($filters['records'] ?? 'resolutions');
         if ($records === 'resolutions' && !in_array($group_by, ['table', 'status', 'path'], true)) {
@@ -3750,8 +3751,11 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
         if ($records === 'conflicts' && !in_array($group_by, ['table', 'type', 'path', 'severity'], true)) {
             throw new InvalidArgumentException('--records conflicts supports --group-by table, type, path, or severity');
         }
-        if (($filters['decision'] ?? null) !== null) {
-            throw new InvalidArgumentException('--group-by cannot be combined with --decision');
+        if ($records === 'decisions' && !in_array($group_by, ['table', 'type', 'path'], true)) {
+            throw new InvalidArgumentException('--records decisions supports --group-by table, type, or path');
+        }
+        if (($filters['decision'] ?? null) !== null && $records !== 'decisions') {
+            throw new InvalidArgumentException('--group-by cannot be combined with --decision unless --records decisions is used');
         }
         if (($filters['conflict_type'] ?? null) !== null) {
             throw new InvalidArgumentException('--group-by cannot be combined with --conflict-type');
@@ -4009,6 +4013,19 @@ function cow_merge_audit_conflict_group_sql(string $group_by): string {
     throw new InvalidArgumentException('unsupported conflict group');
 }
 
+function cow_merge_audit_decision_group_sql(string $group_by): string {
+    if ($group_by === 'table') {
+        return 'd.table_name';
+    }
+    if ($group_by === 'type') {
+        return 'd.decision';
+    }
+    if ($group_by === 'path') {
+        return "CASE WHEN d.table_name = '__files__' THEN COALESCE(forkpress_file_path_group(d.row_identity), '(unknown)') ELSE d.table_name END";
+    }
+    throw new InvalidArgumentException('unsupported decision group');
+}
+
 function cow_merge_audit_count_sql(array $filters, string $record_type, string $alias, bool $review_notes_exist = true): string {
     $conditions = [];
     if ($filters['scope'] === 'files') {
@@ -4207,6 +4224,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
         'conflicts' => [],
         'conflict_groups' => [],
         'decisions' => [],
+        'decision_groups' => [],
         'resolutions' => [],
         'resolution_groups' => [],
         'autoincrement_bands' => [],
@@ -4302,6 +4320,24 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
                 "FROM merge_decisions $decision_filter ORDER BY id DESC LIMIT :limit",
                 $decision_params
             ));
+            if ($filters['records'] === 'decisions' && $filters['group_by'] !== 'none') {
+                [$decision_group_filter, $decision_group_params] = cow_merge_audit_where_sql($run_id, $filters, 'decisions', 'd', $review_notes_exist);
+                $decision_group_params[':limit'] = $limit;
+                $group_expr = cow_merge_audit_decision_group_sql($filters['group_by']);
+                $report['decision_groups'] = cow_merge_audit_table_rows(
+                    $db,
+                    'merge_decisions',
+                    "SELECT :group_by AS group_by, $group_expr AS group_key, COUNT(*) AS decision_count, " .
+                    "SUM(CASE WHEN d.decision = 'target-wins' THEN 1 ELSE 0 END) AS target_wins_count, " .
+                    "SUM(CASE WHEN d.decision = 'source-applied' THEN 1 ELSE 0 END) AS source_applied_count, " .
+                    "SUM(CASE WHEN d.decision = 'id-band-skipped' THEN 1 ELSE 0 END) AS id_band_skipped_count, " .
+                    "SUM(CASE WHEN d.table_name = '__files__' THEN 1 ELSE 0 END) AS file_count, " .
+                    "SUM(CASE WHEN d.table_name <> '__files__' THEN 1 ELSE 0 END) AS db_count " .
+                    "FROM merge_decisions d $decision_group_filter " .
+                    "GROUP BY group_key ORDER BY decision_count DESC, group_key LIMIT :limit",
+                    $decision_group_params + [':group_by' => $filters['group_by']]
+                );
+            }
         }
 
         if ($filters['records'] === 'all' || $filters['records'] === 'resolutions') {
@@ -4472,6 +4508,13 @@ function cow_merge_print_audit_text(array $report): void {
             }
             echo "     reason={$decision['reason']}\n";
             echo "     chosen={$decision['chosen_preview']}\n";
+        }
+    }
+
+    if ($report['decision_groups']) {
+        echo "decision-groups:\n";
+        foreach ($report['decision_groups'] as $group) {
+            echo "  {$group['group_by']}={$group['group_key']} decisions={$group['decision_count']} target-wins={$group['target_wins_count']} source-applied={$group['source_applied_count']} id-band-skipped={$group['id_band_skipped_count']} files={$group['file_count']} db={$group['db_count']}\n";
         }
     }
 
