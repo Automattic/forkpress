@@ -3411,24 +3411,52 @@ function cow_merge_sql_references_table(string $sql, string $table): bool {
 
 function cow_merge_table_dependent_views(SQLite3 $db, string $table, ?string $exclude_view = null): array {
     $views = [];
+    $all_views = [];
     $res = $db->query("SELECT name, sql FROM sqlite_master WHERE type = 'view' AND sql IS NOT NULL ORDER BY name");
     if (!$res) {
         throw new RuntimeException("failed to read view dependencies for $table: " . $db->lastErrorMsg());
     }
     while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
         $name = (string)$row['name'];
-        if ($exclude_view !== null && strcasecmp($name, $exclude_view) === 0) {
-            continue;
-        }
-        $sql = (string)$row['sql'];
-        if (cow_merge_sql_references_table($sql, $table)) {
-            $views[] = [
-                'name' => $name,
-                'sql' => $sql,
-            ];
+        $all_views[$name] = [
+            'name' => $name,
+            'sql' => (string)$row['sql'],
+        ];
+    }
+
+    $seen = [];
+    if ($exclude_view !== null) {
+        $seen[strtolower($exclude_view)] = true;
+    }
+    $queue = [$table];
+    while ($queue) {
+        $current = array_shift($queue);
+        foreach ($all_views as $name => $view) {
+            $key = strtolower($name);
+            if (isset($seen[$key])) {
+                continue;
+            }
+            if (cow_merge_sql_references_table((string)$view['sql'], $current)) {
+                $seen[$key] = true;
+                $views[] = $view;
+                $queue[] = $name;
+            }
         }
     }
     return $views;
+}
+
+function cow_merge_view_trigger_dependencies(SQLite3 $db, array $views): array {
+    $dependencies = [];
+    foreach ($views as $view) {
+        $name = is_array($view) ? (string)$view['name'] : (string)$view;
+        foreach (cow_merge_table_rebuild_dependencies($db, $name) as $dependency) {
+            if ((string)$dependency['type'] === 'trigger') {
+                $dependencies[] = $dependency;
+            }
+        }
+    }
+    return $dependencies;
 }
 
 function cow_merge_validate_views(SQLite3 $db, array $views, string $context): void {
@@ -3449,6 +3477,7 @@ function cow_merge_apply_source_table_rebuild(SQLite3 $target, string $table, st
         throw new InvalidArgumentException('source schema resolution can only rebuild tables with the same column order and unchanged primary key columns');
     }
     $dependent_views = cow_merge_table_dependent_views($target, $table);
+    $dependent_view_triggers = cow_merge_view_trigger_dependencies($target, $dependent_views);
     cow_merge_validate_views($target, $dependent_views, 'pre-rebuild');
     $dependencies = cow_merge_table_rebuild_dependencies($target, $table);
     $tmp_table = '__forkpress_merge_rebuild_' . bin2hex(random_bytes(8));
@@ -3471,7 +3500,7 @@ function cow_merge_apply_source_table_rebuild(SQLite3 $target, string $table, st
         if (!$target->exec($copy_sql)) {
             throw new RuntimeException('failed to copy rows into rebuilt table: ' . $target->lastErrorMsg());
         }
-        foreach ($dependent_views as $view) {
+        foreach (array_reverse($dependent_views) as $view) {
             if (!$target->exec('DROP VIEW ' . cow_merge_quote_ident((string)$view['name']))) {
                 throw new RuntimeException('failed to drop target view ' . $view['name'] . ' during schema rebuild: ' . $target->lastErrorMsg());
             }
@@ -3495,6 +3524,14 @@ function cow_merge_apply_source_table_rebuild(SQLite3 $target, string $table, st
                 throw new RuntimeException('failed to recreate target view ' . $view['name'] . ' after schema rebuild: ' . $target->lastErrorMsg());
             }
         }
+        foreach ($dependent_view_triggers as $dependency) {
+            if (!$target->exec((string)$dependency['sql'])) {
+                throw new RuntimeException(
+                    'failed to recreate dependent target ' . $dependency['type'] . ' ' . $dependency['name'] .
+                    ' after schema rebuild: ' . $target->lastErrorMsg()
+                );
+            }
+        }
         cow_merge_validate_views($target, $dependent_views, 'post-rebuild');
         $target->exec('RELEASE forkpress_schema_rebuild');
     } catch (Throwable $e) {
@@ -3506,7 +3543,10 @@ function cow_merge_apply_source_table_rebuild(SQLite3 $target, string $table, st
 
 function cow_merge_apply_source_view_schema_resolution(SQLite3 $target, string $view, ?string $source_sql): void {
     $dependent_views = cow_merge_table_dependent_views($target, $view, $view);
-    $dependencies = cow_merge_table_rebuild_dependencies($target, $view);
+    $dependencies = array_merge(
+        cow_merge_table_rebuild_dependencies($target, $view),
+        cow_merge_view_trigger_dependencies($target, $dependent_views)
+    );
     if ($source_sql === null && $dependent_views) {
         $names = implode(', ', array_map(fn($dependency) => (string)$dependency['name'], $dependent_views));
         throw new InvalidArgumentException("source view drop resolution cannot leave dependent target views invalid: $names");
@@ -3518,7 +3558,7 @@ function cow_merge_apply_source_view_schema_resolution(SQLite3 $target, string $
     cow_merge_validate_views($target, $dependent_views, 'pre-view-resolution');
     $target->exec('SAVEPOINT forkpress_view_resolution');
     try {
-        foreach ($dependent_views as $dependency) {
+        foreach (array_reverse($dependent_views) as $dependency) {
             if (!$target->exec('DROP VIEW ' . cow_merge_quote_ident((string)$dependency['name']))) {
                 throw new RuntimeException('failed to drop dependent target view ' . $dependency['name'] . ' during view schema resolution: ' . $target->lastErrorMsg());
             }
@@ -3531,17 +3571,17 @@ function cow_merge_apply_source_view_schema_resolution(SQLite3 $target, string $
         if ($source_sql !== null && !$target->exec($source_sql)) {
             throw new RuntimeException('failed to apply source view schema resolution: ' . $target->lastErrorMsg());
         }
+        foreach ($dependent_views as $dependency) {
+            if (!$target->exec((string)$dependency['sql'])) {
+                throw new RuntimeException('failed to recreate dependent target view ' . $dependency['name'] . ' after view schema resolution: ' . $target->lastErrorMsg());
+            }
+        }
         foreach ($dependencies as $dependency) {
             if (!$target->exec((string)$dependency['sql'])) {
                 throw new RuntimeException(
                     'failed to recreate dependent target ' . $dependency['type'] . ' ' . $dependency['name'] .
                     ' after view schema resolution: ' . $target->lastErrorMsg()
                 );
-            }
-        }
-        foreach ($dependent_views as $dependency) {
-            if (!$target->exec((string)$dependency['sql'])) {
-                throw new RuntimeException('failed to recreate dependent target view ' . $dependency['name'] . ' after view schema resolution: ' . $target->lastErrorMsg());
             }
         }
         if ($source_sql !== null) {

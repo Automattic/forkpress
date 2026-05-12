@@ -1277,8 +1277,11 @@ SQL);
 
     $db = open_db($schema_view_dep_target);
     $db->exec('CREATE TABLE plugin_items_dep_insert_audit (item_id TEXT, label TEXT)');
+    $db->exec('CREATE TABLE plugin_items_dep_child_audit (label TEXT)');
     $db->exec('CREATE VIEW plugin_items_dep_child AS SELECT label FROM plugin_items_dep_base');
+    $db->exec('CREATE VIEW plugin_items_dep_grandchild AS SELECT label FROM plugin_items_dep_child');
     $db->exec('CREATE TRIGGER plugin_items_dep_base_insert INSTEAD OF INSERT ON plugin_items_dep_base BEGIN INSERT INTO plugin_items_dep_insert_audit (item_id, label) VALUES (NEW.item_id, NEW.label); END');
+    $db->exec('CREATE TRIGGER plugin_items_dep_child_insert INSTEAD OF INSERT ON plugin_items_dep_child BEGIN INSERT INTO plugin_items_dep_child_audit (label) VALUES (NEW.label); END');
     $db->close();
 
     $result = cow_merge_databases($schema_view_dep_base, $schema_view_dep_source, $schema_view_dep_target, $metadata, 'feature-view-dependency', 'main');
@@ -1294,12 +1297,17 @@ SQL);
     );
     assert_same($schema_view_dep_resolution['status'], 'applied', 'source view rewrite with dependent target view records applied status');
     assert_same((int)scalar($schema_view_dep_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_dep_child'"), 1, 'source view rewrite recreates dependent target view');
+    assert_same((int)scalar($schema_view_dep_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_dep_grandchild'"), 1, 'source view rewrite recreates transitive dependent target view');
     assert_same((int)scalar($schema_view_dep_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_items_dep_base_insert'"), 1, 'source view rewrite recreates dependent target trigger');
+    assert_same((int)scalar($schema_view_dep_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_items_dep_child_insert'"), 1, 'source view rewrite recreates trigger on transitive dependent target view');
     assert_same(scalar($schema_view_dep_target, "SELECT label FROM plugin_items_dep_child WHERE label = 'Alpha'"), 'Alpha', 'dependent target view remains queryable after source view rewrite');
+    assert_same(scalar($schema_view_dep_target, "SELECT label FROM plugin_items_dep_grandchild WHERE label = 'Alpha'"), 'Alpha', 'transitive dependent target view remains queryable after source view rewrite');
     $db = open_db($schema_view_dep_target);
     $db->exec("INSERT INTO plugin_items_dep_base (item_id, label, value) VALUES ('from-view', 'From View', 'triggered')");
+    $db->exec("INSERT INTO plugin_items_dep_child (label) VALUES ('From Child View')");
     $db->close();
     assert_same(scalar($schema_view_dep_target, "SELECT label FROM plugin_items_dep_insert_audit WHERE item_id = 'from-view'"), 'From View', 'dependent target trigger still fires after source view rewrite');
+    assert_same(scalar($schema_view_dep_target, "SELECT label FROM plugin_items_dep_child_audit WHERE label = 'From Child View'"), 'From Child View', 'trigger on transitive dependent target view still fires after source view rewrite');
 
     $schema_view_drop_dep_base = $tmp . '/schema-view-drop-dep-base.sqlite';
     $schema_view_drop_dep_source = $tmp . '/schema-view-drop-dep-source.sqlite';
