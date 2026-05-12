@@ -209,6 +209,44 @@ try {
         1,
         'target-only row delete is auditable'
     );
+    $reviewed_db_decision_id = (int)scalar($metadata, "SELECT id FROM merge_decisions WHERE table_name = 'plugin_items' AND column_name = 'value' AND decision = 'target-kept' ORDER BY id DESC LIMIT 1");
+    $unreviewed_db_decision_id = (int)scalar($metadata, "SELECT id FROM merge_decisions WHERE table_name = 'wp_posts' AND column_name IS NULL AND decision = 'target-kept' ORDER BY id DESC LIMIT 1");
+    $db_decision_review = cow_merge_review_record(
+        $metadata,
+        'decision',
+        $reviewed_db_decision_id,
+        'reviewed',
+        'Target-only plugin value is intentional.',
+        'cow-test'
+    );
+    assert_same($db_decision_review['record_type'], 'decision', 'review note can target a database decision record');
+    $db_decision_queue_audit = cow_merge_audit_report($metadata, null, 10, [
+        'review' => '1',
+        'review_status' => 'unreviewed',
+        'records' => 'decisions',
+        'scope' => 'db',
+    ]);
+    assert_same($db_decision_queue_audit['filters']['review'], true, 'database decision review queue preserves the review shortcut filter');
+    assert_same($db_decision_queue_audit['filters']['review_status'], 'unreviewed', 'database decision review queue preserves the unreviewed filter');
+    assert_same($db_decision_queue_audit['filters']['records'], 'decisions', 'database decision review queue focuses on decision records');
+    assert_same($db_decision_queue_audit['filters']['scope'], 'db', 'database decision review queue focuses on database records');
+    assert_same(count($db_decision_queue_audit['conflicts']), 0, 'database decision review queue omits conflicts');
+    assert_same(count($db_decision_queue_audit['resolutions']), 0, 'database decision review queue omits resolutions');
+    $db_decision_queue_ids = array_map(fn($row) => (int)$row['id'], $db_decision_queue_audit['decisions']);
+    assert_true(in_array($unreviewed_db_decision_id, $db_decision_queue_ids, true), 'database decision review queue returns unreviewed DB decisions');
+    assert_true(!in_array($reviewed_db_decision_id, $db_decision_queue_ids, true), 'database decision review queue excludes reviewed DB decisions');
+    foreach ($db_decision_queue_audit['decisions'] as $row) {
+        assert_same($row['review_status'], null, 'database decision review queue returns only unreviewed records');
+        assert_true($row['table_name'] !== '__files__', 'database decision review queue excludes file records');
+    }
+    $reviewed_db_decision_audit = cow_merge_audit_report($metadata, null, 10, [
+        'records' => 'decisions',
+        'review_status' => 'reviewed',
+        'scope' => 'db',
+    ]);
+    assert_same(count($reviewed_db_decision_audit['decisions']), 1, 'review status filter returns annotated DB decisions');
+    assert_same((int)$reviewed_db_decision_audit['decisions'][0]['id'], $reviewed_db_decision_id, 'reviewed DB decision filter returns the annotated decision');
+    assert_same($reviewed_db_decision_audit['decisions'][0]['review_note'], 'Target-only plugin value is intentional.', 'merge audit JSON exposes latest DB decision review note');
 
     $empty_table_base = $tmp . '/empty-table-base.sqlite';
     $empty_table_source = $tmp . '/empty-table-source.sqlite';
@@ -551,7 +589,11 @@ try {
     assert_true(count($reviewed_status_audit['conflicts']) >= 1, 'review status filter returns reviewed conflicts');
     $reviewed_status_ids = array_map(fn($row) => (int)$row['id'], $reviewed_status_audit['conflicts']);
     assert_true(in_array($reviewed_conflict_id, $reviewed_status_ids, true), 'review status filter returns the annotated conflict');
-    assert_same(count($reviewed_status_audit['decisions']), 0, 'review status filter omits unannotated decisions');
+    $reviewed_status_decision_ids = array_map(fn($row) => (int)$row['id'], $reviewed_status_audit['decisions']);
+    assert_true(in_array($reviewed_db_decision_id, $reviewed_status_decision_ids, true), 'review status filter returns annotated DB decisions');
+    foreach ($reviewed_status_audit['decisions'] as $row) {
+        assert_same($row['review_status'], 'reviewed', 'review status filter omits unannotated decisions');
+    }
     $unreviewed_status_audit = cow_merge_audit_report($metadata, null, 10, ['review_status' => 'unreviewed']);
     assert_same($unreviewed_status_audit['filters']['review_status'], 'unreviewed', 'merge audit JSON report includes unreviewed filter');
     assert_true(count($unreviewed_status_audit['decisions']) >= 1, 'unreviewed filter returns decisions with no review note');

@@ -49,6 +49,9 @@ on_error() {
   dump_if_exists "$TMP/keyless-resolution-status.json"
   dump_if_exists "$TMP/merge-audit.out"
   dump_if_exists "$TMP/merge-audit.json"
+  dump_if_exists "$TMP/merge-db-decision-review-queue.json"
+  dump_if_exists "$TMP/merge-db-decision-reviewed.out"
+  dump_if_exists "$TMP/merge-db-decision-reviewed.json"
   dump_if_exists "$TMP/merge-file-decision-review-queue.json"
   dump_if_exists "$TMP/merge-file-decision-reviewed.out"
   dump_if_exists "$TMP/merge-file-decision-reviewed.json"
@@ -385,6 +388,25 @@ grep -F "target-kept" "$TMP/merge-target-kept-files.out" >/dev/null
 grep -F "wp-content/main-target-file.txt" "$TMP/merge-target-kept-files.out" >/dev/null
 "$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --target-kept --group-by type --limit 12 > "$TMP/merge-target-kept.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); $decisions = $data["decisions"] ?? []; $groups = $data["decision_groups"] ?? []; $ok = is_array($data) && (($data["filters"]["target_kept"] ?? false) === true) && (($data["filters"]["records"] ?? null) === "decisions") && (($data["filters"]["decision"] ?? null) === "target-kept") && count($decisions) > 0; $has_db = false; foreach ($decisions as $row) { if (($row["decision"] ?? null) !== "target-kept") $ok = false; if (($row["table_name"] ?? null) === "forkpress_e2e_target_kept") $has_db = true; } $has_group = false; foreach ($groups as $group) { if (($group["group_key"] ?? null) === "target-kept" && (int)($group["decision_count"] ?? 0) > 0) $has_group = true; } exit($ok && $has_db && $has_group ? 0 : 1);' "$TMP/merge-target-kept.json"
+REVIEWED_DB_DECISION_ID="$(
+  php -r '$db = new SQLite3($argv[1]); $stmt = $db->prepare("SELECT id FROM merge_decisions WHERE table_name = '\''forkpress_e2e_target_kept'\'' AND decision = '\''target-kept'\'' ORDER BY id DESC LIMIT 1"); echo (int)$stmt->execute()->fetchArray(SQLITE3_NUM)[0];' \
+    "$WORK_DIR/cow/merge/metadata.sqlite"
+)"
+UNREVIEWED_DB_DECISION_ID="$(
+  php -r '$db = new SQLite3($argv[1]); $stmt = $db->prepare("SELECT id FROM merge_decisions WHERE table_name <> '\''__files__'\'' AND decision = '\''source-applied'\'' ORDER BY id DESC LIMIT 1"); echo (int)$stmt->execute()->fetchArray(SQLITE3_NUM)[0];' \
+    "$WORK_DIR/cow/merge/metadata.sqlite"
+)"
+if [ "$REVIEWED_DB_DECISION_ID" = "0" ] || [ "$UNREVIEWED_DB_DECISION_ID" = "0" ]; then
+  echo "missing DB decision ids for review queue coverage" >&2
+  exit 1
+fi
+"$BIN" branch --work-dir "$WORK_DIR" merge-review decision "$REVIEWED_DB_DECISION_ID" --status reviewed --note "E2E reviewed target-kept DB decision" --reviewer cow-e2e > "$TMP/merge-db-decision-reviewed.out"
+grep -F "forkpress: recorded COW merge review note" "$TMP/merge-db-decision-reviewed.out" >/dev/null
+grep -F "record:    decision #$REVIEWED_DB_DECISION_ID" "$TMP/merge-db-decision-reviewed.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --review --review-status unreviewed --records decisions --scope db --limit 12 > "$TMP/merge-db-decision-review-queue.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["review"] ?? false) === true) && (($data["filters"]["review_status"] ?? null) === "unreviewed") && (($data["filters"]["records"] ?? null) === "decisions") && (($data["filters"]["scope"] ?? null) === "db") && empty($data["conflicts"] ?? []) && empty($data["resolutions"] ?? []); $has_unreviewed = false; foreach (($data["decisions"] ?? []) as $row) { if (($row["review_status"] ?? null) !== null) $ok = false; if (($row["table_name"] ?? null) === "__files__") $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[2]) $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[3] && ($row["decision"] ?? null) === "source-applied") $has_unreviewed = true; } exit($ok && $has_unreviewed ? 0 : 1);' "$TMP/merge-db-decision-review-queue.json" "$REVIEWED_DB_DECISION_ID" "$UNREVIEWED_DB_DECISION_ID"
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --records decisions --review-status reviewed --scope db --limit 8 > "$TMP/merge-db-decision-reviewed.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $decisions = $data["decisions"] ?? []; $ok = is_array($data) && (($data["filters"]["review_status"] ?? null) === "reviewed") && (($data["filters"]["records"] ?? null) === "decisions") && (($data["filters"]["scope"] ?? null) === "db") && count($decisions) === 1; $row = $decisions[0] ?? []; exit($ok && (int)($row["id"] ?? 0) === (int)$argv[2] && ($row["review_status"] ?? null) === "reviewed" && ($row["review_note"] ?? null) === "E2E reviewed target-kept DB decision" ? 0 : 1);' "$TMP/merge-db-decision-reviewed.json" "$REVIEWED_DB_DECISION_ID"
 "$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --review-status unreviewed --scope files --path-prefix wp-content/main-target-file.txt --limit 8 > "$TMP/merge-unreviewed.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); $decisions = $data["decisions"] ?? []; $ok = is_array($data) && (($data["filters"]["records"] ?? null) === "all") && (($data["filters"]["review_status"] ?? null) === "unreviewed"); $has_file = false; foreach ($decisions as $row) { if (($row["review_status"] ?? null) !== null) $ok = false; if (($row["table_name"] ?? null) === "__files__" && ($row["decision"] ?? null) === "target-kept" && str_contains((string)($row["target_preview"] ?? ""), "wp-content/main-target-file.txt")) $has_file = true; } exit($ok && $has_file ? 0 : 1);' "$TMP/merge-unreviewed.json"
 REVIEWED_FILE_DECISION_ID="$(
