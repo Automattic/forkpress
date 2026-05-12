@@ -3001,7 +3001,7 @@ fn cow_branch_command(
         }
         "merge-review" => {
             let Some(record_type) = args.args.get(1) else {
-                bail!("branch merge-review requires conflict or decision");
+                bail!("branch merge-review requires conflict, decision, or resolution");
             };
             let Some(record_id) = args.args.get(2) else {
                 bail!("branch merge-review requires a record id");

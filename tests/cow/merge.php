@@ -458,6 +458,26 @@ try {
     cow_merge_print_audit_text($reviewed_status_audit);
     $reviewed_status_text = ob_get_clean();
     assert_true(str_contains($reviewed_status_text, 'review-status=reviewed'), 'review status filter is visible in text filters');
+    $resolution_review_id = (int)$applied_resolution_audit['resolutions'][0]['id'];
+    $resolution_review = cow_merge_review_record(
+        $metadata,
+        'resolution',
+        $resolution_review_id,
+        'needs-action',
+        'Follow up with content owner after source resolution.',
+        'cow-test'
+    );
+    assert_same($resolution_review['record_type'], 'resolution', 'review note can target a deterministic resolution record');
+    $reviewed_resolution_audit = cow_merge_audit_report($metadata, null, 10, ['records' => 'resolutions', 'review_status' => 'needs-action']);
+    assert_same(count($reviewed_resolution_audit['conflicts']), 0, 'resolution review status filter omits conflicts when records=resolutions');
+    assert_same(count($reviewed_resolution_audit['decisions']), 0, 'resolution review status filter omits decisions when records=resolutions');
+    assert_same(count($reviewed_resolution_audit['resolutions']), 1, 'review status filter returns annotated resolution records');
+    assert_same($reviewed_resolution_audit['resolutions'][0]['review_status'], 'needs-action', 'merge audit JSON exposes latest resolution review status');
+    assert_same($reviewed_resolution_audit['resolutions'][0]['review_note'], 'Follow up with content owner after source resolution.', 'merge audit JSON exposes latest resolution review note');
+    ob_start();
+    cow_merge_print_audit_text($reviewed_resolution_audit);
+    $reviewed_resolution_text = ob_get_clean();
+    assert_true(str_contains($reviewed_resolution_text, 'review=needs-action') && str_contains($reviewed_resolution_text, 'Follow up with content owner'), 'merge audit text includes resolution review annotations');
     $missing_audit = cow_merge_audit_report($tmp . '/missing-metadata.sqlite', null, 5);
     assert_same($missing_audit['metadata_exists'], false, 'merge audit report handles missing metadata');
     $legacy_metadata = $tmp . '/legacy-metadata.sqlite';
@@ -480,6 +500,23 @@ SQL);
     cow_merge_ensure_metadata($legacy_db);
     $legacy_db->close();
     assert_same(column_type($legacy_metadata, 'merge_runs', 'failure_reason'), 'TEXT', 'metadata migration adds failed-run reason storage to legacy merge databases');
+    $legacy_review_metadata = $tmp . '/legacy-review-metadata.sqlite';
+    $legacy_review_db = open_db($legacy_review_metadata);
+    $legacy_review_db->exec(<<<'SQL'
+CREATE TABLE merge_review_notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    record_type TEXT NOT NULL CHECK(record_type IN ('conflict', 'decision')),
+    record_id INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending', 'needs-action', 'reviewed')),
+    note TEXT NOT NULL,
+    reviewer TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)
+SQL);
+    $legacy_review_db->exec("INSERT INTO merge_review_notes (record_type, record_id, status, note, reviewer) VALUES ('conflict', 1, 'reviewed', 'legacy note', 'cow-test')");
+    cow_merge_ensure_metadata($legacy_review_db);
+    assert_true((bool)$legacy_review_db->exec("INSERT INTO merge_review_notes (record_type, record_id, status, note, reviewer) VALUES ('resolution', 1, 'reviewed', 'resolution note', 'cow-test')"), 'metadata migration allows resolution review notes in legacy merge databases');
+    $legacy_review_db->close();
 
     $file_base_db = $tmp . '/file-base.sqlite';
     $file_source_db = $tmp . '/file-source.sqlite';

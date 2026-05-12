@@ -474,8 +474,9 @@ tooling.
   `--records conflicts`, `--group-by` can summarize conflicts by table, type,
   path, or severity class. With `--records decisions`, `--group-by` can
   summarize automatic decisions by table, type, or path.
-- `forkpress branch merge-review conflict|decision <id> --status pending|needs-action|reviewed --note <text>`
-  `[--reviewer NAME]` appends a review note to an auditable merge conflict or decision.
+- `forkpress branch merge-review conflict|decision|resolution <id> --status pending|needs-action|reviewed --note <text>`
+  `[--reviewer NAME]` appends a review note to an auditable merge conflict,
+  decision, or deterministic resolution record.
 - `forkpress branch merge-resolve conflict <id> --choice source|target [--apply]`
   `[--note TEXT] [--reviewer NAME]` validates an audited DB cell, row
   insert-collision, row-target-deleted, row-source-deleted, or filesystem path
