@@ -10,3 +10,27 @@
 - Added `forkpress branch merge-resolve conflict <id> --choice source|target` as the first validation-gated deterministic resolver for DB cell conflicts, row insert collisions, row delete/update conflicts, no-primary-key table conflicts backed by sidecar row identity, safe filesystem path conflicts, and safe source-added column/index schema conflicts, with applied resolutions recorded in merge metadata.
 - Applied COW merge conflict resolutions now append a `reviewed` annotation to the resolved conflict audit record.
 - Added `forkpress branch merge-audit --records resolutions --resolution-status validated|applied` to inspect deterministic conflict resolution records directly.
+
+## known-good/cow-mergeback-mvp-2026-05-12
+
+Verified as a major known-good checkpoint for the production materialized COW mergeback MVP:
+
+- Generic state-based SQLite branch mergeback for WordPress core and arbitrary plugin tables without plugin declarations.
+- Durable audit metadata for merge runs, decisions, conflicts, reviews, resolutions, ID-band allocations, sidecar row identities, and rollback failures.
+- Branch-time AUTOINCREMENT band allocation and audited plain `INTEGER PRIMARY KEY` skip decisions.
+- No-primary-key table sidecar identity capture, including runtime TEMP-trigger tracking for rowid delete/reuse cases.
+- Filesystem mergeback for regular files, directories, safe relative symlinks, and target-wins audited conflicts for unsafe changes.
+- Validation-gated deterministic conflict resolution for explicit-PK DB conflicts, no-PK DB conflicts via sidecar identity, safe filesystem conflicts, and safe source-added schema columns/indexes.
+- CLI audit/review/resolution commands for inspecting, annotating, and revisiting automatic merge decisions.
+
+Verification for the tag included:
+
+- Fresh temporary runtime-bundle debug build of `target/debug/forkpress`.
+- `tests/cow/e2e.sh target/debug/forkpress`.
+- `php -l scripts/cow/merge.php`.
+- `php -l tests/cow/merge.php`.
+- `php tests/cow/merge.php`.
+- `cargo fmt --check`.
+- `cargo test -p forkpress-storage`.
+- `FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli`.
+- `FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli --features dev-experiments --bin forkpress-dev`.
