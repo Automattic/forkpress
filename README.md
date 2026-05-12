@@ -479,6 +479,9 @@ tooling.
   review note yet; `pending`, `needs-action`, and `reviewed` match the latest
   recorded review annotation. For an active database conflict queue, combine
   `--review --review-status unreviewed --records conflicts --scope db`.
+  Use the same `--records` and `--scope` shape with `--review-status pending`
+  or `--review-status needs-action` to revisit annotated follow-up queues;
+  later review notes supersede earlier notes for filtering.
   For unreviewed deterministic resolution follow-up, use
   `--review --review-status unreviewed --records resolutions --scope db`.
   Use `--scope files` with `--records conflicts` or `--records resolutions`

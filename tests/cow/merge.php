@@ -560,6 +560,37 @@ try {
     cow_merge_databases($review_queue_base, $review_queue_source, $review_queue_target, $metadata, 'feature-review-queue', 'main');
     $review_queue_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND conflict_type = 'cell-conflict' ORDER BY id DESC LIMIT 1");
 
+    $status_transition_base = $tmp . '/status-transition-base.sqlite';
+    $status_transition_source = $tmp . '/status-transition-source.sqlite';
+    $status_transition_target = $tmp . '/status-transition-target.sqlite';
+    create_base_db($status_transition_base);
+    copy($status_transition_base, $status_transition_source);
+    copy($status_transition_base, $status_transition_target);
+    $db = open_db($status_transition_source);
+    $db->exec("UPDATE plugin_items SET value = 'source pending queue conflict' WHERE item_id = 'alpha'");
+    $db->close();
+    $db = open_db($status_transition_target);
+    $db->exec("UPDATE plugin_items SET value = 'target pending queue conflict' WHERE item_id = 'alpha'");
+    $db->close();
+    cow_merge_databases($status_transition_base, $status_transition_source, $status_transition_target, $metadata, 'feature-status-transition', 'main');
+    $status_transition_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND conflict_type = 'cell-conflict' ORDER BY id DESC LIMIT 1");
+    cow_merge_review_record(
+        $metadata,
+        'conflict',
+        $status_transition_conflict_id,
+        'reviewed',
+        'Initial status transition review.',
+        'cow-test'
+    );
+    cow_merge_review_record(
+        $metadata,
+        'conflict',
+        $status_transition_conflict_id,
+        'pending',
+        'Re-opened for a second reviewer.',
+        'cow-test'
+    );
+
     ob_start();
     cow_merge_print_audit_text($reviewed_audit);
     $audit_text = ob_get_clean();
@@ -584,11 +615,34 @@ try {
     $unreviewed_review_queue_ids = array_map(fn($row) => (int)$row['id'], $unreviewed_review_queue_audit['conflicts']);
     assert_true(in_array($review_queue_conflict_id, $unreviewed_review_queue_ids, true), 'review queue audit returns unreviewed DB conflicts');
     assert_true(!in_array($reviewed_conflict_id, $unreviewed_review_queue_ids, true), 'review queue audit excludes reviewed conflicts');
+    assert_true(!in_array($status_transition_conflict_id, $unreviewed_review_queue_ids, true), 'review queue audit excludes pending conflicts from unreviewed queues');
+    $pending_review_queue_audit = cow_merge_audit_report($metadata, null, 10, [
+        'review' => '1',
+        'review_status' => 'pending',
+        'records' => 'conflicts',
+        'scope' => 'db',
+    ]);
+    assert_same($pending_review_queue_audit['filters']['review'], true, 'pending review queue preserves the review shortcut filter');
+    assert_same($pending_review_queue_audit['filters']['review_status'], 'pending', 'pending review queue preserves the pending filter');
+    assert_same($pending_review_queue_audit['filters']['records'], 'conflicts', 'pending review queue can focus on conflict records');
+    assert_same($pending_review_queue_audit['filters']['scope'], 'db', 'pending review queue can focus on database records');
+    assert_same(count($pending_review_queue_audit['decisions']), 0, 'pending conflict queue omits decisions');
+    assert_same(count($pending_review_queue_audit['resolutions']), 0, 'pending conflict queue omits resolutions');
+    $pending_review_queue_ids = array_map(fn($row) => (int)$row['id'], $pending_review_queue_audit['conflicts']);
+    assert_true(in_array($status_transition_conflict_id, $pending_review_queue_ids, true), 'pending review queue returns conflicts whose latest note is pending');
+    assert_true(!in_array($reviewed_conflict_id, $pending_review_queue_ids, true), 'pending review queue excludes reviewed conflicts');
+    $status_transition_rows = array_values(array_filter(
+        $pending_review_queue_audit['conflicts'],
+        fn($row) => (int)$row['id'] === $status_transition_conflict_id
+    ));
+    assert_same($status_transition_rows[0]['review_status'], 'pending', 'pending review queue exposes the latest review status');
+    assert_same($status_transition_rows[0]['review_note'], 'Re-opened for a second reviewer.', 'pending review queue exposes the latest review note');
     $reviewed_status_audit = cow_merge_audit_report($metadata, null, 10, ['review_status' => 'reviewed']);
     assert_same($reviewed_status_audit['filters']['review_status'], 'reviewed', 'merge audit JSON report includes review status filter');
     assert_true(count($reviewed_status_audit['conflicts']) >= 1, 'review status filter returns reviewed conflicts');
     $reviewed_status_ids = array_map(fn($row) => (int)$row['id'], $reviewed_status_audit['conflicts']);
     assert_true(in_array($reviewed_conflict_id, $reviewed_status_ids, true), 'review status filter returns the annotated conflict');
+    assert_true(!in_array($status_transition_conflict_id, $reviewed_status_ids, true), 'reviewed status filter follows the latest review note');
     $reviewed_status_decision_ids = array_map(fn($row) => (int)$row['id'], $reviewed_status_audit['decisions']);
     assert_true(in_array($reviewed_db_decision_id, $reviewed_status_decision_ids, true), 'review status filter returns annotated DB decisions');
     foreach ($reviewed_status_audit['decisions'] as $row) {
