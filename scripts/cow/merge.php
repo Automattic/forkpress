@@ -4356,7 +4356,7 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
         }
     }
     if ($resolution_status) {
-        if (($filters['records'] ?? null) === null) {
+        if (cow_merge_audit_filter_is_default_all($filters, 'records')) {
             $filters['records'] = 'resolutions';
         } elseif (($filters['records'] ?? null) !== 'resolutions') {
             throw new InvalidArgumentException('--resolution-status can only be combined with --records resolutions');
@@ -4374,11 +4374,11 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
             throw new InvalidArgumentException('--resolution-status cannot be combined with --review-status');
         }
     }
-    if ($target_kept && ($filters['records'] ?? null) === null) {
+    if ($target_kept && cow_merge_audit_filter_is_default_all($filters, 'records')) {
         $filters['records'] = 'decisions';
     }
     if ($group_by !== '' && $group_by !== 'none') {
-        if (($filters['records'] ?? null) === null) {
+        if (cow_merge_audit_filter_is_default_all($filters, 'records')) {
             $filters['records'] = 'resolutions';
         } elseif (!in_array(($filters['records'] ?? null), ['conflicts', 'decisions', 'resolutions'], true)) {
             throw new InvalidArgumentException('--group-by can only be combined with --records conflicts, decisions, or resolutions');
@@ -4413,7 +4413,7 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
         if (!$target_kept) {
             return $filters;
         }
-        if (($filters['records'] ?? null) === null) {
+        if (cow_merge_audit_filter_is_default_all($filters, 'records')) {
             $filters['records'] = 'decisions';
         } elseif (($filters['records'] ?? null) !== 'decisions') {
             throw new InvalidArgumentException('--target-kept can only be combined with --records decisions');
@@ -4433,7 +4433,7 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
     } elseif (($filters['scope'] ?? null) === 'files') {
         throw new InvalidArgumentException('--id-band-skips cannot be combined with --scope files');
     }
-    if (($filters['records'] ?? null) === null) {
+    if (cow_merge_audit_filter_is_default_all($filters, 'records')) {
         $filters['records'] = 'decisions';
     } elseif (($filters['records'] ?? null) === 'conflicts') {
         throw new InvalidArgumentException('--id-band-skips cannot be combined with --records conflicts');
@@ -4450,6 +4450,14 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
         throw new InvalidArgumentException('--id-band-skips cannot be combined with file path filters');
     }
     return $filters;
+}
+
+function cow_merge_audit_filter_is_default_all(array $filters, string $key): bool {
+    if (!array_key_exists($key, $filters)) {
+        return true;
+    }
+    $value = $filters[$key];
+    return $value === null || $value === '' || $value === 'all';
 }
 
 function cow_merge_audit_filters(array $filters = []): array {

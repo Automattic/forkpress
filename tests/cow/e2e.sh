@@ -46,6 +46,8 @@ on_error() {
   dump_if_exists "$TMP/keyless-resolution-audit.out"
   dump_if_exists "$TMP/merge-audit.out"
   dump_if_exists "$TMP/merge-audit.json"
+  dump_if_exists "$TMP/merge-target-kept-files.out"
+  dump_if_exists "$TMP/merge-target-kept.json"
   dump_if_exists "$TMP/bad-slash.out"
   dump_if_exists "$TMP/storage-status-final.out"
   dump_if_exists "$TMP/storage-compact.out"
@@ -345,19 +347,25 @@ fi
 grep -F "refusing to reset main without --force" "$TMP/reset-main.out" >/dev/null
 
 log_step "merge branch into main"
+php -r '$db = new SQLite3($argv[1]); $db->exec("CREATE TABLE IF NOT EXISTS forkpress_e2e_target_kept (id INTEGER PRIMARY KEY, label TEXT NOT NULL)");' "$WORK/main/wp-content/database/.ht.sqlite"
 "$BIN" branch --work-dir "$WORK_DIR" create merge-source
 MERGE_TITLE="Merge source $(date +%s)"
 create_branch_post merge-source "$MERGE_TITLE"
+php -r '$db = new SQLite3($argv[1]); $db->exec("INSERT INTO forkpress_e2e_target_kept (id, label) VALUES (1, '\''target-only row'\'')");' "$WORK/main/wp-content/database/.ht.sqlite"
 echo "merged through branch merge" > "$WORK/merge-source/wp-content/merge-source-file.txt"
+echo "kept on target through branch merge" > "$WORK/main/wp-content/main-target-file.txt"
 "$BIN" branch --work-dir "$WORK_DIR" merge merge-source --into main > "$TMP/merge.out"
 grep -F "forkpress: merged merge-source into main" "$TMP/merge.out" >/dev/null
 grep -F "status:    completed" "$TMP/merge.out" >/dev/null
 test -f "$WORK/main/wp-content/merge-source-file.txt"
 grep -F "merged through branch merge" "$WORK/main/wp-content/merge-source-file.txt" >/dev/null
+test -f "$WORK/main/wp-content/main-target-file.txt"
+grep -F "kept on target through branch merge" "$WORK/main/wp-content/main-target-file.txt" >/dev/null
 curl -sS -H "Host: wp.localhost:$PORT" \
   "http://127.0.0.1:$PORT/wp-admin/edit.php" \
   -o "$TMP/main-after-merge-edit.html"
 grep -F "$MERGE_TITLE" "$TMP/main-after-merge-edit.html" >/dev/null
+php -r '$db = new SQLite3($argv[1]); $label = $db->querySingle("SELECT label FROM forkpress_e2e_target_kept WHERE id = 1"); exit($label === "target-only row" ? 0 : 1);' "$WORK/main/wp-content/database/.ht.sqlite"
 test -f "$WORK_DIR/cow/merge/metadata.sqlite"
 php -r '$db = new SQLite3($argv[1]); $count = (int)$db->querySingle("SELECT COUNT(*) FROM merge_runs WHERE source_branch = '\''merge-source'\'' AND target_branch = '\''main'\'' AND status = '\''completed'\''"); exit($count > 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
 "$BIN" branch --work-dir "$WORK_DIR" merge-audit --limit 8 > "$TMP/merge-audit.out"
@@ -365,6 +373,11 @@ grep -F "forkpress: COW merge audit" "$TMP/merge-audit.out" >/dev/null
 grep -F "merge-source -> main" "$TMP/merge-audit.out" >/dev/null
 "$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --limit 3 > "$TMP/merge-audit.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && !empty($data["runs"]) ? 0 : 1);' "$TMP/merge-audit.json"
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --target-kept --scope files --path-prefix wp-content/main-target-file.txt --limit 8 > "$TMP/merge-target-kept-files.out"
+grep -F "target-kept" "$TMP/merge-target-kept-files.out" >/dev/null
+grep -F "wp-content/main-target-file.txt" "$TMP/merge-target-kept-files.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --target-kept --group-by type --limit 12 > "$TMP/merge-target-kept.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $decisions = $data["decisions"] ?? []; $groups = $data["decision_groups"] ?? []; $ok = is_array($data) && (($data["filters"]["target_kept"] ?? false) === true) && (($data["filters"]["records"] ?? null) === "decisions") && (($data["filters"]["decision"] ?? null) === "target-kept") && count($decisions) > 0; $has_db = false; foreach ($decisions as $row) { if (($row["decision"] ?? null) !== "target-kept") $ok = false; if (($row["table_name"] ?? null) === "forkpress_e2e_target_kept") $has_db = true; } $has_group = false; foreach ($groups as $group) { if (($group["group_key"] ?? null) === "target-kept" && (int)($group["decision_count"] ?? 0) > 0) $has_group = true; } exit($ok && $has_db && $has_group ? 0 : 1);' "$TMP/merge-target-kept.json"
 
 log_step "merge runtime-tracked no-PK rowid reuse"
 mkdir -p "$WORK/main/wp-content/mu-plugins"

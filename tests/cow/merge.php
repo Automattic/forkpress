@@ -1969,8 +1969,19 @@ SQL);
     assert_same(count($target_kept_audit['row_identity_summary']), 0, 'target-kept shortcut omits row identity summary rows');
     assert_true(count($target_kept_audit['decisions']) >= 1, 'target-kept shortcut returns preserved target decisions');
     assert_same(count(array_filter($target_kept_audit['decisions'], fn($row) => $row['decision'] === 'target-kept')), count($target_kept_audit['decisions']), 'target-kept shortcut returns only target-kept decisions');
+    $target_kept_default_records_audit = cow_merge_audit_report($metadata, null, 10, [
+        'target_kept' => '1',
+        'records' => 'all',
+        'scope' => 'files',
+        'path_prefix' => 'wp-content/uploads/target-only.txt',
+    ]);
+    assert_same($target_kept_default_records_audit['filters']['records'], 'decisions', 'target-kept shortcut normalizes default CLI records to decisions');
+    assert_same(count($target_kept_default_records_audit['decisions']), 1, 'target-kept shortcut works with file path filters through CLI-style defaults');
+    assert_same($target_kept_default_records_audit['decisions'][0]['decision'], 'target-kept', 'target-kept path filter returns a preserved target decision');
     $target_kept_group_audit = cow_merge_audit_report($metadata, null, 10, ['target_kept' => '1', 'group_by' => 'type']);
     assert_true(count(array_filter($target_kept_group_audit['decision_groups'], fn($row) => $row['group_key'] === 'target-kept')) >= 1, 'target-kept shortcut can group preserved target decisions');
+    $target_kept_default_group_audit = cow_merge_audit_report($metadata, null, 10, ['target_kept' => '1', 'records' => 'all', 'group_by' => 'type']);
+    assert_true(count(array_filter($target_kept_default_group_audit['decision_groups'], fn($row) => $row['group_key'] === 'target-kept')) >= 1, 'target-kept shortcut grouping works through CLI-style default records');
     ob_start();
     cow_merge_print_audit_text($target_kept_audit);
     $target_kept_audit_text = ob_get_clean();

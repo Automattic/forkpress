@@ -28,6 +28,8 @@
 - Added `target-kept` audit decisions for target-only COW schema tables, table schema changes, indexes, views, and triggers that are preserved during mergeback.
 - Added `target-kept` audit decisions for target-only filesystem additions, deletions, and path changes that are preserved during COW mergeback.
 - Added `forkpress branch merge-audit --target-kept` to focus audit output on preserved target/trunk-side merge decisions.
+- Fixed the `--target-kept` audit shortcut to normalize default CLI records before combining with scope/path filters or decision grouping.
+- Added runtime-backed COW e2e coverage for `forkpress branch merge-audit --target-kept` reporting preserved target-side file and data decisions through the real CLI.
 - Added runtime-backed COW e2e coverage for deterministic resolution records being reviewed through `forkpress branch merge-review resolution`.
 - Updated the automatic mergeback loop runner to pass a configurable Codex reasoning-effort setting and to include the changelog/known-good tag policy in every worker prompt.
 
