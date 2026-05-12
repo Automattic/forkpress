@@ -813,6 +813,38 @@ SQL);
     assert_same($exact_path_audit['filters']['path'], 'wp-content/uploads/absolute-link.txt', 'merge audit JSON report includes exact file path filter');
     assert_same(count($exact_path_audit['conflicts']), 1, 'merge audit can filter filesystem conflicts by exact path');
     assert_same($exact_path_audit['conflicts'][0]['row_identity'], cow_merge_file_identity_json('wp-content/uploads/absolute-link.txt'), 'exact path audit filter returns the requested file identity');
+    $reviewed_file_conflict_id = (int)$exact_path_audit['conflicts'][0]['id'];
+    $unreviewed_file_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/conflict.txt')) . "' ORDER BY id DESC LIMIT 1");
+    $file_conflict_review = cow_merge_review_record(
+        $metadata,
+        'conflict',
+        $reviewed_file_conflict_id,
+        'reviewed',
+        'Unsafe symlink is intentionally target-kept.',
+        'cow-test'
+    );
+    assert_same($file_conflict_review['record_type'], 'conflict', 'review note can target a filesystem conflict record');
+    $file_conflict_queue_audit = cow_merge_audit_report($metadata, null, 10, [
+        'review' => '1',
+        'review_status' => 'unreviewed',
+        'records' => 'conflicts',
+        'scope' => 'files',
+        'path_prefix' => 'wp-content/uploads',
+    ]);
+    assert_same($file_conflict_queue_audit['filters']['review'], true, 'file conflict review queue preserves the review shortcut filter');
+    assert_same($file_conflict_queue_audit['filters']['review_status'], 'unreviewed', 'file conflict review queue preserves the unreviewed filter');
+    assert_same($file_conflict_queue_audit['filters']['records'], 'conflicts', 'file conflict review queue focuses on conflict records');
+    assert_same($file_conflict_queue_audit['filters']['scope'], 'files', 'file conflict review queue focuses on filesystem records');
+    assert_same(count($file_conflict_queue_audit['decisions']), 0, 'file conflict review queue omits decisions');
+    assert_same(count($file_conflict_queue_audit['resolutions']), 0, 'file conflict review queue omits resolutions');
+    assert_true(count($file_conflict_queue_audit['conflicts']) >= 1, 'file conflict review queue returns unreviewed filesystem conflicts');
+    $file_conflict_queue_ids = array_map(fn($row) => (int)$row['id'], $file_conflict_queue_audit['conflicts']);
+    assert_true(in_array($unreviewed_file_conflict_id, $file_conflict_queue_ids, true), 'file conflict review queue includes unreviewed filesystem conflicts');
+    assert_true(!in_array($reviewed_file_conflict_id, $file_conflict_queue_ids, true), 'file conflict review queue excludes reviewed filesystem conflicts');
+    foreach ($file_conflict_queue_audit['conflicts'] as $row) {
+        assert_same($row['review_status'], null, 'file conflict review queue returns only unreviewed records');
+        assert_same($row['table_name'], '__files__', 'file conflict review queue excludes database records');
+    }
     $path_prefix_audit = cow_merge_audit_report($metadata, null, 10, [
         'scope' => 'files',
         'records' => 'decisions',
@@ -943,6 +975,38 @@ SQL);
     );
     assert_same($file_delete_resolution['status'], 'applied', 'source filesystem deletion conflict resolution records applied status');
     assert_true(!file_exists($file_resolve_target_root . '/wp-content/uploads/delete-conflict.txt'), 'source filesystem deletion conflict resolution removes the target path after validation');
+    $reviewed_file_resolution_id = (int)$file_source_resolution['resolution_id'];
+    $unreviewed_file_resolution_id = (int)$file_delete_resolution['resolution_id'];
+    $file_resolution_review = cow_merge_review_record(
+        $metadata,
+        'resolution',
+        $reviewed_file_resolution_id,
+        'reviewed',
+        'Source file replacement is accepted.',
+        'cow-test'
+    );
+    assert_same($file_resolution_review['record_type'], 'resolution', 'review note can target a filesystem resolution record');
+    $file_resolution_queue_audit = cow_merge_audit_report($metadata, null, 10, [
+        'review' => '1',
+        'review_status' => 'unreviewed',
+        'records' => 'resolutions',
+        'scope' => 'files',
+        'path_prefix' => 'wp-content/uploads',
+    ]);
+    assert_same($file_resolution_queue_audit['filters']['review'], true, 'file resolution review queue preserves the review shortcut filter');
+    assert_same($file_resolution_queue_audit['filters']['review_status'], 'unreviewed', 'file resolution review queue preserves the unreviewed filter');
+    assert_same($file_resolution_queue_audit['filters']['records'], 'resolutions', 'file resolution review queue focuses on resolution records');
+    assert_same($file_resolution_queue_audit['filters']['scope'], 'files', 'file resolution review queue focuses on filesystem records');
+    assert_same(count($file_resolution_queue_audit['conflicts']), 0, 'file resolution review queue omits conflicts');
+    assert_same(count($file_resolution_queue_audit['decisions']), 0, 'file resolution review queue omits decisions');
+    assert_true(count($file_resolution_queue_audit['resolutions']) >= 1, 'file resolution review queue returns unreviewed filesystem resolutions');
+    $file_resolution_queue_ids = array_map(fn($row) => (int)$row['id'], $file_resolution_queue_audit['resolutions']);
+    assert_true(in_array($unreviewed_file_resolution_id, $file_resolution_queue_ids, true), 'file resolution review queue includes unreviewed filesystem resolutions');
+    assert_true(!in_array($reviewed_file_resolution_id, $file_resolution_queue_ids, true), 'file resolution review queue excludes reviewed filesystem resolutions');
+    foreach ($file_resolution_queue_audit['resolutions'] as $row) {
+        assert_same($row['review_status'], null, 'file resolution review queue returns only unreviewed records');
+        assert_same($row['table_name'], '__files__', 'file resolution review queue excludes database records');
+    }
     $unsafe_symlink_id = (int)scalar($metadata, "SELECT c.id FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = '__files__' AND c.conflict_type = 'file-unsafe-symlink' AND r.source_branch = 'feature-file-resolve' ORDER BY c.id DESC LIMIT 1");
     assert_throws(
         fn() => cow_merge_resolve_conflict($metadata, $unsafe_symlink_id, 'source', true, 'Try unsafe source symlink.', 'cow-test'),

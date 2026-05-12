@@ -429,6 +429,63 @@ php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($
 "$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --records decisions --review-status reviewed --scope files --path wp-content/main-target-file.txt --limit 8 > "$TMP/merge-file-decision-reviewed.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); $decisions = $data["decisions"] ?? []; $ok = is_array($data) && (($data["filters"]["review_status"] ?? null) === "reviewed") && (($data["filters"]["records"] ?? null) === "decisions") && (($data["filters"]["scope"] ?? null) === "files") && count($decisions) === 1; $row = $decisions[0] ?? []; exit($ok && (int)($row["id"] ?? 0) === (int)$argv[2] && ($row["review_status"] ?? null) === "reviewed" && ($row["review_note"] ?? null) === "E2E reviewed target-kept file decision" ? 0 : 1);' "$TMP/merge-file-decision-reviewed.json" "$REVIEWED_FILE_DECISION_ID"
 
+log_step "merge file review queues"
+echo "file review base one" > "$WORK/main/wp-content/file-review-one.txt"
+echo "file review base two" > "$WORK/main/wp-content/file-review-two.txt"
+"$BIN" branch --work-dir "$WORK_DIR" create file-review-source > "$TMP/file-review-create.out"
+grep -F "file-review-source.wp.localhost:$PORT" "$TMP/file-review-create.out" >/dev/null
+echo "file review source one" > "$WORK/file-review-source/wp-content/file-review-one.txt"
+echo "file review source two" > "$WORK/file-review-source/wp-content/file-review-two.txt"
+echo "file review target one" > "$WORK/main/wp-content/file-review-one.txt"
+echo "file review target two" > "$WORK/main/wp-content/file-review-two.txt"
+"$BIN" branch --work-dir "$WORK_DIR" merge file-review-source --into main > "$TMP/file-review-merge.out"
+grep -F "forkpress: merged file-review-source into main" "$TMP/file-review-merge.out" >/dev/null
+grep -F "status:    completed_with_conflicts" "$TMP/file-review-merge.out" >/dev/null
+grep -F "file review target one" "$WORK/main/wp-content/file-review-one.txt" >/dev/null
+grep -F "file review target two" "$WORK/main/wp-content/file-review-two.txt" >/dev/null
+REVIEWED_FILE_CONFLICT_ID="$(
+  php -r 'require_once getcwd() . "/scripts/cow/merge.php"; $db = new SQLite3($argv[1]); $identity = cow_merge_file_identity_json("wp-content/file-review-one.txt"); $stmt = $db->prepare("SELECT id FROM merge_conflicts WHERE table_name = '\''__files__'\'' AND row_identity = :identity AND conflict_type = '\''file-conflict'\'' ORDER BY id DESC LIMIT 1"); $stmt->bindValue(":identity", $identity, SQLITE3_TEXT); echo (int)$stmt->execute()->fetchArray(SQLITE3_NUM)[0];' \
+    "$WORK_DIR/cow/merge/metadata.sqlite"
+)"
+UNREVIEWED_FILE_CONFLICT_ID="$(
+  php -r 'require_once getcwd() . "/scripts/cow/merge.php"; $db = new SQLite3($argv[1]); $identity = cow_merge_file_identity_json("wp-content/file-review-two.txt"); $stmt = $db->prepare("SELECT id FROM merge_conflicts WHERE table_name = '\''__files__'\'' AND row_identity = :identity AND conflict_type = '\''file-conflict'\'' ORDER BY id DESC LIMIT 1"); $stmt->bindValue(":identity", $identity, SQLITE3_TEXT); echo (int)$stmt->execute()->fetchArray(SQLITE3_NUM)[0];' \
+    "$WORK_DIR/cow/merge/metadata.sqlite"
+)"
+if [ "$REVIEWED_FILE_CONFLICT_ID" = "0" ] || [ "$UNREVIEWED_FILE_CONFLICT_ID" = "0" ]; then
+  echo "missing file conflict ids for review queue coverage" >&2
+  exit 1
+fi
+"$BIN" branch --work-dir "$WORK_DIR" merge-review conflict "$REVIEWED_FILE_CONFLICT_ID" --status reviewed --note "E2E reviewed file conflict" --reviewer cow-e2e > "$TMP/file-conflict-reviewed.out"
+grep -F "forkpress: recorded COW merge review note" "$TMP/file-conflict-reviewed.out" >/dev/null
+grep -F "record:    conflict #$REVIEWED_FILE_CONFLICT_ID" "$TMP/file-conflict-reviewed.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --review --review-status unreviewed --records conflicts --scope files --limit 12 > "$TMP/file-conflict-review-queue.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["review"] ?? false) === true) && (($data["filters"]["review_status"] ?? null) === "unreviewed") && (($data["filters"]["records"] ?? null) === "conflicts") && (($data["filters"]["scope"] ?? null) === "files") && empty($data["decisions"] ?? []) && empty($data["resolutions"] ?? []); $has_unreviewed = false; foreach (($data["conflicts"] ?? []) as $row) { if (($row["review_status"] ?? null) !== null) $ok = false; if (($row["table_name"] ?? null) !== "__files__") $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[2]) $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[3] && ($row["conflict_type"] ?? null) === "file-conflict") $has_unreviewed = true; } exit($ok && $has_unreviewed ? 0 : 1);' "$TMP/file-conflict-review-queue.json" "$REVIEWED_FILE_CONFLICT_ID" "$UNREVIEWED_FILE_CONFLICT_ID"
+"$BIN" branch --work-dir "$WORK_DIR" merge-resolve conflict "$REVIEWED_FILE_CONFLICT_ID" --choice source --apply --note "E2E apply source file one" --reviewer cow-e2e > "$TMP/file-resolve-one.out"
+grep -F "forkpress: validated COW merge conflict resolution" "$TMP/file-resolve-one.out" >/dev/null
+grep -F "applied:   yes" "$TMP/file-resolve-one.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" merge-resolve conflict "$UNREVIEWED_FILE_CONFLICT_ID" --choice source --apply --note "E2E apply source file two" --reviewer cow-e2e > "$TMP/file-resolve-two.out"
+grep -F "forkpress: validated COW merge conflict resolution" "$TMP/file-resolve-two.out" >/dev/null
+grep -F "applied:   yes" "$TMP/file-resolve-two.out" >/dev/null
+grep -F "file review source one" "$WORK/main/wp-content/file-review-one.txt" >/dev/null
+grep -F "file review source two" "$WORK/main/wp-content/file-review-two.txt" >/dev/null
+REVIEWED_FILE_RESOLUTION_ID="$(
+  php -r '$db = new SQLite3($argv[1]); echo (int)$db->querySingle("SELECT id FROM merge_resolutions WHERE conflict_id = " . (int)$argv[2] . " ORDER BY id DESC LIMIT 1");' \
+    "$WORK_DIR/cow/merge/metadata.sqlite" "$REVIEWED_FILE_CONFLICT_ID"
+)"
+UNREVIEWED_FILE_RESOLUTION_ID="$(
+  php -r '$db = new SQLite3($argv[1]); echo (int)$db->querySingle("SELECT id FROM merge_resolutions WHERE conflict_id = " . (int)$argv[2] . " ORDER BY id DESC LIMIT 1");' \
+    "$WORK_DIR/cow/merge/metadata.sqlite" "$UNREVIEWED_FILE_CONFLICT_ID"
+)"
+if [ "$REVIEWED_FILE_RESOLUTION_ID" = "0" ] || [ "$UNREVIEWED_FILE_RESOLUTION_ID" = "0" ]; then
+  echo "missing file resolution ids for review queue coverage" >&2
+  exit 1
+fi
+"$BIN" branch --work-dir "$WORK_DIR" merge-review resolution "$REVIEWED_FILE_RESOLUTION_ID" --status reviewed --note "E2E reviewed file resolution" --reviewer cow-e2e > "$TMP/file-resolution-reviewed.out"
+grep -F "forkpress: recorded COW merge review note" "$TMP/file-resolution-reviewed.out" >/dev/null
+grep -F "record:    resolution #$REVIEWED_FILE_RESOLUTION_ID" "$TMP/file-resolution-reviewed.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --review --review-status unreviewed --records resolutions --scope files --limit 12 > "$TMP/file-resolution-review-queue.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["review"] ?? false) === true) && (($data["filters"]["review_status"] ?? null) === "unreviewed") && (($data["filters"]["records"] ?? null) === "resolutions") && (($data["filters"]["scope"] ?? null) === "files") && empty($data["conflicts"] ?? []) && empty($data["decisions"] ?? []); $has_unreviewed = false; foreach (($data["resolutions"] ?? []) as $row) { if (($row["review_status"] ?? null) !== null) $ok = false; if (($row["table_name"] ?? null) !== "__files__") $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[2]) $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[3]) $has_unreviewed = true; } exit($ok && $has_unreviewed ? 0 : 1);' "$TMP/file-resolution-review-queue.json" "$REVIEWED_FILE_RESOLUTION_ID" "$UNREVIEWED_FILE_RESOLUTION_ID"
+
 log_step "merge runtime-tracked no-PK rowid reuse"
 mkdir -p "$WORK/main/wp-content/mu-plugins"
 cat > "$WORK/main/wp-content/mu-plugins/forkpress-e2e-keyless.php" <<'PHP'

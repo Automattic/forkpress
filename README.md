@@ -481,6 +481,8 @@ tooling.
   `--review --review-status unreviewed --records conflicts --scope db`.
   For unreviewed deterministic resolution follow-up, use
   `--review --review-status unreviewed --records resolutions --scope db`.
+  Use `--scope files` with `--records conflicts` or `--records resolutions`
+  for filesystem conflict and deterministic resolution review queues.
   For unreviewed automatic decision review, use
   `--review --review-status unreviewed --records decisions --scope db` or
   `--scope files`.
