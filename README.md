@@ -470,6 +470,9 @@ tooling.
   without opening the raw metadata database.
 - `forkpress branch merge-review conflict|decision <id> --status pending|needs-action|reviewed --note <text>`
   `[--reviewer NAME]` appends a review note to an auditable merge conflict or decision.
+- `forkpress branch merge-resolve conflict <id> --choice source|target [--apply]`
+  `[--note TEXT] [--reviewer NAME]` validates an audited DB cell conflict and,
+  with `--apply`, records the deterministic resolution in merge metadata.
 - `forkpress branch show <name>` prints the branch directory, database, file
   count, and Git ref path.
 - `forkpress branch delete <name>` removes a COW branch. `main` cannot be

@@ -20,6 +20,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "    [--scope all|db|files] [--records all|conflicts|decisions] [--conflict-type TYPE] [--decision DECISION]\n");
     fwrite(STDERR, "    [--id-band-skips] [--review] [--review-status pending|needs-action|reviewed]\n");
     fwrite(STDERR, "  php merge.php review-record --metadata-db <path> --record conflict|decision --id ID --status pending|needs-action|reviewed --note TEXT [--reviewer NAME]\n");
+    fwrite(STDERR, "  php merge.php resolve-conflict --metadata-db <path> --id ID --choice source|target [--apply] [--note TEXT] [--reviewer NAME]\n");
 }
 
 const COW_MERGE_AUTOINCREMENT_BAND_SIZE = 1000000;
@@ -1317,6 +1318,26 @@ CREATE TABLE IF NOT EXISTS merge_review_notes (
 )
 SQL);
     $meta->exec('CREATE INDEX IF NOT EXISTS merge_review_notes_record_idx ON merge_review_notes(record_type, record_id, id)');
+    $meta->exec(<<<'SQL'
+CREATE TABLE IF NOT EXISTS merge_resolutions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conflict_id INTEGER NOT NULL,
+    choice TEXT NOT NULL CHECK(choice IN ('source', 'target')),
+    applied INTEGER NOT NULL CHECK(applied IN (0, 1)),
+    status TEXT NOT NULL CHECK(status IN ('validated', 'applied')),
+    note TEXT NOT NULL,
+    reviewer TEXT NOT NULL,
+    target_db TEXT NOT NULL,
+    table_name TEXT NOT NULL,
+    row_identity TEXT NOT NULL,
+    column_name TEXT NOT NULL,
+    previous_payload TEXT NOT NULL,
+    resolved_payload TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(conflict_id) REFERENCES merge_conflicts(id)
+)
+SQL);
+    $meta->exec('CREATE INDEX IF NOT EXISTS merge_resolutions_conflict_idx ON merge_resolutions(conflict_id, id)');
 }
 
 function cow_merge_ensure_metadata_column(SQLite3 $meta, string $table, string $column, string $definition): void {
@@ -2846,6 +2867,220 @@ function cow_merge_review_record(
     }
 }
 
+function cow_merge_resolution_choice(?string $value): string {
+    if (!in_array($value, ['source', 'target'], true)) {
+        throw new InvalidArgumentException('--choice must be source or target');
+    }
+    return (string)$value;
+}
+
+function cow_merge_bool_flag(mixed $value): bool {
+    return (string)$value === '1' || $value === true;
+}
+
+function cow_merge_decode_payload_json(string $json, string $context): mixed {
+    $decoded = json_decode($json, true);
+    if (json_last_error() !== JSON_ERROR_NONE) {
+        throw new RuntimeException("invalid $context payload: " . json_last_error_msg());
+    }
+    return cow_merge_audit_decode_payload($decoded);
+}
+
+function cow_merge_select_current_cell(SQLite3 $db, string $table, array $identity, array $pk_cols, string $column): mixed {
+    $where_values = [];
+    $where = cow_merge_where_clause($identity, $pk_cols, $where_values);
+    $stmt = $db->prepare('SELECT ' . cow_merge_quote_ident($column) . ' AS value FROM ' . cow_merge_quote_ident($table) . ' WHERE ' . $where);
+    if (!$stmt) {
+        throw new RuntimeException("failed to prepare current cell lookup for $table.$column: " . $db->lastErrorMsg());
+    }
+    foreach ($where_values as $i => $value) {
+        cow_merge_bind($stmt, $i + 1, $value);
+    }
+    $res = $stmt->execute();
+    if (!$res) {
+        throw new RuntimeException("failed to read current cell for $table.$column: " . $db->lastErrorMsg());
+    }
+    $row = $res->fetchArray(SQLITE3_ASSOC);
+    if (!$row) {
+        throw new RuntimeException("cannot resolve $table.$column conflict because the target row no longer exists");
+    }
+    return $row['value'] ?? null;
+}
+
+function cow_merge_update_single_cell(SQLite3 $db, string $table, array $identity, array $pk_cols, string $column, mixed $value): void {
+    $where_values = [];
+    $where = cow_merge_where_clause($identity, $pk_cols, $where_values);
+    $stmt = $db->prepare('UPDATE ' . cow_merge_quote_ident($table) . ' SET ' . cow_merge_quote_ident($column) . ' = ? WHERE ' . $where);
+    if (!$stmt) {
+        throw new RuntimeException("failed to prepare conflict resolution update for $table.$column: " . $db->lastErrorMsg());
+    }
+    cow_merge_bind($stmt, 1, $value);
+    foreach ($where_values as $i => $where_value) {
+        cow_merge_bind($stmt, $i + 2, $where_value);
+    }
+    if (!$stmt->execute()) {
+        throw new RuntimeException("failed to apply conflict resolution to $table.$column: " . $db->lastErrorMsg());
+    }
+    if ($db->changes() !== 1) {
+        throw new RuntimeException("conflict resolution for $table.$column affected {$db->changes()} rows, expected 1");
+    }
+}
+
+function cow_merge_record_resolution(
+    SQLite3 $meta,
+    int $conflict_id,
+    string $choice,
+    bool $apply,
+    string $note,
+    string $reviewer,
+    string $target_db,
+    string $table,
+    string $identity_json,
+    string $column,
+    mixed $previous,
+    mixed $resolved
+): int {
+    $stmt = $meta->prepare(
+        'INSERT INTO merge_resolutions ' .
+        '(conflict_id, choice, applied, status, note, reviewer, target_db, table_name, row_identity, column_name, previous_payload, resolved_payload) ' .
+        'VALUES (:conflict_id, :choice, :applied, :status, :note, :reviewer, :target_db, :table_name, :row_identity, :column_name, :previous_payload, :resolved_payload)'
+    );
+    if (!$stmt) {
+        throw new RuntimeException('failed to prepare resolution record insert: ' . $meta->lastErrorMsg());
+    }
+    cow_merge_bind($stmt, ':conflict_id', $conflict_id);
+    cow_merge_bind($stmt, ':choice', $choice);
+    cow_merge_bind($stmt, ':applied', $apply ? 1 : 0);
+    cow_merge_bind($stmt, ':status', $apply && $choice === 'source' ? 'applied' : 'validated');
+    cow_merge_bind($stmt, ':note', $note);
+    cow_merge_bind($stmt, ':reviewer', $reviewer);
+    cow_merge_bind($stmt, ':target_db', $target_db);
+    cow_merge_bind($stmt, ':table_name', $table);
+    cow_merge_bind($stmt, ':row_identity', $identity_json);
+    cow_merge_bind($stmt, ':column_name', $column);
+    cow_merge_bind($stmt, ':previous_payload', cow_merge_payload_json($previous));
+    cow_merge_bind($stmt, ':resolved_payload', cow_merge_payload_json($resolved));
+    if (!$stmt->execute()) {
+        throw new RuntimeException('failed to record merge resolution: ' . $meta->lastErrorMsg());
+    }
+    return (int)$meta->lastInsertRowID();
+}
+
+function cow_merge_resolve_conflict(
+    string $metadata_db,
+    int $conflict_id,
+    string $choice,
+    bool $apply,
+    string $note,
+    string $reviewer
+): array {
+    if (!is_file($metadata_db)) {
+        throw new InvalidArgumentException("merge metadata database does not exist: $metadata_db");
+    }
+    $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READWRITE);
+    $target = null;
+    try {
+        cow_merge_ensure_metadata($meta);
+        $stmt = $meta->prepare(
+            'SELECT c.id, c.run_id, c.table_name, c.row_identity, c.column_name, c.conflict_type, ' .
+            'c.source_payload, c.target_payload, r.target_db ' .
+            'FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.id = :id'
+        );
+        if (!$stmt) {
+            throw new RuntimeException('failed to prepare conflict lookup: ' . $meta->lastErrorMsg());
+        }
+        cow_merge_bind($stmt, ':id', $conflict_id);
+        $res = $stmt->execute();
+        $conflict = $res ? $res->fetchArray(SQLITE3_ASSOC) : false;
+        if (!$conflict) {
+            throw new InvalidArgumentException("conflict #$conflict_id does not exist in merge metadata");
+        }
+        $table = (string)$conflict['table_name'];
+        $column = (string)($conflict['column_name'] ?? '');
+        if ($table === '__files__') {
+            throw new InvalidArgumentException('filesystem conflicts are not supported by resolve-conflict yet');
+        }
+        if ((string)$conflict['conflict_type'] !== 'cell-conflict' || $column === '') {
+            throw new InvalidArgumentException('resolve-conflict currently supports DB cell-conflict records only');
+        }
+        $target_db = (string)$conflict['target_db'];
+        if (!is_file($target_db)) {
+            throw new RuntimeException("target database for conflict #$conflict_id does not exist: $target_db");
+        }
+        $identity = cow_merge_decode_payload_json((string)$conflict['row_identity'], 'row identity');
+        if (!is_array($identity)) {
+            throw new RuntimeException("invalid row identity for conflict #$conflict_id");
+        }
+        $source_value = cow_merge_decode_payload_json((string)$conflict['source_payload'], 'source');
+        $target_value = cow_merge_decode_payload_json((string)$conflict['target_payload'], 'target');
+        $resolved_value = $choice === 'source' ? $source_value : $target_value;
+
+        $target = cow_merge_open_db($target_db, SQLITE3_OPEN_READWRITE);
+        $pk_cols = cow_merge_pk_cols($target, $table);
+        if (!$pk_cols) {
+            throw new InvalidArgumentException('resolve-conflict currently requires an explicit primary key on the target table');
+        }
+        foreach ($pk_cols as $pk_col) {
+            if (!array_key_exists($pk_col, $identity)) {
+                throw new RuntimeException("conflict #$conflict_id row identity does not include primary key column $pk_col");
+            }
+        }
+        $current_value = cow_merge_select_current_cell($target, $table, $identity, $pk_cols, $column);
+        if (!cow_merge_values_equal($current_value, $target_value)) {
+            throw new RuntimeException('target cell no longer matches the audited conflict target value; rerun merge-audit before resolving');
+        }
+
+        if ($apply) {
+            $meta->exec('BEGIN IMMEDIATE');
+            $target->exec('BEGIN IMMEDIATE');
+            try {
+                if ($choice === 'source') {
+                    cow_merge_update_single_cell($target, $table, $identity, $pk_cols, $column, $source_value);
+                }
+                $resolution_id = cow_merge_record_resolution(
+                    $meta,
+                    $conflict_id,
+                    $choice,
+                    true,
+                    $note,
+                    $reviewer,
+                    $target_db,
+                    $table,
+                    (string)$conflict['row_identity'],
+                    $column,
+                    $current_value,
+                    $resolved_value
+                );
+                $target->exec('COMMIT');
+                $meta->exec('COMMIT');
+            } catch (Throwable $e) {
+                $target->exec('ROLLBACK');
+                $meta->exec('ROLLBACK');
+                throw $e;
+            }
+        } else {
+            $resolution_id = null;
+        }
+
+        return [
+            'metadata_db' => $metadata_db,
+            'conflict_id' => $conflict_id,
+            'resolution_id' => $resolution_id,
+            'choice' => $choice,
+            'applied' => $apply,
+            'status' => $apply && $choice === 'source' ? 'applied' : 'validated',
+            'target_db' => $target_db,
+            'table_name' => $table,
+            'column_name' => $column,
+        ];
+    } finally {
+        if ($target instanceof SQLite3) {
+            $target->close();
+        }
+        $meta->close();
+    }
+}
+
 function cow_merge_audit_apply_shortcuts(array $filters): array {
     $id_band_skips = (string)($filters['id_band_skips'] ?? '') === '1';
     $review = (string)($filters['review'] ?? '') === '1';
@@ -3212,6 +3447,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
         'runs' => [],
         'conflicts' => [],
         'decisions' => [],
+        'resolutions' => [],
         'autoincrement_bands' => [],
         'row_identity_summary' => [],
         'rollback_failures' => [],
@@ -3287,6 +3523,23 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
                 "base_payload, source_payload, target_payload, chosen_payload$decision_review_select " .
                 "FROM merge_decisions $decision_filter ORDER BY id DESC LIMIT :limit",
                 $decision_params
+            ));
+        }
+
+        if ($filters['scope'] !== 'files' && $filters['records'] === 'all') {
+            $resolution_filter = '';
+            $resolution_params = [':limit' => $limit];
+            if ($run_id !== null) {
+                $resolution_filter = 'WHERE c.run_id = :run_id';
+                $resolution_params[':run_id'] = $run_id;
+            }
+            $report['resolutions'] = cow_merge_audit_add_payload_previews(cow_merge_audit_table_rows(
+                $db,
+                'merge_resolutions',
+                "SELECT mr.id, mr.conflict_id, c.run_id, mr.choice, mr.applied, mr.status, mr.reviewer, mr.note, mr.target_db, " .
+                "mr.table_name, mr.row_identity, mr.column_name, mr.previous_payload AS target_payload, mr.resolved_payload AS chosen_payload, mr.created_at " .
+                "FROM merge_resolutions mr JOIN merge_conflicts c ON c.id = mr.conflict_id $resolution_filter ORDER BY mr.id DESC LIMIT :limit",
+                $resolution_params
             ));
         }
 
@@ -3420,6 +3673,18 @@ function cow_merge_print_audit_text(array $report): void {
             }
             echo "     reason={$decision['reason']}\n";
             echo "     chosen={$decision['chosen_preview']}\n";
+        }
+    }
+
+    if ($report['resolutions']) {
+        echo "resolutions:\n";
+        foreach ($report['resolutions'] as $resolution) {
+            $object = cow_merge_audit_object_label($resolution);
+            $applied = ((int)$resolution['applied']) === 1 ? 'yes' : 'no';
+            echo "  #{$resolution['id']} conflict={$resolution['conflict_id']} run={$resolution['run_id']} {$resolution['choice']} $object status={$resolution['status']} applied=$applied reviewer={$resolution['reviewer']}\n";
+            echo "     note=" . cow_merge_audit_truncate((string)$resolution['note'], 240) . "\n";
+            echo "     previous={$resolution['target_preview']}\n";
+            echo "     resolved={$resolution['chosen_preview']}\n";
         }
     }
 
@@ -4153,7 +4418,7 @@ function cow_merge_parse_cli(array $argv, array $required, int $start_index = 1)
             throw new InvalidArgumentException("unexpected argument: $arg");
         }
         $key = substr($arg, 2);
-        if (($key === 'id-band-skips' || $key === 'review') && (!isset($argv[$i + 1]) || str_starts_with($argv[$i + 1], '--'))) {
+        if (($key === 'id-band-skips' || $key === 'review' || $key === 'apply') && (!isset($argv[$i + 1]) || str_starts_with($argv[$i + 1], '--'))) {
             $args[$key] = '1';
             continue;
         }
@@ -4292,6 +4557,31 @@ if (realpath($argv[0] ?? '') === __FILE__) {
                 echo "  record:    {$result['record_type']} #{$result['record_id']}\n";
                 echo "  status:    {$result['status']}\n";
                 echo "  reviewer:  {$result['reviewer']}\n";
+                echo "  metadata:  {$result['metadata_db']}\n";
+            }
+            exit(0);
+        }
+        if ($command === 'resolve-conflict') {
+            $args = cow_merge_parse_cli($argv, ['metadata-db', 'id', 'choice'], 2);
+            $apply = cow_merge_bool_flag($args['apply'] ?? '0');
+            $result = cow_merge_resolve_conflict(
+                $args['metadata-db'],
+                cow_merge_review_record_id($args['id'] ?? null),
+                cow_merge_resolution_choice($args['choice'] ?? null),
+                $apply,
+                cow_merge_review_text($args['note'] ?? 'deterministic conflict resolution', 'note'),
+                cow_merge_review_text($args['reviewer'] ?? 'user', 'reviewer')
+            );
+            if (($args['quiet'] ?? '0') !== '1') {
+                echo "forkpress: validated COW merge conflict resolution\n";
+                echo "  conflict:  #{$result['conflict_id']}\n";
+                if ($result['resolution_id'] !== null) {
+                    echo "  resolution:#{$result['resolution_id']}\n";
+                }
+                echo "  choice:    {$result['choice']}\n";
+                echo "  applied:   " . ($result['applied'] ? 'yes' : 'no') . "\n";
+                echo "  object:    {$result['table_name']}.{$result['column_name']}\n";
+                echo "  target:    {$result['target_db']}\n";
                 echo "  metadata:  {$result['metadata_db']}\n";
             }
             exit(0);

@@ -21,6 +21,15 @@ function assert_same($actual, $expected, $msg) {
     );
 }
 
+function assert_throws(callable $fn, string $contains, string $msg): void {
+    try {
+        $fn();
+        assert_true(false, $msg . ' (no exception thrown)');
+    } catch (Throwable $e) {
+        assert_true(str_contains($e->getMessage(), $contains), $msg . ' (' . $e->getMessage() . ')');
+    }
+}
+
 function remove_tree(string $path): void {
     if (!file_exists($path) && !is_link($path)) {
         return;
@@ -195,6 +204,48 @@ try {
     assert_same(count($audit['runs']), 1, 'merge audit report can focus on one run');
     assert_same((int)$audit['runs'][0]['conflict_count'], 2, 'merge audit run summary includes conflict count');
     assert_same(count($audit['conflicts']), 2, 'merge audit report exports conflict records for a run');
+    $title_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'wp_posts' AND column_name = 'post_title'");
+    $dry_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $title_conflict_id,
+        'source',
+        false,
+        'Preview source title resolution.',
+        'cow-test'
+    );
+    assert_same($dry_resolution['status'], 'validated', 'dry-run source conflict resolution validates target preconditions');
+    assert_same(scalar($conflict_target, "SELECT post_title FROM wp_posts WHERE ID = 1"), 'Target title', 'dry-run source resolution does not mutate target DB');
+    assert_same((int)scalar($metadata, 'SELECT COUNT(*) FROM merge_resolutions'), 0, 'dry-run conflict resolution does not write resolution audit records');
+    $source_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $title_conflict_id,
+        'source',
+        true,
+        'Apply reviewed source title.',
+        'cow-test'
+    );
+    assert_same($source_resolution['status'], 'applied', 'source conflict resolution records applied status');
+    assert_same(scalar($conflict_target, "SELECT post_title FROM wp_posts WHERE ID = 1"), 'Source title', 'source conflict resolution applies audited source cell value');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $title_conflict_id AND choice = 'source' AND applied = 1"), 1, 'source conflict resolution is auditable');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $title_conflict_id, 'source', true, 'Try stale source apply.', 'cow-test'),
+        'target cell no longer matches',
+        'stale conflict resolution is blocked when target has changed since audit'
+    );
+    $option_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'wp_options' AND column_name = 'option_value'");
+    $target_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $option_conflict_id,
+        'target',
+        true,
+        'Reviewed and kept target serialized option.',
+        'cow-test'
+    );
+    assert_same($target_resolution['status'], 'validated', 'target conflict resolution records validated status');
+    assert_same(scalar($conflict_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_test'"), 'a:1:{s:5:"color";s:3:"red";}', 'target conflict resolution leaves target DB unchanged');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $option_conflict_id AND choice = 'target' AND applied = 1"), 1, 'target conflict resolution is auditable');
+    $resolution_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10);
+    assert_same(count($resolution_audit['resolutions']), 2, 'merge audit report exports deterministic resolution records');
     $reviewed_conflict_id = (int)$audit['conflicts'][0]['id'];
     $review_result = cow_merge_review_record(
         $metadata,

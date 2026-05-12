@@ -52,8 +52,8 @@ use forkpress_storage::{
     inspect_cow_merge_audit, list_remote_sites, lock_cow_lifecycle, lock_cow_operations,
     merge_cow_branch, prepare_cow_file_view, print_cow_storage_status,
     print_macos_cow_storage_status, probe_reflink_dir, probe_remote_site, reset_cow_branch,
-    review_cow_merge_audit_record, show_cow_branch, write_cow_branch_list,
-    write_cow_strategy_notes,
+    resolve_cow_merge_conflict, review_cow_merge_audit_record, show_cow_branch,
+    write_cow_branch_list, write_cow_strategy_notes,
 };
 #[cfg(feature = "dev-experiments")]
 use forkpress_storage::{copy_tree_cow, plain_branch_names};
@@ -3036,6 +3036,68 @@ fn cow_branch_command(
             )?;
             Ok(0)
         }
+        "merge-resolve" => {
+            let Some(record_type) = args.args.get(1) else {
+                bail!("branch merge-resolve requires conflict");
+            };
+            if record_type != "conflict" {
+                bail!("branch merge-resolve currently supports conflict records only");
+            }
+            let Some(record_id) = args.args.get(2) else {
+                bail!("branch merge-resolve requires a conflict id");
+            };
+            let mut choice: Option<String> = None;
+            let mut apply = false;
+            let mut note: Option<String> = None;
+            let mut reviewer: Option<String> = None;
+            let mut index = 3;
+            while index < args.args.len() {
+                match args.args[index].as_str() {
+                    "--choice" => {
+                        let Some(value) = args.args.get(index + 1) else {
+                            bail!("--choice requires source or target");
+                        };
+                        choice = Some(value.clone());
+                        index += 2;
+                    }
+                    "--apply" => {
+                        apply = true;
+                        index += 1;
+                    }
+                    "--note" => {
+                        let Some(value) = args.args.get(index + 1) else {
+                            bail!("--note requires text");
+                        };
+                        note = Some(value.clone());
+                        index += 2;
+                    }
+                    "--reviewer" => {
+                        let Some(value) = args.args.get(index + 1) else {
+                            bail!("--reviewer requires a name");
+                        };
+                        reviewer = Some(value.clone());
+                        index += 2;
+                    }
+                    other => {
+                        bail!("unsupported argument for `forkpress branch merge-resolve`: {other}")
+                    }
+                }
+            }
+            let Some(choice) = choice else {
+                bail!("branch merge-resolve requires --choice source|target");
+            };
+            resolve_cow_merge_conflict(
+                &layout,
+                &runtime,
+                &args.shared,
+                record_id,
+                &choice,
+                apply,
+                note.as_deref(),
+                reviewer.as_deref(),
+            )?;
+            Ok(0)
+        }
         "delete" | "rm" => {
             let Some(branch) = args.args.get(1) else {
                 bail!("branch delete requires a branch name");
@@ -4091,6 +4153,45 @@ mod git_helper_tests {
                 "reviewed".to_string(),
                 "--note".to_string(),
                 "Keep target content".to_string(),
+                "--reviewer".to_string(),
+                "alice".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_branch_merge_resolve_args() {
+        let cli = Cli::try_parse_from([
+            "forkpress",
+            "branch",
+            "--work-dir",
+            ".forkpress",
+            "merge-resolve",
+            "conflict",
+            "12",
+            "--choice",
+            "source",
+            "--apply",
+            "--note",
+            "Use source title",
+            "--reviewer",
+            "alice",
+        ])
+        .unwrap();
+        let Commands::Branch(args) = cli.command else {
+            panic!("expected branch command");
+        };
+        assert_eq!(
+            args.args,
+            vec![
+                "merge-resolve".to_string(),
+                "conflict".to_string(),
+                "12".to_string(),
+                "--choice".to_string(),
+                "source".to_string(),
+                "--apply".to_string(),
+                "--note".to_string(),
+                "Use source title".to_string(),
                 "--reviewer".to_string(),
                 "alice".to_string(),
             ]
