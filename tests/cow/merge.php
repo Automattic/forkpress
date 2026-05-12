@@ -788,6 +788,45 @@ SQL);
     cow_merge_print_audit_text($path_prefix_audit);
     $path_prefix_text = ob_get_clean();
     assert_true(str_contains($path_prefix_text, 'path-prefix=wp-content/uploads/links'), 'merge audit text prints active file path prefix filters');
+    $reviewed_file_decision_id = (int)scalar($metadata, "SELECT id FROM merge_decisions WHERE table_name = '__files__' AND row_identity = '$target_only_file_identity' AND decision = 'target-kept' ORDER BY id DESC LIMIT 1");
+    $file_decision_review = cow_merge_review_record(
+        $metadata,
+        'decision',
+        $reviewed_file_decision_id,
+        'reviewed',
+        'Target-only uploaded file is intentional.',
+        'cow-test'
+    );
+    assert_same($file_decision_review['record_type'], 'decision', 'review note can target a filesystem decision record');
+    $file_decision_queue_audit = cow_merge_audit_report($metadata, null, 10, [
+        'review' => '1',
+        'review_status' => 'unreviewed',
+        'records' => 'decisions',
+        'scope' => 'files',
+        'path_prefix' => 'wp-content/uploads',
+    ]);
+    assert_same($file_decision_queue_audit['filters']['review'], true, 'file decision review queue preserves the review shortcut filter');
+    assert_same($file_decision_queue_audit['filters']['review_status'], 'unreviewed', 'file decision review queue preserves the unreviewed filter');
+    assert_same($file_decision_queue_audit['filters']['records'], 'decisions', 'file decision review queue focuses on decision records');
+    assert_same($file_decision_queue_audit['filters']['scope'], 'files', 'file decision review queue focuses on filesystem records');
+    assert_same(count($file_decision_queue_audit['conflicts']), 0, 'file decision review queue omits conflicts');
+    assert_same(count($file_decision_queue_audit['resolutions']), 0, 'file decision review queue omits resolutions');
+    assert_true(count($file_decision_queue_audit['decisions']) >= 1, 'file decision review queue returns unreviewed filesystem decisions');
+    $file_decision_queue_ids = array_map(fn($row) => (int)$row['id'], $file_decision_queue_audit['decisions']);
+    assert_true(!in_array($reviewed_file_decision_id, $file_decision_queue_ids, true), 'file decision review queue excludes reviewed decisions');
+    foreach ($file_decision_queue_audit['decisions'] as $row) {
+        assert_same($row['review_status'], null, 'file decision review queue returns only unreviewed records');
+        assert_same($row['table_name'], '__files__', 'file decision review queue excludes database records');
+    }
+    $reviewed_file_decision_audit = cow_merge_audit_report($metadata, null, 10, [
+        'records' => 'decisions',
+        'review_status' => 'reviewed',
+        'scope' => 'files',
+        'path' => 'wp-content/uploads/target-only.txt',
+    ]);
+    assert_same(count($reviewed_file_decision_audit['decisions']), 1, 'review status filter returns annotated file decisions by path');
+    assert_same($reviewed_file_decision_audit['decisions'][0]['review_status'], 'reviewed', 'merge audit JSON exposes latest file decision review status');
+    assert_same($reviewed_file_decision_audit['decisions'][0]['review_note'], 'Target-only uploaded file is intentional.', 'merge audit JSON exposes latest file decision review note');
 
     $file_resolve_base_root = $tmp . '/files-resolve-base';
     $file_resolve_source_root = $tmp . '/files-resolve-source';

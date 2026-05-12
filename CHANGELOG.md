@@ -36,6 +36,7 @@
 - Added runtime-backed COW e2e coverage for `forkpress branch merge-audit --review-status unreviewed` returning unannotated audit records through the real CLI.
 - Added COW audit coverage and docs for active reviewer queues combining `--review`, `--review-status unreviewed`, `--records conflicts`, and DB scope.
 - Added COW audit coverage and docs for unreviewed deterministic resolution queues combining `--review`, `--review-status unreviewed`, `--records resolutions`, and DB scope.
+- Added COW audit support, coverage, and docs for explicit file decision review queues combining `--review`, `--review-status unreviewed`, `--records decisions`, and file scope.
 - Updated the automatic mergeback loop runner to pass a configurable Codex reasoning-effort setting and to include the changelog/known-good tag policy in every worker prompt.
 
 ## known-good/cow-mergeback-audit-completeness-2026-05-12

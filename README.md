@@ -481,6 +481,8 @@ tooling.
   `--review --review-status unreviewed --records conflicts --scope db`.
   For unreviewed deterministic resolution follow-up, use
   `--review --review-status unreviewed --records resolutions --scope db`.
+  For file decision review, use
+  `--review --review-status unreviewed --records decisions --scope files`.
 - `forkpress branch merge-review conflict|decision|resolution <id> --status pending|needs-action|reviewed --note <text>`
   `[--reviewer NAME]` appends a review note to an auditable merge conflict,
   decision, or deterministic resolution record.

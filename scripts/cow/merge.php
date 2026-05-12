@@ -4584,7 +4584,7 @@ function cow_merge_audit_where_sql(
         $params[':decision'] = $filters['decision'];
     }
 
-    if (($filters['review'] ?? false) === true) {
+    if (($filters['review'] ?? false) === true && ($filters['records'] ?? 'all') !== 'decisions') {
         if ($record_type === 'decisions') {
             $clauses[] = $prefix . "decision = 'id-band-skipped'";
         }
@@ -4729,7 +4729,7 @@ function cow_merge_audit_count_sql(array $filters, string $record_type, string $
     if ($record_type === 'decisions' && $filters['decision'] !== null) {
         $conditions[] = $alias . ".decision = '" . SQLite3::escapeString($filters['decision']) . "'";
     }
-    if (($filters['review'] ?? false) === true) {
+    if (($filters['review'] ?? false) === true && ($filters['records'] ?? 'all') !== 'decisions') {
         if ($record_type === 'decisions') {
             $conditions[] = $alias . ".decision = 'id-band-skipped'";
         }
