@@ -5817,6 +5817,24 @@ function cow_merge_table_rows(
         $row_columns = cow_merge_all_columns($columns, array_keys($base_row ?? []), array_keys($source_row ?? []), array_keys($target_row ?? []));
 
         if (cow_merge_row_values_equal($source_row, $base_row, $row_columns)) {
+            if (!cow_merge_row_values_equal($target_row, $base_row, $row_columns)) {
+                if ($base_row === null && $target_row !== null) {
+                    cow_merge_record_decision($meta, $run_id, $table, $key, null, 'target-kept', 'target inserted row and source did not have it', null, null, $target_row, $target_row);
+                } elseif ($base_row !== null && $target_row === null) {
+                    cow_merge_record_decision($meta, $run_id, $table, $key, null, 'target-kept', 'target deleted row and source did not change it', $base_row, $source_row, null, null);
+                } elseif ($base_row !== null && $target_row !== null) {
+                    foreach ($row_columns as $col) {
+                        if (in_array($col, $pk_cols, true)) {
+                            continue;
+                        }
+                        $b = $base_row[$col] ?? null;
+                        $t = $target_row[$col] ?? null;
+                        if (!cow_merge_values_equal($t, $b)) {
+                            cow_merge_record_decision($meta, $run_id, $table, $key, $col, 'target-kept', 'target changed cell and source did not change it', $b, $source_row[$col] ?? null, $t, $t);
+                        }
+                    }
+                }
+            }
             continue;
         }
         if (cow_merge_row_values_equal($target_row, $source_row, $row_columns)) {
@@ -5893,6 +5911,9 @@ function cow_merge_table_rows(
             $source_changed = !cow_merge_values_equal($s, $b);
             $target_changed = !cow_merge_values_equal($t, $b);
             if (!$source_changed) {
+                if ($target_changed) {
+                    cow_merge_record_decision($meta, $run_id, $table, $key, $col, 'target-kept', 'target changed cell and source did not change it', $b, $s, $t, $t);
+                }
                 continue;
             }
             if (!$target_changed || cow_merge_values_equal($s, $t)) {

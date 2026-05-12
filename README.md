@@ -494,6 +494,9 @@ tooling.
   target table drop.
   Source-added table creation is recorded as a schema-level source-applied
   decision even when the table has no rows.
+  Target-only row inserts, row deletes, and cell changes are preserved and
+  recorded as `target-kept` decisions so clean trunk/main-side data changes are
+  auditable alongside schema changes.
   Target-only schema additions and rewrites are preserved and recorded as
   `target-kept` decisions so clean trunk/main-side DDL remains auditable.
   Compatible rebuilds also preserve

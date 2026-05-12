@@ -171,6 +171,44 @@ try {
     assert_same(scalar($target, "SELECT post_title FROM wp_posts WHERE ID = 2"), 'Source-only post', 'source-only row is inserted');
     assert_same(scalar($target, "SELECT value FROM plugin_items WHERE item_id = 'alpha'"), 'source plugin value', 'plugin table with explicit PK merges generically');
     assert_true(file_exists($metadata), 'merge metadata database is created outside the WordPress DB');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND column_name = 'post_status' AND decision = 'target-kept'"),
+        1,
+        'independent target cell preservation is auditable'
+    );
+
+    $target_only_base = $tmp . '/target-only-base.sqlite';
+    $target_only_source = $tmp . '/target-only-source.sqlite';
+    $target_only_target = $tmp . '/target-only-target.sqlite';
+    create_base_db($target_only_base);
+    copy($target_only_base, $target_only_source);
+    copy($target_only_base, $target_only_target);
+    $db = open_db($target_only_target);
+    $db->exec("UPDATE plugin_items SET value = 'target-only plugin value' WHERE item_id = 'alpha'");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status) VALUES (9, 'Target-only post', 'Created on target', 'publish')");
+    $db->exec("DELETE FROM wp_options WHERE option_name = 'theme_mods_test'");
+    $db->close();
+
+    $target_only_result = cow_merge_databases($target_only_base, $target_only_source, $target_only_target, $metadata, 'feature-target-only-data', 'main');
+    assert_same($target_only_result['status'], 'completed', 'target-only data changes merge cleanly');
+    assert_same(scalar($target_only_target, "SELECT value FROM plugin_items WHERE item_id = 'alpha'"), 'target-only plugin value', 'target-only cell change is preserved');
+    assert_same(scalar($target_only_target, "SELECT post_title FROM wp_posts WHERE ID = 9"), 'Target-only post', 'target-only row insert is preserved');
+    assert_same((int)scalar($target_only_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'theme_mods_test'"), 0, 'target-only row delete is preserved');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_items' AND column_name = 'value' AND decision = 'target-kept'"),
+        1,
+        'target-only cell change is auditable'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND column_name IS NULL AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
+        1,
+        'target-only row insert is auditable'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_options' AND column_name IS NULL AND decision = 'target-kept' AND target_payload IS NULL"),
+        1,
+        'target-only row delete is auditable'
+    );
 
     $empty_table_base = $tmp . '/empty-table-base.sqlite';
     $empty_table_source = $tmp . '/empty-table-source.sqlite';
@@ -926,7 +964,7 @@ SQL);
     assert_same((int)scalar($schema_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_items_label_idx'"), 1, 'source-added index is created on target');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_items' AND column_name = 'extra' AND row_identity IS NULL AND decision = 'source-applied'"), 1, 'source-added column decision is auditable');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_items' AND column_name = 'plugin_items_label_idx' AND decision = 'source-applied'"), 1, 'source-added index decision is auditable');
-    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_items' AND column_name = 'target_note' AND decision = 'target-kept'"), 1, 'target-added column preservation is auditable');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_items' AND column_name = 'target_note' AND row_identity IS NULL AND decision = 'target-kept'"), 1, 'target-added column preservation is auditable');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_items' AND column_name = 'plugin_items_target_note_idx' AND decision = 'target-kept'"), 1, 'target-added index preservation is auditable');
 
     $schema_conflict_base = $tmp . '/schema-conflict-base.sqlite';
