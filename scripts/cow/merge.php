@@ -19,7 +19,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "    [--scope all|db|files] [--records all|conflicts|decisions|resolutions] [--path <path>] [--path-prefix <prefix>]\n");
     fwrite(STDERR, "    [--scope all|db|files] [--records all|conflicts|decisions|resolutions] [--conflict-type TYPE] [--decision DECISION]\n");
     fwrite(STDERR, "    [--id-band-skips] [--review] [--review-status pending|needs-action|reviewed]\n");
-    fwrite(STDERR, "    [--resolution-status validated|applied] [--group-by none|table|status|path]\n");
+    fwrite(STDERR, "    [--resolution-status validated|applied] [--group-by none|table|status|path|type|severity]\n");
     fwrite(STDERR, "  php merge.php review-record --metadata-db <path> --record conflict|decision --id ID --status pending|needs-action|reviewed --note TEXT [--reviewer NAME]\n");
     fwrite(STDERR, "  php merge.php resolve-conflict --metadata-db <path> --id ID --choice source|target [--apply] [--note TEXT] [--reviewer NAME]\n");
 }
@@ -2859,8 +2859,8 @@ function cow_merge_audit_resolution_status_filter(?string $value): ?string {
 
 function cow_merge_audit_group_by(?string $value): string {
     $group_by = $value ?? 'none';
-    if (!in_array($group_by, ['none', 'table', 'status', 'path'], true)) {
-        throw new InvalidArgumentException('--group-by must be none, table, status, or path');
+    if (!in_array($group_by, ['none', 'table', 'status', 'path', 'type', 'severity'], true)) {
+        throw new InvalidArgumentException('--group-by must be none, table, status, path, type, or severity');
     }
     return $group_by;
 }
@@ -3740,8 +3740,15 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
     if ($group_by !== '' && $group_by !== 'none') {
         if (($filters['records'] ?? null) === null) {
             $filters['records'] = 'resolutions';
-        } elseif (($filters['records'] ?? null) !== 'resolutions') {
-            throw new InvalidArgumentException('--group-by can only be combined with --records resolutions');
+        } elseif (!in_array(($filters['records'] ?? null), ['conflicts', 'resolutions'], true)) {
+            throw new InvalidArgumentException('--group-by can only be combined with --records conflicts or resolutions');
+        }
+        $records = (string)($filters['records'] ?? 'resolutions');
+        if ($records === 'resolutions' && !in_array($group_by, ['table', 'status', 'path'], true)) {
+            throw new InvalidArgumentException('--records resolutions supports --group-by table, status, or path');
+        }
+        if ($records === 'conflicts' && !in_array($group_by, ['table', 'type', 'path', 'severity'], true)) {
+            throw new InvalidArgumentException('--records conflicts supports --group-by table, type, path, or severity');
         }
         if (($filters['decision'] ?? null) !== null) {
             throw new InvalidArgumentException('--group-by cannot be combined with --decision');
@@ -3981,6 +3988,27 @@ function cow_merge_audit_resolution_group_sql(string $group_by): string {
     throw new InvalidArgumentException('unsupported resolution group');
 }
 
+function cow_merge_audit_conflict_group_sql(string $group_by): string {
+    if ($group_by === 'table') {
+        return 'c.table_name';
+    }
+    if ($group_by === 'type') {
+        return 'c.conflict_type';
+    }
+    if ($group_by === 'path') {
+        return "CASE WHEN c.table_name = '__files__' THEN COALESCE(forkpress_file_path_group(c.row_identity), '(unknown)') ELSE c.table_name END";
+    }
+    if ($group_by === 'severity') {
+        return "CASE " .
+            "WHEN c.conflict_type LIKE 'schema-%' THEN 'schema' " .
+            "WHEN c.conflict_type IN ('row-insert-collision', 'row-target-deleted', 'row-source-deleted') THEN 'row' " .
+            "WHEN c.conflict_type = 'cell-conflict' THEN 'cell' " .
+            "WHEN c.table_name = '__files__' THEN 'files' " .
+            "ELSE 'other' END";
+    }
+    throw new InvalidArgumentException('unsupported conflict group');
+}
+
 function cow_merge_audit_count_sql(array $filters, string $record_type, string $alias, bool $review_notes_exist = true): string {
     $conditions = [];
     if ($filters['scope'] === 'files') {
@@ -4177,6 +4205,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
         'filters' => $filters,
         'runs' => [],
         'conflicts' => [],
+        'conflict_groups' => [],
         'decisions' => [],
         'resolutions' => [],
         'resolution_groups' => [],
@@ -4243,6 +4272,23 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
                 "FROM merge_conflicts $conflict_filter ORDER BY id DESC LIMIT :limit",
                 $conflict_params
             ));
+            if ($filters['records'] === 'conflicts' && $filters['group_by'] !== 'none') {
+                [$conflict_group_filter, $conflict_group_params] = cow_merge_audit_where_sql($run_id, $filters, 'conflicts', 'c', $review_notes_exist);
+                $conflict_group_params[':limit'] = $limit;
+                $group_expr = cow_merge_audit_conflict_group_sql($filters['group_by']);
+                $report['conflict_groups'] = cow_merge_audit_table_rows(
+                    $db,
+                    'merge_conflicts',
+                    "SELECT :group_by AS group_by, $group_expr AS group_key, COUNT(*) AS conflict_count, " .
+                    "SUM(CASE WHEN c.resolver = 'target-wins' THEN 1 ELSE 0 END) AS target_wins_count, " .
+                    "SUM(CASE WHEN c.resolved_at IS NOT NULL AND c.resolved_at <> '' THEN 1 ELSE 0 END) AS resolved_count, " .
+                    "SUM(CASE WHEN c.table_name = '__files__' THEN 1 ELSE 0 END) AS file_count, " .
+                    "SUM(CASE WHEN c.table_name <> '__files__' THEN 1 ELSE 0 END) AS db_count " .
+                    "FROM merge_conflicts c $conflict_group_filter " .
+                    "GROUP BY group_key ORDER BY conflict_count DESC, group_key LIMIT :limit",
+                    $conflict_group_params + [':group_by' => $filters['group_by']]
+                );
+            }
         }
 
         [$decision_filter, $decision_params] = cow_merge_audit_where_sql($run_id, $filters, 'decisions', '', $review_notes_exist);
@@ -4405,6 +4451,13 @@ function cow_merge_print_audit_text(array $report): void {
             echo "     source={$conflict['source_preview']}\n";
             echo "     target={$conflict['target_preview']}\n";
             echo "     chosen={$conflict['chosen_preview']}\n";
+        }
+    }
+
+    if ($report['conflict_groups']) {
+        echo "conflict-groups:\n";
+        foreach ($report['conflict_groups'] as $group) {
+            echo "  {$group['group_by']}={$group['group_key']} conflicts={$group['conflict_count']} target-wins={$group['target_wins_count']} resolved={$group['resolved_count']} files={$group['file_count']} db={$group['db_count']}\n";
         }
     }
 

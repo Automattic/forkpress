@@ -2966,7 +2966,9 @@ fn cow_branch_command(
                     }
                     "--group-by" => {
                         let Some(value) = args.args.get(index + 1) else {
-                            bail!("--group-by requires none, table, status, or path");
+                            bail!(
+                                "--group-by requires none, table, status, path, type, or severity"
+                            );
                         };
                         group_by = value.clone();
                         index += 2;
@@ -4169,6 +4171,35 @@ mod git_helper_tests {
                 "applied".to_string(),
                 "--group-by".to_string(),
                 "status".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_branch_merge_audit_conflict_grouping() {
+        let cli = Cli::try_parse_from([
+            "forkpress",
+            "branch",
+            "--work-dir",
+            ".forkpress",
+            "merge-audit",
+            "--records",
+            "conflicts",
+            "--group-by",
+            "severity",
+        ])
+        .unwrap();
+        let Commands::Branch(args) = cli.command else {
+            panic!("expected branch command");
+        };
+        assert_eq!(
+            args.args,
+            vec![
+                "merge-audit".to_string(),
+                "--records".to_string(),
+                "conflicts".to_string(),
+                "--group-by".to_string(),
+                "severity".to_string(),
             ]
         );
     }

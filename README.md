@@ -467,10 +467,12 @@ tooling.
   `[--conflict-type TYPE] [--decision DECISION] [--path PATH]`
   `[--path-prefix PREFIX] [--id-band-skips] [--review]`
   `[--review-status pending|needs-action|reviewed]`
-  `[--resolution-status validated|applied] [--group-by table|status|path]` prints the COW merge audit log
+  `[--resolution-status validated|applied] [--group-by table|status|path|type|severity]` prints the COW merge audit log
   without opening the raw metadata database. `--records resolutions` focuses
   the report on deterministic conflict resolution records; `--group-by` adds
-  compact resolution summaries for UI or assistant review.
+  compact resolution summaries for UI or assistant review. With
+  `--records conflicts`, `--group-by` can summarize conflicts by table, type,
+  path, or severity class.
 - `forkpress branch merge-review conflict|decision <id> --status pending|needs-action|reviewed --note <text>`
   `[--reviewer NAME]` appends a review note to an auditable merge conflict or decision.
 - `forkpress branch merge-resolve conflict <id> --choice source|target [--apply]`
