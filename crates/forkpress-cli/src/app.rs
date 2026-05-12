@@ -1,6 +1,4 @@
-#[cfg(feature = "dev-experiments")]
-use anyhow::anyhow;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 #[cfg(feature = "dev-experiments")]
 use std::ffi::OsStr;
@@ -47,12 +45,13 @@ use forkpress_server::{
     unescape_registry_field,
 };
 use forkpress_storage::{
-    CowSiteInit, compact_macos_apfs_sparsebundle_file_view, cow_branch_names, cow_branch_root,
+    CowSiteInit, RemoteBranchOptions, RemoteSiteAdd, add_remote_site, branch_remote_site,
+    compact_macos_apfs_sparsebundle_file_view, cow_branch_names, cow_branch_root,
     create_cow_branch, delete_cow_branch, detach_macos_apfs_sparsebundle_file_view,
     ensure_cow_branch_exists, ensure_cow_file_view_ready, ensure_cow_main_branch,
-    lock_cow_lifecycle, lock_cow_operations, prepare_cow_file_view, print_cow_storage_status,
-    print_macos_cow_storage_status, probe_reflink_dir, reset_cow_branch, show_cow_branch,
-    write_cow_branch_list, write_cow_strategy_notes,
+    list_remote_sites, lock_cow_lifecycle, lock_cow_operations, prepare_cow_file_view,
+    print_cow_storage_status, print_macos_cow_storage_status, probe_reflink_dir, probe_remote_site,
+    reset_cow_branch, show_cow_branch, write_cow_branch_list, write_cow_strategy_notes,
 };
 #[cfg(feature = "dev-experiments")]
 use forkpress_storage::{copy_tree_cow, plain_branch_names};
@@ -115,6 +114,8 @@ enum Commands {
     Branch(BranchPassthrough),
     /// Alias for `branch`.
     Branchctl(BranchPassthrough),
+    /// Manage remote-site caches and branch from them.
+    Remote(RemoteArgs),
     /// Manage authentication users (add/list/remove/verify/auth-enabled).
     #[cfg(feature = "dev-experiments")]
     User(UserPassthrough),
@@ -619,6 +620,80 @@ struct BranchPassthrough {
     args: Vec<String>,
 }
 
+#[derive(Args, Debug, Clone)]
+struct RemoteArgs {
+    #[command(flatten)]
+    shared: SharedPaths,
+
+    #[command(subcommand)]
+    command: RemoteCommand,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum RemoteCommand {
+    /// Register an existing remote-site cache.
+    Add(RemoteAddArgs),
+    /// List registered remote-site caches.
+    List,
+    /// Show cache details for one registered remote site.
+    Show(RemoteShowArgs),
+    /// Create a normal ForkPress COW branch from a registered remote cache.
+    Branch(RemoteBranchArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+struct RemoteAddArgs {
+    /// Local name for this remote-site cache.
+    name: String,
+
+    /// Existing materialized WordPress cache root. This directory must contain wp-load.php before it can be branched.
+    #[arg(long = "cache-root")]
+    cache_root: Option<PathBuf>,
+
+    /// wp-cow clone name or clone directory. Uses its file-cache/mirror directory without deleting or moving it.
+    #[arg(long = "wp-cow-clone")]
+    wp_cow_clone: Option<String>,
+
+    /// wp-cow state directory. Defaults to WPCOW_HOME or ~/.wp-cow when --wp-cow-clone is a name.
+    #[arg(long = "wp-cow-state-dir")]
+    wp_cow_state_dir: Option<PathBuf>,
+
+    /// Remote SSH target to record. This is metadata only; ForkPress does not modify the remote.
+    #[arg(long)]
+    ssh: Option<String>,
+
+    /// Remote WordPress path to record.
+    #[arg(long = "path")]
+    remote_path: Option<String>,
+
+    /// Production site URL to record.
+    #[arg(long = "remote-url")]
+    remote_url: Option<String>,
+
+    /// Local URL hint to record.
+    #[arg(long = "local-url")]
+    local_url: Option<String>,
+
+    /// Replace an existing remote-site registration without touching the cache.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+struct RemoteShowArgs {
+    /// Registered remote-site name.
+    name: String,
+}
+
+#[derive(Args, Debug, Clone)]
+struct RemoteBranchArgs {
+    /// Registered remote-site name.
+    remote: String,
+
+    /// Branch to create from the remote cache.
+    branch: String,
+}
+
 pub(crate) fn main() {
     let code = match run() {
         Ok(code) => code,
@@ -644,6 +719,7 @@ fn run() -> Result<i32> {
         Commands::Push(args) | Commands::Commit(args) => push_command(args),
         Commands::Git(args) => git_command(args),
         Commands::Branch(args) | Commands::Branchctl(args) => branch_command(args),
+        Commands::Remote(args) => remote_command(args),
         #[cfg(feature = "dev-experiments")]
         Commands::User(args) => user_command(args),
         Commands::Logs(args) => logs_command(args),
@@ -2497,6 +2573,148 @@ fn run_gc_once(
     Ok(())
 }
 
+fn remote_command(args: RemoteArgs) -> Result<i32> {
+    let layout = Layout::new(args.shared.work_dir.clone())?;
+    match args.command {
+        RemoteCommand::Add(add) => remote_add_command(&layout, add),
+        RemoteCommand::List => remote_list_command(&layout),
+        RemoteCommand::Show(show) => remote_show_command(&layout, show),
+        RemoteCommand::Branch(branch) => remote_branch_command(&args.shared, &layout, branch),
+    }
+}
+
+fn remote_add_command(layout: &Layout, args: RemoteAddArgs) -> Result<i32> {
+    let wp_cow_clone_root = match args.wp_cow_clone {
+        Some(raw) => Some(resolve_wp_cow_clone_root(
+            &raw,
+            args.wp_cow_state_dir.as_ref(),
+        )?),
+        None => None,
+    };
+    let cache_root = match args.cache_root {
+        Some(path) => Some(absolutize(path)?),
+        None => None,
+    };
+    let manifest = add_remote_site(
+        layout,
+        RemoteSiteAdd {
+            name: args.name,
+            ssh: args.ssh,
+            remote_path: args.remote_path,
+            remote_url: args.remote_url,
+            local_url: args.local_url,
+            cache_root,
+            wp_cow_clone_root,
+            force: args.force,
+        },
+    )?;
+    let cache = forkpress_storage::remote_site_cache_stats(&manifest)?;
+    println!("forkpress: remote site '{}' registered", manifest.name);
+    println!("  cache:     {}", manifest.cache_root.display());
+    println!("  files:     {}", cache.files);
+    println!(
+        "  wp-load:   {}",
+        if cache.has_wp_load { "yes" } else { "no" }
+    );
+    if !manifest.remote_url.is_empty() {
+        println!("  remote:    {}", manifest.remote_url);
+    }
+    Ok(0)
+}
+
+fn remote_list_command(layout: &Layout) -> Result<i32> {
+    let sites = list_remote_sites(layout)?;
+    for site in sites {
+        let cache = forkpress_storage::remote_site_cache_stats(&site)?;
+        println!(
+            "{}\t{}\t{} files\twp-load:{}",
+            site.name,
+            site.cache_root.display(),
+            cache.files,
+            if cache.has_wp_load { "yes" } else { "no" }
+        );
+    }
+    Ok(0)
+}
+
+fn remote_show_command(layout: &Layout, args: RemoteShowArgs) -> Result<i32> {
+    let probe = probe_remote_site(layout, &args.name)?;
+    println!("forkpress remote site {}", probe.manifest.name);
+    println!("  cache:      {}", probe.cache.cache_root.display());
+    println!("  files:      {}", probe.cache.files);
+    println!("  bytes:      {}", probe.cache.bytes);
+    println!(
+        "  wp-load:    {}",
+        if probe.cache.has_wp_load { "yes" } else { "no" }
+    );
+    if !probe.manifest.remote_path.is_empty() {
+        println!("  path:       {}", probe.manifest.remote_path);
+    }
+    if !probe.manifest.remote_url.is_empty() {
+        println!("  remote url: {}", probe.manifest.remote_url);
+    }
+    if let Some(root) = &probe.manifest.wp_cow_clone_root {
+        println!("  wp-cow:     {}", root.display());
+    }
+    Ok(0)
+}
+
+fn remote_branch_command(
+    shared: &SharedPaths,
+    layout: &Layout,
+    args: RemoteBranchArgs,
+) -> Result<i32> {
+    let strategy = require_initialized_strategy(layout, "remote branch")?;
+    if strategy != StorageStrategy::Cow {
+        bail!(
+            "remote branch requires COW storage, found strategy = \"{}\"",
+            strategy.as_str()
+        );
+    }
+    prepare_runtime(layout)?;
+    let runtime = PortableRuntime::from_layout(layout);
+    let _lock = lock_cow_operations(layout)?;
+    ensure_cow_file_view_ready(layout)?;
+    let report = branch_remote_site(
+        layout,
+        &runtime,
+        shared,
+        RemoteBranchOptions {
+            remote: args.remote,
+            branch: args.branch,
+            url_hint: branchctl_url_hint(layout).ok(),
+        },
+    )?;
+    println!(
+        "forkpress: remote cache '{}' branched to '{}'",
+        report.remote.name, report.branch
+    );
+    println!("  source files: {}", report.cache.files);
+    Ok(0)
+}
+
+fn resolve_wp_cow_clone_root(raw: &str, state_dir: Option<&PathBuf>) -> Result<PathBuf> {
+    let as_path = PathBuf::from(raw);
+    if as_path.exists() || raw.contains('/') || raw.contains('\\') {
+        return absolutize(as_path);
+    }
+    let state = match state_dir {
+        Some(path) => absolutize(path.clone())?,
+        None => default_wp_cow_state_dir()?,
+    };
+    Ok(state.join("clones").join(raw))
+}
+
+fn default_wp_cow_state_dir() -> Result<PathBuf> {
+    if let Some(home) = std::env::var_os("WPCOW_HOME") {
+        return Ok(PathBuf::from(home));
+    }
+    let home = std::env::var_os("HOME").ok_or_else(|| {
+        anyhow!("HOME is not set; pass --wp-cow-state-dir when using --wp-cow-clone by name")
+    })?;
+    Ok(PathBuf::from(home).join(".wp-cow"))
+}
+
 fn branch_command(args: BranchPassthrough) -> Result<i32> {
     if args.args.is_empty() {
         bail!("branch requires branchctl arguments, e.g. `forkpress branch create marketing`");
@@ -3539,6 +3757,32 @@ mod git_helper_tests {
         assert_eq!(parsed.from, "main");
         assert_eq!(parsed.auth.user.as_deref(), Some("admin"));
         assert_eq!(parsed.auth.password.as_deref(), Some("admin"));
+    }
+
+    #[test]
+    fn parses_remote_add_wp_cow_clone() {
+        let cli = Cli::try_parse_from([
+            "forkpress",
+            "remote",
+            "--work-dir",
+            ".forkpress",
+            "add",
+            "calm-cottage",
+            "--wp-cow-clone",
+            "calm-cottage",
+            "--force",
+        ])
+        .unwrap();
+        let Commands::Remote(args) = cli.command else {
+            panic!("expected remote command");
+        };
+        let RemoteCommand::Add(add) = args.command else {
+            panic!("expected remote add command");
+        };
+        assert_eq!(args.shared.work_dir, PathBuf::from(".forkpress"));
+        assert_eq!(add.name, "calm-cottage");
+        assert_eq!(add.wp_cow_clone.as_deref(), Some("calm-cottage"));
+        assert!(add.force);
     }
 
     #[test]

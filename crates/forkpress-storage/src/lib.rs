@@ -20,6 +20,13 @@ use forkpress_core::{
 };
 use forkpress_runtime::{PortableRuntime, run_php_script};
 
+mod remote;
+pub use remote::{
+    RemoteBranchOptions, RemoteBranchReport, RemoteCacheStats, RemoteSiteAdd, RemoteSiteManifest,
+    RemoteSiteProbe, add_remote_site, branch_remote_site, list_remote_sites, probe_remote_site,
+    read_remote_site_manifest, remote_site_cache_stats, sanitize_remote_site_name,
+};
+
 pub struct CowSiteInit<'a> {
     pub shared: &'a SharedPaths,
     pub site_title: &'a str,
@@ -334,7 +341,6 @@ pub fn create_cow_branch(
     from: &str,
     url_hint: Option<(String, String)>,
 ) -> Result<()> {
-    validate_branch_name(branch)?;
     validate_branch_name(from)?;
     let file_view = read_site_manifest(layout)?
         .and_then(|manifest| manifest.file_view)
@@ -342,6 +348,36 @@ pub fn create_cow_branch(
     let source = cow_branch_storage_root(layout, from, file_view);
     if !source.is_dir() {
         bail!("source branch does not exist: {from}");
+    }
+    create_cow_branch_from_tree(
+        layout,
+        runtime,
+        shared,
+        branch,
+        &source,
+        &format!("COW branch '{from}'"),
+        url_hint,
+    )
+}
+
+pub fn create_cow_branch_from_tree(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    branch: &str,
+    source: &Path,
+    source_label: &str,
+    url_hint: Option<(String, String)>,
+) -> Result<()> {
+    validate_branch_name(branch)?;
+    let file_view = read_site_manifest(layout)?
+        .and_then(|manifest| manifest.file_view)
+        .unwrap_or(FileViewStrategy::Copy);
+    if !source.join("wp-load.php").is_file() {
+        bail!(
+            "source tree is not a materialized WordPress root: {}",
+            source.display()
+        );
     }
     let public_dest = cow_branch_root(layout, branch);
     if path_exists_no_follow(&public_dest) {
@@ -352,14 +388,14 @@ pub fn create_cow_branch(
         bail!("branch already exists: {branch}");
     }
     if cow_branch_copies_require_cow(layout)? {
-        copy_tree_cow_required(&source, &dest)?;
+        copy_tree_cow_required(source, &dest)?;
     } else {
-        copy_tree_cow(&source, &dest)?;
+        copy_tree_cow(source, &dest)?;
     }
     let branch_root = ensure_cow_public_branch_root(layout, branch, &dest, file_view)?;
     run_cow_bootstrap_script(layout, runtime, shared, &branch_root, "ForkPress", "admin")?;
     write_cow_branch_list(layout)?;
-    println!("forkpress: COW cloned '{from}' -> '{branch}'");
+    println!("forkpress: COW cloned {source_label} -> '{branch}'");
     if let Some((root_host, port)) = url_hint {
         println!(
             "Visit http://{}.{root_host}:{port}/ to see this branch.",
