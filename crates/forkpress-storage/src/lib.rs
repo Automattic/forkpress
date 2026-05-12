@@ -864,6 +864,7 @@ pub fn inspect_cow_merge_audit(
     decision: Option<&str>,
     path: Option<&str>,
     path_prefix: Option<&str>,
+    id_band_skips: bool,
 ) -> Result<()> {
     let metadata_db = cow_merge_metadata_db_path(layout);
     let mut args: Vec<OsString> = vec![
@@ -898,6 +899,9 @@ pub fn inspect_cow_merge_audit(
     if let Some(path_prefix) = path_prefix {
         args.push("--path-prefix".into());
         args.push(path_prefix.into());
+    }
+    if id_band_skips {
+        args.push("--id-band-skips".into());
     }
     run_php_script(
         layout,

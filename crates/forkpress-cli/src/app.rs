@@ -2870,6 +2870,7 @@ fn cow_branch_command(
             let mut decision: Option<String> = None;
             let mut path: Option<String> = None;
             let mut path_prefix: Option<String> = None;
+            let mut id_band_skips = false;
             let mut index = 1;
             while index < args.args.len() {
                 match args.args[index].as_str() {
@@ -2936,6 +2937,10 @@ fn cow_branch_command(
                         path_prefix = Some(value.clone());
                         index += 2;
                     }
+                    "--id-band-skips" => {
+                        id_band_skips = true;
+                        index += 1;
+                    }
                     other => {
                         bail!("unsupported argument for `forkpress branch merge-audit`: {other}")
                     }
@@ -2954,6 +2959,7 @@ fn cow_branch_command(
                 decision.as_deref(),
                 path.as_deref(),
                 path_prefix.as_deref(),
+                id_band_skips,
             )?;
             Ok(0)
         }
@@ -3931,6 +3937,26 @@ mod git_helper_tests {
                 "--path-prefix".to_string(),
                 "wp-content/uploads".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn parses_branch_merge_audit_id_band_skip_shortcut() {
+        let cli = Cli::try_parse_from([
+            "forkpress",
+            "branch",
+            "--work-dir",
+            ".forkpress",
+            "merge-audit",
+            "--id-band-skips",
+        ])
+        .unwrap();
+        let Commands::Branch(args) = cli.command else {
+            panic!("expected branch command");
+        };
+        assert_eq!(
+            args.args,
+            vec!["merge-audit".to_string(), "--id-band-skips".to_string()]
         );
     }
 

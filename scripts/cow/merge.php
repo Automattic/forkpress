@@ -18,6 +18,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "  php merge.php audit --metadata-db <path> [--format text|json] [--limit N] [--run ID]\n");
     fwrite(STDERR, "    [--scope all|db|files] [--records all|conflicts|decisions] [--path <path>] [--path-prefix <prefix>]\n");
     fwrite(STDERR, "    [--scope all|db|files] [--records all|conflicts|decisions] [--conflict-type TYPE] [--decision DECISION]\n");
+    fwrite(STDERR, "    [--id-band-skips]\n");
 }
 
 const COW_MERGE_AUTOINCREMENT_BAND_SIZE = 1000000;
@@ -2735,7 +2736,37 @@ function cow_merge_audit_file_path_filter(?string $value, string $name): ?string
     return $path;
 }
 
+function cow_merge_audit_apply_shortcuts(array $filters): array {
+    $id_band_skips = (string)($filters['id_band_skips'] ?? '') === '1';
+    if (!$id_band_skips) {
+        return $filters;
+    }
+    if (($filters['scope'] ?? null) === null) {
+        $filters['scope'] = 'db';
+    } elseif (($filters['scope'] ?? null) === 'files') {
+        throw new InvalidArgumentException('--id-band-skips cannot be combined with --scope files');
+    }
+    if (($filters['records'] ?? null) === null) {
+        $filters['records'] = 'decisions';
+    } elseif (($filters['records'] ?? null) === 'conflicts') {
+        throw new InvalidArgumentException('--id-band-skips cannot be combined with --records conflicts');
+    }
+    if (($filters['decision'] ?? null) === null) {
+        $filters['decision'] = 'id-band-skipped';
+    } elseif (($filters['decision'] ?? null) !== 'id-band-skipped') {
+        throw new InvalidArgumentException('--id-band-skips cannot be combined with another --decision value');
+    }
+    if (($filters['conflict_type'] ?? null) !== null) {
+        throw new InvalidArgumentException('--id-band-skips cannot be combined with --conflict-type');
+    }
+    if (($filters['path'] ?? null) !== null || ($filters['path_prefix'] ?? null) !== null) {
+        throw new InvalidArgumentException('--id-band-skips cannot be combined with file path filters');
+    }
+    return $filters;
+}
+
 function cow_merge_audit_filters(array $filters = []): array {
+    $filters = cow_merge_audit_apply_shortcuts($filters);
     $scope = cow_merge_audit_scope($filters['scope'] ?? null);
     $path = cow_merge_audit_file_path_filter($filters['path'] ?? null, 'path');
     $path_prefix = cow_merge_audit_file_path_filter($filters['path_prefix'] ?? null, 'path-prefix');
@@ -2752,6 +2783,7 @@ function cow_merge_audit_filters(array $filters = []): array {
         'decision' => cow_merge_audit_filter_text($filters['decision'] ?? null, 'decision'),
         'path' => $path,
         'path_prefix' => $path_prefix,
+        'id_band_skips' => (string)($filters['id_band_skips'] ?? '') === '1',
     ];
 }
 
@@ -3091,7 +3123,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
         if ($run_id !== null) {
             $filter_params[':run_id'] = $run_id;
         }
-        if ($filters['scope'] !== 'files' && $filters['records'] !== 'conflicts') {
+        if ($filters['scope'] !== 'files' && $filters['records'] !== 'conflicts' && !$filters['id_band_skips']) {
             $band_filter = $run_id === null ? '' : 'WHERE allocated_run_id = :run_id OR last_seen_run_id = :run_id';
             $report['autoincrement_bands'] = cow_merge_audit_table_rows(
                 $db,
@@ -3153,6 +3185,9 @@ function cow_merge_audit_filter_label(array $filters): string {
             continue;
         }
         $parts[] = str_replace('_', '-', $key) . '=' . $value;
+    }
+    if (($filters['id_band_skips'] ?? false) === true) {
+        $parts[] = 'id-band-skips';
     }
     return implode(' ', $parts);
 }
@@ -3936,6 +3971,10 @@ function cow_merge_parse_cli(array $argv, array $required, int $start_index = 1)
             throw new InvalidArgumentException("unexpected argument: $arg");
         }
         $key = substr($arg, 2);
+        if ($key === 'id-band-skips' && (!isset($argv[$i + 1]) || str_starts_with($argv[$i + 1], '--'))) {
+            $args[$key] = '1';
+            continue;
+        }
         if (!isset($argv[$i + 1])) {
             throw new InvalidArgumentException("--$key requires a value");
         }
@@ -4039,6 +4078,7 @@ if (realpath($argv[0] ?? '') === __FILE__) {
                     'decision' => $args['decision'] ?? null,
                     'path' => $args['path'] ?? null,
                     'path_prefix' => $args['path-prefix'] ?? null,
+                    'id_band_skips' => $args['id-band-skips'] ?? null,
                 ]
             );
             if ($format === 'json') {

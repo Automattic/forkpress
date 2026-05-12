@@ -788,6 +788,19 @@ SQL);
     $band_audit = cow_merge_audit_report($band_metadata, null, 10);
     assert_true(count($band_audit['autoincrement_bands']) >= 3, 'merge audit report exposes AUTOINCREMENT band allocations');
     assert_true(count($band_audit['decisions']) >= 3, 'merge audit report exposes ID-band decisions');
+    $skip_audit = cow_merge_audit_report($band_metadata, null, 10, ['id_band_skips' => '1']);
+    assert_same($skip_audit['filters']['scope'], 'db', 'ID-band skip shortcut defaults audit scope to DB records');
+    assert_same($skip_audit['filters']['records'], 'decisions', 'ID-band skip shortcut selects decision records');
+    assert_same($skip_audit['filters']['decision'], 'id-band-skipped', 'ID-band skip shortcut selects skipped band decisions');
+    assert_same(count($skip_audit['conflicts']), 0, 'ID-band skip shortcut omits conflict records');
+    assert_same(count($skip_audit['autoincrement_bands']), 0, 'ID-band skip shortcut omits band summary rows');
+    assert_true(count($skip_audit['decisions']) >= 1, 'ID-band skip shortcut returns skipped plain-IPK decisions');
+    assert_same(count(array_filter($skip_audit['decisions'], fn($row) => $row['decision'] === 'id-band-skipped')), count($skip_audit['decisions']), 'ID-band skip shortcut returns only skipped decisions');
+    assert_true(count(array_filter($skip_audit['decisions'], fn($row) => $row['table_name'] === 'plugin_plain_ipk')) >= 1, 'ID-band skip shortcut identifies skipped plain-IPK tables');
+    ob_start();
+    cow_merge_print_audit_text($skip_audit);
+    $skip_audit_text = ob_get_clean();
+    assert_true(str_contains($skip_audit_text, 'id-band-skips'), 'ID-band skip shortcut is visible in text audit filters');
 } finally {
     remove_tree($tmp);
 }

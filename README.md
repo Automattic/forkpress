@@ -465,8 +465,8 @@ tooling.
 - `forkpress branch merge-audit [--format text|json] [--run ID]`
   `[--scope all|db|files] [--records all|conflicts|decisions]`
   `[--conflict-type TYPE] [--decision DECISION] [--path PATH]`
-  `[--path-prefix PREFIX]` prints the COW merge audit log without opening the
-  raw metadata database.
+  `[--path-prefix PREFIX] [--id-band-skips]` prints the COW merge audit log
+  without opening the raw metadata database.
 - `forkpress branch show <name>` prints the branch directory, database, file
   count, and Git ref path.
 - `forkpress branch delete <name>` removes a COW branch. `main` cannot be
