@@ -448,6 +448,32 @@ function cow_merge_index_sql_map(SQLite3 $db): array {
     return $indexes;
 }
 
+function cow_merge_schema_object_sql_map(SQLite3 $db, string $type): array {
+    if (!in_array($type, ['view', 'trigger'], true)) {
+        throw new InvalidArgumentException("unsupported schema object type: $type");
+    }
+    $objects = [];
+    $stmt = $db->prepare(
+        "SELECT name, tbl_name, sql FROM sqlite_master " .
+        "WHERE type = :type AND sql IS NOT NULL ORDER BY name"
+    );
+    if (!$stmt) {
+        throw new RuntimeException("failed to prepare $type schema lookup: " . $db->lastErrorMsg());
+    }
+    cow_merge_bind($stmt, ':type', $type);
+    $res = $stmt->execute();
+    if (!$res) {
+        throw new RuntimeException("failed to read $type schema: " . $db->lastErrorMsg());
+    }
+    while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+        $objects[(string)$row['name']] = [
+            'table' => (string)$row['tbl_name'],
+            'sql' => (string)$row['sql'],
+        ];
+    }
+    return $objects;
+}
+
 function cow_merge_table_sql(SQLite3 $db, string $table): ?string {
     $stmt = $db->prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = :name");
     if (!$stmt) {
@@ -471,6 +497,24 @@ function cow_merge_index_sql(SQLite3 $db, string $index): ?string {
     $res = $stmt->execute();
     if (!$res) {
         throw new RuntimeException("failed to read index schema for $index: " . $db->lastErrorMsg());
+    }
+    $row = $res->fetchArray(SQLITE3_ASSOC);
+    return $row ? (string)$row['sql'] : null;
+}
+
+function cow_merge_schema_object_sql(SQLite3 $db, string $type, string $name): ?string {
+    if (!in_array($type, ['view', 'trigger'], true)) {
+        throw new InvalidArgumentException("unsupported schema object type: $type");
+    }
+    $stmt = $db->prepare("SELECT sql FROM sqlite_master WHERE type = :type AND name = :name AND sql IS NOT NULL");
+    if (!$stmt) {
+        throw new RuntimeException("failed to prepare $type schema lookup for $name: " . $db->lastErrorMsg());
+    }
+    cow_merge_bind($stmt, ':type', $type);
+    cow_merge_bind($stmt, ':name', $name);
+    $res = $stmt->execute();
+    if (!$res) {
+        throw new RuntimeException("failed to read $type schema for $name: " . $db->lastErrorMsg());
     }
     $row = $res->fetchArray(SQLITE3_ASSOC);
     return $row ? (string)$row['sql'] : null;
@@ -3582,10 +3626,55 @@ function cow_merge_resolve_schema_conflict(
                     }
                 };
             }
+        } elseif (in_array($conflict_type, [
+            'schema-source-added-view',
+            'schema-source-changed-view',
+            'schema-source-dropped-view',
+            'schema-view-conflict',
+            'schema-source-added-trigger',
+            'schema-source-changed-trigger',
+            'schema-source-dropped-trigger',
+            'schema-trigger-conflict',
+        ], true)) {
+            if ($object === '') {
+                throw new InvalidArgumentException('schema view/trigger resolution requires a schema object name');
+            }
+            $type = str_contains($conflict_type, 'trigger') ? 'trigger' : 'view';
+            $source_sql = cow_merge_schema_index_sql_payload($source_payload);
+            if ($source_sql === null && !str_contains($conflict_type, 'source-dropped')) {
+                throw new RuntimeException("schema conflict #$conflict_id does not contain a source $type SQL payload");
+            }
+            $current_source_sql = cow_merge_schema_object_sql($source, $type, $object);
+            if (!cow_merge_values_equal($current_source_sql, $source_sql)) {
+                throw new RuntimeException("source $type no longer matches the audited conflict source value; rerun merge before resolving");
+            }
+            $current_target_sql = cow_merge_schema_object_sql($target, $type, $object);
+            $previous = $current_target_sql;
+            if ($target_payload === null) {
+                if ($current_target_sql !== null) {
+                    throw new RuntimeException("target $type no longer matches the audited missing-$type target value; rerun merge-audit before resolving");
+                }
+            } elseif (!cow_merge_values_equal($current_target_sql, $target_payload)) {
+                throw new RuntimeException("target $type no longer matches the audited conflict target value; rerun merge-audit before resolving");
+            }
+            if ($choice === 'source') {
+                $resolved = $source_sql;
+                $apply_source = function () use ($target, $type, $object, $source_sql): void {
+                    if (cow_merge_schema_object_sql($target, $type, $object) !== null) {
+                        $drop_sql = 'DROP ' . strtoupper($type) . ' ' . cow_merge_quote_ident($object);
+                        if (!$target->exec($drop_sql)) {
+                            throw new RuntimeException("failed to drop target $type during schema resolution: " . $target->lastErrorMsg());
+                        }
+                    }
+                    if ($source_sql !== null && !$target->exec($source_sql)) {
+                        throw new RuntimeException("failed to apply source $type schema resolution: " . $target->lastErrorMsg());
+                    }
+                };
+            }
         } else {
             if ($choice === 'source') {
                 if ($conflict_type !== 'schema-conflict' || $object !== '') {
-                    throw new InvalidArgumentException('source schema resolution currently supports source-added columns/indexes, index rewrites/drops, and compatible table rebuilds only');
+                    throw new InvalidArgumentException('source schema resolution currently supports source-added columns/indexes/views/triggers, index/view/trigger rewrites or drops, and compatible table rebuilds only');
                 }
                 if (!is_string($source_payload)) {
                     throw new RuntimeException("schema conflict #$conflict_id does not contain a source table SQL payload");
@@ -5183,6 +5272,123 @@ function cow_merge_apply_index_schema_changes(
     return ['applied' => $applied, 'conflicts' => $conflicts];
 }
 
+function cow_merge_apply_schema_object_changes(
+    SQLite3 $target,
+    SQLite3 $meta,
+    int $run_id,
+    string $type,
+    array $base_objects,
+    array $source_objects,
+    array $target_objects
+): array {
+    if (!in_array($type, ['view', 'trigger'], true)) {
+        throw new InvalidArgumentException("unsupported schema object type: $type");
+    }
+    $applied = 0;
+    $conflicts = 0;
+    $all_objects = array_unique(array_merge(array_keys($base_objects), array_keys($source_objects), array_keys($target_objects)));
+    sort($all_objects);
+
+    foreach ($all_objects as $name) {
+        $base_entry = $base_objects[$name] ?? null;
+        $source_entry = $source_objects[$name] ?? null;
+        $target_entry = $target_objects[$name] ?? null;
+        $table = (string)($source_entry['table'] ?? $target_entry['table'] ?? $base_entry['table'] ?? $name);
+        $base_sql = $base_entry['sql'] ?? null;
+        $source_sql = $source_entry['sql'] ?? null;
+        $target_sql = $target_entry['sql'] ?? null;
+
+        if ($source_sql === $target_sql) {
+            continue;
+        }
+        if ($source_sql === null) {
+            if ($base_sql !== null) {
+                cow_merge_record_schema_conflict(
+                    $meta,
+                    $run_id,
+                    $table,
+                    $name,
+                    "schema-source-dropped-$type",
+                    $base_sql,
+                    null,
+                    $target_sql,
+                    $target_sql,
+                    "source dropped a $type; automatic $type drops are not applied"
+                );
+                $conflicts++;
+            }
+            continue;
+        }
+        if ($base_sql === null && $target_sql === null) {
+            if (!$target->exec($source_sql)) {
+                cow_merge_record_schema_conflict(
+                    $meta,
+                    $run_id,
+                    $table,
+                    $name,
+                    "schema-source-added-$type",
+                    null,
+                    ['sql' => $source_sql, 'error' => $target->lastErrorMsg()],
+                    null,
+                    null,
+                    "source added a $type that SQLite rejected on the target"
+                );
+                $conflicts++;
+                continue;
+            }
+            cow_merge_record_decision(
+                $meta,
+                $run_id,
+                $table,
+                null,
+                $name,
+                'source-applied',
+                "source added a $type that target did not have",
+                null,
+                $source_sql,
+                null,
+                $source_sql
+            );
+            $applied++;
+            continue;
+        }
+        if ($source_sql === $base_sql) {
+            continue;
+        }
+        if ($target_sql === $base_sql) {
+            cow_merge_record_schema_conflict(
+                $meta,
+                $run_id,
+                $table,
+                $name,
+                "schema-source-changed-$type",
+                $base_sql,
+                $source_sql,
+                $target_sql,
+                $target_sql,
+                "source changed an existing $type; automatic $type rewrites are not applied"
+            );
+            $conflicts++;
+            continue;
+        }
+        cow_merge_record_schema_conflict(
+            $meta,
+            $run_id,
+            $table,
+            $name,
+            "schema-$type-conflict",
+            $base_sql,
+            $source_sql,
+            $target_sql,
+            $target_sql,
+            "source and target changed the same $type differently"
+        );
+        $conflicts++;
+    }
+
+    return ['applied' => $applied, 'conflicts' => $conflicts];
+}
+
 function cow_merge_table_rows(
     SQLite3 $base,
     SQLite3 $source,
@@ -5374,6 +5580,12 @@ function cow_merge_databases(
         $base_indexes = cow_merge_index_sql_map($base);
         $source_indexes = cow_merge_index_sql_map($source);
         $target_indexes = cow_merge_index_sql_map($target);
+        $base_views = cow_merge_schema_object_sql_map($base, 'view');
+        $source_views = cow_merge_schema_object_sql_map($source, 'view');
+        $target_views = cow_merge_schema_object_sql_map($target, 'view');
+        $base_triggers = cow_merge_schema_object_sql_map($base, 'trigger');
+        $source_triggers = cow_merge_schema_object_sql_map($source, 'trigger');
+        $target_triggers = cow_merge_schema_object_sql_map($target, 'trigger');
         $all_tables = array_unique(array_merge(array_keys($base_tables), array_keys($source_tables), array_keys($target_tables)));
         sort($all_tables);
 
@@ -5421,6 +5633,12 @@ function cow_merge_databases(
         $index_result = cow_merge_apply_index_schema_changes($target, $meta, $run_id, $base_indexes, $source_indexes, $target_indexes);
         $applied += $index_result['applied'];
         $conflicts += $index_result['conflicts'];
+        $view_result = cow_merge_apply_schema_object_changes($target, $meta, $run_id, 'view', $base_views, $source_views, $target_views);
+        $applied += $view_result['applied'];
+        $conflicts += $view_result['conflicts'];
+        $trigger_result = cow_merge_apply_schema_object_changes($target, $meta, $run_id, 'trigger', $base_triggers, $source_triggers, $target_triggers);
+        $applied += $trigger_result['applied'];
+        $conflicts += $trigger_result['conflicts'];
 
         $target->exec('COMMIT');
         $status = $conflicts > 0 ? 'completed_with_conflicts' : 'completed';

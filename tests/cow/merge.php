@@ -1204,6 +1204,95 @@ SQL);
     assert_same($schema_index_drop_resolution['status'], 'applied', 'source index drop resolution records applied status');
     assert_same(scalar($schema_index_drop_target, "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'plugin_items_drop_idx'"), null, 'source index drop resolution removes target index');
 
+    $schema_object_base = $tmp . '/schema-object-base.sqlite';
+    $schema_object_source = $tmp . '/schema-object-source.sqlite';
+    $schema_object_target = $tmp . '/schema-object-target.sqlite';
+    create_base_db($schema_object_base);
+    $db = open_db($schema_object_base);
+    $db->exec('CREATE TABLE plugin_item_audit (item_id TEXT)');
+    $db->close();
+    copy($schema_object_base, $schema_object_source);
+    copy($schema_object_base, $schema_object_target);
+
+    $db = open_db($schema_object_source);
+    $db->exec('CREATE VIEW plugin_items_source_view AS SELECT item_id, label FROM plugin_items');
+    $db->exec('CREATE TRIGGER plugin_items_source_insert AFTER INSERT ON plugin_items BEGIN INSERT INTO plugin_item_audit (item_id) VALUES (NEW.item_id); END');
+    $db->close();
+
+    $result = cow_merge_databases($schema_object_base, $schema_object_source, $schema_object_target, $metadata, 'feature-schema-object', 'main');
+    assert_same($result['status'], 'completed', 'source-added views and triggers merge cleanly');
+    assert_same((int)scalar($schema_object_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_source_view'"), 1, 'source-added view is created on target');
+    assert_same((int)scalar($schema_object_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_items_source_insert'"), 1, 'source-added trigger is created on target');
+    $db = open_db($schema_object_target);
+    $db->exec("INSERT INTO plugin_items (item_id, label, value) VALUES ('gamma', 'Gamma', 'view trigger')");
+    $db->close();
+    assert_same(scalar($schema_object_target, "SELECT label FROM plugin_items_source_view WHERE item_id = 'gamma'"), 'Gamma', 'source-added view remains queryable after merge');
+    assert_same(scalar($schema_object_target, "SELECT item_id FROM plugin_item_audit WHERE item_id = 'gamma'"), 'gamma', 'source-added trigger fires after merge');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE column_name IN ('plugin_items_source_view', 'plugin_items_source_insert') AND decision = 'source-applied'"), 2, 'source-added view and trigger decisions are auditable');
+
+    $schema_view_rewrite_base = $tmp . '/schema-view-rewrite-base.sqlite';
+    $schema_view_rewrite_source = $tmp . '/schema-view-rewrite-source.sqlite';
+    $schema_view_rewrite_target = $tmp . '/schema-view-rewrite-target.sqlite';
+    create_base_db($schema_view_rewrite_base);
+    $db = open_db($schema_view_rewrite_base);
+    $db->exec('CREATE VIEW plugin_items_review_view AS SELECT item_id, label FROM plugin_items');
+    $db->close();
+    copy($schema_view_rewrite_base, $schema_view_rewrite_source);
+    copy($schema_view_rewrite_base, $schema_view_rewrite_target);
+
+    $db = open_db($schema_view_rewrite_source);
+    $db->exec('DROP VIEW plugin_items_review_view');
+    $db->exec('CREATE VIEW plugin_items_review_view AS SELECT item_id, label, value FROM plugin_items');
+    $db->close();
+
+    $result = cow_merge_databases($schema_view_rewrite_base, $schema_view_rewrite_source, $schema_view_rewrite_target, $metadata, 'feature-view-rewrite', 'main');
+    assert_same($result['status'], 'completed_with_conflicts', 'source-changed view remains a schema conflict');
+    $schema_view_rewrite_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_items_review_view' AND conflict_type = 'schema-source-changed-view' ORDER BY id DESC LIMIT 1");
+    $schema_view_rewrite_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_view_rewrite_conflict_id,
+        'source',
+        true,
+        'Apply source view rewrite.',
+        'test'
+    );
+    assert_same($schema_view_rewrite_resolution['status'], 'applied', 'source view rewrite resolution records applied status');
+    assert_true(str_contains((string)scalar($schema_view_rewrite_target, "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_review_view'"), 'value'), 'source view rewrite replaces target view definition');
+    assert_same(scalar($schema_view_rewrite_target, "SELECT value FROM plugin_items_review_view WHERE item_id = 'alpha'"), 'base', 'rewritten source view remains queryable');
+
+    $schema_trigger_drop_base = $tmp . '/schema-trigger-drop-base.sqlite';
+    $schema_trigger_drop_source = $tmp . '/schema-trigger-drop-source.sqlite';
+    $schema_trigger_drop_target = $tmp . '/schema-trigger-drop-target.sqlite';
+    create_base_db($schema_trigger_drop_base);
+    $db = open_db($schema_trigger_drop_base);
+    $db->exec('CREATE TABLE plugin_trigger_audit (item_id TEXT)');
+    $db->exec('CREATE TRIGGER plugin_items_drop_trigger AFTER INSERT ON plugin_items BEGIN INSERT INTO plugin_trigger_audit (item_id) VALUES (NEW.item_id); END');
+    $db->close();
+    copy($schema_trigger_drop_base, $schema_trigger_drop_source);
+    copy($schema_trigger_drop_base, $schema_trigger_drop_target);
+
+    $db = open_db($schema_trigger_drop_source);
+    $db->exec('DROP TRIGGER plugin_items_drop_trigger');
+    $db->close();
+
+    $result = cow_merge_databases($schema_trigger_drop_base, $schema_trigger_drop_source, $schema_trigger_drop_target, $metadata, 'feature-trigger-drop', 'main');
+    assert_same($result['status'], 'completed_with_conflicts', 'source-dropped trigger remains a schema conflict');
+    $schema_trigger_drop_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_items_drop_trigger' AND conflict_type = 'schema-source-dropped-trigger' ORDER BY id DESC LIMIT 1");
+    $schema_trigger_drop_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_trigger_drop_conflict_id,
+        'source',
+        true,
+        'Apply source trigger drop.',
+        'test'
+    );
+    assert_same($schema_trigger_drop_resolution['status'], 'applied', 'source trigger drop resolution records applied status');
+    assert_same(scalar($schema_trigger_drop_target, "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_items_drop_trigger'"), null, 'source trigger drop resolution removes target trigger');
+    $db = open_db($schema_trigger_drop_target);
+    $db->exec("INSERT INTO plugin_items (item_id, label, value) VALUES ('delta', 'Delta', 'dropped trigger')");
+    $db->close();
+    assert_same((int)scalar($schema_trigger_drop_target, "SELECT COUNT(*) FROM plugin_trigger_audit WHERE item_id = 'delta'"), 0, 'dropped trigger no longer fires after source resolution');
+
     $keyless_base = $tmp . '/keyless-base.sqlite';
     $keyless_source = $tmp . '/keyless-source.sqlite';
     $keyless_target = $tmp . '/keyless-target.sqlite';

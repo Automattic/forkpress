@@ -482,11 +482,12 @@ tooling.
   insert-collision, row-target-deleted, row-source-deleted, or filesystem path
   conflict, plus validation-gated schema conflicts. DB conflicts work for
   explicit primary keys and no-primary-key tables with sidecar row identity.
-  Schema source choices can apply safe source-added columns/indexes, source
-  index rewrites or drops, and compatible table rebuilds that preserve target
-  rows and target indexes/triggers while changing audited non-primary-key
-  column definitions. Compatible rebuilds also preserve dependent target views
-  when those views validate before and after the rebuild. With `--apply`,
+  Schema source choices can apply safe source-added columns, indexes, views,
+  and triggers; source index/view/trigger rewrites or drops; and compatible
+  table rebuilds that preserve target rows and target indexes/triggers while
+  changing audited non-primary-key column definitions. Compatible rebuilds also
+  preserve dependent target views when those views validate before and after the
+  rebuild. With `--apply`,
   ForkPress records the deterministic resolution in merge metadata and appends
   a reviewed annotation to the conflict audit record.
 - `forkpress branch show <name>` prints the branch directory, database, file
