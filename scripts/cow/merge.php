@@ -1627,6 +1627,29 @@ function cow_merge_autoincrement_tables(SQLite3 $db): array {
     return $tables;
 }
 
+function cow_merge_plain_integer_primary_key_tables(SQLite3 $db): array {
+    $tables = [];
+    foreach (cow_merge_table_sql_map($db) as $table => $sql) {
+        $sql = (string)$sql;
+        if (preg_match('/\bAUTOINCREMENT\b/i', $sql) || preg_match('/\bWITHOUT\s+ROWID\b/i', $sql)) {
+            continue;
+        }
+        $pk_columns = array_values(array_filter(
+            cow_merge_table_info($db, $table),
+            fn($column) => (int)$column['pk'] > 0
+        ));
+        if (count($pk_columns) !== 1) {
+            continue;
+        }
+        $type = strtoupper(trim((string)$pk_columns[0]['type']));
+        if ($type === 'INTEGER') {
+            $tables[] = $table;
+        }
+    }
+    sort($tables);
+    return $tables;
+}
+
 function cow_merge_table_max_rowid(SQLite3 $db, string $table): int {
     return (int)$db->querySingle('SELECT COALESCE(MAX(rowid), 0) FROM ' . cow_merge_quote_ident($table));
 }
@@ -1762,6 +1785,7 @@ function cow_merge_allocate_autoincrement_bands(
     $allocated = 0;
     $reused = 0;
     $advanced = 0;
+    $skipped_plain_integer_pk = 0;
     try {
         $db->exec('BEGIN IMMEDIATE');
         $meta->exec('BEGIN IMMEDIATE');
@@ -1810,6 +1834,23 @@ function cow_merge_allocate_autoincrement_bands(
                 ['seq' => $target_seq]
             );
         }
+        foreach (cow_merge_plain_integer_primary_key_tables($db) as $table) {
+            $skipped_plain_integer_pk++;
+            $max_rowid = cow_merge_table_max_rowid($db, $table);
+            cow_merge_record_decision(
+                $meta,
+                $run_id,
+                $table,
+                null,
+                null,
+                'id-band-skipped',
+                'plain INTEGER PRIMARY KEY tables do not have a durable sqlite_sequence reservation point',
+                ['max_rowid' => $max_rowid],
+                ['strategy' => 'state-based-merge'],
+                ['max_rowid' => $max_rowid],
+                ['max_rowid' => $max_rowid]
+            );
+        }
         $meta->exec('COMMIT');
         $db->exec('COMMIT');
         cow_merge_finish_run($meta, $run_id, 'id_bands_allocated');
@@ -1820,6 +1861,7 @@ function cow_merge_allocate_autoincrement_bands(
             'allocated' => $allocated,
             'reused' => $reused,
             'advanced' => $advanced,
+            'skipped_plain_integer_pk' => $skipped_plain_integer_pk,
             'metadata_db' => $metadata_db,
         ];
     } catch (Throwable $e) {
