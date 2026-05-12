@@ -521,6 +521,11 @@ try {
     $reviewed_status_ids = array_map(fn($row) => (int)$row['id'], $reviewed_status_audit['conflicts']);
     assert_true(in_array($reviewed_conflict_id, $reviewed_status_ids, true), 'review status filter returns the annotated conflict');
     assert_same(count($reviewed_status_audit['decisions']), 0, 'review status filter omits unannotated decisions');
+    $unreviewed_status_audit = cow_merge_audit_report($metadata, null, 10, ['review_status' => 'unreviewed']);
+    assert_same($unreviewed_status_audit['filters']['review_status'], 'unreviewed', 'merge audit JSON report includes unreviewed filter');
+    assert_true(count($unreviewed_status_audit['decisions']) >= 1, 'unreviewed filter returns decisions with no review note');
+    $unreviewed_conflict_ids = array_map(fn($row) => (int)$row['id'], $unreviewed_status_audit['conflicts']);
+    assert_true(!in_array($reviewed_conflict_id, $unreviewed_conflict_ids, true), 'unreviewed filter excludes reviewed conflicts');
     $needs_action_status_audit = cow_merge_audit_report($metadata, null, 10, ['review_status' => 'needs-action']);
     assert_same(count($needs_action_status_audit['conflicts']), 0, 'review status filter excludes other latest statuses');
     $missing_review_status_audit = cow_merge_audit_report($tmp . '/missing-review-status.sqlite', null, 5, ['review_status' => 'reviewed']);
@@ -533,6 +538,10 @@ try {
     cow_merge_print_audit_text($reviewed_status_audit);
     $reviewed_status_text = ob_get_clean();
     assert_true(str_contains($reviewed_status_text, 'review-status=reviewed'), 'review status filter is visible in text filters');
+    ob_start();
+    cow_merge_print_audit_text($unreviewed_status_audit);
+    $unreviewed_status_text = ob_get_clean();
+    assert_true(str_contains($unreviewed_status_text, 'review-status=unreviewed'), 'unreviewed filter is visible in text filters');
     $resolution_review_id = (int)$applied_resolution_audit['resolutions'][0]['id'];
     $resolution_review = cow_merge_review_record(
         $metadata,
@@ -549,6 +558,10 @@ try {
     assert_same(count($reviewed_resolution_audit['resolutions']), 1, 'review status filter returns annotated resolution records');
     assert_same($reviewed_resolution_audit['resolutions'][0]['review_status'], 'needs-action', 'merge audit JSON exposes latest resolution review status');
     assert_same($reviewed_resolution_audit['resolutions'][0]['review_note'], 'Follow up with content owner after source resolution.', 'merge audit JSON exposes latest resolution review note');
+    $unreviewed_resolution_audit = cow_merge_audit_report($metadata, null, 10, ['records' => 'resolutions', 'review_status' => 'unreviewed']);
+    assert_true(count($unreviewed_resolution_audit['resolutions']) >= 1, 'unreviewed filter returns resolution records with no review note');
+    $unreviewed_resolution_ids = array_map(fn($row) => (int)$row['id'], $unreviewed_resolution_audit['resolutions']);
+    assert_true(!in_array($resolution_review_id, $unreviewed_resolution_ids, true), 'unreviewed filter excludes reviewed resolution records');
     ob_start();
     cow_merge_print_audit_text($reviewed_resolution_audit);
     $reviewed_resolution_text = ob_get_clean();

@@ -466,7 +466,7 @@ tooling.
   `[--scope all|db|files] [--records all|conflicts|decisions|resolutions]`
   `[--conflict-type TYPE] [--decision DECISION] [--path PATH]`
   `[--path-prefix PREFIX] [--id-band-skips] [--target-kept] [--review]`
-  `[--review-status pending|needs-action|reviewed]`
+  `[--review-status unreviewed|pending|needs-action|reviewed]`
   `[--resolution-status validated|applied] [--group-by table|status|path|type|severity]` prints the COW merge audit log
   without opening the raw metadata database. `--records resolutions` focuses
   the report on deterministic conflict resolution records; `--group-by` adds
@@ -475,6 +475,9 @@ tooling.
   path, or severity class. With `--records decisions`, `--group-by` can
   summarize automatic decisions by table, type, or path. `--target-kept`
   focuses the report on preserved target/trunk-side decisions.
+  `--review-status unreviewed` is audit-only and returns records that have no
+  review note yet; `pending`, `needs-action`, and `reviewed` match the latest
+  recorded review annotation.
 - `forkpress branch merge-review conflict|decision|resolution <id> --status pending|needs-action|reviewed --note <text>`
   `[--reviewer NAME]` appends a review note to an auditable merge conflict,
   decision, or deterministic resolution record.

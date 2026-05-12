@@ -18,7 +18,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "  php merge.php audit --metadata-db <path> [--format text|json] [--limit N] [--run ID]\n");
     fwrite(STDERR, "    [--scope all|db|files] [--records all|conflicts|decisions|resolutions] [--path <path>] [--path-prefix <prefix>]\n");
     fwrite(STDERR, "    [--scope all|db|files] [--records all|conflicts|decisions|resolutions] [--conflict-type TYPE] [--decision DECISION]\n");
-    fwrite(STDERR, "    [--id-band-skips] [--target-kept] [--review] [--review-status pending|needs-action|reviewed]\n");
+    fwrite(STDERR, "    [--id-band-skips] [--target-kept] [--review] [--review-status unreviewed|pending|needs-action|reviewed]\n");
     fwrite(STDERR, "    [--resolution-status validated|applied] [--group-by none|table|status|path|type|severity]\n");
     fwrite(STDERR, "    --group-by supports resolutions by table/status/path, conflicts by table/type/path/severity, and decisions by table/type/path.\n");
     fwrite(STDERR, "  php merge.php review-record --metadata-db <path> --record conflict|decision|resolution --id ID --status pending|needs-action|reviewed --note TEXT [--reviewer NAME]\n");
@@ -3049,7 +3049,10 @@ function cow_merge_audit_review_status_filter(?string $value): ?string {
     if ($value === null || $value === '') {
         return null;
     }
-    return cow_merge_review_status($value);
+    if (!in_array($value, ['unreviewed', 'pending', 'needs-action', 'reviewed'], true)) {
+        throw new InvalidArgumentException('--review-status must be unreviewed, pending, needs-action, or reviewed');
+    }
+    return $value;
 }
 
 function cow_merge_audit_resolution_status_filter(?string $value): ?string {
@@ -4588,7 +4591,15 @@ function cow_merge_audit_where_sql(
     }
 
     if (($filters['review_status'] ?? null) !== null) {
-        if (!$review_notes_exist) {
+        if (($filters['review_status'] ?? null) === 'unreviewed') {
+            if ($review_notes_exist) {
+                $note_type = $record_type === 'conflicts' ? 'conflict' : 'decision';
+                $outer_table = $record_type === 'conflicts' ? 'merge_conflicts' : 'merge_decisions';
+                $outer_id = $alias === '' ? $outer_table . '.id' : $prefix . 'id';
+                $clauses[] = "NOT EXISTS (SELECT 1 FROM merge_review_notes rn WHERE rn.record_type = '$note_type' AND rn.record_id = " .
+                    $outer_id . ')';
+            }
+        } elseif (!$review_notes_exist) {
             $clauses[] = '0 = 1';
         } else {
             $note_type = $record_type === 'conflicts' ? 'conflict' : 'decision';
@@ -4642,7 +4653,11 @@ function cow_merge_audit_resolution_where_sql(
     }
 
     if (($filters['review_status'] ?? null) !== null) {
-        if (!$review_notes_exist) {
+        if (($filters['review_status'] ?? null) === 'unreviewed') {
+            if ($review_notes_exist) {
+                $clauses[] = "NOT EXISTS (SELECT 1 FROM merge_review_notes rn WHERE rn.record_type = 'resolution' AND rn.record_id = mr.id)";
+            }
+        } elseif (!$review_notes_exist) {
             $clauses[] = '0 = 1';
         } else {
             $clauses[] = "(SELECT rn.status FROM merge_review_notes rn WHERE rn.record_type = 'resolution' AND rn.record_id = " .
@@ -4720,7 +4735,13 @@ function cow_merge_audit_count_sql(array $filters, string $record_type, string $
         }
     }
     if (($filters['review_status'] ?? null) !== null) {
-        if (!$review_notes_exist) {
+        if (($filters['review_status'] ?? null) === 'unreviewed') {
+            if ($review_notes_exist) {
+                $note_type = $record_type === 'conflicts' ? 'conflict' : 'decision';
+                $conditions[] = "NOT EXISTS (SELECT 1 FROM merge_review_notes rn WHERE rn.record_type = '$note_type' AND rn.record_id = " .
+                    $alias . '.id)';
+            }
+        } elseif (!$review_notes_exist) {
             $conditions[] = '0 = 1';
         } else {
             $note_type = $record_type === 'conflicts' ? 'conflict' : 'decision';

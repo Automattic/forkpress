@@ -2957,7 +2957,9 @@ fn cow_branch_command(
                     }
                     "--review-status" => {
                         let Some(value) = args.args.get(index + 1) else {
-                            bail!("--review-status requires pending, needs-action, or reviewed");
+                            bail!(
+                                "--review-status requires unreviewed, pending, needs-action, or reviewed"
+                            );
                         };
                         review_status = Some(value.clone());
                         index += 2;
@@ -4151,7 +4153,7 @@ mod git_helper_tests {
             "merge-audit",
             "--review",
             "--review-status",
-            "needs-action",
+            "unreviewed",
         ])
         .unwrap();
         let Commands::Branch(args) = cli.command else {
@@ -4163,7 +4165,7 @@ mod git_helper_tests {
                 "merge-audit".to_string(),
                 "--review".to_string(),
                 "--review-status".to_string(),
-                "needs-action".to_string(),
+                "unreviewed".to_string(),
             ]
         );
     }
