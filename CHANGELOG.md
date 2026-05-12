@@ -30,6 +30,29 @@
 - Added runtime-backed COW e2e coverage for deterministic resolution records being reviewed through `forkpress branch merge-review resolution`.
 - Updated the automatic mergeback loop runner to pass a configurable Codex reasoning-effort setting and to include the changelog/known-good tag policy in every worker prompt.
 
+## known-good/cow-mergeback-audit-completeness-2026-05-12
+
+Verified as a major known-good checkpoint for COW mergeback audit completeness after the view-dependency checkpoint:
+
+- Source-added SQLite table creation is recorded as a schema-level `source-applied` decision, including empty plugin tables that have no row-level decisions.
+- Target-only SQLite schema tables, table schema changes, indexes, views, and triggers are preserved and recorded as `target-kept` decisions.
+- Target-only SQLite row inserts, row deletes, and cell changes are preserved and recorded as `target-kept` decisions.
+- Target-only filesystem additions, deletions, and path changes are preserved and recorded as `target-kept` decisions under the existing `__files__` audit convention.
+- Merge behavior remains plugin-declaration-free; the checkpoint only expands auditable records for applied or preserved state under ForkPress-owned `.forkpress/cow/merge` metadata.
+
+Verification for the tag included:
+
+- Fresh temporary runtime-bundle debug build of `target/debug/forkpress`.
+- `tests/cow/e2e.sh target/debug/forkpress`.
+- `php -l scripts/cow/merge.php`.
+- `php -l tests/cow/merge.php`.
+- `php tests/cow/merge.php`.
+- `bash -n tests/cow/e2e.sh`.
+- `cargo fmt --check`.
+- `cargo test -p forkpress-storage`.
+- `FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli`.
+- `FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli --features dev-experiments --bin forkpress-dev`.
+
 ## known-good/cow-mergeback-view-dependencies-2026-05-12
 
 Verified as a major known-good checkpoint for validation-gated COW schema dependency preservation after the schema-object layer:
