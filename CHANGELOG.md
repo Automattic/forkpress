@@ -22,6 +22,29 @@
 - Added runtime-backed COW e2e coverage for deterministic resolution records being reviewed through `forkpress branch merge-review resolution`.
 - Updated the automatic mergeback loop runner to pass a configurable Codex reasoning-effort setting and to include the changelog/known-good tag policy in every worker prompt.
 
+## known-good/cow-mergeback-schema-objects-2026-05-12
+
+Verified as a major known-good checkpoint for the post-schema-resolver COW mergeback schema-object layer:
+
+- Generic schema merge/audit handling for SQLite views and triggers, including clean source-added object application.
+- Validation-gated resolution for audited source view/trigger rewrites and drops.
+- Auditable source-dropped SQLite table handling, with source resolution blocked until dependent target views, indexes, and triggers are handled explicitly.
+- Resolution review annotations and runtime-backed e2e coverage for reviewing deterministic resolution records through the real `forkpress` binary.
+- Loop-runner coordination updates for the changelog and known-good tag policy.
+
+Verification for the tag included:
+
+- Fresh temporary runtime-bundle debug build of `target/debug/forkpress`.
+- `tests/cow/e2e.sh target/debug/forkpress`.
+- `php -l scripts/cow/merge.php`.
+- `php -l tests/cow/merge.php`.
+- `php tests/cow/merge.php`.
+- `bash -n tests/cow/e2e.sh`.
+- `cargo fmt --check`.
+- `cargo test -p forkpress-storage`.
+- `FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli`.
+- `FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli --features dev-experiments --bin forkpress-dev`.
+
 ## known-good/cow-mergeback-schema-resolver-2026-05-12
 
 Verified as a major known-good checkpoint for the post-MVP COW mergeback schema resolver and audit triage layer:
