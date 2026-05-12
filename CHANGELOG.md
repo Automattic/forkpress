@@ -10,6 +10,7 @@
 - Added `forkpress branch merge-resolve conflict <id> --choice source|target` as the first validation-gated deterministic resolver for DB cell conflicts, row insert collisions, row delete/update conflicts, no-primary-key table conflicts backed by sidecar row identity, safe filesystem path conflicts, and safe source-added column/index schema conflicts, with applied resolutions recorded in merge metadata.
 - Applied COW merge conflict resolutions now append a `reviewed` annotation to the resolved conflict audit record.
 - Added `forkpress branch merge-audit --records resolutions --resolution-status validated|applied` to inspect deterministic conflict resolution records directly.
+- Added `forkpress branch merge-audit --records resolutions --group-by table|status|path` to summarize deterministic resolution records for UI and assistant review.
 
 ## known-good/cow-mergeback-mvp-2026-05-12
 

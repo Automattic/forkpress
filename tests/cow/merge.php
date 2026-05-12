@@ -262,6 +262,19 @@ try {
     cow_merge_print_audit_text($applied_resolution_audit);
     $resolution_status_text = ob_get_clean();
     assert_true(str_contains($resolution_status_text, 'records=resolutions resolution-status=applied'), 'resolution status filter is visible in text filters');
+    $grouped_resolution_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['records' => 'resolutions', 'group_by' => 'status']);
+    assert_same($grouped_resolution_audit['filters']['group_by'], 'status', 'merge audit JSON report includes resolution grouping filter');
+    assert_same(count($grouped_resolution_audit['resolution_groups']), 2, 'resolution audit groups records by status');
+    $group_counts = [];
+    foreach ($grouped_resolution_audit['resolution_groups'] as $group) {
+        $group_counts[$group['group_key']] = (int)$group['resolution_count'];
+    }
+    assert_same($group_counts['applied'] ?? 0, 1, 'resolution grouping counts applied records');
+    assert_same($group_counts['validated'] ?? 0, 1, 'resolution grouping counts validated records');
+    ob_start();
+    cow_merge_print_audit_text($grouped_resolution_audit);
+    $resolution_group_text = ob_get_clean();
+    assert_true(str_contains($resolution_group_text, 'group-by=status') && str_contains($resolution_group_text, 'resolution-groups:'), 'resolution grouping is visible in text audit output');
 
     $row_conflict_base = $tmp . '/row-conflict-base.sqlite';
     $row_conflict_source = $tmp . '/row-conflict-source.sqlite';

@@ -19,7 +19,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "    [--scope all|db|files] [--records all|conflicts|decisions|resolutions] [--path <path>] [--path-prefix <prefix>]\n");
     fwrite(STDERR, "    [--scope all|db|files] [--records all|conflicts|decisions|resolutions] [--conflict-type TYPE] [--decision DECISION]\n");
     fwrite(STDERR, "    [--id-band-skips] [--review] [--review-status pending|needs-action|reviewed]\n");
-    fwrite(STDERR, "    [--resolution-status validated|applied]\n");
+    fwrite(STDERR, "    [--resolution-status validated|applied] [--group-by none|table|status|path]\n");
     fwrite(STDERR, "  php merge.php review-record --metadata-db <path> --record conflict|decision --id ID --status pending|needs-action|reviewed --note TEXT [--reviewer NAME]\n");
     fwrite(STDERR, "  php merge.php resolve-conflict --metadata-db <path> --id ID --choice source|target [--apply] [--note TEXT] [--reviewer NAME]\n");
 }
@@ -2857,6 +2857,14 @@ function cow_merge_audit_resolution_status_filter(?string $value): ?string {
     return $value;
 }
 
+function cow_merge_audit_group_by(?string $value): string {
+    $group_by = $value ?? 'none';
+    if (!in_array($group_by, ['none', 'table', 'status', 'path'], true)) {
+        throw new InvalidArgumentException('--group-by must be none, table, status, or path');
+    }
+    return $group_by;
+}
+
 function cow_merge_audit_file_path_filter(?string $value, string $name): ?string {
     if ($value === null || $value === '') {
         return null;
@@ -3695,6 +3703,7 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
     $id_band_skips = (string)($filters['id_band_skips'] ?? '') === '1';
     $review = (string)($filters['review'] ?? '') === '1';
     $resolution_status = ($filters['resolution_status'] ?? null) !== null && (string)$filters['resolution_status'] !== '';
+    $group_by = (string)($filters['group_by'] ?? 'none');
     if ($id_band_skips && $review) {
         throw new InvalidArgumentException('--id-band-skips cannot be combined with --review');
     }
@@ -3726,6 +3735,28 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
         }
         if (($filters['review_status'] ?? null) !== null) {
             throw new InvalidArgumentException('--resolution-status cannot be combined with --review-status');
+        }
+    }
+    if ($group_by !== '' && $group_by !== 'none') {
+        if (($filters['records'] ?? null) === null) {
+            $filters['records'] = 'resolutions';
+        } elseif (($filters['records'] ?? null) !== 'resolutions') {
+            throw new InvalidArgumentException('--group-by can only be combined with --records resolutions');
+        }
+        if (($filters['decision'] ?? null) !== null) {
+            throw new InvalidArgumentException('--group-by cannot be combined with --decision');
+        }
+        if (($filters['conflict_type'] ?? null) !== null) {
+            throw new InvalidArgumentException('--group-by cannot be combined with --conflict-type');
+        }
+        if ($id_band_skips) {
+            throw new InvalidArgumentException('--group-by cannot be combined with --id-band-skips');
+        }
+        if ($review) {
+            throw new InvalidArgumentException('--group-by cannot be combined with --review');
+        }
+        if (($filters['review_status'] ?? null) !== null) {
+            throw new InvalidArgumentException('--group-by cannot be combined with --review-status');
         }
     }
     if (!$id_band_skips) {
@@ -3777,6 +3808,7 @@ function cow_merge_audit_filters(array $filters = []): array {
         'review' => (string)($filters['review'] ?? '') === '1',
         'review_status' => cow_merge_audit_review_status_filter($filters['review_status'] ?? null),
         'resolution_status' => cow_merge_audit_resolution_status_filter($filters['resolution_status'] ?? null),
+        'group_by' => cow_merge_audit_group_by($filters['group_by'] ?? null),
     ];
 }
 
@@ -3803,6 +3835,15 @@ function cow_merge_audit_file_path_has_prefix(?string $identity_json, ?string $p
     return ($path === $path_prefix || str_starts_with($path, rtrim($path_prefix, '/') . '/')) ? 1 : 0;
 }
 
+function cow_merge_audit_file_path_group(?string $identity_json): ?string {
+    $path = cow_merge_file_path_from_identity($identity_json);
+    if ($path === null || $path === '') {
+        return null;
+    }
+    $first = explode('/', $path, 2)[0];
+    return $first === '' ? null : $first;
+}
+
 function cow_merge_audit_register_functions(SQLite3 $db): void {
     if (!$db->createFunction(
         'forkpress_file_path_has_prefix',
@@ -3813,6 +3854,13 @@ function cow_merge_audit_register_functions(SQLite3 $db): void {
         2
     )) {
         throw new RuntimeException('failed to register audit path-prefix filter');
+    }
+    if (!$db->createFunction(
+        'forkpress_file_path_group',
+        fn($identity_json) => cow_merge_audit_file_path_group(is_string($identity_json) ? $identity_json : null),
+        1
+    )) {
+        throw new RuntimeException('failed to register audit path group function');
     }
 }
 
@@ -3918,6 +3966,19 @@ function cow_merge_audit_resolution_where_sql(
     }
 
     return [$clauses ? 'WHERE ' . implode(' AND ', $clauses) : '', $params];
+}
+
+function cow_merge_audit_resolution_group_sql(string $group_by): string {
+    if ($group_by === 'table') {
+        return 'mr.table_name';
+    }
+    if ($group_by === 'status') {
+        return 'mr.status';
+    }
+    if ($group_by === 'path') {
+        return "CASE WHEN mr.table_name = '__files__' THEN COALESCE(forkpress_file_path_group(mr.row_identity), '(unknown)') ELSE mr.table_name END";
+    }
+    throw new InvalidArgumentException('unsupported resolution group');
 }
 
 function cow_merge_audit_count_sql(array $filters, string $record_type, string $alias, bool $review_notes_exist = true): string {
@@ -4118,6 +4179,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
         'conflicts' => [],
         'decisions' => [],
         'resolutions' => [],
+        'resolution_groups' => [],
         'autoincrement_bands' => [],
         'row_identity_summary' => [],
         'rollback_failures' => [],
@@ -4207,6 +4269,21 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
                 "FROM merge_resolutions mr JOIN merge_conflicts c ON c.id = mr.conflict_id $resolution_filter ORDER BY mr.id DESC LIMIT :limit",
                 $resolution_params
             ));
+            if ($filters['group_by'] !== 'none') {
+                $group_expr = cow_merge_audit_resolution_group_sql($filters['group_by']);
+                $report['resolution_groups'] = cow_merge_audit_table_rows(
+                    $db,
+                    'merge_resolutions',
+                    "SELECT :group_by AS group_by, $group_expr AS group_key, COUNT(*) AS resolution_count, " .
+                    "SUM(CASE WHEN mr.status = 'applied' THEN 1 ELSE 0 END) AS applied_count, " .
+                    "SUM(CASE WHEN mr.status = 'validated' THEN 1 ELSE 0 END) AS validated_count, " .
+                    "SUM(CASE WHEN mr.choice = 'source' THEN 1 ELSE 0 END) AS source_choice_count, " .
+                    "SUM(CASE WHEN mr.choice = 'target' THEN 1 ELSE 0 END) AS target_choice_count " .
+                    "FROM merge_resolutions mr JOIN merge_conflicts c ON c.id = mr.conflict_id $resolution_filter " .
+                    "GROUP BY group_key ORDER BY resolution_count DESC, group_key LIMIT :limit",
+                    $resolution_params + [':group_by' => $filters['group_by']]
+                );
+            }
         }
 
         $filter_params = [':limit' => $limit];
@@ -4266,12 +4343,15 @@ function cow_merge_audit_object_label(array $row): string {
 
 function cow_merge_audit_filter_label(array $filters): string {
     $parts = [];
-    foreach (['scope', 'records', 'conflict_type', 'decision', 'path', 'path_prefix', 'review_status', 'resolution_status'] as $key) {
+    foreach (['scope', 'records', 'conflict_type', 'decision', 'path', 'path_prefix', 'review_status', 'resolution_status', 'group_by'] as $key) {
         $value = $filters[$key] ?? null;
         if ($value === null || $value === '') {
             continue;
         }
         if (($key === 'scope' && $value === 'all') || ($key === 'records' && $value === 'all')) {
+            continue;
+        }
+        if ($key === 'group_by' && $value === 'none') {
             continue;
         }
         $parts[] = str_replace('_', '-', $key) . '=' . $value;
@@ -4351,6 +4431,13 @@ function cow_merge_print_audit_text(array $report): void {
             echo "     note=" . cow_merge_audit_truncate((string)$resolution['note'], 240) . "\n";
             echo "     previous={$resolution['target_preview']}\n";
             echo "     resolved={$resolution['chosen_preview']}\n";
+        }
+    }
+
+    if ($report['resolution_groups']) {
+        echo "resolution-groups:\n";
+        foreach ($report['resolution_groups'] as $group) {
+            echo "  {$group['group_by']}={$group['group_key']} resolutions={$group['resolution_count']} applied={$group['applied_count']} validated={$group['validated_count']} source={$group['source_choice_count']} target={$group['target_choice_count']}\n";
         }
     }
 
@@ -5195,6 +5282,7 @@ if (realpath($argv[0] ?? '') === __FILE__) {
                     'review' => $args['review'] ?? null,
                     'review_status' => $args['review-status'] ?? null,
                     'resolution_status' => $args['resolution-status'] ?? null,
+                    'group_by' => $args['group-by'] ?? null,
                 ]
             );
             if ($format === 'json') {

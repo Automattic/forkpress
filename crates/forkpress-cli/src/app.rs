@@ -2875,6 +2875,7 @@ fn cow_branch_command(
             let mut review = false;
             let mut review_status: Option<String> = None;
             let mut resolution_status: Option<String> = None;
+            let mut group_by = "none".to_string();
             let mut index = 1;
             while index < args.args.len() {
                 match args.args[index].as_str() {
@@ -2908,7 +2909,7 @@ fn cow_branch_command(
                     }
                     "--records" => {
                         let Some(value) = args.args.get(index + 1) else {
-                            bail!("--records requires all, conflicts, or decisions");
+                            bail!("--records requires all, conflicts, decisions, or resolutions");
                         };
                         records = value.clone();
                         index += 2;
@@ -2963,6 +2964,13 @@ fn cow_branch_command(
                         resolution_status = Some(value.clone());
                         index += 2;
                     }
+                    "--group-by" => {
+                        let Some(value) = args.args.get(index + 1) else {
+                            bail!("--group-by requires none, table, status, or path");
+                        };
+                        group_by = value.clone();
+                        index += 2;
+                    }
                     other => {
                         bail!("unsupported argument for `forkpress branch merge-audit`: {other}")
                     }
@@ -2985,6 +2993,7 @@ fn cow_branch_command(
                 review,
                 review_status.as_deref(),
                 resolution_status.as_deref(),
+                &group_by,
             )?;
             Ok(0)
         }
@@ -4143,6 +4152,8 @@ mod git_helper_tests {
             "resolutions",
             "--resolution-status",
             "applied",
+            "--group-by",
+            "status",
         ])
         .unwrap();
         let Commands::Branch(args) = cli.command else {
@@ -4156,6 +4167,8 @@ mod git_helper_tests {
                 "resolutions".to_string(),
                 "--resolution-status".to_string(),
                 "applied".to_string(),
+                "--group-by".to_string(),
+                "status".to_string(),
             ]
         );
     }

@@ -868,6 +868,7 @@ pub fn inspect_cow_merge_audit(
     review: bool,
     review_status: Option<&str>,
     resolution_status: Option<&str>,
+    group_by: &str,
 ) -> Result<()> {
     let metadata_db = cow_merge_metadata_db_path(layout);
     let mut args: Vec<OsString> = vec![
@@ -916,6 +917,10 @@ pub fn inspect_cow_merge_audit(
     if let Some(resolution_status) = resolution_status {
         args.push("--resolution-status".into());
         args.push(resolution_status.into());
+    }
+    if group_by != "none" {
+        args.push("--group-by".into());
+        args.push(group_by.into());
     }
     run_php_script(
         layout,
