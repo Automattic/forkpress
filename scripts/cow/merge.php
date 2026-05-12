@@ -3771,6 +3771,39 @@ function cow_merge_resolve_schema_conflict(
                     }
                 };
             }
+        } elseif ($conflict_type === 'schema-target-dropped-table' && $object === '') {
+            if (!is_string($source_payload)) {
+                throw new RuntimeException("schema conflict #$conflict_id does not contain a source table payload");
+            }
+            if ($target_payload !== null) {
+                throw new RuntimeException("schema conflict #$conflict_id has an unexpected target table payload");
+            }
+            $current_source_sql = cow_merge_table_sql($source, $table);
+            if (!cow_merge_values_equal($current_source_sql, $source_payload)) {
+                throw new RuntimeException('source table schema no longer matches the audited conflict source value; rerun merge before resolving');
+            }
+            $current_target_sql = cow_merge_table_sql($target, $table);
+            $previous = $current_target_sql;
+            if ($current_target_sql !== null) {
+                throw new RuntimeException('target table no longer matches the audited dropped-table target value; rerun merge-audit before resolving');
+            }
+            if ($choice === 'source') {
+                $source_branch = (string)$conflict['source_branch'];
+                $target_branch = (string)$conflict['target_branch'];
+                $resolved = $source_payload;
+                $apply_source = function () use ($source, $target, $meta, $conflict, $source_branch, $target_branch, $table, $source_payload): void {
+                    cow_merge_restore_source_table(
+                        $source,
+                        $target,
+                        $meta,
+                        (int)$conflict['run_id'],
+                        $source_branch,
+                        $target_branch,
+                        $table,
+                        $source_payload
+                    );
+                };
+            }
         } elseif ($conflict_type === 'schema-source-dropped-table' && $object === '') {
             if ($source_payload !== null) {
                 throw new RuntimeException("schema conflict #$conflict_id has an unexpected source table payload");
@@ -3807,7 +3840,7 @@ function cow_merge_resolve_schema_conflict(
         } else {
             if ($choice === 'source') {
                 if ($conflict_type !== 'schema-conflict' || $object !== '') {
-                    throw new InvalidArgumentException('source schema resolution currently supports source-added columns/indexes/views/triggers, index/view/trigger rewrites or drops, source table drops without dependent target views, and compatible table rebuilds only');
+                    throw new InvalidArgumentException('source schema resolution currently supports source-added columns/indexes/views/triggers, index/view/trigger rewrites or drops, source/target table drops with validation, and compatible table rebuilds only');
                 }
                 if (!is_string($source_payload)) {
                     throw new RuntimeException("schema conflict #$conflict_id does not contain a source table SQL payload");
@@ -3913,7 +3946,7 @@ function cow_merge_resolve_conflict(
         cow_merge_ensure_metadata($meta);
         $stmt = $meta->prepare(
             'SELECT c.id, c.run_id, c.table_name, c.row_identity, c.column_name, c.conflict_type, ' .
-            'c.source_payload, c.target_payload, r.source_db, r.target_db, r.target_branch ' .
+            'c.source_payload, c.target_payload, r.source_db, r.target_db, r.source_branch, r.target_branch ' .
             'FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.id = :id'
         );
         if (!$stmt) {
@@ -5130,6 +5163,38 @@ function cow_merge_apply_source_table(
         $applied++;
     }
     return $applied;
+}
+
+function cow_merge_restore_source_table(
+    SQLite3 $source,
+    SQLite3 $target,
+    SQLite3 $meta,
+    int $run_id,
+    string $source_branch,
+    string $target_branch,
+    string $table,
+    string $ddl
+): int {
+    if (cow_merge_table_sql($target, $table) !== null) {
+        throw new RuntimeException("target table already exists during source table restore: $table");
+    }
+    if (!$target->exec($ddl)) {
+        throw new RuntimeException("failed to restore target table $table: " . $target->lastErrorMsg());
+    }
+    $columns = cow_merge_table_columns($source, $table);
+    $pk_cols = cow_merge_pk_cols($source, $table);
+    $rows = $pk_cols
+        ? cow_merge_load_rows($source, $table, $pk_cols)
+        : cow_merge_keyless_rows_for_branch($source, $meta, $run_id, $source_branch, $table, []);
+    $restored = 0;
+    foreach ($rows as $entry) {
+        $new_rowid = cow_merge_insert_row($target, $table, $entry['row'], $columns);
+        if (!$pk_cols) {
+            cow_merge_remember_row_identity($meta, $run_id, $target_branch, $table, $new_rowid, $entry['identity'], $entry['row']);
+        }
+        $restored++;
+    }
+    return $restored;
 }
 
 function cow_merge_record_schema_conflict(

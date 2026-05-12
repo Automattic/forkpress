@@ -1431,6 +1431,50 @@ SQL);
     assert_same($result['status'], 'completed', 'matching source and target table drops do not create conflicts');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_table_both_drop'"), 0, 'matching table drops do not create audit noise');
 
+    $schema_table_target_drop_base = $tmp . '/schema-table-target-drop-base.sqlite';
+    $schema_table_target_drop_source = $tmp . '/schema-table-target-drop-source.sqlite';
+    $schema_table_target_drop_target = $tmp . '/schema-table-target-drop-target.sqlite';
+    create_base_db($schema_table_target_drop_base);
+    $db = open_db($schema_table_target_drop_base);
+    $db->exec('CREATE TABLE plugin_table_target_drop (item_id TEXT PRIMARY KEY, label TEXT)');
+    $db->exec("INSERT INTO plugin_table_target_drop (item_id, label) VALUES ('alpha', 'Alpha')");
+    $db->close();
+    copy($schema_table_target_drop_base, $schema_table_target_drop_source);
+    copy($schema_table_target_drop_base, $schema_table_target_drop_target);
+    $db = open_db($schema_table_target_drop_source);
+    $db->exec("INSERT INTO plugin_table_target_drop (item_id, label) VALUES ('beta', 'Beta')");
+    $db->close();
+    $db = open_db($schema_table_target_drop_target);
+    $db->exec('DROP TABLE plugin_table_target_drop');
+    $db->close();
+
+    $result = cow_merge_databases($schema_table_target_drop_base, $schema_table_target_drop_source, $schema_table_target_drop_target, $metadata, 'feature-table-target-drop', 'main');
+    assert_same($result['status'], 'completed_with_conflicts', 'target-dropped table is recorded as a schema conflict');
+    assert_same((int)scalar($schema_table_target_drop_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_table_target_drop'"), 0, 'target table drop wins by default when source keeps a table');
+    $schema_table_target_drop_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_table_target_drop' AND column_name IS NULL AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
+    assert_true($schema_table_target_drop_conflict_id > 0, 'target-dropped table conflict is auditable');
+    $schema_table_target_drop_dry = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_table_target_drop_conflict_id,
+        'source',
+        false,
+        'Preview source table restore.',
+        'test'
+    );
+    assert_same($schema_table_target_drop_dry['status'], 'validated', 'dry-run source table restore validates current schemas');
+    assert_same((int)scalar($schema_table_target_drop_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_table_target_drop'"), 0, 'dry-run source table restore does not mutate target schema');
+    $schema_table_target_drop_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_table_target_drop_conflict_id,
+        'source',
+        true,
+        'Apply source table restore.',
+        'test'
+    );
+    assert_same($schema_table_target_drop_resolution['status'], 'applied', 'source table restore schema resolution records applied status');
+    assert_same((int)scalar($schema_table_target_drop_target, "SELECT COUNT(*) FROM plugin_table_target_drop"), 2, 'source table restore copies audited source rows into the target table');
+    assert_same(scalar($schema_table_target_drop_target, "SELECT label FROM plugin_table_target_drop WHERE item_id = 'beta'"), 'Beta', 'source table restore includes source-only rows');
+
     $schema_table_drop_view_base = $tmp . '/schema-table-drop-view-base.sqlite';
     $schema_table_drop_view_source = $tmp . '/schema-table-drop-view-source.sqlite';
     $schema_table_drop_view_target = $tmp . '/schema-table-drop-view-target.sqlite';

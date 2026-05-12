@@ -485,9 +485,12 @@ tooling.
   Schema source choices can apply safe source-added columns, indexes, views,
   and triggers; source index/view/trigger rewrites or drops; source table drops
   that do not leave dependent target views invalid or implicitly remove target
-  indexes/triggers; and compatible table rebuilds that preserve target rows and
+  indexes/triggers; source table restores when target dropped a table that
+  source kept; and compatible table rebuilds that preserve target rows and
   target indexes/triggers while changing audited non-primary-key column
-  definitions. Compatible rebuilds also preserve
+  definitions. Source table restores recreate the audited source table and copy
+  source rows after validating that the target table is still absent.
+  Compatible rebuilds also preserve
   dependent target views when those views validate before and after the rebuild.
   Source view rewrites preserve transitive dependent target views and their
   triggers when they validate before and after the rewrite; source view drops
