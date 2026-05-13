@@ -491,6 +491,8 @@ tooling.
   while real schema objects referenced inside those CTEs remain dependencies.
   Trigger references to temporary or attached SQLite schemas are kept
   validation-gated instead of being matched to same-named persistent tables.
+  Quoted schema-qualified references are tracked, while schema-looking text
+  inside SQL literals or comments is ignored by dependency preflight.
   When a source row still violates target constraints, target
   is kept by default and the choice is recorded as
   an auditable `row-target-constraint`. Source deletes that would orphan

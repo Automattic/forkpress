@@ -4086,6 +4086,47 @@ SQL);
         'source-added trigger validation rejects temporary-schema dependencies explicitly'
     );
 
+    $trigger_quoted_target = $tmp . '/trigger-quoted-reference-target.sqlite';
+    create_base_db($trigger_quoted_target);
+    $db = open_db($trigger_quoted_target);
+    $db->exec('CREATE TABLE "plugin trigger quoted gate" (enabled INTEGER)');
+    $db->exec('CREATE TABLE "plugin trigger quoted audit" (item_label TEXT)');
+    $db->close();
+    $db = open_db($trigger_quoted_target);
+    $trigger_quoted_main_missing = cow_merge_missing_trigger_references(
+        $db,
+        'CREATE TRIGGER "plugin trigger quoted items audit" AFTER INSERT ON "plugin trigger quoted items" BEGIN ' .
+        'INSERT INTO "main"."plugin trigger quoted audit" (item_label) ' .
+        'SELECT NEW.label FROM "main"."plugin trigger quoted gate" WHERE enabled = 1; END'
+    );
+    $trigger_quoted_aux_missing = cow_merge_missing_trigger_references(
+        $db,
+        'CREATE TRIGGER "plugin trigger quoted items audit" AFTER INSERT ON "plugin trigger quoted items" BEGIN ' .
+        'INSERT INTO "main"."plugin trigger quoted audit" (item_label) ' .
+        'SELECT NEW.label FROM "aux"."plugin trigger quoted gate" WHERE enabled = 1; END'
+    );
+    $trigger_literal_missing = cow_merge_missing_trigger_references(
+        $db,
+        'CREATE TRIGGER plugin_trigger_literal_items_audit AFTER INSERT ON plugin_trigger_literal_items BEGIN ' .
+        'INSERT INTO "plugin trigger quoted audit" (item_label) VALUES (\'FROM plugin_trigger_literal_missing JOIN temp.plugin_trigger_literal_temp\'); ' .
+        '-- FROM plugin_trigger_comment_missing' . "\n" .
+        'SELECT "JOIN plugin_trigger_double_quoted_literal"; END'
+    );
+    $db->close();
+    assert_same($trigger_quoted_main_missing, [], 'quoted main-schema trigger references match persistent target schema objects');
+    assert_same($trigger_quoted_aux_missing, ['aux.plugin trigger quoted gate'], 'quoted attached-schema trigger references remain validation-gated');
+    assert_same($trigger_literal_missing, [], 'trigger dependency parsing ignores schema-looking text inside literals and comments');
+
+    $view_literal_refs = cow_merge_sql_referenced_schema_objects(
+        'CREATE VIEW "plugin view quoted child" AS ' .
+        'SELECT \'FROM plugin_view_literal_missing\' AS literal_text, label FROM "main"."plugin view quoted source"'
+    );
+    assert_same(
+        $view_literal_refs,
+        [['schema' => 'main', 'name' => 'plugin view quoted source']],
+        'view dependency parsing keeps quoted schema references while ignoring literal text'
+    );
+
     $source_added_trigger_cte_base = $tmp . '/source-added-trigger-cte-base.sqlite';
     $source_added_trigger_cte_source = $tmp . '/source-added-trigger-cte-source.sqlite';
     $source_added_trigger_cte_target = $tmp . '/source-added-trigger-cte-target.sqlite';

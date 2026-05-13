@@ -5175,6 +5175,76 @@ function cow_merge_sql_reference_name(array $match, string $prefix = ''): ?strin
     return null;
 }
 
+function cow_merge_regex_flat_match(array $match): array {
+    $flat = [];
+    foreach ($match as $key => $value) {
+        if (is_array($value)) {
+            $flat[$key] = (string)($value[0] ?? '');
+        } else {
+            $flat[$key] = $value;
+        }
+    }
+    return $flat;
+}
+
+function cow_merge_sql_ignored_ranges(string $sql): array {
+    $ranges = [];
+    $length = strlen($sql);
+    for ($i = 0; $i < $length; $i++) {
+        $char = $sql[$i];
+        $next = $sql[$i + 1] ?? '';
+        if ($char === '-' && $next === '-') {
+            $start = $i;
+            $i += 2;
+            while ($i < $length && $sql[$i] !== "\n") {
+                $i++;
+            }
+            $ranges[] = [$start, $i];
+            continue;
+        }
+        if ($char === '/' && $next === '*') {
+            $start = $i;
+            $i += 2;
+            while ($i < $length - 1 && !($sql[$i] === '*' && $sql[$i + 1] === '/')) {
+                $i++;
+            }
+            $ranges[] = [$start, min($length, $i + 2)];
+            $i++;
+            continue;
+        }
+        if ($char !== '\'' && $char !== '"' && $char !== '`' && $char !== '[') {
+            continue;
+        }
+        $start = $i;
+        $quote = $char === '[' ? ']' : $char;
+        $i++;
+        while ($i < $length) {
+            if ($sql[$i] === $quote) {
+                $after = $sql[$i + 1] ?? '';
+                if (($quote === '\'' || $quote === '"') && $after === $quote) {
+                    $i += 2;
+                    continue;
+                }
+                $i++;
+                break;
+            }
+            $i++;
+        }
+        $ranges[] = [$start, $i];
+        $i--;
+    }
+    return $ranges;
+}
+
+function cow_merge_sql_offset_in_ranges(int $offset, array $ranges): bool {
+    foreach ($ranges as $range) {
+        if ($offset >= $range[0] && $offset < $range[1]) {
+            return true;
+        }
+    }
+    return false;
+}
+
 function cow_merge_sql_split_statements(string $sql): array {
     $statements = [];
     $start = 0;
@@ -5261,22 +5331,20 @@ function cow_merge_sql_skip_parenthesized(string $sql, int $open_pos): ?int {
 function cow_merge_sql_cte_names(string $sql): array {
     $identifier = cow_merge_identifier_pattern();
     $names = [];
+    $ignored_ranges = cow_merge_sql_ignored_ranges($sql);
     if (!preg_match_all('/\bWITH\s+(?:RECURSIVE\s+)?/i', $sql, $with_matches, PREG_OFFSET_CAPTURE)) {
         return [];
     }
     foreach ($with_matches[0] as $with_match) {
+        if (cow_merge_sql_offset_in_ranges((int)$with_match[1], $ignored_ranges)) {
+            continue;
+        }
         $offset = (int)$with_match[1] + strlen((string)$with_match[0]);
         while (true) {
             if (!preg_match('/\G\s*' . $identifier . '(?:\s*\([^)]*\))?\s+AS\s+(?:NOT\s+MATERIALIZED\s+|MATERIALIZED\s+)?\(/i', $sql, $cte_match, PREG_OFFSET_CAPTURE, $offset)) {
                 break;
             }
-            $flat_match = [];
-            foreach ($cte_match as $key => $value) {
-                if (is_string($key) && is_array($value)) {
-                    $flat_match[$key] = (string)$value[0];
-                }
-            }
-            $name = cow_merge_sql_reference_name($flat_match);
+            $name = cow_merge_sql_reference_name(cow_merge_regex_flat_match($cte_match));
             if ($name !== null) {
                 $names[$name] = true;
             }
@@ -5305,14 +5373,19 @@ function cow_merge_sql_referenced_schema_objects(string $sql): array {
     $refs = [];
     foreach (cow_merge_sql_split_statements($sql) as $statement) {
         $cte_names = array_fill_keys(cow_merge_sql_cte_names($statement), true);
+        $ignored_ranges = cow_merge_sql_ignored_ranges($statement);
         foreach ($patterns as $pattern) {
-            if (!preg_match_all($pattern, $statement, $matches, PREG_SET_ORDER)) {
+            if (!preg_match_all($pattern, $statement, $matches, PREG_SET_ORDER | PREG_OFFSET_CAPTURE)) {
                 continue;
             }
             foreach ($matches as $match) {
-                $name = cow_merge_sql_reference_name($match, 'object_');
+                if (cow_merge_sql_offset_in_ranges((int)$match[0][1], $ignored_ranges)) {
+                    continue;
+                }
+                $flat_match = cow_merge_regex_flat_match($match);
+                $name = cow_merge_sql_reference_name($flat_match, 'object_');
                 if ($name !== null && !isset($cte_names[$name])) {
-                    $schema = cow_merge_sql_reference_name($match, 'schema_');
+                    $schema = cow_merge_sql_reference_name($flat_match, 'schema_');
                     $key = ($schema ?? '') . '.' . $name;
                     $refs[$key] = ['schema' => $schema, 'name' => $name];
                 }

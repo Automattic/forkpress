@@ -22,6 +22,7 @@
 - Extended source-added trigger dependency preflight to clear trigger body read references so triggers that read missing target-side schema objects stay validation-gated.
 - Ignored statement-local CTE aliases during source-added trigger dependency preflight while still tracking real schema objects referenced inside the CTE.
 - Treated source-added trigger references to temporary or attached SQLite schemas as validation-gated dependencies instead of matching same-named persistent tables.
+- Tightened source-added view/trigger dependency parsing so quoted schema-qualified references are tracked while schema-looking text inside SQL literals or comments is ignored.
 - Recorded source-added triggers that reference missing target-side schema objects as auditable `schema-source-added-trigger` conflicts instead of installing latent invalid triggers.
 - Added generic foreign-key preflight for COW source row deletes so target-side child rows keep their parent by default with auditable `row-target-constraint` metadata until a reviewed source delete validates.
 - Applied clean source deletes across unchanged target-side foreign-key child graphs before deleting the parent, avoiding false `row-target-constraint` conflicts when source deletes the dependent rows too.
