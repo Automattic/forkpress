@@ -6099,6 +6099,36 @@ function cow_merge_table_rows(
                     $target_row
                 );
                 $applied++;
+            } elseif ($pk_cols && $base_row !== null && $source_row === null && $target_row === null) {
+                cow_merge_record_decision(
+                    $meta,
+                    $run_id,
+                    $table,
+                    $key,
+                    null,
+                    'source-applied',
+                    'source and target deleted row with the same identity',
+                    $base_row,
+                    null,
+                    null,
+                    null
+                );
+                $applied++;
+            } elseif ($pk_cols && $base_row !== null && $source_row !== null && $target_row !== null) {
+                cow_merge_record_decision(
+                    $meta,
+                    $run_id,
+                    $table,
+                    $key,
+                    null,
+                    'source-applied',
+                    'source and target changed row to the same payload',
+                    $base_row,
+                    $source_row,
+                    $target_row,
+                    $target_row
+                );
+                $applied++;
             }
             continue;
         }

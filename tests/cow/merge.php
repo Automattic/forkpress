@@ -552,6 +552,40 @@ try {
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_items' AND decision = 'source-applied' AND reason = 'source inserted row already exists in target with the same identity and payload'"), 1, 'identical same-PK insert collapse is auditable');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_items' AND row_identity LIKE '%same-insert%'"), 0, 'identical same-PK insert does not create a false row conflict');
 
+    $row_same_update_base = $tmp . '/row-same-update-base.sqlite';
+    $row_same_update_source = $tmp . '/row-same-update-source.sqlite';
+    $row_same_update_target = $tmp . '/row-same-update-target.sqlite';
+    create_base_db($row_same_update_base);
+    copy($row_same_update_base, $row_same_update_source);
+    copy($row_same_update_base, $row_same_update_target);
+    foreach ([$row_same_update_source, $row_same_update_target] as $path) {
+        $db = open_db($path);
+        $db->exec("UPDATE plugin_items SET label = 'Same updated label', value = 'same updated row' WHERE item_id = 'alpha'");
+        $db->close();
+    }
+    $row_same_update_result = cow_merge_databases($row_same_update_base, $row_same_update_source, $row_same_update_target, $metadata, 'feature-row-same-update', 'main');
+    assert_same($row_same_update_result['status'], 'completed', 'identical same-PK source and target updates merge without a review conflict');
+    assert_same(scalar($row_same_update_target, "SELECT value FROM plugin_items WHERE item_id = 'alpha'"), 'same updated row', 'identical same-PK update leaves the shared payload in target');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_items' AND decision = 'source-applied' AND reason = 'source and target changed row to the same payload'"), 1, 'identical same-PK update is auditable');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_items' AND r.source_branch = 'feature-row-same-update'"), 0, 'identical same-PK update does not create a false row conflict');
+
+    $row_same_delete_base = $tmp . '/row-same-delete-base.sqlite';
+    $row_same_delete_source = $tmp . '/row-same-delete-source.sqlite';
+    $row_same_delete_target = $tmp . '/row-same-delete-target.sqlite';
+    create_base_db($row_same_delete_base);
+    copy($row_same_delete_base, $row_same_delete_source);
+    copy($row_same_delete_base, $row_same_delete_target);
+    foreach ([$row_same_delete_source, $row_same_delete_target] as $path) {
+        $db = open_db($path);
+        $db->exec("DELETE FROM plugin_items WHERE item_id = 'alpha'");
+        $db->close();
+    }
+    $row_same_delete_result = cow_merge_databases($row_same_delete_base, $row_same_delete_source, $row_same_delete_target, $metadata, 'feature-row-same-delete', 'main');
+    assert_same($row_same_delete_result['status'], 'completed', 'identical same-PK source and target deletes merge without a review conflict');
+    assert_same((int)scalar($row_same_delete_target, "SELECT COUNT(*) FROM plugin_items WHERE item_id = 'alpha'"), 0, 'identical same-PK delete keeps the row deleted');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_items' AND decision = 'source-applied' AND reason = 'source and target deleted row with the same identity'"), 1, 'identical same-PK delete is auditable');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_items' AND r.source_branch = 'feature-row-same-delete'"), 0, 'identical same-PK delete does not create a false row conflict');
+
     $row_target_deleted_base = $tmp . '/row-target-deleted-base.sqlite';
     $row_target_deleted_source = $tmp . '/row-target-deleted-source.sqlite';
     $row_target_deleted_target = $tmp . '/row-target-deleted-target.sqlite';
