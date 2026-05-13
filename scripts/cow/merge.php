@@ -5859,13 +5859,26 @@ function cow_merge_validate_source_table_rebuild(SQLite3 $target, string $table,
 
 function cow_merge_apply_source_view_schema_resolution(SQLite3 $target, string $view, ?string $source_sql): void {
     $dependent_views = cow_merge_table_dependent_views($target, $view, $view);
+    $view_dependencies = cow_merge_table_rebuild_dependencies($target, $view);
+    $dependent_view_triggers = cow_merge_view_trigger_dependencies($target, $dependent_views);
     $dependencies = array_merge(
-        cow_merge_table_rebuild_dependencies($target, $view),
-        cow_merge_view_trigger_dependencies($target, $dependent_views)
+        $view_dependencies,
+        $dependent_view_triggers
     );
+    $dependent_trigger_names = array_map(
+        fn(array $dependency): string => (string)$dependency['name'],
+        array_filter($dependencies, fn(array $dependency): bool => (string)($dependency['type'] ?? '') === 'trigger')
+    );
+    $dependent_trigger_bodies = $source_sql === null
+        ? cow_merge_table_dependent_triggers($target, $view, $dependent_trigger_names)
+        : [];
     if ($source_sql === null && $dependent_views) {
         $names = implode(', ', array_map(fn($dependency) => (string)$dependency['name'], $dependent_views));
         throw new InvalidArgumentException("source view drop resolution cannot leave dependent target views invalid: $names");
+    }
+    if ($source_sql === null && $dependent_trigger_bodies) {
+        $names = implode(', ', array_map(fn($trigger) => (string)$trigger['name'], $dependent_trigger_bodies));
+        throw new InvalidArgumentException("source view drop resolution cannot leave dependent target trigger programs invalid: $names");
     }
     if ($source_sql === null && $dependencies) {
         $names = implode(', ', array_map(fn($dependency) => (string)$dependency['type'] . ' ' . (string)$dependency['name'], $dependencies));

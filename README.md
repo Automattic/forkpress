@@ -505,7 +505,9 @@ tooling.
   Validation-gated source table drops refuse to leave dependent target
   foreign-key child tables pointing at a missing parent table, including during
   dry-run previews, and also refuse to leave target trigger programs that
-  still reference the dropped table.
+  still reference the dropped table. Source view drops likewise refuse to
+  leave target trigger programs that still reference the dropped view, so
+  table-drop chains through dependent views stay explicitly reviewable.
   When a source row still violates target constraints, target
   is kept by default and the choice is recorded as
   an auditable `row-target-constraint`. Source deletes that would orphan
@@ -628,7 +630,7 @@ tooling.
   Source view rewrites preserve transitive dependent target views and their
   triggers when they validate before and after the rewrite; source view drops
   are blocked while dependent target views or triggers still reference the
-  dropped view.
+  dropped view, including triggers on other tables whose bodies read from it.
   With `--apply`,
   ForkPress records the deterministic resolution in merge metadata and appends
   a reviewed annotation to the conflict audit record. Reruns after a reviewed

@@ -28,6 +28,7 @@
 - Tightened validation-gated source view rewrites so preserved target view triggers must still compile before dry-run or apply reports success.
 - Tightened validation-gated source table drops so dry-run and apply refuse to leave dependent target foreign-key child tables pointing at a missing parent table.
 - Tightened validation-gated source table drops so dry-run and apply refuse to leave target trigger programs referencing the dropped table.
+- Tightened validation-gated source view drops so dry-run and apply refuse to leave target trigger programs referencing the dropped view, including table-drop dependency chains.
 - Materialized source-added table indexes before dependent source-added table rows, so foreign keys backed by source-added unique indexes do not produce false row constraint conflicts.
 - Ignored statement-local CTE aliases during source-added trigger dependency preflight while still tracking real schema objects referenced inside the CTE.
 - Treated source-added trigger references to temporary or attached SQLite schemas as validation-gated dependencies instead of matching same-named persistent tables.
