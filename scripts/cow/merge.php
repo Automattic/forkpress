@@ -5557,6 +5557,7 @@ function cow_merge_resolve_schema_conflict(
             if ($choice === 'source') {
                 $source_branch = (string)$conflict['source_branch'];
                 $target_branch = (string)$conflict['target_branch'];
+                cow_merge_validate_source_table_restore_dependencies($source, $target, $table);
                 $resolved = $restore_payload;
                 $apply_source = function () use ($source, $target, $meta, $conflict, $source_branch, $target_branch, $table, $restore_payload): void {
                     cow_merge_restore_source_table(
@@ -7114,6 +7115,52 @@ function cow_merge_apply_source_table(
     return $applied;
 }
 
+function cow_merge_validate_source_table_restore_dependencies(SQLite3 $source, SQLite3 $target, string $table): void {
+    foreach (cow_merge_foreign_key_groups($source, $table) as $group) {
+        $parent_table = (string)($group[0]['table'] ?? '');
+        if ($parent_table === '' || $parent_table === $table) {
+            continue;
+        }
+        $parent_columns = cow_merge_foreign_key_parent_columns($source, $parent_table, $group);
+        if ($parent_columns === null) {
+            throw new InvalidArgumentException("source table restore for $table cannot inspect parent key for $parent_table");
+        }
+        if (cow_merge_table_sql($target, $parent_table) === null) {
+            throw new InvalidArgumentException("source table restore for $table requires parent table $parent_table; restore or materialize that parent table before restoring the child table");
+        }
+
+        $pk_cols = cow_merge_pk_cols($source, $table);
+        foreach (cow_merge_load_rows($source, $table, $pk_cols) as $entry) {
+            $row = $entry['row'];
+            $from_columns = [];
+            $values = [];
+            $skip = false;
+            foreach ($group as $i => $part) {
+                $from = (string)($part['from'] ?? '');
+                if ($from === '' || !isset($parent_columns[$i])) {
+                    throw new InvalidArgumentException("source table restore for $table cannot inspect parent key for $parent_table");
+                }
+                if (!array_key_exists($from, $row) || $row[$from] === null) {
+                    $skip = true;
+                    break;
+                }
+                $from_columns[] = $from;
+                $values[] = $row[$from];
+            }
+            if ($skip || !$from_columns) {
+                continue;
+            }
+            if (!cow_merge_row_exists_by_values($target, $parent_table, $parent_columns, $values)) {
+                throw new InvalidArgumentException(
+                    'source table restore for ' . $table .
+                    ' requires parent row in ' . $parent_table .
+                    '(' . implode(', ', $parent_columns) . ') before restoring child rows'
+                );
+            }
+        }
+    }
+}
+
 function cow_merge_restore_source_table(
     SQLite3 $source,
     SQLite3 $target,
@@ -7127,6 +7174,7 @@ function cow_merge_restore_source_table(
     if (cow_merge_table_sql($target, $table) !== null) {
         throw new RuntimeException("target table already exists during source table restore: $table");
     }
+    cow_merge_validate_source_table_restore_dependencies($source, $target, $table);
     cow_merge_forget_table_row_identities($meta, $run_id, $target_branch, $table);
     $ddl = (string)$restore_payload['table_sql'];
     if (!$target->exec($ddl)) {

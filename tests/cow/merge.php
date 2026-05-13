@@ -3825,6 +3825,28 @@ SQL);
     assert_same($schema_cross_fk_restored_parent_result['status'], 'completed_with_conflicts', 'target-dropped cross-table FK tables record schema conflicts');
     $schema_cross_fk_restored_parent_parent_conflict_id = (int)scalar($schema_cross_fk_restored_parent_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_cross_parent_restore' AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
     $schema_cross_fk_restored_parent_child_conflict_id = (int)scalar($schema_cross_fk_restored_parent_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_cross_child_restore_parent' AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $schema_cross_fk_restored_parent_metadata,
+            $schema_cross_fk_restored_parent_child_conflict_id,
+            'source',
+            false,
+            'Preview child restore before parent table.',
+            'test'
+        ),
+        'requires parent table plugin_cross_parent_restore',
+        'source child table restore reports the missing cross-table parent dependency before mutation'
+    );
+    assert_same(
+        (int)scalar($schema_cross_fk_restored_parent_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_cross_fk_restored_parent_child_conflict_id"),
+        0,
+        'failed child-before-parent restore preview does not record a resolution'
+    );
+    assert_same(
+        (int)scalar($schema_cross_fk_restored_parent_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_cross_child_restore_parent'"),
+        0,
+        'failed child-before-parent restore preview leaves the target child table absent'
+    );
     $schema_cross_fk_restored_parent_parent_resolution = cow_merge_resolve_conflict(
         $schema_cross_fk_restored_parent_metadata,
         $schema_cross_fk_restored_parent_parent_conflict_id,
