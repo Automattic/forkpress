@@ -4098,6 +4098,74 @@ SQL);
     );
     assert_same((int)scalar($source_added_trigger_column_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_trigger_column_items_audit'"), 0, 'failed trigger column resolution rolls back the invalid trigger');
 
+    $source_added_trigger_runtime_base = $tmp . '/source-added-trigger-runtime-base.sqlite';
+    $source_added_trigger_runtime_source = $tmp . '/source-added-trigger-runtime-source.sqlite';
+    $source_added_trigger_runtime_target = $tmp . '/source-added-trigger-runtime-target.sqlite';
+    $source_added_trigger_runtime_metadata = $tmp . '/.forkpress/cow/merge/source-added-trigger-runtime-metadata.sqlite';
+    create_base_db($source_added_trigger_runtime_base);
+    $db = open_db($source_added_trigger_runtime_base);
+    $db->exec('CREATE TABLE plugin_trigger_runtime_audit (item_label TEXT)');
+    $db->close();
+    copy($source_added_trigger_runtime_base, $source_added_trigger_runtime_source);
+    copy($source_added_trigger_runtime_base, $source_added_trigger_runtime_target);
+    cow_merge_capture_row_identities($source_added_trigger_runtime_base, $source_added_trigger_runtime_metadata, 'main');
+    cow_merge_capture_row_identities($source_added_trigger_runtime_source, $source_added_trigger_runtime_metadata, 'feature-source-trigger-runtime', 'main');
+    cow_merge_capture_row_identities($source_added_trigger_runtime_target, $source_added_trigger_runtime_metadata, 'main');
+    $db = open_db($source_added_trigger_runtime_source);
+    $db->exec('CREATE TABLE plugin_trigger_runtime_items (label TEXT)');
+    $db->exec("INSERT INTO plugin_trigger_runtime_items (rowid, label) VALUES (11, 'runtime validation source item')");
+    $db->exec('CREATE TRIGGER plugin_trigger_runtime_insert_old AFTER INSERT ON plugin_trigger_runtime_items BEGIN INSERT INTO plugin_trigger_runtime_audit (item_label) VALUES (OLD.label); END');
+    $db->exec('CREATE TRIGGER plugin_trigger_runtime_delete_new AFTER DELETE ON plugin_trigger_runtime_items BEGIN INSERT INTO plugin_trigger_runtime_audit (item_label) VALUES (NEW.label); END');
+    $db->exec('CREATE TRIGGER plugin_trigger_runtime_update_missing AFTER UPDATE OF missing_label ON plugin_trigger_runtime_items BEGIN INSERT INTO plugin_trigger_runtime_audit (item_label) VALUES (NEW.label); END');
+    $db->close();
+    cow_merge_capture_row_identities($source_added_trigger_runtime_source, $source_added_trigger_runtime_metadata, 'feature-source-trigger-runtime', 'main');
+    $source_added_trigger_runtime_result = cow_merge_databases(
+        $source_added_trigger_runtime_base,
+        $source_added_trigger_runtime_source,
+        $source_added_trigger_runtime_target,
+        $source_added_trigger_runtime_metadata,
+        'feature-source-trigger-runtime',
+        'main'
+    );
+    assert_same($source_added_trigger_runtime_result['status'], 'completed_with_conflicts', 'source-added triggers with invalid runtime programs are audited');
+    assert_same((int)scalar($source_added_trigger_runtime_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_trigger_runtime_items'"), 1, 'source-added trigger runtime table still materializes');
+    assert_same((int)scalar($source_added_trigger_runtime_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'plugin_trigger_runtime_%'"), 0, 'source-added triggers with invalid runtime programs are held back');
+    $runtime_trigger_errors = [];
+    foreach ([
+        'plugin_trigger_runtime_insert_old' => 'OLD.label',
+        'plugin_trigger_runtime_delete_new' => 'NEW.label',
+        'plugin_trigger_runtime_update_missing' => 'missing_label',
+    ] as $trigger_name => $expected_error) {
+        $conflict_id = (int)scalar($source_added_trigger_runtime_metadata, "SELECT id FROM merge_conflicts WHERE column_name = '$trigger_name' AND conflict_type = 'schema-source-added-trigger' ORDER BY id DESC LIMIT 1");
+        assert_true($conflict_id > 0, "$trigger_name records a source-added trigger runtime conflict");
+        $payload = cow_merge_decode_payload_json(
+            (string)scalar($source_added_trigger_runtime_metadata, "SELECT source_payload FROM merge_conflicts WHERE id = $conflict_id"),
+            "$trigger_name runtime payload"
+        );
+        $runtime_trigger_errors[$trigger_name] = (string)($payload['error'] ?? '');
+        assert_true(
+            str_contains($runtime_trigger_errors[$trigger_name], $expected_error),
+            "$trigger_name conflict payload includes the rejected runtime reference"
+        );
+        assert_throws(
+            fn() => cow_merge_resolve_conflict(
+                $source_added_trigger_runtime_metadata,
+                $conflict_id,
+                'source',
+                true,
+                "Try invalid runtime trigger $trigger_name.",
+                'test'
+            ),
+            'failed target trigger validation',
+            "$trigger_name resolution remains gated by trigger program validation"
+        );
+    }
+    assert_same(
+        (int)scalar($source_added_trigger_runtime_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE conflict_type = 'schema-source-added-trigger' AND column_name LIKE 'plugin_trigger_runtime_%'"),
+        3,
+        'invalid OLD, invalid NEW, and invalid UPDATE OF triggers each remain separately reviewable'
+    );
+
     $trigger_cte_refs = cow_merge_trigger_referenced_tables(
         'CREATE TRIGGER plugin_trigger_cte_items_audit AFTER INSERT ON plugin_trigger_cte_items BEGIN ' .
         'INSERT INTO plugin_trigger_cte_audit (item_label) ' .

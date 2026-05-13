@@ -21,6 +21,7 @@
 - Added COW coverage for source-added trigger chains that cross restored tables, source-added views, and source-only tables, keeping each trigger validation-gated until its dependencies exist.
 - Extended source-added trigger dependency preflight to clear trigger body read references so triggers that read missing target-side schema objects stay validation-gated.
 - Validated source-added trigger programs after installation so triggers with invalid target-side column references stay validation-gated instead of becoming latent runtime failures.
+- Added COW coverage for source-added trigger program validation catching invalid `OLD`/`NEW` references and invalid `UPDATE OF` columns before target installation.
 - Ignored statement-local CTE aliases during source-added trigger dependency preflight while still tracking real schema objects referenced inside the CTE.
 - Treated source-added trigger references to temporary or attached SQLite schemas as validation-gated dependencies instead of matching same-named persistent tables.
 - Tightened source-added view/trigger dependency parsing so quoted schema-qualified references are tracked while schema-looking text inside SQL literals or comments is ignored.
