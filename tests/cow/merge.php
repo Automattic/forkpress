@@ -4170,6 +4170,136 @@ SQL);
         'rerunning after source-added view chain resolution does not rediscover resolved schema conflicts'
     );
 
+    $source_added_trigger_chain_base = $tmp . '/source-added-trigger-chain-base.sqlite';
+    $source_added_trigger_chain_source = $tmp . '/source-added-trigger-chain-source.sqlite';
+    $source_added_trigger_chain_target = $tmp . '/source-added-trigger-chain-target.sqlite';
+    $source_added_trigger_chain_metadata = $tmp . '/.forkpress/cow/merge/source-added-trigger-chain-metadata.sqlite';
+    create_base_db($source_added_trigger_chain_base);
+    $db = open_db($source_added_trigger_chain_base);
+    $db->exec('CREATE TABLE plugin_trigger_chain_parent (item_id TEXT PRIMARY KEY, label TEXT)');
+    $db->exec('CREATE TABLE plugin_trigger_chain_audit (title TEXT)');
+    $db->exec('CREATE TABLE plugin_trigger_chain_sink (title TEXT)');
+    $db->exec('CREATE TRIGGER plugin_trigger_chain_audit_after AFTER INSERT ON plugin_trigger_chain_audit BEGIN INSERT INTO plugin_trigger_chain_sink (title) VALUES (NEW.title || " / chained"); END');
+    $db->exec("INSERT INTO plugin_trigger_chain_parent (item_id, label) VALUES ('trigger-chain-parent', 'Trigger Chain Parent')");
+    $db->close();
+    copy($source_added_trigger_chain_base, $source_added_trigger_chain_source);
+    copy($source_added_trigger_chain_base, $source_added_trigger_chain_target);
+    cow_merge_capture_row_identities($source_added_trigger_chain_base, $source_added_trigger_chain_metadata, 'main');
+    cow_merge_capture_row_identities($source_added_trigger_chain_source, $source_added_trigger_chain_metadata, 'feature-source-trigger-chain', 'main');
+    cow_merge_capture_row_identities($source_added_trigger_chain_target, $source_added_trigger_chain_metadata, 'main');
+    $db = open_db($source_added_trigger_chain_source);
+    $db->exec('CREATE TABLE plugin_trigger_chain_extra (item_id TEXT PRIMARY KEY, suffix TEXT)');
+    $db->exec("INSERT INTO plugin_trigger_chain_extra (item_id, suffix) VALUES ('trigger-chain-parent', ' + trigger extra')");
+    $db->exec('CREATE VIEW plugin_trigger_chain_parent_view AS SELECT p.item_id, p.label, e.suffix FROM plugin_trigger_chain_parent p JOIN plugin_trigger_chain_extra e ON e.item_id = p.item_id');
+    $db->exec('CREATE TRIGGER plugin_trigger_chain_view_insert INSTEAD OF INSERT ON plugin_trigger_chain_parent_view BEGIN INSERT INTO plugin_trigger_chain_audit (title) VALUES (NEW.label || NEW.suffix); END');
+    $db->close();
+    $db = open_db($source_added_trigger_chain_target);
+    $db->exec('DROP TABLE plugin_trigger_chain_parent');
+    $db->exec('DROP TABLE plugin_trigger_chain_audit');
+    $db->close();
+    $source_added_trigger_chain_result = cow_merge_databases(
+        $source_added_trigger_chain_base,
+        $source_added_trigger_chain_source,
+        $source_added_trigger_chain_target,
+        $source_added_trigger_chain_metadata,
+        'feature-source-trigger-chain',
+        'main'
+    );
+    assert_same($source_added_trigger_chain_result['status'], 'completed_with_conflicts', 'source-added trigger chain with restored dependencies is audited');
+    assert_same(scalar($source_added_trigger_chain_target, "SELECT suffix FROM plugin_trigger_chain_extra WHERE item_id = 'trigger-chain-parent'"), ' + trigger extra', 'source-only table in the trigger chain materializes before trigger review');
+    assert_same((int)scalar($source_added_trigger_chain_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_trigger_chain_sink'"), 1, 'trigger sink table remains present before trigger review');
+    assert_same((int)scalar($source_added_trigger_chain_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_trigger_chain_parent_view'"), 0, 'source-added trigger view is held back while restored dependencies are missing');
+    assert_same((int)scalar($source_added_trigger_chain_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name IN ('plugin_trigger_chain_audit_after', 'plugin_trigger_chain_view_insert')"), 0, 'source-added trigger chain is held back while dependencies are missing');
+    $source_added_trigger_chain_parent_conflict_id = (int)scalar($source_added_trigger_chain_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_trigger_chain_parent' AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
+    $source_added_trigger_chain_audit_conflict_id = (int)scalar($source_added_trigger_chain_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_trigger_chain_audit' AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
+    $source_added_trigger_chain_view_conflict_id = (int)scalar($source_added_trigger_chain_metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_trigger_chain_parent_view' AND conflict_type = 'schema-source-added-view' ORDER BY id DESC LIMIT 1");
+    $source_added_trigger_chain_view_trigger_conflict_id = (int)scalar($source_added_trigger_chain_metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_trigger_chain_view_insert' AND conflict_type = 'schema-source-added-trigger' ORDER BY id DESC LIMIT 1");
+    assert_true($source_added_trigger_chain_parent_conflict_id > 0, 'trigger chain missing parent table remains reviewable');
+    assert_true($source_added_trigger_chain_audit_conflict_id > 0, 'trigger chain missing audit table remains reviewable');
+    assert_true($source_added_trigger_chain_view_conflict_id > 0, 'trigger chain parent view records a source-added view conflict');
+    assert_true($source_added_trigger_chain_view_trigger_conflict_id > 0, 'trigger chain view trigger records a source-added trigger conflict');
+    assert_same((int)scalar($source_added_trigger_chain_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE column_name = 'plugin_trigger_chain_audit_after' AND conflict_type = 'schema-source-added-trigger'"), 0, 'restored table trigger is carried by the table restore instead of a separate source-added trigger conflict');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $source_added_trigger_chain_metadata,
+            $source_added_trigger_chain_view_trigger_conflict_id,
+            'source',
+            true,
+            'Try view trigger before table and view dependencies.',
+            'test'
+        ),
+        'source trigger plugin_trigger_chain_view_insert references missing target schema objects',
+        'source-added view trigger resolution remains gated before restored audit table exists'
+    );
+    $source_added_trigger_chain_parent_resolution = cow_merge_resolve_conflict(
+        $source_added_trigger_chain_metadata,
+        $source_added_trigger_chain_parent_conflict_id,
+        'source',
+        true,
+        'Restore trigger-chain parent table before view.',
+        'test'
+    );
+    assert_same($source_added_trigger_chain_parent_resolution['status'], 'applied', 'trigger chain parent table restore applies first');
+    $source_added_trigger_chain_audit_resolution = cow_merge_resolve_conflict(
+        $source_added_trigger_chain_metadata,
+        $source_added_trigger_chain_audit_conflict_id,
+        'source',
+        true,
+        'Restore trigger-chain audit table before triggers.',
+        'test'
+    );
+    assert_same($source_added_trigger_chain_audit_resolution['status'], 'applied', 'trigger chain audit table restore applies before triggers');
+    assert_same((int)scalar($source_added_trigger_chain_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_trigger_chain_audit_after'"), 1, 'trigger chain audit table restore brings back its existing trigger');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $source_added_trigger_chain_metadata,
+            $source_added_trigger_chain_view_trigger_conflict_id,
+            'source',
+            true,
+            'Try view trigger before its view dependency.',
+            'test'
+        ),
+        'failed to apply source trigger schema resolution',
+        'source-added view trigger resolution remains gated until source-added view exists'
+    );
+    $source_added_trigger_chain_view_resolution = cow_merge_resolve_conflict(
+        $source_added_trigger_chain_metadata,
+        $source_added_trigger_chain_view_conflict_id,
+        'source',
+        true,
+        'Apply trigger-chain view after table restore.',
+        'test'
+    );
+    assert_same($source_added_trigger_chain_view_resolution['status'], 'applied', 'trigger chain source-added view applies after restored table and source-only table exist');
+    $source_added_trigger_chain_view_trigger_resolution = cow_merge_resolve_conflict(
+        $source_added_trigger_chain_metadata,
+        $source_added_trigger_chain_view_trigger_conflict_id,
+        'source',
+        true,
+        'Apply view trigger after source-added view exists.',
+        'test'
+    );
+    assert_same($source_added_trigger_chain_view_trigger_resolution['status'], 'applied', 'source-added view trigger applies after source-added view exists');
+    $db = open_db($source_added_trigger_chain_target);
+    $db->exec("INSERT INTO plugin_trigger_chain_parent_view (item_id, label, suffix) VALUES ('trigger-chain-parent', 'Trigger Chain Parent', ' + trigger extra')");
+    $db->close();
+    assert_same(scalar($source_added_trigger_chain_target, "SELECT title FROM plugin_trigger_chain_audit WHERE title = 'Trigger Chain Parent + trigger extra'"), 'Trigger Chain Parent + trigger extra', 'reviewed source-added view trigger writes to restored audit table');
+    assert_same(scalar($source_added_trigger_chain_target, "SELECT title FROM plugin_trigger_chain_sink WHERE title = 'Trigger Chain Parent + trigger extra / chained'"), 'Trigger Chain Parent + trigger extra / chained', 'reviewed source-added trigger chain reaches source-only sink table');
+    $source_added_trigger_chain_rerun = cow_merge_databases(
+        $source_added_trigger_chain_base,
+        $source_added_trigger_chain_source,
+        $source_added_trigger_chain_target,
+        $source_added_trigger_chain_metadata,
+        'feature-source-trigger-chain',
+        'main'
+    );
+    assert_same($source_added_trigger_chain_rerun['status'], 'completed', 'rerunning after source-added trigger chain resolution completes without a new conflict');
+    assert_same(
+        (int)scalar($source_added_trigger_chain_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-source-trigger-chain'"),
+        4,
+        'rerunning after source-added trigger chain resolution does not rediscover resolved schema conflicts'
+    );
+
     $schema_cross_fk_restored_parent_base = $tmp . '/schema-cross-fk-restored-parent-base.sqlite';
     $schema_cross_fk_restored_parent_source = $tmp . '/schema-cross-fk-restored-parent-source.sqlite';
     $schema_cross_fk_restored_parent_target = $tmp . '/schema-cross-fk-restored-parent-target.sqlite';

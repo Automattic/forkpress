@@ -5677,7 +5677,7 @@ function cow_merge_resolve_schema_conflict(
                         if ($source_sql !== null) {
                             cow_merge_validate_trigger_references($target, $object, $source_sql);
                         }
-                        if ($source_sql !== null && !$target->exec($source_sql)) {
+                        if ($source_sql !== null && !@$target->exec($source_sql)) {
                             throw new RuntimeException("failed to apply source $type schema resolution: " . $target->lastErrorMsg());
                         }
                     }
@@ -7897,7 +7897,7 @@ function cow_merge_apply_schema_object_changes(
                 if ($type === 'trigger') {
                     cow_merge_validate_trigger_references($target, $name, $source_sql);
                 }
-                if (!$target->exec($source_sql)) {
+                if (!@$target->exec($source_sql)) {
                     throw new RuntimeException($target->lastErrorMsg());
                 }
                 if ($type === 'view') {
