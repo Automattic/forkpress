@@ -515,6 +515,8 @@ tooling.
   Validation-gated source view rewrites also recompile preserved target view
   trigger programs before reporting dry-run or apply success, so a source view
   change cannot leave a latent invalid trigger behind.
+  Target-dropped table restores also validate preserved target views and trigger
+  programs that reference the restored table before reporting success.
   Validation-gated source table drops refuse to leave dependent target
   foreign-key child tables pointing at a missing parent table, including during
   dry-run previews, and also refuse to leave target trigger programs that
@@ -617,7 +619,8 @@ tooling.
   sparse source `rowid` values for no-primary-key tables, then restore source
   indexes/triggers that were removed as a side effect of the target table drop.
   Restore previews and applies also validate target foreign-key integrity and
-  compile restored trigger programs before recording a successful resolution.
+  compile restored trigger programs, preserved target views, and preserved
+  target trigger programs before recording a successful resolution.
   No-primary-key sidecar identities for target rows are tombstoned when table
   drop/restore resolutions remove or recreate the target table, so later rowid
   reuse receives fresh logical identity metadata. Safe source-added column

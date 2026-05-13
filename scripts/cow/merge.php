@@ -8330,6 +8330,16 @@ function cow_merge_restore_source_table(
     if (cow_merge_table_sql($target, $table) !== null) {
         throw new RuntimeException("target table already exists during source table restore: $table");
     }
+    $dependent_views = cow_merge_table_dependent_views($target, $table);
+    $dependent_view_triggers = cow_merge_view_trigger_dependencies($target, $dependent_views);
+    $dependent_trigger_names = array_map(
+        fn(array $dependency): string => (string)$dependency['name'],
+        $dependent_view_triggers
+    );
+    $dependent_triggers = array_merge(
+        $dependent_view_triggers,
+        cow_merge_table_dependent_triggers($target, $table, $dependent_trigger_names)
+    );
     cow_merge_validate_source_table_restore_dependencies($source, $target, $table);
     cow_merge_forget_table_row_identities($meta, $run_id, $target_branch, $table);
     $ddl = (string)$restore_payload['table_sql'];
@@ -8371,6 +8381,10 @@ function cow_merge_restore_source_table(
             throw new RuntimeException('failed to restore source table trigger ' . $trigger['name'] . ': ' . $target->lastErrorMsg());
         }
         cow_merge_validate_trigger_program($target, (string)$trigger['name'], (string)$trigger['sql']);
+    }
+    cow_merge_validate_views($target, $dependent_views, 'source-table-restore');
+    foreach ($dependent_triggers as $dependency) {
+        cow_merge_validate_schema_dependency_program($target, $dependency, 'source table restore');
     }
     cow_merge_validate_foreign_key_integrity($target, 'source table restore');
     return $restored;

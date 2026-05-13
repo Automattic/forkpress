@@ -5892,6 +5892,95 @@ SQL);
         'rerunning after deferred restore object resolutions does not rediscover resolved conflicts'
     );
 
+    $schema_restore_view_rollback_base = $tmp . '/schema-restore-view-rollback-base.sqlite';
+    $schema_restore_view_rollback_source = $tmp . '/schema-restore-view-rollback-source.sqlite';
+    $schema_restore_view_rollback_target = $tmp . '/schema-restore-view-rollback-target.sqlite';
+    $schema_restore_view_rollback_metadata = $tmp . '/.forkpress/cow/merge/schema-restore-view-rollback-metadata.sqlite';
+    create_base_db($schema_restore_view_rollback_base);
+    $db = open_db($schema_restore_view_rollback_base);
+    $db->exec('CREATE TABLE plugin_restore_view_parent (code TEXT NOT NULL PRIMARY KEY, label TEXT NOT NULL)');
+    $db->exec('CREATE TABLE plugin_restore_view_audit (code TEXT, label TEXT)');
+    $db->exec("INSERT INTO plugin_restore_view_parent (code, label) VALUES ('restore-view-parent', 'restore view label')");
+    $db->exec('CREATE TRIGGER plugin_restore_view_parent_insert AFTER INSERT ON plugin_restore_view_parent BEGIN INSERT INTO plugin_restore_view_audit (code, label) VALUES (NEW.code, NEW.label); END');
+    $db->close();
+    copy($schema_restore_view_rollback_base, $schema_restore_view_rollback_source);
+    copy($schema_restore_view_rollback_base, $schema_restore_view_rollback_target);
+
+    $db = open_db($schema_restore_view_rollback_source);
+    $db->exec('DROP TRIGGER plugin_restore_view_parent_insert');
+    $db->exec('CREATE TABLE plugin_restore_view_parent_new (code TEXT NOT NULL PRIMARY KEY, label TEXT NOT NULL) WITHOUT ROWID');
+    $db->exec('INSERT INTO plugin_restore_view_parent_new (code, label) SELECT code, label FROM plugin_restore_view_parent');
+    $db->exec('DROP TABLE plugin_restore_view_parent');
+    $db->exec('ALTER TABLE plugin_restore_view_parent_new RENAME TO plugin_restore_view_parent');
+    $db->exec('CREATE TRIGGER plugin_restore_view_parent_insert AFTER INSERT ON plugin_restore_view_parent BEGIN INSERT INTO plugin_restore_view_audit (code, label) VALUES (NEW.code, NEW.label); END');
+    $db->close();
+    $db = open_db($schema_restore_view_rollback_target);
+    $db->exec('DROP TABLE plugin_restore_view_parent');
+    $db->exec('CREATE VIEW plugin_restore_view_parent_rowids AS SELECT rowid, code FROM plugin_restore_view_parent');
+    $db->close();
+
+    $schema_restore_view_rollback_result = cow_merge_databases(
+        $schema_restore_view_rollback_base,
+        $schema_restore_view_rollback_source,
+        $schema_restore_view_rollback_target,
+        $schema_restore_view_rollback_metadata,
+        'feature-schema-restore-view-rollback',
+        'main'
+    );
+    assert_same($schema_restore_view_rollback_result['status'], 'completed_with_conflicts', 'target-dropped table restore with a preserved rowid view remains reviewable');
+    $schema_restore_view_rollback_conflict_id = (int)scalar($schema_restore_view_rollback_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_restore_view_parent' AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
+    assert_true($schema_restore_view_rollback_conflict_id > 0, 'view-sensitive target-dropped table restore conflict is auditable');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $schema_restore_view_rollback_metadata,
+            $schema_restore_view_rollback_conflict_id,
+            'source',
+            false,
+            'Preview table restore with invalid preserved rowid view.',
+            'test'
+        ),
+        'plugin_restore_view_parent_rowids',
+        'dry-run table restore rejects a preserved target view that would become invalid after source schema application'
+    );
+    assert_same(
+        (int)scalar($schema_restore_view_rollback_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_restore_view_rollback_conflict_id"),
+        0,
+        'failed view-sensitive table restore dry-run does not record resolution metadata'
+    );
+    assert_same(
+        (int)scalar($schema_restore_view_rollback_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_restore_view_parent'"),
+        0,
+        'failed view-sensitive table restore dry-run rolls back the restored table'
+    );
+    assert_same(
+        (int)scalar($schema_restore_view_rollback_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_restore_view_parent_insert'"),
+        0,
+        'failed view-sensitive table restore dry-run rolls back the restored source trigger'
+    );
+    assert_same(
+        (int)scalar($schema_restore_view_rollback_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_restore_view_parent_rowids'"),
+        1,
+        'failed view-sensitive table restore dry-run preserves the target view for review'
+    );
+    $db = open_db($schema_restore_view_rollback_target);
+    $db->exec('DROP VIEW plugin_restore_view_parent_rowids');
+    $db->close();
+    $schema_restore_view_rollback_apply = cow_merge_resolve_conflict(
+        $schema_restore_view_rollback_metadata,
+        $schema_restore_view_rollback_conflict_id,
+        'source',
+        true,
+        'Apply table restore after invalid target view is reviewed.',
+        'test'
+    );
+    assert_same($schema_restore_view_rollback_apply['status'], 'applied', 'table restore applies after the invalid preserved view is handled');
+    assert_true(str_contains((string)scalar($schema_restore_view_rollback_target, "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'plugin_restore_view_parent'"), 'WITHOUT ROWID'), 'validated view-sensitive table restore applies the audited source WITHOUT ROWID schema');
+    assert_same((int)scalar($schema_restore_view_rollback_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_restore_view_parent_insert'"), 1, 'validated view-sensitive table restore installs the restored source trigger');
+    $db = open_db($schema_restore_view_rollback_target);
+    $db->exec("INSERT INTO plugin_restore_view_parent (code, label) VALUES ('restore-view-trigger-check', 'trigger ok')");
+    $db->close();
+    assert_same(scalar($schema_restore_view_rollback_target, "SELECT label FROM plugin_restore_view_audit WHERE code = 'restore-view-trigger-check'"), 'trigger ok', 'restored source trigger works after view-sensitive table restore');
+
     $schema_cross_fk_restored_parent_base = $tmp . '/schema-cross-fk-restored-parent-base.sqlite';
     $schema_cross_fk_restored_parent_source = $tmp . '/schema-cross-fk-restored-parent-source.sqlite';
     $schema_cross_fk_restored_parent_target = $tmp . '/schema-cross-fk-restored-parent-target.sqlite';
