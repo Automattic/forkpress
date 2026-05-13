@@ -545,7 +545,9 @@ tooling.
   indexes/triggers that were removed as a side effect of the target table drop.
   No-primary-key sidecar identities for target rows are tombstoned when table
   drop/restore resolutions remove or recreate the target table, so later rowid
-  reuse receives fresh logical identity metadata.
+  reuse receives fresh logical identity metadata. Safe source-added column
+  resolutions refresh no-primary-key sidecar row hashes immediately after the
+  target row shape changes.
   Source-added table creation is recorded as a schema-level source-applied
   decision even when the table has no rows.
   Identical source/target table, index, view, and trigger schema changes are

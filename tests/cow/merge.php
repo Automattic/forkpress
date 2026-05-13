@@ -2115,6 +2115,80 @@ SQL);
         'rerunning after safe source index resolution does not rediscover the resolved schema conflict'
     );
 
+    $schema_keyless_column_base = $tmp . '/schema-keyless-column-base.sqlite';
+    $schema_keyless_column_source = $tmp . '/schema-keyless-column-source.sqlite';
+    $schema_keyless_column_target = $tmp . '/schema-keyless-column-target.sqlite';
+    $schema_keyless_column_metadata = $tmp . '/.forkpress/cow/merge/schema-keyless-column-metadata.sqlite';
+    create_base_db($schema_keyless_column_base);
+    $db = open_db($schema_keyless_column_base);
+    $db->exec('CREATE TABLE plugin_keyless_schema_column (label TEXT, value TEXT)');
+    $db->exec("INSERT INTO plugin_keyless_schema_column (rowid, label, value) VALUES (5, 'Keyless column', 'base')");
+    $db->close();
+    copy($schema_keyless_column_base, $schema_keyless_column_source);
+    copy($schema_keyless_column_base, $schema_keyless_column_target);
+    cow_merge_capture_row_identities($schema_keyless_column_base, $schema_keyless_column_metadata, 'main');
+    cow_merge_capture_row_identities($schema_keyless_column_source, $schema_keyless_column_metadata, 'feature-keyless-schema-column', 'main');
+    cow_merge_capture_row_identities($schema_keyless_column_target, $schema_keyless_column_metadata, 'main');
+
+    $db = open_db($schema_keyless_column_source);
+    $db->exec("ALTER TABLE plugin_keyless_schema_column ADD COLUMN review_note TEXT DEFAULT 'source default'");
+    $schema_keyless_column_source_columns = cow_merge_columns_by_name(cow_merge_table_info($db, 'plugin_keyless_schema_column'));
+    $db->close();
+
+    $db = open_db($schema_keyless_column_target);
+    $schema_keyless_column_target_sql = cow_merge_table_sql($db, 'plugin_keyless_schema_column');
+    $db->close();
+
+    $manual_meta = cow_merge_open_db($schema_keyless_column_metadata, SQLITE3_OPEN_READWRITE | SQLITE3_OPEN_CREATE);
+    cow_merge_ensure_metadata($manual_meta);
+    $manual_run_id = cow_merge_start_run($manual_meta, 'feature-keyless-schema-column', 'main', $schema_keyless_column_base, $schema_keyless_column_source, $schema_keyless_column_target);
+    cow_merge_record_schema_conflict(
+        $manual_meta,
+        $manual_run_id,
+        'plugin_keyless_schema_column',
+        'review_note',
+        'schema-source-changed',
+        $schema_keyless_column_target_sql,
+        [
+            'column' => $schema_keyless_column_source_columns['review_note'],
+            'definition' => "review_note TEXT DEFAULT 'source default'",
+            'error' => 'simulated earlier apply failure',
+        ],
+        $schema_keyless_column_target_sql,
+        $schema_keyless_column_target_sql,
+        'simulated source-added no-primary-key column conflict'
+    );
+    cow_merge_finish_run($manual_meta, $manual_run_id, 'completed_with_conflicts');
+    $manual_meta->close();
+
+    $schema_keyless_column_conflict_id = (int)scalar($schema_keyless_column_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_keyless_schema_column' AND column_name = 'review_note' AND conflict_type = 'schema-source-changed' ORDER BY id DESC LIMIT 1");
+    $schema_keyless_column_resolution = cow_merge_resolve_conflict(
+        $schema_keyless_column_metadata,
+        $schema_keyless_column_conflict_id,
+        'source',
+        true,
+        'Apply safe no-primary-key source column.',
+        'test'
+    );
+    assert_same($schema_keyless_column_resolution['status'], 'applied', 'source no-primary-key schema column resolution records applied status');
+    assert_same(column_type($schema_keyless_column_target, 'plugin_keyless_schema_column', 'review_note'), 'TEXT', 'source no-primary-key schema column resolution applies audited safe column');
+    assert_same(scalar($schema_keyless_column_target, 'SELECT review_note FROM plugin_keyless_schema_column WHERE rowid = 5'), 'source default', 'source no-primary-key schema column resolution applies the SQLite default to existing rows');
+    $db = open_db($schema_keyless_column_target);
+    $schema_keyless_column_row = cow_merge_load_keyless_physical_row($db, 'plugin_keyless_schema_column', 5);
+    $db->close();
+    assert_same(
+        scalar($schema_keyless_column_metadata, "SELECT row_hash FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_keyless_schema_column' AND rowid = 5"),
+        cow_merge_row_hash($schema_keyless_column_row['row']),
+        'source no-primary-key schema column resolution refreshes target sidecar row hash immediately'
+    );
+    $schema_keyless_column_rerun = cow_merge_databases($schema_keyless_column_base, $schema_keyless_column_source, $schema_keyless_column_target, $schema_keyless_column_metadata, 'feature-keyless-schema-column', 'main');
+    assert_same($schema_keyless_column_rerun['status'], 'completed', 'rerunning after no-primary-key safe source column resolution completes without a new conflict');
+    assert_same(
+        (int)scalar($schema_keyless_column_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_keyless_schema_column' AND c.column_name = 'review_note' AND c.conflict_type = 'schema-source-changed' AND r.source_branch = 'feature-keyless-schema-column'"),
+        1,
+        'rerunning after no-primary-key safe source column resolution does not rediscover the resolved schema conflict'
+    );
+
     $schema_index_rewrite_base = $tmp . '/schema-index-rewrite-base.sqlite';
     $schema_index_rewrite_source = $tmp . '/schema-index-rewrite-source.sqlite';
     $schema_index_rewrite_target = $tmp . '/schema-index-rewrite-target.sqlite';

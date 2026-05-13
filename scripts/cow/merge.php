@@ -4045,11 +4045,13 @@ function cow_merge_resolve_schema_conflict(
                         throw new InvalidArgumentException('source schema resolution can only apply columns that are safe for ALTER TABLE ADD COLUMN');
                     }
                     $resolved = ['column' => $source_column, 'definition' => $definition];
-                    $apply_source = function () use ($target, $table, $definition): void {
+                    $target_branch = (string)$conflict['target_branch'];
+                    $apply_source = function () use ($target, $meta, $conflict, $target_branch, $table, $definition): void {
                         $sql = 'ALTER TABLE ' . cow_merge_quote_ident($table) . ' ADD COLUMN ' . $definition;
                         if (!$target->exec($sql)) {
                             throw new RuntimeException('failed to apply source column schema resolution: ' . $target->lastErrorMsg());
                         }
+                        cow_merge_refresh_table_row_identities($target, $meta, (int)$conflict['run_id'], $target_branch, $table);
                     };
                 } else {
                     $target_table_sql = cow_merge_table_sql($target, $table);
