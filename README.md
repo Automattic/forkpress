@@ -489,6 +489,8 @@ tooling.
   `schema-source-added-trigger` conflicts instead of being installed as latent
   invalid triggers; statement-local CTE aliases in trigger bodies are ignored
   while real schema objects referenced inside those CTEs remain dependencies.
+  Trigger references to temporary or attached SQLite schemas are kept
+  validation-gated instead of being matched to same-named persistent tables.
   When a source row still violates target constraints, target
   is kept by default and the choice is recorded as
   an auditable `row-target-constraint`. Source deletes that would orphan

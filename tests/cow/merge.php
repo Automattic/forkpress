@@ -4056,6 +4056,36 @@ SQL);
         'trigger dependency parsing ignores CTE aliases while retaining real tables read inside the CTE'
     );
 
+    $trigger_temp_target = $tmp . '/trigger-temp-reference-target.sqlite';
+    create_base_db($trigger_temp_target);
+    $db = open_db($trigger_temp_target);
+    $db->exec('CREATE TABLE plugin_trigger_temp_gate (enabled INTEGER)');
+    $db->exec('CREATE TABLE plugin_trigger_temp_audit (item_label TEXT)');
+    $db->close();
+    $db = open_db($trigger_temp_target);
+    $trigger_temp_missing = cow_merge_missing_trigger_references(
+        $db,
+        'CREATE TRIGGER plugin_trigger_temp_items_audit AFTER INSERT ON plugin_trigger_temp_items BEGIN ' .
+        'INSERT INTO plugin_trigger_temp_audit (item_label) ' .
+        'SELECT NEW.label FROM temp.plugin_trigger_temp_gate WHERE enabled = 1; END'
+    );
+    $db->close();
+    assert_same(
+        $trigger_temp_missing,
+        ['temp.plugin_trigger_temp_gate'],
+        'trigger dependency parsing treats temporary-schema references as non-persistent even when main has the same table name'
+    );
+    assert_throws(
+        fn() => cow_merge_validate_trigger_references(
+            open_db($trigger_temp_target),
+            'plugin_trigger_temp_items_audit',
+            'CREATE TRIGGER plugin_trigger_temp_items_audit AFTER INSERT ON plugin_trigger_temp_items BEGIN ' .
+            'SELECT NEW.label FROM temp.plugin_trigger_temp_gate WHERE enabled = 1; END'
+        ),
+        'temp.plugin_trigger_temp_gate',
+        'source-added trigger validation rejects temporary-schema dependencies explicitly'
+    );
+
     $source_added_trigger_cte_base = $tmp . '/source-added-trigger-cte-base.sqlite';
     $source_added_trigger_cte_source = $tmp . '/source-added-trigger-cte-source.sqlite';
     $source_added_trigger_cte_target = $tmp . '/source-added-trigger-cte-target.sqlite';

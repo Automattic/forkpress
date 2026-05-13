@@ -5157,17 +5157,17 @@ function cow_merge_sql_references_table(string $sql, string $table): bool {
     return in_array(strtolower($table), cow_merge_sql_referenced_tables($sql), true);
 }
 
-function cow_merge_identifier_pattern(): string {
-    return '(?:"(?P<dq>[^"]+)"|`(?P<bq>[^`]+)`|\[(?P<br>[^\]]+)\]|\'(?P<sq>[^\']+)\'|(?P<bare>[A-Za-z_][A-Za-z0-9_]*))';
+function cow_merge_identifier_pattern(string $prefix = ''): string {
+    return '(?:"(?P<' . $prefix . 'dq>[^"]+)"|`(?P<' . $prefix . 'bq>[^`]+)`|\[(?P<' . $prefix . 'br>[^\]]+)\]|\'(?P<' . $prefix . 'sq>[^\']+)\'|(?P<' . $prefix . 'bare>[A-Za-z_][A-Za-z0-9_]*))';
 }
 
 function cow_merge_regex_named_match(array $match, string $name): ?string {
     return isset($match[$name]) && is_string($match[$name]) && $match[$name] !== '' ? $match[$name] : null;
 }
 
-function cow_merge_sql_reference_name(array $match): ?string {
+function cow_merge_sql_reference_name(array $match, string $prefix = ''): ?string {
     foreach (['dq', 'bq', 'br', 'sq', 'bare'] as $name) {
-        $value = cow_merge_regex_named_match($match, $name);
+        $value = cow_merge_regex_named_match($match, $prefix . $name);
         if ($value !== null) {
             return strtolower($value);
         }
@@ -5295,11 +5295,12 @@ function cow_merge_sql_cte_names(string $sql): array {
     return array_keys($names);
 }
 
-function cow_merge_sql_referenced_tables(string $sql): array {
-    $identifier = cow_merge_identifier_pattern();
+function cow_merge_sql_referenced_schema_objects(string $sql): array {
+    $schema_identifier = cow_merge_identifier_pattern('schema_');
+    $object_identifier = cow_merge_identifier_pattern('object_');
     $patterns = [
-        '/\b(?:FROM|JOIN|UPDATE|INTO)\s+(?:(?:"main"|"temp"|main|temp)\s*\.\s*)?' . $identifier . '/i',
-        '/\bTABLE\s+(?:(?:"main"|"temp"|main|temp)\s*\.\s*)?' . $identifier . '/i',
+        '/\b(?:FROM|JOIN|UPDATE|INTO)\s+(?:' . $schema_identifier . '\s*\.\s*)?' . $object_identifier . '/i',
+        '/\bTABLE\s+(?:' . $schema_identifier . '\s*\.\s*)?' . $object_identifier . '/i',
     ];
     $refs = [];
     foreach (cow_merge_sql_split_statements($sql) as $statement) {
@@ -5309,12 +5310,22 @@ function cow_merge_sql_referenced_tables(string $sql): array {
                 continue;
             }
             foreach ($matches as $match) {
-                $name = cow_merge_sql_reference_name($match);
+                $name = cow_merge_sql_reference_name($match, 'object_');
                 if ($name !== null && !isset($cte_names[$name])) {
-                    $refs[$name] = true;
+                    $schema = cow_merge_sql_reference_name($match, 'schema_');
+                    $key = ($schema ?? '') . '.' . $name;
+                    $refs[$key] = ['schema' => $schema, 'name' => $name];
                 }
             }
         }
+    }
+    return array_values($refs);
+}
+
+function cow_merge_sql_referenced_tables(string $sql): array {
+    $refs = [];
+    foreach (cow_merge_sql_referenced_schema_objects($sql) as $reference) {
+        $refs[(string)$reference['name']] = true;
     }
     return array_keys($refs);
 }
@@ -5361,11 +5372,18 @@ function cow_merge_sort_view_schema_objects(array $objects, array $source_object
 }
 
 function cow_merge_trigger_referenced_tables(string $sql): array {
+    return array_map(
+        fn(array $reference): string => (string)$reference['name'],
+        cow_merge_trigger_referenced_schema_objects($sql)
+    );
+}
+
+function cow_merge_trigger_referenced_schema_objects(string $sql): array {
     $body = $sql;
     if (preg_match('/\bBEGIN\b(.*)\bEND\b/is', $sql, $match)) {
         $body = (string)$match[1];
     }
-    return cow_merge_sql_referenced_tables($body);
+    return cow_merge_sql_referenced_schema_objects($body);
 }
 
 function cow_merge_schema_object_exists(SQLite3 $db, string $name): bool {
@@ -5383,7 +5401,13 @@ function cow_merge_schema_object_exists(SQLite3 $db, string $name): bool {
 
 function cow_merge_missing_trigger_references(SQLite3 $db, string $sql): array {
     $missing = [];
-    foreach (cow_merge_trigger_referenced_tables($sql) as $table) {
+    foreach (cow_merge_trigger_referenced_schema_objects($sql) as $reference) {
+        $schema = $reference['schema'];
+        $table = (string)$reference['name'];
+        if ($schema !== null && $schema !== 'main') {
+            $missing[] = $schema . '.' . $table;
+            continue;
+        }
         if (!cow_merge_schema_object_exists($db, $table)) {
             $missing[] = $table;
         }
