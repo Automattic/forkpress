@@ -1245,6 +1245,25 @@ function cow_merge_row_values_equal(?array $a, ?array $b, array $columns): bool 
     return true;
 }
 
+function cow_merge_keyless_row_identity_ambiguous(?array $base_row, ?array $source_row, ?array $target_row, array $columns): bool {
+    if ($base_row === null || $source_row === null || $target_row === null || !$columns) {
+        return false;
+    }
+    if (cow_merge_row_values_equal($source_row, $base_row, $columns) || cow_merge_row_values_equal($target_row, $base_row, $columns)) {
+        return false;
+    }
+    if (cow_merge_row_values_equal($source_row, $target_row, $columns)) {
+        return false;
+    }
+
+    foreach ($columns as $col) {
+        if (cow_merge_values_equal($source_row[$col] ?? null, $base_row[$col] ?? null)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 function cow_merge_where_clause(array $identity, array $pk_cols, array &$values): string {
     $clauses = [];
     if ($pk_cols) {
@@ -4249,9 +4268,9 @@ function cow_merge_resolve_conflict(
                 $reviewer
             );
         }
-        $row_conflict_types = ['row-insert-collision', 'row-unique-collision', 'row-target-deleted', 'row-source-deleted'];
+        $row_conflict_types = ['row-insert-collision', 'row-unique-collision', 'row-identity-ambiguous', 'row-target-deleted', 'row-source-deleted'];
         if ($conflict_type !== 'cell-conflict' && !in_array($conflict_type, $row_conflict_types, true)) {
-            throw new InvalidArgumentException('resolve-conflict currently supports DB cell-conflict, row-insert-collision, row-unique-collision, row-target-deleted, and row-source-deleted records only');
+            throw new InvalidArgumentException('resolve-conflict currently supports DB cell-conflict, row-insert-collision, row-unique-collision, row-identity-ambiguous, row-target-deleted, and row-source-deleted records only');
         }
         if ($conflict_type === 'cell-conflict' && $column === '') {
             throw new InvalidArgumentException('cell conflict resolution requires a column name');
@@ -4296,7 +4315,7 @@ function cow_merge_resolve_conflict(
             }
         } else {
             $unique_collision_where_identity = null;
-            if (in_array($conflict_type, ['row-insert-collision', 'row-unique-collision'], true) && (!is_array($source_value) || !is_array($target_value))) {
+            if (in_array($conflict_type, ['row-insert-collision', 'row-unique-collision', 'row-identity-ambiguous'], true) && (!is_array($source_value) || !is_array($target_value))) {
                 throw new RuntimeException("row conflict #$conflict_id does not contain row payloads");
             }
             if ($conflict_type === 'row-target-deleted' && !is_array($source_value)) {
@@ -4815,7 +4834,7 @@ function cow_merge_audit_conflict_group_sql(string $group_by): string {
     if ($group_by === 'severity') {
         return "CASE " .
             "WHEN c.conflict_type LIKE 'schema-%' THEN 'schema' " .
-            "WHEN c.conflict_type IN ('row-insert-collision', 'row-target-deleted', 'row-source-deleted') THEN 'row' " .
+            "WHEN c.conflict_type IN ('row-insert-collision', 'row-unique-collision', 'row-identity-ambiguous', 'row-target-deleted', 'row-source-deleted') THEN 'row' " .
             "WHEN c.conflict_type = 'cell-conflict' THEN 'cell' " .
             "WHEN c.table_name = '__files__' THEN 'files' " .
             "ELSE 'other' END";
@@ -6136,6 +6155,25 @@ function cow_merge_table_rows(
         }
 
         $merged = $target_row;
+        if (!$pk_cols && cow_merge_keyless_row_identity_ambiguous($base_row, $source_row, $target_row, $row_columns)) {
+            cow_merge_record_conflict($meta, $run_id, $table, $key, null, 'row-identity-ambiguous', $base_row, $source_row, $target_row, $target_row);
+            cow_merge_record_decision(
+                $meta,
+                $run_id,
+                $table,
+                $key,
+                null,
+                'target-wins',
+                'no-primary-key source row changed every column while target also changed; rowid reuse cannot be ruled out without runtime identity events',
+                $base_row,
+                $source_row,
+                $target_row,
+                $target_row
+            );
+            $conflicts++;
+            continue;
+        }
+
         $row_conflicts = 0;
         $row_applied = 0;
         foreach ($row_columns as $col) {

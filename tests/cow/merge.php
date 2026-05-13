@@ -2309,6 +2309,46 @@ SQL);
     assert_same((int)scalar($reuse_target, "SELECT COUNT(*) FROM plugin_keyless WHERE label = 'Reused rowid source' AND value = 'new logical row'"), 1, 'source keyless delete resolution leaves the reused logical row intact');
     assert_same((int)scalar($reuse_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $keyless_delete_conflict_id AND table_name = 'plugin_keyless' AND choice = 'source' AND applied = 1"), 1, 'keyless delete resolution is auditable');
 
+    $offline_reuse_base = $tmp . '/offline-reuse-base.sqlite';
+    $offline_reuse_source = $tmp . '/offline-reuse-source.sqlite';
+    $offline_reuse_target = $tmp . '/offline-reuse-target.sqlite';
+    $offline_reuse_metadata = $tmp . '/.forkpress/cow/merge/offline-reuse-metadata.sqlite';
+    create_base_db($offline_reuse_base);
+    copy($offline_reuse_base, $offline_reuse_source);
+    copy($offline_reuse_base, $offline_reuse_target);
+    cow_merge_capture_row_identities($offline_reuse_base, $offline_reuse_metadata, 'main');
+    cow_merge_capture_row_identities($offline_reuse_source, $offline_reuse_metadata, 'feature-offline-reuse', 'main');
+
+    $db = open_db($offline_reuse_source);
+    $db->exec('DELETE FROM plugin_keyless WHERE rowid = 1');
+    $db->exec("INSERT INTO plugin_keyless (label, value) VALUES ('Offline reused rowid', 'new offline row')");
+    $db->close();
+    assert_same((int)scalar($offline_reuse_source, 'SELECT rowid FROM plugin_keyless'), 1, 'offline SQLite edit can reuse a no-PK rowid without runtime events');
+
+    $db = open_db($offline_reuse_target);
+    $db->exec("UPDATE plugin_keyless SET value = 'target kept offline old row' WHERE rowid = 1");
+    $db->close();
+
+    $result = cow_merge_databases($offline_reuse_base, $offline_reuse_source, $offline_reuse_target, $offline_reuse_metadata, 'feature-offline-reuse', 'main');
+    assert_same($result['status'], 'completed_with_conflicts', 'offline no-PK rowid reuse is bounded as a conflict when target also changed');
+    assert_same(scalar($offline_reuse_target, "SELECT label FROM plugin_keyless WHERE rowid = 1"), 'Base keyless', 'offline rowid ambiguity does not partially apply source label to target old row');
+    assert_same(scalar($offline_reuse_target, "SELECT value FROM plugin_keyless WHERE rowid = 1"), 'target kept offline old row', 'offline rowid ambiguity keeps target value by default');
+    assert_same((int)scalar($offline_reuse_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_keyless' AND conflict_type = 'row-identity-ambiguous'"), 1, 'offline no-PK rowid reuse ambiguity is auditable');
+    assert_same((int)scalar($offline_reuse_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_keyless' AND decision = 'target-wins' AND reason LIKE 'no-primary-key source row changed every column%'"), 1, 'offline no-PK rowid reuse default target choice is auditable');
+    $offline_ambiguity_conflict_id = (int)scalar($offline_reuse_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_keyless' AND conflict_type = 'row-identity-ambiguous' ORDER BY id DESC LIMIT 1");
+    $offline_ambiguity_resolution = cow_merge_resolve_conflict(
+        $offline_reuse_metadata,
+        $offline_ambiguity_conflict_id,
+        'source',
+        true,
+        'Apply source row after reviewing offline no-PK ambiguity.',
+        'cow-test'
+    );
+    assert_same($offline_ambiguity_resolution['status'], 'applied', 'source offline no-PK ambiguity resolution records applied status');
+    assert_same(scalar($offline_reuse_target, "SELECT label FROM plugin_keyless WHERE rowid = 1"), 'Offline reused rowid', 'source offline no-PK ambiguity resolution applies audited source label');
+    assert_same(scalar($offline_reuse_target, "SELECT value FROM plugin_keyless WHERE rowid = 1"), 'new offline row', 'source offline no-PK ambiguity resolution applies audited source value');
+    assert_same((int)scalar($offline_reuse_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $offline_ambiguity_conflict_id AND table_name = 'plugin_keyless' AND choice = 'source' AND applied = 1"), 1, 'offline no-PK ambiguity resolution is auditable');
+
     if (!function_exists('add_action')) {
         function add_action($tag, $callback, $priority = 10, $accepted_args = 1) {
             return true;

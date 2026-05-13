@@ -47,6 +47,7 @@
 - Fixed generic COW SQLite mergeback so source-inserted rows that collide with target-side unique indexes are audited as target-wins `row-unique-collision` conflicts instead of aborting the merge.
 - Added validation-gated source resolution for audited `row-unique-collision` conflicts, replacing the still-matching target row only after reviewer apply.
 - Added runtime-backed COW e2e coverage for resolving arbitrary plugin-table `row-unique-collision` conflicts through the real CLI.
+- Bounded offline no-primary-key `rowid` reuse ambiguity by recording auditable `row-identity-ambiguous` target-wins conflicts when a keyless source row looks like a full replacement while the target also changed, with validation-gated source resolution available after review.
 - Updated the automatic mergeback loop runner to pass a configurable Codex reasoning-effort setting and to include the changelog/known-good tag policy in every worker prompt.
 
 ## known-good/cow-mergeback-audit-completeness-2026-05-12
