@@ -73,6 +73,41 @@
 - Fixed COW conflict recording to de-duplicate unchanged schema conflicts with null row identities using an explicit null-safe lookup before inserting metadata.
 - Updated the automatic mergeback loop runner to pass a configurable Codex reasoning-effort setting and to include the changelog/known-good tag policy in every worker prompt.
 
+## known-good/cow-mergeback-identity-stability-2026-05-13
+
+Verified as a major known-good checkpoint for generic COW mergeback identity
+stability and resolver reruns after the audit-completeness checkpoint:
+
+- Branch-time AUTOINCREMENT allocation bands are covered through runtime-backed
+  WordPress admin/REST post creation and arbitrary plugin table inserts.
+- Generic unique-key row collisions are audited and can be resolved through the
+  validation-gated source resolver for arbitrary plugin tables.
+- No-primary-key plugin tables use sidecar identity metadata for runtime-tracked
+  rowid reuse, bounded offline ambiguity, stable unique-insert collapses, and
+  conservative duplicate-preserving behavior when no durable unique evidence
+  exists.
+- Identical source/target row, cell, schema, and filesystem changes are recorded
+  as non-conflicting `source-applied` decisions when generic identity evidence is
+  strong enough, instead of being left as implicit no-ops.
+- Validation-gated DB, filesystem, and schema source resolutions have rerun
+  coverage, including dependency-preserving compatible table rebuilds.
+- Reviewed target-choice reruns are represented as auditable `target-accepted`
+  decisions and counted separately from active `target-wins` defaults in audit
+  summaries.
+
+Verification for the tag included:
+
+- `php -l scripts/cow/merge.php`.
+- `php -l tests/cow/merge.php`.
+- `bash -n tests/cow/e2e.sh`.
+- `php tests/cow/merge.php`.
+- `cargo fmt --check`.
+- `cargo test -p forkpress-storage`.
+- `FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli`.
+- `FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli --features dev-experiments --bin forkpress-dev`.
+- `cargo build --target x86_64-unknown-linux-musl -p forkpress-cli --bin forkpress`.
+- `tests/cow/e2e.sh target/x86_64-unknown-linux-musl/debug/forkpress`.
+
 ## known-good/cow-mergeback-audit-completeness-2026-05-12
 
 Verified as a major known-good checkpoint for COW mergeback audit completeness after the view-dependency checkpoint:
