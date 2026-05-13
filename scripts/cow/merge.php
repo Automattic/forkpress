@@ -5716,6 +5716,31 @@ function cow_merge_trigger_program_cycle_against_target(SQLite3 $db, string $nam
     return $cycles[$name_key] ?? null;
 }
 
+function cow_merge_view_schema_cycle_against_target(SQLite3 $db, string $name, string $sql): ?string {
+    $views = cow_merge_schema_object_sql_map($db, 'view');
+    $name_key = strtolower($name);
+    foreach (array_keys($views) as $existing_name) {
+        if (strtolower((string)$existing_name) === $name_key) {
+            unset($views[$existing_name]);
+        }
+    }
+    $views[$name] = [
+        'table' => $name,
+        'sql' => $sql,
+    ];
+    $cycles = cow_merge_view_schema_dependency_cycles(array_keys($views), $views);
+    return $cycles[$name_key] ?? null;
+}
+
+function cow_merge_validate_view_schema_acyclic(SQLite3 $db, string $name, string $sql): void {
+    $cycle = cow_merge_view_schema_cycle_against_target($db, $name, $sql);
+    if ($cycle !== null) {
+        throw new InvalidArgumentException(
+            'source view ' . $name . ' has unsupported cyclic view dependencies: ' . $cycle
+        );
+    }
+}
+
 function cow_merge_validate_trigger_program_acyclic(SQLite3 $db, string $name, string $sql): void {
     $cycle = cow_merge_trigger_program_cycle_against_target($db, $name, $sql);
     if ($cycle !== null) {
@@ -6225,6 +6250,7 @@ function cow_merge_apply_source_view_schema_resolution(SQLite3 $target, string $
     }
     if ($source_sql !== null) {
         cow_merge_validate_view_references($target, $view, $source_sql);
+        cow_merge_validate_view_schema_acyclic($target, $view, $source_sql);
     }
     cow_merge_validate_views($target, $dependent_views, 'pre-view-resolution');
     $target->exec('SAVEPOINT forkpress_view_resolution');
@@ -6554,7 +6580,7 @@ function cow_merge_resolve_schema_conflict(
                 $source_error = is_array($source_payload) ? (string)($source_payload['error'] ?? '') : '';
                 $mutate_source = function () use ($target, $type, $object, $source_sql, $source_error): void {
                     if ($type === 'view') {
-                        if (str_contains($source_error, 'unsupported cyclic source view dependencies')) {
+                        if (str_contains($source_error, 'unsupported cyclic') && str_contains($source_error, 'view dependencies')) {
                             throw new InvalidArgumentException($source_error);
                         }
                         cow_merge_apply_source_view_schema_resolution($target, $object, $source_sql);
@@ -8905,6 +8931,7 @@ function cow_merge_apply_schema_object_changes(
                         );
                     }
                     cow_merge_validate_view_references($target, $name, $source_sql);
+                    cow_merge_validate_view_schema_acyclic($target, $name, $source_sql);
                 }
                 if (!@$target->exec($source_sql)) {
                     throw new RuntimeException($target->lastErrorMsg());

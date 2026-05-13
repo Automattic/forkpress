@@ -4803,6 +4803,60 @@ SQL);
         'failed cyclic view resolution attempts do not record resolutions'
     );
 
+    $source_added_view_target_cycle_base = $tmp . '/source-added-view-target-cycle-base.sqlite';
+    $source_added_view_target_cycle_source = $tmp . '/source-added-view-target-cycle-source.sqlite';
+    $source_added_view_target_cycle_target = $tmp . '/source-added-view-target-cycle-target.sqlite';
+    $source_added_view_target_cycle_metadata = $tmp . '/.forkpress/cow/merge/source-added-view-target-cycle-metadata.sqlite';
+    create_base_db($source_added_view_target_cycle_base);
+    copy($source_added_view_target_cycle_base, $source_added_view_target_cycle_source);
+    copy($source_added_view_target_cycle_base, $source_added_view_target_cycle_target);
+    $db = open_db($source_added_view_target_cycle_source);
+    $db->exec('CREATE VIEW plugin_target_cycle_source_view AS SELECT item_id, label FROM plugin_target_cycle_existing_view');
+    $db->close();
+    $db = open_db($source_added_view_target_cycle_target);
+    $db->exec('CREATE VIEW plugin_target_cycle_existing_view AS SELECT item_id, label FROM plugin_target_cycle_source_view');
+    $db->close();
+    $source_added_view_target_cycle_result = cow_merge_databases(
+        $source_added_view_target_cycle_base,
+        $source_added_view_target_cycle_source,
+        $source_added_view_target_cycle_target,
+        $source_added_view_target_cycle_metadata,
+        'feature-source-view-target-cycle',
+        'main'
+    );
+    assert_same($source_added_view_target_cycle_result['status'], 'completed_with_conflicts', 'source-added view cycles with target-side views are held as reviewable schema conflicts');
+    assert_same((int)scalar($source_added_view_target_cycle_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_target_cycle_source_view'"), 0, 'source-added view is not installed when it cycles with a target view');
+    assert_same((int)scalar($source_added_view_target_cycle_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_target_cycle_existing_view'"), 1, 'blocked source-added view cycle preserves the target view');
+    $source_added_view_target_cycle_conflict_id = (int)scalar($source_added_view_target_cycle_metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_target_cycle_source_view' AND conflict_type = 'schema-source-added-view' ORDER BY id DESC LIMIT 1");
+    assert_true($source_added_view_target_cycle_conflict_id > 0, 'source-added target-view cycle records a schema conflict');
+    $source_added_view_target_cycle_payload = cow_merge_decode_payload_json(
+        (string)scalar($source_added_view_target_cycle_metadata, "SELECT source_payload FROM merge_conflicts WHERE id = $source_added_view_target_cycle_conflict_id"),
+        'source-added target-view cycle payload'
+    );
+    assert_true(
+        str_contains((string)($source_added_view_target_cycle_payload['error'] ?? ''), 'unsupported cyclic view dependencies') &&
+            str_contains((string)($source_added_view_target_cycle_payload['error'] ?? ''), 'plugin_target_cycle_existing_view') &&
+            str_contains((string)($source_added_view_target_cycle_payload['error'] ?? ''), 'plugin_target_cycle_source_view'),
+        'source-added target-view cycle payload records both view names'
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $source_added_view_target_cycle_metadata,
+            $source_added_view_target_cycle_conflict_id,
+            'source',
+            true,
+            'Try source-added view with target view cycle.',
+            'test'
+        ),
+        'unsupported cyclic view dependencies',
+        'source-added target-view cycle resolution remains validation-gated'
+    );
+    assert_same(
+        (int)scalar($source_added_view_target_cycle_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $source_added_view_target_cycle_conflict_id"),
+        0,
+        'failed source-added target-view cycle resolution does not record a resolution'
+    );
+
     $source_added_trigger_order_base = $tmp . '/source-added-trigger-order-base.sqlite';
     $source_added_trigger_order_source = $tmp . '/source-added-trigger-order-source.sqlite';
     $source_added_trigger_order_target = $tmp . '/source-added-trigger-order-target.sqlite';

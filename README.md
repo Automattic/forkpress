@@ -490,8 +490,9 @@ tooling.
   dependency validates. Cyclic source-added view graphs are also held as
   reviewable `schema-source-added-view` conflicts rather than installed in an
   arbitrary order, and reviewed source resolution keeps the audited cycle reason
-  validation-gated. Missing or non-persistent view references are preflighted
-  before target mutation. Target-dropped table restores defer
+  validation-gated. Source-added views that would cycle with existing target-side
+  views are also held before target mutation. Missing or non-persistent view
+  references are preflighted before target mutation. Target-dropped table restores defer
   source-added indexes and triggers that already have standalone schema
   conflicts, so the table can restore before those objects are resolved in
   dependency order. Source-added triggers attached to, reading, or writing
