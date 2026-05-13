@@ -2873,6 +2873,36 @@ function cow_merge_record_file_conflict(
     );
 }
 
+function cow_merge_record_matching_file_decision(
+    SQLite3 $meta,
+    int $run_id,
+    string $path,
+    ?array $base,
+    ?array $source,
+    ?array $target
+): void {
+    if ($source === null) {
+        $reason = 'source and target deleted the same filesystem path';
+    } elseif ($base === null) {
+        $reason = 'source and target added the same filesystem path';
+    } else {
+        $reason = 'source and target changed filesystem path to the same state';
+    }
+    cow_merge_record_decision(
+        $meta,
+        $run_id,
+        '__files__',
+        cow_merge_file_identity_json($path),
+        'path',
+        'source-applied',
+        $reason,
+        cow_merge_file_path_payload($path, $base),
+        cow_merge_file_path_payload($path, $source),
+        cow_merge_file_path_payload($path, $target),
+        cow_merge_file_path_payload($path, $target)
+    );
+}
+
 function cow_merge_files(
     string $base_files,
     string $source_root,
@@ -2895,6 +2925,7 @@ function cow_merge_files(
     $paths = array_unique(array_merge(array_keys($base_entries), array_keys($source_entries), array_keys($target_entries)));
     sort($paths);
     $operations = [];
+    $applied = 0;
     $conflicts = 0;
 
     try {
@@ -2930,6 +2961,8 @@ function cow_merge_files(
                 continue;
             }
             if (cow_merge_file_entries_equal($source, $target)) {
+                cow_merge_record_matching_file_decision($meta, $run_id, $path, $base, $source, $target);
+                $applied++;
                 continue;
             }
 
@@ -3034,7 +3067,6 @@ function cow_merge_files(
         return strcmp($a['path'], $b['path']);
     });
 
-    $applied = 0;
     $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READWRITE | SQLITE3_OPEN_CREATE);
     cow_merge_ensure_metadata($meta);
     $file_tx = cow_merge_file_transaction_begin();
