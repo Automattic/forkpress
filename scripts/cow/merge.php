@@ -1081,6 +1081,19 @@ function cow_merge_remember_row_identity(
     cow_merge_remember_row_identity_history($meta, $run_id, $branch, $table, $rowid, $identity, $row);
 }
 
+function cow_merge_adopt_row_identity(
+    SQLite3 $meta,
+    int $run_id,
+    string $branch,
+    string $table,
+    int $rowid,
+    array $identity,
+    array $row
+): void {
+    cow_merge_forget_row_identity($meta, $run_id, $branch, $table, $rowid);
+    cow_merge_remember_row_identity($meta, $run_id, $branch, $table, $rowid, $identity, $row);
+}
+
 function cow_merge_forget_row_identity(
     SQLite3 $meta,
     int $run_id,
@@ -6075,10 +6088,14 @@ function cow_merge_table_rows(
         }
 
         if ($base_row === null && $source_row !== null && $target_row === null) {
-            $unique_collision = cow_merge_find_unique_collision($target, $table, $source_row);
+            $unique_collision = cow_merge_find_unique_collision($target, $table, $source_row, !$pk_cols);
             if ($unique_collision !== null) {
                 $unique_columns = cow_merge_all_columns($columns, array_keys($source_row), array_keys($unique_collision['row']));
                 if (!$pk_cols && cow_merge_row_values_equal($source_row, $unique_collision['row'], $unique_columns)) {
+                    if (!isset($unique_collision['rowid'])) {
+                        throw new RuntimeException("cannot adopt $table unique collision identity because the target rowid is unavailable");
+                    }
+                    cow_merge_adopt_row_identity($meta, $run_id, $target_branch, $table, (int)$unique_collision['rowid'], $identity, $unique_collision['row']);
                     cow_merge_record_decision(
                         $meta,
                         $run_id,

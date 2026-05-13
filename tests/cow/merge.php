@@ -2254,6 +2254,12 @@ SQL);
     assert_same((int)scalar($keyless_unique_same_target, "SELECT COUNT(*) FROM plugin_keyless_unique_same WHERE slug = 'same-keyless-slug' AND value = 'same payload'"), 1, 'identical keyless unique insert is not duplicated');
     assert_same((int)scalar($keyless_unique_same_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_keyless_unique_same' AND conflict_type = 'row-unique-collision'"), 0, 'identical keyless unique insert does not record a unique collision conflict');
     assert_same((int)scalar($keyless_unique_same_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_keyless_unique_same' AND decision = 'source-applied' AND reason LIKE 'source inserted no-primary-key row already exists in target by unique index%'"), 1, 'identical keyless unique insert is still auditable as source-applied');
+    $keyless_unique_same_rowid = (int)scalar($keyless_unique_same_target, "SELECT rowid FROM plugin_keyless_unique_same WHERE slug = 'same-keyless-slug'");
+    $keyless_unique_same_source_identity = scalar($keyless_unique_same_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'feature-keyless-unique-same' AND table_name = 'plugin_keyless_unique_same'");
+    assert_same(scalar($keyless_unique_same_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_keyless_unique_same' AND rowid = $keyless_unique_same_rowid"), $keyless_unique_same_source_identity, 'identical keyless unique insert adopts the source sidecar identity onto the target row');
+    cow_merge_databases($keyless_unique_same_base, $keyless_unique_same_source, $keyless_unique_same_target, $keyless_unique_same_metadata, 'feature-keyless-unique-same', 'main');
+    assert_same((int)scalar($keyless_unique_same_target, "SELECT COUNT(*) FROM plugin_keyless_unique_same WHERE slug = 'same-keyless-slug' AND value = 'same payload'"), 1, 'rerunning identical keyless unique merge keeps one target row');
+    assert_same((int)scalar($keyless_unique_same_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_keyless_unique_same' AND decision = 'source-applied' AND reason LIKE 'source inserted no-primary-key row already exists in target by unique index%'"), 1, 'rerunning identical keyless unique merge does not repeat the source-applied collapse decision');
 
     $capture_db = $tmp . '/capture.sqlite';
     $capture_feature = $tmp . '/capture-feature.sqlite';
