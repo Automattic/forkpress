@@ -60,6 +60,13 @@ on_error() {
   dump_if_exists "$TMP/keyless-resolution-needs-action-queue.json"
   dump_if_exists "$TMP/keyless-unreviewed-resolution-queue.json"
   dump_if_exists "$TMP/keyless-resolution-status.json"
+  dump_if_exists "$TMP/offline-keyless-source.json"
+  dump_if_exists "$TMP/offline-keyless-target.json"
+  dump_if_exists "$TMP/offline-keyless-merge.out"
+  dump_if_exists "$TMP/offline-keyless-after-merge.json"
+  dump_if_exists "$TMP/offline-keyless-audit.json"
+  dump_if_exists "$TMP/offline-keyless-resolve.out"
+  dump_if_exists "$TMP/offline-keyless-after-resolution.json"
   dump_if_exists "$TMP/merge-audit.out"
   dump_if_exists "$TMP/merge-audit.json"
   dump_if_exists "$TMP/file-conflict-pending.out"
@@ -770,6 +777,33 @@ grep -F "E2E follow-up on runtime keyless resolution" "$TMP/keyless-resolution-a
 php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["review"] ?? false) === true) && (($data["filters"]["review_status"] ?? null) === "needs-action") && (($data["filters"]["records"] ?? null) === "resolutions") && (($data["filters"]["scope"] ?? null) === "db") && empty($data["conflicts"] ?? []) && empty($data["decisions"] ?? []); $has_resolution = false; foreach (($data["resolutions"] ?? []) as $row) { if (($row["table_name"] ?? null) === "__files__") $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[2] && ($row["review_status"] ?? null) === "needs-action" && ($row["review_note"] ?? null) === "E2E follow-up on runtime keyless resolution") $has_resolution = true; } exit($ok && $has_resolution ? 0 : 1);' "$TMP/keyless-resolution-needs-action-queue.json" "$KEYLESS_RESOLUTION_ID"
 "$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --resolution-status validated --group-by status --limit 8 > "$TMP/keyless-resolution-status.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["records"] ?? null) === "resolutions") && (($data["filters"]["resolution_status"] ?? null) === "validated") && (($data["filters"]["group_by"] ?? null) === "status"); $has_resolution = false; foreach (($data["resolutions"] ?? []) as $row) { if ((int)($row["id"] ?? 0) === (int)$argv[2] && ($row["status"] ?? null) === "validated") $has_resolution = true; } $has_group = false; foreach (($data["resolution_groups"] ?? []) as $group) { if (($group["group_key"] ?? null) === "validated" && (int)($group["resolution_count"] ?? 0) > 0) $has_group = true; } exit($ok && $has_resolution && $has_group ? 0 : 1);' "$TMP/keyless-resolution-status.json" "$KEYLESS_RESOLUTION_ID"
+
+log_step "bound offline no-PK rowid ambiguity"
+php -r '$db = new SQLite3($argv[1]); $db->exec("DROP TABLE IF EXISTS wp_forkpress_e2e_offline_keyless"); $db->exec("CREATE TABLE wp_forkpress_e2e_offline_keyless (label TEXT, value TEXT)"); $db->exec("INSERT INTO wp_forkpress_e2e_offline_keyless (label, value) VALUES ('\''Offline base row'\'', '\''base'\'')");' "$WORK/main/wp-content/database/.ht.sqlite"
+"$BIN" branch --work-dir "$WORK_DIR" create offline-keyless-reuse > "$TMP/offline-keyless-create.out"
+grep -F "offline-keyless-reuse.wp.localhost:$PORT" "$TMP/offline-keyless-create.out" >/dev/null
+php -r '$db = new SQLite3($argv[1]); $db->exec("DELETE FROM wp_forkpress_e2e_offline_keyless WHERE rowid = 1"); $db->exec("INSERT INTO wp_forkpress_e2e_offline_keyless (label, value) VALUES ('\''Offline reused source row'\'', '\''new offline row'\'')"); $row = $db->querySingle("SELECT rowid, label, value FROM wp_forkpress_e2e_offline_keyless", true); file_put_contents($argv[2], json_encode($row)); exit(((int)($row["rowid"] ?? 0) === 1 && ($row["label"] ?? null) === "Offline reused source row") ? 0 : 1);' "$WORK/offline-keyless-reuse/wp-content/database/.ht.sqlite" "$TMP/offline-keyless-source.json"
+php -r '$db = new SQLite3($argv[1]); $db->exec("UPDATE wp_forkpress_e2e_offline_keyless SET value = '\''target kept offline old row'\'' WHERE rowid = 1"); $row = $db->querySingle("SELECT rowid, label, value FROM wp_forkpress_e2e_offline_keyless", true); file_put_contents($argv[2], json_encode($row)); exit(((int)($row["rowid"] ?? 0) === 1 && ($row["value"] ?? null) === "target kept offline old row") ? 0 : 1);' "$WORK/main/wp-content/database/.ht.sqlite" "$TMP/offline-keyless-target.json"
+"$BIN" branch --work-dir "$WORK_DIR" merge offline-keyless-reuse --into main > "$TMP/offline-keyless-merge.out"
+grep -F "forkpress: merged offline-keyless-reuse into main" "$TMP/offline-keyless-merge.out" >/dev/null
+grep -F "status:    completed_with_conflicts" "$TMP/offline-keyless-merge.out" >/dev/null
+php -r '$db = new SQLite3($argv[1]); $rows = []; $res = $db->query("SELECT rowid, label, value FROM wp_forkpress_e2e_offline_keyless ORDER BY rowid"); while ($row = $res->fetchArray(SQLITE3_ASSOC)) $rows[] = $row; file_put_contents($argv[2], json_encode(["rows" => $rows])); exit(count($rows) === 1 && ($rows[0]["label"] ?? null) === "Offline base row" && ($rows[0]["value"] ?? null) === "target kept offline old row" ? 0 : 1);' "$WORK/main/wp-content/database/.ht.sqlite" "$TMP/offline-keyless-after-merge.json"
+OFFLINE_KEYLESS_CONFLICT_ID="$(
+  php -r '$db = new SQLite3($argv[1]); echo (int)$db->querySingle("SELECT c.id FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = '\''wp_forkpress_e2e_offline_keyless'\'' AND c.conflict_type = '\''row-identity-ambiguous'\'' AND r.source_branch = '\''offline-keyless-reuse'\'' AND r.target_branch = '\''main'\'' ORDER BY c.id DESC LIMIT 1");' \
+    "$WORK_DIR/cow/merge/metadata.sqlite"
+)"
+if [ "$OFFLINE_KEYLESS_CONFLICT_ID" = "0" ]; then
+  echo "missing offline keyless row-identity-ambiguous conflict id" >&2
+  exit 1
+fi
+php -r '$db = new SQLite3($argv[1]); $conflict_id = (int)$argv[2]; $target_wins = (int)$db->querySingle("SELECT COUNT(*) FROM merge_decisions WHERE table_name = '\''wp_forkpress_e2e_offline_keyless'\'' AND decision = '\''target-wins'\'' AND reason LIKE '\''no-primary-key source row changed every column%'\''"); exit($conflict_id > 0 && $target_wins > 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite" "$OFFLINE_KEYLESS_CONFLICT_ID"
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --scope db --records conflicts --conflict-type row-identity-ambiguous --limit 20 > "$TMP/offline-keyless-audit.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["conflict_type"] ?? null) === "row-identity-ambiguous") && (($data["filters"]["records"] ?? null) === "conflicts") && (($data["filters"]["scope"] ?? null) === "db"); $has_conflict = false; foreach (($data["conflicts"] ?? []) as $row) { if ((int)($row["id"] ?? 0) === (int)$argv[2] && ($row["table_name"] ?? null) === "wp_forkpress_e2e_offline_keyless" && ($row["conflict_type"] ?? null) === "row-identity-ambiguous") $has_conflict = true; } exit($ok && $has_conflict ? 0 : 1);' "$TMP/offline-keyless-audit.json" "$OFFLINE_KEYLESS_CONFLICT_ID"
+"$BIN" branch --work-dir "$WORK_DIR" merge-resolve conflict "$OFFLINE_KEYLESS_CONFLICT_ID" --choice source --apply --note "Apply reviewed offline no-PK row choice" --reviewer cow-e2e > "$TMP/offline-keyless-resolve.out"
+grep -F "forkpress: validated COW merge conflict resolution" "$TMP/offline-keyless-resolve.out" >/dev/null
+grep -F "applied:   yes" "$TMP/offline-keyless-resolve.out" >/dev/null
+php -r '$db = new SQLite3($argv[1]); $rows = []; $res = $db->query("SELECT rowid, label, value FROM wp_forkpress_e2e_offline_keyless ORDER BY rowid"); while ($row = $res->fetchArray(SQLITE3_ASSOC)) $rows[] = $row; file_put_contents($argv[2], json_encode(["rows" => $rows])); exit(count($rows) === 1 && ($rows[0]["label"] ?? null) === "Offline reused source row" && ($rows[0]["value"] ?? null) === "new offline row" ? 0 : 1);' "$WORK/main/wp-content/database/.ht.sqlite" "$TMP/offline-keyless-after-resolution.json"
+php -r '$db = new SQLite3($argv[1]); $conflict_id = (int)$argv[2]; $resolution = (int)$db->querySingle("SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $conflict_id AND table_name = '\''wp_forkpress_e2e_offline_keyless'\'' AND choice = '\''source'\'' AND applied = 1"); $reviewed = (int)$db->querySingle("SELECT COUNT(*) FROM merge_review_notes WHERE record_type = '\''conflict'\'' AND record_id = $conflict_id AND status = '\''reviewed'\''"); exit($resolution === 1 && $reviewed === 1 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite" "$OFFLINE_KEYLESS_CONFLICT_ID"
 
 log_step "resolve runtime plugin unique collision"
 mkdir -p "$WORK/main/wp-content/mu-plugins"
