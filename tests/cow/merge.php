@@ -682,6 +682,44 @@ try {
     assert_same($fk_delete_source_resolution['status'], 'applied', 'source foreign-key delete resolution applies after the child row is removed');
     assert_same((int)scalar($fk_delete_target, 'SELECT COUNT(*) FROM plugin_fk_delete_parents WHERE id = 1'), 0, 'foreign-key source delete resolution removes the audited parent row');
 
+    $fk_delete_graph_base = $tmp . '/fk-delete-graph-base.sqlite';
+    $fk_delete_graph_source = $tmp . '/fk-delete-graph-source.sqlite';
+    $fk_delete_graph_target = $tmp . '/fk-delete-graph-target.sqlite';
+    $fk_delete_graph_metadata = $tmp . '/.forkpress/cow/merge/fk-delete-graph-metadata.sqlite';
+    create_base_db($fk_delete_graph_base);
+    copy($fk_delete_graph_base, $fk_delete_graph_source);
+    copy($fk_delete_graph_base, $fk_delete_graph_target);
+    foreach ([$fk_delete_graph_base, $fk_delete_graph_source, $fk_delete_graph_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_fk_graph_parents (id INTEGER PRIMARY KEY, label TEXT)');
+        $db->exec('CREATE TABLE plugin_fk_graph_children (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES plugin_fk_graph_parents(id), label TEXT)');
+        $db->exec('CREATE TABLE plugin_fk_graph_grandchildren (id INTEGER PRIMARY KEY, child_id INTEGER NOT NULL REFERENCES plugin_fk_graph_children(id), label TEXT)');
+        $db->exec("INSERT INTO plugin_fk_graph_parents (id, label) VALUES (1, 'base parent')");
+        $db->exec("INSERT INTO plugin_fk_graph_children (id, parent_id, label) VALUES (20, 1, 'base child')");
+        $db->exec("INSERT INTO plugin_fk_graph_grandchildren (id, child_id, label) VALUES (30, 20, 'base grandchild')");
+        $db->close();
+    }
+    $db = open_db($fk_delete_graph_source);
+    $db->exec('DELETE FROM plugin_fk_graph_grandchildren WHERE id = 30');
+    $db->exec('DELETE FROM plugin_fk_graph_children WHERE id = 20');
+    $db->exec('DELETE FROM plugin_fk_graph_parents WHERE id = 1');
+    $db->close();
+    $fk_delete_graph_result = cow_merge_databases($fk_delete_graph_base, $fk_delete_graph_source, $fk_delete_graph_target, $fk_delete_graph_metadata, 'feature-fk-delete-graph', 'main');
+    assert_same($fk_delete_graph_result['status'], 'completed', 'source deleting a foreign-key parent and unchanged descendants applies without a false target constraint conflict');
+    assert_same((int)scalar($fk_delete_graph_target, 'SELECT COUNT(*) FROM plugin_fk_graph_parents'), 0, 'foreign-key parent source delete is applied after source-deleted descendants are removed');
+    assert_same((int)scalar($fk_delete_graph_target, 'SELECT COUNT(*) FROM plugin_fk_graph_children'), 0, 'foreign-key child source delete is applied before parent delete');
+    assert_same((int)scalar($fk_delete_graph_target, 'SELECT COUNT(*) FROM plugin_fk_graph_grandchildren'), 0, 'foreign-key grandchild source delete is applied before child delete');
+    assert_same(
+        (int)scalar($fk_delete_graph_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE conflict_type = 'row-target-constraint' AND table_name LIKE 'plugin_fk_graph_%'"),
+        0,
+        'source-deleted foreign-key graph does not record target constraint conflicts when target descendants are unchanged'
+    );
+    assert_same(
+        (int)scalar($fk_delete_graph_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name LIKE 'plugin_fk_graph_%' AND decision = 'source-applied' AND reason LIKE 'source%deleted row%'"),
+        3,
+        'source-deleted foreign-key graph records auditable source-applied delete decisions'
+    );
+
     $target_only_base = $tmp . '/target-only-base.sqlite';
     $target_only_source = $tmp . '/target-only-source.sqlite';
     $target_only_target = $tmp . '/target-only-target.sqlite';
