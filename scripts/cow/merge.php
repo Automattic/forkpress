@@ -4333,6 +4333,50 @@ function cow_merge_file_transaction_cleanup(array $tx): void {
     }
 }
 
+function cow_merge_file_root_snapshot_begin(string $target_root): array {
+    $manifest = cow_merge_file_manifest_for_root($target_root);
+    $tx = cow_merge_file_transaction_begin();
+    foreach (array_keys($manifest['entries']) as $path) {
+        cow_merge_file_transaction_snapshot_path($tx, $target_root, $path);
+    }
+    return [
+        'entries' => $manifest['entries'],
+        'transaction' => $tx,
+    ];
+}
+
+function cow_merge_file_root_snapshot_restore(array $snapshot, string $target_root): void {
+    $original_entries = $snapshot['entries'] ?? [];
+    if (!is_array($original_entries)) {
+        throw new RuntimeException('invalid filesystem root snapshot');
+    }
+
+    $current_entries = cow_merge_file_manifest_for_root($target_root)['entries'];
+    $added_paths = array_values(array_diff(array_keys($current_entries), array_keys($original_entries)));
+    usort($added_paths, static function (string $a, string $b): int {
+        return strlen($b) <=> strlen($a) ?: strcmp($b, $a);
+    });
+    foreach ($added_paths as $path) {
+        cow_merge_remove_tree(cow_merge_file_target_path($target_root, $path));
+    }
+
+    $tx = $snapshot['transaction'] ?? null;
+    if (!is_array($tx)) {
+        throw new RuntimeException('invalid filesystem root snapshot transaction');
+    }
+    cow_merge_file_transaction_restore($tx, $target_root);
+}
+
+function cow_merge_file_root_snapshot_cleanup(?array $snapshot): void {
+    if ($snapshot === null) {
+        return;
+    }
+    $tx = $snapshot['transaction'] ?? null;
+    if (is_array($tx)) {
+        cow_merge_file_transaction_cleanup($tx);
+    }
+}
+
 function cow_merge_file_entry_without_path(?array $entry): ?array {
     if ($entry === null) {
         return null;
@@ -9977,9 +10021,11 @@ function cow_merge_branch_state(
 
     $target_snapshot = null;
     $metadata_snapshot = null;
+    $filesystem_snapshot = null;
     if ($has_file_args) {
         $target_snapshot = cow_merge_snapshot_sqlite_db($target_db);
         $metadata_snapshot = cow_merge_snapshot_sqlite_db($metadata_db);
+        $filesystem_snapshot = cow_merge_file_root_snapshot_begin((string)$target_root);
     }
 
     $attempted_run_id = null;
@@ -10007,6 +10053,9 @@ function cow_merge_branch_state(
             try {
                 cow_merge_restore_sqlite_snapshot($target_snapshot);
                 cow_merge_restore_sqlite_snapshot($metadata_snapshot);
+                if ($filesystem_snapshot !== null) {
+                    cow_merge_file_root_snapshot_restore($filesystem_snapshot, (string)$target_root);
+                }
                 cow_merge_record_failed_run(
                     $metadata_db,
                     $source_branch,
@@ -10043,6 +10092,7 @@ function cow_merge_branch_state(
         if ($metadata_snapshot !== null) {
             cow_merge_cleanup_sqlite_snapshot($metadata_snapshot);
         }
+        cow_merge_file_root_snapshot_cleanup($filesystem_snapshot);
     }
 }
 

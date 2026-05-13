@@ -2686,6 +2686,74 @@ SQL);
     assert_true(str_contains($whole_audit_text, 'failure=') && str_contains($whole_audit_text, 'forced whole-branch file failure'), 'merge audit text prints failed-run reason');
     assert_same((int)scalar($whole_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE decision = 'source-applied'"), 0, 'whole-branch rollback does not leave source-applied decisions for rolled-back changes');
 
+    $late_whole_base_db = $tmp . '/late-whole-rollback-base.sqlite';
+    $late_whole_source_db = $tmp . '/late-whole-rollback-source.sqlite';
+    $late_whole_target_db = $tmp . '/late-whole-rollback-target.sqlite';
+    create_base_db($late_whole_base_db);
+    copy($late_whole_base_db, $late_whole_source_db);
+    copy($late_whole_base_db, $late_whole_target_db);
+    $db = open_db($late_whole_source_db);
+    $db->exec("UPDATE wp_posts SET post_content = 'late source db change' WHERE ID = 1");
+    $db->close();
+
+    $late_whole_base_root = $tmp . '/late-whole-rollback-base';
+    $late_whole_source_root = $tmp . '/late-whole-rollback-source';
+    $late_whole_target_root = $tmp . '/late-whole-rollback-target';
+    mkdir($late_whole_base_root . '/wp-content/uploads', 0777, true);
+    write_test_file($late_whole_base_root . '/wp-content/uploads/late.txt', 'late base');
+    write_test_file($late_whole_base_root . '/wp-content/uploads/remove-late.txt', 'late remove base');
+    copy_tree_for_test($late_whole_base_root, $late_whole_source_root);
+    copy_tree_for_test($late_whole_base_root, $late_whole_target_root);
+    write_test_file($late_whole_source_root . '/wp-content/uploads/late.txt', 'late source');
+    write_test_file($late_whole_source_root . '/wp-content/uploads/late-added.txt', 'late added source');
+    unlink($late_whole_source_root . '/wp-content/uploads/remove-late.txt');
+    $late_whole_manifest = $tmp . '/.forkpress/cow/merge/file-bases/feature-late-whole-rollback.json';
+    cow_merge_capture_file_base($late_whole_base_root, $late_whole_manifest);
+
+    $late_whole_metadata = $tmp . '/.forkpress/cow/merge/late-whole-rollback-metadata.sqlite';
+    $late_whole_meta = open_db($late_whole_metadata);
+    cow_merge_ensure_metadata($late_whole_meta);
+    $late_whole_meta->exec(<<<'SQL'
+CREATE TRIGGER fail_late_branch_status_update
+BEFORE UPDATE OF status ON merge_runs
+WHEN OLD.source_branch = 'feature-late-whole-rollback'
+  AND OLD.status = 'completed'
+  AND NEW.status = 'completed'
+BEGIN
+    SELECT RAISE(ABORT, 'forced late whole-branch status failure');
+END
+SQL);
+    $late_whole_meta->close();
+
+    $late_whole_failed = false;
+    set_error_handler(static function (int $severity, string $message): bool {
+        return str_contains($message, 'forced late whole-branch status failure');
+    });
+    try {
+        cow_merge_branch_state(
+            $late_whole_base_db,
+            $late_whole_source_db,
+            $late_whole_target_db,
+            $late_whole_metadata,
+            'feature-late-whole-rollback',
+            'main',
+            $late_whole_manifest,
+            $late_whole_source_root,
+            $late_whole_target_root
+        );
+    } catch (Throwable $e) {
+        $late_whole_failed = str_contains($e->getMessage(), 'forced late whole-branch status failure');
+    } finally {
+        restore_error_handler();
+    }
+    assert_true($late_whole_failed, 'late whole-branch rollback surfaces post-filesystem metadata failure');
+    assert_same(scalar($late_whole_target_db, "SELECT post_content FROM wp_posts WHERE ID = 1"), 'Base content', 'late whole-branch rollback restores target DB changes after file phase completed');
+    assert_same(file_get_contents($late_whole_target_root . '/wp-content/uploads/late.txt'), 'late base', 'late whole-branch rollback restores changed filesystem paths after file phase completed');
+    assert_true(!file_exists($late_whole_target_root . '/wp-content/uploads/late-added.txt'), 'late whole-branch rollback removes files added before the late failure');
+    assert_same(file_get_contents($late_whole_target_root . '/wp-content/uploads/remove-late.txt'), 'late remove base', 'late whole-branch rollback restores files deleted before the late failure');
+    assert_same((int)scalar($late_whole_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-late-whole-rollback' AND status = 'failed'"), 1, 'late whole-branch rollback records a failed merge run after restoring metadata');
+    assert_same((int)scalar($late_whole_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__'"), 0, 'late whole-branch rollback discards filesystem decisions after metadata restore');
+
     $rollback_artifact_metadata = $tmp . '/.forkpress/cow/merge/rollback-failure-artifact.sqlite';
     $artifact_path = cow_merge_record_rollback_failure_artifact(
         $rollback_artifact_metadata,

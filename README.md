@@ -641,6 +641,9 @@ tooling.
   `target-kept` decisions so clean trunk/main-side DDL remains auditable.
   Target-only filesystem additions, deletions, and path changes are also
   preserved and recorded as `target-kept` decisions.
+  Mixed database/filesystem merges keep a whole-branch rollback snapshot, so
+  late metadata or filesystem failures restore target database state,
+  filesystem paths, and merge audit metadata before recording the failed run.
   Compatible rebuilds also preserve
   dependent target views when those views validate before and after the rebuild.
   Source view rewrites preserve transitive dependent target views and their
