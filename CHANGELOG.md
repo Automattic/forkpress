@@ -20,6 +20,7 @@
 - Held source-added SQLite view dependency cycles as explicit validation-gated `schema-source-added-view` conflicts instead of trying to guess an installation order.
 - Kept reviewed source resolution for cyclic source-added SQLite views validation-gated with the explicit audited cycle reason.
 - Held source-added SQLite views that would cycle with target-side views as validation-gated `schema-source-added-view` conflicts before target mutation.
+- Added COW coverage for source-changed view rewrites that would cycle with preserved target-side views, keeping source resolution validation-gated until the target view dependency is handled.
 - Added COW coverage for source-added view chains that cross source-only tables and restored target-dropped tables, keeping each view validation-gated until its dependencies exist.
 - Added COW coverage for source-added trigger chains that cross restored tables, source-added views, and source-only tables, keeping each trigger validation-gated until its dependencies exist.
 - Preflighted source-added trigger subject table/view dependencies so triggers attached to missing restored or source-added objects stay validation-gated with explicit audit metadata.

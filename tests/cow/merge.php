@@ -3613,6 +3613,101 @@ SQL);
         'rerunning after dependent source view rewrite does not rediscover the resolved schema conflict'
     );
 
+    $schema_view_cycle_rewrite_base = $tmp . '/schema-view-cycle-rewrite-base.sqlite';
+    $schema_view_cycle_rewrite_source = $tmp . '/schema-view-cycle-rewrite-source.sqlite';
+    $schema_view_cycle_rewrite_target = $tmp . '/schema-view-cycle-rewrite-target.sqlite';
+    create_base_db($schema_view_cycle_rewrite_base);
+    $db = open_db($schema_view_cycle_rewrite_base);
+    $db->exec('CREATE VIEW plugin_items_cycle_parent AS SELECT item_id, label FROM plugin_items');
+    $db->close();
+    copy($schema_view_cycle_rewrite_base, $schema_view_cycle_rewrite_source);
+    copy($schema_view_cycle_rewrite_base, $schema_view_cycle_rewrite_target);
+
+    $db = open_db($schema_view_cycle_rewrite_source);
+    $db->exec('DROP VIEW plugin_items_cycle_parent');
+    $db->exec('CREATE VIEW plugin_items_cycle_parent AS SELECT item_id, label FROM plugin_items_cycle_child');
+    $db->close();
+    $db = open_db($schema_view_cycle_rewrite_target);
+    $db->exec('CREATE VIEW plugin_items_cycle_child AS SELECT item_id, label FROM plugin_items_cycle_parent');
+    $db->close();
+
+    $schema_view_cycle_rewrite_result = cow_merge_databases(
+        $schema_view_cycle_rewrite_base,
+        $schema_view_cycle_rewrite_source,
+        $schema_view_cycle_rewrite_target,
+        $metadata,
+        'feature-view-cycle-rewrite',
+        'main'
+    );
+    assert_same($schema_view_cycle_rewrite_result['status'], 'completed_with_conflicts', 'source view rewrite that would cycle with a preserved target view remains reviewable');
+    $schema_view_cycle_rewrite_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_items_cycle_parent' AND conflict_type = 'schema-source-changed-view' ORDER BY id DESC LIMIT 1");
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $metadata,
+            $schema_view_cycle_rewrite_conflict_id,
+            'source',
+            false,
+            'Preview cyclic source view rewrite.',
+            'test'
+        ),
+        'unsupported cyclic view dependencies',
+        'source view rewrite dry-run refuses to cycle with a preserved target view'
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $metadata,
+            $schema_view_cycle_rewrite_conflict_id,
+            'source',
+            true,
+            'Apply cyclic source view rewrite.',
+            'test'
+        ),
+        'unsupported cyclic view dependencies',
+        'source view rewrite apply refuses to cycle with a preserved target view'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_view_cycle_rewrite_conflict_id"),
+        0,
+        'failed cyclic source view rewrite does not record resolution metadata'
+    );
+    assert_true(
+        str_contains((string)scalar($schema_view_cycle_rewrite_target, "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_cycle_parent'"), 'plugin_items'),
+        'failed cyclic source view rewrite rolls back the target parent view'
+    );
+    assert_same(
+        (int)scalar($schema_view_cycle_rewrite_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_cycle_child'"),
+        1,
+        'failed cyclic source view rewrite preserves the target child view'
+    );
+    $db = open_db($schema_view_cycle_rewrite_target);
+    $db->exec('DROP VIEW plugin_items_cycle_child');
+    $db->exec('CREATE VIEW plugin_items_cycle_child AS SELECT item_id, label FROM plugin_items');
+    $db->close();
+    $schema_view_cycle_rewrite_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_view_cycle_rewrite_conflict_id,
+        'source',
+        true,
+        'Apply source view rewrite after target view cycle is removed.',
+        'test'
+    );
+    assert_same($schema_view_cycle_rewrite_resolution['status'], 'applied', 'source view rewrite applies after the preserved target view no longer cycles');
+    assert_same(scalar($schema_view_cycle_rewrite_target, "SELECT label FROM plugin_items_cycle_parent WHERE item_id = 'alpha'"), 'Alpha', 'resolved source view rewrite remains queryable through the preserved target view');
+    $schema_view_cycle_rewrite_rerun = cow_merge_databases(
+        $schema_view_cycle_rewrite_base,
+        $schema_view_cycle_rewrite_source,
+        $schema_view_cycle_rewrite_target,
+        $metadata,
+        'feature-view-cycle-rewrite',
+        'main'
+    );
+    assert_same($schema_view_cycle_rewrite_rerun['status'], 'completed', 'rerunning after cyclic source view rewrite resolution completes without a new conflict');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.column_name = 'plugin_items_cycle_parent' AND c.conflict_type = 'schema-source-changed-view' AND r.source_branch = 'feature-view-cycle-rewrite'"),
+        1,
+        'rerunning after cyclic source view rewrite resolution does not rediscover the resolved schema conflict'
+    );
+
     $schema_view_trigger_validation_base = $tmp . '/schema-view-trigger-validation-base.sqlite';
     $schema_view_trigger_validation_source = $tmp . '/schema-view-trigger-validation-source.sqlite';
     $schema_view_trigger_validation_target = $tmp . '/schema-view-trigger-validation-target.sqlite';
