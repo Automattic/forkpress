@@ -6148,6 +6148,98 @@ SQL);
     assert_same($schema_restore_view_trigger_rollback_apply['status'], 'applied', 'table restore applies after the invalid preserved target view trigger is handled');
     assert_same(scalar($schema_restore_view_trigger_rollback_target, "SELECT label FROM plugin_restore_view_trigger_live WHERE code = 'restore-view-trigger-parent'"), 'restore view trigger label', 'preserved target view remains queryable after view-trigger-sensitive table restore');
 
+    $schema_restore_transitive_view_trigger_base = $tmp . '/schema-restore-transitive-view-trigger-base.sqlite';
+    $schema_restore_transitive_view_trigger_source = $tmp . '/schema-restore-transitive-view-trigger-source.sqlite';
+    $schema_restore_transitive_view_trigger_target = $tmp . '/schema-restore-transitive-view-trigger-target.sqlite';
+    $schema_restore_transitive_view_trigger_metadata = $tmp . '/.forkpress/cow/merge/schema-restore-transitive-view-trigger-metadata.sqlite';
+    create_base_db($schema_restore_transitive_view_trigger_base);
+    $db = open_db($schema_restore_transitive_view_trigger_base);
+    $db->exec('CREATE TABLE plugin_restore_transitive_parent (code TEXT NOT NULL PRIMARY KEY, label TEXT NOT NULL)');
+    $db->exec('CREATE TABLE plugin_restore_transitive_audit (code TEXT, observed TEXT)');
+    $db->exec("INSERT INTO plugin_restore_transitive_parent (code, label) VALUES ('restore-transitive-parent', 'restore transitive label')");
+    $db->close();
+    copy($schema_restore_transitive_view_trigger_base, $schema_restore_transitive_view_trigger_source);
+    copy($schema_restore_transitive_view_trigger_base, $schema_restore_transitive_view_trigger_target);
+
+    $db = open_db($schema_restore_transitive_view_trigger_source);
+    $db->exec('CREATE TABLE plugin_restore_transitive_parent_new (code TEXT NOT NULL PRIMARY KEY, label TEXT NOT NULL) WITHOUT ROWID');
+    $db->exec('INSERT INTO plugin_restore_transitive_parent_new (code, label) SELECT code, label FROM plugin_restore_transitive_parent');
+    $db->exec('DROP TABLE plugin_restore_transitive_parent');
+    $db->exec('ALTER TABLE plugin_restore_transitive_parent_new RENAME TO plugin_restore_transitive_parent');
+    $db->close();
+    $db = open_db($schema_restore_transitive_view_trigger_target);
+    $db->exec('DROP TABLE plugin_restore_transitive_parent');
+    $db->exec('CREATE VIEW plugin_restore_transitive_live AS SELECT code, label FROM plugin_restore_transitive_parent');
+    $db->exec('CREATE VIEW plugin_restore_transitive_child AS SELECT code, label FROM plugin_restore_transitive_live');
+    $db->exec(
+        'CREATE TRIGGER plugin_restore_transitive_child_insert INSTEAD OF INSERT ON plugin_restore_transitive_child ' .
+        'BEGIN INSERT INTO plugin_restore_transitive_audit (code, observed) ' .
+        'SELECT NEW.code, CAST(rowid AS TEXT) FROM plugin_restore_transitive_parent WHERE code = NEW.code; END'
+    );
+    $db->close();
+
+    $schema_restore_transitive_view_trigger_result = cow_merge_databases(
+        $schema_restore_transitive_view_trigger_base,
+        $schema_restore_transitive_view_trigger_source,
+        $schema_restore_transitive_view_trigger_target,
+        $schema_restore_transitive_view_trigger_metadata,
+        'feature-schema-restore-transitive-view-trigger',
+        'main'
+    );
+    assert_same($schema_restore_transitive_view_trigger_result['status'], 'completed_with_conflicts', 'target-dropped table restore with a preserved transitive view trigger remains reviewable');
+    $schema_restore_transitive_view_trigger_conflict_id = (int)scalar($schema_restore_transitive_view_trigger_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_restore_transitive_parent' AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
+    assert_true($schema_restore_transitive_view_trigger_conflict_id > 0, 'transitive view-trigger-sensitive target-dropped table restore conflict is auditable');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $schema_restore_transitive_view_trigger_metadata,
+            $schema_restore_transitive_view_trigger_conflict_id,
+            'source',
+            false,
+            'Preview table restore with invalid preserved transitive view trigger.',
+            'test'
+        ),
+        'plugin_restore_transitive_child_insert',
+        'dry-run table restore rejects a preserved transitive target view trigger that would become invalid after source schema application'
+    );
+    assert_same(
+        (int)scalar($schema_restore_transitive_view_trigger_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_restore_transitive_view_trigger_conflict_id"),
+        0,
+        'failed transitive view-trigger table restore dry-run does not record resolution metadata'
+    );
+    assert_same(
+        (int)scalar($schema_restore_transitive_view_trigger_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_restore_transitive_parent'"),
+        0,
+        'failed transitive view-trigger table restore dry-run rolls back the restored table'
+    );
+    assert_same(
+        (int)scalar($schema_restore_transitive_view_trigger_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_restore_transitive_live'"),
+        1,
+        'failed transitive view-trigger table restore dry-run preserves the direct target view'
+    );
+    assert_same(
+        (int)scalar($schema_restore_transitive_view_trigger_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_restore_transitive_child'"),
+        1,
+        'failed transitive view-trigger table restore dry-run preserves the child target view'
+    );
+    assert_same(
+        (int)scalar($schema_restore_transitive_view_trigger_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_restore_transitive_child_insert'"),
+        1,
+        'failed transitive view-trigger table restore dry-run preserves the child view trigger for review'
+    );
+    $db = open_db($schema_restore_transitive_view_trigger_target);
+    $db->exec('DROP TRIGGER plugin_restore_transitive_child_insert');
+    $db->close();
+    $schema_restore_transitive_view_trigger_apply = cow_merge_resolve_conflict(
+        $schema_restore_transitive_view_trigger_metadata,
+        $schema_restore_transitive_view_trigger_conflict_id,
+        'source',
+        true,
+        'Apply table restore after invalid transitive target view trigger is reviewed.',
+        'test'
+    );
+    assert_same($schema_restore_transitive_view_trigger_apply['status'], 'applied', 'table restore applies after the invalid transitive target view trigger is handled');
+    assert_same(scalar($schema_restore_transitive_view_trigger_target, "SELECT label FROM plugin_restore_transitive_child WHERE code = 'restore-transitive-parent'"), 'restore transitive label', 'preserved transitive target view remains queryable after table restore');
+
     $schema_cross_fk_restored_parent_base = $tmp . '/schema-cross-fk-restored-parent-base.sqlite';
     $schema_cross_fk_restored_parent_source = $tmp . '/schema-cross-fk-restored-parent-source.sqlite';
     $schema_cross_fk_restored_parent_target = $tmp . '/schema-cross-fk-restored-parent-target.sqlite';
