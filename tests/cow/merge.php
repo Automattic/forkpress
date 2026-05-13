@@ -1794,6 +1794,78 @@ SQL);
         'rerunning after compatible source table rebuild resolution does not rediscover the resolved schema conflict'
     );
 
+    $schema_keyless_rebuild_base = $tmp . '/schema-keyless-rebuild-base.sqlite';
+    $schema_keyless_rebuild_source = $tmp . '/schema-keyless-rebuild-source.sqlite';
+    $schema_keyless_rebuild_target = $tmp . '/schema-keyless-rebuild-target.sqlite';
+    $schema_keyless_rebuild_metadata = $tmp . '/.forkpress/cow/merge/schema-keyless-rebuild-metadata.sqlite';
+    create_base_db($schema_keyless_rebuild_base);
+    $db = open_db($schema_keyless_rebuild_base);
+    $db->exec('CREATE TABLE plugin_keyless_schema_rebuild (label TEXT, value TEXT)');
+    $db->exec("INSERT INTO plugin_keyless_schema_rebuild (rowid, label, value) VALUES (1, 'Dense keyless', 'dense')");
+    $db->exec("INSERT INTO plugin_keyless_schema_rebuild (rowid, label, value) VALUES (7, 'Sparse keyless', 'sparse')");
+    $db->close();
+    copy($schema_keyless_rebuild_base, $schema_keyless_rebuild_source);
+    copy($schema_keyless_rebuild_base, $schema_keyless_rebuild_target);
+    cow_merge_capture_row_identities($schema_keyless_rebuild_target, $schema_keyless_rebuild_metadata, 'main');
+
+    $db = open_db($schema_keyless_rebuild_source);
+    $db->exec('CREATE TABLE plugin_keyless_schema_rebuild_new (label TEXT, value NUMERIC)');
+    $db->exec('INSERT INTO plugin_keyless_schema_rebuild_new (rowid, label, value) SELECT rowid, label, value FROM plugin_keyless_schema_rebuild');
+    $db->exec('DROP TABLE plugin_keyless_schema_rebuild');
+    $db->exec('ALTER TABLE plugin_keyless_schema_rebuild_new RENAME TO plugin_keyless_schema_rebuild');
+    $db->close();
+
+    $db = open_db($schema_keyless_rebuild_target);
+    $db->exec("UPDATE plugin_keyless_schema_rebuild SET value = 'target sparse preserved' WHERE rowid = 7");
+    $db->exec('CREATE TABLE plugin_keyless_schema_rebuild_new (label TEXT, value REAL)');
+    $db->exec('INSERT INTO plugin_keyless_schema_rebuild_new (rowid, label, value) SELECT rowid, label, value FROM plugin_keyless_schema_rebuild');
+    $db->exec('DROP TABLE plugin_keyless_schema_rebuild');
+    $db->exec('ALTER TABLE plugin_keyless_schema_rebuild_new RENAME TO plugin_keyless_schema_rebuild');
+    $db->close();
+
+    $schema_keyless_rebuild_result = cow_merge_databases(
+        $schema_keyless_rebuild_base,
+        $schema_keyless_rebuild_source,
+        $schema_keyless_rebuild_target,
+        $schema_keyless_rebuild_metadata,
+        'feature-keyless-schema-rebuild',
+        'main'
+    );
+    assert_same($schema_keyless_rebuild_result['status'], 'completed_with_conflicts', 'no-primary-key compatible table rewrite remains validation-gated');
+    $schema_keyless_rebuild_conflict_id = (int)scalar($schema_keyless_rebuild_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_keyless_schema_rebuild' AND column_name IS NULL AND conflict_type = 'schema-conflict' ORDER BY id DESC LIMIT 1");
+    $schema_keyless_rebuild_resolution = cow_merge_resolve_conflict(
+        $schema_keyless_rebuild_metadata,
+        $schema_keyless_rebuild_conflict_id,
+        'source',
+        true,
+        'Apply source no-primary-key table schema.',
+        'test'
+    );
+    assert_same($schema_keyless_rebuild_resolution['status'], 'applied', 'source no-primary-key table rebuild schema resolution records applied status');
+    assert_same(column_type($schema_keyless_rebuild_target, 'plugin_keyless_schema_rebuild', 'value'), 'NUMERIC', 'source no-primary-key table rebuild applies audited source column definition');
+    assert_same((int)scalar($schema_keyless_rebuild_target, 'SELECT COUNT(*) FROM plugin_keyless_schema_rebuild WHERE rowid IN (1, 7)'), 2, 'source no-primary-key table rebuild preserves sparse target rowids');
+    assert_same(scalar($schema_keyless_rebuild_target, 'SELECT value FROM plugin_keyless_schema_rebuild WHERE rowid = 7'), 'target sparse preserved', 'source no-primary-key table rebuild preserves target row data');
+    assert_same(
+        scalar($schema_keyless_rebuild_metadata, "SELECT row_hash FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_keyless_schema_rebuild' AND rowid = 7"),
+        cow_merge_row_hash(['label' => 'Sparse keyless', 'value' => 'target sparse preserved']),
+        'source no-primary-key table rebuild refreshes target sidecar row hash immediately'
+    );
+    $schema_keyless_rebuild_rerun = cow_merge_databases(
+        $schema_keyless_rebuild_base,
+        $schema_keyless_rebuild_source,
+        $schema_keyless_rebuild_target,
+        $schema_keyless_rebuild_metadata,
+        'feature-keyless-schema-rebuild',
+        'main'
+    );
+    assert_same($schema_keyless_rebuild_rerun['status'], 'completed', 'rerunning after no-primary-key table rebuild completes without a new conflict');
+    assert_same(scalar($schema_keyless_rebuild_target, 'SELECT value FROM plugin_keyless_schema_rebuild WHERE rowid = 7'), 'target sparse preserved', 'rerunning after no-primary-key table rebuild keeps preserved target data');
+    assert_same(
+        (int)scalar($schema_keyless_rebuild_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_keyless_schema_rebuild' AND c.conflict_type = 'schema-conflict' AND r.source_branch = 'feature-keyless-schema-rebuild'"),
+        1,
+        'rerunning after no-primary-key table rebuild does not rediscover the resolved schema conflict'
+    );
+
     $schema_rebuild_dep_base = $tmp . '/schema-rebuild-dep-base.sqlite';
     $schema_rebuild_dep_source = $tmp . '/schema-rebuild-dep-source.sqlite';
     $schema_rebuild_dep_target = $tmp . '/schema-rebuild-dep-target.sqlite';

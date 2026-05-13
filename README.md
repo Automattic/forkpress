@@ -481,11 +481,13 @@ tooling.
   Without declared unique evidence, identical-looking no-primary-key inserts
   remain separate rows so duplicate-capable plugin tables do not lose data.
   For no-primary-key plugin tables, runtime row identity tracking handles
-  delete/reinsert `rowid` reuse. If a direct offline edit changes cells on a
-  keyless source row that target did not change while target also changed the
-  prior row and no runtime identity event exists, mergeback keeps target by
-  default and records an auditable `row-identity-ambiguous` conflict instead of
-  mixing cells from different possible logical rows.
+  delete/reinsert `rowid` reuse, and validation-gated compatible table rebuilds
+  preserve sparse target `rowid` values while refreshing sidecar row hashes. If
+  a direct offline edit changes cells on a keyless source row that target did
+  not change while target also changed the prior row and no runtime identity
+  event exists, mergeback keeps target by default and records an auditable
+  `row-identity-ambiguous` conflict instead of mixing cells from different
+  possible logical rows.
 - `forkpress branch merge-audit [--format text|json] [--run ID]`
   `[--scope all|db|files] [--records all|conflicts|decisions|resolutions]`
   `[--conflict-type TYPE] [--decision DECISION] [--path PATH]`

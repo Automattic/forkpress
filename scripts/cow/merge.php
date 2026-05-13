@@ -1181,6 +1181,30 @@ function cow_merge_forget_table_row_identities(
     return count($rowids);
 }
 
+function cow_merge_refresh_table_row_identities(
+    SQLite3 $db,
+    SQLite3 $meta,
+    int $run_id,
+    string $branch,
+    string $table
+): int {
+    if (cow_merge_table_sql($db, $table) === null || cow_merge_pk_cols($db, $table)) {
+        return 0;
+    }
+
+    $refreshed = 0;
+    foreach (cow_merge_load_keyless_physical_rows($db, $table) as $entry) {
+        $rowid = (int)$entry['rowid'];
+        $identity = cow_merge_lookup_row_identity($meta, $branch, $table, $rowid);
+        if ($identity === null) {
+            continue;
+        }
+        cow_merge_remember_row_identity($meta, $run_id, $branch, $table, $rowid, $identity, $entry['row']);
+        $refreshed++;
+    }
+    return $refreshed;
+}
+
 function cow_merge_load_keyless_physical_row(SQLite3 $db, string $table, int $rowid): ?array {
     $stmt = $db->prepare(
         'SELECT rowid AS __forkpress_merge_rowid, * FROM ' . cow_merge_quote_ident($table) . ' WHERE rowid = :rowid'
@@ -3816,13 +3840,20 @@ function cow_merge_apply_source_table_rebuild(SQLite3 $target, string $table, st
         throw new InvalidArgumentException('source schema resolution cannot rebuild a table with no columns');
     }
     $quoted_columns = implode(', ', array_map('cow_merge_quote_ident', $columns));
+    $has_pk = count(array_filter($target_columns, fn($column) => (int)$column['pk'] !== 0)) > 0;
+    $insert_columns = $quoted_columns;
+    $select_columns = $quoted_columns;
+    if (!$has_pk) {
+        $insert_columns = 'rowid, ' . $quoted_columns;
+        $select_columns = 'rowid, ' . $quoted_columns;
+    }
     $target->exec('SAVEPOINT forkpress_schema_rebuild');
     try {
         if (!$target->exec($create_sql)) {
             throw new RuntimeException('failed to create rebuilt table: ' . $target->lastErrorMsg());
         }
-        $copy_sql = 'INSERT INTO ' . cow_merge_quote_ident($tmp_table) . ' (' . $quoted_columns . ') ' .
-            'SELECT ' . $quoted_columns . ' FROM ' . cow_merge_quote_ident($table);
+        $copy_sql = 'INSERT INTO ' . cow_merge_quote_ident($tmp_table) . ' (' . $insert_columns . ') ' .
+            'SELECT ' . $select_columns . ' FROM ' . cow_merge_quote_ident($table);
         if (!$target->exec($copy_sql)) {
             throw new RuntimeException('failed to copy rows into rebuilt table: ' . $target->lastErrorMsg());
         }
@@ -4012,8 +4043,10 @@ function cow_merge_resolve_schema_conflict(
                     }
                     $resolved = ['table_sql' => $source_table_sql, 'column' => $source_column];
                     $previous = $target_table_sql;
-                    $apply_source = function () use ($target, $table, $source_table_sql, $source_columns, $target_columns): void {
+                    $target_branch = (string)$conflict['target_branch'];
+                    $apply_source = function () use ($target, $meta, $conflict, $target_branch, $table, $source_table_sql, $source_columns, $target_columns): void {
                         cow_merge_apply_source_table_rebuild($target, $table, $source_table_sql, $source_columns, $target_columns);
+                        cow_merge_refresh_table_row_identities($target, $meta, (int)$conflict['run_id'], $target_branch, $table);
                     };
                 }
             }
@@ -4196,8 +4229,10 @@ function cow_merge_resolve_schema_conflict(
                     throw new InvalidArgumentException('source schema resolution can only rebuild tables with the same column order and unchanged primary key columns');
                 }
                 $resolved = $source_payload;
-                $apply_source = function () use ($target, $table, $source_payload, $source_columns, $target_columns): void {
+                $target_branch = (string)$conflict['target_branch'];
+                $apply_source = function () use ($target, $meta, $conflict, $target_branch, $table, $source_payload, $source_columns, $target_columns): void {
                     cow_merge_apply_source_table_rebuild($target, $table, $source_payload, $source_columns, $target_columns);
+                    cow_merge_refresh_table_row_identities($target, $meta, (int)$conflict['run_id'], $target_branch, $table);
                 };
             } else {
                 $current_target_sql = $object === '' ? cow_merge_table_sql($target, $table) : cow_merge_index_sql($target, $object);
