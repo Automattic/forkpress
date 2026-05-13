@@ -499,6 +499,9 @@ tooling.
   validation-gated instead of being matched to same-named persistent tables.
   Quoted schema-qualified references are tracked, while schema-looking text
   inside SQL literals or comments is ignored by dependency preflight.
+  Validation-gated source view rewrites also recompile preserved target view
+  trigger programs before reporting dry-run or apply success, so a source view
+  change cannot leave a latent invalid trigger behind.
   When a source row still violates target constraints, target
   is kept by default and the choice is recorded as
   an auditable `row-target-constraint`. Source deletes that would orphan

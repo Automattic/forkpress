@@ -5533,7 +5533,76 @@ function cow_merge_trigger_validation_sql(SQLite3 $db, string $sql): ?string {
     return null;
 }
 
+function cow_merge_trigger_pseudo_column_references(string $sql): array {
+    $refs = [];
+    foreach (cow_merge_sql_split_statements($sql) as $statement) {
+        $ignored_ranges = cow_merge_sql_ignored_ranges($statement);
+        $pattern = '/\b(?P<pseudo>NEW|OLD)\s*\.\s*' . cow_merge_identifier_pattern('column_') . '/i';
+        if (!preg_match_all($pattern, $statement, $matches, PREG_SET_ORDER | PREG_OFFSET_CAPTURE)) {
+            continue;
+        }
+        foreach ($matches as $match) {
+            if (cow_merge_sql_offset_in_ranges((int)$match[0][1], $ignored_ranges)) {
+                continue;
+            }
+            $flat_match = cow_merge_regex_flat_match($match);
+            $column = cow_merge_sql_reference_name($flat_match, 'column_');
+            if ($column === null) {
+                continue;
+            }
+            $refs[] = [
+                'pseudo' => strtolower((string)$flat_match['pseudo']),
+                'column' => $column,
+            ];
+        }
+    }
+    return $refs;
+}
+
+function cow_merge_validate_trigger_pseudo_columns(SQLite3 $db, string $name, string $sql): void {
+    $subject = cow_merge_trigger_subject($sql);
+    if ($subject === null) {
+        return;
+    }
+    $table = (string)$subject['table'];
+    $event = (string)$subject['event'];
+    $columns = array_fill_keys(array_map('strtolower', cow_merge_table_columns($db, $table)), true);
+    $table_sql = cow_merge_table_sql($db, $table);
+    if ($table_sql !== null && !preg_match('/\bWITHOUT\s+ROWID\b/i', $table_sql)) {
+        $columns['rowid'] = true;
+        $columns['oid'] = true;
+        $columns['_rowid_'] = true;
+    }
+    foreach (($subject['columns'] ?? []) as $column) {
+        if (!isset($columns[strtolower((string)$column)])) {
+            throw new InvalidArgumentException(
+                'source trigger ' . $name . ' failed target trigger validation: no such column: ' . $column
+            );
+        }
+    }
+    foreach (cow_merge_trigger_pseudo_column_references($sql) as $ref) {
+        $pseudo = (string)$ref['pseudo'];
+        $column = (string)$ref['column'];
+        if ($pseudo === 'old' && $event === 'insert') {
+            throw new InvalidArgumentException(
+                'source trigger ' . $name . ' failed target trigger validation: OLD is not available for INSERT triggers'
+            );
+        }
+        if ($pseudo === 'new' && $event === 'delete') {
+            throw new InvalidArgumentException(
+                'source trigger ' . $name . ' failed target trigger validation: NEW is not available for DELETE triggers'
+            );
+        }
+        if (!isset($columns[$column])) {
+            throw new InvalidArgumentException(
+                'source trigger ' . $name . ' failed target trigger validation: no such column: ' . strtoupper($pseudo) . '.' . $column
+            );
+        }
+    }
+}
+
 function cow_merge_validate_trigger_program(SQLite3 $db, string $name, string $sql): void {
+    cow_merge_validate_trigger_pseudo_columns($db, $name, $sql);
     $validation_sql = cow_merge_trigger_validation_sql($db, $sql);
     if ($validation_sql === null) {
         return;
@@ -5813,6 +5882,7 @@ function cow_merge_apply_source_view_schema_resolution(SQLite3 $target, string $
                     ' after view schema resolution: ' . $target->lastErrorMsg()
                 );
             }
+            cow_merge_validate_schema_dependency_program($target, $dependency, 'view schema resolution');
         }
         if ($source_sql !== null) {
             cow_merge_validate_views($target, [['name' => $view, 'sql' => $source_sql]], 'post-view-resolution');
@@ -6042,7 +6112,7 @@ function cow_merge_resolve_schema_conflict(
             }
             if ($choice === 'source') {
                 $resolved = $source_sql;
-                $apply_source = function () use ($target, $type, $object, $source_sql): void {
+                $mutate_source = function () use ($target, $type, $object, $source_sql): void {
                     if ($type === 'view') {
                         cow_merge_apply_source_view_schema_resolution($target, $object, $source_sql);
                     } else {
@@ -6063,6 +6133,19 @@ function cow_merge_resolve_schema_conflict(
                         }
                     }
                 };
+                $validate_source = function () use ($target, $mutate_source): void {
+                    $target->exec('SAVEPOINT forkpress_schema_object_resolution_validation');
+                    try {
+                        $mutate_source();
+                        $target->exec('ROLLBACK TO forkpress_schema_object_resolution_validation');
+                        $target->exec('RELEASE forkpress_schema_object_resolution_validation');
+                    } catch (Throwable $e) {
+                        $target->exec('ROLLBACK TO forkpress_schema_object_resolution_validation');
+                        $target->exec('RELEASE forkpress_schema_object_resolution_validation');
+                        throw $e;
+                    }
+                };
+                $apply_source = $mutate_source;
             }
         } elseif ($conflict_type === 'schema-target-dropped-table' && $object === '') {
             $restore_payload = cow_merge_normalize_source_table_restore_payload($source_payload);

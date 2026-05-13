@@ -25,6 +25,7 @@
 - Tightened validation-gated source index resolutions so dry-run and apply both prove target rows satisfy the audited source index before reporting success.
 - Tightened validation-gated source index rewrites and drops so dry-run and apply reject latent target foreign-key mismatches before reporting success.
 - Tightened validation-gated source table restores and compatible table rebuilds so dry-run and apply reject latent foreign-key mismatches and invalid restored trigger programs before reporting success.
+- Tightened validation-gated source view rewrites so preserved target view triggers must still compile before dry-run or apply reports success.
 - Materialized source-added table indexes before dependent source-added table rows, so foreign keys backed by source-added unique indexes do not produce false row constraint conflicts.
 - Ignored statement-local CTE aliases during source-added trigger dependency preflight while still tracking real schema objects referenced inside the CTE.
 - Treated source-added trigger references to temporary or attached SQLite schemas as validation-gated dependencies instead of matching same-named persistent tables.

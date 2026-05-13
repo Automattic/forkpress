@@ -3604,6 +3604,78 @@ SQL);
         'rerunning after dependent source view rewrite does not rediscover the resolved schema conflict'
     );
 
+    $schema_view_trigger_validation_base = $tmp . '/schema-view-trigger-validation-base.sqlite';
+    $schema_view_trigger_validation_source = $tmp . '/schema-view-trigger-validation-source.sqlite';
+    $schema_view_trigger_validation_target = $tmp . '/schema-view-trigger-validation-target.sqlite';
+    create_base_db($schema_view_trigger_validation_base);
+    $db = open_db($schema_view_trigger_validation_base);
+    $db->exec('CREATE VIEW plugin_items_trigger_validation_view AS SELECT item_id, label, value FROM plugin_items');
+    $db->close();
+    copy($schema_view_trigger_validation_base, $schema_view_trigger_validation_source);
+    copy($schema_view_trigger_validation_base, $schema_view_trigger_validation_target);
+
+    $db = open_db($schema_view_trigger_validation_source);
+    $db->exec('DROP VIEW plugin_items_trigger_validation_view');
+    $db->exec('CREATE VIEW plugin_items_trigger_validation_view AS SELECT item_id, label FROM plugin_items');
+    $db->close();
+    $db = open_db($schema_view_trigger_validation_target);
+    $db->exec('CREATE TABLE plugin_items_trigger_validation_audit (item_id TEXT, value TEXT)');
+    $db->exec('CREATE TRIGGER plugin_items_trigger_validation_insert INSTEAD OF INSERT ON plugin_items_trigger_validation_view BEGIN INSERT INTO plugin_items_trigger_validation_audit (item_id, value) VALUES (NEW.item_id, NEW.value); END');
+    $db->close();
+
+    $schema_view_trigger_validation_result = cow_merge_databases(
+        $schema_view_trigger_validation_base,
+        $schema_view_trigger_validation_source,
+        $schema_view_trigger_validation_target,
+        $metadata,
+        'feature-view-trigger-validation',
+        'main'
+    );
+    assert_same($schema_view_trigger_validation_result['status'], 'completed_with_conflicts', 'source view rewrite with target trigger remains reviewable');
+    $schema_view_trigger_validation_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_items_trigger_validation_view' AND conflict_type = 'schema-source-changed-view' ORDER BY id DESC LIMIT 1");
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $metadata,
+            $schema_view_trigger_validation_conflict_id,
+            'source',
+            false,
+            'Preview view rewrite with invalid preserved trigger.',
+            'test'
+        ),
+        'failed target trigger validation',
+        'dry-run source view rewrite rejects preserved target trigger programs that no longer compile'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_view_trigger_validation_conflict_id"),
+        0,
+        'failed view trigger validation dry-run does not record resolution metadata'
+    );
+    assert_true(
+        str_contains((string)scalar($schema_view_trigger_validation_target, "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_trigger_validation_view'"), 'value'),
+        'failed view trigger validation dry-run rolls back the target view rewrite'
+    );
+    assert_same(
+        (int)scalar($schema_view_trigger_validation_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_items_trigger_validation_insert'"),
+        1,
+        'failed view trigger validation dry-run preserves the target trigger'
+    );
+    $db = open_db($schema_view_trigger_validation_target);
+    $db->exec('DROP TRIGGER plugin_items_trigger_validation_insert');
+    $db->close();
+    $schema_view_trigger_validation_apply = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_view_trigger_validation_conflict_id,
+        'source',
+        true,
+        'Apply source view rewrite after target trigger review.',
+        'test'
+    );
+    assert_same($schema_view_trigger_validation_apply['status'], 'applied', 'source view rewrite applies after invalid target trigger is handled');
+    assert_true(
+        !str_contains((string)scalar($schema_view_trigger_validation_target, "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_trigger_validation_view'"), 'value'),
+        'validated view rewrite applies the audited source view definition'
+    );
+
     $schema_view_drop_dep_base = $tmp . '/schema-view-drop-dep-base.sqlite';
     $schema_view_drop_dep_source = $tmp . '/schema-view-drop-dep-source.sqlite';
     $schema_view_drop_dep_target = $tmp . '/schema-view-drop-dep-target.sqlite';
@@ -4435,8 +4507,8 @@ SQL);
     assert_same((int)scalar($source_added_trigger_runtime_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'plugin_trigger_runtime_%'"), 0, 'source-added triggers with invalid runtime programs are held back');
     $runtime_trigger_errors = [];
     foreach ([
-        'plugin_trigger_runtime_insert_old' => 'OLD.label',
-        'plugin_trigger_runtime_delete_new' => 'NEW.label',
+        'plugin_trigger_runtime_insert_old' => 'OLD is not available',
+        'plugin_trigger_runtime_delete_new' => 'NEW is not available',
         'plugin_trigger_runtime_update_missing' => 'missing_label',
     ] as $trigger_name => $expected_error) {
         $conflict_id = (int)scalar($source_added_trigger_runtime_metadata, "SELECT id FROM merge_conflicts WHERE column_name = '$trigger_name' AND conflict_type = 'schema-source-added-trigger' ORDER BY id DESC LIMIT 1");
