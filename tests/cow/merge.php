@@ -5152,6 +5152,100 @@ SQL);
         'failed changed-trigger cycle dry-run rolls back the target trigger rewrite'
     );
 
+    $schema_changed_trigger_dependency_cycle_base = $tmp . '/schema-changed-trigger-dependency-cycle-base.sqlite';
+    $schema_changed_trigger_dependency_cycle_source = $tmp . '/schema-changed-trigger-dependency-cycle-source.sqlite';
+    $schema_changed_trigger_dependency_cycle_target = $tmp . '/schema-changed-trigger-dependency-cycle-target.sqlite';
+    $schema_changed_trigger_dependency_cycle_metadata = $tmp . '/.forkpress/cow/merge/schema-changed-trigger-dependency-cycle-metadata.sqlite';
+    create_base_db($schema_changed_trigger_dependency_cycle_base);
+    $db = open_db($schema_changed_trigger_dependency_cycle_base);
+    $db->exec('CREATE TABLE plugin_trigger_dependency_cycle_alpha (label TEXT DEFAULT "alpha")');
+    $db->exec('CREATE TABLE plugin_trigger_dependency_cycle_beta (label TEXT DEFAULT "beta")');
+    $db->exec('CREATE TRIGGER plugin_trigger_dependency_cycle_alpha_insert AFTER INSERT ON plugin_trigger_dependency_cycle_alpha BEGIN SELECT NEW.label; END');
+    $db->exec('CREATE TRIGGER plugin_trigger_dependency_cycle_beta_insert AFTER INSERT ON plugin_trigger_dependency_cycle_beta BEGIN INSERT INTO plugin_trigger_dependency_cycle_alpha (label) VALUES (NEW.label); END');
+    $db->close();
+    copy($schema_changed_trigger_dependency_cycle_base, $schema_changed_trigger_dependency_cycle_source);
+    copy($schema_changed_trigger_dependency_cycle_base, $schema_changed_trigger_dependency_cycle_target);
+    $db = open_db($schema_changed_trigger_dependency_cycle_source);
+    $db->exec('DROP TRIGGER plugin_trigger_dependency_cycle_alpha_insert');
+    $db->exec('CREATE TRIGGER plugin_trigger_dependency_cycle_alpha_insert AFTER INSERT ON plugin_trigger_dependency_cycle_alpha BEGIN INSERT INTO plugin_trigger_dependency_cycle_beta (label) VALUES (NEW.label); END');
+    $db->exec('DROP TRIGGER plugin_trigger_dependency_cycle_beta_insert');
+    $db->close();
+    $schema_changed_trigger_dependency_cycle_result = cow_merge_databases(
+        $schema_changed_trigger_dependency_cycle_base,
+        $schema_changed_trigger_dependency_cycle_source,
+        $schema_changed_trigger_dependency_cycle_target,
+        $schema_changed_trigger_dependency_cycle_metadata,
+        'feature-changed-trigger-dependency-cycle',
+        'main'
+    );
+    assert_same($schema_changed_trigger_dependency_cycle_result['status'], 'completed_with_conflicts', 'source-changed trigger with a source-dropped target trigger dependency remains reviewable');
+    $schema_changed_trigger_dependency_cycle_rewrite_conflict_id = (int)scalar($schema_changed_trigger_dependency_cycle_metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_trigger_dependency_cycle_alpha_insert' AND conflict_type = 'schema-source-changed-trigger' ORDER BY id DESC LIMIT 1");
+    $schema_changed_trigger_dependency_cycle_drop_conflict_id = (int)scalar($schema_changed_trigger_dependency_cycle_metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_trigger_dependency_cycle_beta_insert' AND conflict_type = 'schema-source-dropped-trigger' ORDER BY id DESC LIMIT 1");
+    assert_true($schema_changed_trigger_dependency_cycle_rewrite_conflict_id > 0, 'source-changed trigger dependency cycle records a rewrite conflict');
+    assert_true($schema_changed_trigger_dependency_cycle_drop_conflict_id > 0, 'source-dropped target trigger dependency records a drop conflict');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $schema_changed_trigger_dependency_cycle_metadata,
+            $schema_changed_trigger_dependency_cycle_rewrite_conflict_id,
+            'source',
+            false,
+            'Preview changed trigger before dropping cyclic dependency.',
+            'test'
+        ),
+        'unsupported cyclic trigger dependencies',
+        'source-changed trigger rewrite remains gated until the source-dropped trigger dependency is resolved'
+    );
+    assert_same(
+        (int)scalar($schema_changed_trigger_dependency_cycle_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_changed_trigger_dependency_cycle_rewrite_conflict_id"),
+        0,
+        'failed changed-trigger dependency cycle preview does not record a resolution'
+    );
+    assert_true(
+        str_contains((string)scalar($schema_changed_trigger_dependency_cycle_target, "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_trigger_dependency_cycle_alpha_insert'"), 'SELECT NEW.label'),
+        'failed changed-trigger dependency cycle preview rolls back the trigger rewrite'
+    );
+    $schema_changed_trigger_dependency_cycle_drop_resolution = cow_merge_resolve_conflict(
+        $schema_changed_trigger_dependency_cycle_metadata,
+        $schema_changed_trigger_dependency_cycle_drop_conflict_id,
+        'source',
+        true,
+        'Drop source-dropped trigger before changed trigger rewrite.',
+        'test'
+    );
+    assert_same($schema_changed_trigger_dependency_cycle_drop_resolution['status'], 'applied', 'source-dropped cyclic trigger dependency applies before changed trigger rewrite');
+    $schema_changed_trigger_dependency_cycle_rewrite_resolution = cow_merge_resolve_conflict(
+        $schema_changed_trigger_dependency_cycle_metadata,
+        $schema_changed_trigger_dependency_cycle_rewrite_conflict_id,
+        'source',
+        true,
+        'Apply changed trigger rewrite after dropping cyclic dependency.',
+        'test'
+    );
+    assert_same($schema_changed_trigger_dependency_cycle_rewrite_resolution['status'], 'applied', 'changed trigger rewrite applies after cyclic trigger dependency is resolved');
+    assert_true(
+        str_contains((string)scalar($schema_changed_trigger_dependency_cycle_target, "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_trigger_dependency_cycle_alpha_insert'"), 'plugin_trigger_dependency_cycle_beta'),
+        'resolved changed trigger keeps the audited source rewrite'
+    );
+    assert_same(
+        (int)scalar($schema_changed_trigger_dependency_cycle_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_trigger_dependency_cycle_beta_insert'"),
+        0,
+        'resolved source-dropped trigger dependency remains absent'
+    );
+    $schema_changed_trigger_dependency_cycle_rerun = cow_merge_databases(
+        $schema_changed_trigger_dependency_cycle_base,
+        $schema_changed_trigger_dependency_cycle_source,
+        $schema_changed_trigger_dependency_cycle_target,
+        $schema_changed_trigger_dependency_cycle_metadata,
+        'feature-changed-trigger-dependency-cycle',
+        'main'
+    );
+    assert_same($schema_changed_trigger_dependency_cycle_rerun['status'], 'completed', 'rerunning after changed trigger dependency cycle resolution completes without new conflicts');
+    assert_same(
+        (int)scalar($schema_changed_trigger_dependency_cycle_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-changed-trigger-dependency-cycle'"),
+        2,
+        'rerunning after changed trigger dependency cycle resolution does not rediscover resolved conflicts'
+    );
+
     $schema_restore_trigger_target_cycle_base = $tmp . '/schema-restore-trigger-target-cycle-base.sqlite';
     $schema_restore_trigger_target_cycle_source = $tmp . '/schema-restore-trigger-target-cycle-source.sqlite';
     $schema_restore_trigger_target_cycle_target = $tmp . '/schema-restore-trigger-target-cycle-target.sqlite';
