@@ -1692,6 +1692,20 @@ SQL);
     $db->exec("INSERT INTO plugin_items (item_id, label, value) VALUES ('beta', 'Beta', 42)");
     $db->close();
     assert_same(scalar($schema_rebuild_dep_target, "SELECT item_id FROM plugin_item_audit WHERE item_id = 'beta'"), 'beta', 'recreated target trigger still fires after schema rebuild');
+    $schema_rebuild_dep_rerun = cow_merge_databases($schema_rebuild_dep_base, $schema_rebuild_dep_source, $schema_rebuild_dep_target, $metadata, 'feature-schema-rebuild-deps', 'main');
+    assert_same($schema_rebuild_dep_rerun['status'], 'completed', 'rerunning after dependent source table rebuild completes without a new conflict');
+    assert_same(column_type($schema_rebuild_dep_target, 'plugin_items', 'value'), 'INTEGER', 'rerunning after dependent source table rebuild keeps the audited source schema');
+    assert_same((int)scalar($schema_rebuild_dep_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_items_dep_label_idx'"), 1, 'rerunning after dependent source table rebuild preserves target explicit index');
+    assert_same((int)scalar($schema_rebuild_dep_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_items_dep_insert'"), 1, 'rerunning after dependent source table rebuild preserves target trigger');
+    $db = open_db($schema_rebuild_dep_target);
+    $db->exec("INSERT INTO plugin_items (item_id, label, value) VALUES ('gamma', 'Gamma', 43)");
+    $db->close();
+    assert_same(scalar($schema_rebuild_dep_target, "SELECT item_id FROM plugin_item_audit WHERE item_id = 'gamma'"), 'gamma', 'target trigger still fires after dependent source table rebuild rerun');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_items' AND c.column_name IS NULL AND c.conflict_type = 'schema-conflict' AND r.source_branch = 'feature-schema-rebuild-deps'"),
+        1,
+        'rerunning after dependent source table rebuild does not rediscover the resolved schema conflict'
+    );
 
     $schema_rebuild_view_base = $tmp . '/schema-rebuild-view-base.sqlite';
     $schema_rebuild_view_source = $tmp . '/schema-rebuild-view-source.sqlite';
@@ -1708,13 +1722,14 @@ SQL);
     $db->close();
 
     $db = open_db($schema_rebuild_view_target);
-    $db->exec('CREATE VIEW plugin_items_view AS SELECT item_id, label FROM plugin_items');
     $db->exec('CREATE TABLE plugin_items_new (item_id TEXT PRIMARY KEY, label TEXT, value REAL)');
     $db->exec('INSERT INTO plugin_items_new (item_id, label, value) SELECT item_id, label, value FROM plugin_items');
-    $db->exec('DROP VIEW plugin_items_view');
     $db->exec('DROP TABLE plugin_items');
     $db->exec('ALTER TABLE plugin_items_new RENAME TO plugin_items');
+    $db->exec('CREATE TABLE plugin_items_view_audit (item_id TEXT, label TEXT)');
     $db->exec('CREATE VIEW plugin_items_view AS SELECT item_id, label FROM plugin_items');
+    $db->exec('CREATE VIEW plugin_items_view_child AS SELECT label FROM plugin_items_view');
+    $db->exec('CREATE TRIGGER plugin_items_view_insert INSTEAD OF INSERT ON plugin_items_view BEGIN INSERT INTO plugin_items_view_audit (item_id, label) VALUES (NEW.item_id, NEW.label); END');
     $db->close();
 
     $result = cow_merge_databases($schema_rebuild_view_base, $schema_rebuild_view_source, $schema_rebuild_view_target, $metadata, 'feature-schema-rebuild-view', 'main');
@@ -1731,7 +1746,30 @@ SQL);
     assert_same($schema_rebuild_view_resolution['status'], 'applied', 'source table rebuild with target view records applied status');
     assert_same(column_type($schema_rebuild_view_target, 'plugin_items', 'value'), 'INTEGER', 'source table rebuild with target view applies audited source schema');
     assert_same((int)scalar($schema_rebuild_view_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_view'"), 1, 'source table rebuild preserves target view');
+    assert_same((int)scalar($schema_rebuild_view_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_view_child'"), 1, 'source table rebuild preserves transitive target view');
+    assert_same((int)scalar($schema_rebuild_view_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_items_view_insert'"), 1, 'source table rebuild preserves target view trigger');
     assert_same(scalar($schema_rebuild_view_target, "SELECT label FROM plugin_items_view WHERE item_id = 'alpha'"), 'Alpha', 'preserved target view remains queryable after schema rebuild');
+    assert_same(scalar($schema_rebuild_view_target, "SELECT label FROM plugin_items_view_child WHERE label = 'Alpha'"), 'Alpha', 'preserved transitive target view remains queryable after schema rebuild');
+    $db = open_db($schema_rebuild_view_target);
+    $db->exec("INSERT INTO plugin_items_view (item_id, label) VALUES ('from-view-rebuild', 'From View Rebuild')");
+    $db->close();
+    assert_same(scalar($schema_rebuild_view_target, "SELECT label FROM plugin_items_view_audit WHERE item_id = 'from-view-rebuild'"), 'From View Rebuild', 'preserved target view trigger still fires after schema rebuild');
+    $schema_rebuild_view_rerun = cow_merge_databases($schema_rebuild_view_base, $schema_rebuild_view_source, $schema_rebuild_view_target, $metadata, 'feature-schema-rebuild-view', 'main');
+    assert_same($schema_rebuild_view_rerun['status'], 'completed', 'rerunning after target-view source table rebuild completes without a new conflict');
+    assert_same(column_type($schema_rebuild_view_target, 'plugin_items', 'value'), 'INTEGER', 'rerunning after target-view source table rebuild keeps the audited source schema');
+    assert_same((int)scalar($schema_rebuild_view_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_view'"), 1, 'rerunning after target-view source table rebuild preserves target view');
+    assert_same((int)scalar($schema_rebuild_view_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_view_child'"), 1, 'rerunning after target-view source table rebuild preserves transitive target view');
+    assert_same((int)scalar($schema_rebuild_view_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_items_view_insert'"), 1, 'rerunning after target-view source table rebuild preserves target view trigger');
+    assert_same(scalar($schema_rebuild_view_target, "SELECT label FROM plugin_items_view_child WHERE label = 'Alpha'"), 'Alpha', 'rerunning after target-view source table rebuild keeps transitive target view queryable');
+    $db = open_db($schema_rebuild_view_target);
+    $db->exec("INSERT INTO plugin_items_view (item_id, label) VALUES ('from-view-rerun', 'From View Rerun')");
+    $db->close();
+    assert_same(scalar($schema_rebuild_view_target, "SELECT label FROM plugin_items_view_audit WHERE item_id = 'from-view-rerun'"), 'From View Rerun', 'target view trigger still fires after source table rebuild rerun');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_items' AND c.column_name IS NULL AND c.conflict_type = 'schema-conflict' AND r.source_branch = 'feature-schema-rebuild-view'"),
+        1,
+        'rerunning after target-view source table rebuild does not rediscover the resolved schema conflict'
+    );
 
     $schema_resolve_base = $tmp . '/schema-resolve-base.sqlite';
     $schema_resolve_source = $tmp . '/schema-resolve-source.sqlite';
