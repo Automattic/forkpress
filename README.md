@@ -504,7 +504,8 @@ tooling.
   change cannot leave a latent invalid trigger behind.
   Validation-gated source table drops refuse to leave dependent target
   foreign-key child tables pointing at a missing parent table, including during
-  dry-run previews.
+  dry-run previews, and also refuse to leave target trigger programs that
+  still reference the dropped table.
   When a source row still violates target constraints, target
   is kept by default and the choice is recorded as
   an auditable `row-target-constraint`. Source deletes that would orphan
@@ -585,7 +586,8 @@ tooling.
   Schema source choices can apply safe source-added columns, indexes, views,
   and triggers; source index/view/trigger rewrites or drops; source table drops
   that do not leave dependent target views invalid, implicitly remove target
-  indexes/triggers, or leave dependent target foreign-key child tables pointing
+  indexes/triggers, leave target trigger programs referencing the dropped
+  table, or leave dependent target foreign-key child tables pointing
   at a missing parent table; source table restores when target dropped a table
   that source kept; and compatible table rebuilds that preserve target rows and
   target indexes/triggers while changing audited non-primary-key column

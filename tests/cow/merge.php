@@ -5232,6 +5232,66 @@ SQL);
     assert_same((int)scalar($schema_table_drop_view_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_table_drop_view'"), 1, 'blocked source table drop preserves target table');
     assert_same((int)scalar($schema_table_drop_view_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_table_drop_view_live'"), 1, 'blocked source table drop preserves dependent target view');
 
+    $schema_table_drop_trigger_ref_base = $tmp . '/schema-table-drop-trigger-ref-base.sqlite';
+    $schema_table_drop_trigger_ref_source = $tmp . '/schema-table-drop-trigger-ref-source.sqlite';
+    $schema_table_drop_trigger_ref_target = $tmp . '/schema-table-drop-trigger-ref-target.sqlite';
+    create_base_db($schema_table_drop_trigger_ref_base);
+    $db = open_db($schema_table_drop_trigger_ref_base);
+    $db->exec('CREATE TABLE plugin_table_drop_trigger_ref (item_id TEXT PRIMARY KEY, label TEXT)');
+    $db->exec('CREATE TABLE plugin_table_drop_trigger_ref_observer (item_id TEXT PRIMARY KEY)');
+    $db->exec('CREATE TABLE plugin_table_drop_trigger_ref_audit (item_id TEXT, label TEXT)');
+    $db->exec(<<<'SQL'
+CREATE TRIGGER plugin_table_drop_trigger_ref_observer_insert
+AFTER INSERT ON plugin_table_drop_trigger_ref_observer
+BEGIN
+    INSERT INTO plugin_table_drop_trigger_ref_audit (item_id, label)
+    SELECT item_id, label FROM plugin_table_drop_trigger_ref WHERE item_id = NEW.item_id;
+END
+SQL);
+    $db->close();
+    copy($schema_table_drop_trigger_ref_base, $schema_table_drop_trigger_ref_source);
+    copy($schema_table_drop_trigger_ref_base, $schema_table_drop_trigger_ref_target);
+
+    $db = open_db($schema_table_drop_trigger_ref_source);
+    $db->exec('DROP TRIGGER plugin_table_drop_trigger_ref_observer_insert');
+    $db->exec('DROP TABLE plugin_table_drop_trigger_ref');
+    $db->close();
+
+    $result = cow_merge_databases($schema_table_drop_trigger_ref_base, $schema_table_drop_trigger_ref_source, $schema_table_drop_trigger_ref_target, $metadata, 'feature-table-drop-trigger-ref', 'main');
+    assert_same($result['status'], 'completed_with_conflicts', 'source table drop with dependent target trigger body remains reviewable');
+    $schema_table_drop_trigger_ref_table_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_table_drop_trigger_ref' AND column_name IS NULL AND conflict_type = 'schema-source-dropped-table' ORDER BY id DESC LIMIT 1");
+    $schema_table_drop_trigger_ref_trigger_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_table_drop_trigger_ref_observer_insert' AND conflict_type = 'schema-source-dropped-trigger' ORDER BY id DESC LIMIT 1");
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $schema_table_drop_trigger_ref_table_conflict_id, 'source', false, 'Preview table drop before trigger body dependency.', 'test'),
+        'dependent target trigger programs',
+        'source table drop preview refuses to leave target trigger body invalid'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_table_drop_trigger_ref_table_conflict_id"),
+        0,
+        'failed table drop trigger-body preview does not record a resolution'
+    );
+    assert_same((int)scalar($schema_table_drop_trigger_ref_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_table_drop_trigger_ref'"), 1, 'blocked trigger-body table drop preserves target table');
+    assert_same((int)scalar($schema_table_drop_trigger_ref_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_table_drop_trigger_ref_observer_insert'"), 1, 'blocked trigger-body table drop preserves target trigger');
+    cow_merge_resolve_conflict(
+        $metadata,
+        $schema_table_drop_trigger_ref_trigger_conflict_id,
+        'source',
+        true,
+        'Apply source trigger body dependency drop.',
+        'test'
+    );
+    $schema_table_drop_trigger_ref_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_table_drop_trigger_ref_table_conflict_id,
+        'source',
+        true,
+        'Apply table drop after trigger body dependency.',
+        'test'
+    );
+    assert_same($schema_table_drop_trigger_ref_resolution['status'], 'applied', 'source table drop applies after dependent trigger body is resolved');
+    assert_same((int)scalar($schema_table_drop_trigger_ref_target, "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('plugin_table_drop_trigger_ref', 'plugin_table_drop_trigger_ref_observer_insert')"), 0, 'source table drop removes table after dependent trigger body is resolved');
+
     $schema_table_drop_fk_base = $tmp . '/schema-table-drop-fk-base.sqlite';
     $schema_table_drop_fk_source = $tmp . '/schema-table-drop-fk-source.sqlite';
     $schema_table_drop_fk_target = $tmp . '/schema-table-drop-fk-target.sqlite';

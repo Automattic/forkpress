@@ -5729,6 +5729,29 @@ function cow_merge_view_trigger_dependencies(SQLite3 $db, array $views): array {
     return $dependencies;
 }
 
+function cow_merge_table_dependent_triggers(SQLite3 $db, string $table, array $exclude_trigger_names = []): array {
+    $excluded = array_fill_keys(array_map('strtolower', $exclude_trigger_names), true);
+    $triggers = [];
+    $stmt = $db->query("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND sql IS NOT NULL ORDER BY name");
+    if (!$stmt) {
+        throw new RuntimeException("failed to read trigger dependencies for $table: " . $db->lastErrorMsg());
+    }
+    while ($row = $stmt->fetchArray(SQLITE3_ASSOC)) {
+        $name = (string)$row['name'];
+        if (isset($excluded[strtolower($name)])) {
+            continue;
+        }
+        if (cow_merge_sql_references_table((string)$row['sql'], $table)) {
+            $triggers[] = [
+                'type' => 'trigger',
+                'name' => $name,
+                'sql' => (string)$row['sql'],
+            ];
+        }
+    }
+    return $triggers;
+}
+
 function cow_merge_validate_views(SQLite3 $db, array $views, string $context): void {
     foreach ($views as $view) {
         $name = is_array($view) ? (string)$view['name'] : (string)$view;
@@ -5942,6 +5965,21 @@ function cow_merge_apply_source_table_drop(SQLite3 $target, string $table, bool 
         throw new InvalidArgumentException(
             'source table drop resolution cannot leave dependent target foreign-key child tables invalid: ' .
             implode(', ', $child_tables)
+        );
+    }
+    $attached_triggers = array_values(array_filter(
+        cow_merge_table_rebuild_dependencies($target, $table),
+        fn(array $dependency): bool => (string)($dependency['type'] ?? '') === 'trigger'
+    ));
+    $dependent_triggers = cow_merge_table_dependent_triggers(
+        $target,
+        $table,
+        array_map(fn(array $dependency): string => (string)$dependency['name'], $attached_triggers)
+    );
+    if ($dependent_triggers) {
+        throw new InvalidArgumentException(
+            'source table drop resolution cannot leave dependent target trigger programs invalid: ' .
+            implode(', ', array_map(fn(array $trigger): string => (string)$trigger['name'], $dependent_triggers))
         );
     }
 
