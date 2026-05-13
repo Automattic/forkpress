@@ -47,6 +47,7 @@
 - Added COW coverage for target-dropped no-primary-key table restore rollback after source row sidecars stage but a later preserved foreign-key child validation fails.
 - Added COW coverage for compatible table rebuild rollback when a preserved target trigger would become invalid while an index-backed foreign-key child table still depends on the rebuilt table.
 - Added COW coverage for compatible table rebuild rollback when a preserved target view would become invalid after applying the audited source schema.
+- Made generic DB merge metadata transactional with target DB mutation, so unexpected whole-merge rollbacks discard staged decisions, conflicts, and no-primary-key sidecars while keeping a failed run marker.
 - Tightened validation-gated source view rewrites so preserved target view triggers must still compile before dry-run or apply reports success.
 - Tightened validation-gated source table drops so dry-run and apply refuse to leave dependent target foreign-key child tables pointing at a missing parent table.
 - Tightened validation-gated source table drops so dry-run and apply refuse to leave target trigger programs referencing the dropped table.

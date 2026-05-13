@@ -9747,8 +9747,17 @@ function cow_merge_databases(
 
     $applied = 0;
     $conflicts = 0;
+    $target_transaction_active = false;
+    $metadata_transaction_active = false;
     try {
-        $target->exec('BEGIN IMMEDIATE');
+        if (!$target->exec('BEGIN IMMEDIATE')) {
+            throw new RuntimeException('failed to start target database transaction: ' . $target->lastErrorMsg());
+        }
+        $target_transaction_active = true;
+        if (!$meta->exec('BEGIN IMMEDIATE')) {
+            throw new RuntimeException('failed to start merge metadata transaction: ' . $meta->lastErrorMsg());
+        }
+        $metadata_transaction_active = true;
         $base_tables = cow_merge_table_sql_map($base);
         $source_tables = cow_merge_table_sql_map($source);
         $target_tables = cow_merge_table_sql_map($target);
@@ -9889,9 +9898,16 @@ function cow_merge_databases(
         $applied += $trigger_result['applied'];
         $conflicts += $trigger_result['conflicts'];
 
-        $target->exec('COMMIT');
+        if (!@$target->exec('COMMIT')) {
+            throw new RuntimeException('failed to commit target database transaction: ' . $target->lastErrorMsg());
+        }
+        $target_transaction_active = false;
         $status = $conflicts > 0 ? 'completed_with_conflicts' : 'completed';
         cow_merge_finish_run($meta, $run_id, $status);
+        if (!$meta->exec('COMMIT')) {
+            throw new RuntimeException('failed to commit merge metadata transaction: ' . $meta->lastErrorMsg());
+        }
+        $metadata_transaction_active = false;
         return [
             'run_id' => $run_id,
             'status' => $status,
@@ -9900,7 +9916,12 @@ function cow_merge_databases(
             'metadata_db' => $metadata_db,
         ];
     } catch (Throwable $e) {
-        $target->exec('ROLLBACK');
+        if ($target_transaction_active) {
+            @$target->exec('ROLLBACK');
+        }
+        if ($metadata_transaction_active) {
+            @$meta->exec('ROLLBACK');
+        }
         cow_merge_finish_run($meta, $run_id, 'failed', cow_merge_failure_reason($e));
         throw $e;
     } finally {

@@ -177,6 +177,47 @@ try {
         'independent target cell preservation is auditable'
     );
 
+    $rollback_base = $tmp . '/rollback-base.sqlite';
+    $rollback_source = $tmp . '/rollback-source.sqlite';
+    $rollback_target = $tmp . '/rollback-target.sqlite';
+    $rollback_metadata = $tmp . '/.forkpress/cow/merge/rollback-metadata.sqlite';
+    foreach ([$rollback_base, $rollback_source, $rollback_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_z_rollback_rows (id INTEGER PRIMARY KEY, value TEXT)');
+        $db->exec("INSERT INTO plugin_z_rollback_rows (id, value) VALUES (1, 'base')");
+        $db->close();
+    }
+    $db = open_db($rollback_source);
+    $db->exec('CREATE TABLE plugin_a_keyless_staged (label TEXT, value TEXT)');
+    $db->exec("INSERT INTO plugin_a_keyless_staged (rowid, label, value) VALUES (17, 'staged', 'source')");
+    $db->exec("UPDATE plugin_z_rollback_rows SET value = 'source' WHERE id = 1");
+    $db->close();
+    $db = open_db($rollback_target);
+    $db->exec(
+        "CREATE TRIGGER plugin_z_rollback_guard BEFORE UPDATE ON plugin_z_rollback_rows " .
+        "BEGIN SELECT RAISE(ROLLBACK, 'rollback trigger'); END"
+    );
+    $db->close();
+    assert_throws(
+        fn() => cow_merge_databases($rollback_base, $rollback_source, $rollback_target, $rollback_metadata, 'feature-rollback', 'main'),
+        'failed to commit target database transaction',
+        'whole-merge target rollback is surfaced as a failed merge'
+    );
+    assert_same(
+        (int)scalar($rollback_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_a_keyless_staged'"),
+        0,
+        'whole-merge target rollback removes earlier staged source-added tables'
+    );
+    assert_same(scalar($rollback_target, 'SELECT value FROM plugin_z_rollback_rows WHERE id = 1'), 'base', 'whole-merge target rollback preserves pre-merge row state');
+    assert_same(
+        (int)scalar($rollback_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-rollback' AND status = 'failed' AND failure_reason LIKE 'failed to commit target database transaction%'"),
+        1,
+        'failed whole-merge run remains auditable after metadata rollback'
+    );
+    assert_same((int)scalar($rollback_metadata, 'SELECT COUNT(*) FROM merge_decisions'), 0, 'failed whole-merge rollback discards staged decision metadata');
+    assert_same((int)scalar($rollback_metadata, 'SELECT COUNT(*) FROM merge_conflicts'), 0, 'failed whole-merge rollback discards staged conflict metadata');
+    assert_same((int)scalar($rollback_metadata, 'SELECT COUNT(*) FROM merge_row_identities'), 0, 'failed whole-merge rollback discards staged no-primary-key sidecars');
+
     $unique_base = $tmp . '/unique-base.sqlite';
     $unique_source = $tmp . '/unique-source.sqlite';
     $unique_target = $tmp . '/unique-target.sqlite';
