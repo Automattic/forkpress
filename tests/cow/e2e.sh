@@ -185,6 +185,27 @@ keyless_runtime_request() {
   fi
 }
 
+unique_runtime_request() {
+  local branch="$1"
+  local action="$2"
+  local out="$3"
+  local host
+  host="$(branch_host "$branch")"
+
+  local http
+  http="$(
+    curl -sS -o "$out" -w '%{http_code}' \
+      -H "Host: $host" \
+      "http://127.0.0.1:$PORT/?forkpress_e2e_unique=$action"
+  )"
+  if [ "$http" != "200" ]; then
+    echo "unique runtime action $action on $branch returned $http" >&2
+    cat "$out" >&2
+    "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+    exit 1
+  fi
+}
+
 log_step "init COW site"
 "$BIN" init --work-dir "$WORK_DIR" --admin-password admin
 test -d "$WORK/.forkpress"
@@ -749,6 +770,78 @@ grep -F "E2E follow-up on runtime keyless resolution" "$TMP/keyless-resolution-a
 php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["review"] ?? false) === true) && (($data["filters"]["review_status"] ?? null) === "needs-action") && (($data["filters"]["records"] ?? null) === "resolutions") && (($data["filters"]["scope"] ?? null) === "db") && empty($data["conflicts"] ?? []) && empty($data["decisions"] ?? []); $has_resolution = false; foreach (($data["resolutions"] ?? []) as $row) { if (($row["table_name"] ?? null) === "__files__") $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[2] && ($row["review_status"] ?? null) === "needs-action" && ($row["review_note"] ?? null) === "E2E follow-up on runtime keyless resolution") $has_resolution = true; } exit($ok && $has_resolution ? 0 : 1);' "$TMP/keyless-resolution-needs-action-queue.json" "$KEYLESS_RESOLUTION_ID"
 "$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --resolution-status validated --group-by status --limit 8 > "$TMP/keyless-resolution-status.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["records"] ?? null) === "resolutions") && (($data["filters"]["resolution_status"] ?? null) === "validated") && (($data["filters"]["group_by"] ?? null) === "status"); $has_resolution = false; foreach (($data["resolutions"] ?? []) as $row) { if ((int)($row["id"] ?? 0) === (int)$argv[2] && ($row["status"] ?? null) === "validated") $has_resolution = true; } $has_group = false; foreach (($data["resolution_groups"] ?? []) as $group) { if (($group["group_key"] ?? null) === "validated" && (int)($group["resolution_count"] ?? 0) > 0) $has_group = true; } exit($ok && $has_resolution && $has_group ? 0 : 1);' "$TMP/keyless-resolution-status.json" "$KEYLESS_RESOLUTION_ID"
+
+log_step "resolve runtime plugin unique collision"
+mkdir -p "$WORK/main/wp-content/mu-plugins"
+cat > "$WORK/main/wp-content/mu-plugins/forkpress-e2e-unique.php" <<'PHP'
+<?php
+add_action('init', function () {
+    if (!isset($_GET['forkpress_e2e_unique'])) {
+        return;
+    }
+
+    global $wpdb;
+    $action = sanitize_key(wp_unslash($_GET['forkpress_e2e_unique']));
+    $table = $wpdb->prefix . 'forkpress_e2e_unique';
+    if (!preg_match('/^[A-Za-z0-9_]+$/', $table)) {
+        wp_send_json_error(['error' => 'unsafe table name'], 500);
+    }
+    $quoted = '"' . str_replace('"', '""', $table) . '"';
+
+    $query = static function (string $sql) use ($wpdb): void {
+        $result = $wpdb->query($sql);
+        if ($result === false) {
+            wp_send_json_error(['error' => $wpdb->last_error ?: 'query failed'], 500);
+        }
+    };
+
+    if ($action === 'init') {
+        $query("DROP TABLE IF EXISTS $quoted");
+        $query("CREATE TABLE $quoted (id INTEGER PRIMARY KEY, slug TEXT NOT NULL UNIQUE, value TEXT NOT NULL)");
+    } elseif ($action === 'source-insert') {
+        $query($wpdb->prepare("INSERT INTO $quoted (id, slug, value) VALUES (%d, %s, %s)", 101, 'shared-runtime-slug', 'source runtime row'));
+    } elseif ($action === 'target-insert') {
+        $query($wpdb->prepare("INSERT INTO $quoted (id, slug, value) VALUES (%d, %s, %s)", 202, 'shared-runtime-slug', 'target runtime row'));
+    } elseif ($action !== 'inspect') {
+        wp_send_json_error(['error' => 'unknown action'], 400);
+    }
+
+    $rows = $wpdb->get_results("SELECT id, slug, value FROM $quoted ORDER BY id", ARRAY_A);
+    if (!is_array($rows)) {
+        wp_send_json_error(['error' => $wpdb->last_error ?: 'select failed'], 500);
+    }
+    wp_send_json(['action' => $action, 'rows' => $rows]);
+}, 20);
+PHP
+
+unique_runtime_request main init "$TMP/unique-init.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && count($data["rows"] ?? []) === 0 ? 0 : 1);' "$TMP/unique-init.json"
+"$BIN" branch --work-dir "$WORK_DIR" create unique-collision > "$TMP/unique-create.out"
+grep -F "unique-collision.wp.localhost:$PORT" "$TMP/unique-create.out" >/dev/null
+unique_runtime_request unique-collision source-insert "$TMP/unique-source-insert.json"
+unique_runtime_request main target-insert "$TMP/unique-target-insert.json"
+php -r '$source = json_decode(file_get_contents($argv[1]), true); $target = json_decode(file_get_contents($argv[2]), true); exit(($source["rows"][0]["id"] ?? null) == 101 && ($target["rows"][0]["id"] ?? null) == 202 ? 0 : 1);' "$TMP/unique-source-insert.json" "$TMP/unique-target-insert.json"
+"$BIN" branch --work-dir "$WORK_DIR" merge unique-collision --into main > "$TMP/unique-merge.out"
+grep -F "forkpress: merged unique-collision into main" "$TMP/unique-merge.out" >/dev/null
+grep -F "status:    completed_with_conflicts" "$TMP/unique-merge.out" >/dev/null
+unique_runtime_request main inspect "$TMP/unique-after-merge.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(count($data["rows"] ?? []) === 1 && ($data["rows"][0]["id"] ?? null) == 202 && ($data["rows"][0]["value"] ?? null) === "target runtime row" ? 0 : 1);' "$TMP/unique-after-merge.json"
+UNIQUE_CONFLICT_ID="$(
+  php -r '$db = new SQLite3($argv[1]); echo (int)$db->querySingle("SELECT c.id FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = '\''wp_forkpress_e2e_unique'\'' AND c.conflict_type = '\''row-unique-collision'\'' AND r.source_branch = '\''unique-collision'\'' AND r.target_branch = '\''main'\'' ORDER BY c.id DESC LIMIT 1");' \
+    "$WORK_DIR/cow/merge/metadata.sqlite"
+)"
+if [ "$UNIQUE_CONFLICT_ID" = "0" ]; then
+  echo "missing runtime plugin row-unique-collision conflict id" >&2
+  exit 1
+fi
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --review --review-status unreviewed --records conflicts --scope db --limit 20 > "$TMP/unique-review-queue.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["review"] ?? false) === true) && (($data["filters"]["review_status"] ?? null) === "unreviewed") && (($data["filters"]["records"] ?? null) === "conflicts") && (($data["filters"]["scope"] ?? null) === "db"); $has_conflict = false; foreach (($data["conflicts"] ?? []) as $row) { if (($row["review_status"] ?? null) !== null) $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[2] && ($row["table_name"] ?? null) === "wp_forkpress_e2e_unique" && ($row["conflict_type"] ?? null) === "row-unique-collision") $has_conflict = true; } exit($ok && $has_conflict ? 0 : 1);' "$TMP/unique-review-queue.json" "$UNIQUE_CONFLICT_ID"
+"$BIN" branch --work-dir "$WORK_DIR" merge-resolve conflict "$UNIQUE_CONFLICT_ID" --choice source --apply --note "Apply runtime source unique row" --reviewer cow-e2e > "$TMP/unique-resolve.out"
+grep -F "forkpress: validated COW merge conflict resolution" "$TMP/unique-resolve.out" >/dev/null
+grep -F "applied:   yes" "$TMP/unique-resolve.out" >/dev/null
+unique_runtime_request main inspect "$TMP/unique-after-resolution.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(count($data["rows"] ?? []) === 1 && ($data["rows"][0]["id"] ?? null) == 101 && ($data["rows"][0]["value"] ?? null) === "source runtime row" ? 0 : 1);' "$TMP/unique-after-resolution.json"
+php -r '$db = new SQLite3($argv[1]); $conflict_id = (int)$argv[2]; $resolution = (int)$db->querySingle("SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $conflict_id AND table_name = '\''wp_forkpress_e2e_unique'\'' AND choice = '\''source'\'' AND applied = 1"); $reviewed = (int)$db->querySingle("SELECT COUNT(*) FROM merge_review_notes WHERE record_type = '\''conflict'\'' AND record_id = $conflict_id AND status = '\''reviewed'\''"); exit($resolution === 1 && $reviewed === 1 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite" "$UNIQUE_CONFLICT_ID"
 
 log_step "create agent worktrees"
 "$BIN" agents \

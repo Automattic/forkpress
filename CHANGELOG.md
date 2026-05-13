@@ -46,6 +46,7 @@
 - Added runtime-backed COW e2e coverage for merging independently banded WordPress-created posts between branches without ID collisions, including reviewable source-applied and target-kept audit decisions.
 - Fixed generic COW SQLite mergeback so source-inserted rows that collide with target-side unique indexes are audited as target-wins `row-unique-collision` conflicts instead of aborting the merge.
 - Added validation-gated source resolution for audited `row-unique-collision` conflicts, replacing the still-matching target row only after reviewer apply.
+- Added runtime-backed COW e2e coverage for resolving arbitrary plugin-table `row-unique-collision` conflicts through the real CLI.
 - Updated the automatic mergeback loop runner to pass a configurable Codex reasoning-effort setting and to include the changelog/known-good tag policy in every worker prompt.
 
 ## known-good/cow-mergeback-audit-completeness-2026-05-12
