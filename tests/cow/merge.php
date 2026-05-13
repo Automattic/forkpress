@@ -1834,6 +1834,49 @@ SQL);
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE column_name IN ('plugin_items_source_view', 'plugin_items_source_insert') AND decision = 'source-applied'"), 2, 'source-added view and trigger decisions are auditable');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE column_name IN ('plugin_items_target_view', 'plugin_items_target_insert') AND decision = 'target-kept'"), 2, 'target-added view and trigger preservation decisions are auditable');
 
+    $schema_same_base = $tmp . '/schema-same-base.sqlite';
+    $schema_same_source = $tmp . '/schema-same-source.sqlite';
+    $schema_same_target = $tmp . '/schema-same-target.sqlite';
+    create_base_db($schema_same_base);
+    $db = open_db($schema_same_base);
+    $db->exec('CREATE TABLE plugin_same_schema_drop (item_id TEXT PRIMARY KEY, label TEXT)');
+    $db->exec('CREATE TABLE plugin_same_audit (item_id TEXT)');
+    $db->exec('CREATE INDEX plugin_items_same_idx ON plugin_items(label)');
+    $db->exec('CREATE VIEW plugin_items_same_view AS SELECT item_id, label FROM plugin_items');
+    $db->exec('CREATE TRIGGER plugin_items_same_trigger AFTER INSERT ON plugin_items BEGIN INSERT INTO plugin_same_audit (item_id) VALUES (NEW.item_id); END');
+    $db->close();
+    copy($schema_same_base, $schema_same_source);
+    copy($schema_same_base, $schema_same_target);
+    foreach ([$schema_same_source, $schema_same_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_same_schema_add (item_id TEXT PRIMARY KEY, label TEXT)');
+        $db->exec('DROP TABLE plugin_same_schema_drop');
+        $db->exec('CREATE INDEX plugin_items_same_added_idx ON plugin_items(value)');
+        $db->exec('DROP INDEX plugin_items_same_idx');
+        $db->exec('CREATE INDEX plugin_items_same_idx ON plugin_items(value)');
+        $db->exec('CREATE VIEW plugin_items_same_added_view AS SELECT item_id, value FROM plugin_items');
+        $db->exec('DROP VIEW plugin_items_same_view');
+        $db->exec('CREATE VIEW plugin_items_same_view AS SELECT item_id, label, value FROM plugin_items');
+        $db->exec('CREATE TRIGGER plugin_items_same_added_trigger AFTER UPDATE ON plugin_items BEGIN INSERT INTO plugin_same_audit (item_id) VALUES (NEW.item_id || ":updated"); END');
+        $db->exec('DROP TRIGGER plugin_items_same_trigger');
+        $db->exec('CREATE TRIGGER plugin_items_same_trigger AFTER INSERT ON plugin_items BEGIN INSERT INTO plugin_same_audit (item_id) VALUES (NEW.item_id || ":same"); END');
+        $db->close();
+    }
+    $schema_same_result = cow_merge_databases($schema_same_base, $schema_same_source, $schema_same_target, $metadata, 'feature-schema-same', 'main');
+    $schema_same_run_id = (int)$schema_same_result['run_id'];
+    assert_same($schema_same_result['status'], 'completed', 'identical source and target schema changes merge without conflicts');
+    assert_same((int)scalar($schema_same_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_same_schema_add'"), 1, 'identical source and target table add remains present');
+    assert_same((int)scalar($schema_same_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_same_schema_drop'"), 0, 'identical source and target table drop remains applied');
+    assert_true(str_contains((string)scalar($schema_same_target, "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'plugin_items_same_idx'"), '(value)'), 'identical source and target index rewrite remains present');
+    assert_true(str_contains((string)scalar($schema_same_target, "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_same_view'"), 'value'), 'identical source and target view rewrite remains present');
+    assert_true(str_contains((string)scalar($schema_same_target, "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_items_same_trigger'"), ':same'), 'identical source and target trigger rewrite remains present');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE run_id = $schema_same_run_id"), 0, 'identical source and target schema changes do not create false conflicts');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE run_id = $schema_same_run_id AND decision = 'source-applied'"), 8, 'identical source and target schema changes are auditable as source-applied decisions');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE run_id = $schema_same_run_id AND table_name = 'plugin_same_schema_add' AND reason = 'source and target added the same table schema'"), 1, 'identical source and target table add is auditable');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE run_id = $schema_same_run_id AND table_name = 'plugin_same_schema_drop' AND reason = 'source and target dropped the same table schema'"), 1, 'identical source and target table drop is auditable');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE run_id = $schema_same_run_id AND column_name IN ('plugin_items_same_added_idx', 'plugin_items_same_added_view', 'plugin_items_same_added_trigger') AND reason LIKE 'source and target added the same % schema'"), 3, 'identical source and target schema object adds are auditable');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE run_id = $schema_same_run_id AND column_name IN ('plugin_items_same_idx', 'plugin_items_same_view', 'plugin_items_same_trigger') AND reason LIKE 'source and target changed % schema to the same definition'"), 3, 'identical source and target schema object rewrites are auditable');
+
     $schema_view_rewrite_base = $tmp . '/schema-view-rewrite-base.sqlite';
     $schema_view_rewrite_source = $tmp . '/schema-view-rewrite-source.sqlite';
     $schema_view_rewrite_target = $tmp . '/schema-view-rewrite-target.sqlite';
@@ -2033,7 +2076,7 @@ SQL);
     $db->close();
     $result = cow_merge_databases($schema_table_both_drop_base, $schema_table_both_drop_source, $schema_table_both_drop_target, $metadata, 'feature-table-both-drop', 'main');
     assert_same($result['status'], 'completed', 'matching source and target table drops do not create conflicts');
-    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_table_both_drop'"), 0, 'matching table drops do not create audit noise');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_table_both_drop'"), 0, 'matching table drops do not create conflict noise');
 
     $schema_table_target_drop_base = $tmp . '/schema-table-target-drop-base.sqlite';
     $schema_table_target_drop_source = $tmp . '/schema-table-target-drop-source.sqlite';

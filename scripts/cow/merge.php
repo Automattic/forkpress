@@ -880,6 +880,9 @@ function cow_merge_identity_json(array $identity): string {
 
 function cow_merge_load_rows(SQLite3 $db, string $table, array $pk_cols): array {
     $rows = [];
+    if (cow_merge_table_sql($db, $table) === null) {
+        return $rows;
+    }
     $sql = $pk_cols
         ? 'SELECT * FROM ' . cow_merge_quote_ident($table)
         : 'SELECT rowid AS __forkpress_merge_rowid, * FROM ' . cow_merge_quote_ident($table);
@@ -902,6 +905,9 @@ function cow_merge_load_rows(SQLite3 $db, string $table, array $pk_cols): array 
 
 function cow_merge_load_keyless_physical_rows(SQLite3 $db, string $table): array {
     $rows = [];
+    if (cow_merge_table_sql($db, $table) === null) {
+        return $rows;
+    }
     $res = $db->query('SELECT rowid AS __forkpress_merge_rowid, * FROM ' . cow_merge_quote_ident($table));
     if (!$res) {
         return $rows;
@@ -5556,6 +5562,38 @@ function cow_merge_record_schema_conflict(
     cow_merge_record_decision($meta, $run_id, $table, null, $object, 'target-wins', $reason, $base, $source, $target_value, $chosen);
 }
 
+function cow_merge_record_matching_schema_decision(
+    SQLite3 $meta,
+    int $run_id,
+    string $table,
+    ?string $object,
+    string $schema_type,
+    mixed $base,
+    mixed $source,
+    mixed $target_value
+): void {
+    if ($source === null) {
+        $reason = "source and target dropped the same $schema_type schema";
+    } elseif ($base === null) {
+        $reason = "source and target added the same $schema_type schema";
+    } else {
+        $reason = "source and target changed $schema_type schema to the same definition";
+    }
+    cow_merge_record_decision(
+        $meta,
+        $run_id,
+        $table,
+        null,
+        $object,
+        'source-applied',
+        $reason,
+        $base,
+        $source,
+        $target_value,
+        $target_value
+    );
+}
+
 function cow_merge_apply_safe_table_schema_changes(
     SQLite3 $base,
     SQLite3 $source,
@@ -5744,6 +5782,19 @@ function cow_merge_apply_index_schema_changes(
         $target_sql = $target_entry['sql'] ?? null;
 
         if ($source_sql === $target_sql) {
+            if ($source_sql !== $base_sql) {
+                cow_merge_record_matching_schema_decision(
+                    $meta,
+                    $run_id,
+                    $table,
+                    $index,
+                    'index',
+                    $base_sql,
+                    $source_sql,
+                    $target_sql
+                );
+                $applied++;
+            }
             continue;
         }
         if ($source_sql === null) {
@@ -5890,6 +5941,19 @@ function cow_merge_apply_schema_object_changes(
         $target_sql = $target_entry['sql'] ?? null;
 
         if ($source_sql === $target_sql) {
+            if ($source_sql !== $base_sql) {
+                cow_merge_record_matching_schema_decision(
+                    $meta,
+                    $run_id,
+                    $table,
+                    $name,
+                    $type,
+                    $base_sql,
+                    $source_sql,
+                    $target_sql
+                );
+                $applied++;
+            }
             continue;
         }
         if ($source_sql === null) {
@@ -6352,6 +6416,22 @@ function cow_merge_databases(
             $source_sql = $source_tables[$table] ?? null;
             $target_sql = $target_tables[$table] ?? null;
 
+            if ($source_sql === $target_sql && $source_sql !== $base_sql) {
+                cow_merge_record_matching_schema_decision(
+                    $meta,
+                    $run_id,
+                    $table,
+                    null,
+                    'table',
+                    $base_sql,
+                    $source_sql,
+                    $target_sql
+                );
+                $applied++;
+                if ($source_sql === null) {
+                    continue;
+                }
+            }
             if ($source_sql === null) {
                 if ($base_sql !== null && $target_sql !== null) {
                     cow_merge_record_schema_conflict(
