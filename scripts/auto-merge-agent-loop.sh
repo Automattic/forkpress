@@ -5,7 +5,8 @@ REPO="${FORKPRESS_LOOP_REPO:-Automattic/forkpress}"
 ISSUE="${FORKPRESS_LOOP_ISSUE:-39}"
 SLEEP_SECONDS="${FORKPRESS_LOOP_SLEEP_SECONDS:-15}"
 CODEX_BIN="${CODEX_BIN:-codex}"
-CODEX_REASONING_EFFORT="${CODEX_REASONING_EFFORT:-high}"
+CODEX_REASONING_EFFORT="${CODEX_REASONING_EFFORT:-medium}"
+CODEX_DECISION_REASONING_EFFORT="${CODEX_DECISION_REASONING_EFFORT:-xhigh}"
 WORKDIR="${FORKPRESS_LOOP_WORKDIR:-}"
 LOG_DIR="${FORKPRESS_LOOP_LOG_DIR:-}"
 SANDBOX="${CODEX_SANDBOX:-danger-full-access}"
@@ -22,8 +23,40 @@ fi
 
 mkdir -p "$LOG_DIR"
 
+NEXT_REASONING_FILE="$LOG_DIR/next-reasoning-effort"
+
+validate_reasoning_effort() {
+  case "$1" in
+    low|medium|high|xhigh) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+next_reasoning_effort() {
+  local requested
+  if [[ -s "$NEXT_REASONING_FILE" ]]; then
+    requested="$(sed -n '1{s/^[[:space:]]*//;s/[[:space:]]*$//;p;q;}' "$NEXT_REASONING_FILE")"
+    rm -f "$NEXT_REASONING_FILE"
+    if validate_reasoning_effort "$requested"; then
+      printf '%s\n' "$requested"
+      return
+    fi
+    printf 'forkpress loop: ignored invalid reasoning request %q in %s\n' "$requested" "$NEXT_REASONING_FILE" >&2
+  fi
+  printf '%s\n' "$CODEX_REASONING_EFFORT"
+}
+
+validate_reasoning_effort "$CODEX_REASONING_EFFORT" || {
+  echo "CODEX_REASONING_EFFORT must be low, medium, high, or xhigh." >&2
+  exit 2
+}
+validate_reasoning_effort "$CODEX_DECISION_REASONING_EFFORT" || {
+  echo "CODEX_DECISION_REASONING_EFFORT must be low, medium, high, or xhigh." >&2
+  exit 2
+}
+
 top_args=()
-top_args+=(-c "model_reasoning_effort=\"$CODEX_REASONING_EFFORT\"")
+top_args+=(-c 'service_tier="fast"')
 if [[ "$ENABLE_SEARCH" != "0" ]]; then
   top_args+=(--search)
 fi
@@ -47,6 +80,8 @@ while true; do
   context_file="$LOG_DIR/issue-${ISSUE}-${run_id}.md"
   log_file="$LOG_DIR/run-${run_id}.log"
   last_message_file="$LOG_DIR/last-message-${run_id}.md"
+  reasoning_effort="$(next_reasoning_effort)"
+  run_top_args=("${top_args[@]}" -c "model_reasoning_effort=\"$reasoning_effort\"")
 
   {
     echo "# Coordination issue"
@@ -56,7 +91,7 @@ while true; do
     git -C "$WORKDIR" status --short --branch || true
   } > "$context_file" 2>&1
 
-  echo "forkpress loop: starting run $run_id"
+  echo "forkpress loop: starting run $run_id service_tier=fast reasoning=$reasoning_effort"
 
   {
     cat <<'PROMPT'
@@ -83,6 +118,18 @@ Hard constraints:
 - Create annotated `known-good/...` Git tags only for major verified stable
   states, never for every commit. Tag after relevant verification passes, and
   record the tag name plus covered changes in the changelog and issue comment.
+- If the obvious work appears complete, do not switch to passive monitoring.
+  Re-read the issue, original goal, and current implementation, look for gaps,
+  uncovered nuances, original-prompt omissions, difficult unaddressed parts,
+  shallow implementation, shallow tests, edge cases, and user-flow or
+  operational rough spots. Address the highest-value gap and continue.
+- Keep context lean. Treat the issue and local files as durable state, but use
+  targeted `rg`, `sed`, `git`, and focused log reads instead of broad history
+  dumps whenever possible.
+- For unusually important architecture, data-loss, security, or irreversible
+  product decisions, write the decision reasoning effort value to the next
+  reasoning request file named in the run metadata below. The next iteration
+  will use that effort once, then return to normal.
 
 Before exiting for any reason, append a comment to the coordination issue with:
 - Current state
@@ -96,9 +143,16 @@ locally before exiting. If blocked, record the blocker and the next concrete
 action in the issue comment.
 
 PROMPT
+    echo "# Run metadata"
+    echo "service_tier=fast"
+    echo "reasoning_effort=$reasoning_effort"
+    echo "normal_reasoning_effort=$CODEX_REASONING_EFFORT"
+    echo "decision_reasoning_effort=$CODEX_DECISION_REASONING_EFFORT"
+    echo "next_reasoning_request_file=$NEXT_REASONING_FILE"
+    echo
     echo "# Issue and workspace context"
     cat "$context_file"
-  } | "$CODEX_BIN" "${top_args[@]}" exec \
+  } | "$CODEX_BIN" "${run_top_args[@]}" exec \
     -C "$WORKDIR" \
     --yolo \
     "${model_args[@]}" \
