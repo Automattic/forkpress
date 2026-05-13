@@ -644,6 +644,8 @@ tooling.
   Mixed database/filesystem merges keep a whole-branch rollback snapshot, so
   late metadata or filesystem failures restore target database state,
   filesystem paths, and merge audit metadata before recording the failed run.
+  If rollback itself fails, ForkPress preserves the rollback snapshot backups
+  and records their locations in the rollback-failure JSONL artifact.
   Compatible rebuilds also preserve
   dependent target views when those views validate before and after the rebuild.
   Source view rewrites preserve transitive dependent target views and their

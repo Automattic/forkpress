@@ -49,6 +49,7 @@
 - Added COW coverage for compatible table rebuild rollback when a preserved target view would become invalid after applying the audited source schema.
 - Made generic DB merge metadata transactional with target DB mutation, so unexpected whole-merge rollbacks discard staged decisions, conflicts, and no-primary-key sidecars while keeping a failed run marker.
 - Made mixed DB+filesystem merge rollback restore target filesystem changes after late metadata failures, keeping target DB, files, and `.forkpress/cow/merge` audit metadata aligned.
+- Preserved rollback snapshot artifacts when mixed DB+filesystem rollback itself fails, and recorded DB/filesystem backup locations in the rollback-failure JSONL artifact.
 - Tightened validation-gated source view rewrites so preserved target view triggers must still compile before dry-run or apply reports success.
 - Tightened validation-gated source table drops so dry-run and apply refuse to leave dependent target foreign-key child tables pointing at a missing parent table.
 - Tightened validation-gated source table drops so dry-run and apply refuse to leave target trigger programs referencing the dropped table.

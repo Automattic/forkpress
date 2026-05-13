@@ -3221,7 +3221,8 @@ function cow_merge_record_rollback_failure_artifact(
     string $source_db,
     string $target_db,
     string $original_failure,
-    string $rollback_failure
+    string $rollback_failure,
+    array $rollback_artifacts = []
 ): ?string {
     $artifact_path = cow_merge_rollback_failure_artifact_path($metadata_db);
     $record = [
@@ -3235,6 +3236,9 @@ function cow_merge_record_rollback_failure_artifact(
         'original_failure' => $original_failure,
         'rollback_failure' => $rollback_failure,
     ];
+    if ($rollback_artifacts !== []) {
+        $record['artifacts'] = $rollback_artifacts;
+    }
     $json = json_encode($record, JSON_UNESCAPED_SLASHES);
     if (!is_string($json)) {
         $json = '{"created_at":"' . gmdate('c') . '","rollback_failure":"failed to encode rollback failure artifact"}';
@@ -3273,6 +3277,55 @@ function cow_merge_record_rollback_failure_artifact(
     }
 
     return $artifact_written ? $artifact_path : null;
+}
+
+function cow_merge_sqlite_snapshot_artifact(?array $snapshot): ?array {
+    if ($snapshot === null) {
+        return null;
+    }
+    $backup = $snapshot['backup'] ?? null;
+    return [
+        'path' => (string)($snapshot['path'] ?? ''),
+        'existed' => !empty($snapshot['existed']),
+        'backup' => is_string($backup) ? $backup : null,
+        'backup_exists' => is_string($backup) && is_file($backup),
+    ];
+}
+
+function cow_merge_file_root_snapshot_artifact(?array $snapshot, ?string $target_root): ?array {
+    if ($snapshot === null) {
+        return null;
+    }
+    $tx = $snapshot['transaction'] ?? [];
+    $backups = is_array($tx) && isset($tx['backups']) && is_array($tx['backups'])
+        ? $tx['backups']
+        : [];
+    $artifact_backups = [];
+    foreach ($backups as $backup) {
+        if (!is_array($backup)) {
+            continue;
+        }
+        $backup_file = $backup['backup_file'] ?? null;
+        $artifact_backups[] = [
+            'path' => (string)($backup['path'] ?? ''),
+            'type' => (string)($backup['type'] ?? ''),
+            'backup_file' => is_string($backup_file) ? $backup_file : null,
+            'backup_exists' => is_string($backup_file) && is_file($backup_file),
+        ];
+    }
+
+    $stage_root = is_array($tx) && isset($tx['stage_root']) && is_string($tx['stage_root'])
+        ? $tx['stage_root']
+        : null;
+    $entries = $snapshot['entries'] ?? [];
+    return [
+        'target_root' => $target_root,
+        'stage_root' => $stage_root,
+        'stage_root_exists' => is_string($stage_root) && is_dir($stage_root),
+        'entries_count' => is_array($entries) ? count($entries) : 0,
+        'backup_count' => count($artifact_backups),
+        'backups' => $artifact_backups,
+    ];
 }
 
 function cow_merge_start_run(
@@ -10029,6 +10082,7 @@ function cow_merge_branch_state(
     }
 
     $attempted_run_id = null;
+    $preserve_rollback_snapshots = false;
     try {
         $result = cow_merge_databases($base_db, $source_db, $target_db, $metadata_db, $source_branch, $target_branch);
         $attempted_run_id = (int)$result['run_id'];
@@ -10066,6 +10120,7 @@ function cow_merge_branch_state(
                     cow_merge_failure_reason($e)
                 );
             } catch (Throwable $rollback_error) {
+                $preserve_rollback_snapshots = true;
                 cow_merge_record_rollback_failure_artifact(
                     $metadata_db,
                     $attempted_run_id,
@@ -10075,7 +10130,12 @@ function cow_merge_branch_state(
                     $source_db,
                     $target_db,
                     cow_merge_failure_reason($e),
-                    cow_merge_failure_reason($rollback_error)
+                    cow_merge_failure_reason($rollback_error),
+                    [
+                        'target_db_snapshot' => cow_merge_sqlite_snapshot_artifact($target_snapshot),
+                        'metadata_db_snapshot' => cow_merge_sqlite_snapshot_artifact($metadata_snapshot),
+                        'filesystem_snapshot' => cow_merge_file_root_snapshot_artifact($filesystem_snapshot, $target_root),
+                    ]
                 );
                 throw new RuntimeException(
                     $e->getMessage() . '; whole-branch rollback failed: ' . $rollback_error->getMessage(),
@@ -10086,13 +10146,15 @@ function cow_merge_branch_state(
         }
         throw $e;
     } finally {
-        if ($target_snapshot !== null) {
+        if (!$preserve_rollback_snapshots && $target_snapshot !== null) {
             cow_merge_cleanup_sqlite_snapshot($target_snapshot);
         }
-        if ($metadata_snapshot !== null) {
+        if (!$preserve_rollback_snapshots && $metadata_snapshot !== null) {
             cow_merge_cleanup_sqlite_snapshot($metadata_snapshot);
         }
-        cow_merge_file_root_snapshot_cleanup($filesystem_snapshot);
+        if (!$preserve_rollback_snapshots) {
+            cow_merge_file_root_snapshot_cleanup($filesystem_snapshot);
+        }
     }
 }
 

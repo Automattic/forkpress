@@ -2755,6 +2755,12 @@ SQL);
     assert_same((int)scalar($late_whole_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__'"), 0, 'late whole-branch rollback discards filesystem decisions after metadata restore');
 
     $rollback_artifact_metadata = $tmp . '/.forkpress/cow/merge/rollback-failure-artifact.sqlite';
+    $rollback_artifact_target_db = $tmp . '/rollback-failure-artifact-target.sqlite';
+    create_base_db($rollback_artifact_target_db);
+    $rollback_artifact_db_snapshot = cow_merge_snapshot_sqlite_db($rollback_artifact_target_db);
+    $rollback_artifact_root = $tmp . '/rollback-failure-artifact-root';
+    write_test_file($rollback_artifact_root . '/wp-content/uploads/artifact.txt', 'artifact base');
+    $rollback_artifact_fs_snapshot = cow_merge_file_root_snapshot_begin($rollback_artifact_root);
     $artifact_path = cow_merge_record_rollback_failure_artifact(
         $rollback_artifact_metadata,
         123,
@@ -2764,13 +2770,27 @@ SQL);
         '/tmp/source.sqlite',
         '/tmp/target.sqlite',
         'original merge failure',
-        'restore snapshot failure'
+        'restore snapshot failure',
+        [
+            'target_db_snapshot' => cow_merge_sqlite_snapshot_artifact($rollback_artifact_db_snapshot),
+            'filesystem_snapshot' => cow_merge_file_root_snapshot_artifact($rollback_artifact_fs_snapshot, $rollback_artifact_root),
+        ]
     );
     assert_true(is_string($artifact_path) && is_file($artifact_path), 'rollback failure records a JSONL artifact outside the metadata database');
     $artifact_lines = file($artifact_path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
     assert_true(is_array($artifact_lines) && count($artifact_lines) === 1, 'rollback failure artifact contains one JSONL record');
     $artifact_record = json_decode($artifact_lines[0], true);
     assert_same($artifact_record['rollback_failure'], 'restore snapshot failure', 'rollback failure artifact preserves rollback failure reason');
+    assert_true(is_file($artifact_record['artifacts']['target_db_snapshot']['backup'] ?? ''), 'rollback failure artifact points to preserved target DB backup');
+    assert_true(is_dir($artifact_record['artifacts']['filesystem_snapshot']['stage_root'] ?? ''), 'rollback failure artifact points to preserved filesystem backup directory');
+    $artifact_file_backup = null;
+    foreach ($artifact_record['artifacts']['filesystem_snapshot']['backups'] ?? [] as $backup) {
+        if (($backup['path'] ?? '') === 'wp-content/uploads/artifact.txt') {
+            $artifact_file_backup = $backup;
+            break;
+        }
+    }
+    assert_true(is_array($artifact_file_backup) && is_file($artifact_file_backup['backup_file'] ?? ''), 'rollback failure artifact maps filesystem backup files to original paths');
     assert_same((int)scalar($rollback_artifact_metadata, "SELECT COUNT(*) FROM merge_rollback_failures WHERE source_branch = 'feature-rollback-artifact'"), 1, 'rollback failure is queryable in merge metadata when available');
     $rollback_failure_audit = cow_merge_audit_report($rollback_artifact_metadata, null, 5);
     assert_same(count($rollback_failure_audit['rollback_failures']), 1, 'merge audit JSON report exposes rollback failure artifacts');
@@ -2778,6 +2798,8 @@ SQL);
     cow_merge_print_audit_text($rollback_failure_audit);
     $rollback_failure_text = ob_get_clean();
     assert_true(str_contains($rollback_failure_text, 'rollback-failures:') && str_contains($rollback_failure_text, 'restore snapshot failure'), 'merge audit text prints rollback failure artifacts');
+    cow_merge_cleanup_sqlite_snapshot($rollback_artifact_db_snapshot);
+    cow_merge_file_root_snapshot_cleanup($rollback_artifact_fs_snapshot);
 
     $schema_base = $tmp . '/schema-base.sqlite';
     $schema_source = $tmp . '/schema-source.sqlite';
