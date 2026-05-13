@@ -484,8 +484,8 @@ tooling.
   instead of aborting the merge. Source-added views are ordered by source-side
   view dependencies, and source-added views that need a restored target table
   are held as reviewable `schema-source-added-view` conflicts until that
-  dependency validates. Source-added triggers that write to missing target-side
-  schema objects are held as reviewable
+  dependency validates. Source-added triggers that read or write missing
+  target-side schema objects are held as reviewable
   `schema-source-added-trigger` conflicts instead of being installed as latent
   invalid triggers. When a source row still violates target constraints, target
   is kept by default and the choice is recorded as

@@ -3960,6 +3960,89 @@ SQL);
     );
     assert_same($source_added_trigger_missing_rerun['status'], 'completed', 'rerunning after source-added trigger resolution completes without a new conflict');
 
+    $source_added_trigger_read_base = $tmp . '/source-added-trigger-read-base.sqlite';
+    $source_added_trigger_read_source = $tmp . '/source-added-trigger-read-source.sqlite';
+    $source_added_trigger_read_target = $tmp . '/source-added-trigger-read-target.sqlite';
+    $source_added_trigger_read_metadata = $tmp . '/.forkpress/cow/merge/source-added-trigger-read-metadata.sqlite';
+    create_base_db($source_added_trigger_read_base);
+    $db = open_db($source_added_trigger_read_base);
+    $db->exec('CREATE TABLE plugin_trigger_read_gate (enabled INTEGER NOT NULL)');
+    $db->exec('CREATE TABLE plugin_trigger_read_audit (item_label TEXT)');
+    $db->exec('INSERT INTO plugin_trigger_read_gate (enabled) VALUES (1)');
+    $db->close();
+    copy($source_added_trigger_read_base, $source_added_trigger_read_source);
+    copy($source_added_trigger_read_base, $source_added_trigger_read_target);
+    cow_merge_capture_row_identities($source_added_trigger_read_base, $source_added_trigger_read_metadata, 'main');
+    cow_merge_capture_row_identities($source_added_trigger_read_source, $source_added_trigger_read_metadata, 'feature-source-trigger-read', 'main');
+    cow_merge_capture_row_identities($source_added_trigger_read_target, $source_added_trigger_read_metadata, 'main');
+    $db = open_db($source_added_trigger_read_source);
+    $db->exec('CREATE TABLE plugin_trigger_read_items (label TEXT)');
+    $db->exec("INSERT INTO plugin_trigger_read_items (rowid, label) VALUES (7, 'read dependency source item')");
+    $db->exec('CREATE TRIGGER plugin_trigger_read_items_audit AFTER INSERT ON plugin_trigger_read_items BEGIN INSERT INTO plugin_trigger_read_audit (item_label) SELECT NEW.label FROM plugin_trigger_read_gate WHERE enabled = 1; END');
+    $db->close();
+    cow_merge_capture_row_identities($source_added_trigger_read_source, $source_added_trigger_read_metadata, 'feature-source-trigger-read', 'main');
+    $db = open_db($source_added_trigger_read_target);
+    $db->exec('DROP TABLE plugin_trigger_read_gate');
+    $db->close();
+    $source_added_trigger_read_result = cow_merge_databases(
+        $source_added_trigger_read_base,
+        $source_added_trigger_read_source,
+        $source_added_trigger_read_target,
+        $source_added_trigger_read_metadata,
+        'feature-source-trigger-read',
+        'main'
+    );
+    assert_same($source_added_trigger_read_result['status'], 'completed_with_conflicts', 'source-added trigger with missing read dependency is audited');
+    assert_same((int)scalar($source_added_trigger_read_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_trigger_read_items'"), 1, 'source-added trigger read table still materializes');
+    assert_same((int)scalar($source_added_trigger_read_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_trigger_read_items_audit'"), 0, 'source-added trigger with missing read dependency is held back');
+    $source_added_trigger_read_table_conflict_id = (int)scalar($source_added_trigger_read_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_trigger_read_gate' AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
+    $source_added_trigger_read_conflict_id = (int)scalar($source_added_trigger_read_metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_trigger_read_items_audit' AND conflict_type = 'schema-source-added-trigger' ORDER BY id DESC LIMIT 1");
+    assert_true($source_added_trigger_read_table_conflict_id > 0, 'missing trigger read dependency remains a reviewable table restore conflict');
+    assert_true($source_added_trigger_read_conflict_id > 0, 'missing trigger read dependency records a source-added trigger schema conflict');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $source_added_trigger_read_metadata,
+            $source_added_trigger_read_conflict_id,
+            'source',
+            true,
+            'Try read trigger before gate restore.',
+            'test'
+        ),
+        'references missing target schema objects',
+        'source-added trigger read resolution remains gated until its dependency is restored'
+    );
+    $source_added_trigger_read_table_resolution = cow_merge_resolve_conflict(
+        $source_added_trigger_read_metadata,
+        $source_added_trigger_read_table_conflict_id,
+        'source',
+        true,
+        'Restore trigger read gate before trigger.',
+        'test'
+    );
+    assert_same($source_added_trigger_read_table_resolution['status'], 'applied', 'trigger read dependency table restore applies before trigger resolution');
+    $source_added_trigger_read_resolution = cow_merge_resolve_conflict(
+        $source_added_trigger_read_metadata,
+        $source_added_trigger_read_conflict_id,
+        'source',
+        true,
+        'Apply trigger after read dependency restore.',
+        'test'
+    );
+    assert_same($source_added_trigger_read_resolution['status'], 'applied', 'source-added trigger with read dependency applies after its dependency exists');
+    $db = open_db($source_added_trigger_read_target);
+    $db->exec("INSERT INTO plugin_trigger_read_items (label) VALUES ('post-review read item')");
+    $db->close();
+    assert_same(scalar($source_added_trigger_read_target, "SELECT item_label FROM plugin_trigger_read_audit WHERE item_label = 'post-review read item'"), 'post-review read item', 'reviewed source trigger reads restored dependency when it fires');
+    $source_added_trigger_read_rerun = cow_merge_databases(
+        $source_added_trigger_read_base,
+        $source_added_trigger_read_source,
+        $source_added_trigger_read_target,
+        $source_added_trigger_read_metadata,
+        'feature-source-trigger-read',
+        'main'
+    );
+    assert_same($source_added_trigger_read_rerun['status'], 'completed', 'rerunning after source-added trigger read resolution completes without a new conflict');
+
     $source_added_view_order_base = $tmp . '/source-added-view-order-base.sqlite';
     $source_added_view_order_source = $tmp . '/source-added-view-order-source.sqlite';
     $source_added_view_order_target = $tmp . '/source-added-view-order-target.sqlite';

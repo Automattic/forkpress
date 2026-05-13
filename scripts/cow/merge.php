@@ -5242,25 +5242,7 @@ function cow_merge_trigger_referenced_tables(string $sql): array {
     if (preg_match('/\bBEGIN\b(.*)\bEND\b/is', $sql, $match)) {
         $body = (string)$match[1];
     }
-    $identifier = cow_merge_identifier_pattern();
-    $patterns = [
-        '/\bINSERT\s+(?:OR\s+[A-Z]+\s+)?INTO\s+(?:(?:"main"|"temp"|main|temp)\s*\.\s*)?' . $identifier . '/i',
-        '/\bUPDATE\s+(?:OR\s+[A-Z]+\s+)?(?:(?:"main"|"temp"|main|temp)\s*\.\s*)?' . $identifier . '/i',
-        '/\bDELETE\s+FROM\s+(?:(?:"main"|"temp"|main|temp)\s*\.\s*)?' . $identifier . '/i',
-    ];
-    $refs = [];
-    foreach ($patterns as $pattern) {
-        if (!preg_match_all($pattern, $body, $matches, PREG_SET_ORDER)) {
-            continue;
-        }
-        foreach ($matches as $match) {
-            $name = cow_merge_sql_reference_name($match);
-            if ($name !== null) {
-                $refs[$name] = true;
-            }
-        }
-    }
-    return array_keys($refs);
+    return cow_merge_sql_referenced_tables($body);
 }
 
 function cow_merge_schema_object_exists(SQLite3 $db, string $name): bool {
