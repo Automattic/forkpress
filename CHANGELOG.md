@@ -44,6 +44,7 @@
 - Added COW coverage for target-dropped table restore rollback after restored source indexes/triggers apply but a later preserved target trigger validation fails, preserving index-backed FK child rows.
 - Added COW coverage for target-dropped no-primary-key table restore apply rollback after restored source rows/indexes/triggers stage but a later preserved target trigger validation fails, including sidecar metadata rollback.
 - Added COW coverage for target-dropped no-primary-key table restore dry-run rollback after restored source rows/indexes/triggers stage, including sidecar metadata rollback.
+- Added COW coverage for target-dropped no-primary-key table restore rollback after source row sidecars stage but a later preserved foreign-key child validation fails.
 - Added COW coverage for compatible table rebuild rollback when a preserved target trigger would become invalid while an index-backed foreign-key child table still depends on the rebuilt table.
 - Added COW coverage for compatible table rebuild rollback when a preserved target view would become invalid after applying the audited source schema.
 - Tightened validation-gated source view rewrites so preserved target view triggers must still compile before dry-run or apply reports success.

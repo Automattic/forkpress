@@ -6763,6 +6763,192 @@ SQL);
     $db->close();
     assert_same(scalar($schema_restore_keyless_mixed_rollback_target, "SELECT observed FROM plugin_restore_keyless_mixed_audit WHERE code = 'keyless-restore-new-lookup' AND note = 'source-trigger'"), 'keyless restored trigger label', 'restored keyless source trigger fires after validated mixed dependency table restore');
 
+    $schema_restore_keyless_fk_rollback_base = $tmp . '/schema-restore-keyless-fk-rollback-base.sqlite';
+    $schema_restore_keyless_fk_rollback_source = $tmp . '/schema-restore-keyless-fk-rollback-source.sqlite';
+    $schema_restore_keyless_fk_rollback_target = $tmp . '/schema-restore-keyless-fk-rollback-target.sqlite';
+    $schema_restore_keyless_fk_rollback_metadata = $tmp . '/.forkpress/cow/merge/schema-restore-keyless-fk-rollback-metadata.sqlite';
+    create_base_db($schema_restore_keyless_fk_rollback_base);
+    $db = open_db($schema_restore_keyless_fk_rollback_base);
+    $db->exec('CREATE TABLE plugin_restore_keyless_fk_parent (lookup TEXT NOT NULL, label TEXT NOT NULL)');
+    $db->exec('CREATE UNIQUE INDEX plugin_restore_keyless_fk_parent_lookup_idx ON plugin_restore_keyless_fk_parent(lookup)');
+    $db->exec('CREATE TABLE plugin_restore_keyless_fk_child (parent_lookup TEXT NOT NULL REFERENCES plugin_restore_keyless_fk_parent(lookup), note TEXT NOT NULL)');
+    $db->exec("INSERT INTO plugin_restore_keyless_fk_parent (rowid, lookup, label) VALUES (9, 'keyless-fk-lookup', 'base keyless FK label')");
+    $db->exec("INSERT INTO plugin_restore_keyless_fk_child (parent_lookup, note) VALUES ('keyless-fk-lookup', 'target child needs unique parent index')");
+    $db->close();
+    copy($schema_restore_keyless_fk_rollback_base, $schema_restore_keyless_fk_rollback_source);
+    copy($schema_restore_keyless_fk_rollback_base, $schema_restore_keyless_fk_rollback_target);
+    cow_merge_capture_row_identities($schema_restore_keyless_fk_rollback_base, $schema_restore_keyless_fk_rollback_metadata, 'main');
+    cow_merge_capture_row_identities($schema_restore_keyless_fk_rollback_source, $schema_restore_keyless_fk_rollback_metadata, 'feature-schema-restore-keyless-fk-rollback', 'main');
+    cow_merge_capture_row_identities($schema_restore_keyless_fk_rollback_target, $schema_restore_keyless_fk_rollback_metadata, 'main');
+
+    $db = open_db($schema_restore_keyless_fk_rollback_source);
+    $db->exec('DROP INDEX plugin_restore_keyless_fk_parent_lookup_idx');
+    $db->exec("DELETE FROM plugin_restore_keyless_fk_parent WHERE rowid = 9");
+    $db->exec("INSERT INTO plugin_restore_keyless_fk_parent (rowid, lookup, label) VALUES (9, 'keyless-fk-lookup', 'source keyless FK label')");
+    $db->close();
+    cow_merge_track_row_identity_events(
+        $schema_restore_keyless_fk_rollback_source,
+        $schema_restore_keyless_fk_rollback_metadata,
+        'feature-schema-restore-keyless-fk-rollback',
+        [
+            [
+                'id' => 1,
+                'table' => 'plugin_restore_keyless_fk_parent',
+                'op' => 'delete',
+                'rowid' => 9,
+                'row' => ['lookup' => 'keyless-fk-lookup', 'label' => 'base keyless FK label'],
+            ],
+            [
+                'id' => 2,
+                'table' => 'plugin_restore_keyless_fk_parent',
+                'op' => 'insert',
+                'rowid' => 9,
+                'row' => ['lookup' => 'keyless-fk-lookup', 'label' => 'source keyless FK label'],
+            ],
+        ]
+    );
+    $schema_restore_keyless_fk_source_identity = scalar(
+        $schema_restore_keyless_fk_rollback_metadata,
+        "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'feature-schema-restore-keyless-fk-rollback' AND table_name = 'plugin_restore_keyless_fk_parent' AND rowid = 9"
+    );
+
+    $db = open_db($schema_restore_keyless_fk_rollback_target);
+    $db->exec("DELETE FROM plugin_restore_keyless_fk_parent WHERE rowid = 9");
+    $db->exec("INSERT INTO plugin_restore_keyless_fk_parent (rowid, lookup, label) VALUES (9, 'keyless-fk-lookup', 'stale keyless FK target label')");
+    $db->close();
+    cow_merge_track_row_identity_events(
+        $schema_restore_keyless_fk_rollback_target,
+        $schema_restore_keyless_fk_rollback_metadata,
+        'main',
+        [
+            [
+                'id' => 1,
+                'table' => 'plugin_restore_keyless_fk_parent',
+                'op' => 'delete',
+                'rowid' => 9,
+                'row' => ['lookup' => 'keyless-fk-lookup', 'label' => 'base keyless FK label'],
+            ],
+            [
+                'id' => 2,
+                'table' => 'plugin_restore_keyless_fk_parent',
+                'op' => 'insert',
+                'rowid' => 9,
+                'row' => ['lookup' => 'keyless-fk-lookup', 'label' => 'stale keyless FK target label'],
+            ],
+        ]
+    );
+    $schema_restore_keyless_fk_stale_identity = scalar(
+        $schema_restore_keyless_fk_rollback_metadata,
+        "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_restore_keyless_fk_parent' AND rowid = 9"
+    );
+    assert_true($schema_restore_keyless_fk_source_identity !== $schema_restore_keyless_fk_stale_identity, 'keyless FK restore fixture has distinct source and stale target sidecar identities');
+    $db = open_db($schema_restore_keyless_fk_rollback_target);
+    $db->exec('DROP TABLE plugin_restore_keyless_fk_parent');
+    $db->close();
+
+    $schema_restore_keyless_fk_rollback_result = cow_merge_databases(
+        $schema_restore_keyless_fk_rollback_base,
+        $schema_restore_keyless_fk_rollback_source,
+        $schema_restore_keyless_fk_rollback_target,
+        $schema_restore_keyless_fk_rollback_metadata,
+        'feature-schema-restore-keyless-fk-rollback',
+        'main'
+    );
+    assert_same($schema_restore_keyless_fk_rollback_result['status'], 'completed_with_conflicts', 'target-dropped keyless FK parent restore remains reviewable when the source drops the child FK backing index');
+    $schema_restore_keyless_fk_rollback_conflict_id = (int)scalar($schema_restore_keyless_fk_rollback_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_restore_keyless_fk_parent' AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
+    assert_true($schema_restore_keyless_fk_rollback_conflict_id > 0, 'keyless FK parent restore conflict is auditable');
+    $schema_restore_keyless_fk_source_history_before_failed_preview = (int)scalar(
+        $schema_restore_keyless_fk_rollback_metadata,
+        "SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'main' AND table_name = 'plugin_restore_keyless_fk_parent' AND logical_identity = '" . SQLite3::escapeString((string)$schema_restore_keyless_fk_source_identity) . "'"
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $schema_restore_keyless_fk_rollback_metadata,
+            $schema_restore_keyless_fk_rollback_conflict_id,
+            'source',
+            false,
+            'Preview keyless FK parent restore with missing source unique index.',
+            'test'
+        ),
+        'foreign-key validation error',
+        'failed dry-run rolls back keyless FK parent restore after source sidecar staging'
+    );
+    assert_same(
+        (int)scalar($schema_restore_keyless_fk_rollback_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_restore_keyless_fk_rollback_conflict_id"),
+        0,
+        'failed keyless FK restore dry-run does not record resolution metadata'
+    );
+    assert_same(
+        (int)scalar($schema_restore_keyless_fk_rollback_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_restore_keyless_fk_parent'"),
+        0,
+        'failed keyless FK restore dry-run rolls back the restored table'
+    );
+    assert_same(
+        scalar($schema_restore_keyless_fk_rollback_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_restore_keyless_fk_parent' AND rowid = 9"),
+        $schema_restore_keyless_fk_stale_identity,
+        'failed keyless FK restore dry-run rolls back source sidecar adoption'
+    );
+    assert_same(
+        (int)scalar($schema_restore_keyless_fk_rollback_metadata, "SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'main' AND table_name = 'plugin_restore_keyless_fk_parent' AND logical_identity = '" . SQLite3::escapeString((string)$schema_restore_keyless_fk_source_identity) . "'"),
+        $schema_restore_keyless_fk_source_history_before_failed_preview,
+        'failed keyless FK restore dry-run rolls back source sidecar history writes'
+    );
+    $schema_restore_keyless_fk_source_history_before_failed_apply = (int)scalar(
+        $schema_restore_keyless_fk_rollback_metadata,
+        "SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'main' AND table_name = 'plugin_restore_keyless_fk_parent' AND logical_identity = '" . SQLite3::escapeString((string)$schema_restore_keyless_fk_source_identity) . "'"
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $schema_restore_keyless_fk_rollback_metadata,
+            $schema_restore_keyless_fk_rollback_conflict_id,
+            'source',
+            true,
+            'Apply keyless FK parent restore with missing source unique index.',
+            'test'
+        ),
+        'foreign-key validation error',
+        'failed apply rolls back keyless FK parent restore after source sidecar staging'
+    );
+    assert_same(
+        (int)scalar($schema_restore_keyless_fk_rollback_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_restore_keyless_fk_rollback_conflict_id"),
+        0,
+        'failed keyless FK restore apply does not record resolution metadata'
+    );
+    assert_same(
+        scalar($schema_restore_keyless_fk_rollback_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_restore_keyless_fk_parent' AND rowid = 9"),
+        $schema_restore_keyless_fk_stale_identity,
+        'failed keyless FK restore apply rolls back source sidecar adoption'
+    );
+    assert_same(
+        (int)scalar($schema_restore_keyless_fk_rollback_metadata, "SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'main' AND table_name = 'plugin_restore_keyless_fk_parent' AND logical_identity = '" . SQLite3::escapeString((string)$schema_restore_keyless_fk_source_identity) . "'"),
+        $schema_restore_keyless_fk_source_history_before_failed_apply,
+        'failed keyless FK restore apply rolls back source sidecar history writes'
+    );
+
+    $db = open_db($schema_restore_keyless_fk_rollback_target);
+    $db->exec('DROP TABLE plugin_restore_keyless_fk_child');
+    $db->close();
+    $schema_restore_keyless_fk_rollback_apply = cow_merge_resolve_conflict(
+        $schema_restore_keyless_fk_rollback_metadata,
+        $schema_restore_keyless_fk_rollback_conflict_id,
+        'source',
+        true,
+        'Apply keyless FK parent restore after dependent child schema review.',
+        'test'
+    );
+    assert_same($schema_restore_keyless_fk_rollback_apply['status'], 'applied', 'keyless FK parent restore applies after dependent child schema is handled');
+    assert_same(scalar($schema_restore_keyless_fk_rollback_target, "SELECT label FROM plugin_restore_keyless_fk_parent WHERE rowid = 9"), 'source keyless FK label', 'validated keyless FK restore preserves the audited source rowid and payload');
+    assert_same(
+        scalar($schema_restore_keyless_fk_rollback_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_restore_keyless_fk_parent' AND rowid = 9"),
+        $schema_restore_keyless_fk_source_identity,
+        'validated keyless FK restore adopts source sidecar identity after rollback-sensitive apply succeeds'
+    );
+    assert_same(
+        (int)scalar($schema_restore_keyless_fk_rollback_metadata, "SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'main' AND table_name = 'plugin_restore_keyless_fk_parent' AND logical_identity = '" . SQLite3::escapeString((string)$schema_restore_keyless_fk_stale_identity) . "' AND deleted_at IS NOT NULL"),
+        1,
+        'validated keyless FK restore tombstones stale target sidecar identity after successful apply'
+    );
+
     $schema_cross_fk_restored_parent_base = $tmp . '/schema-cross-fk-restored-parent-base.sqlite';
     $schema_cross_fk_restored_parent_source = $tmp . '/schema-cross-fk-restored-parent-source.sqlite';
     $schema_cross_fk_restored_parent_target = $tmp . '/schema-cross-fk-restored-parent-target.sqlite';
