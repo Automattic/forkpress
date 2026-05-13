@@ -586,10 +586,14 @@ tooling.
   target foreign-key integrity during dry-run and apply, so uniqueness,
   expression-index, or latent foreign-key mismatch failures remain
   validation-gated until reviewers address the blocking target data/schema.
+  Compatible table rebuilds run the same target foreign-key integrity check
+  before dry-run or apply reports success.
   Source table restores recreate the audited source table and copy
   source rows after validating that the target table is still absent, preserving
   sparse source `rowid` values for no-primary-key tables, then restore source
   indexes/triggers that were removed as a side effect of the target table drop.
+  Restore previews and applies also validate target foreign-key integrity and
+  compile restored trigger programs before recording a successful resolution.
   No-primary-key sidecar identities for target rows are tombstoned when table
   drop/restore resolutions remove or recreate the target table, so later rowid
   reuse receives fresh logical identity metadata. Safe source-added column

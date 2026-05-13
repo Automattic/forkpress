@@ -2764,6 +2764,81 @@ SQL);
     assert_same($schema_fk_index_rewrite_apply['status'], 'applied', 'source index rewrite applies after dependent child schema is handled');
     assert_same((int)scalar($schema_fk_index_rewrite_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_fk_index_rewrite_parent_code_idx' AND sql LIKE '%lower(code)%'"), 1, 'validated source index rewrite installs the audited source expression index');
 
+    $schema_restore_fk_index_base = $tmp . '/schema-restore-fk-index-base.sqlite';
+    $schema_restore_fk_index_source = $tmp . '/schema-restore-fk-index-source.sqlite';
+    $schema_restore_fk_index_target = $tmp . '/schema-restore-fk-index-target.sqlite';
+    create_base_db($schema_restore_fk_index_base);
+    $db = open_db($schema_restore_fk_index_base);
+    $db->exec('CREATE TABLE plugin_restore_fk_parent (code TEXT NOT NULL, label TEXT)');
+    $db->exec('CREATE UNIQUE INDEX plugin_restore_fk_parent_code_idx ON plugin_restore_fk_parent(code)');
+    $db->exec('CREATE TABLE plugin_restore_fk_child (parent_code TEXT NOT NULL REFERENCES plugin_restore_fk_parent(code), label TEXT)');
+    $db->exec("INSERT INTO plugin_restore_fk_parent (code, label) VALUES ('restore-parent', 'Restore parent')");
+    $db->exec("INSERT INTO plugin_restore_fk_child (parent_code, label) VALUES ('restore-parent', 'Restore child')");
+    $db->close();
+    copy($schema_restore_fk_index_base, $schema_restore_fk_index_source);
+    copy($schema_restore_fk_index_base, $schema_restore_fk_index_target);
+
+    $db = open_db($schema_restore_fk_index_source);
+    $db->exec('DROP INDEX plugin_restore_fk_parent_code_idx');
+    $db->close();
+    $db = open_db($schema_restore_fk_index_target);
+    $db->exec('DROP TABLE plugin_restore_fk_parent');
+    $db->close();
+
+    $schema_restore_fk_index_result = cow_merge_databases($schema_restore_fk_index_base, $schema_restore_fk_index_source, $schema_restore_fk_index_target, $metadata, 'feature-schema-restore-fk-index', 'main');
+    assert_same($schema_restore_fk_index_result['status'], 'completed_with_conflicts', 'target-dropped FK parent table with source-dropped unique index remains reviewable');
+    $schema_restore_fk_index_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_restore_fk_parent' AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $schema_restore_fk_index_conflict_id, 'source', false, 'Preview parent restore without FK index.', 'test'),
+        'foreign-key validation error',
+        'dry-run source table restore rejects latent foreign-key mismatch before reporting success'
+    );
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_restore_fk_index_conflict_id"), 0, 'failed source table restore dry-run does not record resolution metadata');
+    assert_same((int)scalar($schema_restore_fk_index_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_restore_fk_parent'"), 0, 'failed source table restore dry-run rolls back the restored table');
+    $db = open_db($schema_restore_fk_index_target);
+    $db->exec('DROP TABLE plugin_restore_fk_child');
+    $db->close();
+    $schema_restore_fk_index_apply = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_restore_fk_index_conflict_id,
+        'source',
+        true,
+        'Apply parent restore after child schema review.',
+        'test'
+    );
+    assert_same($schema_restore_fk_index_apply['status'], 'applied', 'source table restore applies after dependent child schema is handled');
+    assert_same((int)scalar($schema_restore_fk_index_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_restore_fk_parent'"), 1, 'validated source table restore recreates the audited parent table');
+    assert_same((int)scalar($schema_restore_fk_index_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_restore_fk_parent_code_idx'"), 0, 'validated source table restore keeps the audited source-dropped index state');
+
+    $schema_restore_trigger_base = $tmp . '/schema-restore-trigger-base.sqlite';
+    $schema_restore_trigger_source = $tmp . '/schema-restore-trigger-source.sqlite';
+    $schema_restore_trigger_target = $tmp . '/schema-restore-trigger-target.sqlite';
+    create_base_db($schema_restore_trigger_base);
+    $db = open_db($schema_restore_trigger_base);
+    $db->exec('CREATE TABLE plugin_restore_trigger_items (id INTEGER PRIMARY KEY, label TEXT)');
+    $db->close();
+    copy($schema_restore_trigger_base, $schema_restore_trigger_source);
+    copy($schema_restore_trigger_base, $schema_restore_trigger_target);
+
+    $db = open_db($schema_restore_trigger_source);
+    $db->exec("INSERT INTO plugin_restore_trigger_items (id, label) VALUES (1, 'Trigger restore')");
+    $db->exec('CREATE TRIGGER plugin_restore_trigger_bad_insert AFTER INSERT ON plugin_restore_trigger_items BEGIN SELECT OLD.label; END');
+    $db->close();
+    $db = open_db($schema_restore_trigger_target);
+    $db->exec('DROP TABLE plugin_restore_trigger_items');
+    $db->close();
+
+    $schema_restore_trigger_result = cow_merge_databases($schema_restore_trigger_base, $schema_restore_trigger_source, $schema_restore_trigger_target, $metadata, 'feature-schema-restore-trigger-validation', 'main');
+    assert_same($schema_restore_trigger_result['status'], 'completed_with_conflicts', 'target-dropped table restore with invalid source trigger remains reviewable');
+    $schema_restore_trigger_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_restore_trigger_items' AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $schema_restore_trigger_conflict_id, 'source', false, 'Preview invalid trigger table restore.', 'test'),
+        'failed target trigger validation',
+        'dry-run source table restore rejects invalid restored trigger programs before reporting success'
+    );
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_restore_trigger_conflict_id"), 0, 'failed trigger restore dry-run does not record resolution metadata');
+    assert_same((int)scalar($schema_restore_trigger_target, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'plugin_restore_trigger_items'"), 0, 'failed trigger restore dry-run rolls back the restored table and trigger');
+
     $schema_conflict_base = $tmp . '/schema-conflict-base.sqlite';
     $schema_conflict_source = $tmp . '/schema-conflict-source.sqlite';
     $schema_conflict_target = $tmp . '/schema-conflict-target.sqlite';
@@ -2864,6 +2939,57 @@ SQL);
         1,
         'rerunning after compatible source table rebuild resolution does not rediscover the resolved schema conflict'
     );
+
+    $schema_rebuild_fk_base = $tmp . '/schema-rebuild-fk-base.sqlite';
+    $schema_rebuild_fk_source = $tmp . '/schema-rebuild-fk-source.sqlite';
+    $schema_rebuild_fk_target = $tmp . '/schema-rebuild-fk-target.sqlite';
+    create_base_db($schema_rebuild_fk_base);
+    $db = open_db($schema_rebuild_fk_base);
+    $db->exec('CREATE TABLE plugin_rebuild_fk_parent (code TEXT NOT NULL UNIQUE, label TEXT)');
+    $db->exec('CREATE TABLE plugin_rebuild_fk_child (parent_code TEXT NOT NULL REFERENCES plugin_rebuild_fk_parent(code), label TEXT)');
+    $db->exec("INSERT INTO plugin_rebuild_fk_parent (code, label) VALUES ('rebuild-parent', 'Rebuild parent')");
+    $db->exec("INSERT INTO plugin_rebuild_fk_child (parent_code, label) VALUES ('rebuild-parent', 'Rebuild child')");
+    $db->close();
+    copy($schema_rebuild_fk_base, $schema_rebuild_fk_source);
+    copy($schema_rebuild_fk_base, $schema_rebuild_fk_target);
+
+    $db = open_db($schema_rebuild_fk_source);
+    $db->exec('CREATE TABLE plugin_rebuild_fk_parent_new (code TEXT NOT NULL, label INTEGER)');
+    $db->exec('INSERT INTO plugin_rebuild_fk_parent_new (code, label) SELECT code, label FROM plugin_rebuild_fk_parent');
+    $db->exec('DROP TABLE plugin_rebuild_fk_parent');
+    $db->exec('ALTER TABLE plugin_rebuild_fk_parent_new RENAME TO plugin_rebuild_fk_parent');
+    $db->close();
+    $db = open_db($schema_rebuild_fk_target);
+    $db->exec('CREATE TABLE plugin_rebuild_fk_parent_new (code TEXT NOT NULL UNIQUE, label REAL)');
+    $db->exec('INSERT INTO plugin_rebuild_fk_parent_new (code, label) SELECT code, label FROM plugin_rebuild_fk_parent');
+    $db->exec('DROP TABLE plugin_rebuild_fk_parent');
+    $db->exec('ALTER TABLE plugin_rebuild_fk_parent_new RENAME TO plugin_rebuild_fk_parent');
+    $db->close();
+
+    $schema_rebuild_fk_result = cow_merge_databases($schema_rebuild_fk_base, $schema_rebuild_fk_source, $schema_rebuild_fk_target, $metadata, 'feature-schema-rebuild-fk', 'main');
+    assert_same($schema_rebuild_fk_result['status'], 'completed_with_conflicts', 'compatible source table rebuild that would invalidate target FKs stays reviewable');
+    $schema_rebuild_fk_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_rebuild_fk_parent' AND conflict_type = 'schema-conflict' ORDER BY id DESC LIMIT 1");
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $schema_rebuild_fk_conflict_id, 'source', false, 'Preview FK-sensitive table rebuild.', 'test'),
+        'foreign-key validation error',
+        'dry-run compatible table rebuild rejects latent foreign-key mismatch before reporting success'
+    );
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_rebuild_fk_conflict_id"), 0, 'failed table rebuild dry-run does not record resolution metadata');
+    assert_same(column_type($schema_rebuild_fk_target, 'plugin_rebuild_fk_parent', 'label'), 'REAL', 'failed table rebuild dry-run rolls back target table schema');
+    $db = open_db($schema_rebuild_fk_target);
+    $db->exec('DROP TABLE plugin_rebuild_fk_child');
+    $db->close();
+    $schema_rebuild_fk_apply = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_rebuild_fk_conflict_id,
+        'source',
+        true,
+        'Apply FK-sensitive table rebuild after child schema review.',
+        'test'
+    );
+    assert_same($schema_rebuild_fk_apply['status'], 'applied', 'compatible table rebuild applies after dependent child schema is handled');
+    assert_same(column_type($schema_rebuild_fk_target, 'plugin_rebuild_fk_parent', 'label'), 'INTEGER', 'validated table rebuild applies the audited source column type');
+    assert_true(!str_contains((string)scalar($schema_rebuild_fk_target, "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'plugin_rebuild_fk_parent'"), 'UNIQUE'), 'validated table rebuild keeps the audited source parent key shape');
 
     $schema_keyless_rebuild_base = $tmp . '/schema-keyless-rebuild-base.sqlite';
     $schema_keyless_rebuild_source = $tmp . '/schema-keyless-rebuild-source.sqlite';

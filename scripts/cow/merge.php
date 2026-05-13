@@ -5726,6 +5726,7 @@ function cow_merge_apply_source_table_rebuild(SQLite3 $target, string $table, st
                     ' after schema rebuild: ' . $target->lastErrorMsg()
                 );
             }
+            cow_merge_validate_schema_dependency_program($target, $dependency, 'schema rebuild');
         }
         foreach ($dependent_views as $view) {
             if (!$target->exec((string)$view['sql'])) {
@@ -5739,12 +5740,27 @@ function cow_merge_apply_source_table_rebuild(SQLite3 $target, string $table, st
                     ' after schema rebuild: ' . $target->lastErrorMsg()
                 );
             }
+            cow_merge_validate_schema_dependency_program($target, $dependency, 'schema rebuild');
         }
         cow_merge_validate_views($target, $dependent_views, 'post-rebuild');
+        cow_merge_validate_foreign_key_integrity($target, 'source table rebuild schema resolution');
         $target->exec('RELEASE forkpress_schema_rebuild');
     } catch (Throwable $e) {
         $target->exec('ROLLBACK TO forkpress_schema_rebuild');
         $target->exec('RELEASE forkpress_schema_rebuild');
+        throw $e;
+    }
+}
+
+function cow_merge_validate_source_table_rebuild(SQLite3 $target, string $table, string $source_sql, array $source_columns, array $target_columns): void {
+    $target->exec('SAVEPOINT forkpress_schema_rebuild_validation');
+    try {
+        cow_merge_apply_source_table_rebuild($target, $table, $source_sql, $source_columns, $target_columns);
+        $target->exec('ROLLBACK TO forkpress_schema_rebuild_validation');
+        $target->exec('RELEASE forkpress_schema_rebuild_validation');
+    } catch (Throwable $e) {
+        $target->exec('ROLLBACK TO forkpress_schema_rebuild_validation');
+        $target->exec('RELEASE forkpress_schema_rebuild_validation');
         throw $e;
     }
 }
@@ -5829,6 +5845,13 @@ function cow_merge_validate_foreign_key_integrity(SQLite3 $db, string $context):
     if ($violations) {
         throw new RuntimeException($context . ' would leave target foreign-key violations: ' . implode('; ', $violations));
     }
+}
+
+function cow_merge_validate_schema_dependency_program(SQLite3 $db, array $dependency, string $context): void {
+    if ((string)($dependency['type'] ?? '') !== 'trigger') {
+        return;
+    }
+    cow_merge_validate_trigger_program($db, (string)$dependency['name'], (string)$dependency['sql']);
 }
 
 function cow_merge_apply_source_index_schema_resolution(SQLite3 $target, string $index, ?string $source_sql, bool $apply): void {
@@ -5950,6 +5973,9 @@ function cow_merge_resolve_schema_conflict(
                     $resolved = ['table_sql' => $source_table_sql, 'column' => $source_column];
                     $previous = $target_table_sql;
                     $target_branch = (string)$conflict['target_branch'];
+                    $validate_source = function () use ($target, $table, $source_table_sql, $source_columns, $target_columns): void {
+                        cow_merge_validate_source_table_rebuild($target, $table, $source_table_sql, $source_columns, $target_columns);
+                    };
                     $apply_source = function () use ($target, $meta, $conflict, $target_branch, $table, $source_table_sql, $source_columns, $target_columns): void {
                         cow_merge_apply_source_table_rebuild($target, $table, $source_table_sql, $source_columns, $target_columns);
                         cow_merge_refresh_table_row_identities($target, $meta, (int)$conflict['run_id'], $target_branch, $table);
@@ -6067,6 +6093,18 @@ function cow_merge_resolve_schema_conflict(
                 $target_branch = (string)$conflict['target_branch'];
                 cow_merge_validate_source_table_restore_dependencies($source, $target, $table);
                 $resolved = $restore_payload;
+                $validate_source = function () use ($source, $target, $meta, $conflict, $source_branch, $target_branch, $table, $restore_payload): void {
+                    cow_merge_validate_source_table_restore(
+                        $source,
+                        $target,
+                        $meta,
+                        (int)$conflict['run_id'],
+                        $source_branch,
+                        $target_branch,
+                        $table,
+                        $restore_payload
+                    );
+                };
                 $apply_source = function () use ($source, $target, $meta, $conflict, $source_branch, $target_branch, $table, $restore_payload): void {
                     cow_merge_restore_source_table(
                         $source,
@@ -6139,6 +6177,9 @@ function cow_merge_resolve_schema_conflict(
                 }
                 $resolved = $source_payload;
                 $target_branch = (string)$conflict['target_branch'];
+                $validate_source = function () use ($target, $table, $source_payload, $source_columns, $target_columns): void {
+                    cow_merge_validate_source_table_rebuild($target, $table, $source_payload, $source_columns, $target_columns);
+                };
                 $apply_source = function () use ($target, $meta, $conflict, $target_branch, $table, $source_payload, $source_columns, $target_columns): void {
                     cow_merge_apply_source_table_rebuild($target, $table, $source_payload, $source_columns, $target_columns);
                     cow_merge_refresh_table_row_identities($target, $meta, (int)$conflict['run_id'], $target_branch, $table);
@@ -7769,7 +7810,44 @@ function cow_merge_restore_source_table(
         }
         cow_merge_validate_trigger_program($target, (string)$trigger['name'], (string)$trigger['sql']);
     }
+    cow_merge_validate_foreign_key_integrity($target, 'source table restore');
     return $restored;
+}
+
+function cow_merge_validate_source_table_restore(
+    SQLite3 $source,
+    SQLite3 $target,
+    SQLite3 $meta,
+    int $run_id,
+    string $source_branch,
+    string $target_branch,
+    string $table,
+    array $restore_payload
+): void {
+    $target->exec('SAVEPOINT forkpress_source_table_restore_validation');
+    $meta->exec('SAVEPOINT forkpress_source_table_restore_validation_meta');
+    try {
+        cow_merge_restore_source_table(
+            $source,
+            $target,
+            $meta,
+            $run_id,
+            $source_branch,
+            $target_branch,
+            $table,
+            $restore_payload
+        );
+        $target->exec('ROLLBACK TO forkpress_source_table_restore_validation');
+        $target->exec('RELEASE forkpress_source_table_restore_validation');
+        $meta->exec('ROLLBACK TO forkpress_source_table_restore_validation_meta');
+        $meta->exec('RELEASE forkpress_source_table_restore_validation_meta');
+    } catch (Throwable $e) {
+        $target->exec('ROLLBACK TO forkpress_source_table_restore_validation');
+        $target->exec('RELEASE forkpress_source_table_restore_validation');
+        $meta->exec('ROLLBACK TO forkpress_source_table_restore_validation_meta');
+        $meta->exec('RELEASE forkpress_source_table_restore_validation_meta');
+        throw $e;
+    }
 }
 
 function cow_merge_record_schema_conflict(
