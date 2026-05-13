@@ -2295,6 +2295,40 @@ SQL);
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE d.table_name = 'plugin_keyless' AND d.column_name = 'value' AND d.decision = 'target-kept' AND d.reason = 'target changed cell and source did not change it' AND r.source_branch = 'feature-keyless-same-cell'"), 1, 'target-only keyless cell next to a shared cell remains auditable');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_keyless' AND r.source_branch = 'feature-keyless-same-cell'"), 0, 'same-cell no-primary-key merge does not create a false identity ambiguity');
 
+    $keyless_same_update_base = $tmp . '/keyless-same-update-base.sqlite';
+    $keyless_same_update_source = $tmp . '/keyless-same-update-source.sqlite';
+    $keyless_same_update_target = $tmp . '/keyless-same-update-target.sqlite';
+    create_base_db($keyless_same_update_base);
+    copy($keyless_same_update_base, $keyless_same_update_source);
+    copy($keyless_same_update_base, $keyless_same_update_target);
+    foreach ([$keyless_same_update_source, $keyless_same_update_target] as $path) {
+        $db = open_db($path);
+        $db->exec("UPDATE plugin_keyless SET label = 'Shared keyless row label', value = 'shared keyless row value' WHERE rowid = 1");
+        $db->close();
+    }
+    $keyless_same_update_result = cow_merge_databases($keyless_same_update_base, $keyless_same_update_source, $keyless_same_update_target, $metadata, 'feature-keyless-same-update', 'main');
+    assert_same($keyless_same_update_result['status'], 'completed', 'identical no-primary-key source and target updates merge without a review conflict');
+    assert_same(scalar($keyless_same_update_target, "SELECT value FROM plugin_keyless WHERE rowid = 1"), 'shared keyless row value', 'identical no-primary-key update leaves the shared payload in target');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE d.table_name = 'plugin_keyless' AND d.decision = 'source-applied' AND d.reason = 'source and target changed row to the same payload' AND r.source_branch = 'feature-keyless-same-update'"), 1, 'identical no-primary-key update is auditable when sidecar identity lines up');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_keyless' AND r.source_branch = 'feature-keyless-same-update'"), 0, 'identical no-primary-key update does not create a false identity ambiguity');
+
+    $keyless_same_delete_base = $tmp . '/keyless-same-delete-base.sqlite';
+    $keyless_same_delete_source = $tmp . '/keyless-same-delete-source.sqlite';
+    $keyless_same_delete_target = $tmp . '/keyless-same-delete-target.sqlite';
+    create_base_db($keyless_same_delete_base);
+    copy($keyless_same_delete_base, $keyless_same_delete_source);
+    copy($keyless_same_delete_base, $keyless_same_delete_target);
+    foreach ([$keyless_same_delete_source, $keyless_same_delete_target] as $path) {
+        $db = open_db($path);
+        $db->exec('DELETE FROM plugin_keyless WHERE rowid = 1');
+        $db->close();
+    }
+    $keyless_same_delete_result = cow_merge_databases($keyless_same_delete_base, $keyless_same_delete_source, $keyless_same_delete_target, $metadata, 'feature-keyless-same-delete', 'main');
+    assert_same($keyless_same_delete_result['status'], 'completed', 'identical no-primary-key source and target deletes merge without a review conflict');
+    assert_same((int)scalar($keyless_same_delete_target, 'SELECT COUNT(*) FROM plugin_keyless WHERE rowid = 1'), 0, 'identical no-primary-key delete keeps the row deleted');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE d.table_name = 'plugin_keyless' AND d.decision = 'source-applied' AND d.reason = 'source and target deleted row with the same identity' AND r.source_branch = 'feature-keyless-same-delete'"), 1, 'identical no-primary-key delete is auditable when sidecar identity lines up');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_keyless' AND r.source_branch = 'feature-keyless-same-delete'"), 0, 'identical no-primary-key delete does not create a false identity ambiguity');
+
     $keyless_conflict_base = $tmp . '/keyless-conflict-base.sqlite';
     $keyless_conflict_source = $tmp . '/keyless-conflict-source.sqlite';
     $keyless_conflict_target = $tmp . '/keyless-conflict-target.sqlite';

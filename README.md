@@ -547,7 +547,9 @@ tooling.
   otherwise divergent table schema are recorded the same way.
   Target-only row inserts, row deletes, and cell changes are preserved and
   recorded as `target-kept` decisions so clean trunk/main-side data changes are
-  auditable alongside schema changes.
+  auditable alongside schema changes. Matching source/target row updates and
+  deletes are recorded as `source-applied` no-ops when explicit primary keys or
+  sidecar no-primary-key identity prove they refer to the same logical row.
   Target-only schema additions and rewrites are preserved and recorded as
   `target-kept` decisions so clean trunk/main-side DDL remains auditable.
   Target-only filesystem additions, deletions, and path changes are also

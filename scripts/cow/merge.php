@@ -6220,7 +6220,7 @@ function cow_merge_table_rows(
                     $target_row
                 );
                 $applied++;
-            } elseif ($pk_cols && $base_row !== null && $source_row === null && $target_row === null) {
+            } elseif ($base_row !== null && $source_row === null && $target_row === null) {
                 cow_merge_record_decision(
                     $meta,
                     $run_id,
@@ -6235,7 +6235,7 @@ function cow_merge_table_rows(
                     null
                 );
                 $applied++;
-            } elseif ($pk_cols && $base_row !== null && $source_row !== null && $target_row !== null) {
+            } elseif ($base_row !== null && $source_row !== null && $target_row !== null) {
                 cow_merge_record_decision(
                     $meta,
                     $run_id,
