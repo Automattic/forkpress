@@ -2831,13 +2831,22 @@ SQL);
     $schema_restore_trigger_result = cow_merge_databases($schema_restore_trigger_base, $schema_restore_trigger_source, $schema_restore_trigger_target, $metadata, 'feature-schema-restore-trigger-validation', 'main');
     assert_same($schema_restore_trigger_result['status'], 'completed_with_conflicts', 'target-dropped table restore with invalid source trigger remains reviewable');
     $schema_restore_trigger_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_restore_trigger_items' AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
+    $schema_restore_trigger_object_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_restore_trigger_bad_insert' AND conflict_type = 'schema-source-added-trigger' ORDER BY id DESC LIMIT 1");
+    assert_true($schema_restore_trigger_object_conflict_id > 0, 'invalid source-added table trigger remains a separate schema conflict');
+    $schema_restore_trigger_preview = cow_merge_resolve_conflict($metadata, $schema_restore_trigger_conflict_id, 'source', false, 'Preview table restore while deferring invalid source trigger.', 'test');
+    assert_same($schema_restore_trigger_preview['status'], 'validated', 'dry-run source table restore validates while deferring invalid source-added trigger');
+    assert_same((int)scalar($schema_restore_trigger_target, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'plugin_restore_trigger_items'"), 0, 'successful trigger-deferred restore dry-run leaves target table absent');
+    $schema_restore_trigger_apply = cow_merge_resolve_conflict($metadata, $schema_restore_trigger_conflict_id, 'source', true, 'Apply table restore while deferring invalid source trigger.', 'test');
+    assert_same($schema_restore_trigger_apply['status'], 'applied', 'source table restore applies while invalid source-added trigger stays separate');
+    assert_same((int)scalar($schema_restore_trigger_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_restore_trigger_items'"), 1, 'trigger-deferred table restore recreates the table');
+    assert_same((int)scalar($schema_restore_trigger_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_restore_trigger_bad_insert'"), 0, 'trigger-deferred table restore does not install the invalid source-added trigger');
     assert_throws(
-        fn() => cow_merge_resolve_conflict($metadata, $schema_restore_trigger_conflict_id, 'source', false, 'Preview invalid trigger table restore.', 'test'),
+        fn() => cow_merge_resolve_conflict($metadata, $schema_restore_trigger_object_conflict_id, 'source', false, 'Preview invalid source trigger after table restore.', 'test'),
         'failed target trigger validation',
-        'dry-run source table restore rejects invalid restored trigger programs before reporting success'
+        'invalid deferred source trigger remains validation-gated after table restore'
     );
-    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_restore_trigger_conflict_id"), 0, 'failed trigger restore dry-run does not record resolution metadata');
-    assert_same((int)scalar($schema_restore_trigger_target, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'plugin_restore_trigger_items'"), 0, 'failed trigger restore dry-run rolls back the restored table and trigger');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_restore_trigger_object_conflict_id"), 0, 'failed deferred trigger dry-run does not record resolution metadata');
+    assert_same((int)scalar($schema_restore_trigger_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_restore_trigger_bad_insert'"), 0, 'failed deferred trigger dry-run rolls back the invalid trigger');
 
     $schema_conflict_base = $tmp . '/schema-conflict-base.sqlite';
     $schema_conflict_source = $tmp . '/schema-conflict-source.sqlite';
@@ -5025,6 +5034,114 @@ SQL);
         (int)scalar($source_added_trigger_chain_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-source-trigger-chain'"),
         4,
         'rerunning after source-added trigger chain resolution does not rediscover resolved schema conflicts'
+    );
+
+    $schema_restore_deferred_objects_base = $tmp . '/schema-restore-deferred-objects-base.sqlite';
+    $schema_restore_deferred_objects_source = $tmp . '/schema-restore-deferred-objects-source.sqlite';
+    $schema_restore_deferred_objects_target = $tmp . '/schema-restore-deferred-objects-target.sqlite';
+    $schema_restore_deferred_objects_metadata = $tmp . '/.forkpress/cow/merge/schema-restore-deferred-objects-metadata.sqlite';
+    create_base_db($schema_restore_deferred_objects_base);
+    $db = open_db($schema_restore_deferred_objects_base);
+    $db->exec('CREATE TABLE plugin_restore_deferred_objects (item_id TEXT PRIMARY KEY, label TEXT)');
+    $db->exec('CREATE TABLE plugin_restore_deferred_audit (item_id TEXT, label TEXT)');
+    $db->close();
+    copy($schema_restore_deferred_objects_base, $schema_restore_deferred_objects_source);
+    copy($schema_restore_deferred_objects_base, $schema_restore_deferred_objects_target);
+    $db = open_db($schema_restore_deferred_objects_source);
+    $db->exec("INSERT INTO plugin_restore_deferred_objects (item_id, label) VALUES ('deferred-alpha', 'Deferred Alpha')");
+    $db->exec('CREATE UNIQUE INDEX plugin_restore_deferred_objects_label_idx ON plugin_restore_deferred_objects(label)');
+    $db->exec('CREATE VIEW plugin_restore_deferred_objects_live AS SELECT item_id, label FROM plugin_restore_deferred_objects');
+    $db->exec(<<<'SQL'
+CREATE TRIGGER plugin_restore_deferred_objects_insert
+AFTER INSERT ON plugin_restore_deferred_objects
+BEGIN
+    INSERT INTO plugin_restore_deferred_audit (item_id, label)
+    SELECT item_id, label FROM plugin_restore_deferred_objects_live WHERE item_id = NEW.item_id;
+END
+SQL);
+    $db->close();
+    $db = open_db($schema_restore_deferred_objects_target);
+    $db->exec('DROP TABLE plugin_restore_deferred_objects');
+    $db->close();
+    $schema_restore_deferred_objects_result = cow_merge_databases(
+        $schema_restore_deferred_objects_base,
+        $schema_restore_deferred_objects_source,
+        $schema_restore_deferred_objects_target,
+        $schema_restore_deferred_objects_metadata,
+        'feature-restore-deferred-objects',
+        'main'
+    );
+    assert_same($schema_restore_deferred_objects_result['status'], 'completed_with_conflicts', 'target-dropped table with source-added dependent objects remains reviewable');
+    $schema_restore_deferred_table_conflict_id = (int)scalar($schema_restore_deferred_objects_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_restore_deferred_objects' AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
+    $schema_restore_deferred_index_conflict_id = (int)scalar($schema_restore_deferred_objects_metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_restore_deferred_objects_label_idx' AND conflict_type = 'schema-source-added-index' ORDER BY id DESC LIMIT 1");
+    $schema_restore_deferred_view_conflict_id = (int)scalar($schema_restore_deferred_objects_metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_restore_deferred_objects_live' AND conflict_type = 'schema-source-added-view' ORDER BY id DESC LIMIT 1");
+    $schema_restore_deferred_trigger_conflict_id = (int)scalar($schema_restore_deferred_objects_metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_restore_deferred_objects_insert' AND conflict_type = 'schema-source-added-trigger' ORDER BY id DESC LIMIT 1");
+    assert_true($schema_restore_deferred_table_conflict_id > 0, 'deferred restore table conflict is auditable');
+    assert_true($schema_restore_deferred_index_conflict_id > 0, 'deferred restore source-added index conflict is auditable separately');
+    assert_true($schema_restore_deferred_view_conflict_id > 0, 'deferred restore source-added view conflict is auditable separately');
+    assert_true($schema_restore_deferred_trigger_conflict_id > 0, 'deferred restore source-added trigger conflict is auditable separately');
+    $schema_restore_deferred_table_resolution = cow_merge_resolve_conflict(
+        $schema_restore_deferred_objects_metadata,
+        $schema_restore_deferred_table_conflict_id,
+        'source',
+        true,
+        'Restore table while deferring standalone source-added objects.',
+        'test'
+    );
+    assert_same($schema_restore_deferred_table_resolution['status'], 'applied', 'target-dropped table restore applies before standalone source-added objects');
+    assert_same((int)scalar($schema_restore_deferred_objects_target, "SELECT COUNT(*) FROM plugin_restore_deferred_objects WHERE item_id = 'deferred-alpha'"), 1, 'deferred restore table rows materialize first');
+    assert_same((int)scalar($schema_restore_deferred_objects_target, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'plugin_restore_deferred_objects_label_idx'"), 0, 'deferred restore leaves standalone source-added index to its own conflict');
+    assert_same((int)scalar($schema_restore_deferred_objects_target, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'plugin_restore_deferred_objects_insert'"), 0, 'deferred restore leaves standalone source-added trigger to its own conflict');
+    $schema_restore_deferred_table_payload = cow_merge_decode_payload_json(
+        (string)scalar($schema_restore_deferred_objects_metadata, "SELECT resolved_payload FROM merge_resolutions WHERE conflict_id = $schema_restore_deferred_table_conflict_id ORDER BY id DESC LIMIT 1"),
+        'target-dropped table deferred object resolution'
+    );
+    assert_same(count($schema_restore_deferred_table_payload['indexes']), 0, 'deferred table restore resolution payload omits standalone source-added indexes');
+    assert_same(count($schema_restore_deferred_table_payload['triggers']), 0, 'deferred table restore resolution payload omits standalone source-added triggers');
+    $schema_restore_deferred_index_resolution = cow_merge_resolve_conflict(
+        $schema_restore_deferred_objects_metadata,
+        $schema_restore_deferred_index_conflict_id,
+        'source',
+        true,
+        'Apply deferred source-added index after table restore.',
+        'test'
+    );
+    assert_same($schema_restore_deferred_index_resolution['status'], 'applied', 'deferred source-added index applies after table restore');
+    $schema_restore_deferred_view_resolution = cow_merge_resolve_conflict(
+        $schema_restore_deferred_objects_metadata,
+        $schema_restore_deferred_view_conflict_id,
+        'source',
+        true,
+        'Apply deferred source-added view after table restore.',
+        'test'
+    );
+    assert_same($schema_restore_deferred_view_resolution['status'], 'applied', 'deferred source-added view applies after table restore');
+    $schema_restore_deferred_trigger_resolution = cow_merge_resolve_conflict(
+        $schema_restore_deferred_objects_metadata,
+        $schema_restore_deferred_trigger_conflict_id,
+        'source',
+        true,
+        'Apply deferred source-added trigger after view restore.',
+        'test'
+    );
+    assert_same($schema_restore_deferred_trigger_resolution['status'], 'applied', 'deferred source-added trigger applies after its view dependency');
+    $db = open_db($schema_restore_deferred_objects_target);
+    $db->exec("INSERT INTO plugin_restore_deferred_objects (item_id, label) VALUES ('deferred-beta', 'Deferred Beta')");
+    $db->close();
+    assert_same(scalar($schema_restore_deferred_objects_target, "SELECT label FROM plugin_restore_deferred_audit WHERE item_id = 'deferred-beta'"), 'Deferred Beta', 'deferred restored trigger works after separate source resolution');
+    $schema_restore_deferred_objects_rerun = cow_merge_databases(
+        $schema_restore_deferred_objects_base,
+        $schema_restore_deferred_objects_source,
+        $schema_restore_deferred_objects_target,
+        $schema_restore_deferred_objects_metadata,
+        'feature-restore-deferred-objects',
+        'main'
+    );
+    assert_same($schema_restore_deferred_objects_rerun['status'], 'completed', 'rerunning after deferred restore object resolutions completes without new conflicts');
+    assert_same(
+        (int)scalar($schema_restore_deferred_objects_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-restore-deferred-objects'"),
+        4,
+        'rerunning after deferred restore object resolutions does not rediscover resolved conflicts'
     );
 
     $schema_cross_fk_restored_parent_base = $tmp . '/schema-cross-fk-restored-parent-base.sqlite';

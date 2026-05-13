@@ -576,6 +576,60 @@ function cow_merge_normalize_source_table_restore_payload(mixed $payload): array
     return $normalized;
 }
 
+function cow_merge_has_schema_conflict_for_object(SQLite3 $meta, int $run_id, string $table, string $object, array $types): bool {
+    $stmt = $meta->prepare(
+        "SELECT 1 FROM merge_conflicts WHERE run_id = :run_id AND table_name = :table_name " .
+        "AND column_name = :column_name AND conflict_type = :conflict_type LIMIT 1"
+    );
+    if (!$stmt) {
+        throw new RuntimeException('failed to prepare restore payload conflict lookup: ' . $meta->lastErrorMsg());
+    }
+    foreach ($types as $type) {
+        cow_merge_bind($stmt, ':run_id', $run_id);
+        cow_merge_bind($stmt, ':table_name', $table);
+        cow_merge_bind($stmt, ':column_name', $object);
+        cow_merge_bind($stmt, ':conflict_type', (string)$type);
+        $res = $stmt->execute();
+        if (!$res) {
+            throw new RuntimeException('failed to inspect restore payload conflicts: ' . $meta->lastErrorMsg());
+        }
+        if ($res->fetchArray(SQLITE3_NUM)) {
+            return true;
+        }
+        $stmt->reset();
+    }
+    return false;
+}
+
+function cow_merge_filter_deferred_source_table_restore_payload(SQLite3 $meta, int $run_id, string $table, array $payload): array {
+    $filtered = $payload;
+    $filtered['indexes'] = [];
+    foreach ($payload['indexes'] as $index) {
+        $name = (string)$index['name'];
+        if (cow_merge_has_schema_conflict_for_object($meta, $run_id, $table, $name, [
+            'schema-source-added-index',
+            'schema-source-changed-index',
+            'schema-index-conflict',
+        ])) {
+            continue;
+        }
+        $filtered['indexes'][] = $index;
+    }
+    $filtered['triggers'] = [];
+    foreach ($payload['triggers'] as $trigger) {
+        $name = (string)$trigger['name'];
+        if (cow_merge_has_schema_conflict_for_object($meta, $run_id, $table, $name, [
+            'schema-source-added-trigger',
+            'schema-source-changed-trigger',
+            'schema-trigger-conflict',
+        ])) {
+            continue;
+        }
+        $filtered['triggers'][] = $trigger;
+    }
+    return $filtered;
+}
+
 function cow_merge_table_columns(SQLite3 $db, string $table): array {
     $columns = [];
     $res = $db->query('PRAGMA table_info(' . cow_merge_quote_ident($table) . ')');
@@ -6275,8 +6329,14 @@ function cow_merge_resolve_schema_conflict(
                 $source_branch = (string)$conflict['source_branch'];
                 $target_branch = (string)$conflict['target_branch'];
                 cow_merge_validate_source_table_restore_dependencies($source, $target, $table);
-                $resolved = $restore_payload;
-                $validate_source = function () use ($source, $target, $meta, $conflict, $source_branch, $target_branch, $table, $restore_payload): void {
+                $restore_payload_to_apply = cow_merge_filter_deferred_source_table_restore_payload(
+                    $meta,
+                    (int)$conflict['run_id'],
+                    $table,
+                    $restore_payload
+                );
+                $resolved = $restore_payload_to_apply;
+                $validate_source = function () use ($source, $target, $meta, $conflict, $source_branch, $target_branch, $table, $restore_payload_to_apply): void {
                     cow_merge_validate_source_table_restore(
                         $source,
                         $target,
@@ -6285,10 +6345,10 @@ function cow_merge_resolve_schema_conflict(
                         $source_branch,
                         $target_branch,
                         $table,
-                        $restore_payload
+                        $restore_payload_to_apply
                     );
                 };
-                $apply_source = function () use ($source, $target, $meta, $conflict, $source_branch, $target_branch, $table, $restore_payload): void {
+                $apply_source = function () use ($source, $target, $meta, $conflict, $source_branch, $target_branch, $table, $restore_payload_to_apply): void {
                     cow_merge_restore_source_table(
                         $source,
                         $target,
@@ -6297,7 +6357,7 @@ function cow_merge_resolve_schema_conflict(
                         $source_branch,
                         $target_branch,
                         $table,
-                        $restore_payload
+                        $restore_payload_to_apply
                     );
                 };
             }

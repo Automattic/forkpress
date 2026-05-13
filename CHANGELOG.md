@@ -22,6 +22,7 @@
 - Extended source-added trigger dependency preflight to clear trigger body read references so triggers that read missing target-side schema objects stay validation-gated.
 - Validated source-added trigger programs after installation so triggers with invalid target-side column references stay validation-gated instead of becoming latent runtime failures.
 - Added COW coverage for source-added trigger program validation catching invalid `OLD`/`NEW` references and invalid `UPDATE OF` columns before target installation.
+- Deferred source-added indexes and triggers that already have standalone schema conflicts during target-dropped table restores, so table rows can restore before those objects are resolved in dependency order.
 - Tightened validation-gated source index resolutions so dry-run and apply both prove target rows satisfy the audited source index before reporting success.
 - Tightened validation-gated source index rewrites and drops so dry-run and apply reject latent target foreign-key mismatches before reporting success.
 - Tightened validation-gated source table restores and compatible table rebuilds so dry-run and apply reject latent foreign-key mismatches and invalid restored trigger programs before reporting success.
