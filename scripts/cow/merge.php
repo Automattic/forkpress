@@ -5154,18 +5154,113 @@ function cow_merge_table_rebuild_dependencies(SQLite3 $db, string $table): array
 }
 
 function cow_merge_sql_references_table(string $sql, string $table): bool {
-    $table = preg_quote($table, '/');
-    $identifier = '(?:"' . $table . '"|`' . $table . '`|\[' . $table . '\]|\'' . $table . '\'|(?<![A-Za-z0-9_])' . $table . '(?![A-Za-z0-9_]))';
+    return in_array(strtolower($table), cow_merge_sql_referenced_tables($sql), true);
+}
+
+function cow_merge_identifier_pattern(): string {
+    return '(?:"(?P<dq>[^"]+)"|`(?P<bq>[^`]+)`|\[(?P<br>[^\]]+)\]|\'(?P<sq>[^\']+)\'|(?P<bare>[A-Za-z_][A-Za-z0-9_]*))';
+}
+
+function cow_merge_regex_named_match(array $match, string $name): ?string {
+    return isset($match[$name]) && is_string($match[$name]) && $match[$name] !== '' ? $match[$name] : null;
+}
+
+function cow_merge_sql_reference_name(array $match): ?string {
+    foreach (['dq', 'bq', 'br', 'sq', 'bare'] as $name) {
+        $value = cow_merge_regex_named_match($match, $name);
+        if ($value !== null) {
+            return strtolower($value);
+        }
+    }
+    return null;
+}
+
+function cow_merge_sql_referenced_tables(string $sql): array {
+    $identifier = cow_merge_identifier_pattern();
     $patterns = [
         '/\b(?:FROM|JOIN|UPDATE|INTO)\s+(?:(?:"main"|"temp"|main|temp)\s*\.\s*)?' . $identifier . '/i',
         '/\bTABLE\s+(?:(?:"main"|"temp"|main|temp)\s*\.\s*)?' . $identifier . '/i',
     ];
+    $refs = [];
     foreach ($patterns as $pattern) {
-        if (preg_match($pattern, $sql)) {
-            return true;
+        if (!preg_match_all($pattern, $sql, $matches, PREG_SET_ORDER)) {
+            continue;
+        }
+        foreach ($matches as $match) {
+            $name = cow_merge_sql_reference_name($match);
+            if ($name !== null) {
+                $refs[$name] = true;
+            }
         }
     }
-    return false;
+    return array_keys($refs);
+}
+
+function cow_merge_trigger_referenced_tables(string $sql): array {
+    $body = $sql;
+    if (preg_match('/\bBEGIN\b(.*)\bEND\b/is', $sql, $match)) {
+        $body = (string)$match[1];
+    }
+    $identifier = cow_merge_identifier_pattern();
+    $patterns = [
+        '/\bINSERT\s+(?:OR\s+[A-Z]+\s+)?INTO\s+(?:(?:"main"|"temp"|main|temp)\s*\.\s*)?' . $identifier . '/i',
+        '/\bUPDATE\s+(?:OR\s+[A-Z]+\s+)?(?:(?:"main"|"temp"|main|temp)\s*\.\s*)?' . $identifier . '/i',
+        '/\bDELETE\s+FROM\s+(?:(?:"main"|"temp"|main|temp)\s*\.\s*)?' . $identifier . '/i',
+    ];
+    $refs = [];
+    foreach ($patterns as $pattern) {
+        if (!preg_match_all($pattern, $body, $matches, PREG_SET_ORDER)) {
+            continue;
+        }
+        foreach ($matches as $match) {
+            $name = cow_merge_sql_reference_name($match);
+            if ($name !== null) {
+                $refs[$name] = true;
+            }
+        }
+    }
+    return array_keys($refs);
+}
+
+function cow_merge_schema_object_exists(SQLite3 $db, string $name): bool {
+    $stmt = $db->prepare("SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND lower(name) = lower(:name) LIMIT 1");
+    if (!$stmt) {
+        throw new RuntimeException('failed to prepare schema object existence lookup: ' . $db->lastErrorMsg());
+    }
+    cow_merge_bind($stmt, ':name', $name);
+    $res = $stmt->execute();
+    if (!$res) {
+        throw new RuntimeException('failed to inspect schema object existence: ' . $db->lastErrorMsg());
+    }
+    return (bool)$res->fetchArray(SQLITE3_NUM);
+}
+
+function cow_merge_missing_trigger_references(SQLite3 $db, string $sql): array {
+    $missing = [];
+    foreach (cow_merge_trigger_referenced_tables($sql) as $table) {
+        if (!cow_merge_schema_object_exists($db, $table)) {
+            $missing[] = $table;
+        }
+    }
+    return $missing;
+}
+
+function cow_merge_validate_trigger_references(SQLite3 $db, string $name, string $sql): void {
+    $missing = cow_merge_missing_trigger_references($db, $sql);
+    if ($missing) {
+        throw new InvalidArgumentException(
+            'source trigger ' . $name . ' references missing target schema objects: ' . implode(', ', $missing)
+        );
+    }
+}
+
+function cow_merge_validate_view_schema(SQLite3 $db, string $name, string $context): void {
+    $res = @$db->query('SELECT * FROM ' . cow_merge_quote_ident($name) . ' LIMIT 0');
+    if (!$res) {
+        throw new InvalidArgumentException(
+            'source view ' . $name . " is invalid during $context validation: " . $db->lastErrorMsg()
+        );
+    }
 }
 
 function cow_merge_table_dependent_views(SQLite3 $db, string $table, ?string $exclude_view = null): array {
@@ -5336,6 +5431,9 @@ function cow_merge_apply_source_view_schema_resolution(SQLite3 $target, string $
         }
         if ($source_sql !== null && !$target->exec($source_sql)) {
             throw new RuntimeException('failed to apply source view schema resolution: ' . $target->lastErrorMsg());
+        }
+        if ($source_sql !== null) {
+            cow_merge_validate_view_schema($target, $view, 'source-view-resolution');
         }
         foreach ($dependent_views as $dependency) {
             if (!$target->exec((string)$dependency['sql'])) {
@@ -5534,6 +5632,9 @@ function cow_merge_resolve_schema_conflict(
                             if (!$target->exec($drop_sql)) {
                                 throw new RuntimeException("failed to drop target $type during schema resolution: " . $target->lastErrorMsg());
                             }
+                        }
+                        if ($source_sql !== null) {
+                            cow_merge_validate_trigger_references($target, $object, $source_sql);
                         }
                         if ($source_sql !== null && !$target->exec($source_sql)) {
                             throw new RuntimeException("failed to apply source $type schema resolution: " . $target->lastErrorMsg());
@@ -7248,6 +7349,7 @@ function cow_merge_restore_source_table(
         if (cow_merge_schema_object_sql($target, 'trigger', (string)$trigger['name']) !== null) {
             throw new RuntimeException('target trigger already exists during source table restore: ' . $trigger['name']);
         }
+        cow_merge_validate_trigger_references($target, (string)$trigger['name'], (string)$trigger['sql']);
         if (!$target->exec((string)$trigger['sql'])) {
             throw new RuntimeException('failed to restore source table trigger ' . $trigger['name'] . ': ' . $target->lastErrorMsg());
         }
@@ -7745,7 +7847,25 @@ function cow_merge_apply_schema_object_changes(
             continue;
         }
         if ($base_sql === null && $target_sql === null) {
-            if (!$target->exec($source_sql)) {
+            $apply_error = null;
+            $target->exec('SAVEPOINT forkpress_schema_object_apply');
+            try {
+                if ($type === 'trigger') {
+                    cow_merge_validate_trigger_references($target, $name, $source_sql);
+                }
+                if (!$target->exec($source_sql)) {
+                    throw new RuntimeException($target->lastErrorMsg());
+                }
+                if ($type === 'view') {
+                    cow_merge_validate_view_schema($target, $name, 'source-added');
+                }
+                $target->exec('RELEASE forkpress_schema_object_apply');
+            } catch (Throwable $e) {
+                $target->exec('ROLLBACK TO forkpress_schema_object_apply');
+                $target->exec('RELEASE forkpress_schema_object_apply');
+                $apply_error = $e->getMessage();
+            }
+            if ($apply_error !== null) {
                 if (cow_merge_record_schema_conflict(
                     $meta,
                     $run_id,
@@ -7753,10 +7873,10 @@ function cow_merge_apply_schema_object_changes(
                     $name,
                     "schema-source-added-$type",
                     null,
-                    ['sql' => $source_sql, 'error' => $target->lastErrorMsg()],
+                    ['sql' => $source_sql, 'error' => $apply_error],
                     null,
                     null,
-                    "source added a $type that SQLite rejected on the target"
+                    "source added a $type that target validation rejected"
                 )) {
                     $conflicts++;
                 }

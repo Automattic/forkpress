@@ -3878,6 +3878,88 @@ SQL);
     );
     assert_same($source_added_fk_child_rerun['status'], 'completed', 'rerunning after source-added child row resolution completes without a new conflict');
 
+    $source_added_trigger_missing_base = $tmp . '/source-added-trigger-missing-base.sqlite';
+    $source_added_trigger_missing_source = $tmp . '/source-added-trigger-missing-source.sqlite';
+    $source_added_trigger_missing_target = $tmp . '/source-added-trigger-missing-target.sqlite';
+    $source_added_trigger_missing_metadata = $tmp . '/.forkpress/cow/merge/source-added-trigger-missing-metadata.sqlite';
+    create_base_db($source_added_trigger_missing_base);
+    $db = open_db($source_added_trigger_missing_base);
+    $db->exec('CREATE TABLE plugin_trigger_audit (item_label TEXT)');
+    $db->close();
+    copy($source_added_trigger_missing_base, $source_added_trigger_missing_source);
+    copy($source_added_trigger_missing_base, $source_added_trigger_missing_target);
+    cow_merge_capture_row_identities($source_added_trigger_missing_base, $source_added_trigger_missing_metadata, 'main');
+    cow_merge_capture_row_identities($source_added_trigger_missing_source, $source_added_trigger_missing_metadata, 'feature-source-trigger-missing', 'main');
+    cow_merge_capture_row_identities($source_added_trigger_missing_target, $source_added_trigger_missing_metadata, 'main');
+    $db = open_db($source_added_trigger_missing_source);
+    $db->exec('CREATE TABLE plugin_trigger_items (label TEXT)');
+    $db->exec("INSERT INTO plugin_trigger_items (rowid, label) VALUES (5, 'source item')");
+    $db->exec('CREATE TRIGGER plugin_trigger_items_audit AFTER INSERT ON plugin_trigger_items BEGIN INSERT INTO plugin_trigger_audit (item_label) VALUES (NEW.label); END');
+    $db->close();
+    cow_merge_capture_row_identities($source_added_trigger_missing_source, $source_added_trigger_missing_metadata, 'feature-source-trigger-missing', 'main');
+    $db = open_db($source_added_trigger_missing_target);
+    $db->exec('DROP TABLE plugin_trigger_audit');
+    $db->close();
+    $source_added_trigger_missing_result = cow_merge_databases(
+        $source_added_trigger_missing_base,
+        $source_added_trigger_missing_source,
+        $source_added_trigger_missing_target,
+        $source_added_trigger_missing_metadata,
+        'feature-source-trigger-missing',
+        'main'
+    );
+    assert_same($source_added_trigger_missing_result['status'], 'completed_with_conflicts', 'source-added trigger with missing target dependency is audited instead of creating a latent invalid trigger');
+    assert_same((int)scalar($source_added_trigger_missing_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_trigger_items'"), 1, 'source-added trigger table still materializes');
+    assert_same(scalar($source_added_trigger_missing_target, 'SELECT label FROM plugin_trigger_items WHERE rowid = 5'), 'source item', 'source-added trigger table rows still materialize before trigger review');
+    assert_same((int)scalar($source_added_trigger_missing_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_trigger_items_audit'"), 0, 'source-added trigger is held back while its target dependency is missing');
+    $source_added_trigger_table_conflict_id = (int)scalar($source_added_trigger_missing_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_trigger_audit' AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
+    $source_added_trigger_conflict_id = (int)scalar($source_added_trigger_missing_metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_trigger_items_audit' AND conflict_type = 'schema-source-added-trigger' ORDER BY id DESC LIMIT 1");
+    assert_true($source_added_trigger_table_conflict_id > 0, 'missing trigger dependency remains a reviewable table restore conflict');
+    assert_true($source_added_trigger_conflict_id > 0, 'missing trigger dependency records a source-added trigger schema conflict');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $source_added_trigger_missing_metadata,
+            $source_added_trigger_conflict_id,
+            'source',
+            true,
+            'Try trigger before audit table restore.',
+            'test'
+        ),
+        'references missing target schema objects',
+        'source-added trigger resolution remains gated until its dependency is restored'
+    );
+    $source_added_trigger_table_resolution = cow_merge_resolve_conflict(
+        $source_added_trigger_missing_metadata,
+        $source_added_trigger_table_conflict_id,
+        'source',
+        true,
+        'Restore trigger audit table before trigger.',
+        'test'
+    );
+    assert_same($source_added_trigger_table_resolution['status'], 'applied', 'trigger dependency table restore applies before trigger resolution');
+    $source_added_trigger_resolution = cow_merge_resolve_conflict(
+        $source_added_trigger_missing_metadata,
+        $source_added_trigger_conflict_id,
+        'source',
+        true,
+        'Apply trigger after dependency restore.',
+        'test'
+    );
+    assert_same($source_added_trigger_resolution['status'], 'applied', 'source-added trigger resolution applies after its dependency exists');
+    $db = open_db($source_added_trigger_missing_target);
+    $db->exec("INSERT INTO plugin_trigger_items (label) VALUES ('post-review item')");
+    $db->close();
+    assert_same(scalar($source_added_trigger_missing_target, "SELECT item_label FROM plugin_trigger_audit WHERE item_label = 'post-review item'"), 'post-review item', 'reviewed source trigger is functional after dependency restore');
+    $source_added_trigger_missing_rerun = cow_merge_databases(
+        $source_added_trigger_missing_base,
+        $source_added_trigger_missing_source,
+        $source_added_trigger_missing_target,
+        $source_added_trigger_missing_metadata,
+        'feature-source-trigger-missing',
+        'main'
+    );
+    assert_same($source_added_trigger_missing_rerun['status'], 'completed', 'rerunning after source-added trigger resolution completes without a new conflict');
+
     $schema_cross_fk_restored_parent_base = $tmp . '/schema-cross-fk-restored-parent-base.sqlite';
     $schema_cross_fk_restored_parent_source = $tmp . '/schema-cross-fk-restored-parent-source.sqlite';
     $schema_cross_fk_restored_parent_target = $tmp . '/schema-cross-fk-restored-parent-target.sqlite';
