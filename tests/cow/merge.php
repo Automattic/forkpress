@@ -426,12 +426,17 @@ try {
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $option_conflict_id AND choice = 'target' AND applied = 1"), 1, 'target conflict resolution is auditable');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_review_notes WHERE record_type = 'conflict' AND record_id = $option_conflict_id AND status = 'reviewed' AND note LIKE 'Resolved with target choice:%'"), 1, 'applied target conflict resolution appends a reviewed note');
     $target_resolution_rerun = cow_merge_databases($conflict_base, $conflict_source, $conflict_target, $metadata, 'feature-conflict', 'main');
-    assert_same($target_resolution_rerun['status'], 'completed_with_conflicts', 'rerunning after target cell resolution still reports the unchanged source/target divergence');
+    assert_same($target_resolution_rerun['status'], 'completed', 'rerunning after target cell resolution treats the reviewed target choice as accepted');
     assert_same(scalar($conflict_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_test'"), 'a:1:{s:5:"color";s:3:"red";}', 'rerunning after target cell resolution keeps the audited target value');
     assert_same(
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_options' AND column_name = 'option_value'"),
         1,
         'rerunning after target cell resolution does not duplicate the unchanged conflict record'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE d.table_name = 'wp_options' AND d.column_name = 'option_value' AND d.decision = 'target-accepted' AND r.source_branch = 'feature-conflict'"),
+        1,
+        'rerunning after target cell resolution records the accepted target choice as an auditable decision'
     );
     $resolution_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10);
     assert_same(count($resolution_audit['resolutions']), 2, 'merge audit report exports deterministic resolution records');
@@ -540,6 +545,44 @@ try {
         fn() => cow_merge_resolve_conflict($metadata, $row_conflict_id, 'target', true, 'Try stale target keep.', 'cow-test'),
         'target row no longer matches',
         'stale row conflict resolution is blocked when target row has changed since audit'
+    );
+
+    $row_target_choice_base = $tmp . '/row-target-choice-base.sqlite';
+    $row_target_choice_source = $tmp . '/row-target-choice-source.sqlite';
+    $row_target_choice_target = $tmp . '/row-target-choice-target.sqlite';
+    create_base_db($row_target_choice_base);
+    copy($row_target_choice_base, $row_target_choice_source);
+    copy($row_target_choice_base, $row_target_choice_target);
+    $db = open_db($row_target_choice_source);
+    $db->exec("INSERT INTO plugin_items (item_id, label, value) VALUES ('target-choice', 'Source target choice', 'source row')");
+    $db->close();
+    $db = open_db($row_target_choice_target);
+    $db->exec("INSERT INTO plugin_items (item_id, label, value) VALUES ('target-choice', 'Target target choice', 'target row')");
+    $db->close();
+    $row_target_choice_result = cow_merge_databases($row_target_choice_base, $row_target_choice_source, $row_target_choice_target, $metadata, 'feature-row-target-choice', 'main');
+    assert_same($row_target_choice_result['status'], 'completed_with_conflicts', 'row target-choice fixture starts with a reviewable conflict');
+    $row_target_choice_id = (int)scalar($metadata, "SELECT c.id FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_items' AND c.conflict_type = 'row-insert-collision' AND r.source_branch = 'feature-row-target-choice' ORDER BY c.id DESC LIMIT 1");
+    $row_target_choice_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $row_target_choice_id,
+        'target',
+        true,
+        'Keep audited target row.',
+        'cow-test'
+    );
+    assert_same($row_target_choice_resolution['status'], 'validated', 'target row resolution records validated status');
+    $row_target_choice_rerun = cow_merge_databases($row_target_choice_base, $row_target_choice_source, $row_target_choice_target, $metadata, 'feature-row-target-choice', 'main');
+    assert_same($row_target_choice_rerun['status'], 'completed', 'rerunning after target row resolution treats the reviewed target choice as accepted');
+    assert_same(scalar($row_target_choice_target, "SELECT value FROM plugin_items WHERE item_id = 'target-choice'"), 'target row', 'rerunning after target row resolution keeps the audited target row');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_items' AND c.conflict_type = 'row-insert-collision' AND r.source_branch = 'feature-row-target-choice'"),
+        1,
+        'rerunning after target row resolution does not duplicate the unchanged row conflict record'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE d.table_name = 'plugin_items' AND d.decision = 'target-accepted' AND r.source_branch = 'feature-row-target-choice'"),
+        1,
+        'rerunning after target row resolution records the accepted target choice as an auditable decision'
     );
 
     $row_same_insert_base = $tmp . '/row-same-insert-base.sqlite';
@@ -1434,12 +1477,17 @@ SQL);
         $file_target_keep_source_root,
         $file_target_keep_target_root
     );
-    assert_same($file_target_keep_rerun['status'], 'completed_with_conflicts', 'rerunning after target filesystem resolution still reports the unchanged source/target divergence');
+    assert_same($file_target_keep_rerun['status'], 'completed', 'rerunning after target filesystem resolution treats the reviewed target choice as accepted');
     assert_same(file_get_contents($file_target_keep_target_root . '/wp-content/uploads/keep-target.txt'), 'target target-choice file', 'rerunning after target filesystem resolution keeps the audited target file');
     assert_same(
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = '__files__' AND c.conflict_type = 'file-conflict' AND c.row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/keep-target.txt')) . "' AND r.source_branch = 'feature-file-target-keep'"),
         1,
         'rerunning after target filesystem resolution does not duplicate the unchanged conflict record'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE d.table_name = '__files__' AND d.column_name = 'path' AND d.decision = 'target-accepted' AND r.source_branch = 'feature-file-target-keep'"),
+        1,
+        'rerunning after target filesystem resolution records the accepted target choice as an auditable decision'
     );
 
     $rollback_base_root = $tmp . '/files-rollback-base';
@@ -1660,12 +1708,17 @@ SQL);
     assert_same($schema_target_resolution['status'], 'validated', 'target schema conflict resolution validates current target schema');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_target_resolution_id AND table_name = 'plugin_items' AND column_name = 'extra' AND choice = 'target' AND applied = 1"), 1, 'target schema resolution is auditable');
     $schema_target_resolution_rerun = cow_merge_databases($schema_conflict_base, $schema_conflict_source, $schema_conflict_target, $metadata, 'feature-schema-conflict', 'main');
-    assert_same($schema_target_resolution_rerun['status'], 'completed_with_conflicts', 'rerunning after target schema resolution still reports the unchanged source/target schema divergence');
+    assert_same($schema_target_resolution_rerun['status'], 'completed', 'rerunning after target schema resolution treats the reviewed target choice as accepted');
     assert_same(column_type($schema_conflict_target, 'plugin_items', 'extra'), 'INTEGER', 'rerunning after target schema resolution keeps the audited target schema');
     assert_same(
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_items' AND c.column_name = 'extra' AND c.conflict_type = 'schema-column-conflict' AND r.source_branch = 'feature-schema-conflict'"),
         1,
         'rerunning after target schema resolution does not duplicate the unchanged conflict record'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE d.table_name = 'plugin_items' AND d.column_name = 'extra' AND d.decision = 'target-accepted' AND r.source_branch = 'feature-schema-conflict'"),
+        1,
+        'rerunning after target schema resolution records the accepted target choice as an auditable decision'
     );
 
     $schema_rebuild_base = $tmp . '/schema-rebuild-base.sqlite';

@@ -2405,6 +2405,25 @@ function cow_merge_record_decision(
     }
 }
 
+function cow_merge_latest_applied_resolution_choice(SQLite3 $meta, int $conflict_id): ?string {
+    $stmt = $meta->prepare(
+        'SELECT choice FROM merge_resolutions WHERE conflict_id = :conflict_id AND applied = 1 ORDER BY id DESC LIMIT 1'
+    );
+    if (!$stmt) {
+        throw new RuntimeException('failed to prepare latest resolution lookup: ' . $meta->lastErrorMsg());
+    }
+    cow_merge_bind($stmt, ':conflict_id', $conflict_id);
+    $res = $stmt->execute();
+    if (!$res) {
+        throw new RuntimeException('failed to look up latest resolution: ' . $meta->lastErrorMsg());
+    }
+    $row = $res->fetchArray(SQLITE3_ASSOC);
+    if (!$row) {
+        return null;
+    }
+    return (string)$row['choice'];
+}
+
 function cow_merge_record_conflict(
     SQLite3 $meta,
     int $run_id,
@@ -2416,7 +2435,7 @@ function cow_merge_record_conflict(
     mixed $source,
     mixed $target,
     mixed $chosen
-): void {
+): bool {
     $base_payload = cow_merge_payload_json($base);
     $source_payload = cow_merge_payload_json($source);
     $target_payload = cow_merge_payload_json($target);
@@ -2454,8 +2473,9 @@ function cow_merge_record_conflict(
     if (!$existing_result) {
         throw new RuntimeException('failed to look up existing merge conflict: ' . $meta->lastErrorMsg());
     }
-    if ($existing_result->fetchArray(SQLITE3_ASSOC)) {
-        return;
+    $existing_row = $existing_result->fetchArray(SQLITE3_ASSOC);
+    if ($existing_row) {
+        return cow_merge_latest_applied_resolution_choice($meta, (int)$existing_row['id']) !== 'target';
     }
 
     $stmt = $meta->prepare(
@@ -2482,6 +2502,7 @@ function cow_merge_record_conflict(
     if (!$stmt->execute()) {
         throw new RuntimeException('failed to record merge conflict: ' . $meta->lastErrorMsg());
     }
+    return true;
 }
 
 function cow_merge_file_source_path(string $source_root, string $path): string {
@@ -2881,9 +2902,9 @@ function cow_merge_record_file_conflict(
     ?array $target,
     ?array $chosen,
     string $reason
-): void {
+): bool {
     $identity = cow_merge_file_identity_json($path);
-    cow_merge_record_conflict(
+    $active = cow_merge_record_conflict(
         $meta,
         $run_id,
         '__files__',
@@ -2901,13 +2922,14 @@ function cow_merge_record_file_conflict(
         '__files__',
         $identity,
         'path',
-        'target-wins',
-        $reason,
+        $active ? 'target-wins' : 'target-accepted',
+        $active ? $reason : 'reviewed target resolution already accepts this filesystem conflict: ' . $reason,
         cow_merge_file_path_payload($path, $base),
         cow_merge_file_path_payload($path, $source),
         cow_merge_file_path_payload($path, $target),
         cow_merge_file_path_payload($path, $chosen)
     );
+    return $active;
 }
 
 function cow_merge_record_matching_file_decision(
@@ -3006,7 +3028,7 @@ function cow_merge_files(
             if (cow_merge_file_entries_equal($target, $base)) {
                 if (!cow_merge_file_entry_auto_applicable($path, $base, $source, $target)) {
                     [$conflict_type, $conflict_reason] = cow_merge_file_unsupported_source_conflict($path, $source);
-                    cow_merge_record_file_conflict(
+                    if (cow_merge_record_file_conflict(
                         $meta,
                         $run_id,
                         $path,
@@ -3016,8 +3038,9 @@ function cow_merge_files(
                         $target,
                         $target,
                         $conflict_reason
-                    );
-                    $conflicts++;
+                    )) {
+                        $conflicts++;
+                    }
                     continue;
                 }
                 if (
@@ -3025,7 +3048,7 @@ function cow_merge_files(
                     && ($base['type'] ?? null) === 'dir'
                     && !cow_merge_file_deleted_dir_is_safe($path, $base_entries, $source_entries, $target_entries)
                 ) {
-                    cow_merge_record_file_conflict(
+                    if (cow_merge_record_file_conflict(
                         $meta,
                         $run_id,
                         $path,
@@ -3035,8 +3058,9 @@ function cow_merge_files(
                         $target,
                         $target,
                         'source deleted a filesystem directory that has target-side descendants'
-                    );
-                    $conflicts++;
+                    )) {
+                        $conflicts++;
+                    }
                     continue;
                 }
                 if ($source === null) {
@@ -3071,8 +3095,9 @@ function cow_merge_files(
                 $type = 'file-source-deleted';
                 $reason = 'source deleted a filesystem path while target changed it';
             }
-            cow_merge_record_file_conflict($meta, $run_id, $path, $type, $base, $source, $target, $target, $reason);
-            $conflicts++;
+            if (cow_merge_record_file_conflict($meta, $run_id, $path, $type, $base, $source, $target, $target, $reason)) {
+                $conflicts++;
+            }
         }
         $meta->exec('COMMIT');
     } catch (Throwable $e) {
@@ -5626,9 +5651,22 @@ function cow_merge_record_schema_conflict(
     mixed $target_value,
     mixed $chosen,
     string $reason
-): void {
-    cow_merge_record_conflict($meta, $run_id, $table, null, $object, $type, $base, $source, $target_value, $chosen);
-    cow_merge_record_decision($meta, $run_id, $table, null, $object, 'target-wins', $reason, $base, $source, $target_value, $chosen);
+): bool {
+    $active = cow_merge_record_conflict($meta, $run_id, $table, null, $object, $type, $base, $source, $target_value, $chosen);
+    cow_merge_record_decision(
+        $meta,
+        $run_id,
+        $table,
+        null,
+        $object,
+        $active ? 'target-wins' : 'target-accepted',
+        $active ? $reason : 'reviewed target resolution already accepts this schema conflict: ' . $reason,
+        $base,
+        $source,
+        $target_value,
+        $chosen
+    );
+    return $active;
 }
 
 function cow_merge_record_matching_schema_decision(
@@ -5663,6 +5701,10 @@ function cow_merge_record_matching_schema_decision(
     );
 }
 
+function cow_merge_schema_conflict_result(bool $active): array {
+    return ['merged' => false, 'applied' => 0, 'conflicts' => $active ? 1 : 0];
+}
+
 function cow_merge_apply_safe_table_schema_changes(
     SQLite3 $base,
     SQLite3 $source,
@@ -5675,7 +5717,7 @@ function cow_merge_apply_safe_table_schema_changes(
     string $target_sql
 ): array {
     if ($base_sql === null) {
-        cow_merge_record_schema_conflict(
+        $active = cow_merge_record_schema_conflict(
             $meta,
             $run_id,
             $table,
@@ -5687,7 +5729,7 @@ function cow_merge_apply_safe_table_schema_changes(
             $target_sql,
             'source and target independently added incompatible table schemas'
         );
-        return ['merged' => false, 'applied' => 0, 'conflicts' => 1];
+        return cow_merge_schema_conflict_result($active);
     }
 
     $base_columns = cow_merge_table_info($base, $table);
@@ -5697,7 +5739,7 @@ function cow_merge_apply_safe_table_schema_changes(
         !cow_merge_base_column_prefix_unchanged($base_columns, $source_columns) ||
         !cow_merge_base_column_prefix_unchanged($base_columns, $target_columns)
     ) {
-        cow_merge_record_schema_conflict(
+        $active = cow_merge_record_schema_conflict(
             $meta,
             $run_id,
             $table,
@@ -5709,7 +5751,7 @@ function cow_merge_apply_safe_table_schema_changes(
             $target_sql,
             'source or target changed existing table columns; only appended columns can be merged automatically'
         );
-        return ['merged' => false, 'applied' => 0, 'conflicts' => 1];
+        return cow_merge_schema_conflict_result($active);
     }
 
     $base_by_name = cow_merge_columns_by_name($base_columns);
@@ -5724,7 +5766,7 @@ function cow_merge_apply_safe_table_schema_changes(
         }
         if (isset($target_by_name[$name_key])) {
             if (!cow_merge_column_signatures_equal($source_column, $target_by_name[$name_key])) {
-                cow_merge_record_schema_conflict(
+                $active = cow_merge_record_schema_conflict(
                     $meta,
                     $run_id,
                     $table,
@@ -5736,7 +5778,7 @@ function cow_merge_apply_safe_table_schema_changes(
                     $target_by_name[$name_key],
                     'source and target added the same column name with incompatible definitions'
                 );
-                return ['merged' => false, 'applied' => 0, 'conflicts' => 1];
+                return cow_merge_schema_conflict_result($active);
             }
             $matching_columns[] = [
                 'source_column' => $source_column,
@@ -5749,7 +5791,7 @@ function cow_merge_apply_safe_table_schema_changes(
 
         $definition = cow_merge_column_definition_from_create_sql($source_sql, (string)$source_column['name']);
         if ($definition === null || !cow_merge_column_definition_is_safe_to_add($definition, $source_column)) {
-            cow_merge_record_schema_conflict(
+            $active = cow_merge_record_schema_conflict(
                 $meta,
                 $run_id,
                 $table,
@@ -5761,7 +5803,7 @@ function cow_merge_apply_safe_table_schema_changes(
                 $target_sql,
                 'source added a column whose definition is not safe to apply automatically'
             );
-            return ['merged' => false, 'applied' => 0, 'conflicts' => 1];
+            return cow_merge_schema_conflict_result($active);
         }
         $columns_to_add[] = ['column' => $source_column, 'definition' => $definition];
     }
@@ -5779,7 +5821,7 @@ function cow_merge_apply_safe_table_schema_changes(
             if (!$target->exec($sql)) {
                 $target->exec('ROLLBACK TO forkpress_schema_merge');
                 $target->exec('RELEASE forkpress_schema_merge');
-                cow_merge_record_schema_conflict(
+                $active = cow_merge_record_schema_conflict(
                     $meta,
                     $run_id,
                     $table,
@@ -5791,7 +5833,7 @@ function cow_merge_apply_safe_table_schema_changes(
                     $target_sql,
                     'source added a column that SQLite rejected on the target'
                 );
-                return ['merged' => false, 'applied' => 0, 'conflicts' => 1];
+                return cow_merge_schema_conflict_result($active);
             }
         }
         $target->exec('RELEASE forkpress_schema_merge');
@@ -5893,7 +5935,7 @@ function cow_merge_apply_index_schema_changes(
         }
         if ($source_sql === null) {
             if ($base_sql !== null) {
-                cow_merge_record_schema_conflict(
+                if (cow_merge_record_schema_conflict(
                     $meta,
                     $run_id,
                     $table,
@@ -5904,8 +5946,9 @@ function cow_merge_apply_index_schema_changes(
                     $target_sql,
                     $target_sql,
                     'source dropped an index; automatic index drops are not applied'
-                );
-                $conflicts++;
+                )) {
+                    $conflicts++;
+                }
             } elseif ($target_sql !== null) {
                 cow_merge_record_decision(
                     $meta,
@@ -5925,7 +5968,7 @@ function cow_merge_apply_index_schema_changes(
         }
         if ($base_sql === null && $target_sql === null) {
             if (!$target->exec($source_sql)) {
-                cow_merge_record_schema_conflict(
+                if (cow_merge_record_schema_conflict(
                     $meta,
                     $run_id,
                     $table,
@@ -5936,8 +5979,9 @@ function cow_merge_apply_index_schema_changes(
                     null,
                     null,
                     'source added an index that SQLite rejected on the target'
-                );
-                $conflicts++;
+                )) {
+                    $conflicts++;
+                }
                 continue;
             }
             cow_merge_record_decision(
@@ -5975,7 +6019,7 @@ function cow_merge_apply_index_schema_changes(
             continue;
         }
         if ($target_sql === $base_sql) {
-            cow_merge_record_schema_conflict(
+            if (cow_merge_record_schema_conflict(
                 $meta,
                 $run_id,
                 $table,
@@ -5986,11 +6030,12 @@ function cow_merge_apply_index_schema_changes(
                 $target_sql,
                 $target_sql,
                 'source changed an existing index; automatic index rewrites are not applied'
-            );
-            $conflicts++;
+            )) {
+                $conflicts++;
+            }
             continue;
         }
-        cow_merge_record_schema_conflict(
+        if (cow_merge_record_schema_conflict(
             $meta,
             $run_id,
             $table,
@@ -6001,8 +6046,9 @@ function cow_merge_apply_index_schema_changes(
             $target_sql,
             $target_sql,
             'source and target changed the same index differently'
-        );
-        $conflicts++;
+        )) {
+            $conflicts++;
+        }
     }
 
     return ['applied' => $applied, 'conflicts' => $conflicts];
@@ -6052,7 +6098,7 @@ function cow_merge_apply_schema_object_changes(
         }
         if ($source_sql === null) {
             if ($base_sql !== null) {
-                cow_merge_record_schema_conflict(
+                if (cow_merge_record_schema_conflict(
                     $meta,
                     $run_id,
                     $table,
@@ -6063,8 +6109,9 @@ function cow_merge_apply_schema_object_changes(
                     $target_sql,
                     $target_sql,
                     "source dropped a $type; automatic $type drops are not applied"
-                );
-                $conflicts++;
+                )) {
+                    $conflicts++;
+                }
             } elseif ($target_sql !== null) {
                 cow_merge_record_decision(
                     $meta,
@@ -6084,7 +6131,7 @@ function cow_merge_apply_schema_object_changes(
         }
         if ($base_sql === null && $target_sql === null) {
             if (!$target->exec($source_sql)) {
-                cow_merge_record_schema_conflict(
+                if (cow_merge_record_schema_conflict(
                     $meta,
                     $run_id,
                     $table,
@@ -6095,8 +6142,9 @@ function cow_merge_apply_schema_object_changes(
                     null,
                     null,
                     "source added a $type that SQLite rejected on the target"
-                );
-                $conflicts++;
+                )) {
+                    $conflicts++;
+                }
                 continue;
             }
             cow_merge_record_decision(
@@ -6134,7 +6182,7 @@ function cow_merge_apply_schema_object_changes(
             continue;
         }
         if ($target_sql === $base_sql) {
-            cow_merge_record_schema_conflict(
+            if (cow_merge_record_schema_conflict(
                 $meta,
                 $run_id,
                 $table,
@@ -6145,11 +6193,12 @@ function cow_merge_apply_schema_object_changes(
                 $target_sql,
                 $target_sql,
                 "source changed an existing $type; automatic $type rewrites are not applied"
-            );
-            $conflicts++;
+            )) {
+                $conflicts++;
+            }
             continue;
         }
-        cow_merge_record_schema_conflict(
+        if (cow_merge_record_schema_conflict(
             $meta,
             $run_id,
             $table,
@@ -6160,8 +6209,9 @@ function cow_merge_apply_schema_object_changes(
             $target_sql,
             $target_sql,
             "source and target changed the same $type differently"
-        );
-        $conflicts++;
+        )) {
+            $conflicts++;
+        }
     }
 
     return ['applied' => $applied, 'conflicts' => $conflicts];
@@ -6316,7 +6366,7 @@ function cow_merge_table_rows(
                     $applied++;
                     continue;
                 }
-                cow_merge_record_conflict(
+                $active = cow_merge_record_conflict(
                     $meta,
                     $run_id,
                     $table,
@@ -6334,14 +6384,16 @@ function cow_merge_table_rows(
                     $table,
                     $key,
                     null,
-                    'target-wins',
-                    'source inserted row collides with target unique index ' . $unique_collision['index'],
+                    $active ? 'target-wins' : 'target-accepted',
+                    ($active ? 'source inserted row collides with target unique index ' : 'reviewed target resolution already accepts source row collision with target unique index ') . $unique_collision['index'],
                     null,
                     $source_row,
                     $unique_collision['row'],
                     $unique_collision['row']
                 );
-                $conflicts++;
+                if ($active) {
+                    $conflicts++;
+                }
                 continue;
             }
             $new_rowid = cow_merge_insert_row($target, $table, $source_row, $columns);
@@ -6365,23 +6417,29 @@ function cow_merge_table_rows(
         }
 
         if ($target_row === null && $source_row !== null) {
-            cow_merge_record_conflict($meta, $run_id, $table, $key, null, 'row-target-deleted', $base_row, $source_row, null, null);
-            cow_merge_record_decision($meta, $run_id, $table, $key, null, 'target-wins', 'target deleted row while source changed it', $base_row, $source_row, null, null);
-            $conflicts++;
+            $active = cow_merge_record_conflict($meta, $run_id, $table, $key, null, 'row-target-deleted', $base_row, $source_row, null, null);
+            cow_merge_record_decision($meta, $run_id, $table, $key, null, $active ? 'target-wins' : 'target-accepted', $active ? 'target deleted row while source changed it' : 'reviewed target resolution already accepts target-deleted row conflict', $base_row, $source_row, null, null);
+            if ($active) {
+                $conflicts++;
+            }
             continue;
         }
 
         if ($base_row === null && $source_row !== null && $target_row !== null) {
-            cow_merge_record_conflict($meta, $run_id, $table, $key, null, 'row-insert-collision', null, $source_row, $target_row, $target_row);
-            cow_merge_record_decision($meta, $run_id, $table, $key, null, 'target-wins', 'source and target inserted different rows with the same identity', null, $source_row, $target_row, $target_row);
-            $conflicts++;
+            $active = cow_merge_record_conflict($meta, $run_id, $table, $key, null, 'row-insert-collision', null, $source_row, $target_row, $target_row);
+            cow_merge_record_decision($meta, $run_id, $table, $key, null, $active ? 'target-wins' : 'target-accepted', $active ? 'source and target inserted different rows with the same identity' : 'reviewed target resolution already accepts same-identity insert collision', null, $source_row, $target_row, $target_row);
+            if ($active) {
+                $conflicts++;
+            }
             continue;
         }
 
         if ($source_row === null && $target_row !== null) {
-            cow_merge_record_conflict($meta, $run_id, $table, $key, null, 'row-source-deleted', $base_row, null, $target_row, $target_row);
-            cow_merge_record_decision($meta, $run_id, $table, $key, null, 'target-wins', 'source deleted row while target changed it', $base_row, null, $target_row, $target_row);
-            $conflicts++;
+            $active = cow_merge_record_conflict($meta, $run_id, $table, $key, null, 'row-source-deleted', $base_row, null, $target_row, $target_row);
+            cow_merge_record_decision($meta, $run_id, $table, $key, null, $active ? 'target-wins' : 'target-accepted', $active ? 'source deleted row while target changed it' : 'reviewed target resolution already accepts source-deleted row conflict', $base_row, null, $target_row, $target_row);
+            if ($active) {
+                $conflicts++;
+            }
             continue;
         }
 
@@ -6402,21 +6460,25 @@ function cow_merge_table_rows(
 
         $merged = $target_row;
         if (!$pk_cols && cow_merge_keyless_row_identity_ambiguous($base_row, $source_row, $target_row, $row_columns)) {
-            cow_merge_record_conflict($meta, $run_id, $table, $key, null, 'row-identity-ambiguous', $base_row, $source_row, $target_row, $target_row);
+            $active = cow_merge_record_conflict($meta, $run_id, $table, $key, null, 'row-identity-ambiguous', $base_row, $source_row, $target_row, $target_row);
             cow_merge_record_decision(
                 $meta,
                 $run_id,
                 $table,
                 $key,
                 null,
-                'target-wins',
-                'no-primary-key source row changed cells that target did not change while target also changed; rowid reuse cannot be ruled out without runtime identity events',
+                $active ? 'target-wins' : 'target-accepted',
+                $active
+                    ? 'no-primary-key source row changed cells that target did not change while target also changed; rowid reuse cannot be ruled out without runtime identity events'
+                    : 'reviewed target resolution already accepts no-primary-key row identity ambiguity',
                 $base_row,
                 $source_row,
                 $target_row,
                 $target_row
             );
-            $conflicts++;
+            if ($active) {
+                $conflicts++;
+            }
             continue;
         }
 
@@ -6448,9 +6510,11 @@ function cow_merge_table_rows(
                 }
                 continue;
             }
-            cow_merge_record_conflict($meta, $run_id, $table, $key, $col, 'cell-conflict', $b, $s, $t, $t);
-            cow_merge_record_decision($meta, $run_id, $table, $key, $col, 'target-wins', 'source and target changed the same cell differently', $b, $s, $t, $t);
-            $row_conflicts++;
+            $active = cow_merge_record_conflict($meta, $run_id, $table, $key, $col, 'cell-conflict', $b, $s, $t, $t);
+            cow_merge_record_decision($meta, $run_id, $table, $key, $col, $active ? 'target-wins' : 'target-accepted', $active ? 'source and target changed the same cell differently' : 'reviewed target resolution already accepts same-cell conflict', $b, $s, $t, $t);
+            if ($active) {
+                $row_conflicts++;
+            }
         }
 
         if ($row_applied > 0) {
@@ -6531,7 +6595,7 @@ function cow_merge_databases(
             }
             if ($source_sql === null) {
                 if ($base_sql !== null && $target_sql !== null) {
-                    cow_merge_record_schema_conflict(
+                    if (cow_merge_record_schema_conflict(
                         $meta,
                         $run_id,
                         $table,
@@ -6542,8 +6606,9 @@ function cow_merge_databases(
                         $target_sql,
                         $target_sql,
                         'source dropped a table; automatic table drops are not applied'
-                    );
-                    $conflicts++;
+                    )) {
+                        $conflicts++;
+                    }
                 } elseif ($base_sql === null && $target_sql !== null) {
                     cow_merge_record_decision(
                         $meta,
@@ -6566,7 +6631,7 @@ function cow_merge_databases(
                 continue;
             }
             if ($target_sql === null) {
-                cow_merge_record_schema_conflict(
+                if (cow_merge_record_schema_conflict(
                     $meta,
                     $run_id,
                     $table,
@@ -6577,8 +6642,9 @@ function cow_merge_databases(
                     null,
                     null,
                     'target dropped table while source kept or changed it'
-                );
-                $conflicts++;
+                )) {
+                    $conflicts++;
+                }
                 continue;
             }
             if ($source_sql !== $target_sql && $source_sql !== $base_sql) {

@@ -562,7 +562,10 @@ tooling.
   dropped view.
   With `--apply`,
   ForkPress records the deterministic resolution in merge metadata and appends
-  a reviewed annotation to the conflict audit record.
+  a reviewed annotation to the conflict audit record. Reruns after a reviewed
+  target choice keep the original conflict and resolution audit records, but
+  treat that unchanged divergence as accepted and record a `target-accepted`
+  decision instead of reporting it as a fresh active conflict.
 - `forkpress branch show <name>` prints the branch directory, database, file
   count, and Git ref path.
 - `forkpress branch delete <name>` removes a COW branch. `main` cannot be
