@@ -2758,6 +2758,53 @@ SQL);
     assert_same((int)scalar($late_whole_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-late-whole-rollback' AND status = 'failed'"), 1, 'late whole-branch rollback records a failed merge run after restoring metadata');
     assert_same((int)scalar($late_whole_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__'"), 0, 'late whole-branch rollback discards filesystem decisions after metadata restore');
 
+    $recovered_file_rollback_metadata = $tmp . '/.forkpress/cow/merge/recovered-file-rollback-metadata.sqlite';
+    $recovered_file_rollback_id = cow_merge_record_failed_run_with_recovered_rollback_failure(
+        $recovered_file_rollback_metadata,
+        'feature-recovered-file-rollback',
+        'main',
+        '/tmp/base.sqlite',
+        '/tmp/source.sqlite',
+        '/tmp/target.sqlite',
+        new CowMergeRollbackFailureException(
+            'forced mixed file failure; filesystem rollback failed: missing staged filesystem backup for: /tmp/target/wp-content/uploads/file.txt',
+            'forced mixed file failure',
+            'missing staged filesystem backup for: /tmp/target/wp-content/uploads/file.txt',
+            ['filesystem_transaction' => ['backup_count' => 2]]
+        )
+    );
+    assert_true($recovered_file_rollback_id > 0, 'recovered filesystem rollback failure records a failed run');
+    assert_same(
+        (int)scalar($recovered_file_rollback_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-recovered-file-rollback' AND status = 'failed'"),
+        1,
+        'recovered filesystem rollback failure leaves the failed run queryable'
+    );
+    assert_same(
+        (int)scalar($recovered_file_rollback_metadata, "SELECT COUNT(*) FROM merge_rollback_failures WHERE run_id = $recovered_file_rollback_id AND source_branch = 'feature-recovered-file-rollback'"),
+        1,
+        'recovered filesystem rollback failure leaves rollback metadata queryable after metadata restoration'
+    );
+    $recovered_file_rollback_audit = cow_merge_audit_report($recovered_file_rollback_metadata, $recovered_file_rollback_id, 5, ['records' => 'rollback-failures']);
+    assert_same(count($recovered_file_rollback_audit['rollback_failures']), 1, 'recovered filesystem rollback failure appears in rollback-failure audit exports');
+    assert_same(
+        $recovered_file_rollback_audit['rollback_failures'][0]['original_failure'],
+        'forced mixed file failure',
+        'recovered filesystem rollback failure preserves the original file-phase error'
+    );
+    assert_same(
+        $recovered_file_rollback_audit['rollback_failures'][0]['rollback_failure'],
+        'missing staged filesystem backup for: /tmp/target/wp-content/uploads/file.txt',
+        'recovered filesystem rollback failure preserves the inner rollback error'
+    );
+    $recovered_file_rollback_artifact = file((string)$recovered_file_rollback_audit['rollback_failures'][0]['artifact_path'], FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    assert_true(is_array($recovered_file_rollback_artifact) && count($recovered_file_rollback_artifact) === 1, 'recovered filesystem rollback failure writes one artifact record');
+    $recovered_file_rollback_record = json_decode($recovered_file_rollback_artifact[0], true);
+    assert_same(
+        $recovered_file_rollback_record['artifacts']['filesystem_transaction']['backup_count'] ?? null,
+        2,
+        'recovered filesystem rollback failure preserves filesystem transaction artifact metadata'
+    );
+
     $rollback_artifact_metadata = $tmp . '/.forkpress/cow/merge/rollback-artifact/rollback-failure-artifact.sqlite';
     $rollback_artifact_target_db = $tmp . '/rollback-failure-artifact-target.sqlite';
     create_base_db($rollback_artifact_target_db);

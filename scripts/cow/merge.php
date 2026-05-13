@@ -28,6 +28,25 @@ function cow_merge_usage(): void {
 const COW_MERGE_AUTOINCREMENT_BAND_SIZE = 1000000;
 const COW_MERGE_AUTOINCREMENT_FIRST_BAND_START = 1000000;
 
+class CowMergeRollbackFailureException extends RuntimeException {
+    public string $originalFailure;
+    public string $rollbackFailure;
+    public array $rollbackArtifacts;
+
+    public function __construct(
+        string $message,
+        string $originalFailure,
+        string $rollbackFailure,
+        array $rollbackArtifacts,
+        ?Throwable $previous = null
+    ) {
+        parent::__construct($message, 0, $previous);
+        $this->originalFailure = $originalFailure;
+        $this->rollbackFailure = $rollbackFailure;
+        $this->rollbackArtifacts = $rollbackArtifacts;
+    }
+}
+
 function cow_merge_mkdir_p(string $path): void {
     if ($path === '' || is_dir($path)) {
         return;
@@ -4826,6 +4845,11 @@ function cow_merge_files(
                 cow_merge_file_transaction_restore($file_tx, $target_root);
             } catch (Throwable $rollback_error) {
                 $preserve_file_tx = true;
+                $original_failure = cow_merge_failure_reason($e);
+                $rollback_failure = cow_merge_failure_reason($rollback_error);
+                $rollback_artifacts = [
+                    'filesystem_transaction' => cow_merge_file_transaction_artifact($file_tx, $target_root),
+                ];
                 cow_merge_record_rollback_failure_artifact(
                     $metadata_db,
                     $run_id,
@@ -4834,15 +4858,15 @@ function cow_merge_files(
                     $run_context['base_db'],
                     $run_context['source_db'],
                     $run_context['target_db'],
-                    cow_merge_failure_reason($e),
-                    cow_merge_failure_reason($rollback_error),
-                    [
-                        'filesystem_transaction' => cow_merge_file_transaction_artifact($file_tx, $target_root),
-                    ]
+                    $original_failure,
+                    $rollback_failure,
+                    $rollback_artifacts
                 );
-                throw new RuntimeException(
+                throw new CowMergeRollbackFailureException(
                     $e->getMessage() . '; filesystem rollback failed: ' . $rollback_error->getMessage(),
-                    0,
+                    $original_failure,
+                    $rollback_failure,
+                    $rollback_artifacts,
                     $e
                 );
             }
@@ -10122,6 +10146,74 @@ function cow_merge_record_failed_run(
     return $run_id;
 }
 
+function cow_merge_filesystem_rollback_failure_parts(Throwable $e): ?array {
+    if ($e instanceof CowMergeRollbackFailureException) {
+        return [
+            'original_failure' => $e->originalFailure,
+            'rollback_failure' => $e->rollbackFailure,
+            'rollback_artifacts' => $e->rollbackArtifacts,
+        ];
+    }
+
+    $reason = cow_merge_failure_reason($e);
+    $needle = '; filesystem rollback failed: ';
+    $pos = strpos($reason, $needle);
+    if ($pos === false) {
+        return null;
+    }
+
+    $original_failure = substr($reason, 0, $pos);
+    $rollback_failure = substr($reason, $pos + strlen($needle));
+    if ($original_failure === '' || $rollback_failure === '') {
+        return null;
+    }
+
+    return [
+        'original_failure' => $original_failure,
+        'rollback_failure' => $rollback_failure,
+        'rollback_artifacts' => [],
+    ];
+}
+
+function cow_merge_record_failed_run_with_recovered_rollback_failure(
+    string $metadata_db,
+    string $source_branch,
+    string $target_branch,
+    string $base_db,
+    string $source_db,
+    string $target_db,
+    Throwable $failure
+): int {
+    $failure_reason = cow_merge_failure_reason($failure);
+    $run_id = cow_merge_record_failed_run(
+        $metadata_db,
+        $source_branch,
+        $target_branch,
+        $base_db,
+        $source_db,
+        $target_db,
+        $failure_reason
+    );
+
+    $filesystem_rollback_failure = cow_merge_filesystem_rollback_failure_parts($failure);
+    if ($filesystem_rollback_failure !== null) {
+        cow_merge_record_rollback_failure_artifact(
+            $metadata_db,
+            $run_id,
+            $source_branch,
+            $target_branch,
+            $base_db,
+            $source_db,
+            $target_db,
+            $filesystem_rollback_failure['original_failure'],
+            $filesystem_rollback_failure['rollback_failure'],
+            $filesystem_rollback_failure['rollback_artifacts']
+        );
+    }
+
+    return $run_id;
+}
+
 function cow_merge_branch_state(
     string $base_db,
     string $source_db,
@@ -10179,14 +10271,14 @@ function cow_merge_branch_state(
                 if ($filesystem_snapshot !== null) {
                     cow_merge_file_root_snapshot_restore($filesystem_snapshot, (string)$target_root);
                 }
-                cow_merge_record_failed_run(
+                cow_merge_record_failed_run_with_recovered_rollback_failure(
                     $metadata_db,
                     $source_branch,
                     $target_branch,
                     $base_db,
                     $source_db,
                     $target_db,
-                    cow_merge_failure_reason($e)
+                    $e
                 );
             } catch (Throwable $rollback_error) {
                 $preserve_rollback_snapshots = true;

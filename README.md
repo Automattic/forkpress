@@ -650,6 +650,10 @@ tooling.
   Filesystem merge planning and file operations also share one audit metadata
   transaction, so a failed file merge does not leave partial conflict or
   decision rows behind.
+  If a filesystem-phase rollback failure is followed by a successful outer
+  mixed DB/filesystem rollback, ForkPress re-records the rollback failure after
+  restoring metadata so `merge-audit --records rollback-failures` remains
+  queryable.
   If rollback itself fails, ForkPress preserves the rollback snapshot backups
   or per-file transaction backups and records their locations in the
   rollback-failure JSONL artifact.
