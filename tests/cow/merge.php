@@ -2563,12 +2563,15 @@ SQL);
     mkdir($rollback_base_root . '/wp-content/uploads', 0777, true);
     write_test_file($rollback_base_root . '/wp-content/uploads/a-first.txt', 'base first');
     write_test_file($rollback_base_root . '/wp-content/uploads/b-second.txt', 'base second');
+    write_test_file($rollback_base_root . '/wp-content/uploads/conflict.txt', 'base conflict');
     copy_tree_for_test($rollback_base_root, $rollback_source_root);
     copy_tree_for_test($rollback_base_root, $rollback_target_root);
     $rollback_manifest = $tmp . '/.forkpress/cow/merge/file-bases/feature-rollback.json';
     cow_merge_capture_file_base($rollback_base_root, $rollback_manifest);
     write_test_file($rollback_source_root . '/wp-content/uploads/a-first.txt', 'source first');
     write_test_file($rollback_source_root . '/wp-content/uploads/b-second.txt', 'source second');
+    write_test_file($rollback_source_root . '/wp-content/uploads/conflict.txt', 'source conflict');
+    write_test_file($rollback_target_root . '/wp-content/uploads/conflict.txt', 'target conflict');
 
     $rollback_metadata = $tmp . '/.forkpress/cow/merge/rollback-metadata.sqlite';
     $rollback_meta = open_db($rollback_metadata);
@@ -2613,6 +2616,7 @@ SQL);
     assert_same(file_get_contents($rollback_target_root . '/wp-content/uploads/a-first.txt'), 'base first', 'filesystem rollback restores a file changed before the failure');
     assert_same(file_get_contents($rollback_target_root . '/wp-content/uploads/b-second.txt'), 'base second', 'filesystem rollback restores the file changed by the failing operation');
     assert_same((int)scalar($rollback_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'source-applied'"), 0, 'filesystem decision metadata rolls back with failed file operations');
+    assert_same((int)scalar($rollback_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__files__'"), 0, 'filesystem conflict metadata rolls back with failed file operations');
 
     $whole_base_db = $tmp . '/whole-rollback-base.sqlite';
     $whole_source_db = $tmp . '/whole-rollback-source.sqlite';

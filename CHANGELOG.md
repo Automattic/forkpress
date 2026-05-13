@@ -51,6 +51,7 @@
 - Made mixed DB+filesystem merge rollback restore target filesystem changes after late metadata failures, keeping target DB, files, and `.forkpress/cow/merge` audit metadata aligned.
 - Preserved rollback snapshot artifacts when mixed DB+filesystem rollback itself fails, and recorded DB/filesystem backup locations in the rollback-failure JSONL artifact.
 - Preserved per-file transaction artifacts when filesystem-phase rollback itself fails, keeping failed rollback backup paths inspectable through merge audit metadata.
+- Made filesystem merge audit metadata atomic across planning and file operations, so failed file merges do not leave partial conflict or decision rows.
 - Added focused `forkpress branch merge-audit --records rollback-failures` inspection for failed rollback artifact records.
 - Tightened validation-gated source view rewrites so preserved target view triggers must still compile before dry-run or apply reports success.
 - Tightened validation-gated source table drops so dry-run and apply refuse to leave dependent target foreign-key child tables pointing at a missing parent table.

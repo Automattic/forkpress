@@ -647,6 +647,9 @@ tooling.
   Mixed database/filesystem merges keep a whole-branch rollback snapshot, so
   late metadata or filesystem failures restore target database state,
   filesystem paths, and merge audit metadata before recording the failed run.
+  Filesystem merge planning and file operations also share one audit metadata
+  transaction, so a failed file merge does not leave partial conflict or
+  decision rows behind.
   If rollback itself fails, ForkPress preserves the rollback snapshot backups
   or per-file transaction backups and records their locations in the
   rollback-failure JSONL artifact.

@@ -4743,13 +4743,11 @@ function cow_merge_files(
                 $conflicts++;
             }
         }
-        $meta->exec('COMMIT');
     } catch (Throwable $e) {
         $meta->exec('ROLLBACK');
         $meta->close();
         throw $e;
     }
-    $meta->close();
 
     usort($operations, function (array $a, array $b): int {
         $rank = [
@@ -4773,16 +4771,11 @@ function cow_merge_files(
         return strcmp($a['path'], $b['path']);
     });
 
-    $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READWRITE | SQLITE3_OPEN_CREATE);
-    cow_merge_ensure_metadata($meta);
     $run_context = cow_merge_run_context($meta, $run_id);
     $file_tx = cow_merge_file_transaction_begin();
     $file_tx_committed = false;
     $preserve_file_tx = false;
     try {
-        if (!$meta->exec('BEGIN IMMEDIATE')) {
-            throw new RuntimeException('failed to start filesystem merge metadata transaction: ' . $meta->lastErrorMsg());
-        }
         foreach ($operations as $op) {
             cow_merge_file_transaction_snapshot_path($file_tx, $target_root, $op['path']);
             if ($op['action'] === 'delete-file') {
