@@ -761,6 +761,42 @@ try {
         'foreign-key child update after parent delete helper remains auditable'
     );
 
+    $fk_keyless_update_base = $tmp . '/fk-keyless-update-base.sqlite';
+    $fk_keyless_update_source = $tmp . '/fk-keyless-update-source.sqlite';
+    $fk_keyless_update_target = $tmp . '/fk-keyless-update-target.sqlite';
+    $fk_keyless_update_metadata = $tmp . '/.forkpress/cow/merge/fk-keyless-update-metadata.sqlite';
+    create_base_db($fk_keyless_update_base);
+    copy($fk_keyless_update_base, $fk_keyless_update_source);
+    copy($fk_keyless_update_base, $fk_keyless_update_target);
+    foreach ([$fk_keyless_update_base, $fk_keyless_update_source, $fk_keyless_update_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_fk_keyless_update_parents (id INTEGER PRIMARY KEY, label TEXT)');
+        $db->exec('CREATE TABLE plugin_fk_keyless_update_children (parent_id INTEGER NOT NULL REFERENCES plugin_fk_keyless_update_parents(id), label TEXT)');
+        $db->exec("INSERT INTO plugin_fk_keyless_update_parents (id, label) VALUES (1, 'old keyless parent')");
+        $db->exec("INSERT INTO plugin_fk_keyless_update_parents (id, label) VALUES (2, 'kept keyless parent')");
+        $db->exec("INSERT INTO plugin_fk_keyless_update_children (rowid, parent_id, label) VALUES (7, 1, 'base keyless child')");
+        $db->close();
+    }
+    $db = open_db($fk_keyless_update_source);
+    $db->exec("UPDATE plugin_fk_keyless_update_children SET parent_id = 2, label = 'source keyless child reparented' WHERE rowid = 7");
+    $db->exec('DELETE FROM plugin_fk_keyless_update_parents WHERE id = 1');
+    $db->close();
+    $fk_keyless_update_result = cow_merge_databases($fk_keyless_update_base, $fk_keyless_update_source, $fk_keyless_update_target, $fk_keyless_update_metadata, 'feature-fk-keyless-update', 'main');
+    assert_same($fk_keyless_update_result['status'], 'completed', 'source updating a no-primary-key foreign-key child before parent delete applies cleanly');
+    assert_same((int)scalar($fk_keyless_update_target, 'SELECT COUNT(*) FROM plugin_fk_keyless_update_parents WHERE id = 1'), 0, 'no-primary-key foreign-key parent source delete applies after child reparent');
+    assert_same((int)scalar($fk_keyless_update_target, 'SELECT parent_id FROM plugin_fk_keyless_update_children WHERE rowid = 7'), 2, 'no-primary-key foreign-key child keeps its sparse rowid while reparenting');
+    assert_same(scalar($fk_keyless_update_target, 'SELECT label FROM plugin_fk_keyless_update_children WHERE rowid = 7'), 'source keyless child reparented', 'no-primary-key foreign-key child source payload is preserved');
+    assert_same(
+        scalar($fk_keyless_update_metadata, "SELECT row_hash FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_fk_keyless_update_children' AND rowid = 7"),
+        cow_merge_row_hash(['parent_id' => 2, 'label' => 'source keyless child reparented']),
+        'no-primary-key foreign-key child update refreshes target sidecar row hash immediately'
+    );
+    assert_same(
+        (int)scalar($fk_keyless_update_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE conflict_type = 'row-target-constraint' AND table_name LIKE 'plugin_fk_keyless_update_%'"),
+        0,
+        'no-primary-key foreign-key child update plus parent delete avoids target constraint conflicts'
+    );
+
     $target_only_base = $tmp . '/target-only-base.sqlite';
     $target_only_source = $tmp . '/target-only-source.sqlite';
     $target_only_target = $tmp . '/target-only-target.sqlite';

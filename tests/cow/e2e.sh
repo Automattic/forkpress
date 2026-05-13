@@ -76,6 +76,9 @@ on_error() {
   dump_if_exists "$TMP/keyless-unique-same-merge.out"
   dump_if_exists "$TMP/keyless-unique-same-rerun.out"
   dump_if_exists "$TMP/keyless-unique-same-after-merge.json"
+  dump_if_exists "$TMP/fk-keyless-update-merge.out"
+  dump_if_exists "$TMP/fk-keyless-update-rerun.out"
+  dump_if_exists "$TMP/fk-keyless-update-after-merge.json"
   dump_if_exists "$TMP/merge-audit.out"
   dump_if_exists "$TMP/merge-audit.json"
   dump_if_exists "$TMP/file-conflict-pending.out"
@@ -854,6 +857,19 @@ php -r '$db = new SQLite3($argv[1]); $conflicts = (int)$db->querySingle("SELECT 
 grep -F "forkpress: merged keyless-unique-same into main" "$TMP/keyless-unique-same-rerun.out" >/dev/null
 grep -F "status:    completed" "$TMP/keyless-unique-same-rerun.out" >/dev/null
 php -r '$site = new SQLite3($argv[1]); $meta = new SQLite3($argv[2]); $rows = (int)$site->querySingle("SELECT COUNT(*) FROM wp_forkpress_e2e_keyless_unique_same WHERE slug = '\''shared-keyless-unique-same'\'' AND value = '\''same payload'\''"); $decisions = (int)$meta->querySingle("SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE d.table_name = '\''wp_forkpress_e2e_keyless_unique_same'\'' AND d.decision = '\''source-applied'\'' AND d.reason LIKE '\''source inserted no-primary-key row already exists in target by unique index%'\'' AND r.source_branch = '\''keyless-unique-same'\'' AND r.target_branch = '\''main'\''"); exit($rows === 1 && $decisions === 1 ? 0 : 1);' "$WORK/main/wp-content/database/.ht.sqlite" "$WORK_DIR/cow/merge/metadata.sqlite"
+
+log_step "merge no-PK foreign-key dependent update"
+php -r '$db = new SQLite3($argv[1]); $db->exec("PRAGMA foreign_keys = ON"); $db->exec("DROP TABLE IF EXISTS wp_forkpress_e2e_fk_keyless_children"); $db->exec("DROP TABLE IF EXISTS wp_forkpress_e2e_fk_keyless_parents"); $db->exec("CREATE TABLE wp_forkpress_e2e_fk_keyless_parents (id INTEGER PRIMARY KEY, label TEXT)"); $db->exec("CREATE TABLE wp_forkpress_e2e_fk_keyless_children (parent_id INTEGER NOT NULL REFERENCES wp_forkpress_e2e_fk_keyless_parents(id), label TEXT)"); $db->exec("INSERT INTO wp_forkpress_e2e_fk_keyless_parents (id, label) VALUES (1, '\''old parent'\''), (2, '\''kept parent'\'')"); $db->exec("INSERT INTO wp_forkpress_e2e_fk_keyless_children (rowid, parent_id, label) VALUES (7, 1, '\''base keyless child'\'')");' "$WORK/main/wp-content/database/.ht.sqlite"
+"$BIN" branch --work-dir "$WORK_DIR" create fk-keyless-update > "$TMP/fk-keyless-update-create.out"
+grep -F "fk-keyless-update.wp.localhost:$PORT" "$TMP/fk-keyless-update-create.out" >/dev/null
+php -r '$db = new SQLite3($argv[1]); $db->exec("PRAGMA foreign_keys = ON"); $db->exec("UPDATE wp_forkpress_e2e_fk_keyless_children SET parent_id = 2, label = '\''source keyless child reparented'\'' WHERE rowid = 7"); $db->exec("DELETE FROM wp_forkpress_e2e_fk_keyless_parents WHERE id = 1");' "$WORK/fk-keyless-update/wp-content/database/.ht.sqlite"
+"$BIN" branch --work-dir "$WORK_DIR" merge fk-keyless-update --into main > "$TMP/fk-keyless-update-merge.out"
+grep -F "forkpress: merged fk-keyless-update into main" "$TMP/fk-keyless-update-merge.out" >/dev/null
+grep -F "status:    completed" "$TMP/fk-keyless-update-merge.out" >/dev/null
+php -r 'require "scripts/cow/merge.php"; $site = new SQLite3($argv[1]); $meta = new SQLite3($argv[2]); $row = $site->querySingle("SELECT rowid, parent_id, label FROM wp_forkpress_e2e_fk_keyless_children WHERE rowid = 7", true); $parent = (int)$site->querySingle("SELECT COUNT(*) FROM wp_forkpress_e2e_fk_keyless_parents WHERE id = 1"); $hash = $meta->querySingle("SELECT row_hash FROM merge_row_identities WHERE branch_name = '\''main'\'' AND table_name = '\''wp_forkpress_e2e_fk_keyless_children'\'' AND rowid = 7"); $conflicts = (int)$meta->querySingle("SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.conflict_type = '\''row-target-constraint'\'' AND c.table_name LIKE '\''wp_forkpress_e2e_fk_keyless_%'\'' AND r.source_branch = '\''fk-keyless-update'\''"); file_put_contents($argv[3], json_encode(["row" => $row, "old_parent_count" => $parent, "row_hash" => $hash, "conflicts" => $conflicts])); exit(is_array($row) && (int)$row["parent_id"] === 2 && ($row["label"] ?? null) === "source keyless child reparented" && $parent === 0 && $hash === cow_merge_row_hash(["parent_id" => 2, "label" => "source keyless child reparented"]) && $conflicts === 0 ? 0 : 1);' "$WORK/main/wp-content/database/.ht.sqlite" "$WORK_DIR/cow/merge/metadata.sqlite" "$TMP/fk-keyless-update-after-merge.json"
+"$BIN" branch --work-dir "$WORK_DIR" merge fk-keyless-update --into main > "$TMP/fk-keyless-update-rerun.out"
+grep -F "forkpress: merged fk-keyless-update into main" "$TMP/fk-keyless-update-rerun.out" >/dev/null
+grep -F "status:    completed" "$TMP/fk-keyless-update-rerun.out" >/dev/null
 
 log_step "resolve runtime plugin unique collision"
 mkdir -p "$WORK/main/wp-content/mu-plugins"
