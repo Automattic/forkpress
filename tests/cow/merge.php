@@ -318,6 +318,49 @@ try {
     assert_same((int)scalar($expression_unique_target, "SELECT id FROM plugin_expression_unique_rows WHERE lower(slug) = 'shared-expression'"), 10, 'source expression unique collision resolution inserts the audited source row identity');
     assert_same(scalar($expression_unique_target, "SELECT value FROM plugin_expression_unique_rows WHERE lower(slug) = 'shared-expression'"), 'source expression row', 'source expression unique collision resolution replaces the target row payload');
 
+    $composite_expression_unique_base = $tmp . '/composite-expression-unique-base.sqlite';
+    $composite_expression_unique_source = $tmp . '/composite-expression-unique-source.sqlite';
+    $composite_expression_unique_target = $tmp . '/composite-expression-unique-target.sqlite';
+    $composite_expression_unique_metadata = $tmp . '/.forkpress/cow/merge/composite-expression-unique-metadata.sqlite';
+    create_base_db($composite_expression_unique_base);
+    copy($composite_expression_unique_base, $composite_expression_unique_source);
+    copy($composite_expression_unique_base, $composite_expression_unique_target);
+    foreach ([$composite_expression_unique_base, $composite_expression_unique_source, $composite_expression_unique_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_composite_expression_unique_rows (id INTEGER PRIMARY KEY, slug TEXT, locale TEXT, active INTEGER NOT NULL DEFAULT 1, value TEXT)');
+        $db->exec('CREATE UNIQUE INDEX plugin_composite_expression_unique_rows_idx ON plugin_composite_expression_unique_rows(lower(slug) COLLATE NOCASE, locale COLLATE NOCASE) WHERE active = 1');
+        $db->close();
+    }
+    $db = open_db($composite_expression_unique_source);
+    $db->exec("INSERT INTO plugin_composite_expression_unique_rows (id, slug, locale, active, value) VALUES (10, 'Shared-Composite', 'EN', 1, 'source composite row')");
+    $db->exec("INSERT INTO plugin_composite_expression_unique_rows (id, slug, locale, active, value) VALUES (11, 'Passive-Composite', 'EN', 0, 'source passive row')");
+    $db->close();
+    $db = open_db($composite_expression_unique_target);
+    $db->exec("INSERT INTO plugin_composite_expression_unique_rows (id, slug, locale, active, value) VALUES (20, 'shared-composite', 'en', 1, 'target composite row')");
+    $db->exec("INSERT INTO plugin_composite_expression_unique_rows (id, slug, locale, active, value) VALUES (21, 'passive-composite', 'en', 1, 'target active passive-slug row')");
+    $db->close();
+    $composite_expression_unique_result = cow_merge_databases($composite_expression_unique_base, $composite_expression_unique_source, $composite_expression_unique_target, $composite_expression_unique_metadata, 'feature-composite-expression-unique', 'main');
+    assert_same($composite_expression_unique_result['status'], 'completed_with_conflicts', 'source insert colliding with composite partial expression unique key is audited instead of aborting');
+    assert_same(
+        (int)scalar($composite_expression_unique_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_composite_expression_unique_rows' AND conflict_type = 'row-unique-collision'"),
+        1,
+        'composite partial expression unique-key row collision is recorded as a conflict'
+    );
+    assert_same(scalar($composite_expression_unique_target, "SELECT value FROM plugin_composite_expression_unique_rows WHERE lower(slug) = 'shared-composite' AND locale COLLATE NOCASE = 'en'"), 'target composite row', 'composite partial expression unique target row wins by default');
+    assert_same((int)scalar($composite_expression_unique_target, "SELECT COUNT(*) FROM plugin_composite_expression_unique_rows WHERE lower(slug) = 'passive-composite' AND locale COLLATE NOCASE = 'en'"), 2, 'source row outside composite partial expression predicate still inserts cleanly');
+    $composite_expression_unique_conflict_id = (int)scalar($composite_expression_unique_metadata, "SELECT c.id FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_composite_expression_unique_rows' AND c.conflict_type = 'row-unique-collision' AND r.source_branch = 'feature-composite-expression-unique' ORDER BY c.id DESC LIMIT 1");
+    $composite_expression_unique_source_resolution = cow_merge_resolve_conflict(
+        $composite_expression_unique_metadata,
+        $composite_expression_unique_conflict_id,
+        'source',
+        true,
+        'Apply composite expression unique source row.',
+        'cow-test'
+    );
+    assert_same($composite_expression_unique_source_resolution['status'], 'applied', 'source composite expression unique collision resolution records applied status');
+    assert_same((int)scalar($composite_expression_unique_target, "SELECT id FROM plugin_composite_expression_unique_rows WHERE lower(slug) = 'shared-composite' AND locale COLLATE NOCASE = 'en'"), 10, 'source composite expression unique collision resolution inserts the audited source row identity');
+    assert_same(scalar($composite_expression_unique_target, "SELECT value FROM plugin_composite_expression_unique_rows WHERE lower(slug) = 'shared-composite' AND locale COLLATE NOCASE = 'en'"), 'source composite row', 'source composite expression unique collision resolution replaces the target row payload');
+
     $target_only_base = $tmp . '/target-only-base.sqlite';
     $target_only_source = $tmp . '/target-only-source.sqlite';
     $target_only_target = $tmp . '/target-only-target.sqlite';

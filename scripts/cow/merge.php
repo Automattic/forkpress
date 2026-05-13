@@ -1613,12 +1613,15 @@ function cow_merge_unique_index_terms(SQLite3 $db, string $name): ?array {
         $seqno = (int)($column['seqno'] ?? count($terms));
         $cid = (int)($column['cid'] ?? -1);
         $column_name = $column['name'] ?? null;
+        $collation = is_string($column['coll'] ?? null) && (string)$column['coll'] !== ''
+            ? (string)$column['coll']
+            : 'BINARY';
         if ($cid >= 0 && is_string($column_name) && $column_name !== '') {
-            $terms[$seqno] = ['type' => 'column', 'name' => $column_name];
+            $terms[$seqno] = ['type' => 'column', 'name' => $column_name, 'collation' => $collation];
             continue;
         }
         if ($cid === -2 && is_array($sql_terms) && isset($sql_terms[$seqno])) {
-            $terms[$seqno] = ['type' => 'expression', 'sql' => $sql_terms[$seqno]];
+            $terms[$seqno] = ['type' => 'expression', 'sql' => $sql_terms[$seqno], 'collation' => $collation];
             continue;
         }
         return null;
@@ -1675,7 +1678,11 @@ function cow_merge_find_unique_collision(SQLite3 $target, string $table, array $
                     $clauses = [];
                     break;
                 }
-                $clauses[] = cow_merge_quote_ident($column) . ' = ?';
+                $collation = (string)($term['collation'] ?? 'BINARY');
+                $collate_sql = strcasecmp($collation, 'BINARY') === 0
+                    ? ''
+                    : ' COLLATE ' . cow_merge_quote_ident($collation);
+                $clauses[] = cow_merge_quote_ident($column) . $collate_sql . ' = ?';
                 $values[] = $source_row[$column];
                 continue;
             }
