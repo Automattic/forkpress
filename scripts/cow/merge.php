@@ -5459,6 +5459,22 @@ function cow_merge_trigger_referenced_schema_objects(string $sql): array {
     return cow_merge_sql_referenced_schema_objects($body);
 }
 
+function cow_merge_missing_schema_references(SQLite3 $db, array $references): array {
+    $missing = [];
+    foreach ($references as $reference) {
+        $schema = $reference['schema'];
+        $table = (string)$reference['name'];
+        if ($schema !== null && $schema !== 'main') {
+            $missing[] = $schema . '.' . $table;
+            continue;
+        }
+        if (!cow_merge_schema_object_exists($db, $table)) {
+            $missing[] = $table;
+        }
+    }
+    return $missing;
+}
+
 function cow_merge_schema_object_exists(SQLite3 $db, string $name): bool {
     $stmt = $db->prepare("SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND lower(name) = lower(:name) LIMIT 1");
     if (!$stmt) {
@@ -5473,19 +5489,7 @@ function cow_merge_schema_object_exists(SQLite3 $db, string $name): bool {
 }
 
 function cow_merge_missing_trigger_references(SQLite3 $db, string $sql): array {
-    $missing = [];
-    foreach (cow_merge_trigger_referenced_schema_objects($sql) as $reference) {
-        $schema = $reference['schema'];
-        $table = (string)$reference['name'];
-        if ($schema !== null && $schema !== 'main') {
-            $missing[] = $schema . '.' . $table;
-            continue;
-        }
-        if (!cow_merge_schema_object_exists($db, $table)) {
-            $missing[] = $table;
-        }
-    }
-    return $missing;
+    return cow_merge_missing_schema_references($db, cow_merge_trigger_referenced_schema_objects($sql));
 }
 
 function cow_merge_validate_trigger_references(SQLite3 $db, string $name, string $sql): void {
@@ -5493,6 +5497,19 @@ function cow_merge_validate_trigger_references(SQLite3 $db, string $name, string
     if ($missing) {
         throw new InvalidArgumentException(
             'source trigger ' . $name . ' references missing target schema objects: ' . implode(', ', $missing)
+        );
+    }
+}
+
+function cow_merge_missing_view_references(SQLite3 $db, string $sql): array {
+    return cow_merge_missing_schema_references($db, cow_merge_sql_referenced_schema_objects($sql));
+}
+
+function cow_merge_validate_view_references(SQLite3 $db, string $name, string $sql): void {
+    $missing = cow_merge_missing_view_references($db, $sql);
+    if ($missing) {
+        throw new InvalidArgumentException(
+            'source view ' . $name . ' references missing target schema objects: ' . implode(', ', $missing)
         );
     }
 }
@@ -5658,6 +5675,9 @@ function cow_merge_apply_source_view_schema_resolution(SQLite3 $target, string $
     if ($source_sql === null && $dependencies) {
         $names = implode(', ', array_map(fn($dependency) => (string)$dependency['type'] . ' ' . (string)$dependency['name'], $dependencies));
         throw new InvalidArgumentException("source view drop resolution cannot implicitly remove dependent target schema objects; resolve or remove them first: $names");
+    }
+    if ($source_sql !== null) {
+        cow_merge_validate_view_references($target, $view, $source_sql);
     }
     cow_merge_validate_views($target, $dependent_views, 'pre-view-resolution');
     $target->exec('SAVEPOINT forkpress_view_resolution');
@@ -8098,6 +8118,8 @@ function cow_merge_apply_schema_object_changes(
             try {
                 if ($type === 'trigger') {
                     cow_merge_validate_trigger_references($target, $name, $source_sql);
+                } elseif ($type === 'view') {
+                    cow_merge_validate_view_references($target, $name, $source_sql);
                 }
                 if (!@$target->exec($source_sql)) {
                     throw new RuntimeException($target->lastErrorMsg());

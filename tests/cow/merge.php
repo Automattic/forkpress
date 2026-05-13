@@ -4126,6 +4126,28 @@ SQL);
         [['schema' => 'main', 'name' => 'plugin view quoted source']],
         'view dependency parsing keeps quoted schema references while ignoring literal text'
     );
+    $view_quoted_target = $tmp . '/view-quoted-reference-target.sqlite';
+    create_base_db($view_quoted_target);
+    $db = open_db($view_quoted_target);
+    $db->exec('CREATE TABLE "plugin view quoted gate" (enabled INTEGER)');
+    $view_quoted_main_missing = cow_merge_missing_view_references(
+        $db,
+        'CREATE VIEW "plugin view quoted child" AS SELECT enabled FROM "main"."plugin view quoted gate"'
+    );
+    $view_quoted_aux_missing = cow_merge_missing_view_references(
+        $db,
+        'CREATE VIEW "plugin view quoted child" AS SELECT enabled FROM "aux"."plugin view quoted gate"'
+    );
+    $view_literal_missing = cow_merge_missing_view_references(
+        $db,
+        'CREATE VIEW plugin_view_literal_child AS ' .
+        'SELECT \'FROM plugin_view_literal_missing\' AS literal_text FROM "plugin view quoted gate" ' .
+        '/* JOIN plugin_view_comment_missing */'
+    );
+    $db->close();
+    assert_same($view_quoted_main_missing, [], 'quoted main-schema view references match persistent target schema objects');
+    assert_same($view_quoted_aux_missing, ['aux.plugin view quoted gate'], 'quoted attached-schema view references remain validation-gated');
+    assert_same($view_literal_missing, [], 'view dependency preflight ignores schema-looking text inside literals and comments');
 
     $source_added_trigger_cte_base = $tmp . '/source-added-trigger-cte-base.sqlite';
     $source_added_trigger_cte_source = $tmp . '/source-added-trigger-cte-source.sqlite';
@@ -4238,7 +4260,7 @@ SQL);
             'Try view before dependency restore.',
             'test'
         ),
-        'source view plugin_view_dependency_source_view is invalid',
+        'source view plugin_view_dependency_source_view references missing target schema objects',
         'source-added view resolution remains gated until its dependency is restored'
     );
     $source_added_view_table_resolution = cow_merge_resolve_conflict(
@@ -4319,7 +4341,7 @@ SQL);
             'Try child view before table and parent view dependencies.',
             'test'
         ),
-        'source view plugin_view_chain_child_view is invalid',
+        'source view plugin_view_chain_child_view references missing target schema objects',
         'source-added child view resolution remains gated before dependencies exist'
     );
     $source_added_view_chain_table_resolution = cow_merge_resolve_conflict(
@@ -4340,7 +4362,7 @@ SQL);
             'Try child view before parent view dependency.',
             'test'
         ),
-        'source view plugin_view_chain_child_view is invalid',
+        'source view plugin_view_chain_child_view references missing target schema objects',
         'source-added child view resolution remains gated until parent view exists'
     );
     $source_added_view_chain_parent_resolution = cow_merge_resolve_conflict(
