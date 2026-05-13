@@ -1309,6 +1309,30 @@ SQL);
     );
     assert_same($file_delete_resolution['status'], 'applied', 'source filesystem deletion conflict resolution records applied status');
     assert_true(!file_exists($file_resolve_target_root . '/wp-content/uploads/delete-conflict.txt'), 'source filesystem deletion conflict resolution removes the target path after validation');
+    $file_resolve_rerun = cow_merge_branch_state(
+        $file_resolve_base_db,
+        $file_resolve_source_db,
+        $file_resolve_target_db,
+        $metadata,
+        'feature-file-resolve',
+        'main',
+        $file_resolve_manifest,
+        $file_resolve_source_root,
+        $file_resolve_target_root
+    );
+    assert_same($file_resolve_rerun['status'], 'completed_with_conflicts', 'rerunning after filesystem source resolutions only reports unresolved file conflicts');
+    assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/conflict.txt'), 'source conflict resolution', 'rerunning after source filesystem replacement keeps the audited source file');
+    assert_true(!file_exists($file_resolve_target_root . '/wp-content/uploads/delete-conflict.txt'), 'rerunning after source filesystem deletion keeps the target path deleted');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = '__files__' AND c.conflict_type = 'file-conflict' AND c.row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/conflict.txt')) . "' AND r.source_branch = 'feature-file-resolve'"),
+        1,
+        'rerunning after source filesystem replacement does not rediscover the resolved file conflict'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = '__files__' AND c.conflict_type = 'file-source-deleted' AND c.row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/delete-conflict.txt')) . "' AND r.source_branch = 'feature-file-resolve'"),
+        1,
+        'rerunning after source filesystem deletion does not rediscover the resolved delete conflict'
+    );
     $reviewed_file_resolution_id = (int)$file_source_resolution['resolution_id'];
     $unreviewed_file_resolution_id = (int)$file_delete_resolution['resolution_id'];
     $file_resolution_review = cow_merge_review_record(
@@ -1811,6 +1835,14 @@ SQL);
     );
     assert_same($schema_index_rewrite_resolution['status'], 'applied', 'source index rewrite resolution records applied status');
     assert_true(str_contains((string)scalar($schema_index_rewrite_target, "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'plugin_items_label_idx'"), '(value)'), 'source index rewrite replaces target index definition');
+    $schema_index_rewrite_rerun = cow_merge_databases($schema_index_rewrite_base, $schema_index_rewrite_source, $schema_index_rewrite_target, $metadata, 'feature-index-rewrite', 'main');
+    assert_same($schema_index_rewrite_rerun['status'], 'completed', 'rerunning after source index rewrite resolution completes without a new conflict');
+    assert_true(str_contains((string)scalar($schema_index_rewrite_target, "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'plugin_items_label_idx'"), '(value)'), 'rerunning after source index rewrite keeps the audited source index');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_items' AND c.column_name = 'plugin_items_label_idx' AND c.conflict_type = 'schema-source-changed-index' AND r.source_branch = 'feature-index-rewrite'"),
+        1,
+        'rerunning after source index rewrite resolution does not rediscover the resolved schema conflict'
+    );
 
     $schema_index_drop_base = $tmp . '/schema-index-drop-base.sqlite';
     $schema_index_drop_source = $tmp . '/schema-index-drop-source.sqlite';
@@ -1839,6 +1871,14 @@ SQL);
     );
     assert_same($schema_index_drop_resolution['status'], 'applied', 'source index drop resolution records applied status');
     assert_same(scalar($schema_index_drop_target, "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'plugin_items_drop_idx'"), null, 'source index drop resolution removes target index');
+    $schema_index_drop_rerun = cow_merge_databases($schema_index_drop_base, $schema_index_drop_source, $schema_index_drop_target, $metadata, 'feature-index-drop', 'main');
+    assert_same($schema_index_drop_rerun['status'], 'completed', 'rerunning after source index drop resolution completes without a new conflict');
+    assert_same(scalar($schema_index_drop_target, "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'plugin_items_drop_idx'"), null, 'rerunning after source index drop keeps the target index removed');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_items' AND c.column_name = 'plugin_items_drop_idx' AND c.conflict_type = 'schema-source-dropped-index' AND r.source_branch = 'feature-index-drop'"),
+        1,
+        'rerunning after source index drop resolution does not rediscover the resolved schema conflict'
+    );
 
     $schema_object_base = $tmp . '/schema-object-base.sqlite';
     $schema_object_source = $tmp . '/schema-object-source.sqlite';
@@ -1947,6 +1987,14 @@ SQL);
     assert_same($schema_view_rewrite_resolution['status'], 'applied', 'source view rewrite resolution records applied status');
     assert_true(str_contains((string)scalar($schema_view_rewrite_target, "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_review_view'"), 'value'), 'source view rewrite replaces target view definition');
     assert_same(scalar($schema_view_rewrite_target, "SELECT value FROM plugin_items_review_view WHERE item_id = 'alpha'"), 'base', 'rewritten source view remains queryable');
+    $schema_view_rewrite_rerun = cow_merge_databases($schema_view_rewrite_base, $schema_view_rewrite_source, $schema_view_rewrite_target, $metadata, 'feature-view-rewrite', 'main');
+    assert_same($schema_view_rewrite_rerun['status'], 'completed', 'rerunning after source view rewrite resolution completes without a new conflict');
+    assert_same(scalar($schema_view_rewrite_target, "SELECT value FROM plugin_items_review_view WHERE item_id = 'alpha'"), 'base', 'rerunning after source view rewrite keeps the audited source view queryable');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.column_name = 'plugin_items_review_view' AND c.conflict_type = 'schema-source-changed-view' AND r.source_branch = 'feature-view-rewrite'"),
+        1,
+        'rerunning after source view rewrite resolution does not rediscover the resolved schema conflict'
+    );
 
     $schema_view_dep_base = $tmp . '/schema-view-dep-base.sqlite';
     $schema_view_dep_source = $tmp . '/schema-view-dep-source.sqlite';
@@ -1996,6 +2044,14 @@ SQL);
     $db->close();
     assert_same(scalar($schema_view_dep_target, "SELECT label FROM plugin_items_dep_insert_audit WHERE item_id = 'from-view'"), 'From View', 'dependent target trigger still fires after source view rewrite');
     assert_same(scalar($schema_view_dep_target, "SELECT label FROM plugin_items_dep_child_audit WHERE label = 'From Child View'"), 'From Child View', 'trigger on transitive dependent target view still fires after source view rewrite');
+    $schema_view_dep_rerun = cow_merge_databases($schema_view_dep_base, $schema_view_dep_source, $schema_view_dep_target, $metadata, 'feature-view-dependency', 'main');
+    assert_same($schema_view_dep_rerun['status'], 'completed', 'rerunning after dependent source view rewrite completes without a new conflict');
+    assert_same(scalar($schema_view_dep_target, "SELECT label FROM plugin_items_dep_child WHERE label = 'Alpha'"), 'Alpha', 'rerunning after dependent source view rewrite keeps dependent target view queryable');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.column_name = 'plugin_items_dep_base' AND c.conflict_type = 'schema-source-changed-view' AND r.source_branch = 'feature-view-dependency'"),
+        1,
+        'rerunning after dependent source view rewrite does not rediscover the resolved schema conflict'
+    );
 
     $schema_view_drop_dep_base = $tmp . '/schema-view-drop-dep-base.sqlite';
     $schema_view_drop_dep_source = $tmp . '/schema-view-drop-dep-source.sqlite';
@@ -2058,6 +2114,14 @@ SQL);
     $db->exec("INSERT INTO plugin_items (item_id, label, value) VALUES ('delta', 'Delta', 'dropped trigger')");
     $db->close();
     assert_same((int)scalar($schema_trigger_drop_target, "SELECT COUNT(*) FROM plugin_trigger_audit WHERE item_id = 'delta'"), 0, 'dropped trigger no longer fires after source resolution');
+    $schema_trigger_drop_rerun = cow_merge_databases($schema_trigger_drop_base, $schema_trigger_drop_source, $schema_trigger_drop_target, $metadata, 'feature-trigger-drop', 'main');
+    assert_same($schema_trigger_drop_rerun['status'], 'completed', 'rerunning after source trigger drop resolution completes without a new conflict');
+    assert_same(scalar($schema_trigger_drop_target, "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_items_drop_trigger'"), null, 'rerunning after source trigger drop keeps the target trigger removed');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.column_name = 'plugin_items_drop_trigger' AND c.conflict_type = 'schema-source-dropped-trigger' AND r.source_branch = 'feature-trigger-drop'"),
+        1,
+        'rerunning after source trigger drop resolution does not rediscover the resolved schema conflict'
+    );
 
     $schema_table_drop_base = $tmp . '/schema-table-drop-base.sqlite';
     $schema_table_drop_source = $tmp . '/schema-table-drop-source.sqlite';

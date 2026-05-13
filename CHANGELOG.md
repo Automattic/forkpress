@@ -64,6 +64,7 @@
 - Recorded identical source/target filesystem additions, changes, and deletions as auditable non-conflicting `source-applied` COW decisions instead of leaving the no-op implicit.
 - Added COW coverage for rerunning no-primary-key source conflict resolutions without rediscovering the resolved keyless cell, unique collision, delete, or row-identity ambiguity conflicts.
 - Added COW coverage for rerunning validation-gated source table drop and target-dropped table restore resolutions without rediscovering the resolved schema conflicts.
+- Added COW coverage for rerunning validation-gated filesystem source resolutions and schema object rewrite/drop resolutions without rediscovering the resolved conflicts.
 - Updated the automatic mergeback loop runner to pass a configurable Codex reasoning-effort setting and to include the changelog/known-good tag policy in every worker prompt.
 
 ## known-good/cow-mergeback-audit-completeness-2026-05-12
