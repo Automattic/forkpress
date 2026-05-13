@@ -557,6 +557,54 @@ try {
     assert_same(scalar($fk_order_target, 'SELECT label FROM plugin_fk_parents WHERE id = 10'), 'source parent', 'foreign-key source parent row is applied');
     assert_same(scalar($fk_order_target, 'SELECT label FROM plugin_fk_children WHERE id = 20'), 'source child', 'foreign-key source child row is applied after parent');
 
+    $self_fk_insert_base = $tmp . '/self-fk-insert-base.sqlite';
+    $self_fk_insert_source = $tmp . '/self-fk-insert-source.sqlite';
+    $self_fk_insert_target = $tmp . '/self-fk-insert-target.sqlite';
+    $self_fk_insert_metadata = $tmp . '/.forkpress/cow/merge/self-fk-insert-metadata.sqlite';
+    create_base_db($self_fk_insert_base);
+    copy($self_fk_insert_base, $self_fk_insert_source);
+    copy($self_fk_insert_base, $self_fk_insert_target);
+    foreach ([$self_fk_insert_base, $self_fk_insert_source, $self_fk_insert_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_self_fk_rows (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES plugin_self_fk_rows(id), label TEXT)');
+        $db->close();
+    }
+    $db = open_db($self_fk_insert_source);
+    $db->exec("INSERT INTO plugin_self_fk_rows (id, parent_id, label) VALUES (1, 2, 'source child before parent')");
+    $db->exec("INSERT INTO plugin_self_fk_rows (id, parent_id, label) VALUES (2, NULL, 'source parent')");
+    $db->close();
+    $self_fk_insert_result = cow_merge_databases($self_fk_insert_base, $self_fk_insert_source, $self_fk_insert_target, $self_fk_insert_metadata, 'feature-self-fk-insert', 'main');
+    assert_same($self_fk_insert_result['status'], 'completed', 'same-table foreign-key source inserts are ordered parent-before-child');
+    assert_same(scalar($self_fk_insert_target, 'SELECT label FROM plugin_self_fk_rows WHERE id = 2'), 'source parent', 'same-table foreign-key parent row is applied before its source child');
+    assert_same(scalar($self_fk_insert_target, 'SELECT parent_id FROM plugin_self_fk_rows WHERE id = 1'), 2, 'same-table foreign-key child row validates after its source parent exists');
+    assert_same(
+        (int)scalar($self_fk_insert_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_self_fk_rows' AND conflict_type = 'row-target-constraint'"),
+        0,
+        'same-table foreign-key source inserts avoid false target constraint conflicts'
+    );
+
+    $self_fk_table_base = $tmp . '/self-fk-table-base.sqlite';
+    $self_fk_table_source = $tmp . '/self-fk-table-source.sqlite';
+    $self_fk_table_target = $tmp . '/self-fk-table-target.sqlite';
+    $self_fk_table_metadata = $tmp . '/.forkpress/cow/merge/self-fk-table-metadata.sqlite';
+    create_base_db($self_fk_table_base);
+    copy($self_fk_table_base, $self_fk_table_source);
+    copy($self_fk_table_base, $self_fk_table_target);
+    $db = open_db($self_fk_table_source);
+    $db->exec('CREATE TABLE plugin_self_fk_added_rows (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES plugin_self_fk_added_rows(id), label TEXT)');
+    $db->exec("INSERT INTO plugin_self_fk_added_rows (id, parent_id, label) VALUES (1, 2, 'source-added child before parent')");
+    $db->exec("INSERT INTO plugin_self_fk_added_rows (id, parent_id, label) VALUES (2, NULL, 'source-added parent')");
+    $db->close();
+    $self_fk_table_result = cow_merge_databases($self_fk_table_base, $self_fk_table_source, $self_fk_table_target, $self_fk_table_metadata, 'feature-self-fk-table', 'main');
+    assert_same($self_fk_table_result['status'], 'completed', 'source-added same-table foreign-key table materializes rows parent-before-child');
+    assert_same(scalar($self_fk_table_target, 'SELECT label FROM plugin_self_fk_added_rows WHERE id = 2'), 'source-added parent', 'source-added same-table foreign-key parent row is materialized');
+    assert_same(scalar($self_fk_table_target, 'SELECT parent_id FROM plugin_self_fk_added_rows WHERE id = 1'), 2, 'source-added same-table foreign-key child row validates after its parent');
+    assert_same(
+        (int)scalar($self_fk_table_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_self_fk_added_rows' AND decision = 'source-applied'"),
+        3,
+        'source-added same-table foreign-key table and rows remain auditable'
+    );
+
     $fk_insert_base = $tmp . '/fk-insert-base.sqlite';
     $fk_insert_source = $tmp . '/fk-insert-source.sqlite';
     $fk_insert_target = $tmp . '/fk-insert-target.sqlite';

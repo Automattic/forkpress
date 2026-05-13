@@ -1463,6 +1463,84 @@ function cow_merge_find_row_entry_by_values(array $rows, array $columns, array $
     return null;
 }
 
+function cow_merge_sort_row_keys_by_self_foreign_keys(SQLite3 $db, string $table, array $keys, array $rows): array {
+    $keys = array_values(array_unique($keys));
+    sort($keys);
+    if (count($keys) < 2) {
+        return $keys;
+    }
+
+    $key_set = array_fill_keys($keys, true);
+    $dependencies = [];
+    foreach ($keys as $key) {
+        $row = $rows[$key]['row'] ?? null;
+        if (!is_array($row)) {
+            continue;
+        }
+        foreach (cow_merge_foreign_key_groups($db, $table) as $group) {
+            $parent_table = (string)($group[0]['table'] ?? '');
+            if ($parent_table !== $table) {
+                continue;
+            }
+            $parent_columns = cow_merge_foreign_key_parent_columns($db, $table, $group);
+            if ($parent_columns === null) {
+                continue;
+            }
+
+            $values = [];
+            $skip = false;
+            foreach ($group as $i => $part) {
+                $from = (string)($part['from'] ?? '');
+                if ($from === '' || !isset($parent_columns[$i]) || !array_key_exists($from, $row) || $row[$from] === null) {
+                    $skip = true;
+                    break;
+                }
+                $values[] = $row[$from];
+            }
+            if ($skip || !$values) {
+                continue;
+            }
+
+            $parent_match = cow_merge_find_row_entry_by_values($rows, $parent_columns, $values);
+            if ($parent_match === null) {
+                continue;
+            }
+            [$parent_key] = $parent_match;
+            $parent_key = (string)$parent_key;
+            if ($parent_key === (string)$key || !isset($key_set[$parent_key])) {
+                continue;
+            }
+            $dependencies[(string)$key][$parent_key] = true;
+        }
+    }
+    if (!$dependencies) {
+        return $keys;
+    }
+
+    $state = [];
+    $ordered = [];
+    $visit = function (string $key) use (&$visit, &$state, &$ordered, $dependencies): void {
+        if (($state[$key] ?? null) === 'done') {
+            return;
+        }
+        if (($state[$key] ?? null) === 'visiting') {
+            return;
+        }
+        $state[$key] = 'visiting';
+        $parents = array_keys($dependencies[$key] ?? []);
+        sort($parents);
+        foreach ($parents as $parent) {
+            $visit($parent);
+        }
+        $state[$key] = 'done';
+        $ordered[] = $key;
+    };
+    foreach ($keys as $key) {
+        $visit((string)$key);
+    }
+    return $ordered;
+}
+
 function cow_merge_foreign_key_error(SQLite3 $target, string $table, array $row): ?string {
     foreach (cow_merge_foreign_key_groups($target, $table) as $group) {
         $parent_table = (string)($group[0]['table'] ?? '');
@@ -7009,7 +7087,9 @@ function cow_merge_apply_source_table(
         ? cow_merge_load_rows($source, $table, $pk_cols)
         : cow_merge_keyless_rows_for_branch($source, $meta, $run_id, $source_branch, $table, []);
     $applied = 1;
-    foreach ($rows as $identity_json => $entry) {
+    $row_keys = cow_merge_sort_row_keys_by_self_foreign_keys($target, $table, array_keys($rows), $rows);
+    foreach ($row_keys as $identity_json) {
+        $entry = $rows[$identity_json];
         if (!$pk_cols) {
             $new_rowid = cow_merge_insert_row_with_rowid($target, $table, (int)$entry['rowid'], $entry['row'], $columns);
             cow_merge_remember_row_identity($meta, $run_id, $target_branch, $table, $new_rowid, $entry['identity'], $entry['row']);
@@ -7748,7 +7828,7 @@ function cow_merge_table_rows(
         );
     }
     $all_keys = array_unique(array_merge(array_keys($base_rows), array_keys($source_rows), array_keys($target_rows)));
-    sort($all_keys);
+    $all_keys = cow_merge_sort_row_keys_by_self_foreign_keys($target, $table, $all_keys, $source_rows);
 
     $applied = 0;
     $conflicts = 0;

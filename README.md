@@ -474,12 +474,13 @@ tooling.
   target row is kept and the choice is recorded as an auditable
   `row-unique-collision`. If a source insert or source row update violates a
   target-side SQLite constraint, including foreign-key references after
-  parent-before-child table ordering, target is also kept by default and the
-  choice is recorded as an auditable `row-target-constraint`. Source deletes
-  that would orphan target-side foreign-key children are held the same way until
-  a reviewed source delete validates, while unchanged target-side child rows
-  that source deleted or reparented away from the deleted parent are applied
-  first so parent-and-dependent changes land together. If source also rewrites a
+  parent-before-child table ordering and same-table foreign-key row ordering,
+  target is also kept by default and the choice is recorded as an auditable
+  `row-target-constraint`. Source deletes that would orphan target-side
+  foreign-key children are held the same way until a reviewed source delete
+  validates, while unchanged target-side child rows that source deleted or
+  reparented away from the deleted parent are applied first so
+  parent-and-dependent changes land together. If source also rewrites a
   referenced child key and updates unchanged grandchildren to follow it,
   ForkPress applies the proven rewrite graph under the same validation savepoint
   before deleting the original parent. If that rewrite points at a source-only
