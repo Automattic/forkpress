@@ -2224,6 +2224,37 @@ SQL);
     $keyless_unique_plain_identity = cow_merge_plain_json(cow_merge_decode_payload_json($keyless_unique_conflict_identity, 'keyless unique row identity'));
     assert_same(scalar($keyless_unique_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_keyless_unique' AND rowid = $keyless_unique_rowid"), $keyless_unique_plain_identity, 'source keyless unique collision resolution moves the source sidecar identity to target');
 
+    $keyless_unique_same_base = $tmp . '/keyless-unique-same-base.sqlite';
+    $keyless_unique_same_source = $tmp . '/keyless-unique-same-source.sqlite';
+    $keyless_unique_same_target = $tmp . '/keyless-unique-same-target.sqlite';
+    $keyless_unique_same_metadata = $tmp . '/.forkpress/cow/merge/keyless-unique-same-metadata.sqlite';
+    create_base_db($keyless_unique_same_base);
+    copy($keyless_unique_same_base, $keyless_unique_same_source);
+    copy($keyless_unique_same_base, $keyless_unique_same_target);
+    foreach ([$keyless_unique_same_base, $keyless_unique_same_source, $keyless_unique_same_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_keyless_unique_same (slug TEXT UNIQUE, value TEXT)');
+        $db->close();
+    }
+    cow_merge_capture_row_identities($keyless_unique_same_base, $keyless_unique_same_metadata, 'main');
+    cow_merge_capture_row_identities($keyless_unique_same_source, $keyless_unique_same_metadata, 'feature-keyless-unique-same', 'main');
+
+    $db = open_db($keyless_unique_same_source);
+    $db->exec("INSERT INTO plugin_keyless_unique_same (slug, value) VALUES ('same-keyless-slug', 'same payload')");
+    $db->close();
+    cow_merge_capture_row_identities($keyless_unique_same_source, $keyless_unique_same_metadata, 'feature-keyless-unique-same', 'main');
+
+    $db = open_db($keyless_unique_same_target);
+    $db->exec("INSERT INTO plugin_keyless_unique_same (slug, value) VALUES ('same-keyless-slug', 'same payload')");
+    $db->close();
+    cow_merge_capture_row_identities($keyless_unique_same_target, $keyless_unique_same_metadata, 'main');
+
+    $result = cow_merge_databases($keyless_unique_same_base, $keyless_unique_same_source, $keyless_unique_same_target, $keyless_unique_same_metadata, 'feature-keyless-unique-same', 'main');
+    assert_same($result['status'], 'completed', 'identical keyless unique inserts merge without a review conflict');
+    assert_same((int)scalar($keyless_unique_same_target, "SELECT COUNT(*) FROM plugin_keyless_unique_same WHERE slug = 'same-keyless-slug' AND value = 'same payload'"), 1, 'identical keyless unique insert is not duplicated');
+    assert_same((int)scalar($keyless_unique_same_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_keyless_unique_same' AND conflict_type = 'row-unique-collision'"), 0, 'identical keyless unique insert does not record a unique collision conflict');
+    assert_same((int)scalar($keyless_unique_same_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_keyless_unique_same' AND decision = 'source-applied' AND reason LIKE 'source inserted no-primary-key row already exists in target by unique index%'"), 1, 'identical keyless unique insert is still auditable as source-applied');
+
     $capture_db = $tmp . '/capture.sqlite';
     $capture_feature = $tmp . '/capture-feature.sqlite';
     $capture_metadata = $tmp . '/.forkpress/cow/merge/capture-metadata.sqlite';

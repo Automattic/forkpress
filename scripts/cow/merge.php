@@ -6077,6 +6077,24 @@ function cow_merge_table_rows(
         if ($base_row === null && $source_row !== null && $target_row === null) {
             $unique_collision = cow_merge_find_unique_collision($target, $table, $source_row);
             if ($unique_collision !== null) {
+                $unique_columns = cow_merge_all_columns($columns, array_keys($source_row), array_keys($unique_collision['row']));
+                if (!$pk_cols && cow_merge_row_values_equal($source_row, $unique_collision['row'], $unique_columns)) {
+                    cow_merge_record_decision(
+                        $meta,
+                        $run_id,
+                        $table,
+                        $key,
+                        null,
+                        'source-applied',
+                        'source inserted no-primary-key row already exists in target by unique index ' . $unique_collision['index'],
+                        null,
+                        $source_row,
+                        $unique_collision['row'],
+                        $unique_collision['row']
+                    );
+                    $applied++;
+                    continue;
+                }
                 cow_merge_record_conflict(
                     $meta,
                     $run_id,

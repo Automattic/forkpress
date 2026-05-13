@@ -51,6 +51,8 @@
 - Added runtime-backed COW e2e coverage for the offline no-primary-key `rowid` ambiguity boundary and reviewed source resolution path.
 - Tightened no-primary-key row identity ambiguity detection so untracked keyless source-only cell changes are not mixed into a target-changed row without runtime identity events.
 - Added runtime-backed COW e2e coverage for partial offline no-primary-key `rowid` ambiguity where the source reuses a rowid while changing only target-unchanged cells.
+- Collapsed identical no-primary-key source/target inserts that meet by a declared unique index into a non-conflicting auditable `source-applied` decision instead of a default target-wins collision.
+- Added runtime-backed COW e2e coverage for identical keyless unique inserts merging through the real CLI without duplicating the row.
 - Updated the automatic mergeback loop runner to pass a configurable Codex reasoning-effort setting and to include the changelog/known-good tag policy in every worker prompt.
 
 ## known-good/cow-mergeback-audit-completeness-2026-05-12
