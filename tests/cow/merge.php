@@ -535,6 +535,99 @@ try {
         'target-side constraint update collision records an auditable target-wins decision'
     );
 
+    $fk_order_base = $tmp . '/fk-order-base.sqlite';
+    $fk_order_source = $tmp . '/fk-order-source.sqlite';
+    $fk_order_target = $tmp . '/fk-order-target.sqlite';
+    $fk_order_metadata = $tmp . '/.forkpress/cow/merge/fk-order-metadata.sqlite';
+    create_base_db($fk_order_base);
+    copy($fk_order_base, $fk_order_source);
+    copy($fk_order_base, $fk_order_target);
+    foreach ([$fk_order_base, $fk_order_source, $fk_order_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_fk_parents (id INTEGER PRIMARY KEY, label TEXT)');
+        $db->exec('CREATE TABLE plugin_fk_children (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES plugin_fk_parents(id), label TEXT)');
+        $db->close();
+    }
+    $db = open_db($fk_order_source);
+    $db->exec("INSERT INTO plugin_fk_children (id, parent_id, label) VALUES (20, 10, 'source child')");
+    $db->exec("INSERT INTO plugin_fk_parents (id, label) VALUES (10, 'source parent')");
+    $db->close();
+    $fk_order_result = cow_merge_databases($fk_order_base, $fk_order_source, $fk_order_target, $fk_order_metadata, 'feature-fk-order', 'main');
+    assert_same($fk_order_result['status'], 'completed', 'foreign-key parent rows are merged before dependent child rows');
+    assert_same(scalar($fk_order_target, 'SELECT label FROM plugin_fk_parents WHERE id = 10'), 'source parent', 'foreign-key source parent row is applied');
+    assert_same(scalar($fk_order_target, 'SELECT label FROM plugin_fk_children WHERE id = 20'), 'source child', 'foreign-key source child row is applied after parent');
+
+    $fk_insert_base = $tmp . '/fk-insert-base.sqlite';
+    $fk_insert_source = $tmp . '/fk-insert-source.sqlite';
+    $fk_insert_target = $tmp . '/fk-insert-target.sqlite';
+    $fk_insert_metadata = $tmp . '/.forkpress/cow/merge/fk-insert-metadata.sqlite';
+    create_base_db($fk_insert_base);
+    copy($fk_insert_base, $fk_insert_source);
+    copy($fk_insert_base, $fk_insert_target);
+    foreach ([$fk_insert_base, $fk_insert_source, $fk_insert_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_fk_insert_parents (id INTEGER PRIMARY KEY, label TEXT)');
+        $db->exec('CREATE TABLE plugin_fk_insert_children (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES plugin_fk_insert_parents(id), label TEXT)');
+        $db->close();
+    }
+    $db = open_db($fk_insert_source);
+    $db->exec("INSERT INTO plugin_fk_insert_children (id, parent_id, label) VALUES (20, 999, 'orphan source child')");
+    $db->close();
+    $fk_insert_result = cow_merge_databases($fk_insert_base, $fk_insert_source, $fk_insert_target, $fk_insert_metadata, 'feature-fk-insert', 'main');
+    assert_same($fk_insert_result['status'], 'completed_with_conflicts', 'source insert violating target foreign key is audited instead of applied');
+    assert_same((int)scalar($fk_insert_target, 'SELECT COUNT(*) FROM plugin_fk_insert_children'), 0, 'foreign-key violating source insert is kept out by default');
+    assert_same(
+        (int)scalar($fk_insert_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_fk_insert_children' AND conflict_type = 'row-target-constraint'"),
+        1,
+        'foreign-key insert violation is recorded as a row target constraint conflict'
+    );
+    $fk_insert_conflict_id = (int)scalar($fk_insert_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_fk_insert_children' AND conflict_type = 'row-target-constraint' ORDER BY id DESC LIMIT 1");
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($fk_insert_metadata, $fk_insert_conflict_id, 'source', true, 'Try orphan source child.', 'cow-test'),
+        'FOREIGN KEY constraint failed',
+        'source resolution for a foreign-key insert remains validation-gated by target constraints'
+    );
+    $db = open_db($fk_insert_target);
+    $db->exec("INSERT INTO plugin_fk_insert_parents (id, label) VALUES (999, 'reviewed parent')");
+    $db->close();
+    $fk_insert_source_resolution = cow_merge_resolve_conflict(
+        $fk_insert_metadata,
+        $fk_insert_conflict_id,
+        'source',
+        true,
+        'Apply orphan source child after parent review.',
+        'cow-test'
+    );
+    assert_same($fk_insert_source_resolution['status'], 'applied', 'source foreign-key insert resolution applies after the parent row exists');
+    assert_same(scalar($fk_insert_target, 'SELECT label FROM plugin_fk_insert_children WHERE id = 20'), 'orphan source child', 'foreign-key source insert resolution applies the audited child row');
+
+    $fk_update_base = $tmp . '/fk-update-base.sqlite';
+    $fk_update_source = $tmp . '/fk-update-source.sqlite';
+    $fk_update_target = $tmp . '/fk-update-target.sqlite';
+    $fk_update_metadata = $tmp . '/.forkpress/cow/merge/fk-update-metadata.sqlite';
+    create_base_db($fk_update_base);
+    copy($fk_update_base, $fk_update_source);
+    copy($fk_update_base, $fk_update_target);
+    foreach ([$fk_update_base, $fk_update_source, $fk_update_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_fk_update_parents (id INTEGER PRIMARY KEY, label TEXT)');
+        $db->exec('CREATE TABLE plugin_fk_update_children (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES plugin_fk_update_parents(id), label TEXT)');
+        $db->exec("INSERT INTO plugin_fk_update_parents (id, label) VALUES (1, 'base parent')");
+        $db->exec("INSERT INTO plugin_fk_update_children (id, parent_id, label) VALUES (20, 1, 'base child')");
+        $db->close();
+    }
+    $db = open_db($fk_update_source);
+    $db->exec("UPDATE plugin_fk_update_children SET parent_id = 999, label = 'source child reparented' WHERE id = 20");
+    $db->close();
+    $fk_update_result = cow_merge_databases($fk_update_base, $fk_update_source, $fk_update_target, $fk_update_metadata, 'feature-fk-update', 'main');
+    assert_same($fk_update_result['status'], 'completed_with_conflicts', 'source update violating target foreign key is audited instead of applied');
+    assert_same((int)scalar($fk_update_target, 'SELECT parent_id FROM plugin_fk_update_children WHERE id = 20'), 1, 'foreign-key violating source update is held for review by default');
+    assert_same(
+        (int)scalar($fk_update_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_fk_update_children' AND conflict_type = 'row-target-constraint'"),
+        1,
+        'foreign-key update violation is recorded as a row target constraint conflict'
+    );
+
     $target_only_base = $tmp . '/target-only-base.sqlite';
     $target_only_source = $tmp . '/target-only-source.sqlite';
     $target_only_target = $tmp . '/target-only-target.sqlite';

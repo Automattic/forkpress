@@ -1365,6 +1365,111 @@ function cow_merge_entry_where_identity(?array $entry, array $pk_cols): ?array {
     return ['rowid' => $entry['rowid'] ?? null];
 }
 
+function cow_merge_foreign_key_groups(SQLite3 $db, string $table): array {
+    $res = @$db->query('PRAGMA foreign_key_list(' . cow_merge_quote_ident($table) . ')');
+    if (!$res) {
+        return [];
+    }
+    $groups = [];
+    while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+        $id = (string)($row['id'] ?? '');
+        if ($id === '') {
+            continue;
+        }
+        $groups[$id][] = $row;
+    }
+    foreach ($groups as &$group) {
+        usort($group, fn($a, $b) => (int)($a['seq'] ?? 0) <=> (int)($b['seq'] ?? 0));
+    }
+    unset($group);
+    ksort($groups);
+    return array_values($groups);
+}
+
+function cow_merge_foreign_key_parent_columns(SQLite3 $db, string $parent_table, array $group): ?array {
+    $columns = [];
+    $needs_parent_pk = false;
+    foreach ($group as $part) {
+        $to = (string)($part['to'] ?? '');
+        if ($to === '') {
+            $needs_parent_pk = true;
+            break;
+        }
+        $columns[] = $to;
+    }
+    if (!$needs_parent_pk) {
+        return $columns;
+    }
+
+    $pk_cols = cow_merge_pk_cols($db, $parent_table);
+    return count($pk_cols) === count($group) ? $pk_cols : null;
+}
+
+function cow_merge_row_satisfies_own_foreign_key(array $row, array $from_columns, array $parent_columns, array $values): bool {
+    foreach ($parent_columns as $i => $parent_column) {
+        if (
+            !array_key_exists($parent_column, $row) ||
+            !array_key_exists($i, $values) ||
+            !cow_merge_values_equal($row[$parent_column], $values[$i])
+        ) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function cow_merge_foreign_key_error(SQLite3 $target, string $table, array $row): ?string {
+    foreach (cow_merge_foreign_key_groups($target, $table) as $group) {
+        $parent_table = (string)($group[0]['table'] ?? '');
+        if ($parent_table === '') {
+            continue;
+        }
+        $parent_columns = cow_merge_foreign_key_parent_columns($target, $parent_table, $group);
+        if ($parent_columns === null) {
+            return "FOREIGN KEY constraint failed on $table: parent key for $parent_table could not be inspected";
+        }
+
+        $from_columns = [];
+        $values = [];
+        $skip = false;
+        foreach ($group as $i => $part) {
+            $from = (string)($part['from'] ?? '');
+            if ($from === '' || !array_key_exists($from, $row) || $row[$from] === null) {
+                $skip = true;
+                break;
+            }
+            $from_columns[] = $from;
+            $values[] = $row[$from];
+            if (!isset($parent_columns[$i])) {
+                return "FOREIGN KEY constraint failed on $table: parent key for $parent_table could not be inspected";
+            }
+        }
+        if ($skip) {
+            continue;
+        }
+
+        $clauses = [];
+        foreach ($parent_columns as $parent_column) {
+            $clauses[] = cow_merge_quote_ident($parent_column) . ' = ?';
+        }
+        $stmt = @$target->prepare('SELECT 1 FROM ' . cow_merge_quote_ident($parent_table) . ' WHERE ' . implode(' AND ', $clauses) . ' LIMIT 1');
+        if (!$stmt) {
+            return "FOREIGN KEY constraint failed on $table: parent table $parent_table could not be inspected";
+        }
+        foreach ($values as $i => $value) {
+            cow_merge_bind($stmt, $i + 1, $value);
+        }
+        $res = @$stmt->execute();
+        if (!$res || !$res->fetchArray(SQLITE3_NUM)) {
+            if ($parent_table === $table && cow_merge_row_satisfies_own_foreign_key($row, $from_columns, $parent_columns, $values)) {
+                continue;
+            }
+            return 'FOREIGN KEY constraint failed on ' . $table . '(' . implode(', ', $from_columns) . ') referencing ' . $parent_table . '(' . implode(', ', $parent_columns) . ')';
+        }
+    }
+    return null;
+}
+
 function cow_merge_is_constraint_error(SQLite3 $db): bool {
     return (int)$db->lastErrorCode() === 19;
 }
@@ -1378,6 +1483,10 @@ function cow_merge_try_insert_row(SQLite3 $target, string $table, array $row, ar
     $columns = array_values(array_filter($columns, fn($col) => array_key_exists($col, $row)));
     if (!$columns) {
         return ['ok' => true, 'rowid' => 0, 'error' => null];
+    }
+    $foreign_key_error = cow_merge_foreign_key_error($target, $table, $row);
+    if ($foreign_key_error !== null) {
+        return ['ok' => false, 'rowid' => null, 'error' => $foreign_key_error];
     }
     $sql = 'INSERT INTO ' . cow_merge_quote_ident($table) . ' (' .
         implode(', ', array_map('cow_merge_quote_ident', $columns)) . ') VALUES (' .
@@ -1408,6 +1517,10 @@ function cow_merge_insert_row(SQLite3 $target, string $table, array $row, array 
 
 function cow_merge_insert_row_with_rowid(SQLite3 $target, string $table, int $rowid, array $row, array $columns): int {
     $columns = array_values(array_filter($columns, fn($col) => array_key_exists($col, $row)));
+    $foreign_key_error = cow_merge_foreign_key_error($target, $table, $row);
+    if ($foreign_key_error !== null) {
+        throw new RuntimeException("failed to insert rowid into $table: $foreign_key_error");
+    }
     $quoted_columns = array_merge(['rowid'], array_map('cow_merge_quote_ident', $columns));
     $sql = 'INSERT INTO ' . cow_merge_quote_ident($table) . ' (' .
         implode(', ', $quoted_columns) . ') VALUES (' .
@@ -1824,6 +1937,10 @@ function cow_merge_try_update_row(
     }
     if (!$set_cols) {
         return ['ok' => true, 'error' => null];
+    }
+    $foreign_key_error = cow_merge_foreign_key_error($target, $table, $row);
+    if ($foreign_key_error !== null) {
+        return ['ok' => false, 'error' => $foreign_key_error];
     }
 
     $where_values = [];
@@ -7188,6 +7305,53 @@ function cow_merge_table_rows(
     return ['applied' => $applied, 'conflicts' => $conflicts];
 }
 
+function cow_merge_foreign_key_parent_tables(SQLite3 $db, string $table): array {
+    $parents = [];
+    foreach (cow_merge_foreign_key_groups($db, $table) as $group) {
+        $parent = (string)($group[0]['table'] ?? '');
+        if ($parent !== '' && $parent !== $table) {
+            $parents[] = $parent;
+        }
+    }
+    return array_values(array_unique($parents));
+}
+
+function cow_merge_sort_tables_by_foreign_keys(array $tables, SQLite3 ...$dbs): array {
+    $tables = array_values(array_unique($tables));
+    sort($tables);
+    $table_set = array_fill_keys($tables, true);
+    $state = [];
+    $ordered = [];
+    $visit = function (string $table) use (&$visit, &$state, &$ordered, $table_set, $dbs): void {
+        if (($state[$table] ?? null) === 'done') {
+            return;
+        }
+        if (($state[$table] ?? null) === 'visiting') {
+            return;
+        }
+        $state[$table] = 'visiting';
+        $parents = [];
+        foreach ($dbs as $db) {
+            foreach (cow_merge_foreign_key_parent_tables($db, $table) as $parent) {
+                if (isset($table_set[$parent])) {
+                    $parents[] = $parent;
+                }
+            }
+        }
+        $parents = array_values(array_unique($parents));
+        sort($parents);
+        foreach ($parents as $parent) {
+            $visit($parent);
+        }
+        $state[$table] = 'done';
+        $ordered[] = $table;
+    };
+    foreach ($tables as $table) {
+        $visit($table);
+    }
+    return $ordered;
+}
+
 function cow_merge_databases(
     string $base_db,
     string $source_db,
@@ -7227,7 +7391,7 @@ function cow_merge_databases(
         $source_triggers = cow_merge_schema_object_sql_map($source, 'trigger');
         $target_triggers = cow_merge_schema_object_sql_map($target, 'trigger');
         $all_tables = array_unique(array_merge(array_keys($base_tables), array_keys($source_tables), array_keys($target_tables)));
-        sort($all_tables);
+        $all_tables = cow_merge_sort_tables_by_foreign_keys($all_tables, $target, $source, $base);
 
         foreach ($all_tables as $table) {
             $base_sql = $base_tables[$table] ?? null;
