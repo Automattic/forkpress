@@ -6333,6 +6333,103 @@ SQL);
     assert_same($schema_restore_transitive_trigger_body_apply['status'], 'applied', 'table restore applies after the invalid transitive target trigger body is handled');
     assert_same(scalar($schema_restore_transitive_trigger_body_target, "SELECT label FROM plugin_restore_transitive_trigger_child WHERE code = 'restore-transitive-trigger-parent'"), 'restore transitive trigger label', 'preserved transitive target view remains queryable after trigger-body-sensitive table restore');
 
+    $schema_restore_deep_trigger_body_base = $tmp . '/schema-restore-deep-trigger-body-base.sqlite';
+    $schema_restore_deep_trigger_body_source = $tmp . '/schema-restore-deep-trigger-body-source.sqlite';
+    $schema_restore_deep_trigger_body_target = $tmp . '/schema-restore-deep-trigger-body-target.sqlite';
+    $schema_restore_deep_trigger_body_metadata = $tmp . '/.forkpress/cow/merge/schema-restore-deep-trigger-body-metadata.sqlite';
+    create_base_db($schema_restore_deep_trigger_body_base);
+    $db = open_db($schema_restore_deep_trigger_body_base);
+    $db->exec('CREATE TABLE plugin_restore_deep_trigger_parent (code TEXT NOT NULL PRIMARY KEY, label TEXT NOT NULL)');
+    $db->exec('CREATE TABLE plugin_restore_deep_trigger_observer (code TEXT)');
+    $db->exec('CREATE TABLE plugin_restore_deep_trigger_audit (code TEXT, observed TEXT, note TEXT)');
+    $db->exec("INSERT INTO plugin_restore_deep_trigger_parent (code, label) VALUES ('restore-deep-trigger-parent', 'restore deep trigger label')");
+    $db->close();
+    copy($schema_restore_deep_trigger_body_base, $schema_restore_deep_trigger_body_source);
+    copy($schema_restore_deep_trigger_body_base, $schema_restore_deep_trigger_body_target);
+
+    $db = open_db($schema_restore_deep_trigger_body_source);
+    $db->exec('CREATE TABLE plugin_restore_deep_trigger_parent_new (code TEXT NOT NULL PRIMARY KEY, label TEXT NOT NULL) WITHOUT ROWID');
+    $db->exec('INSERT INTO plugin_restore_deep_trigger_parent_new (code, label) SELECT code, label FROM plugin_restore_deep_trigger_parent');
+    $db->exec('DROP TABLE plugin_restore_deep_trigger_parent');
+    $db->exec('ALTER TABLE plugin_restore_deep_trigger_parent_new RENAME TO plugin_restore_deep_trigger_parent');
+    $db->close();
+    $db = open_db($schema_restore_deep_trigger_body_target);
+    $db->exec('DROP TABLE plugin_restore_deep_trigger_parent');
+    $db->exec('CREATE VIEW plugin_restore_deep_trigger_live AS SELECT code, label FROM plugin_restore_deep_trigger_parent');
+    $db->exec('CREATE VIEW plugin_restore_deep_trigger_child AS SELECT code, label FROM plugin_restore_deep_trigger_live');
+    $db->exec('CREATE VIEW plugin_restore_deep_trigger_grandchild AS SELECT code, label FROM plugin_restore_deep_trigger_child');
+    $db->exec(
+        'CREATE TRIGGER plugin_restore_deep_trigger_bad_insert AFTER INSERT ON plugin_restore_deep_trigger_observer ' .
+        'BEGIN INSERT INTO plugin_restore_deep_trigger_audit (code, observed, note) ' .
+        "SELECT NEW.code, CAST(rowid AS TEXT), 'bad' FROM plugin_restore_deep_trigger_grandchild WHERE code = NEW.code; END"
+    );
+    $db->exec(
+        'CREATE TRIGGER plugin_restore_deep_trigger_ok_insert AFTER INSERT ON plugin_restore_deep_trigger_observer ' .
+        'BEGIN INSERT INTO plugin_restore_deep_trigger_audit (code, observed, note) ' .
+        "SELECT NEW.code, label, 'ok' FROM plugin_restore_deep_trigger_grandchild WHERE code = NEW.code; END"
+    );
+    $db->close();
+
+    $schema_restore_deep_trigger_body_result = cow_merge_databases(
+        $schema_restore_deep_trigger_body_base,
+        $schema_restore_deep_trigger_body_source,
+        $schema_restore_deep_trigger_body_target,
+        $schema_restore_deep_trigger_body_metadata,
+        'feature-schema-restore-deep-trigger-body',
+        'main'
+    );
+    assert_same($schema_restore_deep_trigger_body_result['status'], 'completed_with_conflicts', 'target-dropped table restore with a preserved deep trigger body remains reviewable');
+    $schema_restore_deep_trigger_body_conflict_id = (int)scalar($schema_restore_deep_trigger_body_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_restore_deep_trigger_parent' AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
+    assert_true($schema_restore_deep_trigger_body_conflict_id > 0, 'deep trigger-body-sensitive target-dropped table restore conflict is auditable');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $schema_restore_deep_trigger_body_metadata,
+            $schema_restore_deep_trigger_body_conflict_id,
+            'source',
+            false,
+            'Preview table restore with invalid preserved deep trigger body.',
+            'test'
+        ),
+        'plugin_restore_deep_trigger_bad_insert',
+        'dry-run table restore rejects a preserved target trigger body that references a deeper invalid view chain'
+    );
+    assert_same(
+        (int)scalar($schema_restore_deep_trigger_body_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_restore_deep_trigger_body_conflict_id"),
+        0,
+        'failed deep trigger-body table restore dry-run does not record resolution metadata'
+    );
+    assert_same(
+        (int)scalar($schema_restore_deep_trigger_body_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_restore_deep_trigger_parent'"),
+        0,
+        'failed deep trigger-body table restore dry-run rolls back the restored table'
+    );
+    assert_same(
+        (int)scalar($schema_restore_deep_trigger_body_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name IN ('plugin_restore_deep_trigger_live', 'plugin_restore_deep_trigger_child', 'plugin_restore_deep_trigger_grandchild')"),
+        3,
+        'failed deep trigger-body table restore dry-run preserves the full target view chain'
+    );
+    assert_same(
+        (int)scalar($schema_restore_deep_trigger_body_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name IN ('plugin_restore_deep_trigger_bad_insert', 'plugin_restore_deep_trigger_ok_insert')"),
+        2,
+        'failed deep trigger-body table restore dry-run preserves all target observer triggers for review'
+    );
+    $db = open_db($schema_restore_deep_trigger_body_target);
+    $db->exec('DROP TRIGGER plugin_restore_deep_trigger_bad_insert');
+    $db->close();
+    $schema_restore_deep_trigger_body_apply = cow_merge_resolve_conflict(
+        $schema_restore_deep_trigger_body_metadata,
+        $schema_restore_deep_trigger_body_conflict_id,
+        'source',
+        true,
+        'Apply table restore after invalid deep target trigger body is reviewed.',
+        'test'
+    );
+    assert_same($schema_restore_deep_trigger_body_apply['status'], 'applied', 'table restore applies after the invalid deep target trigger body is handled');
+    $db = open_db($schema_restore_deep_trigger_body_target);
+    $db->exec("INSERT INTO plugin_restore_deep_trigger_observer (code) VALUES ('restore-deep-trigger-parent')");
+    $db->close();
+    assert_same(scalar($schema_restore_deep_trigger_body_target, "SELECT observed FROM plugin_restore_deep_trigger_audit WHERE note = 'ok' AND code = 'restore-deep-trigger-parent'"), 'restore deep trigger label', 'valid preserved target trigger still fires through the deeper view chain after table restore');
+
     $schema_cross_fk_restored_parent_base = $tmp . '/schema-cross-fk-restored-parent-base.sqlite';
     $schema_cross_fk_restored_parent_source = $tmp . '/schema-cross-fk-restored-parent-source.sqlite';
     $schema_cross_fk_restored_parent_target = $tmp . '/schema-cross-fk-restored-parent-target.sqlite';

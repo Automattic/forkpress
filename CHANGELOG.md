@@ -40,6 +40,7 @@
 - Added COW coverage for target-dropped table restore rollback when preserved target trigger bodies or target view triggers become invalid after the audited source table schema is restored.
 - Added COW coverage for target-dropped table restore rollback when a preserved transitive target view trigger becomes invalid after the audited source table schema is restored.
 - Tightened target-dropped table restore validation so preserved target trigger bodies that reference transitive dependent views are checked before dry-run or apply reports success.
+- Added COW coverage for target-dropped table restore rollback when a preserved target trigger body references a deeper dependent view chain while other target triggers remain valid.
 - Added COW coverage for compatible table rebuild rollback when a preserved target trigger would become invalid while an index-backed foreign-key child table still depends on the rebuilt table.
 - Added COW coverage for compatible table rebuild rollback when a preserved target view would become invalid after applying the audited source schema.
 - Tightened validation-gated source view rewrites so preserved target view triggers must still compile before dry-run or apply reports success.
