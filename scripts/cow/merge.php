@@ -6494,6 +6494,9 @@ function cow_merge_resolve_schema_conflict(
                 $source_error = is_array($source_payload) ? (string)($source_payload['error'] ?? '') : '';
                 $mutate_source = function () use ($target, $type, $object, $source_sql, $source_error): void {
                     if ($type === 'view') {
+                        if (str_contains($source_error, 'unsupported cyclic source view dependencies')) {
+                            throw new InvalidArgumentException($source_error);
+                        }
                         cow_merge_apply_source_view_schema_resolution($target, $object, $source_sql);
                     } else {
                         if (str_contains($source_error, 'unsupported cyclic trigger dependencies')) {

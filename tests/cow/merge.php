@@ -4793,8 +4793,8 @@ SQL);
                 "Try cyclic view $view_name.",
                 'test'
             ),
-            'references missing target schema objects',
-            "$view_name source resolution remains validation-gated"
+            'unsupported cyclic source view dependencies',
+            "$view_name source resolution preserves the audited cycle reason"
         );
     }
     assert_same(
