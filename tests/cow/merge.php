@@ -4724,6 +4724,63 @@ SQL);
     assert_same((int)scalar($source_added_view_order_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE conflict_type = 'schema-source-added-view'"), 0, 'ordered source-added views do not create false schema conflicts');
     assert_same((int)scalar($source_added_view_order_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE column_name IN ('plugin_child_source_view', 'plugin_parent_source_view') AND decision = 'source-applied'"), 2, 'ordered source-added view decisions are auditable');
 
+    $source_added_view_cycle_base = $tmp . '/source-added-view-cycle-base.sqlite';
+    $source_added_view_cycle_source = $tmp . '/source-added-view-cycle-source.sqlite';
+    $source_added_view_cycle_target = $tmp . '/source-added-view-cycle-target.sqlite';
+    $source_added_view_cycle_metadata = $tmp . '/.forkpress/cow/merge/source-added-view-cycle-metadata.sqlite';
+    create_base_db($source_added_view_cycle_base);
+    copy($source_added_view_cycle_base, $source_added_view_cycle_source);
+    copy($source_added_view_cycle_base, $source_added_view_cycle_target);
+    $db = open_db($source_added_view_cycle_source);
+    $db->exec('CREATE VIEW plugin_cycle_alpha_view AS SELECT item_id, label FROM plugin_cycle_beta_view');
+    $db->exec('CREATE VIEW plugin_cycle_beta_view AS SELECT item_id, label FROM plugin_cycle_alpha_view');
+    $db->exec('CREATE VIEW plugin_cycle_self_view AS SELECT item_id, label FROM plugin_cycle_self_view');
+    $db->close();
+    $source_added_view_cycle_result = cow_merge_databases(
+        $source_added_view_cycle_base,
+        $source_added_view_cycle_source,
+        $source_added_view_cycle_target,
+        $source_added_view_cycle_metadata,
+        'feature-source-view-cycle',
+        'main'
+    );
+    assert_same($source_added_view_cycle_result['status'], 'completed_with_conflicts', 'source-added cyclic views are held as reviewable schema conflicts');
+    assert_same((int)scalar($source_added_view_cycle_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name LIKE 'plugin_cycle_%'"), 0, 'source-added cyclic views are not installed on target');
+    foreach ([
+        'plugin_cycle_alpha_view' => 'plugin_cycle_alpha_view -> plugin_cycle_beta_view -> plugin_cycle_alpha_view',
+        'plugin_cycle_beta_view' => 'plugin_cycle_alpha_view -> plugin_cycle_beta_view -> plugin_cycle_alpha_view',
+        'plugin_cycle_self_view' => 'plugin_cycle_self_view -> plugin_cycle_self_view',
+    ] as $view_name => $expected_cycle) {
+        $conflict_id = (int)scalar($source_added_view_cycle_metadata, "SELECT id FROM merge_conflicts WHERE column_name = '$view_name' AND conflict_type = 'schema-source-added-view' ORDER BY id DESC LIMIT 1");
+        assert_true($conflict_id > 0, "$view_name records a source-added cyclic view conflict");
+        $payload = cow_merge_decode_payload_json(
+            (string)scalar($source_added_view_cycle_metadata, "SELECT source_payload FROM merge_conflicts WHERE id = $conflict_id"),
+            "$view_name cyclic view payload"
+        );
+        assert_true(
+            str_contains((string)($payload['error'] ?? ''), 'unsupported cyclic source view dependencies') &&
+                str_contains((string)($payload['error'] ?? ''), $expected_cycle),
+            "$view_name cyclic view conflict payload records the unsupported dependency cycle"
+        );
+        assert_throws(
+            fn() => cow_merge_resolve_conflict(
+                $source_added_view_cycle_metadata,
+                $conflict_id,
+                'source',
+                true,
+                "Try cyclic view $view_name.",
+                'test'
+            ),
+            'references missing target schema objects',
+            "$view_name source resolution remains validation-gated"
+        );
+    }
+    assert_same(
+        (int)scalar($source_added_view_cycle_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id IN (SELECT id FROM merge_conflicts WHERE conflict_type = 'schema-source-added-view')"),
+        0,
+        'failed cyclic view resolution attempts do not record resolutions'
+    );
+
     $source_added_view_missing_base = $tmp . '/source-added-view-missing-base.sqlite';
     $source_added_view_missing_source = $tmp . '/source-added-view-missing-source.sqlite';
     $source_added_view_missing_target = $tmp . '/source-added-view-missing-target.sqlite';

@@ -5457,15 +5457,89 @@ function cow_merge_sql_referenced_tables(string $sql): array {
     return array_keys($refs);
 }
 
-function cow_merge_sort_view_schema_objects(array $objects, array $source_objects): array {
+function cow_merge_view_schema_dependency_map(array $objects, array $source_objects): array {
     $object_names = [];
     foreach ($objects as $object) {
         $object_names[strtolower((string)$object)] = (string)$object;
     }
 
+    $map = [];
+    foreach ($objects as $object) {
+        $name = (string)$object;
+        $key = strtolower($name);
+        $source_sql = (string)($source_objects[$name]['sql'] ?? '');
+        $dependencies = [];
+        foreach (cow_merge_sql_referenced_tables($source_sql) as $reference) {
+            $reference_key = strtolower($reference);
+            if (isset($object_names[$reference_key])) {
+                $dependencies[$reference_key] = $object_names[$reference_key];
+            }
+        }
+        asort($dependencies);
+        $map[$key] = [
+            'name' => $name,
+            'dependencies' => $dependencies,
+        ];
+    }
+
+    return $map;
+}
+
+function cow_merge_view_schema_dependency_cycles(array $objects, array $source_objects): array {
+    $map = cow_merge_view_schema_dependency_map($objects, $source_objects);
+    $cycles = [];
+    $state = [];
+    $stack = [];
+    $positions = [];
+
+    $visit = function (string $key) use (&$visit, &$cycles, &$state, &$stack, &$positions, $map): void {
+        if (($state[$key] ?? null) === 'done') {
+            return;
+        }
+        if (($state[$key] ?? null) === 'visiting') {
+            return;
+        }
+        $state[$key] = 'visiting';
+        $positions[$key] = count($stack);
+        $stack[] = $key;
+
+        foreach (($map[$key]['dependencies'] ?? []) as $dependency_key => $dependency_name) {
+            if (!isset($map[$dependency_key])) {
+                continue;
+            }
+            if (($state[$dependency_key] ?? null) === 'visiting') {
+                $cycle_keys = array_slice($stack, $positions[$dependency_key]);
+                $cycle_keys[] = $dependency_key;
+                $cycle_names = array_map(
+                    fn(string $cycle_key): string => (string)$map[$cycle_key]['name'],
+                    $cycle_keys
+                );
+                $message = implode(' -> ', $cycle_names);
+                foreach (array_unique(array_slice($cycle_keys, 0, -1)) as $cycle_key) {
+                    $cycles[$cycle_key] = $message;
+                }
+                continue;
+            }
+            $visit($dependency_key);
+        }
+
+        array_pop($stack);
+        unset($positions[$key]);
+        $state[$key] = 'done';
+    };
+
+    foreach (array_keys($map) as $key) {
+        $visit($key);
+    }
+
+    return $cycles;
+}
+
+function cow_merge_sort_view_schema_objects(array $objects, array $source_objects): array {
+    $dependency_map = cow_merge_view_schema_dependency_map($objects, $source_objects);
     $ordered = [];
     $state = [];
-    $visit = function (string $object) use (&$visit, &$ordered, &$state, $object_names, $source_objects): void {
+    $visit = function (string $object) use (&$visit, &$ordered, &$state, $dependency_map): void {
         $key = strtolower($object);
         if (($state[$key] ?? null) === 'done') {
             return;
@@ -5474,16 +5548,8 @@ function cow_merge_sort_view_schema_objects(array $objects, array $source_object
             return;
         }
         $state[$key] = 'visiting';
-        $source_sql = (string)($source_objects[$object]['sql'] ?? '');
-        $dependencies = [];
-        foreach (cow_merge_sql_referenced_tables($source_sql) as $reference) {
-            $reference_key = strtolower($reference);
-            if (isset($object_names[$reference_key]) && $reference_key !== $key) {
-                $dependencies[] = $object_names[$reference_key];
-            }
-        }
-        $dependencies = array_values(array_unique($dependencies));
-        sort($dependencies);
+        $dependencies = $dependency_map[$key]['dependencies'] ?? [];
+        unset($dependencies[$key]);
         foreach ($dependencies as $dependency) {
             $visit($dependency);
         }
@@ -8522,7 +8588,9 @@ function cow_merge_apply_schema_object_changes(
     $conflicts = 0;
     $all_objects = array_unique(array_merge(array_keys($base_objects), array_keys($source_objects), array_keys($target_objects)));
     sort($all_objects);
+    $view_cycles = [];
     if ($type === 'view') {
+        $view_cycles = cow_merge_view_schema_dependency_cycles($all_objects, $source_objects);
         $all_objects = cow_merge_sort_view_schema_objects($all_objects, $source_objects);
     }
 
@@ -8591,6 +8659,12 @@ function cow_merge_apply_schema_object_changes(
                 if ($type === 'trigger') {
                     cow_merge_validate_trigger_references($target, $name, $source_sql);
                 } elseif ($type === 'view') {
+                    $cycle = $view_cycles[strtolower($name)] ?? null;
+                    if ($cycle !== null) {
+                        throw new InvalidArgumentException(
+                            'source view ' . $name . ' has unsupported cyclic source view dependencies: ' . $cycle
+                        );
+                    }
                     cow_merge_validate_view_references($target, $name, $source_sql);
                 }
                 if (!@$target->exec($source_sql)) {

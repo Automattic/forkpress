@@ -17,6 +17,7 @@
 - Added COW coverage for target-dropped foreign-key child table restore validation when the parent table exists but the required parent row is still absent.
 - Recorded source-added table rows that are blocked by missing target-side foreign-key parents as auditable `row-target-constraint` conflicts instead of aborting the merge.
 - Ordered source-added SQLite views by source-side view dependencies, and kept source-added views with missing restored-table dependencies as validation-gated `schema-source-added-view` conflicts.
+- Held source-added SQLite view dependency cycles as explicit validation-gated `schema-source-added-view` conflicts instead of trying to guess an installation order.
 - Added COW coverage for source-added view chains that cross source-only tables and restored target-dropped tables, keeping each view validation-gated until its dependencies exist.
 - Added COW coverage for source-added trigger chains that cross restored tables, source-added views, and source-only tables, keeping each trigger validation-gated until its dependencies exist.
 - Extended source-added trigger dependency preflight to clear trigger body read references so triggers that read missing target-side schema objects stay validation-gated.

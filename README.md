@@ -487,8 +487,10 @@ tooling.
   row constraint conflict. Source-added views are ordered by source-side
   view dependencies, and source-added views that need a restored target table
   are held as reviewable `schema-source-added-view` conflicts until that
-  dependency validates, with missing or non-persistent view references
-  preflighted before target mutation. Target-dropped table restores defer
+  dependency validates. Cyclic source-added view graphs are also held as
+  reviewable `schema-source-added-view` conflicts rather than installed in an
+  arbitrary order, with missing or non-persistent view references preflighted
+  before target mutation. Target-dropped table restores defer
   source-added indexes and triggers that already have standalone schema
   conflicts, so the table can restore before those objects are resolved in
   dependency order. Source-added triggers that read or write
