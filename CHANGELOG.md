@@ -69,6 +69,7 @@
 - Added COW coverage for rerunning dependency-preserving compatible table rebuild resolutions while retaining target indexes, triggers, dependent views, and view triggers.
 - Added COW coverage for rerunning validation-gated target-choice DB cell, schema, and filesystem resolutions while preserving audited target state without duplicating unchanged conflict records.
 - Treated rerun conflicts with a reviewed target-choice resolution as accepted target state, recording `target-accepted` decisions instead of reporting the unchanged divergence as a new active conflict.
+- Added `target-accepted` counts to COW merge audit run and decision-group summaries so accepted target states are visible separately from active `target-wins` defaults.
 - Fixed COW conflict recording to de-duplicate unchanged schema conflicts with null row identities using an explicit null-safe lookup before inserting metadata.
 - Updated the automatic mergeback loop runner to pass a configurable Codex reasoning-effort setting and to include the changelog/known-good tag policy in every worker prompt.
 

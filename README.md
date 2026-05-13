@@ -565,7 +565,9 @@ tooling.
   a reviewed annotation to the conflict audit record. Reruns after a reviewed
   target choice keep the original conflict and resolution audit records, but
   treat that unchanged divergence as accepted and record a `target-accepted`
-  decision instead of reporting it as a fresh active conflict.
+  decision instead of reporting it as a fresh active conflict. Audit run and
+  decision-group summaries count those accepted target decisions separately from
+  active `target-wins` defaults.
 - `forkpress branch show <name>` prints the branch directory, database, file
   count, and Git ref path.
 - `forkpress branch delete <name>` removes a COW branch. `main` cannot be

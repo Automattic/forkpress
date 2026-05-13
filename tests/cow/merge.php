@@ -438,6 +438,22 @@ try {
         1,
         'rerunning after target cell resolution records the accepted target choice as an auditable decision'
     );
+    $target_accepted_audit = cow_merge_audit_report($metadata, (int)$target_resolution_rerun['run_id'], 10);
+    assert_same((int)$target_accepted_audit['runs'][0]['target_accepted_count'], 1, 'merge audit run summary counts accepted target decisions');
+    ob_start();
+    cow_merge_print_audit_text($target_accepted_audit);
+    $target_accepted_text = ob_get_clean();
+    assert_true(str_contains($target_accepted_text, 'target-accepted=1'), 'merge audit text includes accepted target decision counts');
+    $target_accepted_grouped_audit = cow_merge_audit_report($metadata, (int)$target_resolution_rerun['run_id'], 10, ['records' => 'decisions', 'group_by' => 'type']);
+    $target_accepted_group = null;
+    foreach ($target_accepted_grouped_audit['decision_groups'] as $group) {
+        if ($group['group_key'] === 'target-accepted') {
+            $target_accepted_group = $group;
+            break;
+        }
+    }
+    assert_true($target_accepted_group !== null, 'decision grouping includes accepted target decisions by type');
+    assert_same((int)$target_accepted_group['target_accepted_count'], 1, 'decision grouping counts accepted target decisions');
     $resolution_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10);
     assert_same(count($resolution_audit['resolutions']), 2, 'merge audit report exports deterministic resolution records');
     $applied_resolution_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['resolution_status' => 'applied']);

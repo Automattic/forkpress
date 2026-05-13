@@ -5221,6 +5221,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
         $decision_count_filter = cow_merge_audit_count_sql($filters, 'decisions', 'd', $review_notes_exist);
         $conflict_count_filter = cow_merge_audit_count_sql($filters, 'conflicts', 'c', $review_notes_exist);
         $target_wins_filter = cow_merge_audit_named_decision_count_sql($filters, 'd', 'target-wins', $review_notes_exist);
+        $target_accepted_filter = cow_merge_audit_named_decision_count_sql($filters, 'd', 'target-accepted', $review_notes_exist);
         $source_applied_filter = cow_merge_audit_named_decision_count_sql($filters, 'd', 'source-applied', $review_notes_exist);
         $target_kept_filter = cow_merge_audit_named_decision_count_sql($filters, 'd', 'target-kept', $review_notes_exist);
         $id_band_filter = cow_merge_audit_count_sql($filters, 'decisions', 'd', $review_notes_exist);
@@ -5235,6 +5236,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
             "(SELECT COUNT(*) FROM merge_decisions d WHERE d.run_id = r.id$decision_count_filter) AS decision_count, " .
             "(SELECT COUNT(*) FROM merge_conflicts c WHERE c.run_id = r.id$conflict_count_filter) AS conflict_count, " .
             "(SELECT COUNT(*) FROM merge_decisions d WHERE d.run_id = r.id AND d.decision = 'target-wins'$target_wins_filter) AS target_wins_count, " .
+            "(SELECT COUNT(*) FROM merge_decisions d WHERE d.run_id = r.id AND d.decision = 'target-accepted'$target_accepted_filter) AS target_accepted_count, " .
             "(SELECT COUNT(*) FROM merge_decisions d WHERE d.run_id = r.id AND d.decision = 'source-applied'$source_applied_filter) AS source_applied_count, " .
             "(SELECT COUNT(*) FROM merge_decisions d WHERE d.run_id = r.id AND d.decision = 'target-kept'$target_kept_filter) AS target_kept_count, " .
             "(SELECT COUNT(*) FROM merge_decisions d WHERE d.run_id = r.id AND d.decision LIKE 'id-band-%'$id_band_filter) AS id_band_decision_count " .
@@ -5292,6 +5294,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
                     'merge_decisions',
                     "SELECT :group_by AS group_by, $group_expr AS group_key, COUNT(*) AS decision_count, " .
                     "SUM(CASE WHEN d.decision = 'target-wins' THEN 1 ELSE 0 END) AS target_wins_count, " .
+                    "SUM(CASE WHEN d.decision = 'target-accepted' THEN 1 ELSE 0 END) AS target_accepted_count, " .
                     "SUM(CASE WHEN d.decision = 'source-applied' THEN 1 ELSE 0 END) AS source_applied_count, " .
                     "SUM(CASE WHEN d.decision = 'target-kept' THEN 1 ELSE 0 END) AS target_kept_count, " .
                     "SUM(CASE WHEN d.decision = 'id-band-skipped' THEN 1 ELSE 0 END) AS id_band_skipped_count, " .
@@ -5435,7 +5438,7 @@ function cow_merge_print_audit_text(array $report): void {
         foreach ($report['runs'] as $run) {
             $finished = $run['finished_at'] !== null && $run['finished_at'] !== '' ? (string)$run['finished_at'] : 'running';
             echo "  #{$run['id']} {$run['status']} {$run['source_branch']} -> {$run['target_branch']} policy={$run['policy']} started={$run['started_at']} finished=$finished\n";
-            echo "     decisions={$run['decision_count']} target-wins={$run['target_wins_count']} source-applied={$run['source_applied_count']} target-kept={$run['target_kept_count']} id-bands={$run['id_band_decision_count']} conflicts={$run['conflict_count']}\n";
+            echo "     decisions={$run['decision_count']} target-wins={$run['target_wins_count']} target-accepted={$run['target_accepted_count']} source-applied={$run['source_applied_count']} target-kept={$run['target_kept_count']} id-bands={$run['id_band_decision_count']} conflicts={$run['conflict_count']}\n";
             if ((string)$run['status'] === 'failed' && isset($run['failure_reason']) && (string)$run['failure_reason'] !== '') {
                 echo "     failure=" . cow_merge_audit_truncate((string)$run['failure_reason'], 240) . "\n";
             }
@@ -5481,7 +5484,7 @@ function cow_merge_print_audit_text(array $report): void {
     if ($report['decision_groups']) {
         echo "decision-groups:\n";
         foreach ($report['decision_groups'] as $group) {
-            echo "  {$group['group_by']}={$group['group_key']} decisions={$group['decision_count']} target-wins={$group['target_wins_count']} source-applied={$group['source_applied_count']} target-kept={$group['target_kept_count']} id-band-skipped={$group['id_band_skipped_count']} files={$group['file_count']} db={$group['db_count']}\n";
+            echo "  {$group['group_by']}={$group['group_key']} decisions={$group['decision_count']} target-wins={$group['target_wins_count']} target-accepted={$group['target_accepted_count']} source-applied={$group['source_applied_count']} target-kept={$group['target_kept_count']} id-band-skipped={$group['id_band_skipped_count']} files={$group['file_count']} db={$group['db_count']}\n";
         }
     }
 
