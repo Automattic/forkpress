@@ -5679,6 +5679,7 @@ function cow_merge_apply_safe_table_schema_changes(
     $source_by_name = cow_merge_columns_by_name($source_columns);
     $target_by_name = cow_merge_columns_by_name($target_columns);
     $columns_to_add = [];
+    $matching_columns = [];
     foreach ($source_columns as $source_column) {
         $name_key = strtolower((string)$source_column['name']);
         if (isset($base_by_name[$name_key])) {
@@ -5700,6 +5701,12 @@ function cow_merge_apply_safe_table_schema_changes(
                 );
                 return ['merged' => false, 'applied' => 0, 'conflicts' => 1];
             }
+            $matching_columns[] = [
+                'source_column' => $source_column,
+                'target_column' => $target_by_name[$name_key],
+                'source_definition' => cow_merge_column_definition_from_create_sql($source_sql, (string)$source_column['name']),
+                'target_definition' => cow_merge_column_definition_from_create_sql($target_sql, (string)$source_column['name']),
+            ];
             continue;
         }
 
@@ -5722,34 +5729,36 @@ function cow_merge_apply_safe_table_schema_changes(
         $columns_to_add[] = ['column' => $source_column, 'definition' => $definition];
     }
 
-    if (!$columns_to_add) {
+    if (!$columns_to_add && !$matching_columns) {
         return ['merged' => true, 'applied' => 0, 'conflicts' => 0];
     }
 
-    $target->exec('SAVEPOINT forkpress_schema_merge');
-    foreach ($columns_to_add as $entry) {
-        $column = $entry['column'];
-        $definition = $entry['definition'];
-        $sql = 'ALTER TABLE ' . cow_merge_quote_ident($table) . ' ADD COLUMN ' . $definition;
-        if (!$target->exec($sql)) {
-            $target->exec('ROLLBACK TO forkpress_schema_merge');
-            $target->exec('RELEASE forkpress_schema_merge');
-            cow_merge_record_schema_conflict(
-                $meta,
-                $run_id,
-                $table,
-                (string)$column['name'],
-                'schema-source-changed',
-                $base_sql,
-                ['column' => $column, 'definition' => $definition, 'error' => $target->lastErrorMsg()],
-                $target_sql,
-                $target_sql,
-                'source added a column that SQLite rejected on the target'
-            );
-            return ['merged' => false, 'applied' => 0, 'conflicts' => 1];
+    if ($columns_to_add) {
+        $target->exec('SAVEPOINT forkpress_schema_merge');
+        foreach ($columns_to_add as $entry) {
+            $column = $entry['column'];
+            $definition = $entry['definition'];
+            $sql = 'ALTER TABLE ' . cow_merge_quote_ident($table) . ' ADD COLUMN ' . $definition;
+            if (!$target->exec($sql)) {
+                $target->exec('ROLLBACK TO forkpress_schema_merge');
+                $target->exec('RELEASE forkpress_schema_merge');
+                cow_merge_record_schema_conflict(
+                    $meta,
+                    $run_id,
+                    $table,
+                    (string)$column['name'],
+                    'schema-source-changed',
+                    $base_sql,
+                    ['column' => $column, 'definition' => $definition, 'error' => $target->lastErrorMsg()],
+                    $target_sql,
+                    $target_sql,
+                    'source added a column that SQLite rejected on the target'
+                );
+                return ['merged' => false, 'applied' => 0, 'conflicts' => 1];
+            }
         }
+        $target->exec('RELEASE forkpress_schema_merge');
     }
-    $target->exec('RELEASE forkpress_schema_merge');
 
     foreach ($columns_to_add as $entry) {
         $column = $entry['column'];
@@ -5788,7 +5797,23 @@ function cow_merge_apply_safe_table_schema_changes(
             ['column' => $target_column, 'definition' => $definition]
         );
     }
-    return ['merged' => true, 'applied' => count($columns_to_add), 'conflicts' => 0];
+    foreach ($matching_columns as $entry) {
+        $column = $entry['source_column'];
+        cow_merge_record_decision(
+            $meta,
+            $run_id,
+            $table,
+            null,
+            (string)$column['name'],
+            'source-applied',
+            'source and target added the same table column',
+            null,
+            ['column' => $entry['source_column'], 'definition' => $entry['source_definition']],
+            ['column' => $entry['target_column'], 'definition' => $entry['target_definition']],
+            ['column' => $entry['target_column'], 'definition' => $entry['target_definition']]
+        );
+    }
+    return ['merged' => true, 'applied' => count($columns_to_add) + count($matching_columns), 'conflicts' => 0];
 }
 
 function cow_merge_apply_index_schema_changes(

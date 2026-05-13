@@ -1511,11 +1511,13 @@ SQL);
 
     $db = open_db($schema_source);
     $db->exec('ALTER TABLE plugin_items ADD COLUMN extra TEXT');
+    $db->exec('ALTER TABLE plugin_items ADD COLUMN shared_note TEXT');
     $db->exec('CREATE INDEX plugin_items_label_idx ON plugin_items(label)');
     $db->exec("UPDATE plugin_items SET extra = 'source-only schema value' WHERE item_id = 'alpha'");
     $db->close();
 
     $db = open_db($schema_target);
+    $db->exec('ALTER TABLE plugin_items ADD COLUMN shared_note TEXT');
     $db->exec('ALTER TABLE plugin_items ADD COLUMN target_note TEXT');
     $db->exec('CREATE INDEX plugin_items_target_note_idx ON plugin_items(target_note)');
     $db->exec("UPDATE plugin_items SET target_note = 'target-only schema value' WHERE item_id = 'alpha'");
@@ -1524,9 +1526,11 @@ SQL);
     $result = cow_merge_databases($schema_base, $schema_source, $schema_target, $metadata, 'feature-schema', 'main');
     assert_same($result['status'], 'completed', 'independent safe schema additions merge cleanly');
     assert_same(scalar($schema_target, "SELECT extra FROM plugin_items WHERE item_id = 'alpha'"), 'source-only schema value', 'source-added column is added to target and row value is merged');
+    assert_same(column_type($schema_target, 'plugin_items', 'shared_note'), 'TEXT', 'shared source/target-added column remains present');
     assert_same(scalar($schema_target, "SELECT target_note FROM plugin_items WHERE item_id = 'alpha'"), 'target-only schema value', 'target-added column value is preserved');
     assert_same((int)scalar($schema_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_items_label_idx'"), 1, 'source-added index is created on target');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_items' AND column_name = 'extra' AND row_identity IS NULL AND decision = 'source-applied'"), 1, 'source-added column decision is auditable');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_items' AND column_name = 'shared_note' AND row_identity IS NULL AND decision = 'source-applied' AND reason = 'source and target added the same table column'"), 1, 'shared source/target-added column decision is auditable inside divergent table schema');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_items' AND column_name = 'plugin_items_label_idx' AND decision = 'source-applied'"), 1, 'source-added index decision is auditable');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_items' AND column_name = 'target_note' AND row_identity IS NULL AND decision = 'target-kept'"), 1, 'target-added column preservation is auditable');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_items' AND column_name = 'plugin_items_target_note_idx' AND decision = 'target-kept'"), 1, 'target-added index preservation is auditable');
