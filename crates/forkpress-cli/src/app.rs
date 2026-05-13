@@ -2910,7 +2910,9 @@ fn cow_branch_command(
                     }
                     "--records" => {
                         let Some(value) = args.args.get(index + 1) else {
-                            bail!("--records requires all, conflicts, decisions, or resolutions");
+                            bail!(
+                                "--records requires all, conflicts, decisions, resolutions, or rollback-failures"
+                            );
                         };
                         records = value.clone();
                         index += 2;

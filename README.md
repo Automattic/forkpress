@@ -557,7 +557,7 @@ tooling.
   `row-identity-ambiguous` conflict instead of mixing cells from different
   possible logical rows.
 - `forkpress branch merge-audit [--format text|json] [--run ID]`
-  `[--scope all|db|files] [--records all|conflicts|decisions|resolutions]`
+  `[--scope all|db|files] [--records all|conflicts|decisions|resolutions|rollback-failures]`
   `[--conflict-type TYPE] [--decision DECISION] [--path PATH]`
   `[--path-prefix PREFIX] [--id-band-skips] [--target-kept] [--review]`
   `[--review-status unreviewed|pending|needs-action|reviewed]`
@@ -587,6 +587,9 @@ tooling.
   For unreviewed automatic decision review, use
   `--review --review-status unreviewed --records decisions --scope db` or
   `--scope files`.
+  `--records rollback-failures` focuses the report on failed whole-branch
+  rollback records and their JSONL artifact path; it can be combined with
+  `--run ID` to inspect one failed attempt.
 - `forkpress branch merge-review conflict|decision|resolution <id> --status pending|needs-action|reviewed --note <text>`
   `[--reviewer NAME]` appends a review note to an auditable merge conflict,
   decision, or deterministic resolution record.

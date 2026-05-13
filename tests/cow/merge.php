@@ -2794,9 +2794,24 @@ SQL);
     assert_same((int)scalar($rollback_artifact_metadata, "SELECT COUNT(*) FROM merge_rollback_failures WHERE source_branch = 'feature-rollback-artifact'"), 1, 'rollback failure is queryable in merge metadata when available');
     $rollback_failure_audit = cow_merge_audit_report($rollback_artifact_metadata, null, 5);
     assert_same(count($rollback_failure_audit['rollback_failures']), 1, 'merge audit JSON report exposes rollback failure artifacts');
+    $rollback_failure_only_audit = cow_merge_audit_report($rollback_artifact_metadata, null, 5, ['records' => 'rollback-failures']);
+    assert_same($rollback_failure_only_audit['filters']['records'], 'rollback-failures', 'rollback failure audit can focus on rollback failure records');
+    assert_same(count($rollback_failure_only_audit['runs']), 0, 'rollback failure audit omits run records');
+    assert_same(count($rollback_failure_only_audit['conflicts']), 0, 'rollback failure audit omits conflict records');
+    assert_same(count($rollback_failure_only_audit['decisions']), 0, 'rollback failure audit omits decision records');
+    assert_same(count($rollback_failure_only_audit['resolutions']), 0, 'rollback failure audit omits resolution records');
+    assert_same(count($rollback_failure_only_audit['rollback_failures']), 1, 'rollback failure audit returns rollback failure records');
+    $rollback_failure_run_audit = cow_merge_audit_report($rollback_artifact_metadata, 123, 5, ['records' => 'rollback-failures']);
+    assert_same(count($rollback_failure_run_audit['rollback_failures']), 1, 'rollback failure audit can filter by failed run id');
+    assert_throws(
+        fn() => cow_merge_audit_report($rollback_artifact_metadata, null, 5, ['records' => 'rollback-failures', 'scope' => 'files']),
+        '--records rollback-failures cannot be combined with --scope',
+        'rollback failure audit rejects file scope filters'
+    );
     ob_start();
-    cow_merge_print_audit_text($rollback_failure_audit);
+    cow_merge_print_audit_text($rollback_failure_only_audit);
     $rollback_failure_text = ob_get_clean();
+    assert_true(str_contains($rollback_failure_text, 'filters:   records=rollback-failures'), 'merge audit text prints rollback failure filter');
     assert_true(str_contains($rollback_failure_text, 'rollback-failures:') && str_contains($rollback_failure_text, 'restore snapshot failure'), 'merge audit text prints rollback failure artifacts');
     cow_merge_cleanup_sqlite_snapshot($rollback_artifact_db_snapshot);
     cow_merge_file_root_snapshot_cleanup($rollback_artifact_fs_snapshot);

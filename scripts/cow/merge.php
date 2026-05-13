@@ -16,8 +16,8 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "  php merge.php track-identity-events --db <path> --metadata-db <path> --branch <branch> --events-json <json>\n");
     fwrite(STDERR, "  php merge.php allocate-id-bands --db <path> --metadata-db <path> --branch <branch>\n");
     fwrite(STDERR, "  php merge.php audit --metadata-db <path> [--format text|json] [--limit N] [--run ID]\n");
-    fwrite(STDERR, "    [--scope all|db|files] [--records all|conflicts|decisions|resolutions] [--path <path>] [--path-prefix <prefix>]\n");
-    fwrite(STDERR, "    [--scope all|db|files] [--records all|conflicts|decisions|resolutions] [--conflict-type TYPE] [--decision DECISION]\n");
+    fwrite(STDERR, "    [--scope all|db|files] [--records all|conflicts|decisions|resolutions|rollback-failures] [--path <path>] [--path-prefix <prefix>]\n");
+    fwrite(STDERR, "    [--scope all|db|files] [--records all|conflicts|decisions|resolutions|rollback-failures] [--conflict-type TYPE] [--decision DECISION]\n");
     fwrite(STDERR, "    [--id-band-skips] [--target-kept] [--review] [--review-status unreviewed|pending|needs-action|reviewed]\n");
     fwrite(STDERR, "    [--resolution-status validated|applied] [--group-by none|table|status|path|type|severity]\n");
     fwrite(STDERR, "    --group-by supports resolutions by table/status/path, conflicts by table/type/path/severity, and decisions by table/type/path.\n");
@@ -3297,35 +3297,13 @@ function cow_merge_file_root_snapshot_artifact(?array $snapshot, ?string $target
         return null;
     }
     $tx = $snapshot['transaction'] ?? [];
-    $backups = is_array($tx) && isset($tx['backups']) && is_array($tx['backups'])
-        ? $tx['backups']
-        : [];
-    $artifact_backups = [];
-    foreach ($backups as $backup) {
-        if (!is_array($backup)) {
-            continue;
-        }
-        $backup_file = $backup['backup_file'] ?? null;
-        $artifact_backups[] = [
-            'path' => (string)($backup['path'] ?? ''),
-            'type' => (string)($backup['type'] ?? ''),
-            'backup_file' => is_string($backup_file) ? $backup_file : null,
-            'backup_exists' => is_string($backup_file) && is_file($backup_file),
-        ];
-    }
-
-    $stage_root = is_array($tx) && isset($tx['stage_root']) && is_string($tx['stage_root'])
-        ? $tx['stage_root']
-        : null;
     $entries = $snapshot['entries'] ?? [];
-    return [
-        'target_root' => $target_root,
-        'stage_root' => $stage_root,
-        'stage_root_exists' => is_string($stage_root) && is_dir($stage_root),
-        'entries_count' => is_array($entries) ? count($entries) : 0,
-        'backup_count' => count($artifact_backups),
-        'backups' => $artifact_backups,
-    ];
+    return array_merge(
+        cow_merge_file_transaction_artifact(is_array($tx) ? $tx : [], $target_root),
+        [
+            'entries_count' => is_array($entries) ? count($entries) : 0,
+        ]
+    );
 }
 
 function cow_merge_start_run(
@@ -4386,6 +4364,36 @@ function cow_merge_file_transaction_cleanup(array $tx): void {
     }
 }
 
+function cow_merge_file_transaction_artifact(array $tx, ?string $target_root = null): array {
+    $backups = isset($tx['backups']) && is_array($tx['backups'])
+        ? $tx['backups']
+        : [];
+    $artifact_backups = [];
+    foreach ($backups as $backup) {
+        if (!is_array($backup)) {
+            continue;
+        }
+        $backup_file = $backup['backup_file'] ?? null;
+        $artifact_backups[] = [
+            'path' => (string)($backup['path'] ?? ''),
+            'type' => (string)($backup['type'] ?? ''),
+            'backup_file' => is_string($backup_file) ? $backup_file : null,
+            'backup_exists' => is_string($backup_file) && is_file($backup_file),
+        ];
+    }
+
+    $stage_root = isset($tx['stage_root']) && is_string($tx['stage_root'])
+        ? $tx['stage_root']
+        : null;
+    return [
+        'target_root' => $target_root,
+        'stage_root' => $stage_root,
+        'stage_root_exists' => is_string($stage_root) && is_dir($stage_root),
+        'backup_count' => count($artifact_backups),
+        'backups' => $artifact_backups,
+    ];
+}
+
 function cow_merge_file_root_snapshot_begin(string $target_root): array {
     $manifest = cow_merge_file_manifest_for_root($target_root);
     $tx = cow_merge_file_transaction_begin();
@@ -4855,8 +4863,8 @@ function cow_merge_audit_scope(?string $value): string {
 
 function cow_merge_audit_records(?string $value): string {
     $records = $value ?? 'all';
-    if (!in_array($records, ['all', 'conflicts', 'decisions', 'resolutions'], true)) {
-        throw new InvalidArgumentException('--records must be all, conflicts, decisions, or resolutions');
+    if (!in_array($records, ['all', 'conflicts', 'decisions', 'resolutions', 'rollback-failures'], true)) {
+        throw new InvalidArgumentException('--records must be all, conflicts, decisions, resolutions, or rollback-failures');
     }
     return $records;
 }
@@ -7499,6 +7507,7 @@ function cow_merge_audit_filter_is_default_all(array $filters, string $key): boo
 function cow_merge_audit_filters(array $filters = []): array {
     $filters = cow_merge_audit_apply_shortcuts($filters);
     $scope = cow_merge_audit_scope($filters['scope'] ?? null);
+    $records = cow_merge_audit_records($filters['records'] ?? null);
     $path = cow_merge_audit_file_path_filter($filters['path'] ?? null, 'path');
     $path_prefix = cow_merge_audit_file_path_filter($filters['path_prefix'] ?? null, 'path-prefix');
     if ($path !== null && $path_prefix !== null) {
@@ -7507,9 +7516,32 @@ function cow_merge_audit_filters(array $filters = []): array {
     if ($scope === 'db' && ($path !== null || $path_prefix !== null)) {
         throw new InvalidArgumentException('--path and --path-prefix require file audit scope');
     }
+    if ($records === 'rollback-failures') {
+        if ($scope !== 'all') {
+            throw new InvalidArgumentException('--records rollback-failures cannot be combined with --scope');
+        }
+        foreach (['conflict_type', 'decision', 'review_status', 'resolution_status'] as $key) {
+            if (($filters[$key] ?? null) !== null && (string)$filters[$key] !== '') {
+                throw new InvalidArgumentException('--records rollback-failures cannot be combined with --' . str_replace('_', '-', $key));
+            }
+        }
+        if ($path !== null || $path_prefix !== null) {
+            throw new InvalidArgumentException('--records rollback-failures cannot be combined with file path filters');
+        }
+        if (
+            (string)($filters['id_band_skips'] ?? '') === '1' ||
+            (string)($filters['target_kept'] ?? '') === '1' ||
+            (string)($filters['review'] ?? '') === '1'
+        ) {
+            throw new InvalidArgumentException('--records rollback-failures cannot be combined with audit shortcuts');
+        }
+        if (cow_merge_audit_group_by($filters['group_by'] ?? null) !== 'none') {
+            throw new InvalidArgumentException('--records rollback-failures cannot be combined with --group-by');
+        }
+    }
     return [
         'scope' => $scope,
-        'records' => cow_merge_audit_records($filters['records'] ?? null),
+        'records' => $records,
         'conflict_type' => cow_merge_audit_filter_text($filters['conflict_type'] ?? null, 'conflict-type'),
         'decision' => cow_merge_audit_filter_text($filters['decision'] ?? null, 'decision'),
         'path' => $path,
@@ -8020,7 +8052,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
 
         [$conflict_filter, $conflict_params] = cow_merge_audit_where_sql($run_id, $filters, 'conflicts', '', $review_notes_exist);
         $conflict_params[':limit'] = $limit;
-        if ($filters['records'] !== 'decisions' && $filters['records'] !== 'resolutions') {
+        if ($filters['records'] === 'all' || $filters['records'] === 'conflicts') {
             $report['conflicts'] = cow_merge_audit_add_payload_previews(cow_merge_audit_table_rows(
                 $db,
                 'merge_conflicts',
@@ -8050,7 +8082,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
 
         [$decision_filter, $decision_params] = cow_merge_audit_where_sql($run_id, $filters, 'decisions', '', $review_notes_exist);
         $decision_params[':limit'] = $limit;
-        if ($filters['records'] !== 'conflicts' && $filters['records'] !== 'resolutions') {
+        if ($filters['records'] === 'all' || $filters['records'] === 'decisions') {
             $report['decisions'] = cow_merge_audit_add_payload_previews(cow_merge_audit_table_rows(
                 $db,
                 'merge_decisions',
@@ -8113,7 +8145,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
         if ($run_id !== null) {
             $filter_params[':run_id'] = $run_id;
         }
-        if ($filters['scope'] !== 'files' && $filters['records'] !== 'conflicts' && !$filters['id_band_skips'] && !$filters['target_kept']) {
+        if ($filters['scope'] !== 'files' && in_array($filters['records'], ['all', 'decisions'], true) && !$filters['id_band_skips'] && !$filters['target_kept']) {
             $band_filter = $run_id === null ? '' : 'WHERE allocated_run_id = :run_id OR last_seen_run_id = :run_id';
             $report['autoincrement_bands'] = cow_merge_audit_table_rows(
                 $db,
@@ -8133,7 +8165,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
             );
         }
 
-        if ($filters['records'] !== 'decisions') {
+        if ($filters['records'] === 'all' || $filters['records'] === 'rollback-failures') {
             $rollback_filter = $run_id === null ? '' : 'WHERE run_id = :run_id';
             $rollback_params = [':limit' => $limit];
             if ($run_id !== null) {
