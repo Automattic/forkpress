@@ -493,7 +493,7 @@ tooling.
   before target mutation. Target-dropped table restores defer
   source-added indexes and triggers that already have standalone schema
   conflicts, so the table can restore before those objects are resolved in
-  dependency order. Source-added triggers that read or write
+  dependency order. Source-added triggers attached to, reading, or writing
   missing target-side schema objects are held as reviewable
   `schema-source-added-trigger` conflicts instead of being installed as latent
   invalid triggers, and trigger programs are compiled after installation so

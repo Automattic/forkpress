@@ -5579,6 +5579,35 @@ function cow_merge_trigger_referenced_schema_objects(string $sql): array {
     return cow_merge_sql_referenced_schema_objects($body);
 }
 
+function cow_merge_trigger_dependency_schema_objects(string $sql): array {
+    $references = [];
+    $subject = cow_merge_trigger_subject($sql);
+    if ($subject !== null) {
+        $references[] = [
+            'schema' => $subject['schema'],
+            'name' => $subject['table'],
+        ];
+    }
+    foreach (cow_merge_trigger_referenced_schema_objects($sql) as $reference) {
+        $references[] = $reference;
+    }
+
+    $deduped = [];
+    foreach ($references as $reference) {
+        $schema = $reference['schema'] ?? null;
+        $name = (string)($reference['name'] ?? '');
+        if ($name === '') {
+            continue;
+        }
+        $key = strtolower((string)($schema ?? '')) . '.' . strtolower($name);
+        $deduped[$key] = [
+            'schema' => $schema,
+            'name' => $name,
+        ];
+    }
+    return array_values($deduped);
+}
+
 function cow_merge_trigger_subject(string $sql): ?array {
     $schema_identifier = cow_merge_identifier_pattern('schema_');
     $table_identifier = cow_merge_identifier_pattern('table_');
@@ -5765,7 +5794,7 @@ function cow_merge_schema_object_exists(SQLite3 $db, string $name): bool {
 }
 
 function cow_merge_missing_trigger_references(SQLite3 $db, string $sql): array {
-    return cow_merge_missing_schema_references($db, cow_merge_trigger_referenced_schema_objects($sql));
+    return cow_merge_missing_schema_references($db, cow_merge_trigger_dependency_schema_objects($sql));
 }
 
 function cow_merge_validate_trigger_references(SQLite3 $db, string $name, string $sql): void {

@@ -4566,6 +4566,7 @@ SQL);
     $trigger_temp_target = $tmp . '/trigger-temp-reference-target.sqlite';
     create_base_db($trigger_temp_target);
     $db = open_db($trigger_temp_target);
+    $db->exec('CREATE TABLE plugin_trigger_temp_items (label TEXT)');
     $db->exec('CREATE TABLE plugin_trigger_temp_gate (enabled INTEGER)');
     $db->exec('CREATE TABLE plugin_trigger_temp_audit (item_label TEXT)');
     $db->close();
@@ -4596,8 +4597,10 @@ SQL);
     $trigger_quoted_target = $tmp . '/trigger-quoted-reference-target.sqlite';
     create_base_db($trigger_quoted_target);
     $db = open_db($trigger_quoted_target);
+    $db->exec('CREATE TABLE "plugin trigger quoted items" (label TEXT)');
     $db->exec('CREATE TABLE "plugin trigger quoted gate" (enabled INTEGER)');
     $db->exec('CREATE TABLE "plugin trigger quoted audit" (item_label TEXT)');
+    $db->exec('CREATE TABLE plugin_trigger_literal_items (label TEXT)');
     $db->close();
     $db = open_db($trigger_quoted_target);
     $trigger_quoted_main_missing = cow_merge_missing_trigger_references(
@@ -5011,6 +5014,15 @@ SQL);
     assert_true($source_added_trigger_chain_audit_conflict_id > 0, 'trigger chain missing audit table remains reviewable');
     assert_true($source_added_trigger_chain_view_conflict_id > 0, 'trigger chain parent view records a source-added view conflict');
     assert_true($source_added_trigger_chain_view_trigger_conflict_id > 0, 'trigger chain view trigger records a source-added trigger conflict');
+    $source_added_trigger_chain_trigger_payload = cow_merge_decode_payload_json(
+        (string)scalar($source_added_trigger_chain_metadata, "SELECT source_payload FROM merge_conflicts WHERE id = $source_added_trigger_chain_view_trigger_conflict_id"),
+        'source trigger chain payload'
+    );
+    assert_true(
+        is_array($source_added_trigger_chain_trigger_payload)
+            && str_contains((string)($source_added_trigger_chain_trigger_payload['error'] ?? ''), 'plugin_trigger_chain_parent_view'),
+        'source-added view trigger conflict payload records the missing trigger subject dependency'
+    );
     assert_same((int)scalar($source_added_trigger_chain_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE column_name = 'plugin_trigger_chain_audit_after' AND conflict_type = 'schema-source-added-trigger'"), 0, 'restored table trigger is carried by the table restore instead of a separate source-added trigger conflict');
     assert_throws(
         fn() => cow_merge_resolve_conflict(
@@ -5052,7 +5064,7 @@ SQL);
             'Try view trigger before its view dependency.',
             'test'
         ),
-        'failed to apply source trigger schema resolution',
+        'source trigger plugin_trigger_chain_view_insert references missing target schema objects: plugin_trigger_chain_parent_view',
         'source-added view trigger resolution remains gated until source-added view exists'
     );
     $source_added_trigger_chain_view_resolution = cow_merge_resolve_conflict(
