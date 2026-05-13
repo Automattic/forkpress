@@ -479,7 +479,10 @@ tooling.
   that would orphan target-side foreign-key children are held the same way until
   a reviewed source delete validates, while unchanged target-side child rows
   that source deleted or reparented away from the deleted parent are applied
-  first so parent-and-dependent changes land together; identical
+  first so parent-and-dependent changes land together. If source also rewrites a
+  referenced child key and updates unchanged grandchildren to follow it,
+  ForkPress applies the proven rewrite graph under the same validation savepoint
+  before deleting the original parent; identical
   source/target inserts with the same explicit primary key, and identical source/target
   updates or deletes to
   existing explicit-primary-key rows, are recorded as non-conflicting

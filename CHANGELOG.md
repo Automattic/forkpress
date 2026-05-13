@@ -13,6 +13,7 @@
 - Added generic foreign-key preflight for COW source row deletes so target-side child rows keep their parent by default with auditable `row-target-constraint` metadata until a reviewed source delete validates.
 - Applied clean source deletes across unchanged target-side foreign-key child graphs before deleting the parent, avoiding false `row-target-constraint` conflicts when source deletes the dependent rows too.
 - Applied clean source updates to unchanged target-side foreign-key child rows before deleting the parent, avoiding false `row-target-constraint` conflicts when source reparents dependent rows away from the deleted parent.
+- Applied clean source rewrites to unchanged foreign-key dependent rows when source changes a referenced child key and updates grandchildren to follow that key before deleting the original parent.
 - Added PHP and runtime-backed COW coverage for no-primary-key foreign-key child updates before parent deletes, including immediate target sidecar row-hash refresh.
 - Added COW coverage for mixed no-primary-key foreign-key dependent delete/update rollback when a later dependent update fails target validation.
 - Refreshed no-primary-key sidecar row hashes immediately after validation-gated safe source-added column resolutions change target row shape.

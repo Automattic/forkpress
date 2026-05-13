@@ -761,6 +761,44 @@ try {
         'foreign-key child update after parent delete helper remains auditable'
     );
 
+    $fk_key_rewrite_base = $tmp . '/fk-key-rewrite-base.sqlite';
+    $fk_key_rewrite_source = $tmp . '/fk-key-rewrite-source.sqlite';
+    $fk_key_rewrite_target = $tmp . '/fk-key-rewrite-target.sqlite';
+    $fk_key_rewrite_metadata = $tmp . '/.forkpress/cow/merge/fk-key-rewrite-metadata.sqlite';
+    create_base_db($fk_key_rewrite_base);
+    copy($fk_key_rewrite_base, $fk_key_rewrite_source);
+    copy($fk_key_rewrite_base, $fk_key_rewrite_target);
+    foreach ([$fk_key_rewrite_base, $fk_key_rewrite_source, $fk_key_rewrite_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_fk_key_rewrite_parents (id INTEGER PRIMARY KEY, label TEXT)');
+        $db->exec('CREATE TABLE plugin_fk_key_rewrite_children (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES plugin_fk_key_rewrite_parents(id), child_key TEXT NOT NULL UNIQUE, label TEXT)');
+        $db->exec('CREATE TABLE plugin_fk_key_rewrite_grandchildren (id INTEGER PRIMARY KEY, child_key TEXT NOT NULL REFERENCES plugin_fk_key_rewrite_children(child_key), label TEXT)');
+        $db->exec("INSERT INTO plugin_fk_key_rewrite_parents (id, label) VALUES (1, 'old parent'), (2, 'kept parent')");
+        $db->exec("INSERT INTO plugin_fk_key_rewrite_children (id, parent_id, child_key, label) VALUES (20, 1, 'old-child-key', 'base child')");
+        $db->exec("INSERT INTO plugin_fk_key_rewrite_grandchildren (id, child_key, label) VALUES (30, 'old-child-key', 'base grandchild')");
+        $db->close();
+    }
+    $db = open_db($fk_key_rewrite_source);
+    $db->exec("UPDATE plugin_fk_key_rewrite_children SET parent_id = 2, child_key = 'new-child-key', label = 'source child rewritten' WHERE id = 20");
+    $db->exec("UPDATE plugin_fk_key_rewrite_grandchildren SET child_key = 'new-child-key', label = 'source grandchild rewritten' WHERE id = 30");
+    $db->exec('DELETE FROM plugin_fk_key_rewrite_parents WHERE id = 1');
+    $db->close();
+    $fk_key_rewrite_result = cow_merge_databases($fk_key_rewrite_base, $fk_key_rewrite_source, $fk_key_rewrite_target, $fk_key_rewrite_metadata, 'feature-fk-key-rewrite', 'main');
+    assert_same($fk_key_rewrite_result['status'], 'completed', 'source rewriting a referenced child key and dependent grandchild key applies before parent delete');
+    assert_same((int)scalar($fk_key_rewrite_target, 'SELECT COUNT(*) FROM plugin_fk_key_rewrite_parents WHERE id = 1'), 0, 'foreign-key parent source delete applies after referenced child key rewrite');
+    assert_same(scalar($fk_key_rewrite_target, 'SELECT child_key FROM plugin_fk_key_rewrite_children WHERE id = 20'), 'new-child-key', 'foreign-key child referenced key rewrite is applied');
+    assert_same(scalar($fk_key_rewrite_target, 'SELECT child_key FROM plugin_fk_key_rewrite_grandchildren WHERE id = 30'), 'new-child-key', 'foreign-key grandchild update is applied before child referenced key rewrite');
+    assert_same(
+        (int)scalar($fk_key_rewrite_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE conflict_type = 'row-target-constraint' AND table_name LIKE 'plugin_fk_key_rewrite_%'"),
+        0,
+        'foreign-key referenced-key rewrite graph avoids target constraint conflicts when target rows are unchanged'
+    );
+    assert_same(
+        (int)scalar($fk_key_rewrite_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_fk_key_rewrite_grandchildren' AND decision = 'source-applied' AND reason = 'source and target changed row to the same payload'"),
+        1,
+        'foreign-key grandchild rewrite remains auditable'
+    );
+
     $fk_keyless_update_base = $tmp . '/fk-keyless-update-base.sqlite';
     $fk_keyless_update_source = $tmp . '/fk-keyless-update-source.sqlite';
     $fk_keyless_update_target = $tmp . '/fk-keyless-update-target.sqlite';
