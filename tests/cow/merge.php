@@ -2368,6 +2368,13 @@ SQL);
     assert_same($keyless_source_resolution['status'], 'applied', 'source keyless cell resolution records applied status');
     assert_same(scalar($keyless_conflict_target, "SELECT value FROM plugin_keyless WHERE rowid = 1"), 'source keyless conflict', 'source keyless cell resolution updates target through sidecar identity');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $keyless_cell_conflict_id AND table_name = 'plugin_keyless' AND column_name = 'value' AND choice = 'source' AND applied = 1"), 1, 'keyless cell resolution is auditable');
+    cow_merge_databases($keyless_conflict_base, $keyless_conflict_source, $keyless_conflict_target, $metadata, 'feature-keyless-conflict', 'main');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_keyless' AND c.column_name = 'value' AND c.conflict_type = 'cell-conflict' AND r.source_branch = 'feature-keyless-conflict'"),
+        1,
+        'rerunning after source keyless cell resolution does not rediscover the resolved no-PK conflict'
+    );
+    assert_same(scalar($keyless_conflict_target, "SELECT value FROM plugin_keyless WHERE rowid = 1"), 'source keyless conflict', 'rerunning after source keyless cell resolution keeps the audited source value');
 
     $keyless_unique_base = $tmp . '/keyless-unique-base.sqlite';
     $keyless_unique_source = $tmp . '/keyless-unique-source.sqlite';
@@ -2413,6 +2420,14 @@ SQL);
     $keyless_unique_rowid = (int)scalar($keyless_unique_target, "SELECT rowid FROM plugin_keyless_unique WHERE slug = 'shared-keyless-slug'");
     $keyless_unique_plain_identity = cow_merge_plain_json(cow_merge_decode_payload_json($keyless_unique_conflict_identity, 'keyless unique row identity'));
     assert_same(scalar($keyless_unique_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_keyless_unique' AND rowid = $keyless_unique_rowid"), $keyless_unique_plain_identity, 'source keyless unique collision resolution moves the source sidecar identity to target');
+    cow_merge_databases($keyless_unique_base, $keyless_unique_source, $keyless_unique_target, $keyless_unique_metadata, 'feature-keyless-unique', 'main');
+    assert_same(
+        (int)scalar($keyless_unique_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_keyless_unique' AND c.conflict_type = 'row-unique-collision' AND r.source_branch = 'feature-keyless-unique'"),
+        1,
+        'rerunning after source keyless unique resolution does not rediscover the resolved unique collision'
+    );
+    assert_same((int)scalar($keyless_unique_target, "SELECT COUNT(*) FROM plugin_keyless_unique WHERE slug = 'shared-keyless-slug'"), 1, 'rerunning after source keyless unique resolution keeps the unique key singular');
+    assert_same(scalar($keyless_unique_target, "SELECT value FROM plugin_keyless_unique WHERE slug = 'shared-keyless-slug'"), 'source unique keyless', 'rerunning after source keyless unique resolution keeps the audited source row');
 
     $keyless_unique_same_base = $tmp . '/keyless-unique-same-base.sqlite';
     $keyless_unique_same_source = $tmp . '/keyless-unique-same-source.sqlite';
@@ -2569,6 +2584,14 @@ SQL);
     assert_same((int)scalar($reuse_target, "SELECT COUNT(*) FROM plugin_keyless WHERE label = 'Base keyless'"), 0, 'source keyless delete resolution removes the target old row by logical identity');
     assert_same((int)scalar($reuse_target, "SELECT COUNT(*) FROM plugin_keyless WHERE label = 'Reused rowid source' AND value = 'new logical row'"), 1, 'source keyless delete resolution leaves the reused logical row intact');
     assert_same((int)scalar($reuse_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $keyless_delete_conflict_id AND table_name = 'plugin_keyless' AND choice = 'source' AND applied = 1"), 1, 'keyless delete resolution is auditable');
+    cow_merge_databases($reuse_base, $reuse_source, $reuse_target, $reuse_metadata, 'feature-reuse', 'main');
+    assert_same(
+        (int)scalar($reuse_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_keyless' AND c.conflict_type = 'row-source-deleted' AND r.source_branch = 'feature-reuse'"),
+        1,
+        'rerunning after source keyless delete resolution does not rediscover the resolved delete conflict'
+    );
+    assert_same((int)scalar($reuse_target, "SELECT COUNT(*) FROM plugin_keyless WHERE label = 'Base keyless'"), 0, 'rerunning after source keyless delete resolution keeps the old row deleted');
+    assert_same((int)scalar($reuse_target, "SELECT COUNT(*) FROM plugin_keyless WHERE label = 'Reused rowid source' AND value = 'new logical row'"), 1, 'rerunning after source keyless delete resolution preserves the replacement logical row');
 
     $offline_reuse_base = $tmp . '/offline-reuse-base.sqlite';
     $offline_reuse_source = $tmp . '/offline-reuse-source.sqlite';
@@ -2609,6 +2632,14 @@ SQL);
     assert_same(scalar($offline_reuse_target, "SELECT label FROM plugin_keyless WHERE rowid = 1"), 'Offline reused rowid', 'source offline no-PK ambiguity resolution applies audited source label');
     assert_same(scalar($offline_reuse_target, "SELECT value FROM plugin_keyless WHERE rowid = 1"), 'new offline row', 'source offline no-PK ambiguity resolution applies audited source value');
     assert_same((int)scalar($offline_reuse_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $offline_ambiguity_conflict_id AND table_name = 'plugin_keyless' AND choice = 'source' AND applied = 1"), 1, 'offline no-PK ambiguity resolution is auditable');
+    cow_merge_databases($offline_reuse_base, $offline_reuse_source, $offline_reuse_target, $offline_reuse_metadata, 'feature-offline-reuse', 'main');
+    assert_same(
+        (int)scalar($offline_reuse_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_keyless' AND c.conflict_type = 'row-identity-ambiguous' AND r.source_branch = 'feature-offline-reuse'"),
+        1,
+        'rerunning after source offline no-PK ambiguity resolution does not rediscover the resolved ambiguity'
+    );
+    assert_same(scalar($offline_reuse_target, "SELECT label FROM plugin_keyless WHERE rowid = 1"), 'Offline reused rowid', 'rerunning after source offline ambiguity resolution keeps the audited source label');
+    assert_same(scalar($offline_reuse_target, "SELECT value FROM plugin_keyless WHERE rowid = 1"), 'new offline row', 'rerunning after source offline ambiguity resolution keeps the audited source value');
 
     if (!function_exists('add_action')) {
         function add_action($tag, $callback, $priority = 10, $accepted_args = 1) {
