@@ -2099,6 +2099,14 @@ SQL);
     );
     assert_same($schema_table_drop_resolution['status'], 'applied', 'source table drop schema resolution records applied status');
     assert_same((int)scalar($schema_table_drop_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_table_drop'"), 0, 'source table drop resolution removes target table after validation');
+    $schema_table_drop_rerun = cow_merge_databases($schema_table_drop_base, $schema_table_drop_source, $schema_table_drop_target, $metadata, 'feature-table-drop', 'main');
+    assert_same($schema_table_drop_rerun['status'], 'completed', 'rerunning after source table drop resolution completes without a new conflict');
+    assert_same((int)scalar($schema_table_drop_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_table_drop'"), 0, 'rerunning after source table drop resolution keeps the table dropped');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_table_drop' AND c.conflict_type = 'schema-source-dropped-table' AND r.source_branch = 'feature-table-drop'"),
+        1,
+        'rerunning after source table drop resolution does not rediscover the resolved schema conflict'
+    );
 
     $schema_table_both_drop_base = $tmp . '/schema-table-both-drop-base.sqlite';
     $schema_table_both_drop_source = $tmp . '/schema-table-both-drop-source.sqlite';
@@ -2177,6 +2185,14 @@ SQL);
     );
     assert_same($schema_table_target_drop_payload['indexes'][0]['name'] ?? null, 'plugin_table_target_drop_label_idx', 'source table restore resolution records restored source index SQL');
     assert_same($schema_table_target_drop_payload['triggers'][0]['name'] ?? null, 'plugin_table_target_drop_insert', 'source table restore resolution records restored source trigger SQL');
+    $schema_table_target_drop_rerun = cow_merge_databases($schema_table_target_drop_base, $schema_table_target_drop_source, $schema_table_target_drop_target, $metadata, 'feature-table-target-drop', 'main');
+    assert_same($schema_table_target_drop_rerun['status'], 'completed', 'rerunning after target-dropped table source restore completes without a new conflict');
+    assert_same((int)scalar($schema_table_target_drop_target, "SELECT COUNT(*) FROM plugin_table_target_drop WHERE item_id IN ('alpha', 'beta', 'gamma')"), 3, 'rerunning after source table restore preserves restored and target-only rows');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_table_target_drop' AND c.conflict_type = 'schema-target-dropped-table' AND r.source_branch = 'feature-table-target-drop'"),
+        1,
+        'rerunning after target-dropped table source restore does not rediscover the resolved schema conflict'
+    );
 
     $schema_table_drop_view_base = $tmp . '/schema-table-drop-view-base.sqlite';
     $schema_table_drop_view_source = $tmp . '/schema-table-drop-view-source.sqlite';
