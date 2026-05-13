@@ -481,7 +481,10 @@ tooling.
   to restore the child first reports the missing parent table or parent row
   dependency before mutating target state. Source-added table rows with missing
   target-side foreign-key parents are held for the same audited row review
-  instead of aborting the merge. Source-added views are ordered by source-side
+  instead of aborting the merge. Source-added indexes are materialized as each
+  new table lands, before dependent source-added tables are processed, so
+  foreign keys backed by source-added unique indexes validate without a false
+  row constraint conflict. Source-added views are ordered by source-side
   view dependencies, and source-added views that need a restored target table
   are held as reviewable `schema-source-added-view` conflicts until that
   dependency validates, with missing or non-persistent view references

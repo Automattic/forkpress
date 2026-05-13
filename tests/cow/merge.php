@@ -1245,6 +1245,42 @@ try {
     assert_same((int)scalar($keyless_source_table_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_keyless_source_table' AND column_name = 'plugin_keyless_source_table_label_idx' AND decision = 'source-applied'"), 1, 'source-added no-primary-key table index restoration is auditable');
     assert_same((int)scalar($keyless_source_table_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_keyless_source_table' AND column_name = 'plugin_keyless_source_table_insert' AND decision = 'source-applied'"), 1, 'source-added no-primary-key table trigger restoration is auditable');
 
+    $source_added_unique_fk_base = $tmp . '/source-added-unique-fk-base.sqlite';
+    $source_added_unique_fk_source = $tmp . '/source-added-unique-fk-source.sqlite';
+    $source_added_unique_fk_target = $tmp . '/source-added-unique-fk-target.sqlite';
+    $source_added_unique_fk_metadata = $tmp . '/.forkpress/cow/merge/source-added-unique-fk-metadata.sqlite';
+    create_base_db($source_added_unique_fk_base);
+    copy($source_added_unique_fk_base, $source_added_unique_fk_source);
+    copy($source_added_unique_fk_base, $source_added_unique_fk_target);
+    $db = open_db($source_added_unique_fk_source);
+    $db->exec('CREATE TABLE plugin_source_unique_parent (code TEXT NOT NULL, label TEXT)');
+    $db->exec('CREATE UNIQUE INDEX plugin_source_unique_parent_code_idx ON plugin_source_unique_parent(code)');
+    $db->exec("INSERT INTO plugin_source_unique_parent (code, label) VALUES ('source-parent', 'Source parent')");
+    $db->exec('CREATE TABLE plugin_source_unique_child (parent_code TEXT NOT NULL REFERENCES plugin_source_unique_parent(code), label TEXT)');
+    $db->exec("INSERT INTO plugin_source_unique_child (parent_code, label) VALUES ('source-parent', 'Source child')");
+    $db->close();
+    $source_added_unique_fk_result = cow_merge_databases(
+        $source_added_unique_fk_base,
+        $source_added_unique_fk_source,
+        $source_added_unique_fk_target,
+        $source_added_unique_fk_metadata,
+        'feature-source-added-unique-fk',
+        'main'
+    );
+    assert_same($source_added_unique_fk_result['status'], 'completed', 'source-added parent unique index materializes before dependent child rows');
+    assert_same((int)scalar($source_added_unique_fk_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_source_unique_parent_code_idx'"), 1, 'source-added parent unique index exists on target');
+    assert_same(scalar($source_added_unique_fk_target, "SELECT label FROM plugin_source_unique_child WHERE parent_code = 'source-parent'"), 'Source child', 'source-added child row validates against the source-added parent unique index');
+    assert_same(
+        (int)scalar($source_added_unique_fk_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE conflict_type = 'row-target-constraint' AND table_name IN ('plugin_source_unique_parent', 'plugin_source_unique_child')"),
+        0,
+        'source-added unique-index-backed FK tables avoid false target constraint conflicts'
+    );
+    assert_same(
+        (int)scalar($source_added_unique_fk_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_source_unique_parent' AND column_name = 'plugin_source_unique_parent_code_idx' AND decision = 'source-applied'"),
+        1,
+        'source-added parent unique index materialization remains auditable'
+    );
+
     $conflict_base = $tmp . '/conflict-base.sqlite';
     $conflict_source = $tmp . '/conflict-source.sqlite';
     $conflict_target = $tmp . '/conflict-target.sqlite';

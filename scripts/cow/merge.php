@@ -7562,7 +7562,8 @@ function cow_merge_apply_source_table(
     string $source_branch,
     string $target_branch,
     string $table,
-    string $ddl
+    string $ddl,
+    array $source_indexes
 ): array {
     if (!$target->exec($ddl)) {
         throw new RuntimeException("failed to create target table $table: " . $target->lastErrorMsg());
@@ -7630,7 +7631,20 @@ function cow_merge_apply_source_table(
         );
         $applied++;
     }
+    cow_merge_apply_source_table_indexes($target, $table, $source_indexes);
     return ['applied' => $applied, 'conflicts' => $conflicts];
+}
+
+function cow_merge_apply_source_table_indexes(SQLite3 $target, string $table, array $source_indexes): void {
+    foreach ($source_indexes as $index => $entry) {
+        if ((string)($entry['table'] ?? '') !== $table) {
+            continue;
+        }
+        if (cow_merge_index_sql($target, (string)$index) !== null) {
+            continue;
+        }
+        @$target->exec((string)$entry['sql']);
+    }
 }
 
 function cow_merge_validate_source_table_restore_dependencies(SQLite3 $source, SQLite3 $target, string $table): void {
@@ -9005,7 +9019,6 @@ function cow_merge_databases(
         $target_tables = cow_merge_table_sql_map($target);
         $base_indexes = cow_merge_index_sql_map($base);
         $source_indexes = cow_merge_index_sql_map($source);
-        $target_indexes = cow_merge_index_sql_map($target);
         $base_views = cow_merge_schema_object_sql_map($base, 'view');
         $source_views = cow_merge_schema_object_sql_map($source, 'view');
         $target_views = cow_merge_schema_object_sql_map($target, 'view');
@@ -9070,7 +9083,7 @@ function cow_merge_databases(
                 continue;
             }
             if ($target_sql === null && $base_sql === null) {
-                $result = cow_merge_apply_source_table($source, $target, $meta, $run_id, $source_branch, $target_branch, $table, $source_sql);
+                $result = cow_merge_apply_source_table($source, $target, $meta, $run_id, $source_branch, $target_branch, $table, $source_sql, $source_indexes);
                 $applied += $result['applied'];
                 $conflicts += $result['conflicts'];
                 continue;
@@ -9130,6 +9143,7 @@ function cow_merge_databases(
             $conflicts += $result['conflicts'];
         }
 
+        $target_indexes = cow_merge_index_sql_map($target);
         $index_result = cow_merge_apply_index_schema_changes($target, $meta, $run_id, $base_indexes, $source_indexes, $target_indexes);
         $applied += $index_result['applied'];
         $conflicts += $index_result['conflicts'];
