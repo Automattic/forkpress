@@ -475,8 +475,11 @@ tooling.
   `row-unique-collision`. If a source insert or source row update violates a
   target-side SQLite constraint, including foreign-key references after
   parent-before-child table ordering, same-table foreign-key row ordering, and
-  reviewed source restores of target-dropped same-table foreign-key tables,
-  target is also kept by default and the choice is recorded as an auditable
+  reviewed source restores of target-dropped same-table foreign-key tables.
+  Restored foreign-key child tables also validate after source-only parent
+  tables materialize or after reviewers restore the parent table first. When a
+  source row still violates target constraints, target is kept by default and
+  the choice is recorded as an auditable
   `row-target-constraint`. Source deletes that would orphan target-side
   foreign-key children are held the same way until a reviewed source delete
   validates, while unchanged target-side child rows that source deleted or

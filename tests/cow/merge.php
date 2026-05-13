@@ -3726,6 +3726,145 @@ SQL);
         'rerunning after no-primary-key self-FK table restore does not rediscover the resolved schema conflict'
     );
 
+    $schema_cross_fk_source_parent_base = $tmp . '/schema-cross-fk-source-parent-base.sqlite';
+    $schema_cross_fk_source_parent_source = $tmp . '/schema-cross-fk-source-parent-source.sqlite';
+    $schema_cross_fk_source_parent_target = $tmp . '/schema-cross-fk-source-parent-target.sqlite';
+    $schema_cross_fk_source_parent_metadata = $tmp . '/.forkpress/cow/merge/schema-cross-fk-source-parent-metadata.sqlite';
+    create_base_db($schema_cross_fk_source_parent_base);
+    $db = open_db($schema_cross_fk_source_parent_base);
+    $db->exec('CREATE TABLE plugin_cross_child_restore_source_parent (parent_code TEXT NOT NULL REFERENCES plugin_cross_parent_source_only(code), label TEXT)');
+    $db->close();
+    copy($schema_cross_fk_source_parent_base, $schema_cross_fk_source_parent_source);
+    copy($schema_cross_fk_source_parent_base, $schema_cross_fk_source_parent_target);
+    cow_merge_capture_row_identities($schema_cross_fk_source_parent_base, $schema_cross_fk_source_parent_metadata, 'main');
+    cow_merge_capture_row_identities($schema_cross_fk_source_parent_source, $schema_cross_fk_source_parent_metadata, 'feature-cross-fk-source-parent', 'main');
+    cow_merge_capture_row_identities($schema_cross_fk_source_parent_target, $schema_cross_fk_source_parent_metadata, 'main');
+    $db = open_db($schema_cross_fk_source_parent_source);
+    $db->exec('CREATE TABLE plugin_cross_parent_source_only (code TEXT PRIMARY KEY, label TEXT)');
+    $db->exec("INSERT INTO plugin_cross_parent_source_only (code, label) VALUES ('source-parent', 'source-only parent')");
+    $db->exec("INSERT INTO plugin_cross_child_restore_source_parent (rowid, parent_code, label) VALUES (7, 'source-parent', 'restored child')");
+    $db->close();
+    cow_merge_capture_row_identities($schema_cross_fk_source_parent_source, $schema_cross_fk_source_parent_metadata, 'feature-cross-fk-source-parent', 'main');
+    $schema_cross_fk_source_parent_child_identity = scalar($schema_cross_fk_source_parent_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'feature-cross-fk-source-parent' AND table_name = 'plugin_cross_child_restore_source_parent' AND rowid = 7");
+    $db = open_db($schema_cross_fk_source_parent_target);
+    $db->exec('DROP TABLE plugin_cross_child_restore_source_parent');
+    $db->close();
+    $schema_cross_fk_source_parent_result = cow_merge_databases(
+        $schema_cross_fk_source_parent_base,
+        $schema_cross_fk_source_parent_source,
+        $schema_cross_fk_source_parent_target,
+        $schema_cross_fk_source_parent_metadata,
+        'feature-cross-fk-source-parent',
+        'main'
+    );
+    assert_same($schema_cross_fk_source_parent_result['status'], 'completed_with_conflicts', 'target-dropped child table records a schema conflict after source-only parent materializes');
+    assert_same(scalar($schema_cross_fk_source_parent_target, "SELECT label FROM plugin_cross_parent_source_only WHERE code = 'source-parent'"), 'source-only parent', 'source-only parent table materializes before dependent child restore');
+    $schema_cross_fk_source_parent_conflict_id = (int)scalar($schema_cross_fk_source_parent_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_cross_child_restore_source_parent' AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
+    $schema_cross_fk_source_parent_resolution = cow_merge_resolve_conflict(
+        $schema_cross_fk_source_parent_metadata,
+        $schema_cross_fk_source_parent_conflict_id,
+        'source',
+        true,
+        'Apply source child restore after source-only parent.',
+        'test'
+    );
+    assert_same($schema_cross_fk_source_parent_resolution['status'], 'applied', 'source child table restore applies after source-only parent materialization');
+    assert_same(scalar($schema_cross_fk_source_parent_target, "SELECT label FROM plugin_cross_child_restore_source_parent WHERE rowid = 7"), 'restored child', 'cross-table child restore preserves the source row');
+    assert_same(
+        scalar($schema_cross_fk_source_parent_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_cross_child_restore_source_parent' AND rowid = 7"),
+        $schema_cross_fk_source_parent_child_identity,
+        'cross-table child restore adopts the source no-primary-key sidecar identity'
+    );
+    assert_same(
+        (int)scalar($schema_cross_fk_source_parent_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_cross_child_restore_source_parent' AND conflict_type = 'row-target-constraint'"),
+        0,
+        'cross-table child restore avoids false target constraint conflicts once source-only parent exists'
+    );
+    $schema_cross_fk_source_parent_rerun = cow_merge_databases(
+        $schema_cross_fk_source_parent_base,
+        $schema_cross_fk_source_parent_source,
+        $schema_cross_fk_source_parent_target,
+        $schema_cross_fk_source_parent_metadata,
+        'feature-cross-fk-source-parent',
+        'main'
+    );
+    assert_same($schema_cross_fk_source_parent_rerun['status'], 'completed', 'rerunning after source-only parent plus child restore completes without a new conflict');
+
+    $schema_cross_fk_restored_parent_base = $tmp . '/schema-cross-fk-restored-parent-base.sqlite';
+    $schema_cross_fk_restored_parent_source = $tmp . '/schema-cross-fk-restored-parent-source.sqlite';
+    $schema_cross_fk_restored_parent_target = $tmp . '/schema-cross-fk-restored-parent-target.sqlite';
+    $schema_cross_fk_restored_parent_metadata = $tmp . '/.forkpress/cow/merge/schema-cross-fk-restored-parent-metadata.sqlite';
+    create_base_db($schema_cross_fk_restored_parent_base);
+    $db = open_db($schema_cross_fk_restored_parent_base);
+    $db->exec('CREATE TABLE plugin_cross_parent_restore (code TEXT PRIMARY KEY, label TEXT)');
+    $db->exec('CREATE TABLE plugin_cross_child_restore_parent (parent_code TEXT NOT NULL REFERENCES plugin_cross_parent_restore(code), label TEXT)');
+    $db->close();
+    copy($schema_cross_fk_restored_parent_base, $schema_cross_fk_restored_parent_source);
+    copy($schema_cross_fk_restored_parent_base, $schema_cross_fk_restored_parent_target);
+    cow_merge_capture_row_identities($schema_cross_fk_restored_parent_base, $schema_cross_fk_restored_parent_metadata, 'main');
+    cow_merge_capture_row_identities($schema_cross_fk_restored_parent_source, $schema_cross_fk_restored_parent_metadata, 'feature-cross-fk-restored-parent', 'main');
+    cow_merge_capture_row_identities($schema_cross_fk_restored_parent_target, $schema_cross_fk_restored_parent_metadata, 'main');
+    $db = open_db($schema_cross_fk_restored_parent_source);
+    $db->exec("INSERT INTO plugin_cross_parent_restore (code, label) VALUES ('restored-parent', 'restored parent')");
+    $db->exec("INSERT INTO plugin_cross_child_restore_parent (rowid, parent_code, label) VALUES (5, 'restored-parent', 'restored child')");
+    $db->close();
+    cow_merge_capture_row_identities($schema_cross_fk_restored_parent_source, $schema_cross_fk_restored_parent_metadata, 'feature-cross-fk-restored-parent', 'main');
+    $schema_cross_fk_restored_parent_child_identity = scalar($schema_cross_fk_restored_parent_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'feature-cross-fk-restored-parent' AND table_name = 'plugin_cross_child_restore_parent' AND rowid = 5");
+    $db = open_db($schema_cross_fk_restored_parent_target);
+    $db->exec('DROP TABLE plugin_cross_child_restore_parent');
+    $db->exec('DROP TABLE plugin_cross_parent_restore');
+    $db->close();
+    $schema_cross_fk_restored_parent_result = cow_merge_databases(
+        $schema_cross_fk_restored_parent_base,
+        $schema_cross_fk_restored_parent_source,
+        $schema_cross_fk_restored_parent_target,
+        $schema_cross_fk_restored_parent_metadata,
+        'feature-cross-fk-restored-parent',
+        'main'
+    );
+    assert_same($schema_cross_fk_restored_parent_result['status'], 'completed_with_conflicts', 'target-dropped cross-table FK tables record schema conflicts');
+    $schema_cross_fk_restored_parent_parent_conflict_id = (int)scalar($schema_cross_fk_restored_parent_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_cross_parent_restore' AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
+    $schema_cross_fk_restored_parent_child_conflict_id = (int)scalar($schema_cross_fk_restored_parent_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_cross_child_restore_parent' AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
+    $schema_cross_fk_restored_parent_parent_resolution = cow_merge_resolve_conflict(
+        $schema_cross_fk_restored_parent_metadata,
+        $schema_cross_fk_restored_parent_parent_conflict_id,
+        'source',
+        true,
+        'Restore source parent table first.',
+        'test'
+    );
+    assert_same($schema_cross_fk_restored_parent_parent_resolution['status'], 'applied', 'source parent table restore applies before dependent child restore');
+    $schema_cross_fk_restored_parent_child_resolution = cow_merge_resolve_conflict(
+        $schema_cross_fk_restored_parent_metadata,
+        $schema_cross_fk_restored_parent_child_conflict_id,
+        'source',
+        true,
+        'Restore source child table after parent table.',
+        'test'
+    );
+    assert_same($schema_cross_fk_restored_parent_child_resolution['status'], 'applied', 'source child table restore applies after restored parent table');
+    assert_same(scalar($schema_cross_fk_restored_parent_target, "SELECT label FROM plugin_cross_parent_restore WHERE code = 'restored-parent'"), 'restored parent', 'restored parent table keeps the audited source row');
+    assert_same(scalar($schema_cross_fk_restored_parent_target, "SELECT label FROM plugin_cross_child_restore_parent WHERE rowid = 5"), 'restored child', 'restored child table validates against the restored parent table');
+    assert_same(
+        scalar($schema_cross_fk_restored_parent_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_cross_child_restore_parent' AND rowid = 5"),
+        $schema_cross_fk_restored_parent_child_identity,
+        'cross-table restored child adopts the source no-primary-key sidecar identity'
+    );
+    $schema_cross_fk_restored_parent_rerun = cow_merge_databases(
+        $schema_cross_fk_restored_parent_base,
+        $schema_cross_fk_restored_parent_source,
+        $schema_cross_fk_restored_parent_target,
+        $schema_cross_fk_restored_parent_metadata,
+        'feature-cross-fk-restored-parent',
+        'main'
+    );
+    assert_same($schema_cross_fk_restored_parent_rerun['status'], 'completed', 'rerunning after cross-table parent and child restores completes without new conflicts');
+    assert_same(
+        (int)scalar($schema_cross_fk_restored_parent_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.conflict_type = 'schema-target-dropped-table' AND r.source_branch = 'feature-cross-fk-restored-parent'"),
+        2,
+        'rerunning after cross-table parent and child restores does not rediscover resolved schema conflicts'
+    );
+
     $schema_table_drop_view_base = $tmp . '/schema-table-drop-view-base.sqlite';
     $schema_table_drop_view_source = $tmp . '/schema-table-drop-view-source.sqlite';
     $schema_table_drop_view_target = $tmp . '/schema-table-drop-view-target.sqlite';
