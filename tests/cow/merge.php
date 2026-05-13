@@ -4803,6 +4803,39 @@ SQL);
         'failed cyclic view resolution attempts do not record resolutions'
     );
 
+    $source_added_trigger_order_base = $tmp . '/source-added-trigger-order-base.sqlite';
+    $source_added_trigger_order_source = $tmp . '/source-added-trigger-order-source.sqlite';
+    $source_added_trigger_order_target = $tmp . '/source-added-trigger-order-target.sqlite';
+    $source_added_trigger_order_metadata = $tmp . '/.forkpress/cow/merge/source-added-trigger-order-metadata.sqlite';
+    create_base_db($source_added_trigger_order_base);
+    $db = open_db($source_added_trigger_order_base);
+    $db->exec('CREATE TABLE plugin_trigger_order_items (item_id TEXT DEFAULT "default-id", label TEXT DEFAULT "default-label")');
+    $db->exec('CREATE TABLE plugin_trigger_order_audit (item_id TEXT, label TEXT)');
+    $db->close();
+    copy($source_added_trigger_order_base, $source_added_trigger_order_source);
+    copy($source_added_trigger_order_base, $source_added_trigger_order_target);
+    $db = open_db($source_added_trigger_order_source);
+    $db->exec('CREATE VIEW plugin_trigger_order_view AS SELECT item_id, label FROM plugin_trigger_order_items');
+    $db->exec('CREATE TRIGGER z_plugin_trigger_order_view_insert INSTEAD OF INSERT ON plugin_trigger_order_view BEGIN INSERT INTO plugin_trigger_order_audit (item_id, label) VALUES (NEW.item_id, NEW.label); END');
+    $db->exec('CREATE TRIGGER a_plugin_trigger_order_items_after AFTER INSERT ON plugin_trigger_order_items BEGIN INSERT INTO plugin_trigger_order_view (item_id, label) VALUES (NEW.item_id, NEW.label); END');
+    $db->close();
+    $source_added_trigger_order_result = cow_merge_databases(
+        $source_added_trigger_order_base,
+        $source_added_trigger_order_source,
+        $source_added_trigger_order_target,
+        $source_added_trigger_order_metadata,
+        'feature-source-trigger-order',
+        'main'
+    );
+    assert_same($source_added_trigger_order_result['status'], 'completed', 'source-added trigger dependencies are installed before dependent trigger programs');
+    assert_same((int)scalar($source_added_trigger_order_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name IN ('a_plugin_trigger_order_items_after', 'z_plugin_trigger_order_view_insert')"), 2, 'dependent source-added triggers both install');
+    assert_same((int)scalar($source_added_trigger_order_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE conflict_type = 'schema-source-added-trigger' AND column_name LIKE '%plugin_trigger_order%'"), 0, 'ordered source-added triggers do not create false schema conflicts');
+    assert_same((int)scalar($source_added_trigger_order_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE column_name IN ('a_plugin_trigger_order_items_after', 'z_plugin_trigger_order_view_insert') AND decision = 'source-applied'"), 2, 'ordered source-added trigger decisions are auditable');
+    $db = open_db($source_added_trigger_order_target);
+    $db->exec("INSERT INTO plugin_trigger_order_items (item_id, label) VALUES ('trigger-order', 'Trigger Order')");
+    $db->close();
+    assert_same(scalar($source_added_trigger_order_target, "SELECT label FROM plugin_trigger_order_audit WHERE item_id = 'trigger-order'"), 'Trigger Order', 'dependent source-added trigger chain fires after ordered materialization');
+
     $source_added_trigger_cycle_base = $tmp . '/source-added-trigger-cycle-base.sqlite';
     $source_added_trigger_cycle_source = $tmp . '/source-added-trigger-cycle-source.sqlite';
     $source_added_trigger_cycle_target = $tmp . '/source-added-trigger-cycle-target.sqlite';

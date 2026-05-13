@@ -5583,7 +5583,7 @@ function cow_merge_view_schema_dependency_cycles(array $objects, array $source_o
     return $cycles;
 }
 
-function cow_merge_trigger_program_dependency_cycles(array $objects, array $source_objects): array {
+function cow_merge_trigger_program_dependency_map(array $objects, array $source_objects): array {
     $triggers_by_subject = [];
     $map = [];
     foreach ($objects as $object) {
@@ -5617,6 +5617,12 @@ function cow_merge_trigger_program_dependency_cycles(array $objects, array $sour
         asort($dependencies);
         $map[$key]['dependencies'] = $dependencies;
     }
+
+    return $map;
+}
+
+function cow_merge_trigger_program_dependency_cycles(array $objects, array $source_objects): array {
+    $map = cow_merge_trigger_program_dependency_map($objects, $source_objects);
 
     $cycles = [];
     $state = [];
@@ -5663,6 +5669,35 @@ function cow_merge_trigger_program_dependency_cycles(array $objects, array $sour
     }
 
     return $cycles;
+}
+
+function cow_merge_sort_trigger_schema_objects(array $objects, array $source_objects): array {
+    $dependency_map = cow_merge_trigger_program_dependency_map($objects, $source_objects);
+    $ordered = [];
+    $state = [];
+    $visit = function (string $object) use (&$visit, &$ordered, &$state, $dependency_map): void {
+        $key = strtolower($object);
+        if (($state[$key] ?? null) === 'done') {
+            return;
+        }
+        if (($state[$key] ?? null) === 'visiting') {
+            return;
+        }
+        $state[$key] = 'visiting';
+        $dependencies = $dependency_map[$key]['dependencies'] ?? [];
+        unset($dependencies[$key]);
+        foreach ($dependencies as $dependency) {
+            $visit($dependency);
+        }
+        $state[$key] = 'done';
+        $ordered[] = $object;
+    };
+
+    foreach ($objects as $object) {
+        $visit((string)$object);
+    }
+
+    return $ordered;
 }
 
 function cow_merge_sort_view_schema_objects(array $objects, array $source_objects): array {
@@ -8761,6 +8796,7 @@ function cow_merge_apply_schema_object_changes(
         $all_objects = cow_merge_sort_view_schema_objects($all_objects, $source_objects);
     } elseif ($type === 'trigger') {
         $trigger_cycles = cow_merge_trigger_program_dependency_cycles($all_objects, $source_objects);
+        $all_objects = cow_merge_sort_trigger_schema_objects($all_objects, $source_objects);
     }
 
     foreach ($all_objects as $name) {
