@@ -5,6 +5,7 @@
 - Added COW branch mergeback for production materialized branches, including generic SQLite 3-way merge, conservative schema additions, filesystem mergeback, rollback handling, and audit metadata under `.forkpress/cow/merge`.
 - Added branch-time AUTOINCREMENT ID bands, audited skips for plain `INTEGER PRIMARY KEY` tables, no-primary-key row identity sidecars, and runtime TEMP-trigger identity tracking.
 - Extended generic row unique-collision detection and validation-gated source resolution to normal-column partial unique indexes.
+- Extended generic row unique-collision detection and validation-gated source resolution to expression unique indexes.
 - Refreshed no-primary-key sidecar row hashes immediately after validation-gated safe source-added column resolutions change target row shape.
 - Added `forkpress branch merge-audit` inspection/export with JSON/text formats, file/path filters, review shortcuts, rollback failure artifacts, and ID-band skip reporting.
 - Added `forkpress branch merge-review` metadata annotations for conflict and decision audit records.

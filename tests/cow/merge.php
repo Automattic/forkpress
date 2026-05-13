@@ -278,6 +278,46 @@ try {
     assert_same((int)scalar($partial_unique_target, "SELECT id FROM plugin_partial_unique_rows WHERE slug = 'partial-shared'"), 10, 'source partial unique collision resolution inserts the audited source row identity');
     assert_same(scalar($partial_unique_target, "SELECT value FROM plugin_partial_unique_rows WHERE slug = 'partial-shared'"), 'source active row', 'source partial unique collision resolution replaces the target row payload');
 
+    $expression_unique_base = $tmp . '/expression-unique-base.sqlite';
+    $expression_unique_source = $tmp . '/expression-unique-source.sqlite';
+    $expression_unique_target = $tmp . '/expression-unique-target.sqlite';
+    $expression_unique_metadata = $tmp . '/.forkpress/cow/merge/expression-unique-metadata.sqlite';
+    create_base_db($expression_unique_base);
+    copy($expression_unique_base, $expression_unique_source);
+    copy($expression_unique_base, $expression_unique_target);
+    foreach ([$expression_unique_base, $expression_unique_source, $expression_unique_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_expression_unique_rows (id INTEGER PRIMARY KEY, slug TEXT, value TEXT)');
+        $db->exec('CREATE UNIQUE INDEX plugin_expression_unique_rows_slug_idx ON plugin_expression_unique_rows(lower(slug))');
+        $db->close();
+    }
+    $db = open_db($expression_unique_source);
+    $db->exec("INSERT INTO plugin_expression_unique_rows (id, slug, value) VALUES (10, 'Shared-Expression', 'source expression row')");
+    $db->close();
+    $db = open_db($expression_unique_target);
+    $db->exec("INSERT INTO plugin_expression_unique_rows (id, slug, value) VALUES (20, 'shared-expression', 'target expression row')");
+    $db->close();
+    $expression_unique_result = cow_merge_databases($expression_unique_base, $expression_unique_source, $expression_unique_target, $expression_unique_metadata, 'feature-expression-unique', 'main');
+    assert_same($expression_unique_result['status'], 'completed_with_conflicts', 'source insert colliding with target expression unique key is audited instead of aborting');
+    assert_same(
+        (int)scalar($expression_unique_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_expression_unique_rows' AND conflict_type = 'row-unique-collision'"),
+        1,
+        'expression unique-key row collision is recorded as a conflict'
+    );
+    assert_same(scalar($expression_unique_target, "SELECT value FROM plugin_expression_unique_rows WHERE lower(slug) = 'shared-expression'"), 'target expression row', 'expression unique target row wins by default');
+    $expression_unique_conflict_id = (int)scalar($expression_unique_metadata, "SELECT c.id FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_expression_unique_rows' AND c.conflict_type = 'row-unique-collision' AND r.source_branch = 'feature-expression-unique' ORDER BY c.id DESC LIMIT 1");
+    $expression_unique_source_resolution = cow_merge_resolve_conflict(
+        $expression_unique_metadata,
+        $expression_unique_conflict_id,
+        'source',
+        true,
+        'Apply expression unique source row.',
+        'cow-test'
+    );
+    assert_same($expression_unique_source_resolution['status'], 'applied', 'source expression unique collision resolution records applied status');
+    assert_same((int)scalar($expression_unique_target, "SELECT id FROM plugin_expression_unique_rows WHERE lower(slug) = 'shared-expression'"), 10, 'source expression unique collision resolution inserts the audited source row identity');
+    assert_same(scalar($expression_unique_target, "SELECT value FROM plugin_expression_unique_rows WHERE lower(slug) = 'shared-expression'"), 'source expression row', 'source expression unique collision resolution replaces the target row payload');
+
     $target_only_base = $tmp . '/target-only-base.sqlite';
     $target_only_source = $tmp . '/target-only-source.sqlite';
     $target_only_target = $tmp . '/target-only-target.sqlite';

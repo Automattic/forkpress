@@ -1451,6 +1451,130 @@ function cow_merge_partial_index_where(string $sql): ?string {
     return null;
 }
 
+function cow_merge_index_sql_terms(string $sql): ?array {
+    $len = strlen($sql);
+    $quote = null;
+    $seen_on = false;
+    $start = null;
+    $depth = 0;
+    for ($i = 0; $i < $len; $i++) {
+        $ch = $sql[$i];
+        if ($quote !== null) {
+            if ($quote === '[' && $ch === ']') {
+                $quote = null;
+            } elseif ($ch === $quote) {
+                if (($quote === "'" || $quote === '"') && $i + 1 < $len && $sql[$i + 1] === $quote) {
+                    $i++;
+                    continue;
+                }
+                $quote = null;
+            }
+            continue;
+        }
+        if ($ch === "'" || $ch === '"' || $ch === '`' || $ch === '[') {
+            $quote = $ch;
+            continue;
+        }
+        if (!$seen_on && strncasecmp(substr($sql, $i, 2), 'ON', 2) === 0) {
+            $before = $i === 0 ? ' ' : $sql[$i - 1];
+            $after = $i + 2 >= $len ? ' ' : $sql[$i + 2];
+            if (!preg_match('/[A-Za-z0-9_]/', $before) && !preg_match('/[A-Za-z0-9_]/', $after)) {
+                $seen_on = true;
+                $i++;
+                continue;
+            }
+        }
+        if ($seen_on && $ch === '(') {
+            $start = $i + 1;
+            $depth = 1;
+            break;
+        }
+    }
+    if ($start === null) {
+        return null;
+    }
+
+    $terms = [];
+    $term_start = $start;
+    $quote = null;
+    for ($i = $start; $i < $len; $i++) {
+        $ch = $sql[$i];
+        if ($quote !== null) {
+            if ($quote === '[' && $ch === ']') {
+                $quote = null;
+            } elseif ($ch === $quote) {
+                if (($quote === "'" || $quote === '"') && $i + 1 < $len && $sql[$i + 1] === $quote) {
+                    $i++;
+                    continue;
+                }
+                $quote = null;
+            }
+            continue;
+        }
+        if ($ch === "'" || $ch === '"' || $ch === '`' || $ch === '[') {
+            $quote = $ch;
+            continue;
+        }
+        if ($ch === '(') {
+            $depth++;
+            continue;
+        }
+        if ($ch === ')') {
+            $depth--;
+            if ($depth === 0) {
+                $term = cow_merge_normalize_index_term_sql(substr($sql, $term_start, $i - $term_start));
+                if ($term === '') {
+                    return null;
+                }
+                $terms[] = $term;
+                return $terms;
+            }
+            continue;
+        }
+        if ($ch === ',' && $depth === 1) {
+            $term = cow_merge_normalize_index_term_sql(substr($sql, $term_start, $i - $term_start));
+            if ($term === '') {
+                return null;
+            }
+            $terms[] = $term;
+            $term_start = $i + 1;
+        }
+    }
+    return null;
+}
+
+function cow_merge_normalize_index_term_sql(string $term): string {
+    $term = trim($term);
+    return preg_replace('/\s+(ASC|DESC)\s*$/i', '', $term) ?? $term;
+}
+
+function cow_merge_row_expression_value(SQLite3 $db, array $row, string $expression): array {
+    $columns = array_keys($row);
+    if (!$columns) {
+        return ['ok' => false, 'value' => null];
+    }
+    $quoted_columns = implode(', ', array_map('cow_merge_quote_ident', $columns));
+    $placeholders = implode(', ', array_fill(0, count($columns), '?'));
+    $sql = 'WITH __forkpress_merge_row (' . $quoted_columns . ') AS (SELECT ' . $placeholders . ') ' .
+        'SELECT ' . $expression . ' AS __forkpress_merge_value FROM __forkpress_merge_row LIMIT 1';
+    $stmt = @$db->prepare($sql);
+    if (!$stmt) {
+        return ['ok' => false, 'value' => null];
+    }
+    foreach ($columns as $i => $column) {
+        cow_merge_bind($stmt, $i + 1, $row[$column] ?? null);
+    }
+    $res = @$stmt->execute();
+    if (!$res) {
+        return ['ok' => false, 'value' => null];
+    }
+    $value = $res->fetchArray(SQLITE3_ASSOC);
+    if (!is_array($value) || !array_key_exists('__forkpress_merge_value', $value)) {
+        return ['ok' => false, 'value' => null];
+    }
+    return ['ok' => true, 'value' => $value['__forkpress_merge_value']];
+}
+
 function cow_merge_row_matches_partial_index_where(SQLite3 $db, array $row, string $where): bool {
     $columns = array_keys($row);
     if (!$columns) {
@@ -1472,6 +1596,38 @@ function cow_merge_row_matches_partial_index_where(SQLite3 $db, array $row, stri
         return false;
     }
     return (bool)$res->fetchArray(SQLITE3_NUM);
+}
+
+function cow_merge_unique_index_terms(SQLite3 $db, string $name): ?array {
+    $sql = cow_merge_index_sql($db, $name);
+    $sql_terms = is_string($sql) ? cow_merge_index_sql_terms($sql) : null;
+    $info = $db->query("PRAGMA index_xinfo('" . SQLite3::escapeString($name) . "')");
+    if (!$info) {
+        return null;
+    }
+    $terms = [];
+    while ($column = $info->fetchArray(SQLITE3_ASSOC)) {
+        if ((int)($column['key'] ?? 1) !== 1) {
+            continue;
+        }
+        $seqno = (int)($column['seqno'] ?? count($terms));
+        $cid = (int)($column['cid'] ?? -1);
+        $column_name = $column['name'] ?? null;
+        if ($cid >= 0 && is_string($column_name) && $column_name !== '') {
+            $terms[$seqno] = ['type' => 'column', 'name' => $column_name];
+            continue;
+        }
+        if ($cid === -2 && is_array($sql_terms) && isset($sql_terms[$seqno])) {
+            $terms[$seqno] = ['type' => 'expression', 'sql' => $sql_terms[$seqno]];
+            continue;
+        }
+        return null;
+    }
+    if (!$terms) {
+        return null;
+    }
+    ksort($terms);
+    return array_values($terms);
 }
 
 function cow_merge_unique_indexes(SQLite3 $db, string $table): array {
@@ -1496,21 +1652,9 @@ function cow_merge_unique_indexes(SQLite3 $db, string $table): array {
                 continue;
             }
         }
-        $info = $db->query("PRAGMA index_info('" . SQLite3::escapeString($name) . "')");
-        if (!$info) {
-            continue;
-        }
-        $columns = [];
-        while ($column = $info->fetchArray(SQLITE3_ASSOC)) {
-            $column_name = $column['name'] ?? null;
-            if (!is_string($column_name) || $column_name === '') {
-                $columns = [];
-                break;
-            }
-            $columns[] = $column_name;
-        }
-        if ($columns) {
-            $indexes[] = ['name' => $name, 'columns' => $columns, 'where' => $where];
+        $terms = cow_merge_unique_index_terms($db, $name);
+        if (is_array($terms)) {
+            $indexes[] = ['name' => $name, 'terms' => $terms, 'where' => $where];
         }
     }
     return $indexes;
@@ -1524,13 +1668,28 @@ function cow_merge_find_unique_collision(SQLite3 $target, string $table, array $
         }
         $values = [];
         $clauses = [];
-        foreach ($index['columns'] as $column) {
-            if (!array_key_exists($column, $source_row) || $source_row[$column] === null) {
+        foreach ($index['terms'] as $term) {
+            if (($term['type'] ?? null) === 'column') {
+                $column = (string)$term['name'];
+                if (!array_key_exists($column, $source_row) || $source_row[$column] === null) {
+                    $clauses = [];
+                    break;
+                }
+                $clauses[] = cow_merge_quote_ident($column) . ' = ?';
+                $values[] = $source_row[$column];
+                continue;
+            }
+            if (($term['type'] ?? null) !== 'expression') {
                 $clauses = [];
                 break;
             }
-            $clauses[] = cow_merge_quote_ident($column) . ' = ?';
-            $values[] = $source_row[$column];
+            $evaluated = cow_merge_row_expression_value($target, $source_row, (string)$term['sql']);
+            if (!($evaluated['ok'] ?? false) || $evaluated['value'] === null) {
+                $clauses = [];
+                break;
+            }
+            $clauses[] = '(' . (string)$term['sql'] . ') = ?';
+            $values[] = $evaluated['value'];
         }
         if (!$clauses) {
             continue;
@@ -1555,7 +1714,7 @@ function cow_merge_find_unique_collision(SQLite3 $target, string $table, array $
         if ($row) {
             $rowid = $row['__forkpress_merge_rowid'] ?? null;
             unset($row['__forkpress_merge_rowid']);
-            $collision = ['index' => $index['name'], 'columns' => $index['columns'], 'row' => $row];
+            $collision = ['index' => $index['name'], 'terms' => $index['terms'], 'row' => $row];
             if ($include_rowid && $rowid !== null) {
                 $collision['rowid'] = (int)$rowid;
             }
