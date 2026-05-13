@@ -1256,12 +1256,19 @@ function cow_merge_keyless_row_identity_ambiguous(?array $base_row, ?array $sour
         return false;
     }
 
+    $source_changed = false;
+    $target_changed = false;
+    $source_only_changed = false;
     foreach ($columns as $col) {
-        if (cow_merge_values_equal($source_row[$col] ?? null, $base_row[$col] ?? null)) {
-            return false;
+        $source_cell_changed = !cow_merge_values_equal($source_row[$col] ?? null, $base_row[$col] ?? null);
+        $target_cell_changed = !cow_merge_values_equal($target_row[$col] ?? null, $base_row[$col] ?? null);
+        $source_changed = $source_changed || $source_cell_changed;
+        $target_changed = $target_changed || $target_cell_changed;
+        if ($source_cell_changed && !$target_cell_changed) {
+            $source_only_changed = true;
         }
     }
-    return true;
+    return $source_changed && $target_changed && $source_only_changed;
 }
 
 function cow_merge_where_clause(array $identity, array $pk_cols, array &$values): string {
@@ -6164,7 +6171,7 @@ function cow_merge_table_rows(
                 $key,
                 null,
                 'target-wins',
-                'no-primary-key source row changed every column while target also changed; rowid reuse cannot be ruled out without runtime identity events',
+                'no-primary-key source row changed cells that target did not change while target also changed; rowid reuse cannot be ruled out without runtime identity events',
                 $base_row,
                 $source_row,
                 $target_row,

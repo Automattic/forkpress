@@ -472,10 +472,11 @@ tooling.
   target-side unique key, the target row is kept and the choice is recorded as
   an auditable `row-unique-collision`. For no-primary-key plugin tables,
   runtime row identity tracking handles delete/reinsert `rowid` reuse. If a
-  direct offline edit changes every column of a keyless source row while target
-  also changed the prior row and no runtime identity event exists, mergeback
-  keeps target by default and records an auditable `row-identity-ambiguous`
-  conflict instead of mixing cells from different possible logical rows.
+  direct offline edit changes cells on a keyless source row that target did not
+  change while target also changed the prior row and no runtime identity event
+  exists, mergeback keeps target by default and records an auditable
+  `row-identity-ambiguous` conflict instead of mixing cells from different
+  possible logical rows.
 - `forkpress branch merge-audit [--format text|json] [--run ID]`
   `[--scope all|db|files] [--records all|conflicts|decisions|resolutions]`
   `[--conflict-type TYPE] [--decision DECISION] [--path PATH]`

@@ -2128,11 +2128,12 @@ SQL);
     $db->close();
 
     $result = cow_merge_databases($keyless_base, $keyless_source, $keyless_target, $metadata, 'feature-keyless', 'main');
-    assert_same($result['status'], 'completed', 'keyless plugin table independent changes merge cleanly');
+    assert_same($result['status'], 'completed_with_conflicts', 'untracked keyless base-row source-only changes are bounded when target also changed');
     assert_same(scalar($keyless_target, "SELECT label FROM plugin_keyless WHERE rowid = 1"), 'Target base label', 'target keyless base-row cell is preserved');
-    assert_same(scalar($keyless_target, "SELECT value FROM plugin_keyless WHERE rowid = 1"), 'source base value', 'source keyless base-row cell is applied');
+    assert_same(scalar($keyless_target, "SELECT value FROM plugin_keyless WHERE rowid = 1"), 'base', 'source keyless base-row cell is not mixed into a target-changed row without runtime identity events');
     assert_same((int)scalar($keyless_target, "SELECT COUNT(*) FROM plugin_keyless WHERE label IN ('Source keyless', 'Target keyless')"), 2, 'source and target keyless inserts are both present');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_keyless' AND conflict_type = 'row-insert-collision'"), 0, 'keyless insert rowid collisions are not recorded as same-row conflicts');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_keyless' AND c.conflict_type = 'row-identity-ambiguous' AND r.source_branch = 'feature-keyless'"), 1, 'keyless sidecar ambiguity is auditable when source-only cells would otherwise be mixed into a target-changed row');
     assert_true((int)scalar($metadata, "SELECT COUNT(*) FROM merge_row_identities WHERE table_name = 'plugin_keyless'") >= 3, 'keyless sidecar row identities are recorded outside the plugin table');
 
     cow_merge_databases($keyless_base, $keyless_source, $keyless_target, $metadata, 'feature-keyless', 'main');
@@ -2334,7 +2335,7 @@ SQL);
     assert_same(scalar($offline_reuse_target, "SELECT label FROM plugin_keyless WHERE rowid = 1"), 'Base keyless', 'offline rowid ambiguity does not partially apply source label to target old row');
     assert_same(scalar($offline_reuse_target, "SELECT value FROM plugin_keyless WHERE rowid = 1"), 'target kept offline old row', 'offline rowid ambiguity keeps target value by default');
     assert_same((int)scalar($offline_reuse_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_keyless' AND conflict_type = 'row-identity-ambiguous'"), 1, 'offline no-PK rowid reuse ambiguity is auditable');
-    assert_same((int)scalar($offline_reuse_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_keyless' AND decision = 'target-wins' AND reason LIKE 'no-primary-key source row changed every column%'"), 1, 'offline no-PK rowid reuse default target choice is auditable');
+    assert_same((int)scalar($offline_reuse_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_keyless' AND decision = 'target-wins' AND reason LIKE 'no-primary-key source row changed cells that target did not change%'"), 1, 'offline no-PK rowid reuse default target choice is auditable');
     $offline_ambiguity_conflict_id = (int)scalar($offline_reuse_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_keyless' AND conflict_type = 'row-identity-ambiguous' ORDER BY id DESC LIMIT 1");
     $offline_ambiguity_resolution = cow_merge_resolve_conflict(
         $offline_reuse_metadata,
