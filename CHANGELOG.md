@@ -54,6 +54,7 @@
 - Collapsed identical no-primary-key source/target inserts that meet by a declared unique index into a non-conflicting auditable `source-applied` decision instead of a default target-wins collision.
 - Added runtime-backed COW e2e coverage for identical keyless unique inserts merging through the real CLI without duplicating the row.
 - Stabilized identical no-primary-key unique-insert collapses by adopting the source sidecar identity onto the existing target row, preventing repeated collapse decisions on rerun.
+- Added COW merge coverage for identical no-primary-key inserts without declared uniqueness remaining separate audited rows instead of being collapsed.
 - Updated the automatic mergeback loop runner to pass a configurable Codex reasoning-effort setting and to include the changelog/known-good tag policy in every worker prompt.
 
 ## known-good/cow-mergeback-audit-completeness-2026-05-12

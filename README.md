@@ -473,6 +473,8 @@ tooling.
   an auditable `row-unique-collision`; no-primary-key inserts that are already
   present in target with the same payload through a declared unique index are
   recorded as an auditable non-conflicting `source-applied` decision instead.
+  Without declared unique evidence, identical-looking no-primary-key inserts
+  remain separate rows so duplicate-capable plugin tables do not lose data.
   For no-primary-key plugin tables, runtime row identity tracking handles
   delete/reinsert `rowid` reuse. If a direct offline edit changes cells on a
   keyless source row that target did not change while target also changed the

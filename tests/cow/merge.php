@@ -2261,6 +2261,38 @@ SQL);
     assert_same((int)scalar($keyless_unique_same_target, "SELECT COUNT(*) FROM plugin_keyless_unique_same WHERE slug = 'same-keyless-slug' AND value = 'same payload'"), 1, 'rerunning identical keyless unique merge keeps one target row');
     assert_same((int)scalar($keyless_unique_same_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_keyless_unique_same' AND decision = 'source-applied' AND reason LIKE 'source inserted no-primary-key row already exists in target by unique index%'"), 1, 'rerunning identical keyless unique merge does not repeat the source-applied collapse decision');
 
+    $keyless_duplicate_base = $tmp . '/keyless-duplicate-base.sqlite';
+    $keyless_duplicate_source = $tmp . '/keyless-duplicate-source.sqlite';
+    $keyless_duplicate_target = $tmp . '/keyless-duplicate-target.sqlite';
+    $keyless_duplicate_metadata = $tmp . '/.forkpress/cow/merge/keyless-duplicate-metadata.sqlite';
+    create_base_db($keyless_duplicate_base);
+    copy($keyless_duplicate_base, $keyless_duplicate_source);
+    copy($keyless_duplicate_base, $keyless_duplicate_target);
+    foreach ([$keyless_duplicate_base, $keyless_duplicate_source, $keyless_duplicate_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_keyless_duplicate (label TEXT, value TEXT)');
+        $db->close();
+    }
+    cow_merge_capture_row_identities($keyless_duplicate_base, $keyless_duplicate_metadata, 'main');
+    cow_merge_capture_row_identities($keyless_duplicate_source, $keyless_duplicate_metadata, 'feature-keyless-duplicate', 'main');
+
+    $db = open_db($keyless_duplicate_source);
+    $db->exec("INSERT INTO plugin_keyless_duplicate (label, value) VALUES ('same duplicate label', 'same duplicate value')");
+    $db->close();
+    cow_merge_capture_row_identities($keyless_duplicate_source, $keyless_duplicate_metadata, 'feature-keyless-duplicate', 'main');
+
+    $db = open_db($keyless_duplicate_target);
+    $db->exec("INSERT INTO plugin_keyless_duplicate (label, value) VALUES ('same duplicate label', 'same duplicate value')");
+    $db->close();
+    cow_merge_capture_row_identities($keyless_duplicate_target, $keyless_duplicate_metadata, 'main');
+
+    $result = cow_merge_databases($keyless_duplicate_base, $keyless_duplicate_source, $keyless_duplicate_target, $keyless_duplicate_metadata, 'feature-keyless-duplicate', 'main');
+    assert_same($result['status'], 'completed', 'identical keyless inserts without declared uniqueness merge as distinct rows');
+    assert_same((int)scalar($keyless_duplicate_target, "SELECT COUNT(*) FROM plugin_keyless_duplicate WHERE label = 'same duplicate label' AND value = 'same duplicate value'"), 2, 'identical keyless rows without unique evidence are not collapsed');
+    assert_same((int)scalar($keyless_duplicate_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_keyless_duplicate' AND decision = 'source-applied' AND reason = 'source inserted row and target did not change it'"), 1, 'source duplicate keyless insert is audited separately');
+    assert_same((int)scalar($keyless_duplicate_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_keyless_duplicate' AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"), 1, 'target duplicate keyless insert is audited separately');
+    assert_same((int)scalar($keyless_duplicate_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_keyless_duplicate'"), 0, 'identical keyless duplicate inserts without uniqueness do not create a false conflict');
+
     $capture_db = $tmp . '/capture.sqlite';
     $capture_feature = $tmp . '/capture-feature.sqlite';
     $capture_metadata = $tmp . '/.forkpress/cow/merge/capture-metadata.sqlite';
