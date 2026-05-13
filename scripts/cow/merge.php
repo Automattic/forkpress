@@ -5917,6 +5917,55 @@ function cow_merge_validate_foreign_key_integrity(SQLite3 $db, string $context):
     }
 }
 
+function cow_merge_foreign_key_child_tables(SQLite3 $db, string $parent_table): array {
+    $children = [];
+    foreach (array_keys(cow_merge_table_sql_map($db)) as $child_table) {
+        if (strcasecmp($child_table, $parent_table) === 0) {
+            continue;
+        }
+        foreach (cow_merge_foreign_key_groups($db, $child_table) as $group) {
+            $parent = (string)($group[0]['table'] ?? '');
+            if ($parent !== '' && strcasecmp($parent, $parent_table) === 0) {
+                $children[] = $child_table;
+                break;
+            }
+        }
+    }
+    $children = array_values(array_unique($children));
+    sort($children);
+    return $children;
+}
+
+function cow_merge_apply_source_table_drop(SQLite3 $target, string $table, bool $apply): void {
+    $child_tables = cow_merge_foreign_key_child_tables($target, $table);
+    if ($child_tables) {
+        throw new InvalidArgumentException(
+            'source table drop resolution cannot leave dependent target foreign-key child tables invalid: ' .
+            implode(', ', $child_tables)
+        );
+    }
+
+    $target->exec('SAVEPOINT forkpress_source_table_drop');
+    try {
+        if (cow_merge_table_sql($target, $table) !== null) {
+            if (!$target->exec('DROP TABLE ' . cow_merge_quote_ident($table))) {
+                throw new RuntimeException('failed to apply source table drop schema resolution: ' . $target->lastErrorMsg());
+            }
+        }
+        cow_merge_validate_foreign_key_integrity($target, 'source table drop schema resolution');
+        if ($apply) {
+            $target->exec('RELEASE forkpress_source_table_drop');
+        } else {
+            $target->exec('ROLLBACK TO forkpress_source_table_drop');
+            $target->exec('RELEASE forkpress_source_table_drop');
+        }
+    } catch (Throwable $e) {
+        $target->exec('ROLLBACK TO forkpress_source_table_drop');
+        $target->exec('RELEASE forkpress_source_table_drop');
+        throw $e;
+    }
+}
+
 function cow_merge_validate_schema_dependency_program(SQLite3 $db, array $dependency, string $context): void {
     if ((string)($dependency['type'] ?? '') !== 'trigger') {
         return;
@@ -6227,12 +6276,11 @@ function cow_merge_resolve_schema_conflict(
                 }
                 $resolved = null;
                 $target_branch = (string)$conflict['target_branch'];
+                $validate_source = function () use ($target, $table): void {
+                    cow_merge_apply_source_table_drop($target, $table, false);
+                };
                 $apply_source = function () use ($target, $meta, $conflict, $target_branch, $table): void {
-                    if (cow_merge_table_sql($target, $table) !== null) {
-                        if (!$target->exec('DROP TABLE ' . cow_merge_quote_ident($table))) {
-                            throw new RuntimeException('failed to apply source table drop schema resolution: ' . $target->lastErrorMsg());
-                        }
-                    }
+                    cow_merge_apply_source_table_drop($target, $table, true);
                     cow_merge_forget_table_row_identities($meta, (int)$conflict['run_id'], $target_branch, $table);
                 };
             }

@@ -502,6 +502,9 @@ tooling.
   Validation-gated source view rewrites also recompile preserved target view
   trigger programs before reporting dry-run or apply success, so a source view
   change cannot leave a latent invalid trigger behind.
+  Validation-gated source table drops refuse to leave dependent target
+  foreign-key child tables pointing at a missing parent table, including during
+  dry-run previews.
   When a source row still violates target constraints, target
   is kept by default and the choice is recorded as
   an auditable `row-target-constraint`. Source deletes that would orphan
@@ -581,9 +584,10 @@ tooling.
   remains the default choice unless a reviewer applies a source resolution.
   Schema source choices can apply safe source-added columns, indexes, views,
   and triggers; source index/view/trigger rewrites or drops; source table drops
-  that do not leave dependent target views invalid or implicitly remove target
-  indexes/triggers; source table restores when target dropped a table that
-  source kept; and compatible table rebuilds that preserve target rows and
+  that do not leave dependent target views invalid, implicitly remove target
+  indexes/triggers, or leave dependent target foreign-key child tables pointing
+  at a missing parent table; source table restores when target dropped a table
+  that source kept; and compatible table rebuilds that preserve target rows and
   target indexes/triggers while changing audited non-primary-key column
   definitions. Source index choices validate against current target rows and
   target foreign-key integrity during dry-run and apply, so uniqueness,

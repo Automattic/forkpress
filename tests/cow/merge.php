@@ -5232,6 +5232,73 @@ SQL);
     assert_same((int)scalar($schema_table_drop_view_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_table_drop_view'"), 1, 'blocked source table drop preserves target table');
     assert_same((int)scalar($schema_table_drop_view_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_table_drop_view_live'"), 1, 'blocked source table drop preserves dependent target view');
 
+    $schema_table_drop_fk_base = $tmp . '/schema-table-drop-fk-base.sqlite';
+    $schema_table_drop_fk_source = $tmp . '/schema-table-drop-fk-source.sqlite';
+    $schema_table_drop_fk_target = $tmp . '/schema-table-drop-fk-target.sqlite';
+    create_base_db($schema_table_drop_fk_base);
+    $db = open_db($schema_table_drop_fk_base);
+    $db->exec('CREATE TABLE plugin_table_drop_fk_parent (item_id TEXT PRIMARY KEY, label TEXT)');
+    $db->exec('CREATE TABLE plugin_table_drop_fk_child (parent_id TEXT REFERENCES plugin_table_drop_fk_parent(item_id), label TEXT)');
+    $db->close();
+    copy($schema_table_drop_fk_base, $schema_table_drop_fk_source);
+    copy($schema_table_drop_fk_base, $schema_table_drop_fk_target);
+
+    $db = open_db($schema_table_drop_fk_source);
+    $db->exec('DROP TABLE plugin_table_drop_fk_child');
+    $db->exec('DROP TABLE plugin_table_drop_fk_parent');
+    $db->close();
+
+    $result = cow_merge_databases($schema_table_drop_fk_base, $schema_table_drop_fk_source, $schema_table_drop_fk_target, $metadata, 'feature-table-drop-fk', 'main');
+    assert_same($result['status'], 'completed_with_conflicts', 'source table drops with dependent FK child tables remain reviewable');
+    $schema_table_drop_fk_parent_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_table_drop_fk_parent' AND column_name IS NULL AND conflict_type = 'schema-source-dropped-table' ORDER BY id DESC LIMIT 1");
+    $schema_table_drop_fk_child_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_table_drop_fk_child' AND column_name IS NULL AND conflict_type = 'schema-source-dropped-table' ORDER BY id DESC LIMIT 1");
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $schema_table_drop_fk_parent_conflict_id, 'source', false, 'Preview parent drop before FK child drop.', 'test'),
+        'dependent target foreign-key child tables',
+        'source table drop preview refuses to leave dependent FK child schema invalid'
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $schema_table_drop_fk_parent_conflict_id, 'source', true, 'Apply parent drop before FK child drop.', 'test'),
+        'dependent target foreign-key child tables',
+        'source table drop apply refuses to leave dependent FK child schema invalid'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_table_drop_fk_parent_conflict_id"),
+        0,
+        'failed parent-before-child table drop attempts do not record a resolution'
+    );
+    assert_same((int)scalar($schema_table_drop_fk_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_table_drop_fk_parent'"), 1, 'failed parent-before-child table drop preserves parent table');
+    assert_same((int)scalar($schema_table_drop_fk_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_table_drop_fk_child'"), 1, 'failed parent-before-child table drop preserves child table');
+    $schema_table_drop_fk_child_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_table_drop_fk_child_conflict_id,
+        'source',
+        true,
+        'Apply source child table drop before parent.',
+        'test'
+    );
+    assert_same($schema_table_drop_fk_child_resolution['status'], 'applied', 'source child table drop applies before parent drop');
+    $schema_table_drop_fk_parent_preview = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_table_drop_fk_parent_conflict_id,
+        'source',
+        false,
+        'Preview source parent table drop after child.',
+        'test'
+    );
+    assert_same($schema_table_drop_fk_parent_preview['status'], 'validated', 'source parent table drop validates after dependent child drop');
+    assert_same((int)scalar($schema_table_drop_fk_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_table_drop_fk_parent'"), 1, 'source parent table drop preview does not mutate target');
+    $schema_table_drop_fk_parent_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_table_drop_fk_parent_conflict_id,
+        'source',
+        true,
+        'Apply source parent table drop after child.',
+        'test'
+    );
+    assert_same($schema_table_drop_fk_parent_resolution['status'], 'applied', 'source parent table drop applies after dependent child drop');
+    assert_same((int)scalar($schema_table_drop_fk_target, "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('plugin_table_drop_fk_parent', 'plugin_table_drop_fk_child')"), 0, 'source FK parent and child table drops both apply after dependency ordering');
+
     $keyless_base = $tmp . '/keyless-base.sqlite';
     $keyless_source = $tmp . '/keyless-source.sqlite';
     $keyless_target = $tmp . '/keyless-target.sqlite';
