@@ -472,8 +472,11 @@ tooling.
   collides with a target-side unique key, including expression indexes,
   generated-column unique keys, and normal-column partial unique indexes, the
   target row is kept and the choice is recorded as an auditable
-  `row-unique-collision`; identical source/target inserts with the same
-  explicit primary key, and identical source/target updates or deletes to
+  `row-unique-collision`. If a source insert or source row update violates a
+  target-side SQLite constraint, target is also kept by default and the choice
+  is recorded as an auditable `row-target-constraint`; identical source/target
+  inserts with the same explicit primary key, and identical source/target
+  updates or deletes to
   existing explicit-primary-key rows, are recorded as non-conflicting
   `source-applied` decisions. Identical source/target cell changes inside an
   otherwise divergent row are also recorded as non-conflicting `source-applied`
@@ -528,9 +531,9 @@ tooling.
   decision, or deterministic resolution record.
 - `forkpress branch merge-resolve conflict <id> --choice source|target [--apply]`
   `[--note TEXT] [--reviewer NAME]` validates an audited DB cell, row
-  insert-collision, row-unique-collision, row-identity-ambiguous, row-target-deleted,
-  row-source-deleted, or filesystem path conflict, plus validation-gated
-  schema conflicts. DB conflicts work for
+  insert-collision, row-unique-collision, row-target-constraint,
+  row-identity-ambiguous, row-target-deleted, row-source-deleted, or filesystem
+  path conflict, plus validation-gated schema conflicts. DB conflicts work for
   explicit primary keys and no-primary-key tables with sidecar row identity.
   `row-unique-collision` source choices replace the still-matching target row
   that owns the colliding unique key, or for audited source-update collisions

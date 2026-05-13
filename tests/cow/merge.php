@@ -450,6 +450,91 @@ try {
     );
     assert_true(cow_merge_values_equal($keyless_update_unique_target_identity, $keyless_update_unique_plain_identity), 'source keyless unique update resolution keeps the source sidecar identity on the updated target row');
 
+    $constraint_insert_base = $tmp . '/constraint-insert-base.sqlite';
+    $constraint_insert_source = $tmp . '/constraint-insert-source.sqlite';
+    $constraint_insert_target = $tmp . '/constraint-insert-target.sqlite';
+    $constraint_insert_metadata = $tmp . '/.forkpress/cow/merge/constraint-insert-metadata.sqlite';
+    create_base_db($constraint_insert_base);
+    copy($constraint_insert_base, $constraint_insert_source);
+    copy($constraint_insert_base, $constraint_insert_target);
+    foreach ([$constraint_insert_base, $constraint_insert_source, $constraint_insert_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_constraint_inserts (id INTEGER PRIMARY KEY, value TEXT)');
+        $db->close();
+    }
+    $db = open_db($constraint_insert_source);
+    $db->exec("INSERT INTO plugin_constraint_inserts (id, value) VALUES (10, 'blocked')");
+    $db->close();
+    $db = open_db($constraint_insert_target);
+    $db->exec('DROP TABLE plugin_constraint_inserts');
+    $db->exec("CREATE TABLE plugin_constraint_inserts (id INTEGER PRIMARY KEY, value TEXT CHECK(value != 'blocked'))");
+    $db->close();
+    $constraint_insert_result = cow_merge_databases($constraint_insert_base, $constraint_insert_source, $constraint_insert_target, $constraint_insert_metadata, 'feature-constraint-insert', 'main');
+    assert_same($constraint_insert_result['status'], 'completed_with_conflicts', 'source insert violating target-side check constraint is audited instead of aborting');
+    assert_same((int)scalar($constraint_insert_target, 'SELECT COUNT(*) FROM plugin_constraint_inserts'), 0, 'target-side check constraint keeps the source insert out by default');
+    assert_same(
+        (int)scalar($constraint_insert_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_constraint_inserts' AND conflict_type = 'row-target-constraint'"),
+        1,
+        'target-side constraint insert collision is recorded as a row conflict'
+    );
+    assert_same(
+        (int)scalar($constraint_insert_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_constraint_inserts' AND decision = 'target-wins' AND reason LIKE 'source inserted row violates target constraints%'"),
+        1,
+        'target-side constraint insert collision records an auditable target-wins decision'
+    );
+    $constraint_insert_conflict_id = (int)scalar($constraint_insert_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_constraint_inserts' AND conflict_type = 'row-target-constraint' ORDER BY id DESC LIMIT 1");
+    $constraint_insert_target_resolution = cow_merge_resolve_conflict(
+        $constraint_insert_metadata,
+        $constraint_insert_conflict_id,
+        'target',
+        true,
+        'Accept target constraint for insert.',
+        'cow-test'
+    );
+    assert_same($constraint_insert_target_resolution['status'], 'validated', 'target constraint insert resolution validates the audited target choice');
+    cow_merge_databases($constraint_insert_base, $constraint_insert_source, $constraint_insert_target, $constraint_insert_metadata, 'feature-constraint-insert', 'main');
+    assert_same(
+        (int)scalar($constraint_insert_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_constraint_inserts' AND decision = 'target-accepted' AND reason LIKE 'reviewed target resolution already accepts source insert blocked by target constraints%'"),
+        1,
+        'rerunning after target constraint insert resolution records accepted target state'
+    );
+
+    $constraint_update_base = $tmp . '/constraint-update-base.sqlite';
+    $constraint_update_source = $tmp . '/constraint-update-source.sqlite';
+    $constraint_update_target = $tmp . '/constraint-update-target.sqlite';
+    $constraint_update_metadata = $tmp . '/.forkpress/cow/merge/constraint-update-metadata.sqlite';
+    create_base_db($constraint_update_base);
+    copy($constraint_update_base, $constraint_update_source);
+    copy($constraint_update_base, $constraint_update_target);
+    foreach ([$constraint_update_base, $constraint_update_source, $constraint_update_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_constraint_updates (id INTEGER PRIMARY KEY, value TEXT)');
+        $db->exec("INSERT INTO plugin_constraint_updates (id, value) VALUES (1, 'allowed')");
+        $db->close();
+    }
+    $db = open_db($constraint_update_source);
+    $db->exec("UPDATE plugin_constraint_updates SET value = 'blocked' WHERE id = 1");
+    $db->close();
+    $db = open_db($constraint_update_target);
+    $db->exec('ALTER TABLE plugin_constraint_updates RENAME TO plugin_constraint_updates_old');
+    $db->exec("CREATE TABLE plugin_constraint_updates (id INTEGER PRIMARY KEY, value TEXT CHECK(value != 'blocked'))");
+    $db->exec('INSERT INTO plugin_constraint_updates (id, value) SELECT id, value FROM plugin_constraint_updates_old');
+    $db->exec('DROP TABLE plugin_constraint_updates_old');
+    $db->close();
+    $constraint_update_result = cow_merge_databases($constraint_update_base, $constraint_update_source, $constraint_update_target, $constraint_update_metadata, 'feature-constraint-update', 'main');
+    assert_same($constraint_update_result['status'], 'completed_with_conflicts', 'source update violating target-side check constraint is audited instead of aborting');
+    assert_same(scalar($constraint_update_target, 'SELECT value FROM plugin_constraint_updates WHERE id = 1'), 'allowed', 'target-side check constraint keeps the original row by default');
+    assert_same(
+        (int)scalar($constraint_update_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_constraint_updates' AND conflict_type = 'row-target-constraint'"),
+        1,
+        'target-side constraint update collision is recorded as a row conflict'
+    );
+    assert_same(
+        (int)scalar($constraint_update_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_constraint_updates' AND decision = 'target-wins' AND reason LIKE 'source changed row violates target constraints%'"),
+        1,
+        'target-side constraint update collision records an auditable target-wins decision'
+    );
+
     $target_only_base = $tmp . '/target-only-base.sqlite';
     $target_only_source = $tmp . '/target-only-source.sqlite';
     $target_only_target = $tmp . '/target-only-target.sqlite';
