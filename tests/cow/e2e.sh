@@ -67,6 +67,12 @@ on_error() {
   dump_if_exists "$TMP/offline-keyless-audit.json"
   dump_if_exists "$TMP/offline-keyless-resolve.out"
   dump_if_exists "$TMP/offline-keyless-after-resolution.json"
+  dump_if_exists "$TMP/offline-keyless-partial-source.json"
+  dump_if_exists "$TMP/offline-keyless-partial-target.json"
+  dump_if_exists "$TMP/offline-keyless-partial-merge.out"
+  dump_if_exists "$TMP/offline-keyless-partial-after-merge.json"
+  dump_if_exists "$TMP/offline-keyless-partial-resolve.out"
+  dump_if_exists "$TMP/offline-keyless-partial-after-resolution.json"
   dump_if_exists "$TMP/merge-audit.out"
   dump_if_exists "$TMP/merge-audit.json"
   dump_if_exists "$TMP/file-conflict-pending.out"
@@ -804,6 +810,31 @@ grep -F "forkpress: validated COW merge conflict resolution" "$TMP/offline-keyle
 grep -F "applied:   yes" "$TMP/offline-keyless-resolve.out" >/dev/null
 php -r '$db = new SQLite3($argv[1]); $rows = []; $res = $db->query("SELECT rowid, label, value FROM wp_forkpress_e2e_offline_keyless ORDER BY rowid"); while ($row = $res->fetchArray(SQLITE3_ASSOC)) $rows[] = $row; file_put_contents($argv[2], json_encode(["rows" => $rows])); exit(count($rows) === 1 && ($rows[0]["label"] ?? null) === "Offline reused source row" && ($rows[0]["value"] ?? null) === "new offline row" ? 0 : 1);' "$WORK/main/wp-content/database/.ht.sqlite" "$TMP/offline-keyless-after-resolution.json"
 php -r '$db = new SQLite3($argv[1]); $conflict_id = (int)$argv[2]; $resolution = (int)$db->querySingle("SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $conflict_id AND table_name = '\''wp_forkpress_e2e_offline_keyless'\'' AND choice = '\''source'\'' AND applied = 1"); $reviewed = (int)$db->querySingle("SELECT COUNT(*) FROM merge_review_notes WHERE record_type = '\''conflict'\'' AND record_id = $conflict_id AND status = '\''reviewed'\''"); exit($resolution === 1 && $reviewed === 1 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite" "$OFFLINE_KEYLESS_CONFLICT_ID"
+
+log_step "bound partial offline no-PK rowid ambiguity"
+php -r '$db = new SQLite3($argv[1]); $db->exec("DROP TABLE IF EXISTS wp_forkpress_e2e_offline_keyless_partial"); $db->exec("CREATE TABLE wp_forkpress_e2e_offline_keyless_partial (label TEXT, value TEXT)"); $db->exec("INSERT INTO wp_forkpress_e2e_offline_keyless_partial (label, value) VALUES ('\''Partial base row'\'', '\''base'\'')");' "$WORK/main/wp-content/database/.ht.sqlite"
+"$BIN" branch --work-dir "$WORK_DIR" create offline-keyless-partial > "$TMP/offline-keyless-partial-create.out"
+grep -F "offline-keyless-partial.wp.localhost:$PORT" "$TMP/offline-keyless-partial-create.out" >/dev/null
+php -r '$db = new SQLite3($argv[1]); $db->exec("DELETE FROM wp_forkpress_e2e_offline_keyless_partial WHERE rowid = 1"); $db->exec("INSERT INTO wp_forkpress_e2e_offline_keyless_partial (label, value) VALUES ('\''Partial reused source row'\'', '\''base'\'')"); $row = $db->querySingle("SELECT rowid, label, value FROM wp_forkpress_e2e_offline_keyless_partial", true); file_put_contents($argv[2], json_encode($row)); exit(((int)($row["rowid"] ?? 0) === 1 && ($row["label"] ?? null) === "Partial reused source row" && ($row["value"] ?? null) === "base") ? 0 : 1);' "$WORK/offline-keyless-partial/wp-content/database/.ht.sqlite" "$TMP/offline-keyless-partial-source.json"
+php -r '$db = new SQLite3($argv[1]); $db->exec("UPDATE wp_forkpress_e2e_offline_keyless_partial SET value = '\''target kept partial old row'\'' WHERE rowid = 1"); $row = $db->querySingle("SELECT rowid, label, value FROM wp_forkpress_e2e_offline_keyless_partial", true); file_put_contents($argv[2], json_encode($row)); exit(((int)($row["rowid"] ?? 0) === 1 && ($row["label"] ?? null) === "Partial base row" && ($row["value"] ?? null) === "target kept partial old row") ? 0 : 1);' "$WORK/main/wp-content/database/.ht.sqlite" "$TMP/offline-keyless-partial-target.json"
+"$BIN" branch --work-dir "$WORK_DIR" merge offline-keyless-partial --into main > "$TMP/offline-keyless-partial-merge.out"
+grep -F "forkpress: merged offline-keyless-partial into main" "$TMP/offline-keyless-partial-merge.out" >/dev/null
+grep -F "status:    completed_with_conflicts" "$TMP/offline-keyless-partial-merge.out" >/dev/null
+php -r '$db = new SQLite3($argv[1]); $rows = []; $res = $db->query("SELECT rowid, label, value FROM wp_forkpress_e2e_offline_keyless_partial ORDER BY rowid"); while ($row = $res->fetchArray(SQLITE3_ASSOC)) $rows[] = $row; file_put_contents($argv[2], json_encode(["rows" => $rows])); exit(count($rows) === 1 && ($rows[0]["label"] ?? null) === "Partial base row" && ($rows[0]["value"] ?? null) === "target kept partial old row" ? 0 : 1);' "$WORK/main/wp-content/database/.ht.sqlite" "$TMP/offline-keyless-partial-after-merge.json"
+OFFLINE_KEYLESS_PARTIAL_CONFLICT_ID="$(
+  php -r '$db = new SQLite3($argv[1]); echo (int)$db->querySingle("SELECT c.id FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = '\''wp_forkpress_e2e_offline_keyless_partial'\'' AND c.conflict_type = '\''row-identity-ambiguous'\'' AND r.source_branch = '\''offline-keyless-partial'\'' AND r.target_branch = '\''main'\'' ORDER BY c.id DESC LIMIT 1");' \
+    "$WORK_DIR/cow/merge/metadata.sqlite"
+)"
+if [ "$OFFLINE_KEYLESS_PARTIAL_CONFLICT_ID" = "0" ]; then
+  echo "missing partial offline keyless row-identity-ambiguous conflict id" >&2
+  exit 1
+fi
+php -r '$db = new SQLite3($argv[1]); $conflict_id = (int)$argv[2]; $target_wins = (int)$db->querySingle("SELECT COUNT(*) FROM merge_decisions WHERE table_name = '\''wp_forkpress_e2e_offline_keyless_partial'\'' AND decision = '\''target-wins'\'' AND reason LIKE '\''no-primary-key source row changed cells that target did not change%'\''"); exit($conflict_id > 0 && $target_wins > 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite" "$OFFLINE_KEYLESS_PARTIAL_CONFLICT_ID"
+"$BIN" branch --work-dir "$WORK_DIR" merge-resolve conflict "$OFFLINE_KEYLESS_PARTIAL_CONFLICT_ID" --choice source --apply --note "Apply reviewed partial offline no-PK row choice" --reviewer cow-e2e > "$TMP/offline-keyless-partial-resolve.out"
+grep -F "forkpress: validated COW merge conflict resolution" "$TMP/offline-keyless-partial-resolve.out" >/dev/null
+grep -F "applied:   yes" "$TMP/offline-keyless-partial-resolve.out" >/dev/null
+php -r '$db = new SQLite3($argv[1]); $rows = []; $res = $db->query("SELECT rowid, label, value FROM wp_forkpress_e2e_offline_keyless_partial ORDER BY rowid"); while ($row = $res->fetchArray(SQLITE3_ASSOC)) $rows[] = $row; file_put_contents($argv[2], json_encode(["rows" => $rows])); exit(count($rows) === 1 && ($rows[0]["label"] ?? null) === "Partial reused source row" && ($rows[0]["value"] ?? null) === "base" ? 0 : 1);' "$WORK/main/wp-content/database/.ht.sqlite" "$TMP/offline-keyless-partial-after-resolution.json"
+php -r '$db = new SQLite3($argv[1]); $conflict_id = (int)$argv[2]; $resolution = (int)$db->querySingle("SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $conflict_id AND table_name = '\''wp_forkpress_e2e_offline_keyless_partial'\'' AND choice = '\''source'\'' AND applied = 1"); $reviewed = (int)$db->querySingle("SELECT COUNT(*) FROM merge_review_notes WHERE record_type = '\''conflict'\'' AND record_id = $conflict_id AND status = '\''reviewed'\''"); exit($resolution === 1 && $reviewed === 1 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite" "$OFFLINE_KEYLESS_PARTIAL_CONFLICT_ID"
 
 log_step "resolve runtime plugin unique collision"
 mkdir -p "$WORK/main/wp-content/mu-plugins"
