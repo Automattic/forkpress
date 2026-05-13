@@ -2715,6 +2715,13 @@ SQL);
     create_base_db($schema_keyless_table_restore_base);
     $db = open_db($schema_keyless_table_restore_base);
     $db->exec('CREATE TABLE plugin_keyless_table_restore (label TEXT, value TEXT)');
+    $db->exec('CREATE UNIQUE INDEX plugin_keyless_table_restore_label_idx ON plugin_keyless_table_restore(label)');
+    $db->exec('CREATE TABLE plugin_keyless_table_restore_audit (label TEXT, value TEXT)');
+    $db->exec(
+        'CREATE TRIGGER plugin_keyless_table_restore_insert AFTER INSERT ON plugin_keyless_table_restore BEGIN ' .
+        'INSERT INTO plugin_keyless_table_restore_audit (label, value) VALUES (NEW.label, NEW.value); ' .
+        'END'
+    );
     $db->exec("INSERT INTO plugin_keyless_table_restore (label, value) VALUES ('Restore keyless', 'base')");
     $db->close();
     copy($schema_keyless_table_restore_base, $schema_keyless_table_restore_source);
@@ -2773,6 +2780,12 @@ SQL);
     assert_same((int)scalar($schema_keyless_table_restore_target, "SELECT COUNT(*) FROM plugin_keyless_table_restore"), 2, 'source no-primary-key table restore copies audited source rows into the target table');
     assert_same(scalar($schema_keyless_table_restore_target, "SELECT value FROM plugin_keyless_table_restore WHERE rowid = 1"), 'source restored base', 'source no-primary-key table restore recreates the audited source row');
     assert_same(scalar($schema_keyless_table_restore_target, "SELECT value FROM plugin_keyless_table_restore WHERE rowid = 9"), 'source extra', 'source no-primary-key table restore preserves sparse source rowids');
+    assert_same((int)scalar($schema_keyless_table_restore_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_keyless_table_restore_label_idx'"), 1, 'source no-primary-key table restore recreates source index');
+    assert_same((int)scalar($schema_keyless_table_restore_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_keyless_table_restore_insert'"), 1, 'source no-primary-key table restore recreates source trigger');
+    $db = open_db($schema_keyless_table_restore_target);
+    $db->exec("INSERT INTO plugin_keyless_table_restore (rowid, label, value) VALUES (15, 'Restored trigger check', 'trigger works')");
+    $db->close();
+    assert_same(scalar($schema_keyless_table_restore_target, "SELECT value FROM plugin_keyless_table_restore_audit WHERE label = 'Restored trigger check'"), 'trigger works', 'source no-primary-key table restore trigger remains functional after restore');
     assert_same(
         scalar($schema_keyless_table_restore_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_keyless_table_restore' AND rowid = 1"),
         $schema_keyless_table_restore_source_identity,
@@ -2787,6 +2800,22 @@ SQL);
         (int)scalar($schema_keyless_table_restore_metadata, "SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'main' AND table_name = 'plugin_keyless_table_restore' AND logical_identity = '" . SQLite3::escapeString((string)$schema_keyless_table_restore_stale_identity) . "' AND deleted_at IS NOT NULL"),
         1,
         'source no-primary-key table restore tombstones stale target sidecar identity before recreating rows'
+    );
+    $schema_keyless_table_restore_payload = cow_merge_decode_payload_json(
+        (string)scalar($schema_keyless_table_restore_metadata, "SELECT resolved_payload FROM merge_resolutions WHERE conflict_id = $schema_keyless_table_restore_conflict_id ORDER BY id DESC LIMIT 1"),
+        'target-dropped no-primary-key table resolution'
+    );
+    assert_same($schema_keyless_table_restore_payload['indexes'][0]['name'] ?? null, 'plugin_keyless_table_restore_label_idx', 'source no-primary-key table restore resolution records restored source index SQL');
+    assert_same($schema_keyless_table_restore_payload['triggers'][0]['name'] ?? null, 'plugin_keyless_table_restore_insert', 'source no-primary-key table restore resolution records restored source trigger SQL');
+    $schema_keyless_table_restore_rerun = cow_merge_databases($schema_keyless_table_restore_base, $schema_keyless_table_restore_source, $schema_keyless_table_restore_target, $schema_keyless_table_restore_metadata, 'feature-keyless-table-restore', 'main');
+    assert_same($schema_keyless_table_restore_rerun['status'], 'completed', 'rerunning after target-dropped no-primary-key table source restore completes without a new conflict');
+    assert_same((int)scalar($schema_keyless_table_restore_target, "SELECT COUNT(*) FROM plugin_keyless_table_restore WHERE rowid IN (1, 9, 15)"), 3, 'rerunning after source no-primary-key table restore preserves restored and target-only sparse rows');
+    assert_same((int)scalar($schema_keyless_table_restore_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_keyless_table_restore_label_idx'"), 1, 'rerunning after source no-primary-key table restore preserves source index');
+    assert_same((int)scalar($schema_keyless_table_restore_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_keyless_table_restore_insert'"), 1, 'rerunning after source no-primary-key table restore preserves source trigger');
+    assert_same(
+        (int)scalar($schema_keyless_table_restore_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_keyless_table_restore' AND c.conflict_type = 'schema-target-dropped-table' AND r.source_branch = 'feature-keyless-table-restore'"),
+        1,
+        'rerunning after target-dropped no-primary-key table restore does not rediscover the resolved schema conflict'
     );
 
     $schema_table_drop_view_base = $tmp . '/schema-table-drop-view-base.sqlite';
