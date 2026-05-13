@@ -5567,6 +5567,116 @@ SQL);
     assert_same($schema_table_drop_fk_parent_resolution['status'], 'applied', 'source parent table drop applies after dependent child drop');
     assert_same((int)scalar($schema_table_drop_fk_target, "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('plugin_table_drop_fk_parent', 'plugin_table_drop_fk_child')"), 0, 'source FK parent and child table drops both apply after dependency ordering');
 
+    $schema_mixed_drop_base = $tmp . '/schema-mixed-drop-base.sqlite';
+    $schema_mixed_drop_source = $tmp . '/schema-mixed-drop-source.sqlite';
+    $schema_mixed_drop_target = $tmp . '/schema-mixed-drop-target.sqlite';
+    create_base_db($schema_mixed_drop_base);
+    $db = open_db($schema_mixed_drop_base);
+    $db->exec('CREATE TABLE plugin_mixed_drop_parent (item_id TEXT PRIMARY KEY, label TEXT)');
+    $db->exec('CREATE TABLE plugin_mixed_drop_child (child_id TEXT PRIMARY KEY, parent_id TEXT REFERENCES plugin_mixed_drop_parent(item_id), label TEXT)');
+    $db->exec('CREATE VIEW plugin_mixed_drop_child_live AS SELECT child_id, parent_id, label FROM plugin_mixed_drop_child');
+    $db->exec('CREATE TABLE plugin_mixed_drop_observer (child_id TEXT PRIMARY KEY)');
+    $db->exec('CREATE TABLE plugin_mixed_drop_audit (child_id TEXT, label TEXT)');
+    $db->exec(<<<'SQL'
+CREATE TRIGGER plugin_mixed_drop_observer_insert
+AFTER INSERT ON plugin_mixed_drop_observer
+BEGIN
+    INSERT INTO plugin_mixed_drop_audit (child_id, label)
+    SELECT child_id, label FROM plugin_mixed_drop_child_live WHERE child_id = NEW.child_id;
+END
+SQL);
+    $db->close();
+    copy($schema_mixed_drop_base, $schema_mixed_drop_source);
+    copy($schema_mixed_drop_base, $schema_mixed_drop_target);
+
+    $db = open_db($schema_mixed_drop_source);
+    $db->exec('DROP TRIGGER plugin_mixed_drop_observer_insert');
+    $db->exec('DROP VIEW plugin_mixed_drop_child_live');
+    $db->exec('DROP TABLE plugin_mixed_drop_child');
+    $db->exec('DROP TABLE plugin_mixed_drop_parent');
+    $db->close();
+
+    $result = cow_merge_databases($schema_mixed_drop_base, $schema_mixed_drop_source, $schema_mixed_drop_target, $metadata, 'feature-mixed-schema-drop-chain', 'main');
+    assert_same($result['status'], 'completed_with_conflicts', 'mixed source table/view/trigger drops remain reviewable');
+    $schema_mixed_drop_parent_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_mixed_drop_parent' AND column_name IS NULL AND conflict_type = 'schema-source-dropped-table' ORDER BY id DESC LIMIT 1");
+    $schema_mixed_drop_child_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_mixed_drop_child' AND column_name IS NULL AND conflict_type = 'schema-source-dropped-table' ORDER BY id DESC LIMIT 1");
+    $schema_mixed_drop_view_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_mixed_drop_child_live' AND conflict_type = 'schema-source-dropped-view' ORDER BY id DESC LIMIT 1");
+    $schema_mixed_drop_trigger_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_mixed_drop_observer_insert' AND conflict_type = 'schema-source-dropped-trigger' ORDER BY id DESC LIMIT 1");
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $schema_mixed_drop_parent_conflict_id, 'source', false, 'Preview parent before FK child table.', 'test'),
+        'dependent target foreign-key child tables',
+        'mixed schema parent table drop remains blocked by the FK child table'
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $schema_mixed_drop_child_conflict_id, 'source', false, 'Preview child before dependent view.', 'test'),
+        'dependent target views',
+        'mixed schema child table drop remains blocked by its dependent view'
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $schema_mixed_drop_view_conflict_id, 'source', false, 'Preview child view before trigger body dependency.', 'test'),
+        'dependent target trigger programs',
+        'mixed schema child view drop remains blocked by external trigger body references'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id IN ($schema_mixed_drop_parent_conflict_id, $schema_mixed_drop_child_conflict_id, $schema_mixed_drop_view_conflict_id)"),
+        0,
+        'failed mixed schema dependency previews do not record resolutions'
+    );
+    assert_same((int)scalar($schema_mixed_drop_target, "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('plugin_mixed_drop_parent', 'plugin_mixed_drop_child', 'plugin_mixed_drop_child_live', 'plugin_mixed_drop_observer_insert')"), 4, 'blocked mixed schema drops preserve the target dependency chain');
+    cow_merge_resolve_conflict(
+        $metadata,
+        $schema_mixed_drop_trigger_conflict_id,
+        'source',
+        true,
+        'Apply source external trigger drop first.',
+        'test'
+    );
+    $schema_mixed_drop_view_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_mixed_drop_view_conflict_id,
+        'source',
+        true,
+        'Apply source child view drop after trigger.',
+        'test'
+    );
+    assert_same($schema_mixed_drop_view_resolution['status'], 'applied', 'mixed schema child view drop applies after trigger body dependency is resolved');
+    $schema_mixed_drop_child_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_mixed_drop_child_conflict_id,
+        'source',
+        true,
+        'Apply source child table drop after view.',
+        'test'
+    );
+    assert_same($schema_mixed_drop_child_resolution['status'], 'applied', 'mixed schema FK child table drop applies after dependent view is resolved');
+    $schema_mixed_drop_parent_preview = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_mixed_drop_parent_conflict_id,
+        'source',
+        false,
+        'Preview source parent table drop after child.',
+        'test'
+    );
+    assert_same($schema_mixed_drop_parent_preview['status'], 'validated', 'mixed schema parent table drop validates after FK child table is resolved');
+    assert_same((int)scalar($schema_mixed_drop_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_mixed_drop_parent'"), 1, 'mixed schema parent drop preview does not mutate target');
+    $schema_mixed_drop_parent_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_mixed_drop_parent_conflict_id,
+        'source',
+        true,
+        'Apply source parent table drop after child.',
+        'test'
+    );
+    assert_same($schema_mixed_drop_parent_resolution['status'], 'applied', 'mixed schema parent table drop applies after dependency chain is resolved');
+    assert_same((int)scalar($schema_mixed_drop_target, "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('plugin_mixed_drop_parent', 'plugin_mixed_drop_child', 'plugin_mixed_drop_child_live', 'plugin_mixed_drop_observer_insert')"), 0, 'mixed table/view/trigger source drops all apply in dependency order');
+    $schema_mixed_drop_rerun = cow_merge_databases($schema_mixed_drop_base, $schema_mixed_drop_source, $schema_mixed_drop_target, $metadata, 'feature-mixed-schema-drop-chain', 'main');
+    assert_same($schema_mixed_drop_rerun['status'], 'completed', 'rerunning after mixed schema drop resolution completes without new conflicts');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-mixed-schema-drop-chain'"),
+        4,
+        'rerunning after mixed schema drop resolution does not rediscover resolved conflicts'
+    );
+
     $keyless_base = $tmp . '/keyless-base.sqlite';
     $keyless_source = $tmp . '/keyless-source.sqlite';
     $keyless_target = $tmp . '/keyless-target.sqlite';

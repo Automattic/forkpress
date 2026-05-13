@@ -30,6 +30,7 @@
 - Tightened validation-gated source table drops so dry-run and apply refuse to leave target trigger programs referencing the dropped table.
 - Tightened validation-gated source view drops so dry-run and apply refuse to leave target trigger programs referencing the dropped view, including table-drop dependency chains.
 - Added COW coverage for validation-gated source view drop chains where a parent view, dependent child view, and child view trigger must be resolved in dependency order.
+- Added COW coverage for mixed validation-gated source drop chains where an FK child table, dependent view, and external trigger body reference must be resolved before the parent table drop.
 - Materialized source-added table indexes before dependent source-added table rows, so foreign keys backed by source-added unique indexes do not produce false row constraint conflicts.
 - Ignored statement-local CTE aliases during source-added trigger dependency preflight while still tracking real schema objects referenced inside the CTE.
 - Treated source-added trigger references to temporary or attached SQLite schemas as validation-gated dependencies instead of matching same-named persistent tables.
