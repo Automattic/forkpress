@@ -720,6 +720,47 @@ try {
         'source-deleted foreign-key graph records auditable source-applied delete decisions'
     );
 
+    $fk_delete_update_base = $tmp . '/fk-delete-update-base.sqlite';
+    $fk_delete_update_source = $tmp . '/fk-delete-update-source.sqlite';
+    $fk_delete_update_target = $tmp . '/fk-delete-update-target.sqlite';
+    $fk_delete_update_metadata = $tmp . '/.forkpress/cow/merge/fk-delete-update-metadata.sqlite';
+    create_base_db($fk_delete_update_base);
+    copy($fk_delete_update_base, $fk_delete_update_source);
+    copy($fk_delete_update_base, $fk_delete_update_target);
+    foreach ([$fk_delete_update_base, $fk_delete_update_source, $fk_delete_update_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_fk_update_delete_parents (id INTEGER PRIMARY KEY, label TEXT)');
+        $db->exec('CREATE TABLE plugin_fk_update_delete_children (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES plugin_fk_update_delete_parents(id), label TEXT)');
+        $db->exec("INSERT INTO plugin_fk_update_delete_parents (id, label) VALUES (1, 'old parent')");
+        $db->exec("INSERT INTO plugin_fk_update_delete_parents (id, label) VALUES (2, 'kept parent')");
+        $db->exec("INSERT INTO plugin_fk_update_delete_children (id, parent_id, label) VALUES (20, 1, 'base child')");
+        $db->close();
+    }
+    $db = open_db($fk_delete_update_source);
+    $db->exec("UPDATE plugin_fk_update_delete_children SET parent_id = 2, label = 'source child reparented' WHERE id = 20");
+    $db->exec('DELETE FROM plugin_fk_update_delete_parents WHERE id = 1');
+    $db->close();
+    $fk_delete_update_result = cow_merge_databases($fk_delete_update_base, $fk_delete_update_source, $fk_delete_update_target, $fk_delete_update_metadata, 'feature-fk-delete-update', 'main');
+    assert_same($fk_delete_update_result['status'], 'completed', 'source updating a foreign-key child away from a deleted parent applies without a false target constraint conflict');
+    assert_same((int)scalar($fk_delete_update_target, 'SELECT COUNT(*) FROM plugin_fk_update_delete_parents WHERE id = 1'), 0, 'foreign-key parent source delete applies after source child update breaks the reference');
+    assert_same((int)scalar($fk_delete_update_target, 'SELECT parent_id FROM plugin_fk_update_delete_children WHERE id = 20'), 2, 'foreign-key child source update is applied before parent delete');
+    assert_same(scalar($fk_delete_update_target, 'SELECT label FROM plugin_fk_update_delete_children WHERE id = 20'), 'source child reparented', 'foreign-key child source payload is preserved');
+    assert_same(
+        (int)scalar($fk_delete_update_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE conflict_type = 'row-target-constraint' AND table_name LIKE 'plugin_fk_update_delete_%'"),
+        0,
+        'foreign-key child update plus parent delete does not record target constraint conflicts when target child is unchanged'
+    );
+    assert_same(
+        (int)scalar($fk_delete_update_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_fk_update_delete_parents' AND decision = 'source-applied' AND reason = 'source deleted row and target did not change it'"),
+        1,
+        'foreign-key parent delete after child update remains auditable'
+    );
+    assert_same(
+        (int)scalar($fk_delete_update_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_fk_update_delete_children' AND decision = 'source-applied' AND reason = 'source and target changed row to the same payload'"),
+        1,
+        'foreign-key child update after parent delete helper remains auditable'
+    );
+
     $target_only_base = $tmp . '/target-only-base.sqlite';
     $target_only_source = $tmp . '/target-only-source.sqlite';
     $target_only_target = $tmp . '/target-only-target.sqlite';

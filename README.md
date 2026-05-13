@@ -477,9 +477,9 @@ tooling.
   parent-before-child table ordering, target is also kept by default and the
   choice is recorded as an auditable `row-target-constraint`. Source deletes
   that would orphan target-side foreign-key children are held the same way until
-  a reviewed source delete validates, while source-deleted child rows that are
-  unchanged in target are removed first so parent-and-child deletes apply
-  together; identical
+  a reviewed source delete validates, while unchanged target-side child rows
+  that source deleted or reparented away from the deleted parent are applied
+  first so parent-and-dependent changes land together; identical
   source/target inserts with the same explicit primary key, and identical source/target
   updates or deletes to
   existing explicit-primary-key rows, are recorded as non-conflicting
