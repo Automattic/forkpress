@@ -24,6 +24,7 @@
 - Preflighted source-added trigger subject table/view dependencies so triggers attached to missing restored or source-added objects stay validation-gated with explicit audit metadata.
 - Ordered acyclic source-added trigger programs by trigger subject/write dependencies so dependent trigger chains install without false schema conflicts.
 - Held source-added trigger program cycles as explicit validation-gated `schema-source-added-trigger` conflicts instead of installing unsupported trigger graphs.
+- Held source-added or source-resolved triggers that would cycle with target-side trigger programs as validation-gated schema conflicts instead of installing unsupported mixed trigger graphs.
 - Extended source-added trigger dependency preflight to clear trigger body read references so triggers that read missing target-side schema objects stay validation-gated.
 - Validated source-added trigger programs after installation so triggers with invalid target-side column references stay validation-gated instead of becoming latent runtime failures.
 - Added COW coverage for source-added trigger program validation catching invalid `OLD`/`NEW` references and invalid `UPDATE OF` columns before target installation.

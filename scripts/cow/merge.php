@@ -5700,6 +5700,31 @@ function cow_merge_sort_trigger_schema_objects(array $objects, array $source_obj
     return $ordered;
 }
 
+function cow_merge_trigger_program_cycle_against_target(SQLite3 $db, string $name, string $sql): ?string {
+    $triggers = cow_merge_schema_object_sql_map($db, 'trigger');
+    $name_key = strtolower($name);
+    foreach (array_keys($triggers) as $existing_name) {
+        if (strtolower((string)$existing_name) === $name_key) {
+            unset($triggers[$existing_name]);
+        }
+    }
+    $triggers[$name] = [
+        'table' => (string)(cow_merge_trigger_subject($sql)['table'] ?? ''),
+        'sql' => $sql,
+    ];
+    $cycles = cow_merge_trigger_program_dependency_cycles(array_keys($triggers), $triggers);
+    return $cycles[$name_key] ?? null;
+}
+
+function cow_merge_validate_trigger_program_acyclic(SQLite3 $db, string $name, string $sql): void {
+    $cycle = cow_merge_trigger_program_cycle_against_target($db, $name, $sql);
+    if ($cycle !== null) {
+        throw new InvalidArgumentException(
+            'source trigger ' . $name . ' has unsupported cyclic trigger dependencies: ' . $cycle
+        );
+    }
+}
+
 function cow_merge_sort_view_schema_objects(array $objects, array $source_objects): array {
     $dependency_map = cow_merge_view_schema_dependency_map($objects, $source_objects);
     $ordered = [];
@@ -6545,6 +6570,7 @@ function cow_merge_resolve_schema_conflict(
                         }
                         if ($source_sql !== null) {
                             cow_merge_validate_trigger_references($target, $object, $source_sql);
+                            cow_merge_validate_trigger_program_acyclic($target, $object, $source_sql);
                         }
                         if ($source_sql !== null && !@$target->exec($source_sql)) {
                             throw new RuntimeException("failed to apply source $type schema resolution: " . $target->lastErrorMsg());
@@ -8869,6 +8895,7 @@ function cow_merge_apply_schema_object_changes(
                         );
                     }
                     cow_merge_validate_trigger_references($target, $name, $source_sql);
+                    cow_merge_validate_trigger_program_acyclic($target, $name, $source_sql);
                 } elseif ($type === 'view') {
                     $cycle = $view_cycles[strtolower($name)] ?? null;
                     if ($cycle !== null) {

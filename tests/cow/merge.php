@@ -4898,6 +4898,111 @@ SQL);
         'failed cyclic trigger resolution attempts do not record resolutions'
     );
 
+    $source_added_trigger_target_cycle_base = $tmp . '/source-added-trigger-target-cycle-base.sqlite';
+    $source_added_trigger_target_cycle_source = $tmp . '/source-added-trigger-target-cycle-source.sqlite';
+    $source_added_trigger_target_cycle_target = $tmp . '/source-added-trigger-target-cycle-target.sqlite';
+    $source_added_trigger_target_cycle_metadata = $tmp . '/.forkpress/cow/merge/source-added-trigger-target-cycle-metadata.sqlite';
+    create_base_db($source_added_trigger_target_cycle_base);
+    $db = open_db($source_added_trigger_target_cycle_base);
+    $db->exec('CREATE TABLE plugin_trigger_target_cycle_alpha (label TEXT DEFAULT "alpha")');
+    $db->exec('CREATE TABLE plugin_trigger_target_cycle_beta (label TEXT DEFAULT "beta")');
+    $db->close();
+    copy($source_added_trigger_target_cycle_base, $source_added_trigger_target_cycle_source);
+    copy($source_added_trigger_target_cycle_base, $source_added_trigger_target_cycle_target);
+    $db = open_db($source_added_trigger_target_cycle_source);
+    $db->exec('CREATE TRIGGER plugin_trigger_target_cycle_alpha_insert AFTER INSERT ON plugin_trigger_target_cycle_alpha BEGIN INSERT INTO plugin_trigger_target_cycle_beta (label) VALUES (NEW.label); END');
+    $db->close();
+    $db = open_db($source_added_trigger_target_cycle_target);
+    $db->exec('CREATE TRIGGER plugin_trigger_target_cycle_beta_insert AFTER INSERT ON plugin_trigger_target_cycle_beta BEGIN INSERT INTO plugin_trigger_target_cycle_alpha (label) VALUES (NEW.label); END');
+    $db->close();
+    $source_added_trigger_target_cycle_result = cow_merge_databases(
+        $source_added_trigger_target_cycle_base,
+        $source_added_trigger_target_cycle_source,
+        $source_added_trigger_target_cycle_target,
+        $source_added_trigger_target_cycle_metadata,
+        'feature-source-trigger-target-cycle',
+        'main'
+    );
+    assert_same($source_added_trigger_target_cycle_result['status'], 'completed_with_conflicts', 'source-added trigger cycles with target-side trigger programs are reviewable');
+    assert_same((int)scalar($source_added_trigger_target_cycle_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_trigger_target_cycle_alpha_insert'"), 0, 'source-added trigger is not installed when it cycles with a target trigger');
+    assert_same((int)scalar($source_added_trigger_target_cycle_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_trigger_target_cycle_beta_insert'"), 1, 'target-side trigger remains preserved by default');
+    $source_added_trigger_target_cycle_conflict_id = (int)scalar($source_added_trigger_target_cycle_metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_trigger_target_cycle_alpha_insert' AND conflict_type = 'schema-source-added-trigger' ORDER BY id DESC LIMIT 1");
+    assert_true($source_added_trigger_target_cycle_conflict_id > 0, 'source-added target-trigger cycle records a schema conflict');
+    $source_added_trigger_target_cycle_payload = cow_merge_decode_payload_json(
+        (string)scalar($source_added_trigger_target_cycle_metadata, "SELECT source_payload FROM merge_conflicts WHERE id = $source_added_trigger_target_cycle_conflict_id"),
+        'source-added target trigger cycle payload'
+    );
+    assert_true(
+        str_contains((string)($source_added_trigger_target_cycle_payload['error'] ?? ''), 'unsupported cyclic trigger dependencies') &&
+            str_contains((string)($source_added_trigger_target_cycle_payload['error'] ?? ''), 'plugin_trigger_target_cycle_alpha_insert') &&
+            str_contains((string)($source_added_trigger_target_cycle_payload['error'] ?? ''), 'plugin_trigger_target_cycle_beta_insert'),
+        'source-added target-trigger cycle payload records both trigger names'
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $source_added_trigger_target_cycle_metadata,
+            $source_added_trigger_target_cycle_conflict_id,
+            'source',
+            true,
+            'Try source trigger that cycles with target trigger.',
+            'test'
+        ),
+        'unsupported cyclic trigger dependencies',
+        'source-added target-trigger cycle resolution remains validation-gated'
+    );
+
+    $schema_changed_trigger_target_cycle_base = $tmp . '/schema-changed-trigger-target-cycle-base.sqlite';
+    $schema_changed_trigger_target_cycle_source = $tmp . '/schema-changed-trigger-target-cycle-source.sqlite';
+    $schema_changed_trigger_target_cycle_target = $tmp . '/schema-changed-trigger-target-cycle-target.sqlite';
+    $schema_changed_trigger_target_cycle_metadata = $tmp . '/.forkpress/cow/merge/schema-changed-trigger-target-cycle-metadata.sqlite';
+    create_base_db($schema_changed_trigger_target_cycle_base);
+    $db = open_db($schema_changed_trigger_target_cycle_base);
+    $db->exec('CREATE TABLE plugin_trigger_changed_cycle_alpha (label TEXT DEFAULT "alpha")');
+    $db->exec('CREATE TABLE plugin_trigger_changed_cycle_beta (label TEXT DEFAULT "beta")');
+    $db->exec('CREATE TRIGGER plugin_trigger_changed_cycle_alpha_insert AFTER INSERT ON plugin_trigger_changed_cycle_alpha BEGIN SELECT NEW.label; END');
+    $db->close();
+    copy($schema_changed_trigger_target_cycle_base, $schema_changed_trigger_target_cycle_source);
+    copy($schema_changed_trigger_target_cycle_base, $schema_changed_trigger_target_cycle_target);
+    $db = open_db($schema_changed_trigger_target_cycle_source);
+    $db->exec('DROP TRIGGER plugin_trigger_changed_cycle_alpha_insert');
+    $db->exec('CREATE TRIGGER plugin_trigger_changed_cycle_alpha_insert AFTER INSERT ON plugin_trigger_changed_cycle_alpha BEGIN INSERT INTO plugin_trigger_changed_cycle_beta (label) VALUES (NEW.label); END');
+    $db->close();
+    $db = open_db($schema_changed_trigger_target_cycle_target);
+    $db->exec('CREATE TRIGGER plugin_trigger_changed_cycle_beta_insert AFTER INSERT ON plugin_trigger_changed_cycle_beta BEGIN INSERT INTO plugin_trigger_changed_cycle_alpha (label) VALUES (NEW.label); END');
+    $db->close();
+    $schema_changed_trigger_target_cycle_result = cow_merge_databases(
+        $schema_changed_trigger_target_cycle_base,
+        $schema_changed_trigger_target_cycle_source,
+        $schema_changed_trigger_target_cycle_target,
+        $schema_changed_trigger_target_cycle_metadata,
+        'feature-changed-trigger-target-cycle',
+        'main'
+    );
+    assert_same($schema_changed_trigger_target_cycle_result['status'], 'completed_with_conflicts', 'source-changed trigger with a target-side trigger cycle remains reviewable');
+    $schema_changed_trigger_target_cycle_conflict_id = (int)scalar($schema_changed_trigger_target_cycle_metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_trigger_changed_cycle_alpha_insert' AND conflict_type = 'schema-source-changed-trigger' ORDER BY id DESC LIMIT 1");
+    assert_true($schema_changed_trigger_target_cycle_conflict_id > 0, 'source-changed target-trigger cycle records a schema conflict');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $schema_changed_trigger_target_cycle_metadata,
+            $schema_changed_trigger_target_cycle_conflict_id,
+            'source',
+            false,
+            'Preview changed trigger that cycles with target trigger.',
+            'test'
+        ),
+        'unsupported cyclic trigger dependencies',
+        'source-changed trigger resolution dry-run remains gated by target trigger cycle validation'
+    );
+    assert_same(
+        (int)scalar($schema_changed_trigger_target_cycle_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_changed_trigger_target_cycle_conflict_id"),
+        0,
+        'failed changed-trigger cycle dry-run does not record a resolution'
+    );
+    assert_true(
+        str_contains((string)scalar($schema_changed_trigger_target_cycle_target, "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_trigger_changed_cycle_alpha_insert'"), 'SELECT NEW.label'),
+        'failed changed-trigger cycle dry-run rolls back the target trigger rewrite'
+    );
+
     $source_added_view_missing_base = $tmp . '/source-added-view-missing-base.sqlite';
     $source_added_view_missing_source = $tmp . '/source-added-view-missing-source.sqlite';
     $source_added_view_missing_target = $tmp . '/source-added-view-missing-target.sqlite';
