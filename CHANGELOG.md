@@ -36,6 +36,7 @@
 - Tightened validation-gated source index resolutions so dry-run and apply both prove target rows satisfy the audited source index before reporting success.
 - Tightened validation-gated source index rewrites and drops so dry-run and apply reject latent target foreign-key mismatches before reporting success.
 - Tightened validation-gated source table restores and compatible table rebuilds so dry-run and apply reject latent foreign-key mismatches and invalid restored trigger programs before reporting success.
+- Added COW coverage for compatible table rebuild rollback when a preserved target trigger would become invalid while an index-backed foreign-key child table still depends on the rebuilt table.
 - Tightened validation-gated source view rewrites so preserved target view triggers must still compile before dry-run or apply reports success.
 - Tightened validation-gated source table drops so dry-run and apply refuse to leave dependent target foreign-key child tables pointing at a missing parent table.
 - Tightened validation-gated source table drops so dry-run and apply refuse to leave target trigger programs referencing the dropped table.

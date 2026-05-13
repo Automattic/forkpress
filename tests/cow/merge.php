@@ -3000,6 +3000,80 @@ SQL);
     assert_same(column_type($schema_rebuild_fk_target, 'plugin_rebuild_fk_parent', 'label'), 'INTEGER', 'validated table rebuild applies the audited source column type');
     assert_true(!str_contains((string)scalar($schema_rebuild_fk_target, "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'plugin_rebuild_fk_parent'"), 'UNIQUE'), 'validated table rebuild keeps the audited source parent key shape');
 
+    $schema_rebuild_trigger_fk_base = $tmp . '/schema-rebuild-trigger-fk-base.sqlite';
+    $schema_rebuild_trigger_fk_source = $tmp . '/schema-rebuild-trigger-fk-source.sqlite';
+    $schema_rebuild_trigger_fk_target = $tmp . '/schema-rebuild-trigger-fk-target.sqlite';
+    create_base_db($schema_rebuild_trigger_fk_base);
+    $db = open_db($schema_rebuild_trigger_fk_base);
+    $db->exec('CREATE TABLE plugin_rebuild_trigger_fk_parent (code TEXT NOT NULL PRIMARY KEY, label TEXT NOT NULL)');
+    $db->exec('CREATE UNIQUE INDEX plugin_rebuild_trigger_fk_parent_label_idx ON plugin_rebuild_trigger_fk_parent(label)');
+    $db->exec('CREATE TABLE plugin_rebuild_trigger_fk_child (parent_label TEXT NOT NULL REFERENCES plugin_rebuild_trigger_fk_parent(label), note TEXT)');
+    $db->exec('CREATE TABLE plugin_rebuild_trigger_fk_audit (seen_rowid TEXT, code TEXT)');
+    $db->exec("INSERT INTO plugin_rebuild_trigger_fk_parent (code, label) VALUES ('parent-code', 'parent-label')");
+    $db->exec("INSERT INTO plugin_rebuild_trigger_fk_child (parent_label, note) VALUES ('parent-label', 'base child')");
+    $db->close();
+    copy($schema_rebuild_trigger_fk_base, $schema_rebuild_trigger_fk_source);
+    copy($schema_rebuild_trigger_fk_base, $schema_rebuild_trigger_fk_target);
+
+    $db = open_db($schema_rebuild_trigger_fk_source);
+    $db->exec('DROP INDEX plugin_rebuild_trigger_fk_parent_label_idx');
+    $db->exec('CREATE TABLE plugin_rebuild_trigger_fk_parent_new (code TEXT NOT NULL PRIMARY KEY, label TEXT NOT NULL) WITHOUT ROWID');
+    $db->exec('INSERT INTO plugin_rebuild_trigger_fk_parent_new (code, label) SELECT code, label FROM plugin_rebuild_trigger_fk_parent');
+    $db->exec('DROP TABLE plugin_rebuild_trigger_fk_parent');
+    $db->exec('ALTER TABLE plugin_rebuild_trigger_fk_parent_new RENAME TO plugin_rebuild_trigger_fk_parent');
+    $db->exec('CREATE UNIQUE INDEX plugin_rebuild_trigger_fk_parent_label_idx ON plugin_rebuild_trigger_fk_parent(label)');
+    $db->close();
+    $db = open_db($schema_rebuild_trigger_fk_target);
+    $db->exec('DROP INDEX plugin_rebuild_trigger_fk_parent_label_idx');
+    $db->exec('CREATE TABLE plugin_rebuild_trigger_fk_parent_new (code TEXT NOT NULL PRIMARY KEY, label NUMERIC NOT NULL)');
+    $db->exec('INSERT INTO plugin_rebuild_trigger_fk_parent_new (code, label) SELECT code, label FROM plugin_rebuild_trigger_fk_parent');
+    $db->exec('DROP TABLE plugin_rebuild_trigger_fk_parent');
+    $db->exec('ALTER TABLE plugin_rebuild_trigger_fk_parent_new RENAME TO plugin_rebuild_trigger_fk_parent');
+    $db->exec('CREATE UNIQUE INDEX plugin_rebuild_trigger_fk_parent_label_idx ON plugin_rebuild_trigger_fk_parent(label)');
+    $db->exec('CREATE TRIGGER plugin_rebuild_trigger_fk_parent_insert AFTER INSERT ON plugin_rebuild_trigger_fk_parent BEGIN INSERT INTO plugin_rebuild_trigger_fk_audit (seen_rowid, code) VALUES (NEW.rowid, NEW.code); END');
+    $db->close();
+
+    $schema_rebuild_trigger_fk_result = cow_merge_databases(
+        $schema_rebuild_trigger_fk_base,
+        $schema_rebuild_trigger_fk_source,
+        $schema_rebuild_trigger_fk_target,
+        $metadata,
+        'feature-schema-rebuild-trigger-fk',
+        'main'
+    );
+    assert_same($schema_rebuild_trigger_fk_result['status'], 'completed_with_conflicts', 'compatible table rebuild with preserved trigger and index-backed FK remains reviewable');
+    $schema_rebuild_trigger_fk_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_rebuild_trigger_fk_parent' AND conflict_type = 'schema-conflict' ORDER BY id DESC LIMIT 1");
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $schema_rebuild_trigger_fk_conflict_id, 'source', false, 'Preview rowid-sensitive table rebuild.', 'test'),
+        'no such column: NEW.rowid',
+        'dry-run table rebuild rejects a preserved trigger that would become invalid after source schema application'
+    );
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_rebuild_trigger_fk_conflict_id"), 0, 'failed trigger-sensitive table rebuild dry-run does not record resolution metadata');
+    assert_same(column_type($schema_rebuild_trigger_fk_target, 'plugin_rebuild_trigger_fk_parent', 'label'), 'NUMERIC', 'failed trigger-sensitive table rebuild dry-run rolls back target table schema');
+    assert_same((int)scalar($schema_rebuild_trigger_fk_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_rebuild_trigger_fk_parent_label_idx'"), 1, 'failed trigger-sensitive table rebuild dry-run preserves target FK backing index');
+    assert_same((int)scalar($schema_rebuild_trigger_fk_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_rebuild_trigger_fk_parent_insert'"), 1, 'failed trigger-sensitive table rebuild dry-run preserves target trigger');
+    $db = open_db($schema_rebuild_trigger_fk_target);
+    $db->exec("INSERT INTO plugin_rebuild_trigger_fk_parent (code, label) VALUES ('target-rowid-parent', 'target-rowid-label')");
+    $db->exec("INSERT INTO plugin_rebuild_trigger_fk_child (parent_label, note) VALUES ('target-rowid-label', 'target child still validates')");
+    $db->close();
+    assert_same(scalar($schema_rebuild_trigger_fk_target, "SELECT code FROM plugin_rebuild_trigger_fk_audit WHERE code = 'target-rowid-parent'"), 'target-rowid-parent', 'preserved target trigger still fires after failed table rebuild dry-run');
+    assert_same(scalar($schema_rebuild_trigger_fk_target, "SELECT note FROM plugin_rebuild_trigger_fk_child WHERE parent_label = 'target-rowid-label'"), 'target child still validates', 'preserved target FK backing index still supports child inserts after failed table rebuild dry-run');
+    $db = open_db($schema_rebuild_trigger_fk_target);
+    $db->exec('DROP TRIGGER plugin_rebuild_trigger_fk_parent_insert');
+    $db->close();
+    $schema_rebuild_trigger_fk_apply = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_rebuild_trigger_fk_conflict_id,
+        'source',
+        true,
+        'Apply rowid-sensitive table rebuild after trigger review.',
+        'test'
+    );
+    assert_same($schema_rebuild_trigger_fk_apply['status'], 'applied', 'table rebuild applies after the invalid preserved trigger is handled');
+    assert_true(str_contains((string)scalar($schema_rebuild_trigger_fk_target, "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'plugin_rebuild_trigger_fk_parent'"), 'WITHOUT ROWID'), 'validated trigger-sensitive table rebuild applies the audited source WITHOUT ROWID schema');
+    assert_same((int)scalar($schema_rebuild_trigger_fk_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_rebuild_trigger_fk_parent_label_idx'"), 1, 'validated trigger-sensitive table rebuild preserves the FK backing index');
+    assert_same(scalar($schema_rebuild_trigger_fk_target, "SELECT note FROM plugin_rebuild_trigger_fk_child WHERE parent_label = 'parent-label'"), 'base child', 'validated trigger-sensitive table rebuild keeps existing index-backed child rows valid');
+
     $schema_keyless_rebuild_base = $tmp . '/schema-keyless-rebuild-base.sqlite';
     $schema_keyless_rebuild_source = $tmp . '/schema-keyless-rebuild-source.sqlite';
     $schema_keyless_rebuild_target = $tmp . '/schema-keyless-rebuild-target.sqlite';
