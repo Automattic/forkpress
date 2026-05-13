@@ -4562,6 +4562,25 @@ SQL);
         ['plugin_trigger_cte_audit', 'plugin_trigger_cte_gate'],
         'trigger dependency parsing ignores CTE aliases while retaining real tables read inside the CTE'
     );
+    $trigger_write_refs = cow_merge_trigger_written_schema_objects(
+        'CREATE TRIGGER plugin_trigger_write_items_audit AFTER INSERT ON plugin_trigger_write_items BEGIN ' .
+        'INSERT INTO plugin_trigger_write_audit (item_label) ' .
+        'WITH plugin_trigger_write_rows(item_label) AS (SELECT NEW.label FROM plugin_trigger_write_gate) ' .
+        'SELECT item_label FROM plugin_trigger_write_rows; ' .
+        'UPDATE main.plugin_trigger_write_gate SET enabled = 1; ' .
+        'DELETE FROM temp.plugin_trigger_write_temp; ' .
+        'SELECT NEW.label FROM plugin_trigger_write_read_only; END'
+    );
+    usort($trigger_write_refs, fn(array $a, array $b): int => strcmp(($a['schema'] ?? '') . '.' . $a['name'], ($b['schema'] ?? '') . '.' . $b['name']));
+    assert_same(
+        $trigger_write_refs,
+        [
+            ['schema' => null, 'name' => 'plugin_trigger_write_audit'],
+            ['schema' => 'main', 'name' => 'plugin_trigger_write_gate'],
+            ['schema' => 'temp', 'name' => 'plugin_trigger_write_temp'],
+        ],
+        'trigger write dependency parsing keeps DML targets while ignoring CTE aliases and read-only references'
+    );
 
     $trigger_temp_target = $tmp . '/trigger-temp-reference-target.sqlite';
     create_base_db($trigger_temp_target);
@@ -4782,6 +4801,68 @@ SQL);
         (int)scalar($source_added_view_cycle_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id IN (SELECT id FROM merge_conflicts WHERE conflict_type = 'schema-source-added-view')"),
         0,
         'failed cyclic view resolution attempts do not record resolutions'
+    );
+
+    $source_added_trigger_cycle_base = $tmp . '/source-added-trigger-cycle-base.sqlite';
+    $source_added_trigger_cycle_source = $tmp . '/source-added-trigger-cycle-source.sqlite';
+    $source_added_trigger_cycle_target = $tmp . '/source-added-trigger-cycle-target.sqlite';
+    $source_added_trigger_cycle_metadata = $tmp . '/.forkpress/cow/merge/source-added-trigger-cycle-metadata.sqlite';
+    create_base_db($source_added_trigger_cycle_base);
+    $db = open_db($source_added_trigger_cycle_base);
+    $db->exec('CREATE TABLE plugin_trigger_cycle_alpha (label TEXT)');
+    $db->exec('CREATE TABLE plugin_trigger_cycle_beta (label TEXT)');
+    $db->exec('CREATE TABLE plugin_trigger_cycle_self (label TEXT)');
+    $db->close();
+    copy($source_added_trigger_cycle_base, $source_added_trigger_cycle_source);
+    copy($source_added_trigger_cycle_base, $source_added_trigger_cycle_target);
+    $db = open_db($source_added_trigger_cycle_source);
+    $db->exec('CREATE TRIGGER plugin_trigger_cycle_alpha_insert AFTER INSERT ON plugin_trigger_cycle_alpha BEGIN INSERT INTO plugin_trigger_cycle_beta (label) VALUES (NEW.label); END');
+    $db->exec('CREATE TRIGGER plugin_trigger_cycle_beta_insert AFTER INSERT ON plugin_trigger_cycle_beta BEGIN INSERT INTO plugin_trigger_cycle_alpha (label) VALUES (NEW.label); END');
+    $db->exec('CREATE TRIGGER plugin_trigger_cycle_self_insert AFTER INSERT ON plugin_trigger_cycle_self BEGIN UPDATE plugin_trigger_cycle_self SET label = NEW.label WHERE rowid = NEW.rowid; END');
+    $db->close();
+    $source_added_trigger_cycle_result = cow_merge_databases(
+        $source_added_trigger_cycle_base,
+        $source_added_trigger_cycle_source,
+        $source_added_trigger_cycle_target,
+        $source_added_trigger_cycle_metadata,
+        'feature-source-trigger-cycle',
+        'main'
+    );
+    assert_same($source_added_trigger_cycle_result['status'], 'completed_with_conflicts', 'source-added cyclic trigger programs are held as reviewable schema conflicts');
+    assert_same((int)scalar($source_added_trigger_cycle_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'plugin_trigger_cycle_%'"), 0, 'source-added cyclic trigger programs are not installed on target');
+    foreach ([
+        'plugin_trigger_cycle_alpha_insert' => 'plugin_trigger_cycle_alpha_insert -> plugin_trigger_cycle_beta_insert -> plugin_trigger_cycle_alpha_insert',
+        'plugin_trigger_cycle_beta_insert' => 'plugin_trigger_cycle_alpha_insert -> plugin_trigger_cycle_beta_insert -> plugin_trigger_cycle_alpha_insert',
+        'plugin_trigger_cycle_self_insert' => 'plugin_trigger_cycle_self_insert -> plugin_trigger_cycle_self_insert',
+    ] as $trigger_name => $expected_cycle) {
+        $conflict_id = (int)scalar($source_added_trigger_cycle_metadata, "SELECT id FROM merge_conflicts WHERE column_name = '$trigger_name' AND conflict_type = 'schema-source-added-trigger' ORDER BY id DESC LIMIT 1");
+        assert_true($conflict_id > 0, "$trigger_name records a source-added cyclic trigger conflict");
+        $payload = cow_merge_decode_payload_json(
+            (string)scalar($source_added_trigger_cycle_metadata, "SELECT source_payload FROM merge_conflicts WHERE id = $conflict_id"),
+            "$trigger_name cyclic trigger payload"
+        );
+        assert_true(
+            str_contains((string)($payload['error'] ?? ''), 'unsupported cyclic trigger dependencies') &&
+                str_contains((string)($payload['error'] ?? ''), $expected_cycle),
+            "$trigger_name cyclic trigger conflict payload records the unsupported dependency cycle"
+        );
+        assert_throws(
+            fn() => cow_merge_resolve_conflict(
+                $source_added_trigger_cycle_metadata,
+                $conflict_id,
+                'source',
+                true,
+                "Try cyclic trigger $trigger_name.",
+                'test'
+            ),
+            'unsupported cyclic trigger dependencies',
+            "$trigger_name source resolution remains validation-gated"
+        );
+    }
+    assert_same(
+        (int)scalar($source_added_trigger_cycle_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id IN (SELECT id FROM merge_conflicts WHERE conflict_type = 'schema-source-added-trigger')"),
+        0,
+        'failed cyclic trigger resolution attempts do not record resolutions'
     );
 
     $source_added_view_missing_base = $tmp . '/source-added-view-missing-base.sqlite';

@@ -496,7 +496,9 @@ tooling.
   dependency order. Source-added triggers attached to, reading, or writing
   missing target-side schema objects are held as reviewable
   `schema-source-added-trigger` conflicts instead of being installed as latent
-  invalid triggers, and trigger programs are compiled after installation so
+  invalid triggers. Source-added trigger program cycles are held as reviewable
+  `schema-source-added-trigger` conflicts instead of installing an unsupported
+  trigger graph, and trigger programs are compiled after installation so
   invalid target-side column references stay validation-gated too;
   statement-local CTE aliases in trigger bodies are ignored while real schema
   objects referenced inside those CTEs remain dependencies.

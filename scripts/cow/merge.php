@@ -5457,6 +5457,54 @@ function cow_merge_sql_referenced_tables(string $sql): array {
     return array_keys($refs);
 }
 
+function cow_merge_sql_written_schema_objects(string $sql): array {
+    $schema_identifier = cow_merge_identifier_pattern('schema_');
+    $object_identifier = cow_merge_identifier_pattern('object_');
+    $patterns = [
+        '/\b(?:INSERT(?:\s+OR\s+\w+)?|REPLACE)\s+INTO\s+(?:' . $schema_identifier . '\s*\.\s*)?' . $object_identifier . '/i',
+        '/\bUPDATE(?:\s+OR\s+\w+)?\s+(?:' . $schema_identifier . '\s*\.\s*)?' . $object_identifier . '/i',
+        '/\bDELETE\s+FROM\s+(?:' . $schema_identifier . '\s*\.\s*)?' . $object_identifier . '/i',
+    ];
+    $refs = [];
+    foreach (cow_merge_sql_split_statements($sql) as $statement) {
+        $cte_names = array_fill_keys(cow_merge_sql_cte_names($statement), true);
+        $ignored_ranges = cow_merge_sql_ignored_ranges($statement);
+        foreach ($patterns as $pattern) {
+            if (!preg_match_all($pattern, $statement, $matches, PREG_SET_ORDER | PREG_OFFSET_CAPTURE)) {
+                continue;
+            }
+            foreach ($matches as $match) {
+                if (cow_merge_sql_offset_in_ranges((int)$match[0][1], $ignored_ranges)) {
+                    continue;
+                }
+                $flat_match = cow_merge_regex_flat_match($match);
+                $name = cow_merge_sql_reference_name($flat_match, 'object_');
+                if ($name !== null && !isset($cte_names[$name])) {
+                    $schema = cow_merge_sql_reference_name($flat_match, 'schema_');
+                    $key = strtolower((string)($schema ?? '')) . '.' . strtolower($name);
+                    $refs[$key] = ['schema' => $schema, 'name' => $name];
+                }
+            }
+        }
+    }
+    return array_values($refs);
+}
+
+function cow_merge_trigger_written_schema_objects(string $sql): array {
+    $body = $sql;
+    if (preg_match('/\bBEGIN\b(.*)\bEND\b/is', $sql, $match)) {
+        $body = (string)$match[1];
+    }
+    return cow_merge_sql_written_schema_objects($body);
+}
+
+function cow_merge_schema_reference_key(?string $schema, string $name): string {
+    $normalized_schema = $schema === null || $schema === '' || strcasecmp($schema, 'main') === 0
+        ? ''
+        : strtolower($schema);
+    return $normalized_schema . '.' . strtolower($name);
+}
+
 function cow_merge_view_schema_dependency_map(array $objects, array $source_objects): array {
     $object_names = [];
     foreach ($objects as $object) {
@@ -5492,6 +5540,88 @@ function cow_merge_view_schema_dependency_cycles(array $objects, array $source_o
     $stack = [];
     $positions = [];
 
+    $visit = function (string $key) use (&$visit, &$cycles, &$state, &$stack, &$positions, $map): void {
+        if (($state[$key] ?? null) === 'done') {
+            return;
+        }
+        if (($state[$key] ?? null) === 'visiting') {
+            return;
+        }
+        $state[$key] = 'visiting';
+        $positions[$key] = count($stack);
+        $stack[] = $key;
+
+        foreach (($map[$key]['dependencies'] ?? []) as $dependency_key => $dependency_name) {
+            if (!isset($map[$dependency_key])) {
+                continue;
+            }
+            if (($state[$dependency_key] ?? null) === 'visiting') {
+                $cycle_keys = array_slice($stack, $positions[$dependency_key]);
+                $cycle_keys[] = $dependency_key;
+                $cycle_names = array_map(
+                    fn(string $cycle_key): string => (string)$map[$cycle_key]['name'],
+                    $cycle_keys
+                );
+                $message = implode(' -> ', $cycle_names);
+                foreach (array_unique(array_slice($cycle_keys, 0, -1)) as $cycle_key) {
+                    $cycles[$cycle_key] = $message;
+                }
+                continue;
+            }
+            $visit($dependency_key);
+        }
+
+        array_pop($stack);
+        unset($positions[$key]);
+        $state[$key] = 'done';
+    };
+
+    foreach (array_keys($map) as $key) {
+        $visit($key);
+    }
+
+    return $cycles;
+}
+
+function cow_merge_trigger_program_dependency_cycles(array $objects, array $source_objects): array {
+    $triggers_by_subject = [];
+    $map = [];
+    foreach ($objects as $object) {
+        $name = (string)$object;
+        $source_sql = (string)($source_objects[$name]['sql'] ?? '');
+        if ($source_sql === '') {
+            continue;
+        }
+        $subject = cow_merge_trigger_subject($source_sql);
+        if ($subject === null) {
+            continue;
+        }
+        $key = strtolower($name);
+        $subject_key = cow_merge_schema_reference_key($subject['schema'], (string)$subject['table']);
+        $triggers_by_subject[$subject_key][$key] = $name;
+        $map[$key] = [
+            'name' => $name,
+            'sql' => $source_sql,
+            'dependencies' => [],
+        ];
+    }
+
+    foreach ($map as $key => $entry) {
+        $dependencies = [];
+        foreach (cow_merge_trigger_written_schema_objects((string)$entry['sql']) as $reference) {
+            $reference_key = cow_merge_schema_reference_key($reference['schema'] ?? null, (string)$reference['name']);
+            foreach (($triggers_by_subject[$reference_key] ?? []) as $trigger_key => $trigger_name) {
+                $dependencies[$trigger_key] = $trigger_name;
+            }
+        }
+        asort($dependencies);
+        $map[$key]['dependencies'] = $dependencies;
+    }
+
+    $cycles = [];
+    $state = [];
+    $stack = [];
+    $positions = [];
     $visit = function (string $key) use (&$visit, &$cycles, &$state, &$stack, &$positions, $map): void {
         if (($state[$key] ?? null) === 'done') {
             return;
@@ -6361,10 +6491,14 @@ function cow_merge_resolve_schema_conflict(
             }
             if ($choice === 'source') {
                 $resolved = $source_sql;
-                $mutate_source = function () use ($target, $type, $object, $source_sql): void {
+                $source_error = is_array($source_payload) ? (string)($source_payload['error'] ?? '') : '';
+                $mutate_source = function () use ($target, $type, $object, $source_sql, $source_error): void {
                     if ($type === 'view') {
                         cow_merge_apply_source_view_schema_resolution($target, $object, $source_sql);
                     } else {
+                        if (str_contains($source_error, 'unsupported cyclic trigger dependencies')) {
+                            throw new InvalidArgumentException($source_error);
+                        }
                         if (cow_merge_schema_object_sql($target, $type, $object) !== null) {
                             $drop_sql = 'DROP ' . strtoupper($type) . ' ' . cow_merge_quote_ident($object);
                             if (!$target->exec($drop_sql)) {
@@ -8618,9 +8752,12 @@ function cow_merge_apply_schema_object_changes(
     $all_objects = array_unique(array_merge(array_keys($base_objects), array_keys($source_objects), array_keys($target_objects)));
     sort($all_objects);
     $view_cycles = [];
+    $trigger_cycles = [];
     if ($type === 'view') {
         $view_cycles = cow_merge_view_schema_dependency_cycles($all_objects, $source_objects);
         $all_objects = cow_merge_sort_view_schema_objects($all_objects, $source_objects);
+    } elseif ($type === 'trigger') {
+        $trigger_cycles = cow_merge_trigger_program_dependency_cycles($all_objects, $source_objects);
     }
 
     foreach ($all_objects as $name) {
@@ -8686,6 +8823,12 @@ function cow_merge_apply_schema_object_changes(
             $target->exec('SAVEPOINT forkpress_schema_object_apply');
             try {
                 if ($type === 'trigger') {
+                    $cycle = $trigger_cycles[strtolower($name)] ?? null;
+                    if ($cycle !== null) {
+                        throw new InvalidArgumentException(
+                            'source trigger ' . $name . ' has unsupported cyclic trigger dependencies: ' . $cycle
+                        );
+                    }
                     cow_merge_validate_trigger_references($target, $name, $source_sql);
                 } elseif ($type === 'view') {
                     $cycle = $view_cycles[strtolower($name)] ?? null;
