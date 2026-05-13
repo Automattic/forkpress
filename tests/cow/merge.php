@@ -3670,6 +3670,62 @@ SQL);
         'rerunning after target-dropped no-primary-key table restore does not rediscover the resolved schema conflict'
     );
 
+    $schema_self_fk_restore_base = $tmp . '/schema-self-fk-restore-base.sqlite';
+    $schema_self_fk_restore_source = $tmp . '/schema-self-fk-restore-source.sqlite';
+    $schema_self_fk_restore_target = $tmp . '/schema-self-fk-restore-target.sqlite';
+    $schema_self_fk_restore_metadata = $tmp . '/.forkpress/cow/merge/schema-self-fk-restore-metadata.sqlite';
+    create_base_db($schema_self_fk_restore_base);
+    $db = open_db($schema_self_fk_restore_base);
+    $db->exec('CREATE TABLE plugin_keyless_self_fk_restore (code TEXT NOT NULL UNIQUE, parent_code TEXT REFERENCES plugin_keyless_self_fk_restore(code), label TEXT)');
+    $db->close();
+    copy($schema_self_fk_restore_base, $schema_self_fk_restore_source);
+    copy($schema_self_fk_restore_base, $schema_self_fk_restore_target);
+    cow_merge_capture_row_identities($schema_self_fk_restore_base, $schema_self_fk_restore_metadata, 'main');
+    cow_merge_capture_row_identities($schema_self_fk_restore_source, $schema_self_fk_restore_metadata, 'feature-self-fk-restore', 'main');
+    cow_merge_capture_row_identities($schema_self_fk_restore_target, $schema_self_fk_restore_metadata, 'main');
+    $db = open_db($schema_self_fk_restore_source);
+    $db->exec("INSERT INTO plugin_keyless_self_fk_restore (rowid, code, parent_code, label) VALUES (3, 'child-before-parent', 'restored-parent', 'restored child')");
+    $db->exec("INSERT INTO plugin_keyless_self_fk_restore (rowid, code, parent_code, label) VALUES (11, 'restored-parent', NULL, 'restored parent')");
+    $db->close();
+    cow_merge_capture_row_identities($schema_self_fk_restore_source, $schema_self_fk_restore_metadata, 'feature-self-fk-restore', 'main');
+    $schema_self_fk_restore_child_identity = scalar($schema_self_fk_restore_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'feature-self-fk-restore' AND table_name = 'plugin_keyless_self_fk_restore' AND rowid = 3");
+    $schema_self_fk_restore_parent_identity = scalar($schema_self_fk_restore_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'feature-self-fk-restore' AND table_name = 'plugin_keyless_self_fk_restore' AND rowid = 11");
+    $db = open_db($schema_self_fk_restore_target);
+    $db->exec('DROP TABLE plugin_keyless_self_fk_restore');
+    $db->close();
+    $schema_self_fk_restore_result = cow_merge_databases($schema_self_fk_restore_base, $schema_self_fk_restore_source, $schema_self_fk_restore_target, $schema_self_fk_restore_metadata, 'feature-self-fk-restore', 'main');
+    assert_same($schema_self_fk_restore_result['status'], 'completed_with_conflicts', 'target-dropped no-primary-key self-FK table is recorded as a schema conflict');
+    $schema_self_fk_restore_conflict_id = (int)scalar($schema_self_fk_restore_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_keyless_self_fk_restore' AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
+    assert_true($schema_self_fk_restore_conflict_id > 0, 'target-dropped no-primary-key self-FK table conflict is auditable');
+    $schema_self_fk_restore_resolution = cow_merge_resolve_conflict(
+        $schema_self_fk_restore_metadata,
+        $schema_self_fk_restore_conflict_id,
+        'source',
+        true,
+        'Apply source no-primary-key self-FK table restore.',
+        'test'
+    );
+    assert_same($schema_self_fk_restore_resolution['status'], 'applied', 'source no-primary-key self-FK table restore records applied status');
+    assert_same(scalar($schema_self_fk_restore_target, "SELECT label FROM plugin_keyless_self_fk_restore WHERE code = 'restored-parent'"), 'restored parent', 'source no-primary-key self-FK table restore inserts the parent row');
+    assert_same(scalar($schema_self_fk_restore_target, "SELECT parent_code FROM plugin_keyless_self_fk_restore WHERE code = 'child-before-parent'"), 'restored-parent', 'source no-primary-key self-FK child validates after restored parent row');
+    assert_same(
+        scalar($schema_self_fk_restore_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_keyless_self_fk_restore' AND rowid = 3"),
+        $schema_self_fk_restore_child_identity,
+        'source no-primary-key self-FK restore adopts child sidecar identity at the sparse rowid'
+    );
+    assert_same(
+        scalar($schema_self_fk_restore_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_keyless_self_fk_restore' AND rowid = 11"),
+        $schema_self_fk_restore_parent_identity,
+        'source no-primary-key self-FK restore adopts parent sidecar identity at the sparse rowid'
+    );
+    $schema_self_fk_restore_rerun = cow_merge_databases($schema_self_fk_restore_base, $schema_self_fk_restore_source, $schema_self_fk_restore_target, $schema_self_fk_restore_metadata, 'feature-self-fk-restore', 'main');
+    assert_same($schema_self_fk_restore_rerun['status'], 'completed', 'rerunning after no-primary-key self-FK table restore completes without a new conflict');
+    assert_same(
+        (int)scalar($schema_self_fk_restore_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_keyless_self_fk_restore' AND c.conflict_type = 'schema-target-dropped-table' AND r.source_branch = 'feature-self-fk-restore'"),
+        1,
+        'rerunning after no-primary-key self-FK table restore does not rediscover the resolved schema conflict'
+    );
+
     $schema_table_drop_view_base = $tmp . '/schema-table-drop-view-base.sqlite';
     $schema_table_drop_view_source = $tmp . '/schema-table-drop-view-source.sqlite';
     $schema_table_drop_view_target = $tmp . '/schema-table-drop-view-target.sqlite';

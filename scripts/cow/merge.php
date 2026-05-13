@@ -7138,7 +7138,9 @@ function cow_merge_restore_source_table(
         ? cow_merge_load_rows($source, $table, $pk_cols)
         : cow_merge_keyless_rows_for_branch($source, $meta, $run_id, $source_branch, $table, []);
     $restored = 0;
-    foreach ($rows as $entry) {
+    $row_keys = cow_merge_sort_row_keys_by_self_foreign_keys($target, $table, array_keys($rows), $rows);
+    foreach ($row_keys as $identity_json) {
+        $entry = $rows[$identity_json];
         if (!$pk_cols) {
             $new_rowid = cow_merge_insert_row_with_rowid($target, $table, (int)$entry['rowid'], $entry['row'], $columns);
             cow_merge_remember_row_identity($meta, $run_id, $target_branch, $table, $new_rowid, $entry['identity'], $entry['row']);

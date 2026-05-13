@@ -11,6 +11,7 @@
 - Added auditable `row-target-constraint` conflicts when source row inserts or updates violate target-side SQLite constraints during generic COW mergeback.
 - Added generic foreign-key preflight for COW row inserts/updates, including parent-before-child table merge ordering and validation-gated source resolution once missing parent rows are present.
 - Ordered source rows inside same-table foreign-key plugin tables so source-only parent rows materialize before dependent child rows, including source-added tables.
+- Ordered rows during validation-gated source restores of target-dropped same-table foreign-key plugin tables, preserving no-primary-key sidecar identities while restoring parent rows before children.
 - Added generic foreign-key preflight for COW source row deletes so target-side child rows keep their parent by default with auditable `row-target-constraint` metadata until a reviewed source delete validates.
 - Applied clean source deletes across unchanged target-side foreign-key child graphs before deleting the parent, avoiding false `row-target-constraint` conflicts when source deletes the dependent rows too.
 - Applied clean source updates to unchanged target-side foreign-key child rows before deleting the parent, avoiding false `row-target-constraint` conflicts when source reparents dependent rows away from the deleted parent.
