@@ -501,9 +501,10 @@ tooling.
   clear subject/write dependencies before installation, while trigger program
   cycles are held as reviewable `schema-source-added-trigger` conflicts instead
   of installing an unsupported trigger graph. Source-added or reviewed source
-  triggers that would cycle with target-side trigger programs stay
-  validation-gated as well, and trigger programs are compiled after
-  installation so invalid target-side column references stay validation-gated too;
+  triggers, including triggers restored with a target-dropped source table, that
+  would cycle with target-side trigger programs stay validation-gated as well,
+  and trigger programs are compiled after installation so invalid target-side
+  column references stay validation-gated too;
   statement-local CTE aliases in trigger bodies are ignored while real schema
   objects referenced inside those CTEs remain dependencies.
   Trigger references to temporary or attached SQLite schemas are kept

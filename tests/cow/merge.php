@@ -5003,6 +5003,90 @@ SQL);
         'failed changed-trigger cycle dry-run rolls back the target trigger rewrite'
     );
 
+    $schema_restore_trigger_target_cycle_base = $tmp . '/schema-restore-trigger-target-cycle-base.sqlite';
+    $schema_restore_trigger_target_cycle_source = $tmp . '/schema-restore-trigger-target-cycle-source.sqlite';
+    $schema_restore_trigger_target_cycle_target = $tmp . '/schema-restore-trigger-target-cycle-target.sqlite';
+    $schema_restore_trigger_target_cycle_metadata = $tmp . '/.forkpress/cow/merge/schema-restore-trigger-target-cycle-metadata.sqlite';
+    create_base_db($schema_restore_trigger_target_cycle_base);
+    $db = open_db($schema_restore_trigger_target_cycle_base);
+    $db->exec('CREATE TABLE plugin_trigger_restore_cycle_alpha (label TEXT DEFAULT "alpha")');
+    $db->exec('CREATE TABLE plugin_trigger_restore_cycle_beta (label TEXT DEFAULT "beta")');
+    $db->exec('CREATE TRIGGER plugin_trigger_restore_cycle_alpha_insert AFTER INSERT ON plugin_trigger_restore_cycle_alpha BEGIN INSERT INTO plugin_trigger_restore_cycle_beta (label) VALUES (NEW.label); END');
+    $db->exec('CREATE TRIGGER plugin_trigger_restore_cycle_beta_insert AFTER INSERT ON plugin_trigger_restore_cycle_beta BEGIN INSERT INTO plugin_trigger_restore_cycle_alpha (label) VALUES (NEW.label); END');
+    $db->close();
+    copy($schema_restore_trigger_target_cycle_base, $schema_restore_trigger_target_cycle_source);
+    copy($schema_restore_trigger_target_cycle_base, $schema_restore_trigger_target_cycle_target);
+    $db = open_db($schema_restore_trigger_target_cycle_source);
+    $db->exec('DROP TRIGGER plugin_trigger_restore_cycle_beta_insert');
+    $db->close();
+    $db = open_db($schema_restore_trigger_target_cycle_target);
+    $db->exec('DROP TABLE plugin_trigger_restore_cycle_alpha');
+    $db->close();
+    $schema_restore_trigger_target_cycle_result = cow_merge_databases(
+        $schema_restore_trigger_target_cycle_base,
+        $schema_restore_trigger_target_cycle_source,
+        $schema_restore_trigger_target_cycle_target,
+        $schema_restore_trigger_target_cycle_metadata,
+        'feature-restore-trigger-target-cycle',
+        'main'
+    );
+    assert_same($schema_restore_trigger_target_cycle_result['status'], 'completed_with_conflicts', 'table restore trigger cycle with target-side trigger remains reviewable');
+    $schema_restore_trigger_target_cycle_table_conflict_id = (int)scalar($schema_restore_trigger_target_cycle_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_trigger_restore_cycle_alpha' AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
+    $schema_restore_trigger_target_cycle_trigger_conflict_id = (int)scalar($schema_restore_trigger_target_cycle_metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_trigger_restore_cycle_beta_insert' AND conflict_type = 'schema-source-dropped-trigger' ORDER BY id DESC LIMIT 1");
+    assert_true($schema_restore_trigger_target_cycle_table_conflict_id > 0, 'target-dropped table conflict is recorded before trigger-cycle restore');
+    assert_true($schema_restore_trigger_target_cycle_trigger_conflict_id > 0, 'source-dropped target trigger conflict is recorded before trigger-cycle restore');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $schema_restore_trigger_target_cycle_metadata,
+            $schema_restore_trigger_target_cycle_table_conflict_id,
+            'source',
+            false,
+            'Preview table restore before trigger drop.',
+            'test'
+        ),
+        'unsupported cyclic trigger dependencies',
+        'table restore dry-run remains gated while restored trigger cycles with target trigger'
+    );
+    assert_same(
+        (int)scalar($schema_restore_trigger_target_cycle_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_restore_trigger_target_cycle_table_conflict_id"),
+        0,
+        'failed table restore trigger-cycle dry-run does not record a resolution'
+    );
+    assert_same(
+        (int)scalar($schema_restore_trigger_target_cycle_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_trigger_restore_cycle_alpha'"),
+        0,
+        'failed table restore trigger-cycle dry-run rolls back the restored table'
+    );
+    $schema_restore_trigger_target_cycle_drop_resolution = cow_merge_resolve_conflict(
+        $schema_restore_trigger_target_cycle_metadata,
+        $schema_restore_trigger_target_cycle_trigger_conflict_id,
+        'source',
+        true,
+        'Drop source-dropped trigger before table restore.',
+        'test'
+    );
+    assert_same($schema_restore_trigger_target_cycle_drop_resolution['status'], 'applied', 'source-dropped target trigger applies before table restore');
+    $schema_restore_trigger_target_cycle_restore_resolution = cow_merge_resolve_conflict(
+        $schema_restore_trigger_target_cycle_metadata,
+        $schema_restore_trigger_target_cycle_table_conflict_id,
+        'source',
+        true,
+        'Restore table after trigger drop.',
+        'test'
+    );
+    assert_same($schema_restore_trigger_target_cycle_restore_resolution['status'], 'applied', 'table restore applies after dependent target trigger is dropped');
+    assert_same((int)scalar($schema_restore_trigger_target_cycle_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_trigger_restore_cycle_alpha_insert'"), 1, 'source table restore installs the restored trigger after cycle dependency is resolved');
+    assert_same((int)scalar($schema_restore_trigger_target_cycle_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_trigger_restore_cycle_beta_insert'"), 0, 'source-dropped target trigger stays dropped after table restore');
+    $schema_restore_trigger_target_cycle_rerun = cow_merge_databases(
+        $schema_restore_trigger_target_cycle_base,
+        $schema_restore_trigger_target_cycle_source,
+        $schema_restore_trigger_target_cycle_target,
+        $schema_restore_trigger_target_cycle_metadata,
+        'feature-restore-trigger-target-cycle',
+        'main'
+    );
+    assert_same($schema_restore_trigger_target_cycle_rerun['status'], 'completed', 'rerunning after trigger-cycle table restore completes without rediscovering conflicts');
+
     $source_added_view_missing_base = $tmp . '/source-added-view-missing-base.sqlite';
     $source_added_view_missing_source = $tmp . '/source-added-view-missing-source.sqlite';
     $source_added_view_missing_target = $tmp . '/source-added-view-missing-target.sqlite';

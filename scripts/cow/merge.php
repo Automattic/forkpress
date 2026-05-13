@@ -8340,6 +8340,7 @@ function cow_merge_restore_source_table(
             throw new RuntimeException('target trigger already exists during source table restore: ' . $trigger['name']);
         }
         cow_merge_validate_trigger_references($target, (string)$trigger['name'], (string)$trigger['sql']);
+        cow_merge_validate_trigger_program_acyclic($target, (string)$trigger['name'], (string)$trigger['sql']);
         if (!$target->exec((string)$trigger['sql'])) {
             throw new RuntimeException('failed to restore source table trigger ' . $trigger['name'] . ': ' . $target->lastErrorMsg());
         }
