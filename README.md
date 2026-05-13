@@ -481,11 +481,13 @@ tooling.
   Without declared unique evidence, identical-looking no-primary-key inserts
   remain separate rows so duplicate-capable plugin tables do not lose data.
   For no-primary-key plugin tables, runtime row identity tracking handles
-  delete/reinsert `rowid` reuse, and validation-gated compatible table rebuilds
-  preserve sparse target `rowid` values while refreshing sidecar row hashes. If
-  a direct offline edit changes cells on a keyless source row that target did
-  not change while target also changed the prior row and no runtime identity
-  event exists, mergeback keeps target by default and records an auditable
+  delete/reinsert `rowid` reuse. Source-added no-primary-key tables and
+  validation-gated source table restores preserve sparse source `rowid` values,
+  while validation-gated compatible table rebuilds preserve sparse target
+  `rowid` values and refresh sidecar row hashes. If a direct offline edit
+  changes cells on a keyless source row that target did not change while target
+  also changed the prior row and no runtime identity event exists, mergeback
+  keeps target by default and records an auditable
   `row-identity-ambiguous` conflict instead of mixing cells from different
   possible logical rows.
 - `forkpress branch merge-audit [--format text|json] [--run ID]`
@@ -538,11 +540,12 @@ tooling.
   source kept; and compatible table rebuilds that preserve target rows and
   target indexes/triggers while changing audited non-primary-key column
   definitions. Source table restores recreate the audited source table and copy
-  source rows after validating that the target table is still absent, then
-  restore source indexes/triggers that were removed as a side effect of the
-  target table drop. No-primary-key sidecar identities for target rows are
-  tombstoned when table drop/restore resolutions remove or recreate the target
-  table, so later rowid reuse receives fresh logical identity metadata.
+  source rows after validating that the target table is still absent, preserving
+  sparse source `rowid` values for no-primary-key tables, then restore source
+  indexes/triggers that were removed as a side effect of the target table drop.
+  No-primary-key sidecar identities for target rows are tombstoned when table
+  drop/restore resolutions remove or recreate the target table, so later rowid
+  reuse receives fresh logical identity metadata.
   Source-added table creation is recorded as a schema-level source-applied
   decision even when the table has no rows.
   Identical source/target table, index, view, and trigger schema changes are

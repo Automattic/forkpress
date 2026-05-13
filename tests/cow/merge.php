@@ -351,6 +351,34 @@ try {
         'target-added table preservation is auditable'
     );
 
+    $keyless_source_table_base = $tmp . '/keyless-source-table-base.sqlite';
+    $keyless_source_table_source = $tmp . '/keyless-source-table-source.sqlite';
+    $keyless_source_table_target = $tmp . '/keyless-source-table-target.sqlite';
+    $keyless_source_table_metadata = $tmp . '/.forkpress/cow/merge/keyless-source-table-metadata.sqlite';
+    create_base_db($keyless_source_table_base);
+    copy($keyless_source_table_base, $keyless_source_table_source);
+    copy($keyless_source_table_base, $keyless_source_table_target);
+    $db = open_db($keyless_source_table_source);
+    $db->exec('CREATE TABLE plugin_keyless_source_table (label TEXT, value TEXT)');
+    $db->exec("INSERT INTO plugin_keyless_source_table (rowid, label, value) VALUES (3, 'Sparse source table alpha', 'alpha')");
+    $db->exec("INSERT INTO plugin_keyless_source_table (rowid, label, value) VALUES (11, 'Sparse source table beta', 'beta')");
+    $db->close();
+    $keyless_source_table_result = cow_merge_databases(
+        $keyless_source_table_base,
+        $keyless_source_table_source,
+        $keyless_source_table_target,
+        $keyless_source_table_metadata,
+        'feature-keyless-source-table',
+        'main'
+    );
+    assert_same($keyless_source_table_result['status'], 'completed', 'source-added no-primary-key table merges cleanly');
+    assert_same((int)scalar($keyless_source_table_target, "SELECT COUNT(*) FROM plugin_keyless_source_table WHERE rowid IN (3, 11)"), 2, 'source-added no-primary-key table preserves sparse source rowids');
+    assert_same(
+        scalar($keyless_source_table_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_keyless_source_table' AND rowid = 11"),
+        scalar($keyless_source_table_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'feature-keyless-source-table' AND table_name = 'plugin_keyless_source_table' AND rowid = 11"),
+        'source-added no-primary-key table adopts source sidecar identity at the preserved rowid'
+    );
+
     $conflict_base = $tmp . '/conflict-base.sqlite';
     $conflict_source = $tmp . '/conflict-source.sqlite';
     $conflict_target = $tmp . '/conflict-target.sqlite';
@@ -2608,10 +2636,11 @@ SQL);
     cow_merge_capture_row_identities($schema_keyless_table_restore_target, $schema_keyless_table_restore_metadata, 'main');
     $db = open_db($schema_keyless_table_restore_source);
     $db->exec("UPDATE plugin_keyless_table_restore SET value = 'source restored base' WHERE rowid = 1");
-    $db->exec("INSERT INTO plugin_keyless_table_restore (label, value) VALUES ('Source restored extra', 'source extra')");
+    $db->exec("INSERT INTO plugin_keyless_table_restore (rowid, label, value) VALUES (9, 'Source restored extra', 'source extra')");
     $db->close();
     cow_merge_capture_row_identities($schema_keyless_table_restore_source, $schema_keyless_table_restore_metadata, 'feature-keyless-table-restore', 'main');
     $schema_keyless_table_restore_source_identity = scalar($schema_keyless_table_restore_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'feature-keyless-table-restore' AND table_name = 'plugin_keyless_table_restore' AND rowid = 1");
+    $schema_keyless_table_restore_source_extra_identity = scalar($schema_keyless_table_restore_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'feature-keyless-table-restore' AND table_name = 'plugin_keyless_table_restore' AND rowid = 9");
     $db = open_db($schema_keyless_table_restore_target);
     $db->exec('DELETE FROM plugin_keyless_table_restore WHERE rowid = 1');
     $db->exec("INSERT INTO plugin_keyless_table_restore (label, value) VALUES ('Target stale rowid', 'target stale identity')");
@@ -2655,10 +2684,16 @@ SQL);
     assert_same($schema_keyless_table_restore_resolution['status'], 'applied', 'source no-primary-key table restore schema resolution records applied status');
     assert_same((int)scalar($schema_keyless_table_restore_target, "SELECT COUNT(*) FROM plugin_keyless_table_restore"), 2, 'source no-primary-key table restore copies audited source rows into the target table');
     assert_same(scalar($schema_keyless_table_restore_target, "SELECT value FROM plugin_keyless_table_restore WHERE rowid = 1"), 'source restored base', 'source no-primary-key table restore recreates the audited source row');
+    assert_same(scalar($schema_keyless_table_restore_target, "SELECT value FROM plugin_keyless_table_restore WHERE rowid = 9"), 'source extra', 'source no-primary-key table restore preserves sparse source rowids');
     assert_same(
         scalar($schema_keyless_table_restore_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_keyless_table_restore' AND rowid = 1"),
         $schema_keyless_table_restore_source_identity,
         'source no-primary-key table restore adopts source sidecar identity after target table recreation'
+    );
+    assert_same(
+        scalar($schema_keyless_table_restore_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_keyless_table_restore' AND rowid = 9"),
+        $schema_keyless_table_restore_source_extra_identity,
+        'source no-primary-key table restore adopts sparse source sidecar identity at the preserved rowid'
     );
     assert_same(
         (int)scalar($schema_keyless_table_restore_metadata, "SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'main' AND table_name = 'plugin_keyless_table_restore' AND logical_identity = '" . SQLite3::escapeString((string)$schema_keyless_table_restore_stale_identity) . "' AND deleted_at IS NOT NULL"),

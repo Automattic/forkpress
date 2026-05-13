@@ -1386,6 +1386,26 @@ function cow_merge_insert_row(SQLite3 $target, string $table, array $row, array 
     return (int)$target->lastInsertRowID();
 }
 
+function cow_merge_insert_row_with_rowid(SQLite3 $target, string $table, int $rowid, array $row, array $columns): int {
+    $columns = array_values(array_filter($columns, fn($col) => array_key_exists($col, $row)));
+    $quoted_columns = array_merge(['rowid'], array_map('cow_merge_quote_ident', $columns));
+    $sql = 'INSERT INTO ' . cow_merge_quote_ident($table) . ' (' .
+        implode(', ', $quoted_columns) . ') VALUES (' .
+        implode(', ', array_fill(0, count($quoted_columns), '?')) . ')';
+    $stmt = $target->prepare($sql);
+    if (!$stmt) {
+        throw new RuntimeException("failed to prepare rowid insert into $table: " . $target->lastErrorMsg());
+    }
+    cow_merge_bind($stmt, 1, $rowid);
+    foreach ($columns as $i => $col) {
+        cow_merge_bind($stmt, $i + 2, $row[$col] ?? null);
+    }
+    if (!$stmt->execute()) {
+        throw new RuntimeException("failed to insert rowid into $table: " . $target->lastErrorMsg());
+    }
+    return (int)$target->lastInsertRowID();
+}
+
 function cow_merge_unique_indexes(SQLite3 $db, string $table): array {
     $indexes = [];
     $res = $db->query('PRAGMA index_list(' . cow_merge_quote_ident($table) . ')');
@@ -5636,9 +5656,11 @@ function cow_merge_apply_source_table(
         : cow_merge_keyless_rows_for_branch($source, $meta, $run_id, $source_branch, $table, []);
     $applied = 1;
     foreach ($rows as $identity_json => $entry) {
-        $new_rowid = cow_merge_insert_row($target, $table, $entry['row'], $columns);
         if (!$pk_cols) {
+            $new_rowid = cow_merge_insert_row_with_rowid($target, $table, (int)$entry['rowid'], $entry['row'], $columns);
             cow_merge_remember_row_identity($meta, $run_id, $target_branch, $table, $new_rowid, $entry['identity'], $entry['row']);
+        } else {
+            cow_merge_insert_row($target, $table, $entry['row'], $columns);
         }
         cow_merge_record_decision(
             $meta,
@@ -5683,9 +5705,11 @@ function cow_merge_restore_source_table(
         : cow_merge_keyless_rows_for_branch($source, $meta, $run_id, $source_branch, $table, []);
     $restored = 0;
     foreach ($rows as $entry) {
-        $new_rowid = cow_merge_insert_row($target, $table, $entry['row'], $columns);
         if (!$pk_cols) {
+            $new_rowid = cow_merge_insert_row_with_rowid($target, $table, (int)$entry['rowid'], $entry['row'], $columns);
             cow_merge_remember_row_identity($meta, $run_id, $target_branch, $table, $new_rowid, $entry['identity'], $entry['row']);
+        } else {
+            cow_merge_insert_row($target, $table, $entry['row'], $columns);
         }
         $restored++;
     }

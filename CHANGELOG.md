@@ -74,6 +74,7 @@
 - Stabilized automatic no-primary-key source-applied row updates and deletes by refreshing or tombstoning target branch sidecar identities during the merge mutation.
 - Tombstoned no-primary-key target sidecar identities during validation-gated schema table drops/restores so recreated tables cannot inherit stale rowid identity metadata.
 - Preserved sparse no-primary-key rowids and refreshed target sidecar row hashes during validation-gated compatible table rebuild resolutions.
+- Preserved sparse source rowids and sidecar identities when applying source-added no-primary-key tables or validation-gated source restores for target-dropped no-primary-key tables.
 - Updated the automatic mergeback loop runner to pass a configurable Codex reasoning-effort setting and to include the changelog/known-good tag policy in every worker prompt.
 
 ## known-good/cow-mergeback-identity-stability-2026-05-13
