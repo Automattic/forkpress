@@ -360,6 +360,12 @@ try {
     copy($keyless_source_table_base, $keyless_source_table_target);
     $db = open_db($keyless_source_table_source);
     $db->exec('CREATE TABLE plugin_keyless_source_table (label TEXT, value TEXT)');
+    $db->exec('CREATE UNIQUE INDEX plugin_keyless_source_table_label_idx ON plugin_keyless_source_table(label)');
+    $db->exec(
+        "CREATE TRIGGER plugin_keyless_source_table_insert AFTER INSERT ON plugin_keyless_source_table BEGIN " .
+        "INSERT INTO plugin_items (item_id, label, value) VALUES ('keyless-source-' || NEW.rowid, NEW.label, NEW.value); " .
+        'END'
+    );
     $db->exec("INSERT INTO plugin_keyless_source_table (rowid, label, value) VALUES (3, 'Sparse source table alpha', 'alpha')");
     $db->exec("INSERT INTO plugin_keyless_source_table (rowid, label, value) VALUES (11, 'Sparse source table beta', 'beta')");
     $db->close();
@@ -373,11 +379,19 @@ try {
     );
     assert_same($keyless_source_table_result['status'], 'completed', 'source-added no-primary-key table merges cleanly');
     assert_same((int)scalar($keyless_source_table_target, "SELECT COUNT(*) FROM plugin_keyless_source_table WHERE rowid IN (3, 11)"), 2, 'source-added no-primary-key table preserves sparse source rowids');
+    assert_same((int)scalar($keyless_source_table_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_keyless_source_table_label_idx'"), 1, 'source-added no-primary-key table restores its source index');
+    assert_same((int)scalar($keyless_source_table_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_keyless_source_table_insert'"), 1, 'source-added no-primary-key table restores its source trigger');
+    $db = open_db($keyless_source_table_target);
+    $db->exec("INSERT INTO plugin_keyless_source_table (rowid, label, value) VALUES (19, 'Sparse source table gamma', 'gamma')");
+    $db->close();
+    assert_same(scalar($keyless_source_table_target, "SELECT value FROM plugin_items WHERE item_id = 'keyless-source-19'"), 'gamma', 'source-added no-primary-key table trigger remains functional on target');
     assert_same(
         scalar($keyless_source_table_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_keyless_source_table' AND rowid = 11"),
         scalar($keyless_source_table_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'feature-keyless-source-table' AND table_name = 'plugin_keyless_source_table' AND rowid = 11"),
         'source-added no-primary-key table adopts source sidecar identity at the preserved rowid'
     );
+    assert_same((int)scalar($keyless_source_table_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_keyless_source_table' AND column_name = 'plugin_keyless_source_table_label_idx' AND decision = 'source-applied'"), 1, 'source-added no-primary-key table index restoration is auditable');
+    assert_same((int)scalar($keyless_source_table_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_keyless_source_table' AND column_name = 'plugin_keyless_source_table_insert' AND decision = 'source-applied'"), 1, 'source-added no-primary-key table trigger restoration is auditable');
 
     $conflict_base = $tmp . '/conflict-base.sqlite';
     $conflict_source = $tmp . '/conflict-source.sqlite';
