@@ -6555,6 +6555,178 @@ SQL);
     assert_same(scalar($schema_restore_mixed_rollback_target, "SELECT observed FROM plugin_restore_mixed_audit WHERE code = 'restore-mixed-new-parent' AND note = 'source-trigger'"), 'restore mixed new label', 'restored source trigger fires after validated mixed dependency table restore');
     assert_same(scalar($schema_restore_mixed_rollback_target, "SELECT note FROM plugin_restore_mixed_child WHERE parent_lookup = 'restore-mixed-lookup'"), 'child stays valid', 'validated mixed dependency table restore keeps the index-backed FK child row valid');
 
+    $schema_restore_keyless_mixed_rollback_base = $tmp . '/schema-restore-keyless-mixed-rollback-base.sqlite';
+    $schema_restore_keyless_mixed_rollback_source = $tmp . '/schema-restore-keyless-mixed-rollback-source.sqlite';
+    $schema_restore_keyless_mixed_rollback_target = $tmp . '/schema-restore-keyless-mixed-rollback-target.sqlite';
+    $schema_restore_keyless_mixed_rollback_metadata = $tmp . '/.forkpress/cow/merge/schema-restore-keyless-mixed-rollback-metadata.sqlite';
+    create_base_db($schema_restore_keyless_mixed_rollback_base);
+    $db = open_db($schema_restore_keyless_mixed_rollback_base);
+    $db->exec('CREATE TABLE plugin_restore_keyless_mixed_parent (lookup TEXT NOT NULL, label TEXT NOT NULL, legacy TEXT NOT NULL)');
+    $db->exec('CREATE UNIQUE INDEX plugin_restore_keyless_mixed_parent_lookup_idx ON plugin_restore_keyless_mixed_parent(lookup)');
+    $db->exec('CREATE TABLE plugin_restore_keyless_mixed_child (parent_lookup TEXT NOT NULL REFERENCES plugin_restore_keyless_mixed_parent(lookup), note TEXT NOT NULL)');
+    $db->exec('CREATE TABLE plugin_restore_keyless_mixed_observer (code TEXT NOT NULL)');
+    $db->exec('CREATE TABLE plugin_restore_keyless_mixed_audit (code TEXT, observed TEXT, note TEXT)');
+    $db->exec(
+        'CREATE TRIGGER plugin_restore_keyless_mixed_parent_insert AFTER INSERT ON plugin_restore_keyless_mixed_parent ' .
+        'BEGIN INSERT INTO plugin_restore_keyless_mixed_audit (code, observed, note) VALUES (NEW.lookup, NEW.label, "source-trigger"); END'
+    );
+    $db->exec("INSERT INTO plugin_restore_keyless_mixed_parent (rowid, lookup, label, legacy) VALUES (7, 'keyless-restore-lookup', 'keyless restore label', 'legacy value')");
+    $db->exec("INSERT INTO plugin_restore_keyless_mixed_child (parent_lookup, note) VALUES ('keyless-restore-lookup', 'keyless child stays valid')");
+    $db->close();
+    copy($schema_restore_keyless_mixed_rollback_base, $schema_restore_keyless_mixed_rollback_source);
+    copy($schema_restore_keyless_mixed_rollback_base, $schema_restore_keyless_mixed_rollback_target);
+    cow_merge_capture_row_identities($schema_restore_keyless_mixed_rollback_base, $schema_restore_keyless_mixed_rollback_metadata, 'main');
+    cow_merge_capture_row_identities($schema_restore_keyless_mixed_rollback_source, $schema_restore_keyless_mixed_rollback_metadata, 'feature-schema-restore-keyless-mixed-rollback', 'main');
+    cow_merge_capture_row_identities($schema_restore_keyless_mixed_rollback_target, $schema_restore_keyless_mixed_rollback_metadata, 'main');
+
+    $db = open_db($schema_restore_keyless_mixed_rollback_source);
+    $db->exec('DROP TRIGGER plugin_restore_keyless_mixed_parent_insert');
+    $db->exec('CREATE TABLE plugin_restore_keyless_mixed_parent_new (lookup TEXT NOT NULL, label TEXT NOT NULL)');
+    $db->exec('INSERT INTO plugin_restore_keyless_mixed_parent_new (rowid, lookup, label) SELECT rowid, lookup, label FROM plugin_restore_keyless_mixed_parent');
+    $db->exec('DROP TABLE plugin_restore_keyless_mixed_parent');
+    $db->exec('ALTER TABLE plugin_restore_keyless_mixed_parent_new RENAME TO plugin_restore_keyless_mixed_parent');
+    $db->exec('CREATE UNIQUE INDEX plugin_restore_keyless_mixed_parent_lookup_idx ON plugin_restore_keyless_mixed_parent(lookup)');
+    $db->exec(
+        'CREATE TRIGGER plugin_restore_keyless_mixed_parent_insert AFTER INSERT ON plugin_restore_keyless_mixed_parent ' .
+        'BEGIN INSERT INTO plugin_restore_keyless_mixed_audit (code, observed, note) VALUES (NEW.lookup, NEW.label, "source-trigger"); END'
+    );
+    $db->close();
+    cow_merge_capture_row_identities($schema_restore_keyless_mixed_rollback_source, $schema_restore_keyless_mixed_rollback_metadata, 'feature-schema-restore-keyless-mixed-rollback', 'main');
+    $schema_restore_keyless_mixed_source_identity = scalar(
+        $schema_restore_keyless_mixed_rollback_metadata,
+        "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'feature-schema-restore-keyless-mixed-rollback' AND table_name = 'plugin_restore_keyless_mixed_parent' AND rowid = 7"
+    );
+
+    $db = open_db($schema_restore_keyless_mixed_rollback_target);
+    $db->exec('DELETE FROM plugin_restore_keyless_mixed_parent WHERE rowid = 7');
+    $db->exec("INSERT INTO plugin_restore_keyless_mixed_parent (rowid, lookup, label, legacy) VALUES (7, 'keyless-restore-lookup', 'stale target label', 'stale legacy')");
+    $db->close();
+    cow_merge_track_row_identity_events(
+        $schema_restore_keyless_mixed_rollback_target,
+        $schema_restore_keyless_mixed_rollback_metadata,
+        'main',
+        [
+            [
+                'id' => 1,
+                'table' => 'plugin_restore_keyless_mixed_parent',
+                'op' => 'delete',
+                'rowid' => 7,
+                'row' => ['lookup' => 'keyless-restore-lookup', 'label' => 'keyless restore label', 'legacy' => 'legacy value'],
+            ],
+            [
+                'id' => 2,
+                'table' => 'plugin_restore_keyless_mixed_parent',
+                'op' => 'insert',
+                'rowid' => 7,
+                'row' => ['lookup' => 'keyless-restore-lookup', 'label' => 'stale target label', 'legacy' => 'stale legacy'],
+            ],
+        ]
+    );
+    $schema_restore_keyless_mixed_stale_identity = scalar(
+        $schema_restore_keyless_mixed_rollback_metadata,
+        "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_restore_keyless_mixed_parent' AND rowid = 7"
+    );
+    $db = open_db($schema_restore_keyless_mixed_rollback_target);
+    $db->exec('DROP TABLE plugin_restore_keyless_mixed_parent');
+    $db->exec(
+        'CREATE TRIGGER plugin_restore_keyless_mixed_observer_insert AFTER INSERT ON plugin_restore_keyless_mixed_observer ' .
+        'BEGIN INSERT INTO plugin_restore_keyless_mixed_audit (code, observed, note) ' .
+        "SELECT NEW.code, legacy, 'target-trigger' FROM plugin_restore_keyless_mixed_parent WHERE lookup = NEW.code; END"
+    );
+    $db->close();
+
+    $schema_restore_keyless_mixed_rollback_result = cow_merge_databases(
+        $schema_restore_keyless_mixed_rollback_base,
+        $schema_restore_keyless_mixed_rollback_source,
+        $schema_restore_keyless_mixed_rollback_target,
+        $schema_restore_keyless_mixed_rollback_metadata,
+        'feature-schema-restore-keyless-mixed-rollback',
+        'main'
+    );
+    assert_same($schema_restore_keyless_mixed_rollback_result['status'], 'completed_with_conflicts', 'target-dropped keyless table restore with mixed dependencies remains reviewable');
+    $schema_restore_keyless_mixed_rollback_conflict_id = (int)scalar($schema_restore_keyless_mixed_rollback_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_restore_keyless_mixed_parent' AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
+    assert_true($schema_restore_keyless_mixed_rollback_conflict_id > 0, 'keyless mixed dependency target-dropped table restore conflict is auditable');
+    $schema_restore_keyless_mixed_source_history_before_failed_apply = (int)scalar(
+        $schema_restore_keyless_mixed_rollback_metadata,
+        "SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'main' AND table_name = 'plugin_restore_keyless_mixed_parent' AND logical_identity = '" . SQLite3::escapeString((string)$schema_restore_keyless_mixed_source_identity) . "'"
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $schema_restore_keyless_mixed_rollback_metadata,
+            $schema_restore_keyless_mixed_rollback_conflict_id,
+            'source',
+            true,
+            'Apply keyless table restore with late preserved target trigger failure.',
+            'test'
+        ),
+        'plugin_restore_keyless_mixed_observer_insert',
+        'failed apply rolls back keyless table restore after source row/index/trigger staging'
+    );
+    assert_same(
+        (int)scalar($schema_restore_keyless_mixed_rollback_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_restore_keyless_mixed_rollback_conflict_id"),
+        0,
+        'failed keyless mixed restore apply does not record resolution metadata'
+    );
+    assert_same(
+        (int)scalar($schema_restore_keyless_mixed_rollback_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_restore_keyless_mixed_parent'"),
+        0,
+        'failed keyless mixed restore apply rolls back the restored table'
+    );
+    assert_same(
+        (int)scalar($schema_restore_keyless_mixed_rollback_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_restore_keyless_mixed_parent_lookup_idx'"),
+        0,
+        'failed keyless mixed restore apply rolls back the restored source index'
+    );
+    assert_same(
+        (int)scalar($schema_restore_keyless_mixed_rollback_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_restore_keyless_mixed_parent_insert'"),
+        0,
+        'failed keyless mixed restore apply rolls back the restored source trigger'
+    );
+    assert_same(
+        (int)scalar($schema_restore_keyless_mixed_rollback_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_restore_keyless_mixed_observer_insert'"),
+        1,
+        'failed keyless mixed restore apply preserves the invalid target trigger for review'
+    );
+    assert_same(
+        scalar($schema_restore_keyless_mixed_rollback_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_restore_keyless_mixed_parent' AND rowid = 7"),
+        $schema_restore_keyless_mixed_stale_identity,
+        'failed keyless mixed restore apply rolls back source sidecar adoption'
+    );
+    assert_same(
+        (int)scalar($schema_restore_keyless_mixed_rollback_metadata, "SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'main' AND table_name = 'plugin_restore_keyless_mixed_parent' AND logical_identity = '" . SQLite3::escapeString((string)$schema_restore_keyless_mixed_source_identity) . "'"),
+        $schema_restore_keyless_mixed_source_history_before_failed_apply,
+        'failed keyless mixed restore apply rolls back new source sidecar history writes'
+    );
+
+    $db = open_db($schema_restore_keyless_mixed_rollback_target);
+    $db->exec('DROP TRIGGER plugin_restore_keyless_mixed_observer_insert');
+    $db->close();
+    $schema_restore_keyless_mixed_rollback_apply = cow_merge_resolve_conflict(
+        $schema_restore_keyless_mixed_rollback_metadata,
+        $schema_restore_keyless_mixed_rollback_conflict_id,
+        'source',
+        true,
+        'Apply keyless table restore after invalid target trigger is reviewed.',
+        'test'
+    );
+    assert_same($schema_restore_keyless_mixed_rollback_apply['status'], 'applied', 'keyless mixed dependency table restore applies after the invalid target trigger is handled');
+    assert_same(scalar($schema_restore_keyless_mixed_rollback_target, "SELECT label FROM plugin_restore_keyless_mixed_parent WHERE rowid = 7"), 'keyless restore label', 'validated keyless mixed restore preserves the audited source rowid and row payload');
+    assert_same(
+        scalar($schema_restore_keyless_mixed_rollback_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_restore_keyless_mixed_parent' AND rowid = 7"),
+        $schema_restore_keyless_mixed_source_identity,
+        'validated keyless mixed restore adopts source sidecar identity after rollback-sensitive apply succeeds'
+    );
+    assert_same(
+        (int)scalar($schema_restore_keyless_mixed_rollback_metadata, "SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'main' AND table_name = 'plugin_restore_keyless_mixed_parent' AND logical_identity = '" . SQLite3::escapeString((string)$schema_restore_keyless_mixed_stale_identity) . "' AND deleted_at IS NOT NULL"),
+        1,
+        'validated keyless mixed restore tombstones stale target sidecar identity after successful apply'
+    );
+    assert_same(scalar($schema_restore_keyless_mixed_rollback_target, "SELECT note FROM plugin_restore_keyless_mixed_child WHERE parent_lookup = 'keyless-restore-lookup'"), 'keyless child stays valid', 'validated keyless mixed restore keeps the index-backed FK child row valid');
+    $db = open_db($schema_restore_keyless_mixed_rollback_target);
+    $db->exec("INSERT INTO plugin_restore_keyless_mixed_parent (rowid, lookup, label) VALUES (17, 'keyless-restore-new-lookup', 'keyless restored trigger label')");
+    $db->close();
+    assert_same(scalar($schema_restore_keyless_mixed_rollback_target, "SELECT observed FROM plugin_restore_keyless_mixed_audit WHERE code = 'keyless-restore-new-lookup' AND note = 'source-trigger'"), 'keyless restored trigger label', 'restored keyless source trigger fires after validated mixed dependency table restore');
+
     $schema_cross_fk_restored_parent_base = $tmp . '/schema-cross-fk-restored-parent-base.sqlite';
     $schema_cross_fk_restored_parent_source = $tmp . '/schema-cross-fk-restored-parent-source.sqlite';
     $schema_cross_fk_restored_parent_target = $tmp . '/schema-cross-fk-restored-parent-target.sqlite';
