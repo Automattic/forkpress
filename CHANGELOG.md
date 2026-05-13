@@ -67,6 +67,8 @@
 - Added COW coverage for rerunning validation-gated filesystem source resolutions and schema object rewrite/drop resolutions without rediscovering the resolved conflicts.
 - Added COW coverage for rerunning validation-gated compatible table rebuild and safe source-added column/index resolutions without rediscovering the resolved schema conflicts.
 - Added COW coverage for rerunning dependency-preserving compatible table rebuild resolutions while retaining target indexes, triggers, dependent views, and view triggers.
+- Added COW coverage for rerunning validation-gated target-choice DB cell, schema, and filesystem resolutions while preserving audited target state without duplicating unchanged conflict records.
+- Fixed COW conflict recording to de-duplicate unchanged schema conflicts with null row identities using an explicit null-safe lookup before inserting metadata.
 - Updated the automatic mergeback loop runner to pass a configurable Codex reasoning-effort setting and to include the changelog/known-good tag policy in every worker prompt.
 
 ## known-good/cow-mergeback-audit-completeness-2026-05-12

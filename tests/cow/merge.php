@@ -425,6 +425,14 @@ try {
     assert_same(scalar($conflict_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_test'"), 'a:1:{s:5:"color";s:3:"red";}', 'target conflict resolution leaves target DB unchanged');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $option_conflict_id AND choice = 'target' AND applied = 1"), 1, 'target conflict resolution is auditable');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_review_notes WHERE record_type = 'conflict' AND record_id = $option_conflict_id AND status = 'reviewed' AND note LIKE 'Resolved with target choice:%'"), 1, 'applied target conflict resolution appends a reviewed note');
+    $target_resolution_rerun = cow_merge_databases($conflict_base, $conflict_source, $conflict_target, $metadata, 'feature-conflict', 'main');
+    assert_same($target_resolution_rerun['status'], 'completed_with_conflicts', 'rerunning after target cell resolution still reports the unchanged source/target divergence');
+    assert_same(scalar($conflict_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_test'"), 'a:1:{s:5:"color";s:3:"red";}', 'rerunning after target cell resolution keeps the audited target value');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_options' AND column_name = 'option_value'"),
+        1,
+        'rerunning after target cell resolution does not duplicate the unchanged conflict record'
+    );
     $resolution_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10);
     assert_same(count($resolution_audit['resolutions']), 2, 'merge audit report exports deterministic resolution records');
     $applied_resolution_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['resolution_status' => 'applied']);
@@ -1372,6 +1380,68 @@ SQL);
         'unsafe source symlink conflicts cannot be applied by the deterministic resolver'
     );
 
+    $file_target_keep_base_root = $tmp . '/files-target-keep-base';
+    $file_target_keep_source_root = $tmp . '/files-target-keep-source';
+    $file_target_keep_target_root = $tmp . '/files-target-keep-target';
+    mkdir($file_target_keep_base_root . '/wp-content/uploads', 0777, true);
+    write_test_file($file_target_keep_base_root . '/wp-content/uploads/keep-target.txt', 'base keep target');
+    copy_tree_for_test($file_target_keep_base_root, $file_target_keep_source_root);
+    copy_tree_for_test($file_target_keep_base_root, $file_target_keep_target_root);
+    $file_target_keep_base_db = $file_target_keep_base_root . '/wp-content/database/.ht.sqlite';
+    $file_target_keep_source_db = $file_target_keep_source_root . '/wp-content/database/.ht.sqlite';
+    $file_target_keep_target_db = $file_target_keep_target_root . '/wp-content/database/.ht.sqlite';
+    mkdir(dirname($file_target_keep_base_db), 0777, true);
+    mkdir(dirname($file_target_keep_source_db), 0777, true);
+    mkdir(dirname($file_target_keep_target_db), 0777, true);
+    create_base_db($file_target_keep_base_db);
+    create_base_db($file_target_keep_source_db);
+    create_base_db($file_target_keep_target_db);
+    $file_target_keep_manifest = $tmp . '/.forkpress/cow/merge/file-bases/feature-file-target-keep.json';
+    cow_merge_capture_file_base($file_target_keep_base_root, $file_target_keep_manifest);
+    write_test_file($file_target_keep_source_root . '/wp-content/uploads/keep-target.txt', 'source target-choice file');
+    write_test_file($file_target_keep_target_root . '/wp-content/uploads/keep-target.txt', 'target target-choice file');
+    $file_target_keep_result = cow_merge_branch_state(
+        $file_target_keep_base_db,
+        $file_target_keep_source_db,
+        $file_target_keep_target_db,
+        $metadata,
+        'feature-file-target-keep',
+        'main',
+        $file_target_keep_manifest,
+        $file_target_keep_source_root,
+        $file_target_keep_target_root
+    );
+    assert_same($file_target_keep_result['status'], 'completed_with_conflicts', 'filesystem target-choice fixture starts with a reviewable conflict');
+    $file_target_keep_conflict_id = (int)scalar($metadata, "SELECT c.id FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = '__files__' AND c.conflict_type = 'file-conflict' AND c.row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/keep-target.txt')) . "' AND r.source_branch = 'feature-file-target-keep' ORDER BY c.id DESC LIMIT 1");
+    $file_target_keep_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $file_target_keep_conflict_id,
+        'target',
+        true,
+        'Keep audited target file.',
+        'cow-test'
+    );
+    assert_same($file_target_keep_resolution['status'], 'validated', 'target filesystem resolution records validated status');
+    assert_same(file_get_contents($file_target_keep_target_root . '/wp-content/uploads/keep-target.txt'), 'target target-choice file', 'target filesystem resolution leaves target file unchanged');
+    $file_target_keep_rerun = cow_merge_branch_state(
+        $file_target_keep_base_db,
+        $file_target_keep_source_db,
+        $file_target_keep_target_db,
+        $metadata,
+        'feature-file-target-keep',
+        'main',
+        $file_target_keep_manifest,
+        $file_target_keep_source_root,
+        $file_target_keep_target_root
+    );
+    assert_same($file_target_keep_rerun['status'], 'completed_with_conflicts', 'rerunning after target filesystem resolution still reports the unchanged source/target divergence');
+    assert_same(file_get_contents($file_target_keep_target_root . '/wp-content/uploads/keep-target.txt'), 'target target-choice file', 'rerunning after target filesystem resolution keeps the audited target file');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = '__files__' AND c.conflict_type = 'file-conflict' AND c.row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/keep-target.txt')) . "' AND r.source_branch = 'feature-file-target-keep'"),
+        1,
+        'rerunning after target filesystem resolution does not duplicate the unchanged conflict record'
+    );
+
     $rollback_base_root = $tmp . '/files-rollback-base';
     $rollback_source_root = $tmp . '/files-rollback-source';
     $rollback_target_root = $tmp . '/files-rollback-target';
@@ -1589,6 +1659,14 @@ SQL);
     );
     assert_same($schema_target_resolution['status'], 'validated', 'target schema conflict resolution validates current target schema');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_target_resolution_id AND table_name = 'plugin_items' AND column_name = 'extra' AND choice = 'target' AND applied = 1"), 1, 'target schema resolution is auditable');
+    $schema_target_resolution_rerun = cow_merge_databases($schema_conflict_base, $schema_conflict_source, $schema_conflict_target, $metadata, 'feature-schema-conflict', 'main');
+    assert_same($schema_target_resolution_rerun['status'], 'completed_with_conflicts', 'rerunning after target schema resolution still reports the unchanged source/target schema divergence');
+    assert_same(column_type($schema_conflict_target, 'plugin_items', 'extra'), 'INTEGER', 'rerunning after target schema resolution keeps the audited target schema');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_items' AND c.column_name = 'extra' AND c.conflict_type = 'schema-column-conflict' AND r.source_branch = 'feature-schema-conflict'"),
+        1,
+        'rerunning after target schema resolution does not duplicate the unchanged conflict record'
+    );
 
     $schema_rebuild_base = $tmp . '/schema-rebuild-base.sqlite';
     $schema_rebuild_source = $tmp . '/schema-rebuild-source.sqlite';

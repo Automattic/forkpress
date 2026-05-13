@@ -2421,6 +2421,43 @@ function cow_merge_record_conflict(
     $source_payload = cow_merge_payload_json($source);
     $target_payload = cow_merge_payload_json($target);
     $chosen_payload = cow_merge_payload_json($chosen);
+    $base_hash = hash('sha256', $base_payload);
+    $source_hash = hash('sha256', $source_payload);
+    $target_hash = hash('sha256', $target_payload);
+    $chosen_hash = hash('sha256', $chosen_payload);
+    $existing = $meta->prepare(
+        'SELECT c.id FROM merge_conflicts c ' .
+        'JOIN merge_runs existing_run ON existing_run.id = c.run_id ' .
+        'JOIN merge_runs current_run ON current_run.id = :run_id ' .
+        'WHERE existing_run.source_branch = current_run.source_branch ' .
+        'AND existing_run.target_branch = current_run.target_branch ' .
+        'AND c.table_name = :table_name ' .
+        'AND ((c.row_identity = :row_identity) OR (c.row_identity IS NULL AND :row_identity IS NULL)) ' .
+        'AND ((c.column_name = :column_name) OR (c.column_name IS NULL AND :column_name IS NULL)) ' .
+        'AND c.conflict_type = :conflict_type ' .
+        'AND c.base_hash = :base_hash AND c.source_hash = :source_hash AND c.target_hash = :target_hash AND c.chosen_hash = :chosen_hash ' .
+        'LIMIT 1'
+    );
+    if (!$existing) {
+        throw new RuntimeException('failed to prepare merge conflict lookup: ' . $meta->lastErrorMsg());
+    }
+    cow_merge_bind($existing, ':run_id', $run_id);
+    cow_merge_bind($existing, ':table_name', $table);
+    cow_merge_bind($existing, ':row_identity', $identity);
+    cow_merge_bind($existing, ':column_name', $column);
+    cow_merge_bind($existing, ':conflict_type', $type);
+    cow_merge_bind($existing, ':base_hash', $base_hash);
+    cow_merge_bind($existing, ':source_hash', $source_hash);
+    cow_merge_bind($existing, ':target_hash', $target_hash);
+    cow_merge_bind($existing, ':chosen_hash', $chosen_hash);
+    $existing_result = $existing->execute();
+    if (!$existing_result) {
+        throw new RuntimeException('failed to look up existing merge conflict: ' . $meta->lastErrorMsg());
+    }
+    if ($existing_result->fetchArray(SQLITE3_ASSOC)) {
+        return;
+    }
+
     $stmt = $meta->prepare(
         'INSERT OR IGNORE INTO merge_conflicts ' .
         '(run_id, table_name, row_identity, column_name, conflict_type, base_payload, source_payload, target_payload, chosen_payload, ' .
@@ -2437,10 +2474,10 @@ function cow_merge_record_conflict(
     cow_merge_bind($stmt, ':source_payload', $source_payload);
     cow_merge_bind($stmt, ':target_payload', $target_payload);
     cow_merge_bind($stmt, ':chosen_payload', $chosen_payload);
-    cow_merge_bind($stmt, ':base_hash', hash('sha256', $base_payload));
-    cow_merge_bind($stmt, ':source_hash', hash('sha256', $source_payload));
-    cow_merge_bind($stmt, ':target_hash', hash('sha256', $target_payload));
-    cow_merge_bind($stmt, ':chosen_hash', hash('sha256', $chosen_payload));
+    cow_merge_bind($stmt, ':base_hash', $base_hash);
+    cow_merge_bind($stmt, ':source_hash', $source_hash);
+    cow_merge_bind($stmt, ':target_hash', $target_hash);
+    cow_merge_bind($stmt, ':chosen_hash', $chosen_hash);
     cow_merge_bind($stmt, ':resolver', 'target-wins');
     if (!$stmt->execute()) {
         throw new RuntimeException('failed to record merge conflict: ' . $meta->lastErrorMsg());
