@@ -469,9 +469,10 @@ tooling.
   generically from SQLite state; branch-time AUTOINCREMENT bands keep
   independently created rows, such as posts saved through wp-admin or REST,
   from colliding across branches. If a clean source insert collides with a
-  target-side unique key, the target row is kept and the choice is recorded as
-  an auditable `row-unique-collision`; identical source/target inserts with the
-  same explicit primary key, and identical source/target updates or deletes to
+  target-side unique key, including a normal-column partial unique index, the
+  target row is kept and the choice is recorded as an auditable
+  `row-unique-collision`; identical source/target inserts with the same
+  explicit primary key, and identical source/target updates or deletes to
   existing explicit-primary-key rows, are recorded as non-conflicting
   `source-applied` decisions. Identical source/target cell changes inside an
   otherwise divergent row are also recorded as non-conflicting `source-applied`

@@ -1406,6 +1406,74 @@ function cow_merge_insert_row_with_rowid(SQLite3 $target, string $table, int $ro
     return (int)$target->lastInsertRowID();
 }
 
+function cow_merge_partial_index_where(string $sql): ?string {
+    $len = strlen($sql);
+    $quote = null;
+    $depth = 0;
+    for ($i = 0; $i < $len; $i++) {
+        $ch = $sql[$i];
+        if ($quote !== null) {
+            if ($quote === '[' && $ch === ']') {
+                $quote = null;
+            } elseif ($ch === $quote) {
+                if ($quote === "'" && $i + 1 < $len && $sql[$i + 1] === "'") {
+                    $i++;
+                    continue;
+                }
+                $quote = null;
+            }
+            continue;
+        }
+        if ($ch === "'" || $ch === '"' || $ch === '`' || $ch === '[') {
+            $quote = $ch;
+            continue;
+        }
+        if ($ch === '(') {
+            $depth++;
+            continue;
+        }
+        if ($ch === ')' && $depth > 0) {
+            $depth--;
+            continue;
+        }
+        if ($depth !== 0 || strncasecmp(substr($sql, $i, 5), 'WHERE', 5) !== 0) {
+            continue;
+        }
+        $before = $i === 0 ? ' ' : $sql[$i - 1];
+        $after = $i + 5 >= $len ? ' ' : $sql[$i + 5];
+        if (preg_match('/[A-Za-z0-9_]/', $before) || preg_match('/[A-Za-z0-9_]/', $after)) {
+            continue;
+        }
+        $where = trim(substr($sql, $i + 5));
+        $where = rtrim($where, " \t\r\n;");
+        return $where === '' ? null : $where;
+    }
+    return null;
+}
+
+function cow_merge_row_matches_partial_index_where(SQLite3 $db, array $row, string $where): bool {
+    $columns = array_keys($row);
+    if (!$columns) {
+        return false;
+    }
+    $quoted_columns = implode(', ', array_map('cow_merge_quote_ident', $columns));
+    $placeholders = implode(', ', array_fill(0, count($columns), '?'));
+    $sql = 'WITH __forkpress_merge_row (' . $quoted_columns . ') AS (SELECT ' . $placeholders . ') ' .
+        'SELECT 1 FROM __forkpress_merge_row WHERE ' . $where . ' LIMIT 1';
+    $stmt = @$db->prepare($sql);
+    if (!$stmt) {
+        return false;
+    }
+    foreach ($columns as $i => $column) {
+        cow_merge_bind($stmt, $i + 1, $row[$column] ?? null);
+    }
+    $res = @$stmt->execute();
+    if (!$res) {
+        return false;
+    }
+    return (bool)$res->fetchArray(SQLITE3_NUM);
+}
+
 function cow_merge_unique_indexes(SQLite3 $db, string $table): array {
     $indexes = [];
     $res = $db->query('PRAGMA index_list(' . cow_merge_quote_ident($table) . ')');
@@ -1413,12 +1481,20 @@ function cow_merge_unique_indexes(SQLite3 $db, string $table): array {
         return [];
     }
     while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
-        if ((int)($row['unique'] ?? 0) !== 1 || (int)($row['partial'] ?? 0) === 1) {
+        if ((int)($row['unique'] ?? 0) !== 1) {
             continue;
         }
         $name = (string)($row['name'] ?? '');
         if ($name === '') {
             continue;
+        }
+        $where = null;
+        if ((int)($row['partial'] ?? 0) === 1) {
+            $sql = cow_merge_index_sql($db, $name);
+            $where = is_string($sql) ? cow_merge_partial_index_where($sql) : null;
+            if ($where === null) {
+                continue;
+            }
         }
         $info = $db->query("PRAGMA index_info('" . SQLite3::escapeString($name) . "')");
         if (!$info) {
@@ -1434,7 +1510,7 @@ function cow_merge_unique_indexes(SQLite3 $db, string $table): array {
             $columns[] = $column_name;
         }
         if ($columns) {
-            $indexes[] = ['name' => $name, 'columns' => $columns];
+            $indexes[] = ['name' => $name, 'columns' => $columns, 'where' => $where];
         }
     }
     return $indexes;
@@ -1442,6 +1518,10 @@ function cow_merge_unique_indexes(SQLite3 $db, string $table): array {
 
 function cow_merge_find_unique_collision(SQLite3 $target, string $table, array $source_row, bool $include_rowid = false): ?array {
     foreach (cow_merge_unique_indexes($target, $table) as $index) {
+        $partial_where = $index['where'] ?? null;
+        if (is_string($partial_where) && !cow_merge_row_matches_partial_index_where($target, $source_row, $partial_where)) {
+            continue;
+        }
         $values = [];
         $clauses = [];
         foreach ($index['columns'] as $column) {
@@ -1454,6 +1534,9 @@ function cow_merge_find_unique_collision(SQLite3 $target, string $table, array $
         }
         if (!$clauses) {
             continue;
+        }
+        if (is_string($partial_where)) {
+            $clauses[] = '(' . $partial_where . ')';
         }
 
         $select = $include_rowid ? 'rowid AS __forkpress_merge_rowid, *' : '*';

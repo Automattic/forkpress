@@ -234,6 +234,50 @@ try {
     assert_same(scalar($unique_target, "SELECT value FROM plugin_unique_rows WHERE slug = 'shared-slug'"), 'source row', 'source unique collision resolution replaces the target row payload');
     assert_same((int)scalar($unique_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $unique_conflict_id AND table_name = 'plugin_unique_rows' AND choice = 'source' AND applied = 1"), 1, 'source unique collision resolution is auditable');
 
+    $partial_unique_base = $tmp . '/partial-unique-base.sqlite';
+    $partial_unique_source = $tmp . '/partial-unique-source.sqlite';
+    $partial_unique_target = $tmp . '/partial-unique-target.sqlite';
+    $partial_unique_metadata = $tmp . '/.forkpress/cow/merge/partial-unique-metadata.sqlite';
+    create_base_db($partial_unique_base);
+    copy($partial_unique_base, $partial_unique_source);
+    copy($partial_unique_base, $partial_unique_target);
+    foreach ([$partial_unique_base, $partial_unique_source, $partial_unique_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_partial_unique_rows (id INTEGER PRIMARY KEY, slug TEXT, active INTEGER NOT NULL DEFAULT 1, value TEXT)');
+        $db->exec('CREATE UNIQUE INDEX plugin_partial_unique_rows_slug_active_idx ON plugin_partial_unique_rows(slug) WHERE active = 1');
+        $db->close();
+    }
+    $db = open_db($partial_unique_source);
+    $db->exec("INSERT INTO plugin_partial_unique_rows (id, slug, active, value) VALUES (10, 'partial-shared', 1, 'source active row')");
+    $db->exec("INSERT INTO plugin_partial_unique_rows (id, slug, active, value) VALUES (11, 'partial-inactive', 0, 'source inactive row')");
+    $db->close();
+    $db = open_db($partial_unique_target);
+    $db->exec("INSERT INTO plugin_partial_unique_rows (id, slug, active, value) VALUES (20, 'partial-shared', 1, 'target active row')");
+    $db->exec("INSERT INTO plugin_partial_unique_rows (id, slug, active, value) VALUES (21, 'partial-inactive', 1, 'target active same slug')");
+    $db->close();
+    $partial_unique_result = cow_merge_databases($partial_unique_base, $partial_unique_source, $partial_unique_target, $partial_unique_metadata, 'feature-partial-unique', 'main');
+    assert_same($partial_unique_result['status'], 'completed_with_conflicts', 'source insert colliding with target partial unique key is audited instead of aborting');
+    assert_same(
+        (int)scalar($partial_unique_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_partial_unique_rows' AND conflict_type = 'row-unique-collision'"),
+        1,
+        'partial unique-key row collision is recorded as a conflict'
+    );
+    assert_same(scalar($partial_unique_target, "SELECT value FROM plugin_partial_unique_rows WHERE slug = 'partial-shared'"), 'target active row', 'partial unique target row wins by default');
+    assert_same((int)scalar($partial_unique_target, "SELECT COUNT(*) FROM plugin_partial_unique_rows WHERE slug = 'partial-inactive'"), 2, 'source row outside partial unique predicate still inserts cleanly');
+    assert_same(scalar($partial_unique_target, "SELECT value FROM plugin_partial_unique_rows WHERE id = 11"), 'source inactive row', 'inactive partial unique source row is applied');
+    $partial_unique_conflict_id = (int)scalar($partial_unique_metadata, "SELECT c.id FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_partial_unique_rows' AND c.conflict_type = 'row-unique-collision' AND r.source_branch = 'feature-partial-unique' ORDER BY c.id DESC LIMIT 1");
+    $partial_unique_source_resolution = cow_merge_resolve_conflict(
+        $partial_unique_metadata,
+        $partial_unique_conflict_id,
+        'source',
+        true,
+        'Apply partial unique source row.',
+        'cow-test'
+    );
+    assert_same($partial_unique_source_resolution['status'], 'applied', 'source partial unique collision resolution records applied status');
+    assert_same((int)scalar($partial_unique_target, "SELECT id FROM plugin_partial_unique_rows WHERE slug = 'partial-shared'"), 10, 'source partial unique collision resolution inserts the audited source row identity');
+    assert_same(scalar($partial_unique_target, "SELECT value FROM plugin_partial_unique_rows WHERE slug = 'partial-shared'"), 'source active row', 'source partial unique collision resolution replaces the target row payload');
+
     $target_only_base = $tmp . '/target-only-base.sqlite';
     $target_only_source = $tmp . '/target-only-source.sqlite';
     $target_only_target = $tmp . '/target-only-target.sqlite';
