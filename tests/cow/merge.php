@@ -3074,6 +3074,65 @@ SQL);
     assert_same((int)scalar($schema_rebuild_trigger_fk_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_rebuild_trigger_fk_parent_label_idx'"), 1, 'validated trigger-sensitive table rebuild preserves the FK backing index');
     assert_same(scalar($schema_rebuild_trigger_fk_target, "SELECT note FROM plugin_rebuild_trigger_fk_child WHERE parent_label = 'parent-label'"), 'base child', 'validated trigger-sensitive table rebuild keeps existing index-backed child rows valid');
 
+    $schema_rebuild_view_rollback_base = $tmp . '/schema-rebuild-view-rollback-base.sqlite';
+    $schema_rebuild_view_rollback_source = $tmp . '/schema-rebuild-view-rollback-source.sqlite';
+    $schema_rebuild_view_rollback_target = $tmp . '/schema-rebuild-view-rollback-target.sqlite';
+    create_base_db($schema_rebuild_view_rollback_base);
+    $db = open_db($schema_rebuild_view_rollback_base);
+    $db->exec('CREATE TABLE plugin_rebuild_view_parent (code TEXT NOT NULL PRIMARY KEY, label TEXT NOT NULL)');
+    $db->exec("INSERT INTO plugin_rebuild_view_parent (code, label) VALUES ('view-parent', 'view label')");
+    $db->close();
+    copy($schema_rebuild_view_rollback_base, $schema_rebuild_view_rollback_source);
+    copy($schema_rebuild_view_rollback_base, $schema_rebuild_view_rollback_target);
+
+    $db = open_db($schema_rebuild_view_rollback_source);
+    $db->exec('CREATE TABLE plugin_rebuild_view_parent_new (code TEXT NOT NULL PRIMARY KEY, label TEXT NOT NULL) WITHOUT ROWID');
+    $db->exec('INSERT INTO plugin_rebuild_view_parent_new (code, label) SELECT code, label FROM plugin_rebuild_view_parent');
+    $db->exec('DROP TABLE plugin_rebuild_view_parent');
+    $db->exec('ALTER TABLE plugin_rebuild_view_parent_new RENAME TO plugin_rebuild_view_parent');
+    $db->close();
+    $db = open_db($schema_rebuild_view_rollback_target);
+    $db->exec('CREATE TABLE plugin_rebuild_view_parent_new (code TEXT NOT NULL PRIMARY KEY, label NUMERIC NOT NULL)');
+    $db->exec('INSERT INTO plugin_rebuild_view_parent_new (code, label) SELECT code, label FROM plugin_rebuild_view_parent');
+    $db->exec('DROP TABLE plugin_rebuild_view_parent');
+    $db->exec('ALTER TABLE plugin_rebuild_view_parent_new RENAME TO plugin_rebuild_view_parent');
+    $db->exec('CREATE VIEW plugin_rebuild_view_parent_rowids AS SELECT rowid, code FROM plugin_rebuild_view_parent');
+    $db->close();
+
+    $schema_rebuild_view_rollback_result = cow_merge_databases(
+        $schema_rebuild_view_rollback_base,
+        $schema_rebuild_view_rollback_source,
+        $schema_rebuild_view_rollback_target,
+        $metadata,
+        'feature-schema-rebuild-view-rollback',
+        'main'
+    );
+    assert_same($schema_rebuild_view_rollback_result['status'], 'completed_with_conflicts', 'compatible table rebuild with preserved rowid view remains reviewable');
+    $schema_rebuild_view_rollback_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_rebuild_view_parent' AND conflict_type = 'schema-conflict' ORDER BY id DESC LIMIT 1");
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $schema_rebuild_view_rollback_conflict_id, 'source', false, 'Preview rowid-view table rebuild.', 'test'),
+        'plugin_rebuild_view_parent_rowids',
+        'dry-run table rebuild rejects a preserved target view that would become invalid after source schema application'
+    );
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_rebuild_view_rollback_conflict_id"), 0, 'failed view-sensitive table rebuild dry-run does not record resolution metadata');
+    assert_same(column_type($schema_rebuild_view_rollback_target, 'plugin_rebuild_view_parent', 'label'), 'NUMERIC', 'failed view-sensitive table rebuild dry-run rolls back target table schema');
+    assert_same((int)scalar($schema_rebuild_view_rollback_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_rebuild_view_parent_rowids'"), 1, 'failed view-sensitive table rebuild dry-run preserves target view');
+    assert_same(scalar($schema_rebuild_view_rollback_target, "SELECT code FROM plugin_rebuild_view_parent_rowids WHERE code = 'view-parent'"), 'view-parent', 'preserved target view remains queryable after failed table rebuild dry-run');
+    $db = open_db($schema_rebuild_view_rollback_target);
+    $db->exec('DROP VIEW plugin_rebuild_view_parent_rowids');
+    $db->close();
+    $schema_rebuild_view_rollback_apply = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_rebuild_view_rollback_conflict_id,
+        'source',
+        true,
+        'Apply rowid-view table rebuild after view review.',
+        'test'
+    );
+    assert_same($schema_rebuild_view_rollback_apply['status'], 'applied', 'table rebuild applies after the invalid preserved view is handled');
+    assert_true(str_contains((string)scalar($schema_rebuild_view_rollback_target, "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'plugin_rebuild_view_parent'"), 'WITHOUT ROWID'), 'validated view-sensitive table rebuild applies the audited source WITHOUT ROWID schema');
+    assert_same((int)scalar($schema_rebuild_view_rollback_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_rebuild_view_parent_rowids'"), 0, 'validated view-sensitive table rebuild leaves the reviewed target view removed');
+
     $schema_keyless_rebuild_base = $tmp . '/schema-keyless-rebuild-base.sqlite';
     $schema_keyless_rebuild_source = $tmp . '/schema-keyless-rebuild-source.sqlite';
     $schema_keyless_rebuild_target = $tmp . '/schema-keyless-rebuild-target.sqlite';
