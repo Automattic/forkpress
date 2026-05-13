@@ -3847,6 +3847,46 @@ SQL);
         0,
         'failed child-before-parent restore preview leaves the target child table absent'
     );
+    $db = open_db($schema_cross_fk_restored_parent_target);
+    $db->exec('CREATE TABLE plugin_cross_parent_restore (code TEXT PRIMARY KEY, label TEXT)');
+    $db->close();
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $schema_cross_fk_restored_parent_metadata,
+            $schema_cross_fk_restored_parent_child_conflict_id,
+            'source',
+            false,
+            'Preview child restore before parent row.',
+            'test'
+        ),
+        'requires parent row in plugin_cross_parent_restore',
+        'source child table restore preview reports the missing cross-table parent row before mutation'
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $schema_cross_fk_restored_parent_metadata,
+            $schema_cross_fk_restored_parent_child_conflict_id,
+            'source',
+            true,
+            'Apply child restore before parent row.',
+            'test'
+        ),
+        'requires parent row in plugin_cross_parent_restore',
+        'source child table restore apply reports the missing cross-table parent row before mutation'
+    );
+    assert_same(
+        (int)scalar($schema_cross_fk_restored_parent_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_cross_fk_restored_parent_child_conflict_id"),
+        0,
+        'failed child-before-parent-row restore attempts do not record a resolution'
+    );
+    assert_same(
+        (int)scalar($schema_cross_fk_restored_parent_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_cross_child_restore_parent'"),
+        0,
+        'failed child-before-parent-row restore attempts leave the target child table absent'
+    );
+    $db = open_db($schema_cross_fk_restored_parent_target);
+    $db->exec('DROP TABLE plugin_cross_parent_restore');
+    $db->close();
     $schema_cross_fk_restored_parent_parent_resolution = cow_merge_resolve_conflict(
         $schema_cross_fk_restored_parent_metadata,
         $schema_cross_fk_restored_parent_parent_conflict_id,

@@ -14,6 +14,7 @@
 - Ordered rows during validation-gated source restores of target-dropped same-table foreign-key plugin tables, preserving no-primary-key sidecar identities while restoring parent rows before children.
 - Added COW coverage for validation-gated source restores of target-dropped foreign-key child tables after source-only or already restored parent tables.
 - Added validation preflight for target-dropped foreign-key child table restores, reporting missing cross-table parent dependencies before dry-run or apply mutates target state.
+- Added COW coverage for target-dropped foreign-key child table restore validation when the parent table exists but the required parent row is still absent.
 - Added generic foreign-key preflight for COW source row deletes so target-side child rows keep their parent by default with auditable `row-target-constraint` metadata until a reviewed source delete validates.
 - Applied clean source deletes across unchanged target-side foreign-key child graphs before deleting the parent, avoiding false `row-target-constraint` conflicts when source deletes the dependent rows too.
 - Applied clean source updates to unchanged target-side foreign-key child rows before deleting the parent, avoiding false `row-target-constraint` conflicts when source reparents dependent rows away from the deleted parent.
