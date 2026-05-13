@@ -57,6 +57,7 @@
 - Added COW merge coverage for identical no-primary-key inserts without declared uniqueness remaining separate audited rows instead of being collapsed.
 - Recorded identical explicit-primary-key source/target inserts as auditable non-conflicting `source-applied` COW decisions instead of leaving the no-op implicit.
 - Recorded identical explicit-primary-key source/target updates and deletes as auditable non-conflicting `source-applied` COW decisions instead of leaving the no-op implicit.
+- Recorded identical source/target cell changes inside otherwise divergent rows as auditable non-conflicting `source-applied` COW decisions, including no-primary-key rows backed by sidecar identity.
 - Recorded identical source/target SQLite table, index, view, and trigger schema changes as auditable non-conflicting `source-applied` COW decisions instead of leaving the no-op implicit.
 - Recorded identical source/target filesystem additions, changes, and deletions as auditable non-conflicting `source-applied` COW decisions instead of leaving the no-op implicit.
 - Updated the automatic mergeback loop runner to pass a configurable Codex reasoning-effort setting and to include the changelog/known-good tag policy in every worker prompt.

@@ -569,6 +569,26 @@ try {
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_items' AND decision = 'source-applied' AND reason = 'source and target changed row to the same payload'"), 1, 'identical same-PK update is auditable');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_items' AND r.source_branch = 'feature-row-same-update'"), 0, 'identical same-PK update does not create a false row conflict');
 
+    $row_same_cell_base = $tmp . '/row-same-cell-base.sqlite';
+    $row_same_cell_source = $tmp . '/row-same-cell-source.sqlite';
+    $row_same_cell_target = $tmp . '/row-same-cell-target.sqlite';
+    create_base_db($row_same_cell_base);
+    copy($row_same_cell_base, $row_same_cell_source);
+    copy($row_same_cell_base, $row_same_cell_target);
+    $db = open_db($row_same_cell_source);
+    $db->exec("UPDATE plugin_items SET label = 'Shared cell label' WHERE item_id = 'alpha'");
+    $db->close();
+    $db = open_db($row_same_cell_target);
+    $db->exec("UPDATE plugin_items SET label = 'Shared cell label', value = 'target-only alongside shared cell' WHERE item_id = 'alpha'");
+    $db->close();
+    $row_same_cell_result = cow_merge_databases($row_same_cell_base, $row_same_cell_source, $row_same_cell_target, $metadata, 'feature-row-same-cell', 'main');
+    assert_same($row_same_cell_result['status'], 'completed', 'identical same-PK cell changes inside a divergent row merge without a review conflict');
+    assert_same(scalar($row_same_cell_target, "SELECT label FROM plugin_items WHERE item_id = 'alpha'"), 'Shared cell label', 'shared same-PK cell value remains in target');
+    assert_same(scalar($row_same_cell_target, "SELECT value FROM plugin_items WHERE item_id = 'alpha'"), 'target-only alongside shared cell', 'target-only same-PK cell remains preserved');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE d.table_name = 'plugin_items' AND d.column_name = 'label' AND d.decision = 'source-applied' AND d.reason = 'source and target changed cell to the same value' AND r.source_branch = 'feature-row-same-cell'"), 1, 'identical same-PK cell change inside a divergent row is auditable');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE d.table_name = 'plugin_items' AND d.column_name = 'value' AND d.decision = 'target-kept' AND d.reason = 'target changed cell and source did not change it' AND r.source_branch = 'feature-row-same-cell'"), 1, 'target-only cell next to a shared cell remains auditable');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_items' AND r.source_branch = 'feature-row-same-cell'"), 0, 'identical same-PK cell change inside a divergent row does not create a false row conflict');
+
     $row_same_delete_base = $tmp . '/row-same-delete-base.sqlite';
     $row_same_delete_source = $tmp . '/row-same-delete-source.sqlite';
     $row_same_delete_target = $tmp . '/row-same-delete-target.sqlite';
@@ -2250,6 +2270,26 @@ SQL);
 
     cow_merge_databases($keyless_base, $keyless_source, $keyless_target, $metadata, 'feature-keyless', 'main');
     assert_same((int)scalar($keyless_target, "SELECT COUNT(*) FROM plugin_keyless WHERE label = 'Source keyless'"), 1, 'rerunning keyless merge does not duplicate the source insert');
+
+    $keyless_same_cell_base = $tmp . '/keyless-same-cell-base.sqlite';
+    $keyless_same_cell_source = $tmp . '/keyless-same-cell-source.sqlite';
+    $keyless_same_cell_target = $tmp . '/keyless-same-cell-target.sqlite';
+    create_base_db($keyless_same_cell_base);
+    copy($keyless_same_cell_base, $keyless_same_cell_source);
+    copy($keyless_same_cell_base, $keyless_same_cell_target);
+    $db = open_db($keyless_same_cell_source);
+    $db->exec("UPDATE plugin_keyless SET label = 'Shared keyless label' WHERE rowid = 1");
+    $db->close();
+    $db = open_db($keyless_same_cell_target);
+    $db->exec("UPDATE plugin_keyless SET label = 'Shared keyless label', value = 'target-only keyless value' WHERE rowid = 1");
+    $db->close();
+    $keyless_same_cell_result = cow_merge_databases($keyless_same_cell_base, $keyless_same_cell_source, $keyless_same_cell_target, $metadata, 'feature-keyless-same-cell', 'main');
+    assert_same($keyless_same_cell_result['status'], 'completed', 'same-cell no-primary-key merge uses sidecar identity without a review conflict');
+    assert_same(scalar($keyless_same_cell_target, "SELECT label FROM plugin_keyless WHERE rowid = 1"), 'Shared keyless label', 'shared keyless cell value remains in target');
+    assert_same(scalar($keyless_same_cell_target, "SELECT value FROM plugin_keyless WHERE rowid = 1"), 'target-only keyless value', 'target-only keyless cell remains preserved');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE d.table_name = 'plugin_keyless' AND d.column_name = 'label' AND d.decision = 'source-applied' AND d.reason = 'source and target changed cell to the same value' AND r.source_branch = 'feature-keyless-same-cell'"), 1, 'same-cell no-primary-key source change is auditable when sidecar identity lines up');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE d.table_name = 'plugin_keyless' AND d.column_name = 'value' AND d.decision = 'target-kept' AND d.reason = 'target changed cell and source did not change it' AND r.source_branch = 'feature-keyless-same-cell'"), 1, 'target-only keyless cell next to a shared cell remains auditable');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_keyless' AND r.source_branch = 'feature-keyless-same-cell'"), 0, 'same-cell no-primary-key merge does not create a false identity ambiguity');
 
     $keyless_conflict_base = $tmp . '/keyless-conflict-base.sqlite';
     $keyless_conflict_source = $tmp . '/keyless-conflict-source.sqlite';

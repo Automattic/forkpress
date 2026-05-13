@@ -6380,6 +6380,9 @@ function cow_merge_table_rows(
                 if (!$target_changed) {
                     cow_merge_record_decision($meta, $run_id, $table, $key, $col, 'source-applied', 'source changed cell and target did not change it', $b, $s, $t, $s);
                     $row_applied++;
+                } else {
+                    cow_merge_record_decision($meta, $run_id, $table, $key, $col, 'source-applied', 'source and target changed cell to the same value', $b, $s, $t, $t);
+                    $row_applied++;
                 }
                 continue;
             }

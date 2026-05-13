@@ -473,9 +473,11 @@ tooling.
   an auditable `row-unique-collision`; identical source/target inserts with the
   same explicit primary key, and identical source/target updates or deletes to
   existing explicit-primary-key rows, are recorded as non-conflicting
-  `source-applied` decisions. No-primary-key inserts that are already present
-  in target with the same payload through a declared unique index are recorded
-  as an auditable non-conflicting `source-applied` decision instead.
+  `source-applied` decisions. Identical source/target cell changes inside an
+  otherwise divergent row are also recorded as non-conflicting `source-applied`
+  decisions when row identity is known. No-primary-key inserts that are already
+  present in target with the same payload through a declared unique index are
+  recorded as an auditable non-conflicting `source-applied` decision instead.
   Without declared unique evidence, identical-looking no-primary-key inserts
   remain separate rows so duplicate-capable plugin tables do not lose data.
   For no-primary-key plugin tables, runtime row identity tracking handles
