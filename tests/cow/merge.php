@@ -4043,6 +4043,61 @@ SQL);
     );
     assert_same($source_added_trigger_read_rerun['status'], 'completed', 'rerunning after source-added trigger read resolution completes without a new conflict');
 
+    $source_added_trigger_column_base = $tmp . '/source-added-trigger-column-base.sqlite';
+    $source_added_trigger_column_source = $tmp . '/source-added-trigger-column-source.sqlite';
+    $source_added_trigger_column_target = $tmp . '/source-added-trigger-column-target.sqlite';
+    $source_added_trigger_column_metadata = $tmp . '/.forkpress/cow/merge/source-added-trigger-column-metadata.sqlite';
+    create_base_db($source_added_trigger_column_base);
+    $db = open_db($source_added_trigger_column_base);
+    $db->exec('CREATE TABLE plugin_trigger_column_audit (item_label TEXT)');
+    $db->close();
+    copy($source_added_trigger_column_base, $source_added_trigger_column_source);
+    copy($source_added_trigger_column_base, $source_added_trigger_column_target);
+    cow_merge_capture_row_identities($source_added_trigger_column_base, $source_added_trigger_column_metadata, 'main');
+    cow_merge_capture_row_identities($source_added_trigger_column_source, $source_added_trigger_column_metadata, 'feature-source-trigger-column', 'main');
+    cow_merge_capture_row_identities($source_added_trigger_column_target, $source_added_trigger_column_metadata, 'main');
+    $db = open_db($source_added_trigger_column_source);
+    $db->exec('CREATE TABLE plugin_trigger_column_items (label TEXT)');
+    $db->exec("INSERT INTO plugin_trigger_column_items (rowid, label) VALUES (9, 'column dependency source item')");
+    $db->exec('CREATE TRIGGER plugin_trigger_column_items_audit AFTER INSERT ON plugin_trigger_column_items BEGIN INSERT INTO plugin_trigger_column_audit (missing_label) VALUES (NEW.label); END');
+    $db->close();
+    cow_merge_capture_row_identities($source_added_trigger_column_source, $source_added_trigger_column_metadata, 'feature-source-trigger-column', 'main');
+    $source_added_trigger_column_result = cow_merge_databases(
+        $source_added_trigger_column_base,
+        $source_added_trigger_column_source,
+        $source_added_trigger_column_target,
+        $source_added_trigger_column_metadata,
+        'feature-source-trigger-column',
+        'main'
+    );
+    assert_same($source_added_trigger_column_result['status'], 'completed_with_conflicts', 'source-added trigger with an invalid target column is audited');
+    assert_same((int)scalar($source_added_trigger_column_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_trigger_column_items'"), 1, 'source-added trigger column table still materializes');
+    assert_same((int)scalar($source_added_trigger_column_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_trigger_column_items_audit'"), 0, 'source-added trigger with invalid column dependency is held back');
+    $source_added_trigger_column_conflict_id = (int)scalar($source_added_trigger_column_metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_trigger_column_items_audit' AND conflict_type = 'schema-source-added-trigger' ORDER BY id DESC LIMIT 1");
+    assert_true($source_added_trigger_column_conflict_id > 0, 'invalid trigger column dependency records a source-added trigger schema conflict');
+    $source_added_trigger_column_payload = cow_merge_decode_payload_json(
+        (string)scalar($source_added_trigger_column_metadata, "SELECT source_payload FROM merge_conflicts WHERE id = $source_added_trigger_column_conflict_id"),
+        'source trigger column payload'
+    );
+    assert_true(
+        is_array($source_added_trigger_column_payload)
+            && str_contains((string)($source_added_trigger_column_payload['error'] ?? ''), 'missing_label'),
+        'invalid trigger column conflict payload includes the rejected column'
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $source_added_trigger_column_metadata,
+            $source_added_trigger_column_conflict_id,
+            'source',
+            true,
+            'Try trigger before audit column exists.',
+            'test'
+        ),
+        'failed target trigger validation',
+        'source-added trigger resolution remains gated while target columns are invalid'
+    );
+    assert_same((int)scalar($source_added_trigger_column_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_trigger_column_items_audit'"), 0, 'failed trigger column resolution rolls back the invalid trigger');
+
     $trigger_cte_refs = cow_merge_trigger_referenced_tables(
         'CREATE TRIGGER plugin_trigger_cte_items_audit AFTER INSERT ON plugin_trigger_cte_items BEGIN ' .
         'INSERT INTO plugin_trigger_cte_audit (item_label) ' .

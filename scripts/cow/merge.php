@@ -5459,6 +5459,93 @@ function cow_merge_trigger_referenced_schema_objects(string $sql): array {
     return cow_merge_sql_referenced_schema_objects($body);
 }
 
+function cow_merge_trigger_subject(string $sql): ?array {
+    $schema_identifier = cow_merge_identifier_pattern('schema_');
+    $table_identifier = cow_merge_identifier_pattern('table_');
+    $pattern =
+        '/\bCREATE\s+(?:TEMP(?:ORARY)?\s+)?TRIGGER(?:\s+IF\s+NOT\s+EXISTS)?\s+' .
+        cow_merge_identifier_pattern('trigger_') .
+        '\s+(?:BEFORE|AFTER|INSTEAD\s+OF)\s+' .
+        '(?P<event>INSERT|DELETE|UPDATE)(?:\s+OF\s+(?P<columns>.*?))?\s+' .
+        'ON\s+(?:' . $schema_identifier . '\s*\.\s*)?' . $table_identifier . '/is';
+    if (!preg_match($pattern, $sql, $match)) {
+        return null;
+    }
+    $flat_match = cow_merge_regex_flat_match($match);
+    $table = cow_merge_sql_reference_name($flat_match, 'table_');
+    if ($table === null) {
+        return null;
+    }
+    $columns = [];
+    $raw_columns = cow_merge_regex_named_match($flat_match, 'columns');
+    if ($raw_columns !== null) {
+        if (preg_match_all('/' . cow_merge_identifier_pattern('column_') . '/', $raw_columns, $column_matches, PREG_SET_ORDER)) {
+            foreach ($column_matches as $column_match) {
+                $column = cow_merge_sql_reference_name(cow_merge_regex_flat_match($column_match), 'column_');
+                if ($column !== null) {
+                    $columns[] = $column;
+                }
+            }
+        }
+    }
+    return [
+        'schema' => cow_merge_sql_reference_name($flat_match, 'schema_'),
+        'table' => $table,
+        'event' => strtolower((string)$flat_match['event']),
+        'columns' => array_values(array_unique($columns)),
+    ];
+}
+
+function cow_merge_qualified_schema_name(?string $schema, string $name): string {
+    if ($schema === null || $schema === '' || $schema === 'main') {
+        return cow_merge_quote_ident($name);
+    }
+    return cow_merge_quote_ident($schema) . '.' . cow_merge_quote_ident($name);
+}
+
+function cow_merge_trigger_validation_sql(SQLite3 $db, string $sql): ?string {
+    $subject = cow_merge_trigger_subject($sql);
+    if ($subject === null) {
+        return null;
+    }
+    $target = cow_merge_qualified_schema_name($subject['schema'], $subject['table']);
+    $event = (string)$subject['event'];
+    if ($event === 'insert') {
+        return 'EXPLAIN INSERT INTO ' . $target . ' DEFAULT VALUES';
+    }
+    if ($event === 'delete') {
+        return 'EXPLAIN DELETE FROM ' . $target . ' WHERE 0';
+    }
+    if ($event === 'update') {
+        $columns = $subject['columns'];
+        if (!$columns) {
+            $columns = cow_merge_table_columns($db, (string)$subject['table']);
+        }
+        if (!$columns) {
+            return null;
+        }
+        $assignments = array_map(
+            fn(string $column): string => cow_merge_quote_ident($column) . ' = ' . cow_merge_quote_ident($column),
+            $columns
+        );
+        return 'EXPLAIN UPDATE ' . $target . ' SET ' . implode(', ', $assignments) . ' WHERE 0';
+    }
+    return null;
+}
+
+function cow_merge_validate_trigger_program(SQLite3 $db, string $name, string $sql): void {
+    $validation_sql = cow_merge_trigger_validation_sql($db, $sql);
+    if ($validation_sql === null) {
+        return;
+    }
+    $res = @$db->query($validation_sql);
+    if (!$res) {
+        throw new InvalidArgumentException(
+            'source trigger ' . $name . ' failed target trigger validation: ' . $db->lastErrorMsg()
+        );
+    }
+}
+
 function cow_merge_missing_schema_references(SQLite3 $db, array $references): array {
     $missing = [];
     foreach ($references as $reference) {
@@ -5901,6 +5988,9 @@ function cow_merge_resolve_schema_conflict(
                         }
                         if ($source_sql !== null && !@$target->exec($source_sql)) {
                             throw new RuntimeException("failed to apply source $type schema resolution: " . $target->lastErrorMsg());
+                        }
+                        if ($source_sql !== null) {
+                            cow_merge_validate_trigger_program($target, $object, $source_sql);
                         }
                     }
                 };
@@ -7616,6 +7706,7 @@ function cow_merge_restore_source_table(
         if (!$target->exec((string)$trigger['sql'])) {
             throw new RuntimeException('failed to restore source table trigger ' . $trigger['name'] . ': ' . $target->lastErrorMsg());
         }
+        cow_merge_validate_trigger_program($target, (string)$trigger['name'], (string)$trigger['sql']);
     }
     return $restored;
 }
@@ -8123,6 +8214,9 @@ function cow_merge_apply_schema_object_changes(
                 }
                 if (!@$target->exec($source_sql)) {
                     throw new RuntimeException($target->lastErrorMsg());
+                }
+                if ($type === 'trigger') {
+                    cow_merge_validate_trigger_program($target, $name, $source_sql);
                 }
                 if ($type === 'view') {
                     cow_merge_validate_view_schema($target, $name, 'source-added');
