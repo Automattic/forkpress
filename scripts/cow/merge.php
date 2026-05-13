@@ -1628,6 +1628,7 @@ function cow_merge_collect_required_foreign_key_parent_materializations(
             'pk_cols' => $parent_pk_cols,
             'identity' => $parent_identity,
             'row' => $parent_source_row,
+            'rowid' => $parent_source_entry['rowid'] ?? null,
             'columns' => $parent_columns_all,
         ];
         $operations[] = ['type' => 'materialize', 'key' => $materialize_key];
@@ -2723,12 +2724,27 @@ function cow_merge_try_delete_row_with_source_deleted_children(
         foreach ($operations as $operation) {
             if (($operation['type'] ?? null) === 'materialize') {
                 $materialization = $materializations[(string)$operation['key']];
-                $insert_result = cow_merge_try_insert_row(
-                    $target,
-                    $materialization['table'],
-                    $materialization['row'],
-                    $materialization['columns']
-                );
+                if (
+                    !$materialization['pk_cols'] &&
+                    isset($materialization['rowid']) &&
+                    cow_merge_load_keyless_physical_row($target, $materialization['table'], (int)$materialization['rowid']) === null
+                ) {
+                    $inserted_rowid = cow_merge_insert_row_with_rowid(
+                        $target,
+                        $materialization['table'],
+                        (int)$materialization['rowid'],
+                        $materialization['row'],
+                        $materialization['columns']
+                    );
+                    $insert_result = ['ok' => true, 'rowid' => $inserted_rowid, 'error' => null];
+                } else {
+                    $insert_result = cow_merge_try_insert_row(
+                        $target,
+                        $materialization['table'],
+                        $materialization['row'],
+                        $materialization['columns']
+                    );
+                }
                 if (!($insert_result['ok'] ?? false)) {
                     throw new RuntimeException((string)($insert_result['error'] ?? 'SQLite constraint failed'));
                 }

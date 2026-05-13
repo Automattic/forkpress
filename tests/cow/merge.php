@@ -835,6 +835,54 @@ try {
         'materialized source parent insert is auditable'
     );
 
+    $fk_keyless_parent_rewrite_base = $tmp . '/fk-keyless-parent-rewrite-base.sqlite';
+    $fk_keyless_parent_rewrite_source = $tmp . '/fk-keyless-parent-rewrite-source.sqlite';
+    $fk_keyless_parent_rewrite_target = $tmp . '/fk-keyless-parent-rewrite-target.sqlite';
+    $fk_keyless_parent_rewrite_metadata = $tmp . '/.forkpress/cow/merge/fk-keyless-parent-rewrite-metadata.sqlite';
+    create_base_db($fk_keyless_parent_rewrite_base);
+    copy($fk_keyless_parent_rewrite_base, $fk_keyless_parent_rewrite_source);
+    copy($fk_keyless_parent_rewrite_base, $fk_keyless_parent_rewrite_target);
+    foreach ([$fk_keyless_parent_rewrite_base, $fk_keyless_parent_rewrite_source, $fk_keyless_parent_rewrite_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_fk_keyless_parent_rewrite_parents (code TEXT NOT NULL UNIQUE, label TEXT)');
+        $db->exec('CREATE TABLE plugin_fk_keyless_parent_rewrite_children (id INTEGER PRIMARY KEY, parent_code TEXT NOT NULL REFERENCES plugin_fk_keyless_parent_rewrite_parents(code), label TEXT)');
+        $db->exec("INSERT INTO plugin_fk_keyless_parent_rewrite_parents (rowid, code, label) VALUES (5, 'old-keyless-parent', 'old keyless parent')");
+        $db->exec("INSERT INTO plugin_fk_keyless_parent_rewrite_children (id, parent_code, label) VALUES (20, 'old-keyless-parent', 'base child')");
+        $db->close();
+    }
+    $db = open_db($fk_keyless_parent_rewrite_source);
+    $db->exec("INSERT INTO plugin_fk_keyless_parent_rewrite_parents (rowid, code, label) VALUES (13, 'new-keyless-parent', 'source keyless parent')");
+    $db->exec("UPDATE plugin_fk_keyless_parent_rewrite_children SET parent_code = 'new-keyless-parent', label = 'source child follows keyless parent' WHERE id = 20");
+    $db->exec("DELETE FROM plugin_fk_keyless_parent_rewrite_parents WHERE code = 'old-keyless-parent'");
+    $db->close();
+    $fk_keyless_parent_rewrite_result = cow_merge_databases($fk_keyless_parent_rewrite_base, $fk_keyless_parent_rewrite_source, $fk_keyless_parent_rewrite_target, $fk_keyless_parent_rewrite_metadata, 'feature-fk-keyless-parent-rewrite', 'main');
+    assert_same($fk_keyless_parent_rewrite_result['status'], 'completed', 'source no-primary-key parent rewrite materializes the source parent before dependent child update');
+    assert_same((int)scalar($fk_keyless_parent_rewrite_target, "SELECT COUNT(*) FROM plugin_fk_keyless_parent_rewrite_parents WHERE code = 'old-keyless-parent'"), 0, 'old no-primary-key foreign-key parent is deleted after dependent rewrite validates');
+    assert_same(scalar($fk_keyless_parent_rewrite_target, 'SELECT code FROM plugin_fk_keyless_parent_rewrite_parents WHERE rowid = 13'), 'new-keyless-parent', 'materialized no-primary-key parent preserves the sparse source rowid');
+    assert_same(scalar($fk_keyless_parent_rewrite_target, 'SELECT parent_code FROM plugin_fk_keyless_parent_rewrite_children WHERE id = 20'), 'new-keyless-parent', 'foreign-key child points at the materialized no-primary-key source parent');
+    $fk_keyless_parent_rewrite_source_identity = (string)scalar($fk_keyless_parent_rewrite_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'feature-fk-keyless-parent-rewrite' AND table_name = 'plugin_fk_keyless_parent_rewrite_parents' AND rowid = 13");
+    assert_same(
+        scalar($fk_keyless_parent_rewrite_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_fk_keyless_parent_rewrite_parents' AND rowid = 13"),
+        $fk_keyless_parent_rewrite_source_identity,
+        'materialized no-primary-key parent adopts the source sidecar identity at the preserved rowid'
+    );
+    assert_same(
+        scalar($fk_keyless_parent_rewrite_metadata, "SELECT row_hash FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_fk_keyless_parent_rewrite_parents' AND rowid = 13"),
+        cow_merge_row_hash(['code' => 'new-keyless-parent', 'label' => 'source keyless parent']),
+        'materialized no-primary-key parent sidecar hash matches the target row'
+    );
+    assert_same(
+        (int)scalar($fk_keyless_parent_rewrite_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE conflict_type = 'row-target-constraint' AND table_name LIKE 'plugin_fk_keyless_parent_rewrite_%'"),
+        0,
+        'no-primary-key parent materialization avoids target constraint conflicts when target rows are unchanged'
+    );
+    $fk_keyless_parent_rewrite_decision_identity = cow_merge_identity_json(cow_merge_decode_row_identity($fk_keyless_parent_rewrite_source_identity, 'keyless parent materialization'));
+    assert_same(
+        (int)scalar($fk_keyless_parent_rewrite_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_fk_keyless_parent_rewrite_parents' AND row_identity = '" . SQLite3::escapeString($fk_keyless_parent_rewrite_decision_identity) . "' AND decision = 'source-applied' AND reason = 'source inserted row before dependent foreign-key rewrite'"),
+        1,
+        'materialized no-primary-key parent insert is auditable'
+    );
+
     $fk_keyless_update_base = $tmp . '/fk-keyless-update-base.sqlite';
     $fk_keyless_update_source = $tmp . '/fk-keyless-update-source.sqlite';
     $fk_keyless_update_target = $tmp . '/fk-keyless-update-target.sqlite';

@@ -484,7 +484,9 @@ tooling.
   ForkPress applies the proven rewrite graph under the same validation savepoint
   before deleting the original parent. If that rewrite points at a source-only
   parent key, ForkPress materializes the audited source parent row inside the
-  same savepoint before updating dependents. Identical source/target inserts
+  same savepoint before updating dependents, preserving sparse source `rowid`
+  values for no-primary-key parent tables when the target rowid is free.
+  Identical source/target inserts
   with the same explicit primary key, and identical source/target updates or
   deletes to existing explicit-primary-key rows, are recorded as non-conflicting
   `source-applied` decisions. Identical source/target cell changes inside an
