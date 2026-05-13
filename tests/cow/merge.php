@@ -5399,6 +5399,107 @@ SQL);
         'rerunning after table/view/trigger chain resolution does not rediscover resolved schema conflicts'
     );
 
+    $schema_view_drop_child_trigger_chain_base = $tmp . '/schema-view-drop-child-trigger-chain-base.sqlite';
+    $schema_view_drop_child_trigger_chain_source = $tmp . '/schema-view-drop-child-trigger-chain-source.sqlite';
+    $schema_view_drop_child_trigger_chain_target = $tmp . '/schema-view-drop-child-trigger-chain-target.sqlite';
+    create_base_db($schema_view_drop_child_trigger_chain_base);
+    $db = open_db($schema_view_drop_child_trigger_chain_base);
+    $db->exec('CREATE TABLE plugin_view_drop_child_trigger_chain_items (item_id TEXT PRIMARY KEY, label TEXT)');
+    $db->exec('CREATE TABLE plugin_view_drop_child_trigger_chain_audit (item_id TEXT, label TEXT)');
+    $db->exec('CREATE VIEW plugin_view_drop_child_trigger_chain_parent AS SELECT item_id, label FROM plugin_view_drop_child_trigger_chain_items');
+    $db->exec('CREATE VIEW plugin_view_drop_child_trigger_chain_child AS SELECT item_id, label FROM plugin_view_drop_child_trigger_chain_parent');
+    $db->exec(<<<'SQL'
+CREATE TRIGGER plugin_view_drop_child_trigger_chain_child_insert
+INSTEAD OF INSERT ON plugin_view_drop_child_trigger_chain_child
+BEGIN
+    INSERT INTO plugin_view_drop_child_trigger_chain_audit (item_id, label) VALUES (NEW.item_id, NEW.label);
+END
+SQL);
+    $db->close();
+    copy($schema_view_drop_child_trigger_chain_base, $schema_view_drop_child_trigger_chain_source);
+    copy($schema_view_drop_child_trigger_chain_base, $schema_view_drop_child_trigger_chain_target);
+
+    $db = open_db($schema_view_drop_child_trigger_chain_source);
+    $db->exec('DROP TRIGGER plugin_view_drop_child_trigger_chain_child_insert');
+    $db->exec('DROP VIEW plugin_view_drop_child_trigger_chain_child');
+    $db->exec('DROP VIEW plugin_view_drop_child_trigger_chain_parent');
+    $db->close();
+
+    $result = cow_merge_databases(
+        $schema_view_drop_child_trigger_chain_base,
+        $schema_view_drop_child_trigger_chain_source,
+        $schema_view_drop_child_trigger_chain_target,
+        $metadata,
+        'feature-view-drop-child-trigger-chain',
+        'main'
+    );
+    assert_same($result['status'], 'completed_with_conflicts', 'source view drops with dependent child view trigger chain remain reviewable');
+    $schema_view_drop_child_trigger_chain_parent_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_view_drop_child_trigger_chain_parent' AND conflict_type = 'schema-source-dropped-view' ORDER BY id DESC LIMIT 1");
+    $schema_view_drop_child_trigger_chain_child_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_view_drop_child_trigger_chain_child' AND conflict_type = 'schema-source-dropped-view' ORDER BY id DESC LIMIT 1");
+    $schema_view_drop_child_trigger_chain_trigger_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_view_drop_child_trigger_chain_child_insert' AND conflict_type = 'schema-source-dropped-trigger' ORDER BY id DESC LIMIT 1");
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $schema_view_drop_child_trigger_chain_parent_conflict_id, 'source', false, 'Preview parent view drop before child view.', 'test'),
+        'dependent target views',
+        'source parent view drop preview refuses to leave dependent child view invalid'
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $schema_view_drop_child_trigger_chain_child_conflict_id, 'source', false, 'Preview child view drop before attached trigger.', 'test'),
+        'dependent target schema objects',
+        'source child view drop preview refuses to implicitly remove its target trigger'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id IN ($schema_view_drop_child_trigger_chain_parent_conflict_id, $schema_view_drop_child_trigger_chain_child_conflict_id)"),
+        0,
+        'failed view-chain previews do not record resolutions'
+    );
+    assert_same((int)scalar($schema_view_drop_child_trigger_chain_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name IN ('plugin_view_drop_child_trigger_chain_parent', 'plugin_view_drop_child_trigger_chain_child')"), 2, 'blocked view-chain drops preserve target views');
+    assert_same((int)scalar($schema_view_drop_child_trigger_chain_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_view_drop_child_trigger_chain_child_insert'"), 1, 'blocked child view drop preserves target trigger');
+    cow_merge_resolve_conflict(
+        $metadata,
+        $schema_view_drop_child_trigger_chain_trigger_conflict_id,
+        'source',
+        true,
+        'Apply source child view trigger drop.',
+        'test'
+    );
+    $schema_view_drop_child_trigger_chain_child_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_view_drop_child_trigger_chain_child_conflict_id,
+        'source',
+        true,
+        'Apply source child view drop after trigger.',
+        'test'
+    );
+    assert_same($schema_view_drop_child_trigger_chain_child_resolution['status'], 'applied', 'source child view drop applies after attached trigger is resolved');
+    $schema_view_drop_child_trigger_chain_parent_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_view_drop_child_trigger_chain_parent_conflict_id,
+        'source',
+        true,
+        'Apply source parent view drop after child.',
+        'test'
+    );
+    assert_same($schema_view_drop_child_trigger_chain_parent_resolution['status'], 'applied', 'source parent view drop applies after dependent child view is resolved');
+    assert_same(
+        (int)scalar($schema_view_drop_child_trigger_chain_target, "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('plugin_view_drop_child_trigger_chain_parent', 'plugin_view_drop_child_trigger_chain_child', 'plugin_view_drop_child_trigger_chain_child_insert')"),
+        0,
+        'source parent view, child view, and child trigger chain drops all resolved schema objects'
+    );
+    $schema_view_drop_child_trigger_chain_rerun = cow_merge_databases(
+        $schema_view_drop_child_trigger_chain_base,
+        $schema_view_drop_child_trigger_chain_source,
+        $schema_view_drop_child_trigger_chain_target,
+        $metadata,
+        'feature-view-drop-child-trigger-chain',
+        'main'
+    );
+    assert_same($schema_view_drop_child_trigger_chain_rerun['status'], 'completed', 'rerunning after view/trigger chain resolution completes without new conflicts');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-view-drop-child-trigger-chain'"),
+        3,
+        'rerunning after view/trigger chain resolution does not rediscover resolved schema conflicts'
+    );
+
     $schema_table_drop_fk_base = $tmp . '/schema-table-drop-fk-base.sqlite';
     $schema_table_drop_fk_source = $tmp . '/schema-table-drop-fk-source.sqlite';
     $schema_table_drop_fk_target = $tmp . '/schema-table-drop-fk-target.sqlite';
