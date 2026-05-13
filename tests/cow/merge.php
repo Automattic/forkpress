@@ -4043,6 +4043,59 @@ SQL);
     );
     assert_same($source_added_trigger_read_rerun['status'], 'completed', 'rerunning after source-added trigger read resolution completes without a new conflict');
 
+    $trigger_cte_refs = cow_merge_trigger_referenced_tables(
+        'CREATE TRIGGER plugin_trigger_cte_items_audit AFTER INSERT ON plugin_trigger_cte_items BEGIN ' .
+        'INSERT INTO plugin_trigger_cte_audit (item_label) ' .
+        'WITH plugin_trigger_cte_rows(item_label) AS (SELECT NEW.label FROM plugin_trigger_cte_gate) ' .
+        'SELECT item_label FROM plugin_trigger_cte_rows; END'
+    );
+    sort($trigger_cte_refs);
+    assert_same(
+        $trigger_cte_refs,
+        ['plugin_trigger_cte_audit', 'plugin_trigger_cte_gate'],
+        'trigger dependency parsing ignores CTE aliases while retaining real tables read inside the CTE'
+    );
+
+    $source_added_trigger_cte_base = $tmp . '/source-added-trigger-cte-base.sqlite';
+    $source_added_trigger_cte_source = $tmp . '/source-added-trigger-cte-source.sqlite';
+    $source_added_trigger_cte_target = $tmp . '/source-added-trigger-cte-target.sqlite';
+    $source_added_trigger_cte_metadata = $tmp . '/.forkpress/cow/merge/source-added-trigger-cte-metadata.sqlite';
+    create_base_db($source_added_trigger_cte_base);
+    $db = open_db($source_added_trigger_cte_base);
+    $db->exec('CREATE TABLE plugin_trigger_cte_audit (item_label TEXT)');
+    $db->close();
+    copy($source_added_trigger_cte_base, $source_added_trigger_cte_source);
+    copy($source_added_trigger_cte_base, $source_added_trigger_cte_target);
+    cow_merge_capture_row_identities($source_added_trigger_cte_base, $source_added_trigger_cte_metadata, 'main');
+    cow_merge_capture_row_identities($source_added_trigger_cte_source, $source_added_trigger_cte_metadata, 'feature-source-trigger-cte', 'main');
+    cow_merge_capture_row_identities($source_added_trigger_cte_target, $source_added_trigger_cte_metadata, 'main');
+    $db = open_db($source_added_trigger_cte_source);
+    $db->exec('CREATE TABLE plugin_trigger_cte_items (label TEXT)');
+    $db->exec("INSERT INTO plugin_trigger_cte_items (rowid, label) VALUES (3, 'cte source item')");
+    $db->exec(
+        'CREATE TRIGGER plugin_trigger_cte_items_audit AFTER INSERT ON plugin_trigger_cte_items BEGIN ' .
+        'INSERT INTO plugin_trigger_cte_audit (item_label) ' .
+        'WITH plugin_trigger_cte_rows(item_label) AS (SELECT NEW.label) ' .
+        'SELECT item_label FROM plugin_trigger_cte_rows; END'
+    );
+    $db->close();
+    cow_merge_capture_row_identities($source_added_trigger_cte_source, $source_added_trigger_cte_metadata, 'feature-source-trigger-cte', 'main');
+    $source_added_trigger_cte_result = cow_merge_databases(
+        $source_added_trigger_cte_base,
+        $source_added_trigger_cte_source,
+        $source_added_trigger_cte_target,
+        $source_added_trigger_cte_metadata,
+        'feature-source-trigger-cte',
+        'main'
+    );
+    assert_same($source_added_trigger_cte_result['status'], 'completed', 'source-added trigger with CTE alias applies without a false missing dependency conflict');
+    assert_same((int)scalar($source_added_trigger_cte_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_trigger_cte_items_audit'"), 1, 'source-added trigger with CTE alias is installed');
+    assert_same((int)scalar($source_added_trigger_cte_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE column_name = 'plugin_trigger_cte_items_audit' AND conflict_type = 'schema-source-added-trigger'"), 0, 'CTE alias does not create a source-added trigger schema conflict');
+    $db = open_db($source_added_trigger_cte_target);
+    $db->exec("INSERT INTO plugin_trigger_cte_items (label) VALUES ('post-merge cte item')");
+    $db->close();
+    assert_same(scalar($source_added_trigger_cte_target, "SELECT item_label FROM plugin_trigger_cte_audit WHERE item_label = 'post-merge cte item'"), 'post-merge cte item', 'source-added trigger with CTE alias fires after merge');
+
     $source_added_view_order_base = $tmp . '/source-added-view-order-base.sqlite';
     $source_added_view_order_source = $tmp . '/source-added-view-order-source.sqlite';
     $source_added_view_order_target = $tmp . '/source-added-view-order-target.sqlite';

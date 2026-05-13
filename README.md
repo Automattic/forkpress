@@ -487,7 +487,9 @@ tooling.
   dependency validates. Source-added triggers that read or write missing
   target-side schema objects are held as reviewable
   `schema-source-added-trigger` conflicts instead of being installed as latent
-  invalid triggers. When a source row still violates target constraints, target
+  invalid triggers; statement-local CTE aliases in trigger bodies are ignored
+  while real schema objects referenced inside those CTEs remain dependencies.
+  When a source row still violates target constraints, target
   is kept by default and the choice is recorded as
   an auditable `row-target-constraint`. Source deletes that would orphan
   target-side foreign-key children are held the same way until a reviewed

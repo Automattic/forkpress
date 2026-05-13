@@ -5175,6 +5175,126 @@ function cow_merge_sql_reference_name(array $match): ?string {
     return null;
 }
 
+function cow_merge_sql_split_statements(string $sql): array {
+    $statements = [];
+    $start = 0;
+    $quote = null;
+    $length = strlen($sql);
+    for ($i = 0; $i < $length; $i++) {
+        $char = $sql[$i];
+        if ($quote !== null) {
+            if ($char === $quote) {
+                $next = $sql[$i + 1] ?? '';
+                if (($quote === '\'' || $quote === '"') && $next === $quote) {
+                    $i++;
+                    continue;
+                }
+                $quote = null;
+            }
+            continue;
+        }
+        if ($char === '\'' || $char === '"' || $char === '`') {
+            $quote = $char;
+            continue;
+        }
+        if ($char === '[') {
+            $quote = ']';
+            continue;
+        }
+        if ($char === ';') {
+            $statement = trim(substr($sql, $start, $i - $start));
+            if ($statement !== '') {
+                $statements[] = $statement;
+            }
+            $start = $i + 1;
+        }
+    }
+    $statement = trim(substr($sql, $start));
+    if ($statement !== '') {
+        $statements[] = $statement;
+    }
+    return $statements ?: [trim($sql)];
+}
+
+function cow_merge_sql_skip_parenthesized(string $sql, int $open_pos): ?int {
+    if (($sql[$open_pos] ?? null) !== '(') {
+        return null;
+    }
+    $quote = null;
+    $depth = 0;
+    $length = strlen($sql);
+    for ($i = $open_pos; $i < $length; $i++) {
+        $char = $sql[$i];
+        if ($quote !== null) {
+            if ($char === $quote) {
+                $next = $sql[$i + 1] ?? '';
+                if (($quote === '\'' || $quote === '"') && $next === $quote) {
+                    $i++;
+                    continue;
+                }
+                $quote = null;
+            }
+            continue;
+        }
+        if ($char === '\'' || $char === '"' || $char === '`') {
+            $quote = $char;
+            continue;
+        }
+        if ($char === '[') {
+            $quote = ']';
+            continue;
+        }
+        if ($char === '(') {
+            $depth++;
+            continue;
+        }
+        if ($char === ')') {
+            $depth--;
+            if ($depth === 0) {
+                return $i + 1;
+            }
+        }
+    }
+    return null;
+}
+
+function cow_merge_sql_cte_names(string $sql): array {
+    $identifier = cow_merge_identifier_pattern();
+    $names = [];
+    if (!preg_match_all('/\bWITH\s+(?:RECURSIVE\s+)?/i', $sql, $with_matches, PREG_OFFSET_CAPTURE)) {
+        return [];
+    }
+    foreach ($with_matches[0] as $with_match) {
+        $offset = (int)$with_match[1] + strlen((string)$with_match[0]);
+        while (true) {
+            if (!preg_match('/\G\s*' . $identifier . '(?:\s*\([^)]*\))?\s+AS\s+(?:NOT\s+MATERIALIZED\s+|MATERIALIZED\s+)?\(/i', $sql, $cte_match, PREG_OFFSET_CAPTURE, $offset)) {
+                break;
+            }
+            $flat_match = [];
+            foreach ($cte_match as $key => $value) {
+                if (is_string($key) && is_array($value)) {
+                    $flat_match[$key] = (string)$value[0];
+                }
+            }
+            $name = cow_merge_sql_reference_name($flat_match);
+            if ($name !== null) {
+                $names[$name] = true;
+            }
+            $open_pos = (int)$cte_match[0][1] + strlen((string)$cte_match[0][0]) - 1;
+            $after_cte = cow_merge_sql_skip_parenthesized($sql, $open_pos);
+            if ($after_cte === null) {
+                break;
+            }
+            $offset = $after_cte;
+            if (!preg_match('/\G\s*,/i', $sql, $comma_match, 0, $offset)) {
+                break;
+            }
+            $offset += strlen($comma_match[0]);
+        }
+    }
+    return array_keys($names);
+}
+
 function cow_merge_sql_referenced_tables(string $sql): array {
     $identifier = cow_merge_identifier_pattern();
     $patterns = [
@@ -5182,14 +5302,17 @@ function cow_merge_sql_referenced_tables(string $sql): array {
         '/\bTABLE\s+(?:(?:"main"|"temp"|main|temp)\s*\.\s*)?' . $identifier . '/i',
     ];
     $refs = [];
-    foreach ($patterns as $pattern) {
-        if (!preg_match_all($pattern, $sql, $matches, PREG_SET_ORDER)) {
-            continue;
-        }
-        foreach ($matches as $match) {
-            $name = cow_merge_sql_reference_name($match);
-            if ($name !== null) {
-                $refs[$name] = true;
+    foreach (cow_merge_sql_split_statements($sql) as $statement) {
+        $cte_names = array_fill_keys(cow_merge_sql_cte_names($statement), true);
+        foreach ($patterns as $pattern) {
+            if (!preg_match_all($pattern, $statement, $matches, PREG_SET_ORDER)) {
+                continue;
+            }
+            foreach ($matches as $match) {
+                $name = cow_merge_sql_reference_name($match);
+                if ($name !== null && !isset($cte_names[$name])) {
+                    $refs[$name] = true;
+                }
             }
         }
     }
