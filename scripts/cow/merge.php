@@ -6084,6 +6084,22 @@ function cow_merge_table_rows(
             continue;
         }
         if (cow_merge_row_values_equal($target_row, $source_row, $row_columns)) {
+            if ($pk_cols && $base_row === null && $source_row !== null && $target_row !== null) {
+                cow_merge_record_decision(
+                    $meta,
+                    $run_id,
+                    $table,
+                    $key,
+                    null,
+                    'source-applied',
+                    'source inserted row already exists in target with the same identity and payload',
+                    null,
+                    $source_row,
+                    $target_row,
+                    $target_row
+                );
+                $applied++;
+            }
             continue;
         }
 

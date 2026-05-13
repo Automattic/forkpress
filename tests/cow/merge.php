@@ -534,6 +534,24 @@ try {
         'stale row conflict resolution is blocked when target row has changed since audit'
     );
 
+    $row_same_insert_base = $tmp . '/row-same-insert-base.sqlite';
+    $row_same_insert_source = $tmp . '/row-same-insert-source.sqlite';
+    $row_same_insert_target = $tmp . '/row-same-insert-target.sqlite';
+    create_base_db($row_same_insert_base);
+    copy($row_same_insert_base, $row_same_insert_source);
+    copy($row_same_insert_base, $row_same_insert_target);
+    $db = open_db($row_same_insert_source);
+    $db->exec("INSERT INTO plugin_items (item_id, label, value) VALUES ('same-insert', 'Same label', 'same row')");
+    $db->close();
+    $db = open_db($row_same_insert_target);
+    $db->exec("INSERT INTO plugin_items (item_id, label, value) VALUES ('same-insert', 'Same label', 'same row')");
+    $db->close();
+    $row_same_insert_result = cow_merge_databases($row_same_insert_base, $row_same_insert_source, $row_same_insert_target, $metadata, 'feature-row-same-insert', 'main');
+    assert_same($row_same_insert_result['status'], 'completed', 'identical same-PK source and target inserts merge without a review conflict');
+    assert_same((int)scalar($row_same_insert_target, "SELECT COUNT(*) FROM plugin_items WHERE item_id = 'same-insert'"), 1, 'identical same-PK insert is not duplicated');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_items' AND decision = 'source-applied' AND reason = 'source inserted row already exists in target with the same identity and payload'"), 1, 'identical same-PK insert collapse is auditable');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_items' AND row_identity LIKE '%same-insert%'"), 0, 'identical same-PK insert does not create a false row conflict');
+
     $row_target_deleted_base = $tmp . '/row-target-deleted-base.sqlite';
     $row_target_deleted_source = $tmp . '/row-target-deleted-source.sqlite';
     $row_target_deleted_target = $tmp . '/row-target-deleted-target.sqlite';
@@ -2260,6 +2278,7 @@ SQL);
     cow_merge_databases($keyless_unique_same_base, $keyless_unique_same_source, $keyless_unique_same_target, $keyless_unique_same_metadata, 'feature-keyless-unique-same', 'main');
     assert_same((int)scalar($keyless_unique_same_target, "SELECT COUNT(*) FROM plugin_keyless_unique_same WHERE slug = 'same-keyless-slug' AND value = 'same payload'"), 1, 'rerunning identical keyless unique merge keeps one target row');
     assert_same((int)scalar($keyless_unique_same_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_keyless_unique_same' AND decision = 'source-applied' AND reason LIKE 'source inserted no-primary-key row already exists in target by unique index%'"), 1, 'rerunning identical keyless unique merge does not repeat the source-applied collapse decision');
+    assert_same((int)scalar($keyless_unique_same_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_keyless_unique_same' AND reason = 'source inserted row already exists in target with the same identity and payload'"), 0, 'rerunning identical keyless unique merge does not add explicit-primary-key audit noise');
 
     $keyless_duplicate_base = $tmp . '/keyless-duplicate-base.sqlite';
     $keyless_duplicate_source = $tmp . '/keyless-duplicate-source.sqlite';
