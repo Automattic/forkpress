@@ -68,6 +68,7 @@
 - Added COW coverage for occupied-rowid no-primary-key foreign-key parent materialization falling back to a fresh target rowid while preserving the source sidecar identity.
 - Added PHP and runtime-backed COW coverage for no-primary-key foreign-key child updates before parent deletes, including immediate target sidecar row-hash refresh.
 - Added COW coverage for mixed no-primary-key foreign-key dependent delete/update rollback when a later dependent update fails target validation.
+- Added COW coverage for multi-table no-primary-key foreign-key rewrite rollback where staged parent materializations and sidecar adoptions are discarded after a later child update fails validation.
 - Refreshed no-primary-key sidecar row hashes immediately after validation-gated safe source-added column resolutions change target row shape.
 - Added `forkpress branch merge-audit` inspection/export with JSON/text formats, file/path filters, review shortcuts, rollback failure artifacts, and ID-band skip reporting.
 - Added `forkpress branch merge-review` metadata annotations for conflict and decision audit records.

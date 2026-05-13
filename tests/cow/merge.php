@@ -1086,6 +1086,86 @@ try {
         'mixed no-primary-key foreign-key rollback records an auditable row-target-constraint conflict'
     );
 
+    $fk_multi_sidecar_rollback_base = $tmp . '/fk-multi-sidecar-rollback-base.sqlite';
+    $fk_multi_sidecar_rollback_source = $tmp . '/fk-multi-sidecar-rollback-source.sqlite';
+    $fk_multi_sidecar_rollback_target = $tmp . '/fk-multi-sidecar-rollback-target.sqlite';
+    $fk_multi_sidecar_rollback_metadata = $tmp . '/.forkpress/cow/merge/fk-multi-sidecar-rollback-metadata.sqlite';
+    create_base_db($fk_multi_sidecar_rollback_base);
+    copy($fk_multi_sidecar_rollback_base, $fk_multi_sidecar_rollback_source);
+    copy($fk_multi_sidecar_rollback_base, $fk_multi_sidecar_rollback_target);
+    foreach ([$fk_multi_sidecar_rollback_base, $fk_multi_sidecar_rollback_source, $fk_multi_sidecar_rollback_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_fk_multi_sidecar_old_parent (id INTEGER PRIMARY KEY, label TEXT)');
+        $db->exec('CREATE TABLE plugin_fk_multi_sidecar_parent_a (code TEXT NOT NULL UNIQUE, label TEXT)');
+        $db->exec('CREATE TABLE plugin_fk_multi_sidecar_parent_b (code TEXT NOT NULL UNIQUE, label TEXT)');
+        $db->exec(
+            "CREATE TABLE plugin_fk_multi_sidecar_child (" .
+            "old_parent_id INTEGER REFERENCES plugin_fk_multi_sidecar_old_parent(id), " .
+            "parent_a_code TEXT REFERENCES plugin_fk_multi_sidecar_parent_a(code), " .
+            "parent_b_code TEXT REFERENCES plugin_fk_multi_sidecar_parent_b(code), " .
+            "label TEXT CHECK(label != 'bad'))"
+        );
+        $db->exec("INSERT INTO plugin_fk_multi_sidecar_old_parent (id, label) VALUES (1, 'old multi parent')");
+        $db->exec("INSERT INTO plugin_fk_multi_sidecar_child (rowid, old_parent_id, parent_a_code, parent_b_code, label) VALUES (5, 1, NULL, NULL, 'base multi child')");
+        $db->close();
+    }
+    cow_merge_capture_row_identities($fk_multi_sidecar_rollback_base, $fk_multi_sidecar_rollback_metadata, 'main');
+    cow_merge_capture_row_identities($fk_multi_sidecar_rollback_source, $fk_multi_sidecar_rollback_metadata, 'feature-fk-multi-sidecar-rollback', 'main');
+    cow_merge_capture_row_identities($fk_multi_sidecar_rollback_target, $fk_multi_sidecar_rollback_metadata, 'main');
+    $db = open_db($fk_multi_sidecar_rollback_source);
+    $db->exec('PRAGMA ignore_check_constraints = ON');
+    $db->exec("INSERT INTO plugin_fk_multi_sidecar_parent_a (rowid, code, label) VALUES (13, 'parent-a', 'source parent A')");
+    $db->exec("INSERT INTO plugin_fk_multi_sidecar_parent_b (rowid, code, label) VALUES (17, 'parent-b', 'source parent B')");
+    $db->exec("UPDATE plugin_fk_multi_sidecar_child SET old_parent_id = NULL, parent_a_code = 'parent-a', parent_b_code = 'parent-b', label = 'bad' WHERE rowid = 5");
+    $db->exec('DELETE FROM plugin_fk_multi_sidecar_old_parent WHERE id = 1');
+    $db->close();
+    cow_merge_capture_row_identities($fk_multi_sidecar_rollback_source, $fk_multi_sidecar_rollback_metadata, 'feature-fk-multi-sidecar-rollback', 'main');
+    $fk_multi_sidecar_meta_db = open_db($fk_multi_sidecar_rollback_metadata);
+    cow_merge_ensure_metadata($fk_multi_sidecar_meta_db);
+    $fk_multi_sidecar_run_id = cow_merge_start_run(
+        $fk_multi_sidecar_meta_db,
+        'feature-fk-multi-sidecar-rollback-direct',
+        'main',
+        $fk_multi_sidecar_rollback_base,
+        $fk_multi_sidecar_rollback_source,
+        $fk_multi_sidecar_rollback_target
+    );
+    $fk_multi_sidecar_base_db = open_db($fk_multi_sidecar_rollback_base);
+    $fk_multi_sidecar_source_db = open_db($fk_multi_sidecar_rollback_source);
+    $fk_multi_sidecar_target_db = open_db($fk_multi_sidecar_rollback_target);
+    $fk_multi_sidecar_result = cow_merge_try_delete_row_with_source_deleted_children(
+        $fk_multi_sidecar_base_db,
+        $fk_multi_sidecar_source_db,
+        $fk_multi_sidecar_target_db,
+        $fk_multi_sidecar_meta_db,
+        $fk_multi_sidecar_run_id,
+        'feature-fk-multi-sidecar-rollback',
+        'main',
+        'plugin_fk_multi_sidecar_old_parent',
+        ['id' => 1],
+        ['id'],
+        ['id' => 1, 'label' => 'old multi parent']
+    );
+    assert_same($fk_multi_sidecar_result['ok'] ?? null, false, 'multi-table no-primary-key foreign-key rewrite rolls back when a later child update fails validation');
+    assert_same((int)$fk_multi_sidecar_target_db->querySingle('SELECT COUNT(*) FROM plugin_fk_multi_sidecar_parent_a'), 0, 'failed multi-table rollback removes the first materialized no-primary-key parent row');
+    assert_same((int)$fk_multi_sidecar_target_db->querySingle('SELECT COUNT(*) FROM plugin_fk_multi_sidecar_parent_b'), 0, 'failed multi-table rollback removes the second materialized no-primary-key parent row');
+    assert_same((int)$fk_multi_sidecar_target_db->querySingle('SELECT COUNT(*) FROM plugin_fk_multi_sidecar_old_parent WHERE id = 1'), 1, 'failed multi-table rollback keeps the deleted parent row');
+    assert_same($fk_multi_sidecar_target_db->querySingle('SELECT label FROM plugin_fk_multi_sidecar_child WHERE rowid = 5'), 'base multi child', 'failed multi-table rollback keeps the no-primary-key child row unchanged');
+    assert_same(
+        (int)$fk_multi_sidecar_meta_db->querySingle("SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = 'main' AND table_name IN ('plugin_fk_multi_sidecar_parent_a', 'plugin_fk_multi_sidecar_parent_b')"),
+        0,
+        'failed multi-table rollback does not adopt source sidecar identities for staged parent materializations'
+    );
+    assert_same(
+        (int)$fk_multi_sidecar_meta_db->querySingle("SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'main' AND table_name IN ('plugin_fk_multi_sidecar_parent_a', 'plugin_fk_multi_sidecar_parent_b')"),
+        0,
+        'failed multi-table rollback does not write source parent sidecar history'
+    );
+    $fk_multi_sidecar_base_db->close();
+    $fk_multi_sidecar_source_db->close();
+    $fk_multi_sidecar_target_db->close();
+    $fk_multi_sidecar_meta_db->close();
+
     $target_only_base = $tmp . '/target-only-base.sqlite';
     $target_only_source = $tmp . '/target-only-source.sqlite';
     $target_only_target = $tmp . '/target-only-target.sqlite';
