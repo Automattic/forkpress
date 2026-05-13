@@ -6430,6 +6430,131 @@ SQL);
     $db->close();
     assert_same(scalar($schema_restore_deep_trigger_body_target, "SELECT observed FROM plugin_restore_deep_trigger_audit WHERE note = 'ok' AND code = 'restore-deep-trigger-parent'"), 'restore deep trigger label', 'valid preserved target trigger still fires through the deeper view chain after table restore');
 
+    $schema_restore_mixed_rollback_base = $tmp . '/schema-restore-mixed-rollback-base.sqlite';
+    $schema_restore_mixed_rollback_source = $tmp . '/schema-restore-mixed-rollback-source.sqlite';
+    $schema_restore_mixed_rollback_target = $tmp . '/schema-restore-mixed-rollback-target.sqlite';
+    $schema_restore_mixed_rollback_metadata = $tmp . '/.forkpress/cow/merge/schema-restore-mixed-rollback-metadata.sqlite';
+    create_base_db($schema_restore_mixed_rollback_base);
+    $db = open_db($schema_restore_mixed_rollback_base);
+    $db->exec('CREATE TABLE plugin_restore_mixed_parent (code TEXT NOT NULL PRIMARY KEY, lookup TEXT NOT NULL, label TEXT NOT NULL)');
+    $db->exec('CREATE UNIQUE INDEX plugin_restore_mixed_parent_lookup_idx ON plugin_restore_mixed_parent(lookup)');
+    $db->exec('CREATE TABLE plugin_restore_mixed_child (parent_lookup TEXT NOT NULL REFERENCES plugin_restore_mixed_parent(lookup), note TEXT NOT NULL)');
+    $db->exec('CREATE TABLE plugin_restore_mixed_observer (code TEXT NOT NULL)');
+    $db->exec('CREATE TABLE plugin_restore_mixed_audit (code TEXT, observed TEXT, note TEXT)');
+    $db->exec(
+        'CREATE TRIGGER plugin_restore_mixed_parent_insert AFTER INSERT ON plugin_restore_mixed_parent ' .
+        'BEGIN INSERT INTO plugin_restore_mixed_audit (code, observed, note) VALUES (NEW.code, NEW.label, "source-trigger"); END'
+    );
+    $db->exec("INSERT INTO plugin_restore_mixed_parent (code, lookup, label) VALUES ('restore-mixed-parent', 'restore-mixed-lookup', 'restore mixed label')");
+    $db->exec("INSERT INTO plugin_restore_mixed_child (parent_lookup, note) VALUES ('restore-mixed-lookup', 'child stays valid')");
+    $db->close();
+    copy($schema_restore_mixed_rollback_base, $schema_restore_mixed_rollback_source);
+    copy($schema_restore_mixed_rollback_base, $schema_restore_mixed_rollback_target);
+
+    $db = open_db($schema_restore_mixed_rollback_source);
+    $db->exec('DROP TRIGGER plugin_restore_mixed_parent_insert');
+    $db->exec('CREATE TABLE plugin_restore_mixed_parent_new (code TEXT NOT NULL PRIMARY KEY, lookup TEXT NOT NULL, label TEXT NOT NULL) WITHOUT ROWID');
+    $db->exec('INSERT INTO plugin_restore_mixed_parent_new (code, lookup, label) SELECT code, lookup, label FROM plugin_restore_mixed_parent');
+    $db->exec('DROP TABLE plugin_restore_mixed_parent');
+    $db->exec('ALTER TABLE plugin_restore_mixed_parent_new RENAME TO plugin_restore_mixed_parent');
+    $db->exec('CREATE UNIQUE INDEX plugin_restore_mixed_parent_lookup_idx ON plugin_restore_mixed_parent(lookup)');
+    $db->exec(
+        'CREATE TRIGGER plugin_restore_mixed_parent_insert AFTER INSERT ON plugin_restore_mixed_parent ' .
+        'BEGIN INSERT INTO plugin_restore_mixed_audit (code, observed, note) VALUES (NEW.code, NEW.label, "source-trigger"); END'
+    );
+    $db->close();
+
+    $db = open_db($schema_restore_mixed_rollback_target);
+    $db->exec('DROP TABLE plugin_restore_mixed_parent');
+    $db->exec(
+        'CREATE TRIGGER plugin_restore_mixed_observer_insert AFTER INSERT ON plugin_restore_mixed_observer ' .
+        'BEGIN INSERT INTO plugin_restore_mixed_audit (code, observed, note) ' .
+        "SELECT NEW.code, CAST(rowid AS TEXT), 'target-trigger' FROM plugin_restore_mixed_parent WHERE code = NEW.code; END"
+    );
+    $db->close();
+
+    $schema_restore_mixed_rollback_result = cow_merge_databases(
+        $schema_restore_mixed_rollback_base,
+        $schema_restore_mixed_rollback_source,
+        $schema_restore_mixed_rollback_target,
+        $schema_restore_mixed_rollback_metadata,
+        'feature-schema-restore-mixed-rollback',
+        'main'
+    );
+    assert_same($schema_restore_mixed_rollback_result['status'], 'completed_with_conflicts', 'target-dropped table restore with mixed FK/index/trigger dependencies remains reviewable');
+    $schema_restore_mixed_rollback_conflict_id = (int)scalar($schema_restore_mixed_rollback_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_restore_mixed_parent' AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
+    assert_true($schema_restore_mixed_rollback_conflict_id > 0, 'mixed dependency target-dropped table restore conflict is auditable');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $schema_restore_mixed_rollback_metadata,
+            $schema_restore_mixed_rollback_conflict_id,
+            'source',
+            false,
+            'Preview table restore with preserved target trigger failure after source index and trigger restore.',
+            'test'
+        ),
+        'plugin_restore_mixed_observer_insert',
+        'dry-run table restore rejects the later invalid preserved target trigger after source index/trigger restoration'
+    );
+    assert_same(
+        (int)scalar($schema_restore_mixed_rollback_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_restore_mixed_rollback_conflict_id"),
+        0,
+        'failed mixed dependency table restore dry-run does not record resolution metadata'
+    );
+    assert_same(
+        (int)scalar($schema_restore_mixed_rollback_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_restore_mixed_parent'"),
+        0,
+        'failed mixed dependency table restore dry-run rolls back the restored table'
+    );
+    assert_same(
+        (int)scalar($schema_restore_mixed_rollback_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_restore_mixed_parent_lookup_idx'"),
+        0,
+        'failed mixed dependency table restore dry-run rolls back the restored source index'
+    );
+    assert_same(
+        (int)scalar($schema_restore_mixed_rollback_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_restore_mixed_parent_insert'"),
+        0,
+        'failed mixed dependency table restore dry-run rolls back the restored source trigger'
+    );
+    assert_same(
+        (int)scalar($schema_restore_mixed_rollback_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_restore_mixed_observer_insert'"),
+        1,
+        'failed mixed dependency table restore dry-run preserves the invalid target trigger for review'
+    );
+    assert_same(
+        (int)scalar($schema_restore_mixed_rollback_target, "SELECT COUNT(*) FROM plugin_restore_mixed_child WHERE parent_lookup = 'restore-mixed-lookup'"),
+        1,
+        'failed mixed dependency table restore dry-run preserves the target FK child row'
+    );
+
+    $db = open_db($schema_restore_mixed_rollback_target);
+    $db->exec('DROP TRIGGER plugin_restore_mixed_observer_insert');
+    $db->close();
+    $schema_restore_mixed_rollback_apply = cow_merge_resolve_conflict(
+        $schema_restore_mixed_rollback_metadata,
+        $schema_restore_mixed_rollback_conflict_id,
+        'source',
+        true,
+        'Apply table restore after invalid target trigger is reviewed.',
+        'test'
+    );
+    assert_same($schema_restore_mixed_rollback_apply['status'], 'applied', 'mixed dependency table restore applies after the invalid target trigger is handled');
+    assert_same(
+        (int)scalar($schema_restore_mixed_rollback_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_restore_mixed_parent_lookup_idx'"),
+        1,
+        'validated mixed dependency table restore recreates the FK backing source index'
+    );
+    assert_same(
+        (int)scalar($schema_restore_mixed_rollback_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_restore_mixed_parent_insert'"),
+        1,
+        'validated mixed dependency table restore recreates the source table trigger'
+    );
+    $db = open_db($schema_restore_mixed_rollback_target);
+    $db->exec("INSERT INTO plugin_restore_mixed_parent (code, lookup, label) VALUES ('restore-mixed-new-parent', 'restore-mixed-new-lookup', 'restore mixed new label')");
+    $db->close();
+    assert_same(scalar($schema_restore_mixed_rollback_target, "SELECT observed FROM plugin_restore_mixed_audit WHERE code = 'restore-mixed-new-parent' AND note = 'source-trigger'"), 'restore mixed new label', 'restored source trigger fires after validated mixed dependency table restore');
+    assert_same(scalar($schema_restore_mixed_rollback_target, "SELECT note FROM plugin_restore_mixed_child WHERE parent_lookup = 'restore-mixed-lookup'"), 'child stays valid', 'validated mixed dependency table restore keeps the index-backed FK child row valid');
+
     $schema_cross_fk_restored_parent_base = $tmp . '/schema-cross-fk-restored-parent-base.sqlite';
     $schema_cross_fk_restored_parent_source = $tmp . '/schema-cross-fk-restored-parent-source.sqlite';
     $schema_cross_fk_restored_parent_target = $tmp . '/schema-cross-fk-restored-parent-target.sqlite';
