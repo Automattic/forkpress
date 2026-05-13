@@ -482,10 +482,11 @@ tooling.
   first so parent-and-dependent changes land together. If source also rewrites a
   referenced child key and updates unchanged grandchildren to follow it,
   ForkPress applies the proven rewrite graph under the same validation savepoint
-  before deleting the original parent; identical
-  source/target inserts with the same explicit primary key, and identical source/target
-  updates or deletes to
-  existing explicit-primary-key rows, are recorded as non-conflicting
+  before deleting the original parent. If that rewrite points at a source-only
+  parent key, ForkPress materializes the audited source parent row inside the
+  same savepoint before updating dependents. Identical source/target inserts
+  with the same explicit primary key, and identical source/target updates or
+  deletes to existing explicit-primary-key rows, are recorded as non-conflicting
   `source-applied` decisions. Identical source/target cell changes inside an
   otherwise divergent row are also recorded as non-conflicting `source-applied`
   decisions when row identity is known. No-primary-key inserts that are already

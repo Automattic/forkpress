@@ -1430,6 +1430,39 @@ function cow_merge_row_matches_values(array $row, array $columns, array $values)
     return true;
 }
 
+function cow_merge_row_exists_by_values(SQLite3 $db, string $table, array $columns, array $values): bool {
+    if (!$columns || count($columns) !== count($values) || cow_merge_table_sql($db, $table) === null) {
+        return false;
+    }
+
+    $clauses = [];
+    foreach ($columns as $column) {
+        $clauses[] = cow_merge_quote_ident($column) . ' = ?';
+    }
+    $stmt = $db->prepare('SELECT 1 FROM ' . cow_merge_quote_ident($table) . ' WHERE ' . implode(' AND ', $clauses) . ' LIMIT 1');
+    if (!$stmt) {
+        throw new RuntimeException("failed to prepare row value lookup on $table: " . $db->lastErrorMsg());
+    }
+    foreach ($values as $i => $value) {
+        cow_merge_bind($stmt, $i + 1, $value);
+    }
+    $res = $stmt->execute();
+    if (!$res) {
+        throw new RuntimeException("failed to query row value lookup on $table: " . $db->lastErrorMsg());
+    }
+    return (bool)$res->fetchArray(SQLITE3_NUM);
+}
+
+function cow_merge_find_row_entry_by_values(array $rows, array $columns, array $values): ?array {
+    foreach ($rows as $key => $entry) {
+        $row = $entry['row'] ?? null;
+        if (is_array($row) && cow_merge_row_matches_values($row, $columns, $values)) {
+            return [$key, $entry];
+        }
+    }
+    return null;
+}
+
 function cow_merge_foreign_key_error(SQLite3 $target, string $table, array $row): ?string {
     foreach (cow_merge_foreign_key_groups($target, $table) as $group) {
         $parent_table = (string)($group[0]['table'] ?? '');
@@ -1480,6 +1513,127 @@ function cow_merge_foreign_key_error(SQLite3 $target, string $table, array $row)
         }
     }
     return null;
+}
+
+function cow_merge_collect_required_foreign_key_parent_materializations(
+    SQLite3 $base,
+    SQLite3 $source,
+    SQLite3 $target,
+    SQLite3 $meta,
+    int $run_id,
+    string $source_branch,
+    string $target_branch,
+    string $table,
+    array $source_row,
+    array &$materializations,
+    array &$operations,
+    array &$visiting
+): bool {
+    foreach (cow_merge_foreign_key_groups($target, $table) as $group) {
+        $parent_table = (string)($group[0]['table'] ?? '');
+        if ($parent_table === '') {
+            continue;
+        }
+        $parent_columns = cow_merge_foreign_key_parent_columns($target, $parent_table, $group);
+        if ($parent_columns === null) {
+            return false;
+        }
+
+        $from_columns = [];
+        $values = [];
+        $skip = false;
+        foreach ($group as $i => $part) {
+            $from = (string)($part['from'] ?? '');
+            if ($from === '' || !isset($parent_columns[$i])) {
+                return false;
+            }
+            if (!array_key_exists($from, $source_row) || $source_row[$from] === null) {
+                $skip = true;
+                break;
+            }
+            $from_columns[] = $from;
+            $values[] = $source_row[$from];
+        }
+        if ($skip || !$from_columns || in_array(null, $values, true)) {
+            continue;
+        }
+        if (cow_merge_row_exists_by_values($target, $parent_table, $parent_columns, $values)) {
+            continue;
+        }
+
+        [$parent_pk_cols, $parent_base_rows, $parent_source_rows, $parent_target_rows] = cow_merge_load_rows_for_fk_delete(
+            $base,
+            $source,
+            $target,
+            $meta,
+            $run_id,
+            $source_branch,
+            $target_branch,
+            $parent_table
+        );
+        $source_match = cow_merge_find_row_entry_by_values($parent_source_rows, $parent_columns, $values);
+        if ($source_match === null) {
+            return false;
+        }
+        [$parent_key, $parent_source_entry] = $source_match;
+        if (($parent_base_rows[$parent_key]['row'] ?? null) !== null || ($parent_target_rows[$parent_key]['row'] ?? null) !== null) {
+            continue;
+        }
+
+        $parent_source_row = $parent_source_entry['row'] ?? null;
+        $parent_identity = $parent_source_entry['identity'] ?? null;
+        if (!is_array($parent_source_row) || !is_array($parent_identity)) {
+            return false;
+        }
+
+        $materialize_key = $parent_table . "\0" . $parent_key;
+        if (isset($materializations[$materialize_key])) {
+            continue;
+        }
+        $visit_key = "materialize\0" . $materialize_key;
+        if (isset($visiting[$visit_key])) {
+            continue;
+        }
+        $visiting[$visit_key] = true;
+        try {
+            if (!cow_merge_collect_required_foreign_key_parent_materializations(
+                $base,
+                $source,
+                $target,
+                $meta,
+                $run_id,
+                $source_branch,
+                $target_branch,
+                $parent_table,
+                $parent_source_row,
+                $materializations,
+                $operations,
+                $visiting
+            )) {
+                return false;
+            }
+        } finally {
+            unset($visiting[$visit_key]);
+        }
+
+        $parent_columns_all = cow_merge_all_columns(
+            cow_merge_table_columns($target, $parent_table),
+            cow_merge_table_columns($source, $parent_table),
+            cow_merge_table_columns($base, $parent_table),
+            array_keys($parent_source_row)
+        );
+        $materializations[$materialize_key] = [
+            'table' => $parent_table,
+            'key' => $parent_key,
+            'pk_cols' => $parent_pk_cols,
+            'identity' => $parent_identity,
+            'row' => $parent_source_row,
+            'columns' => $parent_columns_all,
+        ];
+        $operations[] = ['type' => 'materialize', 'key' => $materialize_key];
+    }
+
+    return true;
 }
 
 function cow_merge_load_rows_for_fk_delete(
@@ -1538,6 +1692,7 @@ function cow_merge_collect_source_deleted_foreign_key_children(
     array $row,
     array &$deletes,
     array &$updates,
+    array &$materializations,
     array &$operations,
     array &$visiting
 ): bool {
@@ -1635,6 +1790,7 @@ function cow_merge_collect_source_deleted_foreign_key_children(
                             $target_row,
                             $deletes,
                             $updates,
+                            $materializations,
                             $operations,
                             $visiting
                         )) {
@@ -1660,6 +1816,22 @@ function cow_merge_collect_source_deleted_foreign_key_children(
 
                     $update_key = $child_table . "\0" . $child_key;
                     if (!isset($updates[$update_key])) {
+                        if (!cow_merge_collect_required_foreign_key_parent_materializations(
+                            $base,
+                            $source,
+                            $target,
+                            $meta,
+                            $run_id,
+                            $source_branch,
+                            $target_branch,
+                            $child_table,
+                            $source_row,
+                            $materializations,
+                            $operations,
+                            $visiting
+                        )) {
+                            return false;
+                        }
                         $source_identity = $source_entry['identity'] ?? $child_identity;
                         if (!is_array($source_identity)) {
                             return false;
@@ -1692,6 +1864,7 @@ function cow_merge_collect_source_deleted_foreign_key_children(
                         $target_row,
                         $deletes,
                         $updates,
+                        $materializations,
                         $operations,
                         $visiting
                     )) {
@@ -1723,6 +1896,7 @@ function cow_merge_collect_source_updated_foreign_key_children(
     array $target_row,
     array &$deletes,
     array &$updates,
+    array &$materializations,
     array &$operations,
     array &$visiting
 ): bool {
@@ -1820,6 +1994,7 @@ function cow_merge_collect_source_updated_foreign_key_children(
                             $dependent_target_row,
                             $deletes,
                             $updates,
+                            $materializations,
                             $operations,
                             $visiting
                         )) {
@@ -1845,6 +2020,22 @@ function cow_merge_collect_source_updated_foreign_key_children(
 
                     $update_key = $child_table . "\0" . $child_key;
                     if (!isset($updates[$update_key])) {
+                        if (!cow_merge_collect_required_foreign_key_parent_materializations(
+                            $base,
+                            $source,
+                            $target,
+                            $meta,
+                            $run_id,
+                            $source_branch,
+                            $target_branch,
+                            $child_table,
+                            $dependent_source_row,
+                            $materializations,
+                            $operations,
+                            $visiting
+                        )) {
+                            return false;
+                        }
                         $source_identity = $source_entry['identity'] ?? $child_identity;
                         if (!is_array($source_identity)) {
                             return false;
@@ -1877,6 +2068,7 @@ function cow_merge_collect_source_updated_foreign_key_children(
                         $dependent_target_row,
                         $deletes,
                         $updates,
+                        $materializations,
                         $operations,
                         $visiting
                     )) {
@@ -2492,6 +2684,7 @@ function cow_merge_try_delete_row_with_source_deleted_children(
 ): array {
     $deletes = [];
     $updates = [];
+    $materializations = [];
     $operations = [];
     $visiting = [];
     if (!cow_merge_collect_source_deleted_foreign_key_children(
@@ -2508,13 +2701,14 @@ function cow_merge_try_delete_row_with_source_deleted_children(
         $row,
         $deletes,
         $updates,
+        $materializations,
         $operations,
         $visiting
     )) {
         return cow_merge_try_delete_row($target, $table, $identity, $pk_cols);
     }
 
-    if (!$deletes && !$updates) {
+    if (!$deletes && !$updates && !$materializations) {
         return cow_merge_try_delete_row($target, $table, $identity, $pk_cols);
     }
 
@@ -2523,8 +2717,33 @@ function cow_merge_try_delete_row_with_source_deleted_children(
     }
     $keyless_deletes = [];
     $keyless_updates = [];
+    $keyless_materializations = [];
+    $materialized_rows = [];
     try {
         foreach ($operations as $operation) {
+            if (($operation['type'] ?? null) === 'materialize') {
+                $materialization = $materializations[(string)$operation['key']];
+                $insert_result = cow_merge_try_insert_row(
+                    $target,
+                    $materialization['table'],
+                    $materialization['row'],
+                    $materialization['columns']
+                );
+                if (!($insert_result['ok'] ?? false)) {
+                    throw new RuntimeException((string)($insert_result['error'] ?? 'SQLite constraint failed'));
+                }
+                if (!$materialization['pk_cols']) {
+                    $keyless_materializations[] = [
+                        $materialization['table'],
+                        (int)($insert_result['rowid'] ?? 0),
+                        $materialization['identity'],
+                        $materialization['row'],
+                    ];
+                }
+                $materialized_rows[] = $materialization;
+                continue;
+            }
+
             if (($operation['type'] ?? null) === 'delete') {
                 $delete = $deletes[(string)$operation['key']];
                 $delete_result = cow_merge_try_delete_row(
@@ -2581,8 +2800,18 @@ function cow_merge_try_delete_row_with_source_deleted_children(
     foreach ($keyless_updates as [$child_table, $rowid, $child_identity, $child_row]) {
         cow_merge_remember_row_identity($meta, $run_id, $target_branch, $child_table, $rowid, $child_identity, $child_row);
     }
+    foreach ($keyless_materializations as [$parent_table, $rowid, $parent_identity, $parent_row]) {
+        cow_merge_remember_row_identity($meta, $run_id, $target_branch, $parent_table, $rowid, $parent_identity, $parent_row);
+    }
 
-    return ['ok' => true, 'error' => null, 'deleted_dependents' => count($deletes), 'updated_dependents' => count($updates)];
+    return [
+        'ok' => true,
+        'error' => null,
+        'deleted_dependents' => count($deletes),
+        'updated_dependents' => count($updates),
+        'materialized_dependents' => count($materializations),
+        'materialized_rows' => $materialized_rows,
+    ];
 }
 
 function cow_merge_delete_row(SQLite3 $target, string $table, array $identity, array $pk_cols): void {
@@ -7507,7 +7736,11 @@ function cow_merge_table_rows(
 
     $applied = 0;
     $conflicts = 0;
+    $externally_applied = [];
     foreach ($all_keys as $key) {
+        if (isset($externally_applied[$key])) {
+            continue;
+        }
         $base_entry = $base_rows[$key] ?? null;
         $source_entry = $source_rows[$key] ?? null;
         $target_entry = $target_rows[$key] ?? null;
@@ -7592,6 +7825,26 @@ function cow_merge_table_rows(
         }
 
         if ($base_row === null && $source_row !== null && $target_row === null) {
+            if ($pk_cols) {
+                $current_row = cow_merge_select_current_row($target, $table, $identity, $pk_cols);
+                if ($current_row !== null && cow_merge_row_values_equal($current_row, $source_row, $row_columns)) {
+                    cow_merge_record_decision(
+                        $meta,
+                        $run_id,
+                        $table,
+                        $key,
+                        null,
+                        'source-applied',
+                        'source inserted row already exists in target with the same identity and payload',
+                        null,
+                        $source_row,
+                        $current_row,
+                        $current_row
+                    );
+                    $applied++;
+                    continue;
+                }
+            }
             $unique_collision = cow_merge_find_unique_collision($target, $table, $source_row, !$pk_cols);
             if ($unique_collision !== null) {
                 $unique_columns = cow_merge_all_columns($columns, array_keys($source_row), array_keys($unique_collision['row']));
@@ -7708,6 +7961,34 @@ function cow_merge_table_rows(
             }
             if (!$pk_cols) {
                 cow_merge_forget_row_identity($meta, $run_id, $target_branch, $table, (int)$where_identity['rowid']);
+            }
+            foreach (($delete_result['materialized_rows'] ?? []) as $materialized_row) {
+                if (!is_array($materialized_row)) {
+                    continue;
+                }
+                $materialized_table = (string)($materialized_row['table'] ?? '');
+                $materialized_key = (string)($materialized_row['key'] ?? '');
+                $materialized_payload = $materialized_row['row'] ?? null;
+                if ($materialized_table === '' || $materialized_key === '' || !is_array($materialized_payload)) {
+                    continue;
+                }
+                cow_merge_record_decision(
+                    $meta,
+                    $run_id,
+                    $materialized_table,
+                    $materialized_key,
+                    null,
+                    'source-applied',
+                    'source inserted row before dependent foreign-key rewrite',
+                    null,
+                    $materialized_payload,
+                    null,
+                    $materialized_payload
+                );
+                if ($materialized_table === $table) {
+                    $externally_applied[$materialized_key] = true;
+                }
+                $applied++;
             }
             cow_merge_record_decision($meta, $run_id, $table, $key, null, 'source-applied', 'source deleted row and target did not change it', $base_row, null, $target_row, null);
             $applied++;
