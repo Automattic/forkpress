@@ -2587,6 +2587,63 @@ SQL);
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_items' AND column_name = 'target_note' AND row_identity IS NULL AND decision = 'target-kept'"), 1, 'target-added column preservation is auditable');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_items' AND column_name = 'plugin_items_target_note_idx' AND decision = 'target-kept'"), 1, 'target-added index preservation is auditable');
 
+    $schema_index_validate_base = $tmp . '/schema-index-validate-base.sqlite';
+    $schema_index_validate_source = $tmp . '/schema-index-validate-source.sqlite';
+    $schema_index_validate_target = $tmp . '/schema-index-validate-target.sqlite';
+    create_base_db($schema_index_validate_base);
+    $db = open_db($schema_index_validate_base);
+    $db->exec('CREATE TABLE plugin_index_validate (id INTEGER PRIMARY KEY, label TEXT)');
+    $db->exec("INSERT INTO plugin_index_validate (id, label) VALUES (1, 'Alpha')");
+    $db->close();
+    copy($schema_index_validate_base, $schema_index_validate_source);
+    copy($schema_index_validate_base, $schema_index_validate_target);
+
+    $db = open_db($schema_index_validate_source);
+    $db->exec('CREATE UNIQUE INDEX plugin_index_validate_lower_idx ON plugin_index_validate(lower(label))');
+    $db->close();
+
+    $db = open_db($schema_index_validate_target);
+    $db->exec("INSERT INTO plugin_index_validate (id, label) VALUES (2, 'alpha')");
+    $db->close();
+
+    $schema_index_validate_result = cow_merge_databases($schema_index_validate_base, $schema_index_validate_source, $schema_index_validate_target, $metadata, 'feature-schema-index-validate', 'main');
+    assert_same($schema_index_validate_result['status'], 'completed_with_conflicts', 'source-added expression unique index blocked by target rows is audited');
+    assert_same((int)scalar($schema_index_validate_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_index_validate_lower_idx'"), 0, 'rejected source-added index is not installed on target');
+    assert_same((int)scalar($schema_index_validate_target, "SELECT COUNT(*) FROM plugin_index_validate WHERE id = 2 AND label = 'alpha'"), 1, 'target row that blocks source-added index is preserved by default');
+    $schema_index_validate_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_index_validate' AND column_name = 'plugin_index_validate_lower_idx' AND conflict_type = 'schema-source-added-index' ORDER BY id DESC LIMIT 1");
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $schema_index_validate_conflict_id, 'source', false, 'Preview blocked source index.', 'test'),
+        'UNIQUE constraint failed',
+        'dry-run source index resolution validates target rows before reporting success'
+    );
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_index_validate_conflict_id"), 0, 'failed source index dry-run does not record resolution metadata');
+    assert_same((int)scalar($schema_index_validate_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_index_validate_lower_idx'"), 0, 'failed source index dry-run leaves target schema unchanged');
+
+    $db = open_db($schema_index_validate_target);
+    $db->exec('DELETE FROM plugin_index_validate WHERE id = 2');
+    $db->close();
+    $schema_index_validate_dry = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_index_validate_conflict_id,
+        'source',
+        false,
+        'Preview source index after row review.',
+        'test'
+    );
+    assert_same($schema_index_validate_dry['status'], 'validated', 'source index dry-run validates after target rows no longer violate the index');
+    assert_same((int)scalar($schema_index_validate_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_index_validate_lower_idx'"), 0, 'successful source index dry-run still leaves target schema unchanged');
+    $schema_index_validate_apply = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_index_validate_conflict_id,
+        'source',
+        true,
+        'Apply source index after row review.',
+        'test'
+    );
+    assert_same($schema_index_validate_apply['status'], 'applied', 'source index resolution applies after validation passes');
+    assert_same((int)scalar($schema_index_validate_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_index_validate_lower_idx'"), 1, 'source index resolution installs the audited expression index');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_index_validate_conflict_id AND choice = 'source' AND applied = 1"), 1, 'successful source index resolution is auditable');
+
     $schema_conflict_base = $tmp . '/schema-conflict-base.sqlite';
     $schema_conflict_source = $tmp . '/schema-conflict-source.sqlite';
     $schema_conflict_target = $tmp . '/schema-conflict-target.sqlite';

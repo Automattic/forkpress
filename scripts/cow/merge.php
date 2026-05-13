@@ -5810,6 +5810,30 @@ function cow_merge_apply_source_view_schema_resolution(SQLite3 $target, string $
     }
 }
 
+function cow_merge_apply_source_index_schema_resolution(SQLite3 $target, string $index, ?string $source_sql, bool $apply): void {
+    $target->exec('SAVEPOINT forkpress_index_resolution');
+    try {
+        if (cow_merge_index_sql($target, $index) !== null) {
+            if (!$target->exec('DROP INDEX ' . cow_merge_quote_ident($index))) {
+                throw new RuntimeException('failed to drop target index during schema resolution: ' . $target->lastErrorMsg());
+            }
+        }
+        if ($source_sql !== null && !@$target->exec($source_sql)) {
+            throw new RuntimeException('failed to apply source index schema resolution: ' . $target->lastErrorMsg());
+        }
+        if ($apply) {
+            $target->exec('RELEASE forkpress_index_resolution');
+        } else {
+            $target->exec('ROLLBACK TO forkpress_index_resolution');
+            $target->exec('RELEASE forkpress_index_resolution');
+        }
+    } catch (Throwable $e) {
+        $target->exec('ROLLBACK TO forkpress_index_resolution');
+        $target->exec('RELEASE forkpress_index_resolution');
+        throw $e;
+    }
+}
+
 function cow_merge_resolve_schema_conflict(
     SQLite3 $meta,
     array $conflict,
@@ -5839,6 +5863,7 @@ function cow_merge_resolve_schema_conflict(
     try {
         $previous = null;
         $resolved = $choice === 'source' ? $source_payload : $target_payload;
+        $validate_source = null;
         $apply_source = null;
 
         if (in_array($conflict_type, ['schema-source-changed', 'schema-column-conflict'], true) && $object !== '') {
@@ -5929,15 +5954,11 @@ function cow_merge_resolve_schema_conflict(
             }
             if ($choice === 'source') {
                 $resolved = $source_sql;
+                $validate_source = function () use ($target, $object, $source_sql): void {
+                    cow_merge_apply_source_index_schema_resolution($target, $object, $source_sql, false);
+                };
                 $apply_source = function () use ($target, $object, $source_sql): void {
-                    if (cow_merge_index_sql($target, $object) !== null) {
-                        if (!$target->exec('DROP INDEX ' . cow_merge_quote_ident($object))) {
-                            throw new RuntimeException('failed to drop target index during schema resolution: ' . $target->lastErrorMsg());
-                        }
-                    }
-                    if ($source_sql !== null && !$target->exec($source_sql)) {
-                        throw new RuntimeException('failed to apply source index schema resolution: ' . $target->lastErrorMsg());
-                    }
+                    cow_merge_apply_source_index_schema_resolution($target, $object, $source_sql, true);
                 };
             }
         } elseif (in_array($conflict_type, [
@@ -6107,6 +6128,10 @@ function cow_merge_resolve_schema_conflict(
                     throw new RuntimeException('target schema no longer matches the audited conflict target value; rerun merge-audit before resolving');
                 }
             }
+        }
+
+        if (!$apply && $choice === 'source' && $validate_source !== null) {
+            $validate_source();
         }
 
         if ($apply) {
@@ -8038,7 +8063,7 @@ function cow_merge_apply_index_schema_changes(
             continue;
         }
         if ($base_sql === null && $target_sql === null) {
-            if (!$target->exec($source_sql)) {
+            if (!@$target->exec($source_sql)) {
                 if (cow_merge_record_schema_conflict(
                     $meta,
                     $run_id,
