@@ -797,6 +797,73 @@ try {
         'no-primary-key foreign-key child update plus parent delete avoids target constraint conflicts'
     );
 
+    $fk_mixed_rollback_base = $tmp . '/fk-mixed-rollback-base.sqlite';
+    $fk_mixed_rollback_source = $tmp . '/fk-mixed-rollback-source.sqlite';
+    $fk_mixed_rollback_target = $tmp . '/fk-mixed-rollback-target.sqlite';
+    $fk_mixed_rollback_metadata = $tmp . '/.forkpress/cow/merge/fk-mixed-rollback-metadata.sqlite';
+    create_base_db($fk_mixed_rollback_base);
+    copy($fk_mixed_rollback_base, $fk_mixed_rollback_source);
+    copy($fk_mixed_rollback_base, $fk_mixed_rollback_target);
+    foreach ([$fk_mixed_rollback_base, $fk_mixed_rollback_source, $fk_mixed_rollback_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_fk_mixed_rollback_parents (id INTEGER PRIMARY KEY, label TEXT)');
+        $db->exec("CREATE TABLE plugin_fk_mixed_rollback_children (parent_id INTEGER NOT NULL REFERENCES plugin_fk_mixed_rollback_parents(id), label TEXT CHECK(label != 'bad'))");
+        $db->exec("INSERT INTO plugin_fk_mixed_rollback_parents (id, label) VALUES (1, 'old rollback parent'), (2, 'kept rollback parent')");
+        $db->exec("INSERT INTO plugin_fk_mixed_rollback_children (rowid, parent_id, label) VALUES (7, 1, 'delete me'), (9, 1, 'base child')");
+        $db->close();
+    }
+    $db = open_db($fk_mixed_rollback_source);
+    $db->exec('PRAGMA ignore_check_constraints = ON');
+    $db->exec('DELETE FROM plugin_fk_mixed_rollback_children WHERE rowid = 7');
+    $db->exec("UPDATE plugin_fk_mixed_rollback_children SET parent_id = 2, label = 'bad' WHERE rowid = 9");
+    $db->exec('DELETE FROM plugin_fk_mixed_rollback_parents WHERE id = 1');
+    $db->close();
+    $fk_mixed_rollback_meta_db = open_db($fk_mixed_rollback_metadata);
+    cow_merge_ensure_metadata($fk_mixed_rollback_meta_db);
+    $fk_mixed_rollback_run_id = cow_merge_start_run(
+        $fk_mixed_rollback_meta_db,
+        'feature-fk-mixed-rollback-direct',
+        'main',
+        $fk_mixed_rollback_base,
+        $fk_mixed_rollback_source,
+        $fk_mixed_rollback_target
+    );
+    $fk_mixed_rollback_base_db = open_db($fk_mixed_rollback_base);
+    $fk_mixed_rollback_source_db = open_db($fk_mixed_rollback_source);
+    $fk_mixed_rollback_target_db = open_db($fk_mixed_rollback_target);
+    $fk_mixed_direct_result = cow_merge_try_delete_row_with_source_deleted_children(
+        $fk_mixed_rollback_base_db,
+        $fk_mixed_rollback_source_db,
+        $fk_mixed_rollback_target_db,
+        $fk_mixed_rollback_meta_db,
+        $fk_mixed_rollback_run_id,
+        'feature-fk-mixed-rollback-direct',
+        'main',
+        'plugin_fk_mixed_rollback_parents',
+        ['id' => 1],
+        ['id'],
+        ['id' => 1, 'label' => 'old rollback parent']
+    );
+    assert_same($fk_mixed_direct_result['ok'] ?? null, false, 'mixed foreign-key dependent delete/update fails as one validation unit when a later update violates target constraints');
+    assert_same((int)$fk_mixed_rollback_target_db->querySingle('SELECT COUNT(*) FROM plugin_fk_mixed_rollback_children WHERE rowid = 7'), 1, 'failed mixed foreign-key dependent update rolls back the earlier dependent delete');
+    assert_same($fk_mixed_rollback_target_db->querySingle('SELECT label FROM plugin_fk_mixed_rollback_children WHERE rowid = 9'), 'base child', 'failed mixed foreign-key dependent update leaves the later child row unchanged');
+    assert_same((int)$fk_mixed_rollback_target_db->querySingle('SELECT COUNT(*) FROM plugin_fk_mixed_rollback_parents WHERE id = 1'), 1, 'failed mixed foreign-key dependent update keeps the parent row');
+    $fk_mixed_rollback_base_db->close();
+    $fk_mixed_rollback_source_db->close();
+    $fk_mixed_rollback_target_db->close();
+    $fk_mixed_rollback_meta_db->close();
+
+    copy($fk_mixed_rollback_base, $fk_mixed_rollback_target);
+    $fk_mixed_rollback_result = cow_merge_databases($fk_mixed_rollback_base, $fk_mixed_rollback_source, $fk_mixed_rollback_target, $fk_mixed_rollback_metadata, 'feature-fk-mixed-rollback', 'main');
+    assert_same($fk_mixed_rollback_result['status'], 'completed_with_conflicts', 'mixed no-primary-key foreign-key dependent rollback is audited as a target constraint conflict');
+    assert_same((int)scalar($fk_mixed_rollback_target, 'SELECT COUNT(*) FROM plugin_fk_mixed_rollback_parents WHERE id = 1'), 1, 'mixed rollback keeps the foreign-key parent by default');
+    assert_same(scalar($fk_mixed_rollback_target, 'SELECT label FROM plugin_fk_mixed_rollback_children WHERE rowid = 9'), 'base child', 'mixed rollback keeps the invalid source child update out by default');
+    assert_same(
+        (int)scalar($fk_mixed_rollback_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_fk_mixed_rollback_parents' AND c.conflict_type = 'row-target-constraint' AND r.source_branch = 'feature-fk-mixed-rollback'"),
+        1,
+        'mixed no-primary-key foreign-key rollback records an auditable row-target-constraint conflict'
+    );
+
     $target_only_base = $tmp . '/target-only-base.sqlite';
     $target_only_source = $tmp . '/target-only-source.sqlite';
     $target_only_target = $tmp . '/target-only-target.sqlite';
