@@ -3355,6 +3355,31 @@ function cow_merge_start_identity_capture_run(
     return (int)$meta->lastInsertRowID();
 }
 
+function cow_merge_run_context(SQLite3 $meta, int $run_id): array {
+    $stmt = $meta->prepare(
+        'SELECT source_branch, target_branch, base_db, source_db, target_db FROM merge_runs WHERE id = :id'
+    );
+    cow_merge_bind($stmt, ':id', $run_id);
+    $result = $stmt->execute();
+    $row = $result ? $result->fetchArray(SQLITE3_ASSOC) : false;
+    if (!$row) {
+        return [
+            'source_branch' => '',
+            'target_branch' => '',
+            'base_db' => '',
+            'source_db' => '',
+            'target_db' => '',
+        ];
+    }
+    return [
+        'source_branch' => (string)$row['source_branch'],
+        'target_branch' => (string)$row['target_branch'],
+        'base_db' => (string)$row['base_db'],
+        'source_db' => (string)$row['source_db'],
+        'target_db' => (string)$row['target_db'],
+    ];
+}
+
 function cow_merge_start_id_band_run(
     SQLite3 $meta,
     string $branch,
@@ -4750,8 +4775,10 @@ function cow_merge_files(
 
     $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READWRITE | SQLITE3_OPEN_CREATE);
     cow_merge_ensure_metadata($meta);
+    $run_context = cow_merge_run_context($meta, $run_id);
     $file_tx = cow_merge_file_transaction_begin();
     $file_tx_committed = false;
+    $preserve_file_tx = false;
     try {
         if (!$meta->exec('BEGIN IMMEDIATE')) {
             throw new RuntimeException('failed to start filesystem merge metadata transaction: ' . $meta->lastErrorMsg());
@@ -4805,6 +4832,21 @@ function cow_merge_files(
             try {
                 cow_merge_file_transaction_restore($file_tx, $target_root);
             } catch (Throwable $rollback_error) {
+                $preserve_file_tx = true;
+                cow_merge_record_rollback_failure_artifact(
+                    $metadata_db,
+                    $run_id,
+                    $run_context['source_branch'],
+                    $run_context['target_branch'],
+                    $run_context['base_db'],
+                    $run_context['source_db'],
+                    $run_context['target_db'],
+                    cow_merge_failure_reason($e),
+                    cow_merge_failure_reason($rollback_error),
+                    [
+                        'filesystem_transaction' => cow_merge_file_transaction_artifact($file_tx, $target_root),
+                    ]
+                );
                 throw new RuntimeException(
                     $e->getMessage() . '; filesystem rollback failed: ' . $rollback_error->getMessage(),
                     0,
@@ -4814,7 +4856,9 @@ function cow_merge_files(
         }
         throw $e;
     } finally {
-        cow_merge_file_transaction_cleanup($file_tx);
+        if (!$preserve_file_tx) {
+            cow_merge_file_transaction_cleanup($file_tx);
+        }
         $meta->close();
     }
 
