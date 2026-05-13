@@ -16,6 +16,7 @@
 - Added validation preflight for target-dropped foreign-key child table restores, reporting missing cross-table parent dependencies before dry-run or apply mutates target state.
 - Added COW coverage for target-dropped foreign-key child table restore validation when the parent table exists but the required parent row is still absent.
 - Recorded source-added table rows that are blocked by missing target-side foreign-key parents as auditable `row-target-constraint` conflicts instead of aborting the merge.
+- Ordered source-added SQLite views by source-side view dependencies, and kept source-added views with missing restored-table dependencies as validation-gated `schema-source-added-view` conflicts.
 - Recorded source-added triggers that reference missing target-side schema objects as auditable `schema-source-added-trigger` conflicts instead of installing latent invalid triggers.
 - Added generic foreign-key preflight for COW source row deletes so target-side child rows keep their parent by default with auditable `row-target-constraint` metadata until a reviewed source delete validates.
 - Applied clean source deletes across unchanged target-side foreign-key child graphs before deleting the parent, avoiding false `row-target-constraint` conflicts when source deletes the dependent rows too.

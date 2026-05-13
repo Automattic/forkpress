@@ -3960,6 +3960,109 @@ SQL);
     );
     assert_same($source_added_trigger_missing_rerun['status'], 'completed', 'rerunning after source-added trigger resolution completes without a new conflict');
 
+    $source_added_view_order_base = $tmp . '/source-added-view-order-base.sqlite';
+    $source_added_view_order_source = $tmp . '/source-added-view-order-source.sqlite';
+    $source_added_view_order_target = $tmp . '/source-added-view-order-target.sqlite';
+    $source_added_view_order_metadata = $tmp . '/.forkpress/cow/merge/source-added-view-order-metadata.sqlite';
+    create_base_db($source_added_view_order_base);
+    copy($source_added_view_order_base, $source_added_view_order_source);
+    copy($source_added_view_order_base, $source_added_view_order_target);
+    $db = open_db($source_added_view_order_source);
+    $db->exec('CREATE VIEW plugin_child_source_view AS SELECT item_id, label FROM plugin_parent_source_view');
+    $db->exec("CREATE VIEW plugin_parent_source_view AS SELECT item_id, label FROM plugin_items WHERE value = 'source view chain'");
+    $db->close();
+    $source_added_view_order_result = cow_merge_databases(
+        $source_added_view_order_base,
+        $source_added_view_order_source,
+        $source_added_view_order_target,
+        $source_added_view_order_metadata,
+        'feature-source-view-order',
+        'main'
+    );
+    assert_same($source_added_view_order_result['status'], 'completed', 'source-added views are ordered by source view dependencies');
+    assert_same((int)scalar($source_added_view_order_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name IN ('plugin_child_source_view', 'plugin_parent_source_view')"), 2, 'dependent source-added views both materialize');
+    $db = open_db($source_added_view_order_target);
+    $db->exec("INSERT INTO plugin_items (item_id, label, value) VALUES ('view-order', 'View Order', 'source view chain')");
+    $db->close();
+    assert_same(scalar($source_added_view_order_target, "SELECT label FROM plugin_child_source_view WHERE item_id = 'view-order'"), 'View Order', 'dependent source-added view is queryable after ordered materialization');
+    assert_same((int)scalar($source_added_view_order_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE conflict_type = 'schema-source-added-view'"), 0, 'ordered source-added views do not create false schema conflicts');
+    assert_same((int)scalar($source_added_view_order_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE column_name IN ('plugin_child_source_view', 'plugin_parent_source_view') AND decision = 'source-applied'"), 2, 'ordered source-added view decisions are auditable');
+
+    $source_added_view_missing_base = $tmp . '/source-added-view-missing-base.sqlite';
+    $source_added_view_missing_source = $tmp . '/source-added-view-missing-source.sqlite';
+    $source_added_view_missing_target = $tmp . '/source-added-view-missing-target.sqlite';
+    $source_added_view_missing_metadata = $tmp . '/.forkpress/cow/merge/source-added-view-missing-metadata.sqlite';
+    create_base_db($source_added_view_missing_base);
+    $db = open_db($source_added_view_missing_base);
+    $db->exec('CREATE TABLE plugin_view_dependency (item_id TEXT PRIMARY KEY, label TEXT)');
+    $db->exec("INSERT INTO plugin_view_dependency (item_id, label) VALUES ('base-view-parent', 'Base View Parent')");
+    $db->close();
+    copy($source_added_view_missing_base, $source_added_view_missing_source);
+    copy($source_added_view_missing_base, $source_added_view_missing_target);
+    cow_merge_capture_row_identities($source_added_view_missing_base, $source_added_view_missing_metadata, 'main');
+    cow_merge_capture_row_identities($source_added_view_missing_source, $source_added_view_missing_metadata, 'feature-source-view-missing', 'main');
+    cow_merge_capture_row_identities($source_added_view_missing_target, $source_added_view_missing_metadata, 'main');
+    $db = open_db($source_added_view_missing_source);
+    $db->exec("CREATE VIEW plugin_view_dependency_source_view AS SELECT item_id, label FROM plugin_view_dependency WHERE label LIKE 'Base%'");
+    $db->close();
+    $db = open_db($source_added_view_missing_target);
+    $db->exec('DROP TABLE plugin_view_dependency');
+    $db->close();
+    $source_added_view_missing_result = cow_merge_databases(
+        $source_added_view_missing_base,
+        $source_added_view_missing_source,
+        $source_added_view_missing_target,
+        $source_added_view_missing_metadata,
+        'feature-source-view-missing',
+        'main'
+    );
+    assert_same($source_added_view_missing_result['status'], 'completed_with_conflicts', 'source-added view with a missing restored-table dependency is audited');
+    assert_same((int)scalar($source_added_view_missing_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_view_dependency_source_view'"), 0, 'source-added view is held back while its table dependency is missing');
+    $source_added_view_table_conflict_id = (int)scalar($source_added_view_missing_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_view_dependency' AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
+    $source_added_view_conflict_id = (int)scalar($source_added_view_missing_metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_view_dependency_source_view' AND conflict_type = 'schema-source-added-view' ORDER BY id DESC LIMIT 1");
+    assert_true($source_added_view_table_conflict_id > 0, 'missing view dependency remains a reviewable table restore conflict');
+    assert_true($source_added_view_conflict_id > 0, 'missing view dependency records a source-added view schema conflict');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $source_added_view_missing_metadata,
+            $source_added_view_conflict_id,
+            'source',
+            true,
+            'Try view before dependency restore.',
+            'test'
+        ),
+        'source view plugin_view_dependency_source_view is invalid',
+        'source-added view resolution remains gated until its dependency is restored'
+    );
+    $source_added_view_table_resolution = cow_merge_resolve_conflict(
+        $source_added_view_missing_metadata,
+        $source_added_view_table_conflict_id,
+        'source',
+        true,
+        'Restore view dependency table before view.',
+        'test'
+    );
+    assert_same($source_added_view_table_resolution['status'], 'applied', 'view dependency table restore applies before view resolution');
+    $source_added_view_resolution = cow_merge_resolve_conflict(
+        $source_added_view_missing_metadata,
+        $source_added_view_conflict_id,
+        'source',
+        true,
+        'Apply view after dependency restore.',
+        'test'
+    );
+    assert_same($source_added_view_resolution['status'], 'applied', 'source-added view resolution applies after its dependency exists');
+    assert_same(scalar($source_added_view_missing_target, "SELECT label FROM plugin_view_dependency_source_view WHERE item_id = 'base-view-parent'"), 'Base View Parent', 'reviewed source view is queryable after dependency restore');
+    $source_added_view_missing_rerun = cow_merge_databases(
+        $source_added_view_missing_base,
+        $source_added_view_missing_source,
+        $source_added_view_missing_target,
+        $source_added_view_missing_metadata,
+        'feature-source-view-missing',
+        'main'
+    );
+    assert_same($source_added_view_missing_rerun['status'], 'completed', 'rerunning after source-added view resolution completes without a new conflict');
+
     $schema_cross_fk_restored_parent_base = $tmp . '/schema-cross-fk-restored-parent-base.sqlite';
     $schema_cross_fk_restored_parent_source = $tmp . '/schema-cross-fk-restored-parent-source.sqlite';
     $schema_cross_fk_restored_parent_target = $tmp . '/schema-cross-fk-restored-parent-target.sqlite';

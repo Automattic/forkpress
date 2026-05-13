@@ -481,8 +481,11 @@ tooling.
   to restore the child first reports the missing parent table or parent row
   dependency before mutating target state. Source-added table rows with missing
   target-side foreign-key parents are held for the same audited row review
-  instead of aborting the merge. Source-added triggers that write to missing
-  target-side schema objects are held as reviewable
+  instead of aborting the merge. Source-added views are ordered by source-side
+  view dependencies, and source-added views that need a restored target table
+  are held as reviewable `schema-source-added-view` conflicts until that
+  dependency validates. Source-added triggers that write to missing target-side
+  schema objects are held as reviewable
   `schema-source-added-trigger` conflicts instead of being installed as latent
   invalid triggers. When a source row still violates target constraints, target
   is kept by default and the choice is recorded as

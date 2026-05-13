@@ -5196,6 +5196,47 @@ function cow_merge_sql_referenced_tables(string $sql): array {
     return array_keys($refs);
 }
 
+function cow_merge_sort_view_schema_objects(array $objects, array $source_objects): array {
+    $object_names = [];
+    foreach ($objects as $object) {
+        $object_names[strtolower((string)$object)] = (string)$object;
+    }
+
+    $ordered = [];
+    $state = [];
+    $visit = function (string $object) use (&$visit, &$ordered, &$state, $object_names, $source_objects): void {
+        $key = strtolower($object);
+        if (($state[$key] ?? null) === 'done') {
+            return;
+        }
+        if (($state[$key] ?? null) === 'visiting') {
+            return;
+        }
+        $state[$key] = 'visiting';
+        $source_sql = (string)($source_objects[$object]['sql'] ?? '');
+        $dependencies = [];
+        foreach (cow_merge_sql_referenced_tables($source_sql) as $reference) {
+            $reference_key = strtolower($reference);
+            if (isset($object_names[$reference_key]) && $reference_key !== $key) {
+                $dependencies[] = $object_names[$reference_key];
+            }
+        }
+        $dependencies = array_values(array_unique($dependencies));
+        sort($dependencies);
+        foreach ($dependencies as $dependency) {
+            $visit($dependency);
+        }
+        $state[$key] = 'done';
+        $ordered[] = $object;
+    };
+
+    foreach ($objects as $object) {
+        $visit((string)$object);
+    }
+
+    return $ordered;
+}
+
 function cow_merge_trigger_referenced_tables(string $sql): array {
     $body = $sql;
     if (preg_match('/\bBEGIN\b(.*)\bEND\b/is', $sql, $match)) {
@@ -7787,6 +7828,9 @@ function cow_merge_apply_schema_object_changes(
     $conflicts = 0;
     $all_objects = array_unique(array_merge(array_keys($base_objects), array_keys($source_objects), array_keys($target_objects)));
     sort($all_objects);
+    if ($type === 'view') {
+        $all_objects = cow_merge_sort_view_schema_objects($all_objects, $source_objects);
+    }
 
     foreach ($all_objects as $name) {
         $base_entry = $base_objects[$name] ?? null;
