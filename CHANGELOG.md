@@ -16,6 +16,7 @@
 - Applied clean source rewrites to unchanged foreign-key dependent rows when source changes a referenced child key and updates grandchildren to follow that key before deleting the original parent.
 - Materialized source-only foreign-key parent rows inside the validated dependent-rewrite savepoint when source rewrites a primary key before deleting the original parent.
 - Preserved sparse source `rowid` values and sidecar identities when materializing source-only no-primary-key foreign-key parent rows inside validated dependent rewrites.
+- Added COW coverage for occupied-rowid no-primary-key foreign-key parent materialization falling back to a fresh target rowid while preserving the source sidecar identity.
 - Added PHP and runtime-backed COW coverage for no-primary-key foreign-key child updates before parent deletes, including immediate target sidecar row-hash refresh.
 - Added COW coverage for mixed no-primary-key foreign-key dependent delete/update rollback when a later dependent update fails target validation.
 - Refreshed no-primary-key sidecar row hashes immediately after validation-gated safe source-added column resolutions change target row shape.

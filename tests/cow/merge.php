@@ -883,6 +883,58 @@ try {
         'materialized no-primary-key parent insert is auditable'
     );
 
+    $fk_keyless_parent_occupied_base = $tmp . '/fk-keyless-parent-occupied-base.sqlite';
+    $fk_keyless_parent_occupied_source = $tmp . '/fk-keyless-parent-occupied-source.sqlite';
+    $fk_keyless_parent_occupied_target = $tmp . '/fk-keyless-parent-occupied-target.sqlite';
+    $fk_keyless_parent_occupied_metadata = $tmp . '/.forkpress/cow/merge/fk-keyless-parent-occupied-metadata.sqlite';
+    create_base_db($fk_keyless_parent_occupied_base);
+    copy($fk_keyless_parent_occupied_base, $fk_keyless_parent_occupied_source);
+    copy($fk_keyless_parent_occupied_base, $fk_keyless_parent_occupied_target);
+    foreach ([$fk_keyless_parent_occupied_base, $fk_keyless_parent_occupied_source, $fk_keyless_parent_occupied_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_fk_keyless_parent_occupied_parents (code TEXT NOT NULL UNIQUE, label TEXT)');
+        $db->exec('CREATE TABLE plugin_fk_keyless_parent_occupied_children (id INTEGER PRIMARY KEY, parent_code TEXT NOT NULL REFERENCES plugin_fk_keyless_parent_occupied_parents(code), label TEXT)');
+        $db->exec("INSERT INTO plugin_fk_keyless_parent_occupied_parents (rowid, code, label) VALUES (5, 'old-occupied-parent', 'old occupied parent')");
+        $db->exec("INSERT INTO plugin_fk_keyless_parent_occupied_children (id, parent_code, label) VALUES (20, 'old-occupied-parent', 'base occupied child')");
+        $db->close();
+    }
+    $db = open_db($fk_keyless_parent_occupied_source);
+    $db->exec("INSERT INTO plugin_fk_keyless_parent_occupied_parents (rowid, code, label) VALUES (13, 'new-occupied-parent', 'source occupied parent')");
+    $db->exec("UPDATE plugin_fk_keyless_parent_occupied_children SET parent_code = 'new-occupied-parent', label = 'source child follows occupied parent' WHERE id = 20");
+    $db->exec("DELETE FROM plugin_fk_keyless_parent_occupied_parents WHERE code = 'old-occupied-parent'");
+    $db->close();
+    $db = open_db($fk_keyless_parent_occupied_target);
+    $db->exec("INSERT INTO plugin_fk_keyless_parent_occupied_parents (rowid, code, label) VALUES (13, 'target-rowid-occupant', 'target rowid occupant')");
+    $db->close();
+    $fk_keyless_parent_occupied_result = cow_merge_databases($fk_keyless_parent_occupied_base, $fk_keyless_parent_occupied_source, $fk_keyless_parent_occupied_target, $fk_keyless_parent_occupied_metadata, 'feature-fk-keyless-parent-occupied', 'main');
+    assert_same($fk_keyless_parent_occupied_result['status'], 'completed', 'source no-primary-key parent rewrite materializes at a fresh rowid when the source rowid is occupied');
+    assert_same((int)scalar($fk_keyless_parent_occupied_target, "SELECT COUNT(*) FROM plugin_fk_keyless_parent_occupied_parents WHERE code = 'old-occupied-parent'"), 0, 'occupied-rowid rewrite still deletes the old parent after dependent rewrite validates');
+    assert_same(scalar($fk_keyless_parent_occupied_target, 'SELECT code FROM plugin_fk_keyless_parent_occupied_parents WHERE rowid = 13'), 'target-rowid-occupant', 'occupied target rowid remains untouched during no-primary-key parent materialization');
+    assert_same(scalar($fk_keyless_parent_occupied_target, 'SELECT code FROM plugin_fk_keyless_parent_occupied_parents WHERE rowid = 14'), 'new-occupied-parent', 'materialized no-primary-key parent falls back to a fresh target rowid');
+    assert_same(scalar($fk_keyless_parent_occupied_target, 'SELECT parent_code FROM plugin_fk_keyless_parent_occupied_children WHERE id = 20'), 'new-occupied-parent', 'foreign-key child points at the freshly materialized no-primary-key source parent');
+    $fk_keyless_parent_occupied_source_identity = (string)scalar($fk_keyless_parent_occupied_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'feature-fk-keyless-parent-occupied' AND table_name = 'plugin_fk_keyless_parent_occupied_parents' AND rowid = 13");
+    assert_same(
+        scalar($fk_keyless_parent_occupied_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_fk_keyless_parent_occupied_parents' AND rowid = 14"),
+        $fk_keyless_parent_occupied_source_identity,
+        'fresh-rowid no-primary-key parent materialization adopts the source sidecar identity'
+    );
+    assert_same(
+        scalar($fk_keyless_parent_occupied_metadata, "SELECT row_hash FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_fk_keyless_parent_occupied_parents' AND rowid = 14"),
+        cow_merge_row_hash(['code' => 'new-occupied-parent', 'label' => 'source occupied parent']),
+        'fresh-rowid no-primary-key parent sidecar hash matches the materialized target row'
+    );
+    assert_same(
+        (int)scalar($fk_keyless_parent_occupied_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE conflict_type = 'row-target-constraint' AND table_name LIKE 'plugin_fk_keyless_parent_occupied_%'"),
+        0,
+        'occupied source rowid fallback avoids target constraint conflicts when target rows are otherwise unchanged'
+    );
+    $fk_keyless_parent_occupied_decision_identity = cow_merge_identity_json(cow_merge_decode_row_identity($fk_keyless_parent_occupied_source_identity, 'occupied keyless parent materialization'));
+    assert_same(
+        (int)scalar($fk_keyless_parent_occupied_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_fk_keyless_parent_occupied_parents' AND row_identity = '" . SQLite3::escapeString($fk_keyless_parent_occupied_decision_identity) . "' AND decision = 'source-applied' AND reason = 'source inserted row before dependent foreign-key rewrite'"),
+        1,
+        'fresh-rowid no-primary-key parent materialization remains auditable under the source identity'
+    );
+
     $fk_keyless_update_base = $tmp . '/fk-keyless-update-base.sqlite';
     $fk_keyless_update_source = $tmp . '/fk-keyless-update-source.sqlite';
     $fk_keyless_update_target = $tmp . '/fk-keyless-update-target.sqlite';
