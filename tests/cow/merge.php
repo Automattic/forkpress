@@ -2563,6 +2563,62 @@ SQL);
     cow_merge_databases($keyless_base, $keyless_source, $keyless_target, $metadata, 'feature-keyless', 'main');
     assert_same((int)scalar($keyless_target, "SELECT COUNT(*) FROM plugin_keyless WHERE label = 'Source keyless'"), 1, 'rerunning keyless merge does not duplicate the source insert');
 
+    $keyless_auto_update_base = $tmp . '/keyless-auto-update-base.sqlite';
+    $keyless_auto_update_source = $tmp . '/keyless-auto-update-source.sqlite';
+    $keyless_auto_update_target = $tmp . '/keyless-auto-update-target.sqlite';
+    $keyless_auto_update_metadata = $tmp . '/.forkpress/cow/merge/keyless-auto-update-metadata.sqlite';
+    create_base_db($keyless_auto_update_base);
+    copy($keyless_auto_update_base, $keyless_auto_update_source);
+    copy($keyless_auto_update_base, $keyless_auto_update_target);
+    $db = open_db($keyless_auto_update_source);
+    $db->exec("UPDATE plugin_keyless SET label = 'Auto source label', value = 'auto source value' WHERE rowid = 1");
+    $db->close();
+    $keyless_auto_update_result = cow_merge_databases($keyless_auto_update_base, $keyless_auto_update_source, $keyless_auto_update_target, $keyless_auto_update_metadata, 'feature-keyless-auto-update', 'main');
+    assert_same($keyless_auto_update_result['status'], 'completed', 'source-only no-primary-key row update applies cleanly');
+    assert_same(scalar($keyless_auto_update_target, "SELECT value FROM plugin_keyless WHERE rowid = 1"), 'auto source value', 'source-only no-primary-key update mutates target');
+    assert_same(
+        scalar($keyless_auto_update_metadata, "SELECT row_hash FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_keyless' AND rowid = 1"),
+        cow_merge_row_hash(['label' => 'Auto source label', 'value' => 'auto source value']),
+        'source-only no-primary-key update refreshes the target sidecar row hash immediately'
+    );
+
+    $keyless_auto_delete_base = $tmp . '/keyless-auto-delete-base.sqlite';
+    $keyless_auto_delete_source = $tmp . '/keyless-auto-delete-source.sqlite';
+    $keyless_auto_delete_target = $tmp . '/keyless-auto-delete-target.sqlite';
+    $keyless_auto_delete_metadata = $tmp . '/.forkpress/cow/merge/keyless-auto-delete-metadata.sqlite';
+    create_base_db($keyless_auto_delete_base);
+    copy($keyless_auto_delete_base, $keyless_auto_delete_source);
+    copy($keyless_auto_delete_base, $keyless_auto_delete_target);
+    $db = open_db($keyless_auto_delete_source);
+    $db->exec('DELETE FROM plugin_keyless WHERE rowid = 1');
+    $db->close();
+    $keyless_auto_delete_result = cow_merge_databases($keyless_auto_delete_base, $keyless_auto_delete_source, $keyless_auto_delete_target, $keyless_auto_delete_metadata, 'feature-keyless-auto-delete', 'main');
+    assert_same($keyless_auto_delete_result['status'], 'completed', 'source-only no-primary-key row delete applies cleanly');
+    assert_same((int)scalar($keyless_auto_delete_target, 'SELECT COUNT(*) FROM plugin_keyless WHERE rowid = 1'), 0, 'source-only no-primary-key delete removes target row');
+    assert_same((int)scalar($keyless_auto_delete_metadata, "SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_keyless' AND rowid = 1"), 0, 'source-only no-primary-key delete clears active target sidecar identity');
+    assert_same((int)scalar($keyless_auto_delete_metadata, "SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'main' AND table_name = 'plugin_keyless' AND rowid = 1 AND deleted_at IS NOT NULL"), 1, 'source-only no-primary-key delete tombstones target sidecar history');
+    $db = open_db($keyless_auto_delete_target);
+    $db->exec("INSERT INTO plugin_keyless (label, value) VALUES ('Target replacement after auto delete', 'runtime replacement')");
+    $db->close();
+    assert_same((int)scalar($keyless_auto_delete_target, 'SELECT rowid FROM plugin_keyless'), 1, 'SQLite can reuse the no-primary-key rowid after automatic merge delete');
+    cow_merge_track_row_identity_events(
+        $keyless_auto_delete_target,
+        $keyless_auto_delete_metadata,
+        'main',
+        [[
+            'id' => 1,
+            'table' => 'plugin_keyless',
+            'op' => 'insert',
+            'rowid' => 1,
+            'row' => ['label' => 'Target replacement after auto delete', 'value' => 'runtime replacement'],
+        ]]
+    );
+    $replacement_identity = cow_merge_decode_payload_json(
+        (string)scalar($keyless_auto_delete_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_keyless' AND rowid = 1"),
+        'replacement no-primary-key identity'
+    );
+    assert_same($replacement_identity['origin'] ?? null, 'runtime-insert', 'rowid reuse after automatic delete receives a fresh runtime sidecar identity');
+
     $keyless_same_cell_base = $tmp . '/keyless-same-cell-base.sqlite';
     $keyless_same_cell_source = $tmp . '/keyless-same-cell-source.sqlite';
     $keyless_same_cell_target = $tmp . '/keyless-same-cell-target.sqlite';

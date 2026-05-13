@@ -6414,6 +6414,9 @@ function cow_merge_table_rows(
                 throw new RuntimeException("cannot delete $table row without a target identity");
             }
             cow_merge_delete_row($target, $table, $where_identity, $pk_cols);
+            if (!$pk_cols) {
+                cow_merge_forget_row_identity($meta, $run_id, $target_branch, $table, (int)$where_identity['rowid']);
+            }
             cow_merge_record_decision($meta, $run_id, $table, $key, null, 'source-applied', 'source deleted row and target did not change it', $base_row, null, $target_row, null);
             $applied++;
             continue;
@@ -6452,6 +6455,9 @@ function cow_merge_table_rows(
                 throw new RuntimeException("cannot update $table row without a target identity");
             }
             cow_merge_update_row($target, $table, $where_identity, $pk_cols, $source_row, $columns);
+            if (!$pk_cols) {
+                cow_merge_remember_row_identity($meta, $run_id, $target_branch, $table, (int)$where_identity['rowid'], $identity, $source_row);
+            }
             cow_merge_record_decision($meta, $run_id, $table, $key, null, 'source-applied', 'source changed row and target did not change it', $base_row, $source_row, $target_row, $source_row);
             $applied++;
             continue;
@@ -6526,6 +6532,9 @@ function cow_merge_table_rows(
                 throw new RuntimeException("cannot update $table row without a target identity");
             }
             cow_merge_update_row($target, $table, $where_identity, $pk_cols, $merged, $columns);
+            if (!$pk_cols) {
+                cow_merge_remember_row_identity($meta, $run_id, $target_branch, $table, (int)$where_identity['rowid'], $identity, $merged);
+            }
             $applied += $row_applied;
         }
         $conflicts += $row_conflicts;
