@@ -6646,6 +6646,42 @@ SQL);
     assert_same($schema_restore_keyless_mixed_rollback_result['status'], 'completed_with_conflicts', 'target-dropped keyless table restore with mixed dependencies remains reviewable');
     $schema_restore_keyless_mixed_rollback_conflict_id = (int)scalar($schema_restore_keyless_mixed_rollback_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_restore_keyless_mixed_parent' AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
     assert_true($schema_restore_keyless_mixed_rollback_conflict_id > 0, 'keyless mixed dependency target-dropped table restore conflict is auditable');
+    $schema_restore_keyless_mixed_source_history_before_failed_preview = (int)scalar(
+        $schema_restore_keyless_mixed_rollback_metadata,
+        "SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'main' AND table_name = 'plugin_restore_keyless_mixed_parent' AND logical_identity = '" . SQLite3::escapeString((string)$schema_restore_keyless_mixed_source_identity) . "'"
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $schema_restore_keyless_mixed_rollback_metadata,
+            $schema_restore_keyless_mixed_rollback_conflict_id,
+            'source',
+            false,
+            'Preview keyless table restore with late preserved target trigger failure.',
+            'test'
+        ),
+        'plugin_restore_keyless_mixed_observer_insert',
+        'failed dry-run rolls back keyless table restore after source row/index/trigger staging'
+    );
+    assert_same(
+        (int)scalar($schema_restore_keyless_mixed_rollback_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_restore_keyless_mixed_rollback_conflict_id"),
+        0,
+        'failed keyless mixed restore dry-run does not record resolution metadata'
+    );
+    assert_same(
+        (int)scalar($schema_restore_keyless_mixed_rollback_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_restore_keyless_mixed_parent'"),
+        0,
+        'failed keyless mixed restore dry-run rolls back the restored table'
+    );
+    assert_same(
+        scalar($schema_restore_keyless_mixed_rollback_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_restore_keyless_mixed_parent' AND rowid = 7"),
+        $schema_restore_keyless_mixed_stale_identity,
+        'failed keyless mixed restore dry-run rolls back source sidecar adoption'
+    );
+    assert_same(
+        (int)scalar($schema_restore_keyless_mixed_rollback_metadata, "SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'main' AND table_name = 'plugin_restore_keyless_mixed_parent' AND logical_identity = '" . SQLite3::escapeString((string)$schema_restore_keyless_mixed_source_identity) . "'"),
+        $schema_restore_keyless_mixed_source_history_before_failed_preview,
+        'failed keyless mixed restore dry-run rolls back new source sidecar history writes'
+    );
     $schema_restore_keyless_mixed_source_history_before_failed_apply = (int)scalar(
         $schema_restore_keyless_mixed_rollback_metadata,
         "SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'main' AND table_name = 'plugin_restore_keyless_mixed_parent' AND logical_identity = '" . SQLite3::escapeString((string)$schema_restore_keyless_mixed_source_identity) . "'"
