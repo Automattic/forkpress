@@ -1637,6 +1637,15 @@ SQL);
     assert_same(column_type($schema_rebuild_target, 'plugin_items', 'value'), 'INTEGER', 'source table rebuild applies audited source column definition');
     assert_same(scalar($schema_rebuild_target, "SELECT value FROM plugin_items WHERE item_id = 'alpha'"), 'target preserved', 'source table rebuild preserves target row data');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_rebuild_conflict_id AND table_name = 'plugin_items' AND choice = 'source' AND applied = 1"), 1, 'source table rebuild schema resolution is auditable');
+    $schema_rebuild_rerun = cow_merge_databases($schema_rebuild_base, $schema_rebuild_source, $schema_rebuild_target, $metadata, 'feature-schema-rebuild', 'main');
+    assert_same($schema_rebuild_rerun['status'], 'completed', 'rerunning after compatible source table rebuild resolution completes without a new conflict');
+    assert_same(column_type($schema_rebuild_target, 'plugin_items', 'value'), 'INTEGER', 'rerunning after source table rebuild keeps the audited source column definition');
+    assert_same(scalar($schema_rebuild_target, "SELECT value FROM plugin_items WHERE item_id = 'alpha'"), 'target preserved', 'rerunning after source table rebuild preserves target row data');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_items' AND c.column_name IS NULL AND c.conflict_type = 'schema-conflict' AND r.source_branch = 'feature-schema-rebuild'"),
+        1,
+        'rerunning after compatible source table rebuild resolution does not rediscover the resolved schema conflict'
+    );
 
     $schema_rebuild_dep_base = $tmp . '/schema-rebuild-dep-base.sqlite';
     $schema_rebuild_dep_source = $tmp . '/schema-rebuild-dep-source.sqlite';
@@ -1806,6 +1815,20 @@ SQL);
     assert_same($schema_index_resolution['status'], 'applied', 'source schema index resolution records applied status');
     assert_same((int)scalar($schema_resolve_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_items_review_idx'"), 1, 'source schema index resolution applies audited source index');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id IN ($schema_column_conflict_id, $schema_index_conflict_id) AND choice = 'source' AND applied = 1"), 2, 'source schema resolutions are auditable');
+    $schema_resolve_rerun = cow_merge_databases($schema_resolve_base, $schema_resolve_source, $schema_resolve_target, $metadata, 'feature-schema-resolution', 'main');
+    assert_same($schema_resolve_rerun['status'], 'completed', 'rerunning after safe source column and index resolutions completes without a new conflict');
+    assert_same(column_type($schema_resolve_target, 'plugin_items', 'review_note'), 'TEXT', 'rerunning after safe source column resolution keeps the audited source column');
+    assert_same((int)scalar($schema_resolve_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_items_review_idx'"), 1, 'rerunning after safe source index resolution keeps the audited source index');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_items' AND c.column_name = 'review_note' AND c.conflict_type = 'schema-source-changed' AND r.source_branch = 'feature-schema-resolution'"),
+        1,
+        'rerunning after safe source column resolution does not rediscover the resolved schema conflict'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_items' AND c.column_name = 'plugin_items_review_idx' AND c.conflict_type = 'schema-source-added-index' AND r.source_branch = 'feature-schema-resolution'"),
+        1,
+        'rerunning after safe source index resolution does not rediscover the resolved schema conflict'
+    );
 
     $schema_index_rewrite_base = $tmp . '/schema-index-rewrite-base.sqlite';
     $schema_index_rewrite_source = $tmp . '/schema-index-rewrite-source.sqlite';
