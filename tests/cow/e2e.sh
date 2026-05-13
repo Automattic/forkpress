@@ -81,6 +81,8 @@ on_error() {
   dump_if_exists "$TMP/fk-keyless-update-after-merge.json"
   dump_if_exists "$TMP/merge-audit.out"
   dump_if_exists "$TMP/merge-audit.json"
+  dump_if_exists "$TMP/merge-rollback-failures.json"
+  dump_if_exists "$TMP/merge-rollback-failures.out"
   dump_if_exists "$TMP/file-conflict-pending.out"
   dump_if_exists "$TMP/file-conflict-pending-queue.json"
   dump_if_exists "$TMP/file-conflict-needs-action.out"
@@ -573,6 +575,16 @@ grep -F "forkpress: COW merge audit" "$TMP/merge-audit.out" >/dev/null
 grep -F "merge-source -> main" "$TMP/merge-audit.out" >/dev/null
 "$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --limit 3 > "$TMP/merge-audit.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && !empty($data["runs"]) ? 0 : 1);' "$TMP/merge-audit.json"
+ROLLBACK_FAILURE_ARTIFACT="$WORK_DIR/cow/merge/e2e-rollback-failures.jsonl"
+printf '%s\n' '{"source_branch":"feature-e2e-rollback","rollback_failure":"forced runtime rollback failure"}' > "$ROLLBACK_FAILURE_ARTIFACT"
+ROLLBACK_FAILURE_RUN_ID="$(
+  php -r '$db = new SQLite3($argv[1]); $db->exec("INSERT INTO merge_runs (source_branch, target_branch, base_ref, status, policy, source_db, target_db, base_db, finished_at, failure_reason) VALUES (\"feature-e2e-rollback\", \"main\", NULL, \"failed\", \"generic-3way-v1\", \"/tmp/e2e-source.sqlite\", \"/tmp/e2e-target.sqlite\", \"/tmp/e2e-base.sqlite\", CURRENT_TIMESTAMP, \"forced runtime rollback failure\")"); $run = $db->lastInsertRowID(); $stmt = $db->prepare("INSERT INTO merge_rollback_failures (run_id, source_branch, target_branch, base_db, source_db, target_db, original_failure, rollback_failure, artifact_path) VALUES (:run_id, \"feature-e2e-rollback\", \"main\", \"/tmp/e2e-base.sqlite\", \"/tmp/e2e-source.sqlite\", \"/tmp/e2e-target.sqlite\", \"forced runtime file failure\", \"forced runtime rollback failure\", :artifact)"); $stmt->bindValue(":run_id", $run, SQLITE3_INTEGER); $stmt->bindValue(":artifact", $argv[2], SQLITE3_TEXT); $stmt->execute(); echo $run;' "$WORK_DIR/cow/merge/metadata.sqlite" "$ROLLBACK_FAILURE_ARTIFACT"
+)"
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --records rollback-failures --run "$ROLLBACK_FAILURE_RUN_ID" --limit 5 > "$TMP/merge-rollback-failures.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $rows = $data["rollback_failures"] ?? []; $runs = $data["runs"] ?? []; $ok = is_array($data) && (($data["filters"]["records"] ?? null) === "rollback-failures") && empty($data["conflicts"] ?? []) && empty($data["decisions"] ?? []) && empty($data["resolutions"] ?? []) && count($runs) === 1 && count($rows) === 1; $run = $runs[0] ?? []; $row = $rows[0] ?? []; exit($ok && (int)($run["id"] ?? 0) === (int)$argv[2] && ($run["status"] ?? null) === "failed" && (int)($row["run_id"] ?? 0) === (int)$argv[2] && ($row["source_branch"] ?? null) === "feature-e2e-rollback" && ($row["rollback_failure"] ?? null) === "forced runtime rollback failure" && ($row["artifact_path"] ?? null) === $argv[3] ? 0 : 1);' "$TMP/merge-rollback-failures.json" "$ROLLBACK_FAILURE_RUN_ID" "$ROLLBACK_FAILURE_ARTIFACT"
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --records rollback-failures --run "$ROLLBACK_FAILURE_RUN_ID" --limit 5 > "$TMP/merge-rollback-failures.out"
+grep -F "filters:   records=rollback-failures" "$TMP/merge-rollback-failures.out" >/dev/null
+grep -F "forced runtime rollback failure" "$TMP/merge-rollback-failures.out" >/dev/null
 "$BIN" branch --work-dir "$WORK_DIR" merge-audit --target-kept --scope files --path-prefix wp-content/main-target-file.txt --limit 8 > "$TMP/merge-target-kept-files.out"
 grep -F "target-kept" "$TMP/merge-target-kept-files.out" >/dev/null
 grep -F "wp-content/main-target-file.txt" "$TMP/merge-target-kept-files.out" >/dev/null

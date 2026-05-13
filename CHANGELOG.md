@@ -54,6 +54,7 @@
 - Made filesystem merge audit metadata atomic across planning and file operations, so failed file merges do not leave partial conflict or decision rows.
 - Re-recorded filesystem rollback failures after mixed DB+filesystem outer rollback restores metadata, keeping rollback failures queryable through merge audit.
 - Added focused `forkpress branch merge-audit --records rollback-failures` inspection for failed rollback artifact records.
+- Added runtime-backed COW e2e coverage for the real `forkpress branch merge-audit --records rollback-failures` CLI route.
 - Tightened validation-gated source view rewrites so preserved target view triggers must still compile before dry-run or apply reports success.
 - Tightened validation-gated source table drops so dry-run and apply refuse to leave dependent target foreign-key child tables pointing at a missing parent table.
 - Tightened validation-gated source table drops so dry-run and apply refuse to leave target trigger programs referencing the dropped table.
