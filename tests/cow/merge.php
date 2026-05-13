@@ -361,6 +361,95 @@ try {
     assert_same((int)scalar($composite_expression_unique_target, "SELECT id FROM plugin_composite_expression_unique_rows WHERE lower(slug) = 'shared-composite' AND locale COLLATE NOCASE = 'en'"), 10, 'source composite expression unique collision resolution inserts the audited source row identity');
     assert_same(scalar($composite_expression_unique_target, "SELECT value FROM plugin_composite_expression_unique_rows WHERE lower(slug) = 'shared-composite' AND locale COLLATE NOCASE = 'en'"), 'source composite row', 'source composite expression unique collision resolution replaces the target row payload');
 
+    $generated_update_unique_base = $tmp . '/generated-update-unique-base.sqlite';
+    $generated_update_unique_source = $tmp . '/generated-update-unique-source.sqlite';
+    $generated_update_unique_target = $tmp . '/generated-update-unique-target.sqlite';
+    $generated_update_unique_metadata = $tmp . '/.forkpress/cow/merge/generated-update-unique-metadata.sqlite';
+    create_base_db($generated_update_unique_base);
+    copy($generated_update_unique_base, $generated_update_unique_source);
+    copy($generated_update_unique_base, $generated_update_unique_target);
+    foreach ([$generated_update_unique_base, $generated_update_unique_source, $generated_update_unique_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_generated_unique_updates (id INTEGER PRIMARY KEY, slug TEXT, slug_norm TEXT GENERATED ALWAYS AS (lower(slug)) STORED UNIQUE, value TEXT)');
+        $db->exec("INSERT INTO plugin_generated_unique_updates (id, slug, value) VALUES (1, 'base-generated-update', 'base generated row')");
+        $db->close();
+    }
+    $db = open_db($generated_update_unique_source);
+    $db->exec("UPDATE plugin_generated_unique_updates SET slug = 'Shared-Generated-Update', value = 'source generated update' WHERE id = 1");
+    $db->close();
+    $db = open_db($generated_update_unique_target);
+    $db->exec("INSERT INTO plugin_generated_unique_updates (id, slug, value) VALUES (2, 'shared-generated-update', 'target generated collision')");
+    $db->close();
+    $generated_update_unique_result = cow_merge_databases($generated_update_unique_base, $generated_update_unique_source, $generated_update_unique_target, $generated_update_unique_metadata, 'feature-generated-update-unique', 'main');
+    assert_same($generated_update_unique_result['status'], 'completed_with_conflicts', 'source update colliding with target generated-column unique key is audited instead of aborting');
+    assert_same(scalar($generated_update_unique_target, "SELECT value FROM plugin_generated_unique_updates WHERE id = 1"), 'base generated row', 'generated unique source update is held for review by default');
+    assert_same(scalar($generated_update_unique_target, "SELECT value FROM plugin_generated_unique_updates WHERE id = 2"), 'target generated collision', 'generated unique target collision wins by default');
+    assert_same(
+        (int)scalar($generated_update_unique_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_generated_unique_updates' AND conflict_type = 'row-unique-collision'"),
+        1,
+        'generated unique update collision is recorded as a conflict'
+    );
+    $generated_update_unique_conflict_id = (int)scalar($generated_update_unique_metadata, "SELECT c.id FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_generated_unique_updates' AND c.conflict_type = 'row-unique-collision' AND r.source_branch = 'feature-generated-update-unique' ORDER BY c.id DESC LIMIT 1");
+    $generated_update_unique_source_resolution = cow_merge_resolve_conflict(
+        $generated_update_unique_metadata,
+        $generated_update_unique_conflict_id,
+        'source',
+        true,
+        'Apply generated unique source update.',
+        'cow-test'
+    );
+    assert_same($generated_update_unique_source_resolution['status'], 'applied', 'source generated unique update collision resolution records applied status');
+    assert_same((int)scalar($generated_update_unique_target, "SELECT COUNT(*) FROM plugin_generated_unique_updates"), 1, 'source generated unique update resolution removes the target collision row');
+    assert_same(scalar($generated_update_unique_target, "SELECT slug_norm FROM plugin_generated_unique_updates WHERE id = 1"), 'shared-generated-update', 'source generated unique update resolution recomputes the generated value');
+    assert_same(scalar($generated_update_unique_target, "SELECT value FROM plugin_generated_unique_updates WHERE id = 1"), 'source generated update', 'source generated unique update resolution updates the original source identity row');
+
+    $keyless_update_unique_base = $tmp . '/keyless-update-unique-base.sqlite';
+    $keyless_update_unique_source = $tmp . '/keyless-update-unique-source.sqlite';
+    $keyless_update_unique_target = $tmp . '/keyless-update-unique-target.sqlite';
+    $keyless_update_unique_metadata = $tmp . '/.forkpress/cow/merge/keyless-update-unique-metadata.sqlite';
+    create_base_db($keyless_update_unique_base);
+    copy($keyless_update_unique_base, $keyless_update_unique_source);
+    copy($keyless_update_unique_base, $keyless_update_unique_target);
+    foreach ([$keyless_update_unique_base, $keyless_update_unique_source, $keyless_update_unique_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_keyless_unique_updates (slug TEXT UNIQUE, value TEXT)');
+        $db->exec("INSERT INTO plugin_keyless_unique_updates (slug, value) VALUES ('base-keyless-update', 'base keyless row')");
+        $db->close();
+    }
+    cow_merge_capture_row_identities($keyless_update_unique_base, $keyless_update_unique_metadata, 'main');
+    cow_merge_capture_row_identities($keyless_update_unique_source, $keyless_update_unique_metadata, 'feature-keyless-update-unique', 'main');
+    $db = open_db($keyless_update_unique_source);
+    $db->exec("UPDATE plugin_keyless_unique_updates SET slug = 'shared-keyless-update', value = 'source keyless update' WHERE rowid = 1");
+    $db->close();
+    cow_merge_capture_row_identities($keyless_update_unique_source, $keyless_update_unique_metadata, 'feature-keyless-update-unique', 'main');
+    $db = open_db($keyless_update_unique_target);
+    $db->exec("INSERT INTO plugin_keyless_unique_updates (slug, value) VALUES ('shared-keyless-update', 'target keyless collision')");
+    $db->close();
+    cow_merge_capture_row_identities($keyless_update_unique_target, $keyless_update_unique_metadata, 'main');
+    $keyless_update_unique_result = cow_merge_databases($keyless_update_unique_base, $keyless_update_unique_source, $keyless_update_unique_target, $keyless_update_unique_metadata, 'feature-keyless-update-unique', 'main');
+    assert_same($keyless_update_unique_result['status'], 'completed_with_conflicts', 'keyless source update colliding with target unique key is audited instead of aborting');
+    assert_same(scalar($keyless_update_unique_target, "SELECT value FROM plugin_keyless_unique_updates WHERE rowid = 1"), 'base keyless row', 'keyless source update is held for review by default');
+    assert_same(scalar($keyless_update_unique_target, "SELECT value FROM plugin_keyless_unique_updates WHERE slug = 'shared-keyless-update'"), 'target keyless collision', 'keyless target collision wins by default');
+    $keyless_update_unique_conflict_id = (int)scalar($keyless_update_unique_metadata, "SELECT c.id FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_keyless_unique_updates' AND c.conflict_type = 'row-unique-collision' AND r.source_branch = 'feature-keyless-update-unique' ORDER BY c.id DESC LIMIT 1");
+    $keyless_update_unique_conflict_identity = scalar($keyless_update_unique_metadata, "SELECT row_identity FROM merge_conflicts WHERE id = $keyless_update_unique_conflict_id");
+    $keyless_update_unique_source_resolution = cow_merge_resolve_conflict(
+        $keyless_update_unique_metadata,
+        $keyless_update_unique_conflict_id,
+        'source',
+        true,
+        'Apply keyless unique source update.',
+        'cow-test'
+    );
+    assert_same($keyless_update_unique_source_resolution['status'], 'applied', 'source keyless unique update collision resolution records applied status');
+    assert_same((int)scalar($keyless_update_unique_target, "SELECT COUNT(*) FROM plugin_keyless_unique_updates"), 1, 'source keyless unique update resolution removes the target collision row');
+    assert_same(scalar($keyless_update_unique_target, "SELECT value FROM plugin_keyless_unique_updates WHERE rowid = 1"), 'source keyless update', 'source keyless unique update resolution updates the original sidecar row');
+    $keyless_update_unique_plain_identity = cow_merge_decode_payload_json($keyless_update_unique_conflict_identity, 'keyless update unique row identity');
+    $keyless_update_unique_target_identity = cow_merge_decode_payload_json(
+        (string)scalar($keyless_update_unique_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_keyless_unique_updates' AND rowid = 1"),
+        'keyless update unique target row identity'
+    );
+    assert_true(cow_merge_values_equal($keyless_update_unique_target_identity, $keyless_update_unique_plain_identity), 'source keyless unique update resolution keeps the source sidecar identity on the updated target row');
+
     $target_only_base = $tmp . '/target-only-base.sqlite';
     $target_only_source = $tmp . '/target-only-source.sqlite';
     $target_only_target = $tmp . '/target-only-target.sqlite';

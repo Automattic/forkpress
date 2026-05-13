@@ -468,10 +468,11 @@ tooling.
   branch into another branch. WordPress and plugin tables are merged
   generically from SQLite state; branch-time AUTOINCREMENT bands keep
   independently created rows, such as posts saved through wp-admin or REST,
-  from colliding across branches. If a clean source insert collides with a
-  target-side unique key, including expression indexes and normal-column partial
-  unique indexes, the target row is kept and the choice is recorded as an
-  auditable `row-unique-collision`; identical source/target inserts with the same
+  from colliding across branches. If a clean source insert or source row update
+  collides with a target-side unique key, including expression indexes,
+  generated-column unique keys, and normal-column partial unique indexes, the
+  target row is kept and the choice is recorded as an auditable
+  `row-unique-collision`; identical source/target inserts with the same
   explicit primary key, and identical source/target updates or deletes to
   existing explicit-primary-key rows, are recorded as non-conflicting
   `source-applied` decisions. Identical source/target cell changes inside an
@@ -532,8 +533,9 @@ tooling.
   schema conflicts. DB conflicts work for
   explicit primary keys and no-primary-key tables with sidecar row identity.
   `row-unique-collision` source choices replace the still-matching target row
-  that owns the colliding unique key; target remains the default choice unless
-  a reviewer applies a source resolution.
+  that owns the colliding unique key, or for audited source-update collisions
+  remove that target row and update the original source-identity row; target
+  remains the default choice unless a reviewer applies a source resolution.
   Schema source choices can apply safe source-added columns, indexes, views,
   and triggers; source index/view/trigger rewrites or drops; source table drops
   that do not leave dependent target views invalid or implicitly remove target

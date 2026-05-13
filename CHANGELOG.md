@@ -7,6 +7,7 @@
 - Extended generic row unique-collision detection and validation-gated source resolution to normal-column partial unique indexes.
 - Extended generic row unique-collision detection and validation-gated source resolution to expression unique indexes.
 - Extended generic row unique-collision detection and validation-gated source resolution to collated composite partial expression unique indexes.
+- Extended generic row unique-collision detection and validation-gated source resolution to source row updates that collide with target-side unique keys.
 - Refreshed no-primary-key sidecar row hashes immediately after validation-gated safe source-added column resolutions change target row shape.
 - Added `forkpress branch merge-audit` inspection/export with JSON/text formats, file/path filters, review shortcuts, rollback failure artifacts, and ID-band skip reporting.
 - Added `forkpress branch merge-review` metadata annotations for conflict and decision audit records.
