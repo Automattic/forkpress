@@ -582,10 +582,11 @@ tooling.
   indexes/triggers; source table restores when target dropped a table that
   source kept; and compatible table rebuilds that preserve target rows and
   target indexes/triggers while changing audited non-primary-key column
-  definitions. Source index choices validate against current target rows during
-  dry-run and apply, so uniqueness or expression-index failures remain
-  validation-gated until reviewers address the blocking target data. Source
-  table restores recreate the audited source table and copy
+  definitions. Source index choices validate against current target rows and
+  target foreign-key integrity during dry-run and apply, so uniqueness,
+  expression-index, or latent foreign-key mismatch failures remain
+  validation-gated until reviewers address the blocking target data/schema.
+  Source table restores recreate the audited source table and copy
   source rows after validating that the target table is still absent, preserving
   sparse source `rowid` values for no-primary-key tables, then restore source
   indexes/triggers that were removed as a side effect of the target table drop.

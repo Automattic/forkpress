@@ -2680,6 +2680,90 @@ SQL);
     assert_same((int)scalar($schema_index_validate_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_index_validate_lower_idx'"), 1, 'source index resolution installs the audited expression index');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_index_validate_conflict_id AND choice = 'source' AND applied = 1"), 1, 'successful source index resolution is auditable');
 
+    $schema_fk_index_drop_base = $tmp . '/schema-fk-index-drop-base.sqlite';
+    $schema_fk_index_drop_source = $tmp . '/schema-fk-index-drop-source.sqlite';
+    $schema_fk_index_drop_target = $tmp . '/schema-fk-index-drop-target.sqlite';
+    create_base_db($schema_fk_index_drop_base);
+    $db = open_db($schema_fk_index_drop_base);
+    $db->exec('CREATE TABLE plugin_fk_index_drop_parent (code TEXT NOT NULL, label TEXT)');
+    $db->exec('CREATE UNIQUE INDEX plugin_fk_index_drop_parent_code_idx ON plugin_fk_index_drop_parent(code)');
+    $db->exec('CREATE TABLE plugin_fk_index_drop_child (parent_code TEXT NOT NULL REFERENCES plugin_fk_index_drop_parent(code), label TEXT)');
+    $db->exec("INSERT INTO plugin_fk_index_drop_parent (code, label) VALUES ('drop-parent', 'Drop parent')");
+    $db->exec("INSERT INTO plugin_fk_index_drop_child (parent_code, label) VALUES ('drop-parent', 'Drop child')");
+    $db->close();
+    copy($schema_fk_index_drop_base, $schema_fk_index_drop_source);
+    copy($schema_fk_index_drop_base, $schema_fk_index_drop_target);
+
+    $db = open_db($schema_fk_index_drop_source);
+    $db->exec('DROP INDEX plugin_fk_index_drop_parent_code_idx');
+    $db->close();
+
+    $schema_fk_index_drop_result = cow_merge_databases($schema_fk_index_drop_base, $schema_fk_index_drop_source, $schema_fk_index_drop_target, $metadata, 'feature-schema-fk-index-drop', 'main');
+    assert_same($schema_fk_index_drop_result['status'], 'completed_with_conflicts', 'source-dropped foreign-key parent index stays validation-gated');
+    $schema_fk_index_drop_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_fk_index_drop_parent' AND column_name = 'plugin_fk_index_drop_parent_code_idx' AND conflict_type = 'schema-source-dropped-index' ORDER BY id DESC LIMIT 1");
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $schema_fk_index_drop_conflict_id, 'source', false, 'Preview FK parent index drop.', 'test'),
+        'foreign-key validation error',
+        'dry-run source index drop rejects latent foreign-key mismatch before reporting success'
+    );
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_fk_index_drop_conflict_id"), 0, 'failed source index drop dry-run does not record resolution metadata');
+    assert_same((int)scalar($schema_fk_index_drop_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_fk_index_drop_parent_code_idx'"), 1, 'failed source index drop dry-run rolls back the target index');
+    $db = open_db($schema_fk_index_drop_target);
+    $db->exec('DROP TABLE plugin_fk_index_drop_child');
+    $db->close();
+    $schema_fk_index_drop_apply = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_fk_index_drop_conflict_id,
+        'source',
+        true,
+        'Apply FK parent index drop after child schema review.',
+        'test'
+    );
+    assert_same($schema_fk_index_drop_apply['status'], 'applied', 'source index drop applies after dependent child schema is handled');
+    assert_same((int)scalar($schema_fk_index_drop_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_fk_index_drop_parent_code_idx'"), 0, 'validated source index drop removes the foreign-key parent index');
+
+    $schema_fk_index_rewrite_base = $tmp . '/schema-fk-index-rewrite-base.sqlite';
+    $schema_fk_index_rewrite_source = $tmp . '/schema-fk-index-rewrite-source.sqlite';
+    $schema_fk_index_rewrite_target = $tmp . '/schema-fk-index-rewrite-target.sqlite';
+    create_base_db($schema_fk_index_rewrite_base);
+    $db = open_db($schema_fk_index_rewrite_base);
+    $db->exec('CREATE TABLE plugin_fk_index_rewrite_parent (code TEXT NOT NULL, label TEXT)');
+    $db->exec('CREATE UNIQUE INDEX plugin_fk_index_rewrite_parent_code_idx ON plugin_fk_index_rewrite_parent(code)');
+    $db->exec('CREATE TABLE plugin_fk_index_rewrite_child (parent_code TEXT NOT NULL REFERENCES plugin_fk_index_rewrite_parent(code), label TEXT)');
+    $db->exec("INSERT INTO plugin_fk_index_rewrite_parent (code, label) VALUES ('rewrite-parent', 'Rewrite parent')");
+    $db->exec("INSERT INTO plugin_fk_index_rewrite_child (parent_code, label) VALUES ('rewrite-parent', 'Rewrite child')");
+    $db->close();
+    copy($schema_fk_index_rewrite_base, $schema_fk_index_rewrite_source);
+    copy($schema_fk_index_rewrite_base, $schema_fk_index_rewrite_target);
+
+    $db = open_db($schema_fk_index_rewrite_source);
+    $db->exec('DROP INDEX plugin_fk_index_rewrite_parent_code_idx');
+    $db->exec('CREATE UNIQUE INDEX plugin_fk_index_rewrite_parent_code_idx ON plugin_fk_index_rewrite_parent(lower(code))');
+    $db->close();
+
+    $schema_fk_index_rewrite_result = cow_merge_databases($schema_fk_index_rewrite_base, $schema_fk_index_rewrite_source, $schema_fk_index_rewrite_target, $metadata, 'feature-schema-fk-index-rewrite', 'main');
+    assert_same($schema_fk_index_rewrite_result['status'], 'completed_with_conflicts', 'source-rewritten foreign-key parent index stays validation-gated');
+    $schema_fk_index_rewrite_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_fk_index_rewrite_parent' AND column_name = 'plugin_fk_index_rewrite_parent_code_idx' AND conflict_type = 'schema-source-changed-index' ORDER BY id DESC LIMIT 1");
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $schema_fk_index_rewrite_conflict_id, 'source', false, 'Preview FK parent index rewrite.', 'test'),
+        'foreign-key validation error',
+        'dry-run source index rewrite rejects latent foreign-key mismatch before reporting success'
+    );
+    assert_same((int)scalar($schema_fk_index_rewrite_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_fk_index_rewrite_parent_code_idx' AND sql LIKE '%lower(code)%'"), 0, 'failed source index rewrite dry-run rolls back the target index SQL');
+    $db = open_db($schema_fk_index_rewrite_target);
+    $db->exec('DROP TABLE plugin_fk_index_rewrite_child');
+    $db->close();
+    $schema_fk_index_rewrite_apply = cow_merge_resolve_conflict(
+        $metadata,
+        $schema_fk_index_rewrite_conflict_id,
+        'source',
+        true,
+        'Apply FK parent index rewrite after child schema review.',
+        'test'
+    );
+    assert_same($schema_fk_index_rewrite_apply['status'], 'applied', 'source index rewrite applies after dependent child schema is handled');
+    assert_same((int)scalar($schema_fk_index_rewrite_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_fk_index_rewrite_parent_code_idx' AND sql LIKE '%lower(code)%'"), 1, 'validated source index rewrite installs the audited source expression index');
+
     $schema_conflict_base = $tmp . '/schema-conflict-base.sqlite';
     $schema_conflict_source = $tmp . '/schema-conflict-source.sqlite';
     $schema_conflict_target = $tmp . '/schema-conflict-target.sqlite';

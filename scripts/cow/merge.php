@@ -5810,6 +5810,27 @@ function cow_merge_apply_source_view_schema_resolution(SQLite3 $target, string $
     }
 }
 
+function cow_merge_validate_foreign_key_integrity(SQLite3 $db, string $context): void {
+    $result = @$db->query('PRAGMA foreign_key_check');
+    if ($result === false) {
+        $message = $db->lastErrorMsg();
+        throw new RuntimeException($context . ' would leave target foreign-key validation error: ' . ($message === '' ? 'unknown SQLite error' : $message));
+    }
+    $violations = [];
+    while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+        $violations[] = (string)($row['table'] ?? '(unknown)') .
+            ' rowid=' . (string)($row['rowid'] ?? 'NULL') .
+            ' parent=' . (string)($row['parent'] ?? '(unknown)') .
+            ' fkid=' . (string)($row['fkid'] ?? '(unknown)');
+        if (count($violations) >= 3) {
+            break;
+        }
+    }
+    if ($violations) {
+        throw new RuntimeException($context . ' would leave target foreign-key violations: ' . implode('; ', $violations));
+    }
+}
+
 function cow_merge_apply_source_index_schema_resolution(SQLite3 $target, string $index, ?string $source_sql, bool $apply): void {
     $target->exec('SAVEPOINT forkpress_index_resolution');
     try {
@@ -5821,6 +5842,7 @@ function cow_merge_apply_source_index_schema_resolution(SQLite3 $target, string 
         if ($source_sql !== null && !@$target->exec($source_sql)) {
             throw new RuntimeException('failed to apply source index schema resolution: ' . $target->lastErrorMsg());
         }
+        cow_merge_validate_foreign_key_integrity($target, 'source index schema resolution');
         if ($apply) {
             $target->exec('RELEASE forkpress_index_resolution');
         } else {
