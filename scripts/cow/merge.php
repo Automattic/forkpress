@@ -2267,11 +2267,11 @@ function cow_merge_insert_row(SQLite3 $target, string $table, array $row, array 
     return (int)($result['rowid'] ?? 0);
 }
 
-function cow_merge_insert_row_with_rowid(SQLite3 $target, string $table, int $rowid, array $row, array $columns): int {
+function cow_merge_try_insert_row_with_rowid(SQLite3 $target, string $table, int $rowid, array $row, array $columns): array {
     $columns = array_values(array_filter($columns, fn($col) => array_key_exists($col, $row)));
     $foreign_key_error = cow_merge_foreign_key_error($target, $table, $row);
     if ($foreign_key_error !== null) {
-        throw new RuntimeException("failed to insert rowid into $table: $foreign_key_error");
+        return ['ok' => false, 'rowid' => null, 'error' => $foreign_key_error];
     }
     $quoted_columns = array_merge(['rowid'], array_map('cow_merge_quote_ident', $columns));
     $sql = 'INSERT INTO ' . cow_merge_quote_ident($table) . ' (' .
@@ -2285,10 +2285,21 @@ function cow_merge_insert_row_with_rowid(SQLite3 $target, string $table, int $ro
     foreach ($columns as $i => $col) {
         cow_merge_bind($stmt, $i + 2, $row[$col] ?? null);
     }
-    if (!$stmt->execute()) {
+    if (!@$stmt->execute()) {
+        if (cow_merge_is_constraint_error($target)) {
+            return ['ok' => false, 'rowid' => null, 'error' => cow_merge_constraint_error($target)];
+        }
         throw new RuntimeException("failed to insert rowid into $table: " . $target->lastErrorMsg());
     }
-    return (int)$target->lastInsertRowID();
+    return ['ok' => true, 'rowid' => (int)$target->lastInsertRowID(), 'error' => null];
+}
+
+function cow_merge_insert_row_with_rowid(SQLite3 $target, string $table, int $rowid, array $row, array $columns): int {
+    $result = cow_merge_try_insert_row_with_rowid($target, $table, $rowid, $row, $columns);
+    if (!($result['ok'] ?? false)) {
+        throw new RuntimeException("failed to insert rowid into $table: " . (string)($result['error'] ?? 'SQLite constraint failed'));
+    }
+    return (int)($result['rowid'] ?? 0);
 }
 
 function cow_merge_partial_index_where(string $sql): ?string {
@@ -5875,6 +5886,7 @@ function cow_merge_resolve_conflict(
 
         $target = cow_merge_open_db($target_db, SQLITE3_OPEN_READWRITE);
         $pk_cols = cow_merge_pk_cols($target, $table);
+        $source_branch = (string)$conflict['source_branch'];
         $target_branch = (string)$conflict['target_branch'];
         $where_identity = $identity;
         if ($pk_cols) {
@@ -6015,9 +6027,16 @@ function cow_merge_resolve_conflict(
                                 cow_merge_forget_row_identity($meta, (int)$conflict['run_id'], $target_branch, $table, (int)$where_identity['rowid']);
                             }
                         } elseif ($target_value === null) {
-                            $new_rowid = cow_merge_insert_row($target, $table, $source_value, $columns);
                             if (!$pk_cols) {
+                                $source_rowid = cow_merge_lookup_active_rowid_by_identity($meta, $source_branch, $table, $identity);
+                                if ($source_rowid !== null && cow_merge_load_keyless_physical_row($target, $table, $source_rowid) === null) {
+                                    $new_rowid = cow_merge_insert_row_with_rowid($target, $table, $source_rowid, $source_value, $columns);
+                                } else {
+                                    $new_rowid = cow_merge_insert_row($target, $table, $source_value, $columns);
+                                }
                                 cow_merge_remember_row_identity($meta, (int)$conflict['run_id'], $target_branch, $table, $new_rowid, $identity, $source_value);
+                            } else {
+                                cow_merge_insert_row($target, $table, $source_value, $columns);
                             }
                         } else {
                             cow_merge_update_row($target, $table, $where_identity, $pk_cols, $source_value, $columns);
@@ -7065,7 +7084,7 @@ function cow_merge_apply_source_table(
     string $target_branch,
     string $table,
     string $ddl
-): int {
+): array {
     if (!$target->exec($ddl)) {
         throw new RuntimeException("failed to create target table $table: " . $target->lastErrorMsg());
     }
@@ -7088,14 +7107,34 @@ function cow_merge_apply_source_table(
         ? cow_merge_load_rows($source, $table, $pk_cols)
         : cow_merge_keyless_rows_for_branch($source, $meta, $run_id, $source_branch, $table, []);
     $applied = 1;
+    $conflicts = 0;
     $row_keys = cow_merge_sort_row_keys_by_self_foreign_keys($target, $table, array_keys($rows), $rows);
     foreach ($row_keys as $identity_json) {
         $entry = $rows[$identity_json];
         if (!$pk_cols) {
-            $new_rowid = cow_merge_insert_row_with_rowid($target, $table, (int)$entry['rowid'], $entry['row'], $columns);
-            cow_merge_remember_row_identity($meta, $run_id, $target_branch, $table, $new_rowid, $entry['identity'], $entry['row']);
+            $insert_result = cow_merge_try_insert_row_with_rowid($target, $table, (int)$entry['rowid'], $entry['row'], $columns);
         } else {
-            cow_merge_insert_row($target, $table, $entry['row'], $columns);
+            $insert_result = cow_merge_try_insert_row($target, $table, $entry['row'], $columns);
+        }
+        if (!($insert_result['ok'] ?? false)) {
+            if (cow_merge_record_row_target_constraint(
+                $meta,
+                $run_id,
+                $table,
+                $identity_json,
+                null,
+                $entry['row'],
+                null,
+                'insert',
+                (string)($insert_result['error'] ?? 'SQLite constraint failed')
+            )) {
+                $conflicts++;
+            }
+            continue;
+        }
+        if (!$pk_cols) {
+            $new_rowid = (int)($insert_result['rowid'] ?? 0);
+            cow_merge_remember_row_identity($meta, $run_id, $target_branch, $table, $new_rowid, $entry['identity'], $entry['row']);
         }
         cow_merge_record_decision(
             $meta,
@@ -7112,7 +7151,7 @@ function cow_merge_apply_source_table(
         );
         $applied++;
     }
-    return $applied;
+    return ['applied' => $applied, 'conflicts' => $conflicts];
 }
 
 function cow_merge_validate_source_table_restore_dependencies(SQLite3 $source, SQLite3 $target, string $table): void {
@@ -8524,7 +8563,9 @@ function cow_merge_databases(
                 continue;
             }
             if ($target_sql === null && $base_sql === null) {
-                $applied += cow_merge_apply_source_table($source, $target, $meta, $run_id, $source_branch, $target_branch, $table, $source_sql);
+                $result = cow_merge_apply_source_table($source, $target, $meta, $run_id, $source_branch, $target_branch, $table, $source_sql);
+                $applied += $result['applied'];
+                $conflicts += $result['conflicts'];
                 continue;
             }
             if ($target_sql === null) {

@@ -3790,6 +3790,94 @@ SQL);
     );
     assert_same($schema_cross_fk_source_parent_rerun['status'], 'completed', 'rerunning after source-only parent plus child restore completes without a new conflict');
 
+    $source_added_fk_child_base = $tmp . '/source-added-fk-child-base.sqlite';
+    $source_added_fk_child_source = $tmp . '/source-added-fk-child-source.sqlite';
+    $source_added_fk_child_target = $tmp . '/source-added-fk-child-target.sqlite';
+    $source_added_fk_child_metadata = $tmp . '/.forkpress/cow/merge/source-added-fk-child-metadata.sqlite';
+    create_base_db($source_added_fk_child_base);
+    $db = open_db($source_added_fk_child_base);
+    $db->exec('CREATE TABLE plugin_source_added_fk_parent (id INTEGER PRIMARY KEY, label TEXT)');
+    $db->close();
+    copy($source_added_fk_child_base, $source_added_fk_child_source);
+    copy($source_added_fk_child_base, $source_added_fk_child_target);
+    cow_merge_capture_row_identities($source_added_fk_child_base, $source_added_fk_child_metadata, 'main');
+    cow_merge_capture_row_identities($source_added_fk_child_source, $source_added_fk_child_metadata, 'feature-source-added-fk-child', 'main');
+    cow_merge_capture_row_identities($source_added_fk_child_target, $source_added_fk_child_metadata, 'main');
+    $db = open_db($source_added_fk_child_source);
+    $db->exec("INSERT INTO plugin_source_added_fk_parent (id, label) VALUES (10, 'source restored parent')");
+    $db->exec('CREATE TABLE plugin_source_added_fk_child (parent_id INTEGER NOT NULL REFERENCES plugin_source_added_fk_parent(id), label TEXT)');
+    $db->exec("INSERT INTO plugin_source_added_fk_child (rowid, parent_id, label) VALUES (9, 10, 'source child awaiting parent')");
+    $db->close();
+    cow_merge_capture_row_identities($source_added_fk_child_source, $source_added_fk_child_metadata, 'feature-source-added-fk-child', 'main');
+    $source_added_fk_child_identity = scalar($source_added_fk_child_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'feature-source-added-fk-child' AND table_name = 'plugin_source_added_fk_child' AND rowid = 9");
+    $db = open_db($source_added_fk_child_target);
+    $db->exec('DROP TABLE plugin_source_added_fk_parent');
+    $db->close();
+    $source_added_fk_child_result = cow_merge_databases(
+        $source_added_fk_child_base,
+        $source_added_fk_child_source,
+        $source_added_fk_child_target,
+        $source_added_fk_child_metadata,
+        'feature-source-added-fk-child',
+        'main'
+    );
+    assert_same($source_added_fk_child_result['status'], 'completed_with_conflicts', 'source-added child rows blocked by missing parent are audited instead of aborting merge');
+    assert_same(
+        (int)scalar($source_added_fk_child_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_source_added_fk_child'"),
+        1,
+        'source-added foreign-key child table schema still materializes for row review'
+    );
+    assert_same((int)scalar($source_added_fk_child_target, 'SELECT COUNT(*) FROM plugin_source_added_fk_child'), 0, 'blocked source-added child row is not inserted by default');
+    $source_added_fk_parent_conflict_id = (int)scalar($source_added_fk_child_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_source_added_fk_parent' AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
+    $source_added_fk_child_conflict_id = (int)scalar($source_added_fk_child_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_source_added_fk_child' AND conflict_type = 'row-target-constraint' ORDER BY id DESC LIMIT 1");
+    assert_true($source_added_fk_parent_conflict_id > 0, 'missing parent table remains a reviewable schema conflict');
+    assert_true($source_added_fk_child_conflict_id > 0, 'blocked source-added child row records a target constraint conflict');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $source_added_fk_child_metadata,
+            $source_added_fk_child_conflict_id,
+            'source',
+            true,
+            'Try source-added child before parent restore.',
+            'test'
+        ),
+        'parent table plugin_source_added_fk_parent could not be inspected',
+        'source-added child row resolution remains gated until the parent table is restored'
+    );
+    $source_added_fk_parent_resolution = cow_merge_resolve_conflict(
+        $source_added_fk_child_metadata,
+        $source_added_fk_parent_conflict_id,
+        'source',
+        true,
+        'Restore source parent table before child row.',
+        'test'
+    );
+    assert_same($source_added_fk_parent_resolution['status'], 'applied', 'source parent table restore applies before source-added child row resolution');
+    $source_added_fk_child_resolution = cow_merge_resolve_conflict(
+        $source_added_fk_child_metadata,
+        $source_added_fk_child_conflict_id,
+        'source',
+        true,
+        'Apply source-added child row after parent restore.',
+        'test'
+    );
+    assert_same($source_added_fk_child_resolution['status'], 'applied', 'source-added child row resolution applies after the parent exists');
+    assert_same(scalar($source_added_fk_child_target, 'SELECT label FROM plugin_source_added_fk_child WHERE rowid = 9'), 'source child awaiting parent', 'source-added keyless child resolution preserves the source sparse rowid');
+    $source_added_fk_child_target_identity = scalar($source_added_fk_child_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_source_added_fk_child' AND rowid = 9");
+    assert_true(
+        cow_merge_decode_payload_json($source_added_fk_child_target_identity, 'target child identity') == cow_merge_decode_payload_json($source_added_fk_child_identity, 'source child identity'),
+        'source-added keyless child resolution adopts the source sidecar identity at the preserved rowid'
+    );
+    $source_added_fk_child_rerun = cow_merge_databases(
+        $source_added_fk_child_base,
+        $source_added_fk_child_source,
+        $source_added_fk_child_target,
+        $source_added_fk_child_metadata,
+        'feature-source-added-fk-child',
+        'main'
+    );
+    assert_same($source_added_fk_child_rerun['status'], 'completed', 'rerunning after source-added child row resolution completes without a new conflict');
+
     $schema_cross_fk_restored_parent_base = $tmp . '/schema-cross-fk-restored-parent-base.sqlite';
     $schema_cross_fk_restored_parent_source = $tmp . '/schema-cross-fk-restored-parent-source.sqlite';
     $schema_cross_fk_restored_parent_target = $tmp . '/schema-cross-fk-restored-parent-target.sqlite';
