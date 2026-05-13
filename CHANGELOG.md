@@ -10,6 +10,7 @@
 - Extended generic row unique-collision detection and validation-gated source resolution to source row updates that collide with target-side unique keys.
 - Added auditable `row-target-constraint` conflicts when source row inserts or updates violate target-side SQLite constraints during generic COW mergeback.
 - Added generic foreign-key preflight for COW row inserts/updates, including parent-before-child table merge ordering and validation-gated source resolution once missing parent rows are present.
+- Added generic foreign-key preflight for COW source row deletes so target-side child rows keep their parent by default with auditable `row-target-constraint` metadata until a reviewed source delete validates.
 - Refreshed no-primary-key sidecar row hashes immediately after validation-gated safe source-added column resolutions change target row shape.
 - Added `forkpress branch merge-audit` inspection/export with JSON/text formats, file/path filters, review shortcuts, rollback failure artifacts, and ID-band skip reporting.
 - Added `forkpress branch merge-review` metadata annotations for conflict and decision audit records.

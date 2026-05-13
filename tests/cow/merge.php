@@ -628,6 +628,60 @@ try {
         'foreign-key update violation is recorded as a row target constraint conflict'
     );
 
+    $fk_delete_base = $tmp . '/fk-delete-base.sqlite';
+    $fk_delete_source = $tmp . '/fk-delete-source.sqlite';
+    $fk_delete_target = $tmp . '/fk-delete-target.sqlite';
+    $fk_delete_metadata = $tmp . '/.forkpress/cow/merge/fk-delete-metadata.sqlite';
+    create_base_db($fk_delete_base);
+    copy($fk_delete_base, $fk_delete_source);
+    copy($fk_delete_base, $fk_delete_target);
+    foreach ([$fk_delete_base, $fk_delete_source, $fk_delete_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_fk_delete_parents (id INTEGER PRIMARY KEY, label TEXT)');
+        $db->exec('CREATE TABLE plugin_fk_delete_children (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES plugin_fk_delete_parents(id), label TEXT)');
+        $db->exec("INSERT INTO plugin_fk_delete_parents (id, label) VALUES (1, 'base parent')");
+        $db->close();
+    }
+    $db = open_db($fk_delete_source);
+    $db->exec('DELETE FROM plugin_fk_delete_parents WHERE id = 1');
+    $db->close();
+    $db = open_db($fk_delete_target);
+    $db->exec("INSERT INTO plugin_fk_delete_children (id, parent_id, label) VALUES (20, 1, 'target child')");
+    $db->close();
+    $fk_delete_result = cow_merge_databases($fk_delete_base, $fk_delete_source, $fk_delete_target, $fk_delete_metadata, 'feature-fk-delete', 'main');
+    assert_same($fk_delete_result['status'], 'completed_with_conflicts', 'source delete violating a target foreign-key child is audited instead of orphaning the child');
+    assert_same((int)scalar($fk_delete_target, 'SELECT COUNT(*) FROM plugin_fk_delete_parents WHERE id = 1'), 1, 'foreign-key protected parent is kept by default');
+    assert_same((int)scalar($fk_delete_target, 'SELECT COUNT(*) FROM plugin_fk_delete_children WHERE id = 20'), 1, 'target foreign-key child is preserved by default');
+    assert_same(
+        (int)scalar($fk_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_fk_delete_parents' AND conflict_type = 'row-target-constraint'"),
+        1,
+        'foreign-key delete violation is recorded as a row target constraint conflict'
+    );
+    assert_same(
+        (int)scalar($fk_delete_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_fk_delete_parents' AND decision = 'target-wins' AND reason LIKE 'source deleted row violates target constraints%'"),
+        1,
+        'foreign-key delete violation records an auditable target-wins decision'
+    );
+    $fk_delete_conflict_id = (int)scalar($fk_delete_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_fk_delete_parents' AND conflict_type = 'row-target-constraint' ORDER BY id DESC LIMIT 1");
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($fk_delete_metadata, $fk_delete_conflict_id, 'source', true, 'Try parent delete while child remains.', 'cow-test'),
+        'FOREIGN KEY constraint failed',
+        'source resolution for a foreign-key protected delete remains validation-gated by target children'
+    );
+    $db = open_db($fk_delete_target);
+    $db->exec('DELETE FROM plugin_fk_delete_children WHERE id = 20');
+    $db->close();
+    $fk_delete_source_resolution = cow_merge_resolve_conflict(
+        $fk_delete_metadata,
+        $fk_delete_conflict_id,
+        'source',
+        true,
+        'Apply parent delete after child review.',
+        'cow-test'
+    );
+    assert_same($fk_delete_source_resolution['status'], 'applied', 'source foreign-key delete resolution applies after the child row is removed');
+    assert_same((int)scalar($fk_delete_target, 'SELECT COUNT(*) FROM plugin_fk_delete_parents WHERE id = 1'), 0, 'foreign-key source delete resolution removes the audited parent row');
+
     $target_only_base = $tmp . '/target-only-base.sqlite';
     $target_only_source = $tmp . '/target-only-source.sqlite';
     $target_only_target = $tmp . '/target-only-target.sqlite';

@@ -1470,6 +1470,65 @@ function cow_merge_foreign_key_error(SQLite3 $target, string $table, array $row)
     return null;
 }
 
+function cow_merge_foreign_key_delete_error(SQLite3 $target, string $table, array $identity, array $pk_cols, array $row): ?string {
+    foreach (array_keys(cow_merge_table_sql_map($target)) as $child_table) {
+        foreach (cow_merge_foreign_key_groups($target, $child_table) as $group) {
+            $parent_table = (string)($group[0]['table'] ?? '');
+            if ($parent_table !== $table) {
+                continue;
+            }
+            $parent_columns = cow_merge_foreign_key_parent_columns($target, $table, $group);
+            if ($parent_columns === null) {
+                return "FOREIGN KEY constraint failed on $table delete: parent key could not be inspected";
+            }
+
+            $from_columns = [];
+            $values = [];
+            foreach ($group as $i => $part) {
+                $from = (string)($part['from'] ?? '');
+                if ($from === '' || !isset($parent_columns[$i])) {
+                    return "FOREIGN KEY constraint failed on $table delete: child key for $child_table could not be inspected";
+                }
+                $parent_column = $parent_columns[$i];
+                if (!array_key_exists($parent_column, $row)) {
+                    return "FOREIGN KEY constraint failed on $table delete: parent column $parent_column could not be inspected";
+                }
+                $from_columns[] = $from;
+                $values[] = $row[$parent_column];
+            }
+            if (!$from_columns) {
+                continue;
+            }
+
+            $clauses = [];
+            foreach ($from_columns as $from_column) {
+                $clauses[] = cow_merge_quote_ident($from_column) . ' = ?';
+            }
+            if ($child_table === $table) {
+                $exclude_values = [];
+                $exclude = cow_merge_where_clause($identity, $pk_cols, $exclude_values);
+                $clauses[] = 'NOT (' . $exclude . ')';
+                $values = array_merge($values, $exclude_values);
+            }
+            $stmt = @$target->prepare('SELECT 1 FROM ' . cow_merge_quote_ident($child_table) . ' WHERE ' . implode(' AND ', $clauses) . ' LIMIT 1');
+            if (!$stmt) {
+                return "FOREIGN KEY constraint failed on $table delete: child table $child_table could not be inspected";
+            }
+            foreach ($values as $i => $value) {
+                cow_merge_bind($stmt, $i + 1, $value);
+            }
+            $res = @$stmt->execute();
+            if (!$res) {
+                return "FOREIGN KEY constraint failed on $table delete: child table $child_table could not be inspected";
+            }
+            if ($res->fetchArray(SQLITE3_NUM)) {
+                return 'FOREIGN KEY constraint failed on ' . $table . ' delete: referenced by ' . $child_table . '(' . implode(', ', $from_columns) . ')';
+            }
+        }
+    }
+    return null;
+}
+
 function cow_merge_is_constraint_error(SQLite3 $db): bool {
     return (int)$db->lastErrorCode() === 19;
 }
@@ -1968,7 +2027,16 @@ function cow_merge_try_update_row(
     return ['ok' => true, 'error' => null];
 }
 
-function cow_merge_delete_row(SQLite3 $target, string $table, array $identity, array $pk_cols): void {
+function cow_merge_try_delete_row(SQLite3 $target, string $table, array $identity, array $pk_cols): array {
+    $current_row = cow_merge_select_current_row($target, $table, $identity, $pk_cols);
+    if ($current_row === null) {
+        return ['ok' => true, 'error' => null];
+    }
+    $foreign_key_error = cow_merge_foreign_key_delete_error($target, $table, $identity, $pk_cols, $current_row);
+    if ($foreign_key_error !== null) {
+        return ['ok' => false, 'error' => $foreign_key_error];
+    }
+
     $values = [];
     $where = cow_merge_where_clause($identity, $pk_cols, $values);
     $stmt = $target->prepare('DELETE FROM ' . cow_merge_quote_ident($table) . ' WHERE ' . $where);
@@ -1978,8 +2046,19 @@ function cow_merge_delete_row(SQLite3 $target, string $table, array $identity, a
     foreach ($values as $i => $value) {
         cow_merge_bind($stmt, $i + 1, $value);
     }
-    if (!$stmt->execute()) {
+    if (!@$stmt->execute()) {
+        if (cow_merge_is_constraint_error($target)) {
+            return ['ok' => false, 'error' => cow_merge_constraint_error($target)];
+        }
         throw new RuntimeException("failed to delete from $table: " . $target->lastErrorMsg());
+    }
+    return ['ok' => true, 'error' => null];
+}
+
+function cow_merge_delete_row(SQLite3 $target, string $table, array $identity, array $pk_cols): void {
+    $result = cow_merge_try_delete_row($target, $table, $identity, $pk_cols);
+    if (!($result['ok'] ?? false)) {
+        throw new RuntimeException("failed to delete from $table: " . (string)($result['error'] ?? 'SQLite constraint failed'));
     }
 }
 
@@ -4971,8 +5050,11 @@ function cow_merge_resolve_conflict(
             if (in_array($conflict_type, ['row-insert-collision', 'row-unique-collision', 'row-identity-ambiguous'], true) && (!is_array($source_value) || !is_array($target_value))) {
                 throw new RuntimeException("row conflict #$conflict_id does not contain row payloads");
             }
-            if ($conflict_type === 'row-target-constraint' && !is_array($source_value)) {
+            if ($conflict_type === 'row-target-constraint' && !is_array($source_value) && $source_value !== null) {
                 throw new RuntimeException("row conflict #$conflict_id does not contain a source row payload");
+            }
+            if ($conflict_type === 'row-target-constraint' && $source_value === null && !is_array($target_value)) {
+                throw new RuntimeException("row conflict #$conflict_id does not contain a target row payload");
             }
             if ($conflict_type === 'row-target-deleted' && !is_array($source_value)) {
                 throw new RuntimeException("row conflict #$conflict_id does not contain a source row payload");
@@ -5073,7 +5155,12 @@ function cow_merge_resolve_conflict(
                         }
                     } elseif ($conflict_type === 'row-target-constraint') {
                         $columns = cow_merge_table_columns($target, $table);
-                        if ($target_value === null) {
+                        if ($source_value === null) {
+                            cow_merge_delete_row($target, $table, $where_identity, $pk_cols);
+                            if (!$pk_cols) {
+                                cow_merge_forget_row_identity($meta, (int)$conflict['run_id'], $target_branch, $table, (int)$where_identity['rowid']);
+                            }
+                        } elseif ($target_value === null) {
                             $new_rowid = cow_merge_insert_row($target, $table, $source_value, $columns);
                             if (!$pk_cols) {
                                 cow_merge_remember_row_identity($meta, (int)$conflict['run_id'], $target_branch, $table, $new_rowid, $identity, $source_value);
@@ -6807,7 +6894,7 @@ function cow_merge_record_row_target_constraint(
     string $table,
     string $key,
     ?array $base_row,
-    array $source_row,
+    ?array $source_row,
     ?array $target_row,
     string $operation,
     string $error
@@ -6824,12 +6911,16 @@ function cow_merge_record_row_target_constraint(
         $target_row,
         $target_row
     );
-    $reason_prefix = $operation === 'insert'
-        ? 'source inserted row violates target constraints'
-        : 'source changed row violates target constraints';
-    $accepted_prefix = $operation === 'insert'
-        ? 'reviewed target resolution already accepts source insert blocked by target constraints'
-        : 'reviewed target resolution already accepts source row change blocked by target constraints';
+    if ($operation === 'insert') {
+        $reason_prefix = 'source inserted row violates target constraints';
+        $accepted_prefix = 'reviewed target resolution already accepts source insert blocked by target constraints';
+    } elseif ($operation === 'delete') {
+        $reason_prefix = 'source deleted row violates target constraints';
+        $accepted_prefix = 'reviewed target resolution already accepts source row delete blocked by target constraints';
+    } else {
+        $reason_prefix = 'source changed row violates target constraints';
+        $accepted_prefix = 'reviewed target resolution already accepts source row change blocked by target constraints';
+    }
     cow_merge_record_decision(
         $meta,
         $run_id,
@@ -7056,7 +7147,23 @@ function cow_merge_table_rows(
             if ($where_identity === null) {
                 throw new RuntimeException("cannot delete $table row without a target identity");
             }
-            cow_merge_delete_row($target, $table, $where_identity, $pk_cols);
+            $delete_result = cow_merge_try_delete_row($target, $table, $where_identity, $pk_cols);
+            if (!($delete_result['ok'] ?? false)) {
+                if (cow_merge_record_row_target_constraint(
+                    $meta,
+                    $run_id,
+                    $table,
+                    $key,
+                    $base_row,
+                    null,
+                    $target_row,
+                    'delete',
+                    (string)($delete_result['error'] ?? 'SQLite constraint failed')
+                )) {
+                    $conflicts++;
+                }
+                continue;
+            }
             if (!$pk_cols) {
                 cow_merge_forget_row_identity($meta, $run_id, $target_branch, $table, (int)$where_identity['rowid']);
             }
