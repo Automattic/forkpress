@@ -6116,6 +6116,44 @@ function cow_merge_table_dependent_triggers(SQLite3 $db, string $table, array $e
     return $triggers;
 }
 
+function cow_merge_trigger_body_dependencies(SQLite3 $db, array $schema_objects, array $exclude_trigger_names = []): array {
+    $objects = [];
+    foreach ($schema_objects as $schema_object) {
+        $name = is_array($schema_object) ? (string)($schema_object['name'] ?? '') : (string)$schema_object;
+        if ($name !== '') {
+            $objects[strtolower($name)] = $name;
+        }
+    }
+    if (!$objects) {
+        return [];
+    }
+
+    $excluded = array_fill_keys(array_map('strtolower', $exclude_trigger_names), true);
+    $triggers = [];
+    $stmt = $db->query("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND sql IS NOT NULL ORDER BY name");
+    if (!$stmt) {
+        throw new RuntimeException('failed to read trigger body dependencies: ' . $db->lastErrorMsg());
+    }
+    while ($row = $stmt->fetchArray(SQLITE3_ASSOC)) {
+        $name = (string)$row['name'];
+        if (isset($excluded[strtolower($name)])) {
+            continue;
+        }
+        foreach ($objects as $object) {
+            if (cow_merge_sql_references_table((string)$row['sql'], $object)) {
+                $triggers[] = [
+                    'type' => 'trigger',
+                    'name' => $name,
+                    'sql' => (string)$row['sql'],
+                ];
+                $excluded[strtolower($name)] = true;
+                break;
+            }
+        }
+    }
+    return $triggers;
+}
+
 function cow_merge_validate_views(SQLite3 $db, array $views, string $context): void {
     foreach ($views as $view) {
         $name = is_array($view) ? (string)$view['name'] : (string)$view;
@@ -8336,9 +8374,10 @@ function cow_merge_restore_source_table(
         fn(array $dependency): string => (string)$dependency['name'],
         $dependent_view_triggers
     );
+    $dependent_schema_objects = array_merge([$table], $dependent_views);
     $dependent_triggers = array_merge(
         $dependent_view_triggers,
-        cow_merge_table_dependent_triggers($target, $table, $dependent_trigger_names)
+        cow_merge_trigger_body_dependencies($target, $dependent_schema_objects, $dependent_trigger_names)
     );
     cow_merge_validate_source_table_restore_dependencies($source, $target, $table);
     cow_merge_forget_table_row_identities($meta, $run_id, $target_branch, $table);

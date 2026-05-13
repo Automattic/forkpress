@@ -6240,6 +6240,99 @@ SQL);
     assert_same($schema_restore_transitive_view_trigger_apply['status'], 'applied', 'table restore applies after the invalid transitive target view trigger is handled');
     assert_same(scalar($schema_restore_transitive_view_trigger_target, "SELECT label FROM plugin_restore_transitive_child WHERE code = 'restore-transitive-parent'"), 'restore transitive label', 'preserved transitive target view remains queryable after table restore');
 
+    $schema_restore_transitive_trigger_body_base = $tmp . '/schema-restore-transitive-trigger-body-base.sqlite';
+    $schema_restore_transitive_trigger_body_source = $tmp . '/schema-restore-transitive-trigger-body-source.sqlite';
+    $schema_restore_transitive_trigger_body_target = $tmp . '/schema-restore-transitive-trigger-body-target.sqlite';
+    $schema_restore_transitive_trigger_body_metadata = $tmp . '/.forkpress/cow/merge/schema-restore-transitive-trigger-body-metadata.sqlite';
+    create_base_db($schema_restore_transitive_trigger_body_base);
+    $db = open_db($schema_restore_transitive_trigger_body_base);
+    $db->exec('CREATE TABLE plugin_restore_transitive_trigger_parent (code TEXT NOT NULL PRIMARY KEY, label TEXT NOT NULL)');
+    $db->exec('CREATE TABLE plugin_restore_transitive_trigger_observer (code TEXT)');
+    $db->exec('CREATE TABLE plugin_restore_transitive_trigger_audit (code TEXT, observed TEXT)');
+    $db->exec("INSERT INTO plugin_restore_transitive_trigger_parent (code, label) VALUES ('restore-transitive-trigger-parent', 'restore transitive trigger label')");
+    $db->close();
+    copy($schema_restore_transitive_trigger_body_base, $schema_restore_transitive_trigger_body_source);
+    copy($schema_restore_transitive_trigger_body_base, $schema_restore_transitive_trigger_body_target);
+
+    $db = open_db($schema_restore_transitive_trigger_body_source);
+    $db->exec('CREATE TABLE plugin_restore_transitive_trigger_parent_new (code TEXT NOT NULL PRIMARY KEY, label TEXT NOT NULL) WITHOUT ROWID');
+    $db->exec('INSERT INTO plugin_restore_transitive_trigger_parent_new (code, label) SELECT code, label FROM plugin_restore_transitive_trigger_parent');
+    $db->exec('DROP TABLE plugin_restore_transitive_trigger_parent');
+    $db->exec('ALTER TABLE plugin_restore_transitive_trigger_parent_new RENAME TO plugin_restore_transitive_trigger_parent');
+    $db->close();
+    $db = open_db($schema_restore_transitive_trigger_body_target);
+    $db->exec('DROP TABLE plugin_restore_transitive_trigger_parent');
+    $db->exec('CREATE VIEW plugin_restore_transitive_trigger_live AS SELECT code, label FROM plugin_restore_transitive_trigger_parent');
+    $db->exec('CREATE VIEW plugin_restore_transitive_trigger_child AS SELECT code, label FROM plugin_restore_transitive_trigger_live');
+    $db->exec(
+        'CREATE TRIGGER plugin_restore_transitive_trigger_observer_insert AFTER INSERT ON plugin_restore_transitive_trigger_observer ' .
+        'BEGIN INSERT INTO plugin_restore_transitive_trigger_audit (code, observed) ' .
+        'SELECT NEW.code, CAST(rowid AS TEXT) FROM plugin_restore_transitive_trigger_child WHERE code = NEW.code; END'
+    );
+    $db->close();
+
+    $schema_restore_transitive_trigger_body_result = cow_merge_databases(
+        $schema_restore_transitive_trigger_body_base,
+        $schema_restore_transitive_trigger_body_source,
+        $schema_restore_transitive_trigger_body_target,
+        $schema_restore_transitive_trigger_body_metadata,
+        'feature-schema-restore-transitive-trigger-body',
+        'main'
+    );
+    assert_same($schema_restore_transitive_trigger_body_result['status'], 'completed_with_conflicts', 'target-dropped table restore with a preserved transitive trigger body remains reviewable');
+    $schema_restore_transitive_trigger_body_conflict_id = (int)scalar($schema_restore_transitive_trigger_body_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_restore_transitive_trigger_parent' AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
+    assert_true($schema_restore_transitive_trigger_body_conflict_id > 0, 'transitive trigger-body-sensitive target-dropped table restore conflict is auditable');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $schema_restore_transitive_trigger_body_metadata,
+            $schema_restore_transitive_trigger_body_conflict_id,
+            'source',
+            false,
+            'Preview table restore with invalid preserved transitive trigger body.',
+            'test'
+        ),
+        'plugin_restore_transitive_trigger_observer_insert',
+        'dry-run table restore rejects a preserved transitive target trigger body that would become invalid after source schema application'
+    );
+    assert_same(
+        (int)scalar($schema_restore_transitive_trigger_body_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_restore_transitive_trigger_body_conflict_id"),
+        0,
+        'failed transitive trigger-body table restore dry-run does not record resolution metadata'
+    );
+    assert_same(
+        (int)scalar($schema_restore_transitive_trigger_body_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_restore_transitive_trigger_parent'"),
+        0,
+        'failed transitive trigger-body table restore dry-run rolls back the restored table'
+    );
+    assert_same(
+        (int)scalar($schema_restore_transitive_trigger_body_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_restore_transitive_trigger_live'"),
+        1,
+        'failed transitive trigger-body table restore dry-run preserves the direct target view'
+    );
+    assert_same(
+        (int)scalar($schema_restore_transitive_trigger_body_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_restore_transitive_trigger_child'"),
+        1,
+        'failed transitive trigger-body table restore dry-run preserves the child target view'
+    );
+    assert_same(
+        (int)scalar($schema_restore_transitive_trigger_body_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_restore_transitive_trigger_observer_insert'"),
+        1,
+        'failed transitive trigger-body table restore dry-run preserves the target observer trigger for review'
+    );
+    $db = open_db($schema_restore_transitive_trigger_body_target);
+    $db->exec('DROP TRIGGER plugin_restore_transitive_trigger_observer_insert');
+    $db->close();
+    $schema_restore_transitive_trigger_body_apply = cow_merge_resolve_conflict(
+        $schema_restore_transitive_trigger_body_metadata,
+        $schema_restore_transitive_trigger_body_conflict_id,
+        'source',
+        true,
+        'Apply table restore after invalid transitive target trigger body is reviewed.',
+        'test'
+    );
+    assert_same($schema_restore_transitive_trigger_body_apply['status'], 'applied', 'table restore applies after the invalid transitive target trigger body is handled');
+    assert_same(scalar($schema_restore_transitive_trigger_body_target, "SELECT label FROM plugin_restore_transitive_trigger_child WHERE code = 'restore-transitive-trigger-parent'"), 'restore transitive trigger label', 'preserved transitive target view remains queryable after trigger-body-sensitive table restore');
+
     $schema_cross_fk_restored_parent_base = $tmp . '/schema-cross-fk-restored-parent-base.sqlite';
     $schema_cross_fk_restored_parent_source = $tmp . '/schema-cross-fk-restored-parent-source.sqlite';
     $schema_cross_fk_restored_parent_target = $tmp . '/schema-cross-fk-restored-parent-target.sqlite';
