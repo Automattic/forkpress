@@ -72,6 +72,7 @@
 - Added `target-accepted` counts to COW merge audit run and decision-group summaries so accepted target states are visible separately from active `target-wins` defaults.
 - Fixed COW conflict recording to de-duplicate unchanged schema conflicts with null row identities using an explicit null-safe lookup before inserting metadata.
 - Stabilized automatic no-primary-key source-applied row updates and deletes by refreshing or tombstoning target branch sidecar identities during the merge mutation.
+- Tombstoned no-primary-key target sidecar identities during validation-gated schema table drops/restores so recreated tables cannot inherit stale rowid identity metadata.
 - Updated the automatic mergeback loop runner to pass a configurable Codex reasoning-effort setting and to include the changelog/known-good tag policy in every worker prompt.
 
 ## known-good/cow-mergeback-identity-stability-2026-05-13

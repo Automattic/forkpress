@@ -2380,6 +2380,60 @@ SQL);
         'rerunning after source table drop resolution does not rediscover the resolved schema conflict'
     );
 
+    $schema_keyless_table_drop_base = $tmp . '/schema-keyless-table-drop-base.sqlite';
+    $schema_keyless_table_drop_source = $tmp . '/schema-keyless-table-drop-source.sqlite';
+    $schema_keyless_table_drop_target = $tmp . '/schema-keyless-table-drop-target.sqlite';
+    $schema_keyless_table_drop_metadata = $tmp . '/.forkpress/cow/merge/schema-keyless-table-drop-metadata.sqlite';
+    create_base_db($schema_keyless_table_drop_base);
+    $db = open_db($schema_keyless_table_drop_base);
+    $db->exec('CREATE TABLE plugin_keyless_table_drop (label TEXT, value TEXT)');
+    $db->exec("INSERT INTO plugin_keyless_table_drop (label, value) VALUES ('Drop keyless', 'base')");
+    $db->close();
+    copy($schema_keyless_table_drop_base, $schema_keyless_table_drop_source);
+    copy($schema_keyless_table_drop_base, $schema_keyless_table_drop_target);
+    cow_merge_capture_row_identities($schema_keyless_table_drop_base, $schema_keyless_table_drop_metadata, 'main');
+    cow_merge_capture_row_identities($schema_keyless_table_drop_source, $schema_keyless_table_drop_metadata, 'feature-keyless-table-drop', 'main');
+    cow_merge_capture_row_identities($schema_keyless_table_drop_target, $schema_keyless_table_drop_metadata, 'main');
+    $db = open_db($schema_keyless_table_drop_source);
+    $db->exec('DROP TABLE plugin_keyless_table_drop');
+    $db->close();
+    $result = cow_merge_databases($schema_keyless_table_drop_base, $schema_keyless_table_drop_source, $schema_keyless_table_drop_target, $schema_keyless_table_drop_metadata, 'feature-keyless-table-drop', 'main');
+    assert_same($result['status'], 'completed_with_conflicts', 'source-dropped no-primary-key table is recorded as a schema conflict');
+    $schema_keyless_table_drop_conflict_id = (int)scalar($schema_keyless_table_drop_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_keyless_table_drop' AND conflict_type = 'schema-source-dropped-table' ORDER BY id DESC LIMIT 1");
+    $schema_keyless_table_drop_resolution = cow_merge_resolve_conflict(
+        $schema_keyless_table_drop_metadata,
+        $schema_keyless_table_drop_conflict_id,
+        'source',
+        true,
+        'Apply source no-primary-key table drop.',
+        'test'
+    );
+    assert_same($schema_keyless_table_drop_resolution['status'], 'applied', 'source no-primary-key table drop schema resolution records applied status');
+    assert_same((int)scalar($schema_keyless_table_drop_metadata, "SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_keyless_table_drop'"), 0, 'source no-primary-key table drop clears active target sidecar identities');
+    assert_same((int)scalar($schema_keyless_table_drop_metadata, "SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'main' AND table_name = 'plugin_keyless_table_drop' AND deleted_at IS NOT NULL"), 1, 'source no-primary-key table drop tombstones target sidecar history');
+    $db = open_db($schema_keyless_table_drop_target);
+    $db->exec('CREATE TABLE plugin_keyless_table_drop (label TEXT, value TEXT)');
+    $db->exec("INSERT INTO plugin_keyless_table_drop (label, value) VALUES ('Drop replacement', 'runtime replacement')");
+    $db->close();
+    assert_same((int)scalar($schema_keyless_table_drop_target, 'SELECT rowid FROM plugin_keyless_table_drop'), 1, 'SQLite can reuse a no-primary-key rowid after source table drop resolution');
+    cow_merge_track_row_identity_events(
+        $schema_keyless_table_drop_target,
+        $schema_keyless_table_drop_metadata,
+        'main',
+        [[
+            'id' => 1,
+            'table' => 'plugin_keyless_table_drop',
+            'op' => 'insert',
+            'rowid' => 1,
+            'row' => ['label' => 'Drop replacement', 'value' => 'runtime replacement'],
+        ]]
+    );
+    $schema_keyless_table_drop_replacement_identity = cow_merge_decode_payload_json(
+        (string)scalar($schema_keyless_table_drop_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_keyless_table_drop' AND rowid = 1"),
+        'replacement identity after source table drop'
+    );
+    assert_same($schema_keyless_table_drop_replacement_identity['origin'] ?? null, 'runtime-insert', 'rowid reuse after source no-primary-key table drop receives a fresh runtime sidecar identity');
+
     $schema_table_both_drop_base = $tmp . '/schema-table-both-drop-base.sqlite';
     $schema_table_both_drop_source = $tmp . '/schema-table-both-drop-source.sqlite';
     $schema_table_both_drop_target = $tmp . '/schema-table-both-drop-target.sqlite';
@@ -2464,6 +2518,80 @@ SQL);
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_table_target_drop' AND c.conflict_type = 'schema-target-dropped-table' AND r.source_branch = 'feature-table-target-drop'"),
         1,
         'rerunning after target-dropped table source restore does not rediscover the resolved schema conflict'
+    );
+
+    $schema_keyless_table_restore_base = $tmp . '/schema-keyless-table-restore-base.sqlite';
+    $schema_keyless_table_restore_source = $tmp . '/schema-keyless-table-restore-source.sqlite';
+    $schema_keyless_table_restore_target = $tmp . '/schema-keyless-table-restore-target.sqlite';
+    $schema_keyless_table_restore_metadata = $tmp . '/.forkpress/cow/merge/schema-keyless-table-restore-metadata.sqlite';
+    create_base_db($schema_keyless_table_restore_base);
+    $db = open_db($schema_keyless_table_restore_base);
+    $db->exec('CREATE TABLE plugin_keyless_table_restore (label TEXT, value TEXT)');
+    $db->exec("INSERT INTO plugin_keyless_table_restore (label, value) VALUES ('Restore keyless', 'base')");
+    $db->close();
+    copy($schema_keyless_table_restore_base, $schema_keyless_table_restore_source);
+    copy($schema_keyless_table_restore_base, $schema_keyless_table_restore_target);
+    cow_merge_capture_row_identities($schema_keyless_table_restore_base, $schema_keyless_table_restore_metadata, 'main');
+    cow_merge_capture_row_identities($schema_keyless_table_restore_source, $schema_keyless_table_restore_metadata, 'feature-keyless-table-restore', 'main');
+    cow_merge_capture_row_identities($schema_keyless_table_restore_target, $schema_keyless_table_restore_metadata, 'main');
+    $db = open_db($schema_keyless_table_restore_source);
+    $db->exec("UPDATE plugin_keyless_table_restore SET value = 'source restored base' WHERE rowid = 1");
+    $db->exec("INSERT INTO plugin_keyless_table_restore (label, value) VALUES ('Source restored extra', 'source extra')");
+    $db->close();
+    cow_merge_capture_row_identities($schema_keyless_table_restore_source, $schema_keyless_table_restore_metadata, 'feature-keyless-table-restore', 'main');
+    $schema_keyless_table_restore_source_identity = scalar($schema_keyless_table_restore_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'feature-keyless-table-restore' AND table_name = 'plugin_keyless_table_restore' AND rowid = 1");
+    $db = open_db($schema_keyless_table_restore_target);
+    $db->exec('DELETE FROM plugin_keyless_table_restore WHERE rowid = 1');
+    $db->exec("INSERT INTO plugin_keyless_table_restore (label, value) VALUES ('Target stale rowid', 'target stale identity')");
+    $db->close();
+    cow_merge_track_row_identity_events(
+        $schema_keyless_table_restore_target,
+        $schema_keyless_table_restore_metadata,
+        'main',
+        [
+            [
+                'id' => 1,
+                'table' => 'plugin_keyless_table_restore',
+                'op' => 'delete',
+                'rowid' => 1,
+                'row' => ['label' => 'Restore keyless', 'value' => 'base'],
+            ],
+            [
+                'id' => 2,
+                'table' => 'plugin_keyless_table_restore',
+                'op' => 'insert',
+                'rowid' => 1,
+                'row' => ['label' => 'Target stale rowid', 'value' => 'target stale identity'],
+            ],
+        ]
+    );
+    $schema_keyless_table_restore_stale_identity = scalar($schema_keyless_table_restore_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_keyless_table_restore' AND rowid = 1");
+    $db = open_db($schema_keyless_table_restore_target);
+    $db->exec('DROP TABLE plugin_keyless_table_restore');
+    $db->close();
+    $result = cow_merge_databases($schema_keyless_table_restore_base, $schema_keyless_table_restore_source, $schema_keyless_table_restore_target, $schema_keyless_table_restore_metadata, 'feature-keyless-table-restore', 'main');
+    assert_same($result['status'], 'completed_with_conflicts', 'target-dropped no-primary-key table is recorded as a schema conflict');
+    $schema_keyless_table_restore_conflict_id = (int)scalar($schema_keyless_table_restore_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_keyless_table_restore' AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
+    $schema_keyless_table_restore_resolution = cow_merge_resolve_conflict(
+        $schema_keyless_table_restore_metadata,
+        $schema_keyless_table_restore_conflict_id,
+        'source',
+        true,
+        'Apply source no-primary-key table restore.',
+        'test'
+    );
+    assert_same($schema_keyless_table_restore_resolution['status'], 'applied', 'source no-primary-key table restore schema resolution records applied status');
+    assert_same((int)scalar($schema_keyless_table_restore_target, "SELECT COUNT(*) FROM plugin_keyless_table_restore"), 2, 'source no-primary-key table restore copies audited source rows into the target table');
+    assert_same(scalar($schema_keyless_table_restore_target, "SELECT value FROM plugin_keyless_table_restore WHERE rowid = 1"), 'source restored base', 'source no-primary-key table restore recreates the audited source row');
+    assert_same(
+        scalar($schema_keyless_table_restore_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_keyless_table_restore' AND rowid = 1"),
+        $schema_keyless_table_restore_source_identity,
+        'source no-primary-key table restore adopts source sidecar identity after target table recreation'
+    );
+    assert_same(
+        (int)scalar($schema_keyless_table_restore_metadata, "SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'main' AND table_name = 'plugin_keyless_table_restore' AND logical_identity = '" . SQLite3::escapeString((string)$schema_keyless_table_restore_stale_identity) . "' AND deleted_at IS NOT NULL"),
+        1,
+        'source no-primary-key table restore tombstones stale target sidecar identity before recreating rows'
     );
 
     $schema_table_drop_view_base = $tmp . '/schema-table-drop-view-base.sqlite';

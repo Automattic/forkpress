@@ -538,7 +538,9 @@ tooling.
   definitions. Source table restores recreate the audited source table and copy
   source rows after validating that the target table is still absent, then
   restore source indexes/triggers that were removed as a side effect of the
-  target table drop.
+  target table drop. No-primary-key sidecar identities for target rows are
+  tombstoned when table drop/restore resolutions remove or recreate the target
+  table, so later rowid reuse receives fresh logical identity metadata.
   Source-added table creation is recorded as a schema-level source-applied
   decision even when the table has no rows.
   Identical source/target table, index, view, and trigger schema changes are

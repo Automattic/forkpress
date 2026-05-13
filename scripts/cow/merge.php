@@ -1154,6 +1154,33 @@ function cow_merge_forget_row_identity(
     return $identity;
 }
 
+function cow_merge_forget_table_row_identities(
+    SQLite3 $meta,
+    int $run_id,
+    string $branch,
+    string $table
+): int {
+    $stmt = $meta->prepare(
+        'SELECT rowid FROM merge_row_identities ' .
+        'WHERE branch_name = :branch_name AND table_name = :table_name ORDER BY rowid'
+    );
+    cow_merge_bind($stmt, ':branch_name', $branch);
+    cow_merge_bind($stmt, ':table_name', $table);
+    $res = $stmt->execute();
+    if (!$res) {
+        throw new RuntimeException('failed to list row identities for table deletion: ' . $meta->lastErrorMsg());
+    }
+
+    $rowids = [];
+    while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+        $rowids[] = (int)$row['rowid'];
+    }
+    foreach ($rowids as $rowid) {
+        cow_merge_forget_row_identity($meta, $run_id, $branch, $table, $rowid);
+    }
+    return count($rowids);
+}
+
 function cow_merge_load_keyless_physical_row(SQLite3 $db, string $table, int $rowid): ?array {
     $stmt = $db->prepare(
         'SELECT rowid AS __forkpress_merge_rowid, * FROM ' . cow_merge_quote_ident($table) . ' WHERE rowid = :rowid'
@@ -4136,12 +4163,14 @@ function cow_merge_resolve_schema_conflict(
                     throw new InvalidArgumentException("source table drop resolution cannot implicitly remove dependent target schema objects; resolve or remove them first: $names");
                 }
                 $resolved = null;
-                $apply_source = function () use ($target, $table): void {
+                $target_branch = (string)$conflict['target_branch'];
+                $apply_source = function () use ($target, $meta, $conflict, $target_branch, $table): void {
                     if (cow_merge_table_sql($target, $table) !== null) {
                         if (!$target->exec('DROP TABLE ' . cow_merge_quote_ident($table))) {
                             throw new RuntimeException('failed to apply source table drop schema resolution: ' . $target->lastErrorMsg());
                         }
                     }
+                    cow_merge_forget_table_row_identities($meta, (int)$conflict['run_id'], $target_branch, $table);
                 };
             }
         } else {
@@ -5607,6 +5636,7 @@ function cow_merge_restore_source_table(
     if (cow_merge_table_sql($target, $table) !== null) {
         throw new RuntimeException("target table already exists during source table restore: $table");
     }
+    cow_merge_forget_table_row_identities($meta, $run_id, $target_branch, $table);
     $ddl = (string)$restore_payload['table_sql'];
     if (!$target->exec($ddl)) {
         throw new RuntimeException("failed to restore target table $table: " . $target->lastErrorMsg());
