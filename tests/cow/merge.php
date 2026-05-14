@@ -325,6 +325,7 @@ try {
     copy($merge_restore_failure_base, $merge_restore_failure_target);
     $db = open_db($merge_restore_failure_source);
     $db->exec("UPDATE wp_posts SET post_content = 'Source restore failure content' WHERE ID = 1");
+    $db->exec('CREATE INDEX plugin_restore_failure_posts_content_idx ON wp_posts(post_content)');
     $db->close();
     $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
         static function (SQLite3 $db, string $sql, string $message): void {
@@ -357,6 +358,11 @@ try {
     }
     assert_true($merge_restore_failure_message !== null && str_contains($merge_restore_failure_message, 'target database rollback failed'), 'direct DB merge target restore failure is surfaced to the caller');
     assert_same(scalar($merge_restore_failure_target, "SELECT post_content FROM wp_posts WHERE ID = 1"), 'Source restore failure content', 'failed direct DB merge restore leaves the committed target state for manual recovery');
+    assert_same(
+        (int)scalar($merge_restore_failure_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_restore_failure_posts_content_idx'"),
+        1,
+        'failed direct DB merge restore leaves committed source-added indexes available for manual recovery'
+    );
     $merge_restore_failure_run_id = (int)scalar($merge_restore_failure_metadata, "SELECT id FROM merge_runs WHERE source_branch = 'feature-merge-restore-failure' AND status = 'failed' ORDER BY id DESC LIMIT 1");
     assert_true($merge_restore_failure_run_id > 0, 'direct DB merge restore failure leaves an auditable failed run');
     assert_same((int)scalar($merge_restore_failure_metadata, "SELECT COUNT(*) FROM merge_rollback_failures WHERE run_id = $merge_restore_failure_run_id"), 1, 'direct DB merge restore failure records rollback-failure metadata');
