@@ -638,8 +638,10 @@ function cow_merge_has_schema_conflict_for_object(SQLite3 $meta, int $run_id, st
         cow_merge_bind($stmt, ':conflict_type', (string)$type);
         $res = cow_merge_execute_checked($stmt, $meta, 'failed to inspect restore payload conflicts');
         if ($res->fetchArray(SQLITE3_NUM)) {
+            cow_merge_result_finalize_checked($res, 'failed to finalize restore payload conflict lookup');
             return true;
         }
+        cow_merge_result_finalize_checked($res, 'failed to finalize restore payload conflict lookup');
         $stmt->reset();
     }
     return false;
@@ -3507,6 +3509,7 @@ function cow_merge_run_context(SQLite3 $meta, int $run_id): array {
     cow_merge_bind($stmt, ':id', $run_id);
     $result = cow_merge_execute_checked($stmt, $meta, 'failed to read merge run context');
     $row = $result ? $result->fetchArray(SQLITE3_ASSOC) : false;
+    cow_merge_result_finalize_checked($result, 'failed to finalize merge run context lookup');
     if (!$row) {
         return [
             'source_branch' => '',
@@ -4207,6 +4210,7 @@ function cow_merge_latest_applied_resolution_choice(SQLite3 $meta, int $conflict
     cow_merge_bind($stmt, ':conflict_id', $conflict_id);
     $res = cow_merge_execute_checked($stmt, $meta, 'failed to look up latest resolution');
     $row = $res->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($res, 'failed to finalize latest resolution lookup');
     if (!$row) {
         return null;
     }
@@ -4259,6 +4263,7 @@ function cow_merge_record_conflict(
     cow_merge_bind($existing, ':chosen_hash', $chosen_hash);
     $existing_result = cow_merge_execute_checked($existing, $meta, 'failed to look up existing merge conflict');
     $existing_row = $existing_result->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($existing_result, 'failed to finalize existing merge conflict lookup');
     if ($existing_row) {
         return cow_merge_latest_applied_resolution_choice($meta, (int)$existing_row['id']) !== 'target';
     }
@@ -5250,8 +5255,10 @@ function cow_merge_review_record(
         cow_merge_bind($stmt, ':id', $record_id);
         $res = cow_merge_execute_checked($stmt, $meta, "failed to execute $record_type lookup");
         if (!$res->fetchArray(SQLITE3_ASSOC)) {
+            cow_merge_result_finalize_checked($res, "failed to finalize $record_type lookup");
             throw new InvalidArgumentException("$record_type #$record_id does not exist in merge metadata");
         }
+        cow_merge_result_finalize_checked($res, "failed to finalize $record_type lookup");
 
         $review_note_id = cow_merge_insert_review_note($meta, $record_type, $record_id, $status, $note, $reviewer);
         cow_merge_exec_checked($meta, 'COMMIT', 'failed to commit review note metadata transaction');
@@ -5372,6 +5379,7 @@ function cow_merge_lookup_active_rowid_by_identity(SQLite3 $meta, string $branch
     cow_merge_bind($stmt, ':logical_identity', cow_merge_plain_json($identity));
     $res = cow_merge_execute_checked($stmt, $meta, 'failed to look up active row identity');
     $row = $res->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($res, 'failed to finalize active row identity lookup');
     if ($row) {
         return (int)$row['rowid'];
     }
@@ -5388,9 +5396,11 @@ function cow_merge_lookup_active_rowid_by_identity(SQLite3 $meta, string $branch
     while ($candidate = $res->fetchArray(SQLITE3_ASSOC)) {
         $candidate_identity = json_decode((string)$candidate['logical_identity'], true);
         if (is_array($candidate_identity) && cow_merge_values_equal($candidate_identity, $identity)) {
+            cow_merge_result_finalize_checked($res, 'failed to finalize active row identity scan');
             return (int)$candidate['rowid'];
         }
     }
+    cow_merge_result_finalize_checked($res, 'failed to finalize active row identity scan');
 
     $history = cow_merge_prepare_checked(
         $meta,
@@ -5404,6 +5414,7 @@ function cow_merge_lookup_active_rowid_by_identity(SQLite3 $meta, string $branch
     cow_merge_bind($history, ':logical_identity', cow_merge_plain_json($identity));
     $res = cow_merge_execute_checked($history, $meta, 'failed to look up row identity history');
     $row = $res->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($res, 'failed to finalize active row identity history lookup');
     if ($row) {
         return (int)$row['rowid'];
     }
@@ -5421,9 +5432,11 @@ function cow_merge_lookup_active_rowid_by_identity(SQLite3 $meta, string $branch
     while ($candidate = $res->fetchArray(SQLITE3_ASSOC)) {
         $candidate_identity = json_decode((string)$candidate['logical_identity'], true);
         if (is_array($candidate_identity) && cow_merge_values_equal($candidate_identity, $identity)) {
+            cow_merge_result_finalize_checked($res, 'failed to finalize active row identity history scan');
             return (int)$candidate['rowid'];
         }
     }
+    cow_merge_result_finalize_checked($res, 'failed to finalize active row identity history scan');
     return null;
 }
 
@@ -7479,6 +7492,7 @@ function cow_merge_resolve_conflict(
         cow_merge_bind($stmt, ':id', $conflict_id);
         $res = cow_merge_execute_checked($stmt, $meta, 'failed to read merge conflict');
         $conflict = $res->fetchArray(SQLITE3_ASSOC);
+        cow_merge_result_finalize_checked($res, 'failed to finalize merge conflict lookup');
         if (!$conflict) {
             throw new InvalidArgumentException("conflict #$conflict_id does not exist in merge metadata");
         }

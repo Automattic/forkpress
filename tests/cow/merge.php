@@ -1722,6 +1722,27 @@ try {
     assert_same((int)$audit['runs'][0]['conflict_count'], 2, 'merge audit run summary includes conflict count');
     assert_same(count($audit['conflicts']), 2, 'merge audit report exports conflict records for a run');
     $title_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'wp_posts' AND column_name = 'post_title'");
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize'] = [
+        static function (SQLite3Result $result, string $message): void {
+            if ($message === 'failed to finalize merge conflict lookup') {
+                throw new RuntimeException('forced resolver conflict lookup finalize failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $metadata,
+            $title_conflict_id,
+            'source',
+            false,
+            'Preview source title resolution with failing lookup finalization.',
+            'cow-test'
+        ),
+        'forced resolver conflict lookup finalize failure',
+        'conflict resolver lookup finalization failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize']);
+    assert_same((int)scalar($metadata, 'SELECT COUNT(*) FROM merge_resolutions'), 0, 'failed resolver conflict lookup finalize records no resolution audit rows');
     $dry_resolution = cow_merge_resolve_conflict(
         $metadata,
         $title_conflict_id,
@@ -2035,6 +2056,31 @@ SQL);
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_review_notes WHERE record_type = 'conflict' AND record_id = $option_conflict_id"),
         $review_note_commit_count,
         'failed direct review note metadata begin records no review note'
+    );
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize'] = [
+        static function (SQLite3Result $result, string $message): void {
+            if ($message === 'failed to finalize conflict lookup') {
+                throw new RuntimeException('forced review conflict lookup finalize failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_review_record(
+            $metadata,
+            'conflict',
+            $option_conflict_id,
+            'pending',
+            'Try direct review note with failing lookup finalization.',
+            'cow-test'
+        ),
+        'forced review conflict lookup finalize failure',
+        'direct review record lookup finalization failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize']);
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_review_notes WHERE record_type = 'conflict' AND record_id = $option_conflict_id"),
+        $review_note_commit_count,
+        'failed direct review lookup finalize records no review note'
     );
     $resolution_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10);
     assert_same(count($resolution_audit['resolutions']), 2, 'merge audit report exports deterministic resolution records');
@@ -2940,6 +2986,227 @@ SQL);
         'row identity lookup recovers after finalize failure is cleared'
     );
     $metadata_identity_finalize_failure_db->close();
+
+    $metadata_context_finalize_failure = $tmp . '/metadata-context-finalize-failure.sqlite';
+    $metadata_context_finalize_failure_db = open_db($metadata_context_finalize_failure);
+    cow_merge_ensure_metadata($metadata_context_finalize_failure_db);
+    $metadata_context_finalize_run_id = cow_merge_start_run(
+        $metadata_context_finalize_failure_db,
+        'feature-context-finalize',
+        'main',
+        'base.sqlite',
+        'source.sqlite',
+        'target.sqlite'
+    );
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize'] = [
+        static function (SQLite3Result $result, string $message): void {
+            if ($message === 'failed to finalize merge run context lookup') {
+                throw new RuntimeException('forced run context finalize failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_run_context($metadata_context_finalize_failure_db, $metadata_context_finalize_run_id),
+        'forced run context finalize failure',
+        'merge run context finalization failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize']);
+    assert_same(
+        cow_merge_run_context($metadata_context_finalize_failure_db, $metadata_context_finalize_run_id)['source_branch'],
+        'feature-context-finalize',
+        'merge run context lookup recovers after finalize failure is cleared'
+    );
+    $metadata_context_finalize_failure_db->close();
+
+    $metadata_active_identity_finalize_failure = $tmp . '/metadata-active-identity-finalize-failure.sqlite';
+    $metadata_active_identity_finalize_failure_db = open_db($metadata_active_identity_finalize_failure);
+    cow_merge_ensure_metadata($metadata_active_identity_finalize_failure_db);
+    cow_merge_remember_row_identity(
+        $metadata_active_identity_finalize_failure_db,
+        1,
+        'feature-active-identity-finalize',
+        'plugin_keyless_active_finalize',
+        11,
+        ['sidecar' => 'active-keyless-row', 'finalize' => 'failure'],
+        ['label' => 'active finalize failure']
+    );
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize'] = [
+        static function (SQLite3Result $result, string $message): void {
+            if ($message === 'failed to finalize active row identity lookup') {
+                throw new RuntimeException('forced active row identity finalize failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_lookup_active_rowid_by_identity(
+            $metadata_active_identity_finalize_failure_db,
+            'feature-active-identity-finalize',
+            'plugin_keyless_active_finalize',
+            ['sidecar' => 'active-keyless-row', 'finalize' => 'failure']
+        ),
+        'forced active row identity finalize failure',
+        'active row identity finalization failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize']);
+    assert_same(
+        cow_merge_lookup_active_rowid_by_identity(
+            $metadata_active_identity_finalize_failure_db,
+            'feature-active-identity-finalize',
+            'plugin_keyless_active_finalize',
+            ['sidecar' => 'active-keyless-row', 'finalize' => 'failure']
+        ),
+        11,
+        'active row identity lookup recovers after finalize failure is cleared'
+    );
+    $metadata_active_identity_finalize_failure_db->close();
+
+    $metadata_conflict_finalize_failure = $tmp . '/metadata-conflict-finalize-failure.sqlite';
+    $metadata_conflict_finalize_failure_db = open_db($metadata_conflict_finalize_failure);
+    cow_merge_ensure_metadata($metadata_conflict_finalize_failure_db);
+    $metadata_conflict_finalize_run_id = cow_merge_start_run(
+        $metadata_conflict_finalize_failure_db,
+        'feature-conflict-finalize',
+        'main',
+        'base.sqlite',
+        'source.sqlite',
+        'target.sqlite'
+    );
+    cow_merge_record_conflict(
+        $metadata_conflict_finalize_failure_db,
+        $metadata_conflict_finalize_run_id,
+        'plugin_finalize_conflicts',
+        cow_merge_payload_json(['id' => 1]),
+        'value',
+        'cell-conflict',
+        'base',
+        'source',
+        'target',
+        'target'
+    );
+    $metadata_conflict_finalize_id = (int)scalar($metadata_conflict_finalize_failure, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_finalize_conflicts'");
+    cow_merge_record_resolution(
+        $metadata_conflict_finalize_failure_db,
+        $metadata_conflict_finalize_id,
+        'target',
+        true,
+        'Keep target before finalize failure test.',
+        'cow-test',
+        'target.sqlite',
+        'plugin_finalize_conflicts',
+        cow_merge_payload_json(['id' => 1]),
+        'value',
+        'target',
+        'target'
+    );
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize'] = [
+        static function (SQLite3Result $result, string $message): void {
+            if ($message === 'failed to finalize existing merge conflict lookup') {
+                throw new RuntimeException('forced existing conflict finalize failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_record_conflict(
+            $metadata_conflict_finalize_failure_db,
+            $metadata_conflict_finalize_run_id,
+            'plugin_finalize_conflicts',
+            cow_merge_payload_json(['id' => 1]),
+            'value',
+            'cell-conflict',
+            'base',
+            'source',
+            'target',
+            'target'
+        ),
+        'forced existing conflict finalize failure',
+        'existing conflict lookup finalization failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize']);
+    assert_same((int)scalar($metadata_conflict_finalize_failure, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_finalize_conflicts'"), 1, 'failed existing conflict finalize does not duplicate conflict metadata');
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize'] = [
+        static function (SQLite3Result $result, string $message): void {
+            if ($message === 'failed to finalize latest resolution lookup') {
+                throw new RuntimeException('forced latest resolution finalize failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_record_conflict(
+            $metadata_conflict_finalize_failure_db,
+            $metadata_conflict_finalize_run_id,
+            'plugin_finalize_conflicts',
+            cow_merge_payload_json(['id' => 1]),
+            'value',
+            'cell-conflict',
+            'base',
+            'source',
+            'target',
+            'target'
+        ),
+        'forced latest resolution finalize failure',
+        'latest resolution lookup finalization failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize']);
+    assert_same((int)scalar($metadata_conflict_finalize_failure, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_finalize_conflicts'"), 1, 'failed latest resolution finalize does not duplicate conflict metadata');
+    assert_same(
+        cow_merge_record_conflict(
+            $metadata_conflict_finalize_failure_db,
+            $metadata_conflict_finalize_run_id,
+            'plugin_finalize_conflicts',
+            cow_merge_payload_json(['id' => 1]),
+            'value',
+            'cell-conflict',
+            'base',
+            'source',
+            'target',
+            'target'
+        ),
+        false,
+        'existing target resolution lookup recovers after conflict finalize failure is cleared'
+    );
+    cow_merge_record_conflict(
+        $metadata_conflict_finalize_failure_db,
+        $metadata_conflict_finalize_run_id,
+        'plugin_restore_payload_finalize',
+        null,
+        'plugin_restore_payload_finalize_idx',
+        'schema-source-added-index',
+        null,
+        'CREATE INDEX plugin_restore_payload_finalize_idx ON plugin_restore_payload_finalize(label)',
+        null,
+        null
+    );
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize'] = [
+        static function (SQLite3Result $result, string $message): void {
+            if ($message === 'failed to finalize restore payload conflict lookup') {
+                throw new RuntimeException('forced restore payload conflict finalize failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_has_schema_conflict_for_object(
+            $metadata_conflict_finalize_failure_db,
+            $metadata_conflict_finalize_run_id,
+            'plugin_restore_payload_finalize',
+            'plugin_restore_payload_finalize_idx',
+            ['schema-source-added-index']
+        ),
+        'forced restore payload conflict finalize failure',
+        'restore payload conflict lookup finalization failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize']);
+    assert_same(
+        cow_merge_has_schema_conflict_for_object(
+            $metadata_conflict_finalize_failure_db,
+            $metadata_conflict_finalize_run_id,
+            'plugin_restore_payload_finalize',
+            'plugin_restore_payload_finalize_idx',
+            ['schema-source-added-index']
+        ),
+        true,
+        'restore payload conflict lookup recovers after finalize failure is cleared'
+    );
+    $metadata_conflict_finalize_failure_db->close();
 
     $metadata_journal_failure = $tmp . '/metadata-journal-failure.sqlite';
     $metadata_journal_failure_db = open_db($metadata_journal_failure);
