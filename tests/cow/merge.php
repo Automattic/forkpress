@@ -13198,6 +13198,39 @@ SQL);
     ]);
     assert_same(count($plugin_review_audit['conflicts']), 1, 'plugin conflict review queue returns reviewed plugin conflicts');
     assert_same($plugin_review_audit['conflicts'][0]['review_status'], 'needs-action', 'plugin audit exposes latest plugin conflict review status');
+    $plugin_cli_audit = run_merge_cli([
+        'audit',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', (string)$plugin_graph_result['run_id'],
+        '--format', 'json',
+        '--scope', 'plugin',
+        '--records', 'conflicts',
+        '--review-status', 'needs-action',
+    ]);
+    assert_same($plugin_cli_audit['status'], 0, 'plugin audit CLI exits successfully');
+    $plugin_cli_report = json_decode($plugin_cli_audit['output'], true);
+    assert_true(is_array($plugin_cli_report), 'plugin audit CLI emits JSON');
+    assert_same($plugin_cli_report['filters']['scope'] ?? null, 'plugin', 'plugin audit CLI preserves plugin scope');
+    assert_same(count($plugin_cli_report['conflicts'] ?? []), 1, 'plugin audit CLI returns reviewed plugin conflicts');
+    assert_same($plugin_cli_report['conflicts'][0]['table_name'] ?? null, '__plugins__', 'plugin audit CLI exposes plugin conflict namespace');
+    $plugin_cli_text_group = run_merge_cli([
+        'audit',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', (string)$plugin_graph_result['run_id'],
+        '--scope', 'plugin',
+        '--records', 'conflicts',
+        '--group-by', 'severity',
+    ]);
+    assert_same($plugin_cli_text_group['status'], 0, 'plugin grouped audit CLI exits successfully');
+    assert_true(str_contains($plugin_cli_text_group['output'], 'scope=plugin') && str_contains($plugin_cli_text_group['output'], 'plugin=1 db=0'), 'plugin grouped audit CLI prints plugin counts separately from DB counts');
+    $plugin_cli_path_error = run_merge_cli([
+        'audit',
+        '--metadata-db', $plugin_graph_metadata,
+        '--scope', 'plugin',
+        '--path', 'wp-content/uploads/plugin-graph-source.dat',
+    ]);
+    assert_true($plugin_cli_path_error['status'] !== 0, 'plugin audit CLI rejects file path filters');
+    assert_true(str_contains($plugin_cli_path_error['output'], '--path and --path-prefix require file audit scope'), 'plugin audit CLI explains path filter scope errors');
 
     copy($band_base, $band_feature_a_reset);
     $result = cow_merge_allocate_autoincrement_bands($band_feature_a_reset, $band_metadata, 'feature-band-a');
