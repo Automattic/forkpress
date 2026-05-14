@@ -3585,12 +3585,46 @@ SQL);
     assert_same((int)scalar($rollback_artifact_metadata, "SELECT COUNT(*) FROM merge_rollback_failures WHERE source_branch = 'feature-file-rollback-artifact'"), 1, 'filesystem transaction rollback failure is queryable in merge metadata when available');
     cow_merge_file_transaction_cleanup($file_tx_artifact);
 
+    $rollback_artifact_insert_failure_metadata = $tmp . '/.forkpress/cow/merge/rollback-artifact-insert-failure/metadata.sqlite';
+    mkdir(dirname($rollback_artifact_insert_failure_metadata), 0777, true);
+    $db = open_db($rollback_artifact_insert_failure_metadata);
+    cow_merge_ensure_metadata($db);
+    $db->exec(
+        "CREATE TRIGGER fail_rollback_failure_insert BEFORE INSERT ON merge_rollback_failures " .
+        "BEGIN SELECT RAISE(ABORT, 'forced rollback failure metadata sink failure'); END"
+    );
+    $db->close();
+    $artifact_insert_failure_path = cow_merge_record_rollback_failure_artifact(
+        $rollback_artifact_insert_failure_metadata,
+        125,
+        'feature-rollback-artifact-insert-failure',
+        'main',
+        '/tmp/base.sqlite',
+        '/tmp/source.sqlite',
+        '/tmp/target.sqlite',
+        'metadata sink original failure',
+        'metadata sink rollback failure',
+        ['target_db_snapshot' => ['path' => '/tmp/target.sqlite', 'backup_exists' => true]]
+    );
+    assert_true(is_string($artifact_insert_failure_path) && is_file($artifact_insert_failure_path), 'rollback failure still records a JSONL artifact when metadata insertion fails');
+    $artifact_insert_failure_lines = file($artifact_insert_failure_path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    assert_true(is_array($artifact_insert_failure_lines) && count($artifact_insert_failure_lines) === 1, 'metadata-insert-failed rollback failure writes one JSONL artifact record');
+    $artifact_insert_failure_record = json_decode($artifact_insert_failure_lines[0], true);
+    assert_same($artifact_insert_failure_record['source_branch'], 'feature-rollback-artifact-insert-failure', 'metadata-insert-failed rollback artifact preserves source branch');
+    assert_same($artifact_insert_failure_record['rollback_failure'], 'metadata sink rollback failure', 'metadata-insert-failed rollback artifact preserves rollback reason');
+    assert_same($artifact_insert_failure_record['artifacts']['target_db_snapshot']['backup_exists'] ?? null, true, 'metadata-insert-failed rollback artifact preserves recovery artifact metadata');
+    assert_same(
+        (int)scalar($rollback_artifact_insert_failure_metadata, "SELECT COUNT(*) FROM merge_rollback_failures WHERE source_branch = 'feature-rollback-artifact-insert-failure'"),
+        0,
+        'metadata-insert-failed rollback artifact does not leave a partial rollback-failure audit row'
+    );
+
     $rollback_artifact_only_dir = $tmp . '/.forkpress/cow/merge/rollback-artifact-only';
     $rollback_artifact_only_metadata = $rollback_artifact_only_dir . '/metadata.sqlite';
     mkdir($rollback_artifact_only_metadata, 0777, true);
     $artifact_only_path = cow_merge_record_rollback_failure_artifact(
         $rollback_artifact_only_metadata,
-        125,
+        126,
         'feature-rollback-artifact-only',
         'main',
         '/tmp/base.sqlite',
