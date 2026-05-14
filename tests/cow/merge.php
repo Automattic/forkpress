@@ -3897,6 +3897,93 @@ SQL);
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_items' AND column_name = 'target_note' AND row_identity IS NULL AND decision = 'target-kept'"), 1, 'target-added column preservation is auditable');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_items' AND column_name = 'plugin_items_target_note_idx' AND decision = 'target-kept'"), 1, 'target-added index preservation is auditable');
 
+    $schema_auto_savepoint_base = $tmp . '/schema-auto-savepoint-base.sqlite';
+    $schema_auto_savepoint_source = $tmp . '/schema-auto-savepoint-source.sqlite';
+    $schema_auto_savepoint_target = $tmp . '/schema-auto-savepoint-target.sqlite';
+    create_base_db($schema_auto_savepoint_base);
+    copy($schema_auto_savepoint_base, $schema_auto_savepoint_source);
+    copy($schema_auto_savepoint_base, $schema_auto_savepoint_target);
+    $db = open_db($schema_auto_savepoint_source);
+    $db->exec('ALTER TABLE plugin_items ADD COLUMN auto_savepoint_note TEXT');
+    $db->close();
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'SAVEPOINT forkpress_schema_merge' && $message === 'failed to start automatic schema merge savepoint') {
+                throw new RuntimeException('forced automatic schema merge savepoint failure');
+            }
+        },
+    ];
+    $schema_auto_savepoint_failure = null;
+    try {
+        cow_merge_databases($schema_auto_savepoint_base, $schema_auto_savepoint_source, $schema_auto_savepoint_target, $metadata, 'feature-schema-auto-savepoint', 'main');
+    } catch (Throwable $e) {
+        $schema_auto_savepoint_failure = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($schema_auto_savepoint_failure !== null && str_contains($schema_auto_savepoint_failure, 'forced automatic schema merge savepoint failure'), 'automatic schema merge savepoint failure is surfaced to the caller');
+    assert_same(column_type($schema_auto_savepoint_target, 'plugin_items', 'auto_savepoint_note'), null, 'failed automatic schema savepoint leaves target schema unchanged');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-schema-auto-savepoint'"), 0, 'failed automatic schema savepoint records no staged decisions');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-schema-auto-savepoint' AND status = 'failed'"), 1, 'failed automatic schema savepoint leaves an auditable failed run');
+
+    $schema_view_savepoint_base = $tmp . '/schema-view-savepoint-base.sqlite';
+    $schema_view_savepoint_source = $tmp . '/schema-view-savepoint-source.sqlite';
+    $schema_view_savepoint_target = $tmp . '/schema-view-savepoint-target.sqlite';
+    create_base_db($schema_view_savepoint_base);
+    copy($schema_view_savepoint_base, $schema_view_savepoint_source);
+    copy($schema_view_savepoint_base, $schema_view_savepoint_target);
+    $db = open_db($schema_view_savepoint_source);
+    $db->exec('CREATE VIEW plugin_source_savepoint_view AS SELECT item_id, label FROM plugin_items');
+    $db->close();
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'SAVEPOINT forkpress_schema_object_apply' && $message === 'failed to start source-added view schema apply savepoint') {
+                throw new RuntimeException('forced source-added view savepoint failure');
+            }
+        },
+    ];
+    $schema_view_savepoint_failure = null;
+    try {
+        cow_merge_databases($schema_view_savepoint_base, $schema_view_savepoint_source, $schema_view_savepoint_target, $metadata, 'feature-schema-view-savepoint', 'main');
+    } catch (Throwable $e) {
+        $schema_view_savepoint_failure = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($schema_view_savepoint_failure !== null && str_contains($schema_view_savepoint_failure, 'forced source-added view savepoint failure'), 'source-added view savepoint failure is surfaced to the caller');
+    assert_same((int)scalar($schema_view_savepoint_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_source_savepoint_view'"), 0, 'failed source-added view savepoint leaves target schema unchanged');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-schema-view-savepoint'"), 0, 'failed source-added view savepoint records no partial conflicts');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-schema-view-savepoint' AND status = 'failed'"), 1, 'failed source-added view savepoint leaves an auditable failed run');
+
+    $schema_trigger_savepoint_base = $tmp . '/schema-trigger-savepoint-base.sqlite';
+    $schema_trigger_savepoint_source = $tmp . '/schema-trigger-savepoint-source.sqlite';
+    $schema_trigger_savepoint_target = $tmp . '/schema-trigger-savepoint-target.sqlite';
+    create_base_db($schema_trigger_savepoint_base);
+    copy($schema_trigger_savepoint_base, $schema_trigger_savepoint_source);
+    copy($schema_trigger_savepoint_base, $schema_trigger_savepoint_target);
+    $db = open_db($schema_trigger_savepoint_source);
+    $db->exec('CREATE TRIGGER plugin_source_savepoint_trigger AFTER INSERT ON plugin_items BEGIN SELECT NEW.item_id; END');
+    $db->close();
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'SAVEPOINT forkpress_schema_object_apply' && $message === 'failed to start source-added trigger schema apply savepoint') {
+                throw new RuntimeException('forced source-added trigger savepoint failure');
+            }
+        },
+    ];
+    $schema_trigger_savepoint_failure = null;
+    try {
+        cow_merge_databases($schema_trigger_savepoint_base, $schema_trigger_savepoint_source, $schema_trigger_savepoint_target, $metadata, 'feature-schema-trigger-savepoint', 'main');
+    } catch (Throwable $e) {
+        $schema_trigger_savepoint_failure = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($schema_trigger_savepoint_failure !== null && str_contains($schema_trigger_savepoint_failure, 'forced source-added trigger savepoint failure'), 'source-added trigger savepoint failure is surfaced to the caller');
+    assert_same((int)scalar($schema_trigger_savepoint_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_source_savepoint_trigger'"), 0, 'failed source-added trigger savepoint leaves target schema unchanged');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-schema-trigger-savepoint'"), 0, 'failed source-added trigger savepoint records no partial conflicts');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-schema-trigger-savepoint' AND status = 'failed'"), 1, 'failed source-added trigger savepoint leaves an auditable failed run');
+
     $schema_index_validate_base = $tmp . '/schema-index-validate-base.sqlite';
     $schema_index_validate_source = $tmp . '/schema-index-validate-source.sqlite';
     $schema_index_validate_target = $tmp . '/schema-index-validate-target.sqlite';

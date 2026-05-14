@@ -9105,30 +9105,46 @@ function cow_merge_apply_safe_table_schema_changes(
     }
 
     if ($columns_to_add) {
-        $target->exec('SAVEPOINT forkpress_schema_merge');
-        foreach ($columns_to_add as $entry) {
-            $column = $entry['column'];
-            $definition = $entry['definition'];
-            $sql = 'ALTER TABLE ' . cow_merge_quote_ident($table) . ' ADD COLUMN ' . $definition;
-            if (!$target->exec($sql)) {
+        $target_savepoint_started = false;
+        try {
+            cow_merge_exec_checked(
+                $target,
+                'SAVEPOINT forkpress_schema_merge',
+                'failed to start automatic schema merge savepoint'
+            );
+            $target_savepoint_started = true;
+            foreach ($columns_to_add as $entry) {
+                $column = $entry['column'];
+                $definition = $entry['definition'];
+                $sql = 'ALTER TABLE ' . cow_merge_quote_ident($table) . ' ADD COLUMN ' . $definition;
+                if (!$target->exec($sql)) {
+                    $target->exec('ROLLBACK TO forkpress_schema_merge');
+                    $target->exec('RELEASE forkpress_schema_merge');
+                    $target_savepoint_started = false;
+                    $active = cow_merge_record_schema_conflict(
+                        $meta,
+                        $run_id,
+                        $table,
+                        (string)$column['name'],
+                        'schema-source-changed',
+                        $base_sql,
+                        ['column' => $column, 'definition' => $definition, 'error' => $target->lastErrorMsg()],
+                        $target_sql,
+                        $target_sql,
+                        'source added a column that SQLite rejected on the target'
+                    );
+                    return cow_merge_schema_conflict_result($active);
+                }
+            }
+            $target->exec('RELEASE forkpress_schema_merge');
+            $target_savepoint_started = false;
+        } catch (Throwable $e) {
+            if ($target_savepoint_started) {
                 $target->exec('ROLLBACK TO forkpress_schema_merge');
                 $target->exec('RELEASE forkpress_schema_merge');
-                $active = cow_merge_record_schema_conflict(
-                    $meta,
-                    $run_id,
-                    $table,
-                    (string)$column['name'],
-                    'schema-source-changed',
-                    $base_sql,
-                    ['column' => $column, 'definition' => $definition, 'error' => $target->lastErrorMsg()],
-                    $target_sql,
-                    $target_sql,
-                    'source added a column that SQLite rejected on the target'
-                );
-                return cow_merge_schema_conflict_result($active);
             }
+            throw $e;
         }
-        $target->exec('RELEASE forkpress_schema_merge');
     }
 
     foreach ($columns_to_add as $entry) {
@@ -9432,8 +9448,14 @@ function cow_merge_apply_schema_object_changes(
         }
         if ($base_sql === null && $target_sql === null) {
             $apply_error = null;
-            $target->exec('SAVEPOINT forkpress_schema_object_apply');
+            $target_savepoint_started = false;
             try {
+                cow_merge_exec_checked(
+                    $target,
+                    'SAVEPOINT forkpress_schema_object_apply',
+                    "failed to start source-added $type schema apply savepoint"
+                );
+                $target_savepoint_started = true;
                 if ($type === 'trigger') {
                     $cycle = $trigger_cycles[strtolower($name)] ?? null;
                     if ($cycle !== null) {
@@ -9463,7 +9485,11 @@ function cow_merge_apply_schema_object_changes(
                     cow_merge_validate_view_schema($target, $name, 'source-added');
                 }
                 $target->exec('RELEASE forkpress_schema_object_apply');
+                $target_savepoint_started = false;
             } catch (Throwable $e) {
+                if (!$target_savepoint_started) {
+                    throw $e;
+                }
                 $target->exec('ROLLBACK TO forkpress_schema_object_apply');
                 $target->exec('RELEASE forkpress_schema_object_apply');
                 $apply_error = $e->getMessage();
