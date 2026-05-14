@@ -15,6 +15,7 @@
 - Extended generic row unique-collision detection and validation-gated source resolution to source row updates that collide with target-side unique keys.
 - Added auditable `row-target-constraint` conflicts when source row inserts or updates violate target-side SQLite constraints during generic COW mergeback.
 - Added generic foreign-key preflight for COW row inserts/updates, including parent-before-child table merge ordering and validation-gated source resolution once missing parent rows are present.
+- Tightened foreign-key parent/child lookup I/O so infrastructure failures surface and roll back instead of becoming misleading `row-target-constraint` conflicts.
 - Ordered source rows inside same-table foreign-key plugin tables so source-only parent rows materialize before dependent child rows, including source-added tables.
 - Ordered rows during validation-gated source restores of target-dropped same-table foreign-key plugin tables, preserving no-primary-key sidecar identities while restoring parent rows before children.
 - Added COW coverage for validation-gated source restores of target-dropped foreign-key child tables after source-only or already restored parent tables.

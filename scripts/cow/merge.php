@@ -1681,19 +1681,19 @@ function cow_merge_foreign_key_error(SQLite3 $target, string $table, array $row)
             $clauses[] = cow_merge_quote_ident($parent_column) . ' = ?';
         }
         $parent_lookup_sql = 'SELECT 1 FROM ' . cow_merge_quote_ident($parent_table) . ' WHERE ' . implode(' AND ', $clauses) . ' LIMIT 1';
-        cow_merge_test_hook('before_sqlite_prepare', $target, $parent_lookup_sql, "failed to prepare foreign key parent lookup on $parent_table");
-        $stmt = @$target->prepare($parent_lookup_sql);
-        if (!$stmt) {
-            return "FOREIGN KEY constraint failed on $table: parent table $parent_table could not be inspected";
+        $stmt = cow_merge_prepare_foreign_key_lookup(
+            $target,
+            $parent_lookup_sql,
+            "failed to prepare foreign key parent lookup on $parent_table",
+            "FOREIGN KEY constraint failed on $table: parent table $parent_table could not be inspected"
+        );
+        if (is_string($stmt)) {
+            return $stmt;
         }
         foreach ($values as $i => $value) {
             cow_merge_bind($stmt, $i + 1, $value);
         }
-        cow_merge_test_hook('before_sqlite_statement_execute', $target, "failed to inspect foreign key parent lookup on $parent_table");
-        $res = @$stmt->execute();
-        if (!$res) {
-            return "FOREIGN KEY constraint failed on $table: parent table $parent_table could not be inspected";
-        }
+        $res = cow_merge_execute_checked($stmt, $target, "failed to inspect foreign key parent lookup on $parent_table");
         $parent_exists = (bool)$res->fetchArray(SQLITE3_NUM);
         cow_merge_result_finalize_checked($res, "failed to finalize foreign key parent lookup on $parent_table");
         if (!$parent_exists) {
@@ -2317,19 +2317,19 @@ function cow_merge_foreign_key_delete_error(SQLite3 $target, string $table, arra
                 $values = array_merge($values, $exclude_values);
             }
             $child_lookup_sql = 'SELECT 1 FROM ' . cow_merge_quote_ident($child_table) . ' WHERE ' . implode(' AND ', $clauses) . ' LIMIT 1';
-            cow_merge_test_hook('before_sqlite_prepare', $target, $child_lookup_sql, "failed to prepare foreign key child lookup on $child_table");
-            $stmt = @$target->prepare($child_lookup_sql);
-            if (!$stmt) {
-                return "FOREIGN KEY constraint failed on $table delete: child table $child_table could not be inspected";
+            $stmt = cow_merge_prepare_foreign_key_lookup(
+                $target,
+                $child_lookup_sql,
+                "failed to prepare foreign key child lookup on $child_table",
+                "FOREIGN KEY constraint failed on $table delete: child table $child_table could not be inspected"
+            );
+            if (is_string($stmt)) {
+                return $stmt;
             }
             foreach ($values as $i => $value) {
                 cow_merge_bind($stmt, $i + 1, $value);
             }
-            cow_merge_test_hook('before_sqlite_statement_execute', $target, "failed to inspect foreign key child lookup on $child_table");
-            $res = @$stmt->execute();
-            if (!$res) {
-                return "FOREIGN KEY constraint failed on $table delete: child table $child_table could not be inspected";
-            }
+            $res = cow_merge_execute_checked($stmt, $target, "failed to inspect foreign key child lookup on $child_table");
             $child_exists = (bool)$res->fetchArray(SQLITE3_NUM);
             cow_merge_result_finalize_checked($res, "failed to finalize foreign key child lookup on $child_table");
             if ($child_exists) {
@@ -2347,6 +2347,23 @@ function cow_merge_is_constraint_error(SQLite3 $db): bool {
 function cow_merge_constraint_error(SQLite3 $db): string {
     $message = trim($db->lastErrorMsg());
     return $message === '' ? 'SQLite constraint failed' : $message;
+}
+
+function cow_merge_prepare_foreign_key_lookup(
+    SQLite3 $db,
+    string $sql,
+    string $message,
+    string $missing_schema_message
+) {
+    cow_merge_test_hook('before_sqlite_prepare', $db, $sql, $message);
+    $stmt = @$db->prepare($sql);
+    if ($stmt) {
+        return $stmt;
+    }
+    if (str_contains(strtolower($db->lastErrorMsg()), 'no such table')) {
+        return $missing_schema_message;
+    }
+    throw new RuntimeException($message . ': ' . $db->lastErrorMsg());
 }
 
 function cow_merge_try_insert_row(SQLite3 $target, string $table, array $row, array $columns): array {

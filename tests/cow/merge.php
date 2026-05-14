@@ -477,6 +477,148 @@ try {
     assert_same((int)scalar($fk_finalize_metadata, 'SELECT COUNT(*) FROM merge_decisions'), 0, 'foreign-key parent finalization failure records no decisions');
     assert_same((int)scalar($fk_finalize_metadata, 'SELECT COUNT(*) FROM merge_conflicts'), 0, 'foreign-key parent finalization failure records no conflicts');
 
+    $fk_parent_prepare_base = $tmp . '/fk-parent-prepare-base.sqlite';
+    $fk_parent_prepare_source = $tmp . '/fk-parent-prepare-source.sqlite';
+    $fk_parent_prepare_target = $tmp . '/fk-parent-prepare-target.sqlite';
+    $fk_parent_prepare_metadata = $tmp . '/.forkpress/cow/merge/fk-parent-prepare-metadata.sqlite';
+    copy($fk_read_base, $fk_parent_prepare_base);
+    copy($fk_read_source, $fk_parent_prepare_source);
+    copy($fk_read_target, $fk_parent_prepare_target);
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_prepare'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($message === 'failed to prepare foreign key parent lookup on plugin_fk_read_parents') {
+                throw new RuntimeException('forced foreign key parent prepare failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_databases(
+            $fk_parent_prepare_base,
+            $fk_parent_prepare_source,
+            $fk_parent_prepare_target,
+            $fk_parent_prepare_metadata,
+            'feature-fk-parent-prepare-rollback',
+            'main'
+        ),
+        'forced foreign key parent prepare failure',
+        'foreign-key parent lookup prepare failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_prepare']);
+    assert_same((int)scalar($fk_parent_prepare_target, 'SELECT COUNT(*) FROM plugin_fk_read_children'), 0, 'foreign-key parent prepare failure leaves target rows unchanged');
+    assert_same((int)scalar($fk_parent_prepare_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-fk-parent-prepare-rollback' AND status = 'failed'"), 1, 'foreign-key parent prepare failure leaves an auditable failed run');
+    assert_same((int)scalar($fk_parent_prepare_metadata, 'SELECT COUNT(*) FROM merge_conflicts'), 0, 'foreign-key parent prepare failure records no misleading row-target-constraint conflict');
+
+    $fk_parent_execute_base = $tmp . '/fk-parent-execute-base.sqlite';
+    $fk_parent_execute_source = $tmp . '/fk-parent-execute-source.sqlite';
+    $fk_parent_execute_target = $tmp . '/fk-parent-execute-target.sqlite';
+    $fk_parent_execute_metadata = $tmp . '/.forkpress/cow/merge/fk-parent-execute-metadata.sqlite';
+    copy($fk_read_base, $fk_parent_execute_base);
+    copy($fk_read_source, $fk_parent_execute_source);
+    copy($fk_read_target, $fk_parent_execute_target);
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_statement_execute'] = [
+        static function (SQLite3 $db, string $message): void {
+            if ($message === 'failed to inspect foreign key parent lookup on plugin_fk_read_parents') {
+                throw new RuntimeException('forced foreign key parent execute failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_databases(
+            $fk_parent_execute_base,
+            $fk_parent_execute_source,
+            $fk_parent_execute_target,
+            $fk_parent_execute_metadata,
+            'feature-fk-parent-execute-rollback',
+            'main'
+        ),
+        'forced foreign key parent execute failure',
+        'foreign-key parent lookup execute failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_statement_execute']);
+    assert_same((int)scalar($fk_parent_execute_target, 'SELECT COUNT(*) FROM plugin_fk_read_children'), 0, 'foreign-key parent execute failure leaves target rows unchanged');
+    assert_same((int)scalar($fk_parent_execute_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-fk-parent-execute-rollback' AND status = 'failed'"), 1, 'foreign-key parent execute failure leaves an auditable failed run');
+    assert_same((int)scalar($fk_parent_execute_metadata, 'SELECT COUNT(*) FROM merge_conflicts'), 0, 'foreign-key parent execute failure records no misleading row-target-constraint conflict');
+
+    $fk_child_base = $tmp . '/fk-child-lookup-base.sqlite';
+    $fk_child_source = $tmp . '/fk-child-lookup-source.sqlite';
+    $fk_child_target = $tmp . '/fk-child-lookup-target.sqlite';
+    create_base_db($fk_child_base);
+    copy($fk_child_base, $fk_child_source);
+    copy($fk_child_base, $fk_child_target);
+    foreach ([$fk_child_base, $fk_child_source, $fk_child_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_fk_lookup_parents (id INTEGER PRIMARY KEY, label TEXT)');
+        $db->exec('CREATE TABLE plugin_fk_lookup_children (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES plugin_fk_lookup_parents(id), label TEXT)');
+        $db->exec("INSERT INTO plugin_fk_lookup_parents (id, label) VALUES (1, 'parent')");
+        $db->exec("INSERT INTO plugin_fk_lookup_children (id, parent_id, label) VALUES (10, 1, 'child')");
+        $db->close();
+    }
+    $db = open_db($fk_child_source);
+    $db->exec('DELETE FROM plugin_fk_lookup_parents WHERE id = 1');
+    $db->close();
+
+    $fk_child_prepare_base = $tmp . '/fk-child-prepare-base.sqlite';
+    $fk_child_prepare_source = $tmp . '/fk-child-prepare-source.sqlite';
+    $fk_child_prepare_target = $tmp . '/fk-child-prepare-target.sqlite';
+    $fk_child_prepare_metadata = $tmp . '/.forkpress/cow/merge/fk-child-prepare-metadata.sqlite';
+    copy($fk_child_base, $fk_child_prepare_base);
+    copy($fk_child_source, $fk_child_prepare_source);
+    copy($fk_child_target, $fk_child_prepare_target);
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_prepare'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($message === 'failed to prepare foreign key child lookup on plugin_fk_lookup_children') {
+                throw new RuntimeException('forced foreign key child prepare failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_databases(
+            $fk_child_prepare_base,
+            $fk_child_prepare_source,
+            $fk_child_prepare_target,
+            $fk_child_prepare_metadata,
+            'feature-fk-child-prepare-rollback',
+            'main'
+        ),
+        'forced foreign key child prepare failure',
+        'foreign-key child lookup prepare failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_prepare']);
+    assert_same((int)scalar($fk_child_prepare_target, 'SELECT COUNT(*) FROM plugin_fk_lookup_parents WHERE id = 1'), 1, 'foreign-key child prepare failure leaves target parent unchanged');
+    assert_same((int)scalar($fk_child_prepare_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-fk-child-prepare-rollback' AND status = 'failed'"), 1, 'foreign-key child prepare failure leaves an auditable failed run');
+    assert_same((int)scalar($fk_child_prepare_metadata, 'SELECT COUNT(*) FROM merge_conflicts'), 0, 'foreign-key child prepare failure records no misleading row-target-constraint conflict');
+
+    $fk_child_execute_base = $tmp . '/fk-child-execute-base.sqlite';
+    $fk_child_execute_source = $tmp . '/fk-child-execute-source.sqlite';
+    $fk_child_execute_target = $tmp . '/fk-child-execute-target.sqlite';
+    $fk_child_execute_metadata = $tmp . '/.forkpress/cow/merge/fk-child-execute-metadata.sqlite';
+    copy($fk_child_base, $fk_child_execute_base);
+    copy($fk_child_source, $fk_child_execute_source);
+    copy($fk_child_target, $fk_child_execute_target);
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_statement_execute'] = [
+        static function (SQLite3 $db, string $message): void {
+            if ($message === 'failed to inspect foreign key child lookup on plugin_fk_lookup_children') {
+                throw new RuntimeException('forced foreign key child execute failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_databases(
+            $fk_child_execute_base,
+            $fk_child_execute_source,
+            $fk_child_execute_target,
+            $fk_child_execute_metadata,
+            'feature-fk-child-execute-rollback',
+            'main'
+        ),
+        'forced foreign key child execute failure',
+        'foreign-key child lookup execute failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_statement_execute']);
+    assert_same((int)scalar($fk_child_execute_target, 'SELECT COUNT(*) FROM plugin_fk_lookup_parents WHERE id = 1'), 1, 'foreign-key child execute failure leaves target parent unchanged');
+    assert_same((int)scalar($fk_child_execute_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-fk-child-execute-rollback' AND status = 'failed'"), 1, 'foreign-key child execute failure leaves an auditable failed run');
+    assert_same((int)scalar($fk_child_execute_metadata, 'SELECT COUNT(*) FROM merge_conflicts'), 0, 'foreign-key child execute failure records no misleading row-target-constraint conflict');
+
     $row_insert_prepare_base = $tmp . '/row-insert-prepare-base.sqlite';
     $row_insert_prepare_source = $tmp . '/row-insert-prepare-source.sqlite';
     $row_insert_prepare_target = $tmp . '/row-insert-prepare-target.sqlite';
