@@ -4191,6 +4191,35 @@ SQL);
     $result = cow_merge_databases($schema_rebuild_base, $schema_rebuild_source, $schema_rebuild_target, $metadata, 'feature-schema-rebuild', 'main');
     assert_same($result['status'], 'completed_with_conflicts', 'incompatible table column rewrite remains a schema conflict');
     $schema_rebuild_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND column_name IS NULL AND conflict_type = 'schema-conflict' ORDER BY id DESC LIMIT 1");
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'SAVEPOINT forkpress_schema_rebuild_validation' && $message === 'failed to start source table rebuild validation target savepoint') {
+                throw new RuntimeException('forced source table rebuild validation savepoint failure');
+            }
+        },
+    ];
+    $schema_rebuild_savepoint_failure = null;
+    try {
+        cow_merge_resolve_conflict(
+            $metadata,
+            $schema_rebuild_conflict_id,
+            'source',
+            false,
+            'Preview table rebuild with failing savepoint.',
+            'test'
+        );
+    } catch (Throwable $e) {
+        $schema_rebuild_savepoint_failure = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($schema_rebuild_savepoint_failure !== null && str_contains($schema_rebuild_savepoint_failure, 'forced source table rebuild validation savepoint failure'), 'source table rebuild validation savepoint failure is surfaced to the caller');
+    assert_same(column_type($schema_rebuild_target, 'plugin_items', 'value'), 'REAL', 'failed table rebuild validation savepoint leaves target schema unchanged');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_rebuild_conflict_id"),
+        0,
+        'failed table rebuild validation savepoint records no resolution metadata'
+    );
     $schema_rebuild_dry = cow_merge_resolve_conflict(
         $metadata,
         $schema_rebuild_conflict_id,
@@ -6623,6 +6652,38 @@ SQL);
     $schema_changed_trigger_dependency_cycle_drop_conflict_id = (int)scalar($schema_changed_trigger_dependency_cycle_metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_trigger_dependency_cycle_beta_insert' AND conflict_type = 'schema-source-dropped-trigger' ORDER BY id DESC LIMIT 1");
     assert_true($schema_changed_trigger_dependency_cycle_rewrite_conflict_id > 0, 'source-changed trigger dependency cycle records a rewrite conflict');
     assert_true($schema_changed_trigger_dependency_cycle_drop_conflict_id > 0, 'source-dropped target trigger dependency records a drop conflict');
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'SAVEPOINT forkpress_schema_object_resolution_validation' && $message === 'failed to start schema object resolution validation target savepoint') {
+                throw new RuntimeException('forced schema object resolution validation savepoint failure');
+            }
+        },
+    ];
+    $schema_changed_trigger_savepoint_failure = null;
+    try {
+        cow_merge_resolve_conflict(
+            $schema_changed_trigger_dependency_cycle_metadata,
+            $schema_changed_trigger_dependency_cycle_rewrite_conflict_id,
+            'source',
+            false,
+            'Preview changed trigger with failing validation savepoint.',
+            'test'
+        );
+    } catch (Throwable $e) {
+        $schema_changed_trigger_savepoint_failure = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($schema_changed_trigger_savepoint_failure !== null && str_contains($schema_changed_trigger_savepoint_failure, 'forced schema object resolution validation savepoint failure'), 'schema object validation savepoint failure is surfaced to the caller');
+    assert_same(
+        (int)scalar($schema_changed_trigger_dependency_cycle_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_changed_trigger_dependency_cycle_rewrite_conflict_id"),
+        0,
+        'failed schema object validation savepoint records no resolution metadata'
+    );
+    assert_true(
+        str_contains((string)scalar($schema_changed_trigger_dependency_cycle_target, "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_trigger_dependency_cycle_alpha_insert'"), 'SELECT NEW.label'),
+        'failed schema object validation savepoint leaves target trigger unchanged'
+    );
     assert_throws(
         fn() => cow_merge_resolve_conflict(
             $schema_changed_trigger_dependency_cycle_metadata,

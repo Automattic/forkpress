@@ -6528,14 +6528,22 @@ function cow_merge_apply_source_table_rebuild(SQLite3 $target, string $table, st
 }
 
 function cow_merge_validate_source_table_rebuild(SQLite3 $target, string $table, string $source_sql, array $source_columns, array $target_columns): void {
-    $target->exec('SAVEPOINT forkpress_schema_rebuild_validation');
+    $target_savepoint_started = false;
     try {
+        cow_merge_exec_checked(
+            $target,
+            'SAVEPOINT forkpress_schema_rebuild_validation',
+            'failed to start source table rebuild validation target savepoint'
+        );
+        $target_savepoint_started = true;
         cow_merge_apply_source_table_rebuild($target, $table, $source_sql, $source_columns, $target_columns);
         $target->exec('ROLLBACK TO forkpress_schema_rebuild_validation');
         $target->exec('RELEASE forkpress_schema_rebuild_validation');
     } catch (Throwable $e) {
-        $target->exec('ROLLBACK TO forkpress_schema_rebuild_validation');
-        $target->exec('RELEASE forkpress_schema_rebuild_validation');
+        if ($target_savepoint_started) {
+            $target->exec('ROLLBACK TO forkpress_schema_rebuild_validation');
+            $target->exec('RELEASE forkpress_schema_rebuild_validation');
+        }
         throw $e;
     }
 }
@@ -6926,14 +6934,22 @@ function cow_merge_resolve_schema_conflict(
                     }
                 };
                 $validate_source = function () use ($target, $mutate_source): void {
-                    $target->exec('SAVEPOINT forkpress_schema_object_resolution_validation');
+                    $target_savepoint_started = false;
                     try {
+                        cow_merge_exec_checked(
+                            $target,
+                            'SAVEPOINT forkpress_schema_object_resolution_validation',
+                            'failed to start schema object resolution validation target savepoint'
+                        );
+                        $target_savepoint_started = true;
                         $mutate_source();
                         $target->exec('ROLLBACK TO forkpress_schema_object_resolution_validation');
                         $target->exec('RELEASE forkpress_schema_object_resolution_validation');
                     } catch (Throwable $e) {
-                        $target->exec('ROLLBACK TO forkpress_schema_object_resolution_validation');
-                        $target->exec('RELEASE forkpress_schema_object_resolution_validation');
+                        if ($target_savepoint_started) {
+                            $target->exec('ROLLBACK TO forkpress_schema_object_resolution_validation');
+                            $target->exec('RELEASE forkpress_schema_object_resolution_validation');
+                        }
                         throw $e;
                     }
                 };
