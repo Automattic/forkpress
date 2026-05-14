@@ -5371,18 +5371,17 @@ function cow_merge_decode_payload_json(string $json, string $context): mixed {
 function cow_merge_select_current_cell(SQLite3 $db, string $table, array $identity, array $pk_cols, string $column): mixed {
     $where_values = [];
     $where = cow_merge_where_clause($identity, $pk_cols, $where_values);
-    $stmt = $db->prepare('SELECT ' . cow_merge_quote_ident($column) . ' AS value FROM ' . cow_merge_quote_ident($table) . ' WHERE ' . $where);
-    if (!$stmt) {
-        throw new RuntimeException("failed to prepare current cell lookup for $table.$column: " . $db->lastErrorMsg());
-    }
+    $stmt = cow_merge_prepare_checked(
+        $db,
+        'SELECT ' . cow_merge_quote_ident($column) . ' AS value FROM ' . cow_merge_quote_ident($table) . ' WHERE ' . $where,
+        "failed to prepare current cell lookup for $table.$column"
+    );
     foreach ($where_values as $i => $value) {
         cow_merge_bind($stmt, $i + 1, $value);
     }
-    $res = $stmt->execute();
-    if (!$res) {
-        throw new RuntimeException("failed to read current cell for $table.$column: " . $db->lastErrorMsg());
-    }
+    $res = cow_merge_execute_checked($stmt, $db, "failed to read current cell for $table.$column");
     $row = $res->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($res, "failed to finalize current cell lookup for $table.$column");
     if (!$row) {
         throw new RuntimeException("cannot resolve $table.$column conflict because the target row no longer exists");
     }
@@ -5392,18 +5391,17 @@ function cow_merge_select_current_cell(SQLite3 $db, string $table, array $identi
 function cow_merge_select_current_row(SQLite3 $db, string $table, array $identity, array $pk_cols): ?array {
     $where_values = [];
     $where = cow_merge_where_clause($identity, $pk_cols, $where_values);
-    $stmt = $db->prepare('SELECT * FROM ' . cow_merge_quote_ident($table) . ' WHERE ' . $where);
-    if (!$stmt) {
-        throw new RuntimeException("failed to prepare current row lookup for $table: " . $db->lastErrorMsg());
-    }
+    $stmt = cow_merge_prepare_checked(
+        $db,
+        'SELECT * FROM ' . cow_merge_quote_ident($table) . ' WHERE ' . $where,
+        "failed to prepare current row lookup for $table"
+    );
     foreach ($where_values as $i => $value) {
         cow_merge_bind($stmt, $i + 1, $value);
     }
-    $res = $stmt->execute();
-    if (!$res) {
-        throw new RuntimeException("failed to read current row for $table: " . $db->lastErrorMsg());
-    }
+    $res = cow_merge_execute_checked($stmt, $db, "failed to read current row for $table");
     $row = $res->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($res, "failed to finalize current row lookup for $table");
     return $row ?: null;
 }
 
@@ -5483,17 +5481,16 @@ function cow_merge_lookup_active_rowid_by_identity(SQLite3 $meta, string $branch
 function cow_merge_update_single_cell(SQLite3 $db, string $table, array $identity, array $pk_cols, string $column, mixed $value): void {
     $where_values = [];
     $where = cow_merge_where_clause($identity, $pk_cols, $where_values);
-    $stmt = $db->prepare('UPDATE ' . cow_merge_quote_ident($table) . ' SET ' . cow_merge_quote_ident($column) . ' = ? WHERE ' . $where);
-    if (!$stmt) {
-        throw new RuntimeException("failed to prepare conflict resolution update for $table.$column: " . $db->lastErrorMsg());
-    }
+    $stmt = cow_merge_prepare_checked(
+        $db,
+        'UPDATE ' . cow_merge_quote_ident($table) . ' SET ' . cow_merge_quote_ident($column) . ' = ? WHERE ' . $where,
+        "failed to prepare conflict resolution update for $table.$column"
+    );
     cow_merge_bind($stmt, 1, $value);
     foreach ($where_values as $i => $where_value) {
         cow_merge_bind($stmt, $i + 2, $where_value);
     }
-    if (!$stmt->execute()) {
-        throw new RuntimeException("failed to apply conflict resolution to $table.$column: " . $db->lastErrorMsg());
-    }
+    cow_merge_execute_checked($stmt, $db, "failed to apply conflict resolution to $table.$column");
     if ($db->changes() !== 1) {
         throw new RuntimeException("conflict resolution for $table.$column affected {$db->changes()} rows, expected 1");
     }

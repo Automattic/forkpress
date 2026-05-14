@@ -1959,6 +1959,69 @@ try {
     );
     unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize']);
     assert_same((int)scalar($metadata, 'SELECT COUNT(*) FROM merge_resolutions'), 0, 'failed resolver conflict lookup finalize records no resolution audit rows');
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_prepare'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($message === 'failed to prepare current cell lookup for wp_posts.post_title') {
+                throw new RuntimeException('forced current cell prepare failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $metadata,
+            $title_conflict_id,
+            'source',
+            false,
+            'Preview source title resolution with failing current-cell prepare.',
+            'cow-test'
+        ),
+        'forced current cell prepare failure',
+        'current-cell prepare failures surface to the caller during resolution validation'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_prepare']);
+    assert_same((int)scalar($metadata, 'SELECT COUNT(*) FROM merge_resolutions'), 0, 'failed current-cell prepare records no resolution audit rows');
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_statement_execute'] = [
+        static function (SQLite3 $db, string $message): void {
+            if ($message === 'failed to read current cell for wp_posts.post_title') {
+                throw new RuntimeException('forced current cell execute failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $metadata,
+            $title_conflict_id,
+            'source',
+            false,
+            'Preview source title resolution with failing current-cell execute.',
+            'cow-test'
+        ),
+        'forced current cell execute failure',
+        'current-cell execute failures surface to the caller during resolution validation'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_statement_execute']);
+    assert_same((int)scalar($metadata, 'SELECT COUNT(*) FROM merge_resolutions'), 0, 'failed current-cell execute records no resolution audit rows');
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize'] = [
+        static function (SQLite3Result $result, string $message): void {
+            if ($message === 'failed to finalize current cell lookup for wp_posts.post_title') {
+                throw new RuntimeException('forced current cell finalize failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $metadata,
+            $title_conflict_id,
+            'source',
+            false,
+            'Preview source title resolution with failing current-cell finalization.',
+            'cow-test'
+        ),
+        'forced current cell finalize failure',
+        'current-cell finalization failures surface to the caller during resolution validation'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize']);
+    assert_same((int)scalar($metadata, 'SELECT COUNT(*) FROM merge_resolutions'), 0, 'failed current-cell finalization records no resolution audit rows');
     $dry_resolution = cow_merge_resolve_conflict(
         $metadata,
         $title_conflict_id,
@@ -1999,7 +2062,7 @@ try {
     $db = open_db($row_resolution_rollback_target);
     $db->exec("UPDATE wp_posts SET post_title = 'Target rollback title' WHERE ID = 1");
     $db->close();
-    cow_merge_databases(
+    $row_resolution_rollback_result = cow_merge_databases(
         $row_resolution_rollback_base,
         $row_resolution_rollback_source,
         $row_resolution_rollback_target,
@@ -2007,7 +2070,31 @@ try {
         'feature-row-resolution-rollback',
         'main'
     );
-    $row_resolution_rollback_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'wp_posts' AND column_name = 'post_title' AND source_payload LIKE '%Source rollback title%' ORDER BY id DESC LIMIT 1");
+    $row_resolution_rollback_run_id = (int)$row_resolution_rollback_result['run_id'];
+    $row_resolution_rollback_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE run_id = $row_resolution_rollback_run_id AND table_name = 'wp_posts' AND column_name = 'post_title' ORDER BY id DESC LIMIT 1");
+    assert_true($row_resolution_rollback_conflict_id > 0, 'row resolution rollback fixture records a cell conflict');
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_statement_execute'] = [
+        static function (SQLite3 $db, string $message): void {
+            if ($message === 'failed to apply conflict resolution to wp_posts.post_title') {
+                throw new RuntimeException('forced conflict resolution update failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $metadata,
+            $row_resolution_rollback_conflict_id,
+            'source',
+            true,
+            'Try audited row with failing target update.',
+            'cow-test'
+        ),
+        'forced conflict resolution update failure',
+        'conflict resolution update failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_statement_execute']);
+    assert_same(scalar($row_resolution_rollback_target, "SELECT post_title FROM wp_posts WHERE ID = 1"), 'Target rollback title', 'failed conflict resolution update leaves target row unchanged');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $row_resolution_rollback_conflict_id"), 0, 'failed conflict resolution update records no resolution metadata');
     $row_resolution_rollback_meta = open_db($metadata);
     $row_resolution_rollback_meta->exec(<<<'SQL'
 CREATE TRIGGER fail_row_resolution_record
@@ -2043,9 +2130,13 @@ SQL);
     $row_resolution_rollback_meta = open_db($metadata);
     $row_resolution_rollback_meta->exec('DROP TRIGGER fail_row_resolution_record');
     $row_resolution_rollback_meta->close();
-    $row_resolution_commit_lock = open_db($metadata);
-    $row_resolution_commit_lock->exec('BEGIN');
-    $row_resolution_commit_lock->querySingle('SELECT COUNT(*) FROM merge_conflicts');
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'COMMIT' && $message === 'failed to commit row resolution metadata transaction') {
+                throw new RuntimeException('forced row resolution metadata commit failure');
+            }
+        },
+    ];
     $row_resolution_commit_failure_message = null;
     try {
         cow_merge_resolve_conflict(
@@ -2053,16 +2144,15 @@ SQL);
             $row_resolution_rollback_conflict_id,
             'source',
             true,
-            'Try audited row with locked metadata commit.',
+            'Try audited row with failing metadata commit.',
             'cow-test'
         );
     } catch (Throwable $e) {
         $row_resolution_commit_failure_message = $e->getMessage();
     } finally {
-        $row_resolution_commit_lock->exec('ROLLBACK');
-        $row_resolution_commit_lock->close();
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
     }
-    assert_true($row_resolution_commit_failure_message !== null, 'row resolution metadata commit failure is surfaced to the caller');
+    assert_true($row_resolution_commit_failure_message !== null && str_contains($row_resolution_commit_failure_message, 'forced row resolution metadata commit failure'), 'row resolution metadata commit failure is surfaced to the caller');
     assert_same(scalar($row_resolution_rollback_target, "SELECT post_title FROM wp_posts WHERE ID = 1"), 'Target rollback title', 'failed row resolution metadata commit restores the already-committed target row');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $row_resolution_rollback_conflict_id"), 0, 'failed row resolution metadata commit records no resolution metadata');
 
