@@ -2998,6 +2998,26 @@ SQL);
     assert_same(column_type($metadata_schema_inspection_failure, 'merge_runs', 'failure_reason'), 'TEXT', 'metadata schema creation succeeds after table inspection failure is cleared');
     $metadata_schema_inspection_failure_db->close();
 
+    $metadata_schema_finalize_failure = $tmp . '/metadata-schema-finalize-failure.sqlite';
+    $metadata_schema_finalize_failure_db = open_db($metadata_schema_finalize_failure);
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize'] = [
+        function (SQLite3Result $result, string $message): void {
+            if ($message === 'failed to finalize metadata table merge_runs inspection') {
+                throw new RuntimeException('forced metadata schema finalize failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_ensure_metadata($metadata_schema_finalize_failure_db),
+        'forced metadata schema finalize failure',
+        'metadata table inspection finalize failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize']);
+    assert_same((int)$metadata_schema_finalize_failure_db->querySingle("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name LIKE 'merge_%'"), 0, 'failed metadata table inspection finalize rolls back metadata setup');
+    cow_merge_ensure_metadata($metadata_schema_finalize_failure_db);
+    assert_same(column_type($metadata_schema_finalize_failure, 'merge_runs', 'failure_reason'), 'TEXT', 'metadata schema creation succeeds after table inspection finalize failure is cleared');
+    $metadata_schema_finalize_failure_db->close();
+
     $metadata_review_schema_lookup_failure = $tmp . '/metadata-review-schema-lookup-failure.sqlite';
     $metadata_review_schema_lookup_failure_db = open_db($metadata_review_schema_lookup_failure);
     $GLOBALS['cow_merge_test_hooks']['before_sqlite_query'] = [
@@ -3020,6 +3040,26 @@ SQL);
     cow_merge_ensure_metadata($metadata_review_schema_lookup_failure_db);
     assert_same((int)$metadata_review_schema_lookup_failure_db->querySingle("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'merge_review_notes'"), 1, 'metadata schema creation succeeds after review-note schema lookup failure is cleared');
     $metadata_review_schema_lookup_failure_db->close();
+
+    $metadata_review_schema_finalize_failure = $tmp . '/metadata-review-schema-finalize-failure.sqlite';
+    $metadata_review_schema_finalize_failure_db = open_db($metadata_review_schema_finalize_failure);
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize'] = [
+        function (SQLite3Result $result, string $message): void {
+            if ($message === 'failed to finalize review-note metadata schema inspection') {
+                throw new RuntimeException('forced review-note schema finalize failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_ensure_metadata($metadata_review_schema_finalize_failure_db),
+        'forced review-note schema finalize failure',
+        'review-note metadata schema finalize failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize']);
+    assert_same((int)$metadata_review_schema_finalize_failure_db->querySingle("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name LIKE 'merge_%'"), 0, 'failed review-note schema finalize rolls back metadata setup');
+    cow_merge_ensure_metadata($metadata_review_schema_finalize_failure_db);
+    assert_same((int)$metadata_review_schema_finalize_failure_db->querySingle("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'merge_review_notes'"), 1, 'metadata schema creation succeeds after review-note schema finalize failure is cleared');
+    $metadata_review_schema_finalize_failure_db->close();
 
     $legacy_metadata = $tmp . '/legacy-metadata.sqlite';
     $legacy_db = open_db($legacy_metadata);

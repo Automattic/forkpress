@@ -3224,11 +3224,17 @@ SQL, 'failed to create metadata table merge_review_notes');
     );
     $review_notes_row = $review_notes_schema->fetchArray(SQLITE3_ASSOC);
     if ($review_notes_row === false) {
-        @$review_notes_schema->finalize();
+        cow_merge_result_finalize_checked(
+            $review_notes_schema,
+            'failed to finalize review-note metadata schema inspection'
+        );
         throw new RuntimeException('failed to inspect review-note metadata schema: missing merge_review_notes table');
     }
     $review_notes_sql = (string)$review_notes_row['sql'];
-    @$review_notes_schema->finalize();
+    cow_merge_result_finalize_checked(
+        $review_notes_schema,
+        'failed to finalize review-note metadata schema inspection'
+    );
     if (str_contains($review_notes_sql, "CHECK(record_type IN ('conflict', 'decision'))")) {
         $migration_savepoint = 'migrate_merge_review_notes_record_type';
         cow_merge_exec_checked(
@@ -3318,11 +3324,17 @@ function cow_merge_ensure_metadata_column(SQLite3 $meta, string $table, string $
     );
     while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
         if ((string)$row['name'] === $column) {
-            @$res->finalize();
+            cow_merge_result_finalize_checked(
+                $res,
+                "failed to finalize metadata table $table inspection"
+            );
             return;
         }
     }
-    @$res->finalize();
+    cow_merge_result_finalize_checked(
+        $res,
+        "failed to finalize metadata table $table inspection"
+    );
     $sql = 'ALTER TABLE ' . cow_merge_quote_ident($table) . ' ADD COLUMN ' . cow_merge_quote_ident($column) . ' ' . $definition;
     cow_merge_exec_checked($meta, $sql, "failed to migrate metadata table $table");
 }
@@ -5497,6 +5509,13 @@ function cow_merge_query_checked(SQLite3 $db, string $sql, string $message): SQL
         throw new RuntimeException($message . ': ' . $db->lastErrorMsg());
     }
     return $result;
+}
+
+function cow_merge_result_finalize_checked(SQLite3Result $result, string $message): void {
+    cow_merge_test_hook('before_sqlite_result_finalize', $result, $message);
+    if (!@$result->finalize()) {
+        throw new RuntimeException($message);
+    }
 }
 
 function cow_merge_release_savepoint_checked(SQLite3 $db, string $savepoint, string $context): void {

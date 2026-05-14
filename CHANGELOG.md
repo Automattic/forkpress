@@ -50,6 +50,7 @@
 - Tightened COW metadata schema initialization savepoints so begin/release failures surface without leaving half-created audit tables.
 - Tightened COW metadata schema DDL execution so table, index, and legacy migration statement failures roll back metadata setup cleanly.
 - Tightened COW metadata schema inspection queries so table-info and review-note schema lookup failures roll back metadata setup cleanly.
+- Tightened COW metadata schema inspection finalization so metadata setup aborts cleanly if SQLite result cleanup fails before migration DDL.
 - Tightened COW metadata journal setup so failures surface before schema initialization can leave partial audit tables.
 - Tightened COW SQLite open initialization so metadata database open failures surface before schema setup can create partial audit state.
 - Tightened COW metadata statement preparation so run, review, conflict, resolution, and rollback-failure audit paths surface prepare failures consistently while preserving JSONL rollback artifacts.
