@@ -13555,6 +13555,63 @@ SQL);
     ]);
     assert_same(count($plugin_cli_record_file_audit['conflicts']), 1, 'plugin validator file-backed conflicts are visible in plugin audit scope');
     assert_true(str_contains($plugin_cli_record_file_audit['conflicts'][0]['chosen_preview'], 'file_backed_finding'), 'plugin validator file-backed conflicts store candidate payloads');
+    $plugin_validator_runner = $tmp . '/plugin-validator-runner.php';
+    write_test_file($plugin_validator_runner, <<<'PHP'
+<?php
+$candidate = [
+    'run' => (int)getenv('FORKPRESS_MERGE_RUN'),
+    'source_branch' => getenv('FORKPRESS_MERGE_SOURCE_BRANCH'),
+    'target_branch' => getenv('FORKPRESS_MERGE_TARGET_BRANCH'),
+    'source_db' => basename((string)getenv('FORKPRESS_MERGE_SOURCE_DB')),
+    'target_db' => basename((string)getenv('FORKPRESS_MERGE_TARGET_DB')),
+];
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-graph',
+            'object' => 'graph:runner:' . $candidate['run'],
+            'reason' => 'runner validator received merge context and found a graph issue',
+            'type' => 'plugin-runner-conflict',
+            'tables' => ['plugin_graph_parent'],
+            'validator' => 'forkpress-graph-runner@1',
+            'candidate' => $candidate,
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $plugin_cli_run_validator = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', (string)$plugin_graph_result['run_id'],
+        '--validator', $plugin_validator_runner,
+        '--format', 'json',
+    ]);
+    assert_same($plugin_cli_run_validator['status'], 0, 'plugin validator runner CLI exits successfully');
+    $plugin_cli_run_validator_result = json_decode($plugin_cli_run_validator['output'], true);
+    assert_same($plugin_cli_run_validator_result['validator_status'] ?? null, 'conflicts', 'plugin validator runner CLI reports validator status');
+    assert_same($plugin_cli_run_validator_result['conflicts'] ?? null, 1, 'plugin validator runner CLI records emitted findings');
+    $plugin_runner_audit = cow_merge_audit_report($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-runner-conflict',
+    ]);
+    assert_same(count($plugin_runner_audit['conflicts']), 1, 'plugin validator runner conflicts are visible in plugin audit scope');
+    assert_true(str_contains($plugin_runner_audit['conflicts'][0]['chosen_preview'], 'feature-plugin-graph-source'), 'plugin validator runner passes source branch context to validators');
+    $plugin_validator_runner_failure = $tmp . '/plugin-validator-runner-failure.php';
+    write_test_file($plugin_validator_runner_failure, <<<'PHP'
+<?php
+fwrite(STDERR, "validator crashed\n");
+exit(7);
+PHP);
+    $plugin_cli_run_validator_failure = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', (string)$plugin_graph_result['run_id'],
+        '--validator', $plugin_validator_runner_failure,
+    ]);
+    assert_true($plugin_cli_run_validator_failure['status'] !== 0, 'plugin validator runner CLI rejects failed validators');
+    assert_true(str_contains($plugin_cli_run_validator_failure['output'], 'exited with status 7'), 'plugin validator runner CLI explains validator process failures');
 
     copy($band_base, $band_feature_a_reset);
     $result = cow_merge_allocate_autoincrement_bands($band_feature_a_reset, $band_metadata, 'feature-band-a');

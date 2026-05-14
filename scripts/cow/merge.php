@@ -16,6 +16,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "  php merge.php track-identity-events --db <path> --metadata-db <path> --branch <branch> --events-json <json>\n");
     fwrite(STDERR, "  php merge.php allocate-id-bands --db <path> --metadata-db <path> --branch <branch>\n");
     fwrite(STDERR, "  php merge.php record-plugin-validator-conflicts --metadata-db <path> --run ID (--findings-json <json>|--findings-file <path>) [--format text|json]\n");
+    fwrite(STDERR, "  php merge.php run-plugin-validator --metadata-db <path> --run ID --validator <path> [--format text|json]\n");
     fwrite(STDERR, "  php merge.php audit --metadata-db <path> [--format text|json] [--limit N] [--run ID]\n");
     fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|decisions|resolutions|rollback-failures] [--path <path>] [--path-prefix <prefix>]\n");
     fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|decisions|resolutions|rollback-failures] [--conflict-type TYPE] [--decision DECISION]\n");
@@ -5249,6 +5250,110 @@ function cow_merge_record_plugin_validator_conflicts(
         'conflicts' => $conflicts,
         'metadata_db' => $metadata_db,
     ];
+}
+
+function cow_merge_decode_plugin_validator_stdout(string $stdout, string $validator): array {
+    $decoded = json_decode($stdout, true);
+    if (json_last_error() !== JSON_ERROR_NONE) {
+        throw new RuntimeException("plugin validator $validator did not emit valid JSON: " . json_last_error_msg());
+    }
+    if (is_array($decoded) && array_is_list($decoded)) {
+        return [
+            'validator_status' => count($decoded) > 0 ? 'conflicts' : 'valid',
+            'findings' => $decoded,
+        ];
+    }
+    if (!is_array($decoded)) {
+        throw new RuntimeException("plugin validator $validator must emit a JSON array or object");
+    }
+    $status = (string)($decoded['status'] ?? '');
+    if (!in_array($status, ['valid', 'conflicts', 'failed'], true)) {
+        throw new RuntimeException("plugin validator $validator emitted an invalid status");
+    }
+    if ($status === 'failed') {
+        $reason = trim((string)($decoded['reason'] ?? ''));
+        throw new RuntimeException("plugin validator $validator failed" . ($reason === '' ? '' : ": $reason"));
+    }
+    $findings = $decoded['findings'] ?? [];
+    if (!is_array($findings) || !array_is_list($findings)) {
+        throw new RuntimeException("plugin validator $validator findings must be a JSON array");
+    }
+    return [
+        'validator_status' => $status,
+        'findings' => $findings,
+    ];
+}
+
+function cow_merge_plugin_validator_command(string $validator): array {
+    $validator = trim($validator);
+    if ($validator === '') {
+        throw new InvalidArgumentException('--validator is required');
+    }
+    if (!is_file($validator)) {
+        throw new InvalidArgumentException("--validator must point to a file: $validator");
+    }
+    if (strtolower(pathinfo($validator, PATHINFO_EXTENSION)) === 'php') {
+        return [PHP_BINARY, $validator];
+    }
+    if (!is_executable($validator)) {
+        throw new InvalidArgumentException("--validator must be executable or a PHP script: $validator");
+    }
+    return [$validator];
+}
+
+function cow_merge_run_plugin_validator(string $metadata_db, int $run_id, string $validator): array {
+    $command = cow_merge_plugin_validator_command($validator);
+    $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READWRITE | SQLITE3_OPEN_CREATE);
+    try {
+        cow_merge_ensure_metadata($meta);
+        $context = cow_merge_run_context($meta, $run_id);
+    } finally {
+        $meta->close();
+    }
+    if ($context['source_branch'] === '' && $context['target_branch'] === '') {
+        throw new InvalidArgumentException("merge run #$run_id does not exist in merge metadata");
+    }
+
+    $env = array_merge($_ENV, [
+        'FORKPRESS_MERGE_METADATA_DB' => $metadata_db,
+        'FORKPRESS_MERGE_RUN' => (string)$run_id,
+        'FORKPRESS_MERGE_SOURCE_BRANCH' => $context['source_branch'],
+        'FORKPRESS_MERGE_TARGET_BRANCH' => $context['target_branch'],
+        'FORKPRESS_MERGE_BASE_DB' => $context['base_db'],
+        'FORKPRESS_MERGE_SOURCE_DB' => $context['source_db'],
+        'FORKPRESS_MERGE_TARGET_DB' => $context['target_db'],
+    ]);
+    $shell_command = implode(' ', array_map('escapeshellarg', $command));
+    $pipes = [];
+    $process = proc_open(
+        $shell_command,
+        [
+            0 => ['pipe', 'r'],
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w'],
+        ],
+        $pipes,
+        null,
+        $env
+    );
+    if (!is_resource($process)) {
+        throw new RuntimeException("failed to start plugin validator $validator");
+    }
+    fclose($pipes[0]);
+    $stdout = stream_get_contents($pipes[1]);
+    $stderr = stream_get_contents($pipes[2]);
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+    $exit_status = proc_close($process);
+    if ($exit_status !== 0) {
+        $stderr = trim(is_string($stderr) ? $stderr : '');
+        throw new RuntimeException("plugin validator $validator exited with status $exit_status" . ($stderr === '' ? '' : ": $stderr"));
+    }
+    $decoded = cow_merge_decode_plugin_validator_stdout(is_string($stdout) ? $stdout : '', $validator);
+    $result = cow_merge_record_plugin_validator_conflicts($metadata_db, $run_id, $decoded['findings']);
+    $result['validator'] = $validator;
+    $result['validator_status'] = $decoded['validator_status'];
+    return $result;
 }
 
 function cow_merge_record_matching_file_decision(
@@ -11801,6 +11906,30 @@ if (realpath($argv[0] ?? '') === __FILE__) {
                 echo "forkpress: recorded plugin validator conflicts\n";
                 echo "  run:       {$result['run_id']}\n";
                 echo "  status:    {$result['status']}\n";
+                echo "  conflicts: {$result['conflicts']}\n";
+                echo "  metadata:  {$result['metadata_db']}\n";
+            }
+            exit(0);
+        }
+        if ($command === 'run-plugin-validator') {
+            $args = cow_merge_parse_cli($argv, ['metadata-db', 'run', 'validator'], 2);
+            $result = cow_merge_run_plugin_validator(
+                $args['metadata-db'],
+                (int)cow_merge_audit_run_id($args['run'] ?? null),
+                $args['validator']
+            );
+            $format = cow_merge_audit_format($args['format'] ?? null);
+            if ($format === 'json') {
+                $encoded = json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+                if (!is_string($encoded)) {
+                    throw new RuntimeException('failed to encode plugin validator run result');
+                }
+                echo $encoded . "\n";
+            } elseif (($args['quiet'] ?? '0') !== '1') {
+                echo "forkpress: ran plugin validator\n";
+                echo "  run:       {$result['run_id']}\n";
+                echo "  status:    {$result['status']}\n";
+                echo "  validator: {$result['validator_status']}\n";
                 echo "  conflicts: {$result['conflicts']}\n";
                 echo "  metadata:  {$result['metadata_db']}\n";
             }
