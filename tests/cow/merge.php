@@ -1463,6 +1463,62 @@ try {
         'target cell no longer matches',
         'stale conflict resolution is blocked when target has changed since audit'
     );
+    $row_resolution_rollback_base = $tmp . '/row-resolution-rollback-base.sqlite';
+    $row_resolution_rollback_source = $tmp . '/row-resolution-rollback-source.sqlite';
+    $row_resolution_rollback_target = $tmp . '/row-resolution-rollback-target.sqlite';
+    create_base_db($row_resolution_rollback_base);
+    copy($row_resolution_rollback_base, $row_resolution_rollback_source);
+    copy($row_resolution_rollback_base, $row_resolution_rollback_target);
+    $db = open_db($row_resolution_rollback_source);
+    $db->exec("UPDATE wp_posts SET post_title = 'Source rollback title' WHERE ID = 1");
+    $db->close();
+    $db = open_db($row_resolution_rollback_target);
+    $db->exec("UPDATE wp_posts SET post_title = 'Target rollback title' WHERE ID = 1");
+    $db->close();
+    cow_merge_databases(
+        $row_resolution_rollback_base,
+        $row_resolution_rollback_source,
+        $row_resolution_rollback_target,
+        $metadata,
+        'feature-row-resolution-rollback',
+        'main'
+    );
+    $row_resolution_rollback_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'wp_posts' AND column_name = 'post_title' AND source_payload LIKE '%Source rollback title%' ORDER BY id DESC LIMIT 1");
+    $row_resolution_rollback_meta = open_db($metadata);
+    $row_resolution_rollback_meta->exec(<<<'SQL'
+CREATE TRIGGER fail_row_resolution_record
+BEFORE INSERT ON merge_resolutions
+WHEN NEW.table_name = 'wp_posts'
+  AND NEW.note = 'Try audited row with failing metadata.'
+BEGIN
+    SELECT RAISE(ABORT, 'forced row resolution metadata failure');
+END
+SQL);
+    $row_resolution_rollback_meta->close();
+    $row_resolution_failure_message = null;
+    set_error_handler(static function (int $severity, string $message): bool {
+        return str_contains($message, 'forced row resolution metadata failure');
+    });
+    try {
+        cow_merge_resolve_conflict(
+            $metadata,
+            $row_resolution_rollback_conflict_id,
+            'source',
+            true,
+            'Try audited row with failing metadata.',
+            'cow-test'
+        );
+    } catch (Throwable $e) {
+        $row_resolution_failure_message = $e->getMessage();
+    } finally {
+        restore_error_handler();
+    }
+    assert_true($row_resolution_failure_message !== null, 'row resolution metadata failure is surfaced to the caller');
+    assert_same(scalar($row_resolution_rollback_target, "SELECT post_title FROM wp_posts WHERE ID = 1"), 'Target rollback title', 'failed row resolution rolls back the target row');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $row_resolution_rollback_conflict_id"), 0, 'failed row resolution records no resolution metadata');
+    $row_resolution_rollback_meta = open_db($metadata);
+    $row_resolution_rollback_meta->exec('DROP TRIGGER fail_row_resolution_record');
+    $row_resolution_rollback_meta->close();
     $option_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'wp_options' AND column_name = 'option_value'");
     $target_resolution = cow_merge_resolve_conflict(
         $metadata,

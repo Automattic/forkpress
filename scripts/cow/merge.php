@@ -5294,6 +5294,12 @@ function cow_merge_record_resolution(
     return (int)$meta->lastInsertRowID();
 }
 
+function cow_merge_exec_checked(SQLite3 $db, string $sql, string $message): void {
+    if (!$db->exec($sql)) {
+        throw new RuntimeException($message . ': ' . $db->lastErrorMsg());
+    }
+}
+
 function cow_merge_schema_column_payload(mixed $payload): ?array {
     if (!is_array($payload)) {
         return null;
@@ -6963,8 +6969,8 @@ function cow_merge_resolve_schema_conflict(
         }
 
         if ($apply) {
-            $meta->exec('BEGIN IMMEDIATE');
-            $target->exec('BEGIN IMMEDIATE');
+            cow_merge_exec_checked($meta, 'BEGIN IMMEDIATE', 'failed to start schema resolution metadata transaction');
+            cow_merge_exec_checked($target, 'BEGIN IMMEDIATE', 'failed to start schema resolution target transaction');
             try {
                 if ($choice === 'source' && $apply_source !== null) {
                     $apply_source();
@@ -6991,11 +6997,11 @@ function cow_merge_resolve_schema_conflict(
                     cow_merge_resolution_review_note($choice, $note),
                     $reviewer
                 );
-                $target->exec('COMMIT');
-                $meta->exec('COMMIT');
+                cow_merge_exec_checked($target, 'COMMIT', 'failed to commit schema resolution target transaction');
+                cow_merge_exec_checked($meta, 'COMMIT', 'failed to commit schema resolution metadata transaction');
             } catch (Throwable $e) {
-                $target->exec('ROLLBACK');
-                $meta->exec('ROLLBACK');
+                @$target->exec('ROLLBACK');
+                @$meta->exec('ROLLBACK');
                 throw $e;
             }
         } else {
@@ -7331,8 +7337,8 @@ function cow_merge_resolve_conflict(
         }
 
         if ($apply) {
-            $meta->exec('BEGIN IMMEDIATE');
-            $target->exec('BEGIN IMMEDIATE');
+            cow_merge_exec_checked($meta, 'BEGIN IMMEDIATE', 'failed to start row resolution metadata transaction');
+            cow_merge_exec_checked($target, 'BEGIN IMMEDIATE', 'failed to start row resolution target transaction');
             try {
                 if ($choice === 'source') {
                     if ($conflict_type === 'cell-conflict') {
@@ -7429,11 +7435,11 @@ function cow_merge_resolve_conflict(
                     cow_merge_resolution_review_note($choice, $note),
                     $reviewer
                 );
-                $target->exec('COMMIT');
-                $meta->exec('COMMIT');
+                cow_merge_exec_checked($target, 'COMMIT', 'failed to commit row resolution target transaction');
+                cow_merge_exec_checked($meta, 'COMMIT', 'failed to commit row resolution metadata transaction');
             } catch (Throwable $e) {
-                $target->exec('ROLLBACK');
-                $meta->exec('ROLLBACK');
+                @$target->exec('ROLLBACK');
+                @$meta->exec('ROLLBACK');
                 throw $e;
             }
         } else {
