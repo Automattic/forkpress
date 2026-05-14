@@ -7205,9 +7205,7 @@ function cow_merge_resolve_schema_conflict(
                     $target_branch = (string)$conflict['target_branch'];
                     $apply_source = function () use ($target, $meta, $conflict, $target_branch, $table, $definition): void {
                         $sql = 'ALTER TABLE ' . cow_merge_quote_ident($table) . ' ADD COLUMN ' . $definition;
-                        if (!$target->exec($sql)) {
-                            throw new RuntimeException('failed to apply source column schema resolution: ' . $target->lastErrorMsg());
-                        }
+                        cow_merge_exec_checked($target, $sql, 'failed to apply source column schema resolution');
                         cow_merge_refresh_table_row_identities($target, $meta, (int)$conflict['run_id'], $target_branch, $table);
                     };
                 } else {
@@ -9538,6 +9536,7 @@ function cow_merge_apply_safe_table_schema_changes(
                 $column = $entry['column'];
                 $definition = $entry['definition'];
                 $sql = 'ALTER TABLE ' . cow_merge_quote_ident($table) . ' ADD COLUMN ' . $definition;
+                cow_merge_test_hook('before_sqlite_exec', $target, $sql, 'failed to apply automatic source column schema merge');
                 if (!$target->exec($sql)) {
                     $cleanup_failure = cow_merge_rollback_release_savepoint_checked(
                         $target,
@@ -9709,6 +9708,7 @@ function cow_merge_apply_index_schema_changes(
             continue;
         }
         if ($base_sql === null && $target_sql === null) {
+            cow_merge_test_hook('before_sqlite_exec', $target, $source_sql, 'failed to apply source-added index schema merge');
             if (!@$target->exec($source_sql)) {
                 if (cow_merge_record_schema_conflict(
                     $meta,

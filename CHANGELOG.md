@@ -43,6 +43,8 @@
 - Tightened validation-gated source index rewrites and drops so dry-run and apply reject latent target foreign-key mismatches before reporting success.
 - Tightened validation-gated source table restores and compatible table rebuilds so dry-run and apply reject latent foreign-key mismatches and invalid restored trigger programs before reporting success.
 - Tightened automatic safe schema merge and source-added view/trigger apply savepoints so begin failures surface cleanly and roll back staged target/metadata state.
+- Tightened automatic source column/index DDL infrastructure failures so they abort and roll back staged schema/audit state instead of being hidden as ordinary schema conflicts.
+- Tightened validation-gated source column resolution DDL so infrastructure failures surface through checked SQLite execution without partial resolution metadata.
 - Tightened validation-gated source table rebuild and source view resolution savepoints so begin failures surface cleanly without staging resolution metadata.
 - Tightened compatible table rebuild DDL execution so staged temporary tables and dependent schema rewrites roll back cleanly on SQLite infrastructure failures.
 - Tightened source view, index, table-drop, trigger, and table-restore DDL execution so schema resolution failures surface through checked SQLite paths and roll back cleanly.

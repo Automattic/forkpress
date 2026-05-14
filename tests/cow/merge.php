@@ -5854,6 +5854,66 @@ SQL);
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-schema-auto-savepoint'"), 0, 'failed automatic schema savepoint records no staged decisions');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-schema-auto-savepoint' AND status = 'failed'"), 1, 'failed automatic schema savepoint leaves an auditable failed run');
 
+    $schema_auto_column_ddl_base = $tmp . '/schema-auto-column-ddl-base.sqlite';
+    $schema_auto_column_ddl_source = $tmp . '/schema-auto-column-ddl-source.sqlite';
+    $schema_auto_column_ddl_target = $tmp . '/schema-auto-column-ddl-target.sqlite';
+    create_base_db($schema_auto_column_ddl_base);
+    copy($schema_auto_column_ddl_base, $schema_auto_column_ddl_source);
+    copy($schema_auto_column_ddl_base, $schema_auto_column_ddl_target);
+    $db = open_db($schema_auto_column_ddl_source);
+    $db->exec('ALTER TABLE plugin_items ADD COLUMN auto_ddl_note TEXT');
+    $db->close();
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'ALTER TABLE "plugin_items" ADD COLUMN auto_ddl_note TEXT' && $message === 'failed to apply automatic source column schema merge') {
+                throw new RuntimeException('forced automatic source column DDL failure');
+            }
+        },
+    ];
+    $schema_auto_column_ddl_failure = null;
+    try {
+        cow_merge_databases($schema_auto_column_ddl_base, $schema_auto_column_ddl_source, $schema_auto_column_ddl_target, $metadata, 'feature-schema-auto-column-ddl', 'main');
+    } catch (Throwable $e) {
+        $schema_auto_column_ddl_failure = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($schema_auto_column_ddl_failure !== null && str_contains($schema_auto_column_ddl_failure, 'forced automatic source column DDL failure'), 'automatic source column DDL infrastructure failure is surfaced to the caller');
+    assert_same(column_type($schema_auto_column_ddl_target, 'plugin_items', 'auto_ddl_note'), null, 'failed automatic source column DDL rolls back target schema');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-schema-auto-column-ddl'"), 0, 'failed automatic source column DDL records no staged decisions');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-schema-auto-column-ddl'"), 0, 'failed automatic source column DDL records no misleading conflicts');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-schema-auto-column-ddl' AND status = 'failed'"), 1, 'failed automatic source column DDL leaves an auditable failed run');
+
+    $schema_auto_index_ddl_base = $tmp . '/schema-auto-index-ddl-base.sqlite';
+    $schema_auto_index_ddl_source = $tmp . '/schema-auto-index-ddl-source.sqlite';
+    $schema_auto_index_ddl_target = $tmp . '/schema-auto-index-ddl-target.sqlite';
+    create_base_db($schema_auto_index_ddl_base);
+    copy($schema_auto_index_ddl_base, $schema_auto_index_ddl_source);
+    copy($schema_auto_index_ddl_base, $schema_auto_index_ddl_target);
+    $db = open_db($schema_auto_index_ddl_source);
+    $db->exec('CREATE INDEX plugin_items_auto_ddl_idx ON plugin_items(label)');
+    $db->close();
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'CREATE INDEX plugin_items_auto_ddl_idx ON plugin_items(label)' && $message === 'failed to apply source-added index schema merge') {
+                throw new RuntimeException('forced source-added index DDL failure');
+            }
+        },
+    ];
+    $schema_auto_index_ddl_failure = null;
+    try {
+        cow_merge_databases($schema_auto_index_ddl_base, $schema_auto_index_ddl_source, $schema_auto_index_ddl_target, $metadata, 'feature-schema-auto-index-ddl', 'main');
+    } catch (Throwable $e) {
+        $schema_auto_index_ddl_failure = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($schema_auto_index_ddl_failure !== null && str_contains($schema_auto_index_ddl_failure, 'forced source-added index DDL failure'), 'source-added index DDL infrastructure failure is surfaced to the caller');
+    assert_same((int)scalar($schema_auto_index_ddl_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_items_auto_ddl_idx'"), 0, 'failed source-added index DDL rolls back target schema');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-schema-auto-index-ddl'"), 0, 'failed source-added index DDL records no staged decisions');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-schema-auto-index-ddl'"), 0, 'failed source-added index DDL records no misleading conflicts');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-schema-auto-index-ddl' AND status = 'failed'"), 1, 'failed source-added index DDL leaves an auditable failed run');
+
     $schema_view_savepoint_base = $tmp . '/schema-view-savepoint-base.sqlite';
     $schema_view_savepoint_source = $tmp . '/schema-view-savepoint-source.sqlite';
     $schema_view_savepoint_target = $tmp . '/schema-view-savepoint-target.sqlite';
@@ -6835,6 +6895,31 @@ SQL);
     );
     assert_same($schema_column_dry['status'], 'validated', 'dry-run schema column source resolution validates target preconditions');
     assert_same(column_type($schema_resolve_target, 'plugin_items', 'review_note'), null, 'dry-run schema column resolution does not mutate target schema');
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'ALTER TABLE "plugin_items" ADD COLUMN review_note TEXT DEFAULT NULL' && $message === 'failed to apply source column schema resolution') {
+                throw new RuntimeException('forced source column resolution DDL failure');
+            }
+        },
+    ];
+    $schema_column_apply_failure = null;
+    try {
+        cow_merge_resolve_conflict(
+            $metadata,
+            $schema_column_conflict_id,
+            'source',
+            true,
+            'Apply safe source column with failing DDL.',
+            'test'
+        );
+    } catch (Throwable $e) {
+        $schema_column_apply_failure = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($schema_column_apply_failure !== null && str_contains($schema_column_apply_failure, 'forced source column resolution DDL failure'), 'source column resolution DDL infrastructure failure is surfaced to the caller');
+    assert_same(column_type($schema_resolve_target, 'plugin_items', 'review_note'), null, 'failed source column resolution DDL rolls back target schema');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_column_conflict_id"), 0, 'failed source column resolution DDL records no resolution metadata');
     $schema_column_resolution = cow_merge_resolve_conflict(
         $metadata,
         $schema_column_conflict_id,
