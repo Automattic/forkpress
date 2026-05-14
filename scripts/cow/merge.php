@@ -6509,6 +6509,7 @@ function cow_merge_validate_trigger_program(SQLite3 $db, string $name, string $s
     if ($validation_sql === null) {
         return;
     }
+    cow_merge_test_hook('before_sqlite_query', $db, $validation_sql, 'failed to run source trigger ' . $name . ' target trigger validation');
     $res = @$db->query($validation_sql);
     if (!$res) {
         throw new InvalidArgumentException(
@@ -6576,7 +6577,9 @@ function cow_merge_validate_view_references(SQLite3 $db, string $name, string $s
 }
 
 function cow_merge_validate_view_schema(SQLite3 $db, string $name, string $context): void {
-    $res = @$db->query('SELECT * FROM ' . cow_merge_quote_ident($name) . ' LIMIT 0');
+    $sql = 'SELECT * FROM ' . cow_merge_quote_ident($name) . ' LIMIT 0';
+    cow_merge_test_hook('before_sqlite_query', $db, $sql, 'failed to run source view ' . $name . " $context validation");
+    $res = @$db->query($sql);
     if (!$res) {
         throw new InvalidArgumentException(
             'source view ' . $name . " is invalid during $context validation: " . $db->lastErrorMsg()
@@ -6714,7 +6717,9 @@ function cow_merge_trigger_body_dependencies(SQLite3 $db, array $schema_objects,
 function cow_merge_validate_views(SQLite3 $db, array $views, string $context): void {
     foreach ($views as $view) {
         $name = is_array($view) ? (string)$view['name'] : (string)$view;
-        $res = @$db->query('SELECT * FROM ' . cow_merge_quote_ident($name) . ' LIMIT 0');
+        $sql = 'SELECT * FROM ' . cow_merge_quote_ident($name) . ' LIMIT 0';
+        cow_merge_test_hook('before_sqlite_query', $db, $sql, 'failed to run target view ' . $name . " $context validation");
+        $res = @$db->query($sql);
         if (!$res) {
             throw new InvalidArgumentException(
                 'source schema resolution cannot preserve target view ' . $name .
@@ -6948,22 +6953,21 @@ function cow_merge_apply_source_view_schema_resolution(SQLite3 $target, string $
 }
 
 function cow_merge_validate_foreign_key_integrity(SQLite3 $db, string $context): void {
-    $result = @$db->query('PRAGMA foreign_key_check');
-    if ($result === false) {
-        $message = $db->lastErrorMsg();
-        throw new RuntimeException($context . ' would leave target foreign-key validation error: ' . ($message === '' ? 'unknown SQLite error' : $message));
-    }
+    $result = cow_merge_query_checked($db, 'PRAGMA foreign_key_check', $context . ' foreign-key validation error');
     $violations = [];
-    while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
-        $violations[] = (string)($row['table'] ?? '(unknown)') .
-            ' rowid=' . (string)($row['rowid'] ?? 'NULL') .
-            ' parent=' . (string)($row['parent'] ?? '(unknown)') .
-            ' fkid=' . (string)($row['fkid'] ?? '(unknown)');
-        if (count($violations) >= 3) {
-            break;
+    try {
+        while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+            $violations[] = (string)($row['table'] ?? '(unknown)') .
+                ' rowid=' . (string)($row['rowid'] ?? 'NULL') .
+                ' parent=' . (string)($row['parent'] ?? '(unknown)') .
+                ' fkid=' . (string)($row['fkid'] ?? '(unknown)');
+            if (count($violations) >= 3) {
+                break;
+            }
         }
+    } finally {
+        cow_merge_result_finalize_checked($result, $context . ' foreign-key validation result');
     }
-    cow_merge_result_finalize_checked($result, $context . ' foreign-key validation result');
     if ($violations) {
         throw new RuntimeException($context . ' would leave target foreign-key violations: ' . implode('; ', $violations));
     }

@@ -380,6 +380,93 @@ try {
     assert_true(true, 'trigger validation succeeds after finalization hook clears');
     $trigger_validation_finalize_handle->close();
 
+    $trigger_validation_query_db = $tmp . '/trigger-validation-query.sqlite';
+    create_base_db($trigger_validation_query_db);
+    $trigger_validation_query_handle = open_db($trigger_validation_query_db);
+    $trigger_validation_query_sql = "CREATE TRIGGER plugin_trigger_validation_query " .
+        "AFTER INSERT ON plugin_items BEGIN SELECT NEW.item_id; END";
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_query'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($message === 'failed to run source trigger plugin_trigger_validation_query target trigger validation') {
+                throw new RuntimeException('forced trigger validation query failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_validate_trigger_program(
+            $trigger_validation_query_handle,
+            'plugin_trigger_validation_query',
+            $trigger_validation_query_sql
+        ),
+        'forced trigger validation query failure',
+        'trigger validation query infrastructure failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_query']);
+    cow_merge_validate_trigger_program(
+        $trigger_validation_query_handle,
+        'plugin_trigger_validation_query',
+        $trigger_validation_query_sql
+    );
+    assert_true(true, 'trigger validation succeeds after query hook clears');
+    $trigger_validation_query_handle->close();
+
+    $view_validation_query_db = $tmp . '/view-validation-query.sqlite';
+    create_base_db($view_validation_query_db);
+    $view_validation_query_handle = open_db($view_validation_query_db);
+    $view_validation_query_handle->exec('CREATE VIEW plugin_view_validation_query AS SELECT item_id, label FROM plugin_items');
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_query'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($message === 'failed to run source view plugin_view_validation_query source-view-validation validation') {
+                throw new RuntimeException('forced source view validation query failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_validate_view_schema($view_validation_query_handle, 'plugin_view_validation_query', 'source-view-validation'),
+        'forced source view validation query failure',
+        'source view validation query infrastructure failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_query']);
+    cow_merge_validate_view_schema($view_validation_query_handle, 'plugin_view_validation_query', 'source-view-validation');
+    assert_true(true, 'source view validation succeeds after query hook clears');
+
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_query'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($message === 'failed to run target view plugin_view_validation_query post-rebuild validation') {
+                throw new RuntimeException('forced target view validation query failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_validate_views($view_validation_query_handle, [['name' => 'plugin_view_validation_query']], 'post-rebuild'),
+        'forced target view validation query failure',
+        'target view validation query infrastructure failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_query']);
+    cow_merge_validate_views($view_validation_query_handle, [['name' => 'plugin_view_validation_query']], 'post-rebuild');
+    assert_true(true, 'target view validation succeeds after query hook clears');
+    $view_validation_query_handle->close();
+
+    $fk_validation_query_db = $tmp . '/fk-validation-query.sqlite';
+    create_base_db($fk_validation_query_db);
+    $fk_validation_query_handle = open_db($fk_validation_query_db);
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_query'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($message === 'unit foreign-key validation error') {
+                throw new RuntimeException('forced foreign-key validation query failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_validate_foreign_key_integrity($fk_validation_query_handle, 'unit'),
+        'forced foreign-key validation query failure',
+        'foreign-key validation query infrastructure failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_query']);
+    cow_merge_validate_foreign_key_integrity($fk_validation_query_handle, 'unit');
+    assert_true(true, 'foreign-key validation succeeds after query hook clears');
+    $fk_validation_query_handle->close();
+
     $unique_read_base = $tmp . '/unique-read-base.sqlite';
     $unique_read_source = $tmp . '/unique-read-source.sqlite';
     $unique_read_target = $tmp . '/unique-read-target.sqlite';
