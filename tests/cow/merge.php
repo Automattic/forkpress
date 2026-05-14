@@ -4582,6 +4582,35 @@ SQL);
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'source-applied' AND row_identity = '$source_link_file_identity' AND reason = 'source added filesystem symlink and target did not have it' AND target_payload IS NULL"), 1, 'source-only filesystem symlink addition records an empty target payload');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'source-applied' AND row_identity = '$source_delete_file_identity' AND reason = 'source deleted filesystem path and target did not change it' AND source_payload IS NULL AND chosen_payload IS NULL"), 1, 'source-only filesystem deletion records empty source and chosen payloads');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'source-applied' AND row_identity = '$source_delete_dir_identity' AND reason = 'source deleted filesystem directory and target did not change it' AND source_payload IS NULL AND chosen_payload IS NULL"), 1, 'source-only filesystem directory deletion records empty source and chosen payloads');
+    $source_delete_dir_audit = cow_merge_audit_report($metadata, null, 10, [
+        'records' => 'decisions',
+        'scope' => 'files',
+        'decision' => 'source-applied',
+        'path' => 'wp-content/uploads/delete-empty-dir',
+    ]);
+    assert_same(count($source_delete_dir_audit['decisions']), 1, 'source-applied deletion audit can focus on an exact filesystem directory path');
+    assert_same($source_delete_dir_audit['decisions'][0]['row_identity'], cow_merge_file_identity_json('wp-content/uploads/delete-empty-dir'), 'source-applied deletion audit returns the requested directory identity');
+    assert_same($source_delete_dir_audit['decisions'][0]['source_preview'], 'null', 'source-applied deletion audit reports an empty source payload preview');
+    assert_same($source_delete_dir_audit['decisions'][0]['chosen_preview'], 'null', 'source-applied deletion audit reports an empty chosen payload preview');
+    $reviewed_source_delete_dir_id = (int)$source_delete_dir_audit['decisions'][0]['id'];
+    $source_delete_dir_review = cow_merge_review_record(
+        $metadata,
+        'decision',
+        $reviewed_source_delete_dir_id,
+        'needs-action',
+        'Review source-applied directory deletion before closing the merge.',
+        'cow-test'
+    );
+    assert_same($source_delete_dir_review['record_type'], 'decision', 'review note can target a source-applied filesystem deletion decision');
+    $reviewed_source_delete_dir_audit = cow_merge_audit_report($metadata, null, 10, [
+        'records' => 'decisions',
+        'review_status' => 'needs-action',
+        'scope' => 'files',
+        'path' => 'wp-content/uploads/delete-empty-dir',
+    ]);
+    assert_same(count($reviewed_source_delete_dir_audit['decisions']), 1, 'review status filter returns annotated source-applied filesystem deletion decisions by path');
+    assert_same($reviewed_source_delete_dir_audit['decisions'][0]['review_status'], 'needs-action', 'source-applied filesystem deletion audit exposes latest review status');
+    assert_same($reviewed_source_delete_dir_audit['decisions'][0]['review_note'], 'Review source-applied directory deletion before closing the merge.', 'source-applied filesystem deletion audit exposes latest review note');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'target-kept' AND row_identity = '$target_only_file_identity'"), 1, 'target-only filesystem addition preservation is auditable');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'target-kept' AND row_identity = '$target_delete_file_identity' AND target_payload IS NULL AND chosen_payload IS NULL"), 1, 'target-only filesystem deletion preservation is auditable');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'target-kept' AND row_identity = '$target_change_file_identity'"), 1, 'target-only filesystem path change preservation is auditable');
