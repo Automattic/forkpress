@@ -1,6 +1,6 @@
 # Plugin Merge Validators
 
-Status: design target
+Status: partial implementation target
 
 ForkPress can merge SQLite rows and files, but plugins often store one logical
 object across custom tables, `postmeta`, options, JSON, serialized PHP values,
@@ -61,6 +61,13 @@ This preserves the current safety model: ForkPress may apply exact safe changes,
 preserve target state, or stop with an auditable conflict, but it should not
 invent plugin-specific rewrites.
 
+The current implementation has the metadata/audit foundation for validator
+conflicts: ForkPress can record plugin-scoped findings against a merge run,
+mark that run as `completed_with_conflicts`, filter `merge-audit` output with
+`scope = plugin`, group plugin findings separately from DB/file findings, and
+attach review notes. Runtime validator discovery and execution are still
+missing.
+
 ## Review Metadata
 
 Plugin conflicts should be exported by `forkpress branch merge-audit` with:
@@ -105,5 +112,7 @@ The clean branch-ID-band case is covered by:
 - `tests/cow/e2e.sh`: runtime WordPress fixture that creates the same shape
   through branch-local requests before merging.
 
-The broken-reference and target-conflicting cases still need the validator API
-and plugin-scoped audit records before they can be represented honestly.
+The PHP unit suite also covers a simulated broken-reference validator finding
+for that graph and verifies plugin-scoped audit output and review metadata.
+Real broken-reference and target-conflicting cases still need runtime validator
+discovery/execution before they can be checked during an actual merge.

@@ -16,8 +16,8 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "  php merge.php track-identity-events --db <path> --metadata-db <path> --branch <branch> --events-json <json>\n");
     fwrite(STDERR, "  php merge.php allocate-id-bands --db <path> --metadata-db <path> --branch <branch>\n");
     fwrite(STDERR, "  php merge.php audit --metadata-db <path> [--format text|json] [--limit N] [--run ID]\n");
-    fwrite(STDERR, "    [--scope all|db|files] [--records all|conflicts|decisions|resolutions|rollback-failures] [--path <path>] [--path-prefix <prefix>]\n");
-    fwrite(STDERR, "    [--scope all|db|files] [--records all|conflicts|decisions|resolutions|rollback-failures] [--conflict-type TYPE] [--decision DECISION]\n");
+    fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|decisions|resolutions|rollback-failures] [--path <path>] [--path-prefix <prefix>]\n");
+    fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|decisions|resolutions|rollback-failures] [--conflict-type TYPE] [--decision DECISION]\n");
     fwrite(STDERR, "    [--id-band-skips] [--target-kept] [--review] [--review-status unreviewed|pending|needs-action|reviewed]\n");
     fwrite(STDERR, "    [--resolution-status validated|applied] [--group-by none|table|status|path|type|severity]\n");
     fwrite(STDERR, "    --group-by supports resolutions by table/status/path, conflicts by table/type/path/severity, and decisions by table/type/path.\n");
@@ -5156,6 +5156,94 @@ function cow_merge_record_file_conflict(
     return $active;
 }
 
+function cow_merge_plugin_identity_json(string $plugin, string $object): string {
+    return cow_merge_payload_json([
+        'plugin' => $plugin,
+        'object' => $object,
+    ]);
+}
+
+function cow_merge_record_plugin_validator_conflicts(
+    string $metadata_db,
+    int $run_id,
+    array $findings
+): array {
+    if ($findings === []) {
+        return [
+            'run_id' => $run_id,
+            'status' => 'valid',
+            'conflicts' => 0,
+            'metadata_db' => $metadata_db,
+        ];
+    }
+
+    $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READWRITE | SQLITE3_OPEN_CREATE);
+    $metadata_transaction_active = false;
+    $conflicts = 0;
+    try {
+        cow_merge_ensure_metadata($meta);
+        cow_merge_exec_checked($meta, 'BEGIN IMMEDIATE', 'failed to start plugin validator metadata transaction');
+        $metadata_transaction_active = true;
+        foreach ($findings as $finding) {
+            if (!is_array($finding)) {
+                throw new InvalidArgumentException('plugin validator findings must be arrays');
+            }
+            $plugin = trim((string)($finding['plugin'] ?? ''));
+            $object = trim((string)($finding['object'] ?? ''));
+            $reason = trim((string)($finding['reason'] ?? ''));
+            if ($plugin === '' || $object === '' || $reason === '') {
+                throw new InvalidArgumentException('plugin validator findings require plugin, object, and reason');
+            }
+            $type = trim((string)($finding['type'] ?? 'plugin-validator-conflict'));
+            if ($type === '' || !str_starts_with($type, 'plugin-')) {
+                throw new InvalidArgumentException('plugin validator conflict type must start with plugin-');
+            }
+            $payload = [
+                'plugin' => $plugin,
+                'object' => $object,
+                'reason' => $reason,
+                'tables' => array_values(array_map('strval', is_array($finding['tables'] ?? null) ? $finding['tables'] : [])),
+                'files' => array_values(array_map('strval', is_array($finding['files'] ?? null) ? $finding['files'] : [])),
+                'validator' => (string)($finding['validator'] ?? ''),
+                'candidate' => $finding['candidate'] ?? null,
+            ];
+            if (cow_merge_record_conflict(
+                $meta,
+                $run_id,
+                '__plugins__',
+                cow_merge_plugin_identity_json($plugin, $object),
+                null,
+                $type,
+                $finding['base'] ?? null,
+                $finding['source'] ?? null,
+                $finding['target'] ?? null,
+                $payload
+            )) {
+                $conflicts++;
+            }
+        }
+        if ($conflicts > 0) {
+            cow_merge_finish_run($meta, $run_id, 'completed_with_conflicts');
+        }
+        cow_merge_exec_checked($meta, 'COMMIT', 'failed to commit plugin validator metadata transaction');
+        $metadata_transaction_active = false;
+    } catch (Throwable $e) {
+        if ($metadata_transaction_active) {
+            @$meta->exec('ROLLBACK');
+        }
+        throw $e;
+    } finally {
+        $meta->close();
+    }
+
+    return [
+        'run_id' => $run_id,
+        'status' => $conflicts > 0 ? 'completed_with_conflicts' : 'valid',
+        'conflicts' => $conflicts,
+        'metadata_db' => $metadata_db,
+    ];
+}
+
 function cow_merge_record_matching_file_decision(
     SQLite3 $meta,
     int $run_id,
@@ -5515,8 +5603,8 @@ function cow_merge_audit_format(?string $value): string {
 
 function cow_merge_audit_scope(?string $value): string {
     $scope = $value ?? 'all';
-    if (!in_array($scope, ['all', 'db', 'files'], true)) {
-        throw new InvalidArgumentException('--scope must be all, db, or files');
+    if (!in_array($scope, ['all', 'db', 'files', 'plugin'], true)) {
+        throw new InvalidArgumentException('--scope must be all, db, files, or plugin');
     }
     return $scope;
 }
@@ -8569,7 +8657,7 @@ function cow_merge_audit_filters(array $filters = []): array {
     if ($path !== null && $path_prefix !== null) {
         throw new InvalidArgumentException('--path and --path-prefix cannot be used together');
     }
-    if ($scope === 'db' && ($path !== null || $path_prefix !== null)) {
+    if ($scope !== 'all' && $scope !== 'files' && ($path !== null || $path_prefix !== null)) {
         throw new InvalidArgumentException('--path and --path-prefix require file audit scope');
     }
     if ($records === 'rollback-failures') {
@@ -8682,7 +8770,9 @@ function cow_merge_audit_where_sql(
     if ($filters['scope'] === 'files') {
         $clauses[] = $prefix . "table_name = '__files__'";
     } elseif ($filters['scope'] === 'db') {
-        $clauses[] = $prefix . "table_name <> '__files__'";
+        $clauses[] = $prefix . "table_name NOT IN ('__files__', '__plugins__')";
+    } elseif ($filters['scope'] === 'plugin') {
+        $clauses[] = $prefix . "table_name = '__plugins__'";
     }
 
     if ($filters['path'] !== null) {
@@ -8755,7 +8845,9 @@ function cow_merge_audit_resolution_where_sql(
     if ($filters['scope'] === 'files') {
         $clauses[] = "mr.table_name = '__files__'";
     } elseif ($filters['scope'] === 'db') {
-        $clauses[] = "mr.table_name <> '__files__'";
+        $clauses[] = "mr.table_name NOT IN ('__files__', '__plugins__')";
+    } elseif ($filters['scope'] === 'plugin') {
+        $clauses[] = "mr.table_name = '__plugins__'";
     }
 
     if ($filters['path'] !== null) {
@@ -8819,6 +8911,7 @@ function cow_merge_audit_conflict_group_sql(string $group_by): string {
             "WHEN c.conflict_type IN ('row-insert-collision', 'row-unique-collision', 'row-target-constraint', 'row-identity-ambiguous', 'row-target-deleted', 'row-source-deleted') THEN 'row' " .
             "WHEN c.conflict_type = 'cell-conflict' THEN 'cell' " .
             "WHEN c.table_name = '__files__' THEN 'files' " .
+            "WHEN c.table_name = '__plugins__' THEN 'plugin' " .
             "ELSE 'other' END";
     }
     throw new InvalidArgumentException('unsupported conflict group');
@@ -8842,7 +8935,9 @@ function cow_merge_audit_count_sql(array $filters, string $record_type, string $
     if ($filters['scope'] === 'files') {
         $conditions[] = $alias . ".table_name = '__files__'";
     } elseif ($filters['scope'] === 'db') {
-        $conditions[] = $alias . ".table_name <> '__files__'";
+        $conditions[] = $alias . ".table_name NOT IN ('__files__', '__plugins__')";
+    } elseif ($filters['scope'] === 'plugin') {
+        $conditions[] = $alias . ".table_name = '__plugins__'";
     }
     if ($record_type === 'conflicts' && $filters['conflict_type'] !== null) {
         $conditions[] = $alias . ".conflict_type = '" . SQLite3::escapeString($filters['conflict_type']) . "'";
@@ -9129,7 +9224,8 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
                     "SUM(CASE WHEN c.resolver = 'target-wins' THEN 1 ELSE 0 END) AS target_wins_count, " .
                     "SUM(CASE WHEN c.resolved_at IS NOT NULL AND c.resolved_at <> '' THEN 1 ELSE 0 END) AS resolved_count, " .
                     "SUM(CASE WHEN c.table_name = '__files__' THEN 1 ELSE 0 END) AS file_count, " .
-                    "SUM(CASE WHEN c.table_name <> '__files__' THEN 1 ELSE 0 END) AS db_count " .
+                    "SUM(CASE WHEN c.table_name = '__plugins__' THEN 1 ELSE 0 END) AS plugin_count, " .
+                    "SUM(CASE WHEN c.table_name NOT IN ('__files__', '__plugins__') THEN 1 ELSE 0 END) AS db_count " .
                     "FROM merge_conflicts c $conflict_group_filter " .
                     "GROUP BY group_key ORDER BY conflict_count DESC, group_key LIMIT :limit",
                     $conflict_group_params + [':group_by' => $filters['group_by']]
@@ -9162,7 +9258,8 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
                     "SUM(CASE WHEN d.decision = 'target-kept' THEN 1 ELSE 0 END) AS target_kept_count, " .
                     "SUM(CASE WHEN d.decision = 'id-band-skipped' THEN 1 ELSE 0 END) AS id_band_skipped_count, " .
                     "SUM(CASE WHEN d.table_name = '__files__' THEN 1 ELSE 0 END) AS file_count, " .
-                    "SUM(CASE WHEN d.table_name <> '__files__' THEN 1 ELSE 0 END) AS db_count " .
+                    "SUM(CASE WHEN d.table_name = '__plugins__' THEN 1 ELSE 0 END) AS plugin_count, " .
+                    "SUM(CASE WHEN d.table_name NOT IN ('__files__', '__plugins__') THEN 1 ELSE 0 END) AS db_count " .
                     "FROM merge_decisions d $decision_group_filter " .
                     "GROUP BY group_key ORDER BY decision_count DESC, group_key LIMIT :limit",
                     $decision_group_params + [':group_by' => $filters['group_by']]
@@ -9202,7 +9299,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
         if ($run_id !== null) {
             $filter_params[':run_id'] = $run_id;
         }
-        if ($filters['scope'] !== 'files' && in_array($filters['records'], ['all', 'decisions'], true) && !$filters['id_band_skips'] && !$filters['target_kept']) {
+        if ($filters['scope'] !== 'files' && $filters['scope'] !== 'plugin' && in_array($filters['records'], ['all', 'decisions'], true) && !$filters['id_band_skips'] && !$filters['target_kept']) {
             $band_filter = $run_id === null ? '' : 'WHERE allocated_run_id = :run_id OR last_seen_run_id = :run_id';
             $report['autoincrement_bands'] = cow_merge_audit_table_rows(
                 $db,
@@ -9348,7 +9445,7 @@ function cow_merge_print_audit_text(array $report): void {
     if ($report['conflict_groups']) {
         echo "conflict-groups:\n";
         foreach ($report['conflict_groups'] as $group) {
-            echo "  {$group['group_by']}={$group['group_key']} conflicts={$group['conflict_count']} target-wins={$group['target_wins_count']} resolved={$group['resolved_count']} files={$group['file_count']} db={$group['db_count']}\n";
+            echo "  {$group['group_by']}={$group['group_key']} conflicts={$group['conflict_count']} target-wins={$group['target_wins_count']} resolved={$group['resolved_count']} files={$group['file_count']} plugin={$group['plugin_count']} db={$group['db_count']}\n";
         }
     }
 
@@ -9366,7 +9463,7 @@ function cow_merge_print_audit_text(array $report): void {
     if ($report['decision_groups']) {
         echo "decision-groups:\n";
         foreach ($report['decision_groups'] as $group) {
-            echo "  {$group['group_by']}={$group['group_key']} decisions={$group['decision_count']} target-wins={$group['target_wins_count']} target-accepted={$group['target_accepted_count']} source-applied={$group['source_applied_count']} target-kept={$group['target_kept_count']} id-band-skipped={$group['id_band_skipped_count']} files={$group['file_count']} db={$group['db_count']}\n";
+            echo "  {$group['group_by']}={$group['group_key']} decisions={$group['decision_count']} target-wins={$group['target_wins_count']} target-accepted={$group['target_accepted_count']} source-applied={$group['source_applied_count']} target-kept={$group['target_kept_count']} id-band-skipped={$group['id_band_skipped_count']} files={$group['file_count']} plugin={$group['plugin_count']} db={$group['db_count']}\n";
         }
     }
 

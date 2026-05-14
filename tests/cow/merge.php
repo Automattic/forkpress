@@ -13113,6 +13113,92 @@ SQL);
     $assert_plugin_graph($plugin_graph_target, $plugin_graph_target_root, $plugin_graph_target_graph, 'target');
     assert_same((int)scalar($plugin_graph_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-plugin-graph-source'"), 0, 'plugin graph merge records no generic conflicts while IDs remain banded');
 
+    $plugin_validator_empty = cow_merge_record_plugin_validator_conflicts($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], []);
+    assert_same($plugin_validator_empty['status'], 'valid', 'plugin validator accepts empty finding batches');
+    assert_same($plugin_validator_empty['conflicts'], 0, 'plugin validator empty finding batch records no conflicts');
+    assert_throws(
+        fn() => cow_merge_record_plugin_validator_conflicts($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], [
+            ['plugin' => '', 'object' => 'graph:broken', 'reason' => 'missing plugin name'],
+        ]),
+        'require plugin, object, and reason',
+        'plugin validator rejects findings without plugin identity'
+    );
+    assert_throws(
+        fn() => cow_merge_record_plugin_validator_conflicts($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], [
+            ['plugin' => 'forkpress-graph', 'object' => 'graph:broken', 'reason' => 'invalid type', 'type' => 'row-conflict'],
+        ]),
+        'must start with plugin-',
+        'plugin validator rejects non-plugin conflict types'
+    );
+    $plugin_validator_result = cow_merge_record_plugin_validator_conflicts($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], [
+        [
+            'plugin' => 'forkpress-graph',
+            'object' => 'graph:source-parent:' . $plugin_graph_source_graph['parent_id'],
+            'reason' => 'source graph references a missing child row after candidate validation',
+            'tables' => ['plugin_graph_parent', 'plugin_graph_child', 'wp_options', 'wp_postmeta'],
+            'files' => [$plugin_graph_source_graph['file_path']],
+            'validator' => 'forkpress-graph-validator@1',
+            'base' => ['parent_id' => null, 'child_id' => null],
+            'source' => $plugin_graph_source_graph,
+            'target' => $plugin_graph_target_graph,
+            'candidate' => $plugin_graph_source_graph + ['missing_child_id' => 999999],
+        ],
+    ]);
+    assert_same($plugin_validator_result['status'], 'completed_with_conflicts', 'plugin validator findings mark the merge run as conflicted');
+    assert_same($plugin_validator_result['conflicts'], 1, 'plugin validator records one active plugin conflict');
+    assert_same(scalar($plugin_graph_metadata, "SELECT status FROM merge_runs WHERE id = " . (int)$plugin_graph_result['run_id']), 'completed_with_conflicts', 'plugin validator updates the merge run status');
+
+    $plugin_audit = cow_merge_audit_report($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+    ]);
+    assert_same($plugin_audit['filters']['scope'], 'plugin', 'plugin audit preserves plugin scope');
+    assert_same(count($plugin_audit['conflicts']), 1, 'plugin audit returns validator conflicts');
+    assert_same($plugin_audit['conflicts'][0]['table_name'], '__plugins__', 'plugin validator conflicts use the plugin audit namespace');
+    assert_same($plugin_audit['conflicts'][0]['conflict_type'], 'plugin-validator-conflict', 'plugin validator conflicts use a plugin conflict type');
+    assert_true(str_contains($plugin_audit['conflicts'][0]['chosen_preview'], 'missing_child_id'), 'plugin audit exposes candidate validator payloads');
+    assert_true(str_contains($plugin_audit['conflicts'][0]['source_preview'], 'plugin-graph-source.dat'), 'plugin audit exposes source plugin file references');
+    assert_true(str_contains($plugin_audit['conflicts'][0]['target_preview'], 'plugin-graph-target.dat'), 'plugin audit exposes target plugin graph references');
+    assert_same(count($plugin_audit['autoincrement_bands']), 0, 'plugin audit scope omits DB AUTOINCREMENT band summaries');
+    assert_same(count($plugin_audit['row_identity_summary']), 0, 'plugin audit scope omits DB row identity summaries');
+    $plugin_conflict_id = (int)$plugin_audit['conflicts'][0]['id'];
+
+    $plugin_db_scope_audit = cow_merge_audit_report($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 10, [
+        'scope' => 'db',
+        'records' => 'conflicts',
+    ]);
+    assert_same(count(array_filter($plugin_db_scope_audit['conflicts'], fn($row) => $row['table_name'] === '__plugins__')), 0, 'DB audit scope excludes plugin validator conflicts');
+
+    $plugin_group_audit = cow_merge_audit_report($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'group_by' => 'severity',
+    ]);
+    assert_same(count($plugin_group_audit['conflict_groups']), 1, 'plugin audit can group validator conflicts');
+    assert_same($plugin_group_audit['conflict_groups'][0]['group_key'], 'plugin', 'plugin validator conflicts group under plugin severity');
+    assert_same((int)$plugin_group_audit['conflict_groups'][0]['plugin_count'], 1, 'plugin conflict grouping counts plugin rows separately');
+    assert_same((int)$plugin_group_audit['conflict_groups'][0]['db_count'], 0, 'plugin conflict grouping does not count plugin rows as DB rows');
+    ob_start();
+    cow_merge_print_audit_text($plugin_group_audit);
+    $plugin_group_text = ob_get_clean();
+    assert_true(str_contains($plugin_group_text, 'plugin=1 db=0'), 'plugin conflict grouping is visible in text audit output');
+
+    cow_merge_review_record(
+        $plugin_graph_metadata,
+        'conflict',
+        $plugin_conflict_id,
+        'needs-action',
+        'plugin graph validator needs an app-specific repair',
+        'cow-test'
+    );
+    $plugin_review_audit = cow_merge_audit_report($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'review_status' => 'needs-action',
+    ]);
+    assert_same(count($plugin_review_audit['conflicts']), 1, 'plugin conflict review queue returns reviewed plugin conflicts');
+    assert_same($plugin_review_audit['conflicts'][0]['review_status'], 'needs-action', 'plugin audit exposes latest plugin conflict review status');
+
     copy($band_base, $band_feature_a_reset);
     $result = cow_merge_allocate_autoincrement_bands($band_feature_a_reset, $band_metadata, 'feature-band-a');
     assert_same($result['allocated'], 3, 'reset branch DB below its old band gets fresh bands instead of reusing possibly published IDs');
