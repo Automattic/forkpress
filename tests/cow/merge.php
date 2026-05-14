@@ -1541,6 +1541,75 @@ SQL);
     assert_true($row_resolution_commit_failure_message !== null, 'row resolution metadata commit failure is surfaced to the caller');
     assert_same(scalar($row_resolution_rollback_target, "SELECT post_title FROM wp_posts WHERE ID = 1"), 'Target rollback title', 'failed row resolution metadata commit restores the already-committed target row');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $row_resolution_rollback_conflict_id"), 0, 'failed row resolution metadata commit records no resolution metadata');
+
+    $schema_resolution_commit_base = $tmp . '/schema-resolution-commit-base.sqlite';
+    $schema_resolution_commit_source = $tmp . '/schema-resolution-commit-source.sqlite';
+    $schema_resolution_commit_target = $tmp . '/schema-resolution-commit-target.sqlite';
+    create_base_db($schema_resolution_commit_base);
+    copy($schema_resolution_commit_base, $schema_resolution_commit_source);
+    copy($schema_resolution_commit_base, $schema_resolution_commit_target);
+    $schema_resolution_commit_source_db = open_db($schema_resolution_commit_source);
+    $schema_resolution_commit_source_db->exec('ALTER TABLE plugin_items ADD COLUMN commit_note TEXT DEFAULT NULL');
+    $schema_resolution_commit_columns = cow_merge_columns_by_name(cow_merge_table_info($schema_resolution_commit_source_db, 'plugin_items'));
+    $schema_resolution_commit_source_db->close();
+    $schema_resolution_commit_target_db = open_db($schema_resolution_commit_target);
+    $schema_resolution_commit_target_sql = cow_merge_table_sql($schema_resolution_commit_target_db, 'plugin_items');
+    $schema_resolution_commit_target_db->close();
+    $schema_resolution_commit_meta = cow_merge_open_db($metadata, SQLITE3_OPEN_READWRITE | SQLITE3_OPEN_CREATE);
+    cow_merge_ensure_metadata($schema_resolution_commit_meta);
+    $schema_resolution_commit_run_id = cow_merge_start_run(
+        $schema_resolution_commit_meta,
+        'feature-schema-resolution-commit-rollback',
+        'main',
+        $schema_resolution_commit_base,
+        $schema_resolution_commit_source,
+        $schema_resolution_commit_target
+    );
+    cow_merge_record_schema_conflict(
+        $schema_resolution_commit_meta,
+        $schema_resolution_commit_run_id,
+        'plugin_items',
+        'commit_note',
+        'schema-source-changed',
+        $schema_resolution_commit_target_sql,
+        ['column' => $schema_resolution_commit_columns['commit_note'], 'definition' => 'commit_note TEXT DEFAULT NULL', 'error' => 'simulated source-added column conflict'],
+        $schema_resolution_commit_target_sql,
+        $schema_resolution_commit_target_sql,
+        'simulated schema resolution commit conflict'
+    );
+    cow_merge_finish_run($schema_resolution_commit_meta, $schema_resolution_commit_run_id, 'completed_with_conflicts');
+    $schema_resolution_commit_meta->close();
+    $schema_resolution_commit_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND column_name = 'commit_note' AND conflict_type = 'schema-source-changed' ORDER BY id DESC LIMIT 1");
+    $schema_resolution_commit_lock_setup = open_db($metadata);
+    $schema_resolution_commit_lock_setup->exec('PRAGMA journal_mode=DELETE');
+    $schema_resolution_commit_lock_setup->close();
+    $schema_resolution_commit_lock = open_db($metadata);
+    $schema_resolution_commit_lock->exec('BEGIN');
+    $schema_resolution_commit_lock->querySingle('SELECT COUNT(*) FROM merge_conflicts');
+    $schema_resolution_commit_failure_message = null;
+    set_error_handler(static function (int $severity, string $message): bool {
+        return str_contains($message, 'database is locked');
+    });
+    try {
+        cow_merge_resolve_conflict(
+            $metadata,
+            $schema_resolution_commit_conflict_id,
+            'source',
+            true,
+            'Try audited schema with locked metadata commit.',
+            'cow-test'
+        );
+    } catch (Throwable $e) {
+        $schema_resolution_commit_failure_message = $e->getMessage();
+    } finally {
+        restore_error_handler();
+        $schema_resolution_commit_lock->exec('ROLLBACK');
+        $schema_resolution_commit_lock->close();
+    }
+    assert_true($schema_resolution_commit_failure_message !== null, 'schema resolution metadata commit failure is surfaced to the caller');
+    assert_same(column_type($schema_resolution_commit_target, 'plugin_items', 'commit_note'), null, 'failed schema resolution metadata commit restores the already-committed target schema');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_resolution_commit_conflict_id"), 0, 'failed schema resolution metadata commit records no resolution metadata');
+
     $option_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'wp_options' AND column_name = 'option_value'");
     $target_resolution = cow_merge_resolve_conflict(
         $metadata,
