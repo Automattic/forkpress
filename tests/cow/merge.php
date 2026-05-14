@@ -547,6 +547,42 @@ try {
     assert_same((int)scalar($row_insert_finalize_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-row-insert-finalize-rollback' AND status = 'failed'"), 1, 'failed source row insert finalization leaves an auditable failed run');
     assert_same((int)scalar($row_insert_finalize_metadata, 'SELECT COUNT(*) FROM merge_decisions'), 0, 'failed source row insert finalization records no decisions');
 
+    $rowid_insert_finalize_base = $tmp . '/rowid-insert-finalize-base.sqlite';
+    $rowid_insert_finalize_source = $tmp . '/rowid-insert-finalize-source.sqlite';
+    $rowid_insert_finalize_target = $tmp . '/rowid-insert-finalize-target.sqlite';
+    $rowid_insert_finalize_metadata = $tmp . '/.forkpress/cow/merge/rowid-insert-finalize-metadata.sqlite';
+    create_base_db($rowid_insert_finalize_base);
+    copy($rowid_insert_finalize_base, $rowid_insert_finalize_source);
+    copy($rowid_insert_finalize_base, $rowid_insert_finalize_target);
+    $db = open_db($rowid_insert_finalize_source);
+    $db->exec('CREATE TABLE plugin_rowid_mutation_insert (label TEXT, value TEXT)');
+    $db->exec("INSERT INTO plugin_rowid_mutation_insert (rowid, label, value) VALUES (19, 'source rowid insert', 'source')");
+    $db->close();
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize'] = [
+        static function (SQLite3Result $result, string $message): void {
+            if ($message === 'failed to finalize rowid insert into plugin_rowid_mutation_insert') {
+                throw new RuntimeException('forced rowid insert finalize failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_databases(
+            $rowid_insert_finalize_base,
+            $rowid_insert_finalize_source,
+            $rowid_insert_finalize_target,
+            $rowid_insert_finalize_metadata,
+            'feature-rowid-insert-finalize-rollback',
+            'main'
+        ),
+        'forced rowid insert finalize failure',
+        'source rowid insert finalization failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize']);
+    assert_same((int)scalar($rowid_insert_finalize_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_rowid_mutation_insert'"), 0, 'failed source rowid insert finalization rolls back source-added table creation');
+    assert_same((int)scalar($rowid_insert_finalize_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-rowid-insert-finalize-rollback' AND status = 'failed'"), 1, 'failed source rowid insert finalization leaves an auditable failed run');
+    assert_same((int)scalar($rowid_insert_finalize_metadata, 'SELECT COUNT(*) FROM merge_row_identities'), 0, 'failed source rowid insert finalization records no sidecar metadata');
+    assert_same((int)scalar($rowid_insert_finalize_metadata, 'SELECT COUNT(*) FROM merge_decisions'), 0, 'failed source rowid insert finalization records no decisions');
+
     $row_update_execute_base = $tmp . '/row-update-execute-base.sqlite';
     $row_update_execute_source = $tmp . '/row-update-execute-source.sqlite';
     $row_update_execute_target = $tmp . '/row-update-execute-target.sqlite';
@@ -587,6 +623,37 @@ try {
     assert_same((int)scalar($row_update_execute_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-row-update-execute-rollback' AND status = 'failed'"), 1, 'failed source row update execute leaves an auditable failed run');
     assert_same((int)scalar($row_update_execute_metadata, 'SELECT COUNT(*) FROM merge_decisions'), 0, 'failed source row update execute records no decisions');
 
+    $row_update_finalize_base = $tmp . '/row-update-finalize-base.sqlite';
+    $row_update_finalize_source = $tmp . '/row-update-finalize-source.sqlite';
+    $row_update_finalize_target = $tmp . '/row-update-finalize-target.sqlite';
+    $row_update_finalize_metadata = $tmp . '/.forkpress/cow/merge/row-update-finalize-metadata.sqlite';
+    copy($row_update_execute_base, $row_update_finalize_base);
+    copy($row_update_execute_source, $row_update_finalize_source);
+    copy($row_update_execute_target, $row_update_finalize_target);
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize'] = [
+        static function (SQLite3Result $result, string $message): void {
+            if ($message === 'failed to finalize update on plugin_row_mutation_update') {
+                throw new RuntimeException('forced row update finalize failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_databases(
+            $row_update_finalize_base,
+            $row_update_finalize_source,
+            $row_update_finalize_target,
+            $row_update_finalize_metadata,
+            'feature-row-update-finalize-rollback',
+            'main'
+        ),
+        'forced row update finalize failure',
+        'source row update finalization failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize']);
+    assert_same(scalar($row_update_finalize_target, 'SELECT value FROM plugin_row_mutation_update WHERE id = 1'), 'base update', 'failed source row update finalization rolls back target rows');
+    assert_same((int)scalar($row_update_finalize_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-row-update-finalize-rollback' AND status = 'failed'"), 1, 'failed source row update finalization leaves an auditable failed run');
+    assert_same((int)scalar($row_update_finalize_metadata, 'SELECT COUNT(*) FROM merge_decisions'), 0, 'failed source row update finalization records no decisions');
+
     $row_delete_execute_base = $tmp . '/row-delete-execute-base.sqlite';
     $row_delete_execute_source = $tmp . '/row-delete-execute-source.sqlite';
     $row_delete_execute_target = $tmp . '/row-delete-execute-target.sqlite';
@@ -626,6 +693,37 @@ try {
     assert_same((int)scalar($row_delete_execute_target, 'SELECT COUNT(*) FROM plugin_row_mutation_delete WHERE id = 1'), 1, 'failed source row delete execute rolls back target rows');
     assert_same((int)scalar($row_delete_execute_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-row-delete-execute-rollback' AND status = 'failed'"), 1, 'failed source row delete execute leaves an auditable failed run');
     assert_same((int)scalar($row_delete_execute_metadata, 'SELECT COUNT(*) FROM merge_decisions'), 0, 'failed source row delete execute records no decisions');
+
+    $row_delete_finalize_base = $tmp . '/row-delete-finalize-base.sqlite';
+    $row_delete_finalize_source = $tmp . '/row-delete-finalize-source.sqlite';
+    $row_delete_finalize_target = $tmp . '/row-delete-finalize-target.sqlite';
+    $row_delete_finalize_metadata = $tmp . '/.forkpress/cow/merge/row-delete-finalize-metadata.sqlite';
+    copy($row_delete_execute_base, $row_delete_finalize_base);
+    copy($row_delete_execute_source, $row_delete_finalize_source);
+    copy($row_delete_execute_target, $row_delete_finalize_target);
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize'] = [
+        static function (SQLite3Result $result, string $message): void {
+            if ($message === 'failed to finalize delete from plugin_row_mutation_delete') {
+                throw new RuntimeException('forced row delete finalize failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_databases(
+            $row_delete_finalize_base,
+            $row_delete_finalize_source,
+            $row_delete_finalize_target,
+            $row_delete_finalize_metadata,
+            'feature-row-delete-finalize-rollback',
+            'main'
+        ),
+        'forced row delete finalize failure',
+        'source row delete finalization failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize']);
+    assert_same((int)scalar($row_delete_finalize_target, 'SELECT COUNT(*) FROM plugin_row_mutation_delete WHERE id = 1'), 1, 'failed source row delete finalization rolls back target rows');
+    assert_same((int)scalar($row_delete_finalize_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-row-delete-finalize-rollback' AND status = 'failed'"), 1, 'failed source row delete finalization leaves an auditable failed run');
+    assert_same((int)scalar($row_delete_finalize_metadata, 'SELECT COUNT(*) FROM merge_decisions'), 0, 'failed source row delete finalization records no decisions');
 
     $decision_execute_base = $tmp . '/decision-execute-base.sqlite';
     $decision_execute_source = $tmp . '/decision-execute-source.sqlite';
