@@ -56,6 +56,7 @@
 - Preserved rollback snapshot artifacts when mixed DB+filesystem rollback itself fails, and recorded DB/filesystem backup locations in the rollback-failure JSONL artifact.
 - Preserved per-file transaction artifacts when filesystem-phase rollback itself fails, keeping failed rollback backup paths inspectable through merge audit metadata.
 - Made filesystem merge audit metadata atomic across planning and file operations, so failed file merges do not leave partial conflict or decision rows.
+- Tightened filesystem merge metadata transaction boundaries so a failed metadata begin cannot leak file planning records outside the rollback scope.
 - Re-recorded filesystem rollback failures after mixed DB+filesystem outer rollback restores metadata, keeping rollback failures queryable through merge audit.
 - Added focused `forkpress branch merge-audit --records rollback-failures` inspection for failed rollback artifact records.
 - Added runtime-backed COW e2e coverage for the real `forkpress branch merge-audit --records rollback-failures` CLI route.

@@ -2874,6 +2874,48 @@ SQL);
     assert_same((int)scalar($rollback_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'source-applied'"), 0, 'filesystem decision metadata rolls back with failed file operations');
     assert_same((int)scalar($rollback_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__files__'"), 0, 'filesystem conflict metadata rolls back with failed file operations');
 
+    $fs_begin_base_root = $tmp . '/files-begin-rollback-base';
+    $fs_begin_source_root = $tmp . '/files-begin-rollback-source';
+    $fs_begin_target_root = $tmp . '/files-begin-rollback-target';
+    mkdir($fs_begin_base_root . '/wp-content/uploads', 0777, true);
+    write_test_file($fs_begin_base_root . '/wp-content/uploads/begin.txt', 'begin base');
+    copy_tree_for_test($fs_begin_base_root, $fs_begin_source_root);
+    copy_tree_for_test($fs_begin_base_root, $fs_begin_target_root);
+    write_test_file($fs_begin_source_root . '/wp-content/uploads/begin.txt', 'begin source');
+    $fs_begin_manifest = $tmp . '/.forkpress/cow/merge/file-bases/feature-files-begin-rollback.json';
+    cow_merge_capture_file_base($fs_begin_base_root, $fs_begin_manifest);
+    $fs_begin_metadata = $tmp . '/.forkpress/cow/merge/files-begin-rollback-metadata.sqlite';
+    $fs_begin_meta = open_db($fs_begin_metadata);
+    cow_merge_ensure_metadata($fs_begin_meta);
+    $fs_begin_run_id = cow_merge_start_run(
+        $fs_begin_meta,
+        'feature-files-begin-rollback',
+        'main',
+        $file_base_db,
+        $file_source_db,
+        $file_target_db
+    );
+    $fs_begin_meta->close();
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'BEGIN IMMEDIATE' && $message === 'failed to start filesystem merge metadata transaction') {
+                throw new RuntimeException('forced filesystem metadata begin failure');
+            }
+        },
+    ];
+    $fs_begin_failure_message = null;
+    try {
+        cow_merge_files($fs_begin_manifest, $fs_begin_source_root, $fs_begin_target_root, $fs_begin_metadata, $fs_begin_run_id);
+    } catch (Throwable $e) {
+        $fs_begin_failure_message = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($fs_begin_failure_message !== null && str_contains($fs_begin_failure_message, 'forced filesystem metadata begin failure'), 'filesystem metadata begin failure is surfaced to the caller');
+    assert_same(file_get_contents($fs_begin_target_root . '/wp-content/uploads/begin.txt'), 'begin base', 'filesystem metadata begin failure does not mutate target files');
+    assert_same((int)scalar($fs_begin_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__'"), 0, 'filesystem metadata begin failure records no file decisions');
+    assert_same((int)scalar($fs_begin_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__files__'"), 0, 'filesystem metadata begin failure records no file conflicts');
+
     $whole_base_db = $tmp . '/whole-rollback-base.sqlite';
     $whole_source_db = $tmp . '/whole-rollback-source.sqlite';
     $whole_target_db = $tmp . '/whole-rollback-target.sqlite';

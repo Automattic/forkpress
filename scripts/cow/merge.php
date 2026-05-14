@@ -4738,9 +4738,11 @@ function cow_merge_files(
     $operations = [];
     $applied = 0;
     $conflicts = 0;
+    $metadata_transaction_active = false;
 
     try {
-        $meta->exec('BEGIN IMMEDIATE');
+        cow_merge_exec_checked($meta, 'BEGIN IMMEDIATE', 'failed to start filesystem merge metadata transaction');
+        $metadata_transaction_active = true;
         foreach ($paths as $path) {
             $base = $base_entries[$path] ?? null;
             $source = $source_entries[$path] ?? null;
@@ -4852,7 +4854,10 @@ function cow_merge_files(
             }
         }
     } catch (Throwable $e) {
-        $meta->exec('ROLLBACK');
+        if ($metadata_transaction_active) {
+            @$meta->exec('ROLLBACK');
+            $metadata_transaction_active = false;
+        }
         $meta->close();
         throw $e;
     }
@@ -4923,12 +4928,14 @@ function cow_merge_files(
             );
             $applied++;
         }
-        if (!$meta->exec('COMMIT')) {
-            throw new RuntimeException('failed to commit filesystem merge metadata transaction: ' . $meta->lastErrorMsg());
-        }
+        cow_merge_exec_checked($meta, 'COMMIT', 'failed to commit filesystem merge metadata transaction');
+        $metadata_transaction_active = false;
         $file_tx_committed = true;
     } catch (Throwable $e) {
-        @$meta->exec('ROLLBACK');
+        if ($metadata_transaction_active) {
+            @$meta->exec('ROLLBACK');
+            $metadata_transaction_active = false;
+        }
         if (!$file_tx_committed) {
             try {
                 cow_merge_file_transaction_restore($file_tx, $target_root);
