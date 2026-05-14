@@ -1466,17 +1466,22 @@ function cow_merge_entry_where_identity(?array $entry, array $pk_cols): ?array {
 }
 
 function cow_merge_foreign_key_groups(SQLite3 $db, string $table): array {
-    $res = @$db->query('PRAGMA foreign_key_list(' . cow_merge_quote_ident($table) . ')');
-    if (!$res) {
-        return [];
-    }
+    $res = cow_merge_query_checked(
+        $db,
+        'PRAGMA foreign_key_list(' . cow_merge_quote_ident($table) . ')',
+        "failed to inspect foreign keys for $table"
+    );
     $groups = [];
-    while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
-        $id = (string)($row['id'] ?? '');
-        if ($id === '') {
-            continue;
+    try {
+        while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+            $id = (string)($row['id'] ?? '');
+            if ($id === '') {
+                continue;
+            }
+            $groups[$id][] = $row;
         }
-        $groups[$id][] = $row;
+    } finally {
+        cow_merge_result_finalize_checked($res, "failed to finalize foreign key inspection for $table");
     }
     foreach ($groups as &$group) {
         usort($group, fn($a, $b) => (int)($a['seq'] ?? 0) <=> (int)($b['seq'] ?? 0));
@@ -1539,18 +1544,18 @@ function cow_merge_row_exists_by_values(SQLite3 $db, string $table, array $colum
     foreach ($columns as $column) {
         $clauses[] = cow_merge_quote_ident($column) . ' = ?';
     }
-    $stmt = $db->prepare('SELECT 1 FROM ' . cow_merge_quote_ident($table) . ' WHERE ' . implode(' AND ', $clauses) . ' LIMIT 1');
-    if (!$stmt) {
-        throw new RuntimeException("failed to prepare row value lookup on $table: " . $db->lastErrorMsg());
-    }
+    $stmt = cow_merge_prepare_checked(
+        $db,
+        'SELECT 1 FROM ' . cow_merge_quote_ident($table) . ' WHERE ' . implode(' AND ', $clauses) . ' LIMIT 1',
+        "failed to prepare row value lookup on $table"
+    );
     foreach ($values as $i => $value) {
         cow_merge_bind($stmt, $i + 1, $value);
     }
-    $res = $stmt->execute();
-    if (!$res) {
-        throw new RuntimeException("failed to query row value lookup on $table: " . $db->lastErrorMsg());
-    }
-    return (bool)$res->fetchArray(SQLITE3_NUM);
+    $res = cow_merge_execute_checked($stmt, $db, "failed to query row value lookup on $table");
+    $exists = (bool)$res->fetchArray(SQLITE3_NUM);
+    cow_merge_result_finalize_checked($res, "failed to finalize row value lookup on $table");
+    return $exists;
 }
 
 function cow_merge_find_row_entry_by_values(array $rows, array $columns, array $values): ?array {
@@ -1675,15 +1680,23 @@ function cow_merge_foreign_key_error(SQLite3 $target, string $table, array $row)
         foreach ($parent_columns as $parent_column) {
             $clauses[] = cow_merge_quote_ident($parent_column) . ' = ?';
         }
-        $stmt = @$target->prepare('SELECT 1 FROM ' . cow_merge_quote_ident($parent_table) . ' WHERE ' . implode(' AND ', $clauses) . ' LIMIT 1');
+        $parent_lookup_sql = 'SELECT 1 FROM ' . cow_merge_quote_ident($parent_table) . ' WHERE ' . implode(' AND ', $clauses) . ' LIMIT 1';
+        cow_merge_test_hook('before_sqlite_prepare', $target, $parent_lookup_sql, "failed to prepare foreign key parent lookup on $parent_table");
+        $stmt = @$target->prepare($parent_lookup_sql);
         if (!$stmt) {
             return "FOREIGN KEY constraint failed on $table: parent table $parent_table could not be inspected";
         }
         foreach ($values as $i => $value) {
             cow_merge_bind($stmt, $i + 1, $value);
         }
+        cow_merge_test_hook('before_sqlite_statement_execute', $target, "failed to inspect foreign key parent lookup on $parent_table");
         $res = @$stmt->execute();
-        if (!$res || !$res->fetchArray(SQLITE3_NUM)) {
+        if (!$res) {
+            return "FOREIGN KEY constraint failed on $table: parent table $parent_table could not be inspected";
+        }
+        $parent_exists = (bool)$res->fetchArray(SQLITE3_NUM);
+        cow_merge_result_finalize_checked($res, "failed to finalize foreign key parent lookup on $parent_table");
+        if (!$parent_exists) {
             if ($parent_table === $table && cow_merge_row_satisfies_own_foreign_key($row, $from_columns, $parent_columns, $values)) {
                 continue;
             }
@@ -2303,18 +2316,23 @@ function cow_merge_foreign_key_delete_error(SQLite3 $target, string $table, arra
                 $clauses[] = 'NOT (' . $exclude . ')';
                 $values = array_merge($values, $exclude_values);
             }
-            $stmt = @$target->prepare('SELECT 1 FROM ' . cow_merge_quote_ident($child_table) . ' WHERE ' . implode(' AND ', $clauses) . ' LIMIT 1');
+            $child_lookup_sql = 'SELECT 1 FROM ' . cow_merge_quote_ident($child_table) . ' WHERE ' . implode(' AND ', $clauses) . ' LIMIT 1';
+            cow_merge_test_hook('before_sqlite_prepare', $target, $child_lookup_sql, "failed to prepare foreign key child lookup on $child_table");
+            $stmt = @$target->prepare($child_lookup_sql);
             if (!$stmt) {
                 return "FOREIGN KEY constraint failed on $table delete: child table $child_table could not be inspected";
             }
             foreach ($values as $i => $value) {
                 cow_merge_bind($stmt, $i + 1, $value);
             }
+            cow_merge_test_hook('before_sqlite_statement_execute', $target, "failed to inspect foreign key child lookup on $child_table");
             $res = @$stmt->execute();
             if (!$res) {
                 return "FOREIGN KEY constraint failed on $table delete: child table $child_table could not be inspected";
             }
-            if ($res->fetchArray(SQLITE3_NUM)) {
+            $child_exists = (bool)$res->fetchArray(SQLITE3_NUM);
+            cow_merge_result_finalize_checked($res, "failed to finalize foreign key child lookup on $child_table");
+            if ($child_exists) {
                 return 'FOREIGN KEY constraint failed on ' . $table . ' delete: referenced by ' . $child_table . '(' . implode(', ', $from_columns) . ')';
             }
         }
@@ -2597,30 +2615,35 @@ function cow_merge_row_matches_partial_index_where(SQLite3 $db, array $row, stri
 function cow_merge_unique_index_terms(SQLite3 $db, string $name): ?array {
     $sql = cow_merge_index_sql($db, $name);
     $sql_terms = is_string($sql) ? cow_merge_index_sql_terms($sql) : null;
-    $info = $db->query("PRAGMA index_xinfo('" . SQLite3::escapeString($name) . "')");
-    if (!$info) {
-        return null;
-    }
+    $info = cow_merge_query_checked(
+        $db,
+        "PRAGMA index_xinfo('" . SQLite3::escapeString($name) . "')",
+        "failed to inspect unique index terms for $name"
+    );
     $terms = [];
-    while ($column = $info->fetchArray(SQLITE3_ASSOC)) {
-        if ((int)($column['key'] ?? 1) !== 1) {
-            continue;
+    try {
+        while ($column = $info->fetchArray(SQLITE3_ASSOC)) {
+            if ((int)($column['key'] ?? 1) !== 1) {
+                continue;
+            }
+            $seqno = (int)($column['seqno'] ?? count($terms));
+            $cid = (int)($column['cid'] ?? -1);
+            $column_name = $column['name'] ?? null;
+            $collation = is_string($column['coll'] ?? null) && (string)$column['coll'] !== ''
+                ? (string)$column['coll']
+                : 'BINARY';
+            if ($cid >= 0 && is_string($column_name) && $column_name !== '') {
+                $terms[$seqno] = ['type' => 'column', 'name' => $column_name, 'collation' => $collation];
+                continue;
+            }
+            if ($cid === -2 && is_array($sql_terms) && isset($sql_terms[$seqno])) {
+                $terms[$seqno] = ['type' => 'expression', 'sql' => $sql_terms[$seqno], 'collation' => $collation];
+                continue;
+            }
+            return null;
         }
-        $seqno = (int)($column['seqno'] ?? count($terms));
-        $cid = (int)($column['cid'] ?? -1);
-        $column_name = $column['name'] ?? null;
-        $collation = is_string($column['coll'] ?? null) && (string)$column['coll'] !== ''
-            ? (string)$column['coll']
-            : 'BINARY';
-        if ($cid >= 0 && is_string($column_name) && $column_name !== '') {
-            $terms[$seqno] = ['type' => 'column', 'name' => $column_name, 'collation' => $collation];
-            continue;
-        }
-        if ($cid === -2 && is_array($sql_terms) && isset($sql_terms[$seqno])) {
-            $terms[$seqno] = ['type' => 'expression', 'sql' => $sql_terms[$seqno], 'collation' => $collation];
-            continue;
-        }
-        return null;
+    } finally {
+        cow_merge_result_finalize_checked($info, "failed to finalize unique index term inspection for $name");
     }
     if (!$terms) {
         return null;
@@ -2631,30 +2654,35 @@ function cow_merge_unique_index_terms(SQLite3 $db, string $name): ?array {
 
 function cow_merge_unique_indexes(SQLite3 $db, string $table): array {
     $indexes = [];
-    $res = $db->query('PRAGMA index_list(' . cow_merge_quote_ident($table) . ')');
-    if (!$res) {
-        return [];
-    }
-    while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
-        if ((int)($row['unique'] ?? 0) !== 1) {
-            continue;
-        }
-        $name = (string)($row['name'] ?? '');
-        if ($name === '') {
-            continue;
-        }
-        $where = null;
-        if ((int)($row['partial'] ?? 0) === 1) {
-            $sql = cow_merge_index_sql($db, $name);
-            $where = is_string($sql) ? cow_merge_partial_index_where($sql) : null;
-            if ($where === null) {
+    $res = cow_merge_query_checked(
+        $db,
+        'PRAGMA index_list(' . cow_merge_quote_ident($table) . ')',
+        "failed to inspect unique indexes for $table"
+    );
+    try {
+        while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+            if ((int)($row['unique'] ?? 0) !== 1) {
                 continue;
             }
+            $name = (string)($row['name'] ?? '');
+            if ($name === '') {
+                continue;
+            }
+            $where = null;
+            if ((int)($row['partial'] ?? 0) === 1) {
+                $sql = cow_merge_index_sql($db, $name);
+                $where = is_string($sql) ? cow_merge_partial_index_where($sql) : null;
+                if ($where === null) {
+                    continue;
+                }
+            }
+            $terms = cow_merge_unique_index_terms($db, $name);
+            if (is_array($terms)) {
+                $indexes[] = ['name' => $name, 'terms' => $terms, 'where' => $where];
+            }
         }
-        $terms = cow_merge_unique_index_terms($db, $name);
-        if (is_array($terms)) {
-            $indexes[] = ['name' => $name, 'terms' => $terms, 'where' => $where];
-        }
+    } finally {
+        cow_merge_result_finalize_checked($res, "failed to finalize unique index inspection for $table");
     }
     return $indexes;
 }
@@ -2732,18 +2760,17 @@ function cow_merge_find_unique_collision(
         }
 
         $select = $needs_rowid ? 'rowid AS __forkpress_merge_rowid, *' : '*';
-        $stmt = $target->prepare('SELECT ' . $select . ' FROM ' . cow_merge_quote_ident($table) . ' WHERE ' . implode(' AND ', $clauses) . ' LIMIT 1');
-        if (!$stmt) {
-            throw new RuntimeException("failed to prepare unique collision lookup on $table: " . $target->lastErrorMsg());
-        }
+        $stmt = cow_merge_prepare_checked(
+            $target,
+            'SELECT ' . $select . ' FROM ' . cow_merge_quote_ident($table) . ' WHERE ' . implode(' AND ', $clauses) . ' LIMIT 1',
+            "failed to prepare unique collision lookup on $table"
+        );
         foreach ($values as $i => $value) {
             cow_merge_bind($stmt, $i + 1, $value);
         }
-        $res = $stmt->execute();
-        if (!$res) {
-            throw new RuntimeException("failed to query unique collision lookup on $table: " . $target->lastErrorMsg());
-        }
+        $res = cow_merge_execute_checked($stmt, $target, "failed to query unique collision lookup on $table");
         $row = $res->fetchArray(SQLITE3_ASSOC);
+        cow_merge_result_finalize_checked($res, "failed to finalize unique collision lookup on $table");
         if ($row) {
             $rowid = $row['__forkpress_merge_rowid'] ?? null;
             unset($row['__forkpress_merge_rowid']);

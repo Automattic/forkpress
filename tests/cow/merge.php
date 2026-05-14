@@ -331,6 +331,152 @@ try {
     assert_same((int)scalar($row_load_finalize_metadata, 'SELECT COUNT(*) FROM merge_decisions'), 0, 'row load finalize failure records no decisions');
     assert_same((int)scalar($row_load_finalize_metadata, 'SELECT COUNT(*) FROM merge_conflicts'), 0, 'row load finalize failure records no conflicts');
 
+    $unique_read_base = $tmp . '/unique-read-base.sqlite';
+    $unique_read_source = $tmp . '/unique-read-source.sqlite';
+    $unique_read_target = $tmp . '/unique-read-target.sqlite';
+    $unique_read_metadata = $tmp . '/.forkpress/cow/merge/unique-read-metadata.sqlite';
+    create_base_db($unique_read_base);
+    copy($unique_read_base, $unique_read_source);
+    copy($unique_read_base, $unique_read_target);
+    foreach ([$unique_read_base, $unique_read_source, $unique_read_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_unique_read (id INTEGER PRIMARY KEY, slug TEXT, value TEXT)');
+        $db->exec('CREATE UNIQUE INDEX plugin_unique_read_slug ON plugin_unique_read(slug)');
+        $db->close();
+    }
+    $db = open_db($unique_read_source);
+    $db->exec("INSERT INTO plugin_unique_read (id, slug, value) VALUES (10, 'unique-read', 'source row')");
+    $db->close();
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_query'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($message === 'failed to inspect unique indexes for plugin_unique_read') {
+                throw new RuntimeException('forced unique index inspection failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_databases(
+            $unique_read_base,
+            $unique_read_source,
+            $unique_read_target,
+            $unique_read_metadata,
+            'feature-unique-read-rollback',
+            'main'
+        ),
+        'forced unique index inspection failure',
+        'unique-index inspection failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_query']);
+    assert_same((int)scalar($unique_read_target, 'SELECT COUNT(*) FROM plugin_unique_read'), 0, 'unique-index inspection failure leaves target rows unchanged');
+    assert_same((int)scalar($unique_read_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-unique-read-rollback' AND status = 'failed'"), 1, 'unique-index inspection failure leaves an auditable failed run');
+    assert_same((int)scalar($unique_read_metadata, 'SELECT COUNT(*) FROM merge_decisions'), 0, 'unique-index inspection failure records no decisions');
+    assert_same((int)scalar($unique_read_metadata, 'SELECT COUNT(*) FROM merge_conflicts'), 0, 'unique-index inspection failure records no conflicts');
+
+    $unique_finalize_base = $tmp . '/unique-finalize-base.sqlite';
+    $unique_finalize_source = $tmp . '/unique-finalize-source.sqlite';
+    $unique_finalize_target = $tmp . '/unique-finalize-target.sqlite';
+    $unique_finalize_metadata = $tmp . '/.forkpress/cow/merge/unique-finalize-metadata.sqlite';
+    copy($unique_read_base, $unique_finalize_base);
+    copy($unique_read_source, $unique_finalize_source);
+    copy($unique_read_target, $unique_finalize_target);
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize'] = [
+        static function (SQLite3Result $result, string $message): void {
+            if ($message === 'failed to finalize unique index term inspection for plugin_unique_read_slug') {
+                throw new RuntimeException('forced unique index term finalize failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_databases(
+            $unique_finalize_base,
+            $unique_finalize_source,
+            $unique_finalize_target,
+            $unique_finalize_metadata,
+            'feature-unique-finalize-rollback',
+            'main'
+        ),
+        'forced unique index term finalize failure',
+        'unique-index term finalization failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize']);
+    assert_same((int)scalar($unique_finalize_target, 'SELECT COUNT(*) FROM plugin_unique_read'), 0, 'unique-index term finalization failure leaves target rows unchanged');
+    assert_same((int)scalar($unique_finalize_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-unique-finalize-rollback' AND status = 'failed'"), 1, 'unique-index term finalization failure leaves an auditable failed run');
+    assert_same((int)scalar($unique_finalize_metadata, 'SELECT COUNT(*) FROM merge_decisions'), 0, 'unique-index term finalization failure records no decisions');
+    assert_same((int)scalar($unique_finalize_metadata, 'SELECT COUNT(*) FROM merge_conflicts'), 0, 'unique-index term finalization failure records no conflicts');
+
+    $fk_read_base = $tmp . '/fk-read-base.sqlite';
+    $fk_read_source = $tmp . '/fk-read-source.sqlite';
+    $fk_read_target = $tmp . '/fk-read-target.sqlite';
+    $fk_read_metadata = $tmp . '/.forkpress/cow/merge/fk-read-metadata.sqlite';
+    create_base_db($fk_read_base);
+    copy($fk_read_base, $fk_read_source);
+    copy($fk_read_base, $fk_read_target);
+    foreach ([$fk_read_base, $fk_read_source, $fk_read_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_fk_read_parents (id INTEGER PRIMARY KEY, label TEXT)');
+        $db->exec('CREATE TABLE plugin_fk_read_children (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES plugin_fk_read_parents(id), label TEXT)');
+        $db->close();
+    }
+    $db = open_db($fk_read_source);
+    $db->exec("INSERT INTO plugin_fk_read_children (id, parent_id, label) VALUES (20, 999, 'orphan source child')");
+    $db->close();
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_query'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($message === 'failed to inspect foreign keys for plugin_fk_read_children') {
+                throw new RuntimeException('forced foreign key inspection failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_databases(
+            $fk_read_base,
+            $fk_read_source,
+            $fk_read_target,
+            $fk_read_metadata,
+            'feature-fk-read-rollback',
+            'main'
+        ),
+        'forced foreign key inspection failure',
+        'foreign-key inspection failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_query']);
+    assert_same((int)scalar($fk_read_target, 'SELECT COUNT(*) FROM plugin_fk_read_children'), 0, 'foreign-key inspection failure leaves target rows unchanged');
+    assert_same((int)scalar($fk_read_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-fk-read-rollback' AND status = 'failed'"), 1, 'foreign-key inspection failure leaves an auditable failed run');
+    assert_same((int)scalar($fk_read_metadata, 'SELECT COUNT(*) FROM merge_decisions'), 0, 'foreign-key inspection failure records no decisions');
+    assert_same((int)scalar($fk_read_metadata, 'SELECT COUNT(*) FROM merge_conflicts'), 0, 'foreign-key inspection failure records no conflicts');
+
+    $fk_finalize_base = $tmp . '/fk-finalize-base.sqlite';
+    $fk_finalize_source = $tmp . '/fk-finalize-source.sqlite';
+    $fk_finalize_target = $tmp . '/fk-finalize-target.sqlite';
+    $fk_finalize_metadata = $tmp . '/.forkpress/cow/merge/fk-finalize-metadata.sqlite';
+    copy($fk_read_base, $fk_finalize_base);
+    copy($fk_read_source, $fk_finalize_source);
+    copy($fk_read_target, $fk_finalize_target);
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize'] = [
+        static function (SQLite3Result $result, string $message): void {
+            if ($message === 'failed to finalize foreign key parent lookup on plugin_fk_read_parents') {
+                throw new RuntimeException('forced foreign key parent finalize failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_databases(
+            $fk_finalize_base,
+            $fk_finalize_source,
+            $fk_finalize_target,
+            $fk_finalize_metadata,
+            'feature-fk-finalize-rollback',
+            'main'
+        ),
+        'forced foreign key parent finalize failure',
+        'foreign-key parent lookup finalization failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize']);
+    assert_same((int)scalar($fk_finalize_target, 'SELECT COUNT(*) FROM plugin_fk_read_children'), 0, 'foreign-key parent finalization failure leaves target rows unchanged');
+    assert_same((int)scalar($fk_finalize_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-fk-finalize-rollback' AND status = 'failed'"), 1, 'foreign-key parent finalization failure leaves an auditable failed run');
+    assert_same((int)scalar($fk_finalize_metadata, 'SELECT COUNT(*) FROM merge_decisions'), 0, 'foreign-key parent finalization failure records no decisions');
+    assert_same((int)scalar($fk_finalize_metadata, 'SELECT COUNT(*) FROM merge_conflicts'), 0, 'foreign-key parent finalization failure records no conflicts');
+
     $decision_execute_base = $tmp . '/decision-execute-base.sqlite';
     $decision_execute_source = $tmp . '/decision-execute-source.sqlite';
     $decision_execute_target = $tmp . '/decision-execute-target.sqlite';
