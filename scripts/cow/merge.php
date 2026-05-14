@@ -3387,10 +3387,12 @@ function cow_merge_record_rollback_failure_artifact(
     try {
         $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READWRITE | SQLITE3_OPEN_CREATE);
         cow_merge_ensure_metadata($meta);
-        $stmt = $meta->prepare(
+        $stmt = cow_merge_prepare_checked(
+            $meta,
             'INSERT INTO merge_rollback_failures ' .
             '(run_id, source_branch, target_branch, base_db, source_db, target_db, original_failure, rollback_failure, artifact_path) ' .
-            'VALUES (:run_id, :source_branch, :target_branch, :base_db, :source_db, :target_db, :original_failure, :rollback_failure, :artifact_path)'
+            'VALUES (:run_id, :source_branch, :target_branch, :base_db, :source_db, :target_db, :original_failure, :rollback_failure, :artifact_path)',
+            'failed to prepare rollback failure insert'
         );
         cow_merge_bind($stmt, ':run_id', $run_id);
         cow_merge_bind($stmt, ':source_branch', $source_branch);
@@ -3401,7 +3403,7 @@ function cow_merge_record_rollback_failure_artifact(
         cow_merge_bind($stmt, ':original_failure', $original_failure);
         cow_merge_bind($stmt, ':rollback_failure', $rollback_failure);
         cow_merge_bind($stmt, ':artifact_path', $artifact_written ? $artifact_path : null);
-        if (!$stmt->execute()) {
+        if (!@$stmt->execute()) {
             throw new RuntimeException('failed to record rollback failure: ' . $meta->lastErrorMsg());
         }
         $meta->close();
@@ -3449,9 +3451,11 @@ function cow_merge_start_run(
     string $source_db,
     string $target_db
 ): int {
-    $stmt = $meta->prepare(
+    $stmt = cow_merge_prepare_checked(
+        $meta,
         'INSERT INTO merge_runs (source_branch, target_branch, base_ref, status, policy, source_db, target_db, base_db) ' .
-        'VALUES (:source_branch, :target_branch, :base_ref, :status, :policy, :source_db, :target_db, :base_db)'
+        'VALUES (:source_branch, :target_branch, :base_ref, :status, :policy, :source_db, :target_db, :base_db)',
+        'failed to prepare merge run insert'
     );
     cow_merge_bind($stmt, ':source_branch', $source_branch);
     cow_merge_bind($stmt, ':target_branch', $target_branch);
@@ -3472,9 +3476,11 @@ function cow_merge_start_identity_capture_run(
     string $branch,
     string $db
 ): int {
-    $stmt = $meta->prepare(
+    $stmt = cow_merge_prepare_checked(
+        $meta,
         'INSERT INTO merge_runs (source_branch, target_branch, base_ref, status, policy, source_db, target_db, base_db) ' .
-        'VALUES (:source_branch, :target_branch, :base_ref, :status, :policy, :source_db, :target_db, :base_db)'
+        'VALUES (:source_branch, :target_branch, :base_ref, :status, :policy, :source_db, :target_db, :base_db)',
+        'failed to prepare row identity capture run insert'
     );
     cow_merge_bind($stmt, ':source_branch', $branch);
     cow_merge_bind($stmt, ':target_branch', $branch);
@@ -3491,8 +3497,10 @@ function cow_merge_start_identity_capture_run(
 }
 
 function cow_merge_run_context(SQLite3 $meta, int $run_id): array {
-    $stmt = $meta->prepare(
-        'SELECT source_branch, target_branch, base_db, source_db, target_db FROM merge_runs WHERE id = :id'
+    $stmt = cow_merge_prepare_checked(
+        $meta,
+        'SELECT source_branch, target_branch, base_db, source_db, target_db FROM merge_runs WHERE id = :id',
+        'failed to prepare merge run context lookup'
     );
     cow_merge_bind($stmt, ':id', $run_id);
     $result = $stmt->execute();
@@ -3520,9 +3528,11 @@ function cow_merge_start_id_band_run(
     string $branch,
     string $db
 ): int {
-    $stmt = $meta->prepare(
+    $stmt = cow_merge_prepare_checked(
+        $meta,
         'INSERT INTO merge_runs (source_branch, target_branch, base_ref, status, policy, source_db, target_db, base_db) ' .
-        'VALUES (:source_branch, :target_branch, :base_ref, :status, :policy, :source_db, :target_db, :base_db)'
+        'VALUES (:source_branch, :target_branch, :base_ref, :status, :policy, :source_db, :target_db, :base_db)',
+        'failed to prepare AUTOINCREMENT band allocation run insert'
     );
     cow_merge_bind($stmt, ':source_branch', $branch);
     cow_merge_bind($stmt, ':target_branch', $branch);
@@ -3543,9 +3553,11 @@ function cow_merge_start_runtime_identity_run(
     string $branch,
     string $db
 ): int {
-    $stmt = $meta->prepare(
+    $stmt = cow_merge_prepare_checked(
+        $meta,
         'INSERT INTO merge_runs (source_branch, target_branch, base_ref, status, policy, source_db, target_db, base_db) ' .
-        'VALUES (:source_branch, :target_branch, :base_ref, :status, :policy, :source_db, :target_db, :base_db)'
+        'VALUES (:source_branch, :target_branch, :base_ref, :status, :policy, :source_db, :target_db, :base_db)',
+        'failed to prepare runtime row identity tracking run insert'
     );
     cow_merge_bind($stmt, ':source_branch', $branch);
     cow_merge_bind($stmt, ':target_branch', $branch);
@@ -3565,8 +3577,10 @@ function cow_merge_finish_run(SQLite3 $meta, int $run_id, string $status, ?strin
     if ($status !== 'failed') {
         $failure_reason = null;
     }
-    $stmt = $meta->prepare(
-        'UPDATE merge_runs SET status = :status, finished_at = CURRENT_TIMESTAMP, failure_reason = :failure_reason WHERE id = :id'
+    $stmt = cow_merge_prepare_checked(
+        $meta,
+        'UPDATE merge_runs SET status = :status, finished_at = CURRENT_TIMESTAMP, failure_reason = :failure_reason WHERE id = :id',
+        'failed to prepare merge run status update'
     );
     cow_merge_bind($stmt, ':status', $status);
     cow_merge_bind($stmt, ':failure_reason', $failure_reason);
@@ -4164,10 +4178,12 @@ function cow_merge_record_decision(
     mixed $target,
     mixed $chosen
 ): void {
-    $stmt = $meta->prepare(
+    $stmt = cow_merge_prepare_checked(
+        $meta,
         'INSERT INTO merge_decisions ' .
         '(run_id, table_name, row_identity, column_name, decision, reason, base_payload, source_payload, target_payload, chosen_payload) ' .
-        'VALUES (:run_id, :table_name, :row_identity, :column_name, :decision, :reason, :base_payload, :source_payload, :target_payload, :chosen_payload)'
+        'VALUES (:run_id, :table_name, :row_identity, :column_name, :decision, :reason, :base_payload, :source_payload, :target_payload, :chosen_payload)',
+        'failed to prepare merge decision insert'
     );
     cow_merge_bind($stmt, ':run_id', $run_id);
     cow_merge_bind($stmt, ':table_name', $table);
@@ -4185,12 +4201,11 @@ function cow_merge_record_decision(
 }
 
 function cow_merge_latest_applied_resolution_choice(SQLite3 $meta, int $conflict_id): ?string {
-    $stmt = $meta->prepare(
-        'SELECT choice FROM merge_resolutions WHERE conflict_id = :conflict_id AND applied = 1 ORDER BY id DESC LIMIT 1'
+    $stmt = cow_merge_prepare_checked(
+        $meta,
+        'SELECT choice FROM merge_resolutions WHERE conflict_id = :conflict_id AND applied = 1 ORDER BY id DESC LIMIT 1',
+        'failed to prepare latest resolution lookup'
     );
-    if (!$stmt) {
-        throw new RuntimeException('failed to prepare latest resolution lookup: ' . $meta->lastErrorMsg());
-    }
     cow_merge_bind($stmt, ':conflict_id', $conflict_id);
     $res = $stmt->execute();
     if (!$res) {
@@ -4223,7 +4238,8 @@ function cow_merge_record_conflict(
     $source_hash = hash('sha256', $source_payload);
     $target_hash = hash('sha256', $target_payload);
     $chosen_hash = hash('sha256', $chosen_payload);
-    $existing = $meta->prepare(
+    $existing = cow_merge_prepare_checked(
+        $meta,
         'SELECT c.id FROM merge_conflicts c ' .
         'JOIN merge_runs existing_run ON existing_run.id = c.run_id ' .
         'JOIN merge_runs current_run ON current_run.id = :run_id ' .
@@ -4234,11 +4250,9 @@ function cow_merge_record_conflict(
         'AND ((c.column_name = :column_name) OR (c.column_name IS NULL AND :column_name IS NULL)) ' .
         'AND c.conflict_type = :conflict_type ' .
         'AND c.base_hash = :base_hash AND c.source_hash = :source_hash AND c.target_hash = :target_hash AND c.chosen_hash = :chosen_hash ' .
-        'LIMIT 1'
+        'LIMIT 1',
+        'failed to prepare merge conflict lookup'
     );
-    if (!$existing) {
-        throw new RuntimeException('failed to prepare merge conflict lookup: ' . $meta->lastErrorMsg());
-    }
     cow_merge_bind($existing, ':run_id', $run_id);
     cow_merge_bind($existing, ':table_name', $table);
     cow_merge_bind($existing, ':row_identity', $identity);
@@ -4257,12 +4271,14 @@ function cow_merge_record_conflict(
         return cow_merge_latest_applied_resolution_choice($meta, (int)$existing_row['id']) !== 'target';
     }
 
-    $stmt = $meta->prepare(
+    $stmt = cow_merge_prepare_checked(
+        $meta,
         'INSERT OR IGNORE INTO merge_conflicts ' .
         '(run_id, table_name, row_identity, column_name, conflict_type, base_payload, source_payload, target_payload, chosen_payload, ' .
         'base_hash, source_hash, target_hash, chosen_hash, resolver, resolved_at) ' .
         'VALUES (:run_id, :table_name, :row_identity, :column_name, :conflict_type, :base_payload, :source_payload, :target_payload, :chosen_payload, ' .
-        ':base_hash, :source_hash, :target_hash, :chosen_hash, :resolver, CURRENT_TIMESTAMP)'
+        ':base_hash, :source_hash, :target_hash, :chosen_hash, :resolver, CURRENT_TIMESTAMP)',
+        'failed to prepare merge conflict insert'
     );
     cow_merge_bind($stmt, ':run_id', $run_id);
     cow_merge_bind($stmt, ':table_name', $table);
@@ -5240,10 +5256,7 @@ function cow_merge_review_record(
             'resolution' => 'merge_resolutions',
             default => throw new InvalidArgumentException('--record must be conflict, decision, or resolution'),
         };
-        $stmt = $meta->prepare("SELECT id FROM $table WHERE id = :id");
-        if (!$stmt) {
-            throw new RuntimeException("failed to prepare $record_type lookup: " . $meta->lastErrorMsg());
-        }
+        $stmt = cow_merge_prepare_checked($meta, "SELECT id FROM $table WHERE id = :id", "failed to prepare $record_type lookup");
         cow_merge_bind($stmt, ':id', $record_id);
         $res = $stmt->execute();
         if (!$res || !$res->fetchArray(SQLITE3_ASSOC)) {
@@ -5280,13 +5293,12 @@ function cow_merge_insert_review_note(
     string $note,
     string $reviewer
 ): int {
-    $stmt = $meta->prepare(
+    $stmt = cow_merge_prepare_checked(
+        $meta,
         'INSERT INTO merge_review_notes (record_type, record_id, status, note, reviewer) ' .
-        'VALUES (:record_type, :record_id, :status, :note, :reviewer)'
+        'VALUES (:record_type, :record_id, :status, :note, :reviewer)',
+        'failed to prepare review note insert'
     );
-    if (!$stmt) {
-        throw new RuntimeException('failed to prepare review note insert: ' . $meta->lastErrorMsg());
-    }
     cow_merge_bind($stmt, ':record_type', $record_type);
     cow_merge_bind($stmt, ':record_id', $record_id);
     cow_merge_bind($stmt, ':status', $status);
@@ -5476,14 +5488,13 @@ function cow_merge_record_resolution(
     mixed $previous,
     mixed $resolved
 ): int {
-    $stmt = $meta->prepare(
+    $stmt = cow_merge_prepare_checked(
+        $meta,
         'INSERT INTO merge_resolutions ' .
         '(conflict_id, choice, applied, status, note, reviewer, target_db, table_name, row_identity, column_name, previous_payload, resolved_payload) ' .
-        'VALUES (:conflict_id, :choice, :applied, :status, :note, :reviewer, :target_db, :table_name, :row_identity, :column_name, :previous_payload, :resolved_payload)'
+        'VALUES (:conflict_id, :choice, :applied, :status, :note, :reviewer, :target_db, :table_name, :row_identity, :column_name, :previous_payload, :resolved_payload)',
+        'failed to prepare resolution record insert'
     );
-    if (!$stmt) {
-        throw new RuntimeException('failed to prepare resolution record insert: ' . $meta->lastErrorMsg());
-    }
     cow_merge_bind($stmt, ':conflict_id', $conflict_id);
     cow_merge_bind($stmt, ':choice', $choice);
     cow_merge_bind($stmt, ':applied', $apply ? 1 : 0);
@@ -5507,6 +5518,15 @@ function cow_merge_exec_checked(SQLite3 $db, string $sql, string $message): void
     if (!@$db->exec($sql)) {
         throw new RuntimeException($message . ': ' . $db->lastErrorMsg());
     }
+}
+
+function cow_merge_prepare_checked(SQLite3 $db, string $sql, string $message): SQLite3Stmt {
+    cow_merge_test_hook('before_sqlite_prepare', $db, $sql, $message);
+    $stmt = @$db->prepare($sql);
+    if (!$stmt) {
+        throw new RuntimeException($message . ': ' . $db->lastErrorMsg());
+    }
+    return $stmt;
 }
 
 function cow_merge_query_checked(SQLite3 $db, string $sql, string $message): SQLite3Result {

@@ -2633,6 +2633,24 @@ SQL);
     assert_true($metadata_open_recovered_run > 0, 'metadata failed-run recording succeeds after open failure is cleared');
     assert_same((int)scalar($metadata_open_failure, 'SELECT COUNT(*) FROM merge_runs WHERE status = "failed"'), 1, 'metadata open recovery records one failed run');
 
+    $metadata_prepare_failure = $tmp . '/metadata-prepare-failure.sqlite';
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_prepare'] = [
+        function (SQLite3 $db, string $sql, string $message): void {
+            if ($message === 'failed to prepare merge run insert') {
+                throw new RuntimeException('forced metadata run prepare failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_record_failed_run($metadata_prepare_failure, 'feature-prepare', 'trunk', 'base.sqlite', 'source.sqlite', 'target.sqlite', 'forced failure'),
+        'forced metadata run prepare failure',
+        'metadata prepare failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_prepare']);
+    assert_same((int)scalar($metadata_prepare_failure, 'SELECT COUNT(*) FROM merge_runs'), 0, 'metadata prepare failure rolls back the failed-run marker');
+    $metadata_prepare_recovered_run = cow_merge_record_failed_run($metadata_prepare_failure, 'feature-prepare', 'trunk', 'base.sqlite', 'source.sqlite', 'target.sqlite', 'forced failure');
+    assert_true($metadata_prepare_recovered_run > 0, 'metadata failed-run recording succeeds after prepare failure is cleared');
+
     $metadata_journal_failure = $tmp . '/metadata-journal-failure.sqlite';
     $metadata_journal_failure_db = open_db($metadata_journal_failure);
     $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
@@ -4204,6 +4222,40 @@ SQL);
         (int)scalar($rollback_artifact_insert_failure_metadata, "SELECT COUNT(*) FROM merge_rollback_failures WHERE source_branch = 'feature-rollback-artifact-insert-failure'"),
         0,
         'metadata-insert-failed rollback artifact does not leave a partial rollback-failure audit row'
+    );
+
+    $rollback_artifact_prepare_failure_metadata = $tmp . '/.forkpress/cow/merge/rollback-artifact-prepare-failure/metadata.sqlite';
+    mkdir(dirname($rollback_artifact_prepare_failure_metadata), 0777, true);
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_prepare'] = [
+        function (SQLite3 $db, string $sql, string $message): void {
+            if ($message === 'failed to prepare rollback failure insert') {
+                throw new RuntimeException('forced rollback failure metadata prepare failure');
+            }
+        },
+    ];
+    $artifact_prepare_failure_path = cow_merge_record_rollback_failure_artifact(
+        $rollback_artifact_prepare_failure_metadata,
+        127,
+        'feature-rollback-artifact-prepare-failure',
+        'main',
+        '/tmp/base.sqlite',
+        '/tmp/source.sqlite',
+        '/tmp/target.sqlite',
+        'metadata prepare original failure',
+        'metadata prepare rollback failure',
+        ['target_db_snapshot' => ['path' => '/tmp/target.sqlite', 'backup_exists' => true]]
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_prepare']);
+    assert_true(is_string($artifact_prepare_failure_path) && is_file($artifact_prepare_failure_path), 'rollback failure still records a JSONL artifact when metadata prepare fails');
+    $artifact_prepare_failure_lines = file($artifact_prepare_failure_path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    assert_true(is_array($artifact_prepare_failure_lines) && count($artifact_prepare_failure_lines) === 1, 'metadata-prepare-failed rollback failure writes one JSONL artifact record');
+    $artifact_prepare_failure_record = json_decode($artifact_prepare_failure_lines[0], true);
+    assert_same($artifact_prepare_failure_record['source_branch'], 'feature-rollback-artifact-prepare-failure', 'metadata-prepare-failed rollback artifact preserves source branch');
+    assert_same($artifact_prepare_failure_record['rollback_failure'], 'metadata prepare rollback failure', 'metadata-prepare-failed rollback artifact preserves rollback reason');
+    assert_same(
+        (int)scalar($rollback_artifact_prepare_failure_metadata, "SELECT COUNT(*) FROM merge_rollback_failures WHERE source_branch = 'feature-rollback-artifact-prepare-failure'"),
+        0,
+        'metadata-prepare-failed rollback artifact does not leave a partial rollback-failure audit row'
     );
 
     $rollback_artifact_only_dir = $tmp . '/.forkpress/cow/merge/rollback-artifact-only';
