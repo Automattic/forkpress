@@ -2891,9 +2891,11 @@ function cow_merge_try_delete_row_with_source_deleted_children(
         return cow_merge_try_delete_row($target, $table, $identity, $pk_cols);
     }
 
-    if (!$target->exec('SAVEPOINT cow_merge_source_deleted_fk_children')) {
-        throw new RuntimeException("failed to create foreign-key delete savepoint for $table: " . $target->lastErrorMsg());
-    }
+    cow_merge_exec_checked(
+        $target,
+        'SAVEPOINT cow_merge_source_deleted_fk_children',
+        "failed to create foreign-key delete savepoint for $table"
+    );
     $keyless_deletes = [];
     $keyless_updates = [];
     $keyless_materializations = [];
@@ -2924,7 +2926,15 @@ function cow_merge_try_delete_row_with_source_deleted_children(
                     );
                 }
                 if (!($insert_result['ok'] ?? false)) {
-                    throw new RuntimeException((string)($insert_result['error'] ?? 'SQLite constraint failed'));
+                    $cleanup_failure = cow_merge_rollback_release_savepoint_checked(
+                        $target,
+                        'cow_merge_source_deleted_fk_children',
+                        'foreign-key dependent rewrite'
+                    );
+                    if ($cleanup_failure !== null) {
+                        throw $cleanup_failure;
+                    }
+                    return ['ok' => false, 'error' => (string)($insert_result['error'] ?? 'SQLite constraint failed')];
                 }
                 if (!$materialization['pk_cols']) {
                     $keyless_materializations[] = [
@@ -2947,7 +2957,15 @@ function cow_merge_try_delete_row_with_source_deleted_children(
                     $delete['pk_cols']
                 );
                 if (!($delete_result['ok'] ?? false)) {
-                    throw new RuntimeException((string)($delete_result['error'] ?? 'SQLite constraint failed'));
+                    $cleanup_failure = cow_merge_rollback_release_savepoint_checked(
+                        $target,
+                        'cow_merge_source_deleted_fk_children',
+                        'foreign-key dependent rewrite'
+                    );
+                    if ($cleanup_failure !== null) {
+                        throw $cleanup_failure;
+                    }
+                    return ['ok' => false, 'error' => (string)($delete_result['error'] ?? 'SQLite constraint failed')];
                 }
                 if (!$delete['pk_cols'] && isset($delete['rowid'])) {
                     $keyless_deletes[] = [$delete['table'], (int)$delete['rowid']];
@@ -2965,7 +2983,15 @@ function cow_merge_try_delete_row_with_source_deleted_children(
                 $update['columns']
             );
             if (!($update_result['ok'] ?? false)) {
-                throw new RuntimeException((string)($update_result['error'] ?? 'SQLite constraint failed'));
+                $cleanup_failure = cow_merge_rollback_release_savepoint_checked(
+                    $target,
+                    'cow_merge_source_deleted_fk_children',
+                    'foreign-key dependent rewrite'
+                );
+                if ($cleanup_failure !== null) {
+                    throw $cleanup_failure;
+                }
+                return ['ok' => false, 'error' => (string)($update_result['error'] ?? 'SQLite constraint failed')];
             }
             if (!$update['pk_cols'] && isset($update['rowid'])) {
                 $keyless_updates[] = [$update['table'], (int)$update['rowid'], $update['identity'], $update['row']];
@@ -2974,18 +3000,29 @@ function cow_merge_try_delete_row_with_source_deleted_children(
 
         $result = cow_merge_try_delete_row($target, $table, $identity, $pk_cols);
         if (!($result['ok'] ?? false)) {
-            $target->exec('ROLLBACK TO SAVEPOINT cow_merge_source_deleted_fk_children');
-            $target->exec('RELEASE SAVEPOINT cow_merge_source_deleted_fk_children');
+            $cleanup_failure = cow_merge_rollback_release_savepoint_checked(
+                $target,
+                'cow_merge_source_deleted_fk_children',
+                'foreign-key dependent rewrite'
+            );
+            if ($cleanup_failure !== null) {
+                throw $cleanup_failure;
+            }
             return $result;
         }
 
-        if (!$target->exec('RELEASE SAVEPOINT cow_merge_source_deleted_fk_children')) {
-            throw new RuntimeException("failed to release foreign-key delete savepoint for $table: " . $target->lastErrorMsg());
-        }
+        cow_merge_release_savepoint_checked($target, 'cow_merge_source_deleted_fk_children', 'foreign-key dependent rewrite');
     } catch (Throwable $e) {
-        $target->exec('ROLLBACK TO SAVEPOINT cow_merge_source_deleted_fk_children');
-        $target->exec('RELEASE SAVEPOINT cow_merge_source_deleted_fk_children');
-        return ['ok' => false, 'error' => $e->getMessage()];
+        $cleanup_failure = cow_merge_rollback_release_savepoint_checked(
+            $target,
+            'cow_merge_source_deleted_fk_children',
+            'foreign-key dependent rewrite',
+            $e
+        );
+        if ($cleanup_failure !== null) {
+            throw $cleanup_failure;
+        }
+        throw $e;
     }
 
     foreach ($keyless_deletes as [$child_table, $rowid]) {

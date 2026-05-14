@@ -1236,6 +1236,46 @@ try {
         'no-primary-key foreign-key child update plus parent delete avoids target constraint conflicts'
     );
 
+    $fk_savepoint_release_failure_target = $tmp . '/fk-savepoint-release-failure-target.sqlite';
+    $fk_savepoint_release_failure_metadata = $tmp . '/.forkpress/cow/merge/fk-savepoint-release-failure-metadata.sqlite';
+    copy($fk_keyless_update_base, $fk_savepoint_release_failure_target);
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'RELEASE cow_merge_source_deleted_fk_children') {
+                throw new RuntimeException('forced foreign-key dependent rewrite release failure');
+            }
+        },
+    ];
+    try {
+        assert_throws(
+            fn() => cow_merge_databases(
+                $fk_keyless_update_base,
+                $fk_keyless_update_source,
+                $fk_savepoint_release_failure_target,
+                $fk_savepoint_release_failure_metadata,
+                'feature-fk-savepoint-release-failure',
+                'main'
+            ),
+            'forced foreign-key dependent rewrite release failure',
+            'foreign-key dependent rewrite savepoint release failures surface to the caller'
+        );
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_same((int)scalar($fk_savepoint_release_failure_target, 'SELECT COUNT(*) FROM plugin_fk_keyless_update_parents WHERE id = 1'), 1, 'failed foreign-key dependent rewrite release rolls back the parent delete');
+    assert_same((int)scalar($fk_savepoint_release_failure_target, 'SELECT parent_id FROM plugin_fk_keyless_update_children WHERE rowid = 7'), 1, 'failed foreign-key dependent rewrite release rolls back the child update');
+    assert_same(
+        (int)scalar($fk_savepoint_release_failure_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-fk-savepoint-release-failure' AND status = 'failed' AND failure_reason LIKE '%forced foreign-key dependent rewrite release failure%'"),
+        1,
+        'foreign-key dependent rewrite release failure leaves an auditable failed run'
+    );
+    assert_same(
+        (int)scalar($fk_savepoint_release_failure_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE conflict_type = 'row-target-constraint' AND table_name LIKE 'plugin_fk_keyless_update_%'"),
+        0,
+        'foreign-key dependent rewrite release failure does not become a misleading row-target-constraint conflict'
+    );
+    assert_same((int)scalar($fk_savepoint_release_failure_metadata, 'SELECT COUNT(*) FROM merge_decisions'), 0, 'foreign-key dependent rewrite release failure rolls back staged decisions');
+
     $fk_mixed_rollback_base = $tmp . '/fk-mixed-rollback-base.sqlite';
     $fk_mixed_rollback_source = $tmp . '/fk-mixed-rollback-source.sqlite';
     $fk_mixed_rollback_target = $tmp . '/fk-mixed-rollback-target.sqlite';

@@ -45,6 +45,7 @@
 - Tightened validation-gated source table rebuild and source view resolution savepoints so begin failures surface cleanly without staging resolution metadata.
 - Tightened COW schema savepoint release/rollback cleanup so cleanup failures surface without leaving partial schema, decision, conflict, or resolution metadata.
 - Tightened schema object validation savepoint cleanup so release failures during source trigger/view dry-runs roll back target mutations and resolution metadata.
+- Tightened foreign-key dependent rewrite savepoint cleanup so release failures abort and roll back the DB merge instead of becoming misleading row constraint conflicts.
 - Tightened validation-gated source table restores so preserved target views and trigger programs that reference the restored table must still validate before dry-run or apply reports success.
 - Added COW coverage for target-dropped table restore rollback when preserved target trigger bodies or target view triggers become invalid after the audited source table schema is restored.
 - Added COW coverage for target-dropped table restore rollback when a preserved transitive target view trigger becomes invalid after the audited source table schema is restored.
