@@ -3207,7 +3207,12 @@ CREATE TABLE IF NOT EXISTS merge_review_notes (
 SQL);
     $review_notes_sql = (string)$meta->querySingle("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'merge_review_notes'");
     if (str_contains($review_notes_sql, "CHECK(record_type IN ('conflict', 'decision'))")) {
-        $meta->exec('SAVEPOINT migrate_merge_review_notes_record_type');
+        $migration_savepoint = 'migrate_merge_review_notes_record_type';
+        cow_merge_exec_checked(
+            $meta,
+            'SAVEPOINT ' . $migration_savepoint,
+            'failed to create review-note metadata migration savepoint'
+        );
         try {
             $meta->exec('ALTER TABLE merge_review_notes RENAME TO merge_review_notes_old');
             $meta->exec(<<<'SQL'
@@ -3226,10 +3231,21 @@ SQL);
                 'SELECT id, record_type, record_id, status, note, reviewer, created_at FROM merge_review_notes_old'
             );
             $meta->exec('DROP TABLE merge_review_notes_old');
-            $meta->exec('RELEASE migrate_merge_review_notes_record_type');
+            cow_merge_release_savepoint_checked(
+                $meta,
+                $migration_savepoint,
+                'review-note metadata migration'
+            );
         } catch (Throwable $e) {
-            $meta->exec('ROLLBACK TO migrate_merge_review_notes_record_type');
-            $meta->exec('RELEASE migrate_merge_review_notes_record_type');
+            $cleanup_error = cow_merge_rollback_release_savepoint_checked(
+                $meta,
+                $migration_savepoint,
+                'review-note metadata migration',
+                $e
+            );
+            if ($cleanup_error !== null) {
+                throw $cleanup_error;
+            }
             throw $e;
         }
     }

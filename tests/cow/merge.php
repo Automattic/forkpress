@@ -2652,6 +2652,80 @@ SQL);
     assert_true((bool)$legacy_review_db->exec("INSERT INTO merge_review_notes (record_type, record_id, status, note, reviewer) VALUES ('resolution', 1, 'reviewed', 'resolution note', 'cow-test')"), 'metadata migration allows resolution review notes in legacy merge databases');
     $legacy_review_db->close();
 
+    $legacy_review_begin_failure_metadata = $tmp . '/legacy-review-begin-failure-metadata.sqlite';
+    $legacy_review_begin_failure_db = open_db($legacy_review_begin_failure_metadata);
+    $legacy_review_begin_failure_db->exec(<<<'SQL'
+CREATE TABLE merge_review_notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    record_type TEXT NOT NULL CHECK(record_type IN ('conflict', 'decision')),
+    record_id INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending', 'needs-action', 'reviewed')),
+    note TEXT NOT NULL,
+    reviewer TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)
+SQL);
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        function (SQLite3 $db, string $sql, string $message) use ($legacy_review_begin_failure_db): void {
+            if (
+                $db === $legacy_review_begin_failure_db &&
+                $sql === 'SAVEPOINT migrate_merge_review_notes_record_type'
+            ) {
+                throw new RuntimeException('forced review metadata migration savepoint begin failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_ensure_metadata($legacy_review_begin_failure_db),
+        'forced review metadata migration savepoint begin failure',
+        'review-note metadata migration savepoint begin failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    assert_true(!@$legacy_review_begin_failure_db->exec("INSERT INTO merge_review_notes (record_type, record_id, status, note, reviewer) VALUES ('resolution', 1, 'reviewed', 'resolution note', 'cow-test')"), 'failed review-note metadata migration begin leaves the legacy review-note constraint unchanged');
+    cow_merge_ensure_metadata($legacy_review_begin_failure_db);
+    assert_true((bool)$legacy_review_begin_failure_db->exec("INSERT INTO merge_review_notes (record_type, record_id, status, note, reviewer) VALUES ('resolution', 1, 'reviewed', 'resolution note', 'cow-test')"), 'review-note metadata migration succeeds after begin failure is cleared');
+    $legacy_review_begin_failure_db->close();
+
+    $legacy_review_release_failure_metadata = $tmp . '/legacy-review-release-failure-metadata.sqlite';
+    $legacy_review_release_failure_db = open_db($legacy_review_release_failure_metadata);
+    $legacy_review_release_failure_db->exec(<<<'SQL'
+CREATE TABLE merge_review_notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    record_type TEXT NOT NULL CHECK(record_type IN ('conflict', 'decision')),
+    record_id INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending', 'needs-action', 'reviewed')),
+    note TEXT NOT NULL,
+    reviewer TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)
+SQL);
+    $legacy_review_release_failure_db->exec("INSERT INTO merge_review_notes (record_type, record_id, status, note, reviewer) VALUES ('conflict', 1, 'reviewed', 'legacy release failure note', 'cow-test')");
+    $legacy_review_release_failure_count = 0;
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        function (SQLite3 $db, string $sql, string $message) use ($legacy_review_release_failure_db, &$legacy_review_release_failure_count): void {
+            if (
+                $db === $legacy_review_release_failure_db &&
+                $sql === 'RELEASE migrate_merge_review_notes_record_type' &&
+                $legacy_review_release_failure_count === 0
+            ) {
+                $legacy_review_release_failure_count++;
+                throw new RuntimeException('forced review metadata migration savepoint release failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_ensure_metadata($legacy_review_release_failure_db),
+        'forced review metadata migration savepoint release failure',
+        'review-note metadata migration savepoint release failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    assert_same((int)$legacy_review_release_failure_db->querySingle("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'merge_review_notes_old'"), 0, 'failed review-note metadata migration release cleans up the temporary legacy table');
+    assert_same((int)$legacy_review_release_failure_db->querySingle('SELECT COUNT(*) FROM merge_review_notes'), 1, 'failed review-note metadata migration release preserves existing notes');
+    assert_true(!@$legacy_review_release_failure_db->exec("INSERT INTO merge_review_notes (record_type, record_id, status, note, reviewer) VALUES ('resolution', 1, 'reviewed', 'resolution note', 'cow-test')"), 'failed review-note metadata migration release rolls back the new record-type constraint');
+    cow_merge_ensure_metadata($legacy_review_release_failure_db);
+    assert_true((bool)$legacy_review_release_failure_db->exec("INSERT INTO merge_review_notes (record_type, record_id, status, note, reviewer) VALUES ('resolution', 1, 'reviewed', 'resolution note', 'cow-test')"), 'review-note metadata migration succeeds after release failure is cleared');
+    $legacy_review_release_failure_db->close();
+
     $file_base_db = $tmp . '/file-base.sqlite';
     $file_source_db = $tmp . '/file-source.sqlite';
     $file_target_db = $tmp . '/file-target.sqlite';
