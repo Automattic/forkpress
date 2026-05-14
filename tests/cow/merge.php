@@ -331,6 +331,55 @@ try {
     assert_same((int)scalar($row_load_finalize_metadata, 'SELECT COUNT(*) FROM merge_decisions'), 0, 'row load finalize failure records no decisions');
     assert_same((int)scalar($row_load_finalize_metadata, 'SELECT COUNT(*) FROM merge_conflicts'), 0, 'row load finalize failure records no conflicts');
 
+    $schema_object_exists_db = $tmp . '/schema-object-exists.sqlite';
+    create_base_db($schema_object_exists_db);
+    $schema_object_exists_handle = open_db($schema_object_exists_db);
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_prepare'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($message === 'failed to prepare schema object existence lookup for plugin_items') {
+                throw new RuntimeException('forced schema object existence prepare failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_schema_object_exists($schema_object_exists_handle, 'plugin_items'),
+        'forced schema object existence prepare failure',
+        'schema object existence prepare failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_prepare']);
+    assert_same(cow_merge_schema_object_exists($schema_object_exists_handle, 'plugin_items'), true, 'schema object existence lookup still succeeds after prepare hook clears');
+    $schema_object_exists_handle->close();
+
+    $trigger_validation_finalize_db = $tmp . '/trigger-validation-finalize.sqlite';
+    create_base_db($trigger_validation_finalize_db);
+    $trigger_validation_finalize_handle = open_db($trigger_validation_finalize_db);
+    $trigger_validation_finalize_sql = "CREATE TRIGGER plugin_trigger_validation_finalize " .
+        "AFTER INSERT ON plugin_items BEGIN SELECT NEW.item_id; END";
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize'] = [
+        static function (SQLite3Result $result, string $message): void {
+            if ($message === 'failed to finalize source trigger plugin_trigger_validation_finalize target trigger validation result') {
+                throw new RuntimeException('forced trigger validation finalization failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_validate_trigger_program(
+            $trigger_validation_finalize_handle,
+            'plugin_trigger_validation_finalize',
+            $trigger_validation_finalize_sql
+        ),
+        'forced trigger validation finalization failure',
+        'trigger validation finalization failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize']);
+    cow_merge_validate_trigger_program(
+        $trigger_validation_finalize_handle,
+        'plugin_trigger_validation_finalize',
+        $trigger_validation_finalize_sql
+    );
+    assert_true(true, 'trigger validation succeeds after finalization hook clears');
+    $trigger_validation_finalize_handle->close();
+
     $unique_read_base = $tmp . '/unique-read-base.sqlite';
     $unique_read_source = $tmp . '/unique-read-source.sqlite';
     $unique_read_target = $tmp . '/unique-read-target.sqlite';

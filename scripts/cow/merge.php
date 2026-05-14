@@ -5711,24 +5711,24 @@ function cow_merge_table_rebuild_supported(array $source_columns, array $target_
 
 function cow_merge_table_rebuild_dependencies(SQLite3 $db, string $table): array {
     $dependents = [];
-    $stmt = $db->prepare(
+    $stmt = cow_merge_prepare_checked(
+        $db,
         "SELECT type, name, sql FROM sqlite_master " .
-        "WHERE tbl_name = :table AND type IN ('index', 'trigger') AND sql IS NOT NULL ORDER BY type, name"
+            "WHERE tbl_name = :table AND type IN ('index', 'trigger') AND sql IS NOT NULL ORDER BY type, name",
+        "failed to prepare table dependent lookup for $table"
     );
-    if (!$stmt) {
-        throw new RuntimeException("failed to prepare table dependent lookup for $table: " . $db->lastErrorMsg());
-    }
     cow_merge_bind($stmt, ':table', $table);
-    $res = $stmt->execute();
-    if (!$res) {
-        throw new RuntimeException("failed to read table dependents for $table: " . $db->lastErrorMsg());
-    }
-    while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
-        $dependents[] = [
-            'type' => (string)$row['type'],
-            'name' => (string)$row['name'],
-            'sql' => (string)$row['sql'],
-        ];
+    $res = cow_merge_execute_checked($stmt, $db, "failed to read table dependents for $table");
+    try {
+        while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+            $dependents[] = [
+                'type' => (string)$row['type'],
+                'name' => (string)$row['name'],
+                'sql' => (string)$row['sql'],
+            ];
+        }
+    } finally {
+        cow_merge_result_finalize_checked($res, "failed to finalize table dependents for $table");
     }
     return $dependents;
 }
@@ -6503,6 +6503,7 @@ function cow_merge_validate_trigger_program(SQLite3 $db, string $name, string $s
             'source trigger ' . $name . ' failed target trigger validation: ' . $db->lastErrorMsg()
         );
     }
+    cow_merge_result_finalize_checked($res, 'failed to finalize source trigger ' . $name . ' target trigger validation result');
 }
 
 function cow_merge_missing_schema_references(SQLite3 $db, array $references): array {
@@ -6522,16 +6523,18 @@ function cow_merge_missing_schema_references(SQLite3 $db, array $references): ar
 }
 
 function cow_merge_schema_object_exists(SQLite3 $db, string $name): bool {
-    $stmt = $db->prepare("SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND lower(name) = lower(:name) LIMIT 1");
-    if (!$stmt) {
-        throw new RuntimeException('failed to prepare schema object existence lookup: ' . $db->lastErrorMsg());
-    }
+    $stmt = cow_merge_prepare_checked(
+        $db,
+        "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND lower(name) = lower(:name) LIMIT 1",
+        "failed to prepare schema object existence lookup for $name"
+    );
     cow_merge_bind($stmt, ':name', $name);
-    $res = $stmt->execute();
-    if (!$res) {
-        throw new RuntimeException('failed to inspect schema object existence: ' . $db->lastErrorMsg());
+    $res = cow_merge_execute_checked($stmt, $db, "failed to inspect schema object existence for $name");
+    try {
+        return (bool)$res->fetchArray(SQLITE3_NUM);
+    } finally {
+        cow_merge_result_finalize_checked($res, "failed to finalize schema object existence lookup for $name");
     }
-    return (bool)$res->fetchArray(SQLITE3_NUM);
 }
 
 function cow_merge_missing_trigger_references(SQLite3 $db, string $sql): array {
@@ -6567,21 +6570,27 @@ function cow_merge_validate_view_schema(SQLite3 $db, string $name, string $conte
             'source view ' . $name . " is invalid during $context validation: " . $db->lastErrorMsg()
         );
     }
+    cow_merge_result_finalize_checked($res, 'failed to finalize source view ' . $name . " $context validation result");
 }
 
 function cow_merge_table_dependent_views(SQLite3 $db, string $table, ?string $exclude_view = null): array {
     $views = [];
     $all_views = [];
-    $res = $db->query("SELECT name, sql FROM sqlite_master WHERE type = 'view' AND sql IS NOT NULL ORDER BY name");
-    if (!$res) {
-        throw new RuntimeException("failed to read view dependencies for $table: " . $db->lastErrorMsg());
-    }
-    while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
-        $name = (string)$row['name'];
-        $all_views[$name] = [
-            'name' => $name,
-            'sql' => (string)$row['sql'],
-        ];
+    $res = cow_merge_query_checked(
+        $db,
+        "SELECT name, sql FROM sqlite_master WHERE type = 'view' AND sql IS NOT NULL ORDER BY name",
+        "failed to read view dependencies for $table"
+    );
+    try {
+        while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+            $name = (string)$row['name'];
+            $all_views[$name] = [
+                'name' => $name,
+                'sql' => (string)$row['sql'],
+            ];
+        }
+    } finally {
+        cow_merge_result_finalize_checked($res, "failed to finalize view dependencies for $table");
     }
 
     $seen = [];
@@ -6622,22 +6631,27 @@ function cow_merge_view_trigger_dependencies(SQLite3 $db, array $views): array {
 function cow_merge_table_dependent_triggers(SQLite3 $db, string $table, array $exclude_trigger_names = []): array {
     $excluded = array_fill_keys(array_map('strtolower', $exclude_trigger_names), true);
     $triggers = [];
-    $stmt = $db->query("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND sql IS NOT NULL ORDER BY name");
-    if (!$stmt) {
-        throw new RuntimeException("failed to read trigger dependencies for $table: " . $db->lastErrorMsg());
-    }
-    while ($row = $stmt->fetchArray(SQLITE3_ASSOC)) {
-        $name = (string)$row['name'];
-        if (isset($excluded[strtolower($name)])) {
-            continue;
+    $stmt = cow_merge_query_checked(
+        $db,
+        "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND sql IS NOT NULL ORDER BY name",
+        "failed to read trigger dependencies for $table"
+    );
+    try {
+        while ($row = $stmt->fetchArray(SQLITE3_ASSOC)) {
+            $name = (string)$row['name'];
+            if (isset($excluded[strtolower($name)])) {
+                continue;
+            }
+            if (cow_merge_sql_references_table((string)$row['sql'], $table)) {
+                $triggers[] = [
+                    'type' => 'trigger',
+                    'name' => $name,
+                    'sql' => (string)$row['sql'],
+                ];
+            }
         }
-        if (cow_merge_sql_references_table((string)$row['sql'], $table)) {
-            $triggers[] = [
-                'type' => 'trigger',
-                'name' => $name,
-                'sql' => (string)$row['sql'],
-            ];
-        }
+    } finally {
+        cow_merge_result_finalize_checked($stmt, "failed to finalize trigger dependencies for $table");
     }
     return $triggers;
 }
@@ -6656,26 +6670,31 @@ function cow_merge_trigger_body_dependencies(SQLite3 $db, array $schema_objects,
 
     $excluded = array_fill_keys(array_map('strtolower', $exclude_trigger_names), true);
     $triggers = [];
-    $stmt = $db->query("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND sql IS NOT NULL ORDER BY name");
-    if (!$stmt) {
-        throw new RuntimeException('failed to read trigger body dependencies: ' . $db->lastErrorMsg());
-    }
-    while ($row = $stmt->fetchArray(SQLITE3_ASSOC)) {
-        $name = (string)$row['name'];
-        if (isset($excluded[strtolower($name)])) {
-            continue;
-        }
-        foreach ($objects as $object) {
-            if (cow_merge_sql_references_table((string)$row['sql'], $object)) {
-                $triggers[] = [
-                    'type' => 'trigger',
-                    'name' => $name,
-                    'sql' => (string)$row['sql'],
-                ];
-                $excluded[strtolower($name)] = true;
-                break;
+    $stmt = cow_merge_query_checked(
+        $db,
+        "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND sql IS NOT NULL ORDER BY name",
+        'failed to read trigger body dependencies'
+    );
+    try {
+        while ($row = $stmt->fetchArray(SQLITE3_ASSOC)) {
+            $name = (string)$row['name'];
+            if (isset($excluded[strtolower($name)])) {
+                continue;
+            }
+            foreach ($objects as $object) {
+                if (cow_merge_sql_references_table((string)$row['sql'], $object)) {
+                    $triggers[] = [
+                        'type' => 'trigger',
+                        'name' => $name,
+                        'sql' => (string)$row['sql'],
+                    ];
+                    $excluded[strtolower($name)] = true;
+                    break;
+                }
             }
         }
+    } finally {
+        cow_merge_result_finalize_checked($stmt, 'failed to finalize trigger body dependencies');
     }
     return $triggers;
 }
@@ -6690,6 +6709,7 @@ function cow_merge_validate_views(SQLite3 $db, array $views, string $context): v
                 " during $context validation: " . $db->lastErrorMsg()
             );
         }
+        cow_merge_result_finalize_checked($res, 'failed to finalize target view ' . $name . " $context validation result");
     }
 }
 
@@ -6931,6 +6951,7 @@ function cow_merge_validate_foreign_key_integrity(SQLite3 $db, string $context):
             break;
         }
     }
+    cow_merge_result_finalize_checked($result, $context . ' foreign-key validation result');
     if ($violations) {
         throw new RuntimeException($context . ' would leave target foreign-key violations: ' . implode('; ', $violations));
     }
