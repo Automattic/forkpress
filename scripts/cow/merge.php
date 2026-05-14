@@ -625,13 +625,12 @@ function cow_merge_normalize_source_table_restore_payload(mixed $payload): array
 }
 
 function cow_merge_has_schema_conflict_for_object(SQLite3 $meta, int $run_id, string $table, string $object, array $types): bool {
-    $stmt = $meta->prepare(
+    $stmt = cow_merge_prepare_checked(
+        $meta,
         "SELECT 1 FROM merge_conflicts WHERE run_id = :run_id AND table_name = :table_name " .
-        "AND column_name = :column_name AND conflict_type = :conflict_type LIMIT 1"
+        "AND column_name = :column_name AND conflict_type = :conflict_type LIMIT 1",
+        'failed to prepare restore payload conflict lookup'
     );
-    if (!$stmt) {
-        throw new RuntimeException('failed to prepare restore payload conflict lookup: ' . $meta->lastErrorMsg());
-    }
     foreach ($types as $type) {
         cow_merge_bind($stmt, ':run_id', $run_id);
         cow_merge_bind($stmt, ':table_name', $table);
@@ -1071,9 +1070,11 @@ function cow_merge_keyless_runtime_identity(
 }
 
 function cow_merge_lookup_row_identity(SQLite3 $meta, string $branch, string $table, int $rowid): ?array {
-    $stmt = $meta->prepare(
+    $stmt = cow_merge_prepare_checked(
+        $meta,
         'SELECT logical_identity FROM merge_row_identities ' .
-        'WHERE branch_name = :branch_name AND table_name = :table_name AND rowid = :rowid'
+        'WHERE branch_name = :branch_name AND table_name = :table_name AND rowid = :rowid',
+        'failed to prepare row identity lookup'
     );
     cow_merge_bind($stmt, ':branch_name', $branch);
     cow_merge_bind($stmt, ':table_name', $table);
@@ -1108,10 +1109,12 @@ function cow_merge_lookup_row_identity_by_hash(
     int $rowid,
     string $row_hash
 ): ?array {
-    $stmt = $meta->prepare(
+    $stmt = cow_merge_prepare_checked(
+        $meta,
         'SELECT logical_identity FROM merge_row_identity_history ' .
         'WHERE branch_name = :branch_name AND table_name = :table_name AND rowid = :rowid AND row_hash = :row_hash ' .
-        'ORDER BY CASE WHEN deleted_at IS NULL THEN 0 ELSE 1 END, updated_at DESC, id DESC LIMIT 1'
+        'ORDER BY CASE WHEN deleted_at IS NULL THEN 0 ELSE 1 END, updated_at DESC, id DESC LIMIT 1',
+        'failed to prepare row identity history lookup'
     );
     cow_merge_bind($stmt, ':branch_name', $branch);
     cow_merge_bind($stmt, ':table_name', $table);
@@ -1141,11 +1144,13 @@ function cow_merge_remember_row_identity_history(
     $on_conflict = $active
         ? 'row_hash = excluded.row_hash, last_seen_run_id = excluded.last_seen_run_id, updated_at = CURRENT_TIMESTAMP, deleted_at = NULL, deleted_run_id = NULL'
         : 'row_hash = excluded.row_hash, last_seen_run_id = excluded.last_seen_run_id, updated_at = CURRENT_TIMESTAMP';
-    $history = $meta->prepare(
+    $history = cow_merge_prepare_checked(
+        $meta,
         'INSERT INTO merge_row_identity_history ' .
         '(branch_name, table_name, rowid, logical_identity, row_hash, first_seen_run_id, last_seen_run_id) ' .
         'VALUES (:branch_name, :table_name, :rowid, :logical_identity, :row_hash, :first_seen_run_id, :last_seen_run_id) ' .
-        'ON CONFLICT(branch_name, table_name, rowid, logical_identity) DO UPDATE SET ' . $on_conflict
+        'ON CONFLICT(branch_name, table_name, rowid, logical_identity) DO UPDATE SET ' . $on_conflict,
+        'failed to prepare row identity history upsert'
     );
     cow_merge_bind($history, ':branch_name', $branch);
     cow_merge_bind($history, ':table_name', $table);
@@ -1168,12 +1173,14 @@ function cow_merge_remember_row_identity(
     array $identity,
     array $row
 ): void {
-    $stmt = $meta->prepare(
+    $stmt = cow_merge_prepare_checked(
+        $meta,
         'INSERT INTO merge_row_identities ' .
         '(branch_name, table_name, rowid, logical_identity, row_hash, first_seen_run_id, last_seen_run_id) ' .
         'VALUES (:branch_name, :table_name, :rowid, :logical_identity, :row_hash, :first_seen_run_id, :last_seen_run_id) ' .
         'ON CONFLICT(branch_name, table_name, rowid) DO UPDATE SET ' .
-        'row_hash = excluded.row_hash, last_seen_run_id = excluded.last_seen_run_id, updated_at = CURRENT_TIMESTAMP'
+        'row_hash = excluded.row_hash, last_seen_run_id = excluded.last_seen_run_id, updated_at = CURRENT_TIMESTAMP',
+        'failed to prepare row identity upsert'
     );
     cow_merge_bind($stmt, ':branch_name', $branch);
     cow_merge_bind($stmt, ':table_name', $table);
@@ -1209,9 +1216,11 @@ function cow_merge_forget_row_identity(
     string $table,
     int $rowid
 ): ?array {
-    $stmt = $meta->prepare(
+    $stmt = cow_merge_prepare_checked(
+        $meta,
         'SELECT logical_identity FROM merge_row_identities ' .
-        'WHERE branch_name = :branch_name AND table_name = :table_name AND rowid = :rowid'
+        'WHERE branch_name = :branch_name AND table_name = :table_name AND rowid = :rowid',
+        'failed to prepare row identity deletion lookup'
     );
     cow_merge_bind($stmt, ':branch_name', $branch);
     cow_merge_bind($stmt, ':table_name', $table);
@@ -1228,10 +1237,12 @@ function cow_merge_forget_row_identity(
     $identity_json = (string)$row['logical_identity'];
     $identity = cow_merge_decode_row_identity($identity_json, "$branch.$table rowid $rowid deletion");
 
-    $history = $meta->prepare(
+    $history = cow_merge_prepare_checked(
+        $meta,
         'UPDATE merge_row_identity_history ' .
         'SET deleted_at = CURRENT_TIMESTAMP, deleted_run_id = :deleted_run_id, last_seen_run_id = :last_seen_run_id, updated_at = CURRENT_TIMESTAMP ' .
-        'WHERE branch_name = :branch_name AND table_name = :table_name AND rowid = :rowid AND logical_identity = :logical_identity'
+        'WHERE branch_name = :branch_name AND table_name = :table_name AND rowid = :rowid AND logical_identity = :logical_identity',
+        'failed to prepare row identity history tombstone'
     );
     cow_merge_bind($history, ':deleted_run_id', $run_id);
     cow_merge_bind($history, ':last_seen_run_id', $run_id);
@@ -1243,8 +1254,10 @@ function cow_merge_forget_row_identity(
         throw new RuntimeException('failed to mark row identity deleted: ' . $meta->lastErrorMsg());
     }
 
-    $delete = $meta->prepare(
-        'DELETE FROM merge_row_identities WHERE branch_name = :branch_name AND table_name = :table_name AND rowid = :rowid'
+    $delete = cow_merge_prepare_checked(
+        $meta,
+        'DELETE FROM merge_row_identities WHERE branch_name = :branch_name AND table_name = :table_name AND rowid = :rowid',
+        'failed to prepare current row identity deletion'
     );
     cow_merge_bind($delete, ':branch_name', $branch);
     cow_merge_bind($delete, ':table_name', $table);
@@ -1262,9 +1275,11 @@ function cow_merge_forget_table_row_identities(
     string $branch,
     string $table
 ): int {
-    $stmt = $meta->prepare(
+    $stmt = cow_merge_prepare_checked(
+        $meta,
         'SELECT rowid FROM merge_row_identities ' .
-        'WHERE branch_name = :branch_name AND table_name = :table_name ORDER BY rowid'
+        'WHERE branch_name = :branch_name AND table_name = :table_name ORDER BY rowid',
+        'failed to prepare table row identity listing'
     );
     cow_merge_bind($stmt, ':branch_name', $branch);
     cow_merge_bind($stmt, ':table_name', $table);
@@ -3913,9 +3928,11 @@ function cow_merge_set_sqlite_sequence(SQLite3 $db, string $table, int $seq): vo
 }
 
 function cow_merge_lookup_autoincrement_band(SQLite3 $meta, string $branch, string $table): ?array {
-    $stmt = $meta->prepare(
+    $stmt = cow_merge_prepare_checked(
+        $meta,
         'SELECT band_start, band_end, band_size FROM merge_autoincrement_bands ' .
-        'WHERE branch_name = :branch_name AND table_name = :table_name'
+        'WHERE branch_name = :branch_name AND table_name = :table_name',
+        'failed to prepare AUTOINCREMENT band lookup'
     );
     cow_merge_bind($stmt, ':branch_name', $branch);
     cow_merge_bind($stmt, ':table_name', $table);
@@ -3943,7 +3960,11 @@ function cow_merge_round_up_to_band(int $value, int $band_size): int {
 }
 
 function cow_merge_next_autoincrement_band_start(SQLite3 $meta, string $table, int $min_start, int $band_size): int {
-    $stmt = $meta->prepare('SELECT MAX(band_end) AS max_band_end FROM merge_autoincrement_bands WHERE table_name = :table_name');
+    $stmt = cow_merge_prepare_checked(
+        $meta,
+        'SELECT MAX(band_end) AS max_band_end FROM merge_autoincrement_bands WHERE table_name = :table_name',
+        'failed to prepare AUTOINCREMENT band selection'
+    );
     cow_merge_bind($stmt, ':table_name', $table);
     $res = $stmt->execute();
     if (!$res) {
@@ -3965,19 +3986,23 @@ function cow_merge_remember_autoincrement_band(
     bool $new_allocation
 ): void {
     if ($new_allocation) {
-        $stmt = $meta->prepare(
+        $stmt = cow_merge_prepare_checked(
+            $meta,
             'INSERT INTO merge_autoincrement_bands ' .
             '(branch_name, table_name, band_start, band_end, band_size, allocated_run_id, last_seen_run_id) ' .
             'VALUES (:branch_name, :table_name, :band_start, :band_end, :band_size, :allocated_run_id, :last_seen_run_id) ' .
             'ON CONFLICT(branch_name, table_name) DO UPDATE SET ' .
             'band_start = excluded.band_start, band_end = excluded.band_end, band_size = excluded.band_size, ' .
-            'allocated_run_id = excluded.allocated_run_id, last_seen_run_id = excluded.last_seen_run_id, updated_at = CURRENT_TIMESTAMP'
+            'allocated_run_id = excluded.allocated_run_id, last_seen_run_id = excluded.last_seen_run_id, updated_at = CURRENT_TIMESTAMP',
+            'failed to prepare AUTOINCREMENT band upsert'
         );
         cow_merge_bind($stmt, ':allocated_run_id', $run_id);
     } else {
-        $stmt = $meta->prepare(
+        $stmt = cow_merge_prepare_checked(
+            $meta,
             'UPDATE merge_autoincrement_bands SET last_seen_run_id = :last_seen_run_id, updated_at = CURRENT_TIMESTAMP ' .
-            'WHERE branch_name = :branch_name AND table_name = :table_name'
+            'WHERE branch_name = :branch_name AND table_name = :table_name',
+            'failed to prepare AUTOINCREMENT band refresh'
         );
     }
     cow_merge_bind($stmt, ':branch_name', $branch);
@@ -5373,13 +5398,12 @@ function cow_merge_select_current_row(SQLite3 $db, string $table, array $identit
 }
 
 function cow_merge_lookup_active_rowid_by_identity(SQLite3 $meta, string $branch, string $table, array $identity): ?int {
-    $stmt = $meta->prepare(
+    $stmt = cow_merge_prepare_checked(
+        $meta,
         'SELECT rowid FROM merge_row_identities ' .
-        'WHERE branch_name = :branch_name AND table_name = :table_name AND logical_identity = :logical_identity'
+        'WHERE branch_name = :branch_name AND table_name = :table_name AND logical_identity = :logical_identity',
+        'failed to prepare active row identity lookup'
     );
-    if (!$stmt) {
-        throw new RuntimeException('failed to prepare row identity lookup: ' . $meta->lastErrorMsg());
-    }
     cow_merge_bind($stmt, ':branch_name', $branch);
     cow_merge_bind($stmt, ':table_name', $table);
     cow_merge_bind($stmt, ':logical_identity', cow_merge_plain_json($identity));
@@ -5392,13 +5416,12 @@ function cow_merge_lookup_active_rowid_by_identity(SQLite3 $meta, string $branch
         return (int)$row['rowid'];
     }
 
-    $scan = $meta->prepare(
+    $scan = cow_merge_prepare_checked(
+        $meta,
         'SELECT rowid, logical_identity FROM merge_row_identities ' .
-        'WHERE branch_name = :branch_name AND table_name = :table_name'
+        'WHERE branch_name = :branch_name AND table_name = :table_name',
+        'failed to prepare active row identity scan'
     );
-    if (!$scan) {
-        throw new RuntimeException('failed to prepare row identity scan: ' . $meta->lastErrorMsg());
-    }
     cow_merge_bind($scan, ':branch_name', $branch);
     cow_merge_bind($scan, ':table_name', $table);
     $res = $scan->execute();
@@ -5412,14 +5435,13 @@ function cow_merge_lookup_active_rowid_by_identity(SQLite3 $meta, string $branch
         }
     }
 
-    $history = $meta->prepare(
+    $history = cow_merge_prepare_checked(
+        $meta,
         'SELECT rowid FROM merge_row_identity_history ' .
         'WHERE branch_name = :branch_name AND table_name = :table_name AND logical_identity = :logical_identity AND deleted_at IS NULL ' .
-        'ORDER BY updated_at DESC, id DESC LIMIT 1'
+        'ORDER BY updated_at DESC, id DESC LIMIT 1',
+        'failed to prepare active row identity history lookup'
     );
-    if (!$history) {
-        throw new RuntimeException('failed to prepare row identity history lookup: ' . $meta->lastErrorMsg());
-    }
     cow_merge_bind($history, ':branch_name', $branch);
     cow_merge_bind($history, ':table_name', $table);
     cow_merge_bind($history, ':logical_identity', cow_merge_plain_json($identity));
@@ -5432,14 +5454,13 @@ function cow_merge_lookup_active_rowid_by_identity(SQLite3 $meta, string $branch
         return (int)$row['rowid'];
     }
 
-    $history_scan = $meta->prepare(
+    $history_scan = cow_merge_prepare_checked(
+        $meta,
         'SELECT rowid, logical_identity FROM merge_row_identity_history ' .
         'WHERE branch_name = :branch_name AND table_name = :table_name AND deleted_at IS NULL ' .
-        'ORDER BY updated_at DESC, id DESC'
+        'ORDER BY updated_at DESC, id DESC',
+        'failed to prepare active row identity history scan'
     );
-    if (!$history_scan) {
-        throw new RuntimeException('failed to prepare row identity history scan: ' . $meta->lastErrorMsg());
-    }
     cow_merge_bind($history_scan, ':branch_name', $branch);
     cow_merge_bind($history_scan, ':table_name', $table);
     $res = $history_scan->execute();
@@ -7483,14 +7504,13 @@ function cow_merge_resolve_conflict(
     $target = null;
     try {
         cow_merge_ensure_metadata($meta);
-        $stmt = $meta->prepare(
+        $stmt = cow_merge_prepare_checked(
+            $meta,
             'SELECT c.id, c.run_id, c.table_name, c.row_identity, c.column_name, c.conflict_type, ' .
             'c.base_payload, c.source_payload, c.target_payload, r.source_db, r.target_db, r.source_branch, r.target_branch ' .
-            'FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.id = :id'
+            'FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.id = :id',
+            'failed to prepare conflict lookup'
         );
-        if (!$stmt) {
-            throw new RuntimeException('failed to prepare conflict lookup: ' . $meta->lastErrorMsg());
-        }
         cow_merge_bind($stmt, ':id', $conflict_id);
         $res = $stmt->execute();
         $conflict = $res ? $res->fetchArray(SQLITE3_ASSOC) : false;
