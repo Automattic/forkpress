@@ -7072,12 +7072,26 @@ function cow_merge_resolve_schema_conflict(
                         );
                         $target_savepoint_started = true;
                         $mutate_source();
-                        $target->exec('ROLLBACK TO forkpress_schema_object_resolution_validation');
-                        $target->exec('RELEASE forkpress_schema_object_resolution_validation');
+                        $cleanup_failure = cow_merge_rollback_release_savepoint_checked(
+                            $target,
+                            'forkpress_schema_object_resolution_validation',
+                            'schema object resolution validation'
+                        );
+                        if ($cleanup_failure !== null) {
+                            throw $cleanup_failure;
+                        }
+                        $target_savepoint_started = false;
                     } catch (Throwable $e) {
                         if ($target_savepoint_started) {
-                            $target->exec('ROLLBACK TO forkpress_schema_object_resolution_validation');
-                            $target->exec('RELEASE forkpress_schema_object_resolution_validation');
+                            $cleanup_failure = cow_merge_rollback_release_savepoint_checked(
+                                $target,
+                                'forkpress_schema_object_resolution_validation',
+                                'schema object resolution validation',
+                                $e
+                            );
+                            if ($cleanup_failure !== null) {
+                                throw $cleanup_failure;
+                            }
                         }
                         throw $e;
                     }

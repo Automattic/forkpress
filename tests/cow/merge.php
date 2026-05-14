@@ -6987,6 +6987,42 @@ SQL);
         'test'
     );
     assert_same($schema_changed_trigger_dependency_cycle_drop_resolution['status'], 'applied', 'source-dropped cyclic trigger dependency applies before changed trigger rewrite');
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'RELEASE forkpress_schema_object_resolution_validation' && $message === 'failed to release schema object resolution validation savepoint') {
+                throw new RuntimeException('forced schema object resolution validation release failure');
+            }
+        },
+    ];
+    $schema_changed_trigger_release_failure = null;
+    try {
+        cow_merge_resolve_conflict(
+            $schema_changed_trigger_dependency_cycle_metadata,
+            $schema_changed_trigger_dependency_cycle_rewrite_conflict_id,
+            'source',
+            false,
+            'Preview changed trigger with failing validation release.',
+            'test'
+        );
+    } catch (Throwable $e) {
+        $schema_changed_trigger_release_failure = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true(
+        $schema_changed_trigger_release_failure !== null &&
+            str_contains($schema_changed_trigger_release_failure, 'forced schema object resolution validation release failure'),
+        'schema object validation release failure is surfaced to the caller'
+    );
+    assert_same(
+        (int)scalar($schema_changed_trigger_dependency_cycle_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_changed_trigger_dependency_cycle_rewrite_conflict_id"),
+        0,
+        'failed schema object validation release records no resolution metadata'
+    );
+    assert_true(
+        str_contains((string)scalar($schema_changed_trigger_dependency_cycle_target, "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_trigger_dependency_cycle_alpha_insert'"), 'SELECT NEW.label'),
+        'failed schema object validation release rolls back the trigger rewrite'
+    );
     $schema_changed_trigger_dependency_cycle_rewrite_resolution = cow_merge_resolve_conflict(
         $schema_changed_trigger_dependency_cycle_metadata,
         $schema_changed_trigger_dependency_cycle_rewrite_conflict_id,
