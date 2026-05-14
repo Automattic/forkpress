@@ -1611,6 +1611,42 @@ SQL);
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_resolution_commit_conflict_id"), 0, 'failed schema resolution metadata commit records no resolution metadata');
 
     $option_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'wp_options' AND column_name = 'option_value'");
+    $target_resolution_rollback_meta = open_db($metadata);
+    $target_resolution_rollback_meta->exec(<<<'SQL'
+CREATE TRIGGER fail_target_resolution_review_note
+BEFORE INSERT ON merge_review_notes
+WHEN NEW.record_type = 'conflict'
+  AND NEW.note LIKE 'Resolved with target choice:%'
+BEGIN
+    SELECT RAISE(ABORT, 'forced target resolution review note failure');
+END
+SQL);
+    $target_resolution_rollback_meta->close();
+    $target_resolution_failure_message = null;
+    set_error_handler(static function (int $severity, string $message): bool {
+        return str_contains($message, 'forced target resolution review note failure');
+    });
+    try {
+        cow_merge_resolve_conflict(
+            $metadata,
+            $option_conflict_id,
+            'target',
+            true,
+            'Try target choice with failing review note.',
+            'cow-test'
+        );
+    } catch (Throwable $e) {
+        $target_resolution_failure_message = $e->getMessage();
+    } finally {
+        restore_error_handler();
+    }
+    assert_true($target_resolution_failure_message !== null, 'target resolution metadata failure is surfaced to the caller');
+    assert_same(scalar($conflict_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_test'"), 'a:1:{s:5:"color";s:3:"red";}', 'failed target resolution leaves target DB unchanged');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $option_conflict_id AND choice = 'target'"), 0, 'failed target resolution rolls back the staged resolution row');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_review_notes WHERE record_type = 'conflict' AND record_id = $option_conflict_id AND note LIKE 'Resolved with target choice:%'"), 0, 'failed target resolution records no reviewed conflict note');
+    $target_resolution_rollback_meta = open_db($metadata);
+    $target_resolution_rollback_meta->exec('DROP TRIGGER fail_target_resolution_review_note');
+    $target_resolution_rollback_meta->close();
     $target_resolution = cow_merge_resolve_conflict(
         $metadata,
         $option_conflict_id,
