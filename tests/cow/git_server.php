@@ -506,6 +506,47 @@ assert_same(file_get_contents($branches . '/main/wp-content/pushed.txt'), "new m
 assert_same($repo->get_branch_tip('refs/heads/feature'), $feature_tip, 'targeted push resync does not publish unrelated branch edits');
 cow_git_remove_tree($tmp);
 
+$tmp = sys_get_temp_dir() . '/forkpress-cow-git-created-id-bands-' . getmypid() . '-' . bin2hex(random_bytes(4));
+$branches = $tmp . '/branches';
+$git = $tmp . '/git';
+mkdir($branches . '/main/wp-content/database', 0777, true);
+file_put_contents($branches . '/main/wp-load.php', "<?php\n");
+$db = new SQLite3($branches . '/main/wp-content/database/.ht.sqlite');
+$db->exec('CREATE TABLE wp_posts (ID INTEGER PRIMARY KEY AUTOINCREMENT, post_title TEXT)');
+$db->exec("INSERT INTO wp_posts (post_title) VALUES ('Base post')");
+$db->close();
+
+$fs = WordPress\Filesystem\LocalFilesystem::create($git);
+$repo = new WordPress\Git\GitRepository($fs, ['default_branch' => 'main']);
+$repo->set_config_value(['user', 'name'], 'ForkPress COW');
+$repo->set_config_value(['user', 'email'], 'forkpress-cow@local');
+cow_git_sync_repository($repo, $branches);
+$main_tip = $repo->get_branch_tip('refs/heads/main');
+$repo->checkout('refs/heads/main');
+$created_tip = $repo->commit([
+    'commit' => [
+        'message' => 'create branch from git',
+        'author' => 'ForkPress Test <forkpress-test@local>',
+        'committer' => 'ForkPress Test <forkpress-test@local>',
+        'parents' => [$main_tip],
+    ],
+    'updates' => ['wordpress/wp-content/git-created.txt' => "created\n"],
+]);
+$repo->set_branch_tip('refs/heads/git-created', $created_tip);
+cow_git_apply_push_to_branches($repo, $git, $branches, $branches, null, 'file-copy', '', ['main' => $main_tip]);
+$created_db = new SQLite3($branches . '/git-created/wp-content/database/.ht.sqlite');
+$created_sequence = (int)$created_db->querySingle("SELECT seq FROM sqlite_sequence WHERE name = 'wp_posts'");
+$created_db->exec("INSERT INTO wp_posts (post_title) VALUES ('Git-created branch post')");
+$created_post_id = (int)$created_db->lastInsertRowID();
+$created_db->close();
+$metadata = new SQLite3($tmp . '/merge/metadata.sqlite');
+$created_band_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'git-created' AND table_name = 'wp_posts'");
+$metadata->close();
+assert_true($created_sequence >= COW_MERGE_AUTOINCREMENT_FIRST_BAND_START - 1, 'Git-created branch advances AUTOINCREMENT sequence into an ID band');
+assert_true($created_post_id >= COW_MERGE_AUTOINCREMENT_FIRST_BAND_START, 'Git-created branch inserts use the allocated ID band');
+assert_same($created_band_count, 1, 'Git-created branch ID band allocation is auditable');
+cow_git_remove_tree($tmp);
+
 $tmp = sys_get_temp_dir() . '/forkpress-cow-git-rollback-resync-' . getmypid() . '-' . bin2hex(random_bytes(4));
 $branches = $tmp . '/branches';
 $git = $tmp . '/git';

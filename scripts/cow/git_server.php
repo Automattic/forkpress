@@ -490,6 +490,7 @@ function cow_git_apply_push_to_branches(
         $branches_to_sync = array_values(array_filter($changed_branches, static function($branch) use ($branches_dir) {
             return is_dir(rtrim($branches_dir, "/\\") . '/' . $branch);
         }));
+        cow_git_allocate_created_branch_id_bands($git_repo_dir, $branch_list_path, $transaction['created']);
         if ($branches_to_sync) {
             cow_git_sync_repository($repo, $branches_dir, $branches_to_sync);
         }
@@ -503,6 +504,29 @@ function cow_git_apply_push_to_branches(
         cow_git_prune_unreachable_objects($repo, $git_repo_dir);
     } catch (\Throwable $e) {
         error_log("COW Git object prune skipped: " . $e->getMessage());
+    }
+}
+
+function cow_git_allocate_created_branch_id_bands(string $git_repo_dir, ?string $branch_list_path, array $created_branches): void {
+    if (!$created_branches) {
+        return;
+    }
+
+    require_once __DIR__ . '/merge.php';
+
+    $branch_list_path = $branch_list_path ?: dirname($git_repo_dir) . '/branches.txt';
+    $metadata_db = dirname($branch_list_path) . '/merge/metadata.sqlite';
+    foreach ($created_branches as $created) {
+        $branch = (string)($created['branch'] ?? '');
+        $storage = rtrim((string)($created['storage'] ?? ''), "/\\");
+        if ($branch === '' || $storage === '') {
+            continue;
+        }
+        cow_merge_allocate_autoincrement_bands(
+            $storage . '/wp-content/database/.ht.sqlite',
+            $metadata_db,
+            $branch
+        );
     }
 }
 
