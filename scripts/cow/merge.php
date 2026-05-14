@@ -2402,6 +2402,117 @@ function cow_merge_constraint_error(SQLite3 $db): string {
     return $message === '' ? 'SQLite constraint failed' : $message;
 }
 
+function cow_merge_source_apply_postcondition_error(string $table, ?array $actual, array $expected, array $columns): ?string {
+    if ($actual === null) {
+        return "target triggers removed the applied source row from $table";
+    }
+    $compare_columns = cow_merge_all_columns($columns, array_keys($expected), array_keys($actual));
+    if (cow_merge_row_values_equal($actual, $expected, $compare_columns)) {
+        return null;
+    }
+    return "target triggers changed the applied source row in $table";
+}
+
+function cow_merge_savepoint_missing_after_transaction_end(RuntimeException $e): bool {
+    return str_contains($e->getMessage(), 'no such savepoint');
+}
+
+function cow_merge_try_insert_row_preserving_payload(
+    SQLite3 $target,
+    string $table,
+    array $row,
+    array $columns,
+    array $identity,
+    array $pk_cols
+): array {
+    static $savepoint_counter = 0;
+    $savepoint = 'cow_merge_insert_payload_' . (++$savepoint_counter);
+    cow_merge_exec_checked($target, 'SAVEPOINT ' . $savepoint, 'failed to start source insert payload savepoint');
+    try {
+        $result = cow_merge_try_insert_row($target, $table, $row, $columns);
+        if (!($result['ok'] ?? false)) {
+            $cleanup = cow_merge_rollback_release_savepoint_checked($target, $savepoint, 'source insert payload');
+            if ($cleanup !== null) {
+                if (cow_merge_savepoint_missing_after_transaction_end($cleanup)) {
+                    return $result;
+                }
+                throw $cleanup;
+            }
+            return $result;
+        }
+
+        if ($pk_cols) {
+            $actual = cow_merge_select_current_row($target, $table, $identity, $pk_cols);
+        } else {
+            $rowid = (int)($result['rowid'] ?? 0);
+            $entry = $rowid > 0 ? cow_merge_load_keyless_physical_row($target, $table, $rowid) : null;
+            $actual = $entry['row'] ?? null;
+        }
+        $postcondition_error = cow_merge_source_apply_postcondition_error($table, $actual, $row, $columns);
+        if ($postcondition_error !== null) {
+            $cleanup = cow_merge_rollback_release_savepoint_checked($target, $savepoint, 'source insert payload');
+            if ($cleanup !== null) {
+                throw $cleanup;
+            }
+            return ['ok' => false, 'rowid' => null, 'error' => $postcondition_error];
+        }
+
+        cow_merge_release_savepoint_checked($target, $savepoint, 'source insert payload');
+        return $result;
+    } catch (Throwable $e) {
+        $cleanup = cow_merge_rollback_release_savepoint_checked($target, $savepoint, 'source insert payload', $e);
+        if ($cleanup !== null && !cow_merge_savepoint_missing_after_transaction_end($cleanup)) {
+            throw $cleanup;
+        }
+        throw $e;
+    }
+}
+
+function cow_merge_try_insert_row_with_rowid_preserving_payload(
+    SQLite3 $target,
+    string $table,
+    int $rowid,
+    array $row,
+    array $columns
+): array {
+    static $savepoint_counter = 0;
+    $savepoint = 'cow_merge_insert_rowid_payload_' . (++$savepoint_counter);
+    cow_merge_exec_checked($target, 'SAVEPOINT ' . $savepoint, 'failed to start source rowid insert payload savepoint');
+    try {
+        $result = cow_merge_try_insert_row_with_rowid($target, $table, $rowid, $row, $columns);
+        if (!($result['ok'] ?? false)) {
+            $cleanup = cow_merge_rollback_release_savepoint_checked($target, $savepoint, 'source rowid insert payload');
+            if ($cleanup !== null) {
+                if (cow_merge_savepoint_missing_after_transaction_end($cleanup)) {
+                    return $result;
+                }
+                throw $cleanup;
+            }
+            return $result;
+        }
+
+        $entry = cow_merge_load_keyless_physical_row($target, $table, $rowid);
+        $actual = $entry['row'] ?? null;
+        $postcondition_error = cow_merge_source_apply_postcondition_error($table, $actual, $row, $columns);
+        if ($postcondition_error !== null) {
+            $cleanup = cow_merge_rollback_release_savepoint_checked($target, $savepoint, 'source rowid insert payload');
+            if ($cleanup !== null) {
+                throw $cleanup;
+            }
+            return ['ok' => false, 'rowid' => null, 'error' => $postcondition_error];
+        }
+
+        cow_merge_release_savepoint_checked($target, $savepoint, 'source rowid insert payload');
+        return $result;
+    } catch (Throwable $e) {
+        $cleanup = cow_merge_rollback_release_savepoint_checked($target, $savepoint, 'source rowid insert payload', $e);
+        if ($cleanup !== null && !cow_merge_savepoint_missing_after_transaction_end($cleanup)) {
+            throw $cleanup;
+        }
+        throw $e;
+    }
+}
+
 function cow_merge_prepare_foreign_key_lookup(
     SQLite3 $db,
     string $sql,
@@ -2911,7 +3022,9 @@ function cow_merge_try_update_row(
     array $identity,
     array $pk_cols,
     array $row,
-    array $columns
+    array $columns,
+    ?string $execute_message = null,
+    ?string $finalize_message = null
 ): array {
     $set_cols = [];
     foreach ($columns as $col) {
@@ -2944,13 +3057,66 @@ function cow_merge_try_update_row(
     $execute_result = cow_merge_execute_constraint_mutation(
         $stmt,
         $target,
-        "failed to update $table",
-        "failed to finalize update on $table"
+        $execute_message ?? "failed to update $table",
+        $finalize_message ?? "failed to finalize update on $table"
     );
     if (!($execute_result['ok'] ?? false)) {
         return ['ok' => false, 'error' => $execute_result['error'] ?? 'SQLite constraint failed'];
     }
     return ['ok' => true, 'error' => null];
+}
+
+function cow_merge_try_update_row_preserving_payload(
+    SQLite3 $target,
+    string $table,
+    array $identity,
+    array $pk_cols,
+    array $row,
+    array $columns,
+    ?string $execute_message = null,
+    ?string $finalize_message = null
+): array {
+    static $savepoint_counter = 0;
+    $savepoint = 'cow_merge_update_payload_' . (++$savepoint_counter);
+    cow_merge_exec_checked($target, 'SAVEPOINT ' . $savepoint, 'failed to start source update payload savepoint');
+    try {
+        $result = cow_merge_try_update_row($target, $table, $identity, $pk_cols, $row, $columns, $execute_message, $finalize_message);
+        if (!($result['ok'] ?? false)) {
+            $cleanup = cow_merge_rollback_release_savepoint_checked($target, $savepoint, 'source update payload');
+            if ($cleanup !== null) {
+                if (cow_merge_savepoint_missing_after_transaction_end($cleanup)) {
+                    return $result;
+                }
+                throw $cleanup;
+            }
+            return $result;
+        }
+
+        $actual = cow_merge_select_current_row($target, $table, $identity, $pk_cols);
+        $postcondition_error = cow_merge_source_apply_postcondition_error($table, $actual, $row, $columns);
+        if ($postcondition_error !== null) {
+            $cleanup = cow_merge_rollback_release_savepoint_checked($target, $savepoint, 'source update payload');
+            if ($cleanup !== null) {
+                throw $cleanup;
+            }
+            return ['ok' => false, 'error' => $postcondition_error];
+        }
+
+        cow_merge_release_savepoint_checked($target, $savepoint, 'source update payload');
+        return $result;
+    } catch (Throwable $e) {
+        $cleanup = cow_merge_rollback_release_savepoint_checked($target, $savepoint, 'source update payload', $e);
+        if ($cleanup !== null && !cow_merge_savepoint_missing_after_transaction_end($cleanup)) {
+            throw $cleanup;
+        }
+        throw $e;
+    }
+}
+
+function cow_merge_require_source_apply_result(array $result, string $message): void {
+    if (!($result['ok'] ?? false)) {
+        throw new RuntimeException($message . ': ' . (string)($result['error'] ?? 'SQLite constraint failed'));
+    }
 }
 
 function cow_merge_try_delete_row(SQLite3 $target, string $table, array $identity, array $pk_cols): array {
@@ -8007,7 +8173,23 @@ function cow_merge_resolve_conflict(
             try {
                 if ($choice === 'source') {
                     if ($conflict_type === 'cell-conflict') {
-                        cow_merge_update_single_cell($target, $table, $where_identity, $pk_cols, $column, $source_value);
+                        $columns = cow_merge_table_columns($target, $table);
+                        $expected_row = cow_merge_select_current_row($target, $table, $where_identity, $pk_cols);
+                        if ($expected_row === null) {
+                            throw new RuntimeException("cannot resolve $table.$column conflict because the target row no longer exists");
+                        }
+                        $expected_row[$column] = $source_value;
+                        $update_result = cow_merge_try_update_row_preserving_payload(
+                            $target,
+                            $table,
+                            $where_identity,
+                            $pk_cols,
+                            $expected_row,
+                            $columns,
+                            "failed to apply conflict resolution to $table.$column",
+                            "failed to finalize conflict resolution update for $table.$column"
+                        );
+                        cow_merge_require_source_apply_result($update_result, "failed to resolve $table.$column with source value");
                         if (!$pk_cols) {
                             $updated_row = cow_merge_select_current_row($target, $table, $where_identity, $pk_cols);
                             if ($updated_row !== null) {
@@ -8021,7 +8203,9 @@ function cow_merge_resolve_conflict(
                         }
                     } elseif ($conflict_type === 'row-target-deleted') {
                         $columns = cow_merge_table_columns($target, $table);
-                        $new_rowid = cow_merge_insert_row($target, $table, $source_value, $columns);
+                        $insert_result = cow_merge_try_insert_row_preserving_payload($target, $table, $source_value, $columns, $identity, $pk_cols);
+                        cow_merge_require_source_apply_result($insert_result, "failed to restore $table source row");
+                        $new_rowid = (int)($insert_result['rowid'] ?? 0);
                         if (!$pk_cols) {
                             cow_merge_remember_row_identity($meta, (int)$conflict['run_id'], $target_branch, $table, $new_rowid, $identity, $source_value);
                         }
@@ -8036,16 +8220,20 @@ function cow_merge_resolve_conflict(
                             if (!$pk_cols) {
                                 $source_rowid = cow_merge_lookup_active_rowid_by_identity($meta, $source_branch, $table, $identity);
                                 if ($source_rowid !== null && cow_merge_load_keyless_physical_row($target, $table, $source_rowid) === null) {
-                                    $new_rowid = cow_merge_insert_row_with_rowid($target, $table, $source_rowid, $source_value, $columns);
+                                    $insert_result = cow_merge_try_insert_row_with_rowid_preserving_payload($target, $table, $source_rowid, $source_value, $columns);
                                 } else {
-                                    $new_rowid = cow_merge_insert_row($target, $table, $source_value, $columns);
+                                    $insert_result = cow_merge_try_insert_row_preserving_payload($target, $table, $source_value, $columns, $identity, $pk_cols);
                                 }
+                                cow_merge_require_source_apply_result($insert_result, "failed to insert $table source row blocked by target state");
+                                $new_rowid = (int)($insert_result['rowid'] ?? 0);
                                 cow_merge_remember_row_identity($meta, (int)$conflict['run_id'], $target_branch, $table, $new_rowid, $identity, $source_value);
                             } else {
-                                cow_merge_insert_row($target, $table, $source_value, $columns);
+                                $insert_result = cow_merge_try_insert_row_preserving_payload($target, $table, $source_value, $columns, $identity, $pk_cols);
+                                cow_merge_require_source_apply_result($insert_result, "failed to insert $table source row blocked by target state");
                             }
                         } else {
-                            cow_merge_update_row($target, $table, $where_identity, $pk_cols, $source_value, $columns);
+                            $update_result = cow_merge_try_update_row_preserving_payload($target, $table, $where_identity, $pk_cols, $source_value, $columns);
+                            cow_merge_require_source_apply_result($update_result, "failed to update $table source row blocked by target state");
                             if (!$pk_cols) {
                                 cow_merge_remember_row_identity($meta, (int)$conflict['run_id'], $target_branch, $table, (int)$where_identity['rowid'], $identity, $source_value);
                             }
@@ -8060,19 +8248,23 @@ function cow_merge_resolve_conflict(
                             cow_merge_forget_row_identity($meta, (int)$conflict['run_id'], $target_branch, $table, (int)$unique_collision_where_identity['rowid']);
                         }
                         if ($is_update_unique_collision) {
-                            cow_merge_update_row($target, $table, $where_identity, $pk_cols, $source_value, $columns);
+                            $update_result = cow_merge_try_update_row_preserving_payload($target, $table, $where_identity, $pk_cols, $source_value, $columns);
+                            cow_merge_require_source_apply_result($update_result, "failed to update $table source row after unique collision removal");
                             if (!$pk_cols) {
                                 cow_merge_remember_row_identity($meta, (int)$conflict['run_id'], $target_branch, $table, (int)$where_identity['rowid'], $identity, $source_value);
                             }
                         } else {
-                            $new_rowid = cow_merge_insert_row($target, $table, $source_value, $columns);
+                            $insert_result = cow_merge_try_insert_row_preserving_payload($target, $table, $source_value, $columns, $identity, $pk_cols);
+                            cow_merge_require_source_apply_result($insert_result, "failed to insert $table source row after unique collision removal");
+                            $new_rowid = (int)($insert_result['rowid'] ?? 0);
                             if (!$pk_cols) {
                                 cow_merge_remember_row_identity($meta, (int)$conflict['run_id'], $target_branch, $table, $new_rowid, $identity, $source_value);
                             }
                         }
                     } else {
                         $columns = cow_merge_table_columns($target, $table);
-                        cow_merge_update_row($target, $table, $where_identity, $pk_cols, $source_value, $columns);
+                        $update_result = cow_merge_try_update_row_preserving_payload($target, $table, $where_identity, $pk_cols, $source_value, $columns);
+                        cow_merge_require_source_apply_result($update_result, "failed to update $table source row");
                         if (!$pk_cols) {
                             cow_merge_remember_row_identity($meta, (int)$conflict['run_id'], $target_branch, $table, (int)$where_identity['rowid'], $identity, $source_value);
                         }
@@ -10179,15 +10371,16 @@ function cow_merge_record_row_target_constraint(
         $target_row,
         $target_row
     );
+    $target_trigger_mutation = str_starts_with($error, 'target triggers ');
     if ($operation === 'insert') {
-        $reason_prefix = 'source inserted row violates target constraints';
-        $accepted_prefix = 'reviewed target resolution already accepts source insert blocked by target constraints';
+        $reason_prefix = $target_trigger_mutation ? 'source inserted row was rewritten by target triggers' : 'source inserted row violates target constraints';
+        $accepted_prefix = $target_trigger_mutation ? 'reviewed target resolution already accepts source insert rewritten by target triggers' : 'reviewed target resolution already accepts source insert blocked by target constraints';
     } elseif ($operation === 'delete') {
         $reason_prefix = 'source deleted row violates target constraints';
         $accepted_prefix = 'reviewed target resolution already accepts source row delete blocked by target constraints';
     } else {
-        $reason_prefix = 'source changed row violates target constraints';
-        $accepted_prefix = 'reviewed target resolution already accepts source row change blocked by target constraints';
+        $reason_prefix = $target_trigger_mutation ? 'source changed row was rewritten by target triggers' : 'source changed row violates target constraints';
+        $accepted_prefix = $target_trigger_mutation ? 'reviewed target resolution already accepts source row change rewritten by target triggers' : 'reviewed target resolution already accepts source row change blocked by target constraints';
     }
     cow_merge_record_decision(
         $meta,
@@ -10408,7 +10601,14 @@ function cow_merge_table_rows(
                 }
                 continue;
             }
-            $insert_result = cow_merge_try_insert_row($target, $table, $source_row, $columns);
+            $insert_result = cow_merge_try_insert_row_preserving_payload(
+                $target,
+                $table,
+                $source_row,
+                $columns,
+                $identity,
+                $pk_cols
+            );
             if (!($insert_result['ok'] ?? false)) {
                 if (cow_merge_record_row_target_constraint(
                     $meta,
@@ -10576,7 +10776,7 @@ function cow_merge_table_rows(
                 }
                 continue;
             }
-            $update_result = cow_merge_try_update_row($target, $table, $where_identity, $pk_cols, $source_row, $columns);
+            $update_result = cow_merge_try_update_row_preserving_payload($target, $table, $where_identity, $pk_cols, $source_row, $columns);
             if (!($update_result['ok'] ?? false)) {
                 if (cow_merge_record_row_target_constraint(
                     $meta,
@@ -10711,7 +10911,7 @@ function cow_merge_table_rows(
         }
 
         if ($row_applied > 0) {
-            $update_result = cow_merge_try_update_row($target, $table, $where_identity, $pk_cols, $merged, $columns);
+            $update_result = cow_merge_try_update_row_preserving_payload($target, $table, $where_identity, $pk_cols, $merged, $columns);
             if (!($update_result['ok'] ?? false)) {
                 if (cow_merge_record_row_target_constraint(
                     $meta,

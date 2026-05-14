@@ -1657,6 +1657,101 @@ try {
         'target-side constraint update collision records an auditable target-wins decision'
     );
 
+    $trigger_insert_base = $tmp . '/trigger-insert-base.sqlite';
+    $trigger_insert_source = $tmp . '/trigger-insert-source.sqlite';
+    $trigger_insert_target = $tmp . '/trigger-insert-target.sqlite';
+    $trigger_insert_metadata = $tmp . '/.forkpress/cow/merge/trigger-insert-metadata.sqlite';
+    create_base_db($trigger_insert_base);
+    copy($trigger_insert_base, $trigger_insert_source);
+    copy($trigger_insert_base, $trigger_insert_target);
+    foreach ([$trigger_insert_base, $trigger_insert_source, $trigger_insert_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_trigger_insert_rows (id INTEGER PRIMARY KEY, value TEXT)');
+        $db->close();
+    }
+    $db = open_db($trigger_insert_source);
+    $db->exec("INSERT INTO plugin_trigger_insert_rows (id, value) VALUES (10, 'source insert')");
+    $db->close();
+    $db = open_db($trigger_insert_target);
+    $db->exec(<<<'SQL'
+CREATE TRIGGER plugin_trigger_insert_rows_rewrite
+AFTER INSERT ON plugin_trigger_insert_rows
+BEGIN
+    UPDATE plugin_trigger_insert_rows SET value = 'target trigger rewrite' WHERE id = NEW.id;
+END
+SQL);
+    $db->close();
+    $trigger_insert_result = cow_merge_databases($trigger_insert_base, $trigger_insert_source, $trigger_insert_target, $trigger_insert_metadata, 'feature-trigger-insert', 'main');
+    assert_same($trigger_insert_result['status'], 'completed_with_conflicts', 'target trigger rewrite of source insert is audited instead of silently changing source payload');
+    assert_same((int)scalar($trigger_insert_target, 'SELECT COUNT(*) FROM plugin_trigger_insert_rows'), 0, 'trigger-mutated source insert is rolled back by default');
+    assert_same(
+        (int)scalar($trigger_insert_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_trigger_insert_rows' AND conflict_type = 'row-target-constraint'"),
+        1,
+        'trigger-mutated source insert records a reviewable row conflict'
+    );
+    assert_same(
+        (int)scalar($trigger_insert_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_trigger_insert_rows' AND decision = 'target-wins' AND reason LIKE '%target triggers changed the applied source row%'"),
+        1,
+        'trigger-mutated source insert records an auditable target-wins decision'
+    );
+    $trigger_insert_conflict_id = (int)scalar($trigger_insert_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_trigger_insert_rows' AND conflict_type = 'row-target-constraint' ORDER BY id DESC LIMIT 1");
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($trigger_insert_metadata, $trigger_insert_conflict_id, 'source', true, 'Try trigger-mutated source insert.', 'cow-test'),
+        'target triggers changed the applied source row',
+        'source resolution for a trigger-mutated insert remains validation-gated'
+    );
+    assert_same((int)scalar($trigger_insert_target, 'SELECT COUNT(*) FROM plugin_trigger_insert_rows'), 0, 'failed trigger-mutated insert resolution leaves target unchanged');
+    assert_same((int)scalar($trigger_insert_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $trigger_insert_conflict_id"), 0, 'failed trigger-mutated insert resolution records no resolution');
+
+    $trigger_update_base = $tmp . '/trigger-update-base.sqlite';
+    $trigger_update_source = $tmp . '/trigger-update-source.sqlite';
+    $trigger_update_target = $tmp . '/trigger-update-target.sqlite';
+    $trigger_update_metadata = $tmp . '/.forkpress/cow/merge/trigger-update-metadata.sqlite';
+    create_base_db($trigger_update_base);
+    copy($trigger_update_base, $trigger_update_source);
+    copy($trigger_update_base, $trigger_update_target);
+    foreach ([$trigger_update_base, $trigger_update_source, $trigger_update_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_trigger_update_rows (id INTEGER PRIMARY KEY, value TEXT, marker TEXT)');
+        $db->exec("INSERT INTO plugin_trigger_update_rows (id, value, marker) VALUES (1, 'base', 'base marker')");
+        $db->close();
+    }
+    $db = open_db($trigger_update_source);
+    $db->exec("UPDATE plugin_trigger_update_rows SET value = 'source update' WHERE id = 1");
+    $db->close();
+    $db = open_db($trigger_update_target);
+    $db->exec(<<<'SQL'
+CREATE TRIGGER plugin_trigger_update_rows_rewrite
+AFTER UPDATE ON plugin_trigger_update_rows
+BEGIN
+    UPDATE plugin_trigger_update_rows SET marker = 'target trigger rewrite' WHERE id = NEW.id;
+END
+SQL);
+    $db->close();
+    $trigger_update_result = cow_merge_databases($trigger_update_base, $trigger_update_source, $trigger_update_target, $trigger_update_metadata, 'feature-trigger-update', 'main');
+    assert_same($trigger_update_result['status'], 'completed_with_conflicts', 'target trigger rewrite of source update is audited instead of silently changing merged row payload');
+    assert_same(scalar($trigger_update_target, 'SELECT value FROM plugin_trigger_update_rows WHERE id = 1'), 'base', 'trigger-mutated source update leaves target value unchanged by default');
+    assert_same(scalar($trigger_update_target, 'SELECT marker FROM plugin_trigger_update_rows WHERE id = 1'), 'base marker', 'trigger-mutated source update rolls back target trigger side effects');
+    assert_same(
+        (int)scalar($trigger_update_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_trigger_update_rows' AND conflict_type = 'row-target-constraint'"),
+        1,
+        'trigger-mutated source update records a reviewable row conflict'
+    );
+    assert_same(
+        (int)scalar($trigger_update_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_trigger_update_rows' AND decision = 'target-wins' AND reason LIKE '%target triggers changed the applied source row%'"),
+        1,
+        'trigger-mutated source update records an auditable target-wins decision'
+    );
+    $trigger_update_conflict_id = (int)scalar($trigger_update_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_trigger_update_rows' AND conflict_type = 'row-target-constraint' ORDER BY id DESC LIMIT 1");
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($trigger_update_metadata, $trigger_update_conflict_id, 'source', true, 'Try trigger-mutated source update.', 'cow-test'),
+        'target triggers changed the applied source row',
+        'source resolution for a trigger-mutated update remains validation-gated'
+    );
+    assert_same(scalar($trigger_update_target, 'SELECT value FROM plugin_trigger_update_rows WHERE id = 1'), 'base', 'failed trigger-mutated update resolution leaves target value unchanged');
+    assert_same(scalar($trigger_update_target, 'SELECT marker FROM plugin_trigger_update_rows WHERE id = 1'), 'base marker', 'failed trigger-mutated update resolution leaves target trigger side effects rolled back');
+    assert_same((int)scalar($trigger_update_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $trigger_update_conflict_id"), 0, 'failed trigger-mutated update resolution records no resolution');
+
     $fk_order_base = $tmp . '/fk-order-base.sqlite';
     $fk_order_source = $tmp . '/fk-order-source.sqlite';
     $fk_order_target = $tmp . '/fk-order-target.sqlite';
