@@ -3585,6 +3585,29 @@ SQL);
     assert_same((int)scalar($rollback_artifact_metadata, "SELECT COUNT(*) FROM merge_rollback_failures WHERE source_branch = 'feature-file-rollback-artifact'"), 1, 'filesystem transaction rollback failure is queryable in merge metadata when available');
     cow_merge_file_transaction_cleanup($file_tx_artifact);
 
+    $rollback_artifact_only_dir = $tmp . '/.forkpress/cow/merge/rollback-artifact-only';
+    $rollback_artifact_only_metadata = $rollback_artifact_only_dir . '/metadata.sqlite';
+    mkdir($rollback_artifact_only_metadata, 0777, true);
+    $artifact_only_path = cow_merge_record_rollback_failure_artifact(
+        $rollback_artifact_only_metadata,
+        125,
+        'feature-rollback-artifact-only',
+        'main',
+        '/tmp/base.sqlite',
+        '/tmp/source.sqlite',
+        '/tmp/target.sqlite',
+        'metadata unavailable original failure',
+        'metadata unavailable rollback failure',
+        ['target_db_snapshot' => ['path' => '/tmp/target.sqlite', 'backup_exists' => true]]
+    );
+    assert_true(is_string($artifact_only_path) && is_file($artifact_only_path), 'rollback failure still records a JSONL artifact when metadata SQLite is unavailable');
+    $artifact_only_lines = file($artifact_only_path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    assert_true(is_array($artifact_only_lines) && count($artifact_only_lines) === 1, 'metadata-unavailable rollback failure writes one JSONL artifact record');
+    $artifact_only_record = json_decode($artifact_only_lines[0], true);
+    assert_same($artifact_only_record['source_branch'], 'feature-rollback-artifact-only', 'metadata-unavailable rollback artifact preserves source branch');
+    assert_same($artifact_only_record['rollback_failure'], 'metadata unavailable rollback failure', 'metadata-unavailable rollback artifact preserves rollback reason');
+    assert_same($artifact_only_record['artifacts']['target_db_snapshot']['backup_exists'] ?? null, true, 'metadata-unavailable rollback artifact preserves recovery artifact metadata');
+
     $schema_base = $tmp . '/schema-base.sqlite';
     $schema_source = $tmp . '/schema-source.sqlite';
     $schema_target = $tmp . '/schema-target.sqlite';
