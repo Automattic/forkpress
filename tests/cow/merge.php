@@ -6034,6 +6034,66 @@ SQL);
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-schema-trigger-savepoint'"), 0, 'failed source-added trigger savepoint records no partial conflicts');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-schema-trigger-savepoint' AND status = 'failed'"), 1, 'failed source-added trigger savepoint leaves an auditable failed run');
 
+    $schema_view_ddl_base = $tmp . '/schema-view-ddl-base.sqlite';
+    $schema_view_ddl_source = $tmp . '/schema-view-ddl-source.sqlite';
+    $schema_view_ddl_target = $tmp . '/schema-view-ddl-target.sqlite';
+    create_base_db($schema_view_ddl_base);
+    copy($schema_view_ddl_base, $schema_view_ddl_source);
+    copy($schema_view_ddl_base, $schema_view_ddl_target);
+    $db = open_db($schema_view_ddl_source);
+    $db->exec('CREATE VIEW plugin_source_ddl_view AS SELECT item_id, label FROM plugin_items');
+    $db->close();
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'CREATE VIEW plugin_source_ddl_view AS SELECT item_id, label FROM plugin_items' && $message === 'failed to apply source-added view schema merge') {
+                throw new RuntimeException('forced source-added view DDL failure');
+            }
+        },
+    ];
+    $schema_view_ddl_failure = null;
+    try {
+        cow_merge_databases($schema_view_ddl_base, $schema_view_ddl_source, $schema_view_ddl_target, $metadata, 'feature-schema-view-ddl', 'main');
+    } catch (Throwable $e) {
+        $schema_view_ddl_failure = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($schema_view_ddl_failure !== null && str_contains($schema_view_ddl_failure, 'forced source-added view DDL failure'), 'source-added view DDL infrastructure failure is surfaced to the caller');
+    assert_same((int)scalar($schema_view_ddl_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_source_ddl_view'"), 0, 'failed source-added view DDL leaves target schema unchanged');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-schema-view-ddl'"), 0, 'failed source-added view DDL records no misleading conflicts');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-schema-view-ddl'"), 0, 'failed source-added view DDL records no staged decisions');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-schema-view-ddl' AND status = 'failed'"), 1, 'failed source-added view DDL leaves an auditable failed run');
+
+    $schema_trigger_ddl_base = $tmp . '/schema-trigger-ddl-base.sqlite';
+    $schema_trigger_ddl_source = $tmp . '/schema-trigger-ddl-source.sqlite';
+    $schema_trigger_ddl_target = $tmp . '/schema-trigger-ddl-target.sqlite';
+    create_base_db($schema_trigger_ddl_base);
+    copy($schema_trigger_ddl_base, $schema_trigger_ddl_source);
+    copy($schema_trigger_ddl_base, $schema_trigger_ddl_target);
+    $db = open_db($schema_trigger_ddl_source);
+    $db->exec('CREATE TRIGGER plugin_source_ddl_trigger AFTER INSERT ON plugin_items BEGIN SELECT NEW.item_id; END');
+    $db->close();
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'CREATE TRIGGER plugin_source_ddl_trigger AFTER INSERT ON plugin_items BEGIN SELECT NEW.item_id; END' && $message === 'failed to apply source-added trigger schema merge') {
+                throw new RuntimeException('forced source-added trigger DDL failure');
+            }
+        },
+    ];
+    $schema_trigger_ddl_failure = null;
+    try {
+        cow_merge_databases($schema_trigger_ddl_base, $schema_trigger_ddl_source, $schema_trigger_ddl_target, $metadata, 'feature-schema-trigger-ddl', 'main');
+    } catch (Throwable $e) {
+        $schema_trigger_ddl_failure = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($schema_trigger_ddl_failure !== null && str_contains($schema_trigger_ddl_failure, 'forced source-added trigger DDL failure'), 'source-added trigger DDL infrastructure failure is surfaced to the caller');
+    assert_same((int)scalar($schema_trigger_ddl_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_source_ddl_trigger'"), 0, 'failed source-added trigger DDL leaves target schema unchanged');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-schema-trigger-ddl'"), 0, 'failed source-added trigger DDL records no misleading conflicts');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-schema-trigger-ddl'"), 0, 'failed source-added trigger DDL records no staged decisions');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-schema-trigger-ddl' AND status = 'failed'"), 1, 'failed source-added trigger DDL leaves an auditable failed run');
+
     $schema_index_validate_base = $tmp . '/schema-index-validate-base.sqlite';
     $schema_index_validate_source = $tmp . '/schema-index-validate-source.sqlite';
     $schema_index_validate_target = $tmp . '/schema-index-validate-target.sqlite';
@@ -9130,6 +9190,7 @@ SQL);
     } finally {
         unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
     }
+    gc_collect_cycles();
     assert_true(
         $schema_changed_trigger_release_failure !== null &&
             str_contains($schema_changed_trigger_release_failure, 'forced schema object resolution validation release failure'),

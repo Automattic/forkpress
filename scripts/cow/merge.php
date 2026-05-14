@@ -9889,6 +9889,8 @@ function cow_merge_apply_schema_object_changes(
         if ($base_sql === null && $target_sql === null) {
             $apply_error = null;
             $target_savepoint_started = false;
+            $source_object_ddl_boundary = false;
+            $source_object_created = false;
             $source_object_validated = false;
             try {
                 cow_merge_exec_checked(
@@ -9916,18 +9918,31 @@ function cow_merge_apply_schema_object_changes(
                     cow_merge_validate_view_references($target, $name, $source_sql);
                     cow_merge_validate_view_schema_acyclic($target, $name, $source_sql);
                 }
+                $source_object_ddl_boundary = true;
+                cow_merge_test_hook('before_sqlite_exec', $target, $source_sql, "failed to apply source-added $type schema merge");
                 if (!@$target->exec($source_sql)) {
-                    throw new RuntimeException($target->lastErrorMsg());
+                    $apply_error = $target->lastErrorMsg();
+                    $cleanup_failure = cow_merge_rollback_release_savepoint_checked(
+                        $target,
+                        'forkpress_schema_object_apply',
+                        "source-added $type schema apply"
+                    );
+                    $target_savepoint_started = false;
+                    if ($cleanup_failure !== null) {
+                        throw $cleanup_failure;
+                    }
+                } else {
+                    $source_object_created = true;
+                    if ($type === 'trigger') {
+                        cow_merge_validate_trigger_program($target, $name, $source_sql);
+                    }
+                    if ($type === 'view') {
+                        cow_merge_validate_view_schema($target, $name, 'source-added');
+                    }
+                    $source_object_validated = true;
+                    cow_merge_release_savepoint_checked($target, 'forkpress_schema_object_apply', "source-added $type schema apply");
+                    $target_savepoint_started = false;
                 }
-                if ($type === 'trigger') {
-                    cow_merge_validate_trigger_program($target, $name, $source_sql);
-                }
-                if ($type === 'view') {
-                    cow_merge_validate_view_schema($target, $name, 'source-added');
-                }
-                $source_object_validated = true;
-                cow_merge_release_savepoint_checked($target, 'forkpress_schema_object_apply', "source-added $type schema apply");
-                $target_savepoint_started = false;
             } catch (Throwable $e) {
                 if (!$target_savepoint_started) {
                     throw $e;
@@ -9940,6 +9955,9 @@ function cow_merge_apply_schema_object_changes(
                 );
                 if ($cleanup_failure !== null) {
                     throw $cleanup_failure;
+                }
+                if ($source_object_ddl_boundary && !$source_object_created) {
+                    throw $e;
                 }
                 if ($source_object_validated) {
                     throw $e;

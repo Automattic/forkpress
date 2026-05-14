@@ -45,6 +45,7 @@
 - Tightened automatic safe schema merge and source-added view/trigger apply savepoints so begin failures surface cleanly and roll back staged target/metadata state.
 - Tightened automatic source column/index DDL infrastructure failures so they abort and roll back staged schema/audit state instead of being hidden as ordinary schema conflicts.
 - Added COW coverage for early source-added table index DDL infrastructure failures, proving source-added table rows and staged audit metadata roll back cleanly.
+- Tightened source-added view/trigger DDL infrastructure failures so they abort and roll back staged schema/audit state instead of being recorded as validation-gated schema conflicts.
 - Tightened validation-gated source column resolution DDL so infrastructure failures surface through checked SQLite execution without partial resolution metadata.
 - Tightened validation-gated source table rebuild and source view resolution savepoints so begin failures surface cleanly without staging resolution metadata.
 - Tightened compatible table rebuild DDL execution so staged temporary tables and dependent schema rewrites roll back cleanly on SQLite infrastructure failures.
