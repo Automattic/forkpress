@@ -465,34 +465,34 @@ function cow_merge_row_hash(array $row): string {
 
 function cow_merge_table_sql_map(SQLite3 $db): array {
     $tables = [];
-    $res = $db->query(
+    $res = cow_merge_query_checked(
+        $db,
         "SELECT name, sql FROM sqlite_master " .
-        "WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        "WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+        'failed to read table schema map'
     );
-    if (!$res) {
-        return $tables;
-    }
     while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
         $tables[(string)$row['name']] = $row['sql'];
     }
+    cow_merge_result_finalize_checked($res, 'failed to finalize table schema map');
     return $tables;
 }
 
 function cow_merge_index_sql_map(SQLite3 $db): array {
     $indexes = [];
-    $res = $db->query(
+    $res = cow_merge_query_checked(
+        $db,
         "SELECT name, tbl_name, sql FROM sqlite_master " .
-        "WHERE type = 'index' AND sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        "WHERE type = 'index' AND sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY name",
+        'failed to read index schema map'
     );
-    if (!$res) {
-        return $indexes;
-    }
     while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
         $indexes[(string)$row['name']] = [
             'table' => (string)$row['tbl_name'],
             'sql' => (string)$row['sql'],
         ];
     }
+    cow_merge_result_finalize_checked($res, 'failed to finalize index schema map');
     return $indexes;
 }
 
@@ -501,52 +501,47 @@ function cow_merge_schema_object_sql_map(SQLite3 $db, string $type): array {
         throw new InvalidArgumentException("unsupported schema object type: $type");
     }
     $objects = [];
-    $stmt = $db->prepare(
+    $stmt = cow_merge_prepare_checked(
+        $db,
         "SELECT name, tbl_name, sql FROM sqlite_master " .
-        "WHERE type = :type AND sql IS NOT NULL ORDER BY name"
+        "WHERE type = :type AND sql IS NOT NULL ORDER BY name",
+        "failed to prepare $type schema lookup"
     );
-    if (!$stmt) {
-        throw new RuntimeException("failed to prepare $type schema lookup: " . $db->lastErrorMsg());
-    }
     cow_merge_bind($stmt, ':type', $type);
-    $res = $stmt->execute();
-    if (!$res) {
-        throw new RuntimeException("failed to read $type schema: " . $db->lastErrorMsg());
-    }
+    $res = cow_merge_execute_checked($stmt, $db, "failed to read $type schema");
     while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
         $objects[(string)$row['name']] = [
             'table' => (string)$row['tbl_name'],
             'sql' => (string)$row['sql'],
         ];
     }
+    cow_merge_result_finalize_checked($res, "failed to finalize $type schema lookup");
     return $objects;
 }
 
 function cow_merge_table_sql(SQLite3 $db, string $table): ?string {
-    $stmt = $db->prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = :name");
-    if (!$stmt) {
-        throw new RuntimeException("failed to prepare table schema lookup for $table: " . $db->lastErrorMsg());
-    }
+    $stmt = cow_merge_prepare_checked(
+        $db,
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = :name",
+        "failed to prepare table schema lookup for $table"
+    );
     cow_merge_bind($stmt, ':name', $table);
-    $res = $stmt->execute();
-    if (!$res) {
-        throw new RuntimeException("failed to read table schema for $table: " . $db->lastErrorMsg());
-    }
+    $res = cow_merge_execute_checked($stmt, $db, "failed to read table schema for $table");
     $row = $res->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($res, "failed to finalize table schema lookup for $table");
     return $row ? (string)$row['sql'] : null;
 }
 
 function cow_merge_index_sql(SQLite3 $db, string $index): ?string {
-    $stmt = $db->prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = :name AND sql IS NOT NULL");
-    if (!$stmt) {
-        throw new RuntimeException("failed to prepare index schema lookup for $index: " . $db->lastErrorMsg());
-    }
+    $stmt = cow_merge_prepare_checked(
+        $db,
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = :name AND sql IS NOT NULL",
+        "failed to prepare index schema lookup for $index"
+    );
     cow_merge_bind($stmt, ':name', $index);
-    $res = $stmt->execute();
-    if (!$res) {
-        throw new RuntimeException("failed to read index schema for $index: " . $db->lastErrorMsg());
-    }
+    $res = cow_merge_execute_checked($stmt, $db, "failed to read index schema for $index");
     $row = $res->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($res, "failed to finalize index schema lookup for $index");
     return $row ? (string)$row['sql'] : null;
 }
 
@@ -554,17 +549,16 @@ function cow_merge_schema_object_sql(SQLite3 $db, string $type, string $name): ?
     if (!in_array($type, ['view', 'trigger'], true)) {
         throw new InvalidArgumentException("unsupported schema object type: $type");
     }
-    $stmt = $db->prepare("SELECT sql FROM sqlite_master WHERE type = :type AND name = :name AND sql IS NOT NULL");
-    if (!$stmt) {
-        throw new RuntimeException("failed to prepare $type schema lookup for $name: " . $db->lastErrorMsg());
-    }
+    $stmt = cow_merge_prepare_checked(
+        $db,
+        "SELECT sql FROM sqlite_master WHERE type = :type AND name = :name AND sql IS NOT NULL",
+        "failed to prepare $type schema lookup for $name"
+    );
     cow_merge_bind($stmt, ':type', $type);
     cow_merge_bind($stmt, ':name', $name);
-    $res = $stmt->execute();
-    if (!$res) {
-        throw new RuntimeException("failed to read $type schema for $name: " . $db->lastErrorMsg());
-    }
+    $res = cow_merge_execute_checked($stmt, $db, "failed to read $type schema for $name");
     $row = $res->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($res, "failed to finalize $type schema lookup for $name");
     return $row ? (string)$row['sql'] : null;
 }
 
@@ -678,22 +672,25 @@ function cow_merge_filter_deferred_source_table_restore_payload(SQLite3 $meta, i
 
 function cow_merge_table_columns(SQLite3 $db, string $table): array {
     $columns = [];
-    $res = $db->query('PRAGMA table_info(' . cow_merge_quote_ident($table) . ')');
-    if (!$res) {
-        return $columns;
-    }
+    $res = cow_merge_query_checked(
+        $db,
+        'PRAGMA table_info(' . cow_merge_quote_ident($table) . ')',
+        "failed to read table columns for $table"
+    );
     while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
         $columns[] = (string)$row['name'];
     }
+    cow_merge_result_finalize_checked($res, "failed to finalize table columns for $table");
     return $columns;
 }
 
 function cow_merge_table_info(SQLite3 $db, string $table): array {
     $columns = [];
-    $res = $db->query('PRAGMA table_info(' . cow_merge_quote_ident($table) . ')');
-    if (!$res) {
-        return $columns;
-    }
+    $res = cow_merge_query_checked(
+        $db,
+        'PRAGMA table_info(' . cow_merge_quote_ident($table) . ')',
+        "failed to read table info for $table"
+    );
     while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
         $columns[] = [
             'name' => (string)$row['name'],
@@ -703,6 +700,7 @@ function cow_merge_table_info(SQLite3 $db, string $table): array {
             'pk' => (int)$row['pk'],
         ];
     }
+    cow_merge_result_finalize_checked($res, "failed to finalize table info for $table");
     return $columns;
 }
 
@@ -949,16 +947,18 @@ function cow_merge_column_definition_is_safe_to_add(string $definition, array $c
 
 function cow_merge_pk_cols(SQLite3 $db, string $table): array {
     $pk = [];
-    $res = $db->query('PRAGMA table_info(' . cow_merge_quote_ident($table) . ')');
-    if (!$res) {
-        return [];
-    }
+    $res = cow_merge_query_checked(
+        $db,
+        'PRAGMA table_info(' . cow_merge_quote_ident($table) . ')',
+        "failed to read primary key columns for $table"
+    );
     while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
         $ordinal = (int)$row['pk'];
         if ($ordinal > 0) {
             $pk[$ordinal] = (string)$row['name'];
         }
     }
+    cow_merge_result_finalize_checked($res, "failed to finalize primary key columns for $table");
     ksort($pk);
     return array_values($pk);
 }
@@ -986,10 +986,7 @@ function cow_merge_load_rows(SQLite3 $db, string $table, array $pk_cols): array 
     $sql = $pk_cols
         ? 'SELECT * FROM ' . cow_merge_quote_ident($table)
         : 'SELECT rowid AS __forkpress_merge_rowid, * FROM ' . cow_merge_quote_ident($table);
-    $res = $db->query($sql);
-    if (!$res) {
-        return $rows;
-    }
+    $res = cow_merge_query_checked($db, $sql, "failed to load rows for $table");
     while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
         $rowid = $row['__forkpress_merge_rowid'] ?? null;
         unset($row['__forkpress_merge_rowid']);
@@ -1000,6 +997,7 @@ function cow_merge_load_rows(SQLite3 $db, string $table, array $pk_cols): array 
             'row' => $row,
         ];
     }
+    cow_merge_result_finalize_checked($res, "failed to finalize loaded rows for $table");
     return $rows;
 }
 
@@ -1008,10 +1006,11 @@ function cow_merge_load_keyless_physical_rows(SQLite3 $db, string $table): array
     if (cow_merge_table_sql($db, $table) === null) {
         return $rows;
     }
-    $res = $db->query('SELECT rowid AS __forkpress_merge_rowid, * FROM ' . cow_merge_quote_ident($table));
-    if (!$res) {
-        return $rows;
-    }
+    $res = cow_merge_query_checked(
+        $db,
+        'SELECT rowid AS __forkpress_merge_rowid, * FROM ' . cow_merge_quote_ident($table),
+        "failed to load physical keyless rows for $table"
+    );
     while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
         $rowid = $row['__forkpress_merge_rowid'] ?? null;
         unset($row['__forkpress_merge_rowid']);
@@ -1023,6 +1022,7 @@ function cow_merge_load_keyless_physical_rows(SQLite3 $db, string $table): array
             'row' => $row,
         ];
     }
+    cow_merge_result_finalize_checked($res, "failed to finalize physical keyless rows for $table");
     return $rows;
 }
 

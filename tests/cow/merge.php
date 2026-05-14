@@ -261,6 +261,76 @@ try {
     assert_same((int)scalar($merge_begin_metadata, 'SELECT COUNT(*) FROM merge_decisions'), 0, 'direct DB merge metadata begin failure records no decisions');
     assert_same((int)scalar($merge_begin_metadata, 'SELECT COUNT(*) FROM merge_conflicts'), 0, 'direct DB merge metadata begin failure records no conflicts');
 
+    $schema_read_base = $tmp . '/schema-read-base.sqlite';
+    $schema_read_source = $tmp . '/schema-read-source.sqlite';
+    $schema_read_target = $tmp . '/schema-read-target.sqlite';
+    $schema_read_metadata = $tmp . '/.forkpress/cow/merge/schema-read-metadata.sqlite';
+    create_base_db($schema_read_base);
+    copy($schema_read_base, $schema_read_source);
+    copy($schema_read_base, $schema_read_target);
+    $db = open_db($schema_read_source);
+    $db->exec("UPDATE wp_posts SET post_content = 'Source schema read content' WHERE ID = 1");
+    $db->close();
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_query'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($message === 'failed to read table schema map') {
+                throw new RuntimeException('forced table schema map read failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_databases(
+            $schema_read_base,
+            $schema_read_source,
+            $schema_read_target,
+            $schema_read_metadata,
+            'feature-schema-read-rollback',
+            'main'
+        ),
+        'forced table schema map read failure',
+        'table schema map read failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_query']);
+    assert_same(scalar($schema_read_target, "SELECT post_content FROM wp_posts WHERE ID = 1"), 'Base content', 'table schema map read failure leaves target data unchanged');
+    assert_same((int)scalar($schema_read_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-schema-read-rollback' AND status = 'failed'"), 1, 'table schema map read failure leaves an auditable failed run');
+    assert_same((int)scalar($schema_read_metadata, 'SELECT COUNT(*) FROM merge_decisions'), 0, 'table schema map read failure records no decisions');
+    assert_same((int)scalar($schema_read_metadata, 'SELECT COUNT(*) FROM merge_conflicts'), 0, 'table schema map read failure records no conflicts');
+
+    $row_load_finalize_base = $tmp . '/row-load-finalize-base.sqlite';
+    $row_load_finalize_source = $tmp . '/row-load-finalize-source.sqlite';
+    $row_load_finalize_target = $tmp . '/row-load-finalize-target.sqlite';
+    $row_load_finalize_metadata = $tmp . '/.forkpress/cow/merge/row-load-finalize-metadata.sqlite';
+    create_base_db($row_load_finalize_base);
+    copy($row_load_finalize_base, $row_load_finalize_source);
+    copy($row_load_finalize_base, $row_load_finalize_target);
+    $db = open_db($row_load_finalize_source);
+    $db->exec("UPDATE wp_posts SET post_content = 'Source row load finalize content' WHERE ID = 1");
+    $db->close();
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize'] = [
+        static function (SQLite3Result $result, string $message): void {
+            if ($message === 'failed to finalize loaded rows for wp_posts') {
+                throw new RuntimeException('forced row load finalize failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_databases(
+            $row_load_finalize_base,
+            $row_load_finalize_source,
+            $row_load_finalize_target,
+            $row_load_finalize_metadata,
+            'feature-row-load-finalize-rollback',
+            'main'
+        ),
+        'forced row load finalize failure',
+        'row load finalize failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize']);
+    assert_same(scalar($row_load_finalize_target, "SELECT post_content FROM wp_posts WHERE ID = 1"), 'Base content', 'row load finalize failure rolls back target row changes');
+    assert_same((int)scalar($row_load_finalize_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-row-load-finalize-rollback' AND status = 'failed'"), 1, 'row load finalize failure leaves an auditable failed run');
+    assert_same((int)scalar($row_load_finalize_metadata, 'SELECT COUNT(*) FROM merge_decisions'), 0, 'row load finalize failure records no decisions');
+    assert_same((int)scalar($row_load_finalize_metadata, 'SELECT COUNT(*) FROM merge_conflicts'), 0, 'row load finalize failure records no conflicts');
+
     $decision_execute_base = $tmp . '/decision-execute-base.sqlite';
     $decision_execute_source = $tmp . '/decision-execute-source.sqlite';
     $decision_execute_target = $tmp . '/decision-execute-target.sqlite';
