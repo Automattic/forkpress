@@ -506,6 +506,17 @@ function forkpress_branch_action_url(): string {
     return function_exists('admin_url') ? admin_url('admin-post.php') : '/wp-admin/admin-post.php';
 }
 
+function forkpress_branch_switcher_data(string $current): array {
+    $branches = array_values(array_unique(forkpress_local_branches($current)));
+    return array_map(function (string $branch) use ($current): array {
+        return [
+            'name'    => $branch,
+            'url'     => forkpress_branch_url($branch),
+            'current' => $branch === $current,
+        ];
+    }, $branches);
+}
+
 function forkpress_branch_run_cli(array $args): array {
     if (!function_exists('proc_open')) {
         return [1, 'ForkPress branch actions require proc_open().'];
@@ -537,6 +548,32 @@ function forkpress_branch_run_cli(array $args): array {
     $code = proc_close($process);
     $output = trim((string) $stdout . "\n" . (string) $stderr);
     return [(int) $code, $output];
+}
+
+function forkpress_branch_wants_json(): bool {
+    $async = $_SERVER['HTTP_X_FORKPRESS_ASYNC'] ?? '';
+    if (is_string($async) && $async === '1') {
+        return true;
+    }
+
+    $accept = $_SERVER['HTTP_ACCEPT'] ?? '';
+    return is_string($accept) && str_contains($accept, 'application/json');
+}
+
+function forkpress_branch_finish_action(string $url, string $type, string $message, array $data = []): void {
+    if (forkpress_branch_wants_json()) {
+        $payload = array_merge([
+            'success' => $type !== 'error',
+            'message' => $message,
+            'url' => $url,
+        ], $data);
+        http_response_code($type === 'error' ? 400 : 200);
+        header('Content-Type: application/json; charset=UTF-8');
+        echo function_exists('wp_json_encode') ? wp_json_encode($payload) : json_encode($payload);
+        exit;
+    }
+
+    forkpress_branch_redirect_with_notice($url, $type, $message);
 }
 
 function forkpress_branch_redirect_with_notice(string $url, string $type, string $message): void {
@@ -575,7 +612,7 @@ add_action('admin_notices', 'forkpress_branch_admin_notice');
 
 function forkpress_handle_branch_create(): void {
     if (!forkpress_branch_can_manage()) {
-        forkpress_branch_redirect_with_notice(forkpress_branch_url(forkpress_current_branch() ?: 'main', '/wp-admin/'), 'error', 'You cannot create ForkPress branches from this site.');
+        forkpress_branch_finish_action(forkpress_branch_url(forkpress_current_branch() ?: 'main', '/wp-admin/'), 'error', 'You cannot create ForkPress branches from this site.');
     }
     if (function_exists('check_admin_referer')) {
         check_admin_referer('forkpress_branch_create');
@@ -586,23 +623,28 @@ function forkpress_handle_branch_create(): void {
     $current = forkpress_current_branch() ?: 'main';
     $branches = forkpress_local_branches($current);
     if (!forkpress_branch_name_is_valid($branch)) {
-        forkpress_branch_redirect_with_notice(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Branch names can use letters, numbers, hyphens, and underscores.');
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Branch names can use letters, numbers, hyphens, and underscores.');
     }
     if (!in_array($from, $branches, true)) {
-        forkpress_branch_redirect_with_notice(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Choose an existing source branch.');
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Choose an existing source branch.');
     }
 
     [$code, $output] = forkpress_branch_run_cli(['create', $branch, '--from', $from]);
     if ($code !== 0) {
-        forkpress_branch_redirect_with_notice(forkpress_branch_url($current, '/wp-admin/'), 'error', $output ?: 'ForkPress could not create the branch.');
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', $output ?: 'ForkPress could not create the branch.');
     }
-    forkpress_branch_redirect_with_notice(forkpress_branch_url($branch, '/wp-admin/'), 'notice', 'Created branch ' . $branch . '.');
+    forkpress_branch_finish_action(
+        forkpress_branch_url($branch, '/wp-admin/'),
+        'notice',
+        'Created branch ' . $branch . '.',
+        ['branches' => forkpress_branch_switcher_data($current)]
+    );
 }
 add_action('admin_post_forkpress_branch_create', 'forkpress_handle_branch_create');
 
 function forkpress_handle_branch_merge(): void {
     if (!forkpress_branch_can_manage()) {
-        forkpress_branch_redirect_with_notice(forkpress_branch_url(forkpress_current_branch() ?: 'main', '/wp-admin/'), 'error', 'You cannot merge ForkPress branches from this site.');
+        forkpress_branch_finish_action(forkpress_branch_url(forkpress_current_branch() ?: 'main', '/wp-admin/'), 'error', 'You cannot merge ForkPress branches from this site.');
     }
     if (function_exists('check_admin_referer')) {
         check_admin_referer('forkpress_branch_merge');
@@ -613,17 +655,22 @@ function forkpress_handle_branch_merge(): void {
     $current = forkpress_current_branch() ?: 'main';
     $branches = forkpress_local_branches($current);
     if (!in_array($source, $branches, true) || !in_array($target, $branches, true)) {
-        forkpress_branch_redirect_with_notice(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Choose existing source and target branches.');
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Choose existing source and target branches.');
     }
     if ($source === $target) {
-        forkpress_branch_redirect_with_notice(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Choose two different branches to merge.');
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Choose two different branches to merge.');
     }
 
     [$code, $output] = forkpress_branch_run_cli(['merge', $source, '--into', $target]);
     if ($code !== 0) {
-        forkpress_branch_redirect_with_notice(forkpress_branch_url($current, '/wp-admin/'), 'error', $output ?: 'ForkPress could not merge the branch.');
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', $output ?: 'ForkPress could not merge the branch.');
     }
-    forkpress_branch_redirect_with_notice(forkpress_branch_url($target, '/wp-admin/'), 'notice', 'Merged ' . $source . ' into ' . $target . '.');
+    forkpress_branch_finish_action(
+        forkpress_branch_url($target, '/wp-admin/'),
+        'notice',
+        'Merged ' . $source . ' into ' . $target . '.',
+        ['branches' => forkpress_branch_switcher_data($current)]
+    );
 }
 add_action('admin_post_forkpress_branch_merge', 'forkpress_handle_branch_merge');
 
@@ -657,16 +704,17 @@ function forkpress_branch_switcher_assets(): void {
         }
         #wpadminbar .forkpress-switcher-panel {
             background: #1d2327;
-            border: 1px solid #3c434a;
-            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.28);
+            border: 1px solid #50575e;
+            border-radius: 6px;
+            box-shadow: 0 12px 28px rgba(0, 0, 0, 0.34);
             box-sizing: border-box;
             color: #f0f0f1;
             display: none;
             left: 0;
-            padding: 10px;
+            padding: 12px;
             position: absolute;
             top: 32px;
-            width: 320px;
+            width: 360px;
             z-index: 99999;
         }
         #wpadminbar #wp-admin-bar-forkpress-branch-indicator:hover .forkpress-switcher-panel,
@@ -676,7 +724,7 @@ function forkpress_branch_switcher_assets(): void {
         #wpadminbar .forkpress-switcher-filter {
             background: #fff;
             border: 1px solid #8c8f94;
-            border-radius: 3px;
+            border-radius: 4px;
             box-sizing: border-box;
             color: #1d2327;
             font-size: 13px;
@@ -727,19 +775,54 @@ function forkpress_branch_switcher_assets(): void {
             padding-top: 10px;
         }
         #wpadminbar .forkpress-switcher-form {
+            background: #2c3338;
+            border: 1px solid #3c434a;
+            border-radius: 6px;
             display: grid;
-            gap: 6px;
+            gap: 8px;
+            padding: 10px;
+        }
+        #wpadminbar .forkpress-switcher-form-title {
+            color: #f0f0f1;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0;
+            line-height: 1.3;
+        }
+        #wpadminbar .forkpress-switcher-field {
+            display: grid;
+            gap: 3px;
+            min-width: 0;
+        }
+        #wpadminbar .forkpress-switcher-label {
+            color: #c3c4c7;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0;
+            line-height: 1.2;
         }
         #wpadminbar .forkpress-switcher-row {
             display: grid;
             gap: 6px;
             grid-template-columns: 1fr 1fr;
         }
+        #wpadminbar .forkpress-switcher-row.is-merge {
+            align-items: end;
+            grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+        }
+        #wpadminbar .forkpress-switcher-arrow {
+            color: #c3c4c7;
+            font-size: 16px;
+            font-weight: 700;
+            line-height: 30px;
+            min-width: 18px;
+            text-align: center;
+        }
         #wpadminbar .forkpress-switcher-input,
         #wpadminbar .forkpress-switcher-select {
             background: #fff;
             border: 1px solid #8c8f94;
-            border-radius: 3px;
+            border-radius: 4px;
             box-sizing: border-box;
             color: #1d2327;
             font-size: 13px;
@@ -753,10 +836,14 @@ function forkpress_branch_switcher_assets(): void {
         #wpadminbar .forkpress-switcher-button {
             background: #2271b1;
             border: 1px solid #2271b1;
-            border-radius: 3px;
+            border-radius: 4px;
             box-sizing: border-box;
             color: #fff;
             cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
             font-size: 13px;
             font-weight: 600;
             height: 30px;
@@ -772,6 +859,47 @@ function forkpress_branch_switcher_assets(): void {
             border-color: #135e96;
             color: #fff;
             outline: none;
+        }
+        #wpadminbar .forkpress-switcher-form.is-loading .forkpress-switcher-button,
+        #wpadminbar .forkpress-switcher-button:disabled {
+            cursor: progress;
+            opacity: 0.82;
+        }
+        #wpadminbar .forkpress-switcher-spinner {
+            animation: forkpress-switcher-spin 0.8s linear infinite;
+            border: 2px solid rgba(255, 255, 255, 0.45);
+            border-top-color: #fff;
+            border-radius: 50%;
+            box-sizing: border-box;
+            display: none;
+            height: 14px;
+            width: 14px;
+        }
+        #wpadminbar .forkpress-switcher-form.is-loading .forkpress-switcher-spinner {
+            display: inline-block;
+        }
+        #wpadminbar .forkpress-switcher-status {
+            border-radius: 4px;
+            display: none;
+            font-size: 12px;
+            line-height: 1.35;
+            padding: 8px;
+        }
+        #wpadminbar .forkpress-switcher-status.is-visible {
+            display: block;
+        }
+        #wpadminbar .forkpress-switcher-status.is-success {
+            background: #0a4b78;
+            color: #fff;
+        }
+        #wpadminbar .forkpress-switcher-status.is-error {
+            background: #8a2424;
+            color: #fff;
+        }
+        @keyframes forkpress-switcher-spin {
+            to {
+                transform: rotate(360deg);
+            }
         }
     </style>';
 }
@@ -790,14 +918,7 @@ function forkpress_render_branch_switcher(): void {
     }
 
     $rendered = true;
-    $branches = array_values(array_unique(forkpress_local_branches($current)));
-    $data = array_map(function (string $branch) use ($current): array {
-        return [
-            'name'    => $branch,
-            'url'     => forkpress_branch_url($branch),
-            'current' => $branch === $current,
-        ];
-    }, $branches);
+    $data = forkpress_branch_switcher_data($current);
     $json = function_exists('wp_json_encode') ? wp_json_encode($data) : json_encode($data);
     $actions = null;
     if (forkpress_branch_can_manage()) {
@@ -824,11 +945,29 @@ function forkpress_render_branch_switcher(): void {
         var actions = <?php echo $actions_json; ?>;
         var panel = document.createElement('div');
         panel.className = 'forkpress-switcher-panel';
-        panel.innerHTML = '<input class="forkpress-switcher-filter" type="search" autocomplete="off" placeholder="Filter branches" aria-label="Filter branches"><div class="forkpress-switcher-list" role="menu"></div>';
+        panel.innerHTML = '<input class="forkpress-switcher-filter" type="search" autocomplete="off" placeholder="Filter branches" aria-label="Filter branches"><div class="forkpress-switcher-list" role="menu"></div><div class="forkpress-switcher-status" role="status" aria-live="polite"></div>';
         item.appendChild(panel);
 
         var input = panel.querySelector('.forkpress-switcher-filter');
         var list = panel.querySelector('.forkpress-switcher-list');
+        var status = panel.querySelector('.forkpress-switcher-status');
+        var actionSelects = [];
+
+        function setBranches(nextBranches) {
+            if (!Array.isArray(nextBranches)) {
+                return;
+            }
+            branches = nextBranches.filter(function (branch) {
+                return branch && typeof branch.name === 'string' && typeof branch.url === 'string';
+            });
+            render();
+            refreshActionSelects();
+        }
+
+        function showStatus(kind, message) {
+            status.className = 'forkpress-switcher-status is-visible is-' + kind;
+            status.textContent = message;
+        }
 
         function render() {
             var query = input.value.toLowerCase();
@@ -867,14 +1006,93 @@ function forkpress_render_branch_switcher(): void {
             var field = document.createElement('select');
             field.className = 'forkpress-switcher-select';
             field.name = name;
+            populateSelect(field, selected);
+            actionSelects.push(field);
+            return field;
+        }
+
+        function populateSelect(field, selected) {
+            var value = selected || field.value;
+            field.innerHTML = '';
             branches.forEach(function (branch) {
                 var option = document.createElement('option');
                 option.value = branch.name;
                 option.textContent = branch.name;
-                option.selected = branch.name === selected;
+                option.selected = branch.name === value;
                 field.appendChild(option);
             });
-            return field;
+        }
+
+        function refreshActionSelects() {
+            actionSelects.forEach(function (field) {
+                populateSelect(field);
+            });
+        }
+
+        function labeledField(labelText, field) {
+            var wrap = document.createElement('label');
+            wrap.className = 'forkpress-switcher-field';
+            var label = document.createElement('span');
+            label.className = 'forkpress-switcher-label';
+            label.textContent = labelText;
+            wrap.appendChild(label);
+            wrap.appendChild(field);
+            return wrap;
+        }
+
+        function setFormLoading(form, loading) {
+            form.classList.toggle('is-loading', loading);
+            Array.prototype.forEach.call(form.elements, function (field) {
+                field.disabled = loading;
+            });
+        }
+
+        function bindAsyncAction(form, clearField) {
+            if (!window.fetch || !window.FormData) {
+                return;
+            }
+
+            form.addEventListener('submit', function (event) {
+                event.preventDefault();
+                var body = new FormData(form);
+                setFormLoading(form, true);
+                showStatus('success', 'Working...');
+
+                fetch(form.action, {
+                    method: 'POST',
+                    body: body,
+                    credentials: 'same-origin',
+                    headers: {
+                        'Accept': 'application/json',
+                        'X-ForkPress-Async': '1'
+                    }
+                }).then(function (response) {
+                    return response.text().then(function (text) {
+                        var payload = null;
+                        try {
+                            payload = text ? JSON.parse(text) : null;
+                        } catch (error) {
+                            payload = null;
+                        }
+                        if (!response.ok || !payload || payload.success === false) {
+                            throw new Error(payload && payload.message ? payload.message : (text || 'ForkPress branch action failed.'));
+                        }
+                        return payload;
+                    });
+                }).then(function (payload) {
+                    if (clearField) {
+                        clearField.value = '';
+                    }
+                    if (payload.branches) {
+                        setBranches(payload.branches);
+                    }
+                    showStatus('success', payload.message || 'ForkPress branch action completed.');
+                }).catch(function (error) {
+                    showStatus('error', error && error.message ? error.message : 'ForkPress branch action failed.');
+                }).then(function () {
+                    setFormLoading(form, false);
+                });
+            });
         }
 
         function addActions() {
@@ -891,6 +1109,10 @@ function forkpress_render_branch_switcher(): void {
             createForm.action = actions.url;
             createForm.appendChild(hidden('action', 'forkpress_branch_create'));
             createForm.appendChild(hidden('_wpnonce', actions.createNonce));
+            var createTitle = document.createElement('div');
+            createTitle.className = 'forkpress-switcher-form-title';
+            createTitle.textContent = 'Create branch';
+            createForm.appendChild(createTitle);
             var createRow = document.createElement('div');
             createRow.className = 'forkpress-switcher-row';
             var branchName = document.createElement('input');
@@ -901,13 +1123,13 @@ function forkpress_render_branch_switcher(): void {
             branchName.placeholder = 'new-branch';
             branchName.pattern = '[a-zA-Z0-9_-]{1,63}';
             branchName.required = true;
-            createRow.appendChild(branchName);
-            createRow.appendChild(select('from', actions.current));
+            createRow.appendChild(labeledField('Name', branchName));
+            createRow.appendChild(labeledField('From', select('from', actions.current)));
             createForm.appendChild(createRow);
             var createButton = document.createElement('button');
             createButton.className = 'forkpress-switcher-button';
             createButton.type = 'submit';
-            createButton.textContent = 'Create branch';
+            createButton.innerHTML = '<span class="forkpress-switcher-spinner" aria-hidden="true"></span><span>Create branch</span>';
             createForm.appendChild(createButton);
 
             var mergeForm = document.createElement('form');
@@ -916,24 +1138,35 @@ function forkpress_render_branch_switcher(): void {
             mergeForm.action = actions.url;
             mergeForm.appendChild(hidden('action', 'forkpress_branch_merge'));
             mergeForm.appendChild(hidden('_wpnonce', actions.mergeNonce));
+            var mergeTitle = document.createElement('div');
+            mergeTitle.className = 'forkpress-switcher-form-title';
+            mergeTitle.textContent = 'Merge branches';
+            mergeForm.appendChild(mergeTitle);
             var mergeRow = document.createElement('div');
-            mergeRow.className = 'forkpress-switcher-row';
+            mergeRow.className = 'forkpress-switcher-row is-merge';
             var firstNonMain = branches.find(function (branch) {
                 return branch.name !== 'main';
             });
             var defaultSource = actions.current === 'main' && firstNonMain ? firstNonMain.name : actions.current;
-            mergeRow.appendChild(select('source', defaultSource));
-            mergeRow.appendChild(select('target', 'main'));
+            mergeRow.appendChild(labeledField('Source', select('source', defaultSource)));
+            var arrow = document.createElement('span');
+            arrow.className = 'forkpress-switcher-arrow';
+            arrow.setAttribute('aria-hidden', 'true');
+            arrow.textContent = '→';
+            mergeRow.appendChild(arrow);
+            mergeRow.appendChild(labeledField('Target', select('target', 'main')));
             mergeForm.appendChild(mergeRow);
             var mergeButton = document.createElement('button');
             mergeButton.className = 'forkpress-switcher-button';
             mergeButton.type = 'submit';
-            mergeButton.textContent = 'Merge branch';
+            mergeButton.innerHTML = '<span class="forkpress-switcher-spinner" aria-hidden="true"></span><span>Merge source → target</span>';
             mergeForm.appendChild(mergeButton);
 
             tools.appendChild(createForm);
             tools.appendChild(mergeForm);
             panel.appendChild(tools);
+            bindAsyncAction(createForm, branchName);
+            bindAsyncAction(mergeForm, null);
         }
 
         item.addEventListener('mouseenter', function () {

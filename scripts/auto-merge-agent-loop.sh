@@ -12,6 +12,18 @@ LOG_DIR="${FORKPRESS_LOOP_LOG_DIR:-}"
 SANDBOX="${CODEX_SANDBOX:-danger-full-access}"
 APPROVAL="${CODEX_APPROVAL:-never}"
 ENABLE_SEARCH="${CODEX_ENABLE_SEARCH:-1}"
+ALLOW_UNATTENDED_YOLO="${FORKPRESS_LOOP_ALLOW_UNATTENDED_YOLO:-}"
+
+if [[ "$SANDBOX" == "danger-full-access" && "$APPROVAL" == "never" && "$ALLOW_UNATTENDED_YOLO" != "1" ]]; then
+  cat >&2 <<'EOF'
+forkpress loop: refusing to start with CODEX_SANDBOX=danger-full-access and CODEX_APPROVAL=never.
+
+This loop repeatedly runs Codex with repo write access and no approval prompts.
+Set FORKPRESS_LOOP_ALLOW_UNATTENDED_YOLO=1 only in a disposable or deliberately
+prepared workspace.
+EOF
+  exit 2
+fi
 
 if [[ -z "$WORKDIR" ]]; then
   WORKDIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"

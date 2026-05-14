@@ -845,31 +845,39 @@ pub fn merge_cow_branch(
         "scripts/cow/merge.php",
         args.iter().map(|arg| arg.as_os_str()),
     )?;
+    // Advance only the source branch's merge bases after a successful merge so
+    // future merges from that source compare against its post-merge state. The
+    // target branch keeps its own base snapshots for merges where it is later
+    // used as the source.
     record_cow_merge_base_snapshot(layout, runtime, shared, source, &source_db)?;
     record_cow_file_merge_base_snapshot(layout, runtime, shared, source, &source_root)?;
     invalidate_cow_git_ref(layout, target)?;
     Ok(())
 }
 
+pub struct CowMergeAuditQuery<'a> {
+    pub format: &'a str,
+    pub limit: &'a str,
+    pub run_id: Option<&'a str>,
+    pub scope: &'a str,
+    pub records: &'a str,
+    pub conflict_type: Option<&'a str>,
+    pub decision: Option<&'a str>,
+    pub path: Option<&'a str>,
+    pub path_prefix: Option<&'a str>,
+    pub id_band_skips: bool,
+    pub target_kept: bool,
+    pub review: bool,
+    pub review_status: Option<&'a str>,
+    pub resolution_status: Option<&'a str>,
+    pub group_by: &'a str,
+}
+
 pub fn inspect_cow_merge_audit(
     layout: &Layout,
     runtime: &PortableRuntime,
     shared: &SharedPaths,
-    format: &str,
-    limit: &str,
-    run_id: Option<&str>,
-    scope: &str,
-    records: &str,
-    conflict_type: Option<&str>,
-    decision: Option<&str>,
-    path: Option<&str>,
-    path_prefix: Option<&str>,
-    id_band_skips: bool,
-    target_kept: bool,
-    review: bool,
-    review_status: Option<&str>,
-    resolution_status: Option<&str>,
-    group_by: &str,
+    query: CowMergeAuditQuery<'_>,
 ) -> Result<()> {
     let metadata_db = cow_merge_metadata_db_path(layout);
     let mut args: Vec<OsString> = vec![
@@ -877,54 +885,54 @@ pub fn inspect_cow_merge_audit(
         "--metadata-db".into(),
         metadata_db.as_os_str().to_os_string(),
         "--format".into(),
-        format.into(),
+        query.format.into(),
         "--limit".into(),
-        limit.into(),
+        query.limit.into(),
         "--scope".into(),
-        scope.into(),
+        query.scope.into(),
         "--records".into(),
-        records.into(),
+        query.records.into(),
     ];
-    if let Some(run_id) = run_id {
+    if let Some(run_id) = query.run_id {
         args.push("--run".into());
         args.push(run_id.into());
     }
-    if let Some(conflict_type) = conflict_type {
+    if let Some(conflict_type) = query.conflict_type {
         args.push("--conflict-type".into());
         args.push(conflict_type.into());
     }
-    if let Some(decision) = decision {
+    if let Some(decision) = query.decision {
         args.push("--decision".into());
         args.push(decision.into());
     }
-    if let Some(path) = path {
+    if let Some(path) = query.path {
         args.push("--path".into());
         args.push(path.into());
     }
-    if let Some(path_prefix) = path_prefix {
+    if let Some(path_prefix) = query.path_prefix {
         args.push("--path-prefix".into());
         args.push(path_prefix.into());
     }
-    if id_band_skips {
+    if query.id_band_skips {
         args.push("--id-band-skips".into());
     }
-    if target_kept {
+    if query.target_kept {
         args.push("--target-kept".into());
     }
-    if review {
+    if query.review {
         args.push("--review".into());
     }
-    if let Some(review_status) = review_status {
+    if let Some(review_status) = query.review_status {
         args.push("--review-status".into());
         args.push(review_status.into());
     }
-    if let Some(resolution_status) = resolution_status {
+    if let Some(resolution_status) = query.resolution_status {
         args.push("--resolution-status".into());
         args.push(resolution_status.into());
     }
-    if group_by != "none" {
+    if query.group_by != "none" {
         args.push("--group-by".into());
-        args.push(group_by.into());
+        args.push(query.group_by.into());
     }
     run_php_script(
         layout,
