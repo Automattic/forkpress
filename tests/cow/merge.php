@@ -2663,6 +2663,52 @@ SQL);
     assert_same((int)$metadata_schema_release_failure_db->querySingle("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'merge_resolutions'"), 1, 'metadata schema creation succeeds after release failure is cleared');
     $metadata_schema_release_failure_db->close();
 
+    $metadata_schema_table_failure = $tmp . '/metadata-schema-table-failure.sqlite';
+    $metadata_schema_table_failure_db = open_db($metadata_schema_table_failure);
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        function (SQLite3 $db, string $sql, string $message) use ($metadata_schema_table_failure_db): void {
+            if (
+                $db === $metadata_schema_table_failure_db &&
+                $message === 'failed to create metadata table merge_decisions'
+            ) {
+                throw new RuntimeException('forced metadata schema table creation failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_ensure_metadata($metadata_schema_table_failure_db),
+        'forced metadata schema table creation failure',
+        'metadata table creation failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    assert_same((int)$metadata_schema_table_failure_db->querySingle("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name LIKE 'merge_%'"), 0, 'failed metadata table creation rolls back earlier metadata tables');
+    cow_merge_ensure_metadata($metadata_schema_table_failure_db);
+    assert_same((int)$metadata_schema_table_failure_db->querySingle("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'merge_decisions'"), 1, 'metadata schema creation succeeds after table creation failure is cleared');
+    $metadata_schema_table_failure_db->close();
+
+    $metadata_schema_index_failure = $tmp . '/metadata-schema-index-failure.sqlite';
+    $metadata_schema_index_failure_db = open_db($metadata_schema_index_failure);
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        function (SQLite3 $db, string $sql, string $message) use ($metadata_schema_index_failure_db): void {
+            if (
+                $db === $metadata_schema_index_failure_db &&
+                $message === 'failed to create metadata index merge_resolutions_conflict_idx'
+            ) {
+                throw new RuntimeException('forced metadata schema index creation failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_ensure_metadata($metadata_schema_index_failure_db),
+        'forced metadata schema index creation failure',
+        'metadata index creation failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    assert_same((int)$metadata_schema_index_failure_db->querySingle("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name LIKE 'merge_%'"), 0, 'failed metadata index creation rolls back metadata tables');
+    cow_merge_ensure_metadata($metadata_schema_index_failure_db);
+    assert_same((int)$metadata_schema_index_failure_db->querySingle("SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'merge_resolutions_conflict_idx'"), 1, 'metadata schema creation succeeds after index creation failure is cleared');
+    $metadata_schema_index_failure_db->close();
+
     $legacy_metadata = $tmp . '/legacy-metadata.sqlite';
     $legacy_db = open_db($legacy_metadata);
     $legacy_db->exec(<<<'SQL'
@@ -2774,6 +2820,43 @@ SQL);
     cow_merge_ensure_metadata($legacy_review_release_failure_db);
     assert_true((bool)$legacy_review_release_failure_db->exec("INSERT INTO merge_review_notes (record_type, record_id, status, note, reviewer) VALUES ('resolution', 1, 'reviewed', 'resolution note', 'cow-test')"), 'review-note metadata migration succeeds after release failure is cleared');
     $legacy_review_release_failure_db->close();
+
+    $legacy_review_copy_failure_metadata = $tmp . '/legacy-review-copy-failure-metadata.sqlite';
+    $legacy_review_copy_failure_db = open_db($legacy_review_copy_failure_metadata);
+    $legacy_review_copy_failure_db->exec(<<<'SQL'
+CREATE TABLE merge_review_notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    record_type TEXT NOT NULL CHECK(record_type IN ('conflict', 'decision')),
+    record_id INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending', 'needs-action', 'reviewed')),
+    note TEXT NOT NULL,
+    reviewer TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)
+SQL);
+    $legacy_review_copy_failure_db->exec("INSERT INTO merge_review_notes (record_type, record_id, status, note, reviewer) VALUES ('conflict', 1, 'reviewed', 'legacy copy failure note', 'cow-test')");
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        function (SQLite3 $db, string $sql, string $message) use ($legacy_review_copy_failure_db): void {
+            if (
+                $db === $legacy_review_copy_failure_db &&
+                $message === 'failed to copy legacy review-note metadata'
+            ) {
+                throw new RuntimeException('forced review metadata migration copy failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_ensure_metadata($legacy_review_copy_failure_db),
+        'forced review metadata migration copy failure',
+        'review-note metadata migration DDL failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    assert_same((int)$legacy_review_copy_failure_db->querySingle("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'merge_review_notes_old'"), 0, 'failed review-note metadata migration copy removes temporary legacy table');
+    assert_same((int)$legacy_review_copy_failure_db->querySingle('SELECT COUNT(*) FROM merge_review_notes'), 1, 'failed review-note metadata migration copy preserves existing notes');
+    assert_true(!@$legacy_review_copy_failure_db->exec("INSERT INTO merge_review_notes (record_type, record_id, status, note, reviewer) VALUES ('resolution', 1, 'reviewed', 'resolution note', 'cow-test')"), 'failed review-note metadata migration copy rolls back the new record-type constraint');
+    cow_merge_ensure_metadata($legacy_review_copy_failure_db);
+    assert_true((bool)$legacy_review_copy_failure_db->exec("INSERT INTO merge_review_notes (record_type, record_id, status, note, reviewer) VALUES ('resolution', 1, 'reviewed', 'resolution note', 'cow-test')"), 'review-note metadata migration succeeds after copy failure is cleared');
+    $legacy_review_copy_failure_db->close();
 
     $file_base_db = $tmp . '/file-base.sqlite';
     $file_source_db = $tmp . '/file-source.sqlite';

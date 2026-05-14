@@ -3061,7 +3061,7 @@ function cow_merge_ensure_metadata(SQLite3 $meta): void {
         'failed to create metadata schema savepoint'
     );
     try {
-    $meta->exec(<<<'SQL'
+    cow_merge_exec_checked($meta, <<<'SQL'
 CREATE TABLE IF NOT EXISTS merge_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     source_branch TEXT NOT NULL,
@@ -3076,9 +3076,9 @@ CREATE TABLE IF NOT EXISTS merge_runs (
     base_db TEXT NOT NULL,
     failure_reason TEXT
 )
-SQL);
+SQL, 'failed to create metadata table merge_runs');
     cow_merge_ensure_metadata_column($meta, 'merge_runs', 'failure_reason', 'TEXT');
-    $meta->exec(<<<'SQL'
+    cow_merge_exec_checked($meta, <<<'SQL'
 CREATE TABLE IF NOT EXISTS merge_decisions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id INTEGER NOT NULL,
@@ -3094,8 +3094,8 @@ CREATE TABLE IF NOT EXISTS merge_decisions (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(run_id) REFERENCES merge_runs(id)
 )
-SQL);
-    $meta->exec(<<<'SQL'
+SQL, 'failed to create metadata table merge_decisions');
+    cow_merge_exec_checked($meta, <<<'SQL'
 CREATE TABLE IF NOT EXISTS merge_conflicts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id INTEGER NOT NULL,
@@ -3117,8 +3117,8 @@ CREATE TABLE IF NOT EXISTS merge_conflicts (
     FOREIGN KEY(run_id) REFERENCES merge_runs(id),
     UNIQUE(table_name, row_identity, column_name, conflict_type, base_hash, source_hash, target_hash, chosen_hash)
 )
-SQL);
-    $meta->exec(<<<'SQL'
+SQL, 'failed to create metadata table merge_conflicts');
+    cow_merge_exec_checked($meta, <<<'SQL'
 CREATE TABLE IF NOT EXISTS merge_row_identities (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     branch_name TEXT NOT NULL,
@@ -3134,8 +3134,8 @@ CREATE TABLE IF NOT EXISTS merge_row_identities (
     FOREIGN KEY(last_seen_run_id) REFERENCES merge_runs(id),
     UNIQUE(branch_name, table_name, rowid)
 )
-SQL);
-    $meta->exec(<<<'SQL'
+SQL, 'failed to create metadata table merge_row_identities');
+    cow_merge_exec_checked($meta, <<<'SQL'
 CREATE TABLE IF NOT EXISTS merge_row_identity_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     branch_name TEXT NOT NULL,
@@ -3154,8 +3154,8 @@ CREATE TABLE IF NOT EXISTS merge_row_identity_history (
     FOREIGN KEY(deleted_run_id) REFERENCES merge_runs(id),
     UNIQUE(branch_name, table_name, rowid, logical_identity)
 )
-SQL);
-    $meta->exec(<<<'SQL'
+SQL, 'failed to create metadata table merge_row_identity_history');
+    cow_merge_exec_checked($meta, <<<'SQL'
 INSERT INTO merge_row_identity_history
     (branch_name, table_name, rowid, logical_identity, row_hash, first_seen_run_id, last_seen_run_id, created_at, updated_at)
 SELECT branch_name, table_name, rowid, logical_identity, row_hash, first_seen_run_id, last_seen_run_id, created_at, updated_at
@@ -3167,8 +3167,8 @@ ON CONFLICT(branch_name, table_name, rowid, logical_identity) DO UPDATE SET
     updated_at = excluded.updated_at,
     deleted_at = NULL,
     deleted_run_id = NULL
-SQL);
-    $meta->exec(<<<'SQL'
+SQL, 'failed to migrate metadata row identity history');
+    cow_merge_exec_checked($meta, <<<'SQL'
 CREATE TABLE IF NOT EXISTS merge_autoincrement_bands (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     branch_name TEXT NOT NULL,
@@ -3184,8 +3184,8 @@ CREATE TABLE IF NOT EXISTS merge_autoincrement_bands (
     FOREIGN KEY(last_seen_run_id) REFERENCES merge_runs(id),
     UNIQUE(branch_name, table_name)
 )
-SQL);
-    $meta->exec(<<<'SQL'
+SQL, 'failed to create metadata table merge_autoincrement_bands');
+    cow_merge_exec_checked($meta, <<<'SQL'
 CREATE TABLE IF NOT EXISTS merge_rollback_failures (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id INTEGER,
@@ -3200,8 +3200,8 @@ CREATE TABLE IF NOT EXISTS merge_rollback_failures (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(run_id) REFERENCES merge_runs(id)
 )
-SQL);
-    $meta->exec(<<<'SQL'
+SQL, 'failed to create metadata table merge_rollback_failures');
+    cow_merge_exec_checked($meta, <<<'SQL'
 CREATE TABLE IF NOT EXISTS merge_review_notes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     record_type TEXT NOT NULL CHECK(record_type IN ('conflict', 'decision', 'resolution')),
@@ -3211,7 +3211,7 @@ CREATE TABLE IF NOT EXISTS merge_review_notes (
     reviewer TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 )
-SQL);
+SQL, 'failed to create metadata table merge_review_notes');
     $review_notes_sql = (string)$meta->querySingle("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'merge_review_notes'");
     if (str_contains($review_notes_sql, "CHECK(record_type IN ('conflict', 'decision'))")) {
         $migration_savepoint = 'migrate_merge_review_notes_record_type';
@@ -3221,8 +3221,8 @@ SQL);
             'failed to create review-note metadata migration savepoint'
         );
         try {
-            $meta->exec('ALTER TABLE merge_review_notes RENAME TO merge_review_notes_old');
-            $meta->exec(<<<'SQL'
+            cow_merge_exec_checked($meta, 'ALTER TABLE merge_review_notes RENAME TO merge_review_notes_old', 'failed to rename legacy review-note metadata table');
+            cow_merge_exec_checked($meta, <<<'SQL'
 CREATE TABLE merge_review_notes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     record_type TEXT NOT NULL CHECK(record_type IN ('conflict', 'decision', 'resolution')),
@@ -3232,12 +3232,14 @@ CREATE TABLE merge_review_notes (
     reviewer TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 )
-SQL);
-            $meta->exec(
+SQL, 'failed to create migrated review-note metadata table');
+            cow_merge_exec_checked(
+                $meta,
                 'INSERT INTO merge_review_notes (id, record_type, record_id, status, note, reviewer, created_at) ' .
-                'SELECT id, record_type, record_id, status, note, reviewer, created_at FROM merge_review_notes_old'
+                'SELECT id, record_type, record_id, status, note, reviewer, created_at FROM merge_review_notes_old',
+                'failed to copy legacy review-note metadata'
             );
-            $meta->exec('DROP TABLE merge_review_notes_old');
+            cow_merge_exec_checked($meta, 'DROP TABLE merge_review_notes_old', 'failed to drop legacy review-note metadata table');
             cow_merge_release_savepoint_checked(
                 $meta,
                 $migration_savepoint,
@@ -3256,8 +3258,8 @@ SQL);
             throw $e;
         }
     }
-    $meta->exec('CREATE INDEX IF NOT EXISTS merge_review_notes_record_idx ON merge_review_notes(record_type, record_id, id)');
-    $meta->exec(<<<'SQL'
+    cow_merge_exec_checked($meta, 'CREATE INDEX IF NOT EXISTS merge_review_notes_record_idx ON merge_review_notes(record_type, record_id, id)', 'failed to create metadata index merge_review_notes_record_idx');
+    cow_merge_exec_checked($meta, <<<'SQL'
 CREATE TABLE IF NOT EXISTS merge_resolutions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     conflict_id INTEGER NOT NULL,
@@ -3275,8 +3277,8 @@ CREATE TABLE IF NOT EXISTS merge_resolutions (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(conflict_id) REFERENCES merge_conflicts(id)
 )
-SQL);
-    $meta->exec('CREATE INDEX IF NOT EXISTS merge_resolutions_conflict_idx ON merge_resolutions(conflict_id, id)');
+SQL, 'failed to create metadata table merge_resolutions');
+    cow_merge_exec_checked($meta, 'CREATE INDEX IF NOT EXISTS merge_resolutions_conflict_idx ON merge_resolutions(conflict_id, id)', 'failed to create metadata index merge_resolutions_conflict_idx');
         cow_merge_release_savepoint_checked($meta, $schema_savepoint, 'metadata schema');
     } catch (Throwable $e) {
         $cleanup_error = cow_merge_rollback_release_savepoint_checked(
@@ -3303,9 +3305,7 @@ function cow_merge_ensure_metadata_column(SQLite3 $meta, string $table, string $
         }
     }
     $sql = 'ALTER TABLE ' . cow_merge_quote_ident($table) . ' ADD COLUMN ' . cow_merge_quote_ident($column) . ' ' . $definition;
-    if (!$meta->exec($sql)) {
-        throw new RuntimeException("failed to migrate metadata table $table: " . $meta->lastErrorMsg());
-    }
+    cow_merge_exec_checked($meta, $sql, "failed to migrate metadata table $table");
 }
 
 function cow_merge_failure_reason(Throwable $e): string {
