@@ -1078,6 +1078,7 @@ function cow_merge_lookup_row_identity(SQLite3 $meta, string $branch, string $ta
     cow_merge_bind($stmt, ':rowid', $rowid);
     $res = cow_merge_execute_checked($stmt, $meta, 'failed to look up row identity');
     $row = $res->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($res, 'failed to finalize row identity lookup');
     if (!$row) {
         return null;
     }
@@ -1116,6 +1117,7 @@ function cow_merge_lookup_row_identity_by_hash(
     cow_merge_bind($stmt, ':row_hash', $row_hash);
     $res = cow_merge_execute_checked($stmt, $meta, 'failed to look up row identity history');
     $row = $res->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($res, 'failed to finalize row identity history lookup');
     if (!$row) {
         return null;
     }
@@ -1214,6 +1216,7 @@ function cow_merge_forget_row_identity(
     cow_merge_bind($stmt, ':rowid', $rowid);
     $res = cow_merge_execute_checked($stmt, $meta, 'failed to look up row identity for deletion');
     $row = $res->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($res, 'failed to finalize row identity deletion lookup');
     if (!$row) {
         return null;
     }
@@ -1269,6 +1272,7 @@ function cow_merge_forget_table_row_identities(
     while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
         $rowids[] = (int)$row['rowid'];
     }
+    cow_merge_result_finalize_checked($res, 'failed to finalize table row identity listing');
     foreach ($rowids as $rowid) {
         cow_merge_forget_row_identity($meta, $run_id, $branch, $table, $rowid);
     }
@@ -3915,6 +3919,7 @@ function cow_merge_lookup_autoincrement_band(SQLite3 $meta, string $branch, stri
     cow_merge_bind($stmt, ':table_name', $table);
     $res = cow_merge_execute_checked($stmt, $meta, 'failed to look up AUTOINCREMENT band');
     $row = $res->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($res, 'failed to finalize AUTOINCREMENT band lookup');
     if (!$row) {
         return null;
     }
@@ -3942,6 +3947,7 @@ function cow_merge_next_autoincrement_band_start(SQLite3 $meta, string $table, i
     cow_merge_bind($stmt, ':table_name', $table);
     $res = cow_merge_execute_checked($stmt, $meta, 'failed to choose AUTOINCREMENT band');
     $row = $res->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($res, 'failed to finalize AUTOINCREMENT band selection');
     $after_existing_bands = $row && $row['max_band_end'] !== null ? ((int)$row['max_band_end']) + 1 : COW_MERGE_AUTOINCREMENT_FIRST_BAND_START;
     return cow_merge_round_up_to_band(max(COW_MERGE_AUTOINCREMENT_FIRST_BAND_START, $after_existing_bands, $min_start), $band_size);
 }

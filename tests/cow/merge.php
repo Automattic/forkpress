@@ -2898,6 +2898,49 @@ SQL);
     assert_same((int)scalar($metadata_identity_execute_failure, 'SELECT COUNT(*) FROM merge_row_identities'), 0, 'failed row identity execute records no sidecar rows');
     $metadata_identity_execute_failure_db->close();
 
+    $metadata_identity_finalize_failure = $tmp . '/metadata-identity-finalize-failure.sqlite';
+    $metadata_identity_finalize_failure_db = open_db($metadata_identity_finalize_failure);
+    cow_merge_ensure_metadata($metadata_identity_finalize_failure_db);
+    cow_merge_remember_row_identity(
+        $metadata_identity_finalize_failure_db,
+        1,
+        'feature-identity-finalize',
+        'plugin_keyless_finalize',
+        9,
+        ['sidecar' => 'keyless-row', 'finalize' => 'failure'],
+        ['label' => 'finalize failure']
+    );
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize'] = [
+        static function (SQLite3Result $result, string $message): void {
+            if ($message === 'failed to finalize row identity lookup') {
+                throw new RuntimeException('forced row identity finalize failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_lookup_row_identity(
+            $metadata_identity_finalize_failure_db,
+            'feature-identity-finalize',
+            'plugin_keyless_finalize',
+            9
+        ),
+        'forced row identity finalize failure',
+        'row identity metadata finalization failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize']);
+    assert_same((int)scalar($metadata_identity_finalize_failure, 'SELECT COUNT(*) FROM merge_row_identities'), 1, 'failed row identity finalize does not mutate sidecar rows');
+    assert_same(
+        cow_merge_lookup_row_identity(
+            $metadata_identity_finalize_failure_db,
+            'feature-identity-finalize',
+            'plugin_keyless_finalize',
+            9
+        )['finalize'] ?? null,
+        'failure',
+        'row identity lookup recovers after finalize failure is cleared'
+    );
+    $metadata_identity_finalize_failure_db->close();
+
     $metadata_journal_failure = $tmp . '/metadata-journal-failure.sqlite';
     $metadata_journal_failure_db = open_db($metadata_journal_failure);
     $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
@@ -10751,6 +10794,30 @@ SQL);
     assert_same((int)scalar($band_execute_failure_db, "SELECT seq FROM sqlite_sequence WHERE name = 'plugin_autoinc'"), 1, 'failed AUTOINCREMENT execute leaves target sequence unchanged');
     assert_same((int)scalar($band_execute_failure_metadata, "SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'feature-band-execute-failure'"), 0, 'failed AUTOINCREMENT execute records no band metadata');
     assert_same((int)scalar($band_execute_failure_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-band-execute-failure' AND status = 'failed'"), 1, 'failed AUTOINCREMENT execute leaves an auditable failed run');
+
+    $band_finalize_failure_db = $tmp . '/band-finalize-failure.sqlite';
+    $band_finalize_failure_metadata = $tmp . '/.forkpress/cow/merge/band-finalize-failure-metadata.sqlite';
+    copy($band_base, $band_finalize_failure_db);
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize'] = [
+        static function (SQLite3Result $result, string $message): void {
+            if ($message === 'failed to finalize AUTOINCREMENT band selection') {
+                throw new RuntimeException('forced AUTOINCREMENT band finalize failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_allocate_autoincrement_bands(
+            $band_finalize_failure_db,
+            $band_finalize_failure_metadata,
+            'feature-band-finalize-failure'
+        ),
+        'forced AUTOINCREMENT band finalize failure',
+        'AUTOINCREMENT metadata finalization failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize']);
+    assert_same((int)scalar($band_finalize_failure_db, "SELECT seq FROM sqlite_sequence WHERE name = 'plugin_autoinc'"), 1, 'failed AUTOINCREMENT finalize leaves target sequence unchanged');
+    assert_same((int)scalar($band_finalize_failure_metadata, "SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'feature-band-finalize-failure'"), 0, 'failed AUTOINCREMENT finalize records no band metadata');
+    assert_same((int)scalar($band_finalize_failure_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-band-finalize-failure' AND status = 'failed'"), 1, 'failed AUTOINCREMENT finalize leaves an auditable failed run');
 
     $band_metadata_commit_rollback_db = $tmp . '/band-metadata-commit-rollback.sqlite';
     $band_metadata_commit_rollback_metadata = $tmp . '/.forkpress/cow/merge/band-metadata-commit-rollback-metadata.sqlite';
