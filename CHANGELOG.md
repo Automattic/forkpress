@@ -81,6 +81,7 @@
 - Added COW coverage for direct decision and resolution review-note metadata commit failures.
 - Tightened validation-gated source view rewrites so preserved target view triggers must still compile before dry-run or apply reports success.
 - Tightened validation-gated source table drops so dry-run and apply refuse to leave dependent target foreign-key child tables pointing at a missing parent table.
+- Added COW coverage for metadata-only review/status/failed-run begin failures, proving no partial notes or run markers are written when audit transactions cannot start.
 - Tightened validation-gated source table drops so dry-run and apply refuse to leave target trigger programs referencing the dropped table.
 - Tightened validation-gated source view drops so dry-run and apply refuse to leave target trigger programs referencing the dropped view, including table-drop dependency chains.
 - Added COW coverage for validation-gated source view drop chains where a parent view, dependent child view, and child view trigger must be resolved in dependency order.

@@ -1867,6 +1867,34 @@ SQL);
         $review_note_commit_count,
         'failed direct review note metadata commit rolls back the staged review note'
     );
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'BEGIN IMMEDIATE' && $message === 'failed to start review note metadata transaction') {
+                throw new RuntimeException('forced review note metadata begin failure');
+            }
+        },
+    ];
+    $review_note_begin_failure_message = null;
+    try {
+        cow_merge_review_record(
+            $metadata,
+            'conflict',
+            $option_conflict_id,
+            'pending',
+            'Try direct review note with failing metadata begin.',
+            'cow-test'
+        );
+    } catch (Throwable $e) {
+        $review_note_begin_failure_message = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($review_note_begin_failure_message !== null && str_contains($review_note_begin_failure_message, 'forced review note metadata begin failure'), 'direct review note metadata begin failure is surfaced to the caller');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_review_notes WHERE record_type = 'conflict' AND record_id = $option_conflict_id"),
+        $review_note_commit_count,
+        'failed direct review note metadata begin records no review note'
+    );
     $resolution_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10);
     assert_same(count($resolution_audit['resolutions']), 2, 'merge audit report exports deterministic resolution records');
     $applied_resolution_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['resolution_status' => 'applied']);
@@ -3320,6 +3348,27 @@ SQL);
         'running',
         'failed run status metadata commit rolls back the staged successful status'
     );
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'BEGIN IMMEDIATE' && $message === 'failed to start run status metadata transaction') {
+                throw new RuntimeException('forced run status metadata begin failure');
+            }
+        },
+    ];
+    $run_status_begin_failure_message = null;
+    try {
+        cow_merge_set_run_status($run_status_commit_metadata, $run_status_id, 'completed');
+    } catch (Throwable $e) {
+        $run_status_begin_failure_message = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($run_status_begin_failure_message !== null && str_contains($run_status_begin_failure_message, 'forced run status metadata begin failure'), 'run status metadata begin failure is surfaced to the caller');
+    assert_same(
+        scalar($run_status_commit_metadata, "SELECT status FROM merge_runs WHERE id = $run_status_id"),
+        'running',
+        'failed run status metadata begin leaves the prior run status unchanged'
+    );
 
     $failed_run_commit_metadata = $tmp . '/.forkpress/cow/merge/failed-run-commit-metadata.sqlite';
     $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
@@ -3350,6 +3399,35 @@ SQL);
         (int)scalar($failed_run_commit_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-failed-run-commit'"),
         0,
         'failed failed-run metadata commit rolls back the staged failed run marker'
+    );
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'BEGIN IMMEDIATE' && $message === 'failed to start failed-run metadata transaction') {
+                throw new RuntimeException('forced failed-run metadata begin failure');
+            }
+        },
+    ];
+    $failed_run_begin_failure_message = null;
+    try {
+        cow_merge_record_failed_run(
+            $failed_run_commit_metadata,
+            'feature-failed-run-begin',
+            'main',
+            '/tmp/base.sqlite',
+            '/tmp/source.sqlite',
+            '/tmp/target.sqlite',
+            'forced begin failure marker'
+        );
+    } catch (Throwable $e) {
+        $failed_run_begin_failure_message = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($failed_run_begin_failure_message !== null && str_contains($failed_run_begin_failure_message, 'forced failed-run metadata begin failure'), 'failed-run metadata begin failure is surfaced to the caller');
+    assert_same(
+        (int)scalar($failed_run_commit_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-failed-run-begin'"),
+        0,
+        'failed failed-run metadata begin records no failed run marker'
     );
 
     $whole_failed_run_commit_base_db = $tmp . '/whole-failed-run-commit-base.sqlite';
