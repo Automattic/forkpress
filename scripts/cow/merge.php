@@ -3212,7 +3212,18 @@ CREATE TABLE IF NOT EXISTS merge_review_notes (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 )
 SQL, 'failed to create metadata table merge_review_notes');
-    $review_notes_sql = (string)$meta->querySingle("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'merge_review_notes'");
+    $review_notes_schema = cow_merge_query_checked(
+        $meta,
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'merge_review_notes'",
+        'failed to inspect review-note metadata schema'
+    );
+    $review_notes_row = $review_notes_schema->fetchArray(SQLITE3_ASSOC);
+    if ($review_notes_row === false) {
+        @$review_notes_schema->finalize();
+        throw new RuntimeException('failed to inspect review-note metadata schema: missing merge_review_notes table');
+    }
+    $review_notes_sql = (string)$review_notes_row['sql'];
+    @$review_notes_schema->finalize();
     if (str_contains($review_notes_sql, "CHECK(record_type IN ('conflict', 'decision'))")) {
         $migration_savepoint = 'migrate_merge_review_notes_record_type';
         cow_merge_exec_checked(
@@ -3295,15 +3306,18 @@ SQL, 'failed to create metadata table merge_resolutions');
 }
 
 function cow_merge_ensure_metadata_column(SQLite3 $meta, string $table, string $column, string $definition): void {
-    $res = $meta->query('PRAGMA table_info(' . cow_merge_quote_ident($table) . ')');
-    if (!$res) {
-        throw new RuntimeException("failed to inspect metadata table $table: " . $meta->lastErrorMsg());
-    }
+    $res = cow_merge_query_checked(
+        $meta,
+        'PRAGMA table_info(' . cow_merge_quote_ident($table) . ')',
+        "failed to inspect metadata table $table"
+    );
     while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
         if ((string)$row['name'] === $column) {
+            @$res->finalize();
             return;
         }
     }
+    @$res->finalize();
     $sql = 'ALTER TABLE ' . cow_merge_quote_ident($table) . ' ADD COLUMN ' . cow_merge_quote_ident($column) . ' ' . $definition;
     cow_merge_exec_checked($meta, $sql, "failed to migrate metadata table $table");
 }
@@ -5480,6 +5494,15 @@ function cow_merge_exec_checked(SQLite3 $db, string $sql, string $message): void
     if (!@$db->exec($sql)) {
         throw new RuntimeException($message . ': ' . $db->lastErrorMsg());
     }
+}
+
+function cow_merge_query_checked(SQLite3 $db, string $sql, string $message): SQLite3Result {
+    cow_merge_test_hook('before_sqlite_query', $db, $sql, $message);
+    $result = @$db->query($sql);
+    if (!$result) {
+        throw new RuntimeException($message . ': ' . $db->lastErrorMsg());
+    }
+    return $result;
 }
 
 function cow_merge_release_savepoint_checked(SQLite3 $db, string $savepoint, string $context): void {
