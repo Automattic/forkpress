@@ -583,6 +583,81 @@ assert_true(!is_dir($branches . '/git-created-no-db'), 'Git-created branch ID-ba
 assert_same(trim((string)file_get_contents($branch_list)), 'main', 'Git-created branch ID-band allocation failure restores the branch list');
 cow_git_remove_tree($tmp);
 
+$tmp = sys_get_temp_dir() . '/forkpress-cow-git-created-id-band-metadata-rollback-' . getmypid() . '-' . bin2hex(random_bytes(4));
+$branches = $tmp . '/branches';
+$git = $tmp . '/git';
+$branch_list = $tmp . '/branches.txt';
+mkdir($branches . '/main/wp-content/database', 0777, true);
+mkdir($branches . '/no-db-source', 0777, true);
+file_put_contents($branches . '/main/wp-load.php', "<?php\n");
+file_put_contents($branches . '/no-db-source/wp-load.php', "<?php\n");
+$db = new SQLite3($branches . '/main/wp-content/database/.ht.sqlite');
+$db->exec('CREATE TABLE wp_posts (ID INTEGER PRIMARY KEY AUTOINCREMENT, post_title TEXT)');
+$db->exec("INSERT INTO wp_posts (post_title) VALUES ('Base post')");
+$db->close();
+
+$fs = WordPress\Filesystem\LocalFilesystem::create($git);
+$repo = new WordPress\Git\GitRepository($fs, ['default_branch' => 'main']);
+$repo->set_config_value(['user', 'name'], 'ForkPress COW');
+$repo->set_config_value(['user', 'email'], 'forkpress-cow@local');
+cow_git_sync_repository($repo, $branches);
+cow_git_write_branch_list($branches, $branch_list);
+$main_tip = $repo->get_branch_tip('refs/heads/main');
+$no_db_tip = $repo->get_branch_tip('refs/heads/no-db-source');
+$repo->checkout('refs/heads/main');
+$created_good_tip = $repo->commit([
+    'commit' => [
+        'message' => 'create allocatable branch from git',
+        'author' => 'ForkPress Test <forkpress-test@local>',
+        'committer' => 'ForkPress Test <forkpress-test@local>',
+        'parents' => [$main_tip],
+    ],
+    'updates' => ['wordpress/wp-content/a-created-ok.txt' => "created\n"],
+]);
+$repo->checkout('refs/heads/no-db-source');
+$created_bad_tip = $repo->commit([
+    'commit' => [
+        'message' => 'create unallocatable branch from git',
+        'author' => 'ForkPress Test <forkpress-test@local>',
+        'committer' => 'ForkPress Test <forkpress-test@local>',
+        'parents' => [$no_db_tip],
+    ],
+    'updates' => ['wordpress/wp-content/z-created-no-db.txt' => "created\n"],
+]);
+$repo->set_branch_tip('refs/heads/a-created-ok', $created_good_tip);
+$repo->set_branch_tip('refs/heads/z-created-no-db', $created_bad_tip);
+$failed = false;
+try {
+    cow_git_apply_push_to_branches(
+        $repo,
+        $git,
+        $branches,
+        $branches,
+        $branch_list,
+        'file-copy',
+        '',
+        ['main' => $main_tip, 'no-db-source' => $no_db_tip]
+    );
+} catch (Throwable $e) {
+    $failed = true;
+}
+assert_true($failed, 'multi-branch Git-created ID-band allocation failure rejects push apply');
+assert_true(!is_dir($branches . '/a-created-ok'), 'multi-branch ID-band allocation failure removes the allocatable created branch');
+assert_true(!is_dir($branches . '/z-created-no-db'), 'multi-branch ID-band allocation failure removes the failing created branch');
+$restored_branch_list = (string)file_get_contents($branch_list);
+assert_true(str_contains($restored_branch_list, "main\n"), 'multi-branch ID-band allocation failure keeps main in the branch list');
+assert_true(str_contains($restored_branch_list, "no-db-source\n"), 'multi-branch ID-band allocation failure keeps existing source branch in the branch list');
+assert_true(!str_contains($restored_branch_list, "a-created-ok\n") && !str_contains($restored_branch_list, "z-created-no-db\n"), 'multi-branch ID-band allocation failure removes created branches from the branch list');
+$metadata = new SQLite3($tmp . '/merge/metadata.sqlite');
+$stale_band_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name IN ('a-created-ok', 'z-created-no-db')");
+$stale_decision_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_decisions WHERE run_id IN (SELECT id FROM merge_runs WHERE source_branch IN ('a-created-ok', 'z-created-no-db') AND policy = 'autoincrement-id-band-allocation')");
+$stale_run_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_runs WHERE source_branch IN ('a-created-ok', 'z-created-no-db') AND policy = 'autoincrement-id-band-allocation'");
+$metadata->close();
+assert_same($stale_band_count, 0, 'multi-branch ID-band allocation failure removes stale created-branch band metadata');
+assert_same($stale_decision_count, 0, 'multi-branch ID-band allocation failure removes stale created-branch decision metadata');
+assert_same($stale_run_count, 0, 'multi-branch ID-band allocation failure removes stale created-branch run metadata');
+cow_git_remove_tree($tmp);
+
 $tmp = sys_get_temp_dir() . '/forkpress-cow-git-rollback-resync-' . getmypid() . '-' . bin2hex(random_bytes(4));
 $branches = $tmp . '/branches';
 $git = $tmp . '/git';

@@ -497,6 +497,7 @@ function cow_git_apply_push_to_branches(
         cow_git_commit_apply_transaction($transaction);
     } catch (\Throwable $e) {
         cow_git_rollback_apply_transaction($transaction);
+        cow_git_cleanup_created_branch_id_band_metadata($git_repo_dir, $branch_list_path, $transaction['created']);
         cow_git_write_branch_list($branches_dir, $branch_list_path);
         throw $e;
     }
@@ -527,6 +528,60 @@ function cow_git_allocate_created_branch_id_bands(string $git_repo_dir, ?string 
             $metadata_db,
             $branch
         );
+    }
+}
+
+function cow_git_cleanup_created_branch_id_band_metadata(string $git_repo_dir, ?string $branch_list_path, array $created_branches): void {
+    if (!$created_branches || !class_exists('SQLite3')) {
+        return;
+    }
+
+    $branch_list_path = $branch_list_path ?: dirname($git_repo_dir) . '/branches.txt';
+    $metadata_db = dirname($branch_list_path) . '/merge/metadata.sqlite';
+    if (!is_file($metadata_db)) {
+        return;
+    }
+
+    $branches = [];
+    foreach ($created_branches as $created) {
+        $branch = (string)($created['branch'] ?? '');
+        if ($branch !== '') {
+            $branches[$branch] = true;
+        }
+    }
+    if (!$branches) {
+        return;
+    }
+
+    $db = new SQLite3($metadata_db, SQLITE3_OPEN_READWRITE);
+    try {
+        $db->busyTimeout(5000);
+        $db->exec('BEGIN IMMEDIATE');
+        foreach (array_keys($branches) as $branch) {
+            foreach ([
+                'DELETE FROM merge_autoincrement_bands WHERE branch_name = :branch',
+                "DELETE FROM merge_decisions WHERE run_id IN (SELECT id FROM merge_runs WHERE source_branch = :branch AND target_branch = :branch AND base_ref = 'autoincrement-id-band' AND policy = 'autoincrement-id-band-allocation')",
+                "DELETE FROM merge_runs WHERE source_branch = :branch AND target_branch = :branch AND base_ref = 'autoincrement-id-band' AND policy = 'autoincrement-id-band-allocation'",
+            ] as $sql) {
+                $stmt = $db->prepare($sql);
+                if (!$stmt) {
+                    throw new \RuntimeException('failed to prepare created-branch ID-band metadata cleanup: ' . $db->lastErrorMsg());
+                }
+                $stmt->bindValue(':branch', $branch, SQLITE3_TEXT);
+                $result = $stmt->execute();
+                if ($result === false) {
+                    throw new \RuntimeException('failed to clean up created-branch ID-band metadata: ' . $db->lastErrorMsg());
+                }
+                $result->finalize();
+                $stmt->close();
+            }
+        }
+        $db->exec('COMMIT');
+    } catch (\Throwable $e) {
+        @$db->exec('ROLLBACK');
+        error_log("ForkPress COW failed to clean created-branch ID-band metadata after push rollback: " . $e->getMessage());
+    } finally {
+        $db->close();
     }
 }
 
