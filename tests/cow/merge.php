@@ -4730,6 +4730,10 @@ SQL);
         assert_same($row['review_status'], null, 'file conflict review queue returns only unreviewed records');
         assert_same($row['table_name'], '__files__', 'file conflict review queue excludes database records');
     }
+    ob_start();
+    cow_merge_print_audit_text($file_conflict_queue_audit);
+    $file_conflict_queue_text = ob_get_clean();
+    assert_true(str_contains($file_conflict_queue_text, 'review=unreviewed'), 'file conflict review queue text marks unreviewed records');
     $path_prefix_audit = cow_merge_audit_report($metadata, null, 10, [
         'scope' => 'files',
         'records' => 'decisions',
@@ -4806,6 +4810,10 @@ SQL);
         assert_same($row['review_status'], null, 'file decision review queue returns only unreviewed records');
         assert_same($row['table_name'], '__files__', 'file decision review queue excludes database records');
     }
+    ob_start();
+    cow_merge_print_audit_text($file_decision_queue_audit);
+    $file_decision_queue_text = ob_get_clean();
+    assert_true(str_contains($file_decision_queue_text, 'review=unreviewed'), 'file decision review queue text marks unreviewed records');
     $reviewed_file_decision_audit = cow_merge_audit_report($metadata, null, 10, [
         'records' => 'decisions',
         'review_status' => 'reviewed',
@@ -5020,6 +5028,10 @@ SQL);
         assert_same($row['review_status'], null, 'file resolution review queue returns only unreviewed records');
         assert_same($row['table_name'], '__files__', 'file resolution review queue excludes database records');
     }
+    ob_start();
+    cow_merge_print_audit_text($file_resolution_queue_audit);
+    $file_resolution_queue_text = ob_get_clean();
+    assert_true(str_contains($file_resolution_queue_text, 'review=unreviewed'), 'file resolution review queue text marks unreviewed records');
     $unsafe_symlink_id = (int)scalar($metadata, "SELECT c.id FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = '__files__' AND c.conflict_type = 'file-unsafe-symlink' AND r.source_branch = 'feature-file-resolve' ORDER BY c.id DESC LIMIT 1");
     assert_throws(
         fn() => cow_merge_resolve_conflict($metadata, $unsafe_symlink_id, 'source', true, 'Try unsafe source symlink.', 'cow-test'),
