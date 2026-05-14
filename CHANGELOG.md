@@ -63,6 +63,7 @@
 - Added focused `forkpress branch merge-audit --records rollback-failures` inspection for failed rollback artifact records.
 - Added runtime-backed COW e2e coverage for the real `forkpress branch merge-audit --records rollback-failures` CLI route.
 - Recorded known-good checkpoint `known-good/cow-mergeback-schema-rollback-stability-2026-05-14` for the accumulated generic schema dependency validation and rollback/audit atomicity work after the identity-stability checkpoint.
+- Recorded known-good checkpoint `known-good/cow-mergeback-rollback-atomicity-2026-05-14` for the accumulated DB/filesystem resolver, sidecar identity, AUTOINCREMENT, and direct merge rollback/audit atomicity work after the schema rollback checkpoint.
 - Tightened filesystem conflict resolution rollback so metadata transaction failures restore target paths, preserve rollback artifacts if restore fails, and do not record partial resolution metadata.
 - Tightened validation-gated DB conflict resolution transaction checks so row/schema resolver target and metadata transactions fail loudly and roll back staged row mutations on metadata failures.
 - Restored validation-gated DB conflict resolution target snapshots when metadata commit fails after the target commit, keeping row/schema apply paths atomic across target and merge metadata databases.
@@ -166,6 +167,40 @@
 - Added COW coverage for source-added no-primary-key plugin tables carrying source indexes/triggers while preserving sparse rowids and sidecar identities.
 - Added COW coverage for target-dropped no-primary-key plugin table restores carrying source indexes/triggers while preserving sparse rowids and sidecar identities.
 - Updated the automatic mergeback loop runner to pass a configurable Codex reasoning-effort setting and to include the changelog/known-good tag policy in every worker prompt.
+
+## known-good/cow-mergeback-rollback-atomicity-2026-05-14
+
+Verified as a major known-good checkpoint for generic COW mergeback rollback and
+audit atomicity after the schema-rollback-stability checkpoint:
+
+- Filesystem conflict resolution restores target paths and rolls back staged
+  resolution metadata if metadata recording fails, preserving rollback artifacts
+  when restore fails.
+- Row and schema conflict resolution apply paths check target and metadata
+  transaction boundaries, restore target DB snapshots after metadata commit
+  failures, and keep rollback-failure artifacts queryable when restoration fails.
+- Review-note, target-choice resolution, no-primary-key identity capture/tracking,
+  AUTOINCREMENT band allocation, direct DB merge, and mixed DB/filesystem merge
+  paths keep ForkPress-owned metadata aligned with target DB/filesystem state.
+- Direct DB merge metadata commit failures restore already-committed target
+  rows/schema and discard staged decisions, conflicts, and no-primary-key sidecar
+  metadata; failed target snapshot restoration keeps recovery artifacts.
+- Rollback-failure audit records remain available through
+  `forkpress branch merge-audit --records rollback-failures`, including the
+  runtime-backed CLI route.
+
+Verification for the tag included:
+
+- `php -l scripts/cow/merge.php`.
+- `php -l tests/cow/merge.php`.
+- `bash -n tests/cow/e2e.sh`.
+- `php tests/cow/merge.php`.
+- `cargo fmt --check`.
+- `cargo test -p forkpress-storage`.
+- `FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli`.
+- `FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli --features dev-experiments --bin forkpress-dev`.
+- `cargo build --target x86_64-unknown-linux-musl -p forkpress-cli --bin forkpress`.
+- `tests/cow/e2e.sh target/x86_64-unknown-linux-musl/debug/forkpress`.
 
 ## known-good/cow-mergeback-identity-stability-2026-05-13
 
