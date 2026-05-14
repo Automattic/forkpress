@@ -84,6 +84,7 @@
 - Added COW coverage for metadata-only review/status/failed-run begin failures, proving no partial notes or run markers are written when audit transactions cannot start.
 - Tightened target-dropped table restore dry-run savepoint handling so target and metadata savepoint begin failures surface without leaving partial schema or resolution metadata.
 - Tightened compatible table rebuild and schema object dry-run validation savepoint handling so savepoint begin failures surface without target schema changes or partial resolution metadata.
+- Tightened source table drop and source index schema resolution savepoint handling so begin failures surface without target schema changes or partial resolution metadata.
 - Tightened validation-gated source table drops so dry-run and apply refuse to leave target trigger programs referencing the dropped table.
 - Tightened validation-gated source view drops so dry-run and apply refuse to leave target trigger programs referencing the dropped view, including table-drop dependency chains.
 - Added COW coverage for validation-gated source view drop chains where a parent view, dependent child view, and child view trigger must be resolved in dependency order.

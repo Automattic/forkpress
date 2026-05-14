@@ -3975,6 +3975,24 @@ SQL);
     $schema_fk_index_drop_result = cow_merge_databases($schema_fk_index_drop_base, $schema_fk_index_drop_source, $schema_fk_index_drop_target, $metadata, 'feature-schema-fk-index-drop', 'main');
     assert_same($schema_fk_index_drop_result['status'], 'completed_with_conflicts', 'source-dropped foreign-key parent index stays validation-gated');
     $schema_fk_index_drop_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_fk_index_drop_parent' AND column_name = 'plugin_fk_index_drop_parent_code_idx' AND conflict_type = 'schema-source-dropped-index' ORDER BY id DESC LIMIT 1");
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'SAVEPOINT forkpress_index_resolution' && $message === 'failed to start source index schema resolution savepoint') {
+                throw new RuntimeException('forced source index resolution savepoint failure');
+            }
+        },
+    ];
+    $schema_fk_index_drop_savepoint_failure = null;
+    try {
+        cow_merge_resolve_conflict($metadata, $schema_fk_index_drop_conflict_id, 'source', false, 'Preview FK parent index drop with failing savepoint.', 'test');
+    } catch (Throwable $e) {
+        $schema_fk_index_drop_savepoint_failure = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($schema_fk_index_drop_savepoint_failure !== null && str_contains($schema_fk_index_drop_savepoint_failure, 'forced source index resolution savepoint failure'), 'source index resolution savepoint failure is surfaced to the caller');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_fk_index_drop_conflict_id"), 0, 'failed source index savepoint records no resolution metadata');
+    assert_same((int)scalar($schema_fk_index_drop_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_fk_index_drop_parent_code_idx'"), 1, 'failed source index savepoint leaves target index unchanged');
     assert_throws(
         fn() => cow_merge_resolve_conflict($metadata, $schema_fk_index_drop_conflict_id, 'source', false, 'Preview FK parent index drop.', 'test'),
         'foreign-key validation error',
@@ -5306,6 +5324,31 @@ SQL);
     assert_same((int)scalar($schema_table_drop_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_table_drop'"), 1, 'target table wins by default when source drops a table');
     $schema_table_drop_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_table_drop' AND column_name IS NULL AND conflict_type = 'schema-source-dropped-table' ORDER BY id DESC LIMIT 1");
     assert_true($schema_table_drop_conflict_id > 0, 'source-dropped table conflict is auditable');
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'SAVEPOINT forkpress_source_table_drop' && $message === 'failed to start source table drop schema resolution savepoint') {
+                throw new RuntimeException('forced source table drop savepoint failure');
+            }
+        },
+    ];
+    $schema_table_drop_savepoint_failure = null;
+    try {
+        cow_merge_resolve_conflict(
+            $metadata,
+            $schema_table_drop_conflict_id,
+            'source',
+            false,
+            'Preview source table drop with failing savepoint.',
+            'test'
+        );
+    } catch (Throwable $e) {
+        $schema_table_drop_savepoint_failure = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($schema_table_drop_savepoint_failure !== null && str_contains($schema_table_drop_savepoint_failure, 'forced source table drop savepoint failure'), 'source table drop savepoint failure is surfaced to the caller');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_table_drop_conflict_id"), 0, 'failed source table drop savepoint records no resolution metadata');
+    assert_same((int)scalar($schema_table_drop_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_table_drop'"), 1, 'failed source table drop savepoint leaves target schema unchanged');
     $schema_table_drop_dry = cow_merge_resolve_conflict(
         $metadata,
         $schema_table_drop_conflict_id,

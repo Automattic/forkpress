@@ -6688,8 +6688,14 @@ function cow_merge_apply_source_table_drop(SQLite3 $target, string $table, bool 
         );
     }
 
-    $target->exec('SAVEPOINT forkpress_source_table_drop');
+    $target_savepoint_started = false;
     try {
+        cow_merge_exec_checked(
+            $target,
+            'SAVEPOINT forkpress_source_table_drop',
+            'failed to start source table drop schema resolution savepoint'
+        );
+        $target_savepoint_started = true;
         if (cow_merge_table_sql($target, $table) !== null) {
             if (!$target->exec('DROP TABLE ' . cow_merge_quote_ident($table))) {
                 throw new RuntimeException('failed to apply source table drop schema resolution: ' . $target->lastErrorMsg());
@@ -6703,8 +6709,10 @@ function cow_merge_apply_source_table_drop(SQLite3 $target, string $table, bool 
             $target->exec('RELEASE forkpress_source_table_drop');
         }
     } catch (Throwable $e) {
-        $target->exec('ROLLBACK TO forkpress_source_table_drop');
-        $target->exec('RELEASE forkpress_source_table_drop');
+        if ($target_savepoint_started) {
+            $target->exec('ROLLBACK TO forkpress_source_table_drop');
+            $target->exec('RELEASE forkpress_source_table_drop');
+        }
         throw $e;
     }
 }
@@ -6717,8 +6725,14 @@ function cow_merge_validate_schema_dependency_program(SQLite3 $db, array $depend
 }
 
 function cow_merge_apply_source_index_schema_resolution(SQLite3 $target, string $index, ?string $source_sql, bool $apply): void {
-    $target->exec('SAVEPOINT forkpress_index_resolution');
+    $target_savepoint_started = false;
     try {
+        cow_merge_exec_checked(
+            $target,
+            'SAVEPOINT forkpress_index_resolution',
+            'failed to start source index schema resolution savepoint'
+        );
+        $target_savepoint_started = true;
         if (cow_merge_index_sql($target, $index) !== null) {
             if (!$target->exec('DROP INDEX ' . cow_merge_quote_ident($index))) {
                 throw new RuntimeException('failed to drop target index during schema resolution: ' . $target->lastErrorMsg());
@@ -6735,8 +6749,10 @@ function cow_merge_apply_source_index_schema_resolution(SQLite3 $target, string 
             $target->exec('RELEASE forkpress_index_resolution');
         }
     } catch (Throwable $e) {
-        $target->exec('ROLLBACK TO forkpress_index_resolution');
-        $target->exec('RELEASE forkpress_index_resolution');
+        if ($target_savepoint_started) {
+            $target->exec('ROLLBACK TO forkpress_index_resolution');
+            $target->exec('RELEASE forkpress_index_resolution');
+        }
         throw $e;
     }
 }
