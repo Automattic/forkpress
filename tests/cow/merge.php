@@ -1688,6 +1688,39 @@ SQL);
     }
     assert_true($target_accepted_group !== null, 'decision grouping includes accepted target decisions by type');
     assert_same((int)$target_accepted_group['target_accepted_count'], 1, 'decision grouping counts accepted target decisions');
+    $review_note_commit_count = (int)scalar($metadata, "SELECT COUNT(*) FROM merge_review_notes WHERE record_type = 'conflict' AND record_id = $option_conflict_id");
+    $review_note_commit_lock_setup = open_db($metadata);
+    $review_note_commit_lock_setup->exec('PRAGMA journal_mode=DELETE');
+    $review_note_commit_lock_setup->close();
+    $review_note_commit_lock = open_db($metadata);
+    $review_note_commit_lock->exec('BEGIN');
+    $review_note_commit_lock->querySingle('SELECT COUNT(*) FROM merge_review_notes');
+    $review_note_commit_failure_message = null;
+    set_error_handler(static function (int $severity, string $message): bool {
+        return str_contains($message, 'database is locked');
+    });
+    try {
+        cow_merge_review_record(
+            $metadata,
+            'conflict',
+            $option_conflict_id,
+            'pending',
+            'Try direct review note with locked metadata commit.',
+            'cow-test'
+        );
+    } catch (Throwable $e) {
+        $review_note_commit_failure_message = $e->getMessage();
+    } finally {
+        restore_error_handler();
+        $review_note_commit_lock->exec('ROLLBACK');
+        $review_note_commit_lock->close();
+    }
+    assert_true($review_note_commit_failure_message !== null, 'direct review note metadata commit failure is surfaced to the caller');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_review_notes WHERE record_type = 'conflict' AND record_id = $option_conflict_id"),
+        $review_note_commit_count,
+        'failed direct review note metadata commit rolls back the staged review note'
+    );
     $resolution_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10);
     assert_same(count($resolution_audit['resolutions']), 2, 'merge audit report exports deterministic resolution records');
     $applied_resolution_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['resolution_status' => 'applied']);

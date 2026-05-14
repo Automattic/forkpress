@@ -5031,8 +5031,11 @@ function cow_merge_review_record(
 ): array {
     cow_merge_mkdir_p(dirname($metadata_db));
     $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READWRITE | SQLITE3_OPEN_CREATE);
+    $transaction_started = false;
     try {
         cow_merge_ensure_metadata($meta);
+        cow_merge_exec_checked($meta, 'BEGIN IMMEDIATE', 'failed to start review note metadata transaction');
+        $transaction_started = true;
         $table = match ($record_type) {
             'conflict' => 'merge_conflicts',
             'decision' => 'merge_decisions',
@@ -5050,6 +5053,8 @@ function cow_merge_review_record(
         }
 
         $review_note_id = cow_merge_insert_review_note($meta, $record_type, $record_id, $status, $note, $reviewer);
+        cow_merge_exec_checked($meta, 'COMMIT', 'failed to commit review note metadata transaction');
+        $transaction_started = false;
         return [
             'metadata_db' => $metadata_db,
             'record_type' => $record_type,
@@ -5059,6 +5064,11 @@ function cow_merge_review_record(
             'reviewer' => $reviewer,
             'review_note_id' => $review_note_id,
         ];
+    } catch (Throwable $e) {
+        if ($transaction_started) {
+            @$meta->exec('ROLLBACK');
+        }
+        throw $e;
     } finally {
         $meta->close();
     }

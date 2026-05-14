@@ -61,6 +61,7 @@
 - Restored validation-gated DB conflict resolution target snapshots when metadata commit fails after the target commit, keeping row/schema apply paths atomic across target and merge metadata databases.
 - Added COW coverage for schema resolution commit-order recovery, proving already-committed target schema mutations roll back when merge metadata commit fails.
 - Added COW coverage for target-choice resolution metadata rollback, proving staged resolution rows and reviewed conflict notes roll back together when note recording fails.
+- Tightened direct COW merge review annotations so metadata commit failures roll back staged review notes instead of leaving partial reviewer state.
 - Tightened validation-gated source view rewrites so preserved target view triggers must still compile before dry-run or apply reports success.
 - Tightened validation-gated source table drops so dry-run and apply refuse to leave dependent target foreign-key child tables pointing at a missing parent table.
 - Tightened validation-gated source table drops so dry-run and apply refuse to leave target trigger programs referencing the dropped table.
