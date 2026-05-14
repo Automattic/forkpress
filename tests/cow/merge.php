@@ -4579,7 +4579,9 @@ SQL);
     $source_link_file_payload = SQLite3::escapeString(cow_merge_payload_json(cow_merge_file_path_payload('wp-content/uploads/links/source-link.txt', ['type' => 'symlink', 'target' => '../new-source.txt'])));
     $source_delete_file_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/delete-me.txt'));
     $source_delete_dir_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/delete-empty-dir'));
+    $conflict_file_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/conflict.txt'));
     $base_file_entries = cow_merge_file_manifest_for_root($file_base_root)['entries'];
+    $source_file_entries = cow_merge_file_manifest_for_root($file_source_root)['entries'];
     $merged_file_entries = cow_merge_file_manifest_for_root($file_target_root)['entries'];
     $source_new_file_payload = SQLite3::escapeString(cow_merge_payload_json(cow_merge_file_path_payload('wp-content/uploads/new-source.txt', $merged_file_entries['wp-content/uploads/new-source.txt'])));
     $source_empty_dir_payload = SQLite3::escapeString(cow_merge_payload_json(cow_merge_file_path_payload('wp-content/uploads/source-empty-dir', $merged_file_entries['wp-content/uploads/source-empty-dir'])));
@@ -4594,6 +4596,9 @@ SQL);
     $target_change_file_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/target-change.txt'));
     $target_change_base_payload = SQLite3::escapeString(cow_merge_payload_json(cow_merge_file_path_payload('wp-content/uploads/target-change.txt', $base_file_entries['wp-content/uploads/target-change.txt'])));
     $target_change_file_payload = SQLite3::escapeString(cow_merge_payload_json(cow_merge_file_path_payload('wp-content/uploads/target-change.txt', $merged_file_entries['wp-content/uploads/target-change.txt'])));
+    $conflict_base_payload = SQLite3::escapeString(cow_merge_payload_json(cow_merge_file_path_payload('wp-content/uploads/conflict.txt', $base_file_entries['wp-content/uploads/conflict.txt'])));
+    $conflict_source_payload = SQLite3::escapeString(cow_merge_payload_json(cow_merge_file_path_payload('wp-content/uploads/conflict.txt', $source_file_entries['wp-content/uploads/conflict.txt'])));
+    $conflict_target_payload = SQLite3::escapeString(cow_merge_payload_json(cow_merge_file_path_payload('wp-content/uploads/conflict.txt', $merged_file_entries['wp-content/uploads/conflict.txt'])));
     $same_added_file_payload = SQLite3::escapeString(cow_merge_payload_json(cow_merge_file_path_payload('wp-content/uploads/same-added.txt', $merged_file_entries['wp-content/uploads/same-added.txt'])));
     $same_change_base_payload = SQLite3::escapeString(cow_merge_payload_json(cow_merge_file_path_payload('wp-content/uploads/same-change.txt', $base_file_entries['wp-content/uploads/same-change.txt'])));
     $same_change_file_payload = SQLite3::escapeString(cow_merge_payload_json(cow_merge_file_path_payload('wp-content/uploads/same-change.txt', $merged_file_entries['wp-content/uploads/same-change.txt'])));
@@ -4663,6 +4668,7 @@ SQL);
     assert_same(count($file_conflict_audit['decisions']), 0, 'conflict-only audit filter omits decisions');
     assert_same(count($file_conflict_audit['autoincrement_bands']), 0, 'file conflict audit filter omits database-only band summaries');
     assert_same(count($file_conflict_audit['row_identity_summary']), 0, 'file conflict audit filter omits database-only row identity summaries');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-conflict' AND row_identity = '$conflict_file_identity' AND base_payload = '$conflict_base_payload' AND source_payload = '$conflict_source_payload' AND target_payload = '$conflict_target_payload' AND chosen_payload = '$conflict_target_payload'"), 1, 'filesystem content conflicts record base, source, target, and chosen target payloads');
     assert_same(count(array_filter($file_conflict_audit['conflicts'], fn($row) => $row['table_name'] === '__files__')), 4, 'filesystem audit filter exports only file records');
     $unsafe_symlink_audit = cow_merge_audit_report($metadata, null, 10, [
         'scope' => 'files',
