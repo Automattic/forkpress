@@ -11587,6 +11587,46 @@ SQL);
         'source-only no-primary-key update refreshes the target sidecar row hash immediately'
     );
 
+    $keyless_shadow_base = $tmp . '/keyless-shadow-base.sqlite';
+    $keyless_shadow_source = $tmp . '/keyless-shadow-source.sqlite';
+    $keyless_shadow_target = $tmp . '/keyless-shadow-target.sqlite';
+    $keyless_shadow_metadata = $tmp . '/.forkpress/cow/merge/keyless-shadow-metadata.sqlite';
+    foreach ([$keyless_shadow_base, $keyless_shadow_source, $keyless_shadow_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_keyless_shadow (rowid TEXT, __forkpress_merge_rowid TEXT, label TEXT, value TEXT)');
+        $db->exec("INSERT INTO plugin_keyless_shadow (_rowid_, rowid, __forkpress_merge_rowid, label, value) VALUES (1, 'app rowid base', 'app alias base', 'Shadow base', 'base')");
+        $db->close();
+    }
+    $db = open_db($keyless_shadow_source);
+    $db->exec("UPDATE plugin_keyless_shadow SET value = 'source shadow update' WHERE _rowid_ = 1");
+    $db->exec("INSERT INTO plugin_keyless_shadow (_rowid_, rowid, __forkpress_merge_rowid, label, value) VALUES (7, 'app rowid insert', 'app alias insert', 'Shadow insert', 'source insert')");
+    $db->close();
+    $keyless_shadow_result = cow_merge_databases($keyless_shadow_base, $keyless_shadow_source, $keyless_shadow_target, $keyless_shadow_metadata, 'feature-keyless-shadow', 'main');
+    assert_same($keyless_shadow_result['status'], 'completed', 'source-only no-primary-key rows merge when app columns shadow rowid aliases');
+    assert_same(scalar($keyless_shadow_target, "SELECT value FROM plugin_keyless_shadow WHERE _rowid_ = 1"), 'source shadow update', 'keyless rowid-shadow update uses the hidden rowid');
+    assert_same(scalar($keyless_shadow_target, "SELECT rowid FROM plugin_keyless_shadow WHERE _rowid_ = 1"), 'app rowid base', 'keyless rowid-shadow update preserves the app rowid column');
+    assert_same(scalar($keyless_shadow_target, "SELECT __forkpress_merge_rowid FROM plugin_keyless_shadow WHERE _rowid_ = 1"), 'app alias base', 'keyless rowid-shadow update preserves the app helper-alias column');
+    $keyless_shadow_insert_rowid = (int)scalar($keyless_shadow_target, "SELECT _rowid_ FROM plugin_keyless_shadow WHERE rowid = 'app rowid insert'");
+    assert_true($keyless_shadow_insert_rowid > 1, 'keyless rowid-shadow insert receives a numeric hidden rowid');
+    assert_same(scalar($keyless_shadow_target, "SELECT value FROM plugin_keyless_shadow WHERE _rowid_ = $keyless_shadow_insert_rowid"), 'source insert', 'keyless rowid-shadow insert applies the source row');
+    assert_same(scalar($keyless_shadow_target, "SELECT rowid FROM plugin_keyless_shadow WHERE _rowid_ = $keyless_shadow_insert_rowid"), 'app rowid insert', 'keyless rowid-shadow insert preserves the app rowid column');
+    assert_same(scalar($keyless_shadow_target, "SELECT __forkpress_merge_rowid FROM plugin_keyless_shadow WHERE _rowid_ = $keyless_shadow_insert_rowid"), 'app alias insert', 'keyless rowid-shadow insert preserves the app helper-alias column');
+    assert_same(
+        scalar($keyless_shadow_metadata, "SELECT row_hash FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_keyless_shadow' AND rowid = 1"),
+        cow_merge_row_hash([
+            'rowid' => 'app rowid base',
+            '__forkpress_merge_rowid' => 'app alias base',
+            'label' => 'Shadow base',
+            'value' => 'source shadow update',
+        ]),
+        'keyless rowid-shadow update refreshes sidecar hashes with app shadow columns'
+    );
+    assert_same(
+        scalar($keyless_shadow_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_keyless_shadow' AND rowid = $keyless_shadow_insert_rowid"),
+        scalar($keyless_shadow_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'feature-keyless-shadow' AND table_name = 'plugin_keyless_shadow' AND rowid = 7"),
+        'keyless rowid-shadow insert adopts the source sidecar identity at the target hidden rowid'
+    );
+
     $keyless_auto_delete_base = $tmp . '/keyless-auto-delete-base.sqlite';
     $keyless_auto_delete_source = $tmp . '/keyless-auto-delete-source.sqlite';
     $keyless_auto_delete_target = $tmp . '/keyless-auto-delete-target.sqlite';

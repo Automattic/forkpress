@@ -704,6 +704,43 @@ function cow_merge_table_info(SQLite3 $db, string $table): array {
     return $columns;
 }
 
+function cow_merge_hidden_rowid_selector(SQLite3 $db, string $table): string {
+    $columns = array_fill_keys(array_map('strtolower', cow_merge_table_columns($db, $table)), true);
+    foreach (['_rowid_', 'oid', 'rowid'] as $candidate) {
+        if (!isset($columns[$candidate])) {
+            return $candidate;
+        }
+    }
+    throw new RuntimeException("cannot access hidden rowid for no-primary-key table $table because rowid, _rowid_, and oid are all table columns");
+}
+
+function cow_merge_keyless_select_parts(SQLite3 $db, string $table): array {
+    $columns = cow_merge_table_columns($db, $table);
+    $select = [cow_merge_hidden_rowid_selector($db, $table)];
+    foreach ($columns as $column) {
+        $select[] = cow_merge_quote_ident($column);
+    }
+    return [$select, $columns];
+}
+
+function cow_merge_keyless_entry_from_numeric_row(array $values, array $columns, string $context): ?array {
+    $rowid = $values[0] ?? null;
+    if ($rowid === null) {
+        return null;
+    }
+    if (!is_numeric($rowid)) {
+        throw new RuntimeException("failed to read numeric rowid for $context");
+    }
+    $row = [];
+    foreach ($columns as $i => $column) {
+        $row[$column] = $values[$i + 1] ?? null;
+    }
+    return [
+        'rowid' => (int)$rowid,
+        'row' => $row,
+    ];
+}
+
 function cow_merge_column_signature(array $column): array {
     return [
         'name' => strtolower((string)$column['name']),
@@ -983,13 +1020,32 @@ function cow_merge_load_rows(SQLite3 $db, string $table, array $pk_cols): array 
     if (cow_merge_table_sql($db, $table) === null) {
         return $rows;
     }
-    $sql = $pk_cols
-        ? 'SELECT * FROM ' . cow_merge_quote_ident($table)
-        : 'SELECT rowid AS __forkpress_merge_rowid, * FROM ' . cow_merge_quote_ident($table);
-    $res = cow_merge_query_checked($db, $sql, "failed to load rows for $table");
+    if (!$pk_cols) {
+        [$select, $columns] = cow_merge_keyless_select_parts($db, $table);
+        $res = cow_merge_query_checked(
+            $db,
+            'SELECT ' . implode(', ', $select) . ' FROM ' . cow_merge_quote_ident($table),
+            "failed to load rows for $table"
+        );
+        while ($values = $res->fetchArray(SQLITE3_NUM)) {
+            $entry = cow_merge_keyless_entry_from_numeric_row($values, $columns, "$table row load");
+            if ($entry === null) {
+                continue;
+            }
+            $identity = cow_merge_row_identity($entry['row'], $pk_cols, $entry['rowid']);
+            $rows[cow_merge_identity_json($identity)] = [
+                'identity' => $identity,
+                'rowid' => $entry['rowid'],
+                'row' => $entry['row'],
+            ];
+        }
+        cow_merge_result_finalize_checked($res, "failed to finalize loaded rows for $table");
+        return $rows;
+    }
+
+    $res = cow_merge_query_checked($db, 'SELECT * FROM ' . cow_merge_quote_ident($table), "failed to load rows for $table");
     while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
-        $rowid = $row['__forkpress_merge_rowid'] ?? null;
-        unset($row['__forkpress_merge_rowid']);
+        $rowid = null;
         $identity = cow_merge_row_identity($row, $pk_cols, $rowid);
         $rows[cow_merge_identity_json($identity)] = [
             'identity' => $identity,
@@ -1006,21 +1062,18 @@ function cow_merge_load_keyless_physical_rows(SQLite3 $db, string $table): array
     if (cow_merge_table_sql($db, $table) === null) {
         return $rows;
     }
+    [$select, $columns] = cow_merge_keyless_select_parts($db, $table);
     $res = cow_merge_query_checked(
         $db,
-        'SELECT rowid AS __forkpress_merge_rowid, * FROM ' . cow_merge_quote_ident($table),
+        'SELECT ' . implode(', ', $select) . ' FROM ' . cow_merge_quote_ident($table),
         "failed to load physical keyless rows for $table"
     );
-    while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
-        $rowid = $row['__forkpress_merge_rowid'] ?? null;
-        unset($row['__forkpress_merge_rowid']);
-        if ($rowid === null) {
+    while ($values = $res->fetchArray(SQLITE3_NUM)) {
+        $entry = cow_merge_keyless_entry_from_numeric_row($values, $columns, "$table physical row load");
+        if ($entry === null) {
             continue;
         }
-        $rows[(string)$rowid] = [
-            'rowid' => (int)$rowid,
-            'row' => $row,
-        ];
+        $rows[(string)$entry['rowid']] = $entry;
     }
     cow_merge_result_finalize_checked($res, "failed to finalize physical keyless rows for $table");
     return $rows;
@@ -1306,29 +1359,27 @@ function cow_merge_refresh_table_row_identities(
 }
 
 function cow_merge_load_keyless_physical_row(SQLite3 $db, string $table, int $rowid): ?array {
+    [$select, $columns] = cow_merge_keyless_select_parts($db, $table);
+    $rowid_selector = cow_merge_hidden_rowid_selector($db, $table);
     $stmt = cow_merge_prepare_checked(
         $db,
-        'SELECT rowid AS __forkpress_merge_rowid, * FROM ' . cow_merge_quote_ident($table) . ' WHERE rowid = :rowid',
+        'SELECT ' . implode(', ', $select) . ' FROM ' . cow_merge_quote_ident($table) . ' WHERE ' . $rowid_selector . ' = :rowid',
         "failed to prepare keyless physical row lookup for $table"
     );
     cow_merge_bind($stmt, ':rowid', $rowid);
     $res = cow_merge_execute_checked($stmt, $db, "failed to load keyless row $table rowid $rowid");
-    $row = $res->fetchArray(SQLITE3_ASSOC);
-    if (!$row) {
+    $values = $res->fetchArray(SQLITE3_NUM);
+    if (!$values) {
         cow_merge_result_finalize_checked($res, "failed to finalize keyless physical row lookup for $table");
         return null;
     }
-    $loaded_rowid = $row['__forkpress_merge_rowid'] ?? null;
-    unset($row['__forkpress_merge_rowid']);
-    if ($loaded_rowid === null) {
+    $entry = cow_merge_keyless_entry_from_numeric_row($values, $columns, "$table physical row lookup");
+    if ($entry === null) {
         cow_merge_result_finalize_checked($res, "failed to finalize keyless physical row lookup for $table");
         return null;
     }
     cow_merge_result_finalize_checked($res, "failed to finalize keyless physical row lookup for $table");
-    return [
-        'rowid' => (int)$loaded_rowid,
-        'row' => $row,
-    ];
+    return $entry;
 }
 
 function cow_merge_keyless_rows_for_branch(
@@ -1443,7 +1494,7 @@ function cow_merge_keyless_row_identity_ambiguous(?array $base_row, ?array $sour
     return $source_changed && $target_changed && $source_only_changed;
 }
 
-function cow_merge_where_clause(array $identity, array $pk_cols, array &$values): string {
+function cow_merge_where_clause(SQLite3 $db, string $table, array $identity, array $pk_cols, array &$values): string {
     $clauses = [];
     if ($pk_cols) {
         foreach ($pk_cols as $col) {
@@ -1451,7 +1502,7 @@ function cow_merge_where_clause(array $identity, array $pk_cols, array &$values)
             $values[] = $identity[$col] ?? null;
         }
     } else {
-        $clauses[] = 'rowid = ?';
+        $clauses[] = cow_merge_hidden_rowid_selector($db, $table) . ' = ?';
         $values[] = $identity['rowid'] ?? null;
     }
     return implode(' AND ', $clauses);
@@ -2314,7 +2365,7 @@ function cow_merge_foreign_key_delete_error(SQLite3 $target, string $table, arra
             }
             if ($child_table === $table) {
                 $exclude_values = [];
-                $exclude = cow_merge_where_clause($identity, $pk_cols, $exclude_values);
+                $exclude = cow_merge_where_clause($target, $table, $identity, $pk_cols, $exclude_values);
                 $clauses[] = 'NOT (' . $exclude . ')';
                 $values = array_merge($values, $exclude_values);
             }
@@ -2410,7 +2461,7 @@ function cow_merge_try_insert_row_with_rowid(SQLite3 $target, string $table, int
     if ($foreign_key_error !== null) {
         return ['ok' => false, 'rowid' => null, 'error' => $foreign_key_error];
     }
-    $quoted_columns = array_merge(['rowid'], array_map('cow_merge_quote_ident', $columns));
+    $quoted_columns = array_merge([cow_merge_hidden_rowid_selector($target, $table)], array_map('cow_merge_quote_ident', $columns));
     $sql = 'INSERT INTO ' . cow_merge_quote_ident($table) . ' (' .
         implode(', ', $quoted_columns) . ') VALUES (' .
         implode(', ', array_fill(0, count($quoted_columns), '?')) . ')';
@@ -2749,6 +2800,7 @@ function cow_merge_find_unique_collision(
     ?int $exclude_rowid = null
 ): ?array {
     $needs_rowid = $include_rowid || ($exclude_identity !== null && !$exclude_pk_cols);
+    $needs_hidden_rowid = $needs_rowid && !cow_merge_pk_cols($target, $table);
     foreach (cow_merge_unique_indexes($target, $table) as $index) {
         $partial_where = $index['where'] ?? null;
         if (is_string($partial_where) && !cow_merge_row_matches_partial_index_where($target, $source_row, $partial_where)) {
@@ -2790,7 +2842,13 @@ function cow_merge_find_unique_collision(
             $clauses[] = '(' . $partial_where . ')';
         }
 
-        $select = $needs_rowid ? 'rowid AS __forkpress_merge_rowid, *' : '*';
+        $keyless_columns = [];
+        if ($needs_hidden_rowid) {
+            [$select_parts, $keyless_columns] = cow_merge_keyless_select_parts($target, $table);
+            $select = implode(', ', $select_parts);
+        } else {
+            $select = '*';
+        }
         $stmt = cow_merge_prepare_checked(
             $target,
             'SELECT ' . $select . ' FROM ' . cow_merge_quote_ident($table) . ' WHERE ' . implode(' AND ', $clauses) . ' LIMIT 1',
@@ -2800,11 +2858,17 @@ function cow_merge_find_unique_collision(
             cow_merge_bind($stmt, $i + 1, $value);
         }
         $res = cow_merge_execute_checked($stmt, $target, "failed to query unique collision lookup on $table");
-        $row = $res->fetchArray(SQLITE3_ASSOC);
+        $rowid = null;
+        if ($needs_hidden_rowid) {
+            $values = $res->fetchArray(SQLITE3_NUM);
+            $entry = $values ? cow_merge_keyless_entry_from_numeric_row($values, $keyless_columns, "$table unique collision lookup") : null;
+            $row = $entry['row'] ?? false;
+            $rowid = $entry['rowid'] ?? null;
+        } else {
+            $row = $res->fetchArray(SQLITE3_ASSOC);
+        }
         cow_merge_result_finalize_checked($res, "failed to finalize unique collision lookup on $table");
         if ($row) {
-            $rowid = $row['__forkpress_merge_rowid'] ?? null;
-            unset($row['__forkpress_merge_rowid']);
             if (
                 $exclude_identity !== null &&
                 cow_merge_unique_collision_matches_identity(
@@ -2865,7 +2929,7 @@ function cow_merge_try_update_row(
     }
 
     $where_values = [];
-    $where = cow_merge_where_clause($identity, $pk_cols, $where_values);
+    $where = cow_merge_where_clause($target, $table, $identity, $pk_cols, $where_values);
     $sql = 'UPDATE ' . cow_merge_quote_ident($table) . ' SET ' .
         implode(', ', array_map(fn($col) => cow_merge_quote_ident($col) . ' = ?', $set_cols)) .
         ' WHERE ' . $where;
@@ -2900,7 +2964,7 @@ function cow_merge_try_delete_row(SQLite3 $target, string $table, array $identit
     }
 
     $values = [];
-    $where = cow_merge_where_clause($identity, $pk_cols, $values);
+    $where = cow_merge_where_clause($target, $table, $identity, $pk_cols, $values);
     $stmt = cow_merge_prepare_checked(
         $target,
         'DELETE FROM ' . cow_merge_quote_ident($table) . ' WHERE ' . $where,
@@ -5427,7 +5491,7 @@ function cow_merge_decode_payload_json(string $json, string $context): mixed {
 
 function cow_merge_select_current_cell(SQLite3 $db, string $table, array $identity, array $pk_cols, string $column): mixed {
     $where_values = [];
-    $where = cow_merge_where_clause($identity, $pk_cols, $where_values);
+    $where = cow_merge_where_clause($db, $table, $identity, $pk_cols, $where_values);
     $stmt = cow_merge_prepare_checked(
         $db,
         'SELECT ' . cow_merge_quote_ident($column) . ' AS value FROM ' . cow_merge_quote_ident($table) . ' WHERE ' . $where,
@@ -5447,7 +5511,7 @@ function cow_merge_select_current_cell(SQLite3 $db, string $table, array $identi
 
 function cow_merge_select_current_row(SQLite3 $db, string $table, array $identity, array $pk_cols): ?array {
     $where_values = [];
-    $where = cow_merge_where_clause($identity, $pk_cols, $where_values);
+    $where = cow_merge_where_clause($db, $table, $identity, $pk_cols, $where_values);
     $stmt = cow_merge_prepare_checked(
         $db,
         'SELECT * FROM ' . cow_merge_quote_ident($table) . ' WHERE ' . $where,
@@ -5537,7 +5601,7 @@ function cow_merge_lookup_active_rowid_by_identity(SQLite3 $meta, string $branch
 
 function cow_merge_update_single_cell(SQLite3 $db, string $table, array $identity, array $pk_cols, string $column, mixed $value): void {
     $where_values = [];
-    $where = cow_merge_where_clause($identity, $pk_cols, $where_values);
+    $where = cow_merge_where_clause($db, $table, $identity, $pk_cols, $where_values);
     $stmt = cow_merge_prepare_checked(
         $db,
         'UPDATE ' . cow_merge_quote_ident($table) . ' SET ' . cow_merge_quote_ident($column) . ' = ? WHERE ' . $where,
