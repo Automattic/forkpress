@@ -5914,6 +5914,38 @@ SQL);
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-schema-auto-index-ddl'"), 0, 'failed source-added index DDL records no misleading conflicts');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-schema-auto-index-ddl' AND status = 'failed'"), 1, 'failed source-added index DDL leaves an auditable failed run');
 
+    $schema_early_index_ddl_base = $tmp . '/schema-early-index-ddl-base.sqlite';
+    $schema_early_index_ddl_source = $tmp . '/schema-early-index-ddl-source.sqlite';
+    $schema_early_index_ddl_target = $tmp . '/schema-early-index-ddl-target.sqlite';
+    create_base_db($schema_early_index_ddl_base);
+    copy($schema_early_index_ddl_base, $schema_early_index_ddl_source);
+    copy($schema_early_index_ddl_base, $schema_early_index_ddl_target);
+    $db = open_db($schema_early_index_ddl_source);
+    $db->exec('CREATE TABLE plugin_early_index_table (id INTEGER PRIMARY KEY, label TEXT)');
+    $db->exec("INSERT INTO plugin_early_index_table (id, label) VALUES (1, 'source row')");
+    $db->exec('CREATE INDEX plugin_early_index_table_label_idx ON plugin_early_index_table(label)');
+    $db->close();
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'CREATE INDEX plugin_early_index_table_label_idx ON plugin_early_index_table(label)' && $message === 'failed to apply early source-added table index schema merge') {
+                throw new RuntimeException('forced early source table index DDL failure');
+            }
+        },
+    ];
+    $schema_early_index_ddl_failure = null;
+    try {
+        cow_merge_databases($schema_early_index_ddl_base, $schema_early_index_ddl_source, $schema_early_index_ddl_target, $metadata, 'feature-schema-early-index-ddl', 'main');
+    } catch (Throwable $e) {
+        $schema_early_index_ddl_failure = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($schema_early_index_ddl_failure !== null && str_contains($schema_early_index_ddl_failure, 'forced early source table index DDL failure'), 'early source table index DDL infrastructure failure is surfaced to the caller');
+    assert_same((int)scalar($schema_early_index_ddl_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_early_index_table'"), 0, 'failed early source table index DDL rolls back source-added target table');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-schema-early-index-ddl'"), 0, 'failed early source table index DDL records no staged decisions');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-schema-early-index-ddl'"), 0, 'failed early source table index DDL records no misleading conflicts');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-schema-early-index-ddl' AND status = 'failed'"), 1, 'failed early source table index DDL leaves an auditable failed run');
+
     $schema_view_savepoint_base = $tmp . '/schema-view-savepoint-base.sqlite';
     $schema_view_savepoint_source = $tmp . '/schema-view-savepoint-source.sqlite';
     $schema_view_savepoint_target = $tmp . '/schema-view-savepoint-target.sqlite';

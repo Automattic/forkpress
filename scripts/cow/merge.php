@@ -9145,6 +9145,12 @@ function cow_merge_apply_source_table_indexes(SQLite3 $target, string $table, ar
         if (cow_merge_index_sql($target, (string)$index) !== null) {
             continue;
         }
+        cow_merge_test_hook(
+            'before_sqlite_exec',
+            $target,
+            (string)$entry['sql'],
+            'failed to apply early source-added table index schema merge'
+        );
         @$target->exec((string)$entry['sql']);
     }
 }
