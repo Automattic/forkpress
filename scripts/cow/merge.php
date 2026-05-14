@@ -10170,6 +10170,9 @@ function cow_merge_databases(
     $conflicts = 0;
     $target_transaction_active = false;
     $metadata_transaction_active = false;
+    $target_committed = false;
+    $target_snapshot = cow_merge_snapshot_sqlite_db($target_db);
+    $preserve_target_snapshot = false;
     try {
         if (!$target->exec('BEGIN IMMEDIATE')) {
             throw new RuntimeException('failed to start target database transaction: ' . $target->lastErrorMsg());
@@ -10323,11 +10326,10 @@ function cow_merge_databases(
             throw new RuntimeException('failed to commit target database transaction: ' . $target->lastErrorMsg());
         }
         $target_transaction_active = false;
+        $target_committed = true;
         $status = $conflicts > 0 ? 'completed_with_conflicts' : 'completed';
         cow_merge_finish_run($meta, $run_id, $status);
-        if (!$meta->exec('COMMIT')) {
-            throw new RuntimeException('failed to commit merge metadata transaction: ' . $meta->lastErrorMsg());
-        }
+        cow_merge_exec_checked($meta, 'COMMIT', 'failed to commit merge metadata transaction');
         $metadata_transaction_active = false;
         return [
             'run_id' => $run_id,
@@ -10337,7 +10339,45 @@ function cow_merge_databases(
             'metadata_db' => $metadata_db,
         ];
     } catch (Throwable $e) {
-        if ($target_transaction_active) {
+        if ($target_committed) {
+            if ($metadata_transaction_active) {
+                @$meta->exec('ROLLBACK');
+                $metadata_transaction_active = false;
+            }
+            try {
+                $target->close();
+                $target = null;
+                cow_merge_restore_sqlite_snapshot($target_snapshot);
+            } catch (Throwable $rollback_error) {
+                $preserve_target_snapshot = true;
+                $run_context = cow_merge_run_context($meta, $run_id);
+                $original_failure = cow_merge_failure_reason($e);
+                $rollback_failure = cow_merge_failure_reason($rollback_error);
+                $rollback_artifacts = [
+                    'target_db_snapshot' => cow_merge_sqlite_snapshot_artifact($target_snapshot),
+                ];
+                cow_merge_finish_run($meta, $run_id, 'failed', $original_failure);
+                cow_merge_record_rollback_failure_artifact(
+                    $metadata_db,
+                    $run_id,
+                    $run_context['source_branch'],
+                    $run_context['target_branch'],
+                    $run_context['base_db'],
+                    $run_context['source_db'],
+                    $run_context['target_db'],
+                    $original_failure,
+                    $rollback_failure,
+                    $rollback_artifacts
+                );
+                throw new CowMergeRollbackFailureException(
+                    $e->getMessage() . '; target database rollback failed: ' . $rollback_error->getMessage(),
+                    $original_failure,
+                    $rollback_failure,
+                    $rollback_artifacts,
+                    $e
+                );
+            }
+        } elseif ($target_transaction_active) {
             @$target->exec('ROLLBACK');
         }
         if ($metadata_transaction_active) {
@@ -10346,9 +10386,14 @@ function cow_merge_databases(
         cow_merge_finish_run($meta, $run_id, 'failed', cow_merge_failure_reason($e));
         throw $e;
     } finally {
+        if (!$preserve_target_snapshot) {
+            cow_merge_cleanup_sqlite_snapshot($target_snapshot);
+        }
         $base->close();
         $source->close();
-        $target->close();
+        if ($target instanceof SQLite3) {
+            $target->close();
+        }
         $meta->close();
     }
 }

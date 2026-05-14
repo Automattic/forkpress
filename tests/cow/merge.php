@@ -219,6 +219,55 @@ try {
     assert_same((int)scalar($rollback_metadata, 'SELECT COUNT(*) FROM merge_conflicts'), 0, 'failed whole-merge rollback discards staged conflict metadata');
     assert_same((int)scalar($rollback_metadata, 'SELECT COUNT(*) FROM merge_row_identities'), 0, 'failed whole-merge rollback discards staged no-primary-key sidecars');
 
+    $merge_commit_base = $tmp . '/merge-commit-base.sqlite';
+    $merge_commit_source = $tmp . '/merge-commit-source.sqlite';
+    $merge_commit_target = $tmp . '/merge-commit-target.sqlite';
+    $merge_commit_metadata = $tmp . '/.forkpress/cow/merge/merge-commit-metadata.sqlite';
+    create_base_db($merge_commit_base);
+    copy($merge_commit_base, $merge_commit_source);
+    copy($merge_commit_base, $merge_commit_target);
+    $db = open_db($merge_commit_source);
+    $db->exec("UPDATE wp_posts SET post_content = 'Source commit rollback content' WHERE ID = 1");
+    $db->exec('CREATE TABLE plugin_commit_keyless (label TEXT, value TEXT)');
+    $db->exec("INSERT INTO plugin_commit_keyless (rowid, label, value) VALUES (23, 'commit', 'source')");
+    $db->close();
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'COMMIT' && $message === 'failed to commit merge metadata transaction') {
+                throw new RuntimeException('forced merge metadata commit failure');
+            }
+        },
+    ];
+    $merge_commit_failure_message = null;
+    try {
+        cow_merge_databases(
+            $merge_commit_base,
+            $merge_commit_source,
+            $merge_commit_target,
+            $merge_commit_metadata,
+            'feature-merge-commit-rollback',
+            'main'
+        );
+    } catch (Throwable $e) {
+        $merge_commit_failure_message = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($merge_commit_failure_message !== null && str_contains($merge_commit_failure_message, 'forced merge metadata commit failure'), 'direct DB merge metadata commit failure is surfaced to the caller');
+    assert_same(scalar($merge_commit_target, "SELECT post_content FROM wp_posts WHERE ID = 1"), 'Base content', 'direct DB merge metadata commit failure restores the already-committed target row');
+    assert_same(
+        (int)scalar($merge_commit_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_commit_keyless'"),
+        0,
+        'direct DB merge metadata commit failure restores already-committed source-added tables'
+    );
+    assert_same(
+        (int)scalar($merge_commit_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-merge-commit-rollback' AND status = 'failed'"),
+        1,
+        'direct DB merge metadata commit failure leaves an auditable failed run'
+    );
+    assert_same((int)scalar($merge_commit_metadata, 'SELECT COUNT(*) FROM merge_decisions'), 0, 'direct DB merge metadata commit failure rolls back staged decisions');
+    assert_same((int)scalar($merge_commit_metadata, 'SELECT COUNT(*) FROM merge_row_identities'), 0, 'direct DB merge metadata commit failure rolls back staged no-primary-key sidecars');
+
     $unique_base = $tmp . '/unique-base.sqlite';
     $unique_source = $tmp . '/unique-source.sqlite';
     $unique_target = $tmp . '/unique-target.sqlite';
