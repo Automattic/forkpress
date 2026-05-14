@@ -4541,6 +4541,7 @@ function cow_merge_file_root_snapshot_begin(string $target_root): array {
 }
 
 function cow_merge_file_root_snapshot_restore(array $snapshot, string $target_root): void {
+    cow_merge_test_hook('before_file_root_snapshot_restore', $snapshot, $target_root);
     $original_entries = $snapshot['entries'] ?? [];
     if (!is_array($original_entries)) {
         throw new RuntimeException('invalid filesystem root snapshot');
@@ -10559,16 +10560,34 @@ function cow_merge_branch_state(
                 );
             } catch (Throwable $rollback_error) {
                 $preserve_rollback_snapshots = true;
+                $failure_reason = cow_merge_failure_reason($e);
+                $rollback_failure_reason = cow_merge_failure_reason($rollback_error);
+                $failed_run_id = $attempted_run_id;
+                try {
+                    $failed_run_id = cow_merge_record_failed_run(
+                        $metadata_db,
+                        $source_branch,
+                        $target_branch,
+                        $base_db,
+                        $source_db,
+                        $target_db,
+                        $failure_reason . '; whole-branch rollback failed: ' . $rollback_failure_reason
+                    );
+                } catch (Throwable) {
+                    // The metadata snapshot may itself be unavailable after a
+                    // rollback failure. The JSONL artifact below is still the
+                    // durable recovery path in that case.
+                }
                 cow_merge_record_rollback_failure_artifact(
                     $metadata_db,
-                    $attempted_run_id,
+                    $failed_run_id,
                     $source_branch,
                     $target_branch,
                     $base_db,
                     $source_db,
                     $target_db,
-                    cow_merge_failure_reason($e),
-                    cow_merge_failure_reason($rollback_error),
+                    $failure_reason,
+                    $rollback_failure_reason,
                     [
                         'target_db_snapshot' => cow_merge_sqlite_snapshot_artifact($target_snapshot),
                         'metadata_db_snapshot' => cow_merge_sqlite_snapshot_artifact($metadata_snapshot),

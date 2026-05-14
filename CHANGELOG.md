@@ -56,6 +56,7 @@
 - Added COW coverage for direct DB merge target snapshot restore failures, proving rollback-failure audit rows and JSONL backup artifacts remain available for recovery.
 - Made mixed DB+filesystem merge rollback restore target filesystem changes after late metadata failures, keeping target DB, files, and `.forkpress/cow/merge` audit metadata aligned.
 - Preserved rollback snapshot artifacts when mixed DB+filesystem rollback itself fails, and recorded DB/filesystem backup locations in the rollback-failure JSONL artifact.
+- Added COW coverage for mixed DB+filesystem rollback failures where filesystem root restoration aborts after metadata restore, proving recovery snapshots stay queryable and preserved.
 - Preserved per-file transaction artifacts when filesystem-phase rollback itself fails, keeping failed rollback backup paths inspectable through merge audit metadata.
 - Made filesystem merge audit metadata atomic across planning and file operations, so failed file merges do not leave partial conflict or decision rows.
 - Tightened filesystem merge metadata transaction boundaries so a failed metadata begin cannot leak file planning records outside the rollback scope.

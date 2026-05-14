@@ -3159,6 +3159,92 @@ SQL);
     assert_same((int)scalar($late_whole_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-late-whole-rollback' AND status = 'failed'"), 1, 'late whole-branch rollback records a failed merge run after restoring metadata');
     assert_same((int)scalar($late_whole_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__'"), 0, 'late whole-branch rollback discards filesystem decisions after metadata restore');
 
+    $whole_fs_restore_failure_base_db = $tmp . '/whole-fs-restore-failure-base.sqlite';
+    $whole_fs_restore_failure_source_db = $tmp . '/whole-fs-restore-failure-source.sqlite';
+    $whole_fs_restore_failure_target_db = $tmp . '/whole-fs-restore-failure-target.sqlite';
+    create_base_db($whole_fs_restore_failure_base_db);
+    copy($whole_fs_restore_failure_base_db, $whole_fs_restore_failure_source_db);
+    copy($whole_fs_restore_failure_base_db, $whole_fs_restore_failure_target_db);
+    $db = open_db($whole_fs_restore_failure_source_db);
+    $db->exec("UPDATE wp_posts SET post_content = 'source db change before filesystem restore failure' WHERE ID = 1");
+    $db->close();
+
+    $whole_fs_restore_failure_base_root = $tmp . '/whole-fs-restore-failure-base';
+    $whole_fs_restore_failure_source_root = $tmp . '/whole-fs-restore-failure-source';
+    $whole_fs_restore_failure_target_root = $tmp . '/whole-fs-restore-failure-target';
+    mkdir($whole_fs_restore_failure_base_root . '/wp-content/uploads', 0777, true);
+    write_test_file($whole_fs_restore_failure_base_root . '/wp-content/uploads/root.txt', 'root base');
+    copy_tree_for_test($whole_fs_restore_failure_base_root, $whole_fs_restore_failure_source_root);
+    copy_tree_for_test($whole_fs_restore_failure_base_root, $whole_fs_restore_failure_target_root);
+    write_test_file($whole_fs_restore_failure_source_root . '/wp-content/uploads/root.txt', 'root source');
+    $whole_fs_restore_failure_manifest = $tmp . '/.forkpress/cow/merge/file-bases/feature-whole-fs-restore-failure.json';
+    cow_merge_capture_file_base($whole_fs_restore_failure_base_root, $whole_fs_restore_failure_manifest);
+
+    $whole_fs_restore_failure_metadata = $tmp . '/.forkpress/cow/merge/whole-fs-restore-failure/metadata.sqlite';
+    cow_merge_mkdir_p(dirname($whole_fs_restore_failure_metadata));
+    $whole_fs_restore_failure_meta = open_db($whole_fs_restore_failure_metadata);
+    cow_merge_ensure_metadata($whole_fs_restore_failure_meta);
+    $whole_fs_restore_failure_meta->exec(<<<'SQL'
+CREATE TRIGGER fail_whole_fs_restore_status_update
+BEFORE UPDATE OF status ON merge_runs
+WHEN OLD.source_branch = 'feature-whole-fs-restore-failure'
+  AND OLD.status = 'completed'
+  AND NEW.status = 'completed'
+BEGIN
+    SELECT RAISE(ABORT, 'forced whole-branch status failure before filesystem restore failure');
+END
+SQL);
+    $whole_fs_restore_failure_meta->close();
+
+    $GLOBALS['cow_merge_test_hooks']['before_file_root_snapshot_restore'] = [
+        static function (array $snapshot, string $target_root) use ($whole_fs_restore_failure_target_root): void {
+            if ($target_root === $whole_fs_restore_failure_target_root) {
+                throw new RuntimeException('forced filesystem root snapshot restore failure');
+            }
+        },
+    ];
+    $whole_fs_restore_failure_message = null;
+    set_error_handler(static function (int $severity, string $message): bool {
+        return str_contains($message, 'forced whole-branch status failure before filesystem restore failure');
+    });
+    try {
+        cow_merge_branch_state(
+            $whole_fs_restore_failure_base_db,
+            $whole_fs_restore_failure_source_db,
+            $whole_fs_restore_failure_target_db,
+            $whole_fs_restore_failure_metadata,
+            'feature-whole-fs-restore-failure',
+            'main',
+            $whole_fs_restore_failure_manifest,
+            $whole_fs_restore_failure_source_root,
+            $whole_fs_restore_failure_target_root
+        );
+    } catch (Throwable $e) {
+        $whole_fs_restore_failure_message = $e->getMessage();
+    } finally {
+        restore_error_handler();
+        unset($GLOBALS['cow_merge_test_hooks']['before_file_root_snapshot_restore']);
+    }
+    assert_true($whole_fs_restore_failure_message !== null && str_contains($whole_fs_restore_failure_message, 'whole-branch rollback failed'), 'whole-branch filesystem restore failure is surfaced to the caller');
+    assert_true(str_contains($whole_fs_restore_failure_message, 'forced filesystem root snapshot restore failure'), 'whole-branch filesystem restore failure includes the rollback error');
+    assert_same(scalar($whole_fs_restore_failure_target_db, "SELECT post_content FROM wp_posts WHERE ID = 1"), 'Base content', 'whole-branch filesystem restore failure still restores target DB snapshot first');
+    assert_same(file_get_contents($whole_fs_restore_failure_target_root . '/wp-content/uploads/root.txt'), 'root source', 'failed filesystem root restore leaves the applied file state for manual recovery');
+    $whole_fs_restore_failure_run_id = (int)scalar($whole_fs_restore_failure_metadata, "SELECT id FROM merge_runs WHERE source_branch = 'feature-whole-fs-restore-failure' AND status = 'failed' ORDER BY id DESC LIMIT 1");
+    assert_true($whole_fs_restore_failure_run_id > 0, 'whole-branch filesystem restore failure records a failed run after metadata restore');
+    assert_same((int)scalar($whole_fs_restore_failure_metadata, "SELECT COUNT(*) FROM merge_rollback_failures WHERE run_id = $whole_fs_restore_failure_run_id"), 1, 'whole-branch filesystem restore failure records rollback-failure metadata');
+    assert_same((int)scalar($whole_fs_restore_failure_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__'"), 0, 'whole-branch filesystem restore failure discards staged file metadata before recording failure');
+    $whole_fs_restore_failure_audit = cow_merge_audit_report($whole_fs_restore_failure_metadata, $whole_fs_restore_failure_run_id, 5, ['records' => 'rollback-failures']);
+    assert_same(count($whole_fs_restore_failure_audit['rollback_failures']), 1, 'whole-branch filesystem restore failure appears in rollback-failure audit exports');
+    assert_true(str_contains($whole_fs_restore_failure_audit['rollback_failures'][0]['rollback_failure'], 'forced filesystem root snapshot restore failure'), 'whole-branch filesystem restore failure audit preserves rollback failure reason');
+    $whole_fs_restore_failure_artifact_path = (string)$whole_fs_restore_failure_audit['rollback_failures'][0]['artifact_path'];
+    assert_true($whole_fs_restore_failure_artifact_path !== '' && is_file($whole_fs_restore_failure_artifact_path), 'whole-branch filesystem restore failure preserves a JSONL artifact');
+    $whole_fs_restore_failure_artifact_lines = file($whole_fs_restore_failure_artifact_path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    assert_true(is_array($whole_fs_restore_failure_artifact_lines) && count($whole_fs_restore_failure_artifact_lines) === 1, 'whole-branch filesystem restore failure writes one artifact record');
+    $whole_fs_restore_failure_artifact = json_decode($whole_fs_restore_failure_artifact_lines[0], true);
+    assert_true(is_file($whole_fs_restore_failure_artifact['artifacts']['target_db_snapshot']['backup'] ?? ''), 'whole-branch filesystem restore failure artifact preserves target DB backup');
+    assert_true(is_file($whole_fs_restore_failure_artifact['artifacts']['metadata_db_snapshot']['backup'] ?? ''), 'whole-branch filesystem restore failure artifact preserves metadata DB backup');
+    assert_true(is_dir($whole_fs_restore_failure_artifact['artifacts']['filesystem_snapshot']['stage_root'] ?? ''), 'whole-branch filesystem restore failure artifact preserves filesystem snapshot backup root');
+
     $recovered_file_rollback_metadata = $tmp . '/.forkpress/cow/merge/recovered-file-rollback-metadata.sqlite';
     $recovered_file_rollback_id = cow_merge_record_failed_run_with_recovered_rollback_failure(
         $recovered_file_rollback_metadata,
