@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Added COW branch mergeback for production materialized branches, including generic SQLite 3-way merge, conservative schema additions, filesystem mergeback, rollback handling, and audit metadata under `.forkpress/cow/merge`.
+- Added COW coverage proving source-only filesystem directory additions record an empty target payload in merge audit decisions.
 - Added branch-time AUTOINCREMENT ID bands, audited skips for plain `INTEGER PRIMARY KEY` tables, no-primary-key row identity sidecars, and runtime TEMP-trigger identity tracking.
 - Tightened no-primary-key identity capture/tracking metadata transactions so staged sidecar identities roll back if run-status recording fails.
 - Tightened no-primary-key identity capture/tracking metadata commit failures so staged sidecars, history, and identity decisions roll back while failed runs remain auditable.
