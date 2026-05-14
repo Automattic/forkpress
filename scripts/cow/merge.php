@@ -6899,33 +6899,43 @@ function cow_merge_apply_source_view_schema_resolution(SQLite3 $target, string $
         );
         $target_savepoint_started = true;
         foreach (array_reverse($dependent_views) as $dependency) {
-            if (!$target->exec('DROP VIEW ' . cow_merge_quote_ident((string)$dependency['name']))) {
-                throw new RuntimeException('failed to drop dependent target view ' . $dependency['name'] . ' during view schema resolution: ' . $target->lastErrorMsg());
-            }
+            cow_merge_exec_checked(
+                $target,
+                'DROP VIEW ' . cow_merge_quote_ident((string)$dependency['name']),
+                'failed to drop dependent target view ' . $dependency['name'] . ' during view schema resolution'
+            );
         }
         if (cow_merge_schema_object_sql($target, 'view', $view) !== null) {
-            if (!$target->exec('DROP VIEW ' . cow_merge_quote_ident($view))) {
-                throw new RuntimeException('failed to drop target view during schema resolution: ' . $target->lastErrorMsg());
-            }
+            cow_merge_exec_checked(
+                $target,
+                'DROP VIEW ' . cow_merge_quote_ident($view),
+                'failed to drop target view during schema resolution'
+            );
         }
-        if ($source_sql !== null && !$target->exec($source_sql)) {
-            throw new RuntimeException('failed to apply source view schema resolution: ' . $target->lastErrorMsg());
+        if ($source_sql !== null) {
+            cow_merge_exec_checked(
+                $target,
+                $source_sql,
+                'failed to apply source view schema resolution'
+            );
         }
         if ($source_sql !== null) {
             cow_merge_validate_view_schema($target, $view, 'source-view-resolution');
         }
         foreach ($dependent_views as $dependency) {
-            if (!$target->exec((string)$dependency['sql'])) {
-                throw new RuntimeException('failed to recreate dependent target view ' . $dependency['name'] . ' after view schema resolution: ' . $target->lastErrorMsg());
-            }
+            cow_merge_exec_checked(
+                $target,
+                (string)$dependency['sql'],
+                'failed to recreate dependent target view ' . $dependency['name'] . ' after view schema resolution'
+            );
         }
         foreach ($dependencies as $dependency) {
-            if (!$target->exec((string)$dependency['sql'])) {
-                throw new RuntimeException(
-                    'failed to recreate dependent target ' . $dependency['type'] . ' ' . $dependency['name'] .
-                    ' after view schema resolution: ' . $target->lastErrorMsg()
-                );
-            }
+            cow_merge_exec_checked(
+                $target,
+                (string)$dependency['sql'],
+                'failed to recreate dependent target ' . $dependency['type'] . ' ' . $dependency['name'] .
+                    ' after view schema resolution'
+            );
             cow_merge_validate_schema_dependency_program($target, $dependency, 'view schema resolution');
         }
         if ($source_sql !== null) {
@@ -7023,9 +7033,11 @@ function cow_merge_apply_source_table_drop(SQLite3 $target, string $table, bool 
         );
         $target_savepoint_started = true;
         if (cow_merge_table_sql($target, $table) !== null) {
-            if (!$target->exec('DROP TABLE ' . cow_merge_quote_ident($table))) {
-                throw new RuntimeException('failed to apply source table drop schema resolution: ' . $target->lastErrorMsg());
-            }
+            cow_merge_exec_checked(
+                $target,
+                'DROP TABLE ' . cow_merge_quote_ident($table),
+                'failed to apply source table drop schema resolution'
+            );
         }
         cow_merge_validate_foreign_key_integrity($target, 'source table drop schema resolution');
         if ($apply) {
@@ -7074,12 +7086,18 @@ function cow_merge_apply_source_index_schema_resolution(SQLite3 $target, string 
         );
         $target_savepoint_started = true;
         if (cow_merge_index_sql($target, $index) !== null) {
-            if (!$target->exec('DROP INDEX ' . cow_merge_quote_ident($index))) {
-                throw new RuntimeException('failed to drop target index during schema resolution: ' . $target->lastErrorMsg());
-            }
+            cow_merge_exec_checked(
+                $target,
+                'DROP INDEX ' . cow_merge_quote_ident($index),
+                'failed to drop target index during schema resolution'
+            );
         }
-        if ($source_sql !== null && !@$target->exec($source_sql)) {
-            throw new RuntimeException('failed to apply source index schema resolution: ' . $target->lastErrorMsg());
+        if ($source_sql !== null) {
+            cow_merge_exec_checked(
+                $target,
+                $source_sql,
+                'failed to apply source index schema resolution'
+            );
         }
         cow_merge_validate_foreign_key_integrity($target, 'source index schema resolution');
         if ($apply) {
@@ -7287,16 +7305,22 @@ function cow_merge_resolve_schema_conflict(
                         }
                         if (cow_merge_schema_object_sql($target, $type, $object) !== null) {
                             $drop_sql = 'DROP ' . strtoupper($type) . ' ' . cow_merge_quote_ident($object);
-                            if (!$target->exec($drop_sql)) {
-                                throw new RuntimeException("failed to drop target $type during schema resolution: " . $target->lastErrorMsg());
-                            }
+                            cow_merge_exec_checked(
+                                $target,
+                                $drop_sql,
+                                "failed to drop target $type during schema resolution"
+                            );
                         }
                         if ($source_sql !== null) {
                             cow_merge_validate_trigger_references($target, $object, $source_sql);
                             cow_merge_validate_trigger_program_acyclic($target, $object, $source_sql);
                         }
-                        if ($source_sql !== null && !@$target->exec($source_sql)) {
-                            throw new RuntimeException("failed to apply source $type schema resolution: " . $target->lastErrorMsg());
+                        if ($source_sql !== null) {
+                            cow_merge_exec_checked(
+                                $target,
+                                $source_sql,
+                                "failed to apply source $type schema resolution"
+                            );
                         }
                         if ($source_sql !== null) {
                             cow_merge_validate_trigger_program($target, $object, $source_sql);
@@ -9047,9 +9071,7 @@ function cow_merge_apply_source_table(
     string $ddl,
     array $source_indexes
 ): array {
-    if (!$target->exec($ddl)) {
-        throw new RuntimeException("failed to create target table $table: " . $target->lastErrorMsg());
-    }
+    cow_merge_exec_checked($target, $ddl, "failed to create target table $table");
     cow_merge_record_decision(
         $meta,
         $run_id,
@@ -9202,9 +9224,7 @@ function cow_merge_restore_source_table(
     cow_merge_validate_source_table_restore_dependencies($source, $target, $table);
     cow_merge_forget_table_row_identities($meta, $run_id, $target_branch, $table);
     $ddl = (string)$restore_payload['table_sql'];
-    if (!$target->exec($ddl)) {
-        throw new RuntimeException("failed to restore target table $table: " . $target->lastErrorMsg());
-    }
+    cow_merge_exec_checked($target, $ddl, "failed to restore target table $table");
     $columns = cow_merge_table_columns($source, $table);
     $pk_cols = cow_merge_pk_cols($source, $table);
     $rows = $pk_cols
@@ -9226,9 +9246,11 @@ function cow_merge_restore_source_table(
         if (cow_merge_index_sql($target, (string)$index['name']) !== null) {
             throw new RuntimeException('target index already exists during source table restore: ' . $index['name']);
         }
-        if (!$target->exec((string)$index['sql'])) {
-            throw new RuntimeException('failed to restore source table index ' . $index['name'] . ': ' . $target->lastErrorMsg());
-        }
+        cow_merge_exec_checked(
+            $target,
+            (string)$index['sql'],
+            'failed to restore source table index ' . $index['name']
+        );
     }
     foreach ($restore_payload['triggers'] as $trigger) {
         if (cow_merge_schema_object_sql($target, 'trigger', (string)$trigger['name']) !== null) {
@@ -9236,9 +9258,11 @@ function cow_merge_restore_source_table(
         }
         cow_merge_validate_trigger_references($target, (string)$trigger['name'], (string)$trigger['sql']);
         cow_merge_validate_trigger_program_acyclic($target, (string)$trigger['name'], (string)$trigger['sql']);
-        if (!$target->exec((string)$trigger['sql'])) {
-            throw new RuntimeException('failed to restore source table trigger ' . $trigger['name'] . ': ' . $target->lastErrorMsg());
-        }
+        cow_merge_exec_checked(
+            $target,
+            (string)$trigger['sql'],
+            'failed to restore source table trigger ' . $trigger['name']
+        );
         cow_merge_validate_trigger_program($target, (string)$trigger['name'], (string)$trigger['sql']);
     }
     cow_merge_validate_views($target, $dependent_views, 'source-table-restore');

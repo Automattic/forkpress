@@ -6038,6 +6038,24 @@ SQL);
     assert_true($schema_fk_index_drop_savepoint_failure !== null && str_contains($schema_fk_index_drop_savepoint_failure, 'forced source index resolution savepoint failure'), 'source index resolution savepoint failure is surfaced to the caller');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_fk_index_drop_conflict_id"), 0, 'failed source index savepoint records no resolution metadata');
     assert_same((int)scalar($schema_fk_index_drop_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_fk_index_drop_parent_code_idx'"), 1, 'failed source index savepoint leaves target index unchanged');
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'DROP INDEX "plugin_fk_index_drop_parent_code_idx"' && $message === 'failed to drop target index during schema resolution') {
+                throw new RuntimeException('forced source index resolution DDL failure');
+            }
+        },
+    ];
+    $schema_fk_index_drop_ddl_failure = null;
+    try {
+        cow_merge_resolve_conflict($metadata, $schema_fk_index_drop_conflict_id, 'source', false, 'Preview FK parent index drop with failing DDL.', 'test');
+    } catch (Throwable $e) {
+        $schema_fk_index_drop_ddl_failure = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($schema_fk_index_drop_ddl_failure !== null && str_contains($schema_fk_index_drop_ddl_failure, 'forced source index resolution DDL failure'), 'source index resolution DDL failure is surfaced to the caller');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_fk_index_drop_conflict_id"), 0, 'failed source index DDL records no resolution metadata');
+    assert_same((int)scalar($schema_fk_index_drop_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_fk_index_drop_parent_code_idx'"), 1, 'failed source index DDL rolls back the target index');
     assert_throws(
         fn() => cow_merge_resolve_conflict($metadata, $schema_fk_index_drop_conflict_id, 'source', false, 'Preview FK parent index drop.', 'test'),
         'foreign-key validation error',
@@ -7127,6 +7145,35 @@ SQL);
         0,
         'failed source view resolution savepoint records no resolution metadata'
     );
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if (str_starts_with($sql, 'CREATE VIEW plugin_items_review_view') && $message === 'failed to apply source view schema resolution') {
+                throw new RuntimeException('forced source view resolution DDL failure');
+            }
+        },
+    ];
+    $schema_view_rewrite_ddl_failure = null;
+    try {
+        cow_merge_resolve_conflict(
+            $metadata,
+            $schema_view_rewrite_conflict_id,
+            'source',
+            false,
+            'Preview source view rewrite with failing DDL.',
+            'test'
+        );
+    } catch (Throwable $e) {
+        $schema_view_rewrite_ddl_failure = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($schema_view_rewrite_ddl_failure !== null && str_contains($schema_view_rewrite_ddl_failure, 'forced source view resolution DDL failure'), 'source view schema resolution DDL failure is surfaced to the caller');
+    assert_true(str_contains((string)scalar($schema_view_rewrite_target, "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_review_view'"), 'label FROM'), 'failed source view resolution DDL rolls back target view');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_view_rewrite_conflict_id"),
+        0,
+        'failed source view resolution DDL records no resolution metadata'
+    );
     $schema_view_rewrite_resolution = cow_merge_resolve_conflict(
         $metadata,
         $schema_view_rewrite_conflict_id,
@@ -7511,6 +7558,31 @@ SQL);
     assert_true($schema_table_drop_release_failure !== null && str_contains($schema_table_drop_release_failure, 'forced source table drop release failure'), 'source table drop savepoint release failure is surfaced to the caller');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_table_drop_conflict_id"), 0, 'failed source table drop release records no resolution metadata');
     assert_same((int)scalar($schema_table_drop_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_table_drop'"), 1, 'failed source table drop release leaves target schema unchanged');
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'DROP TABLE "plugin_table_drop"' && $message === 'failed to apply source table drop schema resolution') {
+                throw new RuntimeException('forced source table drop DDL failure');
+            }
+        },
+    ];
+    $schema_table_drop_ddl_failure = null;
+    try {
+        cow_merge_resolve_conflict(
+            $metadata,
+            $schema_table_drop_conflict_id,
+            'source',
+            false,
+            'Preview source table drop with failing DDL.',
+            'test'
+        );
+    } catch (Throwable $e) {
+        $schema_table_drop_ddl_failure = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($schema_table_drop_ddl_failure !== null && str_contains($schema_table_drop_ddl_failure, 'forced source table drop DDL failure'), 'source table drop DDL failure is surfaced to the caller');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_table_drop_conflict_id"), 0, 'failed source table drop DDL records no resolution metadata');
+    assert_same((int)scalar($schema_table_drop_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_table_drop'"), 1, 'failed source table drop DDL rolls back target schema');
     $schema_table_drop_dry = cow_merge_resolve_conflict(
         $metadata,
         $schema_table_drop_conflict_id,
