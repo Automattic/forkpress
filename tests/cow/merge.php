@@ -8494,6 +8494,40 @@ SQL);
     assert_same($result['created'], 1, 'recapturing a branch creates identities only for new no-PK rows');
     assert_same((int)scalar($capture_metadata, "SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = 'feature-captured' AND table_name = 'plugin_keyless'"), 2, 'recapturing a branch preserves existing identities and adds new rows');
 
+    $capture_failure_feature = $tmp . '/capture-failure-feature.sqlite';
+    copy($capture_db, $capture_failure_feature);
+    $db = open_db($capture_failure_feature);
+    $db->exec("INSERT INTO plugin_keyless (label, value) VALUES ('Capture rollback row', 'should not persist')");
+    $db->close();
+    $capture_failure_meta = open_db($capture_metadata);
+    $capture_failure_meta->exec(<<<'SQL'
+CREATE TRIGGER fail_identity_capture_finish
+BEFORE UPDATE OF status ON merge_runs
+WHEN NEW.status = 'identity_captured'
+BEGIN
+    SELECT RAISE(ABORT, 'forced identity capture finish failure');
+END
+SQL);
+    $capture_failure_meta->close();
+    set_error_handler(static function (int $severity, string $message): bool {
+        return str_contains($message, 'forced identity capture finish failure');
+    });
+    try {
+        assert_throws(
+            fn() => cow_merge_capture_row_identities($capture_failure_feature, $capture_metadata, 'feature-capture-rollback', 'main'),
+            'forced identity capture finish failure',
+            'identity capture success-status failure is surfaced'
+        );
+    } finally {
+        restore_error_handler();
+    }
+    assert_same((int)scalar($capture_metadata, "SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = 'feature-capture-rollback'"), 0, 'failed identity capture rolls back staged sidecar identities');
+    assert_same((int)scalar($capture_metadata, "SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'feature-capture-rollback'"), 0, 'failed identity capture rolls back staged sidecar history');
+    assert_same((int)scalar($capture_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-capture-rollback' AND policy = 'sidecar-row-identity-capture' AND status = 'failed'"), 1, 'failed identity capture run remains auditable');
+    $capture_failure_meta = open_db($capture_metadata);
+    $capture_failure_meta->exec('DROP TRIGGER fail_identity_capture_finish');
+    $capture_failure_meta->close();
+
     $reuse_base = $tmp . '/reuse-base.sqlite';
     $reuse_source = $tmp . '/reuse-source.sqlite';
     $reuse_target = $tmp . '/reuse-target.sqlite';
@@ -8530,6 +8564,57 @@ SQL);
         cow_merge_row_hash(['label' => 'Base keyless', 'value' => 'base']),
         'runtime delete event preserves the deleted no-PK row snapshot instead of hashing the later rowid reuse'
     );
+
+    $track_failure_source = $tmp . '/track-failure-source.sqlite';
+    $track_failure_metadata = $tmp . '/.forkpress/cow/merge/track-failure-metadata.sqlite';
+    create_base_db($track_failure_source);
+    cow_merge_capture_row_identities($track_failure_source, $track_failure_metadata, 'feature-track-rollback');
+    $track_failure_old_identity = scalar($track_failure_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'feature-track-rollback' AND table_name = 'plugin_keyless' AND rowid = 1");
+    $db = open_db($track_failure_source);
+    $db->exec('DELETE FROM plugin_keyless WHERE rowid = 1');
+    $db->exec("INSERT INTO plugin_keyless (label, value) VALUES ('Track rollback row', 'should not persist')");
+    $db->close();
+    $track_failure_meta = open_db($track_failure_metadata);
+    $track_failure_meta->exec(<<<'SQL'
+CREATE TRIGGER fail_identity_track_finish
+BEFORE UPDATE OF status ON merge_runs
+WHEN NEW.status = 'identity_tracked'
+BEGIN
+    SELECT RAISE(ABORT, 'forced identity tracking finish failure');
+END
+SQL);
+    $track_failure_meta->close();
+    set_error_handler(static function (int $severity, string $message): bool {
+        return str_contains($message, 'forced identity tracking finish failure');
+    });
+    try {
+        assert_throws(
+            fn() => cow_merge_track_row_identity_events(
+                $track_failure_source,
+                $track_failure_metadata,
+                'feature-track-rollback',
+                [
+                    ['id' => 1, 'table_name' => 'plugin_keyless', 'op' => 'delete', 'rowid' => 1, 'row' => ['label' => 'Base keyless', 'value' => 'base']],
+                    ['id' => 2, 'table_name' => 'plugin_keyless', 'op' => 'insert', 'rowid' => 1, 'row' => ['label' => 'Track rollback row', 'value' => 'should not persist']],
+                ]
+            ),
+            'forced identity tracking finish failure',
+            'runtime identity tracking success-status failure is surfaced'
+        );
+    } finally {
+        restore_error_handler();
+    }
+    assert_same(
+        scalar($track_failure_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'feature-track-rollback' AND table_name = 'plugin_keyless' AND rowid = 1"),
+        $track_failure_old_identity,
+        'failed runtime identity tracking restores the previous active sidecar identity'
+    );
+    assert_same((int)scalar($track_failure_metadata, "SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'feature-track-rollback' AND table_name = 'plugin_keyless' AND rowid = 1"), 1, 'failed runtime identity tracking rolls back staged sidecar history generations');
+    assert_same((int)scalar($track_failure_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_keyless' AND decision = 'identity-tracked'"), 0, 'failed runtime identity tracking rolls back staged identity decisions');
+    assert_same((int)scalar($track_failure_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-track-rollback' AND policy = 'runtime-row-identity-tracking' AND status = 'failed'"), 1, 'failed runtime identity tracking run remains auditable');
+    $track_failure_meta = open_db($track_failure_metadata);
+    $track_failure_meta->exec('DROP TRIGGER fail_identity_track_finish');
+    $track_failure_meta->close();
 
     $db = open_db($reuse_target);
     $db->exec("UPDATE plugin_keyless SET value = 'target kept old row' WHERE rowid = 1");

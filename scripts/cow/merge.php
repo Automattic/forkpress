@@ -3490,8 +3490,10 @@ function cow_merge_capture_row_identities(
     $tables = 0;
     $rows = 0;
     $created = 0;
+    $metadata_transaction_active = false;
     try {
-        $meta->exec('BEGIN IMMEDIATE');
+        cow_merge_exec_checked($meta, 'BEGIN IMMEDIATE', 'failed to start row identity capture metadata transaction');
+        $metadata_transaction_active = true;
         foreach (cow_merge_keyless_tables($db) as $table) {
             $tables++;
             foreach (cow_merge_load_keyless_physical_rows($db, $table) as $entry) {
@@ -3508,8 +3510,9 @@ function cow_merge_capture_row_identities(
                 $rows++;
             }
         }
-        $meta->exec('COMMIT');
         cow_merge_finish_run($meta, $run_id, 'identity_captured');
+        cow_merge_exec_checked($meta, 'COMMIT', 'failed to commit row identity capture metadata transaction');
+        $metadata_transaction_active = false;
         return [
             'run_id' => $run_id,
             'status' => 'identity_captured',
@@ -3519,7 +3522,9 @@ function cow_merge_capture_row_identities(
             'metadata_db' => $metadata_db,
         ];
     } catch (Throwable $e) {
-        $meta->exec('ROLLBACK');
+        if ($metadata_transaction_active) {
+            @$meta->exec('ROLLBACK');
+        }
         cow_merge_finish_run($meta, $run_id, 'failed', cow_merge_failure_reason($e));
         throw $e;
     } finally {
@@ -3602,9 +3607,11 @@ function cow_merge_track_row_identity_events(
     $tracked = 0;
     $created = 0;
     $deleted = 0;
+    $metadata_transaction_active = false;
     try {
         $keyless_tables = array_fill_keys(cow_merge_keyless_tables($db), true);
-        $meta->exec('BEGIN IMMEDIATE');
+        cow_merge_exec_checked($meta, 'BEGIN IMMEDIATE', 'failed to start runtime row identity metadata transaction');
+        $metadata_transaction_active = true;
         foreach ($events as $event) {
             $table = (string)$event['table_name'];
             $op = (string)$event['op'];
@@ -3681,8 +3688,9 @@ function cow_merge_track_row_identity_events(
             }
         }
 
-        $meta->exec('COMMIT');
         cow_merge_finish_run($meta, $run_id, 'identity_tracked');
+        cow_merge_exec_checked($meta, 'COMMIT', 'failed to commit runtime row identity metadata transaction');
+        $metadata_transaction_active = false;
         return [
             'run_id' => $run_id,
             'status' => 'identity_tracked',
@@ -3693,7 +3701,9 @@ function cow_merge_track_row_identity_events(
             'metadata_db' => $metadata_db,
         ];
     } catch (Throwable $e) {
-        $meta->exec('ROLLBACK');
+        if ($metadata_transaction_active) {
+            @$meta->exec('ROLLBACK');
+        }
         cow_merge_finish_run($meta, $run_id, 'failed', cow_merge_failure_reason($e));
         throw $e;
     } finally {
