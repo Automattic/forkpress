@@ -614,6 +614,7 @@ fn default_worker_count() -> usize {
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(disable_help_flag = true)]
 struct BranchPassthrough {
     #[command(flatten)]
     shared: SharedPaths,
@@ -2718,8 +2719,9 @@ fn default_wp_cow_state_dir() -> Result<PathBuf> {
 }
 
 fn branch_command(args: BranchPassthrough) -> Result<i32> {
-    if args.args.is_empty() {
-        bail!("branch requires branchctl arguments, e.g. `forkpress branch create marketing`");
+    if branch_help_requested(&args.args) {
+        print!("{}", branch_help_text(branch_help_command(&args.args)));
+        return Ok(0);
     }
 
     let layout = Layout::new(args.shared.work_dir.clone())?;
@@ -2788,7 +2790,10 @@ fn cow_branch_command(
         }
         "create" => {
             let Some(branch) = args.args.get(1) else {
-                bail!("branch create requires a branch name");
+                bail!(
+                    "branch create requires a new branch name.\n\n{}",
+                    branch_help_text(Some("create"))
+                );
             };
             let mut from = "main".to_string();
             let mut index = 2;
@@ -2796,12 +2801,28 @@ fn cow_branch_command(
                 match args.args[index].as_str() {
                     "--from" => {
                         let Some(value) = args.args.get(index + 1) else {
-                            bail!("--from requires a branch name");
+                            bail!(
+                                "`--from` requires a source branch name.\n\n{}",
+                                branch_help_text(Some("create"))
+                            );
                         };
                         from = value.clone();
                         index += 2;
                     }
-                    other => bail!("unsupported argument for `forkpress branch create`: {other}"),
+                    value if value.starts_with("--from=") => {
+                        from = value.trim_start_matches("--from=").to_string();
+                        if from.is_empty() {
+                            bail!(
+                                "`--from` requires a source branch name.\n\n{}",
+                                branch_help_text(Some("create"))
+                            );
+                        }
+                        index += 1;
+                    }
+                    other => bail!(
+                        "unsupported argument for `forkpress branch create`: {other}\n\n{}",
+                        branch_help_text(Some("create"))
+                    ),
                 }
             }
             let url_hint = branchctl_url_hint(&layout).ok();
@@ -2810,7 +2831,10 @@ fn cow_branch_command(
         }
         "reset" | "rollback" => {
             let Some(branch) = args.args.get(1) else {
-                bail!("branch reset requires a branch name");
+                bail!(
+                    "branch reset requires the branch to reset.\n\n{}",
+                    branch_help_text(Some("reset"))
+                );
             };
             let mut from: Option<String> = None;
             let mut force = false;
@@ -2819,45 +2843,46 @@ fn cow_branch_command(
                 match args.args[index].as_str() {
                     "--from" => {
                         let Some(value) = args.args.get(index + 1) else {
-                            bail!("--from requires a branch name");
+                            bail!(
+                                "`--from` requires a source branch name.\n\n{}",
+                                branch_help_text(Some("reset"))
+                            );
                         };
                         from = Some(value.clone());
                         index += 2;
+                    }
+                    value if value.starts_with("--from=") => {
+                        let value = value.trim_start_matches("--from=");
+                        if value.is_empty() {
+                            bail!(
+                                "`--from` requires a source branch name.\n\n{}",
+                                branch_help_text(Some("reset"))
+                            );
+                        }
+                        from = Some(value.to_string());
+                        index += 1;
                     }
                     "--force" => {
                         force = true;
                         index += 1;
                     }
-                    other => bail!("unsupported argument for `forkpress branch reset`: {other}"),
+                    other => bail!(
+                        "unsupported argument for `forkpress branch reset`: {other}\n\n{}",
+                        branch_help_text(Some("reset"))
+                    ),
                 }
             }
             let Some(from) = from else {
-                bail!("branch reset requires --from <branch>");
+                bail!(
+                    "branch reset requires `--from <source>`.\n\n{}",
+                    branch_help_text(Some("reset"))
+                );
             };
             reset_cow_branch(&layout, &runtime, &args.shared, branch, &from, force)?;
             Ok(0)
         }
         "merge" => {
-            let Some(source) = args.args.get(1) else {
-                bail!("branch merge requires a source branch name");
-            };
-            let mut target: Option<String> = None;
-            let mut index = 2;
-            while index < args.args.len() {
-                match args.args[index].as_str() {
-                    "--into" => {
-                        let Some(value) = args.args.get(index + 1) else {
-                            bail!("--into requires a branch name");
-                        };
-                        target = Some(value.clone());
-                        index += 2;
-                    }
-                    other => bail!("unsupported argument for `forkpress branch merge`: {other}"),
-                }
-            }
-            let Some(target) = target else {
-                bail!("branch merge requires --into <branch>");
-            };
+            let (source, target) = parse_cow_branch_merge_args(&args.args)?;
             merge_cow_branch(&layout, &runtime, &args.shared, source, &target)?;
             Ok(0)
         }
@@ -3130,13 +3155,140 @@ fn cow_branch_command(
         }
         "delete" | "rm" => {
             let Some(branch) = args.args.get(1) else {
-                bail!("branch delete requires a branch name");
+                bail!(
+                    "branch delete requires a branch name.\n\n{}",
+                    branch_help_text(Some("delete"))
+                );
             };
             delete_cow_branch(&layout, branch)?;
             Ok(0)
         }
-        other => bail!("cow branch subcommand is not implemented yet: {other}"),
+        other => bail!(
+            "unknown branch command `{other}`.\n\n{}",
+            branch_help_text(None)
+        ),
     }
+}
+
+fn branch_help_requested(args: &[String]) -> bool {
+    args.is_empty()
+        || matches!(
+            args.first().map(String::as_str),
+            Some("help" | "--help" | "-h")
+        )
+        || matches!(args.get(1).map(String::as_str), Some("--help" | "-h"))
+}
+
+fn branch_help_command(args: &[String]) -> Option<&str> {
+    match args {
+        [] => None,
+        [flag] if flag == "--help" || flag == "-h" => None,
+        [first, command, ..] if first == "help" => Some(command.as_str()),
+        [command, flag, ..] if flag == "--help" || flag == "-h" => Some(command.as_str()),
+        _ => None,
+    }
+}
+
+fn branch_help_text(command: Option<&str>) -> &'static str {
+    match command {
+        Some("list") => {
+            "Usage: forkpress branch list\n\nPrint all materialized branches for this site.\n"
+        }
+        Some("show") | Some("status") => {
+            "Usage: forkpress branch show [branch]\n\nShow storage details for a branch. Defaults to main.\n"
+        }
+        Some("create") => {
+            "Usage: forkpress branch create <new-branch> [--from <source>]\n\nCreate a branch from another materialized branch. Defaults to --from main.\nExample: forkpress branch create feature --from main\n"
+        }
+        Some("reset") | Some("rollback") => {
+            "Usage: forkpress branch reset <branch> --from <source> [--force]\n\nReplace a branch with a fresh copy of another branch. Resetting main requires --force.\nExample: forkpress branch reset feature --from main\n"
+        }
+        Some("merge") => {
+            "Usage: forkpress branch merge <source> --into <target>\n\nMerge source branch changes into the target branch and record audit metadata.\nExample: forkpress branch merge feature --into main\n"
+        }
+        Some("merge-audit") | Some("audit") => {
+            "Usage: forkpress branch merge-audit [options]\n\nInspect merge runs, decisions, conflicts, resolutions, and rollback failures.\nCommon options: --format text|json, --run <id>, --scope all|db|files, --records all|conflicts|decisions|resolutions|rollback-failures, --review, --review-status <status>.\n"
+        }
+        Some("merge-review") => {
+            "Usage: forkpress branch merge-review <conflict|decision|resolution> <id> --status <pending|needs-action|reviewed> --note <text> [--reviewer <name>]\n\nAttach review metadata to an audit record.\n"
+        }
+        Some("merge-resolve") => {
+            "Usage: forkpress branch merge-resolve conflict <id> --choice <source|target> [--apply] [--note <text>] [--reviewer <name>]\n\nValidate or apply a reviewed merge conflict choice.\n"
+        }
+        Some("delete") | Some("rm") => {
+            "Usage: forkpress branch delete <branch>\n\nDelete a materialized branch. Use with care.\n"
+        }
+        _ => {
+            "Usage: forkpress branch <command> [options]\n\nCommands:\n  list                         List branches\n  show [branch]                Show branch storage details\n  create <branch> [--from b]   Create a branch; defaults to --from main\n  reset <branch> --from b      Replace a branch from another branch\n  merge <source> --into target Merge one branch into another\n  merge-audit [options]        Inspect merge audit records\n  merge-review <type> <id>     Mark an audit record as reviewed\n  merge-resolve conflict <id>  Validate or apply a conflict choice\n  delete <branch>              Delete a branch\n\nExamples:\n  forkpress branch list\n  forkpress branch create feature --from main\n  forkpress branch merge feature --into main\n  forkpress branch merge-audit --review --records conflicts\n\nRun `forkpress branch <command> --help` for command-specific help.\n"
+        }
+    }
+}
+
+fn parse_cow_branch_merge_args(args: &[String]) -> Result<(&str, String)> {
+    let mut source: Option<&str> = None;
+    let mut target: Option<String> = None;
+    let mut index = 1;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--into" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!(
+                        "`--into` requires a target branch name.\n\n{}",
+                        branch_help_text(Some("merge"))
+                    );
+                };
+                target = Some(value.clone());
+                index += 2;
+            }
+            "--target" => {
+                bail!(
+                    "`--target` is not a branch merge option. Use `--into <target>`.\n\n{}",
+                    branch_help_text(Some("merge"))
+                );
+            }
+            value if value.starts_with("--into=") => {
+                let value = value.trim_start_matches("--into=");
+                if value.is_empty() {
+                    bail!(
+                        "`--into` requires a target branch name.\n\n{}",
+                        branch_help_text(Some("merge"))
+                    );
+                }
+                target = Some(value.to_string());
+                index += 1;
+            }
+            value if value.starts_with("--") => {
+                bail!(
+                    "unsupported argument for `forkpress branch merge`: {value}\n\n{}",
+                    branch_help_text(Some("merge"))
+                );
+            }
+            value => {
+                if source.is_some() {
+                    bail!(
+                        "unexpected extra branch name `{value}`.\n\n{}",
+                        branch_help_text(Some("merge"))
+                    );
+                }
+                source = Some(value);
+                index += 1;
+            }
+        }
+    }
+    let Some(source) = source else {
+        bail!(
+            "branch merge requires a source branch name before or after `--into`.\n\n{}",
+            branch_help_text(Some("merge"))
+        );
+    };
+    let Some(target) = target else {
+        bail!(
+            "branch merge requires `--into <target>`.\n\n{}",
+            branch_help_text(Some("merge"))
+        );
+    };
+    Ok((source, target))
 }
 
 #[cfg(feature = "dev-experiments")]
@@ -3859,6 +4011,8 @@ fn start_cow_php_server(
     args: &StartArgs,
     workers: usize,
 ) -> Result<ChildGuard> {
+    let forkpress_bin =
+        std::env::current_exe().context("failed to locate running forkpress binary")?;
     let file_view = read_site_manifest(layout)?
         .and_then(|manifest| manifest.file_view)
         .unwrap_or(FileViewStrategy::Copy);
@@ -3889,6 +4043,8 @@ fn start_cow_php_server(
         .arg(&layout.cow_branches_dir)
         .arg(layout.runtime_dir.join("runtime/cow/router.php"))
         .env("FORKPRESS_BRANCHES_DIR", &layout.cow_branches_dir)
+        .env("FORKPRESS_BIN", &forkpress_bin)
+        .env("FORKPRESS_WORK_DIR", &layout.work_dir)
         .env("FORKPRESS_COW_DIR", &layout.cow_dir)
         .env("FORKPRESS_COW_BRANCHES_DIR", &layout.cow_branches_dir)
         .env("FORKPRESS_COW_STORAGE_BRANCHES_DIR", &storage_branches_dir)
@@ -4058,6 +4214,98 @@ mod git_helper_tests {
         assert_eq!(parsed.from, "main");
         assert_eq!(parsed.auth.user.as_deref(), Some("admin"));
         assert_eq!(parsed.auth.password.as_deref(), Some("admin"));
+    }
+
+    #[test]
+    fn branch_without_args_reaches_custom_help() {
+        let cli = Cli::try_parse_from(["forkpress", "branch"]).unwrap();
+        let Commands::Branch(args) = cli.command else {
+            panic!("expected branch command");
+        };
+        assert!(args.args.is_empty());
+        assert!(branch_help_requested(&args.args));
+        assert!(branch_help_text(branch_help_command(&args.args)).contains("Commands:"));
+    }
+
+    #[test]
+    fn branch_help_flag_reaches_custom_help() {
+        let cli = Cli::try_parse_from(["forkpress", "branch", "--help"]).unwrap();
+        let Commands::Branch(args) = cli.command else {
+            panic!("expected branch command");
+        };
+        assert_eq!(args.args, vec!["--help".to_string()]);
+        assert_eq!(branch_help_command(&args.args), None);
+    }
+
+    #[test]
+    fn branch_subcommand_help_selects_subcommand_text() {
+        let args = vec!["create".to_string(), "--help".to_string()];
+        assert!(branch_help_requested(&args));
+        assert_eq!(branch_help_command(&args), Some("create"));
+        assert!(branch_help_text(branch_help_command(&args)).contains("--from <source>"));
+    }
+
+    #[test]
+    fn parses_branch_merge_source_then_target() {
+        let args = vec![
+            "merge".to_string(),
+            "feature".to_string(),
+            "--into".to_string(),
+            "main".to_string(),
+        ];
+        let (source, target) = parse_cow_branch_merge_args(&args).unwrap();
+        assert_eq!(source, "feature");
+        assert_eq!(target, "main");
+    }
+
+    #[test]
+    fn parses_branch_merge_target_then_source() {
+        let args = vec![
+            "merge".to_string(),
+            "--into".to_string(),
+            "main".to_string(),
+            "feature".to_string(),
+        ];
+        let (source, target) = parse_cow_branch_merge_args(&args).unwrap();
+        assert_eq!(source, "feature");
+        assert_eq!(target, "main");
+    }
+
+    #[test]
+    fn parses_branch_merge_equals_target() {
+        let args = vec![
+            "merge".to_string(),
+            "feature".to_string(),
+            "--into=main".to_string(),
+        ];
+        let (source, target) = parse_cow_branch_merge_args(&args).unwrap();
+        assert_eq!(source, "feature");
+        assert_eq!(target, "main");
+    }
+
+    #[test]
+    fn branch_merge_errors_explain_missing_source() {
+        let args = vec![
+            "merge".to_string(),
+            "--into".to_string(),
+            "main".to_string(),
+        ];
+        let err = parse_cow_branch_merge_args(&args).unwrap_err().to_string();
+        assert!(err.contains("source branch"));
+        assert!(err.contains("forkpress branch merge <source> --into <target>"));
+    }
+
+    #[test]
+    fn branch_merge_errors_suggest_into_for_target() {
+        let args = vec![
+            "merge".to_string(),
+            "feature".to_string(),
+            "--target".to_string(),
+            "main".to_string(),
+        ];
+        let err = parse_cow_branch_merge_args(&args).unwrap_err().to_string();
+        assert!(err.contains("--target"));
+        assert!(err.contains("--into <target>"));
     }
 
     #[test]
