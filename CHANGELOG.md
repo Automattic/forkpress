@@ -8,6 +8,7 @@
 - Tightened no-primary-key identity capture/tracking metadata commit failures so staged sidecars, history, and identity decisions roll back while failed runs remain auditable.
 - Tightened branch-time AUTOINCREMENT ID-band allocation so target `sqlite_sequence` changes and ForkPress-owned metadata roll back together on commit failure.
 - Added COW coverage for AUTOINCREMENT ID-band metadata commit failures, proving already-committed `sqlite_sequence` changes are restored and partial band metadata is discarded.
+- Added COW coverage for AUTOINCREMENT rollback-failure artifacts when target snapshot restoration fails after ID-band metadata commit failure.
 - Extended generic row unique-collision detection and validation-gated source resolution to normal-column partial unique indexes.
 - Extended generic row unique-collision detection and validation-gated source resolution to expression unique indexes.
 - Extended generic row unique-collision detection and validation-gated source resolution to collated composite partial expression unique indexes.

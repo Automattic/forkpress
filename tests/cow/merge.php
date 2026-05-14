@@ -9913,6 +9913,56 @@ SQL);
     assert_same((int)scalar($band_metadata_commit_rollback_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE decision LIKE 'id-band-%'"), 0, 'failed AUTOINCREMENT metadata commit records no ID-band decision metadata');
     assert_same((int)scalar($band_metadata_commit_rollback_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-band-metadata-commit-rollback' AND status = 'failed'"), 1, 'failed AUTOINCREMENT metadata commit leaves an auditable failed run');
 
+    $band_restore_failure_db = $tmp . '/band-restore-failure.sqlite';
+    $band_restore_failure_metadata = $tmp . '/.forkpress/cow/merge/band-restore-failure/metadata.sqlite';
+    copy($band_base, $band_restore_failure_db);
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'COMMIT' && $message === 'failed to commit AUTOINCREMENT metadata transaction') {
+                throw new RuntimeException('forced AUTOINCREMENT metadata commit failure before restore failure');
+            }
+        },
+    ];
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_snapshot_restore'] = [
+        static function (array $snapshot) use ($band_restore_failure_db): void {
+            if (($snapshot['path'] ?? null) === $band_restore_failure_db) {
+                throw new RuntimeException('forced AUTOINCREMENT target snapshot restore failure');
+            }
+        },
+    ];
+    $band_restore_failure_message = null;
+    set_error_handler(static function (int $severity, string $message): bool {
+        return str_contains($message, 'forced AUTOINCREMENT metadata commit failure before restore failure');
+    });
+    try {
+        cow_merge_allocate_autoincrement_bands(
+            $band_restore_failure_db,
+            $band_restore_failure_metadata,
+            'feature-band-restore-failure'
+        );
+    } catch (Throwable $e) {
+        $band_restore_failure_message = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'], $GLOBALS['cow_merge_test_hooks']['before_sqlite_snapshot_restore']);
+        restore_error_handler();
+    }
+    assert_true($band_restore_failure_message !== null && str_contains($band_restore_failure_message, 'target database rollback failed'), 'AUTOINCREMENT target restore failure is surfaced to the caller');
+    assert_true((int)scalar($band_restore_failure_db, "SELECT seq FROM sqlite_sequence WHERE name = 'plugin_autoinc'") >= COW_MERGE_AUTOINCREMENT_FIRST_BAND_START - 1, 'failed AUTOINCREMENT target restore leaves committed sqlite_sequence changes available for manual recovery');
+    assert_same((int)scalar($band_restore_failure_metadata, "SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'feature-band-restore-failure'"), 0, 'failed AUTOINCREMENT target restore rolls back staged band metadata');
+    assert_same((int)scalar($band_restore_failure_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE decision LIKE 'id-band-%'"), 0, 'failed AUTOINCREMENT target restore rolls back staged ID-band decision metadata');
+    $band_restore_failure_run_id = (int)scalar($band_restore_failure_metadata, "SELECT id FROM merge_runs WHERE source_branch = 'feature-band-restore-failure' AND status = 'failed' ORDER BY id DESC LIMIT 1");
+    assert_true($band_restore_failure_run_id > 0, 'AUTOINCREMENT target restore failure leaves an auditable failed run');
+    assert_same((int)scalar($band_restore_failure_metadata, "SELECT COUNT(*) FROM merge_rollback_failures WHERE run_id = $band_restore_failure_run_id"), 1, 'AUTOINCREMENT target restore failure records rollback-failure metadata');
+    $band_restore_failure_audit = cow_merge_audit_report($band_restore_failure_metadata, $band_restore_failure_run_id, 5, ['records' => 'rollback-failures']);
+    assert_same(count($band_restore_failure_audit['rollback_failures']), 1, 'AUTOINCREMENT target restore failure appears in rollback-failure audit exports');
+    assert_true(str_contains($band_restore_failure_audit['rollback_failures'][0]['original_failure'], 'forced AUTOINCREMENT metadata commit failure before restore failure'), 'AUTOINCREMENT rollback-failure audit preserves the metadata commit failure');
+    assert_true(str_contains($band_restore_failure_audit['rollback_failures'][0]['rollback_failure'], 'forced AUTOINCREMENT target snapshot restore failure'), 'AUTOINCREMENT rollback-failure audit preserves the target restore failure');
+    $band_restore_failure_artifact_path = (string)$band_restore_failure_audit['rollback_failures'][0]['artifact_path'];
+    assert_true($band_restore_failure_artifact_path !== '' && is_file($band_restore_failure_artifact_path), 'AUTOINCREMENT target restore failure preserves a JSONL artifact');
+    $band_restore_failure_artifact = file_get_contents($band_restore_failure_artifact_path);
+    assert_true(is_string($band_restore_failure_artifact) && str_contains($band_restore_failure_artifact, '"target_db_snapshot"'), 'AUTOINCREMENT rollback-failure artifact records target DB snapshot details');
+    assert_true(str_contains((string)$band_restore_failure_artifact, '"backup_exists":true'), 'AUTOINCREMENT rollback-failure artifact keeps the target DB snapshot backup for recovery');
+
     $db = open_db($band_feature_a);
     $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status) VALUES ('Band A post', 'branch a', 'publish')");
     $db->exec("INSERT INTO plugin_autoinc (label) VALUES ('branch a plugin auto')");
