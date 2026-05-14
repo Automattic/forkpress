@@ -3872,9 +3872,16 @@ function cow_merge_allocate_autoincrement_bands(
     $reused = 0;
     $advanced = 0;
     $skipped_plain_integer_pk = 0;
+    $db_transaction_active = false;
+    $metadata_transaction_active = false;
+    $db_committed = false;
+    $db_snapshot = cow_merge_snapshot_sqlite_db($db_path);
+    $preserve_db_snapshot = false;
     try {
-        $db->exec('BEGIN IMMEDIATE');
-        $meta->exec('BEGIN IMMEDIATE');
+        cow_merge_exec_checked($db, 'BEGIN IMMEDIATE', 'failed to start AUTOINCREMENT target database transaction');
+        $db_transaction_active = true;
+        cow_merge_exec_checked($meta, 'BEGIN IMMEDIATE', 'failed to start AUTOINCREMENT metadata transaction');
+        $metadata_transaction_active = true;
         foreach (cow_merge_autoincrement_tables($db) as $table) {
             $tables++;
             $max_rowid = cow_merge_table_max_rowid($db, $table);
@@ -3937,9 +3944,12 @@ function cow_merge_allocate_autoincrement_bands(
                 ['max_rowid' => $max_rowid]
             );
         }
-        $meta->exec('COMMIT');
-        $db->exec('COMMIT');
+        cow_merge_exec_checked($db, 'COMMIT', 'failed to commit AUTOINCREMENT target database transaction');
+        $db_transaction_active = false;
+        $db_committed = true;
         cow_merge_finish_run($meta, $run_id, 'id_bands_allocated');
+        cow_merge_exec_checked($meta, 'COMMIT', 'failed to commit AUTOINCREMENT metadata transaction');
+        $metadata_transaction_active = false;
         return [
             'run_id' => $run_id,
             'status' => 'id_bands_allocated',
@@ -3951,12 +3961,64 @@ function cow_merge_allocate_autoincrement_bands(
             'metadata_db' => $metadata_db,
         ];
     } catch (Throwable $e) {
-        $meta->exec('ROLLBACK');
-        $db->exec('ROLLBACK');
+        if ($db_committed) {
+            if ($metadata_transaction_active) {
+                @$meta->exec('ROLLBACK');
+                $metadata_transaction_active = false;
+            }
+            try {
+                $db->close();
+                $db = null;
+                cow_merge_restore_sqlite_snapshot($db_snapshot);
+            } catch (Throwable $rollback_error) {
+                $preserve_db_snapshot = true;
+                $run_context = cow_merge_run_context($meta, $run_id);
+                $original_failure = cow_merge_failure_reason($e);
+                $rollback_failure = cow_merge_failure_reason($rollback_error);
+                $rollback_artifacts = [
+                    'target_db_snapshot' => cow_merge_sqlite_snapshot_artifact($db_snapshot),
+                ];
+                cow_merge_finish_run(
+                    $meta,
+                    $run_id,
+                    'failed',
+                    $e->getMessage() . '; target database rollback failed: ' . $rollback_error->getMessage()
+                );
+                cow_merge_record_rollback_failure_artifact(
+                    $metadata_db,
+                    $run_id,
+                    $run_context['source_branch'],
+                    $run_context['target_branch'],
+                    $run_context['base_db'],
+                    $run_context['source_db'],
+                    $run_context['target_db'],
+                    $original_failure,
+                    $rollback_failure,
+                    $rollback_artifacts
+                );
+                throw new CowMergeRollbackFailureException(
+                    $e->getMessage() . '; target database rollback failed: ' . $rollback_error->getMessage(),
+                    $original_failure,
+                    $rollback_failure,
+                    $rollback_artifacts,
+                    $e
+                );
+            }
+        } elseif ($db_transaction_active) {
+            @$db->exec('ROLLBACK');
+        }
+        if ($metadata_transaction_active) {
+            @$meta->exec('ROLLBACK');
+        }
         cow_merge_finish_run($meta, $run_id, 'failed', cow_merge_failure_reason($e));
         throw $e;
     } finally {
-        $db->close();
+        if (!$preserve_db_snapshot) {
+            cow_merge_cleanup_sqlite_snapshot($db_snapshot);
+        }
+        if ($db instanceof SQLite3) {
+            $db->close();
+        }
         $meta->close();
     }
 }

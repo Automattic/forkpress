@@ -8724,6 +8724,35 @@ SQL);
     assert_same((int)scalar($band_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_plain_ipk' AND decision = 'id-band-skipped'"), 1, 'plain INTEGER PRIMARY KEY skip decision is auditable');
     assert_same((int)scalar($band_feature_a, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'merge_autoincrement_bands'"), 0, 'AUTOINCREMENT metadata is not written into the app database');
 
+    $band_commit_rollback_db = $tmp . '/band-commit-rollback.sqlite';
+    $band_commit_rollback_metadata = $tmp . '/.forkpress/cow/merge/band-commit-rollback-metadata.sqlite';
+    copy($band_base, $band_commit_rollback_db);
+    $band_commit_rollback_lock = open_db($band_commit_rollback_db);
+    $band_commit_rollback_lock->exec('BEGIN');
+    $band_commit_rollback_lock->querySingle('SELECT COUNT(*) FROM plugin_autoinc');
+    $band_commit_failure_message = null;
+    set_error_handler(static function (int $severity, string $message): bool {
+        return str_contains($message, 'database is locked');
+    });
+    try {
+        cow_merge_allocate_autoincrement_bands(
+            $band_commit_rollback_db,
+            $band_commit_rollback_metadata,
+            'feature-band-commit-rollback'
+        );
+    } catch (Throwable $e) {
+        $band_commit_failure_message = $e->getMessage();
+    } finally {
+        restore_error_handler();
+        $band_commit_rollback_lock->exec('ROLLBACK');
+        $band_commit_rollback_lock->close();
+    }
+    assert_true($band_commit_failure_message !== null, 'AUTOINCREMENT target commit failure is surfaced to the caller');
+    assert_same((int)scalar($band_commit_rollback_db, "SELECT seq FROM sqlite_sequence WHERE name = 'plugin_autoinc'"), 1, 'failed AUTOINCREMENT target commit rolls back sqlite_sequence changes');
+    assert_same((int)scalar($band_commit_rollback_metadata, "SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'feature-band-commit-rollback'"), 0, 'failed AUTOINCREMENT target commit records no band metadata');
+    assert_same((int)scalar($band_commit_rollback_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE decision LIKE 'id-band-%'"), 0, 'failed AUTOINCREMENT target commit records no ID-band decision metadata');
+    assert_same((int)scalar($band_commit_rollback_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-band-commit-rollback' AND status = 'failed'"), 1, 'failed AUTOINCREMENT allocation run remains auditable');
+
     $db = open_db($band_feature_a);
     $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status) VALUES ('Band A post', 'branch a', 'publish')");
     $db->exec("INSERT INTO plugin_autoinc (label) VALUES ('branch a plugin auto')");
