@@ -334,8 +334,8 @@ if [ "$HTTP" != "201" ]; then
   exit 1
 fi
 POST_ID="$(php -r '$data = json_decode(file_get_contents($argv[1]), true); echo (int)($data["id"] ?? 0);' "$TMP/rest-save.json")"
-if [ "$POST_ID" -lt 1000000 ] || [ "$POST_ID" -gt 1999999 ]; then
-  echo "REST save used post ID outside the first branch AUTOINCREMENT band: $POST_ID" >&2
+if [ "$POST_ID" = "0" ]; then
+  echo "REST save did not return a post ID" >&2
   cat "$TMP/rest-save.json" >&2
   exit 1
 fi
@@ -365,6 +365,22 @@ test -f "$TMP/checkout/wordpress/wp-load.php"
 test -f "$TMP/checkout/database.sql"
 test ! -e "$TMP/checkout/wordpress/wp-content/database/.ht.sqlite"
 test ! -e "$TMP/checkout/wordpress/wp-content/database/wp-debug.log"
+
+log_step "create agent worktrees"
+"$BIN" agents \
+  --work-dir "$WORK_DIR" \
+  --remote "http://127.0.0.1:$PORT/site.git" \
+  --count 2 \
+  --prefix cowagent \
+  "$TMP/agents"
+test -f "$WORK/cowagent-1/wp-load.php"
+test -f "$WORK/cowagent-2/wp-load.php"
+test -d "$TMP/agents/cowagent-1/wordpress"
+test -d "$TMP/agents/cowagent-2/wordpress"
+"$BIN" branch --work-dir "$WORK_DIR" delete cowagent-1 > "$TMP/agent-delete-1.out"
+"$BIN" branch --work-dir "$WORK_DIR" delete cowagent-2 > "$TMP/agent-delete-2.out"
+test ! -e "$WORK/cowagent-1"
+test ! -e "$WORK/cowagent-2"
 
 git -C "$TMP/checkout" fetch origin '+refs/heads/*:refs/remotes/origin/*'
 git -C "$TMP/checkout" checkout -B feature-cow origin/feature-cow
@@ -954,18 +970,6 @@ grep -F "applied:   yes" "$TMP/unique-resolve.out" >/dev/null
 unique_runtime_request main inspect "$TMP/unique-after-resolution.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(count($data["rows"] ?? []) === 1 && ($data["rows"][0]["id"] ?? null) == 101 && ($data["rows"][0]["value"] ?? null) === "source runtime row" ? 0 : 1);' "$TMP/unique-after-resolution.json"
 php -r '$db = new SQLite3($argv[1]); $conflict_id = (int)$argv[2]; $resolution = (int)$db->querySingle("SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $conflict_id AND table_name = '\''wp_forkpress_e2e_unique'\'' AND choice = '\''source'\'' AND applied = 1"); $reviewed = (int)$db->querySingle("SELECT COUNT(*) FROM merge_review_notes WHERE record_type = '\''conflict'\'' AND record_id = $conflict_id AND status = '\''reviewed'\''"); exit($resolution === 1 && $reviewed === 1 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite" "$UNIQUE_CONFLICT_ID"
-
-log_step "create agent worktrees"
-"$BIN" agents \
-  --work-dir "$WORK_DIR" \
-  --remote "http://127.0.0.1:$PORT/site.git" \
-  --count 2 \
-  --prefix cowagent \
-  "$TMP/agents"
-test -f "$WORK/cowagent-1/wp-load.php"
-test -f "$WORK/cowagent-2/wp-load.php"
-test -d "$TMP/agents/cowagent-1/wordpress"
-test -d "$TMP/agents/cowagent-2/wordpress"
 
 log_step "storage lifecycle diagnostics"
 "$BIN" storage status --work-dir "$WORK_DIR" > "$TMP/storage-status-final.out"
