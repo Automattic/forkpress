@@ -62,6 +62,7 @@
 - Tightened generic row insert/update/delete mutation helpers so target SQLite prepare, execute, and result cleanup failures surface cleanly and roll back staged merge metadata.
 - Added COW coverage for rowid insert, row update, and row delete result-cleanup failures, proving target mutations and staged audit/sidecar metadata roll back cleanly.
 - Tightened DB conflict resolution row/cell target reads and single-cell target updates so SQLite failures surface cleanly without partial resolution metadata.
+- Tightened keyless physical row lookup I/O so runtime sidecar tracking failures surface cleanly and roll back staged identity metadata.
 - Tightened COW merge-audit metadata read paths so table checks, schema inspection, and row-query prepare failures surface consistently through checked SQLite helpers.
 - Tightened COW merge-audit metadata read finalization so table checks, schema inspection, and row queries surface SQLite cleanup failures consistently.
 - Tightened no-primary-key sidecar and AUTOINCREMENT metadata read finalization so row identity and band lookup cleanup failures surface consistently without partial metadata.

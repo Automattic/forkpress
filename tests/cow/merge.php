@@ -11488,6 +11488,80 @@ SQL);
     assert_same((int)scalar($track_commit_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_keyless' AND decision = 'identity-tracked'"), 0, 'failed runtime identity tracking metadata commit rolls back staged identity decisions');
     assert_same((int)scalar($track_commit_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-track-commit-rollback' AND policy = 'runtime-row-identity-tracking' AND status = 'failed'"), 1, 'failed runtime identity tracking metadata commit leaves an auditable failed run');
 
+    $assert_physical_row_tracking_failure = static function (
+        string $suffix,
+        string $hook_name,
+        callable $hook,
+        string $expected_message,
+        string $assertion
+    ) use ($tmp): void {
+        $source = $tmp . "/track-physical-$suffix-source.sqlite";
+        $metadata = $tmp . "/.forkpress/cow/merge/track-physical-$suffix-metadata.sqlite";
+        $branch = "feature-track-physical-$suffix";
+        create_base_db($source);
+        cow_merge_capture_row_identities($source, $metadata, $branch);
+        $db = open_db($source);
+        $db->exec("INSERT INTO plugin_keyless (label, value) VALUES ('Physical $suffix row', 'should not persist')");
+        $db->close();
+        assert_same((int)scalar($source, "SELECT rowid FROM plugin_keyless WHERE label = 'Physical $suffix row'"), 2, "physical $suffix fixture inserts rowid 2");
+
+        $GLOBALS['cow_merge_test_hooks'][$hook_name] = [$hook];
+        try {
+            assert_throws(
+                fn() => cow_merge_track_row_identity_events(
+                    $source,
+                    $metadata,
+                    $branch,
+                    [
+                        ['id' => 1, 'table_name' => 'plugin_keyless', 'op' => 'insert', 'rowid' => 2, 'row' => null],
+                    ]
+                ),
+                $expected_message,
+                $assertion
+            );
+        } finally {
+            unset($GLOBALS['cow_merge_test_hooks'][$hook_name]);
+        }
+
+        assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = '$branch' AND table_name = 'plugin_keyless' AND rowid = 2"), 0, "failed physical $suffix row lookup records no new sidecar identity");
+        assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_keyless' AND decision = 'identity-tracked' AND run_id IN (SELECT id FROM merge_runs WHERE source_branch = '$branch')"), 0, "failed physical $suffix row lookup records no identity-tracked decisions");
+        assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = '$branch' AND policy = 'runtime-row-identity-tracking' AND status = 'failed'"), 1, "failed physical $suffix row lookup leaves an auditable failed run");
+    };
+
+    $assert_physical_row_tracking_failure(
+        'prepare',
+        'before_sqlite_prepare',
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($message === 'failed to prepare keyless physical row lookup for plugin_keyless') {
+                throw new RuntimeException('forced keyless physical row prepare failure');
+            }
+        },
+        'forced keyless physical row prepare failure',
+        'keyless physical row prepare failures surface to the caller'
+    );
+    $assert_physical_row_tracking_failure(
+        'execute',
+        'before_sqlite_statement_execute',
+        static function (SQLite3 $db, string $message): void {
+            if ($message === 'failed to load keyless row plugin_keyless rowid 2') {
+                throw new RuntimeException('forced keyless physical row execute failure');
+            }
+        },
+        'forced keyless physical row execute failure',
+        'keyless physical row execute failures surface to the caller'
+    );
+    $assert_physical_row_tracking_failure(
+        'finalize',
+        'before_sqlite_result_finalize',
+        static function (SQLite3Result $result, string $message): void {
+            if ($message === 'failed to finalize keyless physical row lookup for plugin_keyless') {
+                throw new RuntimeException('forced keyless physical row finalize failure');
+            }
+        },
+        'forced keyless physical row finalize failure',
+        'keyless physical row finalization failures surface to the caller'
+    );
+
     $db = open_db($reuse_target);
     $db->exec("UPDATE plugin_keyless SET value = 'target kept old row' WHERE rowid = 1");
     $db->close();

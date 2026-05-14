@@ -1306,23 +1306,25 @@ function cow_merge_refresh_table_row_identities(
 }
 
 function cow_merge_load_keyless_physical_row(SQLite3 $db, string $table, int $rowid): ?array {
-    $stmt = $db->prepare(
-        'SELECT rowid AS __forkpress_merge_rowid, * FROM ' . cow_merge_quote_ident($table) . ' WHERE rowid = :rowid'
+    $stmt = cow_merge_prepare_checked(
+        $db,
+        'SELECT rowid AS __forkpress_merge_rowid, * FROM ' . cow_merge_quote_ident($table) . ' WHERE rowid = :rowid',
+        "failed to prepare keyless physical row lookup for $table"
     );
     cow_merge_bind($stmt, ':rowid', $rowid);
-    $res = $stmt->execute();
-    if (!$res) {
-        throw new RuntimeException("failed to load keyless row $table rowid $rowid: " . $db->lastErrorMsg());
-    }
+    $res = cow_merge_execute_checked($stmt, $db, "failed to load keyless row $table rowid $rowid");
     $row = $res->fetchArray(SQLITE3_ASSOC);
     if (!$row) {
+        cow_merge_result_finalize_checked($res, "failed to finalize keyless physical row lookup for $table");
         return null;
     }
     $loaded_rowid = $row['__forkpress_merge_rowid'] ?? null;
     unset($row['__forkpress_merge_rowid']);
     if ($loaded_rowid === null) {
+        cow_merge_result_finalize_checked($res, "failed to finalize keyless physical row lookup for $table");
         return null;
     }
+    cow_merge_result_finalize_checked($res, "failed to finalize keyless physical row lookup for $table");
     return [
         'rowid' => (int)$loaded_rowid,
         'row' => $row,
