@@ -261,6 +261,77 @@ try {
     assert_same((int)scalar($merge_begin_metadata, 'SELECT COUNT(*) FROM merge_decisions'), 0, 'direct DB merge metadata begin failure records no decisions');
     assert_same((int)scalar($merge_begin_metadata, 'SELECT COUNT(*) FROM merge_conflicts'), 0, 'direct DB merge metadata begin failure records no conflicts');
 
+    $decision_execute_base = $tmp . '/decision-execute-base.sqlite';
+    $decision_execute_source = $tmp . '/decision-execute-source.sqlite';
+    $decision_execute_target = $tmp . '/decision-execute-target.sqlite';
+    $decision_execute_metadata = $tmp . '/.forkpress/cow/merge/decision-execute-metadata.sqlite';
+    create_base_db($decision_execute_base);
+    copy($decision_execute_base, $decision_execute_source);
+    copy($decision_execute_base, $decision_execute_target);
+    $db = open_db($decision_execute_source);
+    $db->exec("UPDATE wp_posts SET post_content = 'Source decision execute rollback content' WHERE ID = 1");
+    $db->close();
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_statement_execute'] = [
+        static function (SQLite3 $db, string $message): void {
+            if ($message === 'failed to record merge decision') {
+                throw new RuntimeException('forced merge decision execute failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_databases(
+            $decision_execute_base,
+            $decision_execute_source,
+            $decision_execute_target,
+            $decision_execute_metadata,
+            'feature-decision-execute-rollback',
+            'main'
+        ),
+        'forced merge decision execute failure',
+        'merge decision execute failure is surfaced to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_statement_execute']);
+    assert_same(scalar($decision_execute_target, "SELECT post_content FROM wp_posts WHERE ID = 1"), 'Base content', 'merge decision execute failure rolls back target row changes');
+    assert_same((int)scalar($decision_execute_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts'"), 0, 'merge decision execute failure records no partial decision metadata');
+    assert_same((int)scalar($decision_execute_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-decision-execute-rollback' AND status = 'failed'"), 1, 'merge decision execute failure leaves an auditable failed run');
+
+    $conflict_execute_base = $tmp . '/conflict-execute-base.sqlite';
+    $conflict_execute_source = $tmp . '/conflict-execute-source.sqlite';
+    $conflict_execute_target = $tmp . '/conflict-execute-target.sqlite';
+    $conflict_execute_metadata = $tmp . '/.forkpress/cow/merge/conflict-execute-metadata.sqlite';
+    create_base_db($conflict_execute_base);
+    copy($conflict_execute_base, $conflict_execute_source);
+    copy($conflict_execute_base, $conflict_execute_target);
+    $db = open_db($conflict_execute_source);
+    $db->exec("UPDATE wp_posts SET post_content = 'Source conflict execute content' WHERE ID = 1");
+    $db->close();
+    $db = open_db($conflict_execute_target);
+    $db->exec("UPDATE wp_posts SET post_content = 'Target conflict execute content' WHERE ID = 1");
+    $db->close();
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_statement_execute'] = [
+        static function (SQLite3 $db, string $message): void {
+            if ($message === 'failed to record merge conflict') {
+                throw new RuntimeException('forced merge conflict execute failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_databases(
+            $conflict_execute_base,
+            $conflict_execute_source,
+            $conflict_execute_target,
+            $conflict_execute_metadata,
+            'feature-conflict-execute-rollback',
+            'main'
+        ),
+        'forced merge conflict execute failure',
+        'merge conflict execute failure is surfaced to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_statement_execute']);
+    assert_same(scalar($conflict_execute_target, "SELECT post_content FROM wp_posts WHERE ID = 1"), 'Target conflict execute content', 'merge conflict execute failure preserves target row state');
+    assert_same((int)scalar($conflict_execute_metadata, 'SELECT COUNT(*) FROM merge_conflicts'), 0, 'merge conflict execute failure records no partial conflict metadata');
+    assert_same((int)scalar($conflict_execute_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-conflict-execute-rollback' AND status = 'failed'"), 1, 'merge conflict execute failure leaves an auditable failed run');
+
     $merge_commit_base = $tmp . '/merge-commit-base.sqlite';
     $merge_commit_source = $tmp . '/merge-commit-source.sqlite';
     $merge_commit_target = $tmp . '/merge-commit-target.sqlite';

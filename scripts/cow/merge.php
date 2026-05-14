@@ -3418,9 +3418,7 @@ function cow_merge_record_rollback_failure_artifact(
         cow_merge_bind($stmt, ':original_failure', $original_failure);
         cow_merge_bind($stmt, ':rollback_failure', $rollback_failure);
         cow_merge_bind($stmt, ':artifact_path', $artifact_written ? $artifact_path : null);
-        if (!@$stmt->execute()) {
-            throw new RuntimeException('failed to record rollback failure: ' . $meta->lastErrorMsg());
-        }
+        cow_merge_execute_checked($stmt, $meta, 'failed to record rollback failure');
         $meta->close();
     } catch (Throwable $metadata_error) {
         if (isset($meta) && $meta instanceof SQLite3) {
@@ -3480,9 +3478,7 @@ function cow_merge_start_run(
     cow_merge_bind($stmt, ':source_db', $source_db);
     cow_merge_bind($stmt, ':target_db', $target_db);
     cow_merge_bind($stmt, ':base_db', $base_db);
-    if (!$stmt->execute()) {
-        throw new RuntimeException('failed to create merge run: ' . $meta->lastErrorMsg());
-    }
+    cow_merge_execute_checked($stmt, $meta, 'failed to create merge run');
     return (int)$meta->lastInsertRowID();
 }
 
@@ -3505,9 +3501,7 @@ function cow_merge_start_identity_capture_run(
     cow_merge_bind($stmt, ':source_db', $db);
     cow_merge_bind($stmt, ':target_db', $db);
     cow_merge_bind($stmt, ':base_db', $db);
-    if (!$stmt->execute()) {
-        throw new RuntimeException('failed to create row identity capture run: ' . $meta->lastErrorMsg());
-    }
+    cow_merge_execute_checked($stmt, $meta, 'failed to create row identity capture run');
     return (int)$meta->lastInsertRowID();
 }
 
@@ -3518,7 +3512,7 @@ function cow_merge_run_context(SQLite3 $meta, int $run_id): array {
         'failed to prepare merge run context lookup'
     );
     cow_merge_bind($stmt, ':id', $run_id);
-    $result = $stmt->execute();
+    $result = cow_merge_execute_checked($stmt, $meta, 'failed to read merge run context');
     $row = $result ? $result->fetchArray(SQLITE3_ASSOC) : false;
     if (!$row) {
         return [
@@ -3557,9 +3551,7 @@ function cow_merge_start_id_band_run(
     cow_merge_bind($stmt, ':source_db', $db);
     cow_merge_bind($stmt, ':target_db', $db);
     cow_merge_bind($stmt, ':base_db', $db);
-    if (!$stmt->execute()) {
-        throw new RuntimeException('failed to create AUTOINCREMENT band allocation run: ' . $meta->lastErrorMsg());
-    }
+    cow_merge_execute_checked($stmt, $meta, 'failed to create AUTOINCREMENT band allocation run');
     return (int)$meta->lastInsertRowID();
 }
 
@@ -3582,9 +3574,7 @@ function cow_merge_start_runtime_identity_run(
     cow_merge_bind($stmt, ':source_db', $db);
     cow_merge_bind($stmt, ':target_db', $db);
     cow_merge_bind($stmt, ':base_db', $db);
-    if (!$stmt->execute()) {
-        throw new RuntimeException('failed to create runtime row identity tracking run: ' . $meta->lastErrorMsg());
-    }
+    cow_merge_execute_checked($stmt, $meta, 'failed to create runtime row identity tracking run');
     return (int)$meta->lastInsertRowID();
 }
 
@@ -3600,9 +3590,7 @@ function cow_merge_finish_run(SQLite3 $meta, int $run_id, string $status, ?strin
     cow_merge_bind($stmt, ':status', $status);
     cow_merge_bind($stmt, ':failure_reason', $failure_reason);
     cow_merge_bind($stmt, ':id', $run_id);
-    if (!$stmt->execute()) {
-        throw new RuntimeException('failed to finish merge run: ' . $meta->lastErrorMsg());
-    }
+    cow_merge_execute_checked($stmt, $meta, 'failed to finish merge run');
 }
 
 function cow_merge_keyless_tables(SQLite3 $db): array {
@@ -4220,9 +4208,7 @@ function cow_merge_record_decision(
     cow_merge_bind($stmt, ':source_payload', $source === null ? null : cow_merge_payload_json($source));
     cow_merge_bind($stmt, ':target_payload', $target === null ? null : cow_merge_payload_json($target));
     cow_merge_bind($stmt, ':chosen_payload', $chosen === null ? null : cow_merge_payload_json($chosen));
-    if (!$stmt->execute()) {
-        throw new RuntimeException('failed to record merge decision: ' . $meta->lastErrorMsg());
-    }
+    cow_merge_execute_checked($stmt, $meta, 'failed to record merge decision');
 }
 
 function cow_merge_latest_applied_resolution_choice(SQLite3 $meta, int $conflict_id): ?string {
@@ -4232,10 +4218,7 @@ function cow_merge_latest_applied_resolution_choice(SQLite3 $meta, int $conflict
         'failed to prepare latest resolution lookup'
     );
     cow_merge_bind($stmt, ':conflict_id', $conflict_id);
-    $res = $stmt->execute();
-    if (!$res) {
-        throw new RuntimeException('failed to look up latest resolution: ' . $meta->lastErrorMsg());
-    }
+    $res = cow_merge_execute_checked($stmt, $meta, 'failed to look up latest resolution');
     $row = $res->fetchArray(SQLITE3_ASSOC);
     if (!$row) {
         return null;
@@ -4287,10 +4270,7 @@ function cow_merge_record_conflict(
     cow_merge_bind($existing, ':source_hash', $source_hash);
     cow_merge_bind($existing, ':target_hash', $target_hash);
     cow_merge_bind($existing, ':chosen_hash', $chosen_hash);
-    $existing_result = $existing->execute();
-    if (!$existing_result) {
-        throw new RuntimeException('failed to look up existing merge conflict: ' . $meta->lastErrorMsg());
-    }
+    $existing_result = cow_merge_execute_checked($existing, $meta, 'failed to look up existing merge conflict');
     $existing_row = $existing_result->fetchArray(SQLITE3_ASSOC);
     if ($existing_row) {
         return cow_merge_latest_applied_resolution_choice($meta, (int)$existing_row['id']) !== 'target';
@@ -4319,9 +4299,7 @@ function cow_merge_record_conflict(
     cow_merge_bind($stmt, ':target_hash', $target_hash);
     cow_merge_bind($stmt, ':chosen_hash', $chosen_hash);
     cow_merge_bind($stmt, ':resolver', 'target-wins');
-    if (!$stmt->execute()) {
-        throw new RuntimeException('failed to record merge conflict: ' . $meta->lastErrorMsg());
-    }
+    cow_merge_execute_checked($stmt, $meta, 'failed to record merge conflict');
     return true;
 }
 
@@ -5329,9 +5307,7 @@ function cow_merge_insert_review_note(
     cow_merge_bind($stmt, ':status', $status);
     cow_merge_bind($stmt, ':note', $note);
     cow_merge_bind($stmt, ':reviewer', $reviewer);
-    if (!$stmt->execute()) {
-        throw new RuntimeException('failed to record review note: ' . $meta->lastErrorMsg());
-    }
+    cow_merge_execute_checked($stmt, $meta, 'failed to record review note');
     return (int)$meta->lastInsertRowID();
 }
 
@@ -5528,9 +5504,7 @@ function cow_merge_record_resolution(
     cow_merge_bind($stmt, ':column_name', $column);
     cow_merge_bind($stmt, ':previous_payload', cow_merge_payload_json($previous));
     cow_merge_bind($stmt, ':resolved_payload', cow_merge_payload_json($resolved));
-    if (!$stmt->execute()) {
-        throw new RuntimeException('failed to record merge resolution: ' . $meta->lastErrorMsg());
-    }
+    cow_merge_execute_checked($stmt, $meta, 'failed to record merge resolution');
     return (int)$meta->lastInsertRowID();
 }
 
@@ -5548,6 +5522,15 @@ function cow_merge_prepare_checked(SQLite3 $db, string $sql, string $message): S
         throw new RuntimeException($message . ': ' . $db->lastErrorMsg());
     }
     return $stmt;
+}
+
+function cow_merge_execute_checked(SQLite3Stmt $stmt, SQLite3 $db, string $message): SQLite3Result {
+    cow_merge_test_hook('before_sqlite_statement_execute', $db, $message);
+    $result = @$stmt->execute();
+    if (!$result) {
+        throw new RuntimeException($message . ': ' . $db->lastErrorMsg());
+    }
+    return $result;
 }
 
 function cow_merge_query_checked(SQLite3 $db, string $sql, string $message): SQLite3Result {
