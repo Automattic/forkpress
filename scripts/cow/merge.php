@@ -7255,9 +7255,7 @@ function cow_merge_resolve_conflict(
             $resolved_value = $choice === 'source' ? $source_value : $target_value;
 
             if ($apply) {
-                if (!$meta->exec('BEGIN IMMEDIATE')) {
-                    throw new RuntimeException('failed to start filesystem resolution metadata transaction: ' . $meta->lastErrorMsg());
-                }
+                cow_merge_exec_checked($meta, 'BEGIN IMMEDIATE', 'failed to start filesystem resolution metadata transaction');
                 $file_tx = cow_merge_file_transaction_begin();
                 $file_tx_committed = false;
                 $preserve_file_tx = false;
@@ -7288,9 +7286,7 @@ function cow_merge_resolve_conflict(
                         cow_merge_resolution_review_note($choice, $note),
                         $reviewer
                     );
-                    if (!$meta->exec('COMMIT')) {
-                        throw new RuntimeException('failed to commit filesystem resolution metadata transaction: ' . $meta->lastErrorMsg());
-                    }
+                    cow_merge_exec_checked($meta, 'COMMIT', 'failed to commit filesystem resolution metadata transaction');
                     $file_tx_committed = true;
                 } catch (Throwable $e) {
                     @$meta->exec('ROLLBACK');

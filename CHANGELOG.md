@@ -67,6 +67,7 @@
 - Recorded known-good checkpoint `known-good/cow-mergeback-schema-rollback-stability-2026-05-14` for the accumulated generic schema dependency validation and rollback/audit atomicity work after the identity-stability checkpoint.
 - Recorded known-good checkpoint `known-good/cow-mergeback-rollback-atomicity-2026-05-14` for the accumulated DB/filesystem resolver, sidecar identity, AUTOINCREMENT, and direct merge rollback/audit atomicity work after the schema rollback checkpoint.
 - Tightened filesystem conflict resolution rollback so metadata transaction failures restore target paths, preserve rollback artifacts if restore fails, and do not record partial resolution metadata.
+- Tightened filesystem conflict resolution metadata transaction boundaries so commit failures restore target paths and roll back staged resolution/review metadata.
 - Tightened validation-gated DB conflict resolution transaction checks so row/schema resolver target and metadata transactions fail loudly and roll back staged row mutations on metadata failures.
 - Restored validation-gated DB conflict resolution target snapshots when metadata commit fails after the target commit, keeping row/schema apply paths atomic across target and merge metadata databases.
 - Added COW coverage for schema resolution commit-order recovery, proving already-committed target schema mutations roll back when merge metadata commit fails.
