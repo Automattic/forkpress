@@ -70,6 +70,7 @@
 - Tightened filesystem conflict resolution metadata transaction boundaries so commit failures restore target paths and roll back staged resolution/review metadata.
 - Added COW coverage for target-choice row and filesystem resolution metadata commit failures, proving reviewed notes and resolution rows roll back while target state stays unchanged.
 - Tightened COW run-status and failed-run metadata transactions so commit failures roll back staged run state instead of leaving half-written run markers.
+- Added COW coverage for whole-branch rollback reporting when failed-run metadata commits fail after target DB/filesystem state has already been restored.
 - Added COW coverage proving rollback-failure JSONL artifacts are still written when the SQLite rollback metadata sink is unavailable.
 - Added COW coverage proving rollback-failure JSONL artifacts are still written when the SQLite rollback metadata sink rejects the best-effort audit row.
 - Tightened validation-gated DB conflict resolution transaction checks so row/schema resolver target and metadata transactions fail loudly and roll back staged row mutations on metadata failures.

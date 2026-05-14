@@ -3294,6 +3294,92 @@ SQL);
         'failed failed-run metadata commit rolls back the staged failed run marker'
     );
 
+    $whole_failed_run_commit_base_db = $tmp . '/whole-failed-run-commit-base.sqlite';
+    $whole_failed_run_commit_source_db = $tmp . '/whole-failed-run-commit-source.sqlite';
+    $whole_failed_run_commit_target_db = $tmp . '/whole-failed-run-commit-target.sqlite';
+    create_base_db($whole_failed_run_commit_base_db);
+    copy($whole_failed_run_commit_base_db, $whole_failed_run_commit_source_db);
+    copy($whole_failed_run_commit_base_db, $whole_failed_run_commit_target_db);
+    $db = open_db($whole_failed_run_commit_source_db);
+    $db->exec("UPDATE wp_posts SET post_content = 'source db change before failed-run commit failure' WHERE ID = 1");
+    $db->close();
+
+    $whole_failed_run_commit_base_root = $tmp . '/whole-failed-run-commit-base';
+    $whole_failed_run_commit_source_root = $tmp . '/whole-failed-run-commit-source';
+    $whole_failed_run_commit_target_root = $tmp . '/whole-failed-run-commit-target';
+    mkdir($whole_failed_run_commit_base_root . '/wp-content/uploads', 0777, true);
+    write_test_file($whole_failed_run_commit_base_root . '/wp-content/uploads/finalize.txt', 'finalize base');
+    copy_tree_for_test($whole_failed_run_commit_base_root, $whole_failed_run_commit_source_root);
+    copy_tree_for_test($whole_failed_run_commit_base_root, $whole_failed_run_commit_target_root);
+    write_test_file($whole_failed_run_commit_source_root . '/wp-content/uploads/finalize.txt', 'finalize source');
+    $whole_failed_run_commit_manifest = $tmp . '/.forkpress/cow/merge/file-bases/feature-whole-failed-run-commit.json';
+    cow_merge_capture_file_base($whole_failed_run_commit_base_root, $whole_failed_run_commit_manifest);
+
+    $whole_failed_run_commit_metadata = $tmp . '/.forkpress/cow/merge/whole-failed-run-commit/metadata.sqlite';
+    cow_merge_mkdir_p(dirname($whole_failed_run_commit_metadata));
+    $whole_failed_run_commit_meta = open_db($whole_failed_run_commit_metadata);
+    cow_merge_ensure_metadata($whole_failed_run_commit_meta);
+    $whole_failed_run_commit_meta->exec(<<<'SQL'
+CREATE TRIGGER fail_whole_failed_run_commit_file_decision
+BEFORE INSERT ON merge_decisions
+WHEN NEW.table_name = '__files__'
+  AND NEW.decision = 'source-applied'
+BEGIN
+    SELECT RAISE(ABORT, 'forced whole failed-run commit file failure');
+END
+SQL);
+    $whole_failed_run_commit_meta->close();
+
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'COMMIT' && $message === 'failed to commit failed-run metadata transaction') {
+                throw new RuntimeException('forced whole failed-run metadata commit failure');
+            }
+        },
+    ];
+    $whole_failed_run_commit_message = null;
+    set_error_handler(static function (int $severity, string $message): bool {
+        return str_contains($message, 'forced whole failed-run commit file failure');
+    });
+    try {
+        cow_merge_branch_state(
+            $whole_failed_run_commit_base_db,
+            $whole_failed_run_commit_source_db,
+            $whole_failed_run_commit_target_db,
+            $whole_failed_run_commit_metadata,
+            'feature-whole-failed-run-commit',
+            'main',
+            $whole_failed_run_commit_manifest,
+            $whole_failed_run_commit_source_root,
+            $whole_failed_run_commit_target_root
+        );
+    } catch (Throwable $e) {
+        $whole_failed_run_commit_message = $e->getMessage();
+    } finally {
+        restore_error_handler();
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($whole_failed_run_commit_message !== null && str_contains($whole_failed_run_commit_message, 'forced whole failed-run metadata commit failure'), 'whole-branch rollback surfaces failed-run metadata commit failure after restoring target state');
+    assert_same(scalar($whole_failed_run_commit_target_db, "SELECT post_content FROM wp_posts WHERE ID = 1"), 'Base content', 'whole-branch failed-run commit failure still restores target DB state');
+    assert_same(file_get_contents($whole_failed_run_commit_target_root . '/wp-content/uploads/finalize.txt'), 'finalize base', 'whole-branch failed-run commit failure still restores target filesystem state');
+    assert_same(
+        (int)scalar($whole_failed_run_commit_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-whole-failed-run-commit'"),
+        0,
+        'whole-branch failed-run commit failure leaves no partial failed run marker'
+    );
+    assert_same(
+        (int)scalar($whole_failed_run_commit_metadata, "SELECT COUNT(*) FROM merge_rollback_failures WHERE source_branch = 'feature-whole-failed-run-commit'"),
+        1,
+        'whole-branch failed-run commit failure still records rollback-failure metadata'
+    );
+    $whole_failed_run_commit_artifact = $tmp . '/.forkpress/cow/merge/whole-failed-run-commit/rollback-failures.jsonl';
+    assert_true(is_file($whole_failed_run_commit_artifact), 'whole-branch failed-run commit failure still records a JSONL rollback artifact');
+    $whole_failed_run_commit_lines = file($whole_failed_run_commit_artifact, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    assert_true(is_array($whole_failed_run_commit_lines) && count($whole_failed_run_commit_lines) === 1, 'whole-branch failed-run commit failure writes one rollback artifact record');
+    $whole_failed_run_commit_record = json_decode($whole_failed_run_commit_lines[0], true);
+    assert_true(str_contains($whole_failed_run_commit_record['original_failure'] ?? '', 'forced whole failed-run commit file failure'), 'whole-branch failed-run commit artifact preserves the original file failure');
+    assert_true(str_contains($whole_failed_run_commit_record['rollback_failure'] ?? '', 'forced whole failed-run metadata commit failure'), 'whole-branch failed-run commit artifact preserves the failed-run metadata failure');
+
     $late_whole_base_db = $tmp . '/late-whole-rollback-base.sqlite';
     $late_whole_source_db = $tmp . '/late-whole-rollback-source.sqlite';
     $late_whole_target_db = $tmp . '/late-whole-rollback-target.sqlite';
