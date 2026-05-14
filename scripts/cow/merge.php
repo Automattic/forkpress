@@ -3054,6 +3054,13 @@ function cow_merge_delete_row(SQLite3 $target, string $table, array $identity, a
 
 function cow_merge_ensure_metadata(SQLite3 $meta): void {
     $meta->exec('PRAGMA journal_mode = WAL');
+    $schema_savepoint = 'cow_merge_ensure_metadata_schema';
+    cow_merge_exec_checked(
+        $meta,
+        'SAVEPOINT ' . $schema_savepoint,
+        'failed to create metadata schema savepoint'
+    );
+    try {
     $meta->exec(<<<'SQL'
 CREATE TABLE IF NOT EXISTS merge_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3270,6 +3277,19 @@ CREATE TABLE IF NOT EXISTS merge_resolutions (
 )
 SQL);
     $meta->exec('CREATE INDEX IF NOT EXISTS merge_resolutions_conflict_idx ON merge_resolutions(conflict_id, id)');
+        cow_merge_release_savepoint_checked($meta, $schema_savepoint, 'metadata schema');
+    } catch (Throwable $e) {
+        $cleanup_error = cow_merge_rollback_release_savepoint_checked(
+            $meta,
+            $schema_savepoint,
+            'metadata schema',
+            $e
+        );
+        if ($cleanup_error !== null) {
+            throw $cleanup_error;
+        }
+        throw $e;
+    }
 }
 
 function cow_merge_ensure_metadata_column(SQLite3 $meta, string $table, string $column, string $definition): void {
