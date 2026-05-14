@@ -12996,6 +12996,206 @@ SQL);
     assert_same(scalar($band_ref_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $band_ref_target_id AND meta_key = '_forkpress_serialized_ref'"), $band_ref_target_serialized, 'target serialized post reference remains valid after banded merge');
     assert_same((int)scalar($band_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-ref-source'"), 0, 'banded WordPress reference merge records no ID collision conflicts');
 
+    $wp_semantic_base = $tmp . '/wp-semantic-base.sqlite';
+    $wp_semantic_source = $tmp . '/wp-semantic-source.sqlite';
+    $wp_semantic_target = $tmp . '/wp-semantic-target.sqlite';
+    $wp_semantic_metadata = $tmp . '/.forkpress/cow/merge/wp-semantic-metadata.sqlite';
+    create_base_db($wp_semantic_base);
+    $db = open_db($wp_semantic_base);
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_type TEXT NOT NULL DEFAULT 'post'");
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_name TEXT NOT NULL DEFAULT ''");
+    $db->exec('ALTER TABLE wp_posts ADD COLUMN post_parent INTEGER NOT NULL DEFAULT 0');
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN guid TEXT NOT NULL DEFAULT ''");
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec('CREATE TABLE wp_terms (term_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, slug TEXT NOT NULL, term_group INTEGER NOT NULL DEFAULT 0)');
+    $db->exec('CREATE TABLE wp_term_taxonomy (term_taxonomy_id INTEGER PRIMARY KEY AUTOINCREMENT, term_id INTEGER NOT NULL, taxonomy TEXT NOT NULL, description TEXT NOT NULL DEFAULT "", parent INTEGER NOT NULL DEFAULT 0, count INTEGER NOT NULL DEFAULT 0)');
+    $db->exec('CREATE TABLE wp_term_relationships (object_id INTEGER NOT NULL, term_taxonomy_id INTEGER NOT NULL, term_order INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (object_id, term_taxonomy_id))');
+    $db->close();
+    copy($wp_semantic_base, $wp_semantic_source);
+    copy($wp_semantic_base, $wp_semantic_target);
+    $wp_semantic_base_root = $tmp . '/wp-semantic-files-base';
+    $wp_semantic_source_root = $tmp . '/wp-semantic-files-source';
+    $wp_semantic_target_root = $tmp . '/wp-semantic-files-target';
+    mkdir($wp_semantic_base_root . '/wp-content/uploads/2026/05', 0777, true);
+    copy_tree_for_test($wp_semantic_base_root, $wp_semantic_source_root);
+    copy_tree_for_test($wp_semantic_base_root, $wp_semantic_target_root);
+    $wp_semantic_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-semantic-source.json';
+    cow_merge_capture_file_base($wp_semantic_base_root, $wp_semantic_file_base);
+    cow_merge_allocate_autoincrement_bands($wp_semantic_source, $wp_semantic_metadata, 'feature-wp-semantic-source');
+    cow_merge_allocate_autoincrement_bands($wp_semantic_target, $wp_semantic_metadata, 'feature-wp-semantic-target');
+    $write_wp_semantic_bundle = static function (string $db_path, string $root, string $branch): array {
+        $db = open_db($db_path);
+        $suffix = ucfirst($branch);
+        $block_content = "<!-- wp:paragraph --><p>$suffix reusable block</p><!-- /wp:paragraph -->";
+        $stmt = $db->prepare('INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name) VALUES (:title, :content, :status, :type, :slug)');
+        $stmt->bindValue(':title', "$suffix Reusable Block", SQLITE3_TEXT);
+        $stmt->bindValue(':content', $block_content, SQLITE3_TEXT);
+        $stmt->bindValue(':status', 'publish', SQLITE3_TEXT);
+        $stmt->bindValue(':type', 'wp_block', SQLITE3_TEXT);
+        $stmt->bindValue(':slug', "$branch-reusable-block", SQLITE3_TEXT);
+        $stmt->execute();
+        $block_id = (int)$db->lastInsertRowID();
+
+        $file_path = "wp-content/uploads/2026/05/$branch-image.jpg";
+        write_test_file($root . '/' . $file_path, "$branch image bytes\n");
+        $stmt = $db->prepare('INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name, guid) VALUES (:title, :content, :status, :type, :slug, :guid)');
+        $stmt->bindValue(':title', "$suffix Image", SQLITE3_TEXT);
+        $stmt->bindValue(':content', '', SQLITE3_TEXT);
+        $stmt->bindValue(':status', 'inherit', SQLITE3_TEXT);
+        $stmt->bindValue(':type', 'attachment', SQLITE3_TEXT);
+        $stmt->bindValue(':slug', "$branch-image", SQLITE3_TEXT);
+        $stmt->bindValue(':guid', $file_path, SQLITE3_TEXT);
+        $stmt->execute();
+        $attachment_id = (int)$db->lastInsertRowID();
+        $attachment_metadata = serialize([
+            'file' => '2026/05/' . basename($file_path),
+            'width' => 640,
+            'height' => 480,
+            'sizes' => [
+                'thumbnail' => [
+                    'file' => basename($file_path),
+                    'width' => 150,
+                    'height' => 150,
+                ],
+            ],
+        ]);
+        $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', :file), (:post_id, '_wp_attachment_metadata', :metadata)");
+        $stmt->bindValue(':post_id', $attachment_id, SQLITE3_INTEGER);
+        $stmt->bindValue(':file', '2026/05/' . basename($file_path), SQLITE3_TEXT);
+        $stmt->bindValue(':metadata', $attachment_metadata, SQLITE3_TEXT);
+        $stmt->execute();
+
+        $page_content = '<!-- wp:block {"ref":' . $block_id . '} /-->' .
+            '<!-- wp:image {"id":' . $attachment_id . ',"sizeSlug":"large"} --><figure class="wp-block-image size-large"><img class="wp-image-' . $attachment_id . '"/></figure><!-- /wp:image -->';
+        $stmt = $db->prepare('INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name) VALUES (:title, :content, :status, :type, :slug)');
+        $stmt->bindValue(':title', "$suffix Page", SQLITE3_TEXT);
+        $stmt->bindValue(':content', $page_content, SQLITE3_TEXT);
+        $stmt->bindValue(':status', 'publish', SQLITE3_TEXT);
+        $stmt->bindValue(':type', 'page', SQLITE3_TEXT);
+        $stmt->bindValue(':slug', "$branch-page", SQLITE3_TEXT);
+        $stmt->execute();
+        $page_id = (int)$db->lastInsertRowID();
+
+        $stmt = $db->prepare('INSERT INTO wp_terms (name, slug) VALUES (:name, :slug)');
+        $stmt->bindValue(':name', "$suffix Primary Menu", SQLITE3_TEXT);
+        $stmt->bindValue(':slug', "$branch-primary-menu", SQLITE3_TEXT);
+        $stmt->execute();
+        $term_id = (int)$db->lastInsertRowID();
+        $stmt = $db->prepare("INSERT INTO wp_term_taxonomy (term_id, taxonomy, description, count) VALUES (:term_id, 'nav_menu', '', 1)");
+        $stmt->bindValue(':term_id', $term_id, SQLITE3_INTEGER);
+        $stmt->execute();
+        $term_taxonomy_id = (int)$db->lastInsertRowID();
+
+        $stmt = $db->prepare('INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name) VALUES (:title, :content, :status, :type, :slug)');
+        $stmt->bindValue(':title', "$suffix Menu Item", SQLITE3_TEXT);
+        $stmt->bindValue(':content', '', SQLITE3_TEXT);
+        $stmt->bindValue(':status', 'publish', SQLITE3_TEXT);
+        $stmt->bindValue(':type', 'nav_menu_item', SQLITE3_TEXT);
+        $stmt->bindValue(':slug', "$branch-menu-item", SQLITE3_TEXT);
+        $stmt->execute();
+        $menu_item_id = (int)$db->lastInsertRowID();
+        $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES
+            (:menu_item_id, '_menu_item_type', 'post_type'),
+            (:menu_item_id, '_menu_item_object', 'page'),
+            (:menu_item_id, '_menu_item_object_id', :page_id),
+            (:menu_item_id, '_menu_item_menu_item_parent', '0'),
+            (:menu_item_id, '_menu_item_classes', :classes)");
+        $stmt->bindValue(':menu_item_id', $menu_item_id, SQLITE3_INTEGER);
+        $stmt->bindValue(':page_id', (string)$page_id, SQLITE3_TEXT);
+        $stmt->bindValue(':classes', serialize([]), SQLITE3_TEXT);
+        $stmt->execute();
+        $stmt = $db->prepare('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id) VALUES (:object_id, :term_taxonomy_id)');
+        $stmt->bindValue(':object_id', $menu_item_id, SQLITE3_INTEGER);
+        $stmt->bindValue(':term_taxonomy_id', $term_taxonomy_id, SQLITE3_INTEGER);
+        $stmt->execute();
+
+        $graph = [
+            'branch' => $branch,
+            'page_id' => $page_id,
+            'block_id' => $block_id,
+            'attachment_id' => $attachment_id,
+            'menu_item_id' => $menu_item_id,
+            'term_id' => $term_id,
+            'term_taxonomy_id' => $term_taxonomy_id,
+            'file' => '2026/05/' . basename($file_path),
+        ];
+        $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_forkpress_semantic_bundle', :graph)");
+        $stmt->bindValue(':post_id', $page_id, SQLITE3_INTEGER);
+        $stmt->bindValue(':graph', json_encode($graph, JSON_UNESCAPED_SLASHES), SQLITE3_TEXT);
+        $stmt->execute();
+        $theme_mods = serialize([
+            'nav_menu_locations' => [
+                'primary' => $term_id,
+            ],
+            'forkpress_featured_page' => $page_id,
+            'forkpress_featured_block' => $block_id,
+            'forkpress_featured_attachment' => $attachment_id,
+        ]);
+        $stmt = $db->prepare('INSERT INTO wp_options (option_name, option_value, autoload) VALUES (:name, :value, :autoload)');
+        $stmt->bindValue(':name', "theme_mods_forkpress_$branch", SQLITE3_TEXT);
+        $stmt->bindValue(':value', $theme_mods, SQLITE3_TEXT);
+        $stmt->bindValue(':autoload', 'yes', SQLITE3_TEXT);
+        $stmt->execute();
+        $db->close();
+        return $graph;
+    };
+    $wp_semantic_source_graph = $write_wp_semantic_bundle($wp_semantic_source, $wp_semantic_source_root, 'source');
+    $wp_semantic_target_graph = $write_wp_semantic_bundle($wp_semantic_target, $wp_semantic_target_root, 'target');
+    assert_true($wp_semantic_source_graph['page_id'] !== $wp_semantic_target_graph['page_id'], 'WordPress semantic branches receive distinct page IDs before block JSON is written');
+    assert_true($wp_semantic_source_graph['attachment_id'] !== $wp_semantic_target_graph['attachment_id'], 'WordPress semantic branches receive distinct attachment IDs before upload metadata is written');
+    assert_true($wp_semantic_source_graph['term_id'] !== $wp_semantic_target_graph['term_id'], 'WordPress semantic branches receive distinct menu term IDs before theme mods are written');
+    $wp_semantic_result = cow_merge_branch_state(
+        $wp_semantic_base,
+        $wp_semantic_source,
+        $wp_semantic_target,
+        $wp_semantic_metadata,
+        'feature-wp-semantic-source',
+        'feature-wp-semantic-target',
+        $wp_semantic_file_base,
+        $wp_semantic_source_root,
+        $wp_semantic_target_root
+    );
+    assert_same($wp_semantic_result['status'], 'completed', 'banded WordPress semantic object bundles merge cleanly');
+    $assert_wp_semantic_bundle = static function (string $db_path, string $root, array $graph, string $branch): void {
+        $page_id = (int)$graph['page_id'];
+        $block_id = (int)$graph['block_id'];
+        $attachment_id = (int)$graph['attachment_id'];
+        $menu_item_id = (int)$graph['menu_item_id'];
+        $term_id = (int)$graph['term_id'];
+        $term_taxonomy_id = (int)$graph['term_taxonomy_id'];
+        $db = open_db($db_path);
+        $page = $db->querySingle("SELECT post_content, post_type FROM wp_posts WHERE ID = $page_id", true);
+        $block_type = $db->querySingle("SELECT post_type FROM wp_posts WHERE ID = $block_id");
+        $attachment_type = $db->querySingle("SELECT post_type FROM wp_posts WHERE ID = $attachment_id");
+        $attached_file = $db->querySingle("SELECT meta_value FROM wp_postmeta WHERE post_id = $attachment_id AND meta_key = '_wp_attached_file'");
+        $menu_object_id = $db->querySingle("SELECT meta_value FROM wp_postmeta WHERE post_id = $menu_item_id AND meta_key = '_menu_item_object_id'");
+        $relationship_count = (int)$db->querySingle("SELECT COUNT(*) FROM wp_term_relationships WHERE object_id = $menu_item_id AND term_taxonomy_id = $term_taxonomy_id");
+        $menu_taxonomy = $db->querySingle("SELECT taxonomy FROM wp_term_taxonomy WHERE term_taxonomy_id = $term_taxonomy_id AND term_id = $term_id");
+        $bundle = $db->querySingle("SELECT meta_value FROM wp_postmeta WHERE post_id = $page_id AND meta_key = '_forkpress_semantic_bundle'");
+        $theme_mods = $db->querySingle("SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_forkpress_$branch'");
+        $db->close();
+        $decoded_bundle = is_string($bundle) ? json_decode($bundle, true) : null;
+        $decoded_theme_mods = is_string($theme_mods) ? unserialize($theme_mods) : null;
+        assert_same($page['post_type'] ?? null, 'page', "WordPress $branch page survives semantic merge");
+        assert_true(str_contains((string)($page['post_content'] ?? ''), '"ref":' . $block_id), "WordPress $branch page keeps reusable block reference");
+        assert_true(str_contains((string)($page['post_content'] ?? ''), '"id":' . $attachment_id), "WordPress $branch page keeps image block attachment reference");
+        assert_same($block_type, 'wp_block', "WordPress $branch reusable block survives semantic merge");
+        assert_same($attachment_type, 'attachment', "WordPress $branch attachment post survives semantic merge");
+        assert_same($attached_file, $graph['file'], "WordPress $branch attachment metadata keeps upload path");
+        assert_true(file_exists($root . '/wp-content/uploads/' . $graph['file']), "WordPress $branch upload file survives semantic merge");
+        assert_same($menu_object_id, (string)$page_id, "WordPress $branch menu item still points at merged page");
+        assert_same($relationship_count, 1, "WordPress $branch menu relationship survives semantic merge");
+        assert_same($menu_taxonomy, 'nav_menu', "WordPress $branch nav menu taxonomy survives semantic merge");
+        assert_same($decoded_bundle, $graph, "WordPress $branch semantic bundle metadata keeps branch-local IDs");
+        assert_same($decoded_theme_mods['nav_menu_locations']['primary'] ?? null, $term_id, "WordPress $branch theme mods keep menu term ID");
+        assert_same($decoded_theme_mods['forkpress_featured_page'] ?? null, $page_id, "WordPress $branch theme mods keep featured page ID");
+        assert_same($decoded_theme_mods['forkpress_featured_block'] ?? null, $block_id, "WordPress $branch theme mods keep reusable block ID");
+        assert_same($decoded_theme_mods['forkpress_featured_attachment'] ?? null, $attachment_id, "WordPress $branch theme mods keep attachment ID");
+    };
+    $assert_wp_semantic_bundle($wp_semantic_target, $wp_semantic_target_root, $wp_semantic_source_graph, 'source');
+    $assert_wp_semantic_bundle($wp_semantic_target, $wp_semantic_target_root, $wp_semantic_target_graph, 'target');
+    assert_same((int)scalar($wp_semantic_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-wp-semantic-source'"), 0, 'WordPress semantic merge records no generic conflicts while IDs remain banded');
+
     $plugin_graph_base = $tmp . '/plugin-graph-base.sqlite';
     $plugin_graph_source = $tmp . '/plugin-graph-source.sqlite';
     $plugin_graph_target = $tmp . '/plugin-graph-target.sqlite';
