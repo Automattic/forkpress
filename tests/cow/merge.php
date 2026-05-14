@@ -11086,6 +11086,78 @@ SQL);
     assert_same((int)scalar($band_finalize_failure_metadata, "SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'feature-band-finalize-failure'"), 0, 'failed AUTOINCREMENT finalize records no band metadata');
     assert_same((int)scalar($band_finalize_failure_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-band-finalize-failure' AND status = 'failed'"), 1, 'failed AUTOINCREMENT finalize leaves an auditable failed run');
 
+    $band_target_rowid_failure_db = $tmp . '/band-target-rowid-failure.sqlite';
+    $band_target_rowid_failure_metadata = $tmp . '/.forkpress/cow/merge/band-target-rowid-failure-metadata.sqlite';
+    copy($band_base, $band_target_rowid_failure_db);
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_query'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($message === 'failed to read AUTOINCREMENT table max rowid') {
+                throw new RuntimeException('forced AUTOINCREMENT target rowid query failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_allocate_autoincrement_bands(
+            $band_target_rowid_failure_db,
+            $band_target_rowid_failure_metadata,
+            'feature-band-target-rowid-failure'
+        ),
+        'forced AUTOINCREMENT target rowid query failure',
+        'AUTOINCREMENT target max-rowid query failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_query']);
+    assert_same((int)scalar($band_target_rowid_failure_db, "SELECT seq FROM sqlite_sequence WHERE name = 'plugin_autoinc'"), 1, 'failed AUTOINCREMENT target rowid query leaves target sequence unchanged');
+    assert_same((int)scalar($band_target_rowid_failure_metadata, "SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'feature-band-target-rowid-failure'"), 0, 'failed AUTOINCREMENT target rowid query records no band metadata');
+    assert_same((int)scalar($band_target_rowid_failure_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-band-target-rowid-failure' AND status = 'failed'"), 1, 'failed AUTOINCREMENT target rowid query leaves an auditable failed run');
+
+    $band_target_sequence_prepare_failure_db = $tmp . '/band-target-sequence-prepare-failure.sqlite';
+    $band_target_sequence_prepare_failure_metadata = $tmp . '/.forkpress/cow/merge/band-target-sequence-prepare-failure-metadata.sqlite';
+    copy($band_base, $band_target_sequence_prepare_failure_db);
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_prepare'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($message === 'failed to prepare sqlite_sequence lookup') {
+                throw new RuntimeException('forced sqlite_sequence prepare failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_allocate_autoincrement_bands(
+            $band_target_sequence_prepare_failure_db,
+            $band_target_sequence_prepare_failure_metadata,
+            'feature-band-target-sequence-prepare-failure'
+        ),
+        'forced sqlite_sequence prepare failure',
+        'AUTOINCREMENT target sqlite_sequence prepare failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_prepare']);
+    assert_same((int)scalar($band_target_sequence_prepare_failure_db, "SELECT seq FROM sqlite_sequence WHERE name = 'plugin_autoinc'"), 1, 'failed AUTOINCREMENT target sequence prepare leaves target sequence unchanged');
+    assert_same((int)scalar($band_target_sequence_prepare_failure_metadata, "SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'feature-band-target-sequence-prepare-failure'"), 0, 'failed AUTOINCREMENT target sequence prepare records no band metadata');
+    assert_same((int)scalar($band_target_sequence_prepare_failure_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-band-target-sequence-prepare-failure' AND status = 'failed'"), 1, 'failed AUTOINCREMENT target sequence prepare leaves an auditable failed run');
+
+    $band_target_sequence_update_failure_db = $tmp . '/band-target-sequence-update-failure.sqlite';
+    $band_target_sequence_update_failure_metadata = $tmp . '/.forkpress/cow/merge/band-target-sequence-update-failure-metadata.sqlite';
+    copy($band_base, $band_target_sequence_update_failure_db);
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_statement_execute'] = [
+        static function (SQLite3 $db, string $message): void {
+            if ($message === 'failed to update sqlite_sequence') {
+                throw new RuntimeException('forced sqlite_sequence update failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_allocate_autoincrement_bands(
+            $band_target_sequence_update_failure_db,
+            $band_target_sequence_update_failure_metadata,
+            'feature-band-target-sequence-update-failure'
+        ),
+        'forced sqlite_sequence update failure',
+        'AUTOINCREMENT target sqlite_sequence update failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_statement_execute']);
+    assert_same((int)scalar($band_target_sequence_update_failure_db, "SELECT seq FROM sqlite_sequence WHERE name = 'plugin_autoinc'"), 1, 'failed AUTOINCREMENT target sequence update rolls back target sequence changes');
+    assert_same((int)scalar($band_target_sequence_update_failure_metadata, "SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'feature-band-target-sequence-update-failure'"), 0, 'failed AUTOINCREMENT target sequence update records no band metadata');
+    assert_same((int)scalar($band_target_sequence_update_failure_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-band-target-sequence-update-failure' AND status = 'failed'"), 1, 'failed AUTOINCREMENT target sequence update leaves an auditable failed run');
+
     $band_metadata_commit_rollback_db = $tmp . '/band-metadata-commit-rollback.sqlite';
     $band_metadata_commit_rollback_metadata = $tmp . '/.forkpress/cow/merge/band-metadata-commit-rollback-metadata.sqlite';
     copy($band_base, $band_metadata_commit_rollback_db);

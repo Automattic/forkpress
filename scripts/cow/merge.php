@@ -3878,37 +3878,50 @@ function cow_merge_plain_integer_primary_key_tables(SQLite3 $db): array {
 }
 
 function cow_merge_table_max_rowid(SQLite3 $db, string $table): int {
-    return (int)$db->querySingle('SELECT COALESCE(MAX(rowid), 0) FROM ' . cow_merge_quote_ident($table));
+    $res = cow_merge_query_checked(
+        $db,
+        'SELECT COALESCE(MAX(rowid), 0) AS max_rowid FROM ' . cow_merge_quote_ident($table),
+        'failed to read AUTOINCREMENT table max rowid'
+    );
+    $row = $res->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($res, 'failed to finalize AUTOINCREMENT table max rowid lookup');
+    return $row ? (int)$row['max_rowid'] : 0;
 }
 
 function cow_merge_sqlite_sequence_value(SQLite3 $db, string $table): int {
-    $stmt = $db->prepare('SELECT seq FROM sqlite_sequence WHERE name = :name');
+    $stmt = cow_merge_prepare_checked(
+        $db,
+        'SELECT seq FROM sqlite_sequence WHERE name = :name',
+        'failed to prepare sqlite_sequence lookup'
+    );
     cow_merge_bind($stmt, ':name', $table);
-    $res = $stmt->execute();
-    if (!$res) {
-        throw new RuntimeException('failed to read sqlite_sequence: ' . $db->lastErrorMsg());
-    }
+    $res = cow_merge_execute_checked($stmt, $db, 'failed to read sqlite_sequence');
     $row = $res->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($res, 'failed to finalize sqlite_sequence lookup');
     return $row ? (int)$row['seq'] : 0;
 }
 
 function cow_merge_set_sqlite_sequence(SQLite3 $db, string $table, int $seq): void {
-    $stmt = $db->prepare('UPDATE sqlite_sequence SET seq = :seq WHERE name = :name');
+    $stmt = cow_merge_prepare_checked(
+        $db,
+        'UPDATE sqlite_sequence SET seq = :seq WHERE name = :name',
+        'failed to prepare sqlite_sequence update'
+    );
     cow_merge_bind($stmt, ':seq', $seq);
     cow_merge_bind($stmt, ':name', $table);
-    if (!$stmt->execute()) {
-        throw new RuntimeException('failed to update sqlite_sequence: ' . $db->lastErrorMsg());
-    }
+    cow_merge_execute_checked($stmt, $db, 'failed to update sqlite_sequence');
     if ($db->changes() > 0) {
         return;
     }
 
-    $stmt = $db->prepare('INSERT INTO sqlite_sequence (name, seq) VALUES (:name, :seq)');
+    $stmt = cow_merge_prepare_checked(
+        $db,
+        'INSERT INTO sqlite_sequence (name, seq) VALUES (:name, :seq)',
+        'failed to prepare sqlite_sequence insert'
+    );
     cow_merge_bind($stmt, ':name', $table);
     cow_merge_bind($stmt, ':seq', $seq);
-    if (!$stmt->execute()) {
-        throw new RuntimeException('failed to insert sqlite_sequence row: ' . $db->lastErrorMsg());
-    }
+    cow_merge_execute_checked($stmt, $db, 'failed to insert sqlite_sequence row');
 }
 
 function cow_merge_lookup_autoincrement_band(SQLite3 $meta, string $branch, string $table): ?array {

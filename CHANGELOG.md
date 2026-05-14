@@ -55,6 +55,7 @@
 - Tightened COW SQLite open initialization so metadata database open failures surface before schema setup can create partial audit state.
 - Tightened COW metadata statement preparation so run, review, conflict, resolution, and rollback-failure audit paths surface prepare failures consistently while preserving JSONL rollback artifacts.
 - Tightened remaining COW sidecar identity and AUTOINCREMENT metadata prepare paths so prepare failures surface cleanly without partial sidecar or band state.
+- Tightened AUTOINCREMENT target rowid and `sqlite_sequence` reads/writes so target-side allocation failures surface cleanly and roll back staged band metadata.
 - Tightened COW merge-audit metadata read paths so table checks, schema inspection, and row-query prepare failures surface consistently through checked SQLite helpers.
 - Tightened COW merge-audit metadata read finalization so table checks, schema inspection, and row queries surface SQLite cleanup failures consistently.
 - Tightened no-primary-key sidecar and AUTOINCREMENT metadata read finalization so row identity and band lookup cleanup failures surface consistently without partial metadata.
