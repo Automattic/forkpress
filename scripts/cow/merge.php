@@ -6473,8 +6473,14 @@ function cow_merge_apply_source_table_rebuild(SQLite3 $target, string $table, st
         $insert_columns = 'rowid, ' . $quoted_columns;
         $select_columns = 'rowid, ' . $quoted_columns;
     }
-    $target->exec('SAVEPOINT forkpress_schema_rebuild');
+    $target_savepoint_started = false;
     try {
+        cow_merge_exec_checked(
+            $target,
+            'SAVEPOINT forkpress_schema_rebuild',
+            'failed to start source table rebuild schema resolution savepoint'
+        );
+        $target_savepoint_started = true;
         if (!$target->exec($create_sql)) {
             throw new RuntimeException('failed to create rebuilt table: ' . $target->lastErrorMsg());
         }
@@ -6520,9 +6526,12 @@ function cow_merge_apply_source_table_rebuild(SQLite3 $target, string $table, st
         cow_merge_validate_views($target, $dependent_views, 'post-rebuild');
         cow_merge_validate_foreign_key_integrity($target, 'source table rebuild schema resolution');
         $target->exec('RELEASE forkpress_schema_rebuild');
+        $target_savepoint_started = false;
     } catch (Throwable $e) {
-        $target->exec('ROLLBACK TO forkpress_schema_rebuild');
-        $target->exec('RELEASE forkpress_schema_rebuild');
+        if ($target_savepoint_started) {
+            $target->exec('ROLLBACK TO forkpress_schema_rebuild');
+            $target->exec('RELEASE forkpress_schema_rebuild');
+        }
         throw $e;
     }
 }
@@ -6580,8 +6589,14 @@ function cow_merge_apply_source_view_schema_resolution(SQLite3 $target, string $
         cow_merge_validate_view_schema_acyclic($target, $view, $source_sql);
     }
     cow_merge_validate_views($target, $dependent_views, 'pre-view-resolution');
-    $target->exec('SAVEPOINT forkpress_view_resolution');
+    $target_savepoint_started = false;
     try {
+        cow_merge_exec_checked(
+            $target,
+            'SAVEPOINT forkpress_view_resolution',
+            'failed to start source view schema resolution savepoint'
+        );
+        $target_savepoint_started = true;
         foreach (array_reverse($dependent_views) as $dependency) {
             if (!$target->exec('DROP VIEW ' . cow_merge_quote_ident((string)$dependency['name']))) {
                 throw new RuntimeException('failed to drop dependent target view ' . $dependency['name'] . ' during view schema resolution: ' . $target->lastErrorMsg());
@@ -6617,9 +6632,12 @@ function cow_merge_apply_source_view_schema_resolution(SQLite3 $target, string $
         }
         cow_merge_validate_views($target, $dependent_views, 'post-view-resolution');
         $target->exec('RELEASE forkpress_view_resolution');
+        $target_savepoint_started = false;
     } catch (Throwable $e) {
-        $target->exec('ROLLBACK TO forkpress_view_resolution');
-        $target->exec('RELEASE forkpress_view_resolution');
+        if ($target_savepoint_started) {
+            $target->exec('ROLLBACK TO forkpress_view_resolution');
+            $target->exec('RELEASE forkpress_view_resolution');
+        }
         throw $e;
     }
 }

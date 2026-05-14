@@ -4355,6 +4355,35 @@ SQL);
         0,
         'failed table rebuild validation savepoint records no resolution metadata'
     );
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'SAVEPOINT forkpress_schema_rebuild' && $message === 'failed to start source table rebuild schema resolution savepoint') {
+                throw new RuntimeException('forced source table rebuild apply savepoint failure');
+            }
+        },
+    ];
+    $schema_rebuild_apply_savepoint_failure = null;
+    try {
+        cow_merge_resolve_conflict(
+            $metadata,
+            $schema_rebuild_conflict_id,
+            'source',
+            false,
+            'Preview table rebuild with failing apply savepoint.',
+            'test'
+        );
+    } catch (Throwable $e) {
+        $schema_rebuild_apply_savepoint_failure = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($schema_rebuild_apply_savepoint_failure !== null && str_contains($schema_rebuild_apply_savepoint_failure, 'forced source table rebuild apply savepoint failure'), 'source table rebuild apply savepoint failure is surfaced to the caller');
+    assert_same(column_type($schema_rebuild_target, 'plugin_items', 'value'), 'REAL', 'failed table rebuild apply savepoint leaves target schema unchanged');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_rebuild_conflict_id"),
+        0,
+        'failed table rebuild apply savepoint records no resolution metadata'
+    );
     $schema_rebuild_dry = cow_merge_resolve_conflict(
         $metadata,
         $schema_rebuild_conflict_id,
@@ -5107,6 +5136,35 @@ SQL);
     $result = cow_merge_databases($schema_view_rewrite_base, $schema_view_rewrite_source, $schema_view_rewrite_target, $metadata, 'feature-view-rewrite', 'main');
     assert_same($result['status'], 'completed_with_conflicts', 'source-changed view remains a schema conflict');
     $schema_view_rewrite_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_items_review_view' AND conflict_type = 'schema-source-changed-view' ORDER BY id DESC LIMIT 1");
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'SAVEPOINT forkpress_view_resolution' && $message === 'failed to start source view schema resolution savepoint') {
+                throw new RuntimeException('forced source view resolution savepoint failure');
+            }
+        },
+    ];
+    $schema_view_rewrite_savepoint_failure = null;
+    try {
+        cow_merge_resolve_conflict(
+            $metadata,
+            $schema_view_rewrite_conflict_id,
+            'source',
+            false,
+            'Preview source view rewrite with failing savepoint.',
+            'test'
+        );
+    } catch (Throwable $e) {
+        $schema_view_rewrite_savepoint_failure = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($schema_view_rewrite_savepoint_failure !== null && str_contains($schema_view_rewrite_savepoint_failure, 'forced source view resolution savepoint failure'), 'source view schema resolution savepoint failure is surfaced to the caller');
+    assert_true(str_contains((string)scalar($schema_view_rewrite_target, "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_review_view'"), 'label FROM'), 'failed source view resolution savepoint leaves target view unchanged');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_view_rewrite_conflict_id"),
+        0,
+        'failed source view resolution savepoint records no resolution metadata'
+    );
     $schema_view_rewrite_resolution = cow_merge_resolve_conflict(
         $metadata,
         $schema_view_rewrite_conflict_id,
