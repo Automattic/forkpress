@@ -2590,6 +2590,7 @@ function cow_merge_row_expression_value(SQLite3 $db, array $row, string $express
     $placeholders = implode(', ', array_fill(0, count($columns), '?'));
     $sql = 'WITH __forkpress_merge_row (' . $quoted_columns . ') AS (SELECT ' . $placeholders . ') ' .
         'SELECT ' . $expression . ' AS __forkpress_merge_value FROM __forkpress_merge_row LIMIT 1';
+    cow_merge_test_hook('before_sqlite_prepare', $db, $sql, "failed to prepare row expression value for $expression");
     $stmt = @$db->prepare($sql);
     if (!$stmt) {
         return ['ok' => false, 'value' => null];
@@ -2597,15 +2598,20 @@ function cow_merge_row_expression_value(SQLite3 $db, array $row, string $express
     foreach ($columns as $i => $column) {
         cow_merge_bind($stmt, $i + 1, $row[$column] ?? null);
     }
+    cow_merge_test_hook('before_sqlite_statement_execute', $db, "failed to evaluate row expression value for $expression");
     $res = @$stmt->execute();
     if (!$res) {
         return ['ok' => false, 'value' => null];
     }
-    $value = $res->fetchArray(SQLITE3_ASSOC);
-    if (!is_array($value) || !array_key_exists('__forkpress_merge_value', $value)) {
-        return ['ok' => false, 'value' => null];
+    try {
+        $value = $res->fetchArray(SQLITE3_ASSOC);
+        if (!is_array($value) || !array_key_exists('__forkpress_merge_value', $value)) {
+            return ['ok' => false, 'value' => null];
+        }
+        return ['ok' => true, 'value' => $value['__forkpress_merge_value']];
+    } finally {
+        cow_merge_result_finalize_checked($res, "failed to finalize row expression value for $expression");
     }
-    return ['ok' => true, 'value' => $value['__forkpress_merge_value']];
 }
 
 function cow_merge_row_matches_partial_index_where(SQLite3 $db, array $row, string $where): bool {
@@ -2617,6 +2623,7 @@ function cow_merge_row_matches_partial_index_where(SQLite3 $db, array $row, stri
     $placeholders = implode(', ', array_fill(0, count($columns), '?'));
     $sql = 'WITH __forkpress_merge_row (' . $quoted_columns . ') AS (SELECT ' . $placeholders . ') ' .
         'SELECT 1 FROM __forkpress_merge_row WHERE ' . $where . ' LIMIT 1';
+    cow_merge_test_hook('before_sqlite_prepare', $db, $sql, "failed to prepare partial index predicate for $where");
     $stmt = @$db->prepare($sql);
     if (!$stmt) {
         return false;
@@ -2624,11 +2631,16 @@ function cow_merge_row_matches_partial_index_where(SQLite3 $db, array $row, stri
     foreach ($columns as $i => $column) {
         cow_merge_bind($stmt, $i + 1, $row[$column] ?? null);
     }
+    cow_merge_test_hook('before_sqlite_statement_execute', $db, "failed to evaluate partial index predicate for $where");
     $res = @$stmt->execute();
     if (!$res) {
         return false;
     }
-    return (bool)$res->fetchArray(SQLITE3_NUM);
+    try {
+        return (bool)$res->fetchArray(SQLITE3_NUM);
+    } finally {
+        cow_merge_result_finalize_checked($res, "failed to finalize partial index predicate for $where");
+    }
 }
 
 function cow_merge_unique_index_terms(SQLite3 $db, string $name): ?array {

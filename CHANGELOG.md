@@ -59,6 +59,7 @@
 - Tightened AUTOINCREMENT target rowid and `sqlite_sequence` reads/writes so target-side allocation failures surface cleanly and roll back staged band metadata.
 - Tightened core schema and row helper reads so table/index/object maps, table info, primary-key detection, and row loaders surface SQLite failures and finalize result sets explicitly.
 - Tightened unique-index and foreign-key introspection reads so SQLite failures surface cleanly instead of being treated as absent constraints or unsupported merge evidence.
+- Tightened unique-index expression and partial-predicate row evaluation so SQLite cleanup failures surface cleanly and roll back staged merge metadata.
 - Tightened schema dependency validation reads so schema-object existence checks, dependent view/trigger scans, and successful view/trigger validation result cleanup surface SQLite failures explicitly.
 - Tightened generic row insert/update/delete mutation helpers so target SQLite prepare, execute, and result cleanup failures surface cleanly and roll back staged merge metadata.
 - Added COW coverage for rowid insert, row update, and row delete result-cleanup failures, proving target mutations and staged audit/sidecar metadata roll back cleanly.

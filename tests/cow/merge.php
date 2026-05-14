@@ -453,6 +453,88 @@ try {
     assert_same((int)scalar($unique_finalize_metadata, 'SELECT COUNT(*) FROM merge_decisions'), 0, 'unique-index term finalization failure records no decisions');
     assert_same((int)scalar($unique_finalize_metadata, 'SELECT COUNT(*) FROM merge_conflicts'), 0, 'unique-index term finalization failure records no conflicts');
 
+    $unique_expression_base = $tmp . '/unique-expression-base.sqlite';
+    $unique_expression_source = $tmp . '/unique-expression-source.sqlite';
+    $unique_expression_target = $tmp . '/unique-expression-target.sqlite';
+    $unique_expression_metadata = $tmp . '/.forkpress/cow/merge/unique-expression-metadata.sqlite';
+    create_base_db($unique_expression_base);
+    copy($unique_expression_base, $unique_expression_source);
+    copy($unique_expression_base, $unique_expression_target);
+    foreach ([$unique_expression_base, $unique_expression_source, $unique_expression_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_unique_expression_read (id INTEGER PRIMARY KEY, slug TEXT, value TEXT)');
+        $db->exec('CREATE UNIQUE INDEX plugin_unique_expression_read_slug ON plugin_unique_expression_read(lower(slug))');
+        $db->close();
+    }
+    $db = open_db($unique_expression_source);
+    $db->exec("INSERT INTO plugin_unique_expression_read (id, slug, value) VALUES (10, 'Expression Slug', 'source row')");
+    $db->close();
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_prepare'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($message === 'failed to prepare row expression value for lower(slug)') {
+                throw new RuntimeException('forced row expression prepare failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_databases(
+            $unique_expression_base,
+            $unique_expression_source,
+            $unique_expression_target,
+            $unique_expression_metadata,
+            'feature-unique-expression-rollback',
+            'main'
+        ),
+        'forced row expression prepare failure',
+        'unique expression row-evaluation prepare failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_prepare']);
+    assert_same((int)scalar($unique_expression_target, 'SELECT COUNT(*) FROM plugin_unique_expression_read'), 0, 'unique expression row-evaluation failure leaves target rows unchanged');
+    assert_same((int)scalar($unique_expression_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-unique-expression-rollback' AND status = 'failed'"), 1, 'unique expression row-evaluation failure leaves an auditable failed run');
+    assert_same((int)scalar($unique_expression_metadata, 'SELECT COUNT(*) FROM merge_decisions'), 0, 'unique expression row-evaluation failure records no decisions');
+    assert_same((int)scalar($unique_expression_metadata, 'SELECT COUNT(*) FROM merge_conflicts'), 0, 'unique expression row-evaluation failure records no conflicts');
+
+    $unique_partial_base = $tmp . '/unique-partial-base.sqlite';
+    $unique_partial_source = $tmp . '/unique-partial-source.sqlite';
+    $unique_partial_target = $tmp . '/unique-partial-target.sqlite';
+    $unique_partial_metadata = $tmp . '/.forkpress/cow/merge/unique-partial-metadata.sqlite';
+    create_base_db($unique_partial_base);
+    copy($unique_partial_base, $unique_partial_source);
+    copy($unique_partial_base, $unique_partial_target);
+    foreach ([$unique_partial_base, $unique_partial_source, $unique_partial_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_unique_partial_read (id INTEGER PRIMARY KEY, slug TEXT, enabled INTEGER, value TEXT)');
+        $db->exec('CREATE UNIQUE INDEX plugin_unique_partial_read_slug ON plugin_unique_partial_read(slug) WHERE enabled = 1');
+        $db->close();
+    }
+    $db = open_db($unique_partial_source);
+    $db->exec("INSERT INTO plugin_unique_partial_read (id, slug, enabled, value) VALUES (10, 'partial-slug', 1, 'source row')");
+    $db->close();
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize'] = [
+        static function (SQLite3Result $result, string $message): void {
+            if ($message === 'failed to finalize partial index predicate for enabled = 1') {
+                throw new RuntimeException('forced partial index predicate finalize failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_databases(
+            $unique_partial_base,
+            $unique_partial_source,
+            $unique_partial_target,
+            $unique_partial_metadata,
+            'feature-unique-partial-rollback',
+            'main'
+        ),
+        'forced partial index predicate finalize failure',
+        'partial unique-index predicate finalization failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize']);
+    assert_same((int)scalar($unique_partial_target, 'SELECT COUNT(*) FROM plugin_unique_partial_read'), 0, 'partial unique-index predicate failure leaves target rows unchanged');
+    assert_same((int)scalar($unique_partial_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-unique-partial-rollback' AND status = 'failed'"), 1, 'partial unique-index predicate failure leaves an auditable failed run');
+    assert_same((int)scalar($unique_partial_metadata, 'SELECT COUNT(*) FROM merge_decisions'), 0, 'partial unique-index predicate failure records no decisions');
+    assert_same((int)scalar($unique_partial_metadata, 'SELECT COUNT(*) FROM merge_conflicts'), 0, 'partial unique-index predicate failure records no conflicts');
+
     $fk_read_base = $tmp . '/fk-read-base.sqlite';
     $fk_read_source = $tmp . '/fk-read-source.sqlite';
     $fk_read_target = $tmp . '/fk-read-target.sqlite';
