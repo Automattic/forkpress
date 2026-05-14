@@ -97,3 +97,13 @@ The first fixture should model a plugin object with:
 The expected result is a clean merge when branch ID bands keep both graphs
 distinct, and a plugin-scoped review conflict when a graph reference points at
 a missing or target-conflicting object.
+
+The clean branch-ID-band case is covered by:
+
+- `tests/cow/merge.php`: deterministic custom-table graph with JSON,
+  serialized option/postmeta references, and a referenced file.
+- `tests/cow/e2e.sh`: runtime WordPress fixture that creates the same shape
+  through branch-local requests before merging.
+
+The broken-reference and target-conflicting cases still need the validator API
+and plugin-scoped audit records before they can be represented honestly.

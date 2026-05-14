@@ -12996,6 +12996,123 @@ SQL);
     assert_same(scalar($band_ref_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $band_ref_target_id AND meta_key = '_forkpress_serialized_ref'"), $band_ref_target_serialized, 'target serialized post reference remains valid after banded merge');
     assert_same((int)scalar($band_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-ref-source'"), 0, 'banded WordPress reference merge records no ID collision conflicts');
 
+    $plugin_graph_base = $tmp . '/plugin-graph-base.sqlite';
+    $plugin_graph_source = $tmp . '/plugin-graph-source.sqlite';
+    $plugin_graph_target = $tmp . '/plugin-graph-target.sqlite';
+    $plugin_graph_metadata = $tmp . '/.forkpress/cow/merge/plugin-graph-metadata.sqlite';
+    create_base_db($plugin_graph_base);
+    $db = open_db($plugin_graph_base);
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER, meta_key TEXT, meta_value TEXT)');
+    $db->exec('CREATE TABLE plugin_graph_parent (id INTEGER PRIMARY KEY AUTOINCREMENT, branch TEXT NOT NULL, graph_json TEXT NOT NULL, graph_serialized TEXT NOT NULL)');
+    $db->exec('CREATE TABLE plugin_graph_child (id INTEGER PRIMARY KEY AUTOINCREMENT, parent_id INTEGER NOT NULL, branch TEXT NOT NULL, file_path TEXT NOT NULL, payload TEXT NOT NULL)');
+    $db->close();
+    copy($plugin_graph_base, $plugin_graph_source);
+    copy($plugin_graph_base, $plugin_graph_target);
+    $plugin_graph_base_root = $tmp . '/plugin-graph-files-base';
+    $plugin_graph_source_root = $tmp . '/plugin-graph-files-source';
+    $plugin_graph_target_root = $tmp . '/plugin-graph-files-target';
+    mkdir($plugin_graph_base_root . '/wp-content/uploads', 0777, true);
+    copy_tree_for_test($plugin_graph_base_root, $plugin_graph_source_root);
+    copy_tree_for_test($plugin_graph_base_root, $plugin_graph_target_root);
+    $plugin_graph_file_base = $tmp . '/.forkpress/cow/merge/file-bases/plugin-graph-source.json';
+    cow_merge_capture_file_base($plugin_graph_base_root, $plugin_graph_file_base);
+    cow_merge_allocate_autoincrement_bands($plugin_graph_source, $plugin_graph_metadata, 'feature-plugin-graph-source');
+    cow_merge_allocate_autoincrement_bands($plugin_graph_target, $plugin_graph_metadata, 'feature-plugin-graph-target');
+    $write_plugin_graph = static function (string $db_path, string $root, string $branch): array {
+        $db = open_db($db_path);
+        $suffix = ucfirst($branch);
+        $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status) VALUES ('Plugin $suffix Page', 'plugin graph page', 'publish')");
+        $page_id = (int)$db->lastInsertRowID();
+        $file_path = "wp-content/uploads/plugin-graph-$branch.dat";
+        write_test_file($root . '/' . $file_path, "plugin graph file for $branch\n");
+        $initial_graph = [
+            'branch' => $branch,
+            'page_id' => $page_id,
+            'file_path' => $file_path,
+        ];
+        $stmt = $db->prepare('INSERT INTO plugin_graph_parent (branch, graph_json, graph_serialized) VALUES (:branch, :graph_json, :graph_serialized)');
+        $stmt->bindValue(':branch', $branch, SQLITE3_TEXT);
+        $stmt->bindValue(':graph_json', json_encode($initial_graph, JSON_UNESCAPED_SLASHES), SQLITE3_TEXT);
+        $stmt->bindValue(':graph_serialized', serialize($initial_graph), SQLITE3_TEXT);
+        $stmt->execute();
+        $parent_id = (int)$db->lastInsertRowID();
+        $child_payload = [
+            'branch' => $branch,
+            'parent_id' => $parent_id,
+            'page_id' => $page_id,
+            'file_path' => $file_path,
+        ];
+        $stmt = $db->prepare('INSERT INTO plugin_graph_child (parent_id, branch, file_path, payload) VALUES (:parent_id, :branch, :file_path, :payload)');
+        $stmt->bindValue(':parent_id', $parent_id, SQLITE3_INTEGER);
+        $stmt->bindValue(':branch', $branch, SQLITE3_TEXT);
+        $stmt->bindValue(':file_path', $file_path, SQLITE3_TEXT);
+        $stmt->bindValue(':payload', json_encode($child_payload, JSON_UNESCAPED_SLASHES), SQLITE3_TEXT);
+        $stmt->execute();
+        $child_id = (int)$db->lastInsertRowID();
+        $graph = $initial_graph + [
+            'parent_id' => $parent_id,
+            'child_id' => $child_id,
+        ];
+        $stmt = $db->prepare('UPDATE plugin_graph_parent SET graph_json = :graph_json, graph_serialized = :graph_serialized WHERE id = :parent_id');
+        $stmt->bindValue(':graph_json', json_encode($graph, JSON_UNESCAPED_SLASHES), SQLITE3_TEXT);
+        $stmt->bindValue(':graph_serialized', serialize($graph), SQLITE3_TEXT);
+        $stmt->bindValue(':parent_id', $parent_id, SQLITE3_INTEGER);
+        $stmt->execute();
+        $stmt = $db->prepare('INSERT INTO wp_options (option_name, option_value, autoload) VALUES (:name, :value, :autoload)');
+        $stmt->bindValue(':name', "plugin_graph_$branch", SQLITE3_TEXT);
+        $stmt->bindValue(':value', serialize($graph), SQLITE3_TEXT);
+        $stmt->bindValue(':autoload', 'no', SQLITE3_TEXT);
+        $stmt->execute();
+        $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_plugin_graph_ref', :value)");
+        $stmt->bindValue(':post_id', $page_id, SQLITE3_INTEGER);
+        $stmt->bindValue(':value', json_encode($graph, JSON_UNESCAPED_SLASHES), SQLITE3_TEXT);
+        $stmt->execute();
+        $db->close();
+        return $graph;
+    };
+    $plugin_graph_source_graph = $write_plugin_graph($plugin_graph_source, $plugin_graph_source_root, 'source');
+    $plugin_graph_target_graph = $write_plugin_graph($plugin_graph_target, $plugin_graph_target_root, 'target');
+    assert_true($plugin_graph_source_graph['parent_id'] !== $plugin_graph_target_graph['parent_id'], 'plugin graph branches receive distinct parent IDs before references are written');
+    assert_true($plugin_graph_source_graph['child_id'] !== $plugin_graph_target_graph['child_id'], 'plugin graph branches receive distinct child IDs before references are written');
+    $plugin_graph_result = cow_merge_branch_state(
+        $plugin_graph_base,
+        $plugin_graph_source,
+        $plugin_graph_target,
+        $plugin_graph_metadata,
+        'feature-plugin-graph-source',
+        'feature-plugin-graph-target',
+        $plugin_graph_file_base,
+        $plugin_graph_source_root,
+        $plugin_graph_target_root
+    );
+    assert_same($plugin_graph_result['status'], 'completed', 'banded plugin graph with custom tables, references, and files merges cleanly');
+    $assert_plugin_graph = static function (string $db_path, string $root, array $graph, string $branch): void {
+        $parent_id = (int)$graph['parent_id'];
+        $child_id = (int)$graph['child_id'];
+        $page_id = (int)$graph['page_id'];
+        $db = open_db($db_path);
+        $parent = $db->querySingle("SELECT graph_json, graph_serialized FROM plugin_graph_parent WHERE id = $parent_id AND branch = '$branch'", true);
+        $child = $db->querySingle("SELECT parent_id, file_path, payload FROM plugin_graph_child WHERE id = $child_id AND branch = '$branch'", true);
+        $option = $db->querySingle("SELECT option_value FROM wp_options WHERE option_name = 'plugin_graph_$branch'");
+        $postmeta = $db->querySingle("SELECT meta_value FROM wp_postmeta WHERE post_id = $page_id AND meta_key = '_plugin_graph_ref'");
+        $db->close();
+        $parent_json = is_array($parent) ? json_decode((string)$parent['graph_json'], true) : null;
+        $parent_serialized = is_array($parent) ? unserialize((string)$parent['graph_serialized']) : null;
+        $child_payload = is_array($child) ? json_decode((string)$child['payload'], true) : null;
+        $option_graph = is_string($option) ? unserialize($option) : null;
+        $postmeta_graph = is_string($postmeta) ? json_decode($postmeta, true) : null;
+        assert_same($parent_json, $graph, "plugin $branch parent JSON graph references the merged object IDs");
+        assert_same($parent_serialized, $graph, "plugin $branch parent serialized graph references the merged object IDs");
+        assert_same($option_graph, $graph, "plugin $branch option graph references the merged object IDs");
+        assert_same($postmeta_graph, $graph, "plugin $branch postmeta graph references the merged object IDs");
+        assert_same((int)($child['parent_id'] ?? 0), $parent_id, "plugin $branch child row points at the merged parent");
+        assert_same($child_payload['parent_id'] ?? null, $parent_id, "plugin $branch child JSON payload points at the merged parent");
+        assert_true(file_exists($root . '/' . $graph['file_path']), "plugin $branch referenced file exists after merge");
+    };
+    $assert_plugin_graph($plugin_graph_target, $plugin_graph_target_root, $plugin_graph_source_graph, 'source');
+    $assert_plugin_graph($plugin_graph_target, $plugin_graph_target_root, $plugin_graph_target_graph, 'target');
+    assert_same((int)scalar($plugin_graph_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-plugin-graph-source'"), 0, 'plugin graph merge records no generic conflicts while IDs remain banded');
+
     copy($band_base, $band_feature_a_reset);
     $result = cow_merge_allocate_autoincrement_bands($band_feature_a_reset, $band_metadata, 'feature-band-a');
     assert_same($result['allocated'], 3, 'reset branch DB below its old band gets fresh bands instead of reusing possibly published IDs');
