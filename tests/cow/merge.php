@@ -3985,6 +3985,36 @@ SQL);
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-schema-view-savepoint'"), 0, 'failed source-added view savepoint records no partial conflicts');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-schema-view-savepoint' AND status = 'failed'"), 1, 'failed source-added view savepoint leaves an auditable failed run');
 
+    $schema_view_release_base = $tmp . '/schema-view-release-base.sqlite';
+    $schema_view_release_source = $tmp . '/schema-view-release-source.sqlite';
+    $schema_view_release_target = $tmp . '/schema-view-release-target.sqlite';
+    create_base_db($schema_view_release_base);
+    copy($schema_view_release_base, $schema_view_release_source);
+    copy($schema_view_release_base, $schema_view_release_target);
+    $db = open_db($schema_view_release_source);
+    $db->exec('CREATE VIEW plugin_source_release_view AS SELECT item_id, label FROM plugin_items');
+    $db->close();
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'RELEASE forkpress_schema_object_apply' && $message === 'failed to release source-added view schema apply savepoint') {
+                throw new RuntimeException('forced source-added view release failure');
+            }
+        },
+    ];
+    $schema_view_release_failure = null;
+    try {
+        cow_merge_databases($schema_view_release_base, $schema_view_release_source, $schema_view_release_target, $metadata, 'feature-schema-view-release', 'main');
+    } catch (Throwable $e) {
+        $schema_view_release_failure = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($schema_view_release_failure !== null && str_contains($schema_view_release_failure, 'forced source-added view release failure'), 'source-added view savepoint release failure is surfaced to the caller');
+    assert_same((int)scalar($schema_view_release_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_source_release_view'"), 0, 'failed source-added view savepoint release rolls back target schema');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-schema-view-release'"), 0, 'failed source-added view release records no partial conflicts');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-schema-view-release'"), 0, 'failed source-added view release records no partial decisions');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-schema-view-release' AND status = 'failed'"), 1, 'failed source-added view release leaves an auditable failed run');
+
     $schema_trigger_savepoint_base = $tmp . '/schema-trigger-savepoint-base.sqlite';
     $schema_trigger_savepoint_source = $tmp . '/schema-trigger-savepoint-source.sqlite';
     $schema_trigger_savepoint_target = $tmp . '/schema-trigger-savepoint-target.sqlite';
@@ -5524,6 +5554,31 @@ SQL);
     assert_true($schema_table_drop_savepoint_failure !== null && str_contains($schema_table_drop_savepoint_failure, 'forced source table drop savepoint failure'), 'source table drop savepoint failure is surfaced to the caller');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_table_drop_conflict_id"), 0, 'failed source table drop savepoint records no resolution metadata');
     assert_same((int)scalar($schema_table_drop_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_table_drop'"), 1, 'failed source table drop savepoint leaves target schema unchanged');
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'RELEASE forkpress_source_table_drop' && $message === 'failed to release source table drop schema resolution savepoint') {
+                throw new RuntimeException('forced source table drop release failure');
+            }
+        },
+    ];
+    $schema_table_drop_release_failure = null;
+    try {
+        cow_merge_resolve_conflict(
+            $metadata,
+            $schema_table_drop_conflict_id,
+            'source',
+            false,
+            'Preview source table drop with failing release.',
+            'test'
+        );
+    } catch (Throwable $e) {
+        $schema_table_drop_release_failure = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($schema_table_drop_release_failure !== null && str_contains($schema_table_drop_release_failure, 'forced source table drop release failure'), 'source table drop savepoint release failure is surfaced to the caller');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_table_drop_conflict_id"), 0, 'failed source table drop release records no resolution metadata');
+    assert_same((int)scalar($schema_table_drop_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_table_drop'"), 1, 'failed source table drop release leaves target schema unchanged');
     $schema_table_drop_dry = cow_merge_resolve_conflict(
         $metadata,
         $schema_table_drop_conflict_id,

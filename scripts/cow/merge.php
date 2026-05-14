@@ -5409,6 +5409,45 @@ function cow_merge_exec_checked(SQLite3 $db, string $sql, string $message): void
     }
 }
 
+function cow_merge_release_savepoint_checked(SQLite3 $db, string $savepoint, string $context): void {
+    cow_merge_exec_checked(
+        $db,
+        'RELEASE ' . $savepoint,
+        'failed to release ' . $context . ' savepoint'
+    );
+}
+
+function cow_merge_rollback_release_savepoint_checked(
+    SQLite3 $db,
+    string $savepoint,
+    string $context,
+    ?Throwable $cause = null
+): ?RuntimeException {
+    $errors = [];
+    try {
+        cow_merge_exec_checked(
+            $db,
+            'ROLLBACK TO ' . $savepoint,
+            'failed to roll back ' . $context . ' savepoint'
+        );
+    } catch (Throwable $e) {
+        $errors[] = $e->getMessage();
+    }
+    try {
+        cow_merge_release_savepoint_checked($db, $savepoint, $context);
+    } catch (Throwable $e) {
+        $errors[] = $e->getMessage();
+    }
+    if (!$errors) {
+        return null;
+    }
+    $message = 'failed to clean up ' . $context . ' savepoint: ' . implode('; ', $errors);
+    if ($cause !== null) {
+        $message = $cause->getMessage() . '; ' . $message;
+    }
+    return new RuntimeException($message, 0, $cause);
+}
+
 function cow_merge_schema_column_payload(mixed $payload): ?array {
     if (!is_array($payload)) {
         return null;
@@ -6525,12 +6564,19 @@ function cow_merge_apply_source_table_rebuild(SQLite3 $target, string $table, st
         }
         cow_merge_validate_views($target, $dependent_views, 'post-rebuild');
         cow_merge_validate_foreign_key_integrity($target, 'source table rebuild schema resolution');
-        $target->exec('RELEASE forkpress_schema_rebuild');
+        cow_merge_release_savepoint_checked($target, 'forkpress_schema_rebuild', 'source table rebuild schema resolution');
         $target_savepoint_started = false;
     } catch (Throwable $e) {
         if ($target_savepoint_started) {
-            $target->exec('ROLLBACK TO forkpress_schema_rebuild');
-            $target->exec('RELEASE forkpress_schema_rebuild');
+            $cleanup_failure = cow_merge_rollback_release_savepoint_checked(
+                $target,
+                'forkpress_schema_rebuild',
+                'source table rebuild schema resolution',
+                $e
+            );
+            if ($cleanup_failure !== null) {
+                throw $cleanup_failure;
+            }
         }
         throw $e;
     }
@@ -6546,12 +6592,26 @@ function cow_merge_validate_source_table_rebuild(SQLite3 $target, string $table,
         );
         $target_savepoint_started = true;
         cow_merge_apply_source_table_rebuild($target, $table, $source_sql, $source_columns, $target_columns);
-        $target->exec('ROLLBACK TO forkpress_schema_rebuild_validation');
-        $target->exec('RELEASE forkpress_schema_rebuild_validation');
+        $cleanup_failure = cow_merge_rollback_release_savepoint_checked(
+            $target,
+            'forkpress_schema_rebuild_validation',
+            'source table rebuild validation'
+        );
+        if ($cleanup_failure !== null) {
+            throw $cleanup_failure;
+        }
+        $target_savepoint_started = false;
     } catch (Throwable $e) {
         if ($target_savepoint_started) {
-            $target->exec('ROLLBACK TO forkpress_schema_rebuild_validation');
-            $target->exec('RELEASE forkpress_schema_rebuild_validation');
+            $cleanup_failure = cow_merge_rollback_release_savepoint_checked(
+                $target,
+                'forkpress_schema_rebuild_validation',
+                'source table rebuild validation',
+                $e
+            );
+            if ($cleanup_failure !== null) {
+                throw $cleanup_failure;
+            }
         }
         throw $e;
     }
@@ -6631,12 +6691,19 @@ function cow_merge_apply_source_view_schema_resolution(SQLite3 $target, string $
             cow_merge_validate_views($target, [['name' => $view, 'sql' => $source_sql]], 'post-view-resolution');
         }
         cow_merge_validate_views($target, $dependent_views, 'post-view-resolution');
-        $target->exec('RELEASE forkpress_view_resolution');
+        cow_merge_release_savepoint_checked($target, 'forkpress_view_resolution', 'source view schema resolution');
         $target_savepoint_started = false;
     } catch (Throwable $e) {
         if ($target_savepoint_started) {
-            $target->exec('ROLLBACK TO forkpress_view_resolution');
-            $target->exec('RELEASE forkpress_view_resolution');
+            $cleanup_failure = cow_merge_rollback_release_savepoint_checked(
+                $target,
+                'forkpress_view_resolution',
+                'source view schema resolution',
+                $e
+            );
+            if ($cleanup_failure !== null) {
+                throw $cleanup_failure;
+            }
         }
         throw $e;
     }
@@ -6721,15 +6788,29 @@ function cow_merge_apply_source_table_drop(SQLite3 $target, string $table, bool 
         }
         cow_merge_validate_foreign_key_integrity($target, 'source table drop schema resolution');
         if ($apply) {
-            $target->exec('RELEASE forkpress_source_table_drop');
+            cow_merge_release_savepoint_checked($target, 'forkpress_source_table_drop', 'source table drop schema resolution');
         } else {
-            $target->exec('ROLLBACK TO forkpress_source_table_drop');
-            $target->exec('RELEASE forkpress_source_table_drop');
+            $cleanup_failure = cow_merge_rollback_release_savepoint_checked(
+                $target,
+                'forkpress_source_table_drop',
+                'source table drop schema resolution'
+            );
+            if ($cleanup_failure !== null) {
+                throw $cleanup_failure;
+            }
         }
+        $target_savepoint_started = false;
     } catch (Throwable $e) {
         if ($target_savepoint_started) {
-            $target->exec('ROLLBACK TO forkpress_source_table_drop');
-            $target->exec('RELEASE forkpress_source_table_drop');
+            $cleanup_failure = cow_merge_rollback_release_savepoint_checked(
+                $target,
+                'forkpress_source_table_drop',
+                'source table drop schema resolution',
+                $e
+            );
+            if ($cleanup_failure !== null) {
+                throw $cleanup_failure;
+            }
         }
         throw $e;
     }
@@ -6761,15 +6842,29 @@ function cow_merge_apply_source_index_schema_resolution(SQLite3 $target, string 
         }
         cow_merge_validate_foreign_key_integrity($target, 'source index schema resolution');
         if ($apply) {
-            $target->exec('RELEASE forkpress_index_resolution');
+            cow_merge_release_savepoint_checked($target, 'forkpress_index_resolution', 'source index schema resolution');
         } else {
-            $target->exec('ROLLBACK TO forkpress_index_resolution');
-            $target->exec('RELEASE forkpress_index_resolution');
+            $cleanup_failure = cow_merge_rollback_release_savepoint_checked(
+                $target,
+                'forkpress_index_resolution',
+                'source index schema resolution'
+            );
+            if ($cleanup_failure !== null) {
+                throw $cleanup_failure;
+            }
         }
+        $target_savepoint_started = false;
     } catch (Throwable $e) {
         if ($target_savepoint_started) {
-            $target->exec('ROLLBACK TO forkpress_index_resolution');
-            $target->exec('RELEASE forkpress_index_resolution');
+            $cleanup_failure = cow_merge_rollback_release_savepoint_checked(
+                $target,
+                'forkpress_index_resolution',
+                'source index schema resolution',
+                $e
+            );
+            if ($cleanup_failure !== null) {
+                throw $cleanup_failure;
+            }
         }
         throw $e;
     }
@@ -8933,18 +9028,46 @@ function cow_merge_validate_source_table_restore(
             $table,
             $restore_payload
         );
-        $target->exec('ROLLBACK TO forkpress_source_table_restore_validation');
-        $target->exec('RELEASE forkpress_source_table_restore_validation');
-        $meta->exec('ROLLBACK TO forkpress_source_table_restore_validation_meta');
-        $meta->exec('RELEASE forkpress_source_table_restore_validation_meta');
+        $target_cleanup_failure = cow_merge_rollback_release_savepoint_checked(
+            $target,
+            'forkpress_source_table_restore_validation',
+            'source table restore validation target'
+        );
+        if ($target_cleanup_failure !== null) {
+            throw $target_cleanup_failure;
+        }
+        $target_savepoint_started = false;
+        $meta_cleanup_failure = cow_merge_rollback_release_savepoint_checked(
+            $meta,
+            'forkpress_source_table_restore_validation_meta',
+            'source table restore validation metadata'
+        );
+        if ($meta_cleanup_failure !== null) {
+            throw $meta_cleanup_failure;
+        }
+        $meta_savepoint_started = false;
     } catch (Throwable $e) {
         if ($target_savepoint_started) {
-            $target->exec('ROLLBACK TO forkpress_source_table_restore_validation');
-            $target->exec('RELEASE forkpress_source_table_restore_validation');
+            $cleanup_failure = cow_merge_rollback_release_savepoint_checked(
+                $target,
+                'forkpress_source_table_restore_validation',
+                'source table restore validation target',
+                $e
+            );
+            if ($cleanup_failure !== null) {
+                $e = $cleanup_failure;
+            }
         }
         if ($meta_savepoint_started) {
-            $meta->exec('ROLLBACK TO forkpress_source_table_restore_validation_meta');
-            $meta->exec('RELEASE forkpress_source_table_restore_validation_meta');
+            $cleanup_failure = cow_merge_rollback_release_savepoint_checked(
+                $meta,
+                'forkpress_source_table_restore_validation_meta',
+                'source table restore validation metadata',
+                $e
+            );
+            if ($cleanup_failure !== null) {
+                $e = $cleanup_failure;
+            }
         }
         throw $e;
     }
@@ -9136,9 +9259,15 @@ function cow_merge_apply_safe_table_schema_changes(
                 $definition = $entry['definition'];
                 $sql = 'ALTER TABLE ' . cow_merge_quote_ident($table) . ' ADD COLUMN ' . $definition;
                 if (!$target->exec($sql)) {
-                    $target->exec('ROLLBACK TO forkpress_schema_merge');
-                    $target->exec('RELEASE forkpress_schema_merge');
+                    $cleanup_failure = cow_merge_rollback_release_savepoint_checked(
+                        $target,
+                        'forkpress_schema_merge',
+                        'automatic schema merge'
+                    );
                     $target_savepoint_started = false;
+                    if ($cleanup_failure !== null) {
+                        throw $cleanup_failure;
+                    }
                     $active = cow_merge_record_schema_conflict(
                         $meta,
                         $run_id,
@@ -9154,12 +9283,19 @@ function cow_merge_apply_safe_table_schema_changes(
                     return cow_merge_schema_conflict_result($active);
                 }
             }
-            $target->exec('RELEASE forkpress_schema_merge');
+            cow_merge_release_savepoint_checked($target, 'forkpress_schema_merge', 'automatic schema merge');
             $target_savepoint_started = false;
         } catch (Throwable $e) {
             if ($target_savepoint_started) {
-                $target->exec('ROLLBACK TO forkpress_schema_merge');
-                $target->exec('RELEASE forkpress_schema_merge');
+                $cleanup_failure = cow_merge_rollback_release_savepoint_checked(
+                    $target,
+                    'forkpress_schema_merge',
+                    'automatic schema merge',
+                    $e
+                );
+                if ($cleanup_failure !== null) {
+                    throw $cleanup_failure;
+                }
             }
             throw $e;
         }
@@ -9467,6 +9603,7 @@ function cow_merge_apply_schema_object_changes(
         if ($base_sql === null && $target_sql === null) {
             $apply_error = null;
             $target_savepoint_started = false;
+            $source_object_validated = false;
             try {
                 cow_merge_exec_checked(
                     $target,
@@ -9502,14 +9639,25 @@ function cow_merge_apply_schema_object_changes(
                 if ($type === 'view') {
                     cow_merge_validate_view_schema($target, $name, 'source-added');
                 }
-                $target->exec('RELEASE forkpress_schema_object_apply');
+                $source_object_validated = true;
+                cow_merge_release_savepoint_checked($target, 'forkpress_schema_object_apply', "source-added $type schema apply");
                 $target_savepoint_started = false;
             } catch (Throwable $e) {
                 if (!$target_savepoint_started) {
                     throw $e;
                 }
-                $target->exec('ROLLBACK TO forkpress_schema_object_apply');
-                $target->exec('RELEASE forkpress_schema_object_apply');
+                $cleanup_failure = cow_merge_rollback_release_savepoint_checked(
+                    $target,
+                    'forkpress_schema_object_apply',
+                    "source-added $type schema apply",
+                    $e
+                );
+                if ($cleanup_failure !== null) {
+                    throw $cleanup_failure;
+                }
+                if ($source_object_validated) {
+                    throw $e;
+                }
                 $apply_error = $e->getMessage();
             }
             if ($apply_error !== null) {
