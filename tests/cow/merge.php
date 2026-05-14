@@ -6312,6 +6312,40 @@ SQL);
         0,
         'failed table rebuild apply savepoint records no resolution metadata'
     );
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($message === 'failed to copy rows into rebuilt table') {
+                throw new RuntimeException('forced source table rebuild copy failure');
+            }
+        },
+    ];
+    $schema_rebuild_copy_failure = null;
+    try {
+        cow_merge_resolve_conflict(
+            $metadata,
+            $schema_rebuild_conflict_id,
+            'source',
+            false,
+            'Preview table rebuild with failing row copy.',
+            'test'
+        );
+    } catch (Throwable $e) {
+        $schema_rebuild_copy_failure = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($schema_rebuild_copy_failure !== null && str_contains($schema_rebuild_copy_failure, 'forced source table rebuild copy failure'), 'source table rebuild row copy failure is surfaced to the caller');
+    assert_same(column_type($schema_rebuild_target, 'plugin_items', 'value'), 'REAL', 'failed table rebuild row copy leaves target schema unchanged');
+    assert_same(
+        (int)scalar($schema_rebuild_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name LIKE '__forkpress_merge_rebuild_%'"),
+        0,
+        'failed table rebuild row copy rolls back the temporary rebuild table'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_rebuild_conflict_id"),
+        0,
+        'failed table rebuild row copy records no resolution metadata'
+    );
     $schema_rebuild_dry = cow_merge_resolve_conflict(
         $metadata,
         $schema_rebuild_conflict_id,

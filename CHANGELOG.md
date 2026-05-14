@@ -44,6 +44,7 @@
 - Tightened validation-gated source table restores and compatible table rebuilds so dry-run and apply reject latent foreign-key mismatches and invalid restored trigger programs before reporting success.
 - Tightened automatic safe schema merge and source-added view/trigger apply savepoints so begin failures surface cleanly and roll back staged target/metadata state.
 - Tightened validation-gated source table rebuild and source view resolution savepoints so begin failures surface cleanly without staging resolution metadata.
+- Tightened compatible table rebuild DDL execution so staged temporary tables and dependent schema rewrites roll back cleanly on SQLite infrastructure failures.
 - Tightened COW schema savepoint release/rollback cleanup so cleanup failures surface without leaving partial schema, decision, conflict, or resolution metadata.
 - Tightened schema object validation savepoint cleanup so release failures during source trigger/view dry-runs roll back target mutations and resolution metadata.
 - Tightened foreign-key dependent rewrite savepoint cleanup so release failures abort and roll back the DB merge instead of becoming misleading row constraint conflicts.

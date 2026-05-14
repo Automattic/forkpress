@@ -6763,46 +6763,44 @@ function cow_merge_apply_source_table_rebuild(SQLite3 $target, string $table, st
             'failed to start source table rebuild schema resolution savepoint'
         );
         $target_savepoint_started = true;
-        if (!$target->exec($create_sql)) {
-            throw new RuntimeException('failed to create rebuilt table: ' . $target->lastErrorMsg());
-        }
+        cow_merge_exec_checked($target, $create_sql, 'failed to create rebuilt table');
         $copy_sql = 'INSERT INTO ' . cow_merge_quote_ident($tmp_table) . ' (' . $insert_columns . ') ' .
             'SELECT ' . $select_columns . ' FROM ' . cow_merge_quote_ident($table);
-        if (!$target->exec($copy_sql)) {
-            throw new RuntimeException('failed to copy rows into rebuilt table: ' . $target->lastErrorMsg());
-        }
+        cow_merge_exec_checked($target, $copy_sql, 'failed to copy rows into rebuilt table');
         foreach (array_reverse($dependent_views) as $view) {
-            if (!$target->exec('DROP VIEW ' . cow_merge_quote_ident((string)$view['name']))) {
-                throw new RuntimeException('failed to drop target view ' . $view['name'] . ' during schema rebuild: ' . $target->lastErrorMsg());
-            }
+            cow_merge_exec_checked(
+                $target,
+                'DROP VIEW ' . cow_merge_quote_ident((string)$view['name']),
+                'failed to drop target view ' . $view['name'] . ' during schema rebuild'
+            );
         }
-        if (!$target->exec('DROP TABLE ' . cow_merge_quote_ident($table))) {
-            throw new RuntimeException('failed to drop old table during schema rebuild: ' . $target->lastErrorMsg());
-        }
-        if (!$target->exec('ALTER TABLE ' . cow_merge_quote_ident($tmp_table) . ' RENAME TO ' . cow_merge_quote_ident($table))) {
-            throw new RuntimeException('failed to rename rebuilt table: ' . $target->lastErrorMsg());
-        }
+        cow_merge_exec_checked($target, 'DROP TABLE ' . cow_merge_quote_ident($table), 'failed to drop old table during schema rebuild');
+        cow_merge_exec_checked(
+            $target,
+            'ALTER TABLE ' . cow_merge_quote_ident($tmp_table) . ' RENAME TO ' . cow_merge_quote_ident($table),
+            'failed to rename rebuilt table'
+        );
         foreach ($dependencies as $dependency) {
-            if (!$target->exec((string)$dependency['sql'])) {
-                throw new RuntimeException(
-                    'failed to recreate target ' . $dependency['type'] . ' ' . $dependency['name'] .
-                    ' after schema rebuild: ' . $target->lastErrorMsg()
-                );
-            }
+            cow_merge_exec_checked(
+                $target,
+                (string)$dependency['sql'],
+                'failed to recreate target ' . $dependency['type'] . ' ' . $dependency['name'] . ' after schema rebuild'
+            );
             cow_merge_validate_schema_dependency_program($target, $dependency, 'schema rebuild');
         }
         foreach ($dependent_views as $view) {
-            if (!$target->exec((string)$view['sql'])) {
-                throw new RuntimeException('failed to recreate target view ' . $view['name'] . ' after schema rebuild: ' . $target->lastErrorMsg());
-            }
+            cow_merge_exec_checked(
+                $target,
+                (string)$view['sql'],
+                'failed to recreate target view ' . $view['name'] . ' after schema rebuild'
+            );
         }
         foreach ($dependent_view_triggers as $dependency) {
-            if (!$target->exec((string)$dependency['sql'])) {
-                throw new RuntimeException(
-                    'failed to recreate dependent target ' . $dependency['type'] . ' ' . $dependency['name'] .
-                    ' after schema rebuild: ' . $target->lastErrorMsg()
-                );
-            }
+            cow_merge_exec_checked(
+                $target,
+                (string)$dependency['sql'],
+                'failed to recreate dependent target ' . $dependency['type'] . ' ' . $dependency['name'] . ' after schema rebuild'
+            );
             cow_merge_validate_schema_dependency_program($target, $dependency, 'schema rebuild');
         }
         cow_merge_validate_views($target, $dependent_views, 'post-rebuild');
