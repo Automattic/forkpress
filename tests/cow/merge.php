@@ -321,11 +321,19 @@ try {
     $merge_restore_failure_target = $tmp . '/merge-restore-failure-target.sqlite';
     $merge_restore_failure_metadata = $tmp . '/.forkpress/cow/merge/merge-restore-failure/metadata.sqlite';
     create_base_db($merge_restore_failure_base);
+    $db = open_db($merge_restore_failure_base);
+    $db->exec('CREATE TABLE plugin_restore_failure_index_conflict (id INTEGER PRIMARY KEY, label TEXT)');
+    $db->exec("INSERT INTO plugin_restore_failure_index_conflict (id, label) VALUES (1, 'Alpha')");
+    $db->close();
     copy($merge_restore_failure_base, $merge_restore_failure_source);
     copy($merge_restore_failure_base, $merge_restore_failure_target);
     $db = open_db($merge_restore_failure_source);
     $db->exec("UPDATE wp_posts SET post_content = 'Source restore failure content' WHERE ID = 1");
     $db->exec('CREATE INDEX plugin_restore_failure_posts_content_idx ON wp_posts(post_content)');
+    $db->exec('CREATE UNIQUE INDEX plugin_restore_failure_label_lower_idx ON plugin_restore_failure_index_conflict(lower(label))');
+    $db->close();
+    $db = open_db($merge_restore_failure_target);
+    $db->exec("INSERT INTO plugin_restore_failure_index_conflict (id, label) VALUES (2, 'alpha')");
     $db->close();
     $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
         static function (SQLite3 $db, string $sql, string $message): void {
@@ -362,6 +370,16 @@ try {
         (int)scalar($merge_restore_failure_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_restore_failure_posts_content_idx'"),
         1,
         'failed direct DB merge restore leaves committed source-added indexes available for manual recovery'
+    );
+    assert_same(
+        (int)scalar($merge_restore_failure_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_restore_failure_label_lower_idx'"),
+        0,
+        'failed direct DB merge restore does not install source-added indexes rejected before target commit'
+    );
+    assert_same(
+        (int)scalar($merge_restore_failure_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE conflict_type = 'schema-source-added-index' AND column_name = 'plugin_restore_failure_label_lower_idx'"),
+        0,
+        'failed direct DB merge restore rolls back staged source-added index conflict metadata'
     );
     $merge_restore_failure_run_id = (int)scalar($merge_restore_failure_metadata, "SELECT id FROM merge_runs WHERE source_branch = 'feature-merge-restore-failure' AND status = 'failed' ORDER BY id DESC LIMIT 1");
     assert_true($merge_restore_failure_run_id > 0, 'direct DB merge restore failure leaves an auditable failed run');
