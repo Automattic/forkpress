@@ -10392,9 +10392,22 @@ function cow_merge_databases(
 
 function cow_merge_set_run_status(string $metadata_db, int $run_id, string $status): void {
     $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READWRITE | SQLITE3_OPEN_CREATE);
-    cow_merge_ensure_metadata($meta);
-    cow_merge_finish_run($meta, $run_id, $status);
-    $meta->close();
+    $transaction_started = false;
+    try {
+        cow_merge_ensure_metadata($meta);
+        cow_merge_exec_checked($meta, 'BEGIN IMMEDIATE', 'failed to start run status metadata transaction');
+        $transaction_started = true;
+        cow_merge_finish_run($meta, $run_id, $status);
+        cow_merge_exec_checked($meta, 'COMMIT', 'failed to commit run status metadata transaction');
+        $transaction_started = false;
+    } catch (Throwable $e) {
+        if ($transaction_started) {
+            @$meta->exec('ROLLBACK');
+        }
+        throw $e;
+    } finally {
+        $meta->close();
+    }
 }
 
 function cow_merge_record_failed_run(
@@ -10407,11 +10420,24 @@ function cow_merge_record_failed_run(
     ?string $failure_reason = null
 ): int {
     $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READWRITE | SQLITE3_OPEN_CREATE);
-    cow_merge_ensure_metadata($meta);
-    $run_id = cow_merge_start_run($meta, $source_branch, $target_branch, $base_db, $source_db, $target_db);
-    cow_merge_finish_run($meta, $run_id, 'failed', $failure_reason);
-    $meta->close();
-    return $run_id;
+    $transaction_started = false;
+    try {
+        cow_merge_ensure_metadata($meta);
+        cow_merge_exec_checked($meta, 'BEGIN IMMEDIATE', 'failed to start failed-run metadata transaction');
+        $transaction_started = true;
+        $run_id = cow_merge_start_run($meta, $source_branch, $target_branch, $base_db, $source_db, $target_db);
+        cow_merge_finish_run($meta, $run_id, 'failed', $failure_reason);
+        cow_merge_exec_checked($meta, 'COMMIT', 'failed to commit failed-run metadata transaction');
+        $transaction_started = false;
+        return $run_id;
+    } catch (Throwable $e) {
+        if ($transaction_started) {
+            @$meta->exec('ROLLBACK');
+        }
+        throw $e;
+    } finally {
+        $meta->close();
+    }
 }
 
 function cow_merge_filesystem_rollback_failure_parts(Throwable $e): ?array {

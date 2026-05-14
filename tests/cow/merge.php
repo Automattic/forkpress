@@ -3229,6 +3229,71 @@ SQL);
     assert_true(str_contains($whole_audit_text, 'failure=') && str_contains($whole_audit_text, 'forced whole-branch file failure'), 'merge audit text prints failed-run reason');
     assert_same((int)scalar($whole_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE decision = 'source-applied'"), 0, 'whole-branch rollback does not leave source-applied decisions for rolled-back changes');
 
+    $run_status_commit_metadata = $tmp . '/.forkpress/cow/merge/run-status-commit-metadata.sqlite';
+    $run_status_meta = open_db($run_status_commit_metadata);
+    cow_merge_ensure_metadata($run_status_meta);
+    $run_status_id = cow_merge_start_run(
+        $run_status_meta,
+        'feature-run-status-commit',
+        'main',
+        '/tmp/base.sqlite',
+        '/tmp/source.sqlite',
+        '/tmp/target.sqlite'
+    );
+    $run_status_meta->close();
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'COMMIT' && $message === 'failed to commit run status metadata transaction') {
+                throw new RuntimeException('forced run status metadata commit failure');
+            }
+        },
+    ];
+    $run_status_commit_failure_message = null;
+    try {
+        cow_merge_set_run_status($run_status_commit_metadata, $run_status_id, 'completed');
+    } catch (Throwable $e) {
+        $run_status_commit_failure_message = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($run_status_commit_failure_message !== null && str_contains($run_status_commit_failure_message, 'forced run status metadata commit failure'), 'run status metadata commit failure is surfaced to the caller');
+    assert_same(
+        scalar($run_status_commit_metadata, "SELECT status FROM merge_runs WHERE id = $run_status_id"),
+        'running',
+        'failed run status metadata commit rolls back the staged successful status'
+    );
+
+    $failed_run_commit_metadata = $tmp . '/.forkpress/cow/merge/failed-run-commit-metadata.sqlite';
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'COMMIT' && $message === 'failed to commit failed-run metadata transaction') {
+                throw new RuntimeException('forced failed-run metadata commit failure');
+            }
+        },
+    ];
+    $failed_run_commit_failure_message = null;
+    try {
+        cow_merge_record_failed_run(
+            $failed_run_commit_metadata,
+            'feature-failed-run-commit',
+            'main',
+            '/tmp/base.sqlite',
+            '/tmp/source.sqlite',
+            '/tmp/target.sqlite',
+            'forced failure marker'
+        );
+    } catch (Throwable $e) {
+        $failed_run_commit_failure_message = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($failed_run_commit_failure_message !== null && str_contains($failed_run_commit_failure_message, 'forced failed-run metadata commit failure'), 'failed-run metadata commit failure is surfaced to the caller');
+    assert_same(
+        (int)scalar($failed_run_commit_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-failed-run-commit'"),
+        0,
+        'failed failed-run metadata commit rolls back the staged failed run marker'
+    );
+
     $late_whole_base_db = $tmp . '/late-whole-rollback-base.sqlite';
     $late_whole_source_db = $tmp . '/late-whole-rollback-source.sqlite';
     $late_whole_target_db = $tmp . '/late-whole-rollback-target.sqlite';
