@@ -3053,7 +3053,7 @@ function cow_merge_delete_row(SQLite3 $target, string $table, array $identity, a
 }
 
 function cow_merge_ensure_metadata(SQLite3 $meta): void {
-    $meta->exec('PRAGMA journal_mode = WAL');
+    cow_merge_exec_checked($meta, 'PRAGMA journal_mode = WAL', 'failed to configure metadata journal mode');
     $schema_savepoint = 'cow_merge_ensure_metadata_schema';
     cow_merge_exec_checked(
         $meta,

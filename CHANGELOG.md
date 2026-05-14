@@ -50,6 +50,7 @@
 - Tightened COW metadata schema initialization savepoints so begin/release failures surface without leaving half-created audit tables.
 - Tightened COW metadata schema DDL execution so table, index, and legacy migration statement failures roll back metadata setup cleanly.
 - Tightened COW metadata schema inspection queries so table-info and review-note schema lookup failures roll back metadata setup cleanly.
+- Tightened COW metadata journal setup so failures surface before schema initialization can leave partial audit tables.
 - Tightened validation-gated source table restores so preserved target views and trigger programs that reference the restored table must still validate before dry-run or apply reports success.
 - Added COW coverage for target-dropped table restore rollback when preserved target trigger bodies or target view triggers become invalid after the audited source table schema is restored.
 - Added COW coverage for target-dropped table restore rollback when a preserved transitive target view trigger becomes invalid after the audited source table schema is restored.

@@ -2614,6 +2614,30 @@ SQL);
     }
     $missing_audit = cow_merge_audit_report($tmp . '/missing-metadata.sqlite', null, 5);
     assert_same($missing_audit['metadata_exists'], false, 'merge audit report handles missing metadata');
+    $metadata_journal_failure = $tmp . '/metadata-journal-failure.sqlite';
+    $metadata_journal_failure_db = open_db($metadata_journal_failure);
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        function (SQLite3 $db, string $sql, string $message) use ($metadata_journal_failure_db): void {
+            if (
+                $db === $metadata_journal_failure_db &&
+                $sql === 'PRAGMA journal_mode = WAL' &&
+                $message === 'failed to configure metadata journal mode'
+            ) {
+                throw new RuntimeException('forced metadata journal setup failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_ensure_metadata($metadata_journal_failure_db),
+        'forced metadata journal setup failure',
+        'metadata journal setup failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    assert_same((int)$metadata_journal_failure_db->querySingle("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name LIKE 'merge_%'"), 0, 'failed metadata journal setup leaves no metadata tables');
+    cow_merge_ensure_metadata($metadata_journal_failure_db);
+    assert_same((int)$metadata_journal_failure_db->querySingle("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'merge_runs'"), 1, 'metadata schema creation succeeds after journal setup failure is cleared');
+    $metadata_journal_failure_db->close();
+
     $metadata_schema_begin_failure = $tmp . '/metadata-schema-begin-failure.sqlite';
     $metadata_schema_begin_failure_db = open_db($metadata_schema_begin_failure);
     $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
