@@ -8403,6 +8403,7 @@ function cow_merge_fetch_rows(SQLite3 $db, string $sql, array $params = []): arr
         }
         $rows[] = $clean;
     }
+    cow_merge_result_finalize_checked($res, 'failed to finalize audit query');
     return $rows;
 }
 
@@ -8414,7 +8415,9 @@ function cow_merge_audit_has_table(SQLite3 $db, string $table): bool {
     );
     cow_merge_bind($stmt, ':name', $table);
     $res = cow_merge_execute_checked($stmt, $db, 'failed to execute audit table check');
-    return (bool)$res->fetchArray(SQLITE3_NUM);
+    $exists = (bool)$res->fetchArray(SQLITE3_NUM);
+    cow_merge_result_finalize_checked($res, 'failed to finalize audit table check');
+    return $exists;
 }
 
 function cow_merge_audit_has_column(SQLite3 $db, string $table, string $column): bool {
@@ -8428,9 +8431,11 @@ function cow_merge_audit_has_column(SQLite3 $db, string $table, string $column):
     );
     while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
         if ((string)$row['name'] === $column) {
+            cow_merge_result_finalize_checked($res, 'failed to finalize audit table inspection');
             return true;
         }
     }
+    cow_merge_result_finalize_checked($res, 'failed to finalize audit table inspection');
     return false;
 }
 

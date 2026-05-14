@@ -2756,6 +2756,48 @@ SQL);
     );
     unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_statement_execute']);
 
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize'] = [
+        static function (SQLite3Result $result, string $message): void {
+            if ($message === 'failed to finalize audit table check') {
+                throw new RuntimeException('forced audit table check finalize failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_audit_report($metadata, null, 5),
+        'forced audit table check finalize failure',
+        'merge audit table-check finalize failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize']);
+
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize'] = [
+        static function (SQLite3Result $result, string $message): void {
+            if ($message === 'failed to finalize audit table inspection') {
+                throw new RuntimeException('forced audit table inspection finalize failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_audit_report($metadata, null, 5),
+        'forced audit table inspection finalize failure',
+        'merge audit table-info finalize failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize']);
+
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize'] = [
+        static function (SQLite3Result $result, string $message): void {
+            if ($message === 'failed to finalize audit query') {
+                throw new RuntimeException('forced audit row finalize failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_audit_report($metadata, null, 5),
+        'forced audit row finalize failure',
+        'merge audit row-query finalize failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize']);
+
     $metadata_open_failure = $tmp . '/metadata-open-failure.sqlite';
     $GLOBALS['cow_merge_test_hooks']['before_sqlite_open'] = [
         function (string $path, int $flags) use ($metadata_open_failure): void {
