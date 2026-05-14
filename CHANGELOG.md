@@ -56,6 +56,7 @@
 - Tightened direct DB merge transaction boundaries so target and metadata begin/commit failures use checked rollback paths and remain deterministically covered.
 - Restored direct DB merge target snapshots when merge metadata commit fails after the target commit, keeping target rows/schema and ForkPress-owned metadata atomic.
 - Added COW coverage for direct DB merge target snapshot restore failures, proving rollback-failure audit rows and JSONL backup artifacts remain available for recovery.
+- Added COW coverage proving direct DB merge metadata commit failures roll back source-added index schema changes along with staged row/table work.
 - Made mixed DB+filesystem merge rollback restore target filesystem changes after late metadata failures, keeping target DB, files, and `.forkpress/cow/merge` audit metadata aligned.
 - Preserved rollback snapshot artifacts when mixed DB+filesystem rollback itself fails, and recorded DB/filesystem backup locations in the rollback-failure JSONL artifact.
 - Added COW coverage for mixed DB+filesystem rollback failures where filesystem root restoration aborts after metadata restore, proving recovery snapshots stay queryable and preserved.

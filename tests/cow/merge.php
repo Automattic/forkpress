@@ -270,6 +270,7 @@ try {
     copy($merge_commit_base, $merge_commit_target);
     $db = open_db($merge_commit_source);
     $db->exec("UPDATE wp_posts SET post_content = 'Source commit rollback content' WHERE ID = 1");
+    $db->exec('CREATE INDEX plugin_commit_posts_content_idx ON wp_posts(post_content)');
     $db->exec('CREATE TABLE plugin_commit_keyless (label TEXT, value TEXT)');
     $db->exec("INSERT INTO plugin_commit_keyless (rowid, label, value) VALUES (23, 'commit', 'source')");
     $db->close();
@@ -301,6 +302,11 @@ try {
         (int)scalar($merge_commit_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_commit_keyless'"),
         0,
         'direct DB merge metadata commit failure restores already-committed source-added tables'
+    );
+    assert_same(
+        (int)scalar($merge_commit_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_commit_posts_content_idx'"),
+        0,
+        'direct DB merge metadata commit failure restores already-committed source-added indexes'
     );
     assert_same(
         (int)scalar($merge_commit_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-merge-commit-rollback' AND status = 'failed'"),
