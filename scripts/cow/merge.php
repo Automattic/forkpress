@@ -3367,6 +3367,7 @@ SQL, 'failed to create metadata table merge_review_notes');
         $review_notes_schema,
         'failed to finalize review-note metadata schema inspection'
     );
+    unset($review_notes_schema);
     if (str_contains($review_notes_sql, "CHECK(record_type IN ('conflict', 'decision'))")) {
         $migration_savepoint = 'migrate_merge_review_notes_record_type';
         cow_merge_exec_checked(

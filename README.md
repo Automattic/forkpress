@@ -463,7 +463,11 @@ tooling.
 - `forkpress branch list` lists local branches.
 - `forkpress branch create <name> [--from main]` creates a COW branch and
   reserves moderate AUTOINCREMENT ID bands for WordPress core and arbitrary
-  plugin tables that use SQLite `AUTOINCREMENT`.
+  plugin tables that use SQLite `AUTOINCREMENT`. The default band size is
+  1,000,000 IDs per table per branch. That intentionally keeps branch-created
+  IDs stable, including IDs copied into JSON, serialized options, blocks, or
+  plugin data, but operators with legacy 32-bit ID consumers should account for
+  the larger numeric range.
 - `forkpress branch reset <name> --from <source>` replaces one COW branch with
   the files and SQLite database from another branch.
 - `forkpress branch merge <source> --into <target>` merges one materialized COW
@@ -475,9 +479,9 @@ tooling.
   generated-column unique keys, and normal-column partial unique indexes, the
   target row is kept and the choice is recorded as an auditable
   `row-unique-collision`. If a source insert or source row update violates a
-  target-side SQLite constraint, including foreign-key references after
-  parent-before-child table ordering, same-table foreign-key row ordering, and
-  reviewed source restores of target-dropped same-table foreign-key tables.
+  target-side SQLite constraint after parent-before-child table ordering,
+  same-table foreign-key row ordering, and validation-gated source restores,
+  the target row is kept and the blocked source row is recorded for review.
   Restored foreign-key child tables also validate after source-only parent
   tables materialize or after reviewers restore the parent table first; trying
   to restore the child first reports the missing parent table or parent row
@@ -552,12 +556,14 @@ tooling.
   delete/reinsert `rowid` reuse. Source-added no-primary-key tables and
   validation-gated source table restores preserve sparse source `rowid` values,
   while validation-gated compatible table rebuilds preserve sparse target
-  `rowid` values and refresh sidecar row hashes. If a direct offline edit
-  changes cells on a keyless source row that target did not change while target
-  also changed the prior row and no runtime identity event exists, mergeback
-  keeps target by default and records an auditable
-  `row-identity-ambiguous` conflict instead of mixing cells from different
-  possible logical rows.
+  `rowid` values and refresh sidecar row hashes. Runtime row identity tracking
+  adds metadata writes for keyless tables; if that becomes too expensive for a
+  workload, disabling it trades precision for auditable `row-identity-ambiguous`
+  conflicts instead of silent row mixing. If a direct offline edit changes cells
+  on a keyless source row that target did not change while target also changed
+  the prior row and no runtime identity event exists, mergeback keeps target by
+  default and records an auditable `row-identity-ambiguous` conflict instead of
+  mixing cells from different possible logical rows.
 - `forkpress branch merge-audit [--format text|json] [--run ID]`
   `[--scope all|db|files] [--records all|conflicts|decisions|resolutions|rollback-failures]`
   `[--conflict-type TYPE] [--decision DECISION] [--path PATH]`
