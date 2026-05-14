@@ -30,6 +30,16 @@ function assert_throws(callable $fn, string $contains, string $msg): void {
     }
 }
 
+function run_merge_cli(array $args): array {
+    $script = dirname(__DIR__, 2) . '/scripts/cow/merge.php';
+    $command = array_map('escapeshellarg', array_merge([PHP_BINARY, $script], $args));
+    exec(implode(' ', $command) . ' 2>&1', $output, $status);
+    return [
+        'status' => $status,
+        'output' => implode("\n", $output) . ($output === [] ? '' : "\n"),
+    ];
+}
+
 function remove_tree(string $path): void {
     if (!file_exists($path) && !is_link($path)) {
         return;
@@ -4734,6 +4744,43 @@ SQL);
     cow_merge_print_audit_text($file_conflict_queue_audit);
     $file_conflict_queue_text = ob_get_clean();
     assert_true(str_contains($file_conflict_queue_text, 'review=unreviewed'), 'file conflict review queue text marks unreviewed records');
+    $file_conflict_cli_review = run_merge_cli([
+        'review-record',
+        '--metadata-db',
+        $metadata,
+        '--record',
+        'conflict',
+        '--id',
+        (string)$unreviewed_file_conflict_id,
+        '--status',
+        'reviewed',
+        '--note',
+        'Conflict upload reviewed through the CLI.',
+        '--reviewer',
+        'cow-cli-test',
+    ]);
+    assert_same($file_conflict_cli_review['status'], 0, 'CLI review-record accepts filesystem conflicts');
+    assert_true(str_contains($file_conflict_cli_review['output'], 'forkpress: recorded COW merge review note'), 'CLI review-record reports the saved filesystem conflict note');
+    $file_conflict_cli_audit = run_merge_cli([
+        'audit',
+        '--metadata-db',
+        $metadata,
+        '--format',
+        'text',
+        '--scope',
+        'files',
+        '--records',
+        'conflicts',
+        '--review-status',
+        'reviewed',
+        '--path',
+        'wp-content/uploads/conflict.txt',
+        '--limit',
+        '5',
+    ]);
+    assert_same($file_conflict_cli_audit['status'], 0, 'CLI audit text can filter reviewed filesystem conflicts');
+    assert_true(str_contains($file_conflict_cli_audit['output'], 'review=reviewed reviewer=cow-cli-test'), 'CLI audit text prints reviewed filesystem conflict status');
+    assert_true(str_contains($file_conflict_cli_audit['output'], 'note=Conflict upload reviewed through the CLI.'), 'CLI audit text prints reviewed filesystem conflict note');
     $path_prefix_audit = cow_merge_audit_report($metadata, null, 10, [
         'scope' => 'files',
         'records' => 'decisions',
