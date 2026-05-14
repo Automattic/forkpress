@@ -58,6 +58,7 @@
 - Recorded known-good checkpoint `known-good/cow-mergeback-schema-rollback-stability-2026-05-14` for the accumulated generic schema dependency validation and rollback/audit atomicity work after the identity-stability checkpoint.
 - Tightened filesystem conflict resolution rollback so metadata transaction failures restore target paths, preserve rollback artifacts if restore fails, and do not record partial resolution metadata.
 - Tightened validation-gated DB conflict resolution transaction checks so row/schema resolver target and metadata transactions fail loudly and roll back staged row mutations on metadata failures.
+- Restored validation-gated DB conflict resolution target snapshots when metadata commit fails after the target commit, keeping row/schema apply paths atomic across target and merge metadata databases.
 - Tightened validation-gated source view rewrites so preserved target view triggers must still compile before dry-run or apply reports success.
 - Tightened validation-gated source table drops so dry-run and apply refuse to leave dependent target foreign-key child tables pointing at a missing parent table.
 - Tightened validation-gated source table drops so dry-run and apply refuse to leave target trigger programs referencing the dropped table.

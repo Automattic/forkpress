@@ -1519,6 +1519,28 @@ SQL);
     $row_resolution_rollback_meta = open_db($metadata);
     $row_resolution_rollback_meta->exec('DROP TRIGGER fail_row_resolution_record');
     $row_resolution_rollback_meta->close();
+    $row_resolution_commit_lock = open_db($metadata);
+    $row_resolution_commit_lock->exec('BEGIN');
+    $row_resolution_commit_lock->querySingle('SELECT COUNT(*) FROM merge_conflicts');
+    $row_resolution_commit_failure_message = null;
+    try {
+        cow_merge_resolve_conflict(
+            $metadata,
+            $row_resolution_rollback_conflict_id,
+            'source',
+            true,
+            'Try audited row with locked metadata commit.',
+            'cow-test'
+        );
+    } catch (Throwable $e) {
+        $row_resolution_commit_failure_message = $e->getMessage();
+    } finally {
+        $row_resolution_commit_lock->exec('ROLLBACK');
+        $row_resolution_commit_lock->close();
+    }
+    assert_true($row_resolution_commit_failure_message !== null, 'row resolution metadata commit failure is surfaced to the caller');
+    assert_same(scalar($row_resolution_rollback_target, "SELECT post_title FROM wp_posts WHERE ID = 1"), 'Target rollback title', 'failed row resolution metadata commit restores the already-committed target row');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $row_resolution_rollback_conflict_id"), 0, 'failed row resolution metadata commit records no resolution metadata');
     $option_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'wp_options' AND column_name = 'option_value'");
     $target_resolution = cow_merge_resolve_conflict(
         $metadata,
