@@ -53,6 +53,7 @@
 - Added COW coverage for compatible table rebuild rollback when a preserved target view would become invalid after applying the audited source schema.
 - Made generic DB merge metadata transactional with target DB mutation, so unexpected whole-merge rollbacks discard staged decisions, conflicts, and no-primary-key sidecars while keeping a failed run marker.
 - Restored direct DB merge target snapshots when merge metadata commit fails after the target commit, keeping target rows/schema and ForkPress-owned metadata atomic.
+- Added COW coverage for direct DB merge target snapshot restore failures, proving rollback-failure audit rows and JSONL backup artifacts remain available for recovery.
 - Made mixed DB+filesystem merge rollback restore target filesystem changes after late metadata failures, keeping target DB, files, and `.forkpress/cow/merge` audit metadata aligned.
 - Preserved rollback snapshot artifacts when mixed DB+filesystem rollback itself fails, and recorded DB/filesystem backup locations in the rollback-failure JSONL artifact.
 - Preserved per-file transaction artifacts when filesystem-phase rollback itself fails, keeping failed rollback backup paths inspectable through merge audit metadata.

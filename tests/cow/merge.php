@@ -268,6 +268,60 @@ try {
     assert_same((int)scalar($merge_commit_metadata, 'SELECT COUNT(*) FROM merge_decisions'), 0, 'direct DB merge metadata commit failure rolls back staged decisions');
     assert_same((int)scalar($merge_commit_metadata, 'SELECT COUNT(*) FROM merge_row_identities'), 0, 'direct DB merge metadata commit failure rolls back staged no-primary-key sidecars');
 
+    $merge_restore_failure_base = $tmp . '/merge-restore-failure-base.sqlite';
+    $merge_restore_failure_source = $tmp . '/merge-restore-failure-source.sqlite';
+    $merge_restore_failure_target = $tmp . '/merge-restore-failure-target.sqlite';
+    $merge_restore_failure_metadata = $tmp . '/.forkpress/cow/merge/merge-restore-failure/metadata.sqlite';
+    create_base_db($merge_restore_failure_base);
+    copy($merge_restore_failure_base, $merge_restore_failure_source);
+    copy($merge_restore_failure_base, $merge_restore_failure_target);
+    $db = open_db($merge_restore_failure_source);
+    $db->exec("UPDATE wp_posts SET post_content = 'Source restore failure content' WHERE ID = 1");
+    $db->close();
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'COMMIT' && $message === 'failed to commit merge metadata transaction') {
+                throw new RuntimeException('forced merge metadata commit failure before restore failure');
+            }
+        },
+    ];
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_snapshot_restore'] = [
+        static function (array $snapshot) use ($merge_restore_failure_target): void {
+            if (($snapshot['path'] ?? null) === $merge_restore_failure_target) {
+                throw new RuntimeException('forced target snapshot restore failure');
+            }
+        },
+    ];
+    $merge_restore_failure_message = null;
+    try {
+        cow_merge_databases(
+            $merge_restore_failure_base,
+            $merge_restore_failure_source,
+            $merge_restore_failure_target,
+            $merge_restore_failure_metadata,
+            'feature-merge-restore-failure',
+            'main'
+        );
+    } catch (Throwable $e) {
+        $merge_restore_failure_message = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'], $GLOBALS['cow_merge_test_hooks']['before_sqlite_snapshot_restore']);
+    }
+    assert_true($merge_restore_failure_message !== null && str_contains($merge_restore_failure_message, 'target database rollback failed'), 'direct DB merge target restore failure is surfaced to the caller');
+    assert_same(scalar($merge_restore_failure_target, "SELECT post_content FROM wp_posts WHERE ID = 1"), 'Source restore failure content', 'failed direct DB merge restore leaves the committed target state for manual recovery');
+    $merge_restore_failure_run_id = (int)scalar($merge_restore_failure_metadata, "SELECT id FROM merge_runs WHERE source_branch = 'feature-merge-restore-failure' AND status = 'failed' ORDER BY id DESC LIMIT 1");
+    assert_true($merge_restore_failure_run_id > 0, 'direct DB merge restore failure leaves an auditable failed run');
+    assert_same((int)scalar($merge_restore_failure_metadata, "SELECT COUNT(*) FROM merge_rollback_failures WHERE run_id = $merge_restore_failure_run_id"), 1, 'direct DB merge restore failure records rollback-failure metadata');
+    $merge_restore_failure_audit = cow_merge_audit_report($merge_restore_failure_metadata, $merge_restore_failure_run_id, 5, ['records' => 'rollback-failures']);
+    assert_same(count($merge_restore_failure_audit['rollback_failures']), 1, 'direct DB merge restore failure appears in rollback-failure audit exports');
+    assert_true(str_contains($merge_restore_failure_audit['rollback_failures'][0]['original_failure'], 'forced merge metadata commit failure before restore failure'), 'rollback-failure audit preserves the metadata commit failure');
+    assert_true(str_contains($merge_restore_failure_audit['rollback_failures'][0]['rollback_failure'], 'forced target snapshot restore failure'), 'rollback-failure audit preserves the target restore failure');
+    $merge_restore_failure_artifact_path = (string)$merge_restore_failure_audit['rollback_failures'][0]['artifact_path'];
+    assert_true($merge_restore_failure_artifact_path !== '' && is_file($merge_restore_failure_artifact_path), 'direct DB merge restore failure preserves a JSONL artifact');
+    $merge_restore_failure_artifact = file_get_contents($merge_restore_failure_artifact_path);
+    assert_true(is_string($merge_restore_failure_artifact) && str_contains($merge_restore_failure_artifact, '"target_db_snapshot"'), 'rollback-failure artifact records target DB snapshot details');
+    assert_true(str_contains((string)$merge_restore_failure_artifact, '"backup_exists":true'), 'rollback-failure artifact keeps the target DB snapshot backup for recovery');
+
     $unique_base = $tmp . '/unique-base.sqlite';
     $unique_source = $tmp . '/unique-source.sqlite';
     $unique_target = $tmp . '/unique-target.sqlite';

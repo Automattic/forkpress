@@ -140,6 +140,7 @@ function cow_merge_snapshot_sqlite_db(string $path): array {
 }
 
 function cow_merge_restore_sqlite_snapshot(array $snapshot): void {
+    cow_merge_test_hook('before_sqlite_snapshot_restore', $snapshot);
     $path = (string)$snapshot['path'];
     cow_merge_remove_sqlite_files($path);
     if (empty($snapshot['existed'])) {
