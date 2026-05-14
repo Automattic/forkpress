@@ -8431,10 +8431,7 @@ function cow_merge_audit_named_decision_count_sql(array $filters, string $alias,
 }
 
 function cow_merge_fetch_rows(SQLite3 $db, string $sql, array $params = []): array {
-    $stmt = $db->prepare($sql);
-    if (!$stmt) {
-        throw new RuntimeException('failed to prepare audit query: ' . $db->lastErrorMsg());
-    }
+    $stmt = cow_merge_prepare_checked($db, $sql, 'failed to prepare audit query');
     foreach ($params as $key => $value) {
         cow_merge_bind($stmt, $key, $value);
     }
@@ -8454,10 +8451,11 @@ function cow_merge_fetch_rows(SQLite3 $db, string $sql, array $params = []): arr
 }
 
 function cow_merge_audit_has_table(SQLite3 $db, string $table): bool {
-    $stmt = $db->prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = :name");
-    if (!$stmt) {
-        throw new RuntimeException('failed to prepare audit table check: ' . $db->lastErrorMsg());
-    }
+    $stmt = cow_merge_prepare_checked(
+        $db,
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = :name",
+        'failed to prepare audit table check'
+    );
     cow_merge_bind($stmt, ':name', $table);
     $res = $stmt->execute();
     return (bool)($res && $res->fetchArray(SQLITE3_NUM));
@@ -8467,10 +8465,11 @@ function cow_merge_audit_has_column(SQLite3 $db, string $table, string $column):
     if (!cow_merge_audit_has_table($db, $table)) {
         return false;
     }
-    $res = $db->query('PRAGMA table_info(' . cow_merge_quote_ident($table) . ')');
-    if (!$res) {
-        throw new RuntimeException('failed to inspect audit table: ' . $db->lastErrorMsg());
-    }
+    $res = cow_merge_query_checked(
+        $db,
+        'PRAGMA table_info(' . cow_merge_quote_ident($table) . ')',
+        'failed to inspect audit table'
+    );
     while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
         if ((string)$row['name'] === $column) {
             return true;
