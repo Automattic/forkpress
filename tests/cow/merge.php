@@ -4610,6 +4610,8 @@ SQL);
     write_test_file($file_base_root . '/wp-content/uploads/binary-source-change.bin', "base\0binary");
     write_test_file($file_base_root . '/wp-content/uploads/binary-conflict.bin', "base\0binary conflict");
     create_test_symlink('shared.txt', $file_base_root . '/wp-content/uploads/shared-link.txt');
+    mkdir($file_base_root . '/wp-content/uploads/replace-dir-with-file', 0777, true);
+    write_test_file($file_base_root . '/wp-content/uploads/replace-dir-with-file/base-child.txt', 'base child');
     mkdir($file_base_root . '/wp-content/uploads/delete-empty-dir', 0777, true);
     mkdir($file_base_root . '/wp-content/uploads/delete-dir-conflict', 0777, true);
     write_test_file($file_base_root . '/wp-config.php', 'managed base config');
@@ -4618,7 +4620,7 @@ SQL);
     copy_tree_for_test($file_base_root, $file_target_root);
     $file_base_manifest = $tmp . '/.forkpress/cow/merge/file-bases/feature-files.json';
     $file_capture = cow_merge_capture_file_base($file_base_root, $file_base_manifest);
-    assert_same($file_capture['files'], 10, 'filesystem merge base excludes ForkPress-managed files');
+    assert_same($file_capture['files'], 11, 'filesystem merge base excludes ForkPress-managed files');
 
     write_test_file($file_source_root . '/wp-content/uploads/shared.txt', 'source shared');
     write_test_file($file_source_root . '/wp-content/uploads/new-source.txt', 'source new');
@@ -4631,6 +4633,9 @@ SQL);
     create_test_symlink('../../../etc/passwd', $file_source_root . '/wp-content/uploads/outside-link.txt');
     write_test_file($file_source_root . '/wp-content/uploads/binary-source-change.bin', "source\0binary\xff");
     write_test_file($file_source_root . '/wp-content/uploads/binary-conflict.bin', "source\0binary conflict\xff");
+    unlink($file_source_root . '/wp-content/uploads/replace-dir-with-file/base-child.txt');
+    rmdir($file_source_root . '/wp-content/uploads/replace-dir-with-file');
+    write_test_file($file_source_root . '/wp-content/uploads/replace-dir-with-file', 'source replacement file');
     unlink($file_source_root . '/wp-content/uploads/delete-me.txt');
     unlink($file_source_root . '/wp-content/uploads/same-delete.txt');
     rmdir($file_source_root . '/wp-content/uploads/delete-empty-dir');
@@ -4683,12 +4688,15 @@ SQL);
     assert_same(file_get_contents($file_target_root . '/wp-content/uploads/same-change.txt'), 'same changed', 'identical source/target filesystem change remains present');
     assert_same(file_get_contents($file_target_root . '/wp-content/uploads/binary-conflict.bin'), "target\0binary conflict\xfe", 'target binary filesystem path wins conflicting binary edits');
     assert_true(!file_exists($file_target_root . '/wp-content/uploads/same-delete.txt'), 'identical source/target filesystem deletion remains deleted');
+    assert_true(is_dir($file_target_root . '/wp-content/uploads/replace-dir-with-file'), 'target directory remains after reviewed source directory-to-file replacement conflict');
+    assert_same(file_get_contents($file_target_root . '/wp-content/uploads/replace-dir-with-file/base-child.txt'), 'base child', 'target directory child remains after parent replacement conflict');
     assert_same(file_get_contents($file_target_root . '/wp-content/uploads/delete-dir-conflict/target-child.txt'), 'target child', 'target-side directory descendants block automatic source directory deletion');
     assert_same(file_get_contents($file_target_root . '/wp-config.php'), 'target managed config', 'managed wp-config.php is excluded from filesystem merge');
     assert_same(file_get_contents($file_target_root . '/wp-content/database/.ht.sqlite'), 'target managed db', 'managed SQLite database path is excluded from filesystem merge');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-conflict'"), 2, 'filesystem content conflicts are auditable');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-directory-delete-conflict'"), 1, 'unsafe filesystem directory deletion conflict is auditable');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-unsafe-symlink'"), 2, 'unsafe filesystem symlink conflicts are auditable');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-type-replacement-conflict'"), 1, 'filesystem directory/file replacement conflicts are auditable');
     assert_true((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'source-applied'") >= 5, 'filesystem automatic decisions are auditable');
     $source_changed_file_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/shared.txt'));
     $source_new_file_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/new-source.txt'));
@@ -4701,6 +4709,8 @@ SQL);
     $source_delete_file_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/delete-me.txt'));
     $source_delete_dir_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/delete-empty-dir'));
     $conflict_file_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/conflict.txt'));
+    $source_replaced_dir_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/replace-dir-with-file'));
+    $source_replaced_dir_child_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/replace-dir-with-file/base-child.txt'));
     $base_file_entries = cow_merge_file_manifest_for_root($file_base_root)['entries'];
     $source_file_entries = cow_merge_file_manifest_for_root($file_source_root)['entries'];
     $merged_file_entries = cow_merge_file_manifest_for_root($file_target_root)['entries'];
@@ -4786,16 +4796,18 @@ SQL);
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'source-applied' AND row_identity = '$same_change_file_identity' AND reason = 'source and target changed filesystem path to the same state' AND base_payload = '$same_change_base_payload' AND source_payload = '$same_change_file_payload' AND target_payload = '$same_change_file_payload' AND chosen_payload = '$same_change_file_payload'"), 1, 'identical source/target filesystem change records matching source, target, and chosen payloads');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'source-applied' AND row_identity = '$same_delete_file_identity' AND reason = 'source and target deleted the same filesystem path' AND chosen_payload IS NULL"), 1, 'identical source/target filesystem deletion is auditable');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'source-applied' AND row_identity = '$same_delete_file_identity' AND reason = 'source and target deleted the same filesystem path' AND base_payload = '$same_delete_base_payload' AND source_payload IS NULL AND target_payload IS NULL AND chosen_payload IS NULL"), 1, 'identical source/target filesystem deletion records empty source, target, and chosen payloads');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'target-wins' AND row_identity = '$source_replaced_dir_identity' AND reason LIKE 'source changed filesystem path type from dir to file%'"), 1, 'directory-to-file replacement records a type-specific target-wins decision');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'target-kept' AND row_identity = '$source_replaced_dir_child_identity' AND reason = 'target subtree kept because parent filesystem replacement requires review'"), 1, 'directory-to-file replacement preserves unchanged target descendants under the conflicted parent');
     $file_conflict_audit = cow_merge_audit_report($metadata, null, 10, ['scope' => 'files', 'records' => 'conflicts']);
     assert_same($file_conflict_audit['filters']['scope'], 'files', 'merge audit JSON report includes the file scope filter');
     assert_same($file_conflict_audit['filters']['records'], 'conflicts', 'merge audit JSON report includes the record-type filter');
-    assert_same(count($file_conflict_audit['conflicts']), 5, 'merge audit can focus on filesystem conflicts');
+    assert_same(count($file_conflict_audit['conflicts']), 6, 'merge audit can focus on filesystem conflicts');
     assert_same(count($file_conflict_audit['decisions']), 0, 'conflict-only audit filter omits decisions');
     assert_same(count($file_conflict_audit['autoincrement_bands']), 0, 'file conflict audit filter omits database-only band summaries');
     assert_same(count($file_conflict_audit['row_identity_summary']), 0, 'file conflict audit filter omits database-only row identity summaries');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-conflict' AND row_identity = '$conflict_file_identity' AND base_payload = '$conflict_base_payload' AND source_payload = '$conflict_source_payload' AND target_payload = '$conflict_target_payload' AND chosen_payload = '$conflict_target_payload'"), 1, 'filesystem content conflicts record base, source, target, and chosen target payloads');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-conflict' AND row_identity = '$binary_conflict_identity' AND base_payload = '$binary_conflict_base_payload' AND source_payload = '$binary_conflict_source_payload' AND target_payload = '$binary_conflict_target_payload' AND chosen_payload = '$binary_conflict_target_payload'"), 1, 'binary filesystem content conflicts record hash payloads without text decoding');
-    assert_same(count(array_filter($file_conflict_audit['conflicts'], fn($row) => $row['table_name'] === '__files__')), 5, 'filesystem audit filter exports only file records');
+    assert_same(count(array_filter($file_conflict_audit['conflicts'], fn($row) => $row['table_name'] === '__files__')), 6, 'filesystem audit filter exports only file records');
     $unsafe_symlink_audit = cow_merge_audit_report($metadata, null, 10, [
         'scope' => 'files',
         'records' => 'conflicts',
@@ -4986,6 +4998,8 @@ SQL);
     write_test_file($file_resolve_base_root . '/wp-content/uploads/delete-conflict.txt', 'base delete conflict');
     write_test_file($file_resolve_base_root . '/wp-content/uploads/rollback-conflict.txt', 'base rollback conflict');
     write_test_file($file_resolve_base_root . '/wp-content/uploads/commit-rollback-conflict.txt', 'base commit rollback conflict');
+    mkdir($file_resolve_base_root . '/wp-content/uploads/replace-dir-with-file', 0777, true);
+    write_test_file($file_resolve_base_root . '/wp-content/uploads/replace-dir-with-file/base-child.txt', 'base replacement child');
     copy_tree_for_test($file_resolve_base_root, $file_resolve_source_root);
     copy_tree_for_test($file_resolve_base_root, $file_resolve_target_root);
     $file_resolve_base_db = $file_resolve_base_root . '/wp-content/database/.ht.sqlite';
@@ -5004,6 +5018,9 @@ SQL);
     write_test_file($file_resolve_source_root . '/wp-content/uploads/commit-rollback-conflict.txt', 'source commit rollback resolution');
     create_test_symlink('/etc/passwd', $file_resolve_source_root . '/wp-content/uploads/unsafe-link.txt');
     unlink($file_resolve_source_root . '/wp-content/uploads/delete-conflict.txt');
+    unlink($file_resolve_source_root . '/wp-content/uploads/replace-dir-with-file/base-child.txt');
+    rmdir($file_resolve_source_root . '/wp-content/uploads/replace-dir-with-file');
+    write_test_file($file_resolve_source_root . '/wp-content/uploads/replace-dir-with-file', 'source resolved replacement file');
     write_test_file($file_resolve_target_root . '/wp-content/uploads/conflict.txt', 'target conflict resolution');
     write_test_file($file_resolve_target_root . '/wp-content/uploads/delete-conflict.txt', 'target changed before source deletion');
     write_test_file($file_resolve_target_root . '/wp-content/uploads/rollback-conflict.txt', 'target rollback resolution');
@@ -5126,6 +5143,19 @@ SQL);
     );
     assert_same($file_delete_resolution['status'], 'applied', 'source filesystem deletion conflict resolution records applied status');
     assert_true(!file_exists($file_resolve_target_root . '/wp-content/uploads/delete-conflict.txt'), 'source filesystem deletion conflict resolution removes the target path after validation');
+    $file_type_replacement_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-type-replacement-conflict' AND row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/replace-dir-with-file')) . "' ORDER BY id DESC LIMIT 1");
+    $file_type_replacement_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $file_type_replacement_conflict_id,
+        'source',
+        true,
+        'Apply reviewed source directory-to-file replacement.',
+        'cow-test'
+    );
+    assert_same($file_type_replacement_resolution['status'], 'applied', 'source directory-to-file resolution records applied status');
+    assert_true(is_file($file_resolve_target_root . '/wp-content/uploads/replace-dir-with-file'), 'source directory-to-file resolution replaces the target directory with a file');
+    assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/replace-dir-with-file'), 'source resolved replacement file', 'source directory-to-file resolution copies the audited source file');
+    assert_true(!file_exists($file_resolve_target_root . '/wp-content/uploads/replace-dir-with-file/base-child.txt'), 'source directory-to-file resolution removes target directory descendants after review');
     $file_resolve_rerun = cow_merge_branch_state(
         $file_resolve_base_db,
         $file_resolve_source_db,
@@ -5140,6 +5170,7 @@ SQL);
     assert_same($file_resolve_rerun['status'], 'completed_with_conflicts', 'rerunning after filesystem source resolutions only reports unresolved file conflicts');
     assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/conflict.txt'), 'source conflict resolution', 'rerunning after source filesystem replacement keeps the audited source file');
     assert_true(!file_exists($file_resolve_target_root . '/wp-content/uploads/delete-conflict.txt'), 'rerunning after source filesystem deletion keeps the target path deleted');
+    assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/replace-dir-with-file'), 'source resolved replacement file', 'rerunning after source directory-to-file resolution keeps the audited source file');
     assert_same(
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = '__files__' AND c.conflict_type = 'file-conflict' AND c.row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/conflict.txt')) . "' AND r.source_branch = 'feature-file-resolve'"),
         1,
@@ -5149,6 +5180,11 @@ SQL);
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = '__files__' AND c.conflict_type = 'file-source-deleted' AND c.row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/delete-conflict.txt')) . "' AND r.source_branch = 'feature-file-resolve'"),
         1,
         'rerunning after source filesystem deletion does not rediscover the resolved delete conflict'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = '__files__' AND c.conflict_type = 'file-type-replacement-conflict' AND c.row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/replace-dir-with-file')) . "' AND r.source_branch = 'feature-file-resolve'"),
+        1,
+        'rerunning after source directory-to-file resolution does not rediscover the resolved type replacement conflict'
     );
     $reviewed_file_resolution_id = (int)$file_source_resolution['resolution_id'];
     $unreviewed_file_resolution_id = (int)$file_delete_resolution['resolution_id'];

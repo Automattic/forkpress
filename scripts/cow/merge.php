@@ -4669,7 +4669,12 @@ function cow_merge_file_entry_auto_applicable(string $path, ?array $base, ?array
     return false;
 }
 
-function cow_merge_file_unsupported_source_conflict(string $path, ?array $source): array {
+function cow_merge_file_unsupported_source_conflict(
+    string $path,
+    ?array $source,
+    ?array $base = null,
+    ?array $target = null
+): array {
     if (($source['type'] ?? null) === 'symlink') {
         $reason = cow_merge_symlink_safety_reason($path, $source);
         if ($reason !== null) {
@@ -4678,6 +4683,19 @@ function cow_merge_file_unsupported_source_conflict(string $path, ?array $source
                 'source changed a filesystem symlink whose target cannot be safely applied automatically: ' . $reason,
             ];
         }
+    }
+    $source_type = $source['type'] ?? null;
+    $base_type = $base['type'] ?? null;
+    $target_type = $target['type'] ?? null;
+    if (
+        in_array($source_type, ['file', 'dir', 'symlink'], true)
+        && (($base_type !== null && $base_type !== $source_type) || ($target_type !== null && $target_type !== $source_type))
+    ) {
+        return [
+            'file-type-replacement-conflict',
+            'source changed filesystem path type from ' . ($base_type ?? 'missing') .
+            ' to ' . $source_type . '; review before replacing target ' . ($target_type ?? 'missing'),
+        ];
     }
     return [
         'file-unsupported-source-change',
@@ -5036,9 +5054,18 @@ function cow_merge_apply_file_resolution(
     ?array $source,
     ?array $target
 ): void {
-    if ($source !== null && !cow_merge_file_entry_auto_applicable($path, null, $source, $target)) {
-        [$type, $reason] = cow_merge_file_unsupported_source_conflict($path, $source);
-        throw new RuntimeException("cannot apply source filesystem conflict $path ($type): $reason");
+    if ($source !== null) {
+        $source_type = $source['type'] ?? null;
+        if (!in_array($source_type, ['file', 'dir', 'symlink'], true)) {
+            [$type, $reason] = cow_merge_file_unsupported_source_conflict($path, $source, null, $target);
+            throw new RuntimeException("cannot apply source filesystem conflict $path ($type): $reason");
+        }
+        if ($source_type === 'symlink') {
+            $reason = cow_merge_symlink_safety_reason($path, $source);
+            if ($reason !== null) {
+                throw new RuntimeException("cannot apply source filesystem conflict $path (file-unsafe-symlink): $reason");
+            }
+        }
     }
 
     if ($source === null) {
@@ -5051,6 +5078,10 @@ function cow_merge_apply_file_resolution(
     }
 
     $source_type = $source['type'] ?? null;
+    $target_path = cow_merge_file_target_path($target_root, $path);
+    if ($target !== null && ($target['type'] ?? null) !== $source_type && (file_exists($target_path) || is_link($target_path))) {
+        cow_merge_remove_tree($target_path);
+    }
     if ($source_type === 'dir') {
         cow_merge_apply_dir_entry($source_root, $target_root, $path, $source);
     } elseif ($source_type === 'symlink') {
@@ -5179,6 +5210,7 @@ function cow_merge_files(
     $operations = [];
     $applied = 0;
     $conflicts = 0;
+    $target_kept_subtree_conflict_prefixes = [];
     $metadata_transaction_active = false;
 
     try {
@@ -5188,6 +5220,29 @@ function cow_merge_files(
             $base = $base_entries[$path] ?? null;
             $source = $source_entries[$path] ?? null;
             $target = $target_entries[$path] ?? null;
+
+            foreach ($target_kept_subtree_conflict_prefixes as $prefix) {
+                if (!cow_merge_file_has_prefix($path, $prefix)) {
+                    continue;
+                }
+                if (!cow_merge_file_entries_equal($target, $base)) {
+                    continue;
+                }
+                cow_merge_record_decision(
+                    $meta,
+                    $run_id,
+                    '__files__',
+                    cow_merge_file_identity_json($path),
+                    'path',
+                    'target-kept',
+                    'target subtree kept because parent filesystem replacement requires review',
+                    cow_merge_file_path_payload($path, $base),
+                    cow_merge_file_path_payload($path, $source),
+                    cow_merge_file_path_payload($path, $target),
+                    cow_merge_file_path_payload($path, $target)
+                );
+                continue 2;
+            }
 
             if (cow_merge_file_entries_equal($source, $base)) {
                 if (!cow_merge_file_entries_equal($target, $base)) {
@@ -5222,7 +5277,7 @@ function cow_merge_files(
 
             if (cow_merge_file_entries_equal($target, $base)) {
                 if (!cow_merge_file_entry_auto_applicable($path, $base, $source, $target)) {
-                    [$conflict_type, $conflict_reason] = cow_merge_file_unsupported_source_conflict($path, $source);
+                    [$conflict_type, $conflict_reason] = cow_merge_file_unsupported_source_conflict($path, $source, $base, $target);
                     if (cow_merge_record_file_conflict(
                         $meta,
                         $run_id,
@@ -5235,6 +5290,13 @@ function cow_merge_files(
                         $conflict_reason
                     )) {
                         $conflicts++;
+                    }
+                    if (
+                        $conflict_type === 'file-type-replacement-conflict'
+                        && (($base['type'] ?? null) === 'dir' || ($target['type'] ?? null) === 'dir')
+                        && ($source['type'] ?? null) !== 'dir'
+                    ) {
+                        $target_kept_subtree_conflict_prefixes[] = $path;
                     }
                     continue;
                 }
@@ -7897,6 +7959,7 @@ function cow_merge_resolve_conflict(
                 'file-source-deleted',
                 'file-directory-delete-conflict',
                 'file-unsafe-symlink',
+                'file-type-replacement-conflict',
                 'file-unsupported-source-change',
             ];
             if (!in_array($conflict_type, $file_conflict_types, true)) {
