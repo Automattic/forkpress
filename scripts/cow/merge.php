@@ -328,6 +328,21 @@ function cow_merge_capture_file_base(string $root, string $file_base): array {
     ];
 }
 
+function cow_merge_test_hook(string $name, mixed ...$args): void {
+    if (!defined('FORKPRESS_COW_MERGE_TESTS') || FORKPRESS_COW_MERGE_TESTS !== true) {
+        return;
+    }
+    $hooks = $GLOBALS['cow_merge_test_hooks'][$name] ?? null;
+    if (!is_array($hooks)) {
+        return;
+    }
+    foreach ($hooks as $hook) {
+        if (is_callable($hook)) {
+            $hook(...$args);
+        }
+    }
+}
+
 function cow_merge_read_file_base(string $file_base): array {
     if (!is_file($file_base)) {
         throw new RuntimeException("filesystem merge base does not exist: $file_base");
@@ -3486,6 +3501,7 @@ function cow_merge_capture_row_identities(
     $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READWRITE | SQLITE3_OPEN_CREATE);
     cow_merge_ensure_metadata($meta);
     $run_id = cow_merge_start_identity_capture_run($meta, $branch, $db_path);
+    cow_merge_finish_run($meta, $run_id, 'failed', 'row identity capture metadata transaction did not complete');
 
     $tables = 0;
     $rows = 0;
@@ -3603,6 +3619,7 @@ function cow_merge_track_row_identity_events(
     $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READWRITE | SQLITE3_OPEN_CREATE);
     cow_merge_ensure_metadata($meta);
     $run_id = cow_merge_start_runtime_identity_run($meta, $branch, $db_path);
+    cow_merge_finish_run($meta, $run_id, 'failed', 'runtime row identity metadata transaction did not complete');
 
     $tracked = 0;
     $created = 0;
@@ -5377,6 +5394,7 @@ function cow_merge_record_resolution(
 }
 
 function cow_merge_exec_checked(SQLite3 $db, string $sql, string $message): void {
+    cow_merge_test_hook('before_sqlite_exec', $db, $sql, $message);
     if (!$db->exec($sql)) {
         throw new RuntimeException($message . ': ' . $db->lastErrorMsg());
     }

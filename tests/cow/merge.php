@@ -138,6 +138,7 @@ function column_type(string $db_path, string $table, string $column): ?string {
     return null;
 }
 
+define('FORKPRESS_COW_MERGE_TESTS', true);
 require_once __DIR__ . '/../../scripts/cow/merge.php';
 
 echo "=== COW generic SQLite merge ===\n";
@@ -8528,6 +8529,35 @@ SQL);
     $capture_failure_meta->exec('DROP TRIGGER fail_identity_capture_finish');
     $capture_failure_meta->close();
 
+    $capture_commit_failure_feature = $tmp . '/capture-commit-failure-feature.sqlite';
+    copy($capture_db, $capture_commit_failure_feature);
+    $db = open_db($capture_commit_failure_feature);
+    $db->exec("INSERT INTO plugin_keyless (label, value) VALUES ('Capture commit rollback row', 'should not persist')");
+    $db->close();
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'COMMIT' && $message === 'failed to commit row identity capture metadata transaction') {
+                throw new RuntimeException('forced identity capture metadata commit failure');
+            }
+        },
+    ];
+    $capture_commit_failure_message = null;
+    set_error_handler(static function (int $severity, string $message): bool {
+        return str_contains($message, 'forced identity capture metadata commit failure');
+    });
+    try {
+        cow_merge_capture_row_identities($capture_commit_failure_feature, $capture_metadata, 'feature-capture-commit-rollback', 'main');
+    } catch (Throwable $e) {
+        $capture_commit_failure_message = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+        restore_error_handler();
+    }
+    assert_true($capture_commit_failure_message !== null, 'identity capture metadata commit failure is surfaced to the caller');
+    assert_same((int)scalar($capture_metadata, "SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = 'feature-capture-commit-rollback'"), 0, 'failed identity capture metadata commit rolls back staged sidecar identities');
+    assert_same((int)scalar($capture_metadata, "SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'feature-capture-commit-rollback'"), 0, 'failed identity capture metadata commit rolls back staged sidecar history');
+    assert_same((int)scalar($capture_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-capture-commit-rollback' AND policy = 'sidecar-row-identity-capture' AND status = 'failed'"), 1, 'failed identity capture metadata commit leaves an auditable failed run');
+
     $reuse_base = $tmp . '/reuse-base.sqlite';
     $reuse_source = $tmp . '/reuse-source.sqlite';
     $reuse_target = $tmp . '/reuse-target.sqlite';
@@ -8615,6 +8645,52 @@ SQL);
     $track_failure_meta = open_db($track_failure_metadata);
     $track_failure_meta->exec('DROP TRIGGER fail_identity_track_finish');
     $track_failure_meta->close();
+
+    $track_commit_source = $tmp . '/track-commit-source.sqlite';
+    $track_commit_metadata = $capture_metadata;
+    create_base_db($track_commit_source);
+    cow_merge_capture_row_identities($track_commit_source, $track_commit_metadata, 'feature-track-commit-rollback');
+    $track_commit_old_identity = scalar($track_commit_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'feature-track-commit-rollback' AND table_name = 'plugin_keyless' AND rowid = 1");
+    $db = open_db($track_commit_source);
+    $db->exec('DELETE FROM plugin_keyless WHERE rowid = 1');
+    $db->exec("INSERT INTO plugin_keyless (label, value) VALUES ('Track commit rollback row', 'should not persist')");
+    $db->close();
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'COMMIT' && $message === 'failed to commit runtime row identity metadata transaction') {
+                throw new RuntimeException('forced identity tracking metadata commit failure');
+            }
+        },
+    ];
+    $track_commit_failure_message = null;
+    set_error_handler(static function (int $severity, string $message): bool {
+        return str_contains($message, 'forced identity tracking metadata commit failure');
+    });
+    try {
+        cow_merge_track_row_identity_events(
+            $track_commit_source,
+            $track_commit_metadata,
+            'feature-track-commit-rollback',
+            [
+                ['id' => 1, 'table_name' => 'plugin_keyless', 'op' => 'delete', 'rowid' => 1, 'row' => ['label' => 'Base keyless', 'value' => 'base']],
+                ['id' => 2, 'table_name' => 'plugin_keyless', 'op' => 'insert', 'rowid' => 1, 'row' => ['label' => 'Track commit rollback row', 'value' => 'should not persist']],
+            ]
+        );
+    } catch (Throwable $e) {
+        $track_commit_failure_message = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+        restore_error_handler();
+    }
+    assert_true($track_commit_failure_message !== null, 'runtime identity tracking metadata commit failure is surfaced to the caller');
+    assert_same(
+        scalar($track_commit_metadata, "SELECT logical_identity FROM merge_row_identities WHERE branch_name = 'feature-track-commit-rollback' AND table_name = 'plugin_keyless' AND rowid = 1"),
+        $track_commit_old_identity,
+        'failed runtime identity tracking metadata commit restores the previous active sidecar identity'
+    );
+    assert_same((int)scalar($track_commit_metadata, "SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'feature-track-commit-rollback' AND table_name = 'plugin_keyless' AND rowid = 1"), 1, 'failed runtime identity tracking metadata commit rolls back staged sidecar history generations');
+    assert_same((int)scalar($track_commit_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_keyless' AND decision = 'identity-tracked'"), 0, 'failed runtime identity tracking metadata commit rolls back staged identity decisions');
+    assert_same((int)scalar($track_commit_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-track-commit-rollback' AND policy = 'runtime-row-identity-tracking' AND status = 'failed'"), 1, 'failed runtime identity tracking metadata commit leaves an auditable failed run');
 
     $db = open_db($reuse_target);
     $db->exec("UPDATE plugin_keyless SET value = 'target kept old row' WHERE rowid = 1");
