@@ -32,9 +32,70 @@ on_error() {
   local status=$?
   echo "FAIL cow materialized strategy e2e at line ${BASH_LINENO[0]}: ${BASH_COMMAND}" >&2
   dump_if_exists "$TMP/git-created.html"
+  dump_if_exists "$TMP/autoinc-main-init.json"
+  dump_if_exists "$TMP/autoinc-feature-insert.json"
+  dump_if_exists "$TMP/branch-post-edit.html"
+  dump_if_exists "$TMP/branch-post-frontend.html"
+  dump_if_exists "$TMP/band-merge-source-post-new.html"
+  dump_if_exists "$TMP/band-merge-source-rest-save.json"
+  dump_if_exists "$TMP/band-merge-target-post-new.html"
+  dump_if_exists "$TMP/band-merge-target-rest-save.json"
+  dump_if_exists "$TMP/merge-band-posts.out"
+  dump_if_exists "$TMP/band-merge-target-edit.html"
+  dump_if_exists "$TMP/band-merge-target-source-post.html"
+  dump_if_exists "$TMP/band-merge-source-decision-queue.json"
   dump_if_exists "$TMP/git-multi-delete.out"
   dump_if_exists "$TMP/git-delete.out"
   dump_if_exists "$TMP/git-delete-main.out"
+  dump_if_exists "$TMP/keyless-init.json"
+  dump_if_exists "$TMP/keyless-source-reuse.json"
+  dump_if_exists "$TMP/keyless-target-edit.json"
+  dump_if_exists "$TMP/keyless-main-after-merge.json"
+  dump_if_exists "$TMP/keyless-merge.out"
+  dump_if_exists "$TMP/keyless-conflicts.out"
+  dump_if_exists "$TMP/keyless-review-queue.json"
+  dump_if_exists "$TMP/keyless-resolve.out"
+  dump_if_exists "$TMP/keyless-resolution-review.out"
+  dump_if_exists "$TMP/keyless-resolution-audit.out"
+  dump_if_exists "$TMP/keyless-resolution-needs-action-queue.json"
+  dump_if_exists "$TMP/keyless-unreviewed-resolution-queue.json"
+  dump_if_exists "$TMP/keyless-resolution-status.json"
+  dump_if_exists "$TMP/offline-keyless-source.json"
+  dump_if_exists "$TMP/offline-keyless-target.json"
+  dump_if_exists "$TMP/offline-keyless-merge.out"
+  dump_if_exists "$TMP/offline-keyless-after-merge.json"
+  dump_if_exists "$TMP/offline-keyless-audit.json"
+  dump_if_exists "$TMP/offline-keyless-resolve.out"
+  dump_if_exists "$TMP/offline-keyless-after-resolution.json"
+  dump_if_exists "$TMP/offline-keyless-partial-source.json"
+  dump_if_exists "$TMP/offline-keyless-partial-target.json"
+  dump_if_exists "$TMP/offline-keyless-partial-merge.out"
+  dump_if_exists "$TMP/offline-keyless-partial-after-merge.json"
+  dump_if_exists "$TMP/offline-keyless-partial-resolve.out"
+  dump_if_exists "$TMP/offline-keyless-partial-after-resolution.json"
+  dump_if_exists "$TMP/keyless-unique-same-merge.out"
+  dump_if_exists "$TMP/keyless-unique-same-rerun.out"
+  dump_if_exists "$TMP/keyless-unique-same-after-merge.json"
+  dump_if_exists "$TMP/fk-keyless-update-merge.out"
+  dump_if_exists "$TMP/fk-keyless-update-rerun.out"
+  dump_if_exists "$TMP/fk-keyless-update-after-merge.json"
+  dump_if_exists "$TMP/merge-audit.out"
+  dump_if_exists "$TMP/merge-audit.json"
+  dump_if_exists "$TMP/merge-rollback-failures.json"
+  dump_if_exists "$TMP/merge-rollback-failures.out"
+  dump_if_exists "$TMP/file-conflict-pending.out"
+  dump_if_exists "$TMP/file-conflict-pending-queue.json"
+  dump_if_exists "$TMP/file-conflict-needs-action.out"
+  dump_if_exists "$TMP/file-conflict-needs-action-queue.json"
+  dump_if_exists "$TMP/merge-db-decision-review-queue.json"
+  dump_if_exists "$TMP/merge-db-decision-reviewed.out"
+  dump_if_exists "$TMP/merge-db-decision-reviewed.json"
+  dump_if_exists "$TMP/merge-file-decision-review-queue.json"
+  dump_if_exists "$TMP/merge-file-decision-reviewed.out"
+  dump_if_exists "$TMP/merge-file-decision-reviewed.json"
+  dump_if_exists "$TMP/merge-unreviewed.json"
+  dump_if_exists "$TMP/merge-target-kept-files.out"
+  dump_if_exists "$TMP/merge-target-kept.json"
   dump_if_exists "$TMP/bad-slash.out"
   dump_if_exists "$TMP/storage-status-final.out"
   dump_if_exists "$TMP/storage-compact.out"
@@ -103,6 +164,69 @@ NODE
   fi
 }
 
+autoinc_runtime_request() {
+  local branch="$1"
+  local action="$2"
+  local out="$3"
+  local host
+  host="$(branch_host "$branch")"
+
+  local http
+  http="$(
+    curl -sS -o "$out" -w '%{http_code}' \
+      -H "Host: $host" \
+      "http://127.0.0.1:$PORT/?forkpress_e2e_autoinc=$action"
+  )"
+  if [ "$http" != "200" ]; then
+    echo "AUTOINCREMENT runtime action $action on $branch returned $http" >&2
+    cat "$out" >&2
+    "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+    exit 1
+  fi
+}
+
+keyless_runtime_request() {
+  local branch="$1"
+  local action="$2"
+  local out="$3"
+  local host
+  host="$(branch_host "$branch")"
+
+  local http
+  http="$(
+    curl -sS -o "$out" -w '%{http_code}' \
+      -H "Host: $host" \
+      "http://127.0.0.1:$PORT/?forkpress_e2e_keyless=$action"
+  )"
+  if [ "$http" != "200" ]; then
+    echo "keyless runtime action $action on $branch returned $http" >&2
+    cat "$out" >&2
+    "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+    exit 1
+  fi
+}
+
+unique_runtime_request() {
+  local branch="$1"
+  local action="$2"
+  local out="$3"
+  local host
+  host="$(branch_host "$branch")"
+
+  local http
+  http="$(
+    curl -sS -o "$out" -w '%{http_code}' \
+      -H "Host: $host" \
+      "http://127.0.0.1:$PORT/?forkpress_e2e_unique=$action"
+  )"
+  if [ "$http" != "200" ]; then
+    echo "unique runtime action $action on $branch returned $http" >&2
+    cat "$out" >&2
+    "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+    exit 1
+  fi
+}
+
 log_step "init COW site"
 "$BIN" init --work-dir "$WORK_DIR" --admin-password admin
 test -d "$WORK/.forkpress"
@@ -119,12 +243,62 @@ log_step "start server"
 "$BIN" serve --work-dir "$WORK_DIR" --port "$PORT" --root-host wp.localhost --workers 1
 "$BIN" server list | grep -F "$WORK_DIR" >/dev/null
 
+log_step "install runtime AUTOINCREMENT probe"
+mkdir -p "$WORK/main/wp-content/mu-plugins"
+cat > "$WORK/main/wp-content/mu-plugins/forkpress-e2e-autoinc.php" <<'PHP'
+<?php
+add_action('init', function () {
+    if (!isset($_GET['forkpress_e2e_autoinc'])) {
+        return;
+    }
+
+    global $wpdb;
+    $action = sanitize_key(wp_unslash($_GET['forkpress_e2e_autoinc']));
+    $table = $wpdb->prefix . 'forkpress_e2e_autoinc';
+    if (!preg_match('/^[A-Za-z0-9_]+$/', $table)) {
+        wp_send_json_error(['error' => 'unsafe table name'], 500);
+    }
+    $quoted = '`' . str_replace('`', '``', $table) . '`';
+
+    $query = static function (string $sql) use ($wpdb): void {
+        $result = $wpdb->query($sql);
+        if ($result === false) {
+            wp_send_json_error(['error' => $wpdb->last_error ?: 'query failed'], 500);
+        }
+    };
+
+    if ($action === 'init') {
+        $query("DROP TABLE IF EXISTS $quoted");
+        $query("CREATE TABLE $quoted (id bigint(20) unsigned NOT NULL AUTO_INCREMENT, label text NOT NULL, PRIMARY KEY (id))");
+        $query($wpdb->prepare("INSERT INTO $quoted (label) VALUES (%s)", 'Base runtime plugin row'));
+    } elseif ($action === 'insert') {
+        $query($wpdb->prepare("INSERT INTO $quoted (label) VALUES (%s)", 'Branch runtime plugin row'));
+    } elseif ($action !== 'inspect') {
+        wp_send_json_error(['error' => 'unknown action'], 400);
+    }
+
+    $rows = $wpdb->get_results("SELECT id, label FROM $quoted ORDER BY id", ARRAY_A);
+    if (!is_array($rows)) {
+        wp_send_json_error(['error' => $wpdb->last_error ?: 'select failed'], 500);
+    }
+    $max_id = (int)$wpdb->get_var("SELECT COALESCE(MAX(id), 0) FROM $quoted");
+    $seq = (int)$wpdb->get_var($wpdb->prepare("SELECT seq FROM sqlite_sequence WHERE name = %s", $table));
+    wp_send_json(['action' => $action, 'rows' => $rows, 'max_id' => $max_id, 'seq' => $seq]);
+}, 20);
+PHP
+
+autoinc_runtime_request main init "$TMP/autoinc-main-init.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(($data["max_id"] ?? null) === 1 ? 0 : 1);' "$TMP/autoinc-main-init.json"
+
 log_step "create CLI branch"
 "$BIN" branch --work-dir "$WORK_DIR" create feature-cow > "$TMP/branch-create.out"
 grep -F "feature-cow.wp.localhost:$PORT" "$TMP/branch-create.out" >/dev/null
 test -d "$WORK/feature-cow"
 echo "feature only" > "$WORK/feature-cow/wp-content/forkpress-branch.txt"
 test ! -e "$WORK/main/wp-content/forkpress-branch.txt"
+php -r '$meta = new SQLite3($argv[1]); $branch = new SQLite3($argv[2]); $band = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''feature-cow'\'' AND table_name = '\''wp_forkpress_e2e_autoinc'\''", true); $seq = (int)$branch->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''wp_forkpress_e2e_autoinc'\''"); exit($band && (int)$band["band_start"] >= 1000000 && $seq === (int)$band["band_start"] - 1 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite" "$WORK/feature-cow/wp-content/database/.ht.sqlite"
+autoinc_runtime_request feature-cow insert "$TMP/autoinc-feature-insert.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $meta = new SQLite3($argv[2]); $branch = new SQLite3($argv[3]); $max = (int)($data["max_id"] ?? 0); $band = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''feature-cow'\'' AND table_name = '\''wp_forkpress_e2e_autoinc'\''", true); $seq = (int)$branch->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''wp_forkpress_e2e_autoinc'\''"); exit($band && $max >= (int)$band["band_start"] && $max <= (int)$band["band_end"] && $seq === $max ? 0 : 1);' "$TMP/autoinc-feature-insert.json" "$WORK_DIR/cow/merge/metadata.sqlite" "$WORK/feature-cow/wp-content/database/.ht.sqlite"
 
 curl -sS -H "Host: feature-cow.wp.localhost:$PORT" \
   "http://127.0.0.1:$PORT/wp-admin/post-new.php" \
@@ -159,6 +333,24 @@ if [ "$HTTP" != "201" ]; then
   "$BIN" logs --work-dir "$WORK_DIR" --file all -n 160 >&2 || true
   exit 1
 fi
+POST_ID="$(php -r '$data = json_decode(file_get_contents($argv[1]), true); echo (int)($data["id"] ?? 0);' "$TMP/rest-save.json")"
+if [ "$POST_ID" = "0" ]; then
+  echo "REST save did not return a post ID" >&2
+  cat "$TMP/rest-save.json" >&2
+  exit 1
+fi
+php -r '$meta = new SQLite3($argv[1]); $branch = new SQLite3($argv[2]); $band = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''feature-cow'\'' AND table_name = '\''wp_posts'\''", true); $id = (int)$argv[3]; $seq = (int)$branch->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''wp_posts'\''"); exit($band && $id >= (int)$band["band_start"] && $id <= (int)$band["band_end"] && $seq >= $id && $seq <= (int)$band["band_end"] ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite" "$WORK/feature-cow/wp-content/database/.ht.sqlite" "$POST_ID"
+
+curl -sS -H "Host: feature-cow.wp.localhost:$PORT" \
+  "http://127.0.0.1:$PORT/wp-admin/post.php?post=$POST_ID&action=edit" \
+  -o "$TMP/branch-post-edit.html"
+grep -F "$TITLE" "$TMP/branch-post-edit.html" >/dev/null
+grep -F 'id="menu-posts"' "$TMP/branch-post-edit.html" >/dev/null
+
+curl -sSL -H "Host: feature-cow.wp.localhost:$PORT" \
+  "http://127.0.0.1:$PORT/?p=$POST_ID" \
+  -o "$TMP/branch-post-frontend.html"
+grep -F "$TITLE" "$TMP/branch-post-frontend.html" >/dev/null
 
 curl -sS -H "Host: feature-cow.wp.localhost:$PORT" \
   "http://127.0.0.1:$PORT/wp-admin/edit.php" \
@@ -173,6 +365,22 @@ test -f "$TMP/checkout/wordpress/wp-load.php"
 test -f "$TMP/checkout/database.sql"
 test ! -e "$TMP/checkout/wordpress/wp-content/database/.ht.sqlite"
 test ! -e "$TMP/checkout/wordpress/wp-content/database/wp-debug.log"
+
+log_step "create agent worktrees"
+"$BIN" agents \
+  --work-dir "$WORK_DIR" \
+  --remote "http://127.0.0.1:$PORT/site.git" \
+  --count 2 \
+  --prefix cowagent \
+  "$TMP/agents"
+test -f "$WORK/cowagent-1/wp-load.php"
+test -f "$WORK/cowagent-2/wp-load.php"
+test -d "$TMP/agents/cowagent-1/wordpress"
+test -d "$TMP/agents/cowagent-2/wordpress"
+"$BIN" branch --work-dir "$WORK_DIR" delete cowagent-1 > "$TMP/agent-delete-1.out"
+"$BIN" branch --work-dir "$WORK_DIR" delete cowagent-2 > "$TMP/agent-delete-2.out"
+test ! -e "$WORK/cowagent-1"
+test ! -e "$WORK/cowagent-2"
 
 git -C "$TMP/checkout" fetch origin '+refs/heads/*:refs/remotes/origin/*'
 git -C "$TMP/checkout" checkout -B feature-cow origin/feature-cow
@@ -312,17 +520,459 @@ if "$BIN" branch --work-dir "$WORK_DIR" reset main --from reset-source > "$TMP/r
 fi
 grep -F "refusing to reset main without --force" "$TMP/reset-main.out" >/dev/null
 
-log_step "create agent worktrees"
-"$BIN" agents \
-  --work-dir "$WORK_DIR" \
-  --remote "http://127.0.0.1:$PORT/site.git" \
-  --count 2 \
-  --prefix cowagent \
-  "$TMP/agents"
-test -f "$WORK/cowagent-1/wp-load.php"
-test -f "$WORK/cowagent-2/wp-load.php"
-test -d "$TMP/agents/cowagent-1/wordpress"
-test -d "$TMP/agents/cowagent-2/wordpress"
+log_step "merge independently banded WordPress posts"
+"$BIN" branch --work-dir "$WORK_DIR" create band-merge-source > "$TMP/band-merge-source-create.out"
+"$BIN" branch --work-dir "$WORK_DIR" create band-merge-target > "$TMP/band-merge-target-create.out"
+grep -F "band-merge-source.wp.localhost:$PORT" "$TMP/band-merge-source-create.out" >/dev/null
+grep -F "band-merge-target.wp.localhost:$PORT" "$TMP/band-merge-target-create.out" >/dev/null
+BAND_SOURCE_TITLE="Band source $(date +%s)"
+BAND_TARGET_TITLE="Band target $(date +%s)"
+create_branch_post band-merge-source "$BAND_SOURCE_TITLE"
+create_branch_post band-merge-target "$BAND_TARGET_TITLE"
+BAND_SOURCE_POST_ID="$(php -r '$data = json_decode(file_get_contents($argv[1]), true); echo (int)($data["id"] ?? 0);' "$TMP/band-merge-source-rest-save.json")"
+BAND_TARGET_POST_ID="$(php -r '$data = json_decode(file_get_contents($argv[1]), true); echo (int)($data["id"] ?? 0);' "$TMP/band-merge-target-rest-save.json")"
+if [ "$BAND_SOURCE_POST_ID" = "0" ] || [ "$BAND_TARGET_POST_ID" = "0" ] || [ "$BAND_SOURCE_POST_ID" = "$BAND_TARGET_POST_ID" ]; then
+  echo "banded source/target post IDs were not distinct: source=$BAND_SOURCE_POST_ID target=$BAND_TARGET_POST_ID" >&2
+  exit 1
+fi
+php -r '$meta = new SQLite3($argv[1]); $source_id = (int)$argv[2]; $target_id = (int)$argv[3]; $source = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''band-merge-source'\'' AND table_name = '\''wp_posts'\''", true); $target = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''band-merge-target'\'' AND table_name = '\''wp_posts'\''", true); $ok = $source && $target && (int)$source["band_start"] !== (int)$target["band_start"] && $source_id >= (int)$source["band_start"] && $source_id <= (int)$source["band_end"] && $target_id >= (int)$target["band_start"] && $target_id <= (int)$target["band_end"]; exit($ok ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite" "$BAND_SOURCE_POST_ID" "$BAND_TARGET_POST_ID"
+php -r '$db = new SQLite3($argv[1]); $id = (int)$argv[2]; $json = json_encode(["linkedPostId" => $id, "branch" => "source"], JSON_UNESCAPED_SLASHES); $serialized = "a:2:{s:12:\"linkedPostId\";i:$id;s:6:\"branch\";s:6:\"source\";}"; $stmt = $db->prepare("UPDATE wp_posts SET post_content = :content WHERE ID = :id"); $stmt->bindValue(":content", $json, SQLITE3_TEXT); $stmt->bindValue(":id", $id, SQLITE3_INTEGER); $stmt->execute(); $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:id, '\''_forkpress_json_ref'\'', :json), (:id, '\''_forkpress_serialized_ref'\'', :serialized)"); $stmt->bindValue(":id", $id, SQLITE3_INTEGER); $stmt->bindValue(":json", $json, SQLITE3_TEXT); $stmt->bindValue(":serialized", $serialized, SQLITE3_TEXT); $stmt->execute();' "$WORK/band-merge-source/wp-content/database/.ht.sqlite" "$BAND_SOURCE_POST_ID"
+php -r '$db = new SQLite3($argv[1]); $id = (int)$argv[2]; $json = json_encode(["linkedPostId" => $id, "branch" => "target"], JSON_UNESCAPED_SLASHES); $serialized = "a:2:{s:12:\"linkedPostId\";i:$id;s:6:\"branch\";s:6:\"target\";}"; $stmt = $db->prepare("UPDATE wp_posts SET post_content = :content WHERE ID = :id"); $stmt->bindValue(":content", $json, SQLITE3_TEXT); $stmt->bindValue(":id", $id, SQLITE3_INTEGER); $stmt->execute(); $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:id, '\''_forkpress_json_ref'\'', :json), (:id, '\''_forkpress_serialized_ref'\'', :serialized)"); $stmt->bindValue(":id", $id, SQLITE3_INTEGER); $stmt->bindValue(":json", $json, SQLITE3_TEXT); $stmt->bindValue(":serialized", $serialized, SQLITE3_TEXT); $stmt->execute();' "$WORK/band-merge-target/wp-content/database/.ht.sqlite" "$BAND_TARGET_POST_ID"
+"$BIN" branch --work-dir "$WORK_DIR" merge band-merge-source --into band-merge-target > "$TMP/merge-band-posts.out"
+grep -F "forkpress: merged band-merge-source into band-merge-target" "$TMP/merge-band-posts.out" >/dev/null
+grep -F "status:    completed_with_conflicts" "$TMP/merge-band-posts.out" >/dev/null
+curl -sS -H "Host: band-merge-target.wp.localhost:$PORT" \
+  "http://127.0.0.1:$PORT/wp-admin/edit.php" \
+  -o "$TMP/band-merge-target-edit.html"
+grep -F "$BAND_SOURCE_TITLE" "$TMP/band-merge-target-edit.html" >/dev/null
+grep -F "$BAND_TARGET_TITLE" "$TMP/band-merge-target-edit.html" >/dev/null
+curl -sSL -H "Host: band-merge-target.wp.localhost:$PORT" \
+  "http://127.0.0.1:$PORT/?p=$BAND_SOURCE_POST_ID" \
+  -o "$TMP/band-merge-target-source-post.html"
+grep -F "$BAND_SOURCE_TITLE" "$TMP/band-merge-target-source-post.html" >/dev/null
+php -r '$db = new SQLite3($argv[1]); $source_id = (int)$argv[2]; $target_id = (int)$argv[3]; $source_title = $db->querySingle("SELECT post_title FROM wp_posts WHERE ID = $source_id"); $target_title = $db->querySingle("SELECT post_title FROM wp_posts WHERE ID = $target_id"); exit($source_title === $argv[4] && $target_title === $argv[5] ? 0 : 1);' "$WORK/band-merge-target/wp-content/database/.ht.sqlite" "$BAND_SOURCE_POST_ID" "$BAND_TARGET_POST_ID" "$BAND_SOURCE_TITLE" "$BAND_TARGET_TITLE"
+php -r '$db = new SQLite3($argv[1]); $source_id = (int)$argv[2]; $target_id = (int)$argv[3]; $source_json = json_encode(["linkedPostId" => $source_id, "branch" => "source"], JSON_UNESCAPED_SLASHES); $target_json = json_encode(["linkedPostId" => $target_id, "branch" => "target"], JSON_UNESCAPED_SLASHES); $source_serialized = "a:2:{s:12:\"linkedPostId\";i:$source_id;s:6:\"branch\";s:6:\"source\";}"; $target_serialized = "a:2:{s:12:\"linkedPostId\";i:$target_id;s:6:\"branch\";s:6:\"target\";}"; $source_content = $db->querySingle("SELECT post_content FROM wp_posts WHERE ID = $source_id"); $target_content = $db->querySingle("SELECT post_content FROM wp_posts WHERE ID = $target_id"); $source_meta_json = $db->querySingle("SELECT meta_value FROM wp_postmeta WHERE post_id = $source_id AND meta_key = '\''_forkpress_json_ref'\''"); $target_meta_json = $db->querySingle("SELECT meta_value FROM wp_postmeta WHERE post_id = $target_id AND meta_key = '\''_forkpress_json_ref'\''"); $source_meta_serialized = $db->querySingle("SELECT meta_value FROM wp_postmeta WHERE post_id = $source_id AND meta_key = '\''_forkpress_serialized_ref'\''"); $target_meta_serialized = $db->querySingle("SELECT meta_value FROM wp_postmeta WHERE post_id = $target_id AND meta_key = '\''_forkpress_serialized_ref'\''"); $ok = $source_content === $source_json && $target_content === $target_json && $source_meta_json === $source_json && $target_meta_json === $target_json && $source_meta_serialized === $source_serialized && $target_meta_serialized === $target_serialized; exit($ok ? 0 : 1);' "$WORK/band-merge-target/wp-content/database/.ht.sqlite" "$BAND_SOURCE_POST_ID" "$BAND_TARGET_POST_ID"
+BAND_SOURCE_POST_DECISION_ID="$(
+  php -r 'require_once getcwd() . "/scripts/cow/merge.php"; $db = new SQLite3($argv[1]); $identity = cow_merge_identity_json(["ID" => (int)$argv[2]]); $stmt = $db->prepare("SELECT id FROM merge_decisions WHERE table_name = '\''wp_posts'\'' AND row_identity = :identity AND decision = '\''source-applied'\'' ORDER BY id DESC LIMIT 1"); $stmt->bindValue(":identity", $identity, SQLITE3_TEXT); echo (int)$stmt->execute()->fetchArray(SQLITE3_NUM)[0];' \
+    "$WORK_DIR/cow/merge/metadata.sqlite" "$BAND_SOURCE_POST_ID"
+)"
+BAND_TARGET_POST_DECISION_ID="$(
+  php -r 'require_once getcwd() . "/scripts/cow/merge.php"; $db = new SQLite3($argv[1]); $identity = cow_merge_identity_json(["ID" => (int)$argv[2]]); $stmt = $db->prepare("SELECT id FROM merge_decisions WHERE table_name = '\''wp_posts'\'' AND row_identity = :identity AND decision = '\''target-kept'\'' ORDER BY id DESC LIMIT 1"); $stmt->bindValue(":identity", $identity, SQLITE3_TEXT); echo (int)$stmt->execute()->fetchArray(SQLITE3_NUM)[0];' \
+    "$WORK_DIR/cow/merge/metadata.sqlite" "$BAND_TARGET_POST_ID"
+)"
+if [ "$BAND_SOURCE_POST_DECISION_ID" = "0" ] || [ "$BAND_TARGET_POST_DECISION_ID" = "0" ]; then
+  echo "missing banded post merge audit decisions: source=$BAND_SOURCE_POST_DECISION_ID target=$BAND_TARGET_POST_DECISION_ID" >&2
+  exit 1
+fi
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --review --review-status unreviewed --records decisions --scope db --limit 80 > "$TMP/band-merge-source-decision-queue.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["review"] ?? false) === true) && (($data["filters"]["review_status"] ?? null) === "unreviewed") && (($data["filters"]["records"] ?? null) === "decisions") && (($data["filters"]["scope"] ?? null) === "db"); $has_source = false; foreach (($data["decisions"] ?? []) as $row) { if (($row["review_status"] ?? null) !== null) $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[2] && ($row["table_name"] ?? null) === "wp_posts" && ($row["decision"] ?? null) === "source-applied") $has_source = true; } exit($ok && $has_source ? 0 : 1);' "$TMP/band-merge-source-decision-queue.json" "$BAND_SOURCE_POST_DECISION_ID"
+
+log_step "merge branch into main"
+php -r '$db = new SQLite3($argv[1]); $db->exec("CREATE TABLE IF NOT EXISTS forkpress_e2e_target_kept (id INTEGER PRIMARY KEY, label TEXT NOT NULL)");' "$WORK/main/wp-content/database/.ht.sqlite"
+"$BIN" branch --work-dir "$WORK_DIR" create merge-source
+MERGE_TITLE="Merge source $(date +%s)"
+create_branch_post merge-source "$MERGE_TITLE"
+php -r '$db = new SQLite3($argv[1]); $db->exec("INSERT INTO forkpress_e2e_target_kept (id, label) VALUES (1, '\''target-only row'\'')");' "$WORK/main/wp-content/database/.ht.sqlite"
+echo "merged through branch merge" > "$WORK/merge-source/wp-content/merge-source-file.txt"
+echo "kept on target through branch merge" > "$WORK/main/wp-content/main-target-file.txt"
+"$BIN" branch --work-dir "$WORK_DIR" merge merge-source --into main > "$TMP/merge.out"
+grep -F "forkpress: merged merge-source into main" "$TMP/merge.out" >/dev/null
+grep -F "status:    completed" "$TMP/merge.out" >/dev/null
+test -f "$WORK/main/wp-content/merge-source-file.txt"
+grep -F "merged through branch merge" "$WORK/main/wp-content/merge-source-file.txt" >/dev/null
+test -f "$WORK/main/wp-content/main-target-file.txt"
+grep -F "kept on target through branch merge" "$WORK/main/wp-content/main-target-file.txt" >/dev/null
+curl -sS -H "Host: wp.localhost:$PORT" \
+  "http://127.0.0.1:$PORT/wp-admin/edit.php" \
+  -o "$TMP/main-after-merge-edit.html"
+grep -F "$MERGE_TITLE" "$TMP/main-after-merge-edit.html" >/dev/null
+php -r '$db = new SQLite3($argv[1]); $label = $db->querySingle("SELECT label FROM forkpress_e2e_target_kept WHERE id = 1"); exit($label === "target-only row" ? 0 : 1);' "$WORK/main/wp-content/database/.ht.sqlite"
+test -f "$WORK_DIR/cow/merge/metadata.sqlite"
+php -r '$db = new SQLite3($argv[1]); $count = (int)$db->querySingle("SELECT COUNT(*) FROM merge_runs WHERE source_branch = '\''merge-source'\'' AND target_branch = '\''main'\'' AND status = '\''completed'\''"); exit($count > 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --limit 8 > "$TMP/merge-audit.out"
+grep -F "forkpress: COW merge audit" "$TMP/merge-audit.out" >/dev/null
+grep -F "merge-source -> main" "$TMP/merge-audit.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --limit 3 > "$TMP/merge-audit.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && !empty($data["runs"]) ? 0 : 1);' "$TMP/merge-audit.json"
+ROLLBACK_FAILURE_ARTIFACT="$WORK_DIR/cow/merge/e2e-rollback-failures.jsonl"
+printf '%s\n' '{"source_branch":"feature-e2e-rollback","rollback_failure":"forced runtime rollback failure"}' > "$ROLLBACK_FAILURE_ARTIFACT"
+ROLLBACK_FAILURE_RUN_ID="$(
+  php -r '$db = new SQLite3($argv[1]); $db->exec("INSERT INTO merge_runs (source_branch, target_branch, base_ref, status, policy, source_db, target_db, base_db, finished_at, failure_reason) VALUES (\"feature-e2e-rollback\", \"main\", NULL, \"failed\", \"generic-3way-v1\", \"/tmp/e2e-source.sqlite\", \"/tmp/e2e-target.sqlite\", \"/tmp/e2e-base.sqlite\", CURRENT_TIMESTAMP, \"forced runtime rollback failure\")"); $run = $db->lastInsertRowID(); $stmt = $db->prepare("INSERT INTO merge_rollback_failures (run_id, source_branch, target_branch, base_db, source_db, target_db, original_failure, rollback_failure, artifact_path) VALUES (:run_id, \"feature-e2e-rollback\", \"main\", \"/tmp/e2e-base.sqlite\", \"/tmp/e2e-source.sqlite\", \"/tmp/e2e-target.sqlite\", \"forced runtime file failure\", \"forced runtime rollback failure\", :artifact)"); $stmt->bindValue(":run_id", $run, SQLITE3_INTEGER); $stmt->bindValue(":artifact", $argv[2], SQLITE3_TEXT); $stmt->execute(); echo $run;' "$WORK_DIR/cow/merge/metadata.sqlite" "$ROLLBACK_FAILURE_ARTIFACT"
+)"
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --records rollback-failures --run "$ROLLBACK_FAILURE_RUN_ID" --limit 5 > "$TMP/merge-rollback-failures.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $rows = $data["rollback_failures"] ?? []; $runs = $data["runs"] ?? []; $ok = is_array($data) && (($data["filters"]["records"] ?? null) === "rollback-failures") && empty($data["conflicts"] ?? []) && empty($data["decisions"] ?? []) && empty($data["resolutions"] ?? []) && count($runs) === 1 && count($rows) === 1; $run = $runs[0] ?? []; $row = $rows[0] ?? []; exit($ok && (int)($run["id"] ?? 0) === (int)$argv[2] && ($run["status"] ?? null) === "failed" && (int)($row["run_id"] ?? 0) === (int)$argv[2] && ($row["source_branch"] ?? null) === "feature-e2e-rollback" && ($row["rollback_failure"] ?? null) === "forced runtime rollback failure" && ($row["artifact_path"] ?? null) === $argv[3] ? 0 : 1);' "$TMP/merge-rollback-failures.json" "$ROLLBACK_FAILURE_RUN_ID" "$ROLLBACK_FAILURE_ARTIFACT"
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --records rollback-failures --run "$ROLLBACK_FAILURE_RUN_ID" --limit 5 > "$TMP/merge-rollback-failures.out"
+grep -F "filters:   records=rollback-failures" "$TMP/merge-rollback-failures.out" >/dev/null
+grep -F "forced runtime rollback failure" "$TMP/merge-rollback-failures.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --target-kept --scope files --path-prefix wp-content/main-target-file.txt --limit 8 > "$TMP/merge-target-kept-files.out"
+grep -F "target-kept" "$TMP/merge-target-kept-files.out" >/dev/null
+grep -F "wp-content/main-target-file.txt" "$TMP/merge-target-kept-files.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --target-kept --group-by type --limit 12 > "$TMP/merge-target-kept.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $decisions = $data["decisions"] ?? []; $groups = $data["decision_groups"] ?? []; $ok = is_array($data) && (($data["filters"]["target_kept"] ?? false) === true) && (($data["filters"]["records"] ?? null) === "decisions") && (($data["filters"]["decision"] ?? null) === "target-kept") && count($decisions) > 0; $has_db = false; foreach ($decisions as $row) { if (($row["decision"] ?? null) !== "target-kept") $ok = false; if (($row["table_name"] ?? null) === "forkpress_e2e_target_kept") $has_db = true; } $has_group = false; foreach ($groups as $group) { if (($group["group_key"] ?? null) === "target-kept" && (int)($group["decision_count"] ?? 0) > 0) $has_group = true; } exit($ok && $has_db && $has_group ? 0 : 1);' "$TMP/merge-target-kept.json"
+REVIEWED_DB_DECISION_ID="$(
+  php -r '$db = new SQLite3($argv[1]); $stmt = $db->prepare("SELECT id FROM merge_decisions WHERE table_name = '\''forkpress_e2e_target_kept'\'' AND decision = '\''target-kept'\'' ORDER BY id DESC LIMIT 1"); echo (int)$stmt->execute()->fetchArray(SQLITE3_NUM)[0];' \
+    "$WORK_DIR/cow/merge/metadata.sqlite"
+)"
+UNREVIEWED_DB_DECISION_ID="$(
+  php -r '$db = new SQLite3($argv[1]); $stmt = $db->prepare("SELECT id FROM merge_decisions WHERE table_name <> '\''__files__'\'' AND decision = '\''source-applied'\'' ORDER BY id DESC LIMIT 1"); echo (int)$stmt->execute()->fetchArray(SQLITE3_NUM)[0];' \
+    "$WORK_DIR/cow/merge/metadata.sqlite"
+)"
+if [ "$REVIEWED_DB_DECISION_ID" = "0" ] || [ "$UNREVIEWED_DB_DECISION_ID" = "0" ]; then
+  echo "missing DB decision ids for review queue coverage" >&2
+  exit 1
+fi
+"$BIN" branch --work-dir "$WORK_DIR" merge-review decision "$REVIEWED_DB_DECISION_ID" --status reviewed --note "E2E reviewed target-kept DB decision" --reviewer cow-e2e > "$TMP/merge-db-decision-reviewed.out"
+grep -F "forkpress: recorded COW merge review note" "$TMP/merge-db-decision-reviewed.out" >/dev/null
+grep -F "record:    decision #$REVIEWED_DB_DECISION_ID" "$TMP/merge-db-decision-reviewed.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --review --review-status unreviewed --records decisions --scope db --limit 12 > "$TMP/merge-db-decision-review-queue.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["review"] ?? false) === true) && (($data["filters"]["review_status"] ?? null) === "unreviewed") && (($data["filters"]["records"] ?? null) === "decisions") && (($data["filters"]["scope"] ?? null) === "db") && empty($data["conflicts"] ?? []) && empty($data["resolutions"] ?? []); $has_unreviewed = false; foreach (($data["decisions"] ?? []) as $row) { if (($row["review_status"] ?? null) !== null) $ok = false; if (($row["table_name"] ?? null) === "__files__") $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[2]) $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[3] && ($row["decision"] ?? null) === "source-applied") $has_unreviewed = true; } exit($ok && $has_unreviewed ? 0 : 1);' "$TMP/merge-db-decision-review-queue.json" "$REVIEWED_DB_DECISION_ID" "$UNREVIEWED_DB_DECISION_ID"
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --records decisions --review-status reviewed --scope db --limit 8 > "$TMP/merge-db-decision-reviewed.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $decisions = $data["decisions"] ?? []; $ok = is_array($data) && (($data["filters"]["review_status"] ?? null) === "reviewed") && (($data["filters"]["records"] ?? null) === "decisions") && (($data["filters"]["scope"] ?? null) === "db") && count($decisions) === 1; $row = $decisions[0] ?? []; exit($ok && (int)($row["id"] ?? 0) === (int)$argv[2] && ($row["review_status"] ?? null) === "reviewed" && ($row["review_note"] ?? null) === "E2E reviewed target-kept DB decision" ? 0 : 1);' "$TMP/merge-db-decision-reviewed.json" "$REVIEWED_DB_DECISION_ID"
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --review-status unreviewed --scope files --path-prefix wp-content/main-target-file.txt --limit 8 > "$TMP/merge-unreviewed.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $decisions = $data["decisions"] ?? []; $ok = is_array($data) && (($data["filters"]["records"] ?? null) === "all") && (($data["filters"]["review_status"] ?? null) === "unreviewed"); $has_file = false; foreach ($decisions as $row) { if (($row["review_status"] ?? null) !== null) $ok = false; if (($row["table_name"] ?? null) === "__files__" && ($row["decision"] ?? null) === "target-kept" && str_contains((string)($row["target_preview"] ?? ""), "wp-content/main-target-file.txt")) $has_file = true; } exit($ok && $has_file ? 0 : 1);' "$TMP/merge-unreviewed.json"
+REVIEWED_FILE_DECISION_ID="$(
+  php -r 'require_once getcwd() . "/scripts/cow/merge.php"; $db = new SQLite3($argv[1]); $identity = cow_merge_file_identity_json("wp-content/main-target-file.txt"); $stmt = $db->prepare("SELECT id FROM merge_decisions WHERE table_name = '\''__files__'\'' AND row_identity = :identity AND decision = '\''target-kept'\'' ORDER BY id DESC LIMIT 1"); $stmt->bindValue(":identity", $identity, SQLITE3_TEXT); echo (int)$stmt->execute()->fetchArray(SQLITE3_NUM)[0];' \
+    "$WORK_DIR/cow/merge/metadata.sqlite"
+)"
+UNREVIEWED_FILE_DECISION_ID="$(
+  php -r 'require_once getcwd() . "/scripts/cow/merge.php"; $db = new SQLite3($argv[1]); $identity = cow_merge_file_identity_json("wp-content/merge-source-file.txt"); $stmt = $db->prepare("SELECT id FROM merge_decisions WHERE table_name = '\''__files__'\'' AND row_identity = :identity AND decision = '\''source-applied'\'' ORDER BY id DESC LIMIT 1"); $stmt->bindValue(":identity", $identity, SQLITE3_TEXT); echo (int)$stmt->execute()->fetchArray(SQLITE3_NUM)[0];' \
+    "$WORK_DIR/cow/merge/metadata.sqlite"
+)"
+if [ "$REVIEWED_FILE_DECISION_ID" = "0" ] || [ "$UNREVIEWED_FILE_DECISION_ID" = "0" ]; then
+  echo "missing file decision ids for review queue coverage" >&2
+  exit 1
+fi
+"$BIN" branch --work-dir "$WORK_DIR" merge-review decision "$REVIEWED_FILE_DECISION_ID" --status reviewed --note "E2E reviewed target-kept file decision" --reviewer cow-e2e > "$TMP/merge-file-decision-reviewed.out"
+grep -F "forkpress: recorded COW merge review note" "$TMP/merge-file-decision-reviewed.out" >/dev/null
+grep -F "record:    decision #$REVIEWED_FILE_DECISION_ID" "$TMP/merge-file-decision-reviewed.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --review --review-status unreviewed --records decisions --scope files --limit 12 > "$TMP/merge-file-decision-review-queue.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["review"] ?? false) === true) && (($data["filters"]["review_status"] ?? null) === "unreviewed") && (($data["filters"]["records"] ?? null) === "decisions") && (($data["filters"]["scope"] ?? null) === "files") && empty($data["conflicts"] ?? []) && empty($data["resolutions"] ?? []); $has_unreviewed = false; foreach (($data["decisions"] ?? []) as $row) { if (($row["review_status"] ?? null) !== null) $ok = false; if (($row["table_name"] ?? null) !== "__files__") $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[2]) $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[3] && ($row["decision"] ?? null) === "source-applied") $has_unreviewed = true; } exit($ok && $has_unreviewed ? 0 : 1);' "$TMP/merge-file-decision-review-queue.json" "$REVIEWED_FILE_DECISION_ID" "$UNREVIEWED_FILE_DECISION_ID"
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --records decisions --review-status reviewed --scope files --path wp-content/main-target-file.txt --limit 8 > "$TMP/merge-file-decision-reviewed.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $decisions = $data["decisions"] ?? []; $ok = is_array($data) && (($data["filters"]["review_status"] ?? null) === "reviewed") && (($data["filters"]["records"] ?? null) === "decisions") && (($data["filters"]["scope"] ?? null) === "files") && count($decisions) === 1; $row = $decisions[0] ?? []; exit($ok && (int)($row["id"] ?? 0) === (int)$argv[2] && ($row["review_status"] ?? null) === "reviewed" && ($row["review_note"] ?? null) === "E2E reviewed target-kept file decision" ? 0 : 1);' "$TMP/merge-file-decision-reviewed.json" "$REVIEWED_FILE_DECISION_ID"
+
+log_step "merge file review queues"
+echo "file review base one" > "$WORK/main/wp-content/file-review-one.txt"
+echo "file review base two" > "$WORK/main/wp-content/file-review-two.txt"
+"$BIN" branch --work-dir "$WORK_DIR" create file-review-source > "$TMP/file-review-create.out"
+grep -F "file-review-source.wp.localhost:$PORT" "$TMP/file-review-create.out" >/dev/null
+echo "file review source one" > "$WORK/file-review-source/wp-content/file-review-one.txt"
+echo "file review source two" > "$WORK/file-review-source/wp-content/file-review-two.txt"
+echo "file review target one" > "$WORK/main/wp-content/file-review-one.txt"
+echo "file review target two" > "$WORK/main/wp-content/file-review-two.txt"
+"$BIN" branch --work-dir "$WORK_DIR" merge file-review-source --into main > "$TMP/file-review-merge.out"
+grep -F "forkpress: merged file-review-source into main" "$TMP/file-review-merge.out" >/dev/null
+grep -F "status:    completed_with_conflicts" "$TMP/file-review-merge.out" >/dev/null
+grep -F "file review target one" "$WORK/main/wp-content/file-review-one.txt" >/dev/null
+grep -F "file review target two" "$WORK/main/wp-content/file-review-two.txt" >/dev/null
+REVIEWED_FILE_CONFLICT_ID="$(
+  php -r 'require_once getcwd() . "/scripts/cow/merge.php"; $db = new SQLite3($argv[1]); $identity = cow_merge_file_identity_json("wp-content/file-review-one.txt"); $stmt = $db->prepare("SELECT id FROM merge_conflicts WHERE table_name = '\''__files__'\'' AND row_identity = :identity AND conflict_type = '\''file-conflict'\'' ORDER BY id DESC LIMIT 1"); $stmt->bindValue(":identity", $identity, SQLITE3_TEXT); echo (int)$stmt->execute()->fetchArray(SQLITE3_NUM)[0];' \
+    "$WORK_DIR/cow/merge/metadata.sqlite"
+)"
+UNREVIEWED_FILE_CONFLICT_ID="$(
+  php -r 'require_once getcwd() . "/scripts/cow/merge.php"; $db = new SQLite3($argv[1]); $identity = cow_merge_file_identity_json("wp-content/file-review-two.txt"); $stmt = $db->prepare("SELECT id FROM merge_conflicts WHERE table_name = '\''__files__'\'' AND row_identity = :identity AND conflict_type = '\''file-conflict'\'' ORDER BY id DESC LIMIT 1"); $stmt->bindValue(":identity", $identity, SQLITE3_TEXT); echo (int)$stmt->execute()->fetchArray(SQLITE3_NUM)[0];' \
+    "$WORK_DIR/cow/merge/metadata.sqlite"
+)"
+if [ "$REVIEWED_FILE_CONFLICT_ID" = "0" ] || [ "$UNREVIEWED_FILE_CONFLICT_ID" = "0" ]; then
+  echo "missing file conflict ids for review queue coverage" >&2
+  exit 1
+fi
+"$BIN" branch --work-dir "$WORK_DIR" merge-review conflict "$REVIEWED_FILE_CONFLICT_ID" --status reviewed --note "E2E reviewed file conflict" --reviewer cow-e2e > "$TMP/file-conflict-reviewed.out"
+grep -F "forkpress: recorded COW merge review note" "$TMP/file-conflict-reviewed.out" >/dev/null
+grep -F "record:    conflict #$REVIEWED_FILE_CONFLICT_ID" "$TMP/file-conflict-reviewed.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" merge-review conflict "$REVIEWED_FILE_CONFLICT_ID" --status pending --note "E2E pending file conflict follow-up" --reviewer cow-e2e > "$TMP/file-conflict-pending.out"
+grep -F "forkpress: recorded COW merge review note" "$TMP/file-conflict-pending.out" >/dev/null
+grep -F "status:    pending" "$TMP/file-conflict-pending.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --review --review-status pending --records conflicts --scope files --limit 12 > "$TMP/file-conflict-pending-queue.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["review"] ?? false) === true) && (($data["filters"]["review_status"] ?? null) === "pending") && (($data["filters"]["records"] ?? null) === "conflicts") && (($data["filters"]["scope"] ?? null) === "files") && empty($data["decisions"] ?? []) && empty($data["resolutions"] ?? []); $has_pending = false; foreach (($data["conflicts"] ?? []) as $row) { if (($row["table_name"] ?? null) !== "__files__") $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[3]) $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[2] && ($row["review_status"] ?? null) === "pending" && ($row["review_note"] ?? null) === "E2E pending file conflict follow-up") $has_pending = true; } exit($ok && $has_pending ? 0 : 1);' "$TMP/file-conflict-pending-queue.json" "$REVIEWED_FILE_CONFLICT_ID" "$UNREVIEWED_FILE_CONFLICT_ID"
+"$BIN" branch --work-dir "$WORK_DIR" merge-review conflict "$REVIEWED_FILE_CONFLICT_ID" --status needs-action --note "E2E needs-action file conflict follow-up" --reviewer cow-e2e > "$TMP/file-conflict-needs-action.out"
+grep -F "forkpress: recorded COW merge review note" "$TMP/file-conflict-needs-action.out" >/dev/null
+grep -F "status:    needs-action" "$TMP/file-conflict-needs-action.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --review --review-status needs-action --records conflicts --scope files --limit 12 > "$TMP/file-conflict-needs-action-queue.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["review"] ?? false) === true) && (($data["filters"]["review_status"] ?? null) === "needs-action") && (($data["filters"]["records"] ?? null) === "conflicts") && (($data["filters"]["scope"] ?? null) === "files") && empty($data["decisions"] ?? []) && empty($data["resolutions"] ?? []); $has_needs_action = false; foreach (($data["conflicts"] ?? []) as $row) { if (($row["table_name"] ?? null) !== "__files__") $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[3]) $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[2] && ($row["review_status"] ?? null) === "needs-action" && ($row["review_note"] ?? null) === "E2E needs-action file conflict follow-up") $has_needs_action = true; } exit($ok && $has_needs_action ? 0 : 1);' "$TMP/file-conflict-needs-action-queue.json" "$REVIEWED_FILE_CONFLICT_ID" "$UNREVIEWED_FILE_CONFLICT_ID"
+"$BIN" branch --work-dir "$WORK_DIR" merge-review conflict "$REVIEWED_FILE_CONFLICT_ID" --status reviewed --note "E2E closed file conflict review" --reviewer cow-e2e > "$TMP/file-conflict-closed.out"
+grep -F "forkpress: recorded COW merge review note" "$TMP/file-conflict-closed.out" >/dev/null
+grep -F "status:    reviewed" "$TMP/file-conflict-closed.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --review --review-status reviewed --records conflicts --scope files --limit 12 > "$TMP/file-conflict-reviewed-queue.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["review"] ?? false) === true) && (($data["filters"]["review_status"] ?? null) === "reviewed") && (($data["filters"]["records"] ?? null) === "conflicts") && (($data["filters"]["scope"] ?? null) === "files") && empty($data["decisions"] ?? []) && empty($data["resolutions"] ?? []); $has_reviewed = false; foreach (($data["conflicts"] ?? []) as $row) { if (($row["table_name"] ?? null) !== "__files__") $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[3]) $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[2] && ($row["review_status"] ?? null) === "reviewed" && ($row["review_note"] ?? null) === "E2E closed file conflict review") $has_reviewed = true; } exit($ok && $has_reviewed ? 0 : 1);' "$TMP/file-conflict-reviewed-queue.json" "$REVIEWED_FILE_CONFLICT_ID" "$UNREVIEWED_FILE_CONFLICT_ID"
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --review --review-status unreviewed --records conflicts --scope files --limit 12 > "$TMP/file-conflict-review-queue.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["review"] ?? false) === true) && (($data["filters"]["review_status"] ?? null) === "unreviewed") && (($data["filters"]["records"] ?? null) === "conflicts") && (($data["filters"]["scope"] ?? null) === "files") && empty($data["decisions"] ?? []) && empty($data["resolutions"] ?? []); $has_unreviewed = false; foreach (($data["conflicts"] ?? []) as $row) { if (($row["review_status"] ?? null) !== null) $ok = false; if (($row["table_name"] ?? null) !== "__files__") $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[2]) $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[3] && ($row["conflict_type"] ?? null) === "file-conflict") $has_unreviewed = true; } exit($ok && $has_unreviewed ? 0 : 1);' "$TMP/file-conflict-review-queue.json" "$REVIEWED_FILE_CONFLICT_ID" "$UNREVIEWED_FILE_CONFLICT_ID"
+"$BIN" branch --work-dir "$WORK_DIR" merge-resolve conflict "$REVIEWED_FILE_CONFLICT_ID" --choice source --apply --note "E2E apply source file one" --reviewer cow-e2e > "$TMP/file-resolve-one.out"
+grep -F "forkpress: validated COW merge conflict resolution" "$TMP/file-resolve-one.out" >/dev/null
+grep -F "applied:   yes" "$TMP/file-resolve-one.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" merge-resolve conflict "$UNREVIEWED_FILE_CONFLICT_ID" --choice source --apply --note "E2E apply source file two" --reviewer cow-e2e > "$TMP/file-resolve-two.out"
+grep -F "forkpress: validated COW merge conflict resolution" "$TMP/file-resolve-two.out" >/dev/null
+grep -F "applied:   yes" "$TMP/file-resolve-two.out" >/dev/null
+grep -F "file review source one" "$WORK/main/wp-content/file-review-one.txt" >/dev/null
+grep -F "file review source two" "$WORK/main/wp-content/file-review-two.txt" >/dev/null
+REVIEWED_FILE_RESOLUTION_ID="$(
+  php -r '$db = new SQLite3($argv[1]); echo (int)$db->querySingle("SELECT id FROM merge_resolutions WHERE conflict_id = " . (int)$argv[2] . " ORDER BY id DESC LIMIT 1");' \
+    "$WORK_DIR/cow/merge/metadata.sqlite" "$REVIEWED_FILE_CONFLICT_ID"
+)"
+UNREVIEWED_FILE_RESOLUTION_ID="$(
+  php -r '$db = new SQLite3($argv[1]); echo (int)$db->querySingle("SELECT id FROM merge_resolutions WHERE conflict_id = " . (int)$argv[2] . " ORDER BY id DESC LIMIT 1");' \
+    "$WORK_DIR/cow/merge/metadata.sqlite" "$UNREVIEWED_FILE_CONFLICT_ID"
+)"
+if [ "$REVIEWED_FILE_RESOLUTION_ID" = "0" ] || [ "$UNREVIEWED_FILE_RESOLUTION_ID" = "0" ]; then
+  echo "missing file resolution ids for review queue coverage" >&2
+  exit 1
+fi
+"$BIN" branch --work-dir "$WORK_DIR" merge-review resolution "$REVIEWED_FILE_RESOLUTION_ID" --status reviewed --note "E2E reviewed file resolution" --reviewer cow-e2e > "$TMP/file-resolution-reviewed.out"
+grep -F "forkpress: recorded COW merge review note" "$TMP/file-resolution-reviewed.out" >/dev/null
+grep -F "record:    resolution #$REVIEWED_FILE_RESOLUTION_ID" "$TMP/file-resolution-reviewed.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --review --review-status reviewed --records resolutions --scope files --limit 12 > "$TMP/file-resolution-reviewed-queue.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["review"] ?? false) === true) && (($data["filters"]["review_status"] ?? null) === "reviewed") && (($data["filters"]["records"] ?? null) === "resolutions") && (($data["filters"]["scope"] ?? null) === "files") && empty($data["conflicts"] ?? []) && empty($data["decisions"] ?? []); $has_reviewed = false; foreach (($data["resolutions"] ?? []) as $row) { if (($row["table_name"] ?? null) !== "__files__") $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[3]) $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[2] && ($row["review_status"] ?? null) === "reviewed" && ($row["review_note"] ?? null) === "E2E reviewed file resolution") $has_reviewed = true; } exit($ok && $has_reviewed ? 0 : 1);' "$TMP/file-resolution-reviewed-queue.json" "$REVIEWED_FILE_RESOLUTION_ID" "$UNREVIEWED_FILE_RESOLUTION_ID"
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --review --review-status unreviewed --records resolutions --scope files --limit 12 > "$TMP/file-resolution-review-queue.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["review"] ?? false) === true) && (($data["filters"]["review_status"] ?? null) === "unreviewed") && (($data["filters"]["records"] ?? null) === "resolutions") && (($data["filters"]["scope"] ?? null) === "files") && empty($data["conflicts"] ?? []) && empty($data["decisions"] ?? []); $has_unreviewed = false; foreach (($data["resolutions"] ?? []) as $row) { if (($row["review_status"] ?? null) !== null) $ok = false; if (($row["table_name"] ?? null) !== "__files__") $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[2]) $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[3]) $has_unreviewed = true; } exit($ok && $has_unreviewed ? 0 : 1);' "$TMP/file-resolution-review-queue.json" "$REVIEWED_FILE_RESOLUTION_ID" "$UNREVIEWED_FILE_RESOLUTION_ID"
+
+log_step "merge runtime-tracked no-PK rowid reuse"
+mkdir -p "$WORK/main/wp-content/mu-plugins"
+cat > "$WORK/main/wp-content/mu-plugins/forkpress-e2e-keyless.php" <<'PHP'
+<?php
+add_action('init', function () {
+    if (!isset($_GET['forkpress_e2e_keyless'])) {
+        return;
+    }
+
+    global $wpdb;
+    $action = sanitize_key(wp_unslash($_GET['forkpress_e2e_keyless']));
+    $table = $wpdb->prefix . 'forkpress_e2e_keyless';
+    if (!preg_match('/^[A-Za-z0-9_]+$/', $table)) {
+        wp_send_json_error(['error' => 'unsafe table name'], 500);
+    }
+    $quoted = '"' . str_replace('"', '""', $table) . '"';
+
+    $query = static function (string $sql) use ($wpdb): void {
+        $result = $wpdb->query($sql);
+        if ($result === false) {
+            wp_send_json_error(['error' => $wpdb->last_error ?: 'query failed'], 500);
+        }
+    };
+
+    if ($action === 'init') {
+        $query("DROP TABLE IF EXISTS $quoted");
+        $query("CREATE TABLE $quoted (label TEXT, value TEXT)");
+        $query($wpdb->prepare("INSERT INTO $quoted (label, value) VALUES (%s, %s)", 'Base keyless runtime', 'base'));
+    } elseif ($action === 'source-reuse') {
+        $query("DELETE FROM $quoted WHERE rowid = 1");
+        $query($wpdb->prepare("INSERT INTO $quoted (label, value) VALUES (%s, %s)", 'Runtime reused source row', 'new logical row'));
+    } elseif ($action === 'target-edit') {
+        $query($wpdb->prepare("UPDATE $quoted SET value = %s WHERE rowid = 1", 'target kept old row'));
+    } elseif ($action !== 'inspect') {
+        wp_send_json_error(['error' => 'unknown action'], 400);
+    }
+
+    $rows = $wpdb->get_results("SELECT rowid, label, value FROM $quoted ORDER BY rowid", ARRAY_A);
+    if (!is_array($rows)) {
+        wp_send_json_error(['error' => $wpdb->last_error ?: 'select failed'], 500);
+    }
+    wp_send_json(['action' => $action, 'rows' => $rows]);
+}, 20);
+PHP
+
+keyless_runtime_request main init "$TMP/keyless-init.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(($data["rows"][0]["rowid"] ?? null) == 1 && ($data["rows"][0]["label"] ?? null) === "Base keyless runtime" ? 0 : 1);' "$TMP/keyless-init.json"
+"$BIN" branch --work-dir "$WORK_DIR" create keyless-reuse > "$TMP/keyless-create.out"
+grep -F "keyless-reuse.wp.localhost:$PORT" "$TMP/keyless-create.out" >/dev/null
+keyless_runtime_request keyless-reuse source-reuse "$TMP/keyless-source-reuse.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(count($data["rows"] ?? []) === 1 && ($data["rows"][0]["rowid"] ?? null) == 1 && ($data["rows"][0]["label"] ?? null) === "Runtime reused source row" ? 0 : 1);' "$TMP/keyless-source-reuse.json"
+php -r '$db = new SQLite3($argv[1]); $runs = (int)$db->querySingle("SELECT COUNT(*) FROM merge_runs WHERE source_branch = '\''keyless-reuse'\'' AND policy = '\''runtime-row-identity-tracking'\'' AND status = '\''identity_tracked'\''"); $history = (int)$db->querySingle("SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = '\''keyless-reuse'\'' AND table_name = '\''wp_forkpress_e2e_keyless'\'' AND rowid = 1"); exit($runs > 0 && $history >= 2 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
+keyless_runtime_request main target-edit "$TMP/keyless-target-edit.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(($data["rows"][0]["rowid"] ?? null) == 1 && ($data["rows"][0]["value"] ?? null) === "target kept old row" ? 0 : 1);' "$TMP/keyless-target-edit.json"
+"$BIN" branch --work-dir "$WORK_DIR" merge keyless-reuse --into main > "$TMP/keyless-merge.out"
+grep -F "forkpress: merged keyless-reuse into main" "$TMP/keyless-merge.out" >/dev/null
+grep -F "status:    completed_with_conflicts" "$TMP/keyless-merge.out" >/dev/null
+keyless_runtime_request main inspect "$TMP/keyless-main-after-merge.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $old = 0; $new = 0; foreach (($data["rows"] ?? []) as $row) { if (($row["label"] ?? null) === "Base keyless runtime" && ($row["value"] ?? null) === "target kept old row") $old++; if (($row["label"] ?? null) === "Runtime reused source row" && ($row["value"] ?? null) === "new logical row") $new++; } exit($old === 1 && $new === 1 ? 0 : 1);' "$TMP/keyless-main-after-merge.json"
+php -r '$db = new SQLite3($argv[1]); $conflicts = (int)$db->querySingle("SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '\''wp_forkpress_e2e_keyless'\'' AND conflict_type = '\''row-source-deleted'\''"); exit($conflicts > 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --scope db --records conflicts --conflict-type row-source-deleted --limit 8 > "$TMP/keyless-conflicts.out"
+grep -F "wp_forkpress_e2e_keyless" "$TMP/keyless-conflicts.out" >/dev/null
+KEYLESS_CONFLICT_ID="$(
+  php -r '$db = new SQLite3($argv[1]); echo (int)$db->querySingle("SELECT id FROM merge_conflicts WHERE table_name = '\''wp_forkpress_e2e_keyless'\'' AND conflict_type = '\''row-source-deleted'\'' ORDER BY id DESC LIMIT 1");' \
+    "$WORK_DIR/cow/merge/metadata.sqlite"
+)"
+if [ "$KEYLESS_CONFLICT_ID" = "0" ]; then
+  echo "missing keyless row-source-deleted conflict id" >&2
+  exit 1
+fi
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --review --review-status unreviewed --records conflicts --scope db --limit 8 > "$TMP/keyless-review-queue.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["review"] ?? false) === true) && (($data["filters"]["review_status"] ?? null) === "unreviewed") && (($data["filters"]["records"] ?? null) === "conflicts") && (($data["filters"]["scope"] ?? null) === "db") && empty($data["decisions"] ?? []) && empty($data["resolutions"] ?? []); $has_conflict = false; foreach (($data["conflicts"] ?? []) as $row) { if (($row["review_status"] ?? null) !== null) $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[2] && ($row["table_name"] ?? null) === "wp_forkpress_e2e_keyless" && ($row["conflict_type"] ?? null) === "row-source-deleted") $has_conflict = true; } exit($ok && $has_conflict ? 0 : 1);' "$TMP/keyless-review-queue.json" "$KEYLESS_CONFLICT_ID"
+"$BIN" branch --work-dir "$WORK_DIR" merge-resolve conflict "$KEYLESS_CONFLICT_ID" --choice target --apply --note "Keep runtime target row for e2e" --reviewer cow-e2e > "$TMP/keyless-resolve.out"
+grep -F "forkpress: validated COW merge conflict resolution" "$TMP/keyless-resolve.out" >/dev/null
+grep -F "applied:   yes" "$TMP/keyless-resolve.out" >/dev/null
+KEYLESS_RESOLUTION_ID="$(
+  php -r '$db = new SQLite3($argv[1]); echo (int)$db->querySingle("SELECT id FROM merge_resolutions WHERE conflict_id = " . (int)$argv[2] . " ORDER BY id DESC LIMIT 1");' \
+    "$WORK_DIR/cow/merge/metadata.sqlite" "$KEYLESS_CONFLICT_ID"
+)"
+if [ "$KEYLESS_RESOLUTION_ID" = "0" ]; then
+  echo "missing keyless deterministic resolution id" >&2
+  exit 1
+fi
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --review --review-status unreviewed --records resolutions --scope db --limit 8 > "$TMP/keyless-unreviewed-resolution-queue.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["review"] ?? false) === true) && (($data["filters"]["review_status"] ?? null) === "unreviewed") && (($data["filters"]["records"] ?? null) === "resolutions") && (($data["filters"]["scope"] ?? null) === "db") && empty($data["conflicts"] ?? []) && empty($data["decisions"] ?? []); $has_resolution = false; foreach (($data["resolutions"] ?? []) as $row) { if (($row["review_status"] ?? null) !== null) $ok = false; if (($row["table_name"] ?? null) === "__files__") $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[2] && ($row["table_name"] ?? null) === "wp_forkpress_e2e_keyless") $has_resolution = true; } exit($ok && $has_resolution ? 0 : 1);' "$TMP/keyless-unreviewed-resolution-queue.json" "$KEYLESS_RESOLUTION_ID"
+"$BIN" branch --work-dir "$WORK_DIR" merge-review resolution "$KEYLESS_RESOLUTION_ID" --status needs-action --note "E2E follow-up on runtime keyless resolution" --reviewer cow-e2e > "$TMP/keyless-resolution-review.out"
+grep -F "forkpress: recorded COW merge review note" "$TMP/keyless-resolution-review.out" >/dev/null
+grep -F "record:    resolution #$KEYLESS_RESOLUTION_ID" "$TMP/keyless-resolution-review.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --records resolutions --review-status needs-action --limit 8 > "$TMP/keyless-resolution-audit.out"
+grep -F "wp_forkpress_e2e_keyless" "$TMP/keyless-resolution-audit.out" >/dev/null
+grep -F "review=needs-action" "$TMP/keyless-resolution-audit.out" >/dev/null
+grep -F "E2E follow-up on runtime keyless resolution" "$TMP/keyless-resolution-audit.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --review --review-status needs-action --records resolutions --scope db --limit 8 > "$TMP/keyless-resolution-needs-action-queue.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["review"] ?? false) === true) && (($data["filters"]["review_status"] ?? null) === "needs-action") && (($data["filters"]["records"] ?? null) === "resolutions") && (($data["filters"]["scope"] ?? null) === "db") && empty($data["conflicts"] ?? []) && empty($data["decisions"] ?? []); $has_resolution = false; foreach (($data["resolutions"] ?? []) as $row) { if (($row["table_name"] ?? null) === "__files__") $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[2] && ($row["review_status"] ?? null) === "needs-action" && ($row["review_note"] ?? null) === "E2E follow-up on runtime keyless resolution") $has_resolution = true; } exit($ok && $has_resolution ? 0 : 1);' "$TMP/keyless-resolution-needs-action-queue.json" "$KEYLESS_RESOLUTION_ID"
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --resolution-status validated --group-by status --limit 8 > "$TMP/keyless-resolution-status.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["records"] ?? null) === "resolutions") && (($data["filters"]["resolution_status"] ?? null) === "validated") && (($data["filters"]["group_by"] ?? null) === "status"); $has_resolution = false; foreach (($data["resolutions"] ?? []) as $row) { if ((int)($row["id"] ?? 0) === (int)$argv[2] && ($row["status"] ?? null) === "validated") $has_resolution = true; } $has_group = false; foreach (($data["resolution_groups"] ?? []) as $group) { if (($group["group_key"] ?? null) === "validated" && (int)($group["resolution_count"] ?? 0) > 0) $has_group = true; } exit($ok && $has_resolution && $has_group ? 0 : 1);' "$TMP/keyless-resolution-status.json" "$KEYLESS_RESOLUTION_ID"
+
+log_step "bound offline no-PK rowid ambiguity"
+php -r '$db = new SQLite3($argv[1]); $db->exec("DROP TABLE IF EXISTS wp_forkpress_e2e_offline_keyless"); $db->exec("CREATE TABLE wp_forkpress_e2e_offline_keyless (label TEXT, value TEXT)"); $db->exec("INSERT INTO wp_forkpress_e2e_offline_keyless (label, value) VALUES ('\''Offline base row'\'', '\''base'\'')");' "$WORK/main/wp-content/database/.ht.sqlite"
+"$BIN" branch --work-dir "$WORK_DIR" create offline-keyless-reuse > "$TMP/offline-keyless-create.out"
+grep -F "offline-keyless-reuse.wp.localhost:$PORT" "$TMP/offline-keyless-create.out" >/dev/null
+php -r '$db = new SQLite3($argv[1]); $db->exec("DELETE FROM wp_forkpress_e2e_offline_keyless WHERE rowid = 1"); $db->exec("INSERT INTO wp_forkpress_e2e_offline_keyless (label, value) VALUES ('\''Offline reused source row'\'', '\''new offline row'\'')"); $row = $db->querySingle("SELECT rowid, label, value FROM wp_forkpress_e2e_offline_keyless", true); file_put_contents($argv[2], json_encode($row)); exit(((int)($row["rowid"] ?? 0) === 1 && ($row["label"] ?? null) === "Offline reused source row") ? 0 : 1);' "$WORK/offline-keyless-reuse/wp-content/database/.ht.sqlite" "$TMP/offline-keyless-source.json"
+php -r '$db = new SQLite3($argv[1]); $db->exec("UPDATE wp_forkpress_e2e_offline_keyless SET value = '\''target kept offline old row'\'' WHERE rowid = 1"); $row = $db->querySingle("SELECT rowid, label, value FROM wp_forkpress_e2e_offline_keyless", true); file_put_contents($argv[2], json_encode($row)); exit(((int)($row["rowid"] ?? 0) === 1 && ($row["value"] ?? null) === "target kept offline old row") ? 0 : 1);' "$WORK/main/wp-content/database/.ht.sqlite" "$TMP/offline-keyless-target.json"
+"$BIN" branch --work-dir "$WORK_DIR" merge offline-keyless-reuse --into main > "$TMP/offline-keyless-merge.out"
+grep -F "forkpress: merged offline-keyless-reuse into main" "$TMP/offline-keyless-merge.out" >/dev/null
+grep -F "status:    completed_with_conflicts" "$TMP/offline-keyless-merge.out" >/dev/null
+php -r '$db = new SQLite3($argv[1]); $rows = []; $res = $db->query("SELECT rowid, label, value FROM wp_forkpress_e2e_offline_keyless ORDER BY rowid"); while ($row = $res->fetchArray(SQLITE3_ASSOC)) $rows[] = $row; file_put_contents($argv[2], json_encode(["rows" => $rows])); exit(count($rows) === 1 && ($rows[0]["label"] ?? null) === "Offline base row" && ($rows[0]["value"] ?? null) === "target kept offline old row" ? 0 : 1);' "$WORK/main/wp-content/database/.ht.sqlite" "$TMP/offline-keyless-after-merge.json"
+OFFLINE_KEYLESS_CONFLICT_ID="$(
+  php -r '$db = new SQLite3($argv[1]); echo (int)$db->querySingle("SELECT c.id FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = '\''wp_forkpress_e2e_offline_keyless'\'' AND c.conflict_type = '\''row-identity-ambiguous'\'' AND r.source_branch = '\''offline-keyless-reuse'\'' AND r.target_branch = '\''main'\'' ORDER BY c.id DESC LIMIT 1");' \
+    "$WORK_DIR/cow/merge/metadata.sqlite"
+)"
+if [ "$OFFLINE_KEYLESS_CONFLICT_ID" = "0" ]; then
+  echo "missing offline keyless row-identity-ambiguous conflict id" >&2
+  exit 1
+fi
+php -r '$db = new SQLite3($argv[1]); $conflict_id = (int)$argv[2]; $target_wins = (int)$db->querySingle("SELECT COUNT(*) FROM merge_decisions WHERE table_name = '\''wp_forkpress_e2e_offline_keyless'\'' AND decision = '\''target-wins'\'' AND reason LIKE '\''no-primary-key source row changed cells that target did not change%'\''"); exit($conflict_id > 0 && $target_wins > 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite" "$OFFLINE_KEYLESS_CONFLICT_ID"
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --scope db --records conflicts --conflict-type row-identity-ambiguous --limit 20 > "$TMP/offline-keyless-audit.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["conflict_type"] ?? null) === "row-identity-ambiguous") && (($data["filters"]["records"] ?? null) === "conflicts") && (($data["filters"]["scope"] ?? null) === "db"); $has_conflict = false; foreach (($data["conflicts"] ?? []) as $row) { if ((int)($row["id"] ?? 0) === (int)$argv[2] && ($row["table_name"] ?? null) === "wp_forkpress_e2e_offline_keyless" && ($row["conflict_type"] ?? null) === "row-identity-ambiguous") $has_conflict = true; } exit($ok && $has_conflict ? 0 : 1);' "$TMP/offline-keyless-audit.json" "$OFFLINE_KEYLESS_CONFLICT_ID"
+"$BIN" branch --work-dir "$WORK_DIR" merge-resolve conflict "$OFFLINE_KEYLESS_CONFLICT_ID" --choice source --apply --note "Apply reviewed offline no-PK row choice" --reviewer cow-e2e > "$TMP/offline-keyless-resolve.out"
+grep -F "forkpress: validated COW merge conflict resolution" "$TMP/offline-keyless-resolve.out" >/dev/null
+grep -F "applied:   yes" "$TMP/offline-keyless-resolve.out" >/dev/null
+php -r '$db = new SQLite3($argv[1]); $rows = []; $res = $db->query("SELECT rowid, label, value FROM wp_forkpress_e2e_offline_keyless ORDER BY rowid"); while ($row = $res->fetchArray(SQLITE3_ASSOC)) $rows[] = $row; file_put_contents($argv[2], json_encode(["rows" => $rows])); exit(count($rows) === 1 && ($rows[0]["label"] ?? null) === "Offline reused source row" && ($rows[0]["value"] ?? null) === "new offline row" ? 0 : 1);' "$WORK/main/wp-content/database/.ht.sqlite" "$TMP/offline-keyless-after-resolution.json"
+php -r '$db = new SQLite3($argv[1]); $conflict_id = (int)$argv[2]; $resolution = (int)$db->querySingle("SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $conflict_id AND table_name = '\''wp_forkpress_e2e_offline_keyless'\'' AND choice = '\''source'\'' AND applied = 1"); $reviewed = (int)$db->querySingle("SELECT COUNT(*) FROM merge_review_notes WHERE record_type = '\''conflict'\'' AND record_id = $conflict_id AND status = '\''reviewed'\''"); exit($resolution === 1 && $reviewed === 1 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite" "$OFFLINE_KEYLESS_CONFLICT_ID"
+
+log_step "bound partial offline no-PK rowid ambiguity"
+php -r '$db = new SQLite3($argv[1]); $db->exec("DROP TABLE IF EXISTS wp_forkpress_e2e_offline_keyless_partial"); $db->exec("CREATE TABLE wp_forkpress_e2e_offline_keyless_partial (label TEXT, value TEXT)"); $db->exec("INSERT INTO wp_forkpress_e2e_offline_keyless_partial (label, value) VALUES ('\''Partial base row'\'', '\''base'\'')");' "$WORK/main/wp-content/database/.ht.sqlite"
+"$BIN" branch --work-dir "$WORK_DIR" create offline-keyless-partial > "$TMP/offline-keyless-partial-create.out"
+grep -F "offline-keyless-partial.wp.localhost:$PORT" "$TMP/offline-keyless-partial-create.out" >/dev/null
+php -r '$db = new SQLite3($argv[1]); $db->exec("DELETE FROM wp_forkpress_e2e_offline_keyless_partial WHERE rowid = 1"); $db->exec("INSERT INTO wp_forkpress_e2e_offline_keyless_partial (label, value) VALUES ('\''Partial reused source row'\'', '\''base'\'')"); $row = $db->querySingle("SELECT rowid, label, value FROM wp_forkpress_e2e_offline_keyless_partial", true); file_put_contents($argv[2], json_encode($row)); exit(((int)($row["rowid"] ?? 0) === 1 && ($row["label"] ?? null) === "Partial reused source row" && ($row["value"] ?? null) === "base") ? 0 : 1);' "$WORK/offline-keyless-partial/wp-content/database/.ht.sqlite" "$TMP/offline-keyless-partial-source.json"
+php -r '$db = new SQLite3($argv[1]); $db->exec("UPDATE wp_forkpress_e2e_offline_keyless_partial SET value = '\''target kept partial old row'\'' WHERE rowid = 1"); $row = $db->querySingle("SELECT rowid, label, value FROM wp_forkpress_e2e_offline_keyless_partial", true); file_put_contents($argv[2], json_encode($row)); exit(((int)($row["rowid"] ?? 0) === 1 && ($row["label"] ?? null) === "Partial base row" && ($row["value"] ?? null) === "target kept partial old row") ? 0 : 1);' "$WORK/main/wp-content/database/.ht.sqlite" "$TMP/offline-keyless-partial-target.json"
+"$BIN" branch --work-dir "$WORK_DIR" merge offline-keyless-partial --into main > "$TMP/offline-keyless-partial-merge.out"
+grep -F "forkpress: merged offline-keyless-partial into main" "$TMP/offline-keyless-partial-merge.out" >/dev/null
+grep -F "status:    completed_with_conflicts" "$TMP/offline-keyless-partial-merge.out" >/dev/null
+php -r '$db = new SQLite3($argv[1]); $rows = []; $res = $db->query("SELECT rowid, label, value FROM wp_forkpress_e2e_offline_keyless_partial ORDER BY rowid"); while ($row = $res->fetchArray(SQLITE3_ASSOC)) $rows[] = $row; file_put_contents($argv[2], json_encode(["rows" => $rows])); exit(count($rows) === 1 && ($rows[0]["label"] ?? null) === "Partial base row" && ($rows[0]["value"] ?? null) === "target kept partial old row" ? 0 : 1);' "$WORK/main/wp-content/database/.ht.sqlite" "$TMP/offline-keyless-partial-after-merge.json"
+OFFLINE_KEYLESS_PARTIAL_CONFLICT_ID="$(
+  php -r '$db = new SQLite3($argv[1]); echo (int)$db->querySingle("SELECT c.id FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = '\''wp_forkpress_e2e_offline_keyless_partial'\'' AND c.conflict_type = '\''row-identity-ambiguous'\'' AND r.source_branch = '\''offline-keyless-partial'\'' AND r.target_branch = '\''main'\'' ORDER BY c.id DESC LIMIT 1");' \
+    "$WORK_DIR/cow/merge/metadata.sqlite"
+)"
+if [ "$OFFLINE_KEYLESS_PARTIAL_CONFLICT_ID" = "0" ]; then
+  echo "missing partial offline keyless row-identity-ambiguous conflict id" >&2
+  exit 1
+fi
+php -r '$db = new SQLite3($argv[1]); $conflict_id = (int)$argv[2]; $target_wins = (int)$db->querySingle("SELECT COUNT(*) FROM merge_decisions WHERE table_name = '\''wp_forkpress_e2e_offline_keyless_partial'\'' AND decision = '\''target-wins'\'' AND reason LIKE '\''no-primary-key source row changed cells that target did not change%'\''"); exit($conflict_id > 0 && $target_wins > 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite" "$OFFLINE_KEYLESS_PARTIAL_CONFLICT_ID"
+"$BIN" branch --work-dir "$WORK_DIR" merge-resolve conflict "$OFFLINE_KEYLESS_PARTIAL_CONFLICT_ID" --choice source --apply --note "Apply reviewed partial offline no-PK row choice" --reviewer cow-e2e > "$TMP/offline-keyless-partial-resolve.out"
+grep -F "forkpress: validated COW merge conflict resolution" "$TMP/offline-keyless-partial-resolve.out" >/dev/null
+grep -F "applied:   yes" "$TMP/offline-keyless-partial-resolve.out" >/dev/null
+php -r '$db = new SQLite3($argv[1]); $rows = []; $res = $db->query("SELECT rowid, label, value FROM wp_forkpress_e2e_offline_keyless_partial ORDER BY rowid"); while ($row = $res->fetchArray(SQLITE3_ASSOC)) $rows[] = $row; file_put_contents($argv[2], json_encode(["rows" => $rows])); exit(count($rows) === 1 && ($rows[0]["label"] ?? null) === "Partial reused source row" && ($rows[0]["value"] ?? null) === "base" ? 0 : 1);' "$WORK/main/wp-content/database/.ht.sqlite" "$TMP/offline-keyless-partial-after-resolution.json"
+php -r '$db = new SQLite3($argv[1]); $conflict_id = (int)$argv[2]; $resolution = (int)$db->querySingle("SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $conflict_id AND table_name = '\''wp_forkpress_e2e_offline_keyless_partial'\'' AND choice = '\''source'\'' AND applied = 1"); $reviewed = (int)$db->querySingle("SELECT COUNT(*) FROM merge_review_notes WHERE record_type = '\''conflict'\'' AND record_id = $conflict_id AND status = '\''reviewed'\''"); exit($resolution === 1 && $reviewed === 1 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite" "$OFFLINE_KEYLESS_PARTIAL_CONFLICT_ID"
+
+log_step "merge identical keyless unique inserts"
+php -r '$db = new SQLite3($argv[1]); $db->exec("DROP TABLE IF EXISTS wp_forkpress_e2e_keyless_unique_same"); $db->exec("CREATE TABLE wp_forkpress_e2e_keyless_unique_same (slug TEXT UNIQUE, value TEXT)");' "$WORK/main/wp-content/database/.ht.sqlite"
+"$BIN" branch --work-dir "$WORK_DIR" create keyless-unique-same > "$TMP/keyless-unique-same-create.out"
+grep -F "keyless-unique-same.wp.localhost:$PORT" "$TMP/keyless-unique-same-create.out" >/dev/null
+php -r '$db = new SQLite3($argv[1]); $db->exec("INSERT INTO wp_forkpress_e2e_keyless_unique_same (slug, value) VALUES ('\''shared-keyless-unique-same'\'', '\''same payload'\'')");' "$WORK/keyless-unique-same/wp-content/database/.ht.sqlite"
+php -r '$db = new SQLite3($argv[1]); $db->exec("INSERT INTO wp_forkpress_e2e_keyless_unique_same (slug, value) VALUES ('\''shared-keyless-unique-same'\'', '\''same payload'\'')");' "$WORK/main/wp-content/database/.ht.sqlite"
+"$BIN" branch --work-dir "$WORK_DIR" merge keyless-unique-same --into main > "$TMP/keyless-unique-same-merge.out"
+grep -F "forkpress: merged keyless-unique-same into main" "$TMP/keyless-unique-same-merge.out" >/dev/null
+grep -F "status:    completed" "$TMP/keyless-unique-same-merge.out" >/dev/null
+php -r '$db = new SQLite3($argv[1]); $rows = []; $res = $db->query("SELECT rowid, slug, value FROM wp_forkpress_e2e_keyless_unique_same ORDER BY rowid"); while ($row = $res->fetchArray(SQLITE3_ASSOC)) $rows[] = $row; file_put_contents($argv[2], json_encode(["rows" => $rows])); exit(count($rows) === 1 && ($rows[0]["slug"] ?? null) === "shared-keyless-unique-same" && ($rows[0]["value"] ?? null) === "same payload" ? 0 : 1);' "$WORK/main/wp-content/database/.ht.sqlite" "$TMP/keyless-unique-same-after-merge.json"
+php -r '$db = new SQLite3($argv[1]); $conflicts = (int)$db->querySingle("SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = '\''wp_forkpress_e2e_keyless_unique_same'\'' AND c.conflict_type = '\''row-unique-collision'\'' AND r.source_branch = '\''keyless-unique-same'\'' AND r.target_branch = '\''main'\''"); $decisions = (int)$db->querySingle("SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE d.table_name = '\''wp_forkpress_e2e_keyless_unique_same'\'' AND d.decision = '\''source-applied'\'' AND d.reason LIKE '\''source inserted no-primary-key row already exists in target by unique index%'\'' AND r.source_branch = '\''keyless-unique-same'\'' AND r.target_branch = '\''main'\''"); $rowid = (int)$db->querySingle("SELECT rowid FROM merge_row_identities WHERE branch_name = '\''main'\'' AND table_name = '\''wp_forkpress_e2e_keyless_unique_same'\''"); $source_identity = $db->querySingle("SELECT logical_identity FROM merge_row_identities WHERE branch_name = '\''keyless-unique-same'\'' AND table_name = '\''wp_forkpress_e2e_keyless_unique_same'\''"); $target_identity = $db->querySingle("SELECT logical_identity FROM merge_row_identities WHERE branch_name = '\''main'\'' AND table_name = '\''wp_forkpress_e2e_keyless_unique_same'\'' AND rowid = $rowid"); exit($conflicts === 0 && $decisions === 1 && is_string($source_identity) && $source_identity === $target_identity ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
+"$BIN" branch --work-dir "$WORK_DIR" merge keyless-unique-same --into main > "$TMP/keyless-unique-same-rerun.out"
+grep -F "forkpress: merged keyless-unique-same into main" "$TMP/keyless-unique-same-rerun.out" >/dev/null
+grep -F "status:    completed" "$TMP/keyless-unique-same-rerun.out" >/dev/null
+php -r '$site = new SQLite3($argv[1]); $meta = new SQLite3($argv[2]); $rows = (int)$site->querySingle("SELECT COUNT(*) FROM wp_forkpress_e2e_keyless_unique_same WHERE slug = '\''shared-keyless-unique-same'\'' AND value = '\''same payload'\''"); $decisions = (int)$meta->querySingle("SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE d.table_name = '\''wp_forkpress_e2e_keyless_unique_same'\'' AND d.decision = '\''source-applied'\'' AND d.reason LIKE '\''source inserted no-primary-key row already exists in target by unique index%'\'' AND r.source_branch = '\''keyless-unique-same'\'' AND r.target_branch = '\''main'\''"); exit($rows === 1 && $decisions === 1 ? 0 : 1);' "$WORK/main/wp-content/database/.ht.sqlite" "$WORK_DIR/cow/merge/metadata.sqlite"
+
+log_step "merge no-PK foreign-key dependent update"
+php -r '$db = new SQLite3($argv[1]); $db->exec("PRAGMA foreign_keys = ON"); $db->exec("DROP TABLE IF EXISTS wp_forkpress_e2e_fk_keyless_children"); $db->exec("DROP TABLE IF EXISTS wp_forkpress_e2e_fk_keyless_parents"); $db->exec("CREATE TABLE wp_forkpress_e2e_fk_keyless_parents (id INTEGER PRIMARY KEY, label TEXT)"); $db->exec("CREATE TABLE wp_forkpress_e2e_fk_keyless_children (parent_id INTEGER NOT NULL REFERENCES wp_forkpress_e2e_fk_keyless_parents(id), label TEXT)"); $db->exec("INSERT INTO wp_forkpress_e2e_fk_keyless_parents (id, label) VALUES (1, '\''old parent'\''), (2, '\''kept parent'\'')"); $db->exec("INSERT INTO wp_forkpress_e2e_fk_keyless_children (rowid, parent_id, label) VALUES (7, 1, '\''base keyless child'\'')");' "$WORK/main/wp-content/database/.ht.sqlite"
+"$BIN" branch --work-dir "$WORK_DIR" create fk-keyless-update > "$TMP/fk-keyless-update-create.out"
+grep -F "fk-keyless-update.wp.localhost:$PORT" "$TMP/fk-keyless-update-create.out" >/dev/null
+php -r '$db = new SQLite3($argv[1]); $db->exec("PRAGMA foreign_keys = ON"); $db->exec("UPDATE wp_forkpress_e2e_fk_keyless_children SET parent_id = 2, label = '\''source keyless child reparented'\'' WHERE rowid = 7"); $db->exec("DELETE FROM wp_forkpress_e2e_fk_keyless_parents WHERE id = 1");' "$WORK/fk-keyless-update/wp-content/database/.ht.sqlite"
+"$BIN" branch --work-dir "$WORK_DIR" merge fk-keyless-update --into main > "$TMP/fk-keyless-update-merge.out"
+grep -F "forkpress: merged fk-keyless-update into main" "$TMP/fk-keyless-update-merge.out" >/dev/null
+grep -F "status:    completed" "$TMP/fk-keyless-update-merge.out" >/dev/null
+php -r 'require "scripts/cow/merge.php"; $site = new SQLite3($argv[1]); $meta = new SQLite3($argv[2]); $row = $site->querySingle("SELECT rowid, parent_id, label FROM wp_forkpress_e2e_fk_keyless_children WHERE rowid = 7", true); $parent = (int)$site->querySingle("SELECT COUNT(*) FROM wp_forkpress_e2e_fk_keyless_parents WHERE id = 1"); $hash = $meta->querySingle("SELECT row_hash FROM merge_row_identities WHERE branch_name = '\''main'\'' AND table_name = '\''wp_forkpress_e2e_fk_keyless_children'\'' AND rowid = 7"); $conflicts = (int)$meta->querySingle("SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.conflict_type = '\''row-target-constraint'\'' AND c.table_name LIKE '\''wp_forkpress_e2e_fk_keyless_%'\'' AND r.source_branch = '\''fk-keyless-update'\''"); file_put_contents($argv[3], json_encode(["row" => $row, "old_parent_count" => $parent, "row_hash" => $hash, "conflicts" => $conflicts])); exit(is_array($row) && (int)$row["parent_id"] === 2 && ($row["label"] ?? null) === "source keyless child reparented" && $parent === 0 && $hash === cow_merge_row_hash(["parent_id" => 2, "label" => "source keyless child reparented"]) && $conflicts === 0 ? 0 : 1);' "$WORK/main/wp-content/database/.ht.sqlite" "$WORK_DIR/cow/merge/metadata.sqlite" "$TMP/fk-keyless-update-after-merge.json"
+"$BIN" branch --work-dir "$WORK_DIR" merge fk-keyless-update --into main > "$TMP/fk-keyless-update-rerun.out"
+grep -F "forkpress: merged fk-keyless-update into main" "$TMP/fk-keyless-update-rerun.out" >/dev/null
+grep -F "status:    completed" "$TMP/fk-keyless-update-rerun.out" >/dev/null
+
+log_step "resolve runtime plugin unique collision"
+mkdir -p "$WORK/main/wp-content/mu-plugins"
+cat > "$WORK/main/wp-content/mu-plugins/forkpress-e2e-unique.php" <<'PHP'
+<?php
+add_action('init', function () {
+    if (!isset($_GET['forkpress_e2e_unique'])) {
+        return;
+    }
+
+    global $wpdb;
+    $action = sanitize_key(wp_unslash($_GET['forkpress_e2e_unique']));
+    $table = $wpdb->prefix . 'forkpress_e2e_unique';
+    if (!preg_match('/^[A-Za-z0-9_]+$/', $table)) {
+        wp_send_json_error(['error' => 'unsafe table name'], 500);
+    }
+    $quoted = '"' . str_replace('"', '""', $table) . '"';
+
+    $query = static function (string $sql) use ($wpdb): void {
+        $result = $wpdb->query($sql);
+        if ($result === false) {
+            wp_send_json_error(['error' => $wpdb->last_error ?: 'query failed'], 500);
+        }
+    };
+
+    if ($action === 'init') {
+        $query("DROP TABLE IF EXISTS $quoted");
+        $query("CREATE TABLE $quoted (id INTEGER PRIMARY KEY, slug TEXT NOT NULL UNIQUE, value TEXT NOT NULL)");
+    } elseif ($action === 'source-insert') {
+        $query($wpdb->prepare("INSERT INTO $quoted (id, slug, value) VALUES (%d, %s, %s)", 101, 'shared-runtime-slug', 'source runtime row'));
+    } elseif ($action === 'target-insert') {
+        $query($wpdb->prepare("INSERT INTO $quoted (id, slug, value) VALUES (%d, %s, %s)", 202, 'shared-runtime-slug', 'target runtime row'));
+    } elseif ($action !== 'inspect') {
+        wp_send_json_error(['error' => 'unknown action'], 400);
+    }
+
+    $rows = $wpdb->get_results("SELECT id, slug, value FROM $quoted ORDER BY id", ARRAY_A);
+    if (!is_array($rows)) {
+        wp_send_json_error(['error' => $wpdb->last_error ?: 'select failed'], 500);
+    }
+    wp_send_json(['action' => $action, 'rows' => $rows]);
+}, 20);
+PHP
+
+unique_runtime_request main init "$TMP/unique-init.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && count($data["rows"] ?? []) === 0 ? 0 : 1);' "$TMP/unique-init.json"
+"$BIN" branch --work-dir "$WORK_DIR" create unique-collision > "$TMP/unique-create.out"
+grep -F "unique-collision.wp.localhost:$PORT" "$TMP/unique-create.out" >/dev/null
+unique_runtime_request unique-collision source-insert "$TMP/unique-source-insert.json"
+unique_runtime_request main target-insert "$TMP/unique-target-insert.json"
+php -r '$source = json_decode(file_get_contents($argv[1]), true); $target = json_decode(file_get_contents($argv[2]), true); exit(($source["rows"][0]["id"] ?? null) == 101 && ($target["rows"][0]["id"] ?? null) == 202 ? 0 : 1);' "$TMP/unique-source-insert.json" "$TMP/unique-target-insert.json"
+"$BIN" branch --work-dir "$WORK_DIR" merge unique-collision --into main > "$TMP/unique-merge.out"
+grep -F "forkpress: merged unique-collision into main" "$TMP/unique-merge.out" >/dev/null
+grep -F "status:    completed_with_conflicts" "$TMP/unique-merge.out" >/dev/null
+unique_runtime_request main inspect "$TMP/unique-after-merge.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(count($data["rows"] ?? []) === 1 && ($data["rows"][0]["id"] ?? null) == 202 && ($data["rows"][0]["value"] ?? null) === "target runtime row" ? 0 : 1);' "$TMP/unique-after-merge.json"
+UNIQUE_CONFLICT_ID="$(
+  php -r '$db = new SQLite3($argv[1]); echo (int)$db->querySingle("SELECT c.id FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = '\''wp_forkpress_e2e_unique'\'' AND c.conflict_type = '\''row-unique-collision'\'' AND r.source_branch = '\''unique-collision'\'' AND r.target_branch = '\''main'\'' ORDER BY c.id DESC LIMIT 1");' \
+    "$WORK_DIR/cow/merge/metadata.sqlite"
+)"
+if [ "$UNIQUE_CONFLICT_ID" = "0" ]; then
+  echo "missing runtime plugin row-unique-collision conflict id" >&2
+  exit 1
+fi
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --review --review-status unreviewed --records conflicts --scope db --limit 20 > "$TMP/unique-review-queue.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["review"] ?? false) === true) && (($data["filters"]["review_status"] ?? null) === "unreviewed") && (($data["filters"]["records"] ?? null) === "conflicts") && (($data["filters"]["scope"] ?? null) === "db"); $has_conflict = false; foreach (($data["conflicts"] ?? []) as $row) { if (($row["review_status"] ?? null) !== null) $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[2] && ($row["table_name"] ?? null) === "wp_forkpress_e2e_unique" && ($row["conflict_type"] ?? null) === "row-unique-collision") $has_conflict = true; } exit($ok && $has_conflict ? 0 : 1);' "$TMP/unique-review-queue.json" "$UNIQUE_CONFLICT_ID"
+"$BIN" branch --work-dir "$WORK_DIR" merge-resolve conflict "$UNIQUE_CONFLICT_ID" --choice source --apply --note "Apply runtime source unique row" --reviewer cow-e2e > "$TMP/unique-resolve.out"
+grep -F "forkpress: validated COW merge conflict resolution" "$TMP/unique-resolve.out" >/dev/null
+grep -F "applied:   yes" "$TMP/unique-resolve.out" >/dev/null
+unique_runtime_request main inspect "$TMP/unique-after-resolution.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(count($data["rows"] ?? []) === 1 && ($data["rows"][0]["id"] ?? null) == 101 && ($data["rows"][0]["value"] ?? null) === "source runtime row" ? 0 : 1);' "$TMP/unique-after-resolution.json"
+php -r '$db = new SQLite3($argv[1]); $conflict_id = (int)$argv[2]; $resolution = (int)$db->querySingle("SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $conflict_id AND table_name = '\''wp_forkpress_e2e_unique'\'' AND choice = '\''source'\'' AND applied = 1"); $reviewed = (int)$db->querySingle("SELECT COUNT(*) FROM merge_review_notes WHERE record_type = '\''conflict'\'' AND record_id = $conflict_id AND status = '\''reviewed'\''"); exit($resolution === 1 && $reviewed === 1 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite" "$UNIQUE_CONFLICT_ID"
 
 log_step "storage lifecycle diagnostics"
 "$BIN" storage status --work-dir "$WORK_DIR" > "$TMP/storage-status-final.out"

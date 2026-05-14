@@ -70,6 +70,7 @@ fn main() -> Result<()> {
         "runtime/cow/bootstrap_wp.php",
         "runtime/wp.zip",
         "scripts/cow/git_server.php",
+        "scripts/cow/merge.php",
         "scripts/git/autoload.php",
         "scripts/shared/sqlite_backup.php",
         "scripts/shared/sqlite_retry.php",
@@ -464,6 +465,7 @@ fn build_bundle(
         )?;
     } else {
         add_file(&mut tar, repo_root, "scripts/cow/git_server.php")?;
+        add_file(&mut tar, repo_root, "scripts/cow/merge.php")?;
         add_file(&mut tar, repo_root, "scripts/git/autoload.php")?;
         add_file(&mut tar, repo_root, "scripts/shared/sqlite_backup.php")?;
         add_file(&mut tar, repo_root, "scripts/shared/sqlite_retry.php")?;

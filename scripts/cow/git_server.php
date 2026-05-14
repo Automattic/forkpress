@@ -490,12 +490,15 @@ function cow_git_apply_push_to_branches(
         $branches_to_sync = array_values(array_filter($changed_branches, static function($branch) use ($branches_dir) {
             return is_dir(rtrim($branches_dir, "/\\") . '/' . $branch);
         }));
+        cow_git_prepare_created_branch_merge_metadata($git_repo_dir, $branch_list_path, $transaction['created']);
         if ($branches_to_sync) {
             cow_git_sync_repository($repo, $branches_dir, $branches_to_sync);
         }
         cow_git_commit_apply_transaction($transaction);
     } catch (\Throwable $e) {
         cow_git_rollback_apply_transaction($transaction);
+        cow_git_cleanup_created_branch_merge_base_artifacts($git_repo_dir, $branch_list_path, $transaction['created']);
+        cow_git_cleanup_created_branch_id_band_metadata($git_repo_dir, $branch_list_path, $transaction['created']);
         cow_git_write_branch_list($branches_dir, $branch_list_path);
         throw $e;
     }
@@ -503,6 +506,167 @@ function cow_git_apply_push_to_branches(
         cow_git_prune_unreachable_objects($repo, $git_repo_dir);
     } catch (\Throwable $e) {
         error_log("COW Git object prune skipped: " . $e->getMessage());
+    }
+}
+
+function cow_git_prepare_created_branch_merge_metadata(string $git_repo_dir, ?string $branch_list_path, array $created_branches): void {
+    if (!$created_branches) {
+        return;
+    }
+
+    require_once __DIR__ . '/merge.php';
+
+    $branch_list_path = $branch_list_path ?: dirname($git_repo_dir) . '/branches.txt';
+    $metadata_db = dirname($branch_list_path) . '/merge/metadata.sqlite';
+    foreach ($created_branches as $created) {
+        $branch = (string)($created['branch'] ?? '');
+        $storage = rtrim((string)($created['storage'] ?? ''), "/\\");
+        if ($branch === '' || $storage === '') {
+            continue;
+        }
+        cow_merge_allocate_autoincrement_bands(
+            $storage . '/wp-content/database/.ht.sqlite',
+            $metadata_db,
+            $branch
+        );
+        cow_merge_capture_row_identities(
+            $storage . '/wp-content/database/.ht.sqlite',
+            $metadata_db,
+            $branch,
+            isset($created['source']) && is_string($created['source']) ? $created['source'] : null
+        );
+    }
+}
+
+function cow_git_capture_created_branch_merge_bases(
+    string $git_repo_dir,
+    ?string $branch_list_path,
+    string $branch,
+    string $source_root
+): void {
+    require_once __DIR__ . '/merge.php';
+
+    $branch_list_path = $branch_list_path ?: dirname($git_repo_dir) . '/branches.txt';
+    $merge_dir = dirname($branch_list_path) . '/merge';
+    $db = rtrim($source_root, "/\\") . '/wp-content/database/.ht.sqlite';
+    if (is_file($db)) {
+        cow_git_capture_created_branch_db_merge_base($merge_dir, $branch, $db);
+    }
+    cow_git_capture_created_branch_file_merge_base($merge_dir, $branch, $source_root);
+}
+
+function cow_git_capture_created_branch_db_merge_base(string $merge_dir, string $branch, string $source_db): void {
+    $dest = rtrim($merge_dir, "/\\") . '/bases/' . $branch . '.sqlite';
+    cow_git_mkdir(dirname($dest));
+    $tmp = dirname($dest) . '/.' . $branch . '.merge-base-' . getmypid() . '-' . bin2hex(random_bytes(4)) . '.sqlite';
+    cow_git_remove_sqlite_file_and_sidecars($tmp);
+    cow_merge_backup_sqlite_db($source_db, $tmp);
+    cow_git_remove_sqlite_file_and_sidecars($dest);
+    if (!@rename($tmp, $dest)) {
+        cow_git_remove_sqlite_file_and_sidecars($tmp);
+        throw new \RuntimeException("failed to publish merge base snapshot for git-created branch '$branch'");
+    }
+}
+
+function cow_git_capture_created_branch_file_merge_base(string $merge_dir, string $branch, string $source_root): void {
+    $dest = rtrim($merge_dir, "/\\") . '/file-bases/' . $branch . '.json';
+    cow_git_mkdir(dirname($dest));
+    $tmp = dirname($dest) . '/.' . $branch . '.file-merge-base-' . getmypid() . '-' . bin2hex(random_bytes(4)) . '.json';
+    if (file_exists($tmp)) {
+        @unlink($tmp);
+    }
+    cow_merge_capture_file_base($source_root, $tmp);
+    if (file_exists($dest) && !@unlink($dest)) {
+        @unlink($tmp);
+        throw new \RuntimeException("failed to replace filesystem merge base for git-created branch '$branch'");
+    }
+    if (!@rename($tmp, $dest)) {
+        @unlink($tmp);
+        throw new \RuntimeException("failed to publish filesystem merge base for git-created branch '$branch'");
+    }
+}
+
+function cow_git_remove_sqlite_file_and_sidecars(string $path): void {
+    foreach ([$path, $path . '-wal', $path . '-shm', $path . '-journal'] as $candidate) {
+        if (file_exists($candidate) || is_link($candidate)) {
+            @unlink($candidate);
+        }
+    }
+}
+
+function cow_git_cleanup_created_branch_merge_base_artifacts(string $git_repo_dir, ?string $branch_list_path, array $created_branches): void {
+    if (!$created_branches) {
+        return;
+    }
+
+    $branch_list_path = $branch_list_path ?: dirname($git_repo_dir) . '/branches.txt';
+    $merge_dir = dirname($branch_list_path) . '/merge';
+    foreach ($created_branches as $created) {
+        $branch = (string)($created['branch'] ?? '');
+        if ($branch === '') {
+            continue;
+        }
+        cow_git_remove_sqlite_file_and_sidecars(rtrim($merge_dir, "/\\") . '/bases/' . $branch . '.sqlite');
+        $file_base = rtrim($merge_dir, "/\\") . '/file-bases/' . $branch . '.json';
+        if (file_exists($file_base) || is_link($file_base)) {
+            @unlink($file_base);
+        }
+    }
+}
+
+function cow_git_cleanup_created_branch_id_band_metadata(string $git_repo_dir, ?string $branch_list_path, array $created_branches): void {
+    if (!$created_branches || !class_exists('SQLite3')) {
+        return;
+    }
+
+    $branch_list_path = $branch_list_path ?: dirname($git_repo_dir) . '/branches.txt';
+    $metadata_db = dirname($branch_list_path) . '/merge/metadata.sqlite';
+    if (!is_file($metadata_db)) {
+        return;
+    }
+
+    $branches = [];
+    foreach ($created_branches as $created) {
+        $branch = (string)($created['branch'] ?? '');
+        if ($branch !== '') {
+            $branches[$branch] = true;
+        }
+    }
+    if (!$branches) {
+        return;
+    }
+
+    $db = new SQLite3($metadata_db, SQLITE3_OPEN_READWRITE);
+    try {
+        $db->busyTimeout(5000);
+        $db->exec('BEGIN IMMEDIATE');
+        foreach (array_keys($branches) as $branch) {
+            foreach ([
+                'DELETE FROM merge_autoincrement_bands WHERE branch_name = :branch',
+                'DELETE FROM merge_row_identities WHERE branch_name = :branch',
+                'DELETE FROM merge_row_identity_history WHERE branch_name = :branch',
+                "DELETE FROM merge_decisions WHERE run_id IN (SELECT id FROM merge_runs WHERE source_branch = :branch AND target_branch = :branch AND base_ref = 'autoincrement-id-band' AND policy = 'autoincrement-id-band-allocation')",
+                "DELETE FROM merge_runs WHERE source_branch = :branch AND target_branch = :branch AND base_ref IN ('autoincrement-id-band', 'identity-capture') AND policy IN ('autoincrement-id-band-allocation', 'sidecar-row-identity-capture')",
+            ] as $sql) {
+                $stmt = $db->prepare($sql);
+                if (!$stmt) {
+                    throw new \RuntimeException('failed to prepare created-branch ID-band metadata cleanup: ' . $db->lastErrorMsg());
+                }
+                $stmt->bindValue(':branch', $branch, SQLITE3_TEXT);
+                $result = $stmt->execute();
+                if ($result === false) {
+                    throw new \RuntimeException('failed to clean up created-branch ID-band metadata: ' . $db->lastErrorMsg());
+                }
+                $result->finalize();
+                $stmt->close();
+            }
+        }
+        $db->exec('COMMIT');
+    } catch (\Throwable $e) {
+        @$db->exec('ROLLBACK');
+        error_log("ForkPress COW failed to clean created-branch ID-band metadata after push rollback: " . $e->getMessage());
+    } finally {
+        $db->close();
     }
 }
 
@@ -585,6 +749,7 @@ function cow_git_apply_all_refs_to_branches(
         if (!is_dir($branch_root)) {
             $created = cow_git_create_branch_for_ref(
                 $repo,
+                $git_repo_dir,
                 $branches_dir,
                 $storage_branches_dir,
                 $branch_list_path,
@@ -829,6 +994,7 @@ function cow_git_capture_all_head_refs(string $git_repo_dir): array {
 
 function cow_git_create_branch_for_ref(
     GitRepository $repo,
+    string $git_repo_dir,
     string $branches_dir,
     string $storage_branches_dir,
     ?string $branch_list_path,
@@ -874,8 +1040,11 @@ function cow_git_create_branch_for_ref(
     $tmp = dirname($dest_storage) . '/.forkpress-new-' . $branch . '-' . getmypid() . '-' . bin2hex(random_bytes(4));
     $published_storage = false;
     $linked_public = false;
+    $captured_merge_bases = false;
     try {
         cow_git_clone_branch_tree($source_root, $tmp, $file_view);
+        cow_git_capture_created_branch_merge_bases($git_repo_dir, $branch_list_path, $branch, $source_root);
+        $captured_merge_bases = true;
         cow_git_apply_wp_files($repo, $tmp, $wp_files);
 
         if (!rename($tmp, $dest_storage)) {
@@ -897,11 +1066,15 @@ function cow_git_create_branch_for_ref(
         error_log("ForkPress COW git created branch '$branch' from '$source'");
         return [
             'branch' => $branch,
+            'source' => $source,
             'public' => $dest_public,
             'storage' => $dest_storage,
             'linked_public' => $linked_public,
         ];
     } catch (\Throwable $e) {
+        if ($captured_merge_bases) {
+            cow_git_cleanup_created_branch_merge_base_artifacts($git_repo_dir, $branch_list_path, [['branch' => $branch]]);
+        }
         cow_git_remove_tree($tmp);
         if ($linked_public && (file_exists($dest_public) || is_link($dest_public))) {
             cow_git_remove_tree($dest_public);

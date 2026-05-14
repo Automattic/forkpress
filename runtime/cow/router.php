@@ -142,7 +142,15 @@ function forkpress_cow_acquire_request_lock(): bool {
     return true;
 }
 
-if (!forkpress_cow_acquire_request_lock()) {
+function forkpress_cow_is_admin_branch_action(string $path): bool {
+    if ($path !== '/wp-admin/admin-post.php') {
+        return false;
+    }
+    $action = $_REQUEST['action'] ?? '';
+    return is_string($action) && in_array($action, ['forkpress_branch_create', 'forkpress_branch_merge'], true);
+}
+
+if (!forkpress_cow_is_admin_branch_action($path) && !forkpress_cow_acquire_request_lock()) {
     return true;
 }
 

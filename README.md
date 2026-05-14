@@ -461,9 +461,222 @@ tooling.
   user.
 - `forkpress server list` lists running site servers.
 - `forkpress branch list` lists local branches.
-- `forkpress branch create <name> [--from main]` creates a COW branch.
+- `forkpress branch create <name> [--from main]` creates a COW branch and
+  reserves moderate AUTOINCREMENT ID bands for WordPress core and arbitrary
+  plugin tables that use SQLite `AUTOINCREMENT`.
 - `forkpress branch reset <name> --from <source>` replaces one COW branch with
   the files and SQLite database from another branch.
+- `forkpress branch merge <source> --into <target>` merges one materialized COW
+  branch into another branch. WordPress and plugin tables are merged
+  generically from SQLite state; branch-time AUTOINCREMENT bands keep
+  independently created rows, such as posts saved through wp-admin or REST,
+  from colliding across branches. If a clean source insert or source row update
+  collides with a target-side unique key, including expression indexes,
+  generated-column unique keys, and normal-column partial unique indexes, the
+  target row is kept and the choice is recorded as an auditable
+  `row-unique-collision`. If a source insert or source row update violates a
+  target-side SQLite constraint, including foreign-key references after
+  parent-before-child table ordering, same-table foreign-key row ordering, and
+  reviewed source restores of target-dropped same-table foreign-key tables.
+  Restored foreign-key child tables also validate after source-only parent
+  tables materialize or after reviewers restore the parent table first; trying
+  to restore the child first reports the missing parent table or parent row
+  dependency before mutating target state. Source-added table rows with missing
+  target-side foreign-key parents are held for the same audited row review
+  instead of aborting the merge. Source-added indexes are materialized as each
+  new table lands, before dependent source-added tables are processed, so
+  foreign keys backed by source-added unique indexes validate without a false
+  row constraint conflict. Source-added views are ordered by source-side
+  view dependencies, and source-added views that need a restored target table
+  are held as reviewable `schema-source-added-view` conflicts until that
+  dependency validates. Cyclic source-added view graphs are also held as
+  reviewable `schema-source-added-view` conflicts rather than installed in an
+  arbitrary order, and reviewed source resolution keeps the audited cycle reason
+  validation-gated. Source-added views that would cycle with existing target-side
+  views are also held before target mutation. Missing or non-persistent view
+  references are preflighted before target mutation. Target-dropped table restores defer
+  source-added indexes and triggers that already have standalone schema
+  conflicts, so the table can restore before those objects are resolved in
+  dependency order. Source-added triggers attached to, reading, or writing
+  missing target-side schema objects are held as reviewable
+  `schema-source-added-trigger` conflicts instead of being installed as latent
+  invalid triggers. Acyclic source-added trigger programs are ordered by their
+  clear subject/write dependencies before installation, while trigger program
+  cycles are held as reviewable `schema-source-added-trigger` conflicts instead
+  of installing an unsupported trigger graph. Source-added or reviewed source
+  triggers, including triggers restored with a target-dropped source table, that
+  would cycle with target-side trigger programs stay validation-gated as well,
+  and trigger programs are compiled after installation so invalid target-side
+  column references stay validation-gated too;
+  statement-local CTE aliases in trigger bodies are ignored while real schema
+  objects referenced inside those CTEs remain dependencies.
+  Trigger references to temporary or attached SQLite schemas are kept
+  validation-gated instead of being matched to same-named persistent tables.
+  Quoted schema-qualified references are tracked, while schema-looking text
+  inside SQL literals or comments is ignored by dependency preflight.
+  Validation-gated source view rewrites also recompile preserved target view
+  trigger programs before reporting dry-run or apply success, so a source view
+  change cannot leave a latent invalid trigger behind.
+  Target-dropped table restores also validate preserved target views and trigger
+  programs that reference the restored table before reporting success.
+  Validation-gated source table drops refuse to leave dependent target
+  foreign-key child tables pointing at a missing parent table, including during
+  dry-run previews, and also refuse to leave target trigger programs that
+  still reference the dropped table. Source view drops likewise refuse to
+  leave target trigger programs that still reference the dropped view, so
+  table-drop chains through dependent views stay explicitly reviewable.
+  When a source row still violates target constraints, target
+  is kept by default and the choice is recorded as
+  an auditable `row-target-constraint`. Source deletes that would orphan
+  target-side foreign-key children are held the same way until a reviewed
+  source delete validates, while unchanged target-side child rows that source
+  deleted or reparented away from the deleted parent are applied first so
+  parent-and-dependent changes land together. If source also rewrites a
+  referenced child key and updates unchanged grandchildren to follow it,
+  ForkPress applies the proven rewrite graph under the same validation savepoint
+  before deleting the original parent. If that rewrite points at a source-only
+  parent key, ForkPress materializes the audited source parent row inside the
+  same savepoint before updating dependents, preserving sparse source `rowid`
+  values for no-primary-key parent tables when the target rowid is free.
+  Identical source/target inserts
+  with the same explicit primary key, and identical source/target updates or
+  deletes to existing explicit-primary-key rows, are recorded as non-conflicting
+  `source-applied` decisions. Identical source/target cell changes inside an
+  otherwise divergent row are also recorded as non-conflicting `source-applied`
+  decisions when row identity is known. No-primary-key inserts that are already
+  present in target with the same payload through a declared unique index are
+  recorded as an auditable non-conflicting `source-applied` decision instead.
+  Without declared unique evidence, identical-looking no-primary-key inserts
+  remain separate rows so duplicate-capable plugin tables do not lose data.
+  For no-primary-key plugin tables, runtime row identity tracking handles
+  delete/reinsert `rowid` reuse. Source-added no-primary-key tables and
+  validation-gated source table restores preserve sparse source `rowid` values,
+  while validation-gated compatible table rebuilds preserve sparse target
+  `rowid` values and refresh sidecar row hashes. If a direct offline edit
+  changes cells on a keyless source row that target did not change while target
+  also changed the prior row and no runtime identity event exists, mergeback
+  keeps target by default and records an auditable
+  `row-identity-ambiguous` conflict instead of mixing cells from different
+  possible logical rows.
+- `forkpress branch merge-audit [--format text|json] [--run ID]`
+  `[--scope all|db|files] [--records all|conflicts|decisions|resolutions|rollback-failures]`
+  `[--conflict-type TYPE] [--decision DECISION] [--path PATH]`
+  `[--path-prefix PREFIX] [--id-band-skips] [--target-kept] [--review]`
+  `[--review-status unreviewed|pending|needs-action|reviewed]`
+  `[--resolution-status validated|applied] [--group-by table|status|path|type|severity]` prints the COW merge audit log
+  without opening the raw metadata database. `--records resolutions` focuses
+  the report on deterministic conflict resolution records; `--group-by` adds
+  compact resolution summaries for UI or assistant review. With
+  `--records conflicts`, `--group-by` can summarize conflicts by table, type,
+  path, or severity class. With `--records decisions`, `--group-by` can
+  summarize automatic decisions by table, type, or path. `--target-kept`
+  focuses the report on preserved target/trunk-side decisions.
+  `--review-status unreviewed` is audit-only and returns records that have no
+  review note yet; `pending`, `needs-action`, and `reviewed` match the latest
+  recorded review annotation. For an active database conflict queue, combine
+  `--review --review-status unreviewed --records conflicts --scope db`.
+  Use the same `--records` and `--scope` shape with `--review-status pending`
+  or `--review-status needs-action` to revisit annotated follow-up queues;
+  later review notes supersede earlier notes for filtering.
+  `needs-action` queues are intended for records that require owner follow-up
+  before they can be marked reviewed. Use `--review-status reviewed` with the
+  same filters as a closure report for records whose latest annotation is
+  complete.
+  For unreviewed deterministic resolution follow-up, use
+  `--review --review-status unreviewed --records resolutions --scope db`.
+  Use `--scope files` with `--records conflicts` or `--records resolutions`
+  for filesystem conflict and deterministic resolution review queues.
+  For unreviewed automatic decision review, use
+  `--review --review-status unreviewed --records decisions --scope db` or
+  `--scope files`.
+  `--records rollback-failures` focuses the report on failed whole-branch
+  rollback records and their JSONL artifact path; it can be combined with
+  `--run ID` to inspect one failed attempt.
+- `forkpress branch merge-review conflict|decision|resolution <id> --status pending|needs-action|reviewed --note <text>`
+  `[--reviewer NAME]` appends a review note to an auditable merge conflict,
+  decision, or deterministic resolution record.
+- `forkpress branch merge-resolve conflict <id> --choice source|target [--apply]`
+  `[--note TEXT] [--reviewer NAME]` validates an audited DB cell, row
+  insert-collision, row-unique-collision, row-target-constraint,
+  row-identity-ambiguous, row-target-deleted, row-source-deleted, or filesystem
+  path conflict, plus validation-gated schema conflicts. DB conflicts work for
+  explicit primary keys and no-primary-key tables with sidecar row identity.
+  `row-unique-collision` source choices replace the still-matching target row
+  that owns the colliding unique key, or for audited source-update collisions
+  remove that target row and update the original source-identity row; target
+  remains the default choice unless a reviewer applies a source resolution.
+  Schema source choices can apply safe source-added columns, indexes, views,
+  and triggers; source index/view/trigger rewrites or drops; source table drops
+  that do not leave dependent target views invalid, implicitly remove target
+  indexes/triggers, leave target trigger programs referencing the dropped
+  table, or leave dependent target foreign-key child tables pointing
+  at a missing parent table; source table restores when target dropped a table
+  that source kept; and compatible table rebuilds that preserve target rows and
+  target indexes/triggers while changing audited non-primary-key column
+  definitions. Source index choices validate against current target rows and
+  target foreign-key integrity during dry-run and apply, so uniqueness,
+  expression-index, or latent foreign-key mismatch failures remain
+  validation-gated until reviewers address the blocking target data/schema.
+  Compatible table rebuilds run the same target foreign-key integrity check
+  before dry-run or apply reports success.
+  Source table restores recreate the audited source table and copy
+  source rows after validating that the target table is still absent, preserving
+  sparse source `rowid` values for no-primary-key tables, then restore source
+  indexes/triggers that were removed as a side effect of the target table drop.
+  Restore previews and applies also validate target foreign-key integrity and
+  compile restored trigger programs, preserved target views, and preserved
+  target trigger programs before recording a successful resolution.
+  No-primary-key sidecar identities for target rows are tombstoned when table
+  drop/restore resolutions remove or recreate the target table, so later rowid
+  reuse receives fresh logical identity metadata. Safe source-added column
+  resolutions refresh no-primary-key sidecar row hashes immediately after the
+  target row shape changes.
+  Source-added table creation is recorded as a schema-level source-applied
+  decision even when the table has no rows.
+  Identical source/target table, index, view, and trigger schema changes are
+  also recorded as non-conflicting `source-applied` decisions instead of being
+  left as implicit no-ops. Matching source/target column additions inside an
+  otherwise divergent table schema are recorded the same way.
+  Target-only row inserts, row deletes, and cell changes are preserved and
+  recorded as `target-kept` decisions so clean trunk/main-side data changes are
+  auditable alongside schema changes. Matching source/target row updates and
+  deletes are recorded as `source-applied` no-ops when explicit primary keys or
+  sidecar no-primary-key identity prove they refer to the same logical row.
+  Target-only schema additions and rewrites are preserved and recorded as
+  `target-kept` decisions so clean trunk/main-side DDL remains auditable.
+  Target-only filesystem additions, deletions, and path changes are also
+  preserved and recorded as `target-kept` decisions.
+  Filesystem conflict resolutions use the same rollback discipline: if
+  resolution metadata cannot be recorded after a source file choice mutates a
+  target path, the target path is restored and no partial resolution row is
+  kept.
+  Mixed database/filesystem merges keep a whole-branch rollback snapshot, so
+  late metadata or filesystem failures restore target database state,
+  filesystem paths, and merge audit metadata before recording the failed run.
+  Filesystem merge planning and file operations also share one audit metadata
+  transaction, so a failed file merge does not leave partial conflict or
+  decision rows behind.
+  If a filesystem-phase rollback failure is followed by a successful outer
+  mixed DB/filesystem rollback, ForkPress re-records the rollback failure after
+  restoring metadata so `merge-audit --records rollback-failures` remains
+  queryable.
+  If rollback itself fails, ForkPress preserves the rollback snapshot backups
+  or per-file transaction backups and records their locations in the
+  rollback-failure JSONL artifact.
+  Compatible rebuilds also preserve
+  dependent target views when those views validate before and after the rebuild.
+  Source view rewrites preserve transitive dependent target views and their
+  triggers when they validate before and after the rewrite; source view drops
+  are blocked while dependent target views or triggers still reference the
+  dropped view, including triggers on other tables whose bodies read from it.
+  With `--apply`,
+  ForkPress records the deterministic resolution in merge metadata and appends
+  a reviewed annotation to the conflict audit record. Reruns after a reviewed
+  target choice keep the original conflict and resolution audit records, but
+  treat that unchanged divergence as accepted and record a `target-accepted`
+  decision instead of reporting it as a fresh active conflict. Audit run and
+  decision-group summaries count those accepted target decisions separately from
+  active `target-wins` defaults.
 - `forkpress branch show <name>` prints the branch directory, database, file
   count, and Git ref path.
 - `forkpress branch delete <name>` removes a COW branch. `main` cannot be
