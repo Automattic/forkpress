@@ -65,8 +65,16 @@ The current implementation has the metadata/audit foundation for validator
 conflicts: ForkPress can record plugin-scoped findings against a merge run,
 mark that run as `completed_with_conflicts`, filter `merge-audit` output with
 `scope = plugin`, group plugin findings separately from DB/file findings, and
-attach review notes. Runtime validator discovery and execution are still
-missing.
+attach review notes. External validator runners can hand findings back through:
+
+```bash
+php scripts/cow/merge.php record-plugin-validator-conflicts \
+  --metadata-db .forkpress/cow/merge/metadata.sqlite \
+  --run 123 \
+  --findings-json '[{"plugin":"example","object":"widget:42","reason":"missing child row"}]'
+```
+
+Runtime validator discovery and execution are still missing.
 
 ## Review Metadata
 

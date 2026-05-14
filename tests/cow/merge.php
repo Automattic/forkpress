@@ -13130,6 +13130,33 @@ SQL);
         'must start with plugin-',
         'plugin validator rejects non-plugin conflict types'
     );
+    $plugin_cli_empty_record = run_merge_cli([
+        'record-plugin-validator-conflicts',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', (string)$plugin_graph_result['run_id'],
+        '--findings-json', '[]',
+        '--format', 'json',
+    ]);
+    assert_same($plugin_cli_empty_record['status'], 0, 'plugin validator record CLI accepts empty finding batches');
+    $plugin_cli_empty_result = json_decode($plugin_cli_empty_record['output'], true);
+    assert_same($plugin_cli_empty_result['status'] ?? null, 'valid', 'plugin validator record CLI reports valid empty findings');
+    assert_same($plugin_cli_empty_result['conflicts'] ?? null, 0, 'plugin validator record CLI reports zero empty conflicts');
+    $plugin_cli_invalid_run = run_merge_cli([
+        'record-plugin-validator-conflicts',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', '999999',
+        '--findings-json', '[]',
+    ]);
+    assert_true($plugin_cli_invalid_run['status'] !== 0, 'plugin validator record CLI rejects missing merge runs');
+    assert_true(str_contains($plugin_cli_invalid_run['output'], 'merge run #999999 does not exist'), 'plugin validator record CLI explains missing merge runs');
+    $plugin_cli_invalid_json = run_merge_cli([
+        'record-plugin-validator-conflicts',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', (string)$plugin_graph_result['run_id'],
+        '--findings-json', '{"plugin":"forkpress-graph"}',
+    ]);
+    assert_true($plugin_cli_invalid_json['status'] !== 0, 'plugin validator record CLI rejects JSON objects');
+    assert_true(str_contains($plugin_cli_invalid_json['output'], '--findings-json must be a JSON array'), 'plugin validator record CLI explains findings JSON shape');
     $plugin_validator_result = cow_merge_record_plugin_validator_conflicts($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], [
         [
             'plugin' => 'forkpress-graph',
@@ -13231,6 +13258,37 @@ SQL);
     ]);
     assert_true($plugin_cli_path_error['status'] !== 0, 'plugin audit CLI rejects file path filters');
     assert_true(str_contains($plugin_cli_path_error['output'], '--path and --path-prefix require file audit scope'), 'plugin audit CLI explains path filter scope errors');
+    $plugin_cli_record_finding = run_merge_cli([
+        'record-plugin-validator-conflicts',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', (string)$plugin_graph_result['run_id'],
+        '--findings-json', json_encode([
+            [
+                'plugin' => 'forkpress-graph',
+                'object' => 'graph:target-parent:' . $plugin_graph_target_graph['parent_id'],
+                'reason' => 'target graph validator found a conflicting external option reference',
+                'type' => 'plugin-target-conflict',
+                'tables' => ['plugin_graph_parent', 'wp_options'],
+                'files' => [$plugin_graph_target_graph['file_path']],
+                'validator' => 'forkpress-graph-validator@1',
+                'source' => $plugin_graph_source_graph,
+                'target' => $plugin_graph_target_graph,
+                'candidate' => $plugin_graph_target_graph + ['conflicting_option' => 'plugin_graph_target'],
+            ],
+        ], JSON_UNESCAPED_SLASHES),
+        '--format', 'json',
+    ]);
+    assert_same($plugin_cli_record_finding['status'], 0, 'plugin validator record CLI records plugin conflicts');
+    $plugin_cli_record_result = json_decode($plugin_cli_record_finding['output'], true);
+    assert_same($plugin_cli_record_result['status'] ?? null, 'completed_with_conflicts', 'plugin validator record CLI reports conflicted findings');
+    assert_same($plugin_cli_record_result['conflicts'] ?? null, 1, 'plugin validator record CLI reports recorded conflicts');
+    $plugin_cli_record_audit = cow_merge_audit_report($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-target-conflict',
+    ]);
+    assert_same(count($plugin_cli_record_audit['conflicts']), 1, 'plugin validator record CLI conflicts are visible in plugin audit scope');
+    assert_true(str_contains($plugin_cli_record_audit['conflicts'][0]['chosen_preview'], 'conflicting_option'), 'plugin validator record CLI stores candidate payloads');
 
     copy($band_base, $band_feature_a_reset);
     $result = cow_merge_allocate_autoincrement_bands($band_feature_a_reset, $band_metadata, 'feature-band-a');

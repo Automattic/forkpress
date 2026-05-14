@@ -15,6 +15,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "  php merge.php capture-identities --db <path> --metadata-db <path> --branch <branch> [--seed-branch <branch>]\n");
     fwrite(STDERR, "  php merge.php track-identity-events --db <path> --metadata-db <path> --branch <branch> --events-json <json>\n");
     fwrite(STDERR, "  php merge.php allocate-id-bands --db <path> --metadata-db <path> --branch <branch>\n");
+    fwrite(STDERR, "  php merge.php record-plugin-validator-conflicts --metadata-db <path> --run ID --findings-json <json> [--format text|json]\n");
     fwrite(STDERR, "  php merge.php audit --metadata-db <path> [--format text|json] [--limit N] [--run ID]\n");
     fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|decisions|resolutions|rollback-failures] [--path <path>] [--path-prefix <prefix>]\n");
     fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|decisions|resolutions|rollback-failures] [--conflict-type TYPE] [--decision DECISION]\n");
@@ -5168,15 +5169,6 @@ function cow_merge_record_plugin_validator_conflicts(
     int $run_id,
     array $findings
 ): array {
-    if ($findings === []) {
-        return [
-            'run_id' => $run_id,
-            'status' => 'valid',
-            'conflicts' => 0,
-            'metadata_db' => $metadata_db,
-        ];
-    }
-
     $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READWRITE | SQLITE3_OPEN_CREATE);
     $metadata_transaction_active = false;
     $conflicts = 0;
@@ -5184,6 +5176,21 @@ function cow_merge_record_plugin_validator_conflicts(
         cow_merge_ensure_metadata($meta);
         cow_merge_exec_checked($meta, 'BEGIN IMMEDIATE', 'failed to start plugin validator metadata transaction');
         $metadata_transaction_active = true;
+        $stmt = cow_merge_prepare_checked(
+            $meta,
+            'SELECT 1 FROM merge_runs WHERE id = :run_id',
+            'failed to prepare plugin validator merge run lookup'
+        );
+        cow_merge_bind($stmt, ':run_id', $run_id);
+        $res = cow_merge_execute_checked($stmt, $meta, 'failed to execute plugin validator merge run lookup');
+        $run_exists = (bool)$res->fetchArray(SQLITE3_NUM);
+        cow_merge_result_finalize_checked($res, 'failed to finalize plugin validator merge run lookup');
+        if (!$run_exists) {
+            throw new InvalidArgumentException("merge run #$run_id does not exist in merge metadata");
+        }
+        if (!array_is_list($findings)) {
+            throw new InvalidArgumentException('plugin validator findings must be a list');
+        }
         foreach ($findings as $finding) {
             if (!is_array($finding)) {
                 throw new InvalidArgumentException('plugin validator findings must be arrays');
@@ -11741,6 +11748,33 @@ if (realpath($argv[0] ?? '') === __FILE__) {
                 echo "  allocated: {$result['allocated']}\n";
                 echo "  reused:    {$result['reused']}\n";
                 echo "  advanced:  {$result['advanced']}\n";
+                echo "  metadata:  {$result['metadata_db']}\n";
+            }
+            exit(0);
+        }
+        if ($command === 'record-plugin-validator-conflicts') {
+            $args = cow_merge_parse_cli($argv, ['metadata-db', 'run', 'findings-json'], 2);
+            $findings = json_decode($args['findings-json'], true);
+            if (!is_array($findings) || !array_is_list($findings)) {
+                throw new InvalidArgumentException('--findings-json must be a JSON array');
+            }
+            $result = cow_merge_record_plugin_validator_conflicts(
+                $args['metadata-db'],
+                (int)cow_merge_audit_run_id($args['run'] ?? null),
+                $findings
+            );
+            $format = cow_merge_audit_format($args['format'] ?? null);
+            if ($format === 'json') {
+                $encoded = json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+                if (!is_string($encoded)) {
+                    throw new RuntimeException('failed to encode plugin validator result');
+                }
+                echo $encoded . "\n";
+            } elseif (($args['quiet'] ?? '0') !== '1') {
+                echo "forkpress: recorded plugin validator conflicts\n";
+                echo "  run:       {$result['run_id']}\n";
+                echo "  status:    {$result['status']}\n";
+                echo "  conflicts: {$result['conflicts']}\n";
                 echo "  metadata:  {$result['metadata_db']}\n";
             }
             exit(0);
