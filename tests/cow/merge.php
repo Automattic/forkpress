@@ -5404,6 +5404,39 @@ SQL);
     assert_same((int)scalar($schema_table_target_drop_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_table_target_drop'"), 0, 'target table drop wins by default when source keeps a table');
     $schema_table_target_drop_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_table_target_drop' AND column_name IS NULL AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
     assert_true($schema_table_target_drop_conflict_id > 0, 'target-dropped table conflict is auditable');
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'SAVEPOINT forkpress_source_table_restore_validation_meta' && $message === 'failed to start source table restore validation metadata savepoint') {
+                throw new RuntimeException('forced source table restore metadata savepoint failure');
+            }
+        },
+    ];
+    $schema_table_target_drop_savepoint_failure = null;
+    try {
+        cow_merge_resolve_conflict(
+            $metadata,
+            $schema_table_target_drop_conflict_id,
+            'source',
+            false,
+            'Preview source table restore with failing metadata savepoint.',
+            'test'
+        );
+    } catch (Throwable $e) {
+        $schema_table_target_drop_savepoint_failure = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($schema_table_target_drop_savepoint_failure !== null && str_contains($schema_table_target_drop_savepoint_failure, 'forced source table restore metadata savepoint failure'), 'source table restore metadata savepoint failure is surfaced to the caller');
+    assert_same(
+        (int)scalar($schema_table_target_drop_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_table_target_drop'"),
+        0,
+        'failed source table restore metadata savepoint leaves target schema unchanged'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_table_target_drop_conflict_id"),
+        0,
+        'failed source table restore metadata savepoint records no resolution metadata'
+    );
     $schema_table_target_drop_dry = cow_merge_resolve_conflict(
         $metadata,
         $schema_table_target_drop_conflict_id,

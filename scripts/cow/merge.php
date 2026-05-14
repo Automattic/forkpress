@@ -8858,9 +8858,21 @@ function cow_merge_validate_source_table_restore(
     string $table,
     array $restore_payload
 ): void {
-    $target->exec('SAVEPOINT forkpress_source_table_restore_validation');
-    $meta->exec('SAVEPOINT forkpress_source_table_restore_validation_meta');
+    $target_savepoint_started = false;
+    $meta_savepoint_started = false;
     try {
+        cow_merge_exec_checked(
+            $target,
+            'SAVEPOINT forkpress_source_table_restore_validation',
+            'failed to start source table restore validation target savepoint'
+        );
+        $target_savepoint_started = true;
+        cow_merge_exec_checked(
+            $meta,
+            'SAVEPOINT forkpress_source_table_restore_validation_meta',
+            'failed to start source table restore validation metadata savepoint'
+        );
+        $meta_savepoint_started = true;
         cow_merge_restore_source_table(
             $source,
             $target,
@@ -8876,10 +8888,14 @@ function cow_merge_validate_source_table_restore(
         $meta->exec('ROLLBACK TO forkpress_source_table_restore_validation_meta');
         $meta->exec('RELEASE forkpress_source_table_restore_validation_meta');
     } catch (Throwable $e) {
-        $target->exec('ROLLBACK TO forkpress_source_table_restore_validation');
-        $target->exec('RELEASE forkpress_source_table_restore_validation');
-        $meta->exec('ROLLBACK TO forkpress_source_table_restore_validation_meta');
-        $meta->exec('RELEASE forkpress_source_table_restore_validation_meta');
+        if ($target_savepoint_started) {
+            $target->exec('ROLLBACK TO forkpress_source_table_restore_validation');
+            $target->exec('RELEASE forkpress_source_table_restore_validation');
+        }
+        if ($meta_savepoint_started) {
+            $meta->exec('ROLLBACK TO forkpress_source_table_restore_validation_meta');
+            $meta->exec('RELEASE forkpress_source_table_restore_validation_meta');
+        }
         throw $e;
     }
 }
