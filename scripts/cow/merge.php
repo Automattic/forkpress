@@ -2361,18 +2361,18 @@ function cow_merge_try_insert_row(SQLite3 $target, string $table, array $row, ar
     $sql = 'INSERT INTO ' . cow_merge_quote_ident($table) . ' (' .
         implode(', ', array_map('cow_merge_quote_ident', $columns)) . ') VALUES (' .
         implode(', ', array_fill(0, count($columns), '?')) . ')';
-    $stmt = $target->prepare($sql);
-    if (!$stmt) {
-        throw new RuntimeException("failed to prepare insert into $table: " . $target->lastErrorMsg());
-    }
+    $stmt = cow_merge_prepare_checked($target, $sql, "failed to prepare insert into $table");
     foreach ($columns as $i => $col) {
         cow_merge_bind($stmt, $i + 1, $row[$col] ?? null);
     }
-    if (!@$stmt->execute()) {
-        if (cow_merge_is_constraint_error($target)) {
-            return ['ok' => false, 'rowid' => null, 'error' => cow_merge_constraint_error($target)];
-        }
-        throw new RuntimeException("failed to insert into $table: " . $target->lastErrorMsg());
+    $execute_result = cow_merge_execute_constraint_mutation(
+        $stmt,
+        $target,
+        "failed to insert into $table",
+        "failed to finalize insert into $table"
+    );
+    if (!($execute_result['ok'] ?? false)) {
+        return ['ok' => false, 'rowid' => null, 'error' => $execute_result['error'] ?? 'SQLite constraint failed'];
     }
     return ['ok' => true, 'rowid' => (int)$target->lastInsertRowID(), 'error' => null];
 }
@@ -2395,19 +2395,19 @@ function cow_merge_try_insert_row_with_rowid(SQLite3 $target, string $table, int
     $sql = 'INSERT INTO ' . cow_merge_quote_ident($table) . ' (' .
         implode(', ', $quoted_columns) . ') VALUES (' .
         implode(', ', array_fill(0, count($quoted_columns), '?')) . ')';
-    $stmt = $target->prepare($sql);
-    if (!$stmt) {
-        throw new RuntimeException("failed to prepare rowid insert into $table: " . $target->lastErrorMsg());
-    }
+    $stmt = cow_merge_prepare_checked($target, $sql, "failed to prepare rowid insert into $table");
     cow_merge_bind($stmt, 1, $rowid);
     foreach ($columns as $i => $col) {
         cow_merge_bind($stmt, $i + 2, $row[$col] ?? null);
     }
-    if (!@$stmt->execute()) {
-        if (cow_merge_is_constraint_error($target)) {
-            return ['ok' => false, 'rowid' => null, 'error' => cow_merge_constraint_error($target)];
-        }
-        throw new RuntimeException("failed to insert rowid into $table: " . $target->lastErrorMsg());
+    $execute_result = cow_merge_execute_constraint_mutation(
+        $stmt,
+        $target,
+        "failed to insert rowid into $table",
+        "failed to finalize rowid insert into $table"
+    );
+    if (!($execute_result['ok'] ?? false)) {
+        return ['ok' => false, 'rowid' => null, 'error' => $execute_result['error'] ?? 'SQLite constraint failed'];
     }
     return ['ok' => true, 'rowid' => (int)$target->lastInsertRowID(), 'error' => null];
 }
@@ -2838,10 +2838,7 @@ function cow_merge_try_update_row(
     $sql = 'UPDATE ' . cow_merge_quote_ident($table) . ' SET ' .
         implode(', ', array_map(fn($col) => cow_merge_quote_ident($col) . ' = ?', $set_cols)) .
         ' WHERE ' . $where;
-    $stmt = $target->prepare($sql);
-    if (!$stmt) {
-        throw new RuntimeException("failed to prepare update on $table: " . $target->lastErrorMsg());
-    }
+    $stmt = cow_merge_prepare_checked($target, $sql, "failed to prepare update on $table");
     $index = 1;
     foreach ($set_cols as $col) {
         cow_merge_bind($stmt, $index++, $row[$col] ?? null);
@@ -2849,11 +2846,14 @@ function cow_merge_try_update_row(
     foreach ($where_values as $value) {
         cow_merge_bind($stmt, $index++, $value);
     }
-    if (!@$stmt->execute()) {
-        if (cow_merge_is_constraint_error($target)) {
-            return ['ok' => false, 'error' => cow_merge_constraint_error($target)];
-        }
-        throw new RuntimeException("failed to update $table: " . $target->lastErrorMsg());
+    $execute_result = cow_merge_execute_constraint_mutation(
+        $stmt,
+        $target,
+        "failed to update $table",
+        "failed to finalize update on $table"
+    );
+    if (!($execute_result['ok'] ?? false)) {
+        return ['ok' => false, 'error' => $execute_result['error'] ?? 'SQLite constraint failed'];
     }
     return ['ok' => true, 'error' => null];
 }
@@ -2870,18 +2870,22 @@ function cow_merge_try_delete_row(SQLite3 $target, string $table, array $identit
 
     $values = [];
     $where = cow_merge_where_clause($identity, $pk_cols, $values);
-    $stmt = $target->prepare('DELETE FROM ' . cow_merge_quote_ident($table) . ' WHERE ' . $where);
-    if (!$stmt) {
-        throw new RuntimeException("failed to prepare delete from $table: " . $target->lastErrorMsg());
-    }
+    $stmt = cow_merge_prepare_checked(
+        $target,
+        'DELETE FROM ' . cow_merge_quote_ident($table) . ' WHERE ' . $where,
+        "failed to prepare delete from $table"
+    );
     foreach ($values as $i => $value) {
         cow_merge_bind($stmt, $i + 1, $value);
     }
-    if (!@$stmt->execute()) {
-        if (cow_merge_is_constraint_error($target)) {
-            return ['ok' => false, 'error' => cow_merge_constraint_error($target)];
-        }
-        throw new RuntimeException("failed to delete from $table: " . $target->lastErrorMsg());
+    $execute_result = cow_merge_execute_constraint_mutation(
+        $stmt,
+        $target,
+        "failed to delete from $table",
+        "failed to finalize delete from $table"
+    );
+    if (!($execute_result['ok'] ?? false)) {
+        return ['ok' => false, 'error' => $execute_result['error'] ?? 'SQLite constraint failed'];
     }
     return ['ok' => true, 'error' => null];
 }
@@ -5556,6 +5560,24 @@ function cow_merge_execute_checked(SQLite3Stmt $stmt, SQLite3 $db, string $messa
         throw new RuntimeException($message . ': ' . $db->lastErrorMsg());
     }
     return $result;
+}
+
+function cow_merge_execute_constraint_mutation(
+    SQLite3Stmt $stmt,
+    SQLite3 $db,
+    string $message,
+    string $finalize_message
+): array {
+    cow_merge_test_hook('before_sqlite_statement_execute', $db, $message);
+    $result = @$stmt->execute();
+    if (!$result) {
+        if (cow_merge_is_constraint_error($db)) {
+            return ['ok' => false, 'error' => cow_merge_constraint_error($db)];
+        }
+        throw new RuntimeException($message . ': ' . $db->lastErrorMsg());
+    }
+    cow_merge_result_finalize_checked($result, $finalize_message);
+    return ['ok' => true, 'error' => null];
 }
 
 function cow_merge_query_checked(SQLite3 $db, string $sql, string $message): SQLite3Result {
