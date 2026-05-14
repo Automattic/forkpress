@@ -4263,6 +4263,37 @@ function cow_merge_lookup_autoincrement_band(SQLite3 $meta, string $branch, stri
     ];
 }
 
+function cow_merge_autoincrement_id_band_violation(
+    SQLite3 $meta,
+    string $source_branch,
+    string $table,
+    array $source_row,
+    array $pk_cols
+): ?string {
+    if (count($pk_cols) !== 1) {
+        return null;
+    }
+    $band = cow_merge_lookup_autoincrement_band($meta, $source_branch, $table);
+    if ($band === null) {
+        return null;
+    }
+    $pk_col = $pk_cols[0];
+    if (!array_key_exists($pk_col, $source_row)) {
+        return null;
+    }
+    $value = $source_row[$pk_col];
+    if (!is_int($value) && !(is_string($value) && preg_match('/^-?\d+$/', $value))) {
+        return null;
+    }
+    $id = (int)$value;
+    $band_start = (int)$band['band_start'];
+    $band_end = (int)$band['band_end'];
+    if ($id >= $band_start && $id <= $band_end) {
+        return null;
+    }
+    return "source inserted explicit AUTOINCREMENT id $id outside reserved branch band $band_start-$band_end";
+}
+
 function cow_merge_round_up_to_band(int $value, int $band_size): int {
     $remainder = $value % $band_size;
     if ($remainder === 0) {
@@ -10829,6 +10860,25 @@ function cow_merge_table_rows(
         }
 
         if ($base_row === null && $source_row !== null && $target_row === null) {
+            $id_band_violation = $pk_cols
+                ? cow_merge_autoincrement_id_band_violation($meta, $source_branch, $table, $source_row, $pk_cols)
+                : null;
+            if ($id_band_violation !== null) {
+                if (cow_merge_record_row_target_constraint(
+                    $meta,
+                    $run_id,
+                    $table,
+                    $key,
+                    null,
+                    $source_row,
+                    null,
+                    'insert',
+                    $id_band_violation
+                )) {
+                    $conflicts++;
+                }
+                continue;
+            }
             if ($pk_cols) {
                 $current_row = cow_merge_select_current_row($target, $table, $identity, $pk_cols);
                 if ($current_row !== null && cow_merge_row_values_equal($current_row, $source_row, $row_columns)) {

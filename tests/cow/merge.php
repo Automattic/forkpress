@@ -12946,6 +12946,37 @@ SQL);
     $post_id_b = (int)scalar($band_feature_b, "SELECT MAX(ID) FROM wp_posts");
     assert_true($post_id_b > $post_id_a, 'independent branches do not allocate colliding post IDs');
 
+    $band_explicit_base = $tmp . '/band-explicit-base.sqlite';
+    $band_explicit_source = $tmp . '/band-explicit-source.sqlite';
+    $band_explicit_target = $tmp . '/band-explicit-target.sqlite';
+    $band_explicit_metadata = $tmp . '/.forkpress/cow/merge/band-explicit-metadata.sqlite';
+    copy($band_base, $band_explicit_base);
+    copy($band_base, $band_explicit_source);
+    copy($band_base, $band_explicit_target);
+    cow_merge_allocate_autoincrement_bands($band_explicit_source, $band_explicit_metadata, 'feature-band-explicit-source');
+    $db = open_db($band_explicit_source);
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status) VALUES (2, 'Imported explicit post', 'explicit id import', 'publish')");
+    $db->close();
+    $band_explicit_result = cow_merge_databases(
+        $band_explicit_base,
+        $band_explicit_source,
+        $band_explicit_target,
+        $band_explicit_metadata,
+        'feature-band-explicit-source',
+        'main'
+    );
+    assert_same($band_explicit_result['status'], 'completed_with_conflicts', 'explicit source IDs outside the branch band are held for review');
+    assert_same((int)scalar($band_explicit_target, "SELECT COUNT(*) FROM wp_posts WHERE ID = 2"), 0, 'out-of-band explicit source ID is not applied automatically');
+    assert_same(
+        (int)scalar($band_explicit_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-source' AND c.table_name = 'wp_posts' AND c.conflict_type = 'row-target-constraint'"),
+        1,
+        'out-of-band explicit source ID records a reviewable row conflict'
+    );
+    assert_true(
+        str_contains((string)scalar($band_explicit_metadata, "SELECT reason FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-source' AND d.table_name = 'wp_posts' AND d.decision = 'target-wins' ORDER BY d.id DESC LIMIT 1"), 'outside reserved branch band'),
+        'out-of-band explicit source ID explains the reserved-band violation'
+    );
+
     $band_ref_base = $tmp . '/band-ref-base.sqlite';
     $band_ref_source = $tmp . '/band-ref-source.sqlite';
     $band_ref_target = $tmp . '/band-ref-target.sqlite';
