@@ -1,0 +1,26 @@
+{
+  "name": "forkpress-docs",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "check": "astro check",
+    "validate": "npm run check && npm run build"
+  },
+  "dependencies": {
+    "@astrojs/mdx": "^5.0.5",
+    "@astrojs/starlight": "^0.39.2",
+    "astro": "^6.3.2",
+    "starlight-llms-txt": "^0.10.0"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.9",
+    "typescript": "^5.9.3"
+  },
+  "overrides": {
+    "yaml": "2.9.0"
+  }
+}
