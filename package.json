@@ -8,7 +8,7 @@
     "build": "astro build",
     "preview": "astro preview",
     "check": "astro check",
-    "test": "node --test src/remark-rewrite-doc-links.test.mjs",
+    "test": "node --test src/remark-rewrite-doc-links.test.mjs src/astro-config.test.mjs",
     "validate": "npm run check && npm run test && npm run build"
   },
   "dependencies": {

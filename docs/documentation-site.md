@@ -48,5 +48,5 @@ Preview the built site locally:
 npm run preview
 ```
 
-The build publishes `dist/`, including `llms.txt`, `llms-full.txt`, and the
+The build publishes `docs-dist/`, including `llms.txt`, `llms-full.txt`, and the
 Pagefind search index.

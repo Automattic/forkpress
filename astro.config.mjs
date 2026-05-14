@@ -12,6 +12,7 @@ export default defineConfig({
 	site,
 	base,
 	output: 'static',
+	outDir: 'docs-dist',
 	trailingSlash: 'always',
 	markdown: {
 		remarkPlugins: [rewriteDocLinks, removePageTitleHeading],
