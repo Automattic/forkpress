@@ -1991,6 +1991,36 @@ SQL);
     $row_target_choice_result = cow_merge_databases($row_target_choice_base, $row_target_choice_source, $row_target_choice_target, $metadata, 'feature-row-target-choice', 'main');
     assert_same($row_target_choice_result['status'], 'completed_with_conflicts', 'row target-choice fixture starts with a reviewable conflict');
     $row_target_choice_id = (int)scalar($metadata, "SELECT c.id FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_items' AND c.conflict_type = 'row-insert-collision' AND r.source_branch = 'feature-row-target-choice' ORDER BY c.id DESC LIMIT 1");
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'COMMIT' && $message === 'failed to commit row resolution metadata transaction') {
+                throw new RuntimeException('forced target row resolution metadata commit failure');
+            }
+        },
+    ];
+    $row_target_choice_commit_failure_message = null;
+    try {
+        cow_merge_resolve_conflict(
+            $metadata,
+            $row_target_choice_id,
+            'target',
+            true,
+            'Try audited target row with failing metadata commit.',
+            'cow-test'
+        );
+    } catch (Throwable $e) {
+        $row_target_choice_commit_failure_message = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($row_target_choice_commit_failure_message !== null && str_contains($row_target_choice_commit_failure_message, 'forced target row resolution metadata commit failure'), 'target row resolution metadata commit failure is surfaced to the caller');
+    assert_same(scalar($row_target_choice_target, "SELECT value FROM plugin_items WHERE item_id = 'target-choice'"), 'target row', 'failed target row resolution metadata commit leaves target data unchanged');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $row_target_choice_id"), 0, 'failed target row resolution metadata commit records no resolution metadata');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_review_notes WHERE record_type = 'conflict' AND record_id = $row_target_choice_id"),
+        0,
+        'failed target row resolution metadata commit rolls back the reviewed conflict note'
+    );
     $row_target_choice_resolution = cow_merge_resolve_conflict(
         $metadata,
         $row_target_choice_id,
@@ -2960,6 +2990,36 @@ SQL);
     );
     assert_same($file_target_keep_result['status'], 'completed_with_conflicts', 'filesystem target-choice fixture starts with a reviewable conflict');
     $file_target_keep_conflict_id = (int)scalar($metadata, "SELECT c.id FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = '__files__' AND c.conflict_type = 'file-conflict' AND c.row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/keep-target.txt')) . "' AND r.source_branch = 'feature-file-target-keep' ORDER BY c.id DESC LIMIT 1");
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'COMMIT' && $message === 'failed to commit filesystem resolution metadata transaction') {
+                throw new RuntimeException('forced target filesystem resolution metadata commit failure');
+            }
+        },
+    ];
+    $file_target_keep_commit_failure_message = null;
+    try {
+        cow_merge_resolve_conflict(
+            $metadata,
+            $file_target_keep_conflict_id,
+            'target',
+            true,
+            'Try audited target file with failing metadata commit.',
+            'cow-test'
+        );
+    } catch (Throwable $e) {
+        $file_target_keep_commit_failure_message = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($file_target_keep_commit_failure_message !== null && str_contains($file_target_keep_commit_failure_message, 'forced target filesystem resolution metadata commit failure'), 'target filesystem resolution metadata commit failure is surfaced to the caller');
+    assert_same(file_get_contents($file_target_keep_target_root . '/wp-content/uploads/keep-target.txt'), 'target target-choice file', 'failed target filesystem resolution metadata commit leaves target file unchanged');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $file_target_keep_conflict_id"), 0, 'failed target filesystem resolution metadata commit records no resolution metadata');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_review_notes WHERE record_type = 'conflict' AND record_id = $file_target_keep_conflict_id"),
+        0,
+        'failed target filesystem resolution metadata commit rolls back the reviewed conflict note'
+    );
     $file_target_keep_resolution = cow_merge_resolve_conflict(
         $metadata,
         $file_target_keep_conflict_id,
