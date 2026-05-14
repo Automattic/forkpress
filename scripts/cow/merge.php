@@ -57,8 +57,21 @@ function cow_merge_mkdir_p(string $path): void {
 }
 
 function cow_merge_open_db(string $path, int $flags): SQLite3 {
-    $db = new SQLite3($path, $flags);
-    $db->busyTimeout(5000);
+    cow_merge_test_hook('before_sqlite_open', $path, $flags);
+    try {
+        $db = new SQLite3($path, $flags);
+    } catch (Throwable $e) {
+        throw new RuntimeException("failed to open SQLite database $path: " . $e->getMessage(), 0, $e);
+    }
+    try {
+        cow_merge_test_hook('after_sqlite_open', $db, $path, $flags);
+        if (!$db->busyTimeout(5000)) {
+            throw new RuntimeException($db->lastErrorMsg());
+        }
+    } catch (Throwable $e) {
+        $db->close();
+        throw new RuntimeException("failed to initialize SQLite database $path: " . $e->getMessage(), 0, $e);
+    }
     return $db;
 }
 

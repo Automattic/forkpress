@@ -2614,6 +2614,25 @@ SQL);
     }
     $missing_audit = cow_merge_audit_report($tmp . '/missing-metadata.sqlite', null, 5);
     assert_same($missing_audit['metadata_exists'], false, 'merge audit report handles missing metadata');
+    $metadata_open_failure = $tmp . '/metadata-open-failure.sqlite';
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_open'] = [
+        function (string $path, int $flags) use ($metadata_open_failure): void {
+            if ($path === $metadata_open_failure && ($flags & SQLITE3_OPEN_CREATE) !== 0) {
+                throw new RuntimeException('forced metadata open failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_record_failed_run($metadata_open_failure, 'feature', 'trunk', 'base.sqlite', 'source.sqlite', 'target.sqlite', 'forced failure'),
+        'forced metadata open failure',
+        'metadata database open failures surface before schema setup'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_open']);
+    assert_true(!file_exists($metadata_open_failure), 'failed metadata open does not create a partial metadata database');
+    $metadata_open_recovered_run = cow_merge_record_failed_run($metadata_open_failure, 'feature', 'trunk', 'base.sqlite', 'source.sqlite', 'target.sqlite', 'forced failure');
+    assert_true($metadata_open_recovered_run > 0, 'metadata failed-run recording succeeds after open failure is cleared');
+    assert_same((int)scalar($metadata_open_failure, 'SELECT COUNT(*) FROM merge_runs WHERE status = "failed"'), 1, 'metadata open recovery records one failed run');
+
     $metadata_journal_failure = $tmp . '/metadata-journal-failure.sqlite';
     $metadata_journal_failure_db = open_db($metadata_journal_failure);
     $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
