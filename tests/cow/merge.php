@@ -219,6 +219,48 @@ try {
     assert_same((int)scalar($rollback_metadata, 'SELECT COUNT(*) FROM merge_conflicts'), 0, 'failed whole-merge rollback discards staged conflict metadata');
     assert_same((int)scalar($rollback_metadata, 'SELECT COUNT(*) FROM merge_row_identities'), 0, 'failed whole-merge rollback discards staged no-primary-key sidecars');
 
+    $merge_begin_base = $tmp . '/merge-begin-base.sqlite';
+    $merge_begin_source = $tmp . '/merge-begin-source.sqlite';
+    $merge_begin_target = $tmp . '/merge-begin-target.sqlite';
+    $merge_begin_metadata = $tmp . '/.forkpress/cow/merge/merge-begin-metadata.sqlite';
+    create_base_db($merge_begin_base);
+    copy($merge_begin_base, $merge_begin_source);
+    copy($merge_begin_base, $merge_begin_target);
+    $db = open_db($merge_begin_source);
+    $db->exec("UPDATE wp_posts SET post_content = 'Source begin rollback content' WHERE ID = 1");
+    $db->close();
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'BEGIN IMMEDIATE' && $message === 'failed to start merge metadata transaction') {
+                throw new RuntimeException('forced merge metadata begin failure');
+            }
+        },
+    ];
+    $merge_begin_failure_message = null;
+    try {
+        cow_merge_databases(
+            $merge_begin_base,
+            $merge_begin_source,
+            $merge_begin_target,
+            $merge_begin_metadata,
+            'feature-merge-begin-rollback',
+            'main'
+        );
+    } catch (Throwable $e) {
+        $merge_begin_failure_message = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($merge_begin_failure_message !== null && str_contains($merge_begin_failure_message, 'forced merge metadata begin failure'), 'direct DB merge metadata begin failure is surfaced to the caller');
+    assert_same(scalar($merge_begin_target, "SELECT post_content FROM wp_posts WHERE ID = 1"), 'Base content', 'direct DB merge metadata begin failure rolls back the opened target transaction');
+    assert_same(
+        (int)scalar($merge_begin_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-merge-begin-rollback' AND status = 'failed'"),
+        1,
+        'direct DB merge metadata begin failure leaves an auditable failed run'
+    );
+    assert_same((int)scalar($merge_begin_metadata, 'SELECT COUNT(*) FROM merge_decisions'), 0, 'direct DB merge metadata begin failure records no decisions');
+    assert_same((int)scalar($merge_begin_metadata, 'SELECT COUNT(*) FROM merge_conflicts'), 0, 'direct DB merge metadata begin failure records no conflicts');
+
     $merge_commit_base = $tmp . '/merge-commit-base.sqlite';
     $merge_commit_source = $tmp . '/merge-commit-source.sqlite';
     $merge_commit_target = $tmp . '/merge-commit-target.sqlite';

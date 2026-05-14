@@ -5404,7 +5404,7 @@ function cow_merge_record_resolution(
 
 function cow_merge_exec_checked(SQLite3 $db, string $sql, string $message): void {
     cow_merge_test_hook('before_sqlite_exec', $db, $sql, $message);
-    if (!$db->exec($sql)) {
+    if (!@$db->exec($sql)) {
         throw new RuntimeException($message . ': ' . $db->lastErrorMsg());
     }
 }
@@ -10176,13 +10176,9 @@ function cow_merge_databases(
     $target_snapshot = cow_merge_snapshot_sqlite_db($target_db);
     $preserve_target_snapshot = false;
     try {
-        if (!$target->exec('BEGIN IMMEDIATE')) {
-            throw new RuntimeException('failed to start target database transaction: ' . $target->lastErrorMsg());
-        }
+        cow_merge_exec_checked($target, 'BEGIN IMMEDIATE', 'failed to start target database transaction');
         $target_transaction_active = true;
-        if (!$meta->exec('BEGIN IMMEDIATE')) {
-            throw new RuntimeException('failed to start merge metadata transaction: ' . $meta->lastErrorMsg());
-        }
+        cow_merge_exec_checked($meta, 'BEGIN IMMEDIATE', 'failed to start merge metadata transaction');
         $metadata_transaction_active = true;
         $base_tables = cow_merge_table_sql_map($base);
         $source_tables = cow_merge_table_sql_map($source);
@@ -10324,9 +10320,7 @@ function cow_merge_databases(
         $applied += $trigger_result['applied'];
         $conflicts += $trigger_result['conflicts'];
 
-        if (!@$target->exec('COMMIT')) {
-            throw new RuntimeException('failed to commit target database transaction: ' . $target->lastErrorMsg());
-        }
+        cow_merge_exec_checked($target, 'COMMIT', 'failed to commit target database transaction');
         $target_transaction_active = false;
         $target_committed = true;
         $status = $conflicts > 0 ? 'completed_with_conflicts' : 'completed';
