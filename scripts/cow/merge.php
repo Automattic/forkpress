@@ -636,10 +636,7 @@ function cow_merge_has_schema_conflict_for_object(SQLite3 $meta, int $run_id, st
         cow_merge_bind($stmt, ':table_name', $table);
         cow_merge_bind($stmt, ':column_name', $object);
         cow_merge_bind($stmt, ':conflict_type', (string)$type);
-        $res = $stmt->execute();
-        if (!$res) {
-            throw new RuntimeException('failed to inspect restore payload conflicts: ' . $meta->lastErrorMsg());
-        }
+        $res = cow_merge_execute_checked($stmt, $meta, 'failed to inspect restore payload conflicts');
         if ($res->fetchArray(SQLITE3_NUM)) {
             return true;
         }
@@ -1079,10 +1076,7 @@ function cow_merge_lookup_row_identity(SQLite3 $meta, string $branch, string $ta
     cow_merge_bind($stmt, ':branch_name', $branch);
     cow_merge_bind($stmt, ':table_name', $table);
     cow_merge_bind($stmt, ':rowid', $rowid);
-    $res = $stmt->execute();
-    if (!$res) {
-        throw new RuntimeException('failed to look up row identity: ' . $meta->lastErrorMsg());
-    }
+    $res = cow_merge_execute_checked($stmt, $meta, 'failed to look up row identity');
     $row = $res->fetchArray(SQLITE3_ASSOC);
     if (!$row) {
         return null;
@@ -1120,10 +1114,7 @@ function cow_merge_lookup_row_identity_by_hash(
     cow_merge_bind($stmt, ':table_name', $table);
     cow_merge_bind($stmt, ':rowid', $rowid);
     cow_merge_bind($stmt, ':row_hash', $row_hash);
-    $res = $stmt->execute();
-    if (!$res) {
-        throw new RuntimeException('failed to look up row identity history: ' . $meta->lastErrorMsg());
-    }
+    $res = cow_merge_execute_checked($stmt, $meta, 'failed to look up row identity history');
     $row = $res->fetchArray(SQLITE3_ASSOC);
     if (!$row) {
         return null;
@@ -1159,9 +1150,7 @@ function cow_merge_remember_row_identity_history(
     cow_merge_bind($history, ':row_hash', cow_merge_row_hash($row));
     cow_merge_bind($history, ':first_seen_run_id', $run_id);
     cow_merge_bind($history, ':last_seen_run_id', $run_id);
-    if (!$history->execute()) {
-        throw new RuntimeException('failed to remember row identity history: ' . $meta->lastErrorMsg());
-    }
+    cow_merge_execute_checked($history, $meta, 'failed to remember row identity history');
 }
 
 function cow_merge_remember_row_identity(
@@ -1189,9 +1178,7 @@ function cow_merge_remember_row_identity(
     cow_merge_bind($stmt, ':row_hash', cow_merge_row_hash($row));
     cow_merge_bind($stmt, ':first_seen_run_id', $run_id);
     cow_merge_bind($stmt, ':last_seen_run_id', $run_id);
-    if (!$stmt->execute()) {
-        throw new RuntimeException('failed to remember row identity: ' . $meta->lastErrorMsg());
-    }
+    cow_merge_execute_checked($stmt, $meta, 'failed to remember row identity');
 
     cow_merge_remember_row_identity_history($meta, $run_id, $branch, $table, $rowid, $identity, $row);
 }
@@ -1225,10 +1212,7 @@ function cow_merge_forget_row_identity(
     cow_merge_bind($stmt, ':branch_name', $branch);
     cow_merge_bind($stmt, ':table_name', $table);
     cow_merge_bind($stmt, ':rowid', $rowid);
-    $res = $stmt->execute();
-    if (!$res) {
-        throw new RuntimeException('failed to look up row identity for deletion: ' . $meta->lastErrorMsg());
-    }
+    $res = cow_merge_execute_checked($stmt, $meta, 'failed to look up row identity for deletion');
     $row = $res->fetchArray(SQLITE3_ASSOC);
     if (!$row) {
         return null;
@@ -1250,9 +1234,7 @@ function cow_merge_forget_row_identity(
     cow_merge_bind($history, ':table_name', $table);
     cow_merge_bind($history, ':rowid', $rowid);
     cow_merge_bind($history, ':logical_identity', $identity_json);
-    if (!$history->execute()) {
-        throw new RuntimeException('failed to mark row identity deleted: ' . $meta->lastErrorMsg());
-    }
+    cow_merge_execute_checked($history, $meta, 'failed to mark row identity deleted');
 
     $delete = cow_merge_prepare_checked(
         $meta,
@@ -1262,9 +1244,7 @@ function cow_merge_forget_row_identity(
     cow_merge_bind($delete, ':branch_name', $branch);
     cow_merge_bind($delete, ':table_name', $table);
     cow_merge_bind($delete, ':rowid', $rowid);
-    if (!$delete->execute()) {
-        throw new RuntimeException('failed to delete current row identity: ' . $meta->lastErrorMsg());
-    }
+    cow_merge_execute_checked($delete, $meta, 'failed to delete current row identity');
 
     return $identity;
 }
@@ -1283,10 +1263,7 @@ function cow_merge_forget_table_row_identities(
     );
     cow_merge_bind($stmt, ':branch_name', $branch);
     cow_merge_bind($stmt, ':table_name', $table);
-    $res = $stmt->execute();
-    if (!$res) {
-        throw new RuntimeException('failed to list row identities for table deletion: ' . $meta->lastErrorMsg());
-    }
+    $res = cow_merge_execute_checked($stmt, $meta, 'failed to list row identities for table deletion');
 
     $rowids = [];
     while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
@@ -3924,10 +3901,7 @@ function cow_merge_lookup_autoincrement_band(SQLite3 $meta, string $branch, stri
     );
     cow_merge_bind($stmt, ':branch_name', $branch);
     cow_merge_bind($stmt, ':table_name', $table);
-    $res = $stmt->execute();
-    if (!$res) {
-        throw new RuntimeException('failed to look up AUTOINCREMENT band: ' . $meta->lastErrorMsg());
-    }
+    $res = cow_merge_execute_checked($stmt, $meta, 'failed to look up AUTOINCREMENT band');
     $row = $res->fetchArray(SQLITE3_ASSOC);
     if (!$row) {
         return null;
@@ -3954,10 +3928,7 @@ function cow_merge_next_autoincrement_band_start(SQLite3 $meta, string $table, i
         'failed to prepare AUTOINCREMENT band selection'
     );
     cow_merge_bind($stmt, ':table_name', $table);
-    $res = $stmt->execute();
-    if (!$res) {
-        throw new RuntimeException('failed to choose AUTOINCREMENT band: ' . $meta->lastErrorMsg());
-    }
+    $res = cow_merge_execute_checked($stmt, $meta, 'failed to choose AUTOINCREMENT band');
     $row = $res->fetchArray(SQLITE3_ASSOC);
     $after_existing_bands = $row && $row['max_band_end'] !== null ? ((int)$row['max_band_end']) + 1 : COW_MERGE_AUTOINCREMENT_FIRST_BAND_START;
     return cow_merge_round_up_to_band(max(COW_MERGE_AUTOINCREMENT_FIRST_BAND_START, $after_existing_bands, $min_start), $band_size);
@@ -4001,9 +3972,7 @@ function cow_merge_remember_autoincrement_band(
         cow_merge_bind($stmt, ':band_size', $band_size);
     }
     cow_merge_bind($stmt, ':last_seen_run_id', $run_id);
-    if (!$stmt->execute()) {
-        throw new RuntimeException('failed to remember AUTOINCREMENT band: ' . $meta->lastErrorMsg());
-    }
+    cow_merge_execute_checked($stmt, $meta, 'failed to remember AUTOINCREMENT band');
 }
 
 function cow_merge_allocate_autoincrement_bands(
@@ -5261,8 +5230,8 @@ function cow_merge_review_record(
         };
         $stmt = cow_merge_prepare_checked($meta, "SELECT id FROM $table WHERE id = :id", "failed to prepare $record_type lookup");
         cow_merge_bind($stmt, ':id', $record_id);
-        $res = $stmt->execute();
-        if (!$res || !$res->fetchArray(SQLITE3_ASSOC)) {
+        $res = cow_merge_execute_checked($stmt, $meta, "failed to execute $record_type lookup");
+        if (!$res->fetchArray(SQLITE3_ASSOC)) {
             throw new InvalidArgumentException("$record_type #$record_id does not exist in merge metadata");
         }
 
@@ -5383,10 +5352,7 @@ function cow_merge_lookup_active_rowid_by_identity(SQLite3 $meta, string $branch
     cow_merge_bind($stmt, ':branch_name', $branch);
     cow_merge_bind($stmt, ':table_name', $table);
     cow_merge_bind($stmt, ':logical_identity', cow_merge_plain_json($identity));
-    $res = $stmt->execute();
-    if (!$res) {
-        throw new RuntimeException('failed to look up active row identity: ' . $meta->lastErrorMsg());
-    }
+    $res = cow_merge_execute_checked($stmt, $meta, 'failed to look up active row identity');
     $row = $res->fetchArray(SQLITE3_ASSOC);
     if ($row) {
         return (int)$row['rowid'];
@@ -5400,10 +5366,7 @@ function cow_merge_lookup_active_rowid_by_identity(SQLite3 $meta, string $branch
     );
     cow_merge_bind($scan, ':branch_name', $branch);
     cow_merge_bind($scan, ':table_name', $table);
-    $res = $scan->execute();
-    if (!$res) {
-        throw new RuntimeException('failed to scan active row identities: ' . $meta->lastErrorMsg());
-    }
+    $res = cow_merge_execute_checked($scan, $meta, 'failed to scan active row identities');
     while ($candidate = $res->fetchArray(SQLITE3_ASSOC)) {
         $candidate_identity = json_decode((string)$candidate['logical_identity'], true);
         if (is_array($candidate_identity) && cow_merge_values_equal($candidate_identity, $identity)) {
@@ -5421,10 +5384,7 @@ function cow_merge_lookup_active_rowid_by_identity(SQLite3 $meta, string $branch
     cow_merge_bind($history, ':branch_name', $branch);
     cow_merge_bind($history, ':table_name', $table);
     cow_merge_bind($history, ':logical_identity', cow_merge_plain_json($identity));
-    $res = $history->execute();
-    if (!$res) {
-        throw new RuntimeException('failed to look up row identity history: ' . $meta->lastErrorMsg());
-    }
+    $res = cow_merge_execute_checked($history, $meta, 'failed to look up row identity history');
     $row = $res->fetchArray(SQLITE3_ASSOC);
     if ($row) {
         return (int)$row['rowid'];
@@ -5439,10 +5399,7 @@ function cow_merge_lookup_active_rowid_by_identity(SQLite3 $meta, string $branch
     );
     cow_merge_bind($history_scan, ':branch_name', $branch);
     cow_merge_bind($history_scan, ':table_name', $table);
-    $res = $history_scan->execute();
-    if (!$res) {
-        throw new RuntimeException('failed to scan row identity history: ' . $meta->lastErrorMsg());
-    }
+    $res = cow_merge_execute_checked($history_scan, $meta, 'failed to scan row identity history');
     while ($candidate = $res->fetchArray(SQLITE3_ASSOC)) {
         $candidate_identity = json_decode((string)$candidate['logical_identity'], true);
         if (is_array($candidate_identity) && cow_merge_values_equal($candidate_identity, $identity)) {
@@ -7495,8 +7452,8 @@ function cow_merge_resolve_conflict(
             'failed to prepare conflict lookup'
         );
         cow_merge_bind($stmt, ':id', $conflict_id);
-        $res = $stmt->execute();
-        $conflict = $res ? $res->fetchArray(SQLITE3_ASSOC) : false;
+        $res = cow_merge_execute_checked($stmt, $meta, 'failed to read merge conflict');
+        $conflict = $res->fetchArray(SQLITE3_ASSOC);
         if (!$conflict) {
             throw new InvalidArgumentException("conflict #$conflict_id does not exist in merge metadata");
         }
@@ -8418,10 +8375,7 @@ function cow_merge_fetch_rows(SQLite3 $db, string $sql, array $params = []): arr
     foreach ($params as $key => $value) {
         cow_merge_bind($stmt, $key, $value);
     }
-    $res = $stmt->execute();
-    if (!$res) {
-        throw new RuntimeException('failed to execute audit query: ' . $db->lastErrorMsg());
-    }
+    $res = cow_merge_execute_checked($stmt, $db, 'failed to execute audit query');
     $rows = [];
     while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
         $clean = [];
@@ -8440,8 +8394,8 @@ function cow_merge_audit_has_table(SQLite3 $db, string $table): bool {
         'failed to prepare audit table check'
     );
     cow_merge_bind($stmt, ':name', $table);
-    $res = $stmt->execute();
-    return (bool)($res && $res->fetchArray(SQLITE3_NUM));
+    $res = cow_merge_execute_checked($stmt, $db, 'failed to execute audit table check');
+    return (bool)$res->fetchArray(SQLITE3_NUM);
 }
 
 function cow_merge_audit_has_column(SQLite3 $db, string $table, string $column): bool {

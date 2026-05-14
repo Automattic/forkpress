@@ -2728,6 +2728,34 @@ SQL);
     );
     unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_prepare']);
 
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_statement_execute'] = [
+        static function (SQLite3 $db, string $message): void {
+            if ($message === 'failed to execute audit table check') {
+                throw new RuntimeException('forced audit table check execute failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_audit_report($metadata, null, 5),
+        'forced audit table check execute failure',
+        'merge audit table-check execute failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_statement_execute']);
+
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_statement_execute'] = [
+        static function (SQLite3 $db, string $message): void {
+            if ($message === 'failed to execute audit query') {
+                throw new RuntimeException('forced audit row execute failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_audit_report($metadata, null, 5),
+        'forced audit row execute failure',
+        'merge audit row-query execute failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_statement_execute']);
+
     $metadata_open_failure = $tmp . '/metadata-open-failure.sqlite';
     $GLOBALS['cow_merge_test_hooks']['before_sqlite_open'] = [
         function (string $path, int $flags) use ($metadata_open_failure): void {
@@ -2800,6 +2828,33 @@ SQL);
         ['label' => 'prepare recovered']
     );
     assert_same((int)scalar($metadata_identity_prepare_failure, 'SELECT COUNT(*) FROM merge_row_identities'), 1, 'row identity metadata prepare recovers after failure hook is cleared');
+
+    $metadata_identity_execute_failure = $tmp . '/metadata-identity-execute-failure.sqlite';
+    $metadata_identity_execute_failure_db = open_db($metadata_identity_execute_failure);
+    cow_merge_ensure_metadata($metadata_identity_execute_failure_db);
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_statement_execute'] = [
+        function (SQLite3 $db, string $message) use ($metadata_identity_execute_failure_db): void {
+            if ($db === $metadata_identity_execute_failure_db && $message === 'failed to remember row identity') {
+                throw new RuntimeException('forced row identity execute failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_remember_row_identity(
+            $metadata_identity_execute_failure_db,
+            1,
+            'feature-identity-execute',
+            'plugin_keyless_execute',
+            8,
+            ['sidecar' => 'keyless-row', 'execute' => 'failure'],
+            ['label' => 'execute failure']
+        ),
+        'forced row identity execute failure',
+        'row identity metadata execute failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_statement_execute']);
+    assert_same((int)scalar($metadata_identity_execute_failure, 'SELECT COUNT(*) FROM merge_row_identities'), 0, 'failed row identity execute records no sidecar rows');
+    $metadata_identity_execute_failure_db->close();
 
     $metadata_journal_failure = $tmp . '/metadata-journal-failure.sqlite';
     $metadata_journal_failure_db = open_db($metadata_journal_failure);
@@ -10590,6 +10645,30 @@ SQL);
     assert_same((int)scalar($band_prepare_failure_db, "SELECT seq FROM sqlite_sequence WHERE name = 'plugin_autoinc'"), 1, 'failed AUTOINCREMENT prepare leaves target sequence unchanged');
     assert_same((int)scalar($band_prepare_failure_metadata, "SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'feature-band-prepare-failure'"), 0, 'failed AUTOINCREMENT prepare records no band metadata');
     assert_same((int)scalar($band_prepare_failure_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-band-prepare-failure' AND status = 'failed'"), 1, 'failed AUTOINCREMENT prepare leaves an auditable failed run');
+
+    $band_execute_failure_db = $tmp . '/band-execute-failure.sqlite';
+    $band_execute_failure_metadata = $tmp . '/.forkpress/cow/merge/band-execute-failure-metadata.sqlite';
+    copy($band_base, $band_execute_failure_db);
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_statement_execute'] = [
+        static function (SQLite3 $db, string $message): void {
+            if ($message === 'failed to choose AUTOINCREMENT band') {
+                throw new RuntimeException('forced AUTOINCREMENT band execute failure');
+            }
+        },
+    ];
+    assert_throws(
+        fn() => cow_merge_allocate_autoincrement_bands(
+            $band_execute_failure_db,
+            $band_execute_failure_metadata,
+            'feature-band-execute-failure'
+        ),
+        'forced AUTOINCREMENT band execute failure',
+        'AUTOINCREMENT metadata execute failures surface to the caller'
+    );
+    unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_statement_execute']);
+    assert_same((int)scalar($band_execute_failure_db, "SELECT seq FROM sqlite_sequence WHERE name = 'plugin_autoinc'"), 1, 'failed AUTOINCREMENT execute leaves target sequence unchanged');
+    assert_same((int)scalar($band_execute_failure_metadata, "SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'feature-band-execute-failure'"), 0, 'failed AUTOINCREMENT execute records no band metadata');
+    assert_same((int)scalar($band_execute_failure_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-band-execute-failure' AND status = 'failed'"), 1, 'failed AUTOINCREMENT execute leaves an auditable failed run');
 
     $band_metadata_commit_rollback_db = $tmp . '/band-metadata-commit-rollback.sqlite';
     $band_metadata_commit_rollback_metadata = $tmp . '/.forkpress/cow/merge/band-metadata-commit-rollback-metadata.sqlite';

@@ -56,6 +56,7 @@
 - Tightened remaining COW sidecar identity and AUTOINCREMENT metadata prepare paths so prepare failures surface cleanly without partial sidecar or band state.
 - Tightened COW merge-audit metadata read paths so table checks, schema inspection, and row-query prepare failures surface consistently through checked SQLite helpers.
 - Tightened central COW metadata statement execution paths so decision/conflict execute failures roll back target changes and staged audit rows cleanly.
+- Tightened remaining COW sidecar, AUTOINCREMENT, review lookup, resolver lookup, and audit read statement execution paths so execute failures surface consistently without partial metadata.
 - Tightened validation-gated source table restores so preserved target views and trigger programs that reference the restored table must still validate before dry-run or apply reports success.
 - Added COW coverage for target-dropped table restore rollback when preserved target trigger bodies or target view triggers become invalid after the audited source table schema is restored.
 - Added COW coverage for target-dropped table restore rollback when a preserved transitive target view trigger becomes invalid after the audited source table schema is restored.
