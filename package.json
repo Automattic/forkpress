@@ -8,10 +8,10 @@
     "build": "astro build",
     "preview": "astro preview",
     "check": "astro check",
-    "validate": "npm run check && npm run build"
+    "test": "node --test src/remark-rewrite-doc-links.test.mjs",
+    "validate": "npm run check && npm run test && npm run build"
   },
   "dependencies": {
-    "@astrojs/mdx": "^5.0.5",
     "@astrojs/starlight": "^0.39.2",
     "astro": "^6.3.2",
     "starlight-llms-txt": "^0.10.0"
