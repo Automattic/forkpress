@@ -71,8 +71,12 @@ attach review notes. External validator runners can hand findings back through:
 php scripts/cow/merge.php record-plugin-validator-conflicts \
   --metadata-db .forkpress/cow/merge/metadata.sqlite \
   --run 123 \
-  --findings-json '[{"plugin":"example","object":"widget:42","reason":"missing child row"}]'
+  --findings-file /tmp/forkpress-plugin-findings.json
 ```
+
+`--findings-json` is available for small fixtures, but real validators should
+prefer `--findings-file` so large candidate payloads do not hit shell argument
+limits.
 
 Runtime validator discovery and execution are still missing.
 

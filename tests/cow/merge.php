@@ -13157,6 +13157,42 @@ SQL);
     ]);
     assert_true($plugin_cli_invalid_json['status'] !== 0, 'plugin validator record CLI rejects JSON objects');
     assert_true(str_contains($plugin_cli_invalid_json['output'], '--findings-json must be a JSON array'), 'plugin validator record CLI explains findings JSON shape');
+    $plugin_cli_missing_findings = run_merge_cli([
+        'record-plugin-validator-conflicts',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', (string)$plugin_graph_result['run_id'],
+    ]);
+    assert_true($plugin_cli_missing_findings['status'] !== 0, 'plugin validator record CLI requires a findings source');
+    assert_true(str_contains($plugin_cli_missing_findings['output'], '--findings-json or --findings-file is required'), 'plugin validator record CLI explains missing findings input');
+    $plugin_validator_empty_file = $tmp . '/plugin-validator-empty-findings.json';
+    write_test_file($plugin_validator_empty_file, "[]\n");
+    $plugin_cli_empty_file_record = run_merge_cli([
+        'record-plugin-validator-conflicts',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', (string)$plugin_graph_result['run_id'],
+        '--findings-file', $plugin_validator_empty_file,
+        '--format', 'json',
+    ]);
+    assert_same($plugin_cli_empty_file_record['status'], 0, 'plugin validator record CLI accepts findings files');
+    $plugin_cli_empty_file_result = json_decode($plugin_cli_empty_file_record['output'], true);
+    assert_same($plugin_cli_empty_file_result['status'] ?? null, 'valid', 'plugin validator record CLI reports valid empty findings files');
+    $plugin_cli_both_findings = run_merge_cli([
+        'record-plugin-validator-conflicts',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', (string)$plugin_graph_result['run_id'],
+        '--findings-json', '[]',
+        '--findings-file', $plugin_validator_empty_file,
+    ]);
+    assert_true($plugin_cli_both_findings['status'] !== 0, 'plugin validator record CLI rejects multiple findings inputs');
+    assert_true(str_contains($plugin_cli_both_findings['output'], '--findings-json and --findings-file cannot be used together'), 'plugin validator record CLI explains conflicting findings inputs');
+    $plugin_cli_missing_file = run_merge_cli([
+        'record-plugin-validator-conflicts',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', (string)$plugin_graph_result['run_id'],
+        '--findings-file', $tmp . '/missing-plugin-validator-findings.json',
+    ]);
+    assert_true($plugin_cli_missing_file['status'] !== 0, 'plugin validator record CLI rejects missing findings files');
+    assert_true(str_contains($plugin_cli_missing_file['output'], '--findings-file must point to a readable file'), 'plugin validator record CLI explains missing findings files');
     $plugin_validator_result = cow_merge_record_plugin_validator_conflicts($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], [
         [
             'plugin' => 'forkpress-graph',
@@ -13289,6 +13325,36 @@ SQL);
     ]);
     assert_same(count($plugin_cli_record_audit['conflicts']), 1, 'plugin validator record CLI conflicts are visible in plugin audit scope');
     assert_true(str_contains($plugin_cli_record_audit['conflicts'][0]['chosen_preview'], 'conflicting_option'), 'plugin validator record CLI stores candidate payloads');
+    $plugin_validator_file_findings = $tmp . '/plugin-validator-conflict-findings.json';
+    write_test_file($plugin_validator_file_findings, json_encode([
+        [
+            'plugin' => 'forkpress-graph',
+            'object' => 'graph:file-backed:' . $plugin_graph_target_graph['child_id'],
+            'reason' => 'file-backed validator finding recorded from a findings file',
+            'type' => 'plugin-file-backed-conflict',
+            'tables' => ['plugin_graph_child'],
+            'files' => [$plugin_graph_target_graph['file_path']],
+            'validator' => 'forkpress-graph-validator@1',
+            'candidate' => $plugin_graph_target_graph + ['file_backed_finding' => true],
+        ],
+    ], JSON_UNESCAPED_SLASHES) . "\n");
+    $plugin_cli_record_file_finding = run_merge_cli([
+        'record-plugin-validator-conflicts',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', (string)$plugin_graph_result['run_id'],
+        '--findings-file', $plugin_validator_file_findings,
+        '--format', 'json',
+    ]);
+    assert_same($plugin_cli_record_file_finding['status'], 0, 'plugin validator record CLI records conflicts from findings files');
+    $plugin_cli_record_file_result = json_decode($plugin_cli_record_file_finding['output'], true);
+    assert_same($plugin_cli_record_file_result['conflicts'] ?? null, 1, 'plugin validator record CLI reports file-backed conflicts');
+    $plugin_cli_record_file_audit = cow_merge_audit_report($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-file-backed-conflict',
+    ]);
+    assert_same(count($plugin_cli_record_file_audit['conflicts']), 1, 'plugin validator file-backed conflicts are visible in plugin audit scope');
+    assert_true(str_contains($plugin_cli_record_file_audit['conflicts'][0]['chosen_preview'], 'file_backed_finding'), 'plugin validator file-backed conflicts store candidate payloads');
 
     copy($band_base, $band_feature_a_reset);
     $result = cow_merge_allocate_autoincrement_bands($band_feature_a_reset, $band_metadata, 'feature-band-a');

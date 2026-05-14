@@ -15,7 +15,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "  php merge.php capture-identities --db <path> --metadata-db <path> --branch <branch> [--seed-branch <branch>]\n");
     fwrite(STDERR, "  php merge.php track-identity-events --db <path> --metadata-db <path> --branch <branch> --events-json <json>\n");
     fwrite(STDERR, "  php merge.php allocate-id-bands --db <path> --metadata-db <path> --branch <branch>\n");
-    fwrite(STDERR, "  php merge.php record-plugin-validator-conflicts --metadata-db <path> --run ID --findings-json <json> [--format text|json]\n");
+    fwrite(STDERR, "  php merge.php record-plugin-validator-conflicts --metadata-db <path> --run ID (--findings-json <json>|--findings-file <path>) [--format text|json]\n");
     fwrite(STDERR, "  php merge.php audit --metadata-db <path> [--format text|json] [--limit N] [--run ID]\n");
     fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|decisions|resolutions|rollback-failures] [--path <path>] [--path-prefix <prefix>]\n");
     fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|decisions|resolutions|rollback-failures] [--conflict-type TYPE] [--decision DECISION]\n");
@@ -5803,6 +5803,36 @@ function cow_merge_resolution_choice(?string $value): string {
 
 function cow_merge_bool_flag(mixed $value): bool {
     return (string)$value === '1' || $value === true;
+}
+
+function cow_merge_json_array_arg(array $args, string $json_key, string $file_key): array {
+    $has_json = isset($args[$json_key]) && (string)$args[$json_key] !== '';
+    $has_file = isset($args[$file_key]) && (string)$args[$file_key] !== '';
+    $json_label = '--' . str_replace('_', '-', $json_key);
+    $file_label = '--' . str_replace('_', '-', $file_key);
+    if ($has_json && $has_file) {
+        throw new InvalidArgumentException("$json_label and $file_label cannot be used together");
+    }
+    if (!$has_json && !$has_file) {
+        throw new InvalidArgumentException("$json_label or $file_label is required");
+    }
+    if ($has_file) {
+        $path = (string)$args[$file_key];
+        if (!is_file($path)) {
+            throw new InvalidArgumentException("$file_label must point to a readable file");
+        }
+        $json = file_get_contents($path);
+        if ($json === false) {
+            throw new RuntimeException("failed to read $file_label");
+        }
+    } else {
+        $json = (string)$args[$json_key];
+    }
+    $decoded = json_decode($json, true);
+    if (!is_array($decoded) || !array_is_list($decoded)) {
+        throw new InvalidArgumentException("$json_label must be a JSON array");
+    }
+    return $decoded;
 }
 
 function cow_merge_decode_payload_json(string $json, string $context): mixed {
@@ -11753,11 +11783,8 @@ if (realpath($argv[0] ?? '') === __FILE__) {
             exit(0);
         }
         if ($command === 'record-plugin-validator-conflicts') {
-            $args = cow_merge_parse_cli($argv, ['metadata-db', 'run', 'findings-json'], 2);
-            $findings = json_decode($args['findings-json'], true);
-            if (!is_array($findings) || !array_is_list($findings)) {
-                throw new InvalidArgumentException('--findings-json must be a JSON array');
-            }
+            $args = cow_merge_parse_cli($argv, ['metadata-db', 'run'], 2);
+            $findings = cow_merge_json_array_arg($args, 'findings-json', 'findings-file');
             $result = cow_merge_record_plugin_validator_conflicts(
                 $args['metadata-db'],
                 (int)cow_merge_audit_run_id($args['run'] ?? null),
