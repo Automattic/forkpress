@@ -325,8 +325,13 @@ add_action('init', function () {
     ]);
     register_taxonomy('forkpress_topic', ['page', 'forkpress_note'], [
         'public' => false,
+        'hierarchical' => true,
         'show_in_rest' => true,
         'label' => 'ForkPress topics',
+    ]);
+    register_nav_menus([
+        'forkpress_semantic_source' => 'ForkPress Semantic Source',
+        'forkpress_semantic_target' => 'ForkPress Semantic Target',
     ]);
 }, 0);
 
@@ -361,6 +366,17 @@ add_action('init', function () {
         if (is_wp_error($result)) {
             wp_send_json_error(['error' => $result->get_error_message()], 500);
         }
+    };
+    $must_term = static function ($name, $parent = 0) {
+        $existing = term_exists($name, 'forkpress_topic', $parent);
+        if (is_array($existing) && !empty($existing['term_id'])) {
+            return (int)$existing['term_id'];
+        }
+        $created = wp_insert_term($name, 'forkpress_topic', ['parent' => (int)$parent]);
+        if (is_wp_error($created)) {
+            wp_send_json_error(['error' => $created->get_error_message()], 500);
+        }
+        return (int)$created['term_id'];
     };
 
     if ($action === 'seed') {
@@ -412,7 +428,9 @@ add_action('init', function () {
             wp_send_json_error(['error' => $page_id->get_error_message()], 500);
         }
         update_post_meta($page_id, '_forkpress_semantic_branch', $branch);
-        $must_set_terms($page_id, ["Semantic $suffix Topic"]);
+        $parent_term_id = $must_term("Semantic $suffix Parent Topic");
+        $topic_term_id = $must_term("Semantic $suffix Topic", $parent_term_id);
+        $must_set_terms($page_id, [$topic_term_id]);
 
         $note_id = wp_insert_post([
             'post_type' => 'forkpress_note',
@@ -424,7 +442,7 @@ add_action('init', function () {
             wp_send_json_error(['error' => $note_id->get_error_message()], 500);
         }
         update_post_meta($note_id, '_forkpress_semantic_note', $branch);
-        $must_set_terms($note_id, ["Semantic $suffix Topic"]);
+        $must_set_terms($note_id, [$topic_term_id]);
 
         $block_id = wp_insert_post([
             'post_type' => 'wp_block',
@@ -449,6 +467,12 @@ add_action('init', function () {
         if (is_wp_error($menu_item_id)) {
             wp_send_json_error(['error' => $menu_item_id->get_error_message()], 500);
         }
+        $locations = get_theme_mod('nav_menu_locations', []);
+        if (!is_array($locations)) {
+            $locations = [];
+        }
+        $locations["forkpress_semantic_{$branch}"] = (int)$menu_id;
+        set_theme_mod('nav_menu_locations', $locations);
 
         $upload = wp_upload_dir();
         if (!empty($upload['error'])) {
@@ -497,11 +521,22 @@ add_action('init', function () {
             continue;
         }
         $file = $post->post_type === 'attachment' ? get_attached_file($post->ID) : '';
-        $terms = wp_get_object_terms($post->ID, 'forkpress_topic', ['fields' => 'names']);
-        if (is_wp_error($terms)) {
-            $terms = [];
+        $term_objects = wp_get_object_terms($post->ID, 'forkpress_topic');
+        $terms = [];
+        $term_parents = [];
+        if (!is_wp_error($term_objects)) {
+            foreach ($term_objects as $term) {
+                $terms[] = $term->name;
+                if ((int)$term->parent > 0) {
+                    $parent = get_term((int)$term->parent, 'forkpress_topic');
+                    if ($parent && !is_wp_error($parent)) {
+                        $term_parents[$term->name] = $parent->name;
+                    }
+                }
+            }
         }
         sort($terms);
+        ksort($term_parents);
         $rows[] = [
             'id' => (int)$post->ID,
             'type' => $post->post_type,
@@ -511,6 +546,7 @@ add_action('init', function () {
                 ?: get_post_meta($post->ID, '_forkpress_semantic_note', true)
                 ?: get_post_meta($post->ID, '_forkpress_semantic_media', true),
             'terms' => $terms,
+            'term_parents' => $term_parents,
             'file_exists' => $file === '' ? null : file_exists($file),
         ];
     }
@@ -522,11 +558,23 @@ add_action('init', function () {
         }
     }
     sort($menus);
+    $locations = [];
+    foreach (get_nav_menu_locations() as $location => $menu_id) {
+        if (strpos((string)$location, 'forkpress_semantic_') !== 0 || (int)$menu_id <= 0) {
+            continue;
+        }
+        $menu = wp_get_nav_menu_object((int)$menu_id);
+        if ($menu && !is_wp_error($menu)) {
+            $locations[$location] = $menu->name;
+        }
+    }
+    ksort($locations);
 
     wp_send_json([
         'action' => $action,
         'posts' => $rows,
         'menus' => $menus,
+        'menu_locations' => $locations,
         'source_option' => get_option('forkpress_semantic_source_option'),
         'target_option' => get_option('forkpress_semantic_target_option'),
         'source_json_option' => json_decode((string)get_option('forkpress_semantic_source_json_option'), true),
@@ -828,8 +876,8 @@ semantic_runtime_request main seed "$TMP/semantic-seed.json"
 "$BIN" branch --work-dir "$WORK_DIR" create semantic-target > "$TMP/semantic-target-create.out"
 semantic_runtime_request semantic-source source "$TMP/semantic-source.json"
 semantic_runtime_request semantic-target target "$TMP/semantic-target.json"
-php -r '$data = json_decode(file_get_contents($argv[1]), true); $posts = []; foreach (($data["posts"] ?? []) as $post) { $posts[$post["title"] ?? ""] = $post; } $menus = $data["menus"] ?? []; $ok = isset($posts["Semantic Source Page"], $posts["Semantic Source Note"], $posts["Semantic Source Block"], $posts["Semantic Source Media"], $posts["Semantic Source Edited Page"]) && !isset($posts["Semantic Source Delete Page"]) && in_array("Semantic Source Menu", $menus, true) && in_array("Semantic Source Topic", $posts["Semantic Source Page"]["terms"] ?? [], true) && in_array("Semantic Source Topic", $posts["Semantic Source Note"]["terms"] ?? [], true) && (($data["source_option"]["branch"] ?? null) === "source"); exit($ok ? 0 : 1);' "$TMP/semantic-source.json"
-php -r '$data = json_decode(file_get_contents($argv[1]), true); $posts = []; foreach (($data["posts"] ?? []) as $post) { $posts[$post["title"] ?? ""] = $post; } $menus = $data["menus"] ?? []; $ok = isset($posts["Semantic Target Page"], $posts["Semantic Target Note"], $posts["Semantic Target Block"], $posts["Semantic Target Media"], $posts["Semantic Target Edited Page"]) && !isset($posts["Semantic Target Delete Page"]) && in_array("Semantic Target Menu", $menus, true) && in_array("Semantic Target Topic", $posts["Semantic Target Page"]["terms"] ?? [], true) && in_array("Semantic Target Topic", $posts["Semantic Target Note"]["terms"] ?? [], true) && (($data["target_option"]["branch"] ?? null) === "target"); exit($ok ? 0 : 1);' "$TMP/semantic-target.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $posts = []; foreach (($data["posts"] ?? []) as $post) { $posts[$post["title"] ?? ""] = $post; } $menus = $data["menus"] ?? []; $locations = $data["menu_locations"] ?? []; $ok = isset($posts["Semantic Source Page"], $posts["Semantic Source Note"], $posts["Semantic Source Block"], $posts["Semantic Source Media"], $posts["Semantic Source Edited Page"]) && !isset($posts["Semantic Source Delete Page"]) && in_array("Semantic Source Menu", $menus, true) && (($locations["forkpress_semantic_source"] ?? null) === "Semantic Source Menu") && in_array("Semantic Source Topic", $posts["Semantic Source Page"]["terms"] ?? [], true) && (($posts["Semantic Source Page"]["term_parents"]["Semantic Source Topic"] ?? null) === "Semantic Source Parent Topic") && in_array("Semantic Source Topic", $posts["Semantic Source Note"]["terms"] ?? [], true) && (($data["source_option"]["branch"] ?? null) === "source"); exit($ok ? 0 : 1);' "$TMP/semantic-source.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $posts = []; foreach (($data["posts"] ?? []) as $post) { $posts[$post["title"] ?? ""] = $post; } $menus = $data["menus"] ?? []; $locations = $data["menu_locations"] ?? []; $ok = isset($posts["Semantic Target Page"], $posts["Semantic Target Note"], $posts["Semantic Target Block"], $posts["Semantic Target Media"], $posts["Semantic Target Edited Page"]) && !isset($posts["Semantic Target Delete Page"]) && in_array("Semantic Target Menu", $menus, true) && (($locations["forkpress_semantic_target"] ?? null) === "Semantic Target Menu") && in_array("Semantic Target Topic", $posts["Semantic Target Page"]["terms"] ?? [], true) && (($posts["Semantic Target Page"]["term_parents"]["Semantic Target Topic"] ?? null) === "Semantic Target Parent Topic") && in_array("Semantic Target Topic", $posts["Semantic Target Note"]["terms"] ?? [], true) && (($data["target_option"]["branch"] ?? null) === "target"); exit($ok ? 0 : 1);' "$TMP/semantic-target.json"
 "$BIN" branch --work-dir "$WORK_DIR" merge semantic-source --into semantic-target > "$TMP/semantic-merge.out"
 grep -F "forkpress: merged semantic-source into semantic-target" "$TMP/semantic-merge.out" >/dev/null
 grep -E "status:    completed(_with_conflicts)?" "$TMP/semantic-merge.out" >/dev/null
@@ -841,6 +889,7 @@ foreach (($data["posts"] ?? []) as $post) {
     $posts[$post["title"] ?? ""] = $post;
 }
 $menus = $data["menus"] ?? [];
+$locations = $data["menu_locations"] ?? [];
 $required = [
     "Semantic Source Page" => "page",
     "Semantic Target Page" => "page",
@@ -871,10 +920,14 @@ $ok = $ok
     && !isset($posts["Semantic Target Delete Page"])
     && in_array("Semantic Source Topic", $posts["Semantic Source Page"]["terms"] ?? [], true)
     && in_array("Semantic Target Topic", $posts["Semantic Target Page"]["terms"] ?? [], true)
+    && (($posts["Semantic Source Page"]["term_parents"]["Semantic Source Topic"] ?? null) === "Semantic Source Parent Topic")
+    && (($posts["Semantic Target Page"]["term_parents"]["Semantic Target Topic"] ?? null) === "Semantic Target Parent Topic")
     && in_array("Semantic Source Topic", $posts["Semantic Source Note"]["terms"] ?? [], true)
     && in_array("Semantic Target Topic", $posts["Semantic Target Note"]["terms"] ?? [], true)
     && in_array("Semantic Source Menu", $menus, true)
     && in_array("Semantic Target Menu", $menus, true)
+    && (($locations["forkpress_semantic_source"] ?? null) === "Semantic Source Menu")
+    && (($locations["forkpress_semantic_target"] ?? null) === "Semantic Target Menu")
     && $optionRefsValid($data["source_option"] ?? [], "source", "Source")
     && $optionRefsValid($data["target_option"] ?? [], "target", "Target")
     && $optionRefsValid($data["source_json_option"] ?? [], "source", "Source")
