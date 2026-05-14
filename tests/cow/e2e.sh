@@ -32,6 +32,7 @@ on_error() {
   local status=$?
   echo "FAIL cow materialized strategy e2e at line ${BASH_LINENO[0]}: ${BASH_COMMAND}" >&2
   dump_if_exists "$TMP/git-created.html"
+  dump_if_exists "$TMP/git-created-merge.out"
   dump_if_exists "$TMP/autoinc-main-init.json"
   dump_if_exists "$TMP/autoinc-feature-insert.json"
   dump_if_exists "$TMP/branch-post-edit.html"
@@ -43,6 +44,11 @@ on_error() {
   dump_if_exists "$TMP/merge-band-posts.out"
   dump_if_exists "$TMP/band-merge-target-edit.html"
   dump_if_exists "$TMP/band-merge-target-source-post.html"
+  dump_if_exists "$TMP/semantic-seed.json"
+  dump_if_exists "$TMP/semantic-source.json"
+  dump_if_exists "$TMP/semantic-target.json"
+  dump_if_exists "$TMP/semantic-merge.out"
+  dump_if_exists "$TMP/semantic-after-merge.json"
   dump_if_exists "$TMP/band-merge-source-decision-queue.json"
   dump_if_exists "$TMP/git-multi-delete.out"
   dump_if_exists "$TMP/git-delete.out"
@@ -227,6 +233,27 @@ unique_runtime_request() {
   fi
 }
 
+semantic_runtime_request() {
+  local branch="$1"
+  local action="$2"
+  local out="$3"
+  local host
+  host="$(branch_host "$branch")"
+
+  local http
+  http="$(
+    curl -sS -o "$out" -w '%{http_code}' \
+      -H "Host: $host" \
+      "http://127.0.0.1:$PORT/?forkpress_e2e_semantic=$action"
+  )"
+  if [ "$http" != "200" ]; then
+    echo "semantic runtime action $action on $branch returned $http" >&2
+    cat "$out" >&2
+    "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+    exit 1
+  fi
+}
+
 log_step "init COW site"
 "$BIN" init --work-dir "$WORK_DIR" --admin-password admin
 test -d "$WORK/.forkpress"
@@ -284,6 +311,227 @@ add_action('init', function () {
     $max_id = (int)$wpdb->get_var("SELECT COALESCE(MAX(id), 0) FROM $quoted");
     $seq = (int)$wpdb->get_var($wpdb->prepare("SELECT seq FROM sqlite_sequence WHERE name = %s", $table));
     wp_send_json(['action' => $action, 'rows' => $rows, 'max_id' => $max_id, 'seq' => $seq]);
+}, 20);
+PHP
+
+cat > "$WORK/main/wp-content/mu-plugins/forkpress-e2e-semantic.php" <<'PHP'
+<?php
+add_action('init', function () {
+    register_post_type('forkpress_note', [
+        'public' => false,
+        'show_in_rest' => true,
+        'label' => 'ForkPress notes',
+        'supports' => ['title', 'editor', 'custom-fields'],
+    ]);
+    register_taxonomy('forkpress_topic', ['page', 'forkpress_note'], [
+        'public' => false,
+        'show_in_rest' => true,
+        'label' => 'ForkPress topics',
+    ]);
+}, 0);
+
+add_action('init', function () {
+    if (!isset($_GET['forkpress_e2e_semantic'])) {
+        return;
+    }
+
+    $action = sanitize_key(wp_unslash($_GET['forkpress_e2e_semantic']));
+    $branch = null;
+    if ($action === 'source') {
+        $branch = 'source';
+    } elseif ($action === 'target') {
+        $branch = 'target';
+    } elseif ($action !== 'seed' && $action !== 'inspect') {
+        wp_send_json_error(['error' => 'unknown action'], 400);
+    }
+
+    $find_page = static function ($title) {
+        $page = get_page_by_title($title, OBJECT, 'page');
+        return $page instanceof WP_Post ? (int)$page->ID : 0;
+    };
+    $must_insert_post = static function ($args) {
+        $id = wp_insert_post($args, true);
+        if (is_wp_error($id)) {
+            wp_send_json_error(['error' => $id->get_error_message()], 500);
+        }
+        return (int)$id;
+    };
+    $must_set_terms = static function ($post_id, $terms) {
+        $result = wp_set_object_terms($post_id, $terms, 'forkpress_topic');
+        if (is_wp_error($result)) {
+            wp_send_json_error(['error' => $result->get_error_message()], 500);
+        }
+    };
+
+    if ($action === 'seed') {
+        foreach (['Source Edit', 'Target Edit', 'Source Delete', 'Target Delete'] as $case) {
+            $title = "Semantic $case Page";
+            if ($find_page($title) !== 0) {
+                continue;
+            }
+            $id = $must_insert_post([
+                'post_type' => 'page',
+                'post_status' => 'publish',
+                'post_title' => $title,
+                'post_content' => "<!-- wp:paragraph --><p>Base $case page body</p><!-- /wp:paragraph -->",
+            ]);
+            update_post_meta($id, '_forkpress_semantic_base', $case);
+        }
+    }
+
+    if ($branch !== null) {
+        $suffix = ucfirst($branch);
+        $edit_id = $find_page("Semantic $suffix Edit Page");
+        if ($edit_id === 0) {
+            wp_send_json_error(['error' => "missing Semantic $suffix Edit Page"], 500);
+        }
+        $edit_result = wp_update_post([
+            'ID' => $edit_id,
+            'post_title' => "Semantic $suffix Edited Page",
+            'post_content' => "<!-- wp:paragraph --><p>Edited on $branch branch</p><!-- /wp:paragraph -->",
+        ], true);
+        if (is_wp_error($edit_result)) {
+            wp_send_json_error(['error' => $edit_result->get_error_message()], 500);
+        }
+
+        $delete_id = $find_page("Semantic $suffix Delete Page");
+        if ($delete_id === 0) {
+            wp_send_json_error(['error' => "missing Semantic $suffix Delete Page"], 500);
+        }
+        if (wp_delete_post($delete_id, true) === false) {
+            wp_send_json_error(['error' => "failed to delete Semantic $suffix Delete Page"], 500);
+        }
+
+        $page_id = wp_insert_post([
+            'post_type' => 'page',
+            'post_status' => 'publish',
+            'post_title' => "Semantic $suffix Page",
+            'post_content' => "<!-- wp:paragraph --><p>Semantic $branch page body</p><!-- /wp:paragraph -->",
+        ], true);
+        if (is_wp_error($page_id)) {
+            wp_send_json_error(['error' => $page_id->get_error_message()], 500);
+        }
+        update_post_meta($page_id, '_forkpress_semantic_branch', $branch);
+        $must_set_terms($page_id, ["Semantic $suffix Topic"]);
+
+        $note_id = wp_insert_post([
+            'post_type' => 'forkpress_note',
+            'post_status' => 'publish',
+            'post_title' => "Semantic $suffix Note",
+            'post_content' => "CPT content for $branch",
+        ], true);
+        if (is_wp_error($note_id)) {
+            wp_send_json_error(['error' => $note_id->get_error_message()], 500);
+        }
+        update_post_meta($note_id, '_forkpress_semantic_note', $branch);
+        $must_set_terms($note_id, ["Semantic $suffix Topic"]);
+
+        $block_id = wp_insert_post([
+            'post_type' => 'wp_block',
+            'post_status' => 'publish',
+            'post_title' => "Semantic $suffix Block",
+            'post_content' => "<!-- wp:paragraph --><p>Reusable block for $branch</p><!-- /wp:paragraph -->",
+        ], true);
+        if (is_wp_error($block_id)) {
+            wp_send_json_error(['error' => $block_id->get_error_message()], 500);
+        }
+
+        $menu_id = wp_create_nav_menu("Semantic $suffix Menu");
+        if (is_wp_error($menu_id)) {
+            wp_send_json_error(['error' => $menu_id->get_error_message()], 500);
+        }
+        $menu_item_id = wp_update_nav_menu_item($menu_id, 0, [
+            'menu-item-title' => "Semantic $suffix Link",
+            'menu-item-url' => home_url("/semantic-$branch/"),
+            'menu-item-status' => 'publish',
+            'menu-item-type' => 'custom',
+        ]);
+        if (is_wp_error($menu_item_id)) {
+            wp_send_json_error(['error' => $menu_item_id->get_error_message()], 500);
+        }
+
+        $upload = wp_upload_dir();
+        if (!empty($upload['error'])) {
+            wp_send_json_error(['error' => $upload['error']], 500);
+        }
+        if (!wp_mkdir_p($upload['path'])) {
+            wp_send_json_error(['error' => 'failed to create upload directory'], 500);
+        }
+        $filename = "forkpress-semantic-$branch.txt";
+        $path = trailingslashit($upload['path']) . $filename;
+        if (file_put_contents($path, "media for $branch\n") === false) {
+            wp_send_json_error(['error' => 'failed to write upload file'], 500);
+        }
+        $attachment_id = wp_insert_attachment([
+            'post_title' => "Semantic $suffix Media",
+            'post_mime_type' => 'text/plain',
+            'post_status' => 'inherit',
+        ], $path, $page_id, true);
+        if (is_wp_error($attachment_id)) {
+            wp_send_json_error(['error' => $attachment_id->get_error_message()], 500);
+        }
+        update_post_meta($attachment_id, '_forkpress_semantic_media', $branch);
+
+        $graph = [
+            'branch' => $branch,
+            'page_id' => (int)$page_id,
+            'note_id' => (int)$note_id,
+            'block_id' => (int)$block_id,
+            'menu_id' => (int)$menu_id,
+            'attachment_id' => (int)$attachment_id,
+        ];
+        update_option("forkpress_semantic_{$branch}_option", $graph, false);
+        update_option("forkpress_semantic_{$branch}_json_option", wp_json_encode($graph), false);
+    }
+
+    $posts = get_posts([
+        'post_type' => ['page', 'forkpress_note', 'wp_block', 'attachment'],
+        'post_status' => 'any',
+        'numberposts' => -1,
+        'orderby' => 'ID',
+        'order' => 'ASC',
+    ]);
+    $rows = [];
+    foreach ($posts as $post) {
+        if (strpos($post->post_title, 'Semantic ') !== 0) {
+            continue;
+        }
+        $file = $post->post_type === 'attachment' ? get_attached_file($post->ID) : '';
+        $terms = wp_get_object_terms($post->ID, 'forkpress_topic', ['fields' => 'names']);
+        if (is_wp_error($terms)) {
+            $terms = [];
+        }
+        sort($terms);
+        $rows[] = [
+            'id' => (int)$post->ID,
+            'type' => $post->post_type,
+            'title' => $post->post_title,
+            'content' => $post->post_content,
+            'branch' => get_post_meta($post->ID, '_forkpress_semantic_branch', true)
+                ?: get_post_meta($post->ID, '_forkpress_semantic_note', true)
+                ?: get_post_meta($post->ID, '_forkpress_semantic_media', true),
+            'terms' => $terms,
+            'file_exists' => $file === '' ? null : file_exists($file),
+        ];
+    }
+
+    $menus = [];
+    foreach (wp_get_nav_menus(['hide_empty' => false]) as $menu) {
+        if (strpos($menu->name, 'Semantic ') === 0) {
+            $menus[] = $menu->name;
+        }
+    }
+    sort($menus);
+
+    wp_send_json([
+        'action' => $action,
+        'posts' => $rows,
+        'menus' => $menus,
+        'source_option' => get_option('forkpress_semantic_source_option'),
+        'target_option' => get_option('forkpress_semantic_target_option'),
+        'source_json_option' => json_decode((string)get_option('forkpress_semantic_source_json_option'), true),
+        'target_json_option' => json_decode((string)get_option('forkpress_semantic_target_json_option'), true),
+    ]);
 }, 20);
 PHP
 
@@ -431,6 +679,13 @@ curl -sS -H "Host: git-created.wp.localhost:$PORT" \
   -o "$TMP/git-created.html"
 grep -F "Branch: git-created" "$TMP/git-created.html" >/dev/null
 grep -F "Branch not found" "$TMP/git-created.html" && exit 1
+test -f "$WORK_DIR/cow/merge/bases/git-created.sqlite"
+test -f "$WORK_DIR/cow/merge/file-bases/git-created.json"
+"$BIN" branch --work-dir "$WORK_DIR" merge git-created --into main > "$TMP/git-created-merge.out"
+grep -F "forkpress: merged git-created into main" "$TMP/git-created-merge.out" >/dev/null
+grep -F "status:    completed" "$TMP/git-created-merge.out" >/dev/null
+test -f "$WORK/main/wp-content/git-created.txt"
+grep -F "created through git" "$WORK/main/wp-content/git-created.txt" >/dev/null
 
 log_step "reject multi-branch Git delete without mutation"
 if git -C "$TMP/checkout" push origin --delete git-created feature-cow > "$TMP/git-multi-delete.out" 2>&1; then
@@ -566,6 +821,66 @@ if [ "$BAND_SOURCE_POST_DECISION_ID" = "0" ] || [ "$BAND_TARGET_POST_DECISION_ID
 fi
 "$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --review --review-status unreviewed --records decisions --scope db --limit 80 > "$TMP/band-merge-source-decision-queue.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["review"] ?? false) === true) && (($data["filters"]["review_status"] ?? null) === "unreviewed") && (($data["filters"]["records"] ?? null) === "decisions") && (($data["filters"]["scope"] ?? null) === "db"); $has_source = false; foreach (($data["decisions"] ?? []) as $row) { if (($row["review_status"] ?? null) !== null) $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[2] && ($row["table_name"] ?? null) === "wp_posts" && ($row["decision"] ?? null) === "source-applied") $has_source = true; } exit($ok && $has_source ? 0 : 1);' "$TMP/band-merge-source-decision-queue.json" "$BAND_SOURCE_POST_DECISION_ID"
+
+log_step "merge WordPress semantic object graphs"
+semantic_runtime_request main seed "$TMP/semantic-seed.json"
+"$BIN" branch --work-dir "$WORK_DIR" create semantic-source > "$TMP/semantic-source-create.out"
+"$BIN" branch --work-dir "$WORK_DIR" create semantic-target > "$TMP/semantic-target-create.out"
+semantic_runtime_request semantic-source source "$TMP/semantic-source.json"
+semantic_runtime_request semantic-target target "$TMP/semantic-target.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $posts = []; foreach (($data["posts"] ?? []) as $post) { $posts[$post["title"] ?? ""] = $post; } $menus = $data["menus"] ?? []; $ok = isset($posts["Semantic Source Page"], $posts["Semantic Source Note"], $posts["Semantic Source Block"], $posts["Semantic Source Media"], $posts["Semantic Source Edited Page"]) && !isset($posts["Semantic Source Delete Page"]) && in_array("Semantic Source Menu", $menus, true) && in_array("Semantic Source Topic", $posts["Semantic Source Page"]["terms"] ?? [], true) && in_array("Semantic Source Topic", $posts["Semantic Source Note"]["terms"] ?? [], true) && (($data["source_option"]["branch"] ?? null) === "source"); exit($ok ? 0 : 1);' "$TMP/semantic-source.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $posts = []; foreach (($data["posts"] ?? []) as $post) { $posts[$post["title"] ?? ""] = $post; } $menus = $data["menus"] ?? []; $ok = isset($posts["Semantic Target Page"], $posts["Semantic Target Note"], $posts["Semantic Target Block"], $posts["Semantic Target Media"], $posts["Semantic Target Edited Page"]) && !isset($posts["Semantic Target Delete Page"]) && in_array("Semantic Target Menu", $menus, true) && in_array("Semantic Target Topic", $posts["Semantic Target Page"]["terms"] ?? [], true) && in_array("Semantic Target Topic", $posts["Semantic Target Note"]["terms"] ?? [], true) && (($data["target_option"]["branch"] ?? null) === "target"); exit($ok ? 0 : 1);' "$TMP/semantic-target.json"
+"$BIN" branch --work-dir "$WORK_DIR" merge semantic-source --into semantic-target > "$TMP/semantic-merge.out"
+grep -F "forkpress: merged semantic-source into semantic-target" "$TMP/semantic-merge.out" >/dev/null
+grep -E "status:    completed(_with_conflicts)?" "$TMP/semantic-merge.out" >/dev/null
+semantic_runtime_request semantic-target inspect "$TMP/semantic-after-merge.json"
+php -r '
+$data = json_decode(file_get_contents($argv[1]), true);
+$posts = [];
+foreach (($data["posts"] ?? []) as $post) {
+    $posts[$post["title"] ?? ""] = $post;
+}
+$menus = $data["menus"] ?? [];
+$required = [
+    "Semantic Source Page" => "page",
+    "Semantic Target Page" => "page",
+    "Semantic Source Edited Page" => "page",
+    "Semantic Target Edited Page" => "page",
+    "Semantic Source Note" => "forkpress_note",
+    "Semantic Target Note" => "forkpress_note",
+    "Semantic Source Block" => "wp_block",
+    "Semantic Target Block" => "wp_block",
+    "Semantic Source Media" => "attachment",
+    "Semantic Target Media" => "attachment",
+];
+$ok = true;
+foreach ($required as $title => $type) {
+    $ok = $ok && (($posts[$title]["type"] ?? null) === $type);
+}
+$optionRefsValid = static function (array $option, string $branch, string $suffix) use ($posts): bool {
+    return (($option["branch"] ?? null) === $branch)
+        && ((int)($option["page_id"] ?? 0) === (int)($posts["Semantic $suffix Page"]["id"] ?? 0))
+        && ((int)($option["note_id"] ?? 0) === (int)($posts["Semantic $suffix Note"]["id"] ?? 0))
+        && ((int)($option["block_id"] ?? 0) === (int)($posts["Semantic $suffix Block"]["id"] ?? 0))
+        && ((int)($option["attachment_id"] ?? 0) === (int)($posts["Semantic $suffix Media"]["id"] ?? 0));
+};
+$ok = $ok
+    && (($posts["Semantic Source Media"]["file_exists"] ?? null) === true)
+    && (($posts["Semantic Target Media"]["file_exists"] ?? null) === true)
+    && !isset($posts["Semantic Source Delete Page"])
+    && !isset($posts["Semantic Target Delete Page"])
+    && in_array("Semantic Source Topic", $posts["Semantic Source Page"]["terms"] ?? [], true)
+    && in_array("Semantic Target Topic", $posts["Semantic Target Page"]["terms"] ?? [], true)
+    && in_array("Semantic Source Topic", $posts["Semantic Source Note"]["terms"] ?? [], true)
+    && in_array("Semantic Target Topic", $posts["Semantic Target Note"]["terms"] ?? [], true)
+    && in_array("Semantic Source Menu", $menus, true)
+    && in_array("Semantic Target Menu", $menus, true)
+    && $optionRefsValid($data["source_option"] ?? [], "source", "Source")
+    && $optionRefsValid($data["target_option"] ?? [], "target", "Target")
+    && $optionRefsValid($data["source_json_option"] ?? [], "source", "Source")
+    && $optionRefsValid($data["target_json_option"] ?? [], "target", "Target");
+exit($ok ? 0 : 1);
+' "$TMP/semantic-after-merge.json"
 
 log_step "merge branch into main"
 php -r '$db = new SQLite3($argv[1]); $db->exec("CREATE TABLE IF NOT EXISTS forkpress_e2e_target_kept (id INTEGER PRIMARY KEY, label TEXT NOT NULL)");' "$WORK/main/wp-content/database/.ht.sqlite"

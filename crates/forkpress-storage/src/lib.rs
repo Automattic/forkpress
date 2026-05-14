@@ -2246,13 +2246,24 @@ fn compact_macos_apfs_sparsebundle_file_view_impl(layout: &Layout) -> Result<()>
         );
     }
 
-    let output = hdiutil_output([
-        OsString::from("compact"),
-        layout.macos_cow_image.as_os_str().to_owned(),
-    ])?;
-    if !output.status.success() {
-        bail!("{}", hdiutil_failure_message(&output));
+    let mut output = None;
+    for attempt in 0..5 {
+        let attempt_output = hdiutil_output([
+            OsString::from("compact"),
+            layout.macos_cow_image.as_os_str().to_owned(),
+        ])?;
+        if attempt_output.status.success() {
+            output = Some(attempt_output);
+            break;
+        }
+
+        let message = hdiutil_failure_message(&attempt_output);
+        if !macos_hdiutil_compact_retryable_message(&message) || attempt == 4 {
+            bail!("{message}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250 * (attempt + 1) as u64));
     }
+    let output = output.expect("compact retry loop must return output or fail");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2270,6 +2281,12 @@ fn compact_macos_apfs_sparsebundle_file_view_impl(layout: &Layout) -> Result<()>
         shell_quote_path(&layout.work_dir)
     );
     Ok(())
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn macos_hdiutil_compact_retryable_message(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("resource temporarily unavailable") || message.contains("resource busy")
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -3062,5 +3079,18 @@ mod tests {
         copy_loop_file_name(&long_path, &mut out);
         assert_eq!(out[63], 0);
         assert_eq!(out[62], b'a');
+    }
+
+    #[test]
+    fn macos_sparsebundle_compact_retries_transient_hdiutil_busy_errors() {
+        assert!(macos_hdiutil_compact_retryable_message(
+            "hdiutil exited with status exit status: 1\nstderr:\nhdiutil: compact failed - Resource temporarily unavailable"
+        ));
+        assert!(macos_hdiutil_compact_retryable_message(
+            "hdiutil exited with status exit status: 1\nstderr:\nhdiutil: compact failed - resource busy"
+        ));
+        assert!(!macos_hdiutil_compact_retryable_message(
+            "hdiutil exited with status exit status: 1\nstderr:\nhdiutil: compact failed - image not recognized"
+        ));
     }
 }
