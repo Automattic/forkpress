@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="ForkPress">
+  <rect width="64" height="64" rx="12" fill="#111827"/>
+  <g
+    fill="none"
+    stroke="#f9fafb"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    stroke-width="5.5"
+  >
+    <path d="M20 10v20"/>
+    <path d="M32 10v20"/>
+    <path d="M44 10v20"/>
+    <path d="M20 30c0 7 6 12 12 12s12-5 12-12"/>
+    <path d="M32 42v13"/>
+  </g>
+</svg>

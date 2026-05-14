@@ -2,6 +2,8 @@
 
 ForkPress is a single-binary local WordPress branch runner for agent work.
 
+Documentation is published at <https://automattic.github.io/forkpress/>.
+
 The product path is now the **COW materialized backend**. `forkpress init`
 creates ordinary branch directories beside `.forkpress`, such as `./main` and
 `./marketing`. Each branch is a normal WordPress tree with its own SQLite
