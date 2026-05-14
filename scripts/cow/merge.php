@@ -6838,8 +6838,7 @@ function cow_merge_apply_source_table_rebuild(SQLite3 $target, string $table, st
     $insert_columns = $quoted_columns;
     $select_columns = $quoted_columns;
     if (!$has_pk) {
-        $insert_columns = 'rowid, ' . $quoted_columns;
-        $select_columns = 'rowid, ' . $quoted_columns;
+        $select_columns = cow_merge_hidden_rowid_selector($target, $table) . ', ' . $quoted_columns;
     }
     $target_savepoint_started = false;
     try {
@@ -6850,6 +6849,9 @@ function cow_merge_apply_source_table_rebuild(SQLite3 $target, string $table, st
         );
         $target_savepoint_started = true;
         cow_merge_exec_checked($target, $create_sql, 'failed to create rebuilt table');
+        if (!$has_pk) {
+            $insert_columns = cow_merge_hidden_rowid_selector($target, $tmp_table) . ', ' . $quoted_columns;
+        }
         $copy_sql = 'INSERT INTO ' . cow_merge_quote_ident($tmp_table) . ' (' . $insert_columns . ') ' .
             'SELECT ' . $select_columns . ' FROM ' . cow_merge_quote_ident($table);
         cow_merge_exec_checked($target, $copy_sql, 'failed to copy rows into rebuilt table');

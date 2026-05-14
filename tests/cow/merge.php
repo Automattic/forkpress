@@ -6906,6 +6906,80 @@ SQL);
         'rerunning after no-primary-key table rebuild does not rediscover the resolved schema conflict'
     );
 
+    $schema_keyless_shadow_rebuild_base = $tmp . '/schema-keyless-shadow-rebuild-base.sqlite';
+    $schema_keyless_shadow_rebuild_source = $tmp . '/schema-keyless-shadow-rebuild-source.sqlite';
+    $schema_keyless_shadow_rebuild_target = $tmp . '/schema-keyless-shadow-rebuild-target.sqlite';
+    $schema_keyless_shadow_rebuild_metadata = $tmp . '/.forkpress/cow/merge/schema-keyless-shadow-rebuild-metadata.sqlite';
+    create_base_db($schema_keyless_shadow_rebuild_base);
+    $db = open_db($schema_keyless_shadow_rebuild_base);
+    $db->exec('CREATE TABLE plugin_keyless_schema_rebuild_shadow (rowid TEXT, _rowid_ TEXT, label TEXT, value TEXT)');
+    $db->exec("INSERT INTO plugin_keyless_schema_rebuild_shadow (oid, rowid, _rowid_, label, value) VALUES (1, 'app row dense', 'app _row dense', 'Dense shadow keyless', 'dense')");
+    $db->exec("INSERT INTO plugin_keyless_schema_rebuild_shadow (oid, rowid, _rowid_, label, value) VALUES (7, 'app row sparse', 'app _row sparse', 'Sparse shadow keyless', 'sparse')");
+    $db->close();
+    copy($schema_keyless_shadow_rebuild_base, $schema_keyless_shadow_rebuild_source);
+    copy($schema_keyless_shadow_rebuild_base, $schema_keyless_shadow_rebuild_target);
+    cow_merge_capture_row_identities($schema_keyless_shadow_rebuild_target, $schema_keyless_shadow_rebuild_metadata, 'main');
+
+    $db = open_db($schema_keyless_shadow_rebuild_source);
+    $db->exec('CREATE TABLE plugin_keyless_schema_rebuild_shadow_new (rowid TEXT, _rowid_ TEXT, label TEXT, value NUMERIC)');
+    $db->exec('INSERT INTO plugin_keyless_schema_rebuild_shadow_new (oid, rowid, _rowid_, label, value) SELECT oid, rowid, _rowid_, label, value FROM plugin_keyless_schema_rebuild_shadow');
+    $db->exec('DROP TABLE plugin_keyless_schema_rebuild_shadow');
+    $db->exec('ALTER TABLE plugin_keyless_schema_rebuild_shadow_new RENAME TO plugin_keyless_schema_rebuild_shadow');
+    $db->close();
+
+    $db = open_db($schema_keyless_shadow_rebuild_target);
+    $db->exec("UPDATE plugin_keyless_schema_rebuild_shadow SET value = 'target shadow sparse preserved' WHERE oid = 7");
+    $db->exec('CREATE TABLE plugin_keyless_schema_rebuild_shadow_new (rowid TEXT, _rowid_ TEXT, label TEXT, value REAL)');
+    $db->exec('INSERT INTO plugin_keyless_schema_rebuild_shadow_new (oid, rowid, _rowid_, label, value) SELECT oid, rowid, _rowid_, label, value FROM plugin_keyless_schema_rebuild_shadow');
+    $db->exec('DROP TABLE plugin_keyless_schema_rebuild_shadow');
+    $db->exec('ALTER TABLE plugin_keyless_schema_rebuild_shadow_new RENAME TO plugin_keyless_schema_rebuild_shadow');
+    $db->close();
+
+    $schema_keyless_shadow_rebuild_result = cow_merge_databases(
+        $schema_keyless_shadow_rebuild_base,
+        $schema_keyless_shadow_rebuild_source,
+        $schema_keyless_shadow_rebuild_target,
+        $schema_keyless_shadow_rebuild_metadata,
+        'feature-keyless-schema-rebuild-shadow',
+        'main'
+    );
+    assert_same($schema_keyless_shadow_rebuild_result['status'], 'completed_with_conflicts', 'no-primary-key table rebuild with rowid-shadow columns remains validation-gated');
+    $schema_keyless_shadow_rebuild_conflict_id = (int)scalar($schema_keyless_shadow_rebuild_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_keyless_schema_rebuild_shadow' AND column_name IS NULL AND conflict_type = 'schema-conflict' ORDER BY id DESC LIMIT 1");
+    $schema_keyless_shadow_rebuild_resolution = cow_merge_resolve_conflict(
+        $schema_keyless_shadow_rebuild_metadata,
+        $schema_keyless_shadow_rebuild_conflict_id,
+        'source',
+        true,
+        'Apply source no-primary-key table schema with rowid-shadow columns.',
+        'test'
+    );
+    assert_same($schema_keyless_shadow_rebuild_resolution['status'], 'applied', 'source no-primary-key rowid-shadow table rebuild records applied status');
+    assert_same(column_type($schema_keyless_shadow_rebuild_target, 'plugin_keyless_schema_rebuild_shadow', 'value'), 'NUMERIC', 'source no-primary-key rowid-shadow table rebuild applies audited source column definition');
+    assert_same((int)scalar($schema_keyless_shadow_rebuild_target, 'SELECT COUNT(*) FROM plugin_keyless_schema_rebuild_shadow WHERE oid IN (1, 7)'), 2, 'source no-primary-key rowid-shadow table rebuild preserves sparse hidden rowids');
+    assert_same(scalar($schema_keyless_shadow_rebuild_target, 'SELECT value FROM plugin_keyless_schema_rebuild_shadow WHERE oid = 7'), 'target shadow sparse preserved', 'source no-primary-key rowid-shadow table rebuild preserves target row data');
+    assert_same(scalar($schema_keyless_shadow_rebuild_target, 'SELECT rowid FROM plugin_keyless_schema_rebuild_shadow WHERE oid = 7'), 'app row sparse', 'source no-primary-key rowid-shadow table rebuild preserves the app rowid column');
+    assert_same(scalar($schema_keyless_shadow_rebuild_target, 'SELECT _rowid_ FROM plugin_keyless_schema_rebuild_shadow WHERE oid = 7'), 'app _row sparse', 'source no-primary-key rowid-shadow table rebuild preserves the app _rowid_ column');
+    assert_same(
+        scalar($schema_keyless_shadow_rebuild_metadata, "SELECT row_hash FROM merge_row_identities WHERE branch_name = 'main' AND table_name = 'plugin_keyless_schema_rebuild_shadow' AND rowid = 7"),
+        cow_merge_row_hash([
+            'rowid' => 'app row sparse',
+            '_rowid_' => 'app _row sparse',
+            'label' => 'Sparse shadow keyless',
+            'value' => 'target shadow sparse preserved',
+        ]),
+        'source no-primary-key rowid-shadow table rebuild refreshes target sidecar row hash immediately'
+    );
+    $schema_keyless_shadow_rebuild_rerun = cow_merge_databases(
+        $schema_keyless_shadow_rebuild_base,
+        $schema_keyless_shadow_rebuild_source,
+        $schema_keyless_shadow_rebuild_target,
+        $schema_keyless_shadow_rebuild_metadata,
+        'feature-keyless-schema-rebuild-shadow',
+        'main'
+    );
+    assert_same($schema_keyless_shadow_rebuild_rerun['status'], 'completed', 'rerunning after no-primary-key rowid-shadow table rebuild completes without a new conflict');
+    assert_same(scalar($schema_keyless_shadow_rebuild_target, 'SELECT value FROM plugin_keyless_schema_rebuild_shadow WHERE oid = 7'), 'target shadow sparse preserved', 'rerunning after no-primary-key rowid-shadow table rebuild keeps preserved target data');
+
     $schema_rebuild_dep_base = $tmp . '/schema-rebuild-dep-base.sqlite';
     $schema_rebuild_dep_source = $tmp . '/schema-rebuild-dep-source.sqlite';
     $schema_rebuild_dep_target = $tmp . '/schema-rebuild-dep-target.sqlite';
