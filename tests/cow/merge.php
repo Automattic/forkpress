@@ -2412,6 +2412,35 @@ SQL);
         'cow-test'
     );
     assert_same($resolution_review['record_type'], 'resolution', 'review note can target a deterministic resolution record');
+    $resolution_review_note_commit_count = (int)scalar($metadata, "SELECT COUNT(*) FROM merge_review_notes WHERE record_type = 'resolution' AND record_id = $resolution_review_id");
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'COMMIT' && $message === 'failed to commit review note metadata transaction') {
+                throw new RuntimeException('forced resolution review metadata commit failure');
+            }
+        },
+    ];
+    $resolution_review_note_commit_failure_message = null;
+    try {
+        cow_merge_review_record(
+            $metadata,
+            'resolution',
+            $resolution_review_id,
+            'reviewed',
+            'Attempt resolution review note with forced commit failure.',
+            'cow-test'
+        );
+    } catch (Throwable $e) {
+        $resolution_review_note_commit_failure_message = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($resolution_review_note_commit_failure_message !== null && str_contains($resolution_review_note_commit_failure_message, 'forced resolution review metadata commit failure'), 'resolution review metadata commit failure is surfaced to the caller');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_review_notes WHERE record_type = 'resolution' AND record_id = $resolution_review_id"),
+        $resolution_review_note_commit_count,
+        'failed resolution review metadata commit rolls back the staged review note'
+    );
     $reviewed_resolution_audit = cow_merge_audit_report($metadata, null, 10, ['records' => 'resolutions', 'review_status' => 'needs-action']);
     assert_same(count($reviewed_resolution_audit['conflicts']), 0, 'resolution review status filter omits conflicts when records=resolutions');
     assert_same(count($reviewed_resolution_audit['decisions']), 0, 'resolution review status filter omits decisions when records=resolutions');
@@ -2716,6 +2745,35 @@ SQL);
         'cow-test'
     );
     assert_same($file_decision_review['record_type'], 'decision', 'review note can target a filesystem decision record');
+    $decision_review_note_commit_count = (int)scalar($metadata, "SELECT COUNT(*) FROM merge_review_notes WHERE record_type = 'decision' AND record_id = $reviewed_file_decision_id");
+    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
+        static function (SQLite3 $db, string $sql, string $message): void {
+            if ($sql === 'COMMIT' && $message === 'failed to commit review note metadata transaction') {
+                throw new RuntimeException('forced decision review metadata commit failure');
+            }
+        },
+    ];
+    $decision_review_note_commit_failure_message = null;
+    try {
+        cow_merge_review_record(
+            $metadata,
+            'decision',
+            $reviewed_file_decision_id,
+            'pending',
+            'Attempt decision review note with forced commit failure.',
+            'cow-test'
+        );
+    } catch (Throwable $e) {
+        $decision_review_note_commit_failure_message = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
+    }
+    assert_true($decision_review_note_commit_failure_message !== null && str_contains($decision_review_note_commit_failure_message, 'forced decision review metadata commit failure'), 'decision review metadata commit failure is surfaced to the caller');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_review_notes WHERE record_type = 'decision' AND record_id = $reviewed_file_decision_id"),
+        $decision_review_note_commit_count,
+        'failed decision review metadata commit rolls back the staged review note'
+    );
     $file_decision_queue_audit = cow_merge_audit_report($metadata, null, 10, [
         'review' => '1',
         'review_status' => 'unreviewed',
