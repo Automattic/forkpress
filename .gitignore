@@ -10,4 +10,7 @@ runtime/*.db
 /.gitpress/
 /.forkpress/
 /.build/
+/docs-dist/
 /dist/
+/node_modules/
+/.astro/
