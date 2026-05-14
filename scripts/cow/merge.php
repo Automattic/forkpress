@@ -2455,6 +2455,38 @@ function cow_merge_insert_row(SQLite3 $target, string $table, array $row, array 
     return (int)($result['rowid'] ?? 0);
 }
 
+function cow_merge_single_integer_pk_col(SQLite3 $db, string $table, array $pk_cols): ?string {
+    if (count($pk_cols) !== 1) {
+        return null;
+    }
+    $pk = $pk_cols[0];
+    foreach (cow_merge_table_info($db, $table) as $column) {
+        if ((string)$column['name'] !== $pk) {
+            continue;
+        }
+        return preg_match('/\bINT(?:EGER)?\b/i', (string)$column['type']) ? $pk : null;
+    }
+    return null;
+}
+
+function cow_merge_try_insert_row_with_fresh_integer_pk(
+    SQLite3 $target,
+    string $table,
+    array $row,
+    array $columns,
+    string $pk_col
+): array {
+    $rekeyed = $row;
+    unset($rekeyed[$pk_col]);
+    $insert_result = cow_merge_try_insert_row($target, $table, $rekeyed, $columns);
+    if (!($insert_result['ok'] ?? false)) {
+        return $insert_result;
+    }
+    $new_id = (int)($insert_result['rowid'] ?? 0);
+    $rekeyed[$pk_col] = $new_id;
+    return ['ok' => true, 'rowid' => $new_id, 'row' => $rekeyed, 'error' => null];
+}
+
 function cow_merge_try_insert_row_with_rowid(SQLite3 $target, string $table, int $rowid, array $row, array $columns): array {
     $columns = array_values(array_filter($columns, fn($col) => array_key_exists($col, $row)));
     $foreign_key_error = cow_merge_foreign_key_error($target, $table, $row);
@@ -10204,6 +10236,129 @@ function cow_merge_record_row_target_constraint(
     return $active;
 }
 
+function cow_merge_wordpress_post_reference_columns(string $table): array {
+    return match ($table) {
+        'wp_comments' => ['comment_post_ID'],
+        'wp_postmeta' => ['post_id'],
+        'wp_posts' => ['post_parent'],
+        'wp_term_relationships' => ['object_id'],
+        default => [],
+    };
+}
+
+function cow_merge_row_uses_wordpress_post_remap(array $row, array $post_id_remaps, string $table): bool {
+    foreach (cow_merge_wordpress_post_reference_columns($table) as $column) {
+        $value = $row[$column] ?? null;
+        if ((is_int($value) || is_string($value)) && isset($post_id_remaps[(string)$value])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function cow_merge_apply_wordpress_post_id_remaps_to_row(string $table, array $row, array $post_id_remaps): array {
+    if (!$post_id_remaps) {
+        return [$row, false];
+    }
+    $changed = false;
+    foreach (cow_merge_wordpress_post_reference_columns($table) as $column) {
+        $value = $row[$column] ?? null;
+        $map_key = (is_int($value) || is_string($value)) ? (string)$value : null;
+        if ($map_key !== null && isset($post_id_remaps[$map_key])) {
+            $row[$column] = $post_id_remaps[$map_key];
+            $changed = true;
+        }
+    }
+    return [$row, $changed];
+}
+
+function cow_merge_apply_wordpress_post_id_remaps_to_source_rows(
+    string $table,
+    array $source_rows,
+    array $pk_cols,
+    array $post_id_remaps
+): array {
+    if (!$post_id_remaps) {
+        return $source_rows;
+    }
+    $reference_columns = cow_merge_wordpress_post_reference_columns($table);
+    if (!$reference_columns) {
+        return $source_rows;
+    }
+
+    $remapped = [];
+    foreach ($source_rows as $key => $entry) {
+        $row = $entry['row'] ?? null;
+        if (!is_array($row)) {
+            $remapped[$key] = $entry;
+            continue;
+        }
+        [$row, $changed] = cow_merge_apply_wordpress_post_id_remaps_to_row($table, $row, $post_id_remaps);
+        if (!$changed) {
+            $remapped[$key] = $entry;
+            continue;
+        }
+        $entry['row'] = $row;
+        $entry['wordpress_post_remapped'] = true;
+        if ($pk_cols) {
+            $entry['identity'] = cow_merge_row_identity($row, $pk_cols, $entry['rowid'] ?? null);
+            $key = cow_merge_identity_json($entry['identity']);
+        }
+        $remapped[$key] = $entry;
+    }
+    return $remapped;
+}
+
+function cow_merge_try_apply_wordpress_rekeyed_source_insert(
+    SQLite3 $target,
+    SQLite3 $meta,
+    int $run_id,
+    string $target_branch,
+    string $table,
+    string $key,
+    array $source_row,
+    array $target_row,
+    array $columns,
+    array $pk_cols,
+    array &$post_id_remaps,
+    bool $source_uses_wordpress_post_remap = false
+): ?array {
+    $pk_col = cow_merge_single_integer_pk_col($target, $table, $pk_cols);
+    if ($pk_col === null) {
+        return null;
+    }
+    $is_wp_post = $table === 'wp_posts' && $pk_col === 'ID' && array_key_exists('ID', $source_row);
+    $uses_remapped_post = !$is_wp_post && ($source_uses_wordpress_post_remap || cow_merge_row_uses_wordpress_post_remap($source_row, $post_id_remaps, $table));
+    if (!$is_wp_post && !$uses_remapped_post) {
+        return null;
+    }
+
+    $insert_result = cow_merge_try_insert_row_with_fresh_integer_pk($target, $table, $source_row, $columns, $pk_col);
+    if (!($insert_result['ok'] ?? false) || !is_array($insert_result['row'] ?? null)) {
+        return null;
+    }
+    $rekeyed_row = $insert_result['row'];
+    if ($is_wp_post) {
+        $post_id_remaps[(string)$source_row['ID']] = (int)$rekeyed_row['ID'];
+    }
+    cow_merge_record_decision(
+        $meta,
+        $run_id,
+        $table,
+        $key,
+        null,
+        'source-applied',
+        $is_wp_post
+            ? 'source inserted WordPress post with a colliding target ID; assigned a fresh target ID'
+            : 'source inserted WordPress child row with a colliding target ID after parent post rekey; assigned a fresh target ID',
+        null,
+        $source_row,
+        $target_row,
+        $rekeyed_row
+    );
+    return ['row' => $rekeyed_row, 'rowid' => (int)($insert_result['rowid'] ?? 0)];
+}
+
 function cow_merge_table_rows(
     SQLite3 $base,
     SQLite3 $source,
@@ -10212,7 +10367,8 @@ function cow_merge_table_rows(
     int $run_id,
     string $source_branch,
     string $target_branch,
-    string $table
+    string $table,
+    array &$wordpress_post_id_remaps
 ): array {
     $columns = cow_merge_table_columns($target, $table);
     if (!$columns) {
@@ -10239,6 +10395,12 @@ function cow_merge_table_rows(
             $table
         );
     }
+    $source_rows = cow_merge_apply_wordpress_post_id_remaps_to_source_rows(
+        $table,
+        $source_rows,
+        $pk_cols,
+        $wordpress_post_id_remaps
+    );
     $all_keys = array_unique(array_merge(array_keys($base_rows), array_keys($source_rows), array_keys($target_rows)));
     $all_keys = cow_merge_sort_row_keys_by_self_foreign_keys($target, $table, $all_keys, $source_rows);
 
@@ -10255,6 +10417,17 @@ function cow_merge_table_rows(
         $base_row = $base_entry['row'] ?? null;
         $source_row = $source_entry['row'] ?? null;
         $target_row = $target_entry['row'] ?? null;
+        if ($table === 'wp_posts' && is_array($source_row)) {
+            [$remapped_source_row, $source_row_changed] = cow_merge_apply_wordpress_post_id_remaps_to_row($table, $source_row, $wordpress_post_id_remaps);
+            if ($source_row_changed) {
+                $source_row = $remapped_source_row;
+                $source_entry['row'] = $source_row;
+                $source_entry['wordpress_post_remapped'] = true;
+                if ($pk_cols) {
+                    $source_entry['identity'] = cow_merge_row_identity($source_row, $pk_cols, $source_entry['rowid'] ?? null);
+                }
+            }
+        }
         $identity = ($source_entry['identity'] ?? $target_entry['identity'] ?? $base_entry['identity'] ?? null);
         if (!is_array($identity)) {
             continue;
@@ -10351,6 +10524,26 @@ function cow_merge_table_rows(
                     );
                     $applied++;
                     continue;
+                }
+                if ($current_row !== null) {
+                    $rekeyed_source_insert = cow_merge_try_apply_wordpress_rekeyed_source_insert(
+                        $target,
+                        $meta,
+                        $run_id,
+                        $target_branch,
+                        $table,
+                        $key,
+                        $source_row,
+                        $current_row,
+                        $columns,
+                        $pk_cols,
+                        $wordpress_post_id_remaps,
+                        ($source_entry['wordpress_post_remapped'] ?? false) === true
+                    );
+                    if ($rekeyed_source_insert !== null) {
+                        $applied++;
+                        continue;
+                    }
                 }
             }
             $unique_collision = cow_merge_find_unique_collision($target, $table, $source_row, !$pk_cols);
@@ -10513,6 +10706,24 @@ function cow_merge_table_rows(
         }
 
         if ($base_row === null && $source_row !== null && $target_row !== null) {
+            $rekeyed_source_insert = cow_merge_try_apply_wordpress_rekeyed_source_insert(
+                $target,
+                $meta,
+                $run_id,
+                $target_branch,
+                $table,
+                $key,
+                $source_row,
+                $target_row,
+                $columns,
+                $pk_cols,
+                $wordpress_post_id_remaps,
+                ($source_entry['wordpress_post_remapped'] ?? false) === true
+            );
+            if ($rekeyed_source_insert !== null) {
+                $applied++;
+                continue;
+            }
             $active = cow_merge_record_conflict($meta, $run_id, $table, $key, null, 'row-insert-collision', null, $source_row, $target_row, $target_row);
             cow_merge_record_decision($meta, $run_id, $table, $key, null, $active ? 'target-wins' : 'target-accepted', $active ? 'source and target inserted different rows with the same identity' : 'reviewed target resolution already accepts same-identity insert collision', null, $source_row, $target_row, $target_row);
             if ($active) {
@@ -10790,6 +11001,31 @@ function cow_merge_sort_tables_by_foreign_keys(array $tables, SQLite3 ...$dbs): 
     return $ordered;
 }
 
+function cow_merge_sort_wordpress_post_reference_tables(array $tables): array {
+    if (!in_array('wp_posts', $tables, true)) {
+        return $tables;
+    }
+    $original_positions = [];
+    foreach ($tables as $index => $table) {
+        $original_positions[$table] = $index;
+    }
+    $priority = [
+        'wp_posts' => 0,
+        'wp_postmeta' => 1,
+        'wp_comments' => 1,
+        'wp_term_relationships' => 1,
+    ];
+    usort($tables, static function (string $left, string $right) use ($priority, $original_positions): int {
+        $left_priority = $priority[$left] ?? 2;
+        $right_priority = $priority[$right] ?? 2;
+        if ($left_priority !== $right_priority) {
+            return $left_priority <=> $right_priority;
+        }
+        return ($original_positions[$left] ?? 0) <=> ($original_positions[$right] ?? 0);
+    });
+    return $tables;
+}
+
 function cow_merge_databases(
     string $base_db,
     string $source_db,
@@ -10837,6 +11073,8 @@ function cow_merge_databases(
         $target_triggers = cow_merge_schema_object_sql_map($target, 'trigger');
         $all_tables = array_unique(array_merge(array_keys($base_tables), array_keys($source_tables), array_keys($target_tables)));
         $all_tables = cow_merge_sort_tables_by_foreign_keys($all_tables, $target, $source, $base);
+        $all_tables = cow_merge_sort_wordpress_post_reference_tables($all_tables);
+        $wordpress_post_id_remaps = [];
 
         foreach ($all_tables as $table) {
             $base_sql = $base_tables[$table] ?? null;
@@ -10948,7 +11186,7 @@ function cow_merge_databases(
                 );
             }
 
-            $result = cow_merge_table_rows($base, $source, $target, $meta, $run_id, $source_branch, $target_branch, $table);
+            $result = cow_merge_table_rows($base, $source, $target, $meta, $run_id, $source_branch, $target_branch, $table, $wordpress_post_id_remaps);
             $applied += $result['applied'];
             $conflicts += $result['conflicts'];
         }
