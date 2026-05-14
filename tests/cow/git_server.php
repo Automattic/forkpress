@@ -547,6 +547,42 @@ assert_true($created_post_id >= COW_MERGE_AUTOINCREMENT_FIRST_BAND_START, 'Git-c
 assert_same($created_band_count, 1, 'Git-created branch ID band allocation is auditable');
 cow_git_remove_tree($tmp);
 
+$tmp = sys_get_temp_dir() . '/forkpress-cow-git-created-id-band-rollback-' . getmypid() . '-' . bin2hex(random_bytes(4));
+$branches = $tmp . '/branches';
+$git = $tmp . '/git';
+$branch_list = $tmp . '/branches.txt';
+mkdir($branches . '/main', 0777, true);
+file_put_contents($branches . '/main/wp-load.php', "<?php\n");
+
+$fs = WordPress\Filesystem\LocalFilesystem::create($git);
+$repo = new WordPress\Git\GitRepository($fs, ['default_branch' => 'main']);
+$repo->set_config_value(['user', 'name'], 'ForkPress COW');
+$repo->set_config_value(['user', 'email'], 'forkpress-cow@local');
+cow_git_sync_repository($repo, $branches);
+cow_git_write_branch_list($branches, $branch_list);
+$main_tip = $repo->get_branch_tip('refs/heads/main');
+$repo->checkout('refs/heads/main');
+$created_tip = $repo->commit([
+    'commit' => [
+        'message' => 'create branch without database from git',
+        'author' => 'ForkPress Test <forkpress-test@local>',
+        'committer' => 'ForkPress Test <forkpress-test@local>',
+        'parents' => [$main_tip],
+    ],
+    'updates' => ['wordpress/wp-content/git-created-no-db.txt' => "created\n"],
+]);
+$repo->set_branch_tip('refs/heads/git-created-no-db', $created_tip);
+$failed = false;
+try {
+    cow_git_apply_push_to_branches($repo, $git, $branches, $branches, $branch_list, 'file-copy', '', ['main' => $main_tip]);
+} catch (Throwable $e) {
+    $failed = true;
+}
+assert_true($failed, 'Git-created branch ID-band allocation failure rejects push apply');
+assert_true(!is_dir($branches . '/git-created-no-db'), 'Git-created branch ID-band allocation failure removes published branch storage');
+assert_same(trim((string)file_get_contents($branch_list)), 'main', 'Git-created branch ID-band allocation failure restores the branch list');
+cow_git_remove_tree($tmp);
+
 $tmp = sys_get_temp_dir() . '/forkpress-cow-git-rollback-resync-' . getmypid() . '-' . bin2hex(random_bytes(4));
 $branches = $tmp . '/branches';
 $git = $tmp . '/git';

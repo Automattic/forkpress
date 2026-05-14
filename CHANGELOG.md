@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Added COW branch mergeback for production materialized branches, including generic SQLite 3-way merge, conservative schema additions, filesystem mergeback, rollback handling, and audit metadata under `.forkpress/cow/merge`.
+- Added COW Git coverage proving Git-created branch publication rolls back if branch-time AUTOINCREMENT ID-band allocation fails.
 - Added CLI coverage for filesystem merge-audit review round trips through `review-record` and text `audit` output.
 - Tightened no-primary-key schema rebuilds so plugin columns named `rowid` or `_rowid_` do not shadow SQLite hidden row identity.
 - Clarified text merge-audit review queues so `review-status=unreviewed` records are marked as `review=unreviewed`.
