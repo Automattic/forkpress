@@ -7094,9 +7094,12 @@ function cow_merge_resolve_conflict(
             $resolved_value = $choice === 'source' ? $source_value : $target_value;
 
             if ($apply) {
-                $meta->exec('BEGIN IMMEDIATE');
+                if (!$meta->exec('BEGIN IMMEDIATE')) {
+                    throw new RuntimeException('failed to start filesystem resolution metadata transaction: ' . $meta->lastErrorMsg());
+                }
                 $file_tx = cow_merge_file_transaction_begin();
                 $file_tx_committed = false;
+                $preserve_file_tx = false;
                 try {
                     if ($choice === 'source') {
                         cow_merge_file_transaction_snapshot_path($file_tx, $target_root, $path);
@@ -7124,7 +7127,9 @@ function cow_merge_resolve_conflict(
                         cow_merge_resolution_review_note($choice, $note),
                         $reviewer
                     );
-                    $meta->exec('COMMIT');
+                    if (!$meta->exec('COMMIT')) {
+                        throw new RuntimeException('failed to commit filesystem resolution metadata transaction: ' . $meta->lastErrorMsg());
+                    }
                     $file_tx_committed = true;
                 } catch (Throwable $e) {
                     @$meta->exec('ROLLBACK');
@@ -7132,16 +7137,39 @@ function cow_merge_resolve_conflict(
                         try {
                             cow_merge_file_transaction_restore($file_tx, $target_root);
                         } catch (Throwable $rollback_error) {
-                            throw new RuntimeException(
+                            $preserve_file_tx = true;
+                            $run_context = cow_merge_run_context($meta, (int)$conflict['run_id']);
+                            $original_failure = cow_merge_failure_reason($e);
+                            $rollback_failure = cow_merge_failure_reason($rollback_error);
+                            $rollback_artifacts = [
+                                'filesystem_transaction' => cow_merge_file_transaction_artifact($file_tx, $target_root),
+                            ];
+                            cow_merge_record_rollback_failure_artifact(
+                                $metadata_db,
+                                (int)$conflict['run_id'],
+                                $run_context['source_branch'],
+                                $run_context['target_branch'],
+                                $run_context['base_db'],
+                                $run_context['source_db'],
+                                $run_context['target_db'],
+                                $original_failure,
+                                $rollback_failure,
+                                $rollback_artifacts
+                            );
+                            throw new CowMergeRollbackFailureException(
                                 $e->getMessage() . '; filesystem rollback failed: ' . $rollback_error->getMessage(),
-                                0,
+                                $original_failure,
+                                $rollback_failure,
+                                $rollback_artifacts,
                                 $e
                             );
                         }
                     }
                     throw $e;
                 } finally {
-                    cow_merge_file_transaction_cleanup($file_tx);
+                    if (!$preserve_file_tx) {
+                        cow_merge_file_transaction_cleanup($file_tx);
+                    }
                 }
             } else {
                 $resolution_id = null;

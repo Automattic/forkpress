@@ -2360,6 +2360,7 @@ SQL);
     mkdir($file_resolve_base_root . '/wp-content/uploads', 0777, true);
     write_test_file($file_resolve_base_root . '/wp-content/uploads/conflict.txt', 'base conflict');
     write_test_file($file_resolve_base_root . '/wp-content/uploads/delete-conflict.txt', 'base delete conflict');
+    write_test_file($file_resolve_base_root . '/wp-content/uploads/rollback-conflict.txt', 'base rollback conflict');
     copy_tree_for_test($file_resolve_base_root, $file_resolve_source_root);
     copy_tree_for_test($file_resolve_base_root, $file_resolve_target_root);
     $file_resolve_base_db = $file_resolve_base_root . '/wp-content/database/.ht.sqlite';
@@ -2374,10 +2375,12 @@ SQL);
     $file_resolve_manifest = $tmp . '/.forkpress/cow/merge/file-bases/feature-file-resolve.json';
     cow_merge_capture_file_base($file_resolve_base_root, $file_resolve_manifest);
     write_test_file($file_resolve_source_root . '/wp-content/uploads/conflict.txt', 'source conflict resolution');
+    write_test_file($file_resolve_source_root . '/wp-content/uploads/rollback-conflict.txt', 'source rollback resolution');
     create_test_symlink('/etc/passwd', $file_resolve_source_root . '/wp-content/uploads/unsafe-link.txt');
     unlink($file_resolve_source_root . '/wp-content/uploads/delete-conflict.txt');
     write_test_file($file_resolve_target_root . '/wp-content/uploads/conflict.txt', 'target conflict resolution');
     write_test_file($file_resolve_target_root . '/wp-content/uploads/delete-conflict.txt', 'target changed before source deletion');
+    write_test_file($file_resolve_target_root . '/wp-content/uploads/rollback-conflict.txt', 'target rollback resolution');
     cow_merge_branch_state(
         $file_resolve_base_db,
         $file_resolve_source_db,
@@ -2416,6 +2419,42 @@ SQL);
         'target filesystem path no longer matches',
         'stale filesystem conflict resolution is blocked after the target path changes'
     );
+    $file_rollback_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/rollback-conflict.txt')) . "' ORDER BY id DESC LIMIT 1");
+    $file_rollback_meta = open_db($metadata);
+    $file_rollback_meta->exec(<<<'SQL'
+CREATE TRIGGER fail_filesystem_resolution_record
+BEFORE INSERT ON merge_resolutions
+WHEN NEW.table_name = '__files__'
+  AND NEW.note = 'Try audited source file with failing metadata.'
+BEGIN
+    SELECT RAISE(ABORT, 'forced filesystem resolution metadata failure');
+END
+SQL);
+    $file_rollback_meta->close();
+    $file_resolution_failed = false;
+    set_error_handler(static function (int $severity, string $message): bool {
+        return str_contains($message, 'forced filesystem resolution metadata failure');
+    });
+    try {
+        cow_merge_resolve_conflict(
+            $metadata,
+            $file_rollback_conflict_id,
+            'source',
+            true,
+            'Try audited source file with failing metadata.',
+            'cow-test'
+        );
+    } catch (Throwable $e) {
+        $file_resolution_failed = str_contains($e->getMessage(), 'forced filesystem resolution metadata failure');
+    } finally {
+        restore_error_handler();
+    }
+    assert_true($file_resolution_failed, 'filesystem resolution metadata failure is surfaced to the caller');
+    assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/rollback-conflict.txt'), 'target rollback resolution', 'failed filesystem resolution restores the target file');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $file_rollback_conflict_id"), 0, 'failed filesystem resolution records no resolution metadata');
+    $file_rollback_meta = open_db($metadata);
+    $file_rollback_meta->exec('DROP TRIGGER fail_filesystem_resolution_record');
+    $file_rollback_meta->close();
     $file_delete_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/delete-conflict.txt')) . "' ORDER BY id DESC LIMIT 1");
     $file_delete_resolution = cow_merge_resolve_conflict(
         $metadata,

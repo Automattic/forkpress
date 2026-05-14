@@ -644,6 +644,10 @@ tooling.
   `target-kept` decisions so clean trunk/main-side DDL remains auditable.
   Target-only filesystem additions, deletions, and path changes are also
   preserved and recorded as `target-kept` decisions.
+  Filesystem conflict resolutions use the same rollback discipline: if
+  resolution metadata cannot be recorded after a source file choice mutates a
+  target path, the target path is restored and no partial resolution row is
+  kept.
   Mixed database/filesystem merges keep a whole-branch rollback snapshot, so
   late metadata or filesystem failures restore target database state,
   filesystem paths, and merge audit metadata before recording the failed run.
