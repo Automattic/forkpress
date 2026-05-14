@@ -11858,6 +11858,13 @@ SQL);
     assert_same($result['created'], 1, 'recapturing a branch creates identities only for new no-PK rows');
     assert_same((int)scalar($capture_metadata, "SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = 'feature-captured' AND table_name = 'plugin_keyless'"), 2, 'recapturing a branch preserves existing identities and adds new rows');
 
+    $db = open_db($capture_feature);
+    $db->exec('DELETE FROM plugin_keyless WHERE rowid = 1');
+    $db->close();
+    cow_merge_capture_row_identities($capture_feature, $capture_metadata, 'feature-captured', 'main');
+    assert_same((int)scalar($capture_metadata, "SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = 'feature-captured' AND table_name = 'plugin_keyless' AND rowid = 1"), 0, 'recapturing a branch tombstones deleted no-PK row identities');
+    assert_same((int)scalar($capture_metadata, "SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'feature-captured' AND table_name = 'plugin_keyless' AND rowid = 1 AND deleted_at IS NOT NULL"), 1, 'recapturing a branch records deleted no-PK row identity history');
+
     $capture_failure_feature = $tmp . '/capture-failure-feature.sqlite';
     copy($capture_db, $capture_failure_feature);
     $db = open_db($capture_failure_feature);

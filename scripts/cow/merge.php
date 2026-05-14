@@ -3688,8 +3688,10 @@ function cow_merge_capture_row_identities(
         $metadata_transaction_active = true;
         foreach (cow_merge_keyless_tables($db) as $table) {
             $tables++;
+            $current_rowids = [];
             foreach (cow_merge_load_keyless_physical_rows($db, $table) as $entry) {
                 $rowid = (int)$entry['rowid'];
+                $current_rowids[$rowid] = true;
                 $identity = cow_merge_lookup_row_identity($meta, $branch, $table, $rowid);
                 if ($identity === null && $seed_branch !== null) {
                     $identity = cow_merge_lookup_row_identity($meta, $seed_branch, $table, $rowid);
@@ -3700,6 +3702,26 @@ function cow_merge_capture_row_identities(
                 }
                 cow_merge_remember_row_identity($meta, $run_id, $branch, $table, $rowid, $identity, $entry['row']);
                 $rows++;
+            }
+            $active = cow_merge_prepare_checked(
+                $meta,
+                'SELECT rowid FROM merge_row_identities ' .
+                'WHERE branch_name = :branch_name AND table_name = :table_name ORDER BY rowid',
+                'failed to prepare active row identity listing for capture'
+            );
+            cow_merge_bind($active, ':branch_name', $branch);
+            cow_merge_bind($active, ':table_name', $table);
+            $active_result = cow_merge_execute_checked($active, $meta, 'failed to list active row identities for capture');
+            $missing_rowids = [];
+            while ($active_row = $active_result->fetchArray(SQLITE3_ASSOC)) {
+                $active_rowid = (int)$active_row['rowid'];
+                if (!isset($current_rowids[$active_rowid])) {
+                    $missing_rowids[] = $active_rowid;
+                }
+            }
+            cow_merge_result_finalize_checked($active_result, 'failed to finalize active row identity listing for capture');
+            foreach ($missing_rowids as $missing_rowid) {
+                cow_merge_forget_row_identity($meta, $run_id, $branch, $table, $missing_rowid);
             }
         }
         cow_merge_finish_run($meta, $run_id, 'identity_captured');

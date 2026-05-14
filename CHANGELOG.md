@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Added COW branch mergeback for production materialized branches, including generic SQLite 3-way merge, conservative schema additions, filesystem mergeback, rollback handling, and audit metadata under `.forkpress/cow/merge`.
+- Tightened branch-time no-primary-key row identity recapture so offline-deleted rows are tombstoned in sidecar history.
 - Added COW coverage proving source-only filesystem additions record source and chosen payloads.
 - Added COW coverage proving identical source and target filesystem deletions record empty source, target, and chosen payloads.
 - Added COW coverage proving identical source and target filesystem changes record matching source, target, and chosen payloads.
