@@ -9022,9 +9022,34 @@ function cow_merge_audit_filter_label(array $filters): string {
     return implode(' ', $parts);
 }
 
+function cow_merge_audit_effective_review_status(array $row, array $filters): ?string {
+    $status = $row['review_status'] ?? null;
+    if ($status !== null && (string)$status !== '') {
+        return (string)$status;
+    }
+    if (($filters['review_status'] ?? null) === 'unreviewed') {
+        return 'unreviewed';
+    }
+    return null;
+}
+
+function cow_merge_print_audit_review_text(array $row, array $filters, string $note_label = 'note'): void {
+    $status = cow_merge_audit_effective_review_status($row, $filters);
+    if ($status === null) {
+        return;
+    }
+    if ($status === 'unreviewed' && (($row['review_status'] ?? null) === null || (string)$row['review_status'] === '')) {
+        echo "     review=unreviewed\n";
+        return;
+    }
+    echo "     review=$status reviewer={$row['review_reviewer']} at={$row['reviewed_at']}\n";
+    echo "     $note_label=" . cow_merge_audit_truncate((string)$row['review_note'], 240) . "\n";
+}
+
 function cow_merge_print_audit_text(array $report): void {
     echo "forkpress: COW merge audit\n";
     echo "  metadata:  {$report['metadata_db']}\n";
+    $filters = $report['filters'] ?? [];
     $filter_label = cow_merge_audit_filter_label($report['filters'] ?? []);
     if ($filter_label !== '') {
         echo "  filters:   $filter_label\n";
@@ -9055,10 +9080,7 @@ function cow_merge_print_audit_text(array $report): void {
         foreach ($report['conflicts'] as $conflict) {
             $object = cow_merge_audit_object_label($conflict);
             echo "  #{$conflict['id']} run={$conflict['run_id']} {$conflict['conflict_type']} $object resolver={$conflict['resolver']} resolved_at={$conflict['resolved_at']}\n";
-            if (($conflict['review_status'] ?? null) !== null && (string)$conflict['review_status'] !== '') {
-                echo "     review={$conflict['review_status']} reviewer={$conflict['review_reviewer']} at={$conflict['reviewed_at']}\n";
-                echo "     note=" . cow_merge_audit_truncate((string)$conflict['review_note'], 240) . "\n";
-            }
+            cow_merge_print_audit_review_text($conflict, $filters);
             echo "     source={$conflict['source_preview']}\n";
             echo "     target={$conflict['target_preview']}\n";
             echo "     chosen={$conflict['chosen_preview']}\n";
@@ -9077,10 +9099,7 @@ function cow_merge_print_audit_text(array $report): void {
         foreach ($report['decisions'] as $decision) {
             $object = cow_merge_audit_object_label($decision);
             echo "  #{$decision['id']} run={$decision['run_id']} {$decision['decision']} $object\n";
-            if (($decision['review_status'] ?? null) !== null && (string)$decision['review_status'] !== '') {
-                echo "     review={$decision['review_status']} reviewer={$decision['review_reviewer']} at={$decision['reviewed_at']}\n";
-                echo "     note=" . cow_merge_audit_truncate((string)$decision['review_note'], 240) . "\n";
-            }
+            cow_merge_print_audit_review_text($decision, $filters);
             echo "     reason={$decision['reason']}\n";
             echo "     chosen={$decision['chosen_preview']}\n";
         }
@@ -9099,10 +9118,7 @@ function cow_merge_print_audit_text(array $report): void {
             $object = cow_merge_audit_object_label($resolution);
             $applied = ((int)$resolution['applied']) === 1 ? 'yes' : 'no';
             echo "  #{$resolution['id']} conflict={$resolution['conflict_id']} run={$resolution['run_id']} {$resolution['choice']} $object status={$resolution['status']} applied=$applied reviewer={$resolution['reviewer']}\n";
-            if (($resolution['review_status'] ?? null) !== null && (string)$resolution['review_status'] !== '') {
-                echo "     review={$resolution['review_status']} reviewer={$resolution['review_reviewer']} at={$resolution['reviewed_at']}\n";
-                echo "     review-note=" . cow_merge_audit_truncate((string)$resolution['review_note'], 240) . "\n";
-            }
+            cow_merge_print_audit_review_text($resolution, $filters, 'review-note');
             echo "     note=" . cow_merge_audit_truncate((string)$resolution['note'], 240) . "\n";
             echo "     previous={$resolution['target_preview']}\n";
             echo "     resolved={$resolution['chosen_preview']}\n";

@@ -2380,6 +2380,10 @@ try {
         assert_same($row['review_status'], null, 'database decision review queue returns only unreviewed records');
         assert_true($row['table_name'] !== '__files__', 'database decision review queue excludes file records');
     }
+    ob_start();
+    cow_merge_print_audit_text($db_decision_queue_audit);
+    $db_decision_queue_text = ob_get_clean();
+    assert_true(str_contains($db_decision_queue_text, 'review=unreviewed'), 'database decision review queue text marks unreviewed records');
     $reviewed_db_decision_audit = cow_merge_audit_report($metadata, null, 10, [
         'records' => 'decisions',
         'review_status' => 'reviewed',
@@ -3531,6 +3535,7 @@ SQL);
     cow_merge_print_audit_text($unreviewed_status_audit);
     $unreviewed_status_text = ob_get_clean();
     assert_true(str_contains($unreviewed_status_text, 'review-status=unreviewed'), 'unreviewed filter is visible in text filters');
+    assert_true(str_contains($unreviewed_status_text, 'review=unreviewed'), 'unreviewed review status text marks matching records');
     $resolution_review_id = (int)$applied_resolution_audit['resolutions'][0]['id'];
     $resolution_review = cow_merge_review_record(
         $metadata,
@@ -3613,6 +3618,10 @@ SQL);
         assert_same($row['review_status'], null, 'resolution review queue returns only unreviewed records');
         assert_true($row['table_name'] !== '__files__', 'database resolution review queue excludes file records');
     }
+    ob_start();
+    cow_merge_print_audit_text($unreviewed_resolution_queue_audit);
+    $unreviewed_resolution_queue_text = ob_get_clean();
+    assert_true(str_contains($unreviewed_resolution_queue_text, 'review=unreviewed'), 'resolution review queue text marks unreviewed records');
     ob_start();
     cow_merge_print_audit_text($reviewed_resolution_audit);
     $reviewed_resolution_text = ob_get_clean();
