@@ -12977,6 +12977,61 @@ SQL);
         'out-of-band explicit source ID explains the reserved-band violation'
     );
 
+    $plain_graph_base = $tmp . '/plain-ipk-graph-base.sqlite';
+    $plain_graph_source = $tmp . '/plain-ipk-graph-source.sqlite';
+    $plain_graph_target = $tmp . '/plain-ipk-graph-target.sqlite';
+    $plain_graph_metadata = $tmp . '/.forkpress/cow/merge/plain-ipk-graph-metadata.sqlite';
+    create_base_db($plain_graph_base);
+    $db = open_db($plain_graph_base);
+    $db->exec('CREATE TABLE plugin_plain_ipk_graph (id INTEGER PRIMARY KEY, branch TEXT NOT NULL, graph_json TEXT NOT NULL, graph_serialized TEXT NOT NULL)');
+    $db->close();
+    copy($plain_graph_base, $plain_graph_source);
+    copy($plain_graph_base, $plain_graph_target);
+    cow_merge_allocate_autoincrement_bands($plain_graph_source, $plain_graph_metadata, 'feature-plain-ipk-source');
+    cow_merge_allocate_autoincrement_bands($plain_graph_target, $plain_graph_metadata, 'feature-plain-ipk-target');
+    $write_plain_ipk_graph = static function (string $path, string $branch): array {
+        $db = open_db($path);
+        $stmt = $db->prepare('INSERT INTO plugin_plain_ipk_graph (branch, graph_json, graph_serialized) VALUES (:branch, :json, :serialized)');
+        $stmt->bindValue(':branch', $branch, SQLITE3_TEXT);
+        $stmt->bindValue(':json', '{}', SQLITE3_TEXT);
+        $stmt->bindValue(':serialized', 'a:0:{}', SQLITE3_TEXT);
+        $stmt->execute();
+        $id = (int)$db->lastInsertRowID();
+        $graph = ['branch' => $branch, 'self_id' => $id];
+        $json = json_encode($graph, JSON_UNESCAPED_SLASHES);
+        $serialized = 'a:2:{s:6:"branch";s:' . strlen($branch) . ':"' . $branch . '";s:7:"self_id";i:' . $id . ';}';
+        $stmt = $db->prepare('UPDATE plugin_plain_ipk_graph SET graph_json = :json, graph_serialized = :serialized WHERE id = :id');
+        $stmt->bindValue(':json', $json, SQLITE3_TEXT);
+        $stmt->bindValue(':serialized', $serialized, SQLITE3_TEXT);
+        $stmt->bindValue(':id', $id, SQLITE3_INTEGER);
+        $stmt->execute();
+        $db->close();
+        return ['id' => $id, 'json' => $json, 'serialized' => $serialized];
+    };
+    $plain_source_graph = $write_plain_ipk_graph($plain_graph_source, 'source');
+    $plain_target_graph = $write_plain_ipk_graph($plain_graph_target, 'target');
+    assert_same($plain_source_graph['id'], $plain_target_graph['id'], 'plain INTEGER PRIMARY KEY plugin branches can reuse the same row ID before merge');
+    $plain_graph_result = cow_merge_databases(
+        $plain_graph_base,
+        $plain_graph_source,
+        $plain_graph_target,
+        $plain_graph_metadata,
+        'feature-plain-ipk-source',
+        'feature-plain-ipk-target'
+    );
+    assert_same($plain_graph_result['status'], 'completed_with_conflicts', 'plain INTEGER PRIMARY KEY plugin graph ID collision is held for review');
+    assert_same((int)scalar($plain_graph_target, "SELECT COUNT(*) FROM plugin_plain_ipk_graph WHERE branch = 'source'"), 0, 'plain IPK source graph is not applied over a target graph with the same ID');
+    assert_same((string)scalar($plain_graph_target, "SELECT graph_json FROM plugin_plain_ipk_graph WHERE branch = 'target'"), $plain_target_graph['json'], 'plain IPK target graph remains coherent after collision review hold');
+    assert_same(
+        (int)scalar($plain_graph_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-plain-ipk-source' AND c.table_name = 'plugin_plain_ipk_graph' AND c.conflict_type = 'row-insert-collision'"),
+        1,
+        'plain IPK plugin graph collision records a row insert conflict'
+    );
+    assert_true(
+        (int)scalar($plain_graph_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_plain_ipk_graph' AND decision = 'id-band-skipped'") >= 2,
+        'plain IPK plugin graph tables are auditable as non-bandable on both branches'
+    );
+
     $band_ref_base = $tmp . '/band-ref-base.sqlite';
     $band_ref_source = $tmp . '/band-ref-source.sqlite';
     $band_ref_target = $tmp . '/band-ref-target.sqlite';
