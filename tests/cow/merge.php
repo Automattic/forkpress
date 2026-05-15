@@ -14462,6 +14462,7 @@ SQL);
     $db->exec('CREATE TABLE wp_commentmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, comment_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
     $db->exec('CREATE TABLE wp_term_relationships (object_id INTEGER NOT NULL, term_taxonomy_id INTEGER NOT NULL, term_order INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (object_id, term_taxonomy_id))');
     $db->exec("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('page_for_posts', '1', 'yes')");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_parent) VALUES (3, 'Base child page', '', 'publish', 0)");
     $db->exec("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (1, '_menu_item_menu_item_parent', '1')");
     $db->exec("INSERT INTO wp_comments (comment_post_ID, comment_content) VALUES (1, 'Base comment reference')");
     $db->exec("INSERT INTO wp_commentmeta (comment_id, meta_key, meta_value) VALUES (1, '_forkpress_base_comment_ref', 'base comment metadata')");
@@ -14471,6 +14472,7 @@ SQL);
     cow_merge_allocate_autoincrement_bands($band_explicit_ref_source, $band_explicit_ref_metadata, 'feature-band-explicit-ref-source');
     $db = open_db($band_explicit_ref_source);
     $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status) VALUES (2, 'Imported explicit post with metadata', 'explicit id import with child rows', 'publish')");
+    $db->exec("UPDATE wp_posts SET post_parent = 2 WHERE ID = 3");
     $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_parent) VALUES ('Imported child page behind explicit parent', 'child of held explicit id', 'publish', 2)");
     $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (2, '_forkpress_import_ref', :value)");
     $stmt->bindValue(':value', json_encode(['post_id' => 2, 'origin' => 'import'], JSON_UNESCAPED_SLASHES), SQLITE3_TEXT);
@@ -14534,6 +14536,7 @@ SQL);
     );
     assert_same($band_explicit_ref_result['status'], 'completed_with_conflicts', 'explicit source post IDs hold dependent postmeta for review');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_posts WHERE ID = 2"), 0, 'out-of-band explicit source post remains unapplied');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT post_parent FROM wp_posts WHERE ID = 3"), 0, 'updated child posts pointing at a held explicit source post are not applied automatically');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_posts WHERE post_parent = 2"), 0, 'child posts pointing at a held explicit source post are not applied automatically');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_postmeta WHERE post_id = 2"), 0, 'postmeta pointing at a held explicit source post is not applied automatically');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_postmeta WHERE meta_key = '_thumbnail_id' AND meta_value = '2'"), 0, 'postmeta values pointing at a held explicit source post are not applied automatically');
@@ -14564,7 +14567,7 @@ SQL);
     );
     assert_same(
         (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND c.table_name = 'wp_posts' AND c.conflict_type = 'row-target-constraint'"),
-        2,
+        3,
         'explicit parent and child posts behind it record reviewable row conflicts'
     );
     assert_same(
@@ -14599,8 +14602,12 @@ SQL);
         'updated options held behind an explicit source post explain that the source changed the option'
     );
     assert_true(
-        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_posts' AND d.decision = 'target-wins' AND d.reason LIKE '%parent post must merge before child row%'") === 1,
+        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_posts' AND d.decision = 'target-wins' AND d.reason LIKE '%parent post must merge before child row%'") === 2,
         'child posts held behind an explicit source post explain the missing parent'
+    );
+    assert_true(
+        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_posts' AND d.decision = 'target-wins' AND d.reason LIKE 'source changed%'") === 1,
+        'updated child posts held behind an explicit source post explain that the source changed the row'
     );
     assert_true(
         (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_comments' AND d.decision = 'target-wins' AND d.reason LIKE 'source changed%'") === 1,
