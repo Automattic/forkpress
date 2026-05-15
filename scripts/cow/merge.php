@@ -4502,6 +4502,85 @@ function cow_merge_autoincrement_id_band_violation(
     return "source inserted explicit AUTOINCREMENT id $id outside reserved branch band $band_start-$band_end";
 }
 
+function cow_merge_wordpress_parent_reference_violation(
+    SQLite3 $source,
+    SQLite3 $target,
+    SQLite3 $meta,
+    string $source_branch,
+    string $child_label,
+    string $parent_table,
+    string $parent_pk,
+    mixed $parent_id,
+    string $parent_label
+): ?string {
+    if (!is_int($parent_id) && !(is_string($parent_id) && preg_match('/^-?\d+$/', (string)$parent_id))) {
+        return null;
+    }
+    $parent_id = (int)$parent_id;
+    if ($parent_id <= 0 || !cow_merge_schema_object_exists($target, $parent_table)) {
+        return null;
+    }
+    $stmt = cow_merge_prepare_checked(
+        $target,
+        'SELECT 1 FROM ' . cow_merge_quote_ident($parent_table) . ' WHERE ' . cow_merge_quote_ident($parent_pk) . ' = :parent_id LIMIT 1',
+        "failed to prepare WordPress $parent_label parent lookup"
+    );
+    cow_merge_bind($stmt, ':parent_id', $parent_id);
+    $res = cow_merge_execute_checked($stmt, $target, "failed to inspect WordPress $parent_label parent row");
+    try {
+        if ($res->fetchArray(SQLITE3_NUM)) {
+            return null;
+        }
+    } finally {
+        cow_merge_result_finalize_checked($res, "failed to finalize WordPress $parent_label parent lookup");
+    }
+    if (!cow_merge_schema_object_exists($source, $parent_table)) {
+        return "source inserted $child_label references missing $parent_table.$parent_pk $parent_id; parent $parent_label must merge before child row";
+    }
+    $stmt = cow_merge_prepare_checked(
+        $source,
+        'SELECT * FROM ' . cow_merge_quote_ident($parent_table) . ' WHERE ' . cow_merge_quote_ident($parent_pk) . ' = :parent_id LIMIT 1',
+        "failed to prepare WordPress $parent_label source parent lookup"
+    );
+    cow_merge_bind($stmt, ':parent_id', $parent_id);
+    $res = cow_merge_execute_checked($stmt, $source, "failed to inspect WordPress $parent_label source parent row");
+    try {
+        $parent = $res->fetchArray(SQLITE3_ASSOC);
+    } finally {
+        cow_merge_result_finalize_checked($res, "failed to finalize WordPress $parent_label source parent lookup");
+    }
+    if (!$parent) {
+        return "source inserted $child_label references missing $parent_table.$parent_pk $parent_id; parent $parent_label must merge before child row";
+    }
+    $parent_band_violation = cow_merge_autoincrement_id_band_violation($meta, $source_branch, $parent_table, $parent, [$parent_pk]);
+    if ($parent_band_violation !== null) {
+        return "source inserted $child_label references $parent_table.$parent_pk $parent_id that is outside the source branch ID band; parent $parent_label must merge before child row";
+    }
+    return null;
+}
+
+function cow_merge_wordpress_source_row(SQLite3 $source, string $table, string $pk, mixed $id): ?array {
+    if (!is_int($id) && !(is_string($id) && preg_match('/^-?\d+$/', (string)$id))) {
+        return null;
+    }
+    if (!cow_merge_schema_object_exists($source, $table)) {
+        return null;
+    }
+    $stmt = cow_merge_prepare_checked(
+        $source,
+        'SELECT * FROM ' . cow_merge_quote_ident($table) . ' WHERE ' . cow_merge_quote_ident($pk) . ' = :id LIMIT 1',
+        "failed to prepare WordPress source row lookup for $table"
+    );
+    cow_merge_bind($stmt, ':id', (int)$id);
+    $res = cow_merge_execute_checked($stmt, $source, "failed to inspect WordPress source row for $table");
+    try {
+        $row = $res->fetchArray(SQLITE3_ASSOC);
+        return $row ?: null;
+    } finally {
+        cow_merge_result_finalize_checked($res, "failed to finalize WordPress source row lookup for $table");
+    }
+}
+
 function cow_merge_wordpress_insert_reference_violation(
     SQLite3 $source,
     SQLite3 $target,
@@ -4511,63 +4590,27 @@ function cow_merge_wordpress_insert_reference_violation(
     array $source_row
 ): ?string {
     if ($table === 'wp_posts') {
-        $reference_column = 'post_parent';
-        $child_label = 'wp_posts row';
-    } elseif ($table === 'wp_postmeta') {
-        $reference_column = 'post_id';
-        $child_label = 'wp_postmeta row';
-    } elseif ($table === 'wp_term_relationships') {
-        $reference_column = 'object_id';
-        $child_label = 'wp_term_relationships row';
-    } else {
-        return null;
+        return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_posts row', 'wp_posts', 'ID', $source_row['post_parent'] ?? null, 'post');
     }
-    if (!array_key_exists($reference_column, $source_row)) {
-        return null;
+    if ($table === 'wp_postmeta') {
+        return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_postmeta row', 'wp_posts', 'ID', $source_row['post_id'] ?? null, 'post');
     }
-    $post_id = $source_row[$reference_column];
-    if (!is_int($post_id) && !(is_string($post_id) && preg_match('/^-?\d+$/', (string)$post_id))) {
-        return null;
+    if ($table === 'wp_term_taxonomy') {
+        return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_term_taxonomy row', 'wp_terms', 'term_id', $source_row['term_id'] ?? null, 'term');
     }
-    $post_id = (int)$post_id;
-    if ($post_id <= 0 || !cow_merge_schema_object_exists($target, 'wp_posts')) {
-        return null;
-    }
-    $stmt = cow_merge_prepare_checked(
-        $target,
-        'SELECT 1 FROM wp_posts WHERE ID = :post_id LIMIT 1',
-        'failed to prepare WordPress postmeta parent lookup'
-    );
-    cow_merge_bind($stmt, ':post_id', $post_id);
-    $res = cow_merge_execute_checked($stmt, $target, 'failed to inspect WordPress postmeta parent row');
-    try {
-        if ($res->fetchArray(SQLITE3_NUM)) {
-            return null;
+    if ($table === 'wp_term_relationships') {
+        $post_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_term_relationships row', 'wp_posts', 'ID', $source_row['object_id'] ?? null, 'post');
+        if ($post_violation !== null) {
+            return $post_violation;
         }
-    } finally {
-        cow_merge_result_finalize_checked($res, 'failed to finalize WordPress postmeta parent lookup');
-    }
-    if (!cow_merge_schema_object_exists($source, 'wp_posts')) {
-        return "source inserted $child_label references missing wp_posts.ID $post_id; parent post must merge before child row";
-    }
-    $stmt = cow_merge_prepare_checked(
-        $source,
-        'SELECT * FROM wp_posts WHERE ID = :post_id LIMIT 1',
-        'failed to prepare WordPress postmeta source parent lookup'
-    );
-    cow_merge_bind($stmt, ':post_id', $post_id);
-    $res = cow_merge_execute_checked($stmt, $source, 'failed to inspect WordPress postmeta source parent row');
-    try {
-        $parent = $res->fetchArray(SQLITE3_ASSOC);
-    } finally {
-        cow_merge_result_finalize_checked($res, 'failed to finalize WordPress postmeta source parent lookup');
-    }
-    if (!$parent) {
-        return "source inserted $child_label references missing wp_posts.ID $post_id; parent post must merge before child row";
-    }
-    $parent_band_violation = cow_merge_autoincrement_id_band_violation($meta, $source_branch, 'wp_posts', $parent, ['ID']);
-    if ($parent_band_violation !== null) {
-        return "source inserted $child_label references wp_posts.ID $post_id that is outside the source branch ID band; parent post must merge before child row";
+        $taxonomy_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_term_relationships row', 'wp_term_taxonomy', 'term_taxonomy_id', $source_row['term_taxonomy_id'] ?? null, 'term taxonomy');
+        if ($taxonomy_violation !== null) {
+            return $taxonomy_violation;
+        }
+        $term_taxonomy = cow_merge_wordpress_source_row($source, 'wp_term_taxonomy', 'term_taxonomy_id', $source_row['term_taxonomy_id'] ?? null);
+        if ($term_taxonomy !== null) {
+            return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_term_relationships row', 'wp_terms', 'term_id', $term_taxonomy['term_id'] ?? null, 'term');
+        }
     }
     return null;
 }

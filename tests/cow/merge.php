@@ -13540,6 +13540,57 @@ SQL);
         'term relationships held behind an explicit source post explain the missing parent'
     );
 
+    $band_explicit_term_base = $tmp . '/band-explicit-term-base.sqlite';
+    $band_explicit_term_source = $tmp . '/band-explicit-term-source.sqlite';
+    $band_explicit_term_target = $tmp . '/band-explicit-term-target.sqlite';
+    $band_explicit_term_metadata = $tmp . '/.forkpress/cow/merge/band-explicit-term-metadata.sqlite';
+    copy($band_base, $band_explicit_term_base);
+    $db = open_db($band_explicit_term_base);
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status) VALUES ('Base taxonomy owner', '', 'publish')");
+    $db->exec('CREATE TABLE wp_terms (term_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, slug TEXT NOT NULL)');
+    $db->exec('CREATE TABLE wp_term_taxonomy (term_taxonomy_id INTEGER PRIMARY KEY AUTOINCREMENT, term_id INTEGER NOT NULL, taxonomy TEXT NOT NULL, description TEXT NOT NULL DEFAULT "", parent INTEGER NOT NULL DEFAULT 0, count INTEGER NOT NULL DEFAULT 0)');
+    $db->exec('CREATE TABLE wp_term_relationships (object_id INTEGER NOT NULL, term_taxonomy_id INTEGER NOT NULL, term_order INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (object_id, term_taxonomy_id))');
+    $db->close();
+    copy($band_explicit_term_base, $band_explicit_term_source);
+    copy($band_explicit_term_base, $band_explicit_term_target);
+    cow_merge_allocate_autoincrement_bands($band_explicit_term_source, $band_explicit_term_metadata, 'feature-band-explicit-term-source');
+    $db = open_db($band_explicit_term_source);
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (2, 'Imported explicit term', 'imported-explicit-term')");
+    $stmt = $db->prepare("INSERT INTO wp_term_taxonomy (term_id, taxonomy, description, count) VALUES (2, 'category', '', 1)");
+    $stmt->execute();
+    $band_explicit_term_taxonomy_id = (int)$db->lastInsertRowID();
+    $stmt = $db->prepare('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (1, :term_taxonomy_id, 0)');
+    $stmt->bindValue(':term_taxonomy_id', $band_explicit_term_taxonomy_id, SQLITE3_INTEGER);
+    $stmt->execute();
+    $db->close();
+    $band_explicit_term_result = cow_merge_databases(
+        $band_explicit_term_base,
+        $band_explicit_term_source,
+        $band_explicit_term_target,
+        $band_explicit_term_metadata,
+        'feature-band-explicit-term-source',
+        'main'
+    );
+    assert_same($band_explicit_term_result['status'], 'completed_with_conflicts', 'explicit source term IDs hold dependent taxonomy rows for review');
+    assert_same((int)scalar($band_explicit_term_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 2'), 0, 'out-of-band explicit source term remains unapplied');
+    assert_same((int)scalar($band_explicit_term_target, 'SELECT COUNT(*) FROM wp_term_taxonomy WHERE term_id = 2'), 0, 'term taxonomy pointing at a held explicit source term is not applied automatically');
+    assert_same((int)scalar($band_explicit_term_target, "SELECT COUNT(*) FROM wp_term_relationships WHERE term_taxonomy_id = $band_explicit_term_taxonomy_id"), 0, 'term relationships pointing at held explicit source term taxonomy are not applied automatically');
+    assert_same(
+        (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND c.table_name = 'wp_terms' AND c.conflict_type = 'row-target-constraint'"),
+        1,
+        'out-of-band explicit source term records a reviewable row conflict'
+    );
+    assert_same(
+        (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND c.table_name = 'wp_term_taxonomy' AND c.conflict_type = 'row-target-constraint'"),
+        1,
+        'term taxonomy pointing at a held explicit source term records a reviewable row conflict'
+    );
+    assert_same(
+        (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND c.table_name = 'wp_term_relationships' AND c.conflict_type = 'row-target-constraint'"),
+        1,
+        'term relationships pointing at a held explicit source term record a reviewable row conflict'
+    );
+
     $plain_graph_base = $tmp . '/plain-ipk-graph-base.sqlite';
     $plain_graph_source = $tmp . '/plain-ipk-graph-source.sqlite';
     $plain_graph_target = $tmp . '/plain-ipk-graph-target.sqlite';
