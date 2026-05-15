@@ -2143,6 +2143,8 @@ fn start_background_command(args: StartArgs) -> Result<i32> {
     let mut command = Command::new(current_exe);
     command.arg("start");
     append_start_args(&mut command, &args, &layout);
+    forward_env_if_present(&mut command, "FORKPRESS_COW_GIT_TEST_FAILPOINT");
+    forward_env_if_present(&mut command, "FORKPRESS_COW_GIT_TEST_FAILPOINT_ACTION");
     if _cow_lifecycle_lock.is_some() {
         command.env(FORKPRESS_COW_PARENT_LIFECYCLE_LOCK, "1");
     }
@@ -2242,6 +2244,12 @@ fn append_start_args(command: &mut Command, args: &StartArgs, layout: &Layout) {
     #[cfg(feature = "dev-experiments")]
     if let Some(gc_interval) = &args.gc_interval {
         command.arg("--gc-interval").arg(gc_interval);
+    }
+}
+
+fn forward_env_if_present(command: &mut Command, key: &str) {
+    if let Ok(value) = std::env::var(key) {
+        command.env(key, value);
     }
 }
 
@@ -4720,7 +4728,10 @@ fn start_cow_php_server(
         .env("FORKPRESS_DEBUG_LOG", &layout.debug_log)
         .env("FORKPRESS_PLAIN_STRATEGY", "cow")
         .env("FORKPRESS_ROOT_HOST", &args.root_host)
-        .env_remove(FORKPRESS_COW_PARENT_LIFECYCLE_LOCK)
+        .env_remove(FORKPRESS_COW_PARENT_LIFECYCLE_LOCK);
+    forward_env_if_present(&mut command, "FORKPRESS_COW_GIT_TEST_FAILPOINT");
+    forward_env_if_present(&mut command, "FORKPRESS_COW_GIT_TEST_FAILPOINT_ACTION");
+    command
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
 
