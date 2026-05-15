@@ -78,6 +78,9 @@ The Git server suite covers these publication classes:
 - Process exit after staging a Git branch deletion can leave stale delete
   backups and a stale branch-list entry; the next Git apply keeps the branch
   deleted, reconciles the branch list, and removes stale delete artifacts.
+- Process exit during COW Git unreachable-object pruning may leave some
+  unreachable objects behind, but reachable branch objects are preserved and the
+  next prune removes the remaining unreachable objects.
 - Multi-branch Git-created ID-band metadata failure rolls back created branch
   metadata and merge-base artifacts.
 - Stale-source Git-created branch publication is rejected.
@@ -99,7 +102,7 @@ OS-level interruption, not just deliberate exceptions:
 - Kill during public branch symlink/tree publication after storage/link state is
   partially visible in ways not yet covered by the separate-storage retry test.
 - Kill during sparsebundle detach or compact.
-- Kill during cleanup/pruning of rollback artifacts.
+- Kill during cleanup of rollback artifacts outside the Git object-pruning path.
 
 These should be tested by an external harness that can terminate the process at
 named checkpoints and then run a recovery/audit command in a new process.

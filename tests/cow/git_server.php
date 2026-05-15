@@ -254,6 +254,41 @@ assert_true($gc['scanned'] >= 1, 'COW Git GC scans loose objects');
 assert_true($gc['deleted'] >= 1, 'COW Git GC deletes unreachable loose object');
 assert_true(!file_exists($orphan_path), 'COW Git GC removes unreachable loose object file');
 assert_true(is_file($git . '/' . $repo->get_storage_path($repo->get_branch_tip('refs/heads/main'))), 'COW Git GC keeps reachable branch tip');
+
+$crash_orphan_a = $repo->add_object('blob', "crash orphan a\n");
+$crash_orphan_b = $repo->add_object('blob', "crash orphan b\n");
+$crash_orphan_paths = [
+    $git . '/' . $repo->get_storage_path($crash_orphan_a),
+    $git . '/' . $repo->get_storage_path($crash_orphan_b),
+];
+foreach ($crash_orphan_paths as $path) {
+    assert_true(is_file($path), 'test setup creates unreachable prune-crash object');
+}
+$reachable_tip_path = $git . '/' . $repo->get_storage_path($repo->get_branch_tip('refs/heads/main'));
+$prune_crash = run_php_code_env(<<<'PHP'
+require_once getenv('FORKPRESS_COW_GIT_SERVER_HELPER');
+
+$git = getenv('FORKPRESS_COW_GIT_REPO');
+$fs = WordPress\Filesystem\LocalFilesystem::create($git);
+$repo = new WordPress\Git\GitRepository($fs, ['default_branch' => 'main']);
+cow_git_prune_unreachable_objects($repo, $git);
+PHP, [
+    'FORKPRESS_COW_GIT_SERVER_HELPER' => realpath(__DIR__ . '/../../scripts/cow/git_server.php'),
+    'FORKPRESS_COW_GIT_REPO' => $git,
+    'FORKPRESS_COW_GIT_TEST_FAILPOINT' => 'after-git-object-prune',
+    'FORKPRESS_COW_GIT_TEST_FAILPOINT_ACTION' => 'exit',
+]);
+assert_true($prune_crash['status'] !== 0, 'Git object prune crash terminates the prune subprocess');
+$remaining_crash_orphans = array_values(array_filter($crash_orphan_paths, static fn($path) => is_file($path)));
+assert_same(count($remaining_crash_orphans), 1, 'Git object prune crash deletes only one unreachable object before exit');
+assert_true(is_file($reachable_tip_path), 'Git object prune crash preserves reachable branch tip');
+$gc_after_crash = cow_git_prune_unreachable_objects($repo, $git);
+assert_true($gc_after_crash['deleted'] >= 1, 'next Git object prune removes remaining unreachable object after crash');
+foreach ($crash_orphan_paths as $path) {
+    assert_true(!file_exists($path), 'next Git object prune removes prune-crash orphan');
+}
+assert_true(is_file($reachable_tip_path), 'next Git object prune still preserves reachable branch tip after crash');
+
 $orphan_blob = $repo->add_object('blob', "orphan after corruption\n");
 $orphan_path = $git . '/' . $repo->get_storage_path($orphan_blob);
 $main_tip_path = $git . '/' . $repo->get_storage_path($repo->get_branch_tip('refs/heads/main'));

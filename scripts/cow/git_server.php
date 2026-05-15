@@ -1762,6 +1762,7 @@ function cow_git_prune_unreachable_objects(GitRepository $repo, string $git_repo
                 throw new \RuntimeException("failed to prune unreachable COW Git object $oid");
             }
             ++$deleted;
+            cow_git_failpoint('after-git-object-prune');
         }
         @rmdir($dir);
     }
