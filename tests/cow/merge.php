@@ -8981,6 +8981,40 @@ SQL);
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE column_name IN ('plugin_items_source_view', 'plugin_items_source_insert') AND decision = 'source-applied'"), 2, 'source-added view and trigger decisions are auditable');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE column_name IN ('plugin_items_target_view', 'plugin_items_target_insert') AND decision = 'target-kept'"), 2, 'target-added view and trigger preservation decisions are auditable');
 
+    $schema_view_order_base = $tmp . '/schema-view-order-base.sqlite';
+    $schema_view_order_source = $tmp . '/schema-view-order-source.sqlite';
+    $schema_view_order_target = $tmp . '/schema-view-order-target.sqlite';
+    create_base_db($schema_view_order_base);
+    copy($schema_view_order_base, $schema_view_order_source);
+    copy($schema_view_order_base, $schema_view_order_target);
+    $db = open_db($schema_view_order_source);
+    $db->exec('CREATE VIEW plugin_z_source_parent_view AS SELECT item_id, label FROM plugin_items');
+    $db->exec('CREATE VIEW plugin_m_source_child_view AS SELECT item_id, label FROM plugin_z_source_parent_view');
+    $db->exec('CREATE VIEW plugin_a_source_grandchild_view AS SELECT label FROM plugin_m_source_child_view');
+    $db->close();
+
+    $schema_view_order_result = cow_merge_databases(
+        $schema_view_order_base,
+        $schema_view_order_source,
+        $schema_view_order_target,
+        $metadata,
+        'feature-source-view-order',
+        'main'
+    );
+    $schema_view_order_run_id = (int)$schema_view_order_result['run_id'];
+    assert_same($schema_view_order_result['status'], 'completed', 'source-added dependent views merge automatically even when lexical order is unsafe');
+    assert_same(scalar($schema_view_order_target, "SELECT label FROM plugin_a_source_grandchild_view WHERE label = 'Alpha'"), 'Alpha', 'source-added dependent view chain remains queryable after merge');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE run_id = $schema_view_order_run_id AND column_name IN ('plugin_z_source_parent_view', 'plugin_m_source_child_view', 'plugin_a_source_grandchild_view') AND decision = 'source-applied'"),
+        3,
+        'source-added dependent view creation order is auditable'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE run_id = $schema_view_order_run_id AND conflict_type = 'schema-source-added-view'"),
+        0,
+        'source-added dependent view ordering does not create review-only schema conflicts'
+    );
+
     $schema_same_base = $tmp . '/schema-same-base.sqlite';
     $schema_same_source = $tmp . '/schema-same-source.sqlite';
     $schema_same_target = $tmp . '/schema-same-target.sqlite';
