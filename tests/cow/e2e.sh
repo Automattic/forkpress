@@ -1674,6 +1674,13 @@ $reusableBlockValid = static function (array $posts, string $suffix): bool {
     $refs = array_map("intval", $posts["Semantic $suffix Page"]["block_refs"] ?? []);
     return $blockId > 0 && in_array($blockId, $refs, true);
 };
+$editedPageValid = static function (array $posts, array $users, string $branch, string $suffix): bool {
+    $edited = $posts["Semantic $suffix Edited Page"] ?? [];
+    $user = $users["forkpress_semantic_$branch"] ?? [];
+    $expectedContent = "<!-- wp:paragraph --><p>Edited on $branch branch</p><!-- /wp:paragraph -->";
+    return (($edited["content"] ?? null) === $expectedContent)
+        && ((int)($edited["author"] ?? 0) === (int)($user["id"] ?? 0));
+};
 $ok = $ok
     && (($posts["Semantic Source Media"]["file_exists"] ?? null) === true)
     && (($posts["Semantic Target Media"]["file_exists"] ?? null) === true)
@@ -1699,6 +1706,8 @@ $ok = $ok
     && $userValid($users, $posts, $comments, "target", "Target")
     && $commentValid($comments, $posts, "Source")
     && $commentValid($comments, $posts, "Target")
+    && $editedPageValid($posts, $users, "source", "Source")
+    && $editedPageValid($posts, $users, "target", "Target")
     && $reusableBlockValid($posts, "Source")
     && $reusableBlockValid($posts, "Target")
     && $optionRefsValid($data["source_option"] ?? [], "source", "Source")
