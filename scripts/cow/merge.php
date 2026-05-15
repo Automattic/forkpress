@@ -9218,6 +9218,52 @@ function cow_merge_audit_table_rows(
     return cow_merge_fetch_rows($db, $sql, $params);
 }
 
+function cow_merge_cleanup_branch_birth_metadata(string $metadata_db, string $branch): array {
+    if ($branch === '') {
+        throw new InvalidArgumentException('--branch is required');
+    }
+    $result = [
+        'branch' => $branch,
+        'metadata_db' => $metadata_db,
+        'cleaned' => 0,
+    ];
+    if (!is_file($metadata_db)) {
+        return $result;
+    }
+
+    $db = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READWRITE);
+    try {
+        $db->busyTimeout(5000);
+        cow_merge_exec_checked($db, 'BEGIN IMMEDIATE', 'failed to begin branch birth metadata cleanup');
+        $run_filter = "source_branch = :branch AND target_branch = :branch AND base_ref IN ('autoincrement-id-band', 'identity-capture') AND policy IN ('autoincrement-id-band-allocation', 'sidecar-row-identity-capture')";
+        $statements = [
+            ['merge_autoincrement_bands', 'DELETE FROM merge_autoincrement_bands WHERE branch_name = :branch'],
+            ['merge_row_identities', 'DELETE FROM merge_row_identities WHERE branch_name = :branch'],
+            ['merge_row_identity_history', 'DELETE FROM merge_row_identity_history WHERE branch_name = :branch'],
+            ['merge_decisions', "DELETE FROM merge_decisions WHERE run_id IN (SELECT id FROM merge_runs WHERE $run_filter)"],
+            ['merge_runs', "DELETE FROM merge_runs WHERE $run_filter"],
+        ];
+        foreach ($statements as [$table, $sql]) {
+            if (!cow_merge_audit_has_table($db, $table)) {
+                continue;
+            }
+            $stmt = cow_merge_prepare_checked($db, $sql, 'failed to prepare branch birth metadata cleanup');
+            cow_merge_bind($stmt, ':branch', $branch);
+            $res = cow_merge_execute_checked($stmt, $db, 'failed to clean branch birth metadata');
+            $res->finalize();
+            $stmt->close();
+            $result['cleaned'] += $db->changes();
+        }
+        cow_merge_exec_checked($db, 'COMMIT', 'failed to commit branch birth metadata cleanup');
+        return $result;
+    } catch (Throwable $e) {
+        @$db->exec('ROLLBACK');
+        throw $e;
+    } finally {
+        $db->close();
+    }
+}
+
 function cow_merge_audit_decode_payload(mixed $value): mixed {
     if (!is_array($value)) {
         return $value;
@@ -12080,6 +12126,16 @@ if (realpath($argv[0] ?? '') === __FILE__) {
                 echo "  reused:    {$result['reused']}\n";
                 echo "  advanced:  {$result['advanced']}\n";
                 echo "  metadata:  {$result['metadata_db']}\n";
+            }
+            exit(0);
+        }
+        if ($command === 'cleanup-branch-birth-metadata') {
+            $args = cow_merge_parse_cli($argv, ['metadata-db', 'branch'], 2);
+            $result = cow_merge_cleanup_branch_birth_metadata($args['metadata-db'], $args['branch']);
+            if (($args['quiet'] ?? '0') !== '1') {
+                echo "forkpress: cleaned branch birth metadata for {$args['branch']}\n";
+                echo "  cleaned:  {$result['cleaned']}\n";
+                echo "  metadata: {$result['metadata_db']}\n";
             }
             exit(0);
         }

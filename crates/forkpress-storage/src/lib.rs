@@ -469,24 +469,77 @@ pub fn create_cow_branch_from_tree(
     if dest.exists() {
         bail!("branch already exists: {branch}");
     }
-    if cow_branch_copies_require_cow(layout)? {
-        copy_tree_cow_required(source, &dest)?;
-    } else {
-        copy_tree_cow(source, &dest)?;
+    let dest_parent = dest.parent().ok_or_else(|| {
+        anyhow!(
+            "branch destination has no parent directory: {}",
+            dest.display()
+        )
+    })?;
+    fs::create_dir_all(dest_parent)
+        .with_context(|| format!("failed to create {}", dest_parent.display()))?;
+    let staging = unique_cow_operation_dir(dest_parent, "branch-create-stage", branch);
+    if path_exists_no_follow(&staging) {
+        bail!("temporary branch creation path already exists");
     }
-    let branch_root = ensure_cow_public_branch_root(layout, branch, &dest, file_view)?;
-    run_cow_bootstrap_script(layout, runtime, shared, &branch_root, "ForkPress", "admin")?;
+
     let source_db = cow_sqlite_db_path(source);
-    if source_db.is_file() {
+    let mut staging_published = false;
+    let create_result = (|| -> Result<()> {
+        if cow_branch_copies_require_cow(layout)? {
+            copy_tree_cow_required(source, &staging)?;
+        } else {
+            copy_tree_cow(source, &staging)?;
+        }
+
+        run_cow_bootstrap_script(layout, runtime, shared, &staging, "ForkPress", "admin")?;
+        if !source_db.is_file() {
+            bail!(
+                "source branch database does not exist: {}",
+                source_db.display()
+            );
+        }
         record_cow_merge_base_snapshot(layout, runtime, shared, branch, &source_db)?;
-    }
-    let branch_db = cow_sqlite_db_path(&branch_root);
-    if branch_db.is_file() {
+        let branch_db = cow_sqlite_db_path(&staging);
+        if !branch_db.is_file() {
+            bail!(
+                "created branch database does not exist: {}",
+                branch_db.display()
+            );
+        }
         allocate_cow_autoincrement_bands(layout, runtime, shared, branch, &branch_db)?;
         capture_cow_row_identities(layout, runtime, shared, branch, &branch_db, seed_branch)?;
+        record_cow_file_merge_base_snapshot(layout, runtime, shared, branch, &staging)?;
+
+        if path_exists_no_follow(&dest) {
+            bail!("branch already exists: {branch}");
+        }
+        fs::rename(&staging, &dest).with_context(|| {
+            format!(
+                "failed to publish branch {} to {}",
+                staging.display(),
+                dest.display()
+            )
+        })?;
+        staging_published = true;
+        ensure_cow_public_branch_root(layout, branch, &dest, file_view)?;
+        write_cow_branch_list(layout)?;
+        Ok(())
+    })();
+
+    if let Err(err) = create_result {
+        let cleanup = cleanup_failed_cow_branch_create(
+            layout,
+            runtime,
+            shared,
+            branch,
+            &staging,
+            &dest,
+            file_view,
+            staging_published,
+        );
+        return Err(err).context(format!("failed to create COW branch '{branch}'; {cleanup}"));
     }
-    record_cow_file_merge_base_snapshot(layout, runtime, shared, branch, &branch_root)?;
-    write_cow_branch_list(layout)?;
+
     println!("forkpress: COW cloned {source_label} -> '{branch}'");
     if let Some((root_host, port)) = url_hint {
         println!(
@@ -716,6 +769,34 @@ fn capture_cow_row_identities(
         args.push("--seed-branch".into());
         args.push(seed_branch.into());
     }
+    run_php_script(
+        layout,
+        runtime,
+        shared,
+        "scripts/cow/merge.php",
+        args.iter().map(|arg| arg.as_os_str()),
+    )
+}
+
+fn cleanup_cow_branch_birth_metadata(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    branch: &str,
+) -> Result<()> {
+    let metadata_db = cow_merge_metadata_db_path(layout);
+    if !metadata_db.is_file() {
+        return Ok(());
+    }
+    let args: Vec<OsString> = vec![
+        "cleanup-branch-birth-metadata".into(),
+        "--metadata-db".into(),
+        metadata_db.as_os_str().to_os_string(),
+        "--branch".into(),
+        branch.into(),
+        "--quiet".into(),
+        "1".into(),
+    ];
     run_php_script(
         layout,
         runtime,
@@ -2619,6 +2700,116 @@ fn remove_sqlite_file_and_sidecars(db: &Path) -> Result<()> {
     Ok(())
 }
 
+fn remove_branch_path_if_ours(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() || meta.is_file() => {
+            fs::remove_file(path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+            Ok(true)
+        }
+        Ok(meta) if meta.is_dir() => {
+            fs::remove_dir_all(path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+            Ok(true)
+        }
+        Ok(_) => bail!("{} is not a removable branch path", path.display()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err).with_context(|| format!("failed to inspect {}", path.display())),
+    }
+}
+
+fn cleanup_cow_branch_birth_files(
+    layout: &Layout,
+    branch: &str,
+    staging: &Path,
+    dest: &Path,
+    file_view: FileViewStrategy,
+    staging_published: bool,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    if let Err(err) = remove_branch_path_if_ours(staging) {
+        errors.push(err.to_string());
+    }
+    if staging_published {
+        let public_root = cow_branch_root(layout, branch);
+        if public_root != dest {
+            match fs::symlink_metadata(&public_root) {
+                Ok(meta) if meta.file_type().is_symlink() => match fs::read_link(&public_root) {
+                    Ok(target) if target == dest => {
+                        if let Err(err) = fs::remove_file(&public_root) {
+                            errors
+                                .push(format!("failed to remove {}: {err}", public_root.display()));
+                        }
+                    }
+                    Ok(target) => errors.push(format!(
+                        "{} points to {}; expected {}",
+                        public_root.display(),
+                        target.display(),
+                        dest.display()
+                    )),
+                    Err(err) => {
+                        errors.push(format!("failed to read {}: {err}", public_root.display()))
+                    }
+                },
+                Ok(_) if file_view == FileViewStrategy::MacosApfsSparsebundle => {
+                    errors.push(format!(
+                        "{} is not the expected branch symlink",
+                        public_root.display()
+                    ));
+                }
+                Ok(_) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => errors.push(format!(
+                    "failed to inspect {}: {err}",
+                    public_root.display()
+                )),
+            }
+        }
+        if let Err(err) = remove_branch_path_if_ours(dest) {
+            errors.push(err.to_string());
+        }
+    }
+    match cow_merge_base_db_path(layout, branch) {
+        Ok(base_db) => {
+            if let Err(err) = remove_sqlite_file_and_sidecars(&base_db) {
+                errors.push(err.to_string());
+            }
+        }
+        Err(err) => errors.push(err.to_string()),
+    }
+    match cow_merge_file_base_path(layout, branch) {
+        Ok(file_base) => match fs::remove_file(&file_base) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => errors.push(format!("failed to remove {}: {err}", file_base.display())),
+        },
+        Err(err) => errors.push(err.to_string()),
+    }
+    errors
+}
+
+fn cleanup_failed_cow_branch_create(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    branch: &str,
+    staging: &Path,
+    dest: &Path,
+    file_view: FileViewStrategy,
+    staging_published: bool,
+) -> String {
+    let mut errors =
+        cleanup_cow_branch_birth_files(layout, branch, staging, dest, file_view, staging_published);
+    if let Err(err) = cleanup_cow_branch_birth_metadata(layout, runtime, shared, branch) {
+        errors.push(err.to_string());
+    }
+    if errors.is_empty() {
+        "rolled back branch creation artifacts".to_string()
+    } else {
+        format!("rollback incomplete: {}", errors.join("; "))
+    }
+}
+
 fn hot_copy_sqlite_database(
     layout: &Layout,
     runtime: &PortableRuntime,
@@ -2957,6 +3148,56 @@ mod tests {
         assert!(message.contains("rollback incomplete"));
         assert!(message.contains("backup remains"));
         assert!(path_exists_no_follow(&backup));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn branch_birth_cleanup_removes_staged_branch_and_merge_bases() {
+        let root = std::env::temp_dir().join(format!(
+            "forkpress-branch-birth-cleanup-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let layout = Layout::new(root.join(".forkpress")).unwrap();
+        let staging = root.join(".forkpress-branch-create-stage-feature");
+        let dest = root.join("feature");
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(staging.join("wp-load.php"), b"<?php\n").unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(dest.join("wp-load.php"), b"<?php\n").unwrap();
+        let base_db = cow_merge_base_db_path(&layout, "feature").unwrap();
+        fs::create_dir_all(base_db.parent().unwrap()).unwrap();
+        fs::write(&base_db, b"base").unwrap();
+        fs::write(sqlite_sidecar_path(&base_db, "-wal"), b"wal").unwrap();
+        fs::write(sqlite_sidecar_path(&base_db, "-shm"), b"shm").unwrap();
+        let file_base = cow_merge_file_base_path(&layout, "feature").unwrap();
+        fs::create_dir_all(file_base.parent().unwrap()).unwrap();
+        fs::write(&file_base, b"{}").unwrap();
+
+        let errors = cleanup_cow_branch_birth_files(
+            &layout,
+            "feature",
+            &staging,
+            &dest,
+            FileViewStrategy::Copy,
+            true,
+        );
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(!path_exists_no_follow(&staging));
+        assert!(!path_exists_no_follow(&dest));
+        assert!(!path_exists_no_follow(&base_db));
+        assert!(!path_exists_no_follow(&sqlite_sidecar_path(
+            &base_db, "-wal"
+        )));
+        assert!(!path_exists_no_follow(&sqlite_sidecar_path(
+            &base_db, "-shm"
+        )));
+        assert!(!path_exists_no_follow(&file_base));
 
         fs::remove_dir_all(root).unwrap();
     }

@@ -12955,6 +12955,24 @@ SQL);
     assert_same($result['allocated'], 0, 'rerunning allocation on the same branch DB reuses existing bands');
     assert_same($result['reused'], 3, 'rerunning allocation records existing bands as reused');
 
+    $birth_cleanup_db = $tmp . '/band-birth-cleanup.sqlite';
+    copy($band_base, $birth_cleanup_db);
+    $db = open_db($birth_cleanup_db);
+    $db->exec('CREATE TABLE plugin_birth_keyless (label TEXT NOT NULL)');
+    $db->exec("INSERT INTO plugin_birth_keyless (label) VALUES ('birth cleanup keyless')");
+    $db->close();
+    cow_merge_allocate_autoincrement_bands($birth_cleanup_db, $band_metadata, 'feature-birth-cleanup');
+    cow_merge_capture_row_identities($birth_cleanup_db, $band_metadata, 'feature-birth-cleanup');
+    assert_true((int)scalar($band_metadata, "SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'feature-birth-cleanup'") > 0, 'branch birth cleanup fixture creates band metadata');
+    assert_true((int)scalar($band_metadata, "SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = 'feature-birth-cleanup'") > 0, 'branch birth cleanup fixture creates row identity metadata');
+    $birth_cleanup = cow_merge_cleanup_branch_birth_metadata($band_metadata, 'feature-birth-cleanup');
+    assert_true($birth_cleanup['cleaned'] > 0, 'branch birth metadata cleanup reports removed rows');
+    assert_same((int)scalar($band_metadata, "SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'feature-birth-cleanup'"), 0, 'branch birth metadata cleanup removes allocated bands');
+    assert_same((int)scalar($band_metadata, "SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = 'feature-birth-cleanup'"), 0, 'branch birth metadata cleanup removes active row identities');
+    assert_same((int)scalar($band_metadata, "SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'feature-birth-cleanup'"), 0, 'branch birth metadata cleanup removes row identity history');
+    assert_same((int)scalar($band_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-birth-cleanup'"), 0, 'branch birth metadata cleanup removes branch birth runs');
+    assert_true((int)scalar($band_metadata, "SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'feature-band-a'") > 0, 'branch birth metadata cleanup leaves unrelated branch bands intact');
+
     $result = cow_merge_allocate_autoincrement_bands($band_feature_b, $band_metadata, 'feature-band-b');
     assert_same($result['allocated'], 3, 'second branch receives its own bands');
     $db = open_db($band_feature_b);
