@@ -4713,6 +4713,112 @@ function cow_merge_wordpress_comment_reference_violation(
     return null;
 }
 
+function cow_merge_wordpress_option_reference_violation(
+    SQLite3 $source,
+    SQLite3 $target,
+    SQLite3 $meta,
+    string $source_branch,
+    array $source_row
+): ?string {
+    $option_name = (string)($source_row['option_name'] ?? '');
+    $option_value = (string)($source_row['option_value'] ?? '');
+    if ($option_name === '') {
+        return null;
+    }
+
+    $check_post = function (mixed $id, string $label) use ($source, $target, $meta, $source_branch, $option_name): ?string {
+        return cow_merge_wordpress_parent_reference_violation(
+            $source,
+            $target,
+            $meta,
+            $source_branch,
+            "wp_options row '$option_name' $label",
+            'wp_posts',
+            'ID',
+            $id,
+            'post'
+        );
+    };
+    $check_term = function (mixed $id, string $label) use ($source, $target, $meta, $source_branch, $option_name): ?string {
+        return cow_merge_wordpress_parent_reference_violation(
+            $source,
+            $target,
+            $meta,
+            $source_branch,
+            "wp_options row '$option_name' $label",
+            'wp_terms',
+            'term_id',
+            $id,
+            'term'
+        );
+    };
+
+    if (in_array($option_name, ['page_on_front', 'page_for_posts', 'site_icon'], true)) {
+        return $check_post($option_value, 'value');
+    }
+
+    $decoded = @unserialize($option_value, ['allowed_classes' => false]);
+    if (!is_array($decoded)) {
+        return null;
+    }
+
+    if ($option_name === 'sticky_posts') {
+        foreach ($decoded as $index => $post_id) {
+            $violation = $check_post($post_id, 'sticky_posts.' . (string)$index);
+            if ($violation !== null) {
+                return $violation;
+            }
+        }
+        return null;
+    }
+
+    if (str_starts_with($option_name, 'theme_mods_')) {
+        if (array_key_exists('custom_logo', $decoded)) {
+            $violation = $check_post($decoded['custom_logo'], 'custom_logo');
+            if ($violation !== null) {
+                return $violation;
+            }
+        }
+        $locations = $decoded['nav_menu_locations'] ?? null;
+        if (is_array($locations)) {
+            foreach ($locations as $location => $term_id) {
+                $violation = $check_term($term_id, 'nav_menu_locations.' . (string)$location);
+                if ($violation !== null) {
+                    return $violation;
+                }
+            }
+        }
+        return null;
+    }
+
+    if ($option_name === 'widget_nav_menu') {
+        foreach ($decoded as $widget_id => $widget) {
+            if (!is_array($widget) || !array_key_exists('nav_menu', $widget)) {
+                continue;
+            }
+            $violation = $check_term($widget['nav_menu'], 'widget.' . (string)$widget_id . '.nav_menu');
+            if ($violation !== null) {
+                return $violation;
+            }
+        }
+        return null;
+    }
+
+    if ($option_name === 'widget_media_image') {
+        foreach ($decoded as $widget_id => $widget) {
+            if (!is_array($widget) || !array_key_exists('attachment_id', $widget)) {
+                continue;
+            }
+            $violation = $check_post($widget['attachment_id'], 'widget.' . (string)$widget_id . '.attachment_id');
+            if ($violation !== null) {
+                return $violation;
+            }
+        }
+    }
+
+    return null;
+}
+
 function cow_merge_wordpress_insert_reference_violation(
     SQLite3 $source,
     SQLite3 $target,
@@ -4767,6 +4873,9 @@ function cow_merge_wordpress_insert_reference_violation(
         if ($comment !== null) {
             return cow_merge_wordpress_comment_reference_violation($source, $target, $meta, $source_branch, 'wp_commentmeta row', $comment);
         }
+    }
+    if ($table === 'wp_options' || str_ends_with($table, '_options')) {
+        return cow_merge_wordpress_option_reference_violation($source, $target, $meta, $source_branch, $source_row);
     }
     if ($table === 'wp_termmeta') {
         return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_termmeta row', 'wp_terms', 'term_id', $source_row['term_id'] ?? null, 'term');
