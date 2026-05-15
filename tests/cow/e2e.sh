@@ -1017,6 +1017,163 @@ add_action('init', function () {
 }, 20);
 PHP
 
+cat > "$WORK/main/wp-content/mu-plugins/forkpress-semantic-graph.forkpress-merge-validator.php" <<'PHP'
+<?php
+$db_path = getenv('FORKPRESS_MERGE_TARGET_DB') ?: '';
+$target_root = rtrim((string)(getenv('FORKPRESS_MERGE_TARGET_ROOT') ?: ''), '/');
+$merge_run = getenv('FORKPRESS_MERGE_RUN') ?: '';
+$findings = [];
+
+if ($merge_run === '' && $db_path === '') {
+    return;
+}
+
+$emit = static function (array $findings): void {
+    echo json_encode([
+        'status' => count($findings) === 0 ? 'valid' : 'conflicts',
+        'findings' => $findings,
+    ], JSON_UNESCAPED_SLASHES) . "\n";
+};
+$finding = static function (string $object, string $reason, array $tables = [], array $files = [], array $payload = []) use (&$findings): void {
+    $findings[] = [
+        'plugin' => 'forkpress-semantic-graph',
+        'object' => $object,
+        'reason' => $reason,
+        'tables' => array_values($tables),
+        'files' => array_values($files),
+        'validator' => 'forkpress-semantic-graph@1',
+        'payload' => $payload,
+    ];
+};
+
+if ($db_path === '' || !is_file($db_path)) {
+    $finding('candidate-db', 'candidate database is unavailable');
+    $emit($findings);
+    exit;
+}
+
+$db = new SQLite3($db_path, SQLITE3_OPEN_READONLY);
+$quote = static fn(string $name): string => '"' . str_replace('"', '""', $name) . '"';
+$table_named_like = static function (SQLite3 $db, string $suffix): ?string {
+    $stmt = $db->prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE :name ORDER BY name LIMIT 1");
+    $stmt->bindValue(':name', '%' . $suffix, SQLITE3_TEXT);
+    $result = $stmt->execute();
+    $row = $result ? $result->fetchArray(SQLITE3_ASSOC) : false;
+    if ($result) {
+        $result->finalize();
+    }
+    return is_array($row) && isset($row['name']) ? (string)$row['name'] : null;
+};
+$first_row = static function (SQLite3 $db, string $sql, array $params = []): ?array {
+    $stmt = $db->prepare($sql);
+    foreach ($params as $name => $value) {
+        $stmt->bindValue($name, $value, is_int($value) ? SQLITE3_INTEGER : SQLITE3_TEXT);
+    }
+    $result = $stmt->execute();
+    $row = $result ? $result->fetchArray(SQLITE3_ASSOC) : false;
+    if ($result) {
+        $result->finalize();
+    }
+    return is_array($row) ? $row : null;
+};
+$decode_json = static fn($value): ?array => is_array($decoded = json_decode((string)$value, true)) ? $decoded : null;
+$decode_serialized = static function ($value): ?array {
+    $decoded = @unserialize((string)$value);
+    return is_array($decoded) ? $decoded : null;
+};
+$same_int = static fn($left, $right): bool => (int)$left === (int)$right && (int)$left > 0;
+
+$parent_table = $table_named_like($db, 'forkpress_semantic_plugin_parent');
+$child_table = $table_named_like($db, 'forkpress_semantic_plugin_child');
+if ($parent_table === null || $child_table === null) {
+    $emit($findings);
+    exit;
+}
+
+$prefix = substr($parent_table, 0, -strlen('forkpress_semantic_plugin_parent'));
+$posts_table = $prefix . 'posts';
+$options_table = $prefix . 'options';
+$postmeta_table = $prefix . 'postmeta';
+$parent_result = $db->query('SELECT * FROM ' . $quote($parent_table) . ' ORDER BY id');
+while ($parent_result && ($parent = $parent_result->fetchArray(SQLITE3_ASSOC))) {
+    $branch = (string)($parent['branch'] ?? '');
+    $object = $branch === '' ? 'semantic-plugin-parent:' . (string)($parent['id'] ?? '') : "semantic-plugin-graph:$branch";
+    $json_graph = $decode_json($parent['graph_json'] ?? '');
+    $serialized_graph = $decode_serialized($parent['graph_serialized'] ?? '');
+    $tables = [$parent_table, $child_table, $options_table, $postmeta_table, $posts_table];
+    if ($json_graph === null || $serialized_graph === null) {
+        $finding($object, 'parent graph JSON or serialized payload is unreadable', $tables);
+        continue;
+    }
+
+    $parent_id = (int)($parent['id'] ?? 0);
+    $child_id = (int)($json_graph['child_id'] ?? 0);
+    if (!$same_int($json_graph['parent_id'] ?? 0, $parent_id) || !$same_int($serialized_graph['parent_id'] ?? 0, $parent_id)) {
+        $finding($object, 'parent graph payload does not point back at the parent row', $tables, [], ['parent_id' => $parent_id]);
+    }
+    if (!$same_int($serialized_graph['child_id'] ?? 0, $child_id)) {
+        $finding($object, 'serialized parent graph does not match JSON child id', $tables, [], ['child_id' => $child_id]);
+    }
+
+    $child = $first_row(
+        $db,
+        'SELECT * FROM ' . $quote($child_table) . ' WHERE id = :id',
+        [':id' => $child_id]
+    );
+    $child_payload = $child === null ? null : $decode_json($child['payload'] ?? '');
+    if ($child === null || $child_payload === null || !$same_int($child['parent_id'] ?? 0, $parent_id) || !$same_int($child_payload['parent_id'] ?? 0, $parent_id)) {
+        $finding($object, 'child row or child JSON payload no longer points at the parent row', $tables, [], ['parent_id' => $parent_id, 'child_id' => $child_id]);
+    }
+
+    $option = $first_row(
+        $db,
+        'SELECT option_value FROM ' . $quote($options_table) . ' WHERE option_name = :name',
+        [':name' => "forkpress_semantic_plugin_{$branch}_option"]
+    );
+    $option_graph = $option === null ? null : $decode_serialized($option['option_value'] ?? '');
+    if ($option_graph === null || !$same_int($option_graph['parent_id'] ?? 0, $parent_id) || !$same_int($option_graph['child_id'] ?? 0, $child_id)) {
+        $finding($object, 'plugin option graph no longer matches the custom-table graph', $tables, [], ['branch' => $branch]);
+    }
+
+    $page_id = (int)($json_graph['page_id'] ?? 0);
+    $note_id = (int)($json_graph['note_id'] ?? 0);
+    $page = $first_row(
+        $db,
+        'SELECT ID, post_type FROM ' . $quote($posts_table) . ' WHERE ID = :id',
+        [':id' => $page_id]
+    );
+    $note = $first_row(
+        $db,
+        'SELECT ID, post_type FROM ' . $quote($posts_table) . ' WHERE ID = :id',
+        [':id' => $note_id]
+    );
+    if (($page['post_type'] ?? null) !== 'page' || ($note['post_type'] ?? null) !== 'forkpress_note') {
+        $finding($object, 'plugin graph post references no longer point at the expected page and note objects', $tables, [], ['page_id' => $page_id, 'note_id' => $note_id]);
+    }
+
+    $postmeta = $first_row(
+        $db,
+        'SELECT meta_value FROM ' . $quote($postmeta_table) . ' WHERE post_id = :post_id AND meta_key = :meta_key ORDER BY meta_id DESC LIMIT 1',
+        [':post_id' => $page_id, ':meta_key' => '_forkpress_semantic_plugin_graph']
+    );
+    $postmeta_graph = $postmeta === null ? null : $decode_json($postmeta['meta_value'] ?? '');
+    if ($postmeta_graph === null || !$same_int($postmeta_graph['parent_id'] ?? 0, $parent_id) || !$same_int($postmeta_graph['note_id'] ?? 0, $note_id)) {
+        $finding($object, 'page postmeta graph no longer matches the plugin parent and note', $tables, [], ['page_id' => $page_id, 'note_id' => $note_id]);
+    }
+
+    $file = ltrim((string)($json_graph['file'] ?? ''), '/');
+    $child_file = ltrim((string)($child['file_path'] ?? ''), '/');
+    if ($file === '' || $child_file !== $file || $target_root === '' || !is_file($target_root . '/wp-content/uploads/' . $file)) {
+        $finding($object, 'plugin graph file reference is missing or inconsistent', $tables, [$file], ['target_root' => basename($target_root)]);
+    }
+}
+if ($parent_result) {
+    $parent_result->finalize();
+}
+
+$emit($findings);
+PHP
+
 autoinc_runtime_request main init "$TMP/autoinc-main-init.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(($data["max_id"] ?? null) === 1 ? 0 : 1);' "$TMP/autoinc-main-init.json"
 
@@ -1493,6 +1650,7 @@ php -r '$data = json_decode(file_get_contents($argv[1]), true); $posts = []; for
 "$BIN" branch --work-dir "$WORK_DIR" merge semantic-source --into semantic-target > "$TMP/semantic-merge.out"
 grep -F "forkpress: merged semantic-source into semantic-target" "$TMP/semantic-merge.out" >/dev/null
 grep -E "status:    completed(_with_conflicts)?" "$TMP/semantic-merge.out" >/dev/null
+grep -F "plugins:   validators=1 conflicts=0" "$TMP/semantic-merge.out" >/dev/null
 semantic_runtime_request semantic-target inspect "$TMP/semantic-after-merge.json"
 php -r '
 $data = json_decode(file_get_contents($argv[1]), true);

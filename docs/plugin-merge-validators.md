@@ -182,7 +182,8 @@ The clean branch-ID-band case is covered by:
 - `tests/cow/merge.php`: deterministic custom-table graph with JSON,
   serialized option/postmeta references, and a referenced file.
 - `tests/cow/e2e.sh`: runtime WordPress fixture that creates the same shape
-  through branch-local requests before merging.
+  through branch-local requests before merging, then validates the candidate
+  target through an auto-discovered mu-plugin merge validator.
 
 The PHP unit suite also covers a simulated broken-reference validator finding
 for that graph, plugin-scoped audit output, review metadata, automatic
