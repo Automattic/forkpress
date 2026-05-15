@@ -1,4 +1,4 @@
-name: release:prepare
+name: "Release: prepare"
 
 on:
   workflow_dispatch:
@@ -14,6 +14,7 @@ permissions:
 
 jobs:
   prepare:
+    name: "Release: prepare"
     runs-on: ubuntu-latest
     env:
       ASTRO_TELEMETRY_DISABLED: "1"
