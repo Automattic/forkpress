@@ -361,6 +361,30 @@ function cow_merge_test_hook(string $name, mixed ...$args): void {
     }
 }
 
+function cow_merge_failpoint(string $name): void {
+    $configured = getenv('FORKPRESS_COW_MERGE_TEST_FAILPOINT');
+    if (!is_string($configured) || $configured === '') {
+        return;
+    }
+    $failpoints = array_map('trim', explode(',', $configured));
+    if (!in_array($name, $failpoints, true)) {
+        return;
+    }
+
+    $action = getenv('FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION');
+    $action = is_string($action) && $action !== '' ? $action : 'throw';
+    if ($action === 'kill') {
+        if (function_exists('posix_kill') && defined('SIGKILL')) {
+            posix_kill(getmypid(), SIGKILL);
+        }
+        exit(86);
+    }
+    if ($action === 'exit') {
+        exit(86);
+    }
+    throw new RuntimeException("forced COW merge failpoint: $name");
+}
+
 function cow_merge_read_file_base(string $file_base): array {
     if (!is_file($file_base)) {
         throw new RuntimeException("filesystem merge base does not exist: $file_base");
@@ -3732,6 +3756,59 @@ function cow_merge_sqlite_snapshot_artifact(?array $snapshot): ?array {
         'backup' => is_string($backup) ? $backup : null,
         'backup_exists' => is_string($backup) && is_file($backup),
     ];
+}
+
+function cow_merge_crash_recovery_dir(string $metadata_db): string {
+    return dirname($metadata_db) . '/crash-recovery';
+}
+
+function cow_merge_crash_recovery_artifact_path(string $metadata_db, int $run_id, string $checkpoint): string {
+    $safe_checkpoint = preg_replace('/[^A-Za-z0-9_.-]/', '-', $checkpoint);
+    if (!is_string($safe_checkpoint) || $safe_checkpoint === '') {
+        $safe_checkpoint = 'unknown';
+    }
+    return cow_merge_crash_recovery_dir($metadata_db) . '/run-' . $run_id . '-' . $safe_checkpoint . '.json';
+}
+
+function cow_merge_write_crash_recovery_artifact(
+    string $metadata_db,
+    int $run_id,
+    string $checkpoint,
+    array $run_context,
+    array $target_snapshot
+): string {
+    $path = cow_merge_crash_recovery_artifact_path($metadata_db, $run_id, $checkpoint);
+    cow_merge_write_json_file($path, [
+        'version' => 1,
+        'created_at' => gmdate('c'),
+        'checkpoint' => $checkpoint,
+        'run_id' => $run_id,
+        'source_branch' => (string)($run_context['source_branch'] ?? ''),
+        'target_branch' => (string)($run_context['target_branch'] ?? ''),
+        'base_db' => (string)($run_context['base_db'] ?? ''),
+        'source_db' => (string)($run_context['source_db'] ?? ''),
+        'target_db' => (string)($run_context['target_db'] ?? ''),
+        'artifacts' => [
+            'target_db_snapshot' => cow_merge_sqlite_snapshot_artifact($target_snapshot),
+        ],
+    ]);
+    return $path;
+}
+
+function cow_merge_remove_crash_recovery_artifact(?string $path): void {
+    if ($path === null) {
+        return;
+    }
+    if (is_file($path) || is_link($path)) {
+        @unlink($path);
+    }
+    $dir = dirname($path);
+    if (is_dir($dir)) {
+        $entries = scandir($dir);
+        if (is_array($entries) && count(array_diff($entries, ['.', '..'])) === 0) {
+            @rmdir($dir);
+        }
+    }
 }
 
 function cow_merge_file_root_snapshot_artifact(?array $snapshot, ?string $target_root): ?array {
@@ -11753,6 +11830,7 @@ function cow_merge_databases(
     $target_committed = false;
     $target_snapshot = cow_merge_snapshot_sqlite_db($target_db);
     $preserve_target_snapshot = false;
+    $crash_recovery_artifact = null;
     try {
         cow_merge_exec_checked($target, 'BEGIN IMMEDIATE', 'failed to start target database transaction');
         $target_transaction_active = true;
@@ -11898,13 +11976,31 @@ function cow_merge_databases(
         $applied += $trigger_result['applied'];
         $conflicts += $trigger_result['conflicts'];
 
+        $status = $conflicts > 0 ? 'completed_with_conflicts' : 'completed';
+        $crash_recovery_artifact = cow_merge_write_crash_recovery_artifact(
+            $metadata_db,
+            $run_id,
+            'target-db-commit',
+            [
+                'source_branch' => $source_branch,
+                'target_branch' => $target_branch,
+                'base_db' => $base_db,
+                'source_db' => $source_db,
+                'target_db' => $target_db,
+            ],
+            $target_snapshot
+        );
+        cow_merge_failpoint('before-target-db-commit');
         cow_merge_exec_checked($target, 'COMMIT', 'failed to commit target database transaction');
         $target_transaction_active = false;
         $target_committed = true;
-        $status = $conflicts > 0 ? 'completed_with_conflicts' : 'completed';
+        cow_merge_failpoint('after-target-db-commit');
         cow_merge_finish_run($meta, $run_id, $status);
+        cow_merge_failpoint('before-metadata-commit');
         cow_merge_exec_checked($meta, 'COMMIT', 'failed to commit merge metadata transaction');
         $metadata_transaction_active = false;
+        cow_merge_remove_crash_recovery_artifact($crash_recovery_artifact);
+        $crash_recovery_artifact = null;
         return [
             'run_id' => $run_id,
             'status' => $status,
@@ -11922,6 +12018,8 @@ function cow_merge_databases(
                 $target->close();
                 $target = null;
                 cow_merge_restore_sqlite_snapshot($target_snapshot);
+                cow_merge_remove_crash_recovery_artifact($crash_recovery_artifact);
+                $crash_recovery_artifact = null;
             } catch (Throwable $rollback_error) {
                 $preserve_target_snapshot = true;
                 $run_context = cow_merge_run_context($meta, $run_id);
@@ -11958,6 +12056,8 @@ function cow_merge_databases(
             @$meta->exec('ROLLBACK');
         }
         cow_merge_finish_run($meta, $run_id, 'failed', cow_merge_failure_reason($e));
+        cow_merge_remove_crash_recovery_artifact($crash_recovery_artifact);
+        $crash_recovery_artifact = null;
         throw $e;
     } finally {
         if (!$preserve_target_snapshot) {

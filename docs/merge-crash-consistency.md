@@ -31,6 +31,9 @@ The PHP merge suite covers these rollback classes:
 - Failed-run metadata write failures, including artifact-only fallback.
 - ID-band allocation rollback across target DB, metadata DB, and recovery
   artifacts.
+- Process death immediately after the target DB commit but before metadata
+  commit, with a durable crash-recovery artifact that points at the pre-merge
+  target DB snapshot and proves the run was not falsely marked completed.
 
 The Git server suite covers these publication classes:
 
@@ -47,7 +50,10 @@ The Git server suite covers these publication classes:
 The remaining work is finer-grained failure injection around process death or
 OS-level interruption, not just deliberate exceptions:
 
-- Kill after target DB commit but before metadata commit.
+- Kill after target DB commit but before metadata commit is covered for the
+  direct DB merge path; the remaining work is to wire the recovery artifact into
+  an operator-facing recovery command and extend the same process-death harness
+  to full DB+file+Git branch publication.
 - Kill after metadata commit but before file publish.
 - Kill after one file publish but before later file publishes.
 - Kill after file publish but before Git ref update.

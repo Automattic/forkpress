@@ -40,6 +40,36 @@ function run_merge_cli(array $args): array {
     ];
 }
 
+function run_merge_cli_env(array $args, array $env): array {
+    $script = dirname(__DIR__, 2) . '/scripts/cow/merge.php';
+    $base_env = getenv();
+    if (!is_array($base_env)) {
+        $base_env = [];
+    }
+    $pipes = [];
+    $process = proc_open(
+        array_merge([PHP_BINARY, $script], $args),
+        [
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w'],
+        ],
+        $pipes,
+        null,
+        array_merge($base_env, $env)
+    );
+    if (!is_resource($process)) {
+        throw new RuntimeException('failed to start merge CLI subprocess');
+    }
+    $stdout = stream_get_contents($pipes[1]);
+    $stderr = stream_get_contents($pipes[2]);
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+    return [
+        'status' => proc_close($process),
+        'output' => (is_string($stdout) ? $stdout : '') . (is_string($stderr) ? $stderr : ''),
+    ];
+}
+
 function remove_tree(string $path): void {
     if (!file_exists($path) && !is_link($path)) {
         return;
@@ -1298,6 +1328,60 @@ try {
     $merge_restore_failure_artifact = file_get_contents($merge_restore_failure_artifact_path);
     assert_true(is_string($merge_restore_failure_artifact) && str_contains($merge_restore_failure_artifact, '"target_db_snapshot"'), 'rollback-failure artifact records target DB snapshot details');
     assert_true(str_contains((string)$merge_restore_failure_artifact, '"backup_exists":true'), 'rollback-failure artifact keeps the target DB snapshot backup for recovery');
+
+    if (function_exists('posix_kill') && defined('SIGKILL')) {
+        $crash_commit_base = $tmp . '/crash-commit-base.sqlite';
+        $crash_commit_source = $tmp . '/crash-commit-source.sqlite';
+        $crash_commit_target = $tmp . '/crash-commit-target.sqlite';
+        $crash_commit_metadata = $tmp . '/.forkpress/cow/merge/crash-commit/metadata.sqlite';
+        create_base_db($crash_commit_base);
+        copy($crash_commit_base, $crash_commit_source);
+        copy($crash_commit_base, $crash_commit_target);
+        $db = open_db($crash_commit_source);
+        $db->exec("UPDATE wp_posts SET post_content = 'Source crash commit content' WHERE ID = 1");
+        $db->close();
+        $crash_commit_result = run_merge_cli_env(
+            [
+                'merge',
+                '--base-db', $crash_commit_base,
+                '--source-db', $crash_commit_source,
+                '--target-db', $crash_commit_target,
+                '--metadata-db', $crash_commit_metadata,
+                '--source', 'feature-crash-commit',
+                '--target', 'main',
+            ],
+            [
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT' => 'after-target-db-commit',
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION' => 'kill',
+            ]
+        );
+        assert_true($crash_commit_result['status'] !== 0, 'crash failpoint terminates the merge subprocess after target DB commit');
+        assert_same(
+            scalar($crash_commit_target, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Source crash commit content',
+            'process death after target DB commit leaves the durable target change visible'
+        );
+        $crash_recovery_files = glob(dirname($crash_commit_metadata) . '/crash-recovery/*.json');
+        assert_true(is_array($crash_recovery_files) && count($crash_recovery_files) === 1, 'process death after target DB commit leaves one crash recovery artifact');
+        $crash_recovery = json_decode(file_get_contents($crash_recovery_files[0]), true);
+        assert_same($crash_recovery['checkpoint'] ?? null, 'target-db-commit', 'crash recovery artifact identifies the target DB commit checkpoint');
+        assert_same($crash_recovery['source_branch'] ?? null, 'feature-crash-commit', 'crash recovery artifact preserves source branch context');
+        $crash_backup = $crash_recovery['artifacts']['target_db_snapshot']['backup'] ?? null;
+        assert_true(is_string($crash_backup) && is_file($crash_backup), 'crash recovery artifact preserves the pre-commit target DB snapshot');
+        $crash_backup_check = $tmp . '/crash-commit-backup-check.sqlite';
+        copy($crash_backup, $crash_backup_check);
+        assert_same(
+            scalar($crash_backup_check, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Base content',
+            'crash recovery target snapshot can restore the pre-merge target content'
+        );
+        $crash_commit_runs = is_file($crash_commit_metadata)
+            ? (int)scalar($crash_commit_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-crash-commit' AND status = 'completed'")
+            : 0;
+        assert_same($crash_commit_runs, 0, 'process death before metadata commit does not falsely record a completed run');
+    } else {
+        assert_true(true, 'process-death crash failpoint requires POSIX SIGKILL support');
+    }
 
     $unique_base = $tmp . '/unique-base.sqlite';
     $unique_source = $tmp . '/unique-source.sqlite';
