@@ -140,22 +140,30 @@ function remoteRefExists(args) {
 }
 
 function requireExpectedChanges(initialChangedFiles) {
-	const status = runOutput('git', ['status', '--porcelain']).trim();
-	if (status === '') {
+	const status = runOutput('git', ['status', '--porcelain']);
+	requireChangedReleaseFiles([...initialChangedFiles, cargoLock], status);
+}
+
+export function requireChangedReleaseFiles(expectedFiles, status) {
+	if (status.trim() === '') {
 		throw new ReleaseMetadataError('Release metadata is already at the requested version.');
 	}
 
-	const changedFiles = new Set(
+	const changedFiles = changedFilesFromStatus(status);
+	for (const file of expectedFiles) {
+		if (!changedFiles.has(file)) {
+			throw new ReleaseMetadataError(`Expected release file was not changed: ${file}`);
+		}
+	}
+}
+
+export function changedFilesFromStatus(status) {
+	return new Set(
 		status
 			.split('\n')
 			.map((line) => line.slice(3))
 			.filter(Boolean),
 	);
-	for (const file of [...initialChangedFiles, cargoLock]) {
-		if (!changedFiles.has(file)) {
-			throw new ReleaseMetadataError(`Expected release file was not changed: ${file}`);
-		}
-	}
 }
 
 function run(command, args, options = {}) {
