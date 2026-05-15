@@ -8,6 +8,7 @@ import {
 	assertReleaseVersion,
 	cargoLock,
 	installerManifest,
+	isPrereleaseVersion,
 	productionCrateManifests,
 	releaseBranchForVersion,
 	tagForVersion,
@@ -18,7 +19,7 @@ import {
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..');
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
 	main(process.argv.slice(2));
 }
 
@@ -32,6 +33,7 @@ export function main(argv) {
 		requireCommand('gh');
 		fetchReleaseBase();
 		requireRefMissing(branch, tag);
+		const releasePullRequest = releasePullRequestFor(tag, branch);
 
 		run('git', ['switch', '--create', branch, 'origin/trunk']);
 		const changed = updateReleaseMetadata(repoRoot, version);
@@ -56,9 +58,9 @@ export function main(argv) {
 			'--head',
 			branch,
 			'--title',
-			`Prepare release ${tag}`,
+			releasePullRequest.title,
 			'--body',
-			`Updates ForkPress release metadata for ${tag}.`,
+			releasePullRequest.body,
 		]);
 		console.log(`Opened release PR for ${tag}.`);
 	} catch (error) {
@@ -76,6 +78,85 @@ function parseArgs(argv) {
 		process.exit(argv[0] === '--help' ? 0 : 1);
 	}
 	return assertReleaseVersion(argv[0]);
+}
+
+function releasePullRequestFor(tag, branch) {
+	const previousTag = latestReleaseTag(tag);
+	return {
+		title: `Release ${tag}`,
+		body: releasePullRequestBody({
+			tag,
+			branch,
+			previousTag,
+			isPrerelease: isPrereleaseVersion(tag.slice(1)),
+			changelogItems: changelogItemsSince(previousTag),
+		}),
+	};
+}
+
+function latestReleaseTag(tag) {
+	return (
+		runOutput('git', ['tag', '--merged', 'origin/trunk', '--list', 'v[0-9]*', '--sort=-v:refname'])
+			.split('\n')
+			.map((line) => line.trim())
+			.find((candidate) => candidate && candidate !== tag) ?? null
+	);
+}
+
+function changelogItemsSince(previousTag) {
+	if (!previousTag) {
+		return [];
+	}
+
+	return runOutput('git', ['log', '--reverse', '--first-parent', '--pretty=%s', `${previousTag}..origin/trunk`])
+		.trim()
+		.split('\n')
+		.map(formatChangelogItem)
+		.filter(Boolean);
+}
+
+export function releasePullRequestBody({ tag, branch, previousTag, isPrerelease = false, changelogItems }) {
+	const fullChangelogUrl = previousTag
+		? `https://github.com/Automattic/forkpress/compare/${previousTag}...${branch}`
+		: `https://github.com/Automattic/forkpress/commits/${branch}`;
+	const publishSummary = isPrerelease
+		? 'Merging will automatically build ForkPress binaries and create a GitHub prerelease. Homebrew is skipped for prereleases.'
+		: 'Merging will automatically build ForkPress binaries, create a GitHub release, and update the Homebrew formula.';
+
+	return `## Release \`${tag}\`
+
+Version bump and release metadata update for \`${tag}\`.
+
+**Changelog draft:**
+${renderChangelogDraft(changelogItems)}
+
+**Full changelog:** ${fullChangelogUrl}
+
+## Next steps
+
+1. **Review** the changes in this pull request.
+2. **Push** any additional edits to this branch (\`${branch}\`).
+3. **Merge** this pull request to publish \`${tag}\`.
+
+${publishSummary}`;
+}
+
+function renderChangelogDraft(changelogItems) {
+	if (changelogItems.length === 0) {
+		return '* No merged changes detected since the previous release.';
+	}
+	return changelogItems.map((item) => `* ${item}`).join('\n');
+}
+
+export function formatChangelogItem(subject) {
+	return subject
+		.trim()
+		.replace(/^\[codex\]\s*/i, '')
+		.replace(
+			/\s+\(#(\d+)\)$/,
+			(_, pullRequestNumber) =>
+				` ([#${pullRequestNumber}](https://github.com/Automattic/forkpress/pull/${pullRequestNumber}))`,
+		);
 }
 
 function printUsage() {

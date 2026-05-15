@@ -23,6 +23,7 @@ export function main(argv) {
 			appendFileSync(process.env.GITHUB_OUTPUT, `version=${metadata.version}\n`);
 			appendFileSync(process.env.GITHUB_OUTPUT, `tag=${metadata.tag}\n`);
 			appendFileSync(process.env.GITHUB_OUTPUT, `branch=${metadata.branch}\n`);
+			appendFileSync(process.env.GITHUB_OUTPUT, `is_prerelease=${metadata.isPrerelease}\n`);
 		}
 		if (options.printVersion) {
 			console.log(metadata.version);
@@ -84,7 +85,7 @@ function printUsage() {
 
 Options:
   --release-branch <branch>  Verify branch name matches release/v<version>.
-  --github-output           Write version, tag, and branch to GITHUB_OUTPUT.
+  --github-output           Write version, tag, branch, and is_prerelease to GITHUB_OUTPUT.
   --print-version           Print the validated version only.
 `);
 }
