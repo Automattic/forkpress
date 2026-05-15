@@ -50,10 +50,9 @@ use forkpress_storage::{
     cow_branch_root, create_cow_branch, delete_cow_branch, detach_linux_xfs_loop_file_view,
     detach_macos_apfs_sparsebundle_file_view, ensure_cow_branch_exists, ensure_cow_file_view_ready,
     ensure_cow_main_branch, inspect_cow_merge_audit, list_remote_sites, lock_cow_lifecycle,
-    lock_cow_operations, merge_cow_branch, prepare_cow_file_view, print_cow_storage_status,
     print_linux_xfs_loop_storage_status, print_macos_cow_storage_status, probe_reflink_dir,
-    probe_remote_site, reset_cow_branch, resolve_cow_merge_conflict, review_cow_merge_audit_record,
-    show_cow_branch, write_cow_branch_list, write_cow_strategy_notes,
+    probe_remote_site, recover_cow_merge_crash, reset_cow_branch, resolve_cow_merge_conflict,
+    review_cow_merge_audit_record, show_cow_branch, write_cow_branch_list, write_cow_strategy_notes,
 };
 #[cfg(feature = "dev-experiments")]
 use forkpress_storage::{copy_tree_cow, plain_branch_names};
@@ -3046,6 +3045,19 @@ fn cow_branch_command(
             merge_cow_branch(&layout, &runtime, &args.shared, source, &target)?;
             Ok(0)
         }
+        "recover-crash" | "merge-recover" => {
+            let recovery = parse_cow_branch_recover_crash_args(&args.args)?;
+            recover_cow_merge_crash(
+                &layout,
+                &runtime,
+                &args.shared,
+                recovery.run_id.as_deref(),
+                recovery.restore_target_db,
+                recovery.restore_files,
+                &recovery.format,
+            )?;
+            Ok(0)
+        }
         "merge-audit" | "audit" => {
             let mut format = "text".to_string();
             let mut limit = "20".to_string();
@@ -3368,6 +3380,9 @@ fn branch_help_text(command: Option<&str>) -> &'static str {
         Some("merge") => {
             "Usage: forkpress branch merge <source> --into <target>\n\nMerge source branch changes into the target branch and record audit metadata.\nExample: forkpress branch merge feature --into main\n"
         }
+        Some("recover-crash") | Some("merge-recover") => {
+            "Usage: forkpress branch recover-crash [--run <id>] [--restore-target-db] [--restore-files] [--format text|json]\n\nInspect or restore pending COW merge crash-recovery artifacts. Run without restore flags to list pending artifacts first.\nExamples:\n  forkpress branch recover-crash\n  forkpress branch recover-crash --restore-target-db --restore-files\n"
+        }
         Some("merge-audit") | Some("audit") => {
             "Usage: forkpress branch merge-audit [options]\n\nInspect merge runs, decisions, conflicts, resolutions, and rollback failures.\nCommon options: --format text|json, --run <id>, --scope all|db|files, --records all|conflicts|decisions|resolutions|rollback-failures, --review, --review-status <status>.\n"
         }
@@ -3381,9 +3396,80 @@ fn branch_help_text(command: Option<&str>) -> &'static str {
             "Usage: forkpress branch delete <branch>\n\nDelete a materialized branch. Use with care.\n"
         }
         _ => {
-            "Usage: forkpress branch <command> [options]\n\nCommands:\n  list                         List branches\n  show [branch]                Show branch storage details\n  create <branch> [--from b]   Create a branch; defaults to --from main\n  reset <branch> --from b      Replace a branch from another branch\n  merge <source> --into target Merge one branch into another\n  merge-audit [options]        Inspect merge audit records\n  merge-review <type> <id>     Mark an audit record as reviewed\n  merge-resolve conflict <id>  Validate or apply a conflict choice\n  delete <branch>              Delete a branch\n\nExamples:\n  forkpress branch list\n  forkpress branch create feature --from main\n  forkpress branch merge feature --into main\n  forkpress branch merge-audit --review --records conflicts\n\nRun `forkpress branch <command> --help` for command-specific help.\n"
+            "Usage: forkpress branch <command> [options]\n\nCommands:\n  list                         List branches\n  show [branch]                Show branch storage details\n  create <branch> [--from b]   Create a branch; defaults to --from main\n  reset <branch> --from b      Replace a branch from another branch\n  merge <source> --into target Merge one branch into another\n  recover-crash [options]      Inspect or restore pending merge crash artifacts\n  merge-audit [options]        Inspect merge audit records\n  merge-review <type> <id>     Mark an audit record as reviewed\n  merge-resolve conflict <id>  Validate or apply a conflict choice\n  delete <branch>              Delete a branch\n\nExamples:\n  forkpress branch list\n  forkpress branch create feature --from main\n  forkpress branch merge feature --into main\n  forkpress branch recover-crash --restore-target-db --restore-files\n  forkpress branch merge-audit --review --records conflicts\n\nRun `forkpress branch <command> --help` for command-specific help.\n"
         }
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CowBranchRecoverCrashArgs {
+    run_id: Option<String>,
+    restore_target_db: bool,
+    restore_files: bool,
+    format: String,
+}
+
+fn parse_cow_branch_recover_crash_args(args: &[String]) -> Result<CowBranchRecoverCrashArgs> {
+    let mut run_id: Option<String> = None;
+    let mut restore_target_db = false;
+    let mut restore_files = false;
+    let mut format = "text".to_string();
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--run" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--run requires a merge run id");
+                };
+                run_id = Some(value.clone());
+                index += 2;
+            }
+            value if value.starts_with("--run=") => {
+                let value = value.trim_start_matches("--run=");
+                if value.is_empty() {
+                    bail!("--run requires a merge run id");
+                }
+                run_id = Some(value.to_string());
+                index += 1;
+            }
+            "--restore-target-db" => {
+                restore_target_db = true;
+                index += 1;
+            }
+            "--restore-files" => {
+                restore_files = true;
+                index += 1;
+            }
+            "--format" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--format requires text or json");
+                };
+                format = value.clone();
+                index += 2;
+            }
+            value if value.starts_with("--format=") => {
+                let value = value.trim_start_matches("--format=");
+                if value.is_empty() {
+                    bail!("--format requires text or json");
+                }
+                format = value.to_string();
+                index += 1;
+            }
+            other => bail!(
+                "unsupported argument for `forkpress branch recover-crash`: {other}\n\n{}",
+                branch_help_text(Some("recover-crash"))
+            ),
+        }
+    }
+    if format != "text" && format != "json" {
+        bail!("--format requires text or json");
+    }
+    Ok(CowBranchRecoverCrashArgs {
+        run_id,
+        restore_target_db,
+        restore_files,
+        format,
+    })
 }
 
 fn parse_cow_branch_merge_args(args: &[String]) -> Result<(&str, String)> {
@@ -4406,6 +4492,49 @@ mod git_helper_tests {
         assert!(branch_help_requested(&args));
         assert_eq!(branch_help_command(&args), Some("create"));
         assert!(branch_help_text(branch_help_command(&args)).contains("--from <source>"));
+    }
+
+    #[test]
+    fn branch_help_lists_crash_recovery_command() {
+        assert!(branch_help_text(None).contains("recover-crash"));
+        assert!(branch_help_text(Some("recover-crash")).contains("--restore-target-db"));
+        assert!(branch_help_text(Some("recover-crash")).contains("--restore-files"));
+    }
+
+    #[test]
+    fn parses_branch_recover_crash_defaults() {
+        let args = vec!["recover-crash".to_string()];
+        let parsed = parse_cow_branch_recover_crash_args(&args).unwrap();
+        assert_eq!(parsed.run_id, None);
+        assert!(!parsed.restore_target_db);
+        assert!(!parsed.restore_files);
+        assert_eq!(parsed.format, "text");
+    }
+
+    #[test]
+    fn parses_branch_recover_crash_restore_flags() {
+        let args = vec![
+            "recover-crash".to_string(),
+            "--run=7".to_string(),
+            "--restore-target-db".to_string(),
+            "--restore-files".to_string(),
+            "--format=json".to_string(),
+        ];
+        let parsed = parse_cow_branch_recover_crash_args(&args).unwrap();
+        assert_eq!(parsed.run_id.as_deref(), Some("7"));
+        assert!(parsed.restore_target_db);
+        assert!(parsed.restore_files);
+        assert_eq!(parsed.format, "json");
+    }
+
+    #[test]
+    fn branch_recover_crash_errors_on_unknown_flags() {
+        let args = vec!["recover-crash".to_string(), "--target".to_string()];
+        let err = parse_cow_branch_recover_crash_args(&args)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unsupported argument"));
+        assert!(err.contains("forkpress branch recover-crash"));
     }
 
     #[test]

@@ -3919,7 +3919,7 @@ function cow_merge_assert_no_pending_crash_recovery(string $metadata_db): void {
     throw new RuntimeException(
         'refusing to start merge while ' . count($artifacts) . ' pending COW merge crash recovery artifact(s) exist'
         . " for metadata DB $metadata_db; first pending artifact is run #$run at checkpoint $checkpoint. "
-        . "Inspect pending recovery with `$command`, then restore with --restore-target-db and/or --restore-files before merging again."
+        . "Inspect pending recovery with `forkpress branch recover-crash` or `$command`, then restore with --restore-target-db and/or --restore-files before merging again."
     );
 }
 
