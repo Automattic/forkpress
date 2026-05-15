@@ -14088,6 +14088,102 @@ PHP);
     assert_true(str_contains($wp_option_ref_preview, '"missing_object_id":50'), 'WordPress option reference audit includes the missing page ID');
     assert_true(str_contains($wp_option_ref_preview, 'theme_mods_forkpress_active'), 'WordPress option reference audit includes the option name');
 
+    $wp_featured_media_base_root = $tmp . '/wp-featured-media-validator-files-base';
+    $wp_featured_media_source_root = $tmp . '/wp-featured-media-validator-files-source';
+    $wp_featured_media_target_root = $tmp . '/wp-featured-media-validator-files-target';
+    $wp_featured_media_base = $wp_featured_media_base_root . '/wp-content/database/.ht.sqlite';
+    $wp_featured_media_source = $wp_featured_media_source_root . '/wp-content/database/.ht.sqlite';
+    $wp_featured_media_target = $wp_featured_media_target_root . '/wp-content/database/.ht.sqlite';
+    $wp_featured_media_metadata = $tmp . '/.forkpress/cow/merge/wp-featured-media-validator-metadata.sqlite';
+    mkdir($wp_featured_media_base_root . '/wp-content/database', 0777, true);
+    create_base_db($wp_featured_media_base);
+    $db = open_db($wp_featured_media_base);
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_type TEXT NOT NULL DEFAULT 'post'");
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_name TEXT NOT NULL DEFAULT ''");
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN guid TEXT NOT NULL DEFAULT ''");
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, guid) VALUES
+        (60, 'Featured media page', '<!-- wp:paragraph --><p>Featured media page</p><!-- /wp:paragraph -->', 'publish', 'page', 'featured-media-page', ''),
+        (61, 'Featured attachment', '', 'inherit', 'attachment', 'featured-attachment', 'wp-content/uploads/2026/05/featured-image.jpg')");
+    $db->exec("INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES
+        (6000, 60, '_thumbnail_id', '61')");
+    $db->close();
+    write_test_file($wp_featured_media_base_root . '/wp-content/uploads/2026/05/featured-image.jpg', 'featured image bytes');
+    write_test_file($wp_featured_media_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query("SELECT meta_id, post_id, meta_value FROM wp_postmeta WHERE meta_key = '_thumbnail_id'");
+$findings = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    $attachment_id = (int)$row['meta_value'];
+    if ($attachment_id <= 0) {
+        continue;
+    }
+    $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $attachment_id AND post_type = 'attachment'");
+    if ($exists === 0) {
+        $findings[] = [
+            'plugin' => 'forkpress-wp-featured-media',
+            'object' => 'postmeta:' . $row['meta_id'],
+            'reason' => 'featured image references a missing attachment',
+            'type' => 'plugin-wp-featured-image-missing-attachment',
+            'tables' => ['wp_postmeta', 'wp_posts'],
+            'validator' => 'forkpress-wp-featured-media@1',
+            'candidate' => [
+                'post_id' => (int)$row['post_id'],
+                'meta_id' => (int)$row['meta_id'],
+                'field' => '_thumbnail_id',
+                'missing_object_id' => $attachment_id,
+                'object_type' => 'attachment',
+            ],
+        ];
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    copy_tree_for_test($wp_featured_media_base_root, $wp_featured_media_source_root);
+    copy_tree_for_test($wp_featured_media_base_root, $wp_featured_media_target_root);
+    $wp_featured_media_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-featured-media-validator.json';
+    cow_merge_capture_file_base($wp_featured_media_base_root, $wp_featured_media_file_base);
+    cow_merge_allocate_autoincrement_bands($wp_featured_media_source, $wp_featured_media_metadata, 'feature-wp-featured-media-source');
+    cow_merge_allocate_autoincrement_bands($wp_featured_media_target, $wp_featured_media_metadata, 'feature-wp-featured-media-target');
+    $db = open_db($wp_featured_media_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID = 61');
+    $db->close();
+    unlink($wp_featured_media_source_root . '/wp-content/uploads/2026/05/featured-image.jpg');
+    $db = open_db($wp_featured_media_target);
+    $db->exec("UPDATE wp_posts SET post_title = 'Target page still using deleted featured image' WHERE ID = 60");
+    $db->close();
+    $wp_featured_media_result = cow_merge_branch_state(
+        $wp_featured_media_base,
+        $wp_featured_media_source,
+        $wp_featured_media_target,
+        $wp_featured_media_metadata,
+        'feature-wp-featured-media-source',
+        'feature-wp-featured-media-target',
+        $wp_featured_media_file_base,
+        $wp_featured_media_source_root,
+        $wp_featured_media_target_root
+    );
+    assert_same($wp_featured_media_result['status'], 'completed_with_conflicts', 'WordPress featured image validator holds missing attachments for review');
+    assert_same((int)($wp_featured_media_result['plugin_validators'] ?? 0), 1, 'WordPress featured image validator is discovered from mu-plugins during merge');
+    assert_same((int)($wp_featured_media_result['plugin_validator_conflicts'] ?? 0), 1, 'WordPress featured image validator records the missing attachment');
+    assert_same((int)scalar($wp_featured_media_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 61'), 0, 'WordPress featured image validator leaves the source attachment deletion staged for review');
+    assert_true(!file_exists($wp_featured_media_target_root . '/wp-content/uploads/2026/05/featured-image.jpg'), 'WordPress featured image validator leaves the source upload deletion staged for review');
+    assert_same(scalar($wp_featured_media_target, 'SELECT post_title FROM wp_posts WHERE ID = 60'), 'Target page still using deleted featured image', 'WordPress featured image validator preserves the target page edit');
+    assert_same(scalar($wp_featured_media_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 60 AND meta_key = '_thumbnail_id'"), '61', 'WordPress featured image validator keeps the stale thumbnail reference visible for review');
+    $wp_featured_media_audit = cow_merge_audit_report($wp_featured_media_metadata, (int)$wp_featured_media_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-featured-image-missing-attachment',
+    ]);
+    assert_same(count($wp_featured_media_audit['conflicts']), 1, 'WordPress featured image validator exposes the missing attachment as a plugin-scoped audit conflict');
+    $wp_featured_media_preview = (string)($wp_featured_media_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_true(str_contains($wp_featured_media_preview, '"missing_object_id":61'), 'WordPress featured image audit includes the missing attachment ID');
+    assert_true(str_contains($wp_featured_media_preview, '"field":"_thumbnail_id"'), 'WordPress featured image audit includes the thumbnail field');
+
     $wp_lifecycle_base = $tmp . '/wp-lifecycle-base.sqlite';
     $wp_lifecycle_source = $tmp . '/wp-lifecycle-source.sqlite';
     $wp_lifecycle_target = $tmp . '/wp-lifecycle-target.sqlite';
