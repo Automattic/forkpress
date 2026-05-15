@@ -16249,6 +16249,10 @@ PHP);
     assert_same($plugin_original_after_rerun[0]['stale_status'] ?? null, 'stale', 'plugin audit marks reviewed conflicts stale after validator evidence changes');
     assert_true(str_contains((string)($plugin_original_after_rerun[0]['current_target_preview'] ?? ''), '123456'), 'plugin stale audit exposes replacement validator evidence');
     assert_true(str_contains((string)($plugin_original_after_rerun[0]['review_note'] ?? ''), 'plugin graph validator needs an app-specific repair'), 'plugin stale revalidation preserves prior reviewer intent');
+    $plugin_revalidate_again = cow_merge_revalidate_reviewed_conflicts($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 'cow-revalidate');
+    assert_same($plugin_revalidate_again['carried'], 0, 'plugin conflict revalidation does not duplicate carried validator evidence notes');
+    assert_same($plugin_revalidate_again['already_needs_action'], 1, 'plugin conflict revalidation reports already-carried validator evidence');
+    assert_same((int)scalar($plugin_graph_metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $plugin_conflict_id"), 1, 'plugin conflict revalidation keeps replacement validator evidence idempotent');
     assert_throws(
         fn() => cow_merge_resolve_conflict($plugin_graph_metadata, $plugin_conflict_id, 'target', false, 'Try generic plugin resolution.', 'cow-test', true),
         'plugin validator conflicts cannot be resolved by generic merge-resolve',
