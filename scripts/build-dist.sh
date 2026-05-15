@@ -167,18 +167,28 @@ if [ "$NEED_PHP_BUILD" = "1" ]; then
     export PATH="/opt/homebrew/bin:$PATH"
   fi
 
-  # On Apple Silicon, if the parent shell is running under Rosetta, native
-  # clang defaults to x86_64 and some vendored library builds (libzip, etc)
-  # use that default instead of --target=arm64-apple-darwin, producing mixed
-  # arch objects that fail to link. Relaunch the spc subcommands in a native
-  # arm64 shell so every vendored lib compiles for arm64 consistently.
+  # For Apple Silicon release targets, if the parent shell is running under
+  # Rosetta, clang defaults to x86_64 and some vendored library builds (libzip,
+  # etc) use that default instead of arm64, producing mixed-arch objects that
+  # fail to link. Relaunch the spc subcommands in a native arm64 shell so every
+  # vendored lib compiles for arm64 consistently.
   SPC_RUN=( )
-  if [ "$UNAME_S-$UNAME_M" = "Darwin-arm64" ] && [ "$(uname -m)" != "arm64" ]; then
-    SPC_RUN=( arch -arm64 )
+  if [ "$UNAME_S" = "Darwin" ] && [ "$TRIPLE" = "aarch64-apple-darwin" ] && [ "$(uname -m)" != "arm64" ]; then
+    if arch -arm64 /usr/bin/true >/dev/null 2>&1; then
+      SPC_RUN=( arch -arm64 )
+    else
+      echo "ERROR: aarch64-apple-darwin dist builds must run in a native arm64 shell." >&2
+      echo "       Re-run from Apple Silicon without Rosetta, or use: arch -arm64 scripts/build-dist.sh" >&2
+      exit 1
+    fi
   fi
 
-  "${SPC_RUN[@]+"${SPC_RUN[@]}"}" ./bin/spc doctor --auto-fix
-  "${SPC_RUN[@]+"${SPC_RUN[@]}"}" ./bin/spc download --for-extensions="$EXTENSIONS" --with-php=8.3
+  run_spc() {
+    "${SPC_RUN[@]}" ./bin/spc "$@"
+  }
+
+  run_spc doctor --auto-fix
+  run_spc download --for-extensions="$EXTENSIONS" --with-php=8.3
 
   if [ "$PROFILE" = "dev" ]; then
     # Register branchfs as a builtin extension in spc's ext.json so its
@@ -194,11 +204,11 @@ file_put_contents($p, json_encode($c, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES
     # re-runs ./buildconf --force so the new extension is visible to configure.
     # Using the hook (rather than manual pre-extraction) is robust against spc
     # re-extracting php-src during the build phase.
-    "${SPC_RUN[@]+"${SPC_RUN[@]}"}" ./bin/spc build \
+    run_spc build \
       --with-added-patch="$REPO_ROOT/experiments/branchfs/build/spc-patch.php" \
       "$EXTENSIONS,branchfs" --build-cli
   else
-    "${SPC_RUN[@]+"${SPC_RUN[@]}"}" ./bin/spc build "$EXTENSIONS" --build-cli
+    run_spc build "$EXTENSIONS" --build-cli
   fi
   cd "$REPO_ROOT"
 fi
