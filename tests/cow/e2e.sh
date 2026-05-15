@@ -93,6 +93,12 @@ on_error() {
   dump_if_exists "$TMP/merge-audit.out"
   dump_if_exists "$TMP/merge-audit.json"
   dump_if_exists "$TMP/merge-pending-reset.out"
+  dump_if_exists "$TMP/public-crash-merge.out"
+  dump_if_exists "$TMP/public-crash-recover.json"
+  dump_if_exists "$TMP/public-crash-blocked.out"
+  dump_if_exists "$TMP/public-crash-restore.json"
+  dump_if_exists "$TMP/public-crash-retry.out"
+  dump_if_exists "$TMP/public-crash-main-edit.html"
   dump_if_exists "$TMP/merge-rollback-failures.json"
   dump_if_exists "$TMP/merge-rollback-failures.out"
   dump_if_exists "$TMP/file-conflict-pending.out"
@@ -1418,6 +1424,33 @@ grep -F "forkpress: COW merge audit" "$TMP/merge-audit.out" >/dev/null
 grep -F "merge-source -> main" "$TMP/merge-audit.out" >/dev/null
 "$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --limit 3 > "$TMP/merge-audit.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && !empty($data["runs"]) ? 0 : 1);' "$TMP/merge-audit.json"
+
+log_step "public branch merge crash recovery"
+"$BIN" branch --work-dir "$WORK_DIR" create public-crash-merge
+PUBLIC_CRASH_TITLE="Public crash merge $(date +%s)"
+create_branch_post public-crash-merge "$PUBLIC_CRASH_TITLE"
+if FORKPRESS_COW_MERGE_TEST_FAILPOINT=before-target-db-commit FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION=kill \
+  "$BIN" branch --work-dir "$WORK_DIR" merge public-crash-merge --into main > "$TMP/public-crash-merge.out" 2>&1; then
+  echo "public branch merge unexpectedly survived before-target-db-commit kill failpoint" >&2
+  exit 1
+fi
+"$BIN" branch --work-dir "$WORK_DIR" recover-crash --format json > "$TMP/public-crash-recover.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && (int)($data["pending"] ?? 0) >= 1 ? 0 : 1);' "$TMP/public-crash-recover.json"
+if "$BIN" branch --work-dir "$WORK_DIR" merge public-crash-merge --into main > "$TMP/public-crash-blocked.out" 2>&1; then
+  echo "public branch merge unexpectedly ignored pending crash recovery artifact" >&2
+  exit 1
+fi
+grep -F "pending COW merge crash recovery artifact" "$TMP/public-crash-blocked.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" recover-crash --restore-target-db --format json > "$TMP/public-crash-restore.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && (int)($data["pending"] ?? 0) === 0 && (int)($data["restored"] ?? 0) >= 1 ? 0 : 1);' "$TMP/public-crash-restore.json"
+"$BIN" branch --work-dir "$WORK_DIR" merge public-crash-merge --into main > "$TMP/public-crash-retry.out"
+grep -F "forkpress: merged public-crash-merge into main" "$TMP/public-crash-retry.out" >/dev/null
+grep -F "status:    completed" "$TMP/public-crash-retry.out" >/dev/null
+curl -sS -H "Host: wp.localhost:$PORT" \
+  "http://127.0.0.1:$PORT/wp-admin/edit.php" \
+  -o "$TMP/public-crash-main-edit.html"
+grep -F "$PUBLIC_CRASH_TITLE" "$TMP/public-crash-main-edit.html" >/dev/null
+
 ROLLBACK_FAILURE_ARTIFACT="$WORK_DIR/cow/merge/e2e-rollback-failures.jsonl"
 printf '%s\n' '{"source_branch":"feature-e2e-rollback","rollback_failure":"forced runtime rollback failure"}' > "$ROLLBACK_FAILURE_ARTIFACT"
 ROLLBACK_FAILURE_RUN_ID="$(

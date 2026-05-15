@@ -55,6 +55,11 @@ The PHP merge suite covers these rollback classes:
   transaction but before recovery artifact cleanup leaves the artifact and
   rollback material retryable; a second recovery removes the artifact and
   cleanup material after confirming the target is restored.
+- The product E2E suite drives `before-target-db-commit` through the public
+  `forkpress branch merge` command, verifies `forkpress branch recover-crash`
+  reports the pending artifact, verifies a second public merge is blocked while
+  recovery is pending, restores the target DB through the public recovery
+  command, and reruns the public merge successfully.
 
 The Git server suite covers these publication classes:
 
@@ -112,9 +117,9 @@ The Git server suite covers these publication classes:
 
 ## Missing Fault Injection
 
-The remaining work is a product-level kill harness that drives the public
-ForkPress commands through the same failure boundaries already covered by lower
-level PHP/Git tests. The direct merge tests already kill the merge subprocess
+The remaining work is a broader product-level kill harness that drives the
+public ForkPress commands through the same failure boundaries already covered by
+lower level PHP/Git tests. The direct merge tests already kill the merge subprocess
 before/after target DB commit, before metadata commit, before the file phase,
 after an individual file operation, and during crash-recovery cleanup. The Git
 server tests already kill created-branch publication before metadata capture,
