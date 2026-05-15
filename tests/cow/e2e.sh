@@ -1058,6 +1058,7 @@ add_action('init', function () {
                 'option_note_id' => is_array($option_graph) ? (int)($option_graph['note_id'] ?? 0) : 0,
                 'postmeta_parent_id' => is_array($postmeta_json) ? (int)($postmeta_json['parent_id'] ?? 0) : 0,
                 'postmeta_note_id' => is_array($postmeta_json) ? (int)($postmeta_json['note_id'] ?? 0) : 0,
+                'child_payload_parent_id' => is_array($child_payload) ? (int)($child_payload['parent_id'] ?? 0) : 0,
                 'child_payload_note_id' => is_array($child_payload) ? (int)($child_payload['note_id'] ?? 0) : 0,
                 'file_exists' => $file_path !== '' && file_exists(trailingslashit($upload_dir['basedir']) . $file_path),
             ];
@@ -1631,6 +1632,7 @@ $pluginGraphValid = static function (array $graphs, array $posts, string $branch
         && (($graph["serialized_note_id"] ?? null) === $note_id)
         && (($graph["option_note_id"] ?? null) === $note_id)
         && (($graph["postmeta_note_id"] ?? null) === $note_id)
+        && (($graph["child_payload_parent_id"] ?? null) === ($graph["parent_id"] ?? null))
         && (($graph["child_payload_note_id"] ?? null) === $note_id)
         && (($graph["file_exists"] ?? null) === true);
 };
