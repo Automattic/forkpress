@@ -373,6 +373,13 @@ add_action('init', function () {
         }
         return (int)$id;
     };
+    $must_insert_user = static function (array $args): int {
+        $id = wp_insert_user($args);
+        if (is_wp_error($id)) {
+            wp_send_json_error(['error' => $id->get_error_message()], 500);
+        }
+        return (int)$id;
+    };
     $must_set_terms = static function ($post_id, $terms) {
         $result = wp_set_object_terms($post_id, $terms, 'forkpress_topic');
         if (is_wp_error($result)) {
@@ -425,6 +432,19 @@ add_action('init', function () {
 
     if ($branch !== null) {
         $suffix = ucfirst($branch);
+        $user_id = $must_insert_user([
+            'user_login' => "forkpress_semantic_$branch",
+            'user_pass' => wp_generate_password(32, true),
+            'display_name' => "Semantic $suffix Author",
+            'role' => 'author',
+        ]);
+        $user_graph = [
+            'branch' => $branch,
+            'user_id' => (int)$user_id,
+        ];
+        update_user_meta($user_id, '_forkpress_semantic_user_graph', $user_graph);
+        update_user_meta($user_id, '_forkpress_semantic_user_serialized_graph', serialize($user_graph));
+
         $edit_id = $find_page("Semantic $suffix Edit Page");
         if ($edit_id === 0) {
             wp_send_json_error(['error' => "missing Semantic $suffix Edit Page"], 500);
@@ -433,6 +453,7 @@ add_action('init', function () {
             'ID' => $edit_id,
             'post_title' => "Semantic $suffix Edited Page",
             'post_content' => "<!-- wp:paragraph --><p>Edited on $branch branch</p><!-- /wp:paragraph -->",
+            'post_author' => $user_id,
         ], true);
         if (is_wp_error($edit_result)) {
             wp_send_json_error(['error' => $edit_result->get_error_message()], 500);
@@ -451,6 +472,7 @@ add_action('init', function () {
             'post_status' => 'publish',
             'post_title' => "Semantic $suffix Page",
             'post_content' => "<!-- wp:paragraph --><p>Semantic $branch page body</p><!-- /wp:paragraph -->",
+            'post_author' => $user_id,
         ], true);
         if (is_wp_error($page_id)) {
             wp_send_json_error(['error' => $page_id->get_error_message()], 500);
@@ -465,6 +487,7 @@ add_action('init', function () {
             'post_status' => 'publish',
             'post_title' => "Semantic $suffix Note",
             'post_content' => "CPT content for $branch",
+            'post_author' => $user_id,
         ], true);
         if (is_wp_error($note_id)) {
             wp_send_json_error(['error' => $note_id->get_error_message()], 500);
@@ -477,6 +500,7 @@ add_action('init', function () {
             'post_status' => 'publish',
             'post_title' => "Semantic $suffix Block",
             'post_content' => "<!-- wp:paragraph --><p>Reusable block for $branch</p><!-- /wp:paragraph -->",
+            'post_author' => $user_id,
         ], true);
         if (is_wp_error($block_id)) {
             wp_send_json_error(['error' => $block_id->get_error_message()], 500);
@@ -528,6 +552,7 @@ add_action('init', function () {
             'post_title' => "Semantic $suffix Media",
             'post_mime_type' => 'image/png',
             'post_status' => 'inherit',
+            'post_author' => $user_id,
         ], $path, $page_id, true);
         if (is_wp_error($attachment_id)) {
             wp_send_json_error(['error' => $attachment_id->get_error_message()], 500);
@@ -550,13 +575,47 @@ add_action('init', function () {
         ]);
         update_post_meta($attachment_id, '_forkpress_semantic_media', $branch);
 
+        $comment_id = wp_insert_comment([
+            'comment_post_ID' => (int)$page_id,
+            'comment_content' => "Semantic $suffix Comment",
+            'comment_approved' => 1,
+            'user_id' => (int)$user_id,
+        ]);
+        if ($comment_id === false || (int)$comment_id <= 0) {
+            wp_send_json_error(['error' => 'failed to insert semantic comment'], 500);
+        }
+        $comment_id = (int)$comment_id;
+        $reply_id = wp_insert_comment([
+            'comment_post_ID' => (int)$page_id,
+            'comment_content' => "Semantic $suffix Reply",
+            'comment_parent' => $comment_id,
+            'comment_approved' => 1,
+            'user_id' => (int)$user_id,
+        ]);
+        if ($reply_id === false || (int)$reply_id <= 0) {
+            wp_send_json_error(['error' => 'failed to insert semantic reply'], 500);
+        }
+        $reply_id = (int)$reply_id;
+        $comment_graph = [
+            'branch' => $branch,
+            'page_id' => (int)$page_id,
+            'comment_id' => $comment_id,
+            'reply_id' => $reply_id,
+            'user_id' => (int)$user_id,
+        ];
+        add_comment_meta($comment_id, '_forkpress_semantic_comment_graph', $comment_graph);
+        add_comment_meta($reply_id, '_forkpress_semantic_comment_serialized_graph', serialize($comment_graph));
+
         $graph = [
             'branch' => $branch,
+            'user_id' => (int)$user_id,
             'page_id' => (int)$page_id,
             'note_id' => (int)$note_id,
             'block_id' => (int)$block_id,
             'menu_id' => (int)$menu_id,
             'attachment_id' => (int)$attachment_id,
+            'comment_id' => $comment_id,
+            'reply_id' => $reply_id,
         ];
         update_option("forkpress_semantic_{$branch}_option", $graph, false);
         update_option("forkpress_semantic_{$branch}_json_option", wp_json_encode($graph), false);
@@ -660,6 +719,7 @@ add_action('init', function () {
             'type' => $post->post_type,
             'title' => $post->post_title,
             'content' => $post->post_content,
+            'author' => (int)$post->post_author,
             'branch' => get_post_meta($post->ID, '_forkpress_semantic_branch', true)
                 ?: get_post_meta($post->ID, '_forkpress_semantic_note', true)
                 ?: get_post_meta($post->ID, '_forkpress_semantic_media', true),
@@ -670,6 +730,46 @@ add_action('init', function () {
             'generated_files' => $generated_files,
         ];
     }
+
+    $users = [];
+    foreach (get_users(['search' => 'forkpress_semantic_*', 'search_columns' => ['user_login']]) as $user) {
+        $graph = get_user_meta($user->ID, '_forkpress_semantic_user_graph', true);
+        $serialized_graph = maybe_unserialize((string)get_user_meta($user->ID, '_forkpress_semantic_user_serialized_graph', true));
+        $users[$user->user_login] = [
+            'id' => (int)$user->ID,
+            'display_name' => $user->display_name,
+            'graph_user_id' => is_array($graph) ? (int)($graph['user_id'] ?? 0) : 0,
+            'serialized_graph_user_id' => is_array($serialized_graph) ? (int)($serialized_graph['user_id'] ?? 0) : 0,
+        ];
+    }
+    ksort($users);
+
+    $comments = [];
+    $comment_rows = get_comments([
+        'status' => 'all',
+        'orderby' => 'comment_ID',
+        'order' => 'ASC',
+    ]);
+    foreach ($comment_rows as $comment) {
+        if (strpos((string)$comment->comment_content, 'Semantic ') !== 0) {
+            continue;
+        }
+        $graph = get_comment_meta($comment->comment_ID, '_forkpress_semantic_comment_graph', true);
+        $serialized_graph = maybe_unserialize((string)get_comment_meta($comment->comment_ID, '_forkpress_semantic_comment_serialized_graph', true));
+        $comments[(string)$comment->comment_content] = [
+            'id' => (int)$comment->comment_ID,
+            'post_id' => (int)$comment->comment_post_ID,
+            'parent' => (int)$comment->comment_parent,
+            'user_id' => (int)$comment->user_id,
+            'graph_comment_id' => is_array($graph) ? (int)($graph['comment_id'] ?? 0) : 0,
+            'graph_reply_id' => is_array($graph) ? (int)($graph['reply_id'] ?? 0) : 0,
+            'graph_user_id' => is_array($graph) ? (int)($graph['user_id'] ?? 0) : 0,
+            'serialized_graph_comment_id' => is_array($serialized_graph) ? (int)($serialized_graph['comment_id'] ?? 0) : 0,
+            'serialized_graph_reply_id' => is_array($serialized_graph) ? (int)($serialized_graph['reply_id'] ?? 0) : 0,
+            'serialized_graph_user_id' => is_array($serialized_graph) ? (int)($serialized_graph['user_id'] ?? 0) : 0,
+        ];
+    }
+    ksort($comments);
 
     $menus = [];
     $menu_items = [];
@@ -752,6 +852,8 @@ add_action('init', function () {
     wp_send_json([
         'action' => $action,
         'posts' => $rows,
+        'users' => $users,
+        'comments' => $comments,
         'menus' => $menus,
         'menu_items' => $menu_items,
         'menu_locations' => $locations,
@@ -1076,6 +1178,8 @@ foreach (($data["posts"] ?? []) as $post) {
 $menus = $data["menus"] ?? [];
 $menu_items = $data["menu_items"] ?? [];
 $locations = $data["menu_locations"] ?? [];
+$users = $data["users"] ?? [];
+$comments = $data["comments"] ?? [];
 $required = [
     "Semantic Source Page" => "page",
     "Semantic Target Page" => "page",
@@ -1094,10 +1198,13 @@ foreach ($required as $title => $type) {
 }
 $optionRefsValid = static function (array $option, string $branch, string $suffix) use ($posts): bool {
     return (($option["branch"] ?? null) === $branch)
+        && ((int)($option["user_id"] ?? 0) > 0)
         && ((int)($option["page_id"] ?? 0) === (int)($posts["Semantic $suffix Page"]["id"] ?? 0))
         && ((int)($option["note_id"] ?? 0) === (int)($posts["Semantic $suffix Note"]["id"] ?? 0))
         && ((int)($option["block_id"] ?? 0) === (int)($posts["Semantic $suffix Block"]["id"] ?? 0))
-        && ((int)($option["attachment_id"] ?? 0) === (int)($posts["Semantic $suffix Media"]["id"] ?? 0));
+        && ((int)($option["attachment_id"] ?? 0) === (int)($posts["Semantic $suffix Media"]["id"] ?? 0))
+        && ((int)($option["comment_id"] ?? 0) > 0)
+        && ((int)($option["reply_id"] ?? 0) > 0);
 };
 $pluginGraphValid = static function (array $graphs, array $posts, string $branch, string $suffix): bool {
     $graph = $graphs[$branch] ?? [];
@@ -1123,6 +1230,35 @@ $menuItemValid = static function (array $items, array $posts, string $suffix): b
         && (($item["object"] ?? null) === "page")
         && ((int)($item["object_id"] ?? 0) === (int)($posts["Semantic $suffix Page"]["id"] ?? 0));
 };
+$userValid = static function (array $users, array $posts, array $comments, string $branch, string $suffix): bool {
+    $user = $users["forkpress_semantic_$branch"] ?? [];
+    $userId = (int)($user["id"] ?? 0);
+    return $userId > 0
+        && (($user["display_name"] ?? null) === "Semantic $suffix Author")
+        && ((int)($user["graph_user_id"] ?? 0) === $userId)
+        && ((int)($user["serialized_graph_user_id"] ?? 0) === $userId)
+        && ((int)($posts["Semantic $suffix Page"]["author"] ?? 0) === $userId)
+        && ((int)($posts["Semantic $suffix Note"]["author"] ?? 0) === $userId)
+        && ((int)($posts["Semantic $suffix Media"]["author"] ?? 0) === $userId)
+        && ((int)($comments["Semantic $suffix Comment"]["user_id"] ?? 0) === $userId)
+        && ((int)($comments["Semantic $suffix Reply"]["user_id"] ?? 0) === $userId);
+};
+$commentValid = static function (array $comments, array $posts, string $suffix): bool {
+    $comment = $comments["Semantic $suffix Comment"] ?? [];
+    $reply = $comments["Semantic $suffix Reply"] ?? [];
+    $pageId = (int)($posts["Semantic $suffix Page"]["id"] ?? 0);
+    $commentId = (int)($comment["id"] ?? 0);
+    $replyId = (int)($reply["id"] ?? 0);
+    return $commentId > 0
+        && $replyId > 0
+        && ((int)($comment["post_id"] ?? 0) === $pageId)
+        && ((int)($reply["post_id"] ?? 0) === $pageId)
+        && ((int)($reply["parent"] ?? 0) === $commentId)
+        && ((int)($comment["graph_comment_id"] ?? 0) === $commentId)
+        && ((int)($comment["graph_reply_id"] ?? 0) === $replyId)
+        && ((int)($reply["serialized_graph_comment_id"] ?? 0) === $commentId)
+        && ((int)($reply["serialized_graph_reply_id"] ?? 0) === $replyId);
+};
 $ok = $ok
     && (($posts["Semantic Source Media"]["file_exists"] ?? null) === true)
     && (($posts["Semantic Target Media"]["file_exists"] ?? null) === true)
@@ -1144,6 +1280,10 @@ $ok = $ok
     && (($locations["forkpress_semantic_target"] ?? null) === "Semantic Target Menu")
     && $menuItemValid($menu_items, $posts, "Source")
     && $menuItemValid($menu_items, $posts, "Target")
+    && $userValid($users, $posts, $comments, "source", "Source")
+    && $userValid($users, $posts, $comments, "target", "Target")
+    && $commentValid($comments, $posts, "Source")
+    && $commentValid($comments, $posts, "Target")
     && $optionRefsValid($data["source_option"] ?? [], "source", "Source")
     && $optionRefsValid($data["target_option"] ?? [], "target", "Target")
     && $optionRefsValid($data["source_json_option"] ?? [], "source", "Source")
