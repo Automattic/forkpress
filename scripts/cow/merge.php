@@ -6994,6 +6994,45 @@ function cow_merge_lookup_active_rowid_by_identity(SQLite3 $meta, string $branch
     return null;
 }
 
+function cow_merge_keyless_identity_rowid_hint(array $identity): ?int {
+    foreach (['rowid', 'base_rowid'] as $key) {
+        if (!array_key_exists($key, $identity)) {
+            continue;
+        }
+        $value = $identity[$key];
+        if (is_int($value)) {
+            return $value;
+        }
+        if (is_string($value) && preg_match('/^-?\d+$/', $value) === 1) {
+            return (int)$value;
+        }
+    }
+    return null;
+}
+
+function cow_merge_lookup_active_identity_by_rowid(SQLite3 $meta, string $branch, string $table, int $rowid): ?array {
+    $stmt = cow_merge_prepare_checked(
+        $meta,
+        'SELECT logical_identity FROM merge_row_identities ' .
+        'WHERE branch_name = :branch_name AND table_name = :table_name AND rowid = :rowid',
+        'failed to prepare active rowid identity lookup'
+    );
+    cow_merge_bind($stmt, ':branch_name', $branch);
+    cow_merge_bind($stmt, ':table_name', $table);
+    cow_merge_bind($stmt, ':rowid', $rowid);
+    $res = cow_merge_execute_checked($stmt, $meta, 'failed to look up active rowid identity');
+    $row = $res->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($res, 'failed to finalize active rowid identity lookup');
+    if (!$row) {
+        return null;
+    }
+    $identity = json_decode((string)$row['logical_identity'], true);
+    if (!is_array($identity)) {
+        throw new RuntimeException("invalid active row identity sidecar for $branch.$table rowid $rowid");
+    }
+    return $identity;
+}
+
 function cow_merge_update_single_cell(SQLite3 $db, string $table, array $identity, array $pk_cols, string $column, mixed $value): void {
     $where_values = [];
     $where = cow_merge_where_clause($db, $table, $identity, $pk_cols, $where_values);
@@ -10404,10 +10443,23 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
             $source_value = cow_merge_decode_payload_json((string)($conflict['source_payload'] ?? ''), 'source');
             $pk_cols = cow_merge_pk_cols($target, $table);
             $where_identity = $identity;
+            $missing_revalidation_class = 'missing';
+            $identity_replacement_class = null;
             if (!$pk_cols) {
                 $target_branch = (string)($conflict['target_branch'] ?? '');
                 $target_rowid = $target_branch === '' ? null : cow_merge_lookup_active_rowid_by_identity($meta, $target_branch, $table, $identity);
                 $where_identity = $target_rowid === null ? [] : ['rowid' => $target_rowid];
+                if ($target_branch !== '' && $target_rowid === null) {
+                    $identity_rowid = cow_merge_keyless_identity_rowid_hint($identity);
+                    if ($identity_rowid !== null) {
+                        $active_identity = cow_merge_lookup_active_identity_by_rowid($meta, $target_branch, $table, $identity_rowid);
+                        if (is_array($active_identity) && !cow_merge_values_equal($active_identity, $identity)) {
+                            $missing_revalidation_class = 'incompatible';
+                            $identity_replacement_class = 'incompatible';
+                            $where_identity = ['rowid' => $identity_rowid];
+                        }
+                    }
+                }
             }
 
             if ($conflict_type === 'cell-conflict') {
@@ -10426,7 +10478,7 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
                         : 'target cell no longer matches audited target payload; rerun merge-audit before resolving',
                     'revalidation_class' => cow_merge_values_equal($current, $target_value)
                         ? 'unchanged'
-                        : ($current_row === null ? 'missing' : 'compatible-target-drift'),
+                        : ($identity_replacement_class ?? ($current_row === null ? $missing_revalidation_class : 'compatible-target-drift')),
                     'current_target_payload' => cow_merge_payload_json($current),
                 ];
             }
@@ -10455,7 +10507,7 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
                     : 'target row no longer matches audited target payload; rerun merge-audit before resolving',
                 'revalidation_class' => $fresh
                     ? 'unchanged'
-                    : ($current === null ? 'missing' : 'compatible-target-drift'),
+                    : ($identity_replacement_class ?? ($current === null ? $missing_revalidation_class : 'compatible-target-drift')),
                 'current_target_payload' => cow_merge_payload_json($current),
             ];
         } finally {
