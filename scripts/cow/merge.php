@@ -3486,6 +3486,7 @@ CREATE TABLE IF NOT EXISTS merge_revalidations (
     conflict_id INTEGER NOT NULL,
     review_note_id INTEGER NOT NULL,
     run_id INTEGER NOT NULL,
+    replacement_conflict_id INTEGER,
     revalidation_class TEXT NOT NULL DEFAULT 'unclassified',
     source_payload TEXT NOT NULL,
     target_payload TEXT NOT NULL,
@@ -3494,10 +3495,12 @@ CREATE TABLE IF NOT EXISTS merge_revalidations (
     stale_reason TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(conflict_id) REFERENCES merge_conflicts(id),
+    FOREIGN KEY(replacement_conflict_id) REFERENCES merge_conflicts(id),
     FOREIGN KEY(review_note_id) REFERENCES merge_review_notes(id),
     FOREIGN KEY(run_id) REFERENCES merge_runs(id)
 )
 SQL, 'failed to create metadata table merge_revalidations');
+    cow_merge_ensure_metadata_column($meta, 'merge_revalidations', 'replacement_conflict_id', 'INTEGER');
     cow_merge_ensure_metadata_column($meta, 'merge_revalidations', 'revalidation_class', "TEXT NOT NULL DEFAULT 'unclassified'");
     cow_merge_exec_checked($meta, <<<'SQL'
 CREATE TABLE IF NOT EXISTS merge_row_identities (
@@ -6747,7 +6750,8 @@ function cow_merge_revalidate_reviewed_conflicts(
                     (string)($staleness['revalidation_class'] ?? 'unclassified'),
                     $current_source_payload,
                     $current_target_payload,
-                    (string)($staleness['stale_reason'] ?? 'target payload changed')
+                    (string)($staleness['stale_reason'] ?? 'target payload changed'),
+                    isset($staleness['replacement_conflict_id']) ? (int)$staleness['replacement_conflict_id'] : null
                 );
             }
             $carried++;
@@ -6806,18 +6810,20 @@ function cow_merge_record_revalidation(
     string $revalidation_class,
     string $source_payload,
     string $target_payload,
-    string $stale_reason
+    string $stale_reason,
+    ?int $replacement_conflict_id = null
 ): int {
     $stmt = cow_merge_prepare_checked(
         $meta,
         'INSERT INTO merge_revalidations ' .
-        '(conflict_id, review_note_id, run_id, revalidation_class, source_payload, target_payload, source_hash, target_hash, stale_reason) ' .
-        'VALUES (:conflict_id, :review_note_id, :run_id, :revalidation_class, :source_payload, :target_payload, :source_hash, :target_hash, :stale_reason)',
+        '(conflict_id, review_note_id, run_id, replacement_conflict_id, revalidation_class, source_payload, target_payload, source_hash, target_hash, stale_reason) ' .
+        'VALUES (:conflict_id, :review_note_id, :run_id, :replacement_conflict_id, :revalidation_class, :source_payload, :target_payload, :source_hash, :target_hash, :stale_reason)',
         'failed to prepare merge revalidation insert'
     );
     cow_merge_bind($stmt, ':conflict_id', $conflict_id);
     cow_merge_bind($stmt, ':review_note_id', $review_note_id);
     cow_merge_bind($stmt, ':run_id', $run_id);
+    cow_merge_bind($stmt, ':replacement_conflict_id', $replacement_conflict_id);
     cow_merge_bind($stmt, ':revalidation_class', $revalidation_class);
     cow_merge_bind($stmt, ':source_payload', $source_payload);
     cow_merge_bind($stmt, ':target_payload', $target_payload);
@@ -6831,7 +6837,7 @@ function cow_merge_record_revalidation(
 function cow_merge_latest_revalidation(SQLite3 $meta, int $conflict_id): ?array {
     $stmt = cow_merge_prepare_checked(
         $meta,
-        'SELECT id, conflict_id, review_note_id, run_id, revalidation_class, source_payload, target_payload, source_hash, target_hash, stale_reason, created_at ' .
+        'SELECT id, conflict_id, review_note_id, run_id, replacement_conflict_id, revalidation_class, source_payload, target_payload, source_hash, target_hash, stale_reason, created_at ' .
         'FROM merge_revalidations WHERE conflict_id = :conflict_id ORDER BY id DESC LIMIT 1',
         'failed to prepare latest merge revalidation lookup'
     );
@@ -10430,6 +10436,7 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
                 'revalidation_class' => $same_validator_payload ? 'unchanged' : 'replacement-evidence',
                 'current_source_payload' => (string)($latest['source_payload'] ?? ''),
                 'current_target_payload' => (string)($latest['chosen_payload'] ?? ''),
+                'replacement_conflict_id' => (int)$latest['id'],
             ];
         }
 
@@ -10692,6 +10699,22 @@ function cow_merge_audit_add_conflict_staleness(SQLite3 $meta, array $rows): arr
         $row['stale_status'] = $staleness['stale_status'];
         $row['stale_reason'] = $staleness['stale_reason'];
         $row['revalidation_class'] = $staleness['revalidation_class'] ?? 'unclassified';
+        if (isset($staleness['replacement_conflict_id'])) {
+            $row['replacement_conflict_id'] = (int)$staleness['replacement_conflict_id'];
+        }
+        $latest_revalidation = (
+            cow_merge_audit_has_table($meta, 'merge_revalidations')
+            && cow_merge_audit_has_column($meta, 'merge_revalidations', 'replacement_conflict_id')
+        )
+            ? cow_merge_latest_revalidation($meta, (int)$row['id'])
+            : null;
+        if ($latest_revalidation !== null) {
+            $row['latest_revalidation_id'] = (int)$latest_revalidation['id'];
+            $row['latest_revalidation_class'] = (string)($latest_revalidation['revalidation_class'] ?? 'unclassified');
+            if ($latest_revalidation['replacement_conflict_id'] !== null) {
+                $row['latest_revalidation_replacement_conflict_id'] = (int)$latest_revalidation['replacement_conflict_id'];
+            }
+        }
         if ($staleness['current_target_payload'] !== null) {
             $row['current_target_payload'] = $staleness['current_target_payload'];
         }

@@ -16842,6 +16842,7 @@ PHP);
         ],
     ]);
     assert_same($plugin_validator_updated_result['conflicts'], 1, 'plugin validator rerun records replacement evidence for the same plugin object');
+    $plugin_replacement_conflict_id = (int)scalar($plugin_graph_metadata, "SELECT MAX(id) FROM merge_conflicts WHERE table_name = '__plugins__' AND id > $plugin_conflict_id");
     $plugin_revalidate_after_rerun = cow_merge_revalidate_reviewed_conflicts($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 'cow-revalidate');
     assert_same($plugin_revalidate_after_rerun['checked'], 2, 'plugin conflict revalidation inspects original and replacement validator findings');
     assert_same($plugin_revalidate_after_rerun['reviewed'], 1, 'plugin conflict revalidation still only carries reviewed plugin conflicts');
@@ -16849,6 +16850,7 @@ PHP);
     assert_same($plugin_revalidate_after_rerun['carried'], 1, 'plugin conflict revalidation carries changed validator evidence to needs-action');
     assert_same((int)scalar($plugin_graph_metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $plugin_conflict_id"), 1, 'plugin conflict revalidation records replacement validator evidence for audit');
     assert_same(scalar($plugin_graph_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $plugin_conflict_id ORDER BY id DESC LIMIT 1"), 'replacement-evidence', 'plugin revalidation classifies changed validator evidence');
+    assert_same((int)scalar($plugin_graph_metadata, "SELECT replacement_conflict_id FROM merge_revalidations WHERE conflict_id = $plugin_conflict_id ORDER BY id DESC LIMIT 1"), $plugin_replacement_conflict_id, 'plugin revalidation links to the replacement validator conflict');
     $plugin_revalidated_audit = cow_merge_audit_report($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 10, [
         'scope' => 'plugin',
         'records' => 'conflicts',
@@ -16856,6 +16858,8 @@ PHP);
     ]);
     $plugin_original_after_rerun = array_values(array_filter($plugin_revalidated_audit['conflicts'], fn($row) => (int)$row['id'] === $plugin_conflict_id));
     assert_same($plugin_original_after_rerun[0]['stale_status'] ?? null, 'stale', 'plugin audit marks reviewed conflicts stale after validator evidence changes');
+    assert_same((int)($plugin_original_after_rerun[0]['replacement_conflict_id'] ?? 0), $plugin_replacement_conflict_id, 'plugin stale audit exposes the live replacement conflict id');
+    assert_same((int)($plugin_original_after_rerun[0]['latest_revalidation_replacement_conflict_id'] ?? 0), $plugin_replacement_conflict_id, 'plugin stale audit exposes the stored replacement conflict id');
     assert_true(str_contains((string)($plugin_original_after_rerun[0]['current_target_preview'] ?? ''), '123456'), 'plugin stale audit exposes replacement validator evidence');
     assert_true(str_contains((string)($plugin_original_after_rerun[0]['review_note'] ?? ''), 'plugin graph validator needs an app-specific repair'), 'plugin stale revalidation preserves prior reviewer intent');
     $plugin_revalidate_again = cow_merge_revalidate_reviewed_conflicts($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 'cow-revalidate');

@@ -56,8 +56,11 @@ cover `wp_posts` `post_type`, `wp_options` `option_name`, `wp_postmeta`
 `comment_post_ID`/`comment_type`, and commentmeta `comment_id`/`meta_key`.
 Plugin validator conflicts are classified as `unchanged` when the rerun reports
 the same evidence and `replacement-evidence` when the validator reports changed
-evidence for the same plugin object. These classes are audit metadata only.
-They do not make stale reviews apply automatically.
+evidence for the same plugin object. Replacement evidence also links the stale
+review to the newer validator conflict row, so audit output can point reviewers
+at the exact validator record that superseded their prior review. These classes
+and links are audit metadata only. They do not make stale reviews apply
+automatically.
 
 ## Future Re-Audit Model
 
@@ -87,7 +90,9 @@ confirm any compatible drift.
 To support this cleanly, audit metadata should retain:
 
 - Original conflict or decision id.
-- Latest replacement conflict or decision id.
+- Latest replacement conflict or decision id. Plugin validator revalidations
+  now store `merge_revalidations.replacement_conflict_id` and expose the latest
+  replacement conflict id in audit output.
 - Previous review status and note.
 - Re-audit classifier. The current `merge_revalidations.revalidation_class`
   stores `unchanged`, `compatible-target-drift`, `compatible-source-drift`,
@@ -118,10 +123,11 @@ The first implementation supports database cell, database row, and filesystem
 conflicts. Plugin validator conflicts now have a conservative validator-evidence
 classifier: if a validator rerun records changed evidence for the same plugin
 object, the reviewed plugin conflict returns to `needs-action` with the
-replacement validator payload visible in audit. Generic merge resolution still
-cannot apply plugin conflicts; the plugin validator or a plugin-specific repair
-flow remains the authority. Schema conflicts still use the conservative
-stale-target guard until they have schema-specific revalidation payloads.
+replacement validator payload and replacement conflict id visible in audit.
+Generic merge resolution still cannot apply plugin conflicts; the plugin
+validator or a plugin-specific repair flow remains the authority. Schema
+conflicts still use the conservative stale-target guard until they have
+schema-specific revalidation payloads.
 
 ## Test Shape
 
@@ -135,8 +141,9 @@ filesystem conflicts, deleted database target rows, deleted filesystem target
 paths, incompatible no-primary-key rowid replacement, incompatible replacement
 for every currently supported source- and target-side WordPress row semantic
 fingerprint, and plugin validator reruns that carry reviewed plugin conflicts
-back to `needs-action` with `replacement-evidence` when the validator reports
-changed evidence for the same plugin object.
+back to `needs-action` with `replacement-evidence`, replacement validator
+payloads, and replacement conflict links when the validator reports changed
+evidence for the same plugin object.
 
 Future classifier tests should cover plugin/custom primary-key row conflicts
 where the row keeps the same key but a higher-level logical fingerprint proves
