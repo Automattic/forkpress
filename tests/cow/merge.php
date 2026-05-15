@@ -13985,6 +13985,109 @@ PHP);
     assert_true(str_contains($wp_menu_ref_preview, '"missing_object_id":40'), 'WordPress menu reference audit includes the missing page ID');
     assert_true(str_contains($wp_menu_ref_preview, '"object_type":"page"'), 'WordPress menu reference audit includes the menu object type');
 
+    $wp_option_ref_base_root = $tmp . '/wp-option-ref-validator-files-base';
+    $wp_option_ref_source_root = $tmp . '/wp-option-ref-validator-files-source';
+    $wp_option_ref_target_root = $tmp . '/wp-option-ref-validator-files-target';
+    $wp_option_ref_base = $wp_option_ref_base_root . '/wp-content/database/.ht.sqlite';
+    $wp_option_ref_source = $wp_option_ref_source_root . '/wp-content/database/.ht.sqlite';
+    $wp_option_ref_target = $wp_option_ref_target_root . '/wp-content/database/.ht.sqlite';
+    $wp_option_ref_metadata = $tmp . '/.forkpress/cow/merge/wp-option-ref-validator-metadata.sqlite';
+    mkdir($wp_option_ref_base_root . '/wp-content/database', 0777, true);
+    create_base_db($wp_option_ref_base);
+    $db = open_db($wp_option_ref_base);
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_type TEXT NOT NULL DEFAULT 'post'");
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_name TEXT NOT NULL DEFAULT ''");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (50, 'Featured option page', '<!-- wp:paragraph --><p>Featured option page</p><!-- /wp:paragraph -->', 'publish', 'page', 'featured-option-page')");
+    $theme_mods_base = serialize([
+        'forkpress_featured_page' => 50,
+        'forkpress_accent' => 'base',
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('theme_mods_forkpress_active', :value, 'yes')");
+    $stmt->bindValue(':value', $theme_mods_base, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+    write_test_file($wp_option_ref_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query("SELECT option_name, option_value FROM wp_options WHERE option_name LIKE 'theme_mods_%'");
+$findings = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    $mods = @unserialize((string)$row['option_value']);
+    if (!is_array($mods) || !isset($mods['forkpress_featured_page'])) {
+        continue;
+    }
+    $page_id = (int)$mods['forkpress_featured_page'];
+    $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $page_id AND post_type = 'page'");
+    if ($exists === 0) {
+        $findings[] = [
+            'plugin' => 'forkpress-wp-option-refs',
+            'object' => 'option:' . $row['option_name'],
+            'reason' => 'theme option references a missing page',
+            'type' => 'plugin-wp-option-missing-object',
+            'tables' => ['wp_options', 'wp_posts'],
+            'validator' => 'forkpress-wp-option-refs@1',
+            'candidate' => [
+                'option_name' => (string)$row['option_name'],
+                'field' => 'forkpress_featured_page',
+                'missing_object_id' => $page_id,
+                'object_type' => 'page',
+            ],
+        ];
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    copy_tree_for_test($wp_option_ref_base_root, $wp_option_ref_source_root);
+    copy_tree_for_test($wp_option_ref_base_root, $wp_option_ref_target_root);
+    $wp_option_ref_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-option-ref-validator.json';
+    cow_merge_capture_file_base($wp_option_ref_base_root, $wp_option_ref_file_base);
+    cow_merge_allocate_autoincrement_bands($wp_option_ref_source, $wp_option_ref_metadata, 'feature-wp-option-ref-source');
+    cow_merge_allocate_autoincrement_bands($wp_option_ref_target, $wp_option_ref_metadata, 'feature-wp-option-ref-target');
+    $db = open_db($wp_option_ref_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID = 50');
+    $db->close();
+    $db = open_db($wp_option_ref_target);
+    $theme_mods_target = serialize([
+        'forkpress_featured_page' => 50,
+        'forkpress_accent' => 'target',
+    ]);
+    $stmt = $db->prepare("UPDATE wp_options SET option_value = :value WHERE option_name = 'theme_mods_forkpress_active'");
+    $stmt->bindValue(':value', $theme_mods_target, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+    $wp_option_ref_result = cow_merge_branch_state(
+        $wp_option_ref_base,
+        $wp_option_ref_source,
+        $wp_option_ref_target,
+        $wp_option_ref_metadata,
+        'feature-wp-option-ref-source',
+        'feature-wp-option-ref-target',
+        $wp_option_ref_file_base,
+        $wp_option_ref_source_root,
+        $wp_option_ref_target_root
+    );
+    assert_same($wp_option_ref_result['status'], 'completed_with_conflicts', 'WordPress option reference validator holds missing option objects for review');
+    assert_same((int)($wp_option_ref_result['plugin_validators'] ?? 0), 1, 'WordPress option reference validator is discovered from mu-plugins during merge');
+    assert_same((int)($wp_option_ref_result['plugin_validator_conflicts'] ?? 0), 1, 'WordPress option reference validator records the missing featured page');
+    assert_same((int)scalar($wp_option_ref_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 50'), 0, 'WordPress option reference validator leaves the source featured page deletion staged for review');
+    $wp_option_ref_value = scalar($wp_option_ref_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_forkpress_active'");
+    $wp_option_ref_mods = is_string($wp_option_ref_value) ? unserialize($wp_option_ref_value) : null;
+    assert_same($wp_option_ref_mods['forkpress_accent'] ?? null, 'target', 'WordPress option reference validator preserves the target option edit');
+    assert_same($wp_option_ref_mods['forkpress_featured_page'] ?? null, 50, 'WordPress option reference validator keeps the stale featured page reference visible for review');
+    $wp_option_ref_audit = cow_merge_audit_report($wp_option_ref_metadata, (int)$wp_option_ref_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-option-missing-object',
+    ]);
+    assert_same(count($wp_option_ref_audit['conflicts']), 1, 'WordPress option reference validator exposes the missing option object as a plugin-scoped audit conflict');
+    $wp_option_ref_preview = (string)($wp_option_ref_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_true(str_contains($wp_option_ref_preview, '"missing_object_id":50'), 'WordPress option reference audit includes the missing page ID');
+    assert_true(str_contains($wp_option_ref_preview, 'theme_mods_forkpress_active'), 'WordPress option reference audit includes the option name');
+
     $wp_lifecycle_base = $tmp . '/wp-lifecycle-base.sqlite';
     $wp_lifecycle_source = $tmp . '/wp-lifecycle-source.sqlite';
     $wp_lifecycle_target = $tmp . '/wp-lifecycle-target.sqlite';
