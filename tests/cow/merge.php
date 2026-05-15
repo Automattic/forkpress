@@ -14464,6 +14464,7 @@ SQL);
     $db->exec("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('page_for_posts', '1', 'yes')");
     $db->exec("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (1, '_menu_item_menu_item_parent', '1')");
     $db->exec("INSERT INTO wp_comments (comment_post_ID, comment_content) VALUES (1, 'Base comment reference')");
+    $db->exec("INSERT INTO wp_commentmeta (comment_id, meta_key, meta_value) VALUES (1, '_forkpress_base_comment_ref', 'base comment metadata')");
     $db->close();
     copy($band_explicit_ref_base, $band_explicit_ref_source);
     copy($band_explicit_ref_base, $band_explicit_ref_target);
@@ -14511,6 +14512,9 @@ SQL);
     $stmt = $db->prepare("INSERT INTO wp_commentmeta (comment_id, meta_key, meta_value) VALUES (:comment_id, '_forkpress_comment_ref', 'comment metadata behind held explicit post')");
     $stmt->bindValue(':comment_id', $band_explicit_ref_comment_id, SQLITE3_INTEGER);
     $stmt->execute();
+    $stmt = $db->prepare("UPDATE wp_commentmeta SET comment_id = :comment_id WHERE meta_key = '_forkpress_base_comment_ref'");
+    $stmt->bindValue(':comment_id', $band_explicit_ref_comment_id, SQLITE3_INTEGER);
+    $stmt->execute();
     $stmt = $db->prepare("INSERT INTO wp_comments (comment_post_ID, comment_content, comment_parent) VALUES (1, 'Threaded comment behind held explicit post comment', :comment_parent)");
     $stmt->bindValue(':comment_parent', $band_explicit_ref_comment_id, SQLITE3_INTEGER);
     $stmt->execute();
@@ -14544,6 +14548,7 @@ SQL);
     assert_same((int)scalar($band_explicit_ref_target, "SELECT comment_post_ID FROM wp_comments WHERE comment_content = 'Base comment reference'"), 1, 'updated comments pointing at a held explicit source post are not applied automatically');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_comments WHERE comment_post_ID = 2"), 0, 'comments pointing at a held explicit source post are not applied automatically');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_commentmeta WHERE comment_id = $band_explicit_ref_comment_id"), 0, 'comment metadata behind a held explicit source post is not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT comment_id FROM wp_commentmeta WHERE meta_key = '_forkpress_base_comment_ref'"), 1, 'updated comment metadata behind a held explicit source post comment is not applied automatically');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_comments WHERE comment_parent = $band_explicit_ref_comment_id"), 0, 'threaded comments pointing at a held explicit source comment are not applied automatically');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_commentmeta WHERE comment_id = $band_explicit_ref_child_comment_id"), 0, 'threaded comment metadata behind a held explicit source comment is not applied automatically');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_term_relationships WHERE object_id = 2"), 0, 'term relationships pointing at a held explicit source post are not applied automatically');
@@ -14569,7 +14574,7 @@ SQL);
     );
     assert_same(
         (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND c.table_name = 'wp_commentmeta' AND c.conflict_type = 'row-target-constraint'"),
-        2,
+        3,
         'comment metadata behind a held explicit source post or comment records reviewable row conflicts'
     );
     assert_same(
@@ -14600,6 +14605,10 @@ SQL);
     assert_true(
         (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_comments' AND d.decision = 'target-wins' AND d.reason LIKE 'source changed%'") === 1,
         'updated comments held behind an explicit source post explain that the source changed the row'
+    );
+    assert_true(
+        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_commentmeta' AND d.decision = 'target-wins' AND d.reason LIKE 'source changed%'") === 1,
+        'updated comment metadata held behind an explicit source post comment explains that the source changed the row'
     );
     assert_true(
         str_contains((string)scalar($band_explicit_ref_metadata, "SELECT reason FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_term_relationships' AND d.decision = 'target-wins' ORDER BY d.id DESC LIMIT 1"), 'parent post must merge before child row'),
