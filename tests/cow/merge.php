@@ -6156,6 +6156,7 @@ SQL);
     $file_resolve_target_root = $tmp . '/files-resolve-target';
     mkdir($file_resolve_base_root . '/wp-content/uploads', 0777, true);
     write_test_file($file_resolve_base_root . '/wp-content/uploads/conflict.txt', 'base conflict');
+    write_test_file($file_resolve_base_root . '/wp-content/uploads/binary-conflict.bin', "base binary conflict\0\x80");
     write_test_file($file_resolve_base_root . '/wp-content/uploads/delete-conflict.txt', 'base delete conflict');
     write_test_file($file_resolve_base_root . '/wp-content/uploads/rollback-conflict.txt', 'base rollback conflict');
     write_test_file($file_resolve_base_root . '/wp-content/uploads/commit-rollback-conflict.txt', 'base commit rollback conflict');
@@ -6180,6 +6181,7 @@ SQL);
     $file_resolve_manifest = $tmp . '/.forkpress/cow/merge/file-bases/feature-file-resolve.json';
     cow_merge_capture_file_base($file_resolve_base_root, $file_resolve_manifest);
     write_test_file($file_resolve_source_root . '/wp-content/uploads/conflict.txt', 'source conflict resolution');
+    write_test_file($file_resolve_source_root . '/wp-content/uploads/binary-conflict.bin', "source binary resolution\0\xff");
     write_test_file($file_resolve_source_root . '/wp-content/uploads/rollback-conflict.txt', 'source rollback resolution');
     write_test_file($file_resolve_source_root . '/wp-content/uploads/commit-rollback-conflict.txt', 'source commit rollback resolution');
     write_test_file($file_resolve_source_root . '/wp-content/uploads/revalidate-conflict.txt', 'source revalidate resolution');
@@ -6198,6 +6200,7 @@ SQL);
     mkdir($file_resolve_source_root . '/wp-content/uploads/replace-file-with-unsafe-dir', 0777, true);
     create_test_symlink('/etc/passwd', $file_resolve_source_root . '/wp-content/uploads/replace-file-with-unsafe-dir/unsafe-link.txt');
     write_test_file($file_resolve_target_root . '/wp-content/uploads/conflict.txt', 'target conflict resolution');
+    write_test_file($file_resolve_target_root . '/wp-content/uploads/binary-conflict.bin', "target binary resolution\0\xfe");
     write_test_file($file_resolve_target_root . '/wp-content/uploads/delete-conflict.txt', 'target changed before source deletion');
     write_test_file($file_resolve_target_root . '/wp-content/uploads/rollback-conflict.txt', 'target rollback resolution');
     write_test_file($file_resolve_target_root . '/wp-content/uploads/commit-rollback-conflict.txt', 'target commit rollback resolution');
@@ -6237,6 +6240,18 @@ SQL);
     assert_same($file_source_resolution['status'], 'applied', 'source filesystem conflict resolution records applied status');
     assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/conflict.txt'), 'source conflict resolution', 'source filesystem conflict resolution copies the audited source file');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $file_conflict_id AND table_name = '__files__' AND column_name = 'path' AND choice = 'source' AND applied = 1"), 1, 'filesystem conflict resolution is auditable');
+    $binary_file_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/binary-conflict.bin')) . "' ORDER BY id DESC LIMIT 1");
+    $binary_file_source_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $binary_file_conflict_id,
+        'source',
+        true,
+        'Apply audited source binary file.',
+        'cow-test'
+    );
+    assert_same($binary_file_source_resolution['status'], 'applied', 'source binary filesystem conflict resolution records applied status');
+    assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/binary-conflict.bin'), "source binary resolution\0\xff", 'source binary filesystem conflict resolution copies exact source bytes');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $binary_file_conflict_id AND table_name = '__files__' AND column_name = 'path' AND choice = 'source' AND applied = 1"), 1, 'binary filesystem conflict resolution is auditable');
     assert_throws(
         fn() => cow_merge_resolve_conflict($metadata, $file_conflict_id, 'target', true, 'Try stale file keep.', 'cow-test'),
         'target filesystem path no longer matches',
@@ -6494,6 +6509,7 @@ SQL);
     );
     assert_same($file_resolve_rerun['status'], 'completed_with_conflicts', 'rerunning after filesystem source resolutions only reports unresolved file conflicts');
     assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/conflict.txt'), 'source conflict resolution', 'rerunning after source filesystem replacement keeps the audited source file');
+    assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/binary-conflict.bin'), "source binary resolution\0\xff", 'rerunning after source binary filesystem replacement keeps the exact audited bytes');
     assert_true(!file_exists($file_resolve_target_root . '/wp-content/uploads/delete-conflict.txt'), 'rerunning after source filesystem deletion keeps the target path deleted');
     assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/replace-dir-with-file'), 'source resolved replacement file', 'rerunning after source directory-to-file resolution keeps the audited source file');
     assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/replace-file-with-dir/source-child.txt'), 'source resolved replacement child', 'rerunning after source file-to-directory resolution keeps the audited source directory');
@@ -6504,6 +6520,11 @@ SQL);
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = '__files__' AND c.conflict_type = 'file-conflict' AND c.row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/conflict.txt')) . "' AND r.source_branch = 'feature-file-resolve'"),
         1,
         'rerunning after source filesystem replacement does not rediscover the resolved file conflict'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = '__files__' AND c.conflict_type = 'file-conflict' AND c.row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/binary-conflict.bin')) . "' AND r.source_branch = 'feature-file-resolve'"),
+        1,
+        'rerunning after source binary filesystem replacement does not rediscover the resolved binary file conflict'
     );
     assert_same(
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = '__files__' AND c.conflict_type = 'file-source-deleted' AND c.row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/delete-conflict.txt')) . "' AND r.source_branch = 'feature-file-resolve'"),
