@@ -706,20 +706,61 @@ pub fn reset_cow_branch(
         return Err(err).context(format!("failed to reset COW branch; {rollback}"));
     }
 
+    let metadata_backup = match snapshot_cow_reset_metadata(layout, runtime, shared, branch, parent)
+    {
+        Ok(backup) => backup,
+        Err(err) => {
+            let failed = unique_cow_operation_dir(parent, "reset-failed", branch);
+            let rollback = rollback_failed_reset_publish(
+                branch,
+                &target,
+                &backup,
+                &staging,
+                &failed,
+                target_moved_to_backup,
+                staging_published,
+            );
+            return Err(err).context(format!(
+                "failed to snapshot COW reset metadata before finalizing reset; {rollback}"
+            ));
+        }
+    };
+    let finalize = (|| -> Result<()> {
+        record_cow_merge_base_snapshot(layout, runtime, shared, branch, &source_db)?;
+        let target_db = cow_sqlite_db_path(&target);
+        if target_db.is_file() {
+            allocate_cow_autoincrement_bands(layout, runtime, shared, branch, &target_db)?;
+            capture_cow_row_identities(layout, runtime, shared, branch, &target_db, Some(from))?;
+        }
+        record_cow_file_merge_base_snapshot(layout, runtime, shared, branch, &target)?;
+        invalidate_cow_git_ref(layout, branch)?;
+        Ok(())
+    })();
+
+    if let Err(err) = finalize {
+        let metadata_rollback = metadata_backup.restore(layout);
+        let failed = unique_cow_operation_dir(parent, "reset-failed", branch);
+        let branch_rollback = rollback_failed_reset_publish(
+            branch,
+            &target,
+            &backup,
+            &staging,
+            &failed,
+            target_moved_to_backup,
+            staging_published,
+        );
+        return Err(err).context(format!(
+            "failed to finalize COW branch reset metadata; {metadata_rollback}; {branch_rollback}"
+        ));
+    }
+    metadata_backup.cleanup();
+
     if let Err(err) = fs::remove_dir_all(&backup) {
         eprintln!(
             "forkpress: warning: reset succeeded but failed to remove old branch backup {}: {err}",
             backup.display()
         );
     }
-    record_cow_merge_base_snapshot(layout, runtime, shared, branch, &source_db)?;
-    let target_db = cow_sqlite_db_path(&target);
-    if target_db.is_file() {
-        allocate_cow_autoincrement_bands(layout, runtime, shared, branch, &target_db)?;
-        capture_cow_row_identities(layout, runtime, shared, branch, &target_db, Some(from))?;
-    }
-    record_cow_file_merge_base_snapshot(layout, runtime, shared, branch, &target)?;
-    invalidate_cow_git_ref(layout, branch)?;
 
     println!("forkpress: reset COW branch '{branch}' from '{from}'");
     Ok(())
@@ -2810,6 +2851,185 @@ fn cleanup_failed_cow_branch_create(
     }
 }
 
+struct CowResetMetadataBackup {
+    branch: String,
+    root: PathBuf,
+    metadata_db: Option<PathBuf>,
+    merge_base_db: Option<PathBuf>,
+    file_base: Option<PathBuf>,
+}
+
+impl CowResetMetadataBackup {
+    fn restore_sqlite(backup: &Option<PathBuf>, dest: &Path, label: &str) -> Result<()> {
+        remove_sqlite_file_and_sidecars(dest)?;
+        if let Some(backup) = backup {
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            fs::copy(backup, dest).with_context(|| {
+                format!(
+                    "failed to restore {label} {} from {}",
+                    dest.display(),
+                    backup.display()
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    fn restore_file(backup: &Option<PathBuf>, dest: &Path, label: &str) -> Result<()> {
+        match fs::remove_file(dest) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err).with_context(|| format!("failed to remove {}", dest.display()));
+            }
+        }
+        if let Some(backup) = backup {
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            fs::copy(backup, dest).with_context(|| {
+                format!(
+                    "failed to restore {label} {} from {}",
+                    dest.display(),
+                    backup.display()
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    fn restore(&self, layout: &Layout) -> String {
+        let mut errors = Vec::new();
+        if let Err(err) = Self::restore_sqlite(
+            &self.metadata_db,
+            &cow_merge_metadata_db_path(layout),
+            "metadata database",
+        ) {
+            errors.push(err.to_string());
+        }
+        match cow_merge_base_db_path(layout, &self.branch) {
+            Ok(dest) => {
+                if let Err(err) = Self::restore_sqlite(&self.merge_base_db, &dest, "DB merge base")
+                {
+                    errors.push(err.to_string());
+                }
+            }
+            Err(err) => errors.push(err.to_string()),
+        }
+        match cow_merge_file_base_path(layout, &self.branch) {
+            Ok(dest) => {
+                if let Err(err) =
+                    Self::restore_file(&self.file_base, &dest, "filesystem merge base")
+                {
+                    errors.push(err.to_string());
+                }
+            }
+            Err(err) => errors.push(err.to_string()),
+        };
+        self.cleanup();
+        if errors.is_empty() {
+            "restored previous reset metadata".to_string()
+        } else {
+            format!("metadata rollback incomplete: {}", errors.join("; "))
+        }
+    }
+
+    fn cleanup(&self) {
+        if let Err(err) = fs::remove_dir_all(&self.root)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!(
+                "forkpress: warning: failed to remove reset metadata backup {}: {err}",
+                self.root.display()
+            );
+        }
+    }
+}
+
+fn snapshot_optional_sqlite(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    source: &Path,
+    dest: &Path,
+    label: &str,
+) -> Result<Option<PathBuf>> {
+    if !source.is_file() {
+        return Ok(None);
+    }
+    hot_copy_sqlite_database(layout, runtime, shared, source, dest)
+        .with_context(|| format!("failed to snapshot {label} {}", source.display()))?;
+    Ok(Some(dest.to_path_buf()))
+}
+
+fn snapshot_optional_file(source: &Path, dest: &Path, label: &str) -> Result<Option<PathBuf>> {
+    if !source.is_file() {
+        return Ok(None);
+    }
+    fs::copy(source, dest)
+        .with_context(|| format!("failed to snapshot {label} {}", source.display()))?;
+    Ok(Some(dest.to_path_buf()))
+}
+
+fn snapshot_cow_reset_metadata(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    branch: &str,
+    parent: &Path,
+) -> Result<CowResetMetadataBackup> {
+    let root = unique_cow_operation_dir(parent, "reset-metadata-backup", branch);
+    if path_exists_no_follow(&root) {
+        bail!("temporary reset metadata backup path already exists");
+    }
+    fs::create_dir_all(&root).with_context(|| format!("failed to create {}", root.display()))?;
+
+    let result = (|| -> Result<CowResetMetadataBackup> {
+        let metadata_db = snapshot_optional_sqlite(
+            layout,
+            runtime,
+            shared,
+            &cow_merge_metadata_db_path(layout),
+            &root.join("metadata.sqlite"),
+            "merge metadata database",
+        )?;
+        let merge_base_db = snapshot_optional_sqlite(
+            layout,
+            runtime,
+            shared,
+            &cow_merge_base_db_path(layout, branch)?,
+            &root.join("merge-base.sqlite"),
+            "DB merge base",
+        )?;
+        let file_base = snapshot_optional_file(
+            &cow_merge_file_base_path(layout, branch)?,
+            &root.join("file-base.json"),
+            "filesystem merge base",
+        )?;
+
+        Ok(CowResetMetadataBackup {
+            branch: branch.to_string(),
+            root: root.clone(),
+            metadata_db,
+            merge_base_db,
+            file_base,
+        })
+    })();
+    if result.is_err()
+        && let Err(err) = fs::remove_dir_all(&root)
+    {
+        eprintln!(
+            "forkpress: warning: failed to remove incomplete reset metadata backup {}: {err}",
+            root.display()
+        );
+    }
+    result
+}
+
 fn hot_copy_sqlite_database(
     layout: &Layout,
     runtime: &PortableRuntime,
@@ -3198,6 +3418,68 @@ mod tests {
             &base_db, "-shm"
         )));
         assert!(!path_exists_no_follow(&file_base));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reset_metadata_backup_restores_previous_artifacts() {
+        let root = std::env::temp_dir().join(format!(
+            "forkpress-reset-metadata-backup-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let layout = Layout::new(root.join(".forkpress")).unwrap();
+        let branch = "feature";
+        let backup_root = root.join(".forkpress-reset-metadata-backup-feature-test");
+        fs::create_dir_all(&backup_root).unwrap();
+
+        let metadata_db = cow_merge_metadata_db_path(&layout);
+        fs::create_dir_all(metadata_db.parent().unwrap()).unwrap();
+        fs::write(&metadata_db, b"new metadata").unwrap();
+        fs::write(
+            sqlite_sidecar_path(&metadata_db, "-wal"),
+            b"new metadata wal",
+        )
+        .unwrap();
+        fs::write(backup_root.join("metadata.sqlite"), b"old metadata").unwrap();
+
+        let merge_base = cow_merge_base_db_path(&layout, branch).unwrap();
+        fs::create_dir_all(merge_base.parent().unwrap()).unwrap();
+        fs::write(&merge_base, b"new base").unwrap();
+        fs::write(sqlite_sidecar_path(&merge_base, "-wal"), b"new base wal").unwrap();
+        fs::write(backup_root.join("merge-base.sqlite"), b"old base").unwrap();
+
+        let file_base = cow_merge_file_base_path(&layout, branch).unwrap();
+        fs::create_dir_all(file_base.parent().unwrap()).unwrap();
+        fs::write(&file_base, b"{\"new\":true}").unwrap();
+        fs::write(backup_root.join("file-base.json"), b"{\"old\":true}").unwrap();
+
+        let backup = CowResetMetadataBackup {
+            branch: branch.to_string(),
+            root: backup_root.clone(),
+            metadata_db: Some(backup_root.join("metadata.sqlite")),
+            merge_base_db: Some(backup_root.join("merge-base.sqlite")),
+            file_base: Some(backup_root.join("file-base.json")),
+        };
+
+        let message = backup.restore(&layout);
+        assert!(message.contains("restored previous reset metadata"));
+        assert_eq!(fs::read(&metadata_db).unwrap(), b"old metadata");
+        assert_eq!(fs::read(&merge_base).unwrap(), b"old base");
+        assert_eq!(fs::read(&file_base).unwrap(), b"{\"old\":true}");
+        assert!(!path_exists_no_follow(&sqlite_sidecar_path(
+            &metadata_db,
+            "-wal"
+        )));
+        assert!(!path_exists_no_follow(&sqlite_sidecar_path(
+            &merge_base,
+            "-wal"
+        )));
+        assert!(!path_exists_no_follow(&backup_root));
 
         fs::remove_dir_all(root).unwrap();
     }
