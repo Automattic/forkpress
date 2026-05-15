@@ -34,6 +34,11 @@ on_error() {
   dump_if_exists "$TMP/git-created.html"
   dump_if_exists "$TMP/git-created-merge.out"
   dump_if_exists "$TMP/autoinc-main-init.json"
+  dump_if_exists "$TMP/ui-create-admin.html"
+  dump_if_exists "$TMP/ui-create.json"
+  dump_if_exists "$TMP/ui-merge-admin.html"
+  dump_if_exists "$TMP/ui-merge.json"
+  dump_if_exists "$TMP/ui-main-after-merge-edit.html"
   dump_if_exists "$TMP/autoinc-feature-insert.json"
   dump_if_exists "$TMP/branch-post-edit.html"
   dump_if_exists "$TMP/branch-post-frontend.html"
@@ -252,6 +257,33 @@ semantic_runtime_request() {
     "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
     exit 1
   fi
+}
+
+branch_ui_nonce() {
+  local branch="$1"
+  local field="$2"
+  local out="$3"
+  local host
+  host="$(branch_host "$branch")"
+
+  curl -sS -H "Host: $host" \
+    "http://127.0.0.1:$PORT/wp-admin/" \
+    -o "$out"
+
+  node - <<'NODE' "$out" "$field"
+const fs = require('fs');
+const html = fs.readFileSync(process.argv[2], 'utf8');
+const field = process.argv[3];
+const match = html.match(/var actions = (\{.*?\}|null);/s);
+if (!match || match[1] === 'null') {
+  process.exit(2);
+}
+const actions = JSON.parse(match[1]);
+if (!actions || typeof actions[field] !== 'string' || !actions[field]) {
+  process.exit(3);
+}
+console.log(actions[field]);
+NODE
 }
 
 log_step "init COW site"
@@ -868,6 +900,63 @@ PHP
 
 autoinc_runtime_request main init "$TMP/autoinc-main-init.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(($data["max_id"] ?? null) === 1 ? 0 : 1);' "$TMP/autoinc-main-init.json"
+
+log_step "create and merge branch through WordPress admin UI"
+UI_CREATE_NONCE="$(branch_ui_nonce main createNonce "$TMP/ui-create-admin.html")"
+UI_CREATE_HTTP="$(
+  curl -sS -o "$TMP/ui-create.json" -w '%{http_code}' \
+    -H "Host: wp.localhost:$PORT" \
+    -H "Accept: application/json" \
+    -H "X-ForkPress-Async: 1" \
+    --data-urlencode "action=forkpress_branch_create" \
+    --data-urlencode "_wpnonce=$UI_CREATE_NONCE" \
+    --data-urlencode "branch=ui-created" \
+    --data-urlencode "from=main" \
+    "http://127.0.0.1:$PORT/wp-admin/admin-post.php"
+)"
+if [ "$UI_CREATE_HTTP" != "200" ]; then
+  echo "WP UI branch create returned $UI_CREATE_HTTP" >&2
+  cat "$TMP/ui-create.json" >&2
+  "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+  exit 1
+fi
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $branches = array_map(fn($row) => $row["name"] ?? "", $data["branches"] ?? []); exit(($data["success"] ?? null) === true && ($data["message"] ?? null) === "Created branch ui-created." && in_array("ui-created", $branches, true) ? 0 : 1);' "$TMP/ui-create.json"
+test -d "$WORK/ui-created"
+test -f "$WORK_DIR/cow/merge/bases/ui-created.sqlite"
+test -f "$WORK_DIR/cow/merge/file-bases/ui-created.json"
+php -r '$db = new SQLite3($argv[1]); exit((int)$db->querySingle("SELECT MAX(id) FROM wp_forkpress_e2e_autoinc") === 1 ? 0 : 1);' "$WORK_DIR/cow/merge/bases/ui-created.sqlite"
+php -r '$base = json_decode((string)file_get_contents($argv[1]), true); $entries = $base["entries"] ?? []; exit(is_array($entries) && count($entries) > 0 && !isset($entries["wp-content/ui-created-file.txt"]) ? 0 : 1);' "$WORK_DIR/cow/merge/file-bases/ui-created.json"
+php -r '$meta = new SQLite3($argv[1]); $branch = new SQLite3($argv[2]); $band = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''ui-created'\'' AND table_name = '\''wp_forkpress_e2e_autoinc'\''", true); $seq = (int)$branch->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''wp_forkpress_e2e_autoinc'\''"); exit($band && (int)$band["band_start"] >= 1000000 && $seq === (int)$band["band_start"] - 1 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite" "$WORK/ui-created/wp-content/database/.ht.sqlite"
+
+UI_MERGE_TITLE="UI branch merge $(date +%s)"
+create_branch_post ui-created "$UI_MERGE_TITLE"
+echo "merged through WP branch UI" > "$WORK/ui-created/wp-content/ui-created-file.txt"
+UI_MERGE_NONCE="$(branch_ui_nonce main mergeNonce "$TMP/ui-merge-admin.html")"
+UI_MERGE_HTTP="$(
+  curl -sS -o "$TMP/ui-merge.json" -w '%{http_code}' \
+    -H "Host: wp.localhost:$PORT" \
+    -H "Accept: application/json" \
+    -H "X-ForkPress-Async: 1" \
+    --data-urlencode "action=forkpress_branch_merge" \
+    --data-urlencode "_wpnonce=$UI_MERGE_NONCE" \
+    --data-urlencode "source=ui-created" \
+    --data-urlencode "target=main" \
+    "http://127.0.0.1:$PORT/wp-admin/admin-post.php"
+)"
+if [ "$UI_MERGE_HTTP" != "200" ]; then
+  echo "WP UI branch merge returned $UI_MERGE_HTTP" >&2
+  cat "$TMP/ui-merge.json" >&2
+  "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+  exit 1
+fi
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(($data["success"] ?? null) === true && ($data["message"] ?? null) === "Merged ui-created into main." ? 0 : 1);' "$TMP/ui-merge.json"
+test -f "$WORK/main/wp-content/ui-created-file.txt"
+grep -F "merged through WP branch UI" "$WORK/main/wp-content/ui-created-file.txt" >/dev/null
+curl -sS -H "Host: wp.localhost:$PORT" \
+  "http://127.0.0.1:$PORT/wp-admin/edit.php" \
+  -o "$TMP/ui-main-after-merge-edit.html"
+grep -F "$UI_MERGE_TITLE" "$TMP/ui-main-after-merge-edit.html" >/dev/null
+php -r '$db = new SQLite3($argv[1]); $count = (int)$db->querySingle("SELECT COUNT(*) FROM merge_runs WHERE source_branch = '\''ui-created'\'' AND target_branch = '\''main'\'' AND status = '\''completed'\''"); exit($count > 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
 
 log_step "create CLI branch"
 "$BIN" branch --work-dir "$WORK_DIR" create feature-cow > "$TMP/branch-create.out"
