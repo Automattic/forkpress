@@ -1062,7 +1062,7 @@ fi
 test -d "$WORK/ui-created"
 test -f "$WORK_DIR/cow/merge/bases/ui-created.sqlite"
 test -f "$WORK_DIR/cow/merge/file-bases/ui-created.json"
-grep -F "$WORK/ui-created/wp-content/database/.ht.sqlite" "$WORK/ui-created/wp-config.php" >/dev/null
+grep -F "ui-created/wp-content/database/.ht.sqlite" "$WORK/ui-created/wp-config.php" >/dev/null
 if grep -F "branch-create-stage" "$WORK/ui-created/wp-config.php" >/dev/null; then
   echo "WP UI branch create left wp-config.php pointing at the staging directory" >&2
   exit 1
