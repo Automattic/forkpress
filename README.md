@@ -1,267 +1,340 @@
-# ForkPress
+# [ForkPress](https://automattic.github.io/forkpress/)
 
-ForkPress is a single-binary local WordPress branch runner for agent work.
+ForkPress is a single-binary WordPress branching environment for agentic work.
 
-Documentation is published at <https://automattic.github.io/forkpress/>.
+At a glance:
 
-The product path is now the **COW materialized backend**. `forkpress init`
-creates ordinary branch directories beside `.forkpress`, such as `./main` and
-`./marketing`. Each branch is a normal WordPress tree with its own SQLite
-database file, and branch creation uses filesystem copy-on-write when the
-machine can provide it.
+- **Run** a WordPress site locally through ForkPress.
+- **Branch** the site at any time and get a dedicated preview URL.
+- **Work** in ordinary branch directories created instantly with copy-on-write
+  storage.
+- **Merge** WordPress file and database changes across branches.
+- **Use Git** transparently against ForkPress sites.
 
-No Docker, no system PHP, no MySQL daemon, no FUSE service, and no helper
-daemon. The release artifact is one `forkpress` binary on macOS/Linux and a
-click-through installer on Windows.
+ForkPress also creates agent worktrees, adds branch switching to the WordPress
+admin bar, exposes redacted database snapshots for model context, records
+auditable merge decisions, and includes CLI diagnostics for logs and storage.
 
-## Quick Start
+It ships as a single executable with no external runtime dependencies.
 
-Start in an empty project directory:
+## Quick start
+
+Commands below assume `forkpress` is on your `PATH`. If you unpacked a release
+archive in the current directory, use `./forkpress` instead.
+
+1. **Create and start a site.**
+
+   ```bash
+   mkdir my-site
+   cd my-site
+   forkpress init
+   forkpress serve
+   ```
+
+2. **Open the local preview.**
+
+   ```text
+   http://wp.localhost:18080/
+   http://wp.localhost:18080/wp-admin/
+   ```
+
+   The admin opens logged in by default. To use the normal WordPress login
+   form, start the server with:
+
+   ```bash
+   FORKPRESS_AUTO_LOGIN=0 forkpress serve
+   ```
+
+3. **Stop the site.**
+
+   ```bash
+   forkpress stop
+   ```
+
+   `stop` also detaches mount-backed branch storage when the site uses it.
+
+## Installation
+
+Download the release for your platform from
+<https://github.com/Automattic/forkpress/releases>.
+
+| Platform | Artifact | Notes |
+| --- | --- | --- |
+| macOS&nbsp;Apple&nbsp;silicon | `forkpress-aarch64-apple-darwin.tar.gz` | Static `forkpress` binary. |
+| macOS&nbsp;Intel | `forkpress-x86_64-apple-darwin.tar.gz` | Static `forkpress` binary. |
+| Linux&nbsp;ARM64 | `forkpress-aarch64-unknown-linux-musl.tar.gz` | Static musl-linked `forkpress` binary. |
+| Linux&nbsp;x86_64 | `forkpress-x86_64-unknown-linux-musl.tar.gz` | Static musl-linked `forkpress` binary. |
+| Windows&nbsp;x86_64 | `ForkPressSetup.exe` | Installer with Dev Drive setup and shortcuts. |
+
+### macOS and Linux
 
 ```bash
-./forkpress init
-./forkpress serve
-```
-
-Open:
-
-```text
-http://wp.localhost:18080/
-http://wp.localhost:18080/wp-admin/
-```
-
-The admin opens logged in by default. To use the normal WordPress login form,
-start the server with:
-
-```bash
-FORKPRESS_AUTO_LOGIN=0 ./forkpress serve
-```
-
-Stop the site server and detach any mount-backed COW storage:
-
-```bash
-./forkpress stop
-```
-
-## Install
-
-Download the archive for your machine from a release, unpack it, and run the
-binary.
-
-Windows:
-
-1. Download `ForkPressSetup.exe` from a release.
-2. Open it and follow the prompts.
-3. Accept the Windows permission prompt.
-4. Reboot only if Windows asks.
-5. Open **Start ForkPress Site** from the desktop or Start Menu.
-
-The Windows installer installs protected program files under
-`%ProgramFiles%\ForkPress`, creates a ReFS Dev Drive VHDX at
-`%ProgramData%\ForkPress\Storage\forkpress-dev-drive.vhdx`, mounts it at
-`%USERPROFILE%\ForkPressDevDrive`, adds `forkpress.exe` to the user PATH, creates
-`%USERPROFILE%\ForkPressDevDrive\Sites\My ForkPress Site`, runs `forkpress init`
-there, and creates shortcuts. It does not require WSL, Docker, FUSE, WinFsp, or
-manual Windows feature setup.
-
-macOS:
-
-```bash
-case "$(uname -m)" in
-  arm64) TARGET=aarch64-apple-darwin ;;
-  x86_64) TARGET=x86_64-apple-darwin ;;
-  *) echo "Unsupported Mac architecture: $(uname -m)" >&2; exit 1 ;;
-esac
-
 curl -L -o forkpress.tar.gz \
-  "https://github.com/Automattic/forkpress/releases/download/<tag>/forkpress-$TARGET.tar.gz"
-
+  "https://github.com/Automattic/forkpress/releases/download/<tag>/forkpress-<target>.tar.gz"
 tar -xzf forkpress.tar.gz
 chmod +x forkpress
 ./forkpress --version
 ```
 
-Release targets:
+Replace `<target>` with one of the macOS or Linux target names from the table.
 
-- `x86_64-pc-windows-msvc`
-- `aarch64-apple-darwin`
-- `x86_64-apple-darwin`
-- `aarch64-unknown-linux-musl`
-- `x86_64-unknown-linux-musl`
+### Windows
 
-## Work With Branches
+Download `ForkPressSetup.exe`, open it, and follow the prompts.
 
-Create a branch:
+The installer adds `forkpress.exe` to the user `PATH`, prepares a clone-capable
+ReFS Dev Drive, creates a starter site, and installs Start Menu and desktop
+shortcuts. It does not require WSL, Docker, WinFsp, or manual Windows feature
+setup.
 
-```bash
-./forkpress branch create marketing
-```
+## Branching
 
-That creates:
+ForkPress branches are ordinary WordPress directories beside `.forkpress`. Each
+branch has its own SQLite database at `wp-content/database/.ht.sqlite`, so
+branch writes stay isolated.
 
 ```text
-.forkpress/        # ForkPress metadata, runtime, logs, COW bookkeeping
+.forkpress/        # ForkPress metadata, runtime, logs, and storage bookkeeping
 main/              # main WordPress tree
 marketing/         # marketing WordPress tree
 ```
 
-Preview the branch:
+1. **Create a branch.**
 
-```text
-http://marketing.wp.localhost:18080/
-http://marketing.wp.localhost:18080/wp-admin/
-```
+   ```bash
+   forkpress branch create marketing
+   ```
 
-The WordPress admin bar shows `Branch: <name>`. Hover it to filter and switch
-between local branches.
+   To branch from something other than `main`:
 
-Reset a branch back to another branch:
+   ```bash
+   forkpress branch create marketing --from staging
+   ```
 
-```bash
-./forkpress branch reset marketing --from main
-```
+2. **Preview it.**
 
-That replaces `./marketing` with a fresh COW clone of `./main`, including the
-branch-local SQLite database. ForkPress refuses to reset `main` unless you pass
-`--force`.
+   ```text
+   http://marketing.wp.localhost:18080/
+   http://marketing.wp.localhost:18080/wp-admin/
+   ```
 
-## Git Workflow
+   The WordPress admin bar shows the current branch and lets you switch between
+   local branches.
 
-ForkPress exposes a Git smart-HTTP view at:
+3. **Inspect branches.**
+
+   ```bash
+   forkpress branch list
+   forkpress branch show marketing
+   ```
+
+4. **Reset or delete a branch.**
+
+   ```bash
+   forkpress branch reset marketing --from main
+   forkpress branch delete marketing
+   ```
+
+`main` cannot be deleted. Resetting `main` requires `--force`.
+
+## Merging
+
+ForkPress merges WordPress files and branch-local SQLite database changes. Clean
+source changes are applied, target-only changes are preserved, and anything that
+needs a human decision is recorded in the merge audit log.
+
+ForkPress reserves per-branch AUTOINCREMENT ID ranges for WordPress and plugin
+tables. That keeps independently created rows stable across branches, including
+IDs embedded in blocks, JSON, serialized options, or plugin data.
+
+1. **Merge into `main`.**
+
+   ```bash
+   forkpress branch merge marketing --into main
+   ```
+
+2. **Inspect merge activity.**
+
+   ```bash
+   forkpress branch merge-audit
+   forkpress branch merge-audit --review --records conflicts
+   forkpress branch merge-audit --format json --review --records decisions
+   ```
+
+3. **Apply a reviewed conflict choice.**
+
+   ```bash
+   forkpress branch merge-resolve conflict <id> --choice source --apply
+   ```
+
+4. **Mark an audit record as reviewed.**
+
+   ```bash
+   forkpress branch merge-review conflict <id> \
+     --status reviewed \
+     --note "Verified in wp-admin"
+   ```
+
+## Git workflow
+
+ForkPress serves every site as a Git smart-HTTP remote:
 
 ```text
 http://wp.localhost:18080/site.git
 ```
 
-Clone it:
+1. **Clone the site.**
+
+   ```bash
+   forkpress clone http://wp.localhost:18080/site.git site
+   cd site
+   ```
+
+2. **Switch branches.**
+
+   ```bash
+   git fetch origin
+   git switch marketing
+   ```
+
+3. **Edit WordPress files** under `wordpress/`.
+
+4. **Commit back to ForkPress.**
+
+   ```bash
+   forkpress commit -m "Update marketing page"
+   ```
+
+5. **Preview the pushed branch.**
+
+   ```text
+   http://marketing.wp.localhost:18080/
+   ```
+
+The checkout contains editable WordPress files under `wordpress/` and a
+read-only `database.sql` snapshot for model context. The snapshot is regenerated
+from the branch database, redacts credential-shaped values, and is ignored on
+push.
+
+Database changes should happen through WordPress, WP-CLI, or another tool that
+operates on the branch database. Private runtime state under
+`wordpress/wp-content/database/` is not part of the Git view.
+
+## Agents
+
+1. **Create agent worktrees.**
+
+   ```bash
+   forkpress agents
+   ```
+
+   By default, ForkPress creates ten branches and matching worktrees:
+
+   ```text
+   forkpress-agents/site
+   forkpress-agents/agent-1
+   forkpress-agents/agent-2
+   ...
+   forkpress-agents/agent-10
+   ```
+
+2. **Tune the pool when needed.**
+
+   ```bash
+   forkpress agents --count 3 --prefix review
+   ```
+
+3. **Commit from an agent worktree.**
+
+   ```bash
+   cd forkpress-agents/review-1
+   forkpress commit -m "Update review 1"
+   ```
+
+4. **Preview the branch.**
+
+   ```text
+   http://review-1.wp.localhost:18080/
+   ```
+
+## Copy-on-write storage
+
+Branches are materialized directories. ForkPress shares unchanged file blocks
+with the source branch and stores new blocks only when a branch writes to a
+file.
+
+### Storage cascade
+
+| Platform | Default | Fallback |
+| --- | --- | --- |
+| macOS | APFS `clonefile` in the project directory. | Rootless APFS sparsebundle under `.forkpress/macos-cow`. |
+| Linux | `FICLONE` reflinks in the project directory. | Shared XFS loop volume under the user's ForkPress data directory. |
+| Windows | ReFS block cloning on a Dev Drive. | Dev Drive setup through the Windows installer. |
+
+Public branch directories remain visible beside `.forkpress` even when physical
+storage lives in a mount-backed fallback.
+
+Linux XFS loop storage requires permission to allocate loop devices and mount
+filesystems, usually root or `CAP_SYS_ADMIN`.
+
+Full file-copy materialization is available only when explicitly requested. It
+is not part of the automatic copy-on-write cascade.
+
+### Storage diagnostics
+
+**Inspect storage and clone support:**
 
 ```bash
-./forkpress clone http://wp.localhost:18080/site.git site
-cd site
+forkpress storage status
+forkpress doctor storage
 ```
 
-The checkout has this shape:
-
-```text
-site/
-  database.sql        # read-only snapshot of the current branch DB
-  wordpress/          # editable WordPress files
-```
-
-Switch to a ForkPress branch:
+**Attach or detach mount-backed storage:**
 
 ```bash
-git fetch origin
-git switch marketing
+forkpress storage mount
+forkpress storage detach
 ```
 
-Create a Git branch from a fetched ForkPress branch and push it. ForkPress will
-materialize the matching COW branch when it receives the new Git ref:
+**Compact macOS sparsebundle storage after branch churn:**
 
 ```bash
-git switch -c marketing origin/main
-../forkpress commit -m "create marketing branch"
+forkpress storage compact
 ```
 
-Edit files under `wordpress/`, then push them back into the materialized COW
-branch:
+Tools such as `du`, Finder, and some disk analyzers can over-count shared
+copy-on-write extents because they add up path sizes rather than unique physical
+blocks. `storage status` and `doctor storage` show the branch root, physical
+storage root, and mount-backed storage details when applicable.
+
+Before moving or deleting a site with mount-backed storage, stop it through
+ForkPress:
 
 ```bash
-printf "hello from marketing\n" > wordpress/wp-content/marketing.txt
-../forkpress commit -m "marketing file change"
+forkpress stop
 ```
 
-Preview the pushed file:
+On Linux XFS-loop sites, `forkpress storage detach` unmounts the shared volume
+only after other running ForkPress servers using that storage view are stopped.
 
-```text
-http://marketing.wp.localhost:18080/wp-content/marketing.txt
-```
+## Logs
 
-Delete the remote Git branch when you want to remove the matching preview
-branch:
+**Show WordPress critical errors and PHP fatals:**
 
 ```bash
-git push origin --delete marketing
+forkpress logs --file wp
 ```
 
-ForkPress accepts one branch update per Git push. Push branch creates, updates,
-and deletes one branch at a time.
-
-`database.sql` is generated for model context. Edits to `database.sql` are
-ignored on push; database changes should happen through WordPress, WP-CLI, or
-another tool operating on the branch's own SQLite database.
-The snapshot includes user tables, table rows, explicit indexes, triggers, and
-views, while omitting SQLite and ForkPress driver internals. Credential-shaped
-columns and key/value rows, such as WordPress password hashes, session tokens,
-application passwords, and plugin API tokens, are redacted before the snapshot
-is written into the Git view.
-`wordpress/wp-content/database/` is private runtime state and is not part of the
-Git view; ForkPress ignores pushed files under that path.
-After a push, ForkPress immediately re-snapshots the branch so the remote Git
-ref reflects the generated `database.sql`, not a user-edited copy. Successful
-push cleanup also prunes unreachable loose objects from `.forkpress/cow/git`,
-including Git snapshots left behind by deleted or force-updated preview refs.
-`forkpress commit` fetches that normalized ref and fast-forwards your checkout
-when possible, so generated files and ignored private runtime paths do not leave
-the worktree one commit behind the preview server.
-
-## Run Agents
-
-With the site server running:
+**Follow new WordPress log output:**
 
 ```bash
-./forkpress agents
+forkpress logs --file wp --follow
 ```
 
-This creates ten ForkPress branches and ten Git worktrees:
-
-```text
-forkpress-agents/site
-forkpress-agents/agent-1
-forkpress-agents/agent-2
-...
-forkpress-agents/agent-10
-```
-
-Each `agent-N` worktree is checked out on its matching ForkPress branch.
-
-Create fewer or differently named worktrees:
+**Print known log paths:**
 
 ```bash
-./forkpress agents --count 3 --prefix experiment
-```
-
-After an agent edits files:
-
-```bash
-cd forkpress-agents/experiment-1
-../../forkpress commit -m "experiment 1 changes"
-```
-
-Preview it at:
-
-```text
-http://experiment-1.wp.localhost:18080/
-```
-
-## Logs And Debugging
-
-Show WordPress critical errors and PHP fatals:
-
-```bash
-./forkpress logs --file wp
-```
-
-Follow new WordPress log output while reproducing a browser problem:
-
-```bash
-./forkpress logs --file wp --follow
-```
-
-Print every known log path:
-
-```bash
-./forkpress logs --file all --paths
+forkpress logs --file all --paths
 ```
 
 Useful log files:
@@ -272,483 +345,54 @@ Useful log files:
 - `forkpress`: `.forkpress/logs/forkpress-server.log`
 - `gc`: `.forkpress/logs/gc.log`
 
-## How COW Storage Works
-
-ForkPress records the selected storage strategy in `.forkpress/site.toml`:
-
-```toml
-version = 1
-strategy = "cow"
-file_view = "reflink"
-```
-
-The COW backend has three layers:
-
-```mermaid
-flowchart TB
-    cli[forkpress CLI]
-    server[Local PHP server<br/>wp.localhost:18080]
-    git[Git smart HTTP<br/>/site.git]
-
-    subgraph Project["Project directory"]
-        main[./main<br/>WordPress files<br/>wp-content/database/.ht.sqlite]
-        branch[./marketing<br/>WordPress files<br/>wp-content/database/.ht.sqlite]
-        meta[.forkpress<br/>runtime, logs, site.toml]
-    end
-
-    cowgit[.forkpress/cow/git<br/>Git adapter object store]
-    macos[.forkpress/macos-cow<br/>optional APFS sparsebundle]
-
-    cli --> meta
-    cli -- branch create --> branch
-    server --> main
-    server --> branch
-    git <--> cowgit
-    cowgit <--> main
-    cowgit <--> branch
-    macos -. physical storage when needed .-> main
-    macos -. physical storage when needed .-> branch
-```
-
-The durable WordPress state for a branch is the branch directory itself. A post
-save on `marketing.wp.localhost` writes to:
-
-```text
-./marketing/wp-content/database/.ht.sqlite
-```
-
-It does not write to `./main`, and it does not use SQL views, overlay tables,
-or branch table prefixes.
-
-ForkPress-served WordPress requests take a shared advisory lock at
-`.forkpress/cow/operations.lock`. COW mutations such as branch create, reset,
-delete, and Git apply take the same lock exclusively, so ForkPress does not
-publish or remove a branch tree while one of its own HTTP requests is active.
-Direct shell/editor writes to `./main` or `./marketing` are normal filesystem
-writes and do not participate in that lock.
-
-### File View Cascade
-
-ForkPress tries the cheapest ordinary-file view first:
-
-1. **Native filesystem cloning in the project directory.** On macOS this uses
-   APFS `clonefile`; on Linux this uses `FICLONE` reflinks; on Windows this
-   uses ReFS block cloning when the project lives on a ReFS/Dev Drive volume.
-   New branches share unchanged file blocks with the source branch. Writes to a
-   branch path do not mutate the source path.
-2. **Rootless APFS sparsebundle on macOS.** If the project volume cannot clone files,
-   ForkPress creates `.forkpress/macos-cow/branches.sparsebundle`, mounts it at
-   `.forkpress/macos-cow/mount`, stores the physical branch trees there, and
-   exposes public branch directories like `./main` and `./marketing`.
-3. **Guided ReFS Dev Drive setup on Windows.** If a Windows project is not on
-   clone-capable storage, the Windows installer runs the Dev Drive setup flow
-   and creates ForkPress shortcuts into `%USERPROFILE%\ForkPressDevDrive`.
-4. **Full file copy.** This is the final fallback when COW storage is not
-   available.
-
-Inspect the selected file view:
-
-```bash
-./forkpress storage status
-./forkpress doctor storage
-```
-
-`storage status` also reports branch count, the public branch root, the physical
-storage root, the COW lifecycle locks, and any leftover staging directories from
-interrupted branch operations.
-
-If a sparsebundle is attached, stop through ForkPress before deleting or moving
-the project:
-
-```bash
-./forkpress stop
-rm -rf .forkpress main marketing
-```
-
-On sparsebundle-backed sites, reclaim free space inside the image after branch
-churn:
-
-```bash
-./forkpress storage compact
-```
-
-Compaction stops this site's server, detaches the sparsebundle, runs
-`hdiutil compact`, and leaves storage detached. Run `./forkpress serve` or
-`./forkpress storage mount` to attach it again.
-
-If macOS reports the storage is busy, close terminals or editors inside
-`.forkpress/macos-cow/mount` and run `./forkpress stop` again. Use
-`./forkpress stop --force` only for cleanup after normal detach reports a busy
-mount.
-
-### Git Is An Interface
-
-Git is not the source of truth. It is an editing and transport view over the
-COW branch directories.
-
-```mermaid
-sequenceDiagram
-    participant Agent as Agent worktree
-    participant Git as Git smart HTTP
-    participant Store as .forkpress/cow/git
-    participant Branch as ./marketing
-
-    Agent->>Git: clone/fetch
-    Git->>Branch: snapshot wordpress/ files + database.sql
-    Git->>Store: update Git objects/refs
-    Store-->>Agent: Git branch
-
-    Agent->>Agent: edit wordpress/ files
-    Agent->>Git: forkpress commit
-    Git->>Store: receive pushed commit
-    Git->>Branch: apply wordpress/ changes
-```
-
-Before every Git request, ForkPress snapshots each branch directory into the
-Git adapter store. After a push, ForkPress applies only `wordpress/` changes
-back to the target branch directory, excluding private runtime paths such as
-`wp-content/database/`. The branch's SQLite database remains branch-local and is
-never overwritten by `database.sql`.
-
-## Production And Dev Builds
-
-The production binary is `forkpress`. It only exposes the materialized COW
-strategy and its file-view cascade:
-
-- macOS APFS `clonefile`;
-- macOS APFS sparsebundle fallback;
-- Linux `FICLONE` reflinks;
-- full file-copy fallback.
-
-Experimental storage work is compiled into `forkpress-dev`, not `forkpress`.
-The dev binary enables:
-
-- the older BranchFS/SQLite strategy;
-- the Redb CAS manifest strategy;
-- hidden embedded-ZFS smoke tooling. The native ZFS engine still requires an
-  explicit `FORKPRESS_ENABLE_EMBEDDED_ZFS=1` build because it fetches and links
-  the external OpenZFS experiment.
-
-## Repository Layout
-
-Production Rust packages live under `crates/`:
-
-- `forkpress-cli`: binaries and high-level command routing;
-- `forkpress-core`: shared layout, manifest, path, and strategy types;
-- `forkpress-storage`: production COW branch storage, including APFS
-  `clonefile`, APFS sparsebundle, Linux `FICLONE`, Windows ReFS block cloning,
-  and file-copy fallback;
-- `forkpress-runtime`: embedded PHP/WordPress runtime preparation and PHP
-  script execution;
-- `forkpress-server`: server registry, stop/list, and TCP readiness helpers;
-- `forkpress-git`: Git command, ref, worktree, and push-sync helpers.
-
-Production PHP runtime files live in `runtime/`, production/shared helper
-scripts live in `scripts/`, and production COW PHP tests live in `tests/`.
-Experiment-specific code lives under `experiments/`, including BranchFS, CAS
-Rust crates, the experiment WordPress plugin, and the embedded-ZFS smoke
-tooling.
-
 ## Commands
 
-- `forkpress init` initializes a site. On macOS the default strategy is `cow`.
-- `forkpress init --admin-password admin` creates a COW site with a known
-  local admin password.
-- `forkpress serve` starts the server in the background.
-- `forkpress start` starts the server in the foreground.
-- `forkpress stop` stops this site's server and detaches mount-backed storage.
-- `forkpress stop --all` stops every running ForkPress site server for your
-  user.
-- `forkpress server list` lists running site servers.
-- `forkpress branch list` lists local branches.
-- `forkpress branch create <name> [--from main]` creates a COW branch and
-  reserves moderate AUTOINCREMENT ID bands for WordPress core and arbitrary
-  plugin tables that use SQLite `AUTOINCREMENT`. The default band size is
-  1,000,000 IDs per table per branch. That intentionally keeps branch-created
-  IDs stable, including IDs copied into JSON, serialized options, blocks, or
-  plugin data, but operators with legacy 32-bit ID consumers should account for
-  the larger numeric range.
-- `forkpress branch reset <name> --from <source>` replaces one COW branch with
-  the files and SQLite database from another branch.
-- `forkpress branch merge <source> --into <target>` merges one materialized COW
-  branch into another branch. WordPress and plugin tables are merged
-  generically from SQLite state; branch-time AUTOINCREMENT bands keep
-  independently created rows, such as posts saved through wp-admin or REST,
-  from colliding across branches. If a clean source insert or source row update
-  collides with a target-side unique key, including expression indexes,
-  generated-column unique keys, and normal-column partial unique indexes, the
-  target row is kept and the choice is recorded as an auditable
-  `row-unique-collision`. If a source insert or source row update violates a
-  target-side SQLite constraint after parent-before-child table ordering,
-  same-table foreign-key row ordering, and validation-gated source restores,
-  the target row is kept and the blocked source row is recorded for review.
-  Restored foreign-key child tables also validate after source-only parent
-  tables materialize or after reviewers restore the parent table first; trying
-  to restore the child first reports the missing parent table or parent row
-  dependency before mutating target state. Source-added table rows with missing
-  target-side foreign-key parents are held for the same audited row review
-  instead of aborting the merge. Source-added indexes are materialized as each
-  new table lands, before dependent source-added tables are processed, so
-  foreign keys backed by source-added unique indexes validate without a false
-  row constraint conflict. Source-added views are ordered by source-side
-  view dependencies, and source-added views that need a restored target table
-  are held as reviewable `schema-source-added-view` conflicts until that
-  dependency validates. Cyclic source-added view graphs are also held as
-  reviewable `schema-source-added-view` conflicts rather than installed in an
-  arbitrary order, and reviewed source resolution keeps the audited cycle reason
-  validation-gated. Source-added views that would cycle with existing target-side
-  views are also held before target mutation. Missing or non-persistent view
-  references are preflighted before target mutation. Target-dropped table restores defer
-  source-added indexes and triggers that already have standalone schema
-  conflicts, so the table can restore before those objects are resolved in
-  dependency order. Source-added triggers attached to, reading, or writing
-  missing target-side schema objects are held as reviewable
-  `schema-source-added-trigger` conflicts instead of being installed as latent
-  invalid triggers. Acyclic source-added trigger programs are ordered by their
-  clear subject/write dependencies before installation, while trigger program
-  cycles are held as reviewable `schema-source-added-trigger` conflicts instead
-  of installing an unsupported trigger graph. Source-added or reviewed source
-  triggers, including triggers restored with a target-dropped source table, that
-  would cycle with target-side trigger programs stay validation-gated as well,
-  and trigger programs are compiled after installation so invalid target-side
-  column references stay validation-gated too;
-  statement-local CTE aliases in trigger bodies are ignored while real schema
-  objects referenced inside those CTEs remain dependencies.
-  Trigger references to temporary or attached SQLite schemas are kept
-  validation-gated instead of being matched to same-named persistent tables.
-  Quoted schema-qualified references are tracked, while schema-looking text
-  inside SQL literals or comments is ignored by dependency preflight.
-  Validation-gated source view rewrites also recompile preserved target view
-  trigger programs before reporting dry-run or apply success, so a source view
-  change cannot leave a latent invalid trigger behind.
-  Target-dropped table restores also validate preserved target views and trigger
-  programs that reference the restored table before reporting success.
-  Validation-gated source table drops refuse to leave dependent target
-  foreign-key child tables pointing at a missing parent table, including during
-  dry-run previews, and also refuse to leave target trigger programs that
-  still reference the dropped table. Source view drops likewise refuse to
-  leave target trigger programs that still reference the dropped view, so
-  table-drop chains through dependent views stay explicitly reviewable.
-  When a source row still violates target constraints, target
-  is kept by default and the choice is recorded as
-  an auditable `row-target-constraint`. Source deletes that would orphan
-  target-side foreign-key children are held the same way until a reviewed
-  source delete validates, while unchanged target-side child rows that source
-  deleted or reparented away from the deleted parent are applied first so
-  parent-and-dependent changes land together. If source also rewrites a
-  referenced child key and updates unchanged grandchildren to follow it,
-  ForkPress applies the proven rewrite graph under the same validation savepoint
-  before deleting the original parent. If that rewrite points at a source-only
-  parent key, ForkPress materializes the audited source parent row inside the
-  same savepoint before updating dependents, preserving sparse source `rowid`
-  values for no-primary-key parent tables when the target rowid is free.
-  Identical source/target inserts
-  with the same explicit primary key, and identical source/target updates or
-  deletes to existing explicit-primary-key rows, are recorded as non-conflicting
-  `source-applied` decisions. Identical source/target cell changes inside an
-  otherwise divergent row are also recorded as non-conflicting `source-applied`
-  decisions when row identity is known. No-primary-key inserts that are already
-  present in target with the same payload through a declared unique index are
-  recorded as an auditable non-conflicting `source-applied` decision instead.
-  Without declared unique evidence, identical-looking no-primary-key inserts
-  remain separate rows so duplicate-capable plugin tables do not lose data.
-  For no-primary-key plugin tables, runtime row identity tracking handles
-  delete/reinsert `rowid` reuse. Source-added no-primary-key tables and
-  validation-gated source table restores preserve sparse source `rowid` values,
-  while validation-gated compatible table rebuilds preserve sparse target
-  `rowid` values and refresh sidecar row hashes. Runtime row identity tracking
-  adds metadata writes for keyless tables; if that becomes too expensive for a
-  workload, disabling it trades precision for auditable `row-identity-ambiguous`
-  conflicts instead of silent row mixing. If a direct offline edit changes cells
-  on a keyless source row that target did not change while target also changed
-  the prior row and no runtime identity event exists, mergeback keeps target by
-  default and records an auditable `row-identity-ambiguous` conflict instead of
-  mixing cells from different possible logical rows.
-- `forkpress branch merge-audit [--format text|json] [--run ID]`
-  `[--scope all|db|files] [--records all|conflicts|decisions|resolutions|rollback-failures]`
-  `[--conflict-type TYPE] [--decision DECISION] [--path PATH]`
-  `[--path-prefix PREFIX] [--id-band-skips] [--target-kept] [--review]`
-  `[--review-status unreviewed|pending|needs-action|reviewed]`
-  `[--resolution-status validated|applied] [--group-by table|status|path|type|severity]` prints the COW merge audit log
-  without opening the raw metadata database. `--records resolutions` focuses
-  the report on deterministic conflict resolution records; `--group-by` adds
-  compact resolution summaries for UI or assistant review. With
-  `--records conflicts`, `--group-by` can summarize conflicts by table, type,
-  path, or severity class. With `--records decisions`, `--group-by` can
-  summarize automatic decisions by table, type, or path. `--target-kept`
-  focuses the report on preserved target/trunk-side decisions.
-  `--review-status unreviewed` is audit-only and returns records that have no
-  review note yet; `pending`, `needs-action`, and `reviewed` match the latest
-  recorded review annotation. For an active database conflict queue, combine
-  `--review --review-status unreviewed --records conflicts --scope db`.
-  Use the same `--records` and `--scope` shape with `--review-status pending`
-  or `--review-status needs-action` to revisit annotated follow-up queues;
-  later review notes supersede earlier notes for filtering.
-  `needs-action` queues are intended for records that require owner follow-up
-  before they can be marked reviewed. Use `--review-status reviewed` with the
-  same filters as a closure report for records whose latest annotation is
-  complete.
-  For unreviewed deterministic resolution follow-up, use
-  `--review --review-status unreviewed --records resolutions --scope db`.
-  Use `--scope files` with `--records conflicts` or `--records resolutions`
-  for filesystem conflict and deterministic resolution review queues.
-  For unreviewed automatic decision review, use
-  `--review --review-status unreviewed --records decisions --scope db` or
-  `--scope files`.
-  `--records rollback-failures` focuses the report on failed whole-branch
-  rollback records and their JSONL artifact path; it can be combined with
-  `--run ID` to inspect one failed attempt.
-- `forkpress branch merge-review conflict|decision|resolution <id> --status pending|needs-action|reviewed --note <text>`
-  `[--reviewer NAME]` appends a review note to an auditable merge conflict,
-  decision, or deterministic resolution record.
-- `forkpress branch merge-resolve conflict <id> --choice source|target [--apply]`
-  `[--note TEXT] [--reviewer NAME]` validates an audited DB cell, row
-  insert-collision, row-unique-collision, row-target-constraint,
-  row-identity-ambiguous, row-target-deleted, row-source-deleted, or filesystem
-  path conflict, plus validation-gated schema conflicts. DB conflicts work for
-  explicit primary keys and no-primary-key tables with sidecar row identity.
-  `row-unique-collision` source choices replace the still-matching target row
-  that owns the colliding unique key, or for audited source-update collisions
-  remove that target row and update the original source-identity row; target
-  remains the default choice unless a reviewer applies a source resolution.
-  Schema source choices can apply safe source-added columns, indexes, views,
-  and triggers; source index/view/trigger rewrites or drops; source table drops
-  that do not leave dependent target views invalid, implicitly remove target
-  indexes/triggers, leave target trigger programs referencing the dropped
-  table, or leave dependent target foreign-key child tables pointing
-  at a missing parent table; source table restores when target dropped a table
-  that source kept; and compatible table rebuilds that preserve target rows and
-  target indexes/triggers while changing audited non-primary-key column
-  definitions. Source index choices validate against current target rows and
-  target foreign-key integrity during dry-run and apply, so uniqueness,
-  expression-index, or latent foreign-key mismatch failures remain
-  validation-gated until reviewers address the blocking target data/schema.
-  Compatible table rebuilds run the same target foreign-key integrity check
-  before dry-run or apply reports success.
-  Source table restores recreate the audited source table and copy
-  source rows after validating that the target table is still absent, preserving
-  sparse source `rowid` values for no-primary-key tables, then restore source
-  indexes/triggers that were removed as a side effect of the target table drop.
-  Restore previews and applies also validate target foreign-key integrity and
-  compile restored trigger programs, preserved target views, and preserved
-  target trigger programs before recording a successful resolution.
-  No-primary-key sidecar identities for target rows are tombstoned when table
-  drop/restore resolutions remove or recreate the target table, so later rowid
-  reuse receives fresh logical identity metadata. Safe source-added column
-  resolutions refresh no-primary-key sidecar row hashes immediately after the
-  target row shape changes.
-  Source-added table creation is recorded as a schema-level source-applied
-  decision even when the table has no rows.
-  Identical source/target table, index, view, and trigger schema changes are
-  also recorded as non-conflicting `source-applied` decisions instead of being
-  left as implicit no-ops. Matching source/target column additions inside an
-  otherwise divergent table schema are recorded the same way.
-  Target-only row inserts, row deletes, and cell changes are preserved and
-  recorded as `target-kept` decisions so clean trunk/main-side data changes are
-  auditable alongside schema changes. Matching source/target row updates and
-  deletes are recorded as `source-applied` no-ops when explicit primary keys or
-  sidecar no-primary-key identity prove they refer to the same logical row.
-  Target-only schema additions and rewrites are preserved and recorded as
-  `target-kept` decisions so clean trunk/main-side DDL remains auditable.
-  Target-only filesystem additions, deletions, and path changes are also
-  preserved and recorded as `target-kept` decisions.
-  Filesystem conflict resolutions use the same rollback discipline: if
-  resolution metadata cannot be recorded after a source file choice mutates a
-  target path, the target path is restored and no partial resolution row is
-  kept.
-  Mixed database/filesystem merges keep a whole-branch rollback snapshot, so
-  late metadata or filesystem failures restore target database state,
-  filesystem paths, and merge audit metadata before recording the failed run.
-  Filesystem merge planning and file operations also share one audit metadata
-  transaction, so a failed file merge does not leave partial conflict or
-  decision rows behind.
-  If a filesystem-phase rollback failure is followed by a successful outer
-  mixed DB/filesystem rollback, ForkPress re-records the rollback failure after
-  restoring metadata so `merge-audit --records rollback-failures` remains
-  queryable.
-  If rollback itself fails, ForkPress preserves the rollback snapshot backups
-  or per-file transaction backups and records their locations in the
-  rollback-failure JSONL artifact.
-  Compatible rebuilds also preserve
-  dependent target views when those views validate before and after the rebuild.
-  Source view rewrites preserve transitive dependent target views and their
-  triggers when they validate before and after the rewrite; source view drops
-  are blocked while dependent target views or triggers still reference the
-  dropped view, including triggers on other tables whose bodies read from it.
-  With `--apply`,
-  ForkPress records the deterministic resolution in merge metadata and appends
-  a reviewed annotation to the conflict audit record. Reruns after a reviewed
-  target choice keep the original conflict and resolution audit records, but
-  treat that unchanged divergence as accepted and record a `target-accepted`
-  decision instead of reporting it as a fresh active conflict. Audit run and
-  decision-group summaries count those accepted target decisions separately from
-  active `target-wins` defaults.
-- `forkpress branch show <name>` prints the branch directory, database, file
-  count, and Git ref path.
-- `forkpress branch delete <name>` removes a COW branch. `main` cannot be
-  deleted.
-- `forkpress clone [remote] [dir]` wraps `git clone`.
-- `forkpress agents [dir] --count 10 --prefix agent` creates agent branches
-  and worktrees.
-- `forkpress commit -m "message"` stages, commits, and pushes the current Git
-  branch back into ForkPress.
-- `forkpress pull` wraps `git pull --rebase --autostash`.
-- `forkpress logs --file wp|php|server|forkpress|gc|all` prints logs.
-- `forkpress storage status|mount|detach|compact` diagnoses or manually manages
-  detachable COW storage.
-- `forkpress doctor storage` probes local filesystem clone support.
+| Command | Purpose |
+| --- | --- |
+| `forkpress init` | Create a site and seed the local admin user. |
+| `forkpress serve` | Start the preview server in the background. |
+| `forkpress start` | Start the preview server in the foreground. |
+| `forkpress stop` | Stop this site's server and detach mount-backed storage. |
+| `forkpress server list` | List running ForkPress servers. |
+| `forkpress branch list` | List local branches. |
+| `forkpress branch show <name>` | Show branch storage details. |
+| `forkpress branch create <name> [--from main]` | Create a branch. |
+| `forkpress branch reset <name> --from <source>` | Replace a branch from another branch. |
+| `forkpress branch merge <source> --into <target>` | Merge one branch into another. |
+| `forkpress branch merge-audit` | Inspect merge runs, decisions, conflicts, and resolutions. |
+| `forkpress branch merge-resolve conflict <id>` | Validate or apply a conflict choice. |
+| `forkpress branch merge-review <type> <id>` | Attach review status to an audit record. |
+| `forkpress branch delete <name>` | Delete a branch other than `main`. |
+| `forkpress clone [remote] [dir]` | Clone the ForkPress Git remote. |
+| `forkpress agents [dir]` | Create agent branches and Git worktrees. |
+| `forkpress commit -m "message"` | Commit and push the current Git branch back to ForkPress. |
+| `forkpress pull` | Pull with rebase and autostash. |
+| `forkpress logs --file <name>` | Read WordPress, PHP, server, and maintenance logs. |
+| `forkpress storage status` | Show selected storage and mount state. |
+| `forkpress storage mount` | Attach mount-backed storage. |
+| `forkpress storage detach` | Detach mount-backed storage. |
+| `forkpress storage compact` | Compact macOS sparsebundle storage. |
+| `forkpress doctor storage` | Probe local filesystem clone support. |
 
-## Build From Source
+Run `forkpress <command> --help` or `forkpress branch <command> --help` for
+command-specific options.
+
+## Development
+
+Local development needs a Rust toolchain, Make, PHP, PHP development headers,
+and SQLite development libraries.
+
+**Build the runtime bundle and production binary:**
 
 ```bash
 make dist
 make forkpress
 ```
 
-`make dist` builds the production static PHP runtime. `make forkpress` embeds
-that runtime and the PHP/WordPress assets into the production Rust binary.
-
-Developer experiment build:
-
-```bash
-make dist-dev
-make forkpress-dev
-```
-
-`make dist-dev` adds the experimental BranchFS/CAS PHP runtime support, and
-`make forkpress-dev` builds the Rust binary with the `dev-experiments` Cargo
-feature. The production wrapper rejects `dev-experiments`; use
-`--bin forkpress-dev` whenever that feature is enabled.
-
-For fast Rust-only checks without rebuilding PHP:
+**Run the main test suites:**
 
 ```bash
 cargo test --workspace --exclude forkpress-cli
-cargo test -p forkpress-core --features dev-experiments
 FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli
-FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli --features dev-experiments --bin forkpress-dev
-```
-
-PHP unit tests:
-
-```bash
-make test-cow
-make test-branchfs
 make test-all
 ```
-
-`tests/` contains production COW tests. Experiment-specific runtime files,
-Rust crates, and tests live with their experiment code under `experiments/`.
-There are no generic PHP tests shared by both storage families yet; common
-behavior is covered through the COW and experiment-specific suites.
-
-## Publish
-
-Push a version tag:
-
-```bash
-git tag v0.1.13
-git push origin v0.1.13
-```
-
-The release workflow builds and uploads the target archives listed above.
