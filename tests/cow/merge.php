@@ -17422,7 +17422,17 @@ PHP);
     ]);
     assert_same($plugin_validator_updated_result['conflicts'], 1, 'plugin validator rerun records replacement evidence for the same plugin object');
     $plugin_replacement_conflict_id = (int)scalar($plugin_graph_metadata, "SELECT MAX(id) FROM merge_conflicts WHERE table_name = '__plugins__' AND id > $plugin_conflict_id");
-    $plugin_revalidate_after_rerun = cow_merge_revalidate_reviewed_conflicts($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 'cow-revalidate');
+    $plugin_cli_revalidate_after_rerun = run_merge_cli([
+        'audit',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', (string)$plugin_graph_result['run_id'],
+        '--revalidate',
+        '--reviewer', 'cow-revalidate',
+        '--format', 'json',
+    ]);
+    assert_same($plugin_cli_revalidate_after_rerun['status'], 0, 'plugin merge-audit --revalidate CLI exits successfully');
+    $plugin_revalidate_after_rerun = json_decode($plugin_cli_revalidate_after_rerun['output'], true);
+    assert_true(is_array($plugin_revalidate_after_rerun), 'plugin merge-audit --revalidate CLI emits JSON');
     assert_same($plugin_revalidate_after_rerun['checked'], 2, 'plugin conflict revalidation inspects original and replacement validator findings');
     assert_same($plugin_revalidate_after_rerun['reviewed'], 1, 'plugin conflict revalidation still only carries reviewed plugin conflicts');
     assert_same($plugin_revalidate_after_rerun['stale'], 1, 'plugin conflict revalidation treats changed validator evidence as stale');

@@ -13894,7 +13894,7 @@ function cow_merge_parse_cli(array $argv, array $required, int $start_index = 1)
             throw new InvalidArgumentException("unexpected argument: $arg");
         }
         $key = substr($arg, 2);
-        if (in_array($key, ['id-band-skips', 'target-kept', 'review', 'apply', 'after-revalidate', 'restore-target-db', 'restore-files'], true) && (!isset($argv[$i + 1]) || str_starts_with($argv[$i + 1], '--'))) {
+        if (in_array($key, ['id-band-skips', 'target-kept', 'review', 'revalidate', 'apply', 'after-revalidate', 'restore-target-db', 'restore-files'], true) && (!isset($argv[$i + 1]) || str_starts_with($argv[$i + 1], '--'))) {
             $args[$key] = '1';
             continue;
         }
@@ -14098,6 +14098,31 @@ if (realpath($argv[0] ?? '') === __FILE__) {
         if ($command === 'audit') {
             $args = cow_merge_parse_cli($argv, ['metadata-db'], 2);
             $format = cow_merge_audit_format($args['format'] ?? null);
+            if (cow_merge_bool_flag($args['revalidate'] ?? '0')) {
+                $result = cow_merge_revalidate_reviewed_conflicts(
+                    $args['metadata-db'],
+                    cow_merge_audit_run_id($args['run'] ?? null),
+                    cow_merge_review_text($args['reviewer'] ?? 'forkpress', 'reviewer')
+                );
+                if ($format === 'json') {
+                    $encoded = json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+                    if (!is_string($encoded)) {
+                        throw new RuntimeException('failed to encode review revalidation result');
+                    }
+                    echo $encoded . "\n";
+                } elseif (($args['quiet'] ?? '0') !== '1') {
+                    echo "forkpress: revalidated reviewed COW merge conflicts\n";
+                    echo "  checked:              {$result['checked']}\n";
+                    echo "  reviewed:             {$result['reviewed']}\n";
+                    echo "  fresh:                {$result['fresh']}\n";
+                    echo "  stale:                {$result['stale']}\n";
+                    echo "  errors:               {$result['errors']}\n";
+                    echo "  carried:              {$result['carried']}\n";
+                    echo "  already-needs-action: {$result['already_needs_action']}\n";
+                    echo "  metadata:             {$result['metadata_db']}\n";
+                }
+                exit(0);
+            }
             $report = cow_merge_audit_report(
                 $args['metadata-db'],
                 cow_merge_audit_run_id($args['run'] ?? null),
