@@ -1057,6 +1057,16 @@ function cow_git_create_branch_for_ref(
 
     $dest_storage = cow_git_branch_storage_root($storage_branches_dir, $branches_dir, $branch);
     $dest_public = rtrim($branches_dir, "/\\") . '/' . $branch;
+    if (
+        cow_git_normalize_path($dest_storage) !== cow_git_normalize_path($dest_public)
+        && (file_exists($dest_storage) || is_link($dest_storage))
+        && !file_exists($dest_public)
+        && !is_link($dest_public)
+    ) {
+        cow_git_remove_tree($dest_storage);
+        cow_git_cleanup_created_branch_merge_base_artifacts($git_repo_dir, $branch_list_path, [['branch' => $branch]]);
+        cow_git_cleanup_created_branch_id_band_metadata($git_repo_dir, $branch_list_path, [['branch' => $branch]]);
+    }
     if (file_exists($dest_storage) || is_link($dest_storage) || file_exists($dest_public) || is_link($dest_public)) {
         throw new \RuntimeException("branch '$branch' already exists");
     }
@@ -1087,6 +1097,7 @@ function cow_git_create_branch_for_ref(
             throw new \RuntimeException("failed to publish git-created branch '$branch'");
         }
         $published_storage = true;
+        cow_git_failpoint('after-created-branch-storage');
 
         if (cow_git_normalize_path($dest_storage) !== cow_git_normalize_path($dest_public)) {
             if (!symlink($dest_storage, $dest_public)) {
