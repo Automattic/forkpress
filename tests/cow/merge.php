@@ -17273,6 +17273,28 @@ PHP);
         'must start with plugin-',
         'plugin validator rejects non-plugin conflict types'
     );
+    assert_throws(
+        fn() => cow_merge_decode_plugin_validator_stdout(json_encode([
+            'status' => 'valid',
+            'findings' => [
+                [
+                    'plugin' => 'forkpress-graph',
+                    'object' => 'graph:broken',
+                    'reason' => 'contradictory valid status',
+                ],
+            ],
+        ], JSON_UNESCAPED_SLASHES), 'contradictory-valid-validator'),
+        'status valid with findings',
+        'plugin validator rejects valid status with findings'
+    );
+    assert_throws(
+        fn() => cow_merge_decode_plugin_validator_stdout(json_encode([
+            'status' => 'conflicts',
+            'findings' => [],
+        ], JSON_UNESCAPED_SLASHES), 'empty-conflicts-validator'),
+        'status conflicts without findings',
+        'plugin validator rejects conflicts status without findings'
+    );
     $plugin_cli_empty_record = run_merge_cli([
         'record-plugin-validator-conflicts',
         '--metadata-db', $plugin_graph_metadata,

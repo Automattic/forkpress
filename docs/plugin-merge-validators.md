@@ -135,6 +135,11 @@ result is reported. When it returns `failed` or exits unsuccessfully, the merge
 helper restores the pre-merge target database, metadata database, and target
 file tree using the same rollback path as other late merge failures.
 
+Validator status and findings must agree. `valid` must emit no findings, and
+`conflicts` must emit at least one finding. Contradictory validator output is
+treated as a validator failure so plugin state is not reported with ambiguous
+review evidence.
+
 ## Review Metadata
 
 Plugin conflicts should be exported by `forkpress branch merge-audit` with:

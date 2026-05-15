@@ -6316,6 +6316,12 @@ function cow_merge_decode_plugin_validator_stdout(string $stdout, string $valida
     if (!is_array($findings) || !array_is_list($findings)) {
         throw new RuntimeException("plugin validator $validator findings must be a JSON array");
     }
+    if ($status === 'valid' && count($findings) > 0) {
+        throw new RuntimeException("plugin validator $validator emitted status valid with findings");
+    }
+    if ($status === 'conflicts' && count($findings) === 0) {
+        throw new RuntimeException("plugin validator $validator emitted status conflicts without findings");
+    }
     return [
         'validator_status' => $status,
         'findings' => $findings,
