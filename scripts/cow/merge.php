@@ -4581,6 +4581,29 @@ function cow_merge_wordpress_source_row(SQLite3 $source, string $table, string $
     }
 }
 
+function cow_merge_wordpress_source_postmeta_value(SQLite3 $source, mixed $post_id, string $meta_key): ?string {
+    if (!is_int($post_id) && !(is_string($post_id) && preg_match('/^-?\d+$/', (string)$post_id))) {
+        return null;
+    }
+    if (!cow_merge_schema_object_exists($source, 'wp_postmeta')) {
+        return null;
+    }
+    $stmt = cow_merge_prepare_checked(
+        $source,
+        "SELECT meta_value FROM wp_postmeta WHERE post_id = :post_id AND meta_key = :meta_key ORDER BY meta_id DESC LIMIT 1",
+        'failed to prepare WordPress source postmeta lookup'
+    );
+    cow_merge_bind($stmt, ':post_id', (int)$post_id);
+    cow_merge_bind($stmt, ':meta_key', $meta_key);
+    $res = cow_merge_execute_checked($stmt, $source, 'failed to inspect WordPress source postmeta row');
+    try {
+        $row = $res->fetchArray(SQLITE3_ASSOC);
+        return $row ? (string)$row['meta_value'] : null;
+    } finally {
+        cow_merge_result_finalize_checked($res, 'failed to finalize WordPress source postmeta lookup');
+    }
+}
+
 function cow_merge_wordpress_insert_reference_violation(
     SQLite3 $source,
     SQLite3 $target,
@@ -4598,8 +4621,17 @@ function cow_merge_wordpress_insert_reference_violation(
             return $post_violation;
         }
         $meta_key = (string)($source_row['meta_key'] ?? '');
-        if (in_array($meta_key, ['_thumbnail_id', '_menu_item_object_id'], true)) {
+        if (in_array($meta_key, ['_thumbnail_id', '_menu_item_menu_item_parent'], true)) {
             return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_postmeta row', 'wp_posts', 'ID', $source_row['meta_value'] ?? null, 'referenced post');
+        }
+        if ($meta_key === '_menu_item_object_id') {
+            $menu_item_type = cow_merge_wordpress_source_postmeta_value($source, $source_row['post_id'] ?? null, '_menu_item_type');
+            if ($menu_item_type === 'taxonomy') {
+                return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_postmeta row', 'wp_terms', 'term_id', $source_row['meta_value'] ?? null, 'referenced term');
+            }
+            if ($menu_item_type === 'post_type') {
+                return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_postmeta row', 'wp_posts', 'ID', $source_row['meta_value'] ?? null, 'referenced post');
+            }
         }
         return null;
     }

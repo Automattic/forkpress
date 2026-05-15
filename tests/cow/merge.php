@@ -13569,6 +13569,8 @@ SQL);
     copy($band_base, $band_explicit_term_base);
     $db = open_db($band_explicit_term_base);
     $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status) VALUES ('Base taxonomy owner', '', 'publish')");
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_type TEXT NOT NULL DEFAULT 'post'");
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
     $db->exec('CREATE TABLE wp_terms (term_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, slug TEXT NOT NULL)');
     $db->exec('CREATE TABLE wp_term_taxonomy (term_taxonomy_id INTEGER PRIMARY KEY AUTOINCREMENT, term_id INTEGER NOT NULL, taxonomy TEXT NOT NULL, description TEXT NOT NULL DEFAULT "", parent INTEGER NOT NULL DEFAULT 0, count INTEGER NOT NULL DEFAULT 0)');
     $db->exec('CREATE TABLE wp_term_relationships (object_id INTEGER NOT NULL, term_taxonomy_id INTEGER NOT NULL, term_order INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (object_id, term_taxonomy_id))');
@@ -13589,6 +13591,11 @@ SQL);
     $stmt = $db->prepare('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (1, :term_taxonomy_id, 0)');
     $stmt->bindValue(':term_taxonomy_id', $band_explicit_term_taxonomy_id, SQLITE3_INTEGER);
     $stmt->execute();
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type) VALUES ('Taxonomy menu item behind explicit term', '', 'publish', 'nav_menu_item')");
+    $band_explicit_term_menu_item_id = (int)$db->lastInsertRowID();
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:menu_item_id, '_menu_item_type', 'taxonomy'), (:menu_item_id, '_menu_item_object_id', '2')");
+    $stmt->bindValue(':menu_item_id', $band_explicit_term_menu_item_id, SQLITE3_INTEGER);
+    $stmt->execute();
     $db->close();
     $band_explicit_term_result = cow_merge_databases(
         $band_explicit_term_base,
@@ -13603,6 +13610,7 @@ SQL);
     assert_same((int)scalar($band_explicit_term_target, 'SELECT COUNT(*) FROM wp_term_taxonomy WHERE term_id = 2'), 0, 'term taxonomy pointing at a held explicit source term is not applied automatically');
     assert_same((int)scalar($band_explicit_term_target, 'SELECT COUNT(*) FROM wp_term_taxonomy WHERE parent = 2'), 0, 'hierarchical term taxonomy pointing at a held explicit parent term is not applied automatically');
     assert_same((int)scalar($band_explicit_term_target, "SELECT COUNT(*) FROM wp_term_relationships WHERE term_taxonomy_id = $band_explicit_term_taxonomy_id"), 0, 'term relationships pointing at held explicit source term taxonomy are not applied automatically');
+    assert_same((int)scalar($band_explicit_term_target, "SELECT COUNT(*) FROM wp_postmeta WHERE post_id = $band_explicit_term_menu_item_id AND meta_key = '_menu_item_object_id' AND meta_value = '2'"), 0, 'taxonomy menu item object references pointing at a held explicit source term are not applied automatically');
     assert_same(
         (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND c.table_name = 'wp_terms' AND c.conflict_type = 'row-target-constraint'"),
         1,
@@ -13617,6 +13625,11 @@ SQL);
         (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND c.table_name = 'wp_term_relationships' AND c.conflict_type = 'row-target-constraint'"),
         1,
         'term relationships pointing at a held explicit source term record a reviewable row conflict'
+    );
+    assert_same(
+        (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND c.table_name = 'wp_postmeta' AND c.conflict_type = 'row-target-constraint'"),
+        1,
+        'taxonomy menu item object references pointing at a held explicit source term record a reviewable row conflict'
     );
 
     $plain_graph_base = $tmp . '/plain-ipk-graph-base.sqlite';
