@@ -10,6 +10,35 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+require_static_php_build_tools() {
+  local missing=()
+  local required=(git composer php re2c automake bison)
+
+  if [ "$UNAME_S" = "Darwin" ]; then
+    # static-php-cli patches have failed under BSD patch on macOS; use GNU patch.
+    required+=(gpatch)
+  fi
+
+  for cmd in "${required[@]}"; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+      missing+=("$cmd")
+    fi
+  done
+
+  if [ "${#missing[@]}" -eq 0 ]; then
+    return
+  fi
+
+  echo "ERROR: missing static PHP build tools: ${missing[*]}" >&2
+  if [ "$UNAME_S" = "Darwin" ]; then
+    echo "Install them with: brew update && brew install composer php re2c automake bison gpatch" >&2
+  elif [ "$UNAME_S" = "Linux" ]; then
+    echo "Install them with your package manager; CI uses: apt-get install automake php-cli composer re2c bison" >&2
+  fi
+  echo "Refusing to let static-php-cli auto-install prerequisites during the release bundle build." >&2
+  exit 1
+}
+
 # --- Target detection ------------------------------------------------------
 UNAME_S=$(uname -s)
 UNAME_M=$(uname -m)
@@ -99,6 +128,7 @@ fi
 
 if [ "$NEED_PHP_BUILD" = "1" ]; then
   echo "==> Building static PHP via static-php-cli (first-time: 3-5 minutes)"
+  require_static_php_build_tools
   if [ ! -d "$SPC_DIR" ]; then
     mkdir -p "$BUILD_DIR"
     git clone --depth 1 https://github.com/crazywhalecc/static-php-cli.git "$SPC_DIR"
