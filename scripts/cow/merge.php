@@ -4821,6 +4821,20 @@ function cow_merge_wordpress_post_content_reference_violation(
             $source_action
         );
     };
+    $check_term = function (mixed $id, string $label) use ($source, $target, $meta, $source_branch, $source_action): ?string {
+        return cow_merge_wordpress_parent_reference_violation(
+            $source,
+            $target,
+            $meta,
+            $source_branch,
+            "wp_posts post_content $label",
+            'wp_terms',
+            'term_id',
+            $id,
+            'term',
+            $source_action
+        );
+    };
 
     $blocks = cow_merge_wordpress_post_content_blocks($content);
     if (!$blocks) {
@@ -4869,6 +4883,21 @@ function cow_merge_wordpress_post_content_reference_violation(
             $violation = $check_user($attrs['userId'], 'wp:avatar.userId');
             if ($violation !== null) {
                 return $violation;
+            }
+        }
+
+        if ($block_name === 'navigation-link' && array_key_exists('id', $attrs)) {
+            if (($attrs['kind'] ?? null) === 'post-type') {
+                $violation = $check_post($attrs['id'], 'wp:navigation-link.id');
+                if ($violation !== null) {
+                    return $violation;
+                }
+            }
+            if (($attrs['kind'] ?? null) === 'taxonomy') {
+                $violation = $check_term($attrs['id'], 'wp:navigation-link.id');
+                if ($violation !== null) {
+                    return $violation;
+                }
             }
         }
     }

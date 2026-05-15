@@ -14472,6 +14472,7 @@ SQL);
     $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_parent) VALUES (10, 'Base cover block consumer', '<!-- wp:paragraph --><p>base cover block content</p><!-- /wp:paragraph -->', 'publish', 0)");
     $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_parent) VALUES (11, 'Base file block consumer', '<!-- wp:paragraph --><p>base file block content</p><!-- /wp:paragraph -->', 'publish', 0)");
     $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_parent) VALUES (12, 'Base video block consumer', '<!-- wp:paragraph --><p>base video block content</p><!-- /wp:paragraph -->', 'publish', 0)");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_parent) VALUES (13, 'Base post navigation link consumer', '<!-- wp:paragraph --><p>base post navigation link content</p><!-- /wp:paragraph -->', 'publish', 0)");
     $db->exec("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (1, '_menu_item_menu_item_parent', '1')");
     $db->exec("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (1, '_forkpress_base_post_ref', 'base post metadata')");
     $db->exec("INSERT INTO wp_comments (comment_post_ID, comment_content) VALUES (1, 'Base comment reference')");
@@ -14517,6 +14518,10 @@ SQL);
     $band_explicit_ref_video_content = '<!-- wp:video {"id":6} --><figure class="wp-block-video"></figure><!-- /wp:video -->';
     $stmt = $db->prepare('UPDATE wp_posts SET post_content = :content WHERE ID = 12');
     $stmt->bindValue(':content', $band_explicit_ref_video_content, SQLITE3_TEXT);
+    $stmt->execute();
+    $band_explicit_ref_post_nav_content = '<!-- wp:navigation-link {"id":2,"kind":"post-type","type":"page","label":"Held page"} /-->';
+    $stmt = $db->prepare('UPDATE wp_posts SET post_content = :content WHERE ID = 13');
+    $stmt->bindValue(':content', $band_explicit_ref_post_nav_content, SQLITE3_TEXT);
     $stmt->execute();
     $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_parent) VALUES ('Imported child page behind explicit parent', 'child of held explicit id', 'publish', 2)");
     $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (2, '_forkpress_import_ref', :value)");
@@ -14596,6 +14601,7 @@ SQL);
     assert_same(scalar($band_explicit_ref_target, "SELECT post_content FROM wp_posts WHERE ID = 10"), '<!-- wp:paragraph --><p>base cover block content</p><!-- /wp:paragraph -->', 'updated cover block refs pointing at a held explicit source attachment are not applied automatically');
     assert_same(scalar($band_explicit_ref_target, "SELECT post_content FROM wp_posts WHERE ID = 11"), '<!-- wp:paragraph --><p>base file block content</p><!-- /wp:paragraph -->', 'updated file block refs pointing at a held explicit source attachment are not applied automatically');
     assert_same(scalar($band_explicit_ref_target, "SELECT post_content FROM wp_posts WHERE ID = 12"), '<!-- wp:paragraph --><p>base video block content</p><!-- /wp:paragraph -->', 'updated video block refs pointing at a held explicit source attachment are not applied automatically');
+    assert_same(scalar($band_explicit_ref_target, "SELECT post_content FROM wp_posts WHERE ID = 13"), '<!-- wp:paragraph --><p>base post navigation link content</p><!-- /wp:paragraph -->', 'updated post navigation link refs pointing at a held explicit source post are not applied automatically');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_posts WHERE post_parent = 2"), 0, 'child posts pointing at a held explicit source post are not applied automatically');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_postmeta WHERE post_id = 2"), 0, 'postmeta pointing at a held explicit source post is not applied automatically');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_postmeta WHERE meta_key = '_thumbnail_id' AND meta_value = '2'"), 0, 'postmeta values pointing at a held explicit source post are not applied automatically');
@@ -14630,7 +14636,7 @@ SQL);
     );
     assert_same(
         (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND c.table_name = 'wp_posts' AND c.conflict_type = 'row-target-constraint'"),
-        12,
+        13,
         'explicit parent, attachment, child, and block consumer posts behind them record reviewable row conflicts'
     );
     assert_same(
@@ -14665,11 +14671,11 @@ SQL);
         'updated options held behind an explicit source post explain that the source changed the option'
     );
     assert_true(
-        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_posts' AND d.decision = 'target-wins' AND d.reason LIKE '%parent post must merge before child row%'") === 10,
+        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_posts' AND d.decision = 'target-wins' AND d.reason LIKE '%parent post must merge before child row%'") === 11,
         'child posts and block content held behind an explicit source post explain the missing parent'
     );
     assert_true(
-        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_posts' AND d.decision = 'target-wins' AND d.reason LIKE 'source changed%'") === 9,
+        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_posts' AND d.decision = 'target-wins' AND d.reason LIKE 'source changed%'") === 10,
         'updated child posts and block content held behind an explicit source post explain that the source changed the row'
     );
     assert_true(
@@ -14745,6 +14751,7 @@ SQL);
     $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES (3, 1, 'category', '', 0, 1)");
     $db->exec("INSERT INTO wp_termmeta (term_id, meta_key, meta_value) VALUES (1, '_forkpress_base_term_ref', 'base term metadata')");
     $db->exec('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (1, 1, 0)');
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type) VALUES ('Base taxonomy navigation link consumer', '<!-- wp:paragraph --><p>base taxonomy navigation link content</p><!-- /wp:paragraph -->', 'publish', 'page')");
     $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type) VALUES ('Base taxonomy menu item', '', 'publish', 'nav_menu_item')");
     $band_explicit_term_base_menu_item_id = (int)$db->lastInsertRowID();
     $db->exec("INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES ($band_explicit_term_base_menu_item_id, 1, 0)");
@@ -14780,6 +14787,7 @@ SQL);
     $db->exec("UPDATE wp_termmeta SET term_id = 2 WHERE meta_key = '_forkpress_base_term_ref'");
     $db->exec("UPDATE wp_term_taxonomy SET term_id = 2 WHERE term_taxonomy_id = 1");
     $db->exec("UPDATE wp_term_taxonomy SET parent = 2 WHERE term_taxonomy_id = 3");
+    $db->exec("UPDATE wp_posts SET post_content = '<!-- wp:navigation-link {\"id\":2,\"kind\":\"taxonomy\",\"type\":\"category\",\"label\":\"Held term\"} /-->' WHERE post_title = 'Base taxonomy navigation link consumer'");
     $stmt = $db->prepare('UPDATE wp_term_relationships SET term_taxonomy_id = :term_taxonomy_id WHERE object_id = :object_id AND term_taxonomy_id = 1');
     $stmt->bindValue(':term_taxonomy_id', $band_explicit_term_taxonomy_id, SQLITE3_INTEGER);
     $stmt->bindValue(':object_id', $band_explicit_term_base_menu_item_id, SQLITE3_INTEGER);
@@ -14829,6 +14837,7 @@ SQL);
     assert_same((int)scalar($band_explicit_term_target, "SELECT COUNT(*) FROM wp_postmeta WHERE post_id = $band_explicit_term_menu_item_id AND meta_key = '_menu_item_object_id' AND meta_value = '2'"), 0, 'taxonomy menu item object references pointing at a held explicit source term are not applied automatically');
     assert_same(scalar($band_explicit_term_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_existing_term_refs'"), $band_explicit_term_base_theme_mods, 'updated theme mods pointing at a held explicit source nav menu are not applied automatically');
     assert_same(scalar($band_explicit_term_target, "SELECT option_value FROM wp_options WHERE option_name = 'widget_nav_menu'"), $band_explicit_term_base_nav_widget, 'updated nav menu widgets pointing at a held explicit source menu are not applied automatically');
+    assert_same(scalar($band_explicit_term_target, "SELECT post_content FROM wp_posts WHERE post_title = 'Base taxonomy navigation link consumer'"), '<!-- wp:paragraph --><p>base taxonomy navigation link content</p><!-- /wp:paragraph -->', 'updated taxonomy navigation link refs pointing at a held explicit source term are not applied automatically');
     assert_same((int)scalar($band_explicit_term_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'theme_mods_imported_term_refs'"), 0, 'theme mods pointing at a held explicit source nav menu are not applied automatically');
     assert_same(
         (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND c.table_name = 'wp_terms' AND c.conflict_type = 'row-target-constraint'"),
@@ -14856,6 +14865,11 @@ SQL);
         'taxonomy menu item object references pointing at a held explicit source term record a reviewable row conflict'
     );
     assert_same(
+        (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND c.table_name = 'wp_posts' AND c.conflict_type = 'row-target-constraint'"),
+        1,
+        'taxonomy navigation link block refs pointing at a held explicit source term record a reviewable row conflict'
+    );
+    assert_same(
         (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND c.table_name = 'wp_options' AND c.conflict_type = 'row-target-constraint'"),
         3,
         'options pointing at a held explicit source term record reviewable row conflicts'
@@ -14865,7 +14879,7 @@ SQL);
         'options held behind an explicit source term explain the missing parent'
     );
     assert_true(
-        (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND d.table_name IN ('wp_termmeta', 'wp_term_taxonomy', 'wp_term_relationships', 'wp_postmeta', 'wp_options') AND d.decision = 'target-wins' AND d.reason LIKE 'source changed%'") === 7,
+        (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND d.table_name IN ('wp_termmeta', 'wp_term_taxonomy', 'wp_term_relationships', 'wp_postmeta', 'wp_options', 'wp_posts') AND d.decision = 'target-wins' AND d.reason LIKE 'source changed%'") === 8,
         'updated rows held behind an explicit source term explain that the source changed the row'
     );
 
