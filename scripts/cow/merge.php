@@ -10301,7 +10301,43 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
     $table = (string)($conflict['table_name'] ?? '');
     $conflict_type = (string)($conflict['conflict_type'] ?? '');
     try {
-        if ($table === '__plugins__' || str_starts_with($conflict_type, 'schema-')) {
+        if ($table === '__plugins__') {
+            $replacement = cow_merge_fetch_rows(
+                $meta,
+                'SELECT id, source_payload, target_payload, chosen_payload, source_hash, target_hash, chosen_hash ' .
+                'FROM merge_conflicts ' .
+                'WHERE run_id = :run_id ' .
+                'AND table_name = :table_name ' .
+                'AND row_identity = :row_identity ' .
+                'AND conflict_type = :conflict_type ' .
+                'AND id > :id ' .
+                'ORDER BY id DESC LIMIT 1',
+                [
+                    ':run_id' => (int)($conflict['run_id'] ?? 0),
+                    ':table_name' => $table,
+                    ':row_identity' => (string)($conflict['row_identity'] ?? ''),
+                    ':conflict_type' => $conflict_type,
+                    ':id' => (int)($conflict['id'] ?? 0),
+                ]
+            );
+            if (!$replacement) {
+                return $status;
+            }
+            $latest = $replacement[0];
+            $same_validator_payload =
+                hash_equals((string)($conflict['source_hash'] ?? ''), (string)($latest['source_hash'] ?? ''))
+                && hash_equals((string)($conflict['target_hash'] ?? ''), (string)($latest['target_hash'] ?? ''))
+                && hash_equals((string)($conflict['chosen_hash'] ?? ''), (string)($latest['chosen_hash'] ?? ''));
+            return [
+                'stale_status' => $same_validator_payload ? 'fresh' : 'stale',
+                'stale_reason' => $same_validator_payload
+                    ? 'plugin validator finding still matches audited conflict payload'
+                    : 'plugin validator reported updated evidence for this plugin object; rerun plugin audit before resolving',
+                'current_target_payload' => (string)($latest['chosen_payload'] ?? ''),
+            ];
+        }
+
+        if (str_starts_with($conflict_type, 'schema-')) {
             return $status;
         }
 

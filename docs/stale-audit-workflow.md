@@ -92,16 +92,23 @@ again after revalidation, guarded resolution fails and asks for another
 revalidation instead of applying the stale original conflict.
 
 The first implementation supports database cell, database row, and filesystem
-conflicts. Plugin and schema conflicts still use the conservative stale-target
-guard until they have conflict-specific revalidation payloads.
+conflicts. Plugin validator conflicts now have a conservative validator-evidence
+classifier: if a validator rerun records changed evidence for the same plugin
+object, the reviewed plugin conflict returns to `needs-action` with the
+replacement validator payload visible in audit. Generic merge resolution still
+cannot apply plugin conflicts; the plugin validator or a plugin-specific repair
+flow remains the authority. Schema conflicts still use the conservative
+stale-target guard until they have schema-specific revalidation payloads.
 
 ## Test Shape
 
 The implemented tests in `tests/cow/merge.php` cover stale cell/file detection,
 carrying reviewed conflicts into `needs-action`, preserving prior reviewer
 intent in the carried note, idempotent reruns, replacement revalidation payloads
-after further target drift, and guarded source resolution for database cells,
-database rows, and filesystem paths after revalidation.
+after further target drift, guarded source resolution for database cells,
+database rows, and filesystem paths after revalidation, and plugin validator
+reruns that carry reviewed plugin conflicts back to `needs-action` when the
+validator reports changed evidence for the same plugin object.
 
 Future classifier tests should cover three records:
 

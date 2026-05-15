@@ -16219,6 +16219,36 @@ PHP);
     assert_same($plugin_revalidate['stale'], 0, 'plugin conflict revalidation does not infer stale state without rerunning validators');
     assert_same($plugin_revalidate['carried'], 0, 'plugin conflict revalidation does not carry plugin conflicts without validator evidence');
     assert_same((int)scalar($plugin_graph_metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $plugin_conflict_id"), 0, 'plugin conflict revalidation records no guarded payload without rerunning validators');
+    $plugin_validator_updated_result = cow_merge_record_plugin_validator_conflicts($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], [
+        [
+            'plugin' => 'forkpress-graph',
+            'object' => 'graph:source-parent:' . $plugin_graph_source_graph['parent_id'],
+            'reason' => 'source graph still references a missing child row after validator rerun',
+            'tables' => ['plugin_graph_parent', 'plugin_graph_child', 'wp_options', 'wp_postmeta'],
+            'files' => [$plugin_graph_source_graph['file_path']],
+            'validator' => 'forkpress-graph-validator@1',
+            'base' => ['parent_id' => null, 'child_id' => null],
+            'source' => $plugin_graph_source_graph,
+            'target' => $plugin_graph_target_graph,
+            'candidate' => $plugin_graph_source_graph + ['missing_child_id' => 123456],
+        ],
+    ]);
+    assert_same($plugin_validator_updated_result['conflicts'], 1, 'plugin validator rerun records replacement evidence for the same plugin object');
+    $plugin_revalidate_after_rerun = cow_merge_revalidate_reviewed_conflicts($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 'cow-revalidate');
+    assert_same($plugin_revalidate_after_rerun['checked'], 2, 'plugin conflict revalidation inspects original and replacement validator findings');
+    assert_same($plugin_revalidate_after_rerun['reviewed'], 1, 'plugin conflict revalidation still only carries reviewed plugin conflicts');
+    assert_same($plugin_revalidate_after_rerun['stale'], 1, 'plugin conflict revalidation treats changed validator evidence as stale');
+    assert_same($plugin_revalidate_after_rerun['carried'], 1, 'plugin conflict revalidation carries changed validator evidence to needs-action');
+    assert_same((int)scalar($plugin_graph_metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $plugin_conflict_id"), 1, 'plugin conflict revalidation records replacement validator evidence for audit');
+    $plugin_revalidated_audit = cow_merge_audit_report($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'review_status' => 'needs-action',
+    ]);
+    $plugin_original_after_rerun = array_values(array_filter($plugin_revalidated_audit['conflicts'], fn($row) => (int)$row['id'] === $plugin_conflict_id));
+    assert_same($plugin_original_after_rerun[0]['stale_status'] ?? null, 'stale', 'plugin audit marks reviewed conflicts stale after validator evidence changes');
+    assert_true(str_contains((string)($plugin_original_after_rerun[0]['current_target_preview'] ?? ''), '123456'), 'plugin stale audit exposes replacement validator evidence');
+    assert_true(str_contains((string)($plugin_original_after_rerun[0]['review_note'] ?? ''), 'plugin graph validator needs an app-specific repair'), 'plugin stale revalidation preserves prior reviewer intent');
     assert_throws(
         fn() => cow_merge_resolve_conflict($plugin_graph_metadata, $plugin_conflict_id, 'target', false, 'Try generic plugin resolution.', 'cow-test', true),
         'plugin validator conflicts cannot be resolved by generic merge-resolve',
@@ -16248,7 +16278,7 @@ PHP);
         '--group-by', 'severity',
     ]);
     assert_same($plugin_cli_text_group['status'], 0, 'plugin grouped audit CLI exits successfully');
-    assert_true(str_contains($plugin_cli_text_group['output'], 'scope=plugin') && str_contains($plugin_cli_text_group['output'], 'plugin=1 db=0'), 'plugin grouped audit CLI prints plugin counts separately from DB counts');
+    assert_true(str_contains($plugin_cli_text_group['output'], 'scope=plugin') && str_contains($plugin_cli_text_group['output'], 'plugin=2 db=0'), 'plugin grouped audit CLI prints plugin counts separately from DB counts');
     $plugin_cli_path_error = run_merge_cli([
         'audit',
         '--metadata-db', $plugin_graph_metadata,
