@@ -13818,6 +13818,67 @@ PHP);
     assert_same(scalar($wp_lifecycle_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 13 AND meta_key = '_forkpress_lifecycle'"), 'target edited meta', 'WordPress target page meta edit is preserved');
     assert_same((int)scalar($wp_lifecycle_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-wp-lifecycle-source'"), 0, 'WordPress lifecycle merge records no conflicts for independent edits and deletes');
 
+    $wp_edit_delete_base = $tmp . '/wp-edit-delete-base.sqlite';
+    $wp_edit_delete_source = $tmp . '/wp-edit-delete-source.sqlite';
+    $wp_edit_delete_target = $tmp . '/wp-edit-delete-target.sqlite';
+    $wp_edit_delete_metadata = $tmp . '/.forkpress/cow/merge/wp-edit-delete-metadata.sqlite';
+    create_base_db($wp_edit_delete_base);
+    $db = open_db($wp_edit_delete_base);
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_type TEXT NOT NULL DEFAULT 'post'");
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_name TEXT NOT NULL DEFAULT ''");
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (20, 'Base source-edit target-delete page', 'base source-edit target-delete content', 'publish', 'page', 'source-edit-target-delete-page'),
+        (21, 'Base source-delete target-edit page', 'base source-delete target-edit content', 'publish', 'page', 'source-delete-target-edit-page')");
+    $db->exec("INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES
+        (20, 20, '_forkpress_edit_delete', 'base source-edit target-delete meta'),
+        (21, 21, '_forkpress_edit_delete', 'base source-delete target-edit meta')");
+    $db->close();
+    copy($wp_edit_delete_base, $wp_edit_delete_source);
+    copy($wp_edit_delete_base, $wp_edit_delete_target);
+    cow_merge_allocate_autoincrement_bands($wp_edit_delete_source, $wp_edit_delete_metadata, 'feature-wp-edit-delete-source');
+    cow_merge_allocate_autoincrement_bands($wp_edit_delete_target, $wp_edit_delete_metadata, 'feature-wp-edit-delete-target');
+    $db = open_db($wp_edit_delete_source);
+    $db->exec("UPDATE wp_posts SET post_title = 'Source edited target-deleted page', post_content = '<!-- wp:paragraph --><p>Source edit versus target delete</p><!-- /wp:paragraph -->' WHERE ID = 20");
+    $db->exec("UPDATE wp_postmeta SET meta_value = 'source edited target-deleted meta' WHERE post_id = 20 AND meta_key = '_forkpress_edit_delete'");
+    $db->exec('DELETE FROM wp_postmeta WHERE post_id = 21');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 21');
+    $db->close();
+    $db = open_db($wp_edit_delete_target);
+    $db->exec('DELETE FROM wp_postmeta WHERE post_id = 20');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 20');
+    $db->exec("UPDATE wp_posts SET post_title = 'Target edited source-deleted page', post_content = '<!-- wp:paragraph --><p>Target edit versus source delete</p><!-- /wp:paragraph -->' WHERE ID = 21");
+    $db->exec("UPDATE wp_postmeta SET meta_value = 'target edited source-deleted meta' WHERE post_id = 21 AND meta_key = '_forkpress_edit_delete'");
+    $db->close();
+    $wp_edit_delete_result = cow_merge_databases(
+        $wp_edit_delete_base,
+        $wp_edit_delete_source,
+        $wp_edit_delete_target,
+        $wp_edit_delete_metadata,
+        'feature-wp-edit-delete-source',
+        'feature-wp-edit-delete-target'
+    );
+    assert_same($wp_edit_delete_result['status'], 'completed_with_conflicts', 'WordPress page edit/delete conflicts remain reviewable');
+    assert_same((int)scalar($wp_edit_delete_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 20'), 0, 'WordPress target page deletion wins before source edit/delete review');
+    assert_same((int)scalar($wp_edit_delete_target, 'SELECT COUNT(*) FROM wp_postmeta WHERE post_id = 20'), 0, 'WordPress target page metadata deletion wins before source edit/delete review');
+    assert_same(scalar($wp_edit_delete_target, 'SELECT post_title FROM wp_posts WHERE ID = 21'), 'Target edited source-deleted page', 'WordPress target page edit wins before source delete review');
+    assert_same(scalar($wp_edit_delete_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 21 AND meta_key = '_forkpress_edit_delete'"), 'target edited source-deleted meta', 'WordPress target metadata edit wins before source delete review');
+    assert_same(
+        (int)scalar($wp_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-wp-edit-delete-source' AND c.conflict_type = 'row-target-deleted' AND c.table_name IN ('wp_posts', 'wp_postmeta')"),
+        2,
+        'WordPress source edits against target deletes record page and metadata conflicts'
+    );
+    assert_same(
+        (int)scalar($wp_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-wp-edit-delete-source' AND c.conflict_type = 'row-source-deleted' AND c.table_name IN ('wp_posts', 'wp_postmeta')"),
+        2,
+        'WordPress source deletes against target edits record page and metadata conflicts'
+    );
+    assert_same(
+        (int)scalar($wp_edit_delete_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-wp-edit-delete-source' AND d.decision = 'target-wins' AND d.table_name IN ('wp_posts', 'wp_postmeta')"),
+        4,
+        'WordPress edit/delete conflict defaults are auditable as target-wins decisions'
+    );
+
     $plugin_graph_base = $tmp . '/plugin-graph-base.sqlite';
     $plugin_graph_source = $tmp . '/plugin-graph-source.sqlite';
     $plugin_graph_target = $tmp . '/plugin-graph-target.sqlite';
