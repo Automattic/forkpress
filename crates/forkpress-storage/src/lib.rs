@@ -875,6 +875,34 @@ fn allocate_cow_autoincrement_bands(
     )
 }
 
+fn validate_cow_branch_birth_metadata(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    branch: &str,
+    db: &Path,
+) -> Result<()> {
+    let metadata_db = cow_merge_metadata_db_path(layout);
+    let args: Vec<OsString> = vec![
+        "validate-branch-birth-metadata".into(),
+        "--db".into(),
+        db.as_os_str().to_os_string(),
+        "--metadata-db".into(),
+        metadata_db.as_os_str().to_os_string(),
+        "--branch".into(),
+        branch.into(),
+        "--quiet".into(),
+        "1".into(),
+    ];
+    run_php_script(
+        layout,
+        runtime,
+        shared,
+        "scripts/cow/merge.php",
+        args.iter().map(|arg| arg.as_os_str()),
+    )
+}
+
 fn record_cow_merge_base_snapshot(
     layout: &Layout,
     runtime: &PortableRuntime,
@@ -1020,6 +1048,8 @@ pub fn merge_cow_branch(
             base_files.display()
         );
     }
+    validate_cow_branch_birth_metadata(layout, runtime, shared, source, &source_db)
+        .with_context(|| format!("branch '{source}' is missing required merge metadata"))?;
 
     let metadata_db = cow_merge_metadata_db_path(layout);
     let args: Vec<OsString> = vec![

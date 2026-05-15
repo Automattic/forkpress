@@ -15,6 +15,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "  php merge.php capture-identities --db <path> --metadata-db <path> --branch <branch> [--seed-branch <branch>]\n");
     fwrite(STDERR, "  php merge.php track-identity-events --db <path> --metadata-db <path> --branch <branch> --events-json <json>\n");
     fwrite(STDERR, "  php merge.php allocate-id-bands --db <path> --metadata-db <path> --branch <branch>\n");
+    fwrite(STDERR, "  php merge.php validate-branch-birth-metadata --db <path> --metadata-db <path> --branch <branch>\n");
     fwrite(STDERR, "  php merge.php record-plugin-validator-conflicts --metadata-db <path> --run ID (--findings-json <json>|--findings-file <path>) [--format text|json]\n");
     fwrite(STDERR, "  php merge.php run-plugin-validator --metadata-db <path> --run ID --validator <path> [--format text|json]\n");
     fwrite(STDERR, "  php merge.php audit --metadata-db <path> [--format text|json] [--limit N] [--run ID]\n");
@@ -4525,6 +4526,68 @@ function cow_merge_allocate_autoincrement_bands(
         if ($db instanceof SQLite3) {
             $db->close();
         }
+        $meta->close();
+    }
+}
+
+function cow_merge_validate_branch_birth_metadata(
+    string $db_path,
+    string $metadata_db,
+    string $branch
+): array {
+    if (!is_file($db_path)) {
+        throw new RuntimeException("SQLite database does not exist: $db_path");
+    }
+    if (!is_file($metadata_db)) {
+        throw new RuntimeException("merge metadata database does not exist: $metadata_db");
+    }
+
+    $db = cow_merge_open_db($db_path, SQLITE3_OPEN_READONLY);
+    $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READONLY);
+    try {
+        foreach (['merge_autoincrement_bands', 'merge_row_identities'] as $table) {
+            if (!cow_merge_audit_has_table($meta, $table)) {
+                throw new RuntimeException("merge metadata database is missing required table $table");
+            }
+        }
+
+        $autoincrement_tables = cow_merge_autoincrement_tables($db);
+        $keyless_tables = cow_merge_keyless_tables($db);
+        $missing = [];
+        foreach ($autoincrement_tables as $table) {
+            if (cow_merge_lookup_autoincrement_band($meta, $branch, $table) === null) {
+                $missing[] = "AUTOINCREMENT ID band for $table";
+            }
+        }
+
+        $keyless_rows = 0;
+        foreach ($keyless_tables as $table) {
+            foreach (cow_merge_load_keyless_physical_rows($db, $table) as $entry) {
+                $keyless_rows++;
+                $rowid = (int)$entry['rowid'];
+                if (cow_merge_lookup_row_identity($meta, $branch, $table, $rowid) === null) {
+                    $missing[] = "row identity for $table rowid $rowid";
+                }
+            }
+        }
+
+        if ($missing) {
+            $preview = implode(', ', array_slice($missing, 0, 8));
+            if (count($missing) > 8) {
+                $preview .= ', ...';
+            }
+            throw new RuntimeException("branch '$branch' is missing required merge metadata: $preview");
+        }
+
+        return [
+            'status' => 'validated',
+            'branch' => $branch,
+            'autoincrement_tables' => count($autoincrement_tables),
+            'keyless_tables' => count($keyless_tables),
+            'keyless_rows' => $keyless_rows,
+        ];
+    } finally {
+        $db->close();
         $meta->close();
     }
 }
@@ -12126,6 +12189,22 @@ if (realpath($argv[0] ?? '') === __FILE__) {
                 echo "  reused:    {$result['reused']}\n";
                 echo "  advanced:  {$result['advanced']}\n";
                 echo "  metadata:  {$result['metadata_db']}\n";
+            }
+            exit(0);
+        }
+        if ($command === 'validate-branch-birth-metadata') {
+            $args = cow_merge_parse_cli($argv, ['db', 'metadata-db', 'branch'], 2);
+            $result = cow_merge_validate_branch_birth_metadata(
+                $args['db'],
+                $args['metadata-db'],
+                $args['branch']
+            );
+            if (($args['quiet'] ?? '0') !== '1') {
+                echo "forkpress: validated branch birth metadata for {$args['branch']}\n";
+                echo "  status:               {$result['status']}\n";
+                echo "  autoincrement tables: {$result['autoincrement_tables']}\n";
+                echo "  keyless tables:       {$result['keyless_tables']}\n";
+                echo "  keyless rows:         {$result['keyless_rows']}\n";
             }
             exit(0);
         }

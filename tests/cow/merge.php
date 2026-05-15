@@ -12963,6 +12963,17 @@ SQL);
     $db->close();
     cow_merge_allocate_autoincrement_bands($birth_cleanup_db, $band_metadata, 'feature-birth-cleanup');
     cow_merge_capture_row_identities($birth_cleanup_db, $band_metadata, 'feature-birth-cleanup');
+    $birth_validation = cow_merge_validate_branch_birth_metadata($birth_cleanup_db, $band_metadata, 'feature-birth-cleanup');
+    assert_same($birth_validation['status'], 'validated', 'branch birth metadata validation accepts complete ID bands and row identities');
+    assert_true($birth_validation['autoincrement_tables'] >= 3, 'branch birth metadata validation counts AUTOINCREMENT tables');
+    assert_true($birth_validation['keyless_rows'] >= 1, 'branch birth metadata validation counts keyless row identities');
+    $birth_validation_cli = run_merge_cli([
+        'validate-branch-birth-metadata',
+        '--db', $birth_cleanup_db,
+        '--metadata-db', $band_metadata,
+        '--branch', 'feature-birth-cleanup',
+    ]);
+    assert_same($birth_validation_cli['status'], 0, 'branch birth metadata validation CLI accepts complete branch metadata');
     assert_true((int)scalar($band_metadata, "SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'feature-birth-cleanup'") > 0, 'branch birth cleanup fixture creates band metadata');
     assert_true((int)scalar($band_metadata, "SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = 'feature-birth-cleanup'") > 0, 'branch birth cleanup fixture creates row identity metadata');
     $birth_cleanup = cow_merge_cleanup_branch_birth_metadata($band_metadata, 'feature-birth-cleanup');
@@ -12972,6 +12983,29 @@ SQL);
     assert_same((int)scalar($band_metadata, "SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'feature-birth-cleanup'"), 0, 'branch birth metadata cleanup removes row identity history');
     assert_same((int)scalar($band_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-birth-cleanup'"), 0, 'branch birth metadata cleanup removes branch birth runs');
     assert_true((int)scalar($band_metadata, "SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'feature-band-a'") > 0, 'branch birth metadata cleanup leaves unrelated branch bands intact');
+
+    $missing_birth_band_db = $tmp . '/missing-birth-band.sqlite';
+    $missing_birth_band_metadata = $tmp . '/.forkpress/cow/merge/missing-birth-band-metadata.sqlite';
+    copy($band_base, $missing_birth_band_db);
+    cow_merge_capture_row_identities($missing_birth_band_db, $missing_birth_band_metadata, 'feature-missing-birth-band');
+    $missing_birth_band_cli = run_merge_cli([
+        'validate-branch-birth-metadata',
+        '--db', $missing_birth_band_db,
+        '--metadata-db', $missing_birth_band_metadata,
+        '--branch', 'feature-missing-birth-band',
+    ]);
+    assert_true($missing_birth_band_cli['status'] !== 0, 'branch birth metadata validation CLI rejects missing ID bands');
+    assert_true(str_contains($missing_birth_band_cli['output'], 'AUTOINCREMENT ID band'), 'branch birth metadata validation explains missing ID bands');
+
+    $missing_birth_identity_db = $tmp . '/missing-birth-identity.sqlite';
+    $missing_birth_identity_metadata = $tmp . '/.forkpress/cow/merge/missing-birth-identity-metadata.sqlite';
+    copy($band_base, $missing_birth_identity_db);
+    cow_merge_allocate_autoincrement_bands($missing_birth_identity_db, $missing_birth_identity_metadata, 'feature-missing-birth-identity');
+    assert_throws(
+        fn() => cow_merge_validate_branch_birth_metadata($missing_birth_identity_db, $missing_birth_identity_metadata, 'feature-missing-birth-identity'),
+        'row identity for plugin_keyless rowid',
+        'branch birth metadata validation rejects missing no-primary-key row identities'
+    );
 
     $result = cow_merge_allocate_autoincrement_bands($band_feature_b, $band_metadata, 'feature-band-b');
     assert_same($result['allocated'], 3, 'second branch receives its own bands');
