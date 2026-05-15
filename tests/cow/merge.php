@@ -3366,6 +3366,45 @@ SQL);
         'after-revalidate resolution audits the latest revalidated target payload'
     );
 
+    $missing_cell_base = $tmp . '/missing-cell-base.sqlite';
+    $missing_cell_source = $tmp . '/missing-cell-source.sqlite';
+    $missing_cell_target = $tmp . '/missing-cell-target.sqlite';
+    $missing_cell_metadata = $tmp . '/.forkpress/cow/merge/missing-cell-metadata.sqlite';
+    create_base_db($missing_cell_base);
+    copy($missing_cell_base, $missing_cell_source);
+    copy($missing_cell_base, $missing_cell_target);
+    $db = open_db($missing_cell_source);
+    $db->exec("UPDATE plugin_items SET value = 'source missing-cell conflict' WHERE item_id = 'alpha'");
+    $db->close();
+    $db = open_db($missing_cell_target);
+    $db->exec("UPDATE plugin_items SET value = 'target missing-cell conflict' WHERE item_id = 'alpha'");
+    $db->close();
+    $missing_cell_merge = cow_merge_databases($missing_cell_base, $missing_cell_source, $missing_cell_target, $missing_cell_metadata, 'feature-missing-cell-review', 'main');
+    $missing_cell_run_id = (int)$missing_cell_merge['run_id'];
+    $missing_cell_conflict_id = (int)scalar($missing_cell_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND column_name = 'value'");
+    cow_merge_review_record(
+        $missing_cell_metadata,
+        'conflict',
+        $missing_cell_conflict_id,
+        'reviewed',
+        'Revalidate before applying a row that may disappear.',
+        'cow-test'
+    );
+    $db = open_db($missing_cell_target);
+    $db->exec("DELETE FROM plugin_items WHERE item_id = 'alpha'");
+    $db->close();
+    $missing_cell_revalidated = cow_merge_revalidate_reviewed_conflicts($missing_cell_metadata, $missing_cell_run_id, 'cow-revalidate');
+    assert_same($missing_cell_revalidated['carried'], 1, 'review revalidation carries missing target cell rows back to needs-action');
+    assert_same(scalar($missing_cell_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $missing_cell_conflict_id ORDER BY id DESC LIMIT 1"), 'missing', 'cell revalidation classifies deleted target rows as missing');
+    $missing_cell_audit = cow_merge_audit_report($missing_cell_metadata, $missing_cell_run_id, 10, ['records' => 'conflicts']);
+    $missing_cell_conflicts = array_values(array_filter($missing_cell_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $missing_cell_conflict_id));
+    assert_same($missing_cell_conflicts[0]['revalidation_class'] ?? null, 'missing', 'cell audit exposes missing target row revalidation class');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($missing_cell_metadata, $missing_cell_conflict_id, 'source', true, 'Try source after missing-row revalidation.', 'cow-test', true),
+        'target row no longer exists',
+        'after-revalidate cell resolution does not recreate a missing target row through a cell update'
+    );
+
     $row_resolution_rollback_base = $tmp . '/row-resolution-rollback-base.sqlite';
     $row_resolution_rollback_source = $tmp . '/row-resolution-rollback-source.sqlite';
     $row_resolution_rollback_target = $tmp . '/row-resolution-rollback-target.sqlite';
@@ -5673,6 +5712,7 @@ SQL);
     write_test_file($file_resolve_base_root . '/wp-content/uploads/rollback-conflict.txt', 'base rollback conflict');
     write_test_file($file_resolve_base_root . '/wp-content/uploads/commit-rollback-conflict.txt', 'base commit rollback conflict');
     write_test_file($file_resolve_base_root . '/wp-content/uploads/revalidate-conflict.txt', 'base revalidate conflict');
+    write_test_file($file_resolve_base_root . '/wp-content/uploads/revalidate-missing.txt', 'base revalidate missing');
     mkdir($file_resolve_base_root . '/wp-content/uploads/replace-dir-with-file', 0777, true);
     write_test_file($file_resolve_base_root . '/wp-content/uploads/replace-dir-with-file/base-child.txt', 'base replacement child');
     copy_tree_for_test($file_resolve_base_root, $file_resolve_source_root);
@@ -5692,6 +5732,7 @@ SQL);
     write_test_file($file_resolve_source_root . '/wp-content/uploads/rollback-conflict.txt', 'source rollback resolution');
     write_test_file($file_resolve_source_root . '/wp-content/uploads/commit-rollback-conflict.txt', 'source commit rollback resolution');
     write_test_file($file_resolve_source_root . '/wp-content/uploads/revalidate-conflict.txt', 'source revalidate resolution');
+    write_test_file($file_resolve_source_root . '/wp-content/uploads/revalidate-missing.txt', 'source revalidate missing');
     create_test_symlink('/etc/passwd', $file_resolve_source_root . '/wp-content/uploads/unsafe-link.txt');
     unlink($file_resolve_source_root . '/wp-content/uploads/delete-conflict.txt');
     unlink($file_resolve_source_root . '/wp-content/uploads/replace-dir-with-file/base-child.txt');
@@ -5702,6 +5743,7 @@ SQL);
     write_test_file($file_resolve_target_root . '/wp-content/uploads/rollback-conflict.txt', 'target rollback resolution');
     write_test_file($file_resolve_target_root . '/wp-content/uploads/commit-rollback-conflict.txt', 'target commit rollback resolution');
     write_test_file($file_resolve_target_root . '/wp-content/uploads/revalidate-conflict.txt', 'target revalidate resolution');
+    write_test_file($file_resolve_target_root . '/wp-content/uploads/revalidate-missing.txt', 'target revalidate missing');
     cow_merge_branch_state(
         $file_resolve_base_db,
         $file_resolve_source_db,
@@ -5804,6 +5846,36 @@ SQL);
         $file_revalidated_target_payload,
         'after-revalidate filesystem resolution audits the latest revalidated target file payload'
     );
+    $file_missing_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/revalidate-missing.txt')) . "' ORDER BY id DESC LIMIT 1");
+    cow_merge_review_record(
+        $metadata,
+        'conflict',
+        $file_missing_conflict_id,
+        'reviewed',
+        'Revalidate before applying a source file whose target disappeared.',
+        'cow-test'
+    );
+    unlink($file_resolve_target_root . '/wp-content/uploads/revalidate-missing.txt');
+    $file_missing_revalidated = cow_merge_revalidate_reviewed_conflicts($metadata, null, 'cow-revalidate');
+    assert_true($file_missing_revalidated['carried'] >= 1, 'review revalidation carries missing filesystem paths to needs-action');
+    assert_same(scalar($metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $file_missing_conflict_id ORDER BY id DESC LIMIT 1"), 'missing', 'filesystem revalidation classifies deleted target paths as missing');
+    $file_missing_audit = cow_merge_audit_report($metadata, null, 10, [
+        'records' => 'conflicts',
+        'scope' => 'files',
+        'path' => 'wp-content/uploads/revalidate-missing.txt',
+    ]);
+    assert_same($file_missing_audit['conflicts'][0]['revalidation_class'] ?? null, 'missing', 'filesystem audit exposes missing path revalidation class');
+    $file_missing_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $file_missing_conflict_id,
+        'source',
+        true,
+        'Apply source file after missing-path revalidation.',
+        'cow-test',
+        true
+    );
+    assert_same($file_missing_resolution['status'], 'applied', 'after-revalidate source resolution can restore a reviewed missing filesystem path');
+    assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/revalidate-missing.txt'), 'source revalidate missing', 'after-revalidate filesystem resolution restores the audited source path');
     $file_rollback_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/rollback-conflict.txt')) . "' ORDER BY id DESC LIMIT 1");
     $file_rollback_meta = open_db($metadata);
     $file_rollback_meta->exec(<<<'SQL'

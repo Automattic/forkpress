@@ -121,17 +121,15 @@ carrying reviewed conflicts into `needs-action`, preserving prior reviewer
 intent in the carried note, idempotent reruns, replacement revalidation payloads
 after further target drift, guarded source resolution for database cells,
 database rows, and filesystem paths after revalidation, revalidation classifiers
-for stale database row/cell drift, incompatible no-primary-key rowid
-replacement, and plugin validator reruns that carry reviewed plugin conflicts
-back to `needs-action` with `replacement-evidence` when the validator reports
-changed evidence for the same plugin object.
+for stale database row/cell drift, deleted database target rows, deleted
+filesystem target paths, incompatible no-primary-key rowid replacement, and
+plugin validator reruns that carry reviewed plugin conflicts back to
+`needs-action` with `replacement-evidence` when the validator reports changed
+evidence for the same plugin object.
 
-Future classifier tests should cover three records:
-
-- A filesystem conflict where the target file changed and must remain blocked
-  until the reviewer confirms the new payload.
-- A primary-key row conflict where the target row keeps the same key but a
-  higher-level logical fingerprint proves it now represents a different object.
+Future classifier tests should cover primary-key row conflicts where the target
+row keeps the same key but a higher-level logical fingerprint proves it now
+represents a different object.
 
 The existing stale-resolution tests in `tests/cow/merge.php` should remain.
 They prove stale resolutions are blocked. New tests should prove reviewers get
