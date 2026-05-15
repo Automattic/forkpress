@@ -12,7 +12,7 @@ cd "$REPO_ROOT"
 
 require_static_php_build_tools() {
   local missing=()
-  local required=(git composer php re2c automake bison)
+  local required=(git composer php re2c automake bison pkg-config)
 
   if [ "$UNAME_S" = "Darwin" ]; then
     # static-php-cli patches have failed under BSD patch on macOS; use GNU patch.
@@ -31,9 +31,9 @@ require_static_php_build_tools() {
 
   echo "ERROR: missing static PHP build tools: ${missing[*]}" >&2
   if [ "$UNAME_S" = "Darwin" ]; then
-    echo "Install them with: brew update && brew install composer php re2c automake bison gpatch" >&2
+    echo "Install them with: brew update && brew install composer php re2c automake bison pkg-config gpatch" >&2
   elif [ "$UNAME_S" = "Linux" ]; then
-    echo "Install them with your package manager; CI uses: apt-get install automake php-cli composer re2c bison" >&2
+    echo "Install them with your package manager; CI uses: apt-get install automake php-cli composer re2c bison pkg-config" >&2
   fi
   echo "Refusing to let static-php-cli auto-install prerequisites during the release bundle build." >&2
   exit 1

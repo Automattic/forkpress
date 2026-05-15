@@ -102,7 +102,7 @@ jobs:
       - name: Install runtime build tools
         run: |
           brew update
-          brew install composer gpatch automake re2c bison
+          brew install composer gpatch automake re2c bison pkg-config
           brew install php || true
 
       - name: Build production dist bundle
