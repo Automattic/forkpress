@@ -9516,6 +9516,18 @@ function cow_merge_resolve_conflict(
                         if (!$pk_cols) {
                             cow_merge_forget_row_identity($meta, (int)$conflict['run_id'], $target_branch, $table, (int)$where_identity['rowid']);
                         }
+                    } elseif (
+                        $after_revalidate
+                        && $target_value === null
+                        && in_array($conflict_type, ['row-insert-collision', 'row-identity-ambiguous'], true)
+                    ) {
+                        $columns = cow_merge_table_columns($target, $table);
+                        $insert_result = cow_merge_try_insert_row_preserving_payload($target, $table, $source_value, $columns, $identity, $pk_cols);
+                        cow_merge_require_source_apply_result($insert_result, "failed to restore $table source row after revalidation");
+                        $new_rowid = (int)($insert_result['rowid'] ?? 0);
+                        if (!$pk_cols) {
+                            cow_merge_remember_row_identity($meta, (int)$conflict['run_id'], $target_branch, $table, $new_rowid, $identity, $source_value);
+                        }
                     } elseif ($conflict_type === 'row-target-deleted') {
                         $columns = cow_merge_table_columns($target, $table);
                         $insert_result = cow_merge_try_insert_row_preserving_payload($target, $table, $source_value, $columns, $identity, $pk_cols);
