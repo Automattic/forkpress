@@ -1527,6 +1527,61 @@ function cow_merge_row_semantic_identity(string $table, ?array $row): ?array {
     return $identity;
 }
 
+function cow_merge_wordpress_target_local_row_reason(string $table, ?array $base_row, ?array $source_row, ?array $target_row): ?string {
+    if ($table !== 'wp_usermeta') {
+        return null;
+    }
+    $saw_row = false;
+    foreach ([$base_row, $source_row, $target_row] as $row) {
+        if ($row === null) {
+            continue;
+        }
+        $saw_row = true;
+        if (($row['meta_key'] ?? null) !== 'session_tokens') {
+            return null;
+        }
+    }
+    if (!$saw_row) {
+        return null;
+    }
+    return 'target kept branch-local WordPress usermeta session_tokens; source auth session state is not merged';
+}
+
+function cow_merge_record_target_local_row_kept(
+    SQLite3 $meta,
+    int $run_id,
+    string $table,
+    string $key,
+    array $row_columns,
+    array $pk_cols,
+    ?array $base_row,
+    ?array $source_row,
+    ?array $target_row,
+    string $reason
+): void {
+    if ($base_row === null || $source_row === null || $target_row === null) {
+        cow_merge_record_decision($meta, $run_id, $table, $key, null, 'target-kept', $reason, $base_row, $source_row, $target_row, $target_row);
+        return;
+    }
+
+    $recorded = false;
+    foreach ($row_columns as $col) {
+        if (in_array($col, $pk_cols, true)) {
+            continue;
+        }
+        $b = $base_row[$col] ?? null;
+        $s = $source_row[$col] ?? null;
+        $t = $target_row[$col] ?? null;
+        if (!cow_merge_values_equal($s, $b) || !cow_merge_values_equal($t, $b)) {
+            cow_merge_record_decision($meta, $run_id, $table, $key, $col, 'target-kept', $reason, $b, $s, $t, $t);
+            $recorded = true;
+        }
+    }
+    if (!$recorded) {
+        cow_merge_record_decision($meta, $run_id, $table, $key, null, 'target-kept', $reason, $base_row, $source_row, $target_row, $target_row);
+    }
+}
+
 function cow_merge_keyless_row_identity_ambiguous(?array $base_row, ?array $source_row, ?array $target_row, array $columns): bool {
     if ($base_row === null || $source_row === null || $target_row === null || !$columns) {
         return false;
@@ -12765,6 +12820,22 @@ function cow_merge_table_rows(
             continue;
         }
         $row_columns = cow_merge_all_columns($columns, array_keys($base_row ?? []), array_keys($source_row ?? []), array_keys($target_row ?? []));
+        $target_local_reason = cow_merge_wordpress_target_local_row_reason($table, $base_row, $source_row, $target_row);
+        if ($target_local_reason !== null && !cow_merge_row_values_equal($source_row, $base_row, $row_columns)) {
+            cow_merge_record_target_local_row_kept(
+                $meta,
+                $run_id,
+                $table,
+                $key,
+                $row_columns,
+                $pk_cols,
+                $base_row,
+                $source_row,
+                $target_row,
+                $target_local_reason
+            );
+            continue;
+        }
 
         if (cow_merge_row_values_equal($source_row, $base_row, $row_columns)) {
             if (!cow_merge_row_values_equal($target_row, $base_row, $row_columns)) {

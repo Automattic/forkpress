@@ -218,6 +218,43 @@ try {
         'independent target cell preservation is auditable'
     );
 
+    $volatile_base = $tmp . '/volatile-usermeta-base.sqlite';
+    $volatile_source = $tmp . '/volatile-usermeta-source.sqlite';
+    $volatile_target = $tmp . '/volatile-usermeta-target.sqlite';
+    $volatile_metadata = $tmp . '/.forkpress/cow/merge/volatile-usermeta-metadata.sqlite';
+    foreach ([$volatile_base, $volatile_source, $volatile_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE wp_posts (ID INTEGER PRIMARY KEY AUTOINCREMENT, post_title TEXT, post_content TEXT, post_status TEXT)');
+        $db->exec('CREATE TABLE wp_usermeta (umeta_id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+        $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status) VALUES (1, 'Shared page', 'Base content', 'draft')");
+        $db->exec("INSERT INTO wp_usermeta (umeta_id, user_id, meta_key, meta_value) VALUES (16, 1, 'session_tokens', 'base-token')");
+        $db->close();
+    }
+    $db = open_db($volatile_source);
+    $db->exec("UPDATE wp_posts SET post_content = 'Source page content' WHERE ID = 1");
+    $db->exec("UPDATE wp_usermeta SET meta_value = 'source-token' WHERE umeta_id = 16");
+    $db->exec("INSERT INTO wp_usermeta (umeta_id, user_id, meta_key, meta_value) VALUES (17, 2, 'session_tokens', 'source-only-token')");
+    $db->close();
+    $db = open_db($volatile_target);
+    $db->exec("UPDATE wp_posts SET post_status = 'publish' WHERE ID = 1");
+    $db->exec("UPDATE wp_usermeta SET meta_value = 'target-token' WHERE umeta_id = 16");
+    $db->close();
+    $volatile_result = cow_merge_databases($volatile_base, $volatile_source, $volatile_target, $volatile_metadata, 'feature-volatile-usermeta', 'main');
+    assert_same($volatile_result['status'], 'completed', 'branch-local WordPress session tokens do not force a review conflict');
+    assert_same(scalar($volatile_target, "SELECT post_content FROM wp_posts WHERE ID = 1"), 'Source page content', 'content changes still merge while session tokens are ignored');
+    assert_same(scalar($volatile_target, "SELECT post_status FROM wp_posts WHERE ID = 1"), 'publish', 'target content changes are preserved while session tokens are ignored');
+    assert_same(scalar($volatile_target, "SELECT meta_value FROM wp_usermeta WHERE umeta_id = 16"), 'target-token', 'target WordPress session token remains branch-local');
+    assert_same((int)scalar($volatile_target, "SELECT COUNT(*) FROM wp_usermeta WHERE umeta_id = 17"), 0, 'source-only WordPress session token is not imported');
+    assert_same(
+        (int)scalar($volatile_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_usermeta'"),
+        0,
+        'volatile WordPress session token policy records no usermeta conflicts'
+    );
+    assert_true(
+        (int)scalar($volatile_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_usermeta' AND decision = 'target-kept' AND reason LIKE '%session_tokens%'") >= 2,
+        'volatile WordPress session token skips remain auditable'
+    );
+
     $rollback_base = $tmp . '/rollback-base.sqlite';
     $rollback_source = $tmp . '/rollback-source.sqlite';
     $rollback_target = $tmp . '/rollback-target.sqlite';
