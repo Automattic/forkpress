@@ -413,11 +413,11 @@ jobs:
           ruby -c homebrew-tap/forkpress.rb
           git -C homebrew-tap config user.name "github-actions[bot]"
           git -C homebrew-tap config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git -C homebrew-tap diff --quiet -- forkpress.rb; then
+          git -C homebrew-tap add forkpress.rb
+          if git -C homebrew-tap diff --cached --quiet -- forkpress.rb; then
             echo "Automattic/homebrew-tap already has forkpress.rb for ${{ needs.preflight.outputs.tag }}."
             exit 0
           fi
-          git -C homebrew-tap add forkpress.rb
           git -C homebrew-tap commit \
             -m "Update ForkPress to ${{ needs.preflight.outputs.tag }}" \
             -m "Release: https://github.com/Automattic/forkpress/releases/tag/${{ needs.preflight.outputs.tag }}"
