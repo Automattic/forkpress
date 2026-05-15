@@ -10,6 +10,48 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+require_static_php_build_tools() {
+  local missing=()
+  local required=(git composer php re2c automake bison pkg-config)
+
+  if [ "$UNAME_S" = "Darwin" ]; then
+    # static-php-cli patches have failed under BSD patch on macOS; use GNU patch.
+    required+=(gpatch)
+  fi
+
+  for cmd in "${required[@]}"; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+      missing+=("$cmd")
+    fi
+  done
+
+  if [ "${#missing[@]}" -eq 0 ]; then
+    return
+  fi
+
+  echo "ERROR: missing static PHP build tools: ${missing[*]}" >&2
+  if [ "$UNAME_S" = "Darwin" ]; then
+    echo "Install them with: brew update && brew install composer php re2c automake bison pkg-config gpatch" >&2
+  elif [ "$UNAME_S" = "Linux" ]; then
+    echo "Install them with your package manager; CI uses: apt-get install automake php-cli composer re2c bison pkg-config" >&2
+  fi
+  echo "Refusing to let static-php-cli auto-install prerequisites during the release bundle build." >&2
+  exit 1
+}
+
+ensure_static_php_cli_checkout() {
+  mkdir -p "$BUILD_DIR"
+  if [ ! -d "$SPC_DIR/.git" ]; then
+    rm -rf "$SPC_DIR"
+    git clone --no-checkout https://github.com/crazywhalecc/static-php-cli.git "$SPC_DIR"
+  fi
+
+  git -C "$SPC_DIR" fetch --depth 1 origin "$SPC_REF"
+  git -C "$SPC_DIR" checkout --detach FETCH_HEAD
+  git -C "$SPC_DIR" reset --hard FETCH_HEAD
+  printf '%s\n' "$SPC_REF" > "$SPC_REF_MARKER"
+}
+
 # --- Target detection ------------------------------------------------------
 UNAME_S=$(uname -s)
 UNAME_M=$(uname -m)
@@ -43,6 +85,8 @@ fi
 DIST_DIR="${FORKPRESS_DIST_DIR:-$REPO_ROOT/dist/$DIST_NAME}"
 BUILD_DIR="${FORKPRESS_BUILD_DIR:-$REPO_ROOT/.build/$DIST_NAME}"
 SPC_DIR="$BUILD_DIR/static-php-cli"
+SPC_REF="${FORKPRESS_STATIC_PHP_CLI_REF:-8d038f435da7845926ba425dfbae0278cd0e0746}"
+SPC_REF_MARKER="$SPC_DIR/.forkpress-static-php-cli-ref"
 CAS_TARGET_DIR="$BUILD_DIR/cas-ffi-target"
 CAS_LIB_DIR="$CAS_TARGET_DIR/$TRIPLE/release"
 
@@ -92,6 +136,9 @@ if [ -x "$SPC_DIR/buildroot/bin/php" ]; then
         break
       fi
     done
+    if [ ! -f "$SPC_REF_MARKER" ] || [ "$(cat "$SPC_REF_MARKER")" != "$SPC_REF" ]; then
+      NEED_PHP_BUILD=1
+    fi
   else
     rm -f "$SPC_DIR/buildroot/bin/php"
   fi
@@ -99,10 +146,8 @@ fi
 
 if [ "$NEED_PHP_BUILD" = "1" ]; then
   echo "==> Building static PHP via static-php-cli (first-time: 3-5 minutes)"
-  if [ ! -d "$SPC_DIR" ]; then
-    mkdir -p "$BUILD_DIR"
-    git clone --depth 1 https://github.com/crazywhalecc/static-php-cli.git "$SPC_DIR"
-  fi
+  require_static_php_build_tools
+  ensure_static_php_cli_checkout
   cd "$SPC_DIR"
   # --ignore-platform-reqs skips strict checking of the PHP version constraint
   # in static-php-cli's composer.lock (which can float up to PHP >= 8.4 as
@@ -122,18 +167,32 @@ if [ "$NEED_PHP_BUILD" = "1" ]; then
     export PATH="/opt/homebrew/bin:$PATH"
   fi
 
-  # On Apple Silicon, if the parent shell is running under Rosetta, native
-  # clang defaults to x86_64 and some vendored library builds (libzip, etc)
-  # use that default instead of --target=arm64-apple-darwin, producing mixed
-  # arch objects that fail to link. Relaunch the spc subcommands in a native
-  # arm64 shell so every vendored lib compiles for arm64 consistently.
-  SPC_RUN=( )
-  if [ "$UNAME_S-$UNAME_M" = "Darwin-arm64" ] && [ "$(uname -m)" != "arm64" ]; then
-    SPC_RUN=( arch -arm64 )
+  # For Apple Silicon release targets, if the parent shell is running under
+  # Rosetta, clang defaults to x86_64 and some vendored library builds (libzip,
+  # etc) use that default instead of arm64, producing mixed-arch objects that
+  # fail to link. Relaunch the spc subcommands in a native arm64 shell so every
+  # vendored lib compiles for arm64 consistently.
+  SPC_RUN_UNDER_ARM64=0
+  if [ "$UNAME_S" = "Darwin" ] && [ "$TRIPLE" = "aarch64-apple-darwin" ] && [ "$(uname -m)" != "arm64" ]; then
+    if arch -arm64 /usr/bin/true >/dev/null 2>&1; then
+      SPC_RUN_UNDER_ARM64=1
+    else
+      echo "ERROR: aarch64-apple-darwin dist builds must run in a native arm64 shell." >&2
+      echo "       Re-run from Apple Silicon without Rosetta, or use: arch -arm64 scripts/build-dist.sh" >&2
+      exit 1
+    fi
   fi
 
-  "${SPC_RUN[@]+"${SPC_RUN[@]}"}" ./bin/spc doctor --auto-fix
-  "${SPC_RUN[@]+"${SPC_RUN[@]}"}" ./bin/spc download --for-extensions="$EXTENSIONS" --with-php=8.3
+  run_spc() {
+    if [ "$SPC_RUN_UNDER_ARM64" = "1" ]; then
+      arch -arm64 ./bin/spc "$@"
+    else
+      ./bin/spc "$@"
+    fi
+  }
+
+  run_spc doctor --auto-fix
+  run_spc download --for-extensions="$EXTENSIONS" --with-php=8.3
 
   if [ "$PROFILE" = "dev" ]; then
     # Register branchfs as a builtin extension in spc's ext.json so its
@@ -149,11 +208,11 @@ file_put_contents($p, json_encode($c, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES
     # re-runs ./buildconf --force so the new extension is visible to configure.
     # Using the hook (rather than manual pre-extraction) is robust against spc
     # re-extracting php-src during the build phase.
-    "${SPC_RUN[@]+"${SPC_RUN[@]}"}" ./bin/spc build \
+    run_spc build \
       --with-added-patch="$REPO_ROOT/experiments/branchfs/build/spc-patch.php" \
       "$EXTENSIONS,branchfs" --build-cli
   else
-    "${SPC_RUN[@]+"${SPC_RUN[@]}"}" ./bin/spc build "$EXTENSIONS" --build-cli
+    run_spc build "$EXTENSIONS" --build-cli
   fi
   cd "$REPO_ROOT"
 fi

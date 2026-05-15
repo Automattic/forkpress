@@ -469,24 +469,84 @@ pub fn create_cow_branch_from_tree(
     if dest.exists() {
         bail!("branch already exists: {branch}");
     }
-    if cow_branch_copies_require_cow(layout)? {
-        copy_tree_cow_required(source, &dest)?;
-    } else {
-        copy_tree_cow(source, &dest)?;
+    let dest_parent = dest.parent().ok_or_else(|| {
+        anyhow!(
+            "branch destination has no parent directory: {}",
+            dest.display()
+        )
+    })?;
+    fs::create_dir_all(dest_parent)
+        .with_context(|| format!("failed to create {}", dest_parent.display()))?;
+    let staging = unique_cow_operation_dir(dest_parent, "branch-create-stage", branch);
+    if path_exists_no_follow(&staging) {
+        bail!("temporary branch creation path already exists");
     }
-    let branch_root = ensure_cow_public_branch_root(layout, branch, &dest, file_view)?;
-    run_cow_bootstrap_script(layout, runtime, shared, &branch_root, "ForkPress", "admin")?;
+    cleanup_unpublished_cow_branch_birth_artifacts(
+        layout, runtime, shared, branch, &staging, &dest, file_view,
+    )
+    .with_context(|| {
+        format!("failed to clean stale unpublished COW branch birth artifacts for '{branch}'")
+    })?;
+
     let source_db = cow_sqlite_db_path(source);
-    if source_db.is_file() {
+    let mut staging_published = false;
+    let create_result = (|| -> Result<()> {
+        if cow_branch_copies_require_cow(layout)? {
+            copy_tree_cow_required(source, &staging)?;
+        } else {
+            copy_tree_cow(source, &staging)?;
+        }
+
+        run_cow_bootstrap_script(layout, runtime, shared, &staging, "ForkPress", "admin")?;
+        if !source_db.is_file() {
+            bail!(
+                "source branch database does not exist: {}",
+                source_db.display()
+            );
+        }
         record_cow_merge_base_snapshot(layout, runtime, shared, branch, &source_db)?;
-    }
-    let branch_db = cow_sqlite_db_path(&branch_root);
-    if branch_db.is_file() {
+        let branch_db = cow_sqlite_db_path(&staging);
+        if !branch_db.is_file() {
+            bail!(
+                "created branch database does not exist: {}",
+                branch_db.display()
+            );
+        }
         allocate_cow_autoincrement_bands(layout, runtime, shared, branch, &branch_db)?;
         capture_cow_row_identities(layout, runtime, shared, branch, &branch_db, seed_branch)?;
+        record_cow_file_merge_base_snapshot(layout, runtime, shared, branch, &staging)?;
+        cow_storage_failpoint("after-branch-create-birth-metadata")?;
+
+        if path_exists_no_follow(&dest) {
+            bail!("branch already exists: {branch}");
+        }
+        fs::rename(&staging, &dest).with_context(|| {
+            format!(
+                "failed to publish branch {} to {}",
+                staging.display(),
+                dest.display()
+            )
+        })?;
+        staging_published = true;
+        ensure_cow_public_branch_root(layout, branch, &dest, file_view)?;
+        write_cow_branch_list(layout)?;
+        Ok(())
+    })();
+
+    if let Err(err) = create_result {
+        let cleanup = cleanup_failed_cow_branch_create(
+            layout,
+            runtime,
+            shared,
+            branch,
+            &staging,
+            &dest,
+            file_view,
+            staging_published,
+        );
+        return Err(err).context(format!("failed to create COW branch '{branch}'; {cleanup}"));
     }
-    record_cow_file_merge_base_snapshot(layout, runtime, shared, branch, &branch_root)?;
-    write_cow_branch_list(layout)?;
+
     println!("forkpress: COW cloned {source_label} -> '{branch}'");
     if let Some((root_host, port)) = url_hint {
         println!(
@@ -511,10 +571,144 @@ pub fn ensure_cow_branch_exists(
     let public_root = cow_branch_root(layout, branch);
     let storage_root = cow_branch_storage_root(layout, branch, file_view);
     if public_root.join("wp-load.php").is_file() || storage_root.join("wp-load.php").is_file() {
+        ensure_no_pending_cow_reset(layout, branch)?;
+        let root = if storage_root.join("wp-load.php").is_file() {
+            &storage_root
+        } else {
+            &public_root
+        };
+        let db = validate_existing_cow_branch_birth_files(layout, branch, root)?;
+        validate_cow_branch_birth_metadata(layout, runtime, shared, branch, &db)
+            .with_context(|| {
+                format!(
+                    "existing COW branch '{branch}' is missing required merge metadata; reset or delete/recreate it before reuse"
+                )
+            })?;
         println!("forkpress: reusing existing branch {branch}");
         return Ok(());
     }
     create_cow_branch(layout, runtime, shared, branch, from, url_hint)
+}
+
+fn validate_existing_cow_branch_birth_files(
+    layout: &Layout,
+    branch: &str,
+    root: &Path,
+) -> Result<PathBuf> {
+    let db = cow_sqlite_db_path(root);
+    if !db.is_file() {
+        bail!(
+            "existing COW branch '{branch}' is missing its database at {}. Reset or delete/recreate it before reuse.",
+            db.display()
+        );
+    }
+    let base_db = cow_merge_base_db_path(layout, branch)?;
+    if !base_db.is_file() {
+        bail!(
+            "existing COW branch '{branch}' is missing its DB merge base at {}. Reset or delete/recreate it before reuse.",
+            base_db.display()
+        );
+    }
+    let file_base = cow_merge_file_base_path(layout, branch)?;
+    if !file_base.is_file() {
+        bail!(
+            "existing COW branch '{branch}' is missing its filesystem merge base at {}. Reset or delete/recreate it before reuse.",
+            file_base.display()
+        );
+    }
+    Ok(db)
+}
+
+fn cow_reset_pending_path(layout: &Layout, branch: &str) -> Result<PathBuf> {
+    validate_branch_name(branch)?;
+    Ok(layout
+        .cow_dir
+        .join("reset-pending")
+        .join(format!("{branch}.txt")))
+}
+
+fn write_cow_reset_pending(layout: &Layout, branch: &str, from: &str) -> Result<()> {
+    let path = cow_reset_pending_path(layout, branch)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(
+        &path,
+        format!(
+            "branch={branch}\nfrom={from}\ncreated_at_unix={}\n",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        ),
+    )
+    .with_context(|| {
+        format!(
+            "failed to record pending COW branch reset at {}",
+            path.display()
+        )
+    })
+}
+
+fn clear_cow_reset_pending(layout: &Layout, branch: &str) -> Result<()> {
+    let path = cow_reset_pending_path(layout, branch)?;
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| {
+            format!(
+                "failed to clear pending COW branch reset marker {}",
+                path.display()
+            )
+        }),
+    }
+}
+
+fn ensure_no_pending_cow_reset(layout: &Layout, branch: &str) -> Result<()> {
+    let path = cow_reset_pending_path(layout, branch)?;
+    if path.exists() {
+        bail!(
+            "COW branch '{branch}' has an unfinished reset recorded at {}. Rerun `forkpress branch reset {branch} --from <source>` or delete/recreate the branch before reuse or merge.",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn cow_storage_failpoint(name: &str) -> Result<()> {
+    let configured = match std::env::var("FORKPRESS_COW_STORAGE_TEST_FAILPOINT") {
+        Ok(value) if !value.is_empty() => value,
+        _ => return Ok(()),
+    };
+    if !configured
+        .split(',')
+        .map(str::trim)
+        .any(|candidate| candidate == name)
+    {
+        return Ok(());
+    }
+
+    match std::env::var("FORKPRESS_COW_STORAGE_TEST_FAILPOINT_ACTION")
+        .unwrap_or_else(|_| "throw".to_string())
+        .as_str()
+    {
+        "exit" => std::process::exit(86),
+        _ => bail!("forced COW storage failpoint: {name}"),
+    }
+}
+
+fn clear_cow_reset_pending_if_rollback_complete(
+    layout: &Layout,
+    branch: &str,
+    rollback_notes: &[&str],
+) {
+    if rollback_notes
+        .iter()
+        .all(|note| !note.contains("incomplete"))
+    {
+        let _ = clear_cow_reset_pending(layout, branch);
+    }
 }
 
 pub fn show_cow_branch(layout: &Layout, branch: &str) -> Result<()> {
@@ -573,6 +767,7 @@ pub fn reset_cow_branch(
     if !target.join("wp-load.php").is_file() {
         bail!("target branch does not exist: {branch}");
     }
+    ensure_no_pending_cow_reset(layout, from)?;
 
     let source_db = cow_sqlite_db_path(&source);
     if !source_db.is_file() {
@@ -613,6 +808,7 @@ pub fn reset_cow_branch(
         return Err(err).context("failed to stage COW branch reset");
     }
 
+    write_cow_reset_pending(layout, branch, from)?;
     let mut target_moved_to_backup = false;
     let mut staging_published = false;
     let publish = (|| -> Result<()> {
@@ -650,8 +846,66 @@ pub fn reset_cow_branch(
             target_moved_to_backup,
             staging_published,
         );
+        clear_cow_reset_pending_if_rollback_complete(layout, branch, &[&rollback]);
         return Err(err).context(format!("failed to reset COW branch; {rollback}"));
     }
+
+    cow_storage_failpoint("after-branch-reset-publish")?;
+    let metadata_backup = match snapshot_cow_reset_metadata(layout, runtime, shared, branch, parent)
+    {
+        Ok(backup) => backup,
+        Err(err) => {
+            let failed = unique_cow_operation_dir(parent, "reset-failed", branch);
+            let rollback = rollback_failed_reset_publish(
+                branch,
+                &target,
+                &backup,
+                &staging,
+                &failed,
+                target_moved_to_backup,
+                staging_published,
+            );
+            clear_cow_reset_pending_if_rollback_complete(layout, branch, &[&rollback]);
+            return Err(err).context(format!(
+                "failed to snapshot COW reset metadata before finalizing reset; {rollback}"
+            ));
+        }
+    };
+    let finalize = (|| -> Result<()> {
+        record_cow_merge_base_snapshot(layout, runtime, shared, branch, &source_db)?;
+        let target_db = cow_sqlite_db_path(&target);
+        if target_db.is_file() {
+            allocate_cow_autoincrement_bands(layout, runtime, shared, branch, &target_db)?;
+            capture_cow_row_identities(layout, runtime, shared, branch, &target_db, Some(from))?;
+        }
+        record_cow_file_merge_base_snapshot(layout, runtime, shared, branch, &target)?;
+        invalidate_cow_git_ref(layout, branch)?;
+        Ok(())
+    })();
+
+    if let Err(err) = finalize {
+        let metadata_rollback = metadata_backup.restore(layout);
+        let failed = unique_cow_operation_dir(parent, "reset-failed", branch);
+        let branch_rollback = rollback_failed_reset_publish(
+            branch,
+            &target,
+            &backup,
+            &staging,
+            &failed,
+            target_moved_to_backup,
+            staging_published,
+        );
+        clear_cow_reset_pending_if_rollback_complete(
+            layout,
+            branch,
+            &[&metadata_rollback, &branch_rollback],
+        );
+        return Err(err).context(format!(
+            "failed to finalize COW branch reset metadata; {metadata_rollback}; {branch_rollback}"
+        ));
+    }
+    clear_cow_reset_pending(layout, branch)?;
+    metadata_backup.cleanup();
 
     if let Err(err) = fs::remove_dir_all(&backup) {
         eprintln!(
@@ -659,14 +913,6 @@ pub fn reset_cow_branch(
             backup.display()
         );
     }
-    record_cow_merge_base_snapshot(layout, runtime, shared, branch, &source_db)?;
-    let target_db = cow_sqlite_db_path(&target);
-    if target_db.is_file() {
-        allocate_cow_autoincrement_bands(layout, runtime, shared, branch, &target_db)?;
-        capture_cow_row_identities(layout, runtime, shared, branch, &target_db, Some(from))?;
-    }
-    record_cow_file_merge_base_snapshot(layout, runtime, shared, branch, &target)?;
-    invalidate_cow_git_ref(layout, branch)?;
 
     println!("forkpress: reset COW branch '{branch}' from '{from}'");
     Ok(())
@@ -725,6 +971,34 @@ fn capture_cow_row_identities(
     )
 }
 
+fn cleanup_cow_branch_birth_metadata(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    branch: &str,
+) -> Result<()> {
+    let metadata_db = cow_merge_metadata_db_path(layout);
+    if !metadata_db.is_file() {
+        return Ok(());
+    }
+    let args: Vec<OsString> = vec![
+        "cleanup-branch-birth-metadata".into(),
+        "--metadata-db".into(),
+        metadata_db.as_os_str().to_os_string(),
+        "--branch".into(),
+        branch.into(),
+        "--quiet".into(),
+        "1".into(),
+    ];
+    run_php_script(
+        layout,
+        runtime,
+        shared,
+        "scripts/cow/merge.php",
+        args.iter().map(|arg| arg.as_os_str()),
+    )
+}
+
 fn allocate_cow_autoincrement_bands(
     layout: &Layout,
     runtime: &PortableRuntime,
@@ -735,6 +1009,34 @@ fn allocate_cow_autoincrement_bands(
     let metadata_db = cow_merge_metadata_db_path(layout);
     let args: Vec<OsString> = vec![
         "allocate-id-bands".into(),
+        "--db".into(),
+        db.as_os_str().to_os_string(),
+        "--metadata-db".into(),
+        metadata_db.as_os_str().to_os_string(),
+        "--branch".into(),
+        branch.into(),
+        "--quiet".into(),
+        "1".into(),
+    ];
+    run_php_script(
+        layout,
+        runtime,
+        shared,
+        "scripts/cow/merge.php",
+        args.iter().map(|arg| arg.as_os_str()),
+    )
+}
+
+fn validate_cow_branch_birth_metadata(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    branch: &str,
+    db: &Path,
+) -> Result<()> {
+    let metadata_db = cow_merge_metadata_db_path(layout);
+    let args: Vec<OsString> = vec![
+        "validate-branch-birth-metadata".into(),
         "--db".into(),
         db.as_os_str().to_os_string(),
         "--metadata-db".into(),
@@ -851,6 +1153,7 @@ pub fn merge_cow_branch(
     shared: &SharedPaths,
     source: &str,
     target: &str,
+    plugin_validator: Option<&Path>,
 ) -> Result<()> {
     validate_branch_name(source)?;
     validate_branch_name(target)?;
@@ -869,6 +1172,8 @@ pub fn merge_cow_branch(
     if !target_root.join("wp-load.php").is_file() {
         bail!("target branch does not exist: {target}");
     }
+    ensure_no_pending_cow_reset(layout, source)?;
+    ensure_no_pending_cow_reset(layout, target)?;
 
     let source_db = cow_sqlite_db_path(&source_root);
     let target_db = cow_sqlite_db_path(&target_root);
@@ -898,9 +1203,11 @@ pub fn merge_cow_branch(
             base_files.display()
         );
     }
+    validate_cow_branch_birth_metadata(layout, runtime, shared, source, &source_db)
+        .with_context(|| format!("branch '{source}' is missing required merge metadata"))?;
 
     let metadata_db = cow_merge_metadata_db_path(layout);
-    let args: Vec<OsString> = vec![
+    let mut args: Vec<OsString> = vec![
         "--base-db".into(),
         base_db.as_os_str().to_os_string(),
         "--source-db".into(),
@@ -920,6 +1227,10 @@ pub fn merge_cow_branch(
         "--target-root".into(),
         target_root.as_os_str().to_os_string(),
     ];
+    if let Some(plugin_validator) = plugin_validator {
+        args.push("--plugin-validator".into());
+        args.push(plugin_validator.as_os_str().to_os_string());
+    }
     run_php_script(
         layout,
         runtime,
@@ -1025,6 +1336,140 @@ pub fn inspect_cow_merge_audit(
     )
 }
 
+pub fn recover_cow_merge_crash(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    run_id: Option<&str>,
+    restore_target_db: bool,
+    restore_files: bool,
+    format: &str,
+) -> Result<()> {
+    let metadata_db = cow_merge_metadata_db_path(layout);
+    let mut args: Vec<OsString> = vec![
+        "recover-crash".into(),
+        "--metadata-db".into(),
+        metadata_db.as_os_str().to_os_string(),
+        "--format".into(),
+        format.into(),
+    ];
+    if let Some(run_id) = run_id {
+        args.push("--run".into());
+        args.push(run_id.into());
+    }
+    if restore_target_db {
+        args.push("--restore-target-db".into());
+    }
+    if restore_files {
+        args.push("--restore-files".into());
+    }
+    run_php_script(
+        layout,
+        runtime,
+        shared,
+        "scripts/cow/merge.php",
+        args.iter().map(|arg| arg.as_os_str()),
+    )
+}
+
+pub fn revalidate_cow_merge_reviews(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    run_id: Option<&str>,
+    reviewer: Option<&str>,
+    format: &str,
+) -> Result<()> {
+    let metadata_db = cow_merge_metadata_db_path(layout);
+    let mut args: Vec<OsString> = vec![
+        "revalidate-reviews".into(),
+        "--metadata-db".into(),
+        metadata_db.as_os_str().to_os_string(),
+        "--format".into(),
+        format.into(),
+    ];
+    if let Some(run_id) = run_id {
+        args.push("--run".into());
+        args.push(run_id.into());
+    }
+    if let Some(reviewer) = reviewer {
+        args.push("--reviewer".into());
+        args.push(reviewer.into());
+    }
+    run_php_script(
+        layout,
+        runtime,
+        shared,
+        "scripts/cow/merge.php",
+        args.iter().map(|arg| arg.as_os_str()),
+    )
+}
+
+pub fn record_cow_plugin_validator_conflicts(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    run_id: &str,
+    findings_json: Option<&str>,
+    findings_file: Option<&Path>,
+    format: &str,
+) -> Result<()> {
+    let metadata_db = cow_merge_metadata_db_path(layout);
+    let mut args: Vec<OsString> = vec![
+        "record-plugin-validator-conflicts".into(),
+        "--metadata-db".into(),
+        metadata_db.as_os_str().to_os_string(),
+        "--run".into(),
+        run_id.into(),
+        "--format".into(),
+        format.into(),
+    ];
+    if let Some(findings_json) = findings_json {
+        args.push("--findings-json".into());
+        args.push(findings_json.into());
+    }
+    if let Some(findings_file) = findings_file {
+        args.push("--findings-file".into());
+        args.push(findings_file.as_os_str().to_os_string());
+    }
+    run_php_script(
+        layout,
+        runtime,
+        shared,
+        "scripts/cow/merge.php",
+        args.iter().map(|arg| arg.as_os_str()),
+    )
+}
+
+pub fn run_cow_plugin_validator(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    run_id: &str,
+    validator: &Path,
+    format: &str,
+) -> Result<()> {
+    let metadata_db = cow_merge_metadata_db_path(layout);
+    let args: Vec<OsString> = vec![
+        "run-plugin-validator".into(),
+        "--metadata-db".into(),
+        metadata_db.as_os_str().to_os_string(),
+        "--run".into(),
+        run_id.into(),
+        "--validator".into(),
+        validator.as_os_str().to_os_string(),
+        "--format".into(),
+        format.into(),
+    ];
+    run_php_script(
+        layout,
+        runtime,
+        shared,
+        "scripts/cow/merge.php",
+        args.iter().map(|arg| arg.as_os_str()),
+    )
+}
+
 pub fn review_cow_merge_audit_record(
     layout: &Layout,
     runtime: &PortableRuntime,
@@ -1069,6 +1514,7 @@ pub fn resolve_cow_merge_conflict(
     conflict_id: &str,
     choice: &str,
     apply: bool,
+    after_revalidate: bool,
     note: Option<&str>,
     reviewer: Option<&str>,
 ) -> Result<()> {
@@ -1084,6 +1530,9 @@ pub fn resolve_cow_merge_conflict(
     ];
     if apply {
         args.push("--apply".into());
+    }
+    if after_revalidate {
+        args.push("--after-revalidate".into());
     }
     if let Some(note) = note {
         args.push("--note".into());
@@ -2246,13 +2695,24 @@ fn compact_macos_apfs_sparsebundle_file_view_impl(layout: &Layout) -> Result<()>
         );
     }
 
-    let output = hdiutil_output([
-        OsString::from("compact"),
-        layout.macos_cow_image.as_os_str().to_owned(),
-    ])?;
-    if !output.status.success() {
-        bail!("{}", hdiutil_failure_message(&output));
+    let mut output = None;
+    for attempt in 0..5 {
+        let attempt_output = hdiutil_output([
+            OsString::from("compact"),
+            layout.macos_cow_image.as_os_str().to_owned(),
+        ])?;
+        if attempt_output.status.success() {
+            output = Some(attempt_output);
+            break;
+        }
+
+        let message = hdiutil_failure_message(&attempt_output);
+        if !macos_hdiutil_compact_retryable_message(&message) || attempt == 4 {
+            bail!("{message}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250 * (attempt + 1) as u64));
     }
+    let output = output.expect("compact retry loop must return output or fail");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2270,6 +2730,12 @@ fn compact_macos_apfs_sparsebundle_file_view_impl(layout: &Layout) -> Result<()>
         shell_quote_path(&layout.work_dir)
     );
     Ok(())
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn macos_hdiutil_compact_retryable_message(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("resource temporarily unavailable") || message.contains("resource busy")
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -2600,6 +3066,319 @@ fn remove_sqlite_file_and_sidecars(db: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn remove_branch_path_if_ours(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() || meta.is_file() => {
+            fs::remove_file(path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+            Ok(true)
+        }
+        Ok(meta) if meta.is_dir() => {
+            fs::remove_dir_all(path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+            Ok(true)
+        }
+        Ok(_) => bail!("{} is not a removable branch path", path.display()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err).with_context(|| format!("failed to inspect {}", path.display())),
+    }
+}
+
+fn cleanup_cow_branch_birth_files(
+    layout: &Layout,
+    branch: &str,
+    staging: &Path,
+    dest: &Path,
+    file_view: FileViewStrategy,
+    staging_published: bool,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    if let Err(err) = remove_branch_path_if_ours(staging) {
+        errors.push(err.to_string());
+    }
+    if staging_published {
+        let public_root = cow_branch_root(layout, branch);
+        if public_root != dest {
+            match fs::symlink_metadata(&public_root) {
+                Ok(meta) if meta.file_type().is_symlink() => match fs::read_link(&public_root) {
+                    Ok(target) if target == dest => {
+                        if let Err(err) = fs::remove_file(&public_root) {
+                            errors
+                                .push(format!("failed to remove {}: {err}", public_root.display()));
+                        }
+                    }
+                    Ok(target) => errors.push(format!(
+                        "{} points to {}; expected {}",
+                        public_root.display(),
+                        target.display(),
+                        dest.display()
+                    )),
+                    Err(err) => {
+                        errors.push(format!("failed to read {}: {err}", public_root.display()))
+                    }
+                },
+                Ok(_) if file_view == FileViewStrategy::MacosApfsSparsebundle => {
+                    errors.push(format!(
+                        "{} is not the expected branch symlink",
+                        public_root.display()
+                    ));
+                }
+                Ok(_) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => errors.push(format!(
+                    "failed to inspect {}: {err}",
+                    public_root.display()
+                )),
+            }
+        }
+        if let Err(err) = remove_branch_path_if_ours(dest) {
+            errors.push(err.to_string());
+        }
+    }
+    match cow_merge_base_db_path(layout, branch) {
+        Ok(base_db) => {
+            if let Err(err) = remove_sqlite_file_and_sidecars(&base_db) {
+                errors.push(err.to_string());
+            }
+        }
+        Err(err) => errors.push(err.to_string()),
+    }
+    match cow_merge_file_base_path(layout, branch) {
+        Ok(file_base) => match fs::remove_file(&file_base) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => errors.push(format!("failed to remove {}: {err}", file_base.display())),
+        },
+        Err(err) => errors.push(err.to_string()),
+    }
+    errors
+}
+
+fn cleanup_failed_cow_branch_create(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    branch: &str,
+    staging: &Path,
+    dest: &Path,
+    file_view: FileViewStrategy,
+    staging_published: bool,
+) -> String {
+    let mut errors =
+        cleanup_cow_branch_birth_files(layout, branch, staging, dest, file_view, staging_published);
+    if let Err(err) = cleanup_cow_branch_birth_metadata(layout, runtime, shared, branch) {
+        errors.push(err.to_string());
+    }
+    if errors.is_empty() {
+        "rolled back branch creation artifacts".to_string()
+    } else {
+        format!("rollback incomplete: {}", errors.join("; "))
+    }
+}
+
+fn cleanup_unpublished_cow_branch_birth_artifacts(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    branch: &str,
+    staging: &Path,
+    dest: &Path,
+    file_view: FileViewStrategy,
+) -> Result<()> {
+    let mut errors =
+        cleanup_cow_branch_birth_files(layout, branch, staging, dest, file_view, false);
+    if let Err(err) = cleanup_cow_branch_birth_metadata(layout, runtime, shared, branch) {
+        errors.push(err.to_string());
+    }
+    if let Err(err) = clear_cow_reset_pending(layout, branch) {
+        errors.push(err.to_string());
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        bail!("{}", errors.join("; "))
+    }
+}
+
+struct CowResetMetadataBackup {
+    branch: String,
+    root: PathBuf,
+    metadata_db: Option<PathBuf>,
+    merge_base_db: Option<PathBuf>,
+    file_base: Option<PathBuf>,
+}
+
+impl CowResetMetadataBackup {
+    fn restore_sqlite(backup: &Option<PathBuf>, dest: &Path, label: &str) -> Result<()> {
+        remove_sqlite_file_and_sidecars(dest)?;
+        if let Some(backup) = backup {
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            fs::copy(backup, dest).with_context(|| {
+                format!(
+                    "failed to restore {label} {} from {}",
+                    dest.display(),
+                    backup.display()
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    fn restore_file(backup: &Option<PathBuf>, dest: &Path, label: &str) -> Result<()> {
+        match fs::remove_file(dest) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err).with_context(|| format!("failed to remove {}", dest.display()));
+            }
+        }
+        if let Some(backup) = backup {
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            fs::copy(backup, dest).with_context(|| {
+                format!(
+                    "failed to restore {label} {} from {}",
+                    dest.display(),
+                    backup.display()
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    fn restore(&self, layout: &Layout) -> String {
+        let mut errors = Vec::new();
+        if let Err(err) = Self::restore_sqlite(
+            &self.metadata_db,
+            &cow_merge_metadata_db_path(layout),
+            "metadata database",
+        ) {
+            errors.push(err.to_string());
+        }
+        match cow_merge_base_db_path(layout, &self.branch) {
+            Ok(dest) => {
+                if let Err(err) = Self::restore_sqlite(&self.merge_base_db, &dest, "DB merge base")
+                {
+                    errors.push(err.to_string());
+                }
+            }
+            Err(err) => errors.push(err.to_string()),
+        }
+        match cow_merge_file_base_path(layout, &self.branch) {
+            Ok(dest) => {
+                if let Err(err) =
+                    Self::restore_file(&self.file_base, &dest, "filesystem merge base")
+                {
+                    errors.push(err.to_string());
+                }
+            }
+            Err(err) => errors.push(err.to_string()),
+        };
+        self.cleanup();
+        if errors.is_empty() {
+            "restored previous reset metadata".to_string()
+        } else {
+            format!("metadata rollback incomplete: {}", errors.join("; "))
+        }
+    }
+
+    fn cleanup(&self) {
+        if let Err(err) = fs::remove_dir_all(&self.root)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!(
+                "forkpress: warning: failed to remove reset metadata backup {}: {err}",
+                self.root.display()
+            );
+        }
+    }
+}
+
+fn snapshot_optional_sqlite(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    source: &Path,
+    dest: &Path,
+    label: &str,
+) -> Result<Option<PathBuf>> {
+    if !source.is_file() {
+        return Ok(None);
+    }
+    hot_copy_sqlite_database(layout, runtime, shared, source, dest)
+        .with_context(|| format!("failed to snapshot {label} {}", source.display()))?;
+    Ok(Some(dest.to_path_buf()))
+}
+
+fn snapshot_optional_file(source: &Path, dest: &Path, label: &str) -> Result<Option<PathBuf>> {
+    if !source.is_file() {
+        return Ok(None);
+    }
+    fs::copy(source, dest)
+        .with_context(|| format!("failed to snapshot {label} {}", source.display()))?;
+    Ok(Some(dest.to_path_buf()))
+}
+
+fn snapshot_cow_reset_metadata(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    branch: &str,
+    parent: &Path,
+) -> Result<CowResetMetadataBackup> {
+    let root = unique_cow_operation_dir(parent, "reset-metadata-backup", branch);
+    if path_exists_no_follow(&root) {
+        bail!("temporary reset metadata backup path already exists");
+    }
+    fs::create_dir_all(&root).with_context(|| format!("failed to create {}", root.display()))?;
+
+    let result = (|| -> Result<CowResetMetadataBackup> {
+        let metadata_db = snapshot_optional_sqlite(
+            layout,
+            runtime,
+            shared,
+            &cow_merge_metadata_db_path(layout),
+            &root.join("metadata.sqlite"),
+            "merge metadata database",
+        )?;
+        let merge_base_db = snapshot_optional_sqlite(
+            layout,
+            runtime,
+            shared,
+            &cow_merge_base_db_path(layout, branch)?,
+            &root.join("merge-base.sqlite"),
+            "DB merge base",
+        )?;
+        let file_base = snapshot_optional_file(
+            &cow_merge_file_base_path(layout, branch)?,
+            &root.join("file-base.json"),
+            "filesystem merge base",
+        )?;
+
+        Ok(CowResetMetadataBackup {
+            branch: branch.to_string(),
+            root: root.clone(),
+            metadata_db,
+            merge_base_db,
+            file_base,
+        })
+    })();
+    if result.is_err()
+        && let Err(err) = fs::remove_dir_all(&root)
+    {
+        eprintln!(
+            "forkpress: warning: failed to remove incomplete reset metadata backup {}: {err}",
+            root.display()
+        );
+    }
+    result
 }
 
 fn hot_copy_sqlite_database(
@@ -2945,6 +3724,273 @@ mod tests {
     }
 
     #[test]
+    fn branch_birth_cleanup_removes_staged_branch_and_merge_bases() {
+        let root = std::env::temp_dir().join(format!(
+            "forkpress-branch-birth-cleanup-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let layout = Layout::new(root.join(".forkpress")).unwrap();
+        let staging = root.join(".forkpress-branch-create-stage-feature");
+        let dest = root.join("feature");
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(staging.join("wp-load.php"), b"<?php\n").unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(dest.join("wp-load.php"), b"<?php\n").unwrap();
+        let base_db = cow_merge_base_db_path(&layout, "feature").unwrap();
+        fs::create_dir_all(base_db.parent().unwrap()).unwrap();
+        fs::write(&base_db, b"base").unwrap();
+        fs::write(sqlite_sidecar_path(&base_db, "-wal"), b"wal").unwrap();
+        fs::write(sqlite_sidecar_path(&base_db, "-shm"), b"shm").unwrap();
+        let file_base = cow_merge_file_base_path(&layout, "feature").unwrap();
+        fs::create_dir_all(file_base.parent().unwrap()).unwrap();
+        fs::write(&file_base, b"{}").unwrap();
+
+        let errors = cleanup_cow_branch_birth_files(
+            &layout,
+            "feature",
+            &staging,
+            &dest,
+            FileViewStrategy::Copy,
+            true,
+        );
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(!path_exists_no_follow(&staging));
+        assert!(!path_exists_no_follow(&dest));
+        assert!(!path_exists_no_follow(&base_db));
+        assert!(!path_exists_no_follow(&sqlite_sidecar_path(
+            &base_db, "-wal"
+        )));
+        assert!(!path_exists_no_follow(&sqlite_sidecar_path(
+            &base_db, "-shm"
+        )));
+        assert!(!path_exists_no_follow(&file_base));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unpublished_branch_birth_cleanup_keeps_branch_tree_but_removes_merge_bases() {
+        let root = std::env::temp_dir().join(format!(
+            "forkpress-unpublished-branch-birth-cleanup-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let layout = Layout::new(root.join(".forkpress")).unwrap();
+        let staging = root.join(".forkpress-branch-create-stage-feature");
+        let dest = root.join("feature");
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(dest.join("wp-load.php"), b"<?php\n").unwrap();
+        let base_db = cow_merge_base_db_path(&layout, "feature").unwrap();
+        fs::create_dir_all(base_db.parent().unwrap()).unwrap();
+        fs::write(&base_db, b"base").unwrap();
+        fs::write(sqlite_sidecar_path(&base_db, "-wal"), b"wal").unwrap();
+        fs::write(sqlite_sidecar_path(&base_db, "-shm"), b"shm").unwrap();
+        let file_base = cow_merge_file_base_path(&layout, "feature").unwrap();
+        fs::create_dir_all(file_base.parent().unwrap()).unwrap();
+        fs::write(&file_base, b"{}").unwrap();
+
+        let errors = cleanup_cow_branch_birth_files(
+            &layout,
+            "feature",
+            &staging,
+            &dest,
+            FileViewStrategy::Copy,
+            false,
+        );
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(path_exists_no_follow(&dest));
+        assert!(dest.join("wp-load.php").is_file());
+        assert!(!path_exists_no_follow(&base_db));
+        assert!(!path_exists_no_follow(&sqlite_sidecar_path(
+            &base_db, "-wal"
+        )));
+        assert!(!path_exists_no_follow(&sqlite_sidecar_path(
+            &base_db, "-shm"
+        )));
+        assert!(!path_exists_no_follow(&file_base));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn existing_branch_reuse_requires_merge_bases() {
+        let root = std::env::temp_dir().join(format!(
+            "forkpress-branch-reuse-metadata-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let layout = Layout::new(root.join(".forkpress")).unwrap();
+        let branch_root = cow_branch_root(&layout, "feature");
+        fs::create_dir_all(branch_root.join("wp-content/database")).unwrap();
+        fs::write(branch_root.join("wp-load.php"), b"<?php\n").unwrap();
+        fs::write(
+            branch_root.join("wp-content/database/.ht.sqlite"),
+            b"sqlite placeholder",
+        )
+        .unwrap();
+
+        let missing_base =
+            validate_existing_cow_branch_birth_files(&layout, "feature", &branch_root)
+                .unwrap_err()
+                .to_string();
+        assert!(missing_base.contains("missing its DB merge base"));
+
+        let base_db = cow_merge_base_db_path(&layout, "feature").unwrap();
+        fs::create_dir_all(base_db.parent().unwrap()).unwrap();
+        fs::write(&base_db, b"base").unwrap();
+        let missing_file_base =
+            validate_existing_cow_branch_birth_files(&layout, "feature", &branch_root)
+                .unwrap_err()
+                .to_string();
+        assert!(missing_file_base.contains("missing its filesystem merge base"));
+
+        let file_base = cow_merge_file_base_path(&layout, "feature").unwrap();
+        fs::create_dir_all(file_base.parent().unwrap()).unwrap();
+        fs::write(&file_base, b"{}").unwrap();
+        let db = validate_existing_cow_branch_birth_files(&layout, "feature", &branch_root)
+            .expect("existing branch has the required birth files");
+        assert_eq!(db, branch_root.join("wp-content/database/.ht.sqlite"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pending_reset_marker_blocks_branch_reuse_and_merge_guards() {
+        let root = std::env::temp_dir().join(format!(
+            "forkpress-pending-reset-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let layout = Layout::new(root.join(".forkpress")).unwrap();
+
+        ensure_no_pending_cow_reset(&layout, "feature").unwrap();
+        write_cow_reset_pending(&layout, "feature", "main").unwrap();
+
+        let err = ensure_no_pending_cow_reset(&layout, "feature")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unfinished reset"));
+        assert!(err.contains("forkpress branch reset feature --from <source>"));
+
+        clear_cow_reset_pending(&layout, "feature").unwrap();
+        write_cow_reset_pending(&layout, "feature", "main").unwrap();
+        let staging = root.join(".forkpress-branch-create-stage-feature");
+        let dest = root.join("feature");
+        cleanup_unpublished_cow_branch_birth_artifacts(
+            &layout,
+            &PortableRuntime::from_layout(&layout),
+            &SharedPaths {
+                work_dir: layout.work_dir.clone(),
+                php_bin: None,
+            },
+            "feature",
+            &staging,
+            &dest,
+            FileViewStrategy::Copy,
+        )
+        .unwrap();
+        ensure_no_pending_cow_reset(&layout, "feature").unwrap();
+
+        write_cow_reset_pending(&layout, "feature", "main").unwrap();
+        clear_cow_reset_pending_if_rollback_complete(
+            &layout,
+            "feature",
+            &["restored previous branch contents"],
+        );
+        ensure_no_pending_cow_reset(&layout, "feature").unwrap();
+
+        write_cow_reset_pending(&layout, "feature", "main").unwrap();
+        clear_cow_reset_pending_if_rollback_complete(
+            &layout,
+            "feature",
+            &["rollback incomplete: previous branch backup is missing"],
+        );
+        assert!(cow_reset_pending_path(&layout, "feature").unwrap().exists());
+        clear_cow_reset_pending(&layout, "feature").unwrap();
+        ensure_no_pending_cow_reset(&layout, "feature").unwrap();
+        assert!(!cow_reset_pending_path(&layout, "feature").unwrap().exists());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reset_metadata_backup_restores_previous_artifacts() {
+        let root = std::env::temp_dir().join(format!(
+            "forkpress-reset-metadata-backup-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let layout = Layout::new(root.join(".forkpress")).unwrap();
+        let branch = "feature";
+        let backup_root = root.join(".forkpress-reset-metadata-backup-feature-test");
+        fs::create_dir_all(&backup_root).unwrap();
+
+        let metadata_db = cow_merge_metadata_db_path(&layout);
+        fs::create_dir_all(metadata_db.parent().unwrap()).unwrap();
+        fs::write(&metadata_db, b"new metadata").unwrap();
+        fs::write(
+            sqlite_sidecar_path(&metadata_db, "-wal"),
+            b"new metadata wal",
+        )
+        .unwrap();
+        fs::write(backup_root.join("metadata.sqlite"), b"old metadata").unwrap();
+
+        let merge_base = cow_merge_base_db_path(&layout, branch).unwrap();
+        fs::create_dir_all(merge_base.parent().unwrap()).unwrap();
+        fs::write(&merge_base, b"new base").unwrap();
+        fs::write(sqlite_sidecar_path(&merge_base, "-wal"), b"new base wal").unwrap();
+        fs::write(backup_root.join("merge-base.sqlite"), b"old base").unwrap();
+
+        let file_base = cow_merge_file_base_path(&layout, branch).unwrap();
+        fs::create_dir_all(file_base.parent().unwrap()).unwrap();
+        fs::write(&file_base, b"{\"new\":true}").unwrap();
+        fs::write(backup_root.join("file-base.json"), b"{\"old\":true}").unwrap();
+
+        let backup = CowResetMetadataBackup {
+            branch: branch.to_string(),
+            root: backup_root.clone(),
+            metadata_db: Some(backup_root.join("metadata.sqlite")),
+            merge_base_db: Some(backup_root.join("merge-base.sqlite")),
+            file_base: Some(backup_root.join("file-base.json")),
+        };
+
+        let message = backup.restore(&layout);
+        assert!(message.contains("restored previous reset metadata"));
+        assert_eq!(fs::read(&metadata_db).unwrap(), b"old metadata");
+        assert_eq!(fs::read(&merge_base).unwrap(), b"old base");
+        assert_eq!(fs::read(&file_base).unwrap(), b"{\"old\":true}");
+        assert!(!path_exists_no_follow(&sqlite_sidecar_path(
+            &metadata_db,
+            "-wal"
+        )));
+        assert!(!path_exists_no_follow(&sqlite_sidecar_path(
+            &merge_base,
+            "-wal"
+        )));
+        assert!(!path_exists_no_follow(&backup_root));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn windows_refs_clone_plan_keeps_unaligned_tail_out_of_ioctl() {
         assert_eq!(windows_refs_clone_plan(0), (0, 0));
         assert_eq!(windows_refs_clone_plan(1), (0, 1));
@@ -3062,5 +4108,18 @@ mod tests {
         copy_loop_file_name(&long_path, &mut out);
         assert_eq!(out[63], 0);
         assert_eq!(out[62], b'a');
+    }
+
+    #[test]
+    fn macos_sparsebundle_compact_retries_transient_hdiutil_busy_errors() {
+        assert!(macos_hdiutil_compact_retryable_message(
+            "hdiutil exited with status exit status: 1\nstderr:\nhdiutil: compact failed - Resource temporarily unavailable"
+        ));
+        assert!(macos_hdiutil_compact_retryable_message(
+            "hdiutil exited with status exit status: 1\nstderr:\nhdiutil: compact failed - resource busy"
+        ));
+        assert!(!macos_hdiutil_compact_retryable_message(
+            "hdiutil exited with status exit status: 1\nstderr:\nhdiutil: compact failed - image not recognized"
+        ));
     }
 }

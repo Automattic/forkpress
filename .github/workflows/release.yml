@@ -14,6 +14,7 @@ on:
       - "scripts/cow/**"
       - "scripts/git/**"
       - "scripts/shared/**"
+      - "tests/release/**"
       - "installer/windows/**"
       - "wp-plugin/**"
       - "vendor/**"
@@ -50,10 +51,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Release preflight checks
+        if: matrix.os != 'windows'
+        run: make test-release
+
       - name: Install toolchain (mac)
         if: matrix.os == 'darwin'
         run: |
-          brew install composer gpatch
+          brew update
+          brew install composer gpatch automake re2c bison pkg-config
           # php-cli from brew drives static-php-cli
           brew install php || true
 
@@ -62,7 +68,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential clang curl git pkg-config unzip \
+            automake build-essential clang curl git pkg-config unzip \
             musl-tools php-cli composer re2c bison
 
       - name: Install toolchain (windows)

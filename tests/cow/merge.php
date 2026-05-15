@@ -40,6 +40,36 @@ function run_merge_cli(array $args): array {
     ];
 }
 
+function run_merge_cli_env(array $args, array $env): array {
+    $script = dirname(__DIR__, 2) . '/scripts/cow/merge.php';
+    $base_env = getenv();
+    if (!is_array($base_env)) {
+        $base_env = [];
+    }
+    $pipes = [];
+    $process = proc_open(
+        array_merge([PHP_BINARY, $script], $args),
+        [
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w'],
+        ],
+        $pipes,
+        null,
+        array_merge($base_env, $env)
+    );
+    if (!is_resource($process)) {
+        throw new RuntimeException('failed to start merge CLI subprocess');
+    }
+    $stdout = stream_get_contents($pipes[1]);
+    $stderr = stream_get_contents($pipes[2]);
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+    return [
+        'status' => proc_close($process),
+        'output' => (is_string($stdout) ? $stdout : '') . (is_string($stderr) ? $stderr : ''),
+    ];
+}
+
 function remove_tree(string $path): void {
     if (!file_exists($path) && !is_link($path)) {
         return;
@@ -1298,6 +1328,481 @@ try {
     $merge_restore_failure_artifact = file_get_contents($merge_restore_failure_artifact_path);
     assert_true(is_string($merge_restore_failure_artifact) && str_contains($merge_restore_failure_artifact, '"target_db_snapshot"'), 'rollback-failure artifact records target DB snapshot details');
     assert_true(str_contains((string)$merge_restore_failure_artifact, '"backup_exists":true'), 'rollback-failure artifact keeps the target DB snapshot backup for recovery');
+
+    if (function_exists('posix_kill') && defined('SIGKILL')) {
+        $crash_before_commit_base = $tmp . '/crash-before-commit-base.sqlite';
+        $crash_before_commit_source = $tmp . '/crash-before-commit-source.sqlite';
+        $crash_before_commit_target = $tmp . '/crash-before-commit-target.sqlite';
+        $crash_before_commit_metadata = $tmp . '/.forkpress/cow/merge/crash-before-commit/metadata.sqlite';
+        create_base_db($crash_before_commit_base);
+        copy($crash_before_commit_base, $crash_before_commit_source);
+        copy($crash_before_commit_base, $crash_before_commit_target);
+        $db = open_db($crash_before_commit_source);
+        $db->exec("UPDATE wp_posts SET post_content = 'Source crash before commit content' WHERE ID = 1");
+        $db->close();
+        $crash_before_commit_result = run_merge_cli_env(
+            [
+                'merge',
+                '--base-db', $crash_before_commit_base,
+                '--source-db', $crash_before_commit_source,
+                '--target-db', $crash_before_commit_target,
+                '--metadata-db', $crash_before_commit_metadata,
+                '--source', 'feature-crash-before-commit',
+                '--target', 'main',
+            ],
+            [
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT' => 'before-target-db-commit',
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION' => 'kill',
+            ]
+        );
+        assert_true($crash_before_commit_result['status'] !== 0, 'crash failpoint terminates the merge subprocess before target DB commit');
+        assert_same(
+            scalar($crash_before_commit_target, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Base content',
+            'process death before target DB commit leaves the target DB transaction rolled back'
+        );
+        $crash_before_commit_files = glob(dirname($crash_before_commit_metadata) . '/crash-recovery/*.json');
+        assert_true(is_array($crash_before_commit_files) && count($crash_before_commit_files) === 1, 'process death before target DB commit leaves one crash recovery artifact');
+        $crash_before_commit_recovery = json_decode(file_get_contents($crash_before_commit_files[0]), true);
+        assert_same($crash_before_commit_recovery['checkpoint'] ?? null, 'target-db-commit', 'pre-target-commit crash recovery artifact uses the target DB commit checkpoint');
+        assert_same($crash_before_commit_recovery['source_branch'] ?? null, 'feature-crash-before-commit', 'pre-target-commit crash recovery artifact preserves source branch context');
+        $crash_before_commit_backup = $crash_before_commit_recovery['artifacts']['target_db_snapshot']['backup'] ?? null;
+        assert_true(is_string($crash_before_commit_backup) && is_file($crash_before_commit_backup), 'pre-target-commit crash recovery artifact preserves the target DB snapshot');
+        $blocked_crash_before_commit_rematch = run_merge_cli([
+            'merge',
+            '--base-db', $crash_before_commit_base,
+            '--source-db', $crash_before_commit_source,
+            '--target-db', $crash_before_commit_target,
+            '--metadata-db', $crash_before_commit_metadata,
+            '--source', 'feature-crash-before-commit',
+            '--target', 'main',
+        ]);
+        assert_true($blocked_crash_before_commit_rematch['status'] !== 0, 'pending pre-target-commit crash recovery blocks a subsequent merge');
+        assert_true(str_contains($blocked_crash_before_commit_rematch['output'], 'pending COW merge crash recovery artifact'), 'pending pre-target-commit crash recovery error explains the recovery queue');
+        $crash_before_commit_restore = run_merge_cli([
+            'recover-crash',
+            '--metadata-db', $crash_before_commit_metadata,
+            '--restore-target-db',
+            '--format', 'json',
+        ]);
+        assert_same($crash_before_commit_restore['status'], 0, 'crash recovery CLI restores pre-target-commit target DB snapshots');
+        $crash_before_commit_restore_json = json_decode($crash_before_commit_restore['output'], true);
+        assert_same($crash_before_commit_restore_json['restored'] ?? null, 1, 'crash recovery CLI reports one restored pre-target-commit artifact');
+        assert_same(
+            scalar($crash_before_commit_target, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Base content',
+            'crash recovery CLI leaves the pre-target-commit target DB at base content'
+        );
+
+        $crash_commit_base = $tmp . '/crash-commit-base.sqlite';
+        $crash_commit_source = $tmp . '/crash-commit-source.sqlite';
+        $crash_commit_target = $tmp . '/crash-commit-target.sqlite';
+        $crash_commit_metadata = $tmp . '/.forkpress/cow/merge/crash-commit/metadata.sqlite';
+        create_base_db($crash_commit_base);
+        copy($crash_commit_base, $crash_commit_source);
+        copy($crash_commit_base, $crash_commit_target);
+        $db = open_db($crash_commit_source);
+        $db->exec("UPDATE wp_posts SET post_content = 'Source crash commit content' WHERE ID = 1");
+        $db->close();
+        $crash_commit_result = run_merge_cli_env(
+            [
+                'merge',
+                '--base-db', $crash_commit_base,
+                '--source-db', $crash_commit_source,
+                '--target-db', $crash_commit_target,
+                '--metadata-db', $crash_commit_metadata,
+                '--source', 'feature-crash-commit',
+                '--target', 'main',
+            ],
+            [
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT' => 'after-target-db-commit',
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION' => 'kill',
+            ]
+        );
+        assert_true($crash_commit_result['status'] !== 0, 'crash failpoint terminates the merge subprocess after target DB commit');
+        assert_same(
+            scalar($crash_commit_target, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Source crash commit content',
+            'process death after target DB commit leaves the durable target change visible'
+        );
+        $crash_recovery_files = glob(dirname($crash_commit_metadata) . '/crash-recovery/*.json');
+        assert_true(is_array($crash_recovery_files) && count($crash_recovery_files) === 1, 'process death after target DB commit leaves one crash recovery artifact');
+        $crash_recovery = json_decode(file_get_contents($crash_recovery_files[0]), true);
+        assert_same($crash_recovery['checkpoint'] ?? null, 'target-db-commit', 'crash recovery artifact identifies the target DB commit checkpoint');
+        assert_same($crash_recovery['source_branch'] ?? null, 'feature-crash-commit', 'crash recovery artifact preserves source branch context');
+        $crash_backup = $crash_recovery['artifacts']['target_db_snapshot']['backup'] ?? null;
+        assert_true(is_string($crash_backup) && is_file($crash_backup), 'crash recovery artifact preserves the pre-commit target DB snapshot');
+        $crash_backup_check = $tmp . '/crash-commit-backup-check.sqlite';
+        copy($crash_backup, $crash_backup_check);
+        assert_same(
+            scalar($crash_backup_check, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Base content',
+            'crash recovery target snapshot can restore the pre-merge target content'
+        );
+        $crash_commit_runs = is_file($crash_commit_metadata)
+            ? (int)scalar($crash_commit_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-crash-commit' AND status = 'completed'")
+            : 0;
+        assert_same($crash_commit_runs, 0, 'process death before metadata commit does not falsely record a completed run');
+        $crash_recovery_report = run_merge_cli([
+            'recover-crash',
+            '--metadata-db', $crash_commit_metadata,
+            '--format', 'json',
+        ]);
+        assert_same($crash_recovery_report['status'], 0, 'crash recovery CLI lists pending artifacts');
+        $crash_recovery_report_json = json_decode($crash_recovery_report['output'], true);
+        assert_same($crash_recovery_report_json['pending'] ?? null, 1, 'crash recovery CLI reports one pending artifact');
+        assert_same($crash_recovery_report_json['artifacts'][0]['checkpoint'] ?? null, 'target-db-commit', 'crash recovery CLI reports the commit checkpoint');
+        $blocked_crash_rematch = run_merge_cli([
+            'merge',
+            '--base-db', $crash_commit_base,
+            '--source-db', $crash_commit_source,
+            '--target-db', $crash_commit_target,
+            '--metadata-db', $crash_commit_metadata,
+            '--source', 'feature-crash-commit',
+            '--target', 'main',
+        ]);
+        assert_true($blocked_crash_rematch['status'] !== 0, 'pending DB crash recovery blocks a subsequent merge');
+        assert_true(str_contains($blocked_crash_rematch['output'], 'pending COW merge crash recovery artifact'), 'pending DB crash recovery error explains the recovery queue');
+        assert_same(
+            scalar($crash_commit_target, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Source crash commit content',
+            'blocked merge leaves the pending DB crash state untouched'
+        );
+        $crash_restore_interrupted = run_merge_cli_env(
+            [
+                'recover-crash',
+                '--metadata-db', $crash_commit_metadata,
+                '--restore-target-db',
+                '--format', 'json',
+            ],
+            [
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT' => 'after-crash-recovery-restore',
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION' => 'exit',
+            ]
+        );
+        assert_true($crash_restore_interrupted['status'] !== 0, 'crash recovery restore cleanup failpoint terminates the recovery subprocess');
+        assert_same(
+            scalar($crash_commit_target, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Base content',
+            'interrupted crash recovery restores the pre-merge target DB content before artifact cleanup'
+        );
+        $interrupted_crash_recovery_files = glob(dirname($crash_commit_metadata) . '/crash-recovery/*.json');
+        assert_true(is_array($interrupted_crash_recovery_files) && count($interrupted_crash_recovery_files) === 1, 'interrupted crash recovery leaves the recovery artifact retryable');
+        assert_true(is_file($crash_backup), 'interrupted crash recovery keeps the target DB snapshot backup for retry');
+        $crash_restore_report = run_merge_cli([
+            'recover-crash',
+            '--metadata-db', $crash_commit_metadata,
+            '--restore-target-db',
+            '--format', 'json',
+        ]);
+        assert_same($crash_restore_report['status'], 0, 'crash recovery CLI restores target DB snapshots explicitly');
+        $crash_restore_report_json = json_decode($crash_restore_report['output'], true);
+        assert_same($crash_restore_report_json['restored'] ?? null, 1, 'crash recovery CLI reports one restored artifact');
+        assert_same($crash_restore_report_json['pending'] ?? null, 0, 'crash recovery CLI removes restored artifacts from the pending queue');
+        assert_same(
+            scalar($crash_commit_target, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Base content',
+            'crash recovery CLI restores the pre-merge target DB content'
+        );
+        $restored_crash_recovery_files = glob(dirname($crash_commit_metadata) . '/crash-recovery/*.json');
+        assert_true(is_array($restored_crash_recovery_files) && count($restored_crash_recovery_files) === 0, 'crash recovery CLI removes restored artifact files');
+        assert_true(!file_exists($crash_backup), 'completed crash recovery cleanup removes target DB snapshot backup');
+
+        $crash_metadata_base = $tmp . '/crash-metadata-base.sqlite';
+        $crash_metadata_source = $tmp . '/crash-metadata-source.sqlite';
+        $crash_metadata_target = $tmp . '/crash-metadata-target.sqlite';
+        $crash_metadata_db = $tmp . '/.forkpress/cow/merge/crash-metadata/metadata.sqlite';
+        create_base_db($crash_metadata_base);
+        copy($crash_metadata_base, $crash_metadata_source);
+        copy($crash_metadata_base, $crash_metadata_target);
+        $db = open_db($crash_metadata_source);
+        $db->exec("UPDATE wp_posts SET post_content = 'Source crash metadata content' WHERE ID = 1");
+        $db->close();
+        $crash_metadata_result = run_merge_cli_env(
+            [
+                'merge',
+                '--base-db', $crash_metadata_base,
+                '--source-db', $crash_metadata_source,
+                '--target-db', $crash_metadata_target,
+                '--metadata-db', $crash_metadata_db,
+                '--source', 'feature-crash-metadata',
+                '--target', 'main',
+            ],
+            [
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT' => 'before-metadata-commit',
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION' => 'kill',
+            ]
+        );
+        assert_true($crash_metadata_result['status'] !== 0, 'crash failpoint terminates the merge subprocess before metadata commit');
+        assert_same(
+            scalar($crash_metadata_target, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Source crash metadata content',
+            'process death before metadata commit leaves the durable target change visible'
+        );
+        $crash_metadata_files = glob(dirname($crash_metadata_db) . '/crash-recovery/*.json');
+        assert_true(is_array($crash_metadata_files) && count($crash_metadata_files) === 1, 'process death before metadata commit leaves one crash recovery artifact');
+        $crash_metadata_recovery = json_decode(file_get_contents($crash_metadata_files[0]), true);
+        assert_same($crash_metadata_recovery['checkpoint'] ?? null, 'target-db-commit', 'pre-metadata crash recovery artifact uses the target DB commit checkpoint');
+        assert_same($crash_metadata_recovery['source_branch'] ?? null, 'feature-crash-metadata', 'pre-metadata crash recovery artifact preserves source branch context');
+        $crash_metadata_completed = is_file($crash_metadata_db)
+            ? (int)scalar($crash_metadata_db, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-crash-metadata' AND status = 'completed'")
+            : 0;
+        assert_same($crash_metadata_completed, 0, 'process death before metadata commit does not publish a completed merge run');
+        $blocked_crash_metadata_rematch = run_merge_cli([
+            'merge',
+            '--base-db', $crash_metadata_base,
+            '--source-db', $crash_metadata_source,
+            '--target-db', $crash_metadata_target,
+            '--metadata-db', $crash_metadata_db,
+            '--source', 'feature-crash-metadata',
+            '--target', 'main',
+        ]);
+        assert_true($blocked_crash_metadata_rematch['status'] !== 0, 'pending pre-metadata crash recovery blocks a subsequent merge');
+        assert_true(str_contains($blocked_crash_metadata_rematch['output'], 'pending COW merge crash recovery artifact'), 'pending pre-metadata crash recovery error explains the recovery queue');
+        $crash_metadata_restore = run_merge_cli([
+            'recover-crash',
+            '--metadata-db', $crash_metadata_db,
+            '--restore-target-db',
+            '--format', 'json',
+        ]);
+        assert_same($crash_metadata_restore['status'], 0, 'crash recovery CLI restores pre-metadata target DB snapshots');
+        $crash_metadata_restore_json = json_decode($crash_metadata_restore['output'], true);
+        assert_same($crash_metadata_restore_json['restored'] ?? null, 1, 'crash recovery CLI reports one restored pre-metadata artifact');
+        assert_same(
+            scalar($crash_metadata_target, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Base content',
+            'crash recovery CLI restores the pre-metadata target DB content'
+        );
+
+        $crash_before_file_base_db = $tmp . '/crash-before-file-base.sqlite';
+        $crash_before_file_source_db = $tmp . '/crash-before-file-source.sqlite';
+        $crash_before_file_target_db = $tmp . '/crash-before-file-target.sqlite';
+        $crash_before_file_metadata = $tmp . '/.forkpress/cow/merge/crash-before-file/metadata.sqlite';
+        create_base_db($crash_before_file_base_db);
+        copy($crash_before_file_base_db, $crash_before_file_source_db);
+        copy($crash_before_file_base_db, $crash_before_file_target_db);
+        $db = open_db($crash_before_file_source_db);
+        $db->exec("UPDATE wp_posts SET post_content = 'Source crash before file content' WHERE ID = 1");
+        $db->close();
+        $crash_before_file_base_root = $tmp . '/crash-before-file-base-root';
+        $crash_before_file_source_root = $tmp . '/crash-before-file-source-root';
+        $crash_before_file_target_root = $tmp . '/crash-before-file-target-root';
+        write_test_file($crash_before_file_base_root . '/wp-content/uploads/before-file.txt', 'base before-file content');
+        copy_tree_for_test($crash_before_file_base_root, $crash_before_file_source_root);
+        copy_tree_for_test($crash_before_file_base_root, $crash_before_file_target_root);
+        write_test_file($crash_before_file_source_root . '/wp-content/uploads/before-file.txt', 'source before-file content');
+        $crash_before_file_manifest = $tmp . '/.forkpress/cow/merge/file-bases/feature-crash-before-file.json';
+        cow_merge_capture_file_base($crash_before_file_base_root, $crash_before_file_manifest);
+        $crash_before_file_result = run_merge_cli_env(
+            [
+                'merge',
+                '--base-db', $crash_before_file_base_db,
+                '--source-db', $crash_before_file_source_db,
+                '--target-db', $crash_before_file_target_db,
+                '--metadata-db', $crash_before_file_metadata,
+                '--source', 'feature-crash-before-file',
+                '--target', 'main',
+                '--base-files', $crash_before_file_manifest,
+                '--source-root', $crash_before_file_source_root,
+                '--target-root', $crash_before_file_target_root,
+            ],
+            [
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT' => 'before-file-op',
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION' => 'kill',
+            ]
+        );
+        assert_true($crash_before_file_result['status'] !== 0, 'crash failpoint terminates the merge subprocess before filesystem operations begin');
+        assert_same(
+            scalar($crash_before_file_target_db, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Source crash before file content',
+            'process death before filesystem operations can leave the already committed DB phase visible'
+        );
+        assert_same(
+            file_get_contents($crash_before_file_target_root . '/wp-content/uploads/before-file.txt'),
+            'base before-file content',
+            'process death before filesystem operations leaves files at the pre-merge content'
+        );
+        $crash_before_file_report = run_merge_cli([
+            'recover-crash',
+            '--metadata-db', $crash_before_file_metadata,
+            '--format', 'json',
+        ]);
+        assert_same($crash_before_file_report['status'], 0, 'crash recovery CLI lists pending before-file artifacts');
+        $crash_before_file_report_json = json_decode($crash_before_file_report['output'], true);
+        assert_same($crash_before_file_report_json['pending'] ?? null, 1, 'crash recovery CLI reports one pending before-file artifact');
+        assert_same($crash_before_file_report_json['artifacts'][0]['checkpoint'] ?? null, 'before-file-op', 'crash recovery CLI reports the before-file checkpoint');
+        assert_true(is_array($crash_before_file_report_json['artifacts'][0]['target_db_snapshot'] ?? null), 'before-file crash artifact preserves the target DB snapshot');
+        assert_true(is_array($crash_before_file_report_json['artifacts'][0]['metadata_db_snapshot'] ?? null), 'before-file crash artifact preserves the metadata DB snapshot');
+        assert_true(is_array($crash_before_file_report_json['artifacts'][0]['filesystem_snapshot_summary'] ?? null), 'before-file crash artifact preserves the filesystem root snapshot summary');
+        $blocked_crash_before_file_rematch = run_merge_cli([
+            'merge',
+            '--base-db', $crash_before_file_base_db,
+            '--source-db', $crash_before_file_source_db,
+            '--target-db', $crash_before_file_target_db,
+            '--metadata-db', $crash_before_file_metadata,
+            '--source', 'feature-crash-before-file',
+            '--target', 'main',
+            '--base-files', $crash_before_file_manifest,
+            '--source-root', $crash_before_file_source_root,
+            '--target-root', $crash_before_file_target_root,
+        ]);
+        assert_true($blocked_crash_before_file_rematch['status'] !== 0, 'pending before-file crash recovery blocks a subsequent merge');
+        assert_true(str_contains($blocked_crash_before_file_rematch['output'], 'pending COW merge crash recovery artifact'), 'pending before-file crash recovery error explains the recovery queue');
+        $crash_before_file_restore = run_merge_cli([
+            'recover-crash',
+            '--metadata-db', $crash_before_file_metadata,
+            '--restore-target-db',
+            '--restore-files',
+            '--format', 'json',
+        ]);
+        assert_same($crash_before_file_restore['status'], 0, 'crash recovery CLI restores before-file whole-branch snapshots');
+        $crash_before_file_restore_json = json_decode($crash_before_file_restore['output'], true);
+        assert_same($crash_before_file_restore_json['restored'] ?? null, 1, 'crash recovery CLI reports one restored before-file artifact');
+        assert_same($crash_before_file_restore_json['pending'] ?? null, 0, 'crash recovery CLI clears the before-file crash queue after restore');
+        assert_same(
+            scalar($crash_before_file_target_db, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Base content',
+            'before-file crash recovery restores the pre-merge target DB content'
+        );
+        assert_same(
+            file_get_contents($crash_before_file_target_root . '/wp-content/uploads/before-file.txt'),
+            'base before-file content',
+            'before-file crash recovery leaves files at the pre-merge content'
+        );
+
+        $crash_file_base_db = $tmp . '/crash-file-base.sqlite';
+        $crash_file_source_db = $tmp . '/crash-file-source.sqlite';
+        $crash_file_target_db = $tmp . '/crash-file-target.sqlite';
+        $crash_file_metadata = $tmp . '/.forkpress/cow/merge/crash-file/metadata.sqlite';
+        create_base_db($crash_file_base_db);
+        copy($crash_file_base_db, $crash_file_source_db);
+        copy($crash_file_base_db, $crash_file_target_db);
+        $db = open_db($crash_file_source_db);
+        $db->exec("UPDATE wp_posts SET post_content = 'Source crash file DB content' WHERE ID = 1");
+        $db->close();
+        $crash_file_base_root = $tmp . '/crash-file-base-root';
+        $crash_file_source_root = $tmp . '/crash-file-source-root';
+        $crash_file_target_root = $tmp . '/crash-file-target-root';
+        write_test_file($crash_file_base_root . '/wp-content/uploads/crash-file.txt', 'base file crash content');
+        copy_tree_for_test($crash_file_base_root, $crash_file_source_root);
+        copy_tree_for_test($crash_file_base_root, $crash_file_target_root);
+        write_test_file($crash_file_source_root . '/wp-content/uploads/crash-file.txt', 'source file crash content');
+        $crash_file_base_manifest = $tmp . '/.forkpress/cow/merge/file-bases/feature-crash-file.json';
+        cow_merge_capture_file_base($crash_file_base_root, $crash_file_base_manifest);
+        $crash_file_result = run_merge_cli_env(
+            [
+                'merge',
+                '--base-db', $crash_file_base_db,
+                '--source-db', $crash_file_source_db,
+                '--target-db', $crash_file_target_db,
+                '--metadata-db', $crash_file_metadata,
+                '--source', 'feature-crash-file',
+                '--target', 'main',
+                '--base-files', $crash_file_base_manifest,
+                '--source-root', $crash_file_source_root,
+                '--target-root', $crash_file_target_root,
+            ],
+            [
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT' => 'after-file-op',
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION' => 'kill',
+            ]
+        );
+        assert_true($crash_file_result['status'] !== 0, 'crash failpoint terminates the merge subprocess after a filesystem operation');
+        assert_same(
+            file_get_contents($crash_file_target_root . '/wp-content/uploads/crash-file.txt'),
+            'source file crash content',
+            'process death after filesystem operation leaves the durable file change visible'
+        );
+        assert_same(
+            scalar($crash_file_target_db, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Source crash file DB content',
+            'process death after filesystem operation leaves the durable DB change visible'
+        );
+        $crash_file_report = run_merge_cli([
+            'recover-crash',
+            '--metadata-db', $crash_file_metadata,
+            '--format', 'json',
+        ]);
+        assert_same($crash_file_report['status'], 0, 'crash recovery CLI lists pending filesystem artifacts');
+        $crash_file_report_json = json_decode($crash_file_report['output'], true);
+        assert_same($crash_file_report_json['pending'] ?? null, 2, 'crash recovery CLI reports whole-branch and filesystem pending artifacts');
+        $crash_file_checkpoints = array_column($crash_file_report_json['artifacts'] ?? [], 'checkpoint');
+        sort($crash_file_checkpoints);
+        assert_same($crash_file_checkpoints, ['before-file-op', 'file-op'], 'crash recovery CLI reports whole-branch and filesystem operation checkpoints');
+        $crash_file_op_artifacts = array_values(array_filter($crash_file_report_json['artifacts'] ?? [], fn($artifact) => ($artifact['checkpoint'] ?? null) === 'file-op'));
+        assert_same($crash_file_op_artifacts[0]['filesystem_transaction_summary']['backup_count'] ?? null, 1, 'filesystem crash recovery artifact preserves file backup metadata');
+        $crash_whole_branch_artifacts = array_values(array_filter($crash_file_report_json['artifacts'] ?? [], fn($artifact) => ($artifact['checkpoint'] ?? null) === 'before-file-op'));
+        assert_true(is_array($crash_whole_branch_artifacts[0]['target_db_snapshot'] ?? null), 'filesystem crash keeps whole-branch target DB rollback material');
+        assert_true(is_array($crash_whole_branch_artifacts[0]['filesystem_snapshot_summary'] ?? null), 'filesystem crash keeps whole-branch filesystem rollback material');
+        $blocked_crash_file_rematch = run_merge_cli([
+            'merge',
+            '--base-db', $crash_file_base_db,
+            '--source-db', $crash_file_source_db,
+            '--target-db', $crash_file_target_db,
+            '--metadata-db', $crash_file_metadata,
+            '--source', 'feature-crash-file',
+            '--target', 'main',
+            '--base-files', $crash_file_base_manifest,
+            '--source-root', $crash_file_source_root,
+            '--target-root', $crash_file_target_root,
+        ]);
+        assert_true($blocked_crash_file_rematch['status'] !== 0, 'pending filesystem crash recovery blocks a subsequent merge');
+        assert_true(str_contains($blocked_crash_file_rematch['output'], 'pending COW merge crash recovery artifact'), 'pending filesystem crash recovery error explains the recovery queue');
+        assert_same(
+            file_get_contents($crash_file_target_root . '/wp-content/uploads/crash-file.txt'),
+            'source file crash content',
+            'blocked merge leaves the pending filesystem crash state untouched'
+        );
+        $crash_file_restore_interrupted = run_merge_cli_env(
+            [
+                'recover-crash',
+                '--metadata-db', $crash_file_metadata,
+                '--restore-target-db',
+                '--restore-files',
+                '--format', 'json',
+            ],
+            [
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT' => 'after-crash-recovery-restore',
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION' => 'exit',
+            ]
+        );
+        assert_true($crash_file_restore_interrupted['status'] !== 0, 'filesystem crash recovery cleanup failpoint terminates the recovery subprocess');
+        assert_same(
+            file_get_contents($crash_file_target_root . '/wp-content/uploads/crash-file.txt'),
+            'base file crash content',
+            'interrupted filesystem crash recovery restores pre-merge file content before artifact cleanup'
+        );
+        assert_same(
+            scalar($crash_file_target_db, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Base content',
+            'interrupted filesystem crash recovery restores pre-merge DB content before artifact cleanup'
+        );
+        $interrupted_crash_file_recovery_files = glob(dirname($crash_file_metadata) . '/crash-recovery/*.json');
+        assert_true(is_array($interrupted_crash_file_recovery_files) && count($interrupted_crash_file_recovery_files) === 2, 'interrupted filesystem crash recovery leaves recovery artifacts retryable');
+        $crash_file_restore = run_merge_cli([
+            'recover-crash',
+            '--metadata-db', $crash_file_metadata,
+            '--restore-target-db',
+            '--restore-files',
+            '--format', 'json',
+        ]);
+        assert_same($crash_file_restore['status'], 0, 'crash recovery CLI restores filesystem transactions explicitly');
+        $crash_file_restore_json = json_decode($crash_file_restore['output'], true);
+        assert_same($crash_file_restore_json['restored'] ?? null, 2, 'crash recovery CLI reports restored whole-branch and filesystem artifacts');
+        assert_same($crash_file_restore_json['pending'] ?? null, 0, 'crash recovery CLI clears the filesystem crash queue after restore');
+        assert_same(
+            file_get_contents($crash_file_target_root . '/wp-content/uploads/crash-file.txt'),
+            'base file crash content',
+            'crash recovery CLI restores the pre-merge filesystem content'
+        );
+        assert_same(
+            scalar($crash_file_target_db, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Base content',
+            'crash recovery CLI restores the pre-merge DB content'
+        );
+    } else {
+        assert_true(true, 'process-death crash failpoint requires POSIX SIGKILL support');
+    }
 
     $unique_base = $tmp . '/unique-base.sqlite';
     $unique_source = $tmp . '/unique-source.sqlite';
@@ -2654,6 +3159,8 @@ SQL);
     assert_same(count($audit['runs']), 1, 'merge audit report can focus on one run');
     assert_same((int)$audit['runs'][0]['conflict_count'], 2, 'merge audit run summary includes conflict count');
     assert_same(count($audit['conflicts']), 2, 'merge audit report exports conflict records for a run');
+    $title_audit_conflicts = array_values(array_filter($audit['conflicts'], fn($row) => ($row['table_name'] ?? null) === 'wp_posts' && ($row['column_name'] ?? null) === 'post_title'));
+    assert_same($title_audit_conflicts[0]['stale_status'] ?? null, 'fresh', 'merge audit marks unchanged target conflicts as fresh');
     $title_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'wp_posts' AND column_name = 'post_title'");
     $GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize'] = [
         static function (SQLite3Result $result, string $message): void {
@@ -2767,6 +3274,363 @@ SQL);
         'target cell no longer matches',
         'stale conflict resolution is blocked when target has changed since audit'
     );
+    $stale_cell_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['records' => 'conflicts']);
+    $stale_cell_conflicts = array_values(array_filter($stale_cell_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $title_conflict_id));
+    assert_same($stale_cell_conflicts[0]['stale_status'] ?? null, 'stale', 'merge audit marks drifted target cell conflicts as stale');
+    assert_true(str_contains((string)($stale_cell_conflicts[0]['current_target_preview'] ?? ''), 'Source title'), 'stale target cell audit exposes the current target value');
+
+    $revalidate_base = $tmp . '/revalidate-base.sqlite';
+    $revalidate_source = $tmp . '/revalidate-source.sqlite';
+    $revalidate_target = $tmp . '/revalidate-target.sqlite';
+    $revalidate_metadata = $tmp . '/.forkpress/cow/merge/revalidate-metadata.sqlite';
+    create_base_db($revalidate_base);
+    copy($revalidate_base, $revalidate_source);
+    copy($revalidate_base, $revalidate_target);
+    $db = open_db($revalidate_source);
+    $db->exec("UPDATE plugin_items SET value = 'source revalidate conflict' WHERE item_id = 'alpha'");
+    $db->close();
+    $db = open_db($revalidate_target);
+    $db->exec("UPDATE plugin_items SET value = 'target revalidate conflict' WHERE item_id = 'alpha'");
+    $db->close();
+    $revalidate_merge = cow_merge_databases($revalidate_base, $revalidate_source, $revalidate_target, $revalidate_metadata, 'feature-revalidate-review', 'main');
+    $revalidate_run_id = (int)$revalidate_merge['run_id'];
+    $revalidate_conflict_id = (int)scalar($revalidate_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND column_name = 'value'");
+    cow_merge_review_record(
+        $revalidate_metadata,
+        'conflict',
+        $revalidate_conflict_id,
+        'reviewed',
+        'Keep target plugin value for launch.',
+        'cow-test'
+    );
+    $db = open_db($revalidate_target);
+    $db->exec("UPDATE plugin_items SET value = 'target drift after review' WHERE item_id = 'alpha'");
+    $db->close();
+    $revalidated = cow_merge_revalidate_reviewed_conflicts($revalidate_metadata, $revalidate_run_id, 'cow-revalidate');
+    assert_same($revalidated['checked'], 1, 'review revalidation checks conflicts in the selected run');
+    assert_same($revalidated['reviewed'], 1, 'review revalidation inspects reviewed conflicts');
+    assert_same($revalidated['stale'], 1, 'review revalidation detects target drift');
+    assert_same($revalidated['carried'], 1, 'review revalidation carries stale reviewer intent to needs-action');
+    $revalidated_audit = cow_merge_audit_report($revalidate_metadata, $revalidate_run_id, 10, [
+        'records' => 'conflicts',
+        'review_status' => 'needs-action',
+    ]);
+    assert_same(count($revalidated_audit['conflicts']), 1, 'revalidated stale reviews enter the needs-action queue');
+    assert_same($revalidated_audit['conflicts'][0]['stale_status'] ?? null, 'stale', 'revalidated review keeps stale audit context visible');
+    assert_true(str_contains((string)$revalidated_audit['conflicts'][0]['review_note'], 'Keep target plugin value for launch.'), 'revalidated review preserves the prior reviewer note');
+    $revalidated_again = run_merge_cli([
+        'revalidate-reviews',
+        '--metadata-db', $revalidate_metadata,
+        '--run', (string)$revalidate_run_id,
+        '--format', 'json',
+    ]);
+    assert_same($revalidated_again['status'], 0, 'review revalidation CLI accepts already-carried stale reviews');
+    $revalidated_again_json = json_decode($revalidated_again['output'], true);
+    assert_same($revalidated_again_json['carried'] ?? null, 0, 'review revalidation CLI does not duplicate carried notes');
+    assert_same($revalidated_again_json['already_needs_action'] ?? null, 1, 'review revalidation CLI reports already-carried stale reviews');
+    $audit_revalidate_help = run_merge_cli(['audit', '--help']);
+    assert_same($audit_revalidate_help['status'], 0, 'merge audit helper help exits successfully');
+    assert_true(str_contains($audit_revalidate_help['output'], '--revalidate'), 'merge audit helper help documents revalidation shortcut');
+    assert_same((int)scalar($revalidate_metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $revalidate_conflict_id"), 1, 'review revalidation records the stale target payload for guarded resolution');
+    assert_same(scalar($revalidate_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $revalidate_conflict_id ORDER BY id DESC LIMIT 1"), 'compatible-target-drift', 'cell revalidation classifies same-object target drift');
+    $revalidated_class_audit = cow_merge_audit_report($revalidate_metadata, $revalidate_run_id, 10, ['records' => 'conflicts']);
+    $revalidated_class_conflicts = array_values(array_filter($revalidated_class_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $revalidate_conflict_id));
+    assert_same($revalidated_class_conflicts[0]['revalidation_class'] ?? null, 'compatible-target-drift', 'cell audit exposes the revalidation classifier');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($revalidate_metadata, $revalidate_conflict_id, 'source', true, 'Try stale source apply before guarded revalidation.', 'cow-test'),
+        'target cell no longer matches the audited conflict target value',
+        'stale conflict resolution still fails without the after-revalidate guard'
+    );
+    $db = open_db($revalidate_target);
+    $db->exec("UPDATE plugin_items SET value = 'target drift after revalidation' WHERE item_id = 'alpha'");
+    $db->close();
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($revalidate_metadata, $revalidate_conflict_id, 'source', true, 'Try stale source apply after new target drift.', 'cow-test', true),
+        'target payload changed after latest merge revalidation',
+        'after-revalidate resolution fails if target drifted again after revalidation'
+    );
+    $revalidated_after_drift = cow_merge_revalidate_reviewed_conflicts($revalidate_metadata, $revalidate_run_id, 'cow-revalidate');
+    assert_same($revalidated_after_drift['carried'], 1, 'review revalidation carries a new needs-action note after further target drift');
+    assert_same((int)scalar($revalidate_metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $revalidate_conflict_id"), 2, 'review revalidation records the replacement stale target payload after further drift');
+    $after_revalidate_resolution = cow_merge_resolve_conflict(
+        $revalidate_metadata,
+        $revalidate_conflict_id,
+        'source',
+        true,
+        'Apply source after revalidating target drift.',
+        'cow-test',
+        true
+    );
+    assert_same($after_revalidate_resolution['status'], 'applied', 'after-revalidate source resolution applies a revalidated stale cell conflict');
+    assert_same(scalar($revalidate_target, "SELECT value FROM plugin_items WHERE item_id = 'alpha'"), 'source revalidate conflict', 'after-revalidate source resolution writes the audited source value');
+    assert_same(
+        scalar($revalidate_metadata, "SELECT previous_payload FROM merge_resolutions WHERE conflict_id = $revalidate_conflict_id ORDER BY id DESC LIMIT 1"),
+        cow_merge_payload_json('target drift after revalidation'),
+        'after-revalidate resolution audits the latest revalidated target payload'
+    );
+
+    $missing_cell_base = $tmp . '/missing-cell-base.sqlite';
+    $missing_cell_source = $tmp . '/missing-cell-source.sqlite';
+    $missing_cell_target = $tmp . '/missing-cell-target.sqlite';
+    $missing_cell_metadata = $tmp . '/.forkpress/cow/merge/missing-cell-metadata.sqlite';
+    create_base_db($missing_cell_base);
+    copy($missing_cell_base, $missing_cell_source);
+    copy($missing_cell_base, $missing_cell_target);
+    $db = open_db($missing_cell_source);
+    $db->exec("UPDATE plugin_items SET value = 'source missing-cell conflict' WHERE item_id = 'alpha'");
+    $db->close();
+    $db = open_db($missing_cell_target);
+    $db->exec("UPDATE plugin_items SET value = 'target missing-cell conflict' WHERE item_id = 'alpha'");
+    $db->close();
+    $missing_cell_merge = cow_merge_databases($missing_cell_base, $missing_cell_source, $missing_cell_target, $missing_cell_metadata, 'feature-missing-cell-review', 'main');
+    $missing_cell_run_id = (int)$missing_cell_merge['run_id'];
+    $missing_cell_conflict_id = (int)scalar($missing_cell_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND column_name = 'value'");
+    cow_merge_review_record(
+        $missing_cell_metadata,
+        'conflict',
+        $missing_cell_conflict_id,
+        'reviewed',
+        'Revalidate before applying a row that may disappear.',
+        'cow-test'
+    );
+    $db = open_db($missing_cell_target);
+    $db->exec("DELETE FROM plugin_items WHERE item_id = 'alpha'");
+    $db->close();
+    $missing_cell_revalidated = cow_merge_revalidate_reviewed_conflicts($missing_cell_metadata, $missing_cell_run_id, 'cow-revalidate');
+    assert_same($missing_cell_revalidated['carried'], 1, 'review revalidation carries missing target cell rows back to needs-action');
+    assert_same(scalar($missing_cell_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $missing_cell_conflict_id ORDER BY id DESC LIMIT 1"), 'missing', 'cell revalidation classifies deleted target rows as missing');
+    $missing_cell_audit = cow_merge_audit_report($missing_cell_metadata, $missing_cell_run_id, 10, ['records' => 'conflicts']);
+    $missing_cell_conflicts = array_values(array_filter($missing_cell_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $missing_cell_conflict_id));
+    assert_same($missing_cell_conflicts[0]['revalidation_class'] ?? null, 'missing', 'cell audit exposes missing target row revalidation class');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($missing_cell_metadata, $missing_cell_conflict_id, 'source', true, 'Try source after missing-row revalidation.', 'cow-test', true),
+        'target row no longer exists',
+        'after-revalidate cell resolution does not recreate a missing target row through a cell update'
+    );
+
+    $source_drift_base = $tmp . '/source-drift-base.sqlite';
+    $source_drift_source = $tmp . '/source-drift-source.sqlite';
+    $source_drift_target = $tmp . '/source-drift-target.sqlite';
+    $source_drift_metadata = $tmp . '/.forkpress/cow/merge/source-drift-metadata.sqlite';
+    create_base_db($source_drift_base);
+    copy($source_drift_base, $source_drift_source);
+    copy($source_drift_base, $source_drift_target);
+    $db = open_db($source_drift_source);
+    $db->exec("UPDATE plugin_items SET value = 'source drift original conflict' WHERE item_id = 'alpha'");
+    $db->close();
+    $db = open_db($source_drift_target);
+    $db->exec("UPDATE plugin_items SET value = 'target source-drift conflict' WHERE item_id = 'alpha'");
+    $db->close();
+    $source_drift_merge = cow_merge_databases($source_drift_base, $source_drift_source, $source_drift_target, $source_drift_metadata, 'feature-source-drift-review', 'main');
+    $source_drift_run_id = (int)$source_drift_merge['run_id'];
+    $source_drift_conflict_id = (int)scalar($source_drift_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND column_name = 'value'");
+    cow_merge_review_record(
+        $source_drift_metadata,
+        'conflict',
+        $source_drift_conflict_id,
+        'reviewed',
+        'Apply source after confirming it still matches review.',
+        'cow-test'
+    );
+    $db = open_db($source_drift_source);
+    $db->exec("UPDATE plugin_items SET value = 'source drift after review' WHERE item_id = 'alpha'");
+    $db->close();
+    $source_drift_revalidated = cow_merge_revalidate_reviewed_conflicts($source_drift_metadata, $source_drift_run_id, 'cow-revalidate');
+    assert_same($source_drift_revalidated['carried'], 1, 'review revalidation carries source-drifted cell conflicts to needs-action');
+    assert_same(scalar($source_drift_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $source_drift_conflict_id ORDER BY id DESC LIMIT 1"), 'compatible-source-drift', 'cell revalidation classifies changed source payloads');
+    assert_same(scalar($source_drift_metadata, "SELECT source_payload FROM merge_revalidations WHERE conflict_id = $source_drift_conflict_id ORDER BY id DESC LIMIT 1"), cow_merge_payload_json('source drift after review'), 'source-drift revalidation records the current source payload');
+    $source_drift_audit = cow_merge_audit_report($source_drift_metadata, $source_drift_run_id, 10, ['records' => 'conflicts']);
+    $source_drift_conflicts = array_values(array_filter($source_drift_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $source_drift_conflict_id));
+    assert_same($source_drift_conflicts[0]['revalidation_class'] ?? null, 'compatible-source-drift', 'cell audit exposes source-drift revalidation class');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($source_drift_metadata, $source_drift_conflict_id, 'source', true, 'Try source after source-drift revalidation.', 'cow-test', true),
+        'source payload changed after latest merge revalidation',
+        'after-revalidate source resolution fails if the source payload changed after review'
+    );
+
+    $row_source_drift_base = $tmp . '/row-source-drift-base.sqlite';
+    $row_source_drift_source = $tmp . '/row-source-drift-source.sqlite';
+    $row_source_drift_target = $tmp . '/row-source-drift-target.sqlite';
+    $row_source_drift_metadata = $tmp . '/.forkpress/cow/merge/row-source-drift-metadata.sqlite';
+    create_base_db($row_source_drift_base);
+    copy($row_source_drift_base, $row_source_drift_source);
+    copy($row_source_drift_base, $row_source_drift_target);
+    $db = open_db($row_source_drift_source);
+    $db->exec("INSERT INTO plugin_items (item_id, label, value) VALUES ('source-drift-row', 'source row original label', 'source row original value')");
+    $db->close();
+    $db = open_db($row_source_drift_target);
+    $db->exec("INSERT INTO plugin_items (item_id, label, value) VALUES ('source-drift-row', 'target row conflict label', 'target row conflict value')");
+    $db->close();
+    $row_source_drift_merge = cow_merge_databases($row_source_drift_base, $row_source_drift_source, $row_source_drift_target, $row_source_drift_metadata, 'feature-row-source-drift-review', 'main');
+    $row_source_drift_run_id = (int)$row_source_drift_merge['run_id'];
+    $row_source_drift_conflict_id = (int)scalar($row_source_drift_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND row_identity = '" . SQLite3::escapeString(cow_merge_identity_json(['item_id' => 'source-drift-row'])) . "'");
+    cow_merge_review_record(
+        $row_source_drift_metadata,
+        'conflict',
+        $row_source_drift_conflict_id,
+        'reviewed',
+        'Apply source row after confirming it still matches review.',
+        'cow-test'
+    );
+    $db = open_db($row_source_drift_source);
+    $db->exec("UPDATE plugin_items SET label = 'source row drifted label', value = 'source row drifted value' WHERE item_id = 'source-drift-row'");
+    $db->close();
+    $row_source_drift_revalidated = cow_merge_revalidate_reviewed_conflicts($row_source_drift_metadata, $row_source_drift_run_id, 'cow-revalidate');
+    assert_same($row_source_drift_revalidated['carried'], 1, 'review revalidation carries source-drifted row conflicts to needs-action');
+    assert_same(scalar($row_source_drift_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $row_source_drift_conflict_id ORDER BY id DESC LIMIT 1"), 'compatible-source-drift', 'row revalidation classifies changed source payloads');
+    assert_same(
+        scalar($row_source_drift_metadata, "SELECT source_payload FROM merge_revalidations WHERE conflict_id = $row_source_drift_conflict_id ORDER BY id DESC LIMIT 1"),
+        cow_merge_payload_json(['item_id' => 'source-drift-row', 'label' => 'source row drifted label', 'value' => 'source row drifted value']),
+        'row source-drift revalidation records the current source row payload'
+    );
+    $row_source_drift_audit = cow_merge_audit_report($row_source_drift_metadata, $row_source_drift_run_id, 10, ['records' => 'conflicts']);
+    $row_source_drift_conflicts = array_values(array_filter($row_source_drift_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $row_source_drift_conflict_id));
+    assert_same($row_source_drift_conflicts[0]['revalidation_class'] ?? null, 'compatible-source-drift', 'row audit exposes source-drift revalidation class');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($row_source_drift_metadata, $row_source_drift_conflict_id, 'source', true, 'Try source row after source-drift revalidation.', 'cow-test', true),
+        'source payload changed after latest merge revalidation',
+        'after-revalidate row resolution fails if the source row changed after review'
+    );
+
+    $source_semantic_identity_cases = [
+        'post' => [
+            'table' => 'wp_posts',
+            'create' => 'CREATE TABLE wp_posts (ID INTEGER PRIMARY KEY, post_type TEXT, post_title TEXT, post_content TEXT)',
+            'source_insert' => "INSERT INTO wp_posts (ID, post_type, post_title, post_content) VALUES (110, 'page', 'Source reviewed page', 'source reviewed page content')",
+            'target_insert' => "INSERT INTO wp_posts (ID, post_type, post_title, post_content) VALUES (110, 'page', 'Target reviewed page', 'target reviewed page content')",
+            'source_update' => "UPDATE wp_posts SET post_type = 'attachment', post_title = 'Source replacement attachment', post_content = 'source replacement attachment content' WHERE ID = 110",
+            'branch' => 'feature-source-post-identity-review',
+            'label' => 'source post_type',
+        ],
+        'option' => [
+            'table' => 'wp_options',
+            'create' => 'CREATE TABLE wp_options (option_id INTEGER PRIMARY KEY, option_name TEXT, option_value TEXT)',
+            'source_insert' => "INSERT INTO wp_options (option_id, option_name, option_value) VALUES (120, 'source_setting', 'source value')",
+            'target_insert' => "INSERT INTO wp_options (option_id, option_name, option_value) VALUES (120, 'target_setting', 'target value')",
+            'source_update' => "UPDATE wp_options SET option_name = 'replacement_setting', option_value = 'replacement value' WHERE option_id = 120",
+            'branch' => 'feature-source-option-identity-review',
+            'label' => 'source option_name',
+        ],
+        'postmeta' => [
+            'table' => 'wp_postmeta',
+            'create' => 'CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY, post_id INTEGER, meta_key TEXT, meta_value TEXT)',
+            'source_insert' => "INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES (130, 10, 'source_key', 'source value')",
+            'target_insert' => "INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES (130, 10, 'target_key', 'target value')",
+            'source_update' => "UPDATE wp_postmeta SET post_id = 11, meta_key = 'replacement_key', meta_value = 'replacement value' WHERE meta_id = 130",
+            'branch' => 'feature-source-postmeta-identity-review',
+            'label' => 'source post_id/meta_key',
+        ],
+        'term' => [
+            'table' => 'wp_terms',
+            'create' => 'CREATE TABLE wp_terms (term_id INTEGER PRIMARY KEY, name TEXT, slug TEXT, term_group INTEGER)',
+            'source_insert' => "INSERT INTO wp_terms (term_id, name, slug, term_group) VALUES (140, 'Source term', 'source-term', 0)",
+            'target_insert' => "INSERT INTO wp_terms (term_id, name, slug, term_group) VALUES (140, 'Target term', 'target-term', 0)",
+            'source_update' => "UPDATE wp_terms SET name = 'Replacement term', slug = 'replacement-term' WHERE term_id = 140",
+            'branch' => 'feature-source-term-identity-review',
+            'label' => 'source term slug',
+        ],
+        'term-taxonomy' => [
+            'table' => 'wp_term_taxonomy',
+            'create' => 'CREATE TABLE wp_term_taxonomy (term_taxonomy_id INTEGER PRIMARY KEY, term_id INTEGER, taxonomy TEXT, description TEXT)',
+            'source_insert' => "INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description) VALUES (150, 40, 'category', 'source taxonomy')",
+            'target_insert' => "INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description) VALUES (150, 40, 'post_tag', 'target taxonomy')",
+            'source_update' => "UPDATE wp_term_taxonomy SET term_id = 41, taxonomy = 'nav_menu', description = 'replacement taxonomy' WHERE term_taxonomy_id = 150",
+            'branch' => 'feature-source-term-taxonomy-identity-review',
+            'label' => 'source term_id/taxonomy',
+        ],
+        'termmeta' => [
+            'table' => 'wp_termmeta',
+            'create' => 'CREATE TABLE wp_termmeta (meta_id INTEGER PRIMARY KEY, term_id INTEGER, meta_key TEXT, meta_value TEXT)',
+            'source_insert' => "INSERT INTO wp_termmeta (meta_id, term_id, meta_key, meta_value) VALUES (160, 40, 'source_key', 'source value')",
+            'target_insert' => "INSERT INTO wp_termmeta (meta_id, term_id, meta_key, meta_value) VALUES (160, 40, 'target_key', 'target value')",
+            'source_update' => "UPDATE wp_termmeta SET term_id = 41, meta_key = 'replacement_key', meta_value = 'replacement value' WHERE meta_id = 160",
+            'branch' => 'feature-source-termmeta-identity-review',
+            'label' => 'source term_id/meta_key',
+        ],
+        'user' => [
+            'table' => 'wp_users',
+            'create' => 'CREATE TABLE wp_users (ID INTEGER PRIMARY KEY, user_login TEXT, user_email TEXT)',
+            'source_insert' => "INSERT INTO wp_users (ID, user_login, user_email) VALUES (170, 'source_user', 'source@example.test')",
+            'target_insert' => "INSERT INTO wp_users (ID, user_login, user_email) VALUES (170, 'target_user', 'target@example.test')",
+            'source_update' => "UPDATE wp_users SET user_login = 'replacement_user', user_email = 'replacement@example.test' WHERE ID = 170",
+            'branch' => 'feature-source-user-identity-review',
+            'label' => 'source user_login',
+        ],
+        'usermeta' => [
+            'table' => 'wp_usermeta',
+            'create' => 'CREATE TABLE wp_usermeta (umeta_id INTEGER PRIMARY KEY, user_id INTEGER, meta_key TEXT, meta_value TEXT)',
+            'source_insert' => "INSERT INTO wp_usermeta (umeta_id, user_id, meta_key, meta_value) VALUES (180, 70, 'source_key', 'source value')",
+            'target_insert' => "INSERT INTO wp_usermeta (umeta_id, user_id, meta_key, meta_value) VALUES (180, 70, 'target_key', 'target value')",
+            'source_update' => "UPDATE wp_usermeta SET user_id = 71, meta_key = 'replacement_key', meta_value = 'replacement value' WHERE umeta_id = 180",
+            'branch' => 'feature-source-usermeta-identity-review',
+            'label' => 'source user_id/meta_key',
+        ],
+        'comment' => [
+            'table' => 'wp_comments',
+            'create' => 'CREATE TABLE wp_comments (comment_ID INTEGER PRIMARY KEY, comment_post_ID INTEGER, comment_type TEXT, comment_content TEXT)',
+            'source_insert' => "INSERT INTO wp_comments (comment_ID, comment_post_ID, comment_type, comment_content) VALUES (190, 10, 'comment', 'source comment')",
+            'target_insert' => "INSERT INTO wp_comments (comment_ID, comment_post_ID, comment_type, comment_content) VALUES (190, 10, 'review', 'target comment')",
+            'source_update' => "UPDATE wp_comments SET comment_post_ID = 11, comment_type = 'pingback', comment_content = 'replacement comment' WHERE comment_ID = 190",
+            'branch' => 'feature-source-comment-identity-review',
+            'label' => 'source comment_post_ID/comment_type',
+        ],
+        'commentmeta' => [
+            'table' => 'wp_commentmeta',
+            'create' => 'CREATE TABLE wp_commentmeta (meta_id INTEGER PRIMARY KEY, comment_id INTEGER, meta_key TEXT, meta_value TEXT)',
+            'source_insert' => "INSERT INTO wp_commentmeta (meta_id, comment_id, meta_key, meta_value) VALUES (200, 90, 'source_key', 'source value')",
+            'target_insert' => "INSERT INTO wp_commentmeta (meta_id, comment_id, meta_key, meta_value) VALUES (200, 90, 'target_key', 'target value')",
+            'source_update' => "UPDATE wp_commentmeta SET comment_id = 91, meta_key = 'replacement_key', meta_value = 'replacement value' WHERE meta_id = 200",
+            'branch' => 'feature-source-commentmeta-identity-review',
+            'label' => 'source comment_id/meta_key',
+        ],
+    ];
+    foreach ($source_semantic_identity_cases as $case_name => $case) {
+        $case_base = $tmp . "/source-semantic-$case_name-base.sqlite";
+        $case_source = $tmp . "/source-semantic-$case_name-source.sqlite";
+        $case_target = $tmp . "/source-semantic-$case_name-target.sqlite";
+        $case_metadata = $tmp . "/.forkpress/cow/merge/source-semantic-$case_name-metadata.sqlite";
+        foreach ([$case_base, $case_source, $case_target] as $path) {
+            $db = open_db($path);
+            $db->exec($case['create']);
+            $db->close();
+        }
+        $db = open_db($case_source);
+        $db->exec($case['source_insert']);
+        $db->close();
+        $db = open_db($case_target);
+        $db->exec($case['target_insert']);
+        $db->close();
+        $case_merge = cow_merge_databases($case_base, $case_source, $case_target, $case_metadata, $case['branch'], 'main');
+        $case_run_id = (int)$case_merge['run_id'];
+        assert_same($case_merge['status'], 'completed_with_conflicts', $case['label'] . ' source semantic identity fixture starts with a same-ID row conflict');
+        $case_conflict_id = (int)scalar($case_metadata, "SELECT id FROM merge_conflicts WHERE table_name = '{$case['table']}' AND conflict_type = 'row-insert-collision'");
+        cow_merge_review_record(
+            $case_metadata,
+            'conflict',
+            $case_conflict_id,
+            'reviewed',
+            'Apply reviewed source row only if it is still the same semantic object.',
+            'cow-test'
+        );
+        $db = open_db($case_source);
+        $db->exec($case['source_update']);
+        $db->close();
+        $case_revalidated = cow_merge_revalidate_reviewed_conflicts($case_metadata, $case_run_id, 'cow-revalidate');
+        assert_same($case_revalidated['carried'], 1, $case['label'] . ' source semantic replacement is carried to needs-action');
+        assert_same(scalar($case_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $case_conflict_id ORDER BY id DESC LIMIT 1"), 'incompatible', $case['label'] . ' source semantic replacement is classified as incompatible');
+        $case_audit = cow_merge_audit_report($case_metadata, $case_run_id, 10, ['records' => 'conflicts']);
+        $case_conflicts = array_values(array_filter($case_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $case_conflict_id));
+        assert_same($case_conflicts[0]['revalidation_class'] ?? null, 'incompatible', $case['label'] . ' source audit exposes incompatible semantic replacement');
+        assert_true(str_contains((string)($case_conflicts[0]['stale_reason'] ?? ''), 'source row semantic identity'), $case['label'] . ' source stale reason explains semantic identity drift');
+        if ($case_name === 'post') {
+            assert_throws(
+                fn() => cow_merge_resolve_conflict($case_metadata, $case_conflict_id, 'source', true, 'Do not apply reviewed source row after source replacement.', 'cow-test', true),
+                'latest merge revalidation is incompatible',
+                'after-revalidate blocks source resolution from an incompatible source semantic replacement'
+            );
+        }
+    }
+
     $row_resolution_rollback_base = $tmp . '/row-resolution-rollback-base.sqlite';
     $row_resolution_rollback_source = $tmp . '/row-resolution-rollback-source.sqlite';
     $row_resolution_rollback_target = $tmp . '/row-resolution-rollback-target.sqlite';
@@ -3212,6 +4076,291 @@ SQL);
         fn() => cow_merge_resolve_conflict($metadata, $row_conflict_id, 'target', true, 'Try stale target keep.', 'cow-test'),
         'target row no longer matches',
         'stale row conflict resolution is blocked when target row has changed since audit'
+    );
+
+    $row_revalidate_base = $tmp . '/row-revalidate-base.sqlite';
+    $row_revalidate_source = $tmp . '/row-revalidate-source.sqlite';
+    $row_revalidate_target = $tmp . '/row-revalidate-target.sqlite';
+    $row_revalidate_metadata = $tmp . '/.forkpress/cow/merge/row-revalidate-metadata.sqlite';
+    create_base_db($row_revalidate_base);
+    copy($row_revalidate_base, $row_revalidate_source);
+    copy($row_revalidate_base, $row_revalidate_target);
+    $db = open_db($row_revalidate_source);
+    $db->exec("INSERT INTO plugin_items (item_id, label, value) VALUES ('row-revalidate', 'Source row revalidate', 'source row revalidate')");
+    $db->close();
+    $db = open_db($row_revalidate_target);
+    $db->exec("INSERT INTO plugin_items (item_id, label, value) VALUES ('row-revalidate', 'Target row revalidate', 'target row revalidate')");
+    $db->close();
+    $row_revalidate_merge = cow_merge_databases($row_revalidate_base, $row_revalidate_source, $row_revalidate_target, $row_revalidate_metadata, 'feature-row-revalidate', 'main');
+    $row_revalidate_run_id = (int)$row_revalidate_merge['run_id'];
+    $row_revalidate_conflict_id = (int)scalar($row_revalidate_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND conflict_type = 'row-insert-collision'");
+    cow_merge_review_record(
+        $row_revalidate_metadata,
+        'conflict',
+        $row_revalidate_conflict_id,
+        'reviewed',
+        'Keep target plugin row until revalidation.',
+        'cow-test'
+    );
+    $db = open_db($row_revalidate_target);
+    $db->exec("UPDATE plugin_items SET label = 'Target row drift after review', value = 'target row drift after review' WHERE item_id = 'row-revalidate'");
+    $db->close();
+    $row_revalidated = cow_merge_revalidate_reviewed_conflicts($row_revalidate_metadata, $row_revalidate_run_id, 'cow-revalidate');
+    assert_same($row_revalidated['carried'], 1, 'review revalidation carries stale row conflicts to needs-action');
+    assert_same((int)scalar($row_revalidate_metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $row_revalidate_conflict_id"), 1, 'row revalidation records the stale target row payload');
+    assert_same(scalar($row_revalidate_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $row_revalidate_conflict_id ORDER BY id DESC LIMIT 1"), 'compatible-target-drift', 'row revalidation classifies same-identity target drift');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($row_revalidate_metadata, $row_revalidate_conflict_id, 'source', true, 'Try stale row source before guarded revalidation.', 'cow-test'),
+        'target row no longer matches',
+        'stale row source resolution still fails without the after-revalidate guard'
+    );
+    $db = open_db($row_revalidate_target);
+    $db->exec("UPDATE plugin_items SET label = 'Target row drift after revalidation', value = 'target row drift after revalidation' WHERE item_id = 'row-revalidate'");
+    $db->close();
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($row_revalidate_metadata, $row_revalidate_conflict_id, 'source', true, 'Try stale row source after new target drift.', 'cow-test', true),
+        'target payload changed after latest merge revalidation',
+        'after-revalidate row resolution fails if target drifted again after revalidation'
+    );
+    $row_revalidated_after_drift = cow_merge_revalidate_reviewed_conflicts($row_revalidate_metadata, $row_revalidate_run_id, 'cow-revalidate');
+    assert_same($row_revalidated_after_drift['carried'], 1, 'review revalidation carries a new row note after further target drift');
+    assert_same((int)scalar($row_revalidate_metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $row_revalidate_conflict_id"), 2, 'row revalidation records the replacement stale target row payload');
+    $row_revalidated_target_payload = cow_merge_payload_json([
+        'item_id' => 'row-revalidate',
+        'label' => 'Target row drift after revalidation',
+        'value' => 'target row drift after revalidation',
+    ]);
+    $row_after_revalidate_resolution = cow_merge_resolve_conflict(
+        $row_revalidate_metadata,
+        $row_revalidate_conflict_id,
+        'source',
+        true,
+        'Apply source row after revalidating target drift.',
+        'cow-test',
+        true
+    );
+    assert_same($row_after_revalidate_resolution['status'], 'applied', 'after-revalidate source resolution applies a revalidated stale row conflict');
+    assert_same(scalar($row_revalidate_target, "SELECT label FROM plugin_items WHERE item_id = 'row-revalidate'"), 'Source row revalidate', 'after-revalidate row resolution writes the audited source row');
+    assert_same(
+        scalar($row_revalidate_metadata, "SELECT previous_payload FROM merge_resolutions WHERE conflict_id = $row_revalidate_conflict_id ORDER BY id DESC LIMIT 1"),
+        $row_revalidated_target_payload,
+        'after-revalidate row resolution audits the latest revalidated target row payload'
+    );
+
+    $post_identity_base = $tmp . '/post-identity-base.sqlite';
+    $post_identity_source = $tmp . '/post-identity-source.sqlite';
+    $post_identity_target = $tmp . '/post-identity-target.sqlite';
+    $post_identity_metadata = $tmp . '/.forkpress/cow/merge/post-identity-metadata.sqlite';
+    foreach ([$post_identity_base, $post_identity_source, $post_identity_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE wp_posts (ID INTEGER PRIMARY KEY, post_type TEXT, post_title TEXT, post_content TEXT)');
+        $db->close();
+    }
+    $db = open_db($post_identity_source);
+    $db->exec("INSERT INTO wp_posts (ID, post_type, post_title, post_content) VALUES (10, 'page', 'Source page', 'source page content')");
+    $db->close();
+    $db = open_db($post_identity_target);
+    $db->exec("INSERT INTO wp_posts (ID, post_type, post_title, post_content) VALUES (10, 'page', 'Target page', 'target page content')");
+    $db->close();
+    $post_identity_merge = cow_merge_databases($post_identity_base, $post_identity_source, $post_identity_target, $post_identity_metadata, 'feature-post-identity-review', 'main');
+    $post_identity_run_id = (int)$post_identity_merge['run_id'];
+    assert_same($post_identity_merge['status'], 'completed_with_conflicts', 'post semantic identity fixture starts with a same-ID row conflict');
+    $post_identity_conflict_id = (int)scalar($post_identity_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'wp_posts' AND conflict_type = 'row-insert-collision'");
+    cow_merge_review_record(
+        $post_identity_metadata,
+        'conflict',
+        $post_identity_conflict_id,
+        'reviewed',
+        'Review source page before applying over target page.',
+        'cow-test'
+    );
+    $db = open_db($post_identity_target);
+    $db->exec("UPDATE wp_posts SET post_type = 'attachment', post_title = 'Target attachment', post_content = 'target attachment content' WHERE ID = 10");
+    $db->close();
+    $post_identity_revalidated = cow_merge_revalidate_reviewed_conflicts($post_identity_metadata, $post_identity_run_id, 'cow-revalidate');
+    assert_same($post_identity_revalidated['carried'], 1, 'review revalidation carries semantically replaced post rows to needs-action');
+    assert_same(scalar($post_identity_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $post_identity_conflict_id ORDER BY id DESC LIMIT 1"), 'incompatible', 'post row revalidation classifies changed post_type as incompatible');
+    $post_identity_audit = cow_merge_audit_report($post_identity_metadata, $post_identity_run_id, 10, ['records' => 'conflicts']);
+    $post_identity_conflicts = array_values(array_filter($post_identity_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $post_identity_conflict_id));
+    assert_same($post_identity_conflicts[0]['revalidation_class'] ?? null, 'incompatible', 'post row audit exposes incompatible semantic replacement');
+    assert_true(str_contains((string)($post_identity_conflicts[0]['stale_reason'] ?? ''), 'semantic identity'), 'post row stale reason explains semantic identity drift');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($post_identity_metadata, $post_identity_conflict_id, 'source', true, 'Do not apply source page over replacement attachment.', 'cow-test', true),
+        'latest merge revalidation is incompatible',
+        'after-revalidate blocks source resolution over an incompatible post semantic replacement'
+    );
+
+    $semantic_identity_cases = [
+        'option' => [
+            'table' => 'wp_options',
+            'create' => 'CREATE TABLE wp_options (option_id INTEGER PRIMARY KEY, option_name TEXT, option_value TEXT)',
+            'source_insert' => "INSERT INTO wp_options (option_id, option_name, option_value) VALUES (20, 'source_setting', 'source value')",
+            'target_insert' => "INSERT INTO wp_options (option_id, option_name, option_value) VALUES (20, 'target_setting', 'target value')",
+            'target_update' => "UPDATE wp_options SET option_name = 'replacement_setting', option_value = 'replacement value' WHERE option_id = 20",
+            'branch' => 'feature-option-identity-review',
+            'label' => 'option_name',
+        ],
+        'postmeta' => [
+            'table' => 'wp_postmeta',
+            'create' => 'CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY, post_id INTEGER, meta_key TEXT, meta_value TEXT)',
+            'source_insert' => "INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES (30, 10, 'source_key', 'source value')",
+            'target_insert' => "INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES (30, 10, 'target_key', 'target value')",
+            'target_update' => "UPDATE wp_postmeta SET post_id = 11, meta_key = 'replacement_key', meta_value = 'replacement value' WHERE meta_id = 30",
+            'branch' => 'feature-postmeta-identity-review',
+            'label' => 'post_id/meta_key',
+        ],
+        'term' => [
+            'table' => 'wp_terms',
+            'create' => 'CREATE TABLE wp_terms (term_id INTEGER PRIMARY KEY, name TEXT, slug TEXT, term_group INTEGER)',
+            'source_insert' => "INSERT INTO wp_terms (term_id, name, slug, term_group) VALUES (40, 'Source term', 'source-term', 0)",
+            'target_insert' => "INSERT INTO wp_terms (term_id, name, slug, term_group) VALUES (40, 'Target term', 'target-term', 0)",
+            'target_update' => "UPDATE wp_terms SET name = 'Replacement term', slug = 'replacement-term' WHERE term_id = 40",
+            'branch' => 'feature-term-identity-review',
+            'label' => 'term slug',
+        ],
+        'term-taxonomy' => [
+            'table' => 'wp_term_taxonomy',
+            'create' => 'CREATE TABLE wp_term_taxonomy (term_taxonomy_id INTEGER PRIMARY KEY, term_id INTEGER, taxonomy TEXT, description TEXT)',
+            'source_insert' => "INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description) VALUES (50, 40, 'category', 'source taxonomy')",
+            'target_insert' => "INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description) VALUES (50, 40, 'post_tag', 'target taxonomy')",
+            'target_update' => "UPDATE wp_term_taxonomy SET term_id = 41, taxonomy = 'nav_menu', description = 'replacement taxonomy' WHERE term_taxonomy_id = 50",
+            'branch' => 'feature-term-taxonomy-identity-review',
+            'label' => 'term_id/taxonomy',
+        ],
+        'termmeta' => [
+            'table' => 'wp_termmeta',
+            'create' => 'CREATE TABLE wp_termmeta (meta_id INTEGER PRIMARY KEY, term_id INTEGER, meta_key TEXT, meta_value TEXT)',
+            'source_insert' => "INSERT INTO wp_termmeta (meta_id, term_id, meta_key, meta_value) VALUES (60, 40, 'source_key', 'source value')",
+            'target_insert' => "INSERT INTO wp_termmeta (meta_id, term_id, meta_key, meta_value) VALUES (60, 40, 'target_key', 'target value')",
+            'target_update' => "UPDATE wp_termmeta SET term_id = 41, meta_key = 'replacement_key', meta_value = 'replacement value' WHERE meta_id = 60",
+            'branch' => 'feature-termmeta-identity-review',
+            'label' => 'term_id/meta_key',
+        ],
+        'user' => [
+            'table' => 'wp_users',
+            'create' => 'CREATE TABLE wp_users (ID INTEGER PRIMARY KEY, user_login TEXT, user_email TEXT)',
+            'source_insert' => "INSERT INTO wp_users (ID, user_login, user_email) VALUES (70, 'source_user', 'source@example.test')",
+            'target_insert' => "INSERT INTO wp_users (ID, user_login, user_email) VALUES (70, 'target_user', 'target@example.test')",
+            'target_update' => "UPDATE wp_users SET user_login = 'replacement_user', user_email = 'replacement@example.test' WHERE ID = 70",
+            'branch' => 'feature-user-identity-review',
+            'label' => 'user_login',
+        ],
+        'usermeta' => [
+            'table' => 'wp_usermeta',
+            'create' => 'CREATE TABLE wp_usermeta (umeta_id INTEGER PRIMARY KEY, user_id INTEGER, meta_key TEXT, meta_value TEXT)',
+            'source_insert' => "INSERT INTO wp_usermeta (umeta_id, user_id, meta_key, meta_value) VALUES (80, 70, 'source_key', 'source value')",
+            'target_insert' => "INSERT INTO wp_usermeta (umeta_id, user_id, meta_key, meta_value) VALUES (80, 70, 'target_key', 'target value')",
+            'target_update' => "UPDATE wp_usermeta SET user_id = 71, meta_key = 'replacement_key', meta_value = 'replacement value' WHERE umeta_id = 80",
+            'branch' => 'feature-usermeta-identity-review',
+            'label' => 'user_id/meta_key',
+        ],
+        'comment' => [
+            'table' => 'wp_comments',
+            'create' => 'CREATE TABLE wp_comments (comment_ID INTEGER PRIMARY KEY, comment_post_ID INTEGER, comment_type TEXT, comment_content TEXT)',
+            'source_insert' => "INSERT INTO wp_comments (comment_ID, comment_post_ID, comment_type, comment_content) VALUES (90, 10, 'comment', 'source comment')",
+            'target_insert' => "INSERT INTO wp_comments (comment_ID, comment_post_ID, comment_type, comment_content) VALUES (90, 10, 'review', 'target comment')",
+            'target_update' => "UPDATE wp_comments SET comment_post_ID = 11, comment_type = 'pingback', comment_content = 'replacement comment' WHERE comment_ID = 90",
+            'branch' => 'feature-comment-identity-review',
+            'label' => 'comment_post_ID/comment_type',
+        ],
+        'commentmeta' => [
+            'table' => 'wp_commentmeta',
+            'create' => 'CREATE TABLE wp_commentmeta (meta_id INTEGER PRIMARY KEY, comment_id INTEGER, meta_key TEXT, meta_value TEXT)',
+            'source_insert' => "INSERT INTO wp_commentmeta (meta_id, comment_id, meta_key, meta_value) VALUES (100, 90, 'source_key', 'source value')",
+            'target_insert' => "INSERT INTO wp_commentmeta (meta_id, comment_id, meta_key, meta_value) VALUES (100, 90, 'target_key', 'target value')",
+            'target_update' => "UPDATE wp_commentmeta SET comment_id = 91, meta_key = 'replacement_key', meta_value = 'replacement value' WHERE meta_id = 100",
+            'branch' => 'feature-commentmeta-identity-review',
+            'label' => 'comment_id/meta_key',
+        ],
+    ];
+    foreach ($semantic_identity_cases as $case_name => $case) {
+        $case_base = $tmp . "/semantic-$case_name-base.sqlite";
+        $case_source = $tmp . "/semantic-$case_name-source.sqlite";
+        $case_target = $tmp . "/semantic-$case_name-target.sqlite";
+        $case_metadata = $tmp . "/.forkpress/cow/merge/semantic-$case_name-metadata.sqlite";
+        foreach ([$case_base, $case_source, $case_target] as $path) {
+            $db = open_db($path);
+            $db->exec($case['create']);
+            $db->close();
+        }
+        $db = open_db($case_source);
+        $db->exec($case['source_insert']);
+        $db->close();
+        $db = open_db($case_target);
+        $db->exec($case['target_insert']);
+        $db->close();
+        $case_merge = cow_merge_databases($case_base, $case_source, $case_target, $case_metadata, $case['branch'], 'main');
+        $case_run_id = (int)$case_merge['run_id'];
+        assert_same($case_merge['status'], 'completed_with_conflicts', $case['label'] . ' semantic identity fixture starts with a same-ID row conflict');
+        $case_conflict_id = (int)scalar($case_metadata, "SELECT id FROM merge_conflicts WHERE table_name = '{$case['table']}' AND conflict_type = 'row-insert-collision'");
+        cow_merge_review_record(
+            $case_metadata,
+            'conflict',
+            $case_conflict_id,
+            'reviewed',
+            'Review source row before applying over target semantic identity.',
+            'cow-test'
+        );
+        $db = open_db($case_target);
+        $db->exec($case['target_update']);
+        $db->close();
+        $case_revalidated = cow_merge_revalidate_reviewed_conflicts($case_metadata, $case_run_id, 'cow-revalidate');
+        assert_same($case_revalidated['carried'], 1, $case['label'] . ' semantic replacement is carried to needs-action');
+        assert_same(scalar($case_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $case_conflict_id ORDER BY id DESC LIMIT 1"), 'incompatible', $case['label'] . ' semantic replacement is classified as incompatible');
+        $case_audit = cow_merge_audit_report($case_metadata, $case_run_id, 10, ['records' => 'conflicts']);
+        $case_conflicts = array_values(array_filter($case_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $case_conflict_id));
+        assert_same($case_conflicts[0]['revalidation_class'] ?? null, 'incompatible', $case['label'] . ' audit exposes incompatible semantic replacement');
+        assert_true(str_contains((string)($case_conflicts[0]['stale_reason'] ?? ''), 'semantic identity'), $case['label'] . ' stale reason explains semantic identity drift');
+    }
+
+    $row_missing_base = $tmp . '/row-missing-base.sqlite';
+    $row_missing_source = $tmp . '/row-missing-source.sqlite';
+    $row_missing_target = $tmp . '/row-missing-target.sqlite';
+    $row_missing_metadata = $tmp . '/.forkpress/cow/merge/row-missing-metadata.sqlite';
+    create_base_db($row_missing_base);
+    copy($row_missing_base, $row_missing_source);
+    copy($row_missing_base, $row_missing_target);
+    $db = open_db($row_missing_source);
+    $db->exec("INSERT INTO plugin_items (item_id, label, value) VALUES ('row-missing', 'Source row missing', 'source row missing')");
+    $db->close();
+    $db = open_db($row_missing_target);
+    $db->exec("INSERT INTO plugin_items (item_id, label, value) VALUES ('row-missing', 'Target row missing', 'target row missing')");
+    $db->close();
+    $row_missing_merge = cow_merge_databases($row_missing_base, $row_missing_source, $row_missing_target, $row_missing_metadata, 'feature-row-missing-review', 'main');
+    $row_missing_run_id = (int)$row_missing_merge['run_id'];
+    $row_missing_conflict_id = (int)scalar($row_missing_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND conflict_type = 'row-insert-collision'");
+    cow_merge_review_record(
+        $row_missing_metadata,
+        'conflict',
+        $row_missing_conflict_id,
+        'reviewed',
+        'Revalidate before applying a row conflict whose target disappeared.',
+        'cow-test'
+    );
+    $db = open_db($row_missing_target);
+    $db->exec("DELETE FROM plugin_items WHERE item_id = 'row-missing'");
+    $db->close();
+    $row_missing_revalidated = cow_merge_revalidate_reviewed_conflicts($row_missing_metadata, $row_missing_run_id, 'cow-revalidate');
+    assert_same($row_missing_revalidated['carried'], 1, 'review revalidation carries missing target row conflicts to needs-action');
+    assert_same(scalar($row_missing_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $row_missing_conflict_id ORDER BY id DESC LIMIT 1"), 'missing', 'row revalidation classifies deleted target rows as missing');
+    $row_missing_audit = cow_merge_audit_report($row_missing_metadata, $row_missing_run_id, 10, ['records' => 'conflicts']);
+    $row_missing_conflicts = array_values(array_filter($row_missing_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $row_missing_conflict_id));
+    assert_same($row_missing_conflicts[0]['revalidation_class'] ?? null, 'missing', 'row audit exposes missing target row revalidation class');
+    $row_missing_resolution = cow_merge_resolve_conflict(
+        $row_missing_metadata,
+        $row_missing_conflict_id,
+        'source',
+        true,
+        'Apply source after missing-row conflict revalidation.',
+        'cow-test',
+        true
+    );
+    assert_same($row_missing_resolution['status'], 'applied', 'after-revalidate source resolution can restore a reviewed missing row conflict');
+    assert_same(scalar($row_missing_target, "SELECT label FROM plugin_items WHERE item_id = 'row-missing'"), 'Source row missing', 'after-revalidate row resolution restores the audited source row');
+    assert_same(
+        scalar($row_missing_metadata, "SELECT previous_payload FROM merge_resolutions WHERE conflict_id = $row_missing_conflict_id ORDER BY id DESC LIMIT 1"),
+        cow_merge_payload_json(null),
+        'after-revalidate row resolution audits the missing revalidated target row'
     );
 
     $row_target_choice_base = $tmp . '/row-target-choice-base.sqlite';
@@ -4607,7 +5756,12 @@ SQL);
     write_test_file($file_base_root . '/wp-content/uploads/same-change.txt', 'base same change');
     write_test_file($file_base_root . '/wp-content/uploads/same-delete.txt', 'base same delete');
     write_test_file($file_base_root . '/wp-content/uploads/conflict.txt', 'base conflict');
+    write_test_file($file_base_root . '/wp-content/uploads/binary-source-change.bin', "base\0binary");
+    write_test_file($file_base_root . '/wp-content/uploads/binary-conflict.bin', "base\0binary conflict");
     create_test_symlink('shared.txt', $file_base_root . '/wp-content/uploads/shared-link.txt');
+    mkdir($file_base_root . '/wp-content/uploads/replace-dir-with-file', 0777, true);
+    write_test_file($file_base_root . '/wp-content/uploads/replace-dir-with-file/base-child.txt', 'base child');
+    write_test_file($file_base_root . '/wp-content/uploads/replace-file-with-dir', 'base file child');
     mkdir($file_base_root . '/wp-content/uploads/delete-empty-dir', 0777, true);
     mkdir($file_base_root . '/wp-content/uploads/delete-dir-conflict', 0777, true);
     write_test_file($file_base_root . '/wp-config.php', 'managed base config');
@@ -4616,7 +5770,7 @@ SQL);
     copy_tree_for_test($file_base_root, $file_target_root);
     $file_base_manifest = $tmp . '/.forkpress/cow/merge/file-bases/feature-files.json';
     $file_capture = cow_merge_capture_file_base($file_base_root, $file_base_manifest);
-    assert_same($file_capture['files'], 8, 'filesystem merge base excludes ForkPress-managed files');
+    assert_same($file_capture['files'], 12, 'filesystem merge base excludes ForkPress-managed files');
 
     write_test_file($file_source_root . '/wp-content/uploads/shared.txt', 'source shared');
     write_test_file($file_source_root . '/wp-content/uploads/new-source.txt', 'source new');
@@ -4627,6 +5781,16 @@ SQL);
     create_test_symlink('../new-source.txt', $file_source_root . '/wp-content/uploads/links/source-link.txt');
     create_test_symlink('/etc/passwd', $file_source_root . '/wp-content/uploads/absolute-link.txt');
     create_test_symlink('../../../etc/passwd', $file_source_root . '/wp-content/uploads/outside-link.txt');
+    create_test_symlink('self-link.txt', $file_source_root . '/wp-content/uploads/self-link.txt');
+    create_test_symlink('../../wp-config.php', $file_source_root . '/wp-content/uploads/managed-link.txt');
+    write_test_file($file_source_root . '/wp-content/uploads/binary-source-change.bin', "source\0binary\xff");
+    write_test_file($file_source_root . '/wp-content/uploads/binary-conflict.bin', "source\0binary conflict\xff");
+    unlink($file_source_root . '/wp-content/uploads/replace-dir-with-file/base-child.txt');
+    rmdir($file_source_root . '/wp-content/uploads/replace-dir-with-file');
+    write_test_file($file_source_root . '/wp-content/uploads/replace-dir-with-file', 'source replacement file');
+    unlink($file_source_root . '/wp-content/uploads/replace-file-with-dir');
+    mkdir($file_source_root . '/wp-content/uploads/replace-file-with-dir', 0777, true);
+    write_test_file($file_source_root . '/wp-content/uploads/replace-file-with-dir/source-child.txt', 'source replacement child');
     unlink($file_source_root . '/wp-content/uploads/delete-me.txt');
     unlink($file_source_root . '/wp-content/uploads/same-delete.txt');
     rmdir($file_source_root . '/wp-content/uploads/delete-empty-dir');
@@ -4642,6 +5806,7 @@ SQL);
     unlink($file_target_root . '/wp-content/uploads/target-delete.txt');
     unlink($file_target_root . '/wp-content/uploads/same-delete.txt');
     write_test_file($file_target_root . '/wp-content/uploads/target-change.txt', 'target changed');
+    write_test_file($file_target_root . '/wp-content/uploads/binary-conflict.bin', "target\0binary conflict\xfe");
     write_test_file($file_target_root . '/wp-content/uploads/delete-dir-conflict/target-child.txt', 'target child');
     write_test_file($file_target_root . '/wp-config.php', 'target managed config');
     write_test_file($file_target_root . '/wp-content/database/.ht.sqlite', 'target managed db');
@@ -4665,8 +5830,11 @@ SQL);
     assert_same(readlink($file_target_root . '/wp-content/uploads/shared-link.txt'), 'new-source.txt', 'merged symlink keeps the source relative target');
     assert_true(is_link($file_target_root . '/wp-content/uploads/links/source-link.txt'), 'source-only safe filesystem symlink addition is applied');
     assert_same(readlink($file_target_root . '/wp-content/uploads/links/source-link.txt'), '../new-source.txt', 'safe symlink with in-root parent traversal is preserved');
+    assert_same(file_get_contents($file_target_root . '/wp-content/uploads/binary-source-change.bin'), "source\0binary\xff", 'source-only binary filesystem modification is applied exactly');
     assert_true(!file_exists($file_target_root . '/wp-content/uploads/absolute-link.txt') && !is_link($file_target_root . '/wp-content/uploads/absolute-link.txt'), 'absolute source symlink is not auto-applied');
     assert_true(!file_exists($file_target_root . '/wp-content/uploads/outside-link.txt') && !is_link($file_target_root . '/wp-content/uploads/outside-link.txt'), 'path-traversing source symlink is not auto-applied');
+    assert_true(!file_exists($file_target_root . '/wp-content/uploads/self-link.txt') && !is_link($file_target_root . '/wp-content/uploads/self-link.txt'), 'self-referential source symlink is not auto-applied');
+    assert_true(!file_exists($file_target_root . '/wp-content/uploads/managed-link.txt') && !is_link($file_target_root . '/wp-content/uploads/managed-link.txt'), 'managed-path source symlink is not auto-applied');
     assert_true(!file_exists($file_target_root . '/wp-content/uploads/delete-me.txt'), 'source-only filesystem deletion is applied');
     assert_true(!file_exists($file_target_root . '/wp-content/uploads/delete-empty-dir'), 'source-only empty filesystem directory deletion is applied');
     assert_same(file_get_contents($file_target_root . '/wp-content/uploads/conflict.txt'), 'target conflict', 'target filesystem path wins conflicting edits');
@@ -4675,13 +5843,18 @@ SQL);
     assert_same(file_get_contents($file_target_root . '/wp-content/uploads/target-change.txt'), 'target changed', 'target-only filesystem path change is preserved');
     assert_same(file_get_contents($file_target_root . '/wp-content/uploads/same-added.txt'), 'same added', 'identical source/target filesystem addition remains present');
     assert_same(file_get_contents($file_target_root . '/wp-content/uploads/same-change.txt'), 'same changed', 'identical source/target filesystem change remains present');
+    assert_same(file_get_contents($file_target_root . '/wp-content/uploads/binary-conflict.bin'), "target\0binary conflict\xfe", 'target binary filesystem path wins conflicting binary edits');
     assert_true(!file_exists($file_target_root . '/wp-content/uploads/same-delete.txt'), 'identical source/target filesystem deletion remains deleted');
+    assert_true(is_dir($file_target_root . '/wp-content/uploads/replace-dir-with-file'), 'target directory remains after reviewed source directory-to-file replacement conflict');
+    assert_same(file_get_contents($file_target_root . '/wp-content/uploads/replace-dir-with-file/base-child.txt'), 'base child', 'target directory child remains after parent replacement conflict');
+    assert_same(file_get_contents($file_target_root . '/wp-content/uploads/replace-file-with-dir'), 'base file child', 'target file remains after reviewed source file-to-directory replacement conflict');
     assert_same(file_get_contents($file_target_root . '/wp-content/uploads/delete-dir-conflict/target-child.txt'), 'target child', 'target-side directory descendants block automatic source directory deletion');
     assert_same(file_get_contents($file_target_root . '/wp-config.php'), 'target managed config', 'managed wp-config.php is excluded from filesystem merge');
     assert_same(file_get_contents($file_target_root . '/wp-content/database/.ht.sqlite'), 'target managed db', 'managed SQLite database path is excluded from filesystem merge');
-    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-conflict'"), 1, 'filesystem conflict is auditable');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-conflict'"), 2, 'filesystem content conflicts are auditable');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-directory-delete-conflict'"), 1, 'unsafe filesystem directory deletion conflict is auditable');
-    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-unsafe-symlink'"), 2, 'unsafe filesystem symlink conflicts are auditable');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-unsafe-symlink'"), 4, 'unsafe filesystem symlink conflicts are auditable');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-type-replacement-conflict'"), 2, 'filesystem directory/file replacement conflicts are auditable');
     assert_true((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'source-applied'") >= 5, 'filesystem automatic decisions are auditable');
     $source_changed_file_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/shared.txt'));
     $source_new_file_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/new-source.txt'));
@@ -4694,6 +5867,10 @@ SQL);
     $source_delete_file_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/delete-me.txt'));
     $source_delete_dir_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/delete-empty-dir'));
     $conflict_file_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/conflict.txt'));
+    $source_replaced_dir_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/replace-dir-with-file'));
+    $source_replaced_file_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/replace-file-with-dir'));
+    $source_replaced_dir_child_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/replace-dir-with-file/base-child.txt'));
+    $source_replaced_file_child_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/replace-file-with-dir/source-child.txt'));
     $base_file_entries = cow_merge_file_manifest_for_root($file_base_root)['entries'];
     $source_file_entries = cow_merge_file_manifest_for_root($file_source_root)['entries'];
     $merged_file_entries = cow_merge_file_manifest_for_root($file_target_root)['entries'];
@@ -4713,6 +5890,10 @@ SQL);
     $conflict_base_payload = SQLite3::escapeString(cow_merge_payload_json(cow_merge_file_path_payload('wp-content/uploads/conflict.txt', $base_file_entries['wp-content/uploads/conflict.txt'])));
     $conflict_source_payload = SQLite3::escapeString(cow_merge_payload_json(cow_merge_file_path_payload('wp-content/uploads/conflict.txt', $source_file_entries['wp-content/uploads/conflict.txt'])));
     $conflict_target_payload = SQLite3::escapeString(cow_merge_payload_json(cow_merge_file_path_payload('wp-content/uploads/conflict.txt', $merged_file_entries['wp-content/uploads/conflict.txt'])));
+    $binary_conflict_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/binary-conflict.bin'));
+    $binary_conflict_base_payload = SQLite3::escapeString(cow_merge_payload_json(cow_merge_file_path_payload('wp-content/uploads/binary-conflict.bin', $base_file_entries['wp-content/uploads/binary-conflict.bin'])));
+    $binary_conflict_source_payload = SQLite3::escapeString(cow_merge_payload_json(cow_merge_file_path_payload('wp-content/uploads/binary-conflict.bin', $source_file_entries['wp-content/uploads/binary-conflict.bin'])));
+    $binary_conflict_target_payload = SQLite3::escapeString(cow_merge_payload_json(cow_merge_file_path_payload('wp-content/uploads/binary-conflict.bin', $merged_file_entries['wp-content/uploads/binary-conflict.bin'])));
     $same_added_file_payload = SQLite3::escapeString(cow_merge_payload_json(cow_merge_file_path_payload('wp-content/uploads/same-added.txt', $merged_file_entries['wp-content/uploads/same-added.txt'])));
     $same_change_base_payload = SQLite3::escapeString(cow_merge_payload_json(cow_merge_file_path_payload('wp-content/uploads/same-change.txt', $base_file_entries['wp-content/uploads/same-change.txt'])));
     $same_change_file_payload = SQLite3::escapeString(cow_merge_payload_json(cow_merge_file_path_payload('wp-content/uploads/same-change.txt', $merged_file_entries['wp-content/uploads/same-change.txt'])));
@@ -4775,21 +5956,28 @@ SQL);
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'source-applied' AND row_identity = '$same_change_file_identity' AND reason = 'source and target changed filesystem path to the same state' AND base_payload = '$same_change_base_payload' AND source_payload = '$same_change_file_payload' AND target_payload = '$same_change_file_payload' AND chosen_payload = '$same_change_file_payload'"), 1, 'identical source/target filesystem change records matching source, target, and chosen payloads');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'source-applied' AND row_identity = '$same_delete_file_identity' AND reason = 'source and target deleted the same filesystem path' AND chosen_payload IS NULL"), 1, 'identical source/target filesystem deletion is auditable');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'source-applied' AND row_identity = '$same_delete_file_identity' AND reason = 'source and target deleted the same filesystem path' AND base_payload = '$same_delete_base_payload' AND source_payload IS NULL AND target_payload IS NULL AND chosen_payload IS NULL"), 1, 'identical source/target filesystem deletion records empty source, target, and chosen payloads');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'target-wins' AND row_identity = '$source_replaced_dir_identity' AND reason LIKE 'source changed filesystem path type from dir to file%'"), 1, 'directory-to-file replacement records a type-specific target-wins decision');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'target-wins' AND row_identity = '$source_replaced_file_identity' AND reason LIKE 'source changed filesystem path type from file to dir%'"), 1, 'file-to-directory replacement records a type-specific target-wins decision');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'target-kept' AND row_identity = '$source_replaced_dir_child_identity' AND reason = 'target subtree kept because parent filesystem replacement requires review'"), 1, 'directory-to-file replacement preserves unchanged target descendants under the conflicted parent');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'target-kept' AND row_identity = '$source_replaced_file_child_identity' AND reason = 'target subtree kept because parent filesystem replacement requires review'"), 1, 'file-to-directory replacement holds source descendants under the conflicted parent');
     $file_conflict_audit = cow_merge_audit_report($metadata, null, 10, ['scope' => 'files', 'records' => 'conflicts']);
     assert_same($file_conflict_audit['filters']['scope'], 'files', 'merge audit JSON report includes the file scope filter');
     assert_same($file_conflict_audit['filters']['records'], 'conflicts', 'merge audit JSON report includes the record-type filter');
-    assert_same(count($file_conflict_audit['conflicts']), 4, 'merge audit can focus on filesystem conflicts');
+    assert_same(count($file_conflict_audit['conflicts']), 9, 'merge audit can focus on filesystem conflicts');
     assert_same(count($file_conflict_audit['decisions']), 0, 'conflict-only audit filter omits decisions');
     assert_same(count($file_conflict_audit['autoincrement_bands']), 0, 'file conflict audit filter omits database-only band summaries');
     assert_same(count($file_conflict_audit['row_identity_summary']), 0, 'file conflict audit filter omits database-only row identity summaries');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-conflict' AND row_identity = '$conflict_file_identity' AND base_payload = '$conflict_base_payload' AND source_payload = '$conflict_source_payload' AND target_payload = '$conflict_target_payload' AND chosen_payload = '$conflict_target_payload'"), 1, 'filesystem content conflicts record base, source, target, and chosen target payloads');
-    assert_same(count(array_filter($file_conflict_audit['conflicts'], fn($row) => $row['table_name'] === '__files__')), 4, 'filesystem audit filter exports only file records');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-conflict' AND row_identity = '$binary_conflict_identity' AND base_payload = '$binary_conflict_base_payload' AND source_payload = '$binary_conflict_source_payload' AND target_payload = '$binary_conflict_target_payload' AND chosen_payload = '$binary_conflict_target_payload'"), 1, 'binary filesystem content conflicts record hash payloads without text decoding');
+    assert_same(count(array_filter($file_conflict_audit['conflicts'], fn($row) => $row['table_name'] === '__files__')), 9, 'filesystem audit filter exports only file records');
     $unsafe_symlink_audit = cow_merge_audit_report($metadata, null, 10, [
         'scope' => 'files',
         'records' => 'conflicts',
         'conflict_type' => 'file-unsafe-symlink',
     ]);
-    assert_same(count($unsafe_symlink_audit['conflicts']), 2, 'merge audit can filter filesystem conflicts by type');
+    assert_same(count($unsafe_symlink_audit['conflicts']), 4, 'merge audit can filter filesystem conflicts by type');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'target-wins' AND reason LIKE '%symlink target points at itself%'"), 1, 'unsafe symlink decisions explain self-referential symlinks');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'target-wins' AND reason LIKE '%symlink target points at a ForkPress-managed path%'"), 1, 'unsafe symlink decisions explain managed-path symlinks');
     ob_start();
     cow_merge_print_audit_text($unsafe_symlink_audit);
     $unsafe_symlink_text = ob_get_clean();
@@ -4971,9 +6159,17 @@ SQL);
     $file_resolve_target_root = $tmp . '/files-resolve-target';
     mkdir($file_resolve_base_root . '/wp-content/uploads', 0777, true);
     write_test_file($file_resolve_base_root . '/wp-content/uploads/conflict.txt', 'base conflict');
+    write_test_file($file_resolve_base_root . '/wp-content/uploads/binary-conflict.bin', "base binary conflict\0\x80");
     write_test_file($file_resolve_base_root . '/wp-content/uploads/delete-conflict.txt', 'base delete conflict');
     write_test_file($file_resolve_base_root . '/wp-content/uploads/rollback-conflict.txt', 'base rollback conflict');
     write_test_file($file_resolve_base_root . '/wp-content/uploads/commit-rollback-conflict.txt', 'base commit rollback conflict');
+    write_test_file($file_resolve_base_root . '/wp-content/uploads/revalidate-conflict.txt', 'base revalidate conflict');
+    write_test_file($file_resolve_base_root . '/wp-content/uploads/revalidate-missing.txt', 'base revalidate missing');
+    write_test_file($file_resolve_base_root . '/wp-content/uploads/revalidate-source-drift.txt', 'base revalidate source drift');
+    mkdir($file_resolve_base_root . '/wp-content/uploads/replace-dir-with-file', 0777, true);
+    write_test_file($file_resolve_base_root . '/wp-content/uploads/replace-dir-with-file/base-child.txt', 'base replacement child');
+    write_test_file($file_resolve_base_root . '/wp-content/uploads/replace-file-with-dir', 'base replacement file');
+    write_test_file($file_resolve_base_root . '/wp-content/uploads/replace-file-with-unsafe-dir', 'base unsafe replacement file');
     copy_tree_for_test($file_resolve_base_root, $file_resolve_source_root);
     copy_tree_for_test($file_resolve_base_root, $file_resolve_target_root);
     $file_resolve_base_db = $file_resolve_base_root . '/wp-content/database/.ht.sqlite';
@@ -4988,14 +6184,32 @@ SQL);
     $file_resolve_manifest = $tmp . '/.forkpress/cow/merge/file-bases/feature-file-resolve.json';
     cow_merge_capture_file_base($file_resolve_base_root, $file_resolve_manifest);
     write_test_file($file_resolve_source_root . '/wp-content/uploads/conflict.txt', 'source conflict resolution');
+    write_test_file($file_resolve_source_root . '/wp-content/uploads/binary-conflict.bin', "source binary resolution\0\xff");
     write_test_file($file_resolve_source_root . '/wp-content/uploads/rollback-conflict.txt', 'source rollback resolution');
     write_test_file($file_resolve_source_root . '/wp-content/uploads/commit-rollback-conflict.txt', 'source commit rollback resolution');
+    write_test_file($file_resolve_source_root . '/wp-content/uploads/revalidate-conflict.txt', 'source revalidate resolution');
+    write_test_file($file_resolve_source_root . '/wp-content/uploads/revalidate-missing.txt', 'source revalidate missing');
+    write_test_file($file_resolve_source_root . '/wp-content/uploads/revalidate-source-drift.txt', 'source revalidate original');
     create_test_symlink('/etc/passwd', $file_resolve_source_root . '/wp-content/uploads/unsafe-link.txt');
     unlink($file_resolve_source_root . '/wp-content/uploads/delete-conflict.txt');
+    unlink($file_resolve_source_root . '/wp-content/uploads/replace-dir-with-file/base-child.txt');
+    rmdir($file_resolve_source_root . '/wp-content/uploads/replace-dir-with-file');
+    write_test_file($file_resolve_source_root . '/wp-content/uploads/replace-dir-with-file', 'source resolved replacement file');
+    unlink($file_resolve_source_root . '/wp-content/uploads/replace-file-with-dir');
+    mkdir($file_resolve_source_root . '/wp-content/uploads/replace-file-with-dir', 0777, true);
+    write_test_file($file_resolve_source_root . '/wp-content/uploads/replace-file-with-dir/source-child.txt', 'source resolved replacement child');
+    create_test_symlink('source-child.txt', $file_resolve_source_root . '/wp-content/uploads/replace-file-with-dir/source-link.txt');
+    unlink($file_resolve_source_root . '/wp-content/uploads/replace-file-with-unsafe-dir');
+    mkdir($file_resolve_source_root . '/wp-content/uploads/replace-file-with-unsafe-dir', 0777, true);
+    create_test_symlink('/etc/passwd', $file_resolve_source_root . '/wp-content/uploads/replace-file-with-unsafe-dir/unsafe-link.txt');
     write_test_file($file_resolve_target_root . '/wp-content/uploads/conflict.txt', 'target conflict resolution');
+    write_test_file($file_resolve_target_root . '/wp-content/uploads/binary-conflict.bin', "target binary resolution\0\xfe");
     write_test_file($file_resolve_target_root . '/wp-content/uploads/delete-conflict.txt', 'target changed before source deletion');
     write_test_file($file_resolve_target_root . '/wp-content/uploads/rollback-conflict.txt', 'target rollback resolution');
     write_test_file($file_resolve_target_root . '/wp-content/uploads/commit-rollback-conflict.txt', 'target commit rollback resolution');
+    write_test_file($file_resolve_target_root . '/wp-content/uploads/revalidate-conflict.txt', 'target revalidate resolution');
+    write_test_file($file_resolve_target_root . '/wp-content/uploads/revalidate-missing.txt', 'target revalidate missing');
+    write_test_file($file_resolve_target_root . '/wp-content/uploads/revalidate-source-drift.txt', 'target revalidate source drift');
     cow_merge_branch_state(
         $file_resolve_base_db,
         $file_resolve_source_db,
@@ -5029,10 +6243,146 @@ SQL);
     assert_same($file_source_resolution['status'], 'applied', 'source filesystem conflict resolution records applied status');
     assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/conflict.txt'), 'source conflict resolution', 'source filesystem conflict resolution copies the audited source file');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $file_conflict_id AND table_name = '__files__' AND column_name = 'path' AND choice = 'source' AND applied = 1"), 1, 'filesystem conflict resolution is auditable');
+    $binary_file_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/binary-conflict.bin')) . "' ORDER BY id DESC LIMIT 1");
+    $binary_file_source_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $binary_file_conflict_id,
+        'source',
+        true,
+        'Apply audited source binary file.',
+        'cow-test'
+    );
+    assert_same($binary_file_source_resolution['status'], 'applied', 'source binary filesystem conflict resolution records applied status');
+    assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/binary-conflict.bin'), "source binary resolution\0\xff", 'source binary filesystem conflict resolution copies exact source bytes');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $binary_file_conflict_id AND table_name = '__files__' AND column_name = 'path' AND choice = 'source' AND applied = 1"), 1, 'binary filesystem conflict resolution is auditable');
     assert_throws(
         fn() => cow_merge_resolve_conflict($metadata, $file_conflict_id, 'target', true, 'Try stale file keep.', 'cow-test'),
         'target filesystem path no longer matches',
         'stale filesystem conflict resolution is blocked after the target path changes'
+    );
+    $stale_file_audit = cow_merge_audit_report($metadata, null, 10, [
+        'records' => 'conflicts',
+        'scope' => 'files',
+        'path' => 'wp-content/uploads/conflict.txt',
+    ]);
+    assert_same($stale_file_audit['conflicts'][0]['stale_status'] ?? null, 'stale', 'merge audit marks drifted filesystem conflicts as stale');
+    assert_true(isset($stale_file_audit['conflicts'][0]['current_target_preview']), 'stale filesystem audit exposes the current target file manifest');
+    assert_true(
+        ($stale_file_audit['conflicts'][0]['current_target_preview'] ?? null) !== ($stale_file_audit['conflicts'][0]['target_preview'] ?? null),
+        'stale filesystem audit distinguishes current target file state from the audited target state'
+    );
+    $file_revalidate_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/revalidate-conflict.txt')) . "' ORDER BY id DESC LIMIT 1");
+    cow_merge_review_record(
+        $metadata,
+        'conflict',
+        $file_revalidate_conflict_id,
+        'reviewed',
+        'Keep target uploaded file until revalidation.',
+        'cow-test'
+    );
+    write_test_file($file_resolve_target_root . '/wp-content/uploads/revalidate-conflict.txt', 'target file drift after review');
+    $file_revalidated = cow_merge_revalidate_reviewed_conflicts($metadata, null, 'cow-revalidate');
+    assert_true($file_revalidated['carried'] >= 1, 'review revalidation carries stale filesystem conflicts to needs-action');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $file_revalidate_conflict_id"), 1, 'filesystem revalidation records the stale target file payload');
+    assert_same(scalar($metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $file_revalidate_conflict_id ORDER BY id DESC LIMIT 1"), 'compatible-target-drift', 'filesystem revalidation classifies changed target files');
+    $file_revalidated_class_audit = cow_merge_audit_report($metadata, null, 10, [
+        'records' => 'conflicts',
+        'scope' => 'files',
+        'path' => 'wp-content/uploads/revalidate-conflict.txt',
+    ]);
+    assert_same($file_revalidated_class_audit['conflicts'][0]['revalidation_class'] ?? null, 'compatible-target-drift', 'filesystem audit exposes the revalidation classifier');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $file_revalidate_conflict_id, 'source', true, 'Try stale file source before guarded revalidation.', 'cow-test'),
+        'target filesystem path no longer matches',
+        'stale filesystem source resolution still fails without the after-revalidate guard'
+    );
+    write_test_file($file_resolve_target_root . '/wp-content/uploads/revalidate-conflict.txt', 'target file drift after revalidation');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $file_revalidate_conflict_id, 'source', true, 'Try stale file source after new target drift.', 'cow-test', true),
+        'target payload changed after latest merge revalidation',
+        'after-revalidate filesystem resolution fails if target drifted again after revalidation'
+    );
+    $file_revalidated_after_drift = cow_merge_revalidate_reviewed_conflicts($metadata, null, 'cow-revalidate');
+    assert_true($file_revalidated_after_drift['carried'] >= 1, 'review revalidation carries a new filesystem note after further target drift');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $file_revalidate_conflict_id"), 2, 'filesystem revalidation records the replacement stale target file payload');
+    assert_same(scalar($metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $file_revalidate_conflict_id ORDER BY id DESC LIMIT 1"), 'compatible-target-drift', 'filesystem replacement revalidation keeps same-path drift classified');
+    $file_revalidated_target_entry = cow_merge_file_manifest_for_root($file_resolve_target_root)['entries']['wp-content/uploads/revalidate-conflict.txt'];
+    $file_revalidated_target_payload = cow_merge_payload_json(cow_merge_file_path_payload('wp-content/uploads/revalidate-conflict.txt', $file_revalidated_target_entry));
+    $file_after_revalidate_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $file_revalidate_conflict_id,
+        'source',
+        true,
+        'Apply source file after revalidating target drift.',
+        'cow-test',
+        true
+    );
+    assert_same($file_after_revalidate_resolution['status'], 'applied', 'after-revalidate source resolution applies a revalidated stale filesystem conflict');
+    assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/revalidate-conflict.txt'), 'source revalidate resolution', 'after-revalidate filesystem resolution copies the audited source file');
+    assert_same(
+        scalar($metadata, "SELECT previous_payload FROM merge_resolutions WHERE conflict_id = $file_revalidate_conflict_id ORDER BY id DESC LIMIT 1"),
+        $file_revalidated_target_payload,
+        'after-revalidate filesystem resolution audits the latest revalidated target file payload'
+    );
+    $file_missing_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/revalidate-missing.txt')) . "' ORDER BY id DESC LIMIT 1");
+    cow_merge_review_record(
+        $metadata,
+        'conflict',
+        $file_missing_conflict_id,
+        'reviewed',
+        'Revalidate before applying a source file whose target disappeared.',
+        'cow-test'
+    );
+    unlink($file_resolve_target_root . '/wp-content/uploads/revalidate-missing.txt');
+    $file_missing_revalidated = cow_merge_revalidate_reviewed_conflicts($metadata, null, 'cow-revalidate');
+    assert_true($file_missing_revalidated['carried'] >= 1, 'review revalidation carries missing filesystem paths to needs-action');
+    assert_same(scalar($metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $file_missing_conflict_id ORDER BY id DESC LIMIT 1"), 'missing', 'filesystem revalidation classifies deleted target paths as missing');
+    $file_missing_audit = cow_merge_audit_report($metadata, null, 10, [
+        'records' => 'conflicts',
+        'scope' => 'files',
+        'path' => 'wp-content/uploads/revalidate-missing.txt',
+    ]);
+    assert_same($file_missing_audit['conflicts'][0]['revalidation_class'] ?? null, 'missing', 'filesystem audit exposes missing path revalidation class');
+    $file_missing_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $file_missing_conflict_id,
+        'source',
+        true,
+        'Apply source file after missing-path revalidation.',
+        'cow-test',
+        true
+    );
+    assert_same($file_missing_resolution['status'], 'applied', 'after-revalidate source resolution can restore a reviewed missing filesystem path');
+    assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/revalidate-missing.txt'), 'source revalidate missing', 'after-revalidate filesystem resolution restores the audited source path');
+    $file_source_drift_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/revalidate-source-drift.txt')) . "' ORDER BY id DESC LIMIT 1");
+    cow_merge_review_record(
+        $metadata,
+        'conflict',
+        $file_source_drift_conflict_id,
+        'reviewed',
+        'Revalidate before applying a source file whose source branch may change.',
+        'cow-test'
+    );
+    write_test_file($file_resolve_source_root . '/wp-content/uploads/revalidate-source-drift.txt', 'source file drift after review');
+    $file_source_drift_revalidated = cow_merge_revalidate_reviewed_conflicts($metadata, null, 'cow-revalidate');
+    assert_true($file_source_drift_revalidated['carried'] >= 1, 'review revalidation carries source-drifted filesystem paths to needs-action');
+    assert_same(scalar($metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $file_source_drift_conflict_id ORDER BY id DESC LIMIT 1"), 'compatible-source-drift', 'filesystem revalidation classifies changed source files');
+    $file_source_drift_entry = cow_merge_file_manifest_for_root($file_resolve_source_root)['entries']['wp-content/uploads/revalidate-source-drift.txt'];
+    assert_same(
+        scalar($metadata, "SELECT source_payload FROM merge_revalidations WHERE conflict_id = $file_source_drift_conflict_id ORDER BY id DESC LIMIT 1"),
+        cow_merge_payload_json(cow_merge_file_path_payload('wp-content/uploads/revalidate-source-drift.txt', $file_source_drift_entry)),
+        'filesystem source-drift revalidation records the current source file payload'
+    );
+    $file_source_drift_audit = cow_merge_audit_report($metadata, null, 10, [
+        'records' => 'conflicts',
+        'scope' => 'files',
+        'path' => 'wp-content/uploads/revalidate-source-drift.txt',
+    ]);
+    assert_same($file_source_drift_audit['conflicts'][0]['revalidation_class'] ?? null, 'compatible-source-drift', 'filesystem audit exposes source-drift revalidation class');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $file_source_drift_conflict_id, 'source', true, 'Try source file after source-drift revalidation.', 'cow-test', true),
+        'source payload changed after latest merge revalidation',
+        'after-revalidate filesystem resolution fails if the source file changed after review'
     );
     $file_rollback_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/rollback-conflict.txt')) . "' ORDER BY id DESC LIMIT 1");
     $file_rollback_meta = open_db($metadata);
@@ -5114,6 +6464,41 @@ SQL);
     );
     assert_same($file_delete_resolution['status'], 'applied', 'source filesystem deletion conflict resolution records applied status');
     assert_true(!file_exists($file_resolve_target_root . '/wp-content/uploads/delete-conflict.txt'), 'source filesystem deletion conflict resolution removes the target path after validation');
+    $file_type_replacement_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-type-replacement-conflict' AND row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/replace-dir-with-file')) . "' ORDER BY id DESC LIMIT 1");
+    $file_type_replacement_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $file_type_replacement_conflict_id,
+        'source',
+        true,
+        'Apply reviewed source directory-to-file replacement.',
+        'cow-test'
+    );
+    assert_same($file_type_replacement_resolution['status'], 'applied', 'source directory-to-file resolution records applied status');
+    assert_true(is_file($file_resolve_target_root . '/wp-content/uploads/replace-dir-with-file'), 'source directory-to-file resolution replaces the target directory with a file');
+    assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/replace-dir-with-file'), 'source resolved replacement file', 'source directory-to-file resolution copies the audited source file');
+    assert_true(!file_exists($file_resolve_target_root . '/wp-content/uploads/replace-dir-with-file/base-child.txt'), 'source directory-to-file resolution removes target directory descendants after review');
+    $file_type_replacement_inverse_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-type-replacement-conflict' AND row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/replace-file-with-dir')) . "' ORDER BY id DESC LIMIT 1");
+    $file_type_replacement_inverse_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $file_type_replacement_inverse_conflict_id,
+        'source',
+        true,
+        'Apply reviewed source file-to-directory replacement.',
+        'cow-test'
+    );
+    assert_same($file_type_replacement_inverse_resolution['status'], 'applied', 'source file-to-directory resolution records applied status');
+    assert_true(is_dir($file_resolve_target_root . '/wp-content/uploads/replace-file-with-dir'), 'source file-to-directory resolution replaces the target file with a directory');
+    assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/replace-file-with-dir/source-child.txt'), 'source resolved replacement child', 'source file-to-directory resolution copies the audited source directory child');
+    assert_true(is_link($file_resolve_target_root . '/wp-content/uploads/replace-file-with-dir/source-link.txt'), 'source file-to-directory resolution copies safe source symlink child');
+    assert_same(readlink($file_resolve_target_root . '/wp-content/uploads/replace-file-with-dir/source-link.txt'), 'source-child.txt', 'source file-to-directory resolution preserves safe source symlink child target');
+    $file_type_replacement_unsafe_dir_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-type-replacement-conflict' AND row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/replace-file-with-unsafe-dir')) . "' ORDER BY id DESC LIMIT 1");
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $file_type_replacement_unsafe_dir_conflict_id, 'source', true, 'Try reviewed source directory replacement with unsafe symlink descendant.', 'cow-test'),
+        'cannot apply source filesystem directory subtree',
+        'source file-to-directory resolution rejects unsafe source symlink descendants'
+    );
+    assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/replace-file-with-unsafe-dir'), 'base unsafe replacement file', 'failed source file-to-directory resolution restores the target file when a subtree symlink is unsafe');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $file_type_replacement_unsafe_dir_conflict_id"), 0, 'failed unsafe directory replacement records no resolution metadata');
     $file_resolve_rerun = cow_merge_branch_state(
         $file_resolve_base_db,
         $file_resolve_source_db,
@@ -5127,16 +6512,37 @@ SQL);
     );
     assert_same($file_resolve_rerun['status'], 'completed_with_conflicts', 'rerunning after filesystem source resolutions only reports unresolved file conflicts');
     assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/conflict.txt'), 'source conflict resolution', 'rerunning after source filesystem replacement keeps the audited source file');
+    assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/binary-conflict.bin'), "source binary resolution\0\xff", 'rerunning after source binary filesystem replacement keeps the exact audited bytes');
     assert_true(!file_exists($file_resolve_target_root . '/wp-content/uploads/delete-conflict.txt'), 'rerunning after source filesystem deletion keeps the target path deleted');
+    assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/replace-dir-with-file'), 'source resolved replacement file', 'rerunning after source directory-to-file resolution keeps the audited source file');
+    assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/replace-file-with-dir/source-child.txt'), 'source resolved replacement child', 'rerunning after source file-to-directory resolution keeps the audited source directory');
+    assert_true(is_link($file_resolve_target_root . '/wp-content/uploads/replace-file-with-dir/source-link.txt'), 'rerunning after source file-to-directory resolution keeps the audited source symlink child');
+    assert_same(readlink($file_resolve_target_root . '/wp-content/uploads/replace-file-with-dir/source-link.txt'), 'source-child.txt', 'rerunning after source file-to-directory resolution keeps the audited source symlink target');
+    assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/replace-file-with-unsafe-dir'), 'base unsafe replacement file', 'rerunning after failed unsafe directory replacement keeps the restored target file');
     assert_same(
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = '__files__' AND c.conflict_type = 'file-conflict' AND c.row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/conflict.txt')) . "' AND r.source_branch = 'feature-file-resolve'"),
         1,
         'rerunning after source filesystem replacement does not rediscover the resolved file conflict'
     );
     assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = '__files__' AND c.conflict_type = 'file-conflict' AND c.row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/binary-conflict.bin')) . "' AND r.source_branch = 'feature-file-resolve'"),
+        1,
+        'rerunning after source binary filesystem replacement does not rediscover the resolved binary file conflict'
+    );
+    assert_same(
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = '__files__' AND c.conflict_type = 'file-source-deleted' AND c.row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/delete-conflict.txt')) . "' AND r.source_branch = 'feature-file-resolve'"),
         1,
         'rerunning after source filesystem deletion does not rediscover the resolved delete conflict'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = '__files__' AND c.conflict_type = 'file-type-replacement-conflict' AND c.row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/replace-dir-with-file')) . "' AND r.source_branch = 'feature-file-resolve'"),
+        1,
+        'rerunning after source directory-to-file resolution does not rediscover the resolved type replacement conflict'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = '__files__' AND c.conflict_type = 'file-type-replacement-conflict' AND c.row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/replace-file-with-dir')) . "' AND r.source_branch = 'feature-file-resolve'"),
+        1,
+        'rerunning after source file-to-directory resolution does not rediscover the resolved type replacement conflict'
     );
     $reviewed_file_resolution_id = (int)$file_source_resolution['resolution_id'];
     $unreviewed_file_resolution_id = (int)$file_delete_resolution['resolution_id'];
@@ -7295,6 +8701,31 @@ SQL);
     $manual_meta->close();
 
     $schema_column_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND column_name = 'review_note' AND conflict_type = 'schema-source-changed' ORDER BY id DESC LIMIT 1");
+    cow_merge_review_record(
+        $metadata,
+        'conflict',
+        $schema_column_conflict_id,
+        'reviewed',
+        'Schema column reviewed before revalidation.',
+        'cow-test'
+    );
+    $schema_review_audit = cow_merge_audit_report($metadata, $manual_run_id, 10, [
+        'records' => 'conflicts',
+        'review_status' => 'reviewed',
+    ]);
+    assert_same(count($schema_review_audit['conflicts']), 1, 'schema review audit returns reviewed schema conflicts');
+    assert_same($schema_review_audit['conflicts'][0]['stale_status'] ?? null, 'unknown', 'schema conflicts are not marked fresh or stale by generic audit');
+    $schema_revalidate = cow_merge_revalidate_reviewed_conflicts($metadata, $manual_run_id, 'cow-revalidate');
+    assert_same($schema_revalidate['checked'], 2, 'schema conflict revalidation checks conflicts in the selected run');
+    assert_same($schema_revalidate['reviewed'], 1, 'schema conflict revalidation sees reviewed schema conflicts');
+    assert_same($schema_revalidate['stale'], 0, 'schema conflict revalidation does not infer stale state generically');
+    assert_same($schema_revalidate['carried'], 0, 'schema conflict revalidation does not carry schema conflicts without schema-specific evidence');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $schema_column_conflict_id"), 0, 'schema conflict revalidation records no guarded payload without schema-specific evidence');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $schema_column_conflict_id, 'source', false, 'Try guarded schema resolution.', 'cow-test', true),
+        '--after-revalidate currently supports database row/cell conflicts and filesystem conflicts only',
+        'schema conflicts have an explicit guarded revalidation boundary'
+    );
     $schema_column_dry = cow_merge_resolve_conflict(
         $metadata,
         $schema_column_conflict_id,
@@ -7549,6 +8980,40 @@ SQL);
     assert_same(scalar($schema_object_target, "SELECT item_id FROM plugin_item_audit WHERE item_id = 'gamma:target'"), 'gamma:target', 'target-added trigger fires after merge');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE column_name IN ('plugin_items_source_view', 'plugin_items_source_insert') AND decision = 'source-applied'"), 2, 'source-added view and trigger decisions are auditable');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE column_name IN ('plugin_items_target_view', 'plugin_items_target_insert') AND decision = 'target-kept'"), 2, 'target-added view and trigger preservation decisions are auditable');
+
+    $schema_view_order_base = $tmp . '/schema-view-order-base.sqlite';
+    $schema_view_order_source = $tmp . '/schema-view-order-source.sqlite';
+    $schema_view_order_target = $tmp . '/schema-view-order-target.sqlite';
+    create_base_db($schema_view_order_base);
+    copy($schema_view_order_base, $schema_view_order_source);
+    copy($schema_view_order_base, $schema_view_order_target);
+    $db = open_db($schema_view_order_source);
+    $db->exec('CREATE VIEW plugin_z_source_parent_view AS SELECT item_id, label FROM plugin_items');
+    $db->exec('CREATE VIEW plugin_m_source_child_view AS SELECT item_id, label FROM plugin_z_source_parent_view');
+    $db->exec('CREATE VIEW plugin_a_source_grandchild_view AS SELECT label FROM plugin_m_source_child_view');
+    $db->close();
+
+    $schema_view_order_result = cow_merge_databases(
+        $schema_view_order_base,
+        $schema_view_order_source,
+        $schema_view_order_target,
+        $metadata,
+        'feature-source-view-order',
+        'main'
+    );
+    $schema_view_order_run_id = (int)$schema_view_order_result['run_id'];
+    assert_same($schema_view_order_result['status'], 'completed', 'source-added dependent views merge automatically even when lexical order is unsafe');
+    assert_same(scalar($schema_view_order_target, "SELECT label FROM plugin_a_source_grandchild_view WHERE label = 'Alpha'"), 'Alpha', 'source-added dependent view chain remains queryable after merge');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE run_id = $schema_view_order_run_id AND column_name IN ('plugin_z_source_parent_view', 'plugin_m_source_child_view', 'plugin_a_source_grandchild_view') AND decision = 'source-applied'"),
+        3,
+        'source-added dependent view creation order is auditable'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE run_id = $schema_view_order_run_id AND conflict_type = 'schema-source-added-view'"),
+        0,
+        'source-added dependent view ordering does not create review-only schema conflicts'
+    );
 
     $schema_same_base = $tmp . '/schema-same-base.sqlite';
     $schema_same_source = $tmp . '/schema-same-source.sqlite';
@@ -12002,6 +13467,57 @@ SQL);
     );
     assert_same(scalar($keyless_conflict_target, "SELECT value FROM plugin_keyless WHERE rowid = 1"), 'source keyless conflict', 'rerunning after source keyless cell resolution keeps the audited source value');
 
+    $keyless_revalidate_base = $tmp . '/keyless-revalidate-base.sqlite';
+    $keyless_revalidate_source = $tmp . '/keyless-revalidate-source.sqlite';
+    $keyless_revalidate_target = $tmp . '/keyless-revalidate-target.sqlite';
+    $keyless_revalidate_metadata = $tmp . '/.forkpress/cow/merge/keyless-revalidate-metadata.sqlite';
+    create_base_db($keyless_revalidate_base);
+    copy($keyless_revalidate_base, $keyless_revalidate_source);
+    copy($keyless_revalidate_base, $keyless_revalidate_target);
+    $db = open_db($keyless_revalidate_source);
+    $db->exec("UPDATE plugin_keyless SET value = 'source keyless revalidate' WHERE rowid = 1");
+    $db->close();
+    $db = open_db($keyless_revalidate_target);
+    $db->exec("UPDATE plugin_keyless SET value = 'target keyless revalidate' WHERE rowid = 1");
+    $db->close();
+    $keyless_revalidate_result = cow_merge_databases($keyless_revalidate_base, $keyless_revalidate_source, $keyless_revalidate_target, $keyless_revalidate_metadata, 'feature-keyless-revalidate', 'main');
+    $keyless_revalidate_run_id = (int)$keyless_revalidate_result['run_id'];
+    assert_same($keyless_revalidate_result['status'], 'completed_with_conflicts', 'keyless stale-revalidation fixture starts with a cell conflict');
+    $keyless_revalidate_conflict_id = (int)scalar($keyless_revalidate_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_keyless' AND column_name = 'value' AND conflict_type = 'cell-conflict' ORDER BY id DESC LIMIT 1");
+    cow_merge_review_record(
+        $keyless_revalidate_metadata,
+        'conflict',
+        $keyless_revalidate_conflict_id,
+        'reviewed',
+        'Review original keyless row before replacement.',
+        'cow-test'
+    );
+    $db = open_db($keyless_revalidate_target);
+    $db->exec('DELETE FROM plugin_keyless WHERE rowid = 1');
+    $db->exec("INSERT INTO plugin_keyless (label, value) VALUES ('Replacement keyless', 'runtime replacement')");
+    $db->close();
+    assert_same((int)scalar($keyless_revalidate_target, 'SELECT rowid FROM plugin_keyless'), 1, 'keyless stale-revalidation fixture reuses the reviewed rowid');
+    cow_merge_track_row_identity_events(
+        $keyless_revalidate_target,
+        $keyless_revalidate_metadata,
+        'main',
+        [
+            ['id' => 1, 'table_name' => 'plugin_keyless', 'op' => 'delete', 'rowid' => 1, 'row' => ['label' => 'Base keyless', 'value' => 'target keyless revalidate']],
+            ['id' => 2, 'table_name' => 'plugin_keyless', 'op' => 'insert', 'rowid' => 1, 'row' => ['label' => 'Replacement keyless', 'value' => 'runtime replacement']],
+        ]
+    );
+    $keyless_revalidated = cow_merge_revalidate_reviewed_conflicts($keyless_revalidate_metadata, $keyless_revalidate_run_id, 'cow-revalidate');
+    assert_same($keyless_revalidated['carried'], 1, 'keyless rowid replacement carries stale review intent');
+    assert_same(scalar($keyless_revalidate_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $keyless_revalidate_conflict_id ORDER BY id DESC LIMIT 1"), 'incompatible', 'keyless rowid replacement is classified as incompatible');
+    $keyless_revalidated_audit = cow_merge_audit_report($keyless_revalidate_metadata, $keyless_revalidate_run_id, 10, ['records' => 'conflicts']);
+    $keyless_revalidated_conflicts = array_values(array_filter($keyless_revalidated_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $keyless_revalidate_conflict_id));
+    assert_same($keyless_revalidated_conflicts[0]['revalidation_class'] ?? null, 'incompatible', 'keyless audit exposes incompatible rowid replacement');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($keyless_revalidate_metadata, $keyless_revalidate_conflict_id, 'source', true, 'Do not apply source over replacement keyless row.', 'cow-test', true),
+        'target row no longer exists',
+        'after-revalidate does not apply reviewed source over an incompatible keyless replacement'
+    );
+
     $keyless_unique_base = $tmp . '/keyless-unique-base.sqlite';
     $keyless_unique_source = $tmp . '/keyless-unique-source.sqlite';
     $keyless_unique_target = $tmp . '/keyless-unique-target.sqlite';
@@ -12574,6 +14090,10 @@ SQL);
     }
 
     require_once __DIR__ . '/../../wp-plugin/forkpress-wp.php';
+    assert_true(forkpress_branch_name_is_valid('feature_safe-1'), 'WP branch UI accepts CLI-compatible branch names');
+    assert_true(!forkpress_branch_name_is_valid('feature branch'), 'WP branch UI rejects branch names with spaces');
+    assert_true(!forkpress_branch_name_is_valid('wp'), 'WP branch UI rejects reserved routing branch names');
+    assert_true(!forkpress_branch_name_is_valid('Admin'), 'WP branch UI rejects reserved routing branch names case-insensitively');
     $GLOBALS['wpdb']->query('CREATE TABLE plugin_runtime_keyless (label TEXT, value TEXT)');
     $GLOBALS['wpdb']->query("INSERT INTO plugin_runtime_keyless (label, value) VALUES ('First runtime row', 'base')");
     $GLOBALS['wpdb']->query('DELETE FROM plugin_runtime_keyless WHERE rowid = 1');
@@ -12890,6 +14410,58 @@ SQL);
     assert_same($result['allocated'], 0, 'rerunning allocation on the same branch DB reuses existing bands');
     assert_same($result['reused'], 3, 'rerunning allocation records existing bands as reused');
 
+    $birth_cleanup_db = $tmp . '/band-birth-cleanup.sqlite';
+    copy($band_base, $birth_cleanup_db);
+    $db = open_db($birth_cleanup_db);
+    $db->exec('CREATE TABLE plugin_birth_keyless (label TEXT NOT NULL)');
+    $db->exec("INSERT INTO plugin_birth_keyless (label) VALUES ('birth cleanup keyless')");
+    $db->close();
+    cow_merge_allocate_autoincrement_bands($birth_cleanup_db, $band_metadata, 'feature-birth-cleanup');
+    cow_merge_capture_row_identities($birth_cleanup_db, $band_metadata, 'feature-birth-cleanup');
+    $birth_validation = cow_merge_validate_branch_birth_metadata($birth_cleanup_db, $band_metadata, 'feature-birth-cleanup');
+    assert_same($birth_validation['status'], 'validated', 'branch birth metadata validation accepts complete ID bands and row identities');
+    assert_true($birth_validation['autoincrement_tables'] >= 3, 'branch birth metadata validation counts AUTOINCREMENT tables');
+    assert_true($birth_validation['keyless_rows'] >= 1, 'branch birth metadata validation counts keyless row identities');
+    $birth_validation_cli = run_merge_cli([
+        'validate-branch-birth-metadata',
+        '--db', $birth_cleanup_db,
+        '--metadata-db', $band_metadata,
+        '--branch', 'feature-birth-cleanup',
+    ]);
+    assert_same($birth_validation_cli['status'], 0, 'branch birth metadata validation CLI accepts complete branch metadata');
+    assert_true((int)scalar($band_metadata, "SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'feature-birth-cleanup'") > 0, 'branch birth cleanup fixture creates band metadata');
+    assert_true((int)scalar($band_metadata, "SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = 'feature-birth-cleanup'") > 0, 'branch birth cleanup fixture creates row identity metadata');
+    $birth_cleanup = cow_merge_cleanup_branch_birth_metadata($band_metadata, 'feature-birth-cleanup');
+    assert_true($birth_cleanup['cleaned'] > 0, 'branch birth metadata cleanup reports removed rows');
+    assert_same((int)scalar($band_metadata, "SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'feature-birth-cleanup'"), 0, 'branch birth metadata cleanup removes allocated bands');
+    assert_same((int)scalar($band_metadata, "SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = 'feature-birth-cleanup'"), 0, 'branch birth metadata cleanup removes active row identities');
+    assert_same((int)scalar($band_metadata, "SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'feature-birth-cleanup'"), 0, 'branch birth metadata cleanup removes row identity history');
+    assert_same((int)scalar($band_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-birth-cleanup'"), 0, 'branch birth metadata cleanup removes branch birth runs');
+    assert_true((int)scalar($band_metadata, "SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'feature-band-a'") > 0, 'branch birth metadata cleanup leaves unrelated branch bands intact');
+
+    $missing_birth_band_db = $tmp . '/missing-birth-band.sqlite';
+    $missing_birth_band_metadata = $tmp . '/.forkpress/cow/merge/missing-birth-band-metadata.sqlite';
+    copy($band_base, $missing_birth_band_db);
+    cow_merge_capture_row_identities($missing_birth_band_db, $missing_birth_band_metadata, 'feature-missing-birth-band');
+    $missing_birth_band_cli = run_merge_cli([
+        'validate-branch-birth-metadata',
+        '--db', $missing_birth_band_db,
+        '--metadata-db', $missing_birth_band_metadata,
+        '--branch', 'feature-missing-birth-band',
+    ]);
+    assert_true($missing_birth_band_cli['status'] !== 0, 'branch birth metadata validation CLI rejects missing ID bands');
+    assert_true(str_contains($missing_birth_band_cli['output'], 'AUTOINCREMENT ID band'), 'branch birth metadata validation explains missing ID bands');
+
+    $missing_birth_identity_db = $tmp . '/missing-birth-identity.sqlite';
+    $missing_birth_identity_metadata = $tmp . '/.forkpress/cow/merge/missing-birth-identity-metadata.sqlite';
+    copy($band_base, $missing_birth_identity_db);
+    cow_merge_allocate_autoincrement_bands($missing_birth_identity_db, $missing_birth_identity_metadata, 'feature-missing-birth-identity');
+    assert_throws(
+        fn() => cow_merge_validate_branch_birth_metadata($missing_birth_identity_db, $missing_birth_identity_metadata, 'feature-missing-birth-identity'),
+        'row identity for plugin_keyless rowid',
+        'branch birth metadata validation rejects missing no-primary-key row identities'
+    );
+
     $result = cow_merge_allocate_autoincrement_bands($band_feature_b, $band_metadata, 'feature-band-b');
     assert_same($result['allocated'], 3, 'second branch receives its own bands');
     $db = open_db($band_feature_b);
@@ -12897,6 +14469,671 @@ SQL);
     $db->close();
     $post_id_b = (int)scalar($band_feature_b, "SELECT MAX(ID) FROM wp_posts");
     assert_true($post_id_b > $post_id_a, 'independent branches do not allocate colliding post IDs');
+
+    $band_explicit_base = $tmp . '/band-explicit-base.sqlite';
+    $band_explicit_source = $tmp . '/band-explicit-source.sqlite';
+    $band_explicit_target = $tmp . '/band-explicit-target.sqlite';
+    $band_explicit_metadata = $tmp . '/.forkpress/cow/merge/band-explicit-metadata.sqlite';
+    copy($band_base, $band_explicit_base);
+    copy($band_base, $band_explicit_source);
+    copy($band_base, $band_explicit_target);
+    cow_merge_allocate_autoincrement_bands($band_explicit_source, $band_explicit_metadata, 'feature-band-explicit-source');
+    $db = open_db($band_explicit_source);
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status) VALUES (2, 'Imported explicit post', 'explicit id import', 'publish')");
+    $db->exec("INSERT INTO plugin_autoinc (id, label) VALUES (2, 'imported explicit plugin row')");
+    $db->close();
+    $band_explicit_result = cow_merge_databases(
+        $band_explicit_base,
+        $band_explicit_source,
+        $band_explicit_target,
+        $band_explicit_metadata,
+        'feature-band-explicit-source',
+        'main'
+    );
+    assert_same($band_explicit_result['status'], 'completed_with_conflicts', 'explicit source IDs outside the branch band are held for review');
+    assert_same((int)scalar($band_explicit_target, "SELECT COUNT(*) FROM wp_posts WHERE ID = 2"), 0, 'out-of-band explicit source ID is not applied automatically');
+    assert_same((int)scalar($band_explicit_target, "SELECT COUNT(*) FROM plugin_autoinc WHERE id = 2"), 0, 'out-of-band explicit plugin AUTOINCREMENT ID is not applied automatically');
+    assert_same(
+        (int)scalar($band_explicit_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-source' AND c.table_name = 'wp_posts' AND c.conflict_type = 'row-target-constraint'"),
+        1,
+        'out-of-band explicit source ID records a reviewable row conflict'
+    );
+    assert_same(
+        (int)scalar($band_explicit_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-source' AND c.table_name = 'plugin_autoinc' AND c.conflict_type = 'row-target-constraint'"),
+        1,
+        'out-of-band explicit plugin AUTOINCREMENT ID records a reviewable row conflict'
+    );
+    assert_true(
+        str_contains((string)scalar($band_explicit_metadata, "SELECT reason FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-source' AND d.table_name = 'wp_posts' AND d.decision = 'target-wins' ORDER BY d.id DESC LIMIT 1"), 'outside reserved branch band'),
+        'out-of-band explicit source ID explains the reserved-band violation'
+    );
+    assert_true(
+        str_contains((string)scalar($band_explicit_metadata, "SELECT reason FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-source' AND d.table_name = 'plugin_autoinc' AND d.decision = 'target-wins' ORDER BY d.id DESC LIMIT 1"), 'outside reserved branch band'),
+        'out-of-band explicit plugin AUTOINCREMENT ID explains the reserved-band violation'
+    );
+
+    $band_rewrite_base = $tmp . '/band-rewrite-base.sqlite';
+    $band_rewrite_source = $tmp . '/band-rewrite-source.sqlite';
+    $band_rewrite_target = $tmp . '/band-rewrite-target.sqlite';
+    $band_rewrite_metadata = $tmp . '/.forkpress/cow/merge/band-rewrite-metadata.sqlite';
+    copy($band_base, $band_rewrite_base);
+    copy($band_base, $band_rewrite_source);
+    copy($band_base, $band_rewrite_target);
+    cow_merge_allocate_autoincrement_bands($band_rewrite_source, $band_rewrite_metadata, 'feature-band-rewrite-source');
+    $db = open_db($band_rewrite_source);
+    $db->exec("UPDATE wp_posts SET ID = 2, post_title = 'Rewritten explicit post ID' WHERE ID = 1");
+    $db->exec("UPDATE plugin_autoinc SET id = 2, label = 'rewritten explicit plugin ID' WHERE id = 1");
+    $db->close();
+    $band_rewrite_result = cow_merge_databases(
+        $band_rewrite_base,
+        $band_rewrite_source,
+        $band_rewrite_target,
+        $band_rewrite_metadata,
+        'feature-band-rewrite-source',
+        'main'
+    );
+    assert_same($band_rewrite_result['status'], 'completed_with_conflicts', 'out-of-band AUTOINCREMENT primary-key rewrites remain reviewable');
+    assert_same((int)scalar($band_rewrite_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 1'), 1, 'out-of-band primary-key rewrite does not delete the original target row by default');
+    assert_same((int)scalar($band_rewrite_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 2'), 0, 'out-of-band primary-key rewrite does not insert the rewritten explicit ID by default');
+    assert_same((int)scalar($band_rewrite_target, 'SELECT COUNT(*) FROM plugin_autoinc WHERE id = 1'), 1, 'out-of-band plugin primary-key rewrite does not delete the original target row by default');
+    assert_same((int)scalar($band_rewrite_target, 'SELECT COUNT(*) FROM plugin_autoinc WHERE id = 2'), 0, 'out-of-band plugin primary-key rewrite does not insert the rewritten explicit ID by default');
+    assert_same(
+        (int)scalar($band_rewrite_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-rewrite-source' AND c.table_name = 'wp_posts' AND c.conflict_type = 'row-target-constraint'"),
+        2,
+        'out-of-band primary-key rewrite records reviewable insert and paired delete conflicts'
+    );
+    assert_same(
+        (int)scalar($band_rewrite_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-rewrite-source' AND c.table_name = 'plugin_autoinc' AND c.conflict_type = 'row-target-constraint'"),
+        2,
+        'out-of-band plugin primary-key rewrite records reviewable insert and paired delete conflicts'
+    );
+    assert_true(
+        str_contains((string)scalar($band_rewrite_metadata, "SELECT reason FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-rewrite-source' AND d.table_name = 'wp_posts' AND d.row_identity = '" . SQLite3::escapeString(cow_merge_identity_json(['ID' => 1])) . "' ORDER BY d.id DESC LIMIT 1"), 'held explicit AUTOINCREMENT insert'),
+        'out-of-band primary-key rewrite explains why the paired source delete is held'
+    );
+    assert_true(
+        str_contains((string)scalar($band_rewrite_metadata, "SELECT reason FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-rewrite-source' AND d.table_name = 'plugin_autoinc' AND d.row_identity = '" . SQLite3::escapeString(cow_merge_identity_json(['id' => 1])) . "' ORDER BY d.id DESC LIMIT 1"), 'held explicit AUTOINCREMENT insert'),
+        'out-of-band plugin primary-key rewrite explains why the paired source delete is held'
+    );
+
+    $band_explicit_ref_base = $tmp . '/band-explicit-ref-base.sqlite';
+    $band_explicit_ref_source = $tmp . '/band-explicit-ref-source.sqlite';
+    $band_explicit_ref_target = $tmp . '/band-explicit-ref-target.sqlite';
+    $band_explicit_ref_metadata = $tmp . '/.forkpress/cow/merge/band-explicit-ref-metadata.sqlite';
+    copy($band_base, $band_explicit_ref_base);
+    $db = open_db($band_explicit_ref_base);
+    $db->exec('ALTER TABLE wp_posts ADD COLUMN post_parent INTEGER NOT NULL DEFAULT 0');
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_type TEXT NOT NULL DEFAULT 'post'");
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec('CREATE TABLE wp_comments (comment_ID INTEGER PRIMARY KEY AUTOINCREMENT, comment_post_ID INTEGER NOT NULL, comment_content TEXT NOT NULL, comment_parent INTEGER NOT NULL DEFAULT 0)');
+    $db->exec('CREATE TABLE wp_commentmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, comment_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec('CREATE TABLE wp_term_relationships (object_id INTEGER NOT NULL, term_taxonomy_id INTEGER NOT NULL, term_order INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (object_id, term_taxonomy_id))');
+    $db->exec("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('page_for_posts', '1', 'yes')");
+    $db->exec("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('site_icon', '1', 'yes')");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_parent) VALUES (3, 'Base child page', '', 'publish', 0)");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_parent) VALUES (4, 'Base reusable block consumer', '<!-- wp:paragraph --><p>base reusable block content</p><!-- /wp:paragraph -->', 'publish', 0)");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_parent) VALUES (5, 'Base image block consumer', '<!-- wp:paragraph --><p>base image block content</p><!-- /wp:paragraph -->', 'publish', 0)");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_parent) VALUES (7, 'Base gallery block consumer', '<!-- wp:paragraph --><p>base gallery block content</p><!-- /wp:paragraph -->', 'publish', 0)");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_parent) VALUES (8, 'Base media text block consumer', '<!-- wp:paragraph --><p>base media text block content</p><!-- /wp:paragraph -->', 'publish', 0)");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_parent) VALUES (9, 'Base audio block consumer', '<!-- wp:paragraph --><p>base audio block content</p><!-- /wp:paragraph -->', 'publish', 0)");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_parent) VALUES (10, 'Base cover block consumer', '<!-- wp:paragraph --><p>base cover block content</p><!-- /wp:paragraph -->', 'publish', 0)");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_parent) VALUES (11, 'Base file block consumer', '<!-- wp:paragraph --><p>base file block content</p><!-- /wp:paragraph -->', 'publish', 0)");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_parent) VALUES (12, 'Base video block consumer', '<!-- wp:paragraph --><p>base video block content</p><!-- /wp:paragraph -->', 'publish', 0)");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_parent) VALUES (13, 'Base post navigation link consumer', '<!-- wp:paragraph --><p>base post navigation link content</p><!-- /wp:paragraph -->', 'publish', 0)");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_parent) VALUES (14, 'Base navigation block consumer', '<!-- wp:paragraph --><p>base navigation block content</p><!-- /wp:paragraph -->', 'publish', 0)");
+    $db->exec("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (1, '_menu_item_menu_item_parent', '1')");
+    $db->exec("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (1, '_forkpress_base_post_ref', 'base post metadata')");
+    $db->exec("INSERT INTO wp_comments (comment_post_ID, comment_content) VALUES (1, 'Base comment reference')");
+    $db->exec("INSERT INTO wp_comments (comment_post_ID, comment_content) VALUES (1, 'Base threaded comment reference')");
+    $db->exec("INSERT INTO wp_commentmeta (comment_id, meta_key, meta_value) VALUES (1, '_forkpress_base_comment_ref', 'base comment metadata')");
+    $db->exec('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (1, 20, 0)');
+    $db->close();
+    copy($band_explicit_ref_base, $band_explicit_ref_source);
+    copy($band_explicit_ref_base, $band_explicit_ref_target);
+    cow_merge_allocate_autoincrement_bands($band_explicit_ref_source, $band_explicit_ref_metadata, 'feature-band-explicit-ref-source');
+    $db = open_db($band_explicit_ref_source);
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type) VALUES (2, 'Imported explicit reusable block', 'explicit id import with child rows', 'publish', 'wp_block')");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type) VALUES (6, 'Imported explicit image attachment', '', 'inherit', 'attachment')");
+    $db->exec("UPDATE wp_posts SET post_parent = 2 WHERE ID = 3");
+    $band_explicit_ref_reusable_content = '<!-- wp:block {"ref":2} /-->';
+    $stmt = $db->prepare('UPDATE wp_posts SET post_content = :content WHERE ID = 4');
+    $stmt->bindValue(':content', $band_explicit_ref_reusable_content, SQLITE3_TEXT);
+    $stmt->execute();
+    $band_explicit_ref_image_content = '<!-- wp:image {"id":6,"sizeSlug":"large","style":{"border":{"radius":"4px"}}} --><figure class="wp-block-image size-large"><img class="wp-image-6"/></figure><!-- /wp:image -->';
+    $stmt = $db->prepare('UPDATE wp_posts SET post_content = :content WHERE ID = 5');
+    $stmt->bindValue(':content', $band_explicit_ref_image_content, SQLITE3_TEXT);
+    $stmt->execute();
+    $band_explicit_ref_gallery_content = '<!-- wp:gallery {"ids":[6],"linkTo":"none","style":{"spacing":{"blockGap":"10px"}}} /-->';
+    $stmt = $db->prepare('UPDATE wp_posts SET post_content = :content WHERE ID = 7');
+    $stmt->bindValue(':content', $band_explicit_ref_gallery_content, SQLITE3_TEXT);
+    $stmt->execute();
+    $band_explicit_ref_media_text_content = '<!-- wp:media-text {"mediaId":6,"mediaType":"image"} --><div class="wp-block-media-text"></div><!-- /wp:media-text -->';
+    $stmt = $db->prepare('UPDATE wp_posts SET post_content = :content WHERE ID = 8');
+    $stmt->bindValue(':content', $band_explicit_ref_media_text_content, SQLITE3_TEXT);
+    $stmt->execute();
+    $band_explicit_ref_audio_content = '<!-- wp:audio {"id":6} --><figure class="wp-block-audio"></figure><!-- /wp:audio -->';
+    $stmt = $db->prepare('UPDATE wp_posts SET post_content = :content WHERE ID = 9');
+    $stmt->bindValue(':content', $band_explicit_ref_audio_content, SQLITE3_TEXT);
+    $stmt->execute();
+    $band_explicit_ref_cover_content = '<!-- wp:cover {"id":6} --><div class="wp-block-cover"></div><!-- /wp:cover -->';
+    $stmt = $db->prepare('UPDATE wp_posts SET post_content = :content WHERE ID = 10');
+    $stmt->bindValue(':content', $band_explicit_ref_cover_content, SQLITE3_TEXT);
+    $stmt->execute();
+    $band_explicit_ref_file_content = '<!-- wp:file {"id":6} --><div class="wp-block-file"></div><!-- /wp:file -->';
+    $stmt = $db->prepare('UPDATE wp_posts SET post_content = :content WHERE ID = 11');
+    $stmt->bindValue(':content', $band_explicit_ref_file_content, SQLITE3_TEXT);
+    $stmt->execute();
+    $band_explicit_ref_video_content = '<!-- wp:video {"id":6} --><figure class="wp-block-video"></figure><!-- /wp:video -->';
+    $stmt = $db->prepare('UPDATE wp_posts SET post_content = :content WHERE ID = 12');
+    $stmt->bindValue(':content', $band_explicit_ref_video_content, SQLITE3_TEXT);
+    $stmt->execute();
+    $band_explicit_ref_post_nav_content = '<!-- wp:navigation-link {"id":2,"kind":"post-type","type":"page","label":"Held page"} /-->';
+    $stmt = $db->prepare('UPDATE wp_posts SET post_content = :content WHERE ID = 13');
+    $stmt->bindValue(':content', $band_explicit_ref_post_nav_content, SQLITE3_TEXT);
+    $stmt->execute();
+    $band_explicit_ref_navigation_content = '<!-- wp:navigation {"ref":2,"overlayMenu":"never"} /-->';
+    $stmt = $db->prepare('UPDATE wp_posts SET post_content = :content WHERE ID = 14');
+    $stmt->bindValue(':content', $band_explicit_ref_navigation_content, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_parent) VALUES ('Imported child page behind explicit parent', 'child of held explicit id', 'publish', 2)");
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (2, '_forkpress_import_ref', :value)");
+    $stmt->bindValue(':value', json_encode(['post_id' => 2, 'origin' => 'import'], JSON_UNESCAPED_SLASHES), SQLITE3_TEXT);
+    $stmt->execute();
+    $db->exec("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (1, '_thumbnail_id', '2')");
+    $db->exec("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('page_on_front', '2', 'yes')");
+    $band_explicit_ref_sticky_posts = serialize([2]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('sticky_posts', :value, 'yes')");
+    $stmt->bindValue(':value', $band_explicit_ref_sticky_posts, SQLITE3_TEXT);
+    $stmt->execute();
+    $band_explicit_ref_theme_mods = serialize(['custom_logo' => 2]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('theme_mods_imported_post_refs', :value, 'yes')");
+    $stmt->bindValue(':value', $band_explicit_ref_theme_mods, SQLITE3_TEXT);
+    $stmt->execute();
+    $band_explicit_ref_media_widget = serialize([
+        2 => [
+            'attachment_id' => 2,
+            'caption' => 'Imported media widget behind held explicit attachment',
+        ],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_media_image', :value, 'yes')");
+    $stmt->bindValue(':value', $band_explicit_ref_media_widget, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->exec("UPDATE wp_options SET option_value = '2' WHERE option_name = 'page_for_posts'");
+    $db->exec("UPDATE wp_options SET option_value = '2' WHERE option_name = 'site_icon'");
+    $band_explicit_ref_updated_theme_mods = serialize(['custom_logo' => 2]);
+    $stmt = $db->prepare("UPDATE wp_options SET option_value = :value WHERE option_name = 'theme_mods_test'");
+    $stmt->bindValue(':value', $band_explicit_ref_updated_theme_mods, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->exec("UPDATE wp_postmeta SET post_id = 2 WHERE meta_key = '_forkpress_base_post_ref'");
+    $db->exec("UPDATE wp_postmeta SET meta_value = '2' WHERE post_id = 1 AND meta_key = '_menu_item_menu_item_parent'");
+    $db->exec("UPDATE wp_comments SET comment_post_ID = 2 WHERE comment_content = 'Base comment reference'");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type) VALUES ('Post type menu item behind explicit post', '', 'publish', 'nav_menu_item')");
+    $band_explicit_ref_menu_item_id = (int)$db->lastInsertRowID();
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:menu_item_id, '_menu_item_type', 'post_type'), (:menu_item_id, '_menu_item_object_id', '2')");
+    $stmt->bindValue(':menu_item_id', $band_explicit_ref_menu_item_id, SQLITE3_INTEGER);
+    $stmt->execute();
+    $stmt = $db->prepare("INSERT INTO wp_comments (comment_post_ID, comment_content) VALUES (2, 'Comment behind held explicit post')");
+    $stmt->execute();
+    $band_explicit_ref_comment_id = (int)$db->lastInsertRowID();
+    $stmt = $db->prepare("UPDATE wp_comments SET comment_parent = :comment_parent WHERE comment_content = 'Base threaded comment reference'");
+    $stmt->bindValue(':comment_parent', $band_explicit_ref_comment_id, SQLITE3_INTEGER);
+    $stmt->execute();
+    $stmt = $db->prepare("INSERT INTO wp_commentmeta (comment_id, meta_key, meta_value) VALUES (:comment_id, '_forkpress_comment_ref', 'comment metadata behind held explicit post')");
+    $stmt->bindValue(':comment_id', $band_explicit_ref_comment_id, SQLITE3_INTEGER);
+    $stmt->execute();
+    $stmt = $db->prepare("UPDATE wp_commentmeta SET comment_id = :comment_id WHERE meta_key = '_forkpress_base_comment_ref'");
+    $stmt->bindValue(':comment_id', $band_explicit_ref_comment_id, SQLITE3_INTEGER);
+    $stmt->execute();
+    $stmt = $db->prepare("INSERT INTO wp_comments (comment_post_ID, comment_content, comment_parent) VALUES (1, 'Threaded comment behind held explicit post comment', :comment_parent)");
+    $stmt->bindValue(':comment_parent', $band_explicit_ref_comment_id, SQLITE3_INTEGER);
+    $stmt->execute();
+    $band_explicit_ref_child_comment_id = (int)$db->lastInsertRowID();
+    $stmt = $db->prepare("INSERT INTO wp_commentmeta (comment_id, meta_key, meta_value) VALUES (:comment_id, '_forkpress_child_comment_ref', 'child comment metadata behind held explicit post comment')");
+    $stmt->bindValue(':comment_id', $band_explicit_ref_child_comment_id, SQLITE3_INTEGER);
+    $stmt->execute();
+    $db->exec('UPDATE wp_term_relationships SET object_id = 2 WHERE object_id = 1 AND term_taxonomy_id = 20');
+    $db->close();
+    $band_explicit_ref_result = cow_merge_databases(
+        $band_explicit_ref_base,
+        $band_explicit_ref_source,
+        $band_explicit_ref_target,
+        $band_explicit_ref_metadata,
+        'feature-band-explicit-ref-source',
+        'main'
+    );
+    assert_same($band_explicit_ref_result['status'], 'completed_with_conflicts', 'explicit source post IDs hold dependent postmeta for review');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_posts WHERE ID = 2"), 0, 'out-of-band explicit source post remains unapplied');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_posts WHERE ID = 6"), 0, 'out-of-band explicit source attachment remains unapplied');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT post_parent FROM wp_posts WHERE ID = 3"), 0, 'updated child posts pointing at a held explicit source post are not applied automatically');
+    assert_same(scalar($band_explicit_ref_target, "SELECT post_content FROM wp_posts WHERE ID = 4"), '<!-- wp:paragraph --><p>base reusable block content</p><!-- /wp:paragraph -->', 'updated reusable block refs pointing at a held explicit source block are not applied automatically');
+    assert_same(scalar($band_explicit_ref_target, "SELECT post_content FROM wp_posts WHERE ID = 5"), '<!-- wp:paragraph --><p>base image block content</p><!-- /wp:paragraph -->', 'updated image block refs pointing at a held explicit source attachment are not applied automatically');
+    assert_same(scalar($band_explicit_ref_target, "SELECT post_content FROM wp_posts WHERE ID = 7"), '<!-- wp:paragraph --><p>base gallery block content</p><!-- /wp:paragraph -->', 'updated gallery block refs pointing at a held explicit source attachment are not applied automatically');
+    assert_same(scalar($band_explicit_ref_target, "SELECT post_content FROM wp_posts WHERE ID = 8"), '<!-- wp:paragraph --><p>base media text block content</p><!-- /wp:paragraph -->', 'updated media-text block refs pointing at a held explicit source attachment are not applied automatically');
+    assert_same(scalar($band_explicit_ref_target, "SELECT post_content FROM wp_posts WHERE ID = 9"), '<!-- wp:paragraph --><p>base audio block content</p><!-- /wp:paragraph -->', 'updated audio block refs pointing at a held explicit source attachment are not applied automatically');
+    assert_same(scalar($band_explicit_ref_target, "SELECT post_content FROM wp_posts WHERE ID = 10"), '<!-- wp:paragraph --><p>base cover block content</p><!-- /wp:paragraph -->', 'updated cover block refs pointing at a held explicit source attachment are not applied automatically');
+    assert_same(scalar($band_explicit_ref_target, "SELECT post_content FROM wp_posts WHERE ID = 11"), '<!-- wp:paragraph --><p>base file block content</p><!-- /wp:paragraph -->', 'updated file block refs pointing at a held explicit source attachment are not applied automatically');
+    assert_same(scalar($band_explicit_ref_target, "SELECT post_content FROM wp_posts WHERE ID = 12"), '<!-- wp:paragraph --><p>base video block content</p><!-- /wp:paragraph -->', 'updated video block refs pointing at a held explicit source attachment are not applied automatically');
+    assert_same(scalar($band_explicit_ref_target, "SELECT post_content FROM wp_posts WHERE ID = 13"), '<!-- wp:paragraph --><p>base post navigation link content</p><!-- /wp:paragraph -->', 'updated post navigation link refs pointing at a held explicit source post are not applied automatically');
+    assert_same(scalar($band_explicit_ref_target, "SELECT post_content FROM wp_posts WHERE ID = 14"), '<!-- wp:paragraph --><p>base navigation block content</p><!-- /wp:paragraph -->', 'updated navigation block refs pointing at a held explicit source navigation post are not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_posts WHERE post_parent = 2"), 0, 'child posts pointing at a held explicit source post are not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_postmeta WHERE post_id = 2"), 0, 'postmeta pointing at a held explicit source post is not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_postmeta WHERE meta_key = '_thumbnail_id' AND meta_value = '2'"), 0, 'postmeta values pointing at a held explicit source post are not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'page_on_front' AND option_value = '2'"), 0, 'scalar options pointing at a held explicit source post are not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'sticky_posts'"), 0, 'serialized options pointing at a held explicit source post are not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'theme_mods_imported_post_refs'"), 0, 'theme mods pointing at a held explicit source attachment are not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'widget_media_image'"), 0, 'media widgets pointing at a held explicit source attachment are not applied automatically');
+    assert_same(scalar($band_explicit_ref_target, "SELECT option_value FROM wp_options WHERE option_name = 'page_for_posts'"), '1', 'updated scalar options pointing at a held explicit source post are not applied automatically');
+    assert_same(scalar($band_explicit_ref_target, "SELECT option_value FROM wp_options WHERE option_name = 'site_icon'"), '1', 'updated site icons pointing at a held explicit source attachment are not applied automatically');
+    assert_same(scalar($band_explicit_ref_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_test'"), 'a:1:{s:5:"color";s:4:"blue";}', 'updated theme mods pointing at a held explicit source attachment are not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT post_id FROM wp_postmeta WHERE meta_key = '_forkpress_base_post_ref'"), 1, 'updated postmeta owners pointing at a held explicit source post are not applied automatically');
+    assert_same(scalar($band_explicit_ref_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 1 AND meta_key = '_menu_item_menu_item_parent'"), '1', 'updated postmeta pointing at a held explicit source post is not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_postmeta WHERE post_id = $band_explicit_ref_menu_item_id AND meta_key = '_menu_item_object_id' AND meta_value = '2'"), 0, 'post-type menu item object references pointing at a held explicit source post are not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT comment_post_ID FROM wp_comments WHERE comment_content = 'Base comment reference'"), 1, 'updated comments pointing at a held explicit source post are not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT comment_parent FROM wp_comments WHERE comment_content = 'Base threaded comment reference'"), 0, 'updated threaded comments pointing at a held explicit source comment are not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_comments WHERE comment_post_ID = 2"), 0, 'comments pointing at a held explicit source post are not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_commentmeta WHERE comment_id = $band_explicit_ref_comment_id"), 0, 'comment metadata behind a held explicit source post is not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT comment_id FROM wp_commentmeta WHERE meta_key = '_forkpress_base_comment_ref'"), 1, 'updated comment metadata behind a held explicit source post comment is not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_comments WHERE comment_parent = $band_explicit_ref_comment_id"), 0, 'threaded comments pointing at a held explicit source comment are not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_commentmeta WHERE comment_id = $band_explicit_ref_child_comment_id"), 0, 'threaded comment metadata behind a held explicit source comment is not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_term_relationships WHERE object_id = 2"), 0, 'term relationships pointing at a held explicit source post are not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_term_relationships WHERE object_id = 1 AND term_taxonomy_id = 20"), 1, 'updated term relationship object IDs pointing at a held explicit source post are not applied automatically');
+    assert_same(
+        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND c.table_name = 'wp_postmeta' AND c.conflict_type = 'row-target-constraint'"),
+        5,
+        'postmeta pointing at a held explicit source post records reviewable row conflicts'
+    );
+    assert_same(
+        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND c.table_name = 'wp_options' AND c.conflict_type = 'row-target-constraint'"),
+        7,
+        'options pointing at a held explicit source post record reviewable row conflicts'
+    );
+    assert_same(
+        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND c.table_name = 'wp_posts' AND c.conflict_type = 'row-target-constraint'"),
+        14,
+        'explicit parent, attachment, child, and block consumer posts behind them record reviewable row conflicts'
+    );
+    assert_same(
+        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND c.table_name = 'wp_comments' AND c.conflict_type = 'row-target-constraint'"),
+        4,
+        'comments pointing at a held explicit source post or comment record reviewable row conflicts'
+    );
+    assert_same(
+        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND c.table_name = 'wp_commentmeta' AND c.conflict_type = 'row-target-constraint'"),
+        3,
+        'comment metadata behind a held explicit source post or comment records reviewable row conflicts'
+    );
+    assert_same(
+        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND c.table_name = 'wp_term_relationships' AND c.conflict_type = 'row-target-constraint'"),
+        2,
+        'term relationships pointing at a held explicit source post record a reviewable row conflict'
+    );
+    assert_true(
+        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_postmeta' AND d.decision = 'target-wins' AND d.reason LIKE '%must merge before child row%'") === 5,
+        'postmeta held behind an explicit source post explains the missing parent'
+    );
+    assert_true(
+        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_postmeta' AND d.decision = 'target-wins' AND d.reason LIKE 'source changed%'") === 2,
+        'updated postmeta held behind an explicit source post explains that the source changed the row'
+    );
+    assert_true(
+        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_options' AND d.decision = 'target-wins' AND d.reason LIKE '%parent post must merge before child row%'") === 7,
+        'options held behind an explicit source post explain the missing parent'
+    );
+    assert_true(
+        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_options' AND d.decision = 'target-wins' AND d.reason LIKE 'source changed%'") === 3,
+        'updated options held behind an explicit source post explain that the source changed the option'
+    );
+    assert_true(
+        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_posts' AND d.decision = 'target-wins' AND d.reason LIKE '%parent post must merge before child row%'") === 12,
+        'child posts and block content held behind an explicit source post explain the missing parent'
+    );
+    assert_true(
+        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_posts' AND d.decision = 'target-wins' AND d.reason LIKE 'source changed%'") === 11,
+        'updated child posts and block content held behind an explicit source post explain that the source changed the row'
+    );
+    assert_true(
+        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_comments' AND d.decision = 'target-wins' AND d.reason LIKE 'source changed%'") === 2,
+        'updated comments held behind an explicit source post explain that the source changed the row'
+    );
+    assert_true(
+        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_commentmeta' AND d.decision = 'target-wins' AND d.reason LIKE 'source changed%'") === 1,
+        'updated comment metadata held behind an explicit source post comment explains that the source changed the row'
+    );
+    assert_true(
+        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_term_relationships' AND d.decision = 'target-wins' AND d.reason LIKE '%parent post must merge before child row%'") === 2,
+        'term relationships held behind an explicit source post explain the missing parent'
+    );
+
+    $band_explicit_sticky_base = $tmp . '/band-explicit-sticky-base.sqlite';
+    $band_explicit_sticky_source = $tmp . '/band-explicit-sticky-source.sqlite';
+    $band_explicit_sticky_target = $tmp . '/band-explicit-sticky-target.sqlite';
+    $band_explicit_sticky_metadata = $tmp . '/.forkpress/cow/merge/band-explicit-sticky-metadata.sqlite';
+    copy($band_base, $band_explicit_sticky_base);
+    $band_explicit_sticky_base_value = serialize([1]);
+    $db = open_db($band_explicit_sticky_base);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('sticky_posts', :value, 'yes')");
+    $stmt->bindValue(':value', $band_explicit_sticky_base_value, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+    copy($band_explicit_sticky_base, $band_explicit_sticky_source);
+    copy($band_explicit_sticky_base, $band_explicit_sticky_target);
+    cow_merge_allocate_autoincrement_bands($band_explicit_sticky_source, $band_explicit_sticky_metadata, 'feature-band-explicit-sticky-source');
+    $db = open_db($band_explicit_sticky_source);
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status) VALUES (2, 'Imported explicit sticky post', 'explicit sticky id', 'publish')");
+    $band_explicit_sticky_updated_value = serialize([2]);
+    $stmt = $db->prepare("UPDATE wp_options SET option_value = :value WHERE option_name = 'sticky_posts'");
+    $stmt->bindValue(':value', $band_explicit_sticky_updated_value, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+    $band_explicit_sticky_result = cow_merge_databases(
+        $band_explicit_sticky_base,
+        $band_explicit_sticky_source,
+        $band_explicit_sticky_target,
+        $band_explicit_sticky_metadata,
+        'feature-band-explicit-sticky-source',
+        'main'
+    );
+    assert_same($band_explicit_sticky_result['status'], 'completed_with_conflicts', 'updated sticky posts behind explicit source post IDs remain reviewable');
+    assert_same((int)scalar($band_explicit_sticky_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 2'), 0, 'out-of-band explicit sticky source post remains unapplied');
+    assert_same(scalar($band_explicit_sticky_target, "SELECT option_value FROM wp_options WHERE option_name = 'sticky_posts'"), $band_explicit_sticky_base_value, 'updated sticky posts pointing at a held explicit source post are not applied automatically');
+    assert_same(
+        (int)scalar($band_explicit_sticky_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-sticky-source' AND c.table_name = 'wp_options' AND c.conflict_type = 'row-target-constraint'"),
+        1,
+        'updated sticky posts pointing at a held explicit source post record a reviewable option conflict'
+    );
+    assert_true(
+        str_contains((string)scalar($band_explicit_sticky_metadata, "SELECT reason FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-sticky-source' AND d.table_name = 'wp_options' AND d.decision = 'target-wins' ORDER BY d.id DESC LIMIT 1"), 'parent post must merge before child row'),
+        'updated sticky posts held behind an explicit source post explain the missing parent'
+    );
+
+    $band_explicit_term_base = $tmp . '/band-explicit-term-base.sqlite';
+    $band_explicit_term_source = $tmp . '/band-explicit-term-source.sqlite';
+    $band_explicit_term_target = $tmp . '/band-explicit-term-target.sqlite';
+    $band_explicit_term_metadata = $tmp . '/.forkpress/cow/merge/band-explicit-term-metadata.sqlite';
+    copy($band_base, $band_explicit_term_base);
+    $db = open_db($band_explicit_term_base);
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status) VALUES ('Base taxonomy owner', '', 'publish')");
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_type TEXT NOT NULL DEFAULT 'post'");
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec('CREATE TABLE wp_terms (term_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, slug TEXT NOT NULL)');
+    $db->exec('CREATE TABLE wp_termmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, term_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec('CREATE TABLE wp_term_taxonomy (term_taxonomy_id INTEGER PRIMARY KEY AUTOINCREMENT, term_id INTEGER NOT NULL, taxonomy TEXT NOT NULL, description TEXT NOT NULL DEFAULT "", parent INTEGER NOT NULL DEFAULT 0, count INTEGER NOT NULL DEFAULT 0)');
+    $db->exec('CREATE TABLE wp_term_relationships (object_id INTEGER NOT NULL, term_taxonomy_id INTEGER NOT NULL, term_order INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (object_id, term_taxonomy_id))');
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (1, 'Base category term', 'base-category-term')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, count) VALUES (1, 1, 'category', '', 1)");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES (3, 1, 'category', '', 0, 1)");
+    $db->exec("INSERT INTO wp_termmeta (term_id, meta_key, meta_value) VALUES (1, '_forkpress_base_term_ref', 'base term metadata')");
+    $db->exec('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (1, 1, 0)');
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type) VALUES ('Base taxonomy navigation link consumer', '<!-- wp:paragraph --><p>base taxonomy navigation link content</p><!-- /wp:paragraph -->', 'publish', 'page')");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type) VALUES ('Base taxonomy query consumer', '<!-- wp:paragraph --><p>base taxonomy query content</p><!-- /wp:paragraph -->', 'publish', 'page')");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type) VALUES ('Base tag query consumer', '<!-- wp:paragraph --><p>base tag query content</p><!-- /wp:paragraph -->', 'publish', 'page')");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type) VALUES ('Base taxonomy menu item', '', 'publish', 'nav_menu_item')");
+    $band_explicit_term_base_menu_item_id = (int)$db->lastInsertRowID();
+    $db->exec("INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES ($band_explicit_term_base_menu_item_id, 1, 0)");
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:menu_item_id, '_menu_item_type', 'taxonomy'), (:menu_item_id, '_menu_item_object_id', '1')");
+    $stmt->bindValue(':menu_item_id', $band_explicit_term_base_menu_item_id, SQLITE3_INTEGER);
+    $stmt->execute();
+    $band_explicit_term_base_theme_mods = serialize(['nav_menu_locations' => ['primary' => 1]]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('theme_mods_existing_term_refs', :value, 'yes')");
+    $stmt->bindValue(':value', $band_explicit_term_base_theme_mods, SQLITE3_TEXT);
+    $stmt->execute();
+    $band_explicit_term_base_nav_widget = serialize([2 => ['nav_menu' => 1, 'title' => 'Base nav widget']]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_nav_menu', :value, 'yes')");
+    $stmt->bindValue(':value', $band_explicit_term_base_nav_widget, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+    copy($band_explicit_term_base, $band_explicit_term_source);
+    copy($band_explicit_term_base, $band_explicit_term_target);
+    cow_merge_allocate_autoincrement_bands($band_explicit_term_source, $band_explicit_term_metadata, 'feature-band-explicit-term-source');
+    $db = open_db($band_explicit_term_source);
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (2, 'Imported explicit term', 'imported-explicit-term')");
+    $stmt = $db->prepare("INSERT INTO wp_term_taxonomy (term_id, taxonomy, description, count) VALUES (2, 'category', '', 1)");
+    $stmt->execute();
+    $band_explicit_term_taxonomy_id = (int)$db->lastInsertRowID();
+    $db->exec("INSERT INTO wp_termmeta (term_id, meta_key, meta_value) VALUES (2, '_forkpress_term_ref', 'term metadata behind held explicit term')");
+    $db->exec("INSERT INTO wp_terms (name, slug) VALUES ('Imported child term behind explicit parent', 'imported-child-term')");
+    $band_explicit_child_term_id = (int)$db->lastInsertRowID();
+    $stmt = $db->prepare("INSERT INTO wp_term_taxonomy (term_id, taxonomy, description, parent, count) VALUES (:term_id, 'category', '', 2, 1)");
+    $stmt->bindValue(':term_id', $band_explicit_child_term_id, SQLITE3_INTEGER);
+    $stmt->execute();
+    $stmt = $db->prepare('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (1, :term_taxonomy_id, 0)');
+    $stmt->bindValue(':term_taxonomy_id', $band_explicit_term_taxonomy_id, SQLITE3_INTEGER);
+    $stmt->execute();
+    $db->exec("UPDATE wp_termmeta SET term_id = 2 WHERE meta_key = '_forkpress_base_term_ref'");
+    $db->exec("UPDATE wp_term_taxonomy SET term_id = 2 WHERE term_taxonomy_id = 1");
+    $db->exec("UPDATE wp_term_taxonomy SET parent = 2 WHERE term_taxonomy_id = 3");
+    $db->exec("UPDATE wp_posts SET post_content = '<!-- wp:navigation-link {\"id\":2,\"kind\":\"taxonomy\",\"type\":\"category\",\"label\":\"Held term\"} /-->' WHERE post_title = 'Base taxonomy navigation link consumer'");
+    $db->exec("UPDATE wp_posts SET post_content = '<!-- wp:query {\"query\":{\"categoryIds\":[2],\"perPage\":3}} --><!-- /wp:query -->' WHERE post_title = 'Base taxonomy query consumer'");
+    $db->exec("UPDATE wp_posts SET post_content = '<!-- wp:query {\"query\":{\"tagIds\":[2],\"perPage\":3}} --><!-- /wp:query -->' WHERE post_title = 'Base tag query consumer'");
+    $stmt = $db->prepare('UPDATE wp_term_relationships SET term_taxonomy_id = :term_taxonomy_id WHERE object_id = :object_id AND term_taxonomy_id = 1');
+    $stmt->bindValue(':term_taxonomy_id', $band_explicit_term_taxonomy_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':object_id', $band_explicit_term_base_menu_item_id, SQLITE3_INTEGER);
+    $stmt->execute();
+    $db->exec("UPDATE wp_postmeta SET meta_value = '2' WHERE post_id = $band_explicit_term_base_menu_item_id AND meta_key = '_menu_item_object_id'");
+    $band_explicit_term_updated_theme_mods = serialize(['nav_menu_locations' => ['primary' => 2]]);
+    $stmt = $db->prepare("UPDATE wp_options SET option_value = :value WHERE option_name = 'theme_mods_existing_term_refs'");
+    $stmt->bindValue(':value', $band_explicit_term_updated_theme_mods, SQLITE3_TEXT);
+    $stmt->execute();
+    $band_explicit_term_updated_nav_widget = serialize([2 => ['nav_menu' => 2, 'title' => 'Updated nav widget']]);
+    $stmt = $db->prepare("UPDATE wp_options SET option_value = :value WHERE option_name = 'widget_nav_menu'");
+    $stmt->bindValue(':value', $band_explicit_term_updated_nav_widget, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type) VALUES ('Taxonomy menu item behind explicit term', '', 'publish', 'nav_menu_item')");
+    $band_explicit_term_menu_item_id = (int)$db->lastInsertRowID();
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:menu_item_id, '_menu_item_type', 'taxonomy'), (:menu_item_id, '_menu_item_object_id', '2')");
+    $stmt->bindValue(':menu_item_id', $band_explicit_term_menu_item_id, SQLITE3_INTEGER);
+    $stmt->execute();
+    $band_explicit_term_theme_mods = serialize([
+        'nav_menu_locations' => [
+            'primary' => 2,
+        ],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('theme_mods_imported_term_refs', :value, 'yes')");
+    $stmt->bindValue(':value', $band_explicit_term_theme_mods, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+    $band_explicit_term_result = cow_merge_databases(
+        $band_explicit_term_base,
+        $band_explicit_term_source,
+        $band_explicit_term_target,
+        $band_explicit_term_metadata,
+        'feature-band-explicit-term-source',
+        'main'
+    );
+    assert_same($band_explicit_term_result['status'], 'completed_with_conflicts', 'explicit source term IDs hold dependent taxonomy rows for review');
+    assert_same((int)scalar($band_explicit_term_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 2'), 0, 'out-of-band explicit source term remains unapplied');
+    assert_same((int)scalar($band_explicit_term_target, 'SELECT COUNT(*) FROM wp_termmeta WHERE term_id = 2'), 0, 'term metadata pointing at a held explicit source term is not applied automatically');
+    assert_same((int)scalar($band_explicit_term_target, "SELECT term_id FROM wp_termmeta WHERE meta_key = '_forkpress_base_term_ref'"), 1, 'updated term metadata pointing at a held explicit source term is not applied automatically');
+    assert_same((int)scalar($band_explicit_term_target, 'SELECT COUNT(*) FROM wp_term_taxonomy WHERE term_id = 2'), 0, 'term taxonomy pointing at a held explicit source term is not applied automatically');
+    assert_same((int)scalar($band_explicit_term_target, 'SELECT term_id FROM wp_term_taxonomy WHERE term_taxonomy_id = 1'), 1, 'updated term taxonomy pointing at a held explicit source term is not applied automatically');
+    assert_same((int)scalar($band_explicit_term_target, 'SELECT COUNT(*) FROM wp_term_taxonomy WHERE parent = 2'), 0, 'hierarchical term taxonomy pointing at a held explicit parent term is not applied automatically');
+    assert_same((int)scalar($band_explicit_term_target, 'SELECT parent FROM wp_term_taxonomy WHERE term_taxonomy_id = 3'), 0, 'updated term taxonomy parents pointing at a held explicit source term are not applied automatically');
+    assert_same((int)scalar($band_explicit_term_target, "SELECT COUNT(*) FROM wp_term_relationships WHERE term_taxonomy_id = $band_explicit_term_taxonomy_id"), 0, 'term relationships pointing at held explicit source term taxonomy are not applied automatically');
+    assert_same((int)scalar($band_explicit_term_target, "SELECT COUNT(*) FROM wp_term_relationships WHERE object_id = $band_explicit_term_base_menu_item_id AND term_taxonomy_id = 1"), 1, 'updated term relationships pointing at held explicit source term taxonomy are not applied automatically');
+    assert_same(scalar($band_explicit_term_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $band_explicit_term_base_menu_item_id AND meta_key = '_menu_item_object_id'"), '1', 'updated taxonomy menu item object references pointing at a held explicit source term are not applied automatically');
+    assert_same((int)scalar($band_explicit_term_target, "SELECT COUNT(*) FROM wp_postmeta WHERE post_id = $band_explicit_term_menu_item_id AND meta_key = '_menu_item_object_id' AND meta_value = '2'"), 0, 'taxonomy menu item object references pointing at a held explicit source term are not applied automatically');
+    assert_same(scalar($band_explicit_term_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_existing_term_refs'"), $band_explicit_term_base_theme_mods, 'updated theme mods pointing at a held explicit source nav menu are not applied automatically');
+    assert_same(scalar($band_explicit_term_target, "SELECT option_value FROM wp_options WHERE option_name = 'widget_nav_menu'"), $band_explicit_term_base_nav_widget, 'updated nav menu widgets pointing at a held explicit source menu are not applied automatically');
+    assert_same(scalar($band_explicit_term_target, "SELECT post_content FROM wp_posts WHERE post_title = 'Base taxonomy navigation link consumer'"), '<!-- wp:paragraph --><p>base taxonomy navigation link content</p><!-- /wp:paragraph -->', 'updated taxonomy navigation link refs pointing at a held explicit source term are not applied automatically');
+    assert_same(scalar($band_explicit_term_target, "SELECT post_content FROM wp_posts WHERE post_title = 'Base taxonomy query consumer'"), '<!-- wp:paragraph --><p>base taxonomy query content</p><!-- /wp:paragraph -->', 'updated query block term refs pointing at a held explicit source term are not applied automatically');
+    assert_same(scalar($band_explicit_term_target, "SELECT post_content FROM wp_posts WHERE post_title = 'Base tag query consumer'"), '<!-- wp:paragraph --><p>base tag query content</p><!-- /wp:paragraph -->', 'updated query block tag refs pointing at a held explicit source term are not applied automatically');
+    assert_same((int)scalar($band_explicit_term_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'theme_mods_imported_term_refs'"), 0, 'theme mods pointing at a held explicit source nav menu are not applied automatically');
+    assert_same(
+        (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND c.table_name = 'wp_terms' AND c.conflict_type = 'row-target-constraint'"),
+        1,
+        'out-of-band explicit source term records a reviewable row conflict'
+    );
+    assert_same(
+        (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND c.table_name = 'wp_term_taxonomy' AND c.conflict_type = 'row-target-constraint'"),
+        4,
+        'term taxonomy pointing at a held explicit source term records a reviewable row conflict'
+    );
+    assert_same(
+        (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND c.table_name = 'wp_termmeta' AND c.conflict_type = 'row-target-constraint'"),
+        2,
+        'term metadata pointing at a held explicit source term records a reviewable row conflict'
+    );
+    assert_same(
+        (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND c.table_name = 'wp_term_relationships' AND c.conflict_type = 'row-target-constraint'"),
+        3,
+        'term relationships pointing at a held explicit source term record a reviewable row conflict'
+    );
+    assert_same(
+        (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND c.table_name = 'wp_postmeta' AND c.conflict_type = 'row-target-constraint'"),
+        2,
+        'taxonomy menu item object references pointing at a held explicit source term record a reviewable row conflict'
+    );
+    assert_same(
+        (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND c.table_name = 'wp_posts' AND c.conflict_type = 'row-target-constraint'"),
+        3,
+        'taxonomy block refs pointing at a held explicit source term record a reviewable row conflict'
+    );
+    assert_same(
+        (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND c.table_name = 'wp_options' AND c.conflict_type = 'row-target-constraint'"),
+        3,
+        'options pointing at a held explicit source term record reviewable row conflicts'
+    );
+    assert_true(
+        (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND d.table_name = 'wp_options' AND d.decision = 'target-wins' AND d.reason LIKE '%parent term must merge before child row%'") === 3,
+        'options held behind an explicit source term explain the missing parent'
+    );
+    assert_true(
+        (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND d.table_name IN ('wp_termmeta', 'wp_term_taxonomy', 'wp_term_relationships', 'wp_postmeta', 'wp_options', 'wp_posts') AND d.decision = 'target-wins' AND d.reason LIKE 'source changed%'") === 10,
+        'updated rows held behind an explicit source term explain that the source changed the row'
+    );
+
+    $band_explicit_user_base = $tmp . '/band-explicit-user-base.sqlite';
+    $band_explicit_user_source = $tmp . '/band-explicit-user-source.sqlite';
+    $band_explicit_user_target = $tmp . '/band-explicit-user-target.sqlite';
+    $band_explicit_user_metadata = $tmp . '/.forkpress/cow/merge/band-explicit-user-metadata.sqlite';
+    copy($band_base, $band_explicit_user_base);
+    $db = open_db($band_explicit_user_base);
+    $db->exec('ALTER TABLE wp_posts ADD COLUMN post_author INTEGER NOT NULL DEFAULT 0');
+    $db->exec('CREATE TABLE wp_users (ID INTEGER PRIMARY KEY AUTOINCREMENT, user_login TEXT NOT NULL, user_email TEXT NOT NULL DEFAULT "")');
+    $db->exec('CREATE TABLE wp_usermeta (umeta_id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec('CREATE TABLE wp_comments (comment_ID INTEGER PRIMARY KEY AUTOINCREMENT, comment_post_ID INTEGER NOT NULL, comment_content TEXT NOT NULL, comment_parent INTEGER NOT NULL DEFAULT 0, user_id INTEGER NOT NULL DEFAULT 0)');
+    $db->exec("INSERT INTO wp_users (ID, user_login, user_email) VALUES (1, 'base-user', 'base@example.test')");
+    $db->exec("INSERT INTO wp_usermeta (user_id, meta_key, meta_value) VALUES (1, 'nickname', 'base-user')");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_author) VALUES ('Base authored post', 'base author should remain', 'publish', 1)");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_author) VALUES ('Base avatar block consumer', '<!-- wp:paragraph --><p>base avatar content</p><!-- /wp:paragraph -->', 'publish', 1)");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_author) VALUES ('Base author query consumer', '<!-- wp:paragraph --><p>base author query content</p><!-- /wp:paragraph -->', 'publish', 1)");
+    $db->exec("INSERT INTO wp_comments (comment_post_ID, comment_content, user_id) VALUES (1, 'Base user comment', 1)");
+    $db->close();
+    copy($band_explicit_user_base, $band_explicit_user_source);
+    copy($band_explicit_user_base, $band_explicit_user_target);
+    cow_merge_allocate_autoincrement_bands($band_explicit_user_source, $band_explicit_user_metadata, 'feature-band-explicit-user-source');
+    $db = open_db($band_explicit_user_source);
+    $db->exec("INSERT INTO wp_users (ID, user_login, user_email) VALUES (2, 'imported-explicit-user', 'imported@example.test')");
+    $db->exec("INSERT INTO wp_usermeta (user_id, meta_key, meta_value) VALUES (2, 'description', 'metadata behind held explicit user')");
+    $db->exec("UPDATE wp_usermeta SET user_id = 2 WHERE meta_key = 'nickname'");
+    $db->exec("UPDATE wp_posts SET post_author = 2 WHERE post_title = 'Base authored post'");
+    $db->exec("UPDATE wp_posts SET post_content = '<!-- wp:avatar {\"userId\":2,\"size\":96} /-->' WHERE post_title = 'Base avatar block consumer'");
+    $db->exec("UPDATE wp_posts SET post_content = '<!-- wp:query {\"query\":{\"author\":2,\"perPage\":3}} --><!-- /wp:query -->' WHERE post_title = 'Base author query consumer'");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_author) VALUES ('Post behind explicit author', 'author should be review-held', 'publish', 2)");
+    $db->exec("UPDATE wp_comments SET user_id = 2 WHERE comment_content = 'Base user comment'");
+    $db->exec("INSERT INTO wp_comments (comment_post_ID, comment_content, user_id) VALUES (1, 'Comment behind held explicit user', 2)");
+    $db->close();
+    $band_explicit_user_result = cow_merge_databases(
+        $band_explicit_user_base,
+        $band_explicit_user_source,
+        $band_explicit_user_target,
+        $band_explicit_user_metadata,
+        'feature-band-explicit-user-source',
+        'main'
+    );
+    assert_same($band_explicit_user_result['status'], 'completed_with_conflicts', 'explicit source user IDs hold dependent user rows for review');
+    assert_same((int)scalar($band_explicit_user_target, 'SELECT COUNT(*) FROM wp_users WHERE ID = 2'), 0, 'out-of-band explicit source user remains unapplied');
+    assert_same((int)scalar($band_explicit_user_target, 'SELECT COUNT(*) FROM wp_usermeta WHERE user_id = 2'), 0, 'usermeta pointing at a held explicit source user is not applied automatically');
+    assert_same((int)scalar($band_explicit_user_target, "SELECT user_id FROM wp_usermeta WHERE meta_key = 'nickname'"), 1, 'updated usermeta pointing at a held explicit source user is not applied automatically');
+    assert_same((int)scalar($band_explicit_user_target, "SELECT post_author FROM wp_posts WHERE post_title = 'Base authored post'"), 1, 'updated post authors pointing at a held explicit source user are not applied automatically');
+    assert_same(scalar($band_explicit_user_target, "SELECT post_content FROM wp_posts WHERE post_title = 'Base avatar block consumer'"), '<!-- wp:paragraph --><p>base avatar content</p><!-- /wp:paragraph -->', 'updated avatar block refs pointing at a held explicit source user are not applied automatically');
+    assert_same(scalar($band_explicit_user_target, "SELECT post_content FROM wp_posts WHERE post_title = 'Base author query consumer'"), '<!-- wp:paragraph --><p>base author query content</p><!-- /wp:paragraph -->', 'updated query block author refs pointing at a held explicit source user are not applied automatically');
+    assert_same((int)scalar($band_explicit_user_target, 'SELECT COUNT(*) FROM wp_posts WHERE post_author = 2'), 0, 'posts authored by a held explicit source user are not applied automatically');
+    assert_same((int)scalar($band_explicit_user_target, "SELECT user_id FROM wp_comments WHERE comment_content = 'Base user comment'"), 1, 'updated comments pointing at a held explicit source user are not applied automatically');
+    assert_same((int)scalar($band_explicit_user_target, 'SELECT COUNT(*) FROM wp_comments WHERE user_id = 2'), 0, 'comments pointing at a held explicit source user are not applied automatically');
+    assert_same(
+        (int)scalar($band_explicit_user_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-user-source' AND c.table_name = 'wp_users' AND c.conflict_type = 'row-target-constraint'"),
+        1,
+        'out-of-band explicit source user records a reviewable row conflict'
+    );
+    assert_same(
+        (int)scalar($band_explicit_user_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-user-source' AND c.table_name = 'wp_usermeta' AND c.conflict_type = 'row-target-constraint'"),
+        2,
+        'usermeta pointing at a held explicit source user records a reviewable row conflict'
+    );
+    assert_same(
+        (int)scalar($band_explicit_user_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-user-source' AND c.table_name = 'wp_posts' AND c.conflict_type = 'row-target-constraint'"),
+        4,
+        'posts authored by or referencing a held explicit source user record a reviewable row conflict'
+    );
+    assert_same(
+        (int)scalar($band_explicit_user_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-user-source' AND c.table_name = 'wp_comments' AND c.conflict_type = 'row-target-constraint'"),
+        2,
+        'comments pointing at a held explicit source user record a reviewable row conflict'
+    );
+    assert_true(
+        (int)scalar($band_explicit_user_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-user-source' AND d.table_name IN ('wp_usermeta', 'wp_posts', 'wp_comments') AND d.decision = 'target-wins' AND d.reason LIKE '%parent user must merge before child row%'") === 8,
+        'child rows held behind an explicit source user explain the missing parent'
+    );
+    assert_true(
+        (int)scalar($band_explicit_user_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-user-source' AND d.table_name IN ('wp_usermeta', 'wp_posts', 'wp_comments') AND d.decision = 'target-wins' AND d.reason LIKE 'source changed%'") === 5,
+        'updated child rows held behind an explicit source user explain that the source changed the row'
+    );
+
+    $plain_graph_base = $tmp . '/plain-ipk-graph-base.sqlite';
+    $plain_graph_source = $tmp . '/plain-ipk-graph-source.sqlite';
+    $plain_graph_target = $tmp . '/plain-ipk-graph-target.sqlite';
+    $plain_graph_metadata = $tmp . '/.forkpress/cow/merge/plain-ipk-graph-metadata.sqlite';
+    create_base_db($plain_graph_base);
+    $db = open_db($plain_graph_base);
+    $db->exec('CREATE TABLE plugin_plain_ipk_graph (id INTEGER PRIMARY KEY, branch TEXT NOT NULL, graph_json TEXT NOT NULL, graph_serialized TEXT NOT NULL)');
+    $db->close();
+    copy($plain_graph_base, $plain_graph_source);
+    copy($plain_graph_base, $plain_graph_target);
+    cow_merge_allocate_autoincrement_bands($plain_graph_source, $plain_graph_metadata, 'feature-plain-ipk-source');
+    cow_merge_allocate_autoincrement_bands($plain_graph_target, $plain_graph_metadata, 'feature-plain-ipk-target');
+    $write_plain_ipk_graph = static function (string $path, string $branch): array {
+        $db = open_db($path);
+        $stmt = $db->prepare('INSERT INTO plugin_plain_ipk_graph (branch, graph_json, graph_serialized) VALUES (:branch, :json, :serialized)');
+        $stmt->bindValue(':branch', $branch, SQLITE3_TEXT);
+        $stmt->bindValue(':json', '{}', SQLITE3_TEXT);
+        $stmt->bindValue(':serialized', 'a:0:{}', SQLITE3_TEXT);
+        $stmt->execute();
+        $id = (int)$db->lastInsertRowID();
+        $graph = ['branch' => $branch, 'self_id' => $id];
+        $json = json_encode($graph, JSON_UNESCAPED_SLASHES);
+        $serialized = 'a:2:{s:6:"branch";s:' . strlen($branch) . ':"' . $branch . '";s:7:"self_id";i:' . $id . ';}';
+        $stmt = $db->prepare('UPDATE plugin_plain_ipk_graph SET graph_json = :json, graph_serialized = :serialized WHERE id = :id');
+        $stmt->bindValue(':json', $json, SQLITE3_TEXT);
+        $stmt->bindValue(':serialized', $serialized, SQLITE3_TEXT);
+        $stmt->bindValue(':id', $id, SQLITE3_INTEGER);
+        $stmt->execute();
+        $db->close();
+        return ['id' => $id, 'json' => $json, 'serialized' => $serialized];
+    };
+    $plain_source_graph = $write_plain_ipk_graph($plain_graph_source, 'source');
+    $plain_target_graph = $write_plain_ipk_graph($plain_graph_target, 'target');
+    assert_same($plain_source_graph['id'], $plain_target_graph['id'], 'plain INTEGER PRIMARY KEY plugin branches can reuse the same row ID before merge');
+    $plain_graph_result = cow_merge_databases(
+        $plain_graph_base,
+        $plain_graph_source,
+        $plain_graph_target,
+        $plain_graph_metadata,
+        'feature-plain-ipk-source',
+        'feature-plain-ipk-target'
+    );
+    assert_same($plain_graph_result['status'], 'completed_with_conflicts', 'plain INTEGER PRIMARY KEY plugin graph ID collision is held for review');
+    assert_same((int)scalar($plain_graph_target, "SELECT COUNT(*) FROM plugin_plain_ipk_graph WHERE branch = 'source'"), 0, 'plain IPK source graph is not applied over a target graph with the same ID');
+    assert_same((string)scalar($plain_graph_target, "SELECT graph_json FROM plugin_plain_ipk_graph WHERE branch = 'target'"), $plain_target_graph['json'], 'plain IPK target graph remains coherent after collision review hold');
+    assert_same(
+        (int)scalar($plain_graph_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-plain-ipk-source' AND c.table_name = 'plugin_plain_ipk_graph' AND c.conflict_type = 'row-insert-collision'"),
+        1,
+        'plain IPK plugin graph collision records a row insert conflict'
+    );
+    assert_true(
+        (int)scalar($plain_graph_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_plain_ipk_graph' AND decision = 'id-band-skipped'") >= 2,
+        'plain IPK plugin graph tables are auditable as non-bandable on both branches'
+    );
 
     $band_ref_base = $tmp . '/band-ref-base.sqlite';
     $band_ref_source = $tmp . '/band-ref-source.sqlite';
@@ -12947,6 +15184,3251 @@ SQL);
     assert_same(scalar($band_ref_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $band_ref_source_id AND meta_key = '_forkpress_serialized_ref'"), $band_ref_source_serialized, 'source serialized post reference remains valid after banded merge');
     assert_same(scalar($band_ref_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $band_ref_target_id AND meta_key = '_forkpress_serialized_ref'"), $band_ref_target_serialized, 'target serialized post reference remains valid after banded merge');
     assert_same((int)scalar($band_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-ref-source'"), 0, 'banded WordPress reference merge records no ID collision conflicts');
+
+    $wp_semantic_base = $tmp . '/wp-semantic-base.sqlite';
+    $wp_semantic_source = $tmp . '/wp-semantic-source.sqlite';
+    $wp_semantic_target = $tmp . '/wp-semantic-target.sqlite';
+    $wp_semantic_metadata = $tmp . '/.forkpress/cow/merge/wp-semantic-metadata.sqlite';
+    create_base_db($wp_semantic_base);
+    $db = open_db($wp_semantic_base);
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_type TEXT NOT NULL DEFAULT 'post'");
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_name TEXT NOT NULL DEFAULT ''");
+    $db->exec('ALTER TABLE wp_posts ADD COLUMN post_parent INTEGER NOT NULL DEFAULT 0');
+    $db->exec('ALTER TABLE wp_posts ADD COLUMN post_author INTEGER NOT NULL DEFAULT 0');
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN guid TEXT NOT NULL DEFAULT ''");
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec('CREATE TABLE wp_comments (comment_ID INTEGER PRIMARY KEY AUTOINCREMENT, comment_post_ID INTEGER NOT NULL, comment_content TEXT NOT NULL, comment_parent INTEGER NOT NULL DEFAULT 0, user_id INTEGER NOT NULL DEFAULT 0)');
+    $db->exec('CREATE TABLE wp_commentmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, comment_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec('CREATE TABLE wp_users (ID INTEGER PRIMARY KEY AUTOINCREMENT, user_login TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL)');
+    $db->exec('CREATE TABLE wp_usermeta (umeta_id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec('CREATE TABLE wp_terms (term_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, slug TEXT NOT NULL, term_group INTEGER NOT NULL DEFAULT 0)');
+    $db->exec('CREATE TABLE wp_term_taxonomy (term_taxonomy_id INTEGER PRIMARY KEY AUTOINCREMENT, term_id INTEGER NOT NULL, taxonomy TEXT NOT NULL, description TEXT NOT NULL DEFAULT "", parent INTEGER NOT NULL DEFAULT 0, count INTEGER NOT NULL DEFAULT 0)');
+    $db->exec('CREATE TABLE wp_term_relationships (object_id INTEGER NOT NULL, term_taxonomy_id INTEGER NOT NULL, term_order INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (object_id, term_taxonomy_id))');
+    $db->close();
+    copy($wp_semantic_base, $wp_semantic_source);
+    copy($wp_semantic_base, $wp_semantic_target);
+    $wp_semantic_base_root = $tmp . '/wp-semantic-files-base';
+    $wp_semantic_source_root = $tmp . '/wp-semantic-files-source';
+    $wp_semantic_target_root = $tmp . '/wp-semantic-files-target';
+    mkdir($wp_semantic_base_root . '/wp-content/uploads/2026/05', 0777, true);
+    copy_tree_for_test($wp_semantic_base_root, $wp_semantic_source_root);
+    copy_tree_for_test($wp_semantic_base_root, $wp_semantic_target_root);
+    $wp_semantic_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-semantic-source.json';
+    cow_merge_capture_file_base($wp_semantic_base_root, $wp_semantic_file_base);
+    cow_merge_allocate_autoincrement_bands($wp_semantic_source, $wp_semantic_metadata, 'feature-wp-semantic-source');
+    cow_merge_allocate_autoincrement_bands($wp_semantic_target, $wp_semantic_metadata, 'feature-wp-semantic-target');
+    $write_wp_semantic_bundle = static function (string $db_path, string $root, string $branch): array {
+        $db = open_db($db_path);
+        $suffix = ucfirst($branch);
+        $stmt = $db->prepare('INSERT INTO wp_users (user_login, display_name) VALUES (:login, :display_name)');
+        $stmt->bindValue(':login', "forkpress_$branch", SQLITE3_TEXT);
+        $stmt->bindValue(':display_name', "$suffix Author", SQLITE3_TEXT);
+        $stmt->execute();
+        $user_id = (int)$db->lastInsertRowID();
+        $user_graph = [
+            'branch' => $branch,
+            'user_id' => $user_id,
+        ];
+        $stmt = $db->prepare("INSERT INTO wp_usermeta (user_id, meta_key, meta_value) VALUES (:user_id, '_forkpress_user_graph', :json), (:user_id, '_forkpress_user_serialized_graph', :serialized)");
+        $stmt->bindValue(':user_id', $user_id, SQLITE3_INTEGER);
+        $stmt->bindValue(':json', json_encode($user_graph, JSON_UNESCAPED_SLASHES), SQLITE3_TEXT);
+        $stmt->bindValue(':serialized', serialize($user_graph), SQLITE3_TEXT);
+        $stmt->execute();
+        $block_content = "<!-- wp:paragraph --><p>$suffix reusable block</p><!-- /wp:paragraph -->";
+        $stmt = $db->prepare('INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name) VALUES (:title, :content, :status, :type, :slug)');
+        $stmt->bindValue(':title', "$suffix Reusable Block", SQLITE3_TEXT);
+        $stmt->bindValue(':content', $block_content, SQLITE3_TEXT);
+        $stmt->bindValue(':status', 'publish', SQLITE3_TEXT);
+        $stmt->bindValue(':type', 'wp_block', SQLITE3_TEXT);
+        $stmt->bindValue(':slug', "$branch-reusable-block", SQLITE3_TEXT);
+        $stmt->execute();
+        $block_id = (int)$db->lastInsertRowID();
+
+        $file_path = "wp-content/uploads/2026/05/$branch-image.jpg";
+        write_test_file($root . '/' . $file_path, "$branch image bytes\n");
+        $stmt = $db->prepare('INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name, guid) VALUES (:title, :content, :status, :type, :slug, :guid)');
+        $stmt->bindValue(':title', "$suffix Image", SQLITE3_TEXT);
+        $stmt->bindValue(':content', '', SQLITE3_TEXT);
+        $stmt->bindValue(':status', 'inherit', SQLITE3_TEXT);
+        $stmt->bindValue(':type', 'attachment', SQLITE3_TEXT);
+        $stmt->bindValue(':slug', "$branch-image", SQLITE3_TEXT);
+        $stmt->bindValue(':guid', $file_path, SQLITE3_TEXT);
+        $stmt->execute();
+        $attachment_id = (int)$db->lastInsertRowID();
+        $attachment_metadata = serialize([
+            'file' => '2026/05/' . basename($file_path),
+            'width' => 640,
+            'height' => 480,
+            'sizes' => [
+                'thumbnail' => [
+                    'file' => basename($file_path),
+                    'width' => 150,
+                    'height' => 150,
+                ],
+            ],
+        ]);
+        $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', :file), (:post_id, '_wp_attachment_metadata', :metadata)");
+        $stmt->bindValue(':post_id', $attachment_id, SQLITE3_INTEGER);
+        $stmt->bindValue(':file', '2026/05/' . basename($file_path), SQLITE3_TEXT);
+        $stmt->bindValue(':metadata', $attachment_metadata, SQLITE3_TEXT);
+        $stmt->execute();
+
+        $page_content = '<!-- wp:block {"ref":' . $block_id . '} /-->' .
+            '<!-- wp:image {"id":' . $attachment_id . ',"sizeSlug":"large"} --><figure class="wp-block-image size-large"><img class="wp-image-' . $attachment_id . '"/></figure><!-- /wp:image -->';
+        $stmt = $db->prepare('INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name) VALUES (:title, :content, :status, :type, :slug)');
+        $stmt->bindValue(':title', "$suffix Page", SQLITE3_TEXT);
+        $stmt->bindValue(':content', $page_content, SQLITE3_TEXT);
+        $stmt->bindValue(':status', 'publish', SQLITE3_TEXT);
+        $stmt->bindValue(':type', 'page', SQLITE3_TEXT);
+        $stmt->bindValue(':slug', "$branch-page", SQLITE3_TEXT);
+        $stmt->execute();
+        $page_id = (int)$db->lastInsertRowID();
+
+        $stmt = $db->prepare('INSERT INTO wp_comments (comment_post_ID, comment_content, user_id) VALUES (:post_id, :content, :user_id)');
+        $stmt->bindValue(':post_id', $page_id, SQLITE3_INTEGER);
+        $stmt->bindValue(':content', "$suffix page comment", SQLITE3_TEXT);
+        $stmt->bindValue(':user_id', $user_id, SQLITE3_INTEGER);
+        $stmt->execute();
+        $comment_id = (int)$db->lastInsertRowID();
+        $stmt = $db->prepare('INSERT INTO wp_comments (comment_post_ID, comment_content, comment_parent, user_id) VALUES (:post_id, :content, :parent, :user_id)');
+        $stmt->bindValue(':post_id', $page_id, SQLITE3_INTEGER);
+        $stmt->bindValue(':content', "$suffix threaded reply", SQLITE3_TEXT);
+        $stmt->bindValue(':parent', $comment_id, SQLITE3_INTEGER);
+        $stmt->bindValue(':user_id', $user_id, SQLITE3_INTEGER);
+        $stmt->execute();
+        $reply_comment_id = (int)$db->lastInsertRowID();
+        $comment_graph = [
+            'branch' => $branch,
+            'page_id' => $page_id,
+            'comment_id' => $comment_id,
+            'reply_comment_id' => $reply_comment_id,
+        ];
+        $stmt = $db->prepare("INSERT INTO wp_commentmeta (comment_id, meta_key, meta_value) VALUES (:comment_id, '_forkpress_comment_graph', :json), (:reply_comment_id, '_forkpress_comment_serialized_graph', :serialized)");
+        $stmt->bindValue(':comment_id', $comment_id, SQLITE3_INTEGER);
+        $stmt->bindValue(':reply_comment_id', $reply_comment_id, SQLITE3_INTEGER);
+        $stmt->bindValue(':json', json_encode($comment_graph, JSON_UNESCAPED_SLASHES), SQLITE3_TEXT);
+        $stmt->bindValue(':serialized', serialize($comment_graph), SQLITE3_TEXT);
+        $stmt->execute();
+
+        $stmt = $db->prepare('INSERT INTO wp_terms (name, slug) VALUES (:name, :slug)');
+        $stmt->bindValue(':name', "$suffix Primary Menu", SQLITE3_TEXT);
+        $stmt->bindValue(':slug', "$branch-primary-menu", SQLITE3_TEXT);
+        $stmt->execute();
+        $term_id = (int)$db->lastInsertRowID();
+        $stmt = $db->prepare("INSERT INTO wp_term_taxonomy (term_id, taxonomy, description, count) VALUES (:term_id, 'nav_menu', '', 1)");
+        $stmt->bindValue(':term_id', $term_id, SQLITE3_INTEGER);
+        $stmt->execute();
+        $term_taxonomy_id = (int)$db->lastInsertRowID();
+
+        $stmt = $db->prepare('INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name) VALUES (:title, :content, :status, :type, :slug)');
+        $stmt->bindValue(':title', "$suffix Menu Item", SQLITE3_TEXT);
+        $stmt->bindValue(':content', '', SQLITE3_TEXT);
+        $stmt->bindValue(':status', 'publish', SQLITE3_TEXT);
+        $stmt->bindValue(':type', 'nav_menu_item', SQLITE3_TEXT);
+        $stmt->bindValue(':slug', "$branch-menu-item", SQLITE3_TEXT);
+        $stmt->execute();
+        $menu_item_id = (int)$db->lastInsertRowID();
+        $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES
+            (:menu_item_id, '_menu_item_type', 'post_type'),
+            (:menu_item_id, '_menu_item_object', 'page'),
+            (:menu_item_id, '_menu_item_object_id', :page_id),
+            (:menu_item_id, '_menu_item_menu_item_parent', '0'),
+            (:menu_item_id, '_menu_item_classes', :classes)");
+        $stmt->bindValue(':menu_item_id', $menu_item_id, SQLITE3_INTEGER);
+        $stmt->bindValue(':page_id', (string)$page_id, SQLITE3_TEXT);
+        $stmt->bindValue(':classes', serialize([]), SQLITE3_TEXT);
+        $stmt->execute();
+        $stmt = $db->prepare('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id) VALUES (:object_id, :term_taxonomy_id)');
+        $stmt->bindValue(':object_id', $menu_item_id, SQLITE3_INTEGER);
+        $stmt->bindValue(':term_taxonomy_id', $term_taxonomy_id, SQLITE3_INTEGER);
+        $stmt->execute();
+
+        $db->exec("UPDATE wp_posts SET post_author = $user_id WHERE ID IN ($block_id, $attachment_id, $page_id, $menu_item_id)");
+        $graph = [
+            'branch' => $branch,
+            'user_id' => $user_id,
+            'page_id' => $page_id,
+            'block_id' => $block_id,
+            'attachment_id' => $attachment_id,
+            'comment_id' => $comment_id,
+            'reply_comment_id' => $reply_comment_id,
+            'menu_item_id' => $menu_item_id,
+            'term_id' => $term_id,
+            'term_taxonomy_id' => $term_taxonomy_id,
+            'file' => '2026/05/' . basename($file_path),
+        ];
+        $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_forkpress_semantic_bundle', :graph)");
+        $stmt->bindValue(':post_id', $page_id, SQLITE3_INTEGER);
+        $stmt->bindValue(':graph', json_encode($graph, JSON_UNESCAPED_SLASHES), SQLITE3_TEXT);
+        $stmt->execute();
+        $theme_mods = serialize([
+            'nav_menu_locations' => [
+                'primary' => $term_id,
+            ],
+            'forkpress_featured_page' => $page_id,
+            'forkpress_featured_block' => $block_id,
+            'forkpress_featured_attachment' => $attachment_id,
+        ]);
+        $stmt = $db->prepare('INSERT INTO wp_options (option_name, option_value, autoload) VALUES (:name, :value, :autoload)');
+        $stmt->bindValue(':name', "theme_mods_forkpress_$branch", SQLITE3_TEXT);
+        $stmt->bindValue(':value', $theme_mods, SQLITE3_TEXT);
+        $stmt->bindValue(':autoload', 'yes', SQLITE3_TEXT);
+        $stmt->execute();
+        $db->close();
+        return $graph;
+    };
+    $wp_semantic_source_graph = $write_wp_semantic_bundle($wp_semantic_source, $wp_semantic_source_root, 'source');
+    $wp_semantic_target_graph = $write_wp_semantic_bundle($wp_semantic_target, $wp_semantic_target_root, 'target');
+    assert_true($wp_semantic_source_graph['user_id'] !== $wp_semantic_target_graph['user_id'], 'WordPress semantic branches receive distinct user IDs before post authors and usermeta are written');
+    assert_true($wp_semantic_source_graph['page_id'] !== $wp_semantic_target_graph['page_id'], 'WordPress semantic branches receive distinct page IDs before block JSON is written');
+    assert_true($wp_semantic_source_graph['attachment_id'] !== $wp_semantic_target_graph['attachment_id'], 'WordPress semantic branches receive distinct attachment IDs before upload metadata is written');
+    assert_true($wp_semantic_source_graph['comment_id'] !== $wp_semantic_target_graph['comment_id'], 'WordPress semantic branches receive distinct comment IDs before commentmeta is written');
+    assert_true($wp_semantic_source_graph['term_id'] !== $wp_semantic_target_graph['term_id'], 'WordPress semantic branches receive distinct menu term IDs before theme mods are written');
+    $wp_semantic_result = cow_merge_branch_state(
+        $wp_semantic_base,
+        $wp_semantic_source,
+        $wp_semantic_target,
+        $wp_semantic_metadata,
+        'feature-wp-semantic-source',
+        'feature-wp-semantic-target',
+        $wp_semantic_file_base,
+        $wp_semantic_source_root,
+        $wp_semantic_target_root
+    );
+    assert_same($wp_semantic_result['status'], 'completed', 'banded WordPress semantic object bundles merge cleanly');
+    $assert_wp_semantic_bundle = static function (string $db_path, string $root, array $graph, string $branch): void {
+        $page_id = (int)$graph['page_id'];
+        $user_id = (int)$graph['user_id'];
+        $block_id = (int)$graph['block_id'];
+        $attachment_id = (int)$graph['attachment_id'];
+        $comment_id = (int)$graph['comment_id'];
+        $reply_comment_id = (int)$graph['reply_comment_id'];
+        $menu_item_id = (int)$graph['menu_item_id'];
+        $term_id = (int)$graph['term_id'];
+        $term_taxonomy_id = (int)$graph['term_taxonomy_id'];
+        $db = open_db($db_path);
+        $page = $db->querySingle("SELECT post_content, post_type FROM wp_posts WHERE ID = $page_id", true);
+        $user_login = $db->querySingle("SELECT user_login FROM wp_users WHERE ID = $user_id");
+        $user_graph_json = $db->querySingle("SELECT meta_value FROM wp_usermeta WHERE user_id = $user_id AND meta_key = '_forkpress_user_graph'");
+        $user_graph_serialized = $db->querySingle("SELECT meta_value FROM wp_usermeta WHERE user_id = $user_id AND meta_key = '_forkpress_user_serialized_graph'");
+        $page_author = (int)$db->querySingle("SELECT post_author FROM wp_posts WHERE ID = $page_id");
+        $block_type = $db->querySingle("SELECT post_type FROM wp_posts WHERE ID = $block_id");
+        $attachment_type = $db->querySingle("SELECT post_type FROM wp_posts WHERE ID = $attachment_id");
+        $attached_file = $db->querySingle("SELECT meta_value FROM wp_postmeta WHERE post_id = $attachment_id AND meta_key = '_wp_attached_file'");
+        $comment_post_id = (int)$db->querySingle("SELECT comment_post_ID FROM wp_comments WHERE comment_ID = $comment_id");
+        $comment_user_id = (int)$db->querySingle("SELECT user_id FROM wp_comments WHERE comment_ID = $comment_id");
+        $reply_parent = (int)$db->querySingle("SELECT comment_parent FROM wp_comments WHERE comment_ID = $reply_comment_id");
+        $reply_user_id = (int)$db->querySingle("SELECT user_id FROM wp_comments WHERE comment_ID = $reply_comment_id");
+        $comment_graph_json = $db->querySingle("SELECT meta_value FROM wp_commentmeta WHERE comment_id = $comment_id AND meta_key = '_forkpress_comment_graph'");
+        $reply_graph_serialized = $db->querySingle("SELECT meta_value FROM wp_commentmeta WHERE comment_id = $reply_comment_id AND meta_key = '_forkpress_comment_serialized_graph'");
+        $menu_object_id = $db->querySingle("SELECT meta_value FROM wp_postmeta WHERE post_id = $menu_item_id AND meta_key = '_menu_item_object_id'");
+        $relationship_count = (int)$db->querySingle("SELECT COUNT(*) FROM wp_term_relationships WHERE object_id = $menu_item_id AND term_taxonomy_id = $term_taxonomy_id");
+        $menu_taxonomy = $db->querySingle("SELECT taxonomy FROM wp_term_taxonomy WHERE term_taxonomy_id = $term_taxonomy_id AND term_id = $term_id");
+        $bundle = $db->querySingle("SELECT meta_value FROM wp_postmeta WHERE post_id = $page_id AND meta_key = '_forkpress_semantic_bundle'");
+        $theme_mods = $db->querySingle("SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_forkpress_$branch'");
+        $db->close();
+        $decoded_user_graph = is_string($user_graph_json) ? json_decode($user_graph_json, true) : null;
+        $decoded_serialized_user_graph = is_string($user_graph_serialized) ? unserialize($user_graph_serialized) : null;
+        $decoded_bundle = is_string($bundle) ? json_decode($bundle, true) : null;
+        $decoded_comment_graph = is_string($comment_graph_json) ? json_decode($comment_graph_json, true) : null;
+        $decoded_reply_graph = is_string($reply_graph_serialized) ? unserialize($reply_graph_serialized) : null;
+        $decoded_theme_mods = is_string($theme_mods) ? unserialize($theme_mods) : null;
+        assert_same($user_login, "forkpress_$branch", "WordPress $branch user survives semantic merge");
+        assert_same($decoded_user_graph, [
+            'branch' => $branch,
+            'user_id' => $user_id,
+        ], "WordPress $branch user JSON metadata keeps branch-local IDs");
+        assert_same($decoded_serialized_user_graph, [
+            'branch' => $branch,
+            'user_id' => $user_id,
+        ], "WordPress $branch user serialized metadata keeps branch-local IDs");
+        assert_same($page['post_type'] ?? null, 'page', "WordPress $branch page survives semantic merge");
+        assert_same($page_author, $user_id, "WordPress $branch page author points at merged user");
+        assert_true(str_contains((string)($page['post_content'] ?? ''), '"ref":' . $block_id), "WordPress $branch page keeps reusable block reference");
+        assert_true(str_contains((string)($page['post_content'] ?? ''), '"id":' . $attachment_id), "WordPress $branch page keeps image block attachment reference");
+        assert_same($block_type, 'wp_block', "WordPress $branch reusable block survives semantic merge");
+        assert_same($attachment_type, 'attachment', "WordPress $branch attachment post survives semantic merge");
+        assert_same($attached_file, $graph['file'], "WordPress $branch attachment metadata keeps upload path");
+        assert_true(file_exists($root . '/wp-content/uploads/' . $graph['file']), "WordPress $branch upload file survives semantic merge");
+        assert_same($comment_post_id, $page_id, "WordPress $branch page comment still points at merged page");
+        assert_same($comment_user_id, $user_id, "WordPress $branch page comment author points at merged user");
+        assert_same($reply_parent, $comment_id, "WordPress $branch threaded comment still points at merged parent comment");
+        assert_same($reply_user_id, $user_id, "WordPress $branch threaded comment author points at merged user");
+        assert_same($decoded_comment_graph, [
+            'branch' => $branch,
+            'page_id' => $page_id,
+            'comment_id' => $comment_id,
+            'reply_comment_id' => $reply_comment_id,
+        ], "WordPress $branch comment JSON metadata keeps branch-local IDs");
+        assert_same($decoded_reply_graph, [
+            'branch' => $branch,
+            'page_id' => $page_id,
+            'comment_id' => $comment_id,
+            'reply_comment_id' => $reply_comment_id,
+        ], "WordPress $branch threaded comment serialized metadata keeps branch-local IDs");
+        assert_same($menu_object_id, (string)$page_id, "WordPress $branch menu item still points at merged page");
+        assert_same($relationship_count, 1, "WordPress $branch menu relationship survives semantic merge");
+        assert_same($menu_taxonomy, 'nav_menu', "WordPress $branch nav menu taxonomy survives semantic merge");
+        assert_same($decoded_bundle, $graph, "WordPress $branch semantic bundle metadata keeps branch-local IDs");
+        assert_same($decoded_theme_mods['nav_menu_locations']['primary'] ?? null, $term_id, "WordPress $branch theme mods keep menu term ID");
+        assert_same($decoded_theme_mods['forkpress_featured_page'] ?? null, $page_id, "WordPress $branch theme mods keep featured page ID");
+        assert_same($decoded_theme_mods['forkpress_featured_block'] ?? null, $block_id, "WordPress $branch theme mods keep reusable block ID");
+        assert_same($decoded_theme_mods['forkpress_featured_attachment'] ?? null, $attachment_id, "WordPress $branch theme mods keep attachment ID");
+    };
+    $assert_wp_semantic_bundle($wp_semantic_target, $wp_semantic_target_root, $wp_semantic_source_graph, 'source');
+    $assert_wp_semantic_bundle($wp_semantic_target, $wp_semantic_target_root, $wp_semantic_target_graph, 'target');
+    assert_same((int)scalar($wp_semantic_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-wp-semantic-source'"), 0, 'WordPress semantic merge records no generic conflicts while IDs remain banded');
+
+    $wp_media_base_root = $tmp . '/wp-media-validator-files-base';
+    $wp_media_source_root = $tmp . '/wp-media-validator-files-source';
+    $wp_media_target_root = $tmp . '/wp-media-validator-files-target';
+    $wp_media_base = $wp_media_base_root . '/wp-content/database/.ht.sqlite';
+    $wp_media_source = $wp_media_source_root . '/wp-content/database/.ht.sqlite';
+    $wp_media_target = $wp_media_target_root . '/wp-content/database/.ht.sqlite';
+    $wp_media_metadata = $tmp . '/.forkpress/cow/merge/wp-media-validator-metadata.sqlite';
+    mkdir($wp_media_base_root . '/wp-content/database', 0777, true);
+    create_base_db($wp_media_base);
+    $db = open_db($wp_media_base);
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_type TEXT NOT NULL DEFAULT 'post'");
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN guid TEXT NOT NULL DEFAULT ''");
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->close();
+    write_test_file($wp_media_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$target_root = rtrim((string)getenv('FORKPRESS_MERGE_TARGET_ROOT'), '/');
+$unsafe_upload_path = static function (string $relative_file): ?string {
+    $path = str_replace('\\', '/', $relative_file);
+    if ($path === '') {
+        return 'upload path is empty';
+    }
+    if (str_contains($path, "\0")) {
+        return 'upload path contains a NUL byte';
+    }
+    if (str_starts_with($path, '/')) {
+        return 'upload path is absolute';
+    }
+    foreach (explode('/', $path) as $segment) {
+        if ($segment === '..') {
+            return 'upload path contains parent traversal';
+        }
+    }
+    return null;
+};
+$res = $db->query("SELECT p.ID, f.meta_value AS attached_file, m.meta_value AS metadata
+    FROM wp_posts p
+    JOIN wp_postmeta f ON f.post_id = p.ID AND f.meta_key = '_wp_attached_file'
+    JOIN wp_postmeta m ON m.post_id = p.ID AND m.meta_key = '_wp_attachment_metadata'
+    WHERE p.post_type = 'attachment'
+    ORDER BY p.ID");
+$findings = [];
+$claimed_uploads = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    $attached_file = (string)$row['attached_file'];
+    $metadata = @unserialize((string)$row['metadata']);
+    if (!is_array($metadata)) {
+        $findings[] = [
+            'plugin' => 'forkpress-wp-media',
+            'object' => 'attachment:' . $row['ID'],
+            'reason' => 'attachment metadata is not readable',
+            'type' => 'plugin-wp-media-invalid-metadata',
+            'tables' => ['wp_posts', 'wp_postmeta'],
+            'validator' => 'forkpress-wp-media@1',
+            'candidate' => ['attached_file' => $attached_file],
+        ];
+        continue;
+    }
+    $metadata_file = isset($metadata['file']) ? (string)$metadata['file'] : '';
+    if ($metadata_file !== '' && $metadata_file !== $attached_file) {
+        $findings[] = [
+            'plugin' => 'forkpress-wp-media',
+            'object' => 'attachment:' . $row['ID'],
+            'reason' => '_wp_attached_file does not match _wp_attachment_metadata file',
+            'type' => 'plugin-wp-media-file-mismatch',
+            'tables' => ['wp_posts', 'wp_postmeta'],
+            'validator' => 'forkpress-wp-media@1',
+            'candidate' => [
+                'attached_file' => $attached_file,
+                'metadata_file' => $metadata_file,
+            ],
+        ];
+    }
+    $metadata_width = $metadata['width'] ?? null;
+    $metadata_height = $metadata['height'] ?? null;
+    if (!is_numeric($metadata_width) || !is_numeric($metadata_height) || (int)$metadata_width <= 0 || (int)$metadata_height <= 0) {
+        $findings[] = [
+            'plugin' => 'forkpress-wp-media',
+            'object' => 'attachment:' . $row['ID'],
+            'reason' => 'attachment original dimensions are invalid',
+            'type' => 'plugin-wp-media-original-dimensions-drift',
+            'tables' => ['wp_posts', 'wp_postmeta'],
+            'validator' => 'forkpress-wp-media@1',
+            'candidate' => [
+                'attached_file' => $attached_file,
+                'width' => $metadata_width,
+                'height' => $metadata_height,
+            ],
+        ];
+    }
+    $relative_files = array_values(array_unique([$attached_file, $metadata_file]));
+    $directory = trim(dirname($metadata_file !== '' ? $metadata_file : $attached_file), '.');
+    foreach (($metadata['sizes'] ?? []) as $size_name => $size) {
+        if (!is_array($size) || !isset($size['file'])) {
+            continue;
+        }
+        $size_file = str_replace('\\', '/', (string)$size['file']);
+        $size_width = $size['width'] ?? null;
+        $size_height = $size['height'] ?? null;
+        if (!is_numeric($size_width) || !is_numeric($size_height) || (int)$size_width <= 0 || (int)$size_height <= 0) {
+            $findings[] = [
+                'plugin' => 'forkpress-wp-media',
+                'object' => 'attachment:' . $row['ID'],
+                'reason' => 'attachment generated size dimensions are invalid',
+                'type' => 'plugin-wp-media-generated-dimensions-drift',
+                'tables' => ['wp_posts', 'wp_postmeta'],
+                'validator' => 'forkpress-wp-media@1',
+                'candidate' => [
+                    'attached_file' => $attached_file,
+                    'size' => (string)$size_name,
+                    'width' => $size_width,
+                    'height' => $size_height,
+                ],
+            ];
+        }
+        if ($size_file === '' || (str_contains($size_file, '/') && $unsafe_upload_path($size_file) === null)) {
+            $findings[] = [
+                'plugin' => 'forkpress-wp-media',
+                'object' => 'attachment:' . $row['ID'],
+                'reason' => 'attachment generated size file is not a non-empty basename',
+                'type' => 'plugin-wp-media-generated-file-drift',
+                'tables' => ['wp_posts', 'wp_postmeta'],
+                'validator' => 'forkpress-wp-media@1',
+                'candidate' => [
+                    'attached_file' => $attached_file,
+                    'size' => (string)$size_name,
+                    'generated_file' => (string)$size['file'],
+                ],
+            ];
+            if ($size_file === '') {
+                continue;
+            }
+        }
+        $relative_files[] = trim($directory . '/' . $size_file, '/');
+    }
+    foreach ($relative_files as $relative_file) {
+        $relative_file = (string)$relative_file;
+        $unsafe_reason = $unsafe_upload_path($relative_file);
+        if ($unsafe_reason !== null) {
+            $findings[] = [
+                'plugin' => 'forkpress-wp-media',
+                'object' => 'attachment:' . $row['ID'],
+                'reason' => 'attachment metadata references an unsafe upload path: ' . $unsafe_reason,
+                'type' => 'plugin-wp-media-unsafe-path',
+                'tables' => ['wp_posts', 'wp_postmeta'],
+                'validator' => 'forkpress-wp-media@1',
+                'candidate' => [
+                    'attached_file' => $attached_file,
+                    'unsafe_file' => $relative_file,
+                ],
+            ];
+            continue;
+        }
+        $path = $target_root . '/wp-content/uploads/' . ltrim($relative_file, '/');
+        if (!is_file($path)) {
+            $findings[] = [
+                'plugin' => 'forkpress-wp-media',
+                'object' => 'attachment:' . $row['ID'],
+                'reason' => 'attachment metadata references a missing upload file',
+                'type' => 'plugin-wp-media-missing-file',
+                'tables' => ['wp_posts', 'wp_postmeta'],
+                'paths' => ['wp-content/uploads/' . ltrim((string)$relative_file, '/')],
+                'validator' => 'forkpress-wp-media@1',
+                'candidate' => [
+                    'attached_file' => $attached_file,
+                    'missing_file' => $relative_file,
+                ],
+            ];
+        }
+        $claimed_uploads[$relative_file] ??= [];
+        $claimed_uploads[$relative_file][] = (int)$row['ID'];
+    }
+}
+foreach ($claimed_uploads as $relative_file => $attachment_ids) {
+    $attachment_counts = array_count_values($attachment_ids);
+    $duplicate_attachment_ids = array_values(array_map('intval', array_keys(array_filter(
+        $attachment_counts,
+        static fn(int $count): bool => $count > 1
+    ))));
+    $unique_attachment_ids = array_values(array_unique($attachment_ids));
+    if (count($unique_attachment_ids) < 2 && $duplicate_attachment_ids === []) {
+        continue;
+    }
+    $findings[] = [
+        'plugin' => 'forkpress-wp-media',
+        'object' => 'upload:' . $relative_file,
+        'reason' => $duplicate_attachment_ids !== []
+            ? 'attachment metadata claims the same upload file multiple times'
+            : 'multiple attachment metadata records claim the same upload file',
+        'type' => 'plugin-wp-media-duplicate-file',
+        'tables' => ['wp_posts', 'wp_postmeta'],
+        'paths' => ['wp-content/uploads/' . ltrim((string)$relative_file, '/')],
+        'validator' => 'forkpress-wp-media@1',
+        'candidate' => [
+            'file' => $relative_file,
+            'attachment_ids' => $unique_attachment_ids,
+            'duplicate_attachment_ids' => $duplicate_attachment_ids,
+        ],
+    ];
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    copy_tree_for_test($wp_media_base_root, $wp_media_source_root);
+    copy_tree_for_test($wp_media_base_root, $wp_media_target_root);
+    $wp_media_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-media-validator.json';
+    cow_merge_capture_file_base($wp_media_base_root, $wp_media_file_base);
+    cow_merge_allocate_autoincrement_bands($wp_media_source, $wp_media_metadata, 'feature-wp-media-source');
+    cow_merge_allocate_autoincrement_bands($wp_media_target, $wp_media_metadata, 'feature-wp-media-target');
+    write_test_file($wp_media_source_root . '/wp-content/uploads/2026/05/source-original.jpg', "source original image\n");
+    $wp_media_attachment_metadata = serialize([
+        'file' => '2026/05/source-original.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'source-original-150x150.jpg',
+                'width' => 150,
+                'height' => 150,
+            ],
+        ],
+    ]);
+    $db = open_db($wp_media_source);
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, guid) VALUES ('Source media missing generated file', '', 'inherit', 'attachment', 'wp-content/uploads/2026/05/source-original.jpg')");
+    $wp_media_attachment_id = (int)$db->lastInsertRowID();
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', :file), (:post_id, '_wp_attachment_metadata', :metadata)");
+    $stmt->bindValue(':post_id', $wp_media_attachment_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':file', '2026/05/source-original.jpg', SQLITE3_TEXT);
+    $stmt->bindValue(':metadata', $wp_media_attachment_metadata, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, guid) VALUES ('Source media missing original file', '', 'inherit', 'attachment', 'wp-content/uploads/2026/05/source-missing-original.jpg')");
+    $wp_media_missing_original_id = (int)$db->lastInsertRowID();
+    $wp_media_missing_original_metadata = serialize([
+        'file' => '2026/05/source-missing-original.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', :file), (:post_id, '_wp_attachment_metadata', :metadata)");
+    $stmt->bindValue(':post_id', $wp_media_missing_original_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':file', '2026/05/source-missing-original.jpg', SQLITE3_TEXT);
+    $stmt->bindValue(':metadata', $wp_media_missing_original_metadata, SQLITE3_TEXT);
+    $stmt->execute();
+    write_test_file($wp_media_source_root . '/wp-content/uploads/2026/05/source-attached-file.jpg', "source attached file bytes\n");
+    write_test_file($wp_media_source_root . '/wp-content/uploads/2026/05/source-metadata-file.jpg', "source metadata file bytes\n");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, guid) VALUES ('Source media mismatched metadata file', '', 'inherit', 'attachment', 'wp-content/uploads/2026/05/source-attached-file.jpg')");
+    $wp_media_mismatch_id = (int)$db->lastInsertRowID();
+    $wp_media_mismatch_metadata = serialize([
+        'file' => '2026/05/source-metadata-file.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', :file), (:post_id, '_wp_attachment_metadata', :metadata)");
+    $stmt->bindValue(':post_id', $wp_media_mismatch_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':file', '2026/05/source-attached-file.jpg', SQLITE3_TEXT);
+    $stmt->bindValue(':metadata', $wp_media_mismatch_metadata, SQLITE3_TEXT);
+    $stmt->execute();
+    write_test_file($wp_media_source_root . '/wp-content/uploads/2026/05/source-invalid-metadata.jpg', "source invalid metadata bytes\n");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, guid) VALUES ('Source media invalid attachment metadata', '', 'inherit', 'attachment', 'wp-content/uploads/2026/05/source-invalid-metadata.jpg')");
+    $wp_media_invalid_metadata_id = (int)$db->lastInsertRowID();
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', :file), (:post_id, '_wp_attachment_metadata', :metadata)");
+    $stmt->bindValue(':post_id', $wp_media_invalid_metadata_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':file', '2026/05/source-invalid-metadata.jpg', SQLITE3_TEXT);
+    $stmt->bindValue(':metadata', 'not-a-serialized-attachment-metadata-payload', SQLITE3_TEXT);
+    $stmt->execute();
+    write_test_file($wp_media_source_root . '/wp-content/uploads/2026/05/source-original-dimensions-drift.jpg', "source original dimensions drift bytes\n");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, guid) VALUES ('Source media original dimensions drift', '', 'inherit', 'attachment', 'wp-content/uploads/2026/05/source-original-dimensions-drift.jpg')");
+    $wp_media_original_dimensions_drift_id = (int)$db->lastInsertRowID();
+    $wp_media_original_dimensions_drift_metadata = serialize([
+        'file' => '2026/05/source-original-dimensions-drift.jpg',
+        'width' => 0,
+        'height' => 480,
+        'sizes' => [],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', :file), (:post_id, '_wp_attachment_metadata', :metadata)");
+    $stmt->bindValue(':post_id', $wp_media_original_dimensions_drift_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':file', '2026/05/source-original-dimensions-drift.jpg', SQLITE3_TEXT);
+    $stmt->bindValue(':metadata', $wp_media_original_dimensions_drift_metadata, SQLITE3_TEXT);
+    $stmt->execute();
+    write_test_file($wp_media_source_root . '/wp-content/uploads/2026/05/source-unsafe-path.jpg', "source unsafe path original bytes\n");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, guid) VALUES ('Source media unsafe generated path', '', 'inherit', 'attachment', 'wp-content/uploads/2026/05/source-unsafe-path.jpg')");
+    $wp_media_unsafe_path_id = (int)$db->lastInsertRowID();
+    $wp_media_unsafe_path_metadata = serialize([
+        'file' => '2026/05/source-unsafe-path.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => '../source-unsafe-path-150x150.jpg',
+                'width' => 150,
+                'height' => 150,
+            ],
+        ],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', :file), (:post_id, '_wp_attachment_metadata', :metadata)");
+    $stmt->bindValue(':post_id', $wp_media_unsafe_path_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':file', '2026/05/source-unsafe-path.jpg', SQLITE3_TEXT);
+    $stmt->bindValue(':metadata', $wp_media_unsafe_path_metadata, SQLITE3_TEXT);
+    $stmt->execute();
+    write_test_file($wp_media_source_root . '/wp-content/uploads/2026/05/source-generated-path-drift.jpg', "source generated path drift original bytes\n");
+    write_test_file($wp_media_source_root . '/wp-content/uploads/2026/05/nested/source-generated-path-drift-150x150.jpg', "source generated path drift nested generated bytes\n");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, guid) VALUES ('Source media generated path drift', '', 'inherit', 'attachment', 'wp-content/uploads/2026/05/source-generated-path-drift.jpg')");
+    $wp_media_generated_path_drift_id = (int)$db->lastInsertRowID();
+    $wp_media_generated_path_drift_metadata = serialize([
+        'file' => '2026/05/source-generated-path-drift.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'nested/source-generated-path-drift-150x150.jpg',
+                'width' => 150,
+                'height' => 150,
+            ],
+        ],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', :file), (:post_id, '_wp_attachment_metadata', :metadata)");
+    $stmt->bindValue(':post_id', $wp_media_generated_path_drift_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':file', '2026/05/source-generated-path-drift.jpg', SQLITE3_TEXT);
+    $stmt->bindValue(':metadata', $wp_media_generated_path_drift_metadata, SQLITE3_TEXT);
+    $stmt->execute();
+    write_test_file($wp_media_source_root . '/wp-content/uploads/2026/05/source-generated-empty-drift.jpg', "source generated empty drift original bytes\n");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, guid) VALUES ('Source media generated empty drift', '', 'inherit', 'attachment', 'wp-content/uploads/2026/05/source-generated-empty-drift.jpg')");
+    $wp_media_generated_empty_drift_id = (int)$db->lastInsertRowID();
+    $wp_media_generated_empty_drift_metadata = serialize([
+        'file' => '2026/05/source-generated-empty-drift.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => '',
+                'width' => 150,
+                'height' => 150,
+            ],
+        ],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', :file), (:post_id, '_wp_attachment_metadata', :metadata)");
+    $stmt->bindValue(':post_id', $wp_media_generated_empty_drift_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':file', '2026/05/source-generated-empty-drift.jpg', SQLITE3_TEXT);
+    $stmt->bindValue(':metadata', $wp_media_generated_empty_drift_metadata, SQLITE3_TEXT);
+    $stmt->execute();
+    write_test_file($wp_media_source_root . '/wp-content/uploads/2026/05/source-self-duplicate.jpg', "source self duplicate original bytes\n");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, guid) VALUES ('Source media self duplicate generated file', '', 'inherit', 'attachment', 'wp-content/uploads/2026/05/source-self-duplicate.jpg')");
+    $wp_media_self_duplicate_id = (int)$db->lastInsertRowID();
+    $wp_media_self_duplicate_metadata = serialize([
+        'file' => '2026/05/source-self-duplicate.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'source-self-duplicate.jpg',
+                'width' => 150,
+                'height' => 150,
+            ],
+        ],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', :file), (:post_id, '_wp_attachment_metadata', :metadata)");
+    $stmt->bindValue(':post_id', $wp_media_self_duplicate_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':file', '2026/05/source-self-duplicate.jpg', SQLITE3_TEXT);
+    $stmt->bindValue(':metadata', $wp_media_self_duplicate_metadata, SQLITE3_TEXT);
+    $stmt->execute();
+    write_test_file($wp_media_source_root . '/wp-content/uploads/2026/05/source-generated-dimensions-drift.jpg', "source generated dimensions drift original bytes\n");
+    write_test_file($wp_media_source_root . '/wp-content/uploads/2026/05/source-generated-dimensions-drift-150x150.jpg', "source generated dimensions drift generated bytes\n");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, guid) VALUES ('Source media generated dimensions drift', '', 'inherit', 'attachment', 'wp-content/uploads/2026/05/source-generated-dimensions-drift.jpg')");
+    $wp_media_generated_dimensions_drift_id = (int)$db->lastInsertRowID();
+    $wp_media_generated_dimensions_drift_metadata = serialize([
+        'file' => '2026/05/source-generated-dimensions-drift.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'source-generated-dimensions-drift-150x150.jpg',
+                'width' => 0,
+                'height' => 150,
+            ],
+        ],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', :file), (:post_id, '_wp_attachment_metadata', :metadata)");
+    $stmt->bindValue(':post_id', $wp_media_generated_dimensions_drift_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':file', '2026/05/source-generated-dimensions-drift.jpg', SQLITE3_TEXT);
+    $stmt->bindValue(':metadata', $wp_media_generated_dimensions_drift_metadata, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, guid) VALUES ('Source media unsafe attached path', '', 'inherit', 'attachment', '/tmp/source-unsafe-attached.jpg')");
+    $wp_media_unsafe_attached_path_id = (int)$db->lastInsertRowID();
+    $wp_media_unsafe_attached_path_metadata = serialize([
+        'file' => '/tmp/source-unsafe-attached.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', :file), (:post_id, '_wp_attachment_metadata', :metadata)");
+    $stmt->bindValue(':post_id', $wp_media_unsafe_attached_path_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':file', '/tmp/source-unsafe-attached.jpg', SQLITE3_TEXT);
+    $stmt->bindValue(':metadata', $wp_media_unsafe_attached_path_metadata, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, guid) VALUES ('Source media empty attached path', '', 'inherit', 'attachment', '')");
+    $wp_media_empty_attached_path_id = (int)$db->lastInsertRowID();
+    $wp_media_empty_attached_path_metadata = serialize([
+        'file' => '',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', :file), (:post_id, '_wp_attachment_metadata', :metadata)");
+    $stmt->bindValue(':post_id', $wp_media_empty_attached_path_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':file', '', SQLITE3_TEXT);
+    $stmt->bindValue(':metadata', $wp_media_empty_attached_path_metadata, SQLITE3_TEXT);
+    $stmt->execute();
+    $wp_media_nul_attached_path = "2026/05/source-nul\0path.jpg";
+    $stmt = $db->prepare("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, guid) VALUES ('Source media NUL attached path', '', 'inherit', 'attachment', :guid)");
+    $stmt->bindValue(':guid', 'wp-content/uploads/' . $wp_media_nul_attached_path, SQLITE3_TEXT);
+    $stmt->execute();
+    $wp_media_nul_attached_path_id = (int)$db->lastInsertRowID();
+    $wp_media_nul_attached_path_metadata = serialize([
+        'file' => $wp_media_nul_attached_path,
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', :file), (:post_id, '_wp_attachment_metadata', :metadata)");
+    $stmt->bindValue(':post_id', $wp_media_nul_attached_path_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':file', $wp_media_nul_attached_path, SQLITE3_TEXT);
+    $stmt->bindValue(':metadata', $wp_media_nul_attached_path_metadata, SQLITE3_TEXT);
+    $stmt->execute();
+    write_test_file($wp_media_source_root . '/wp-content/uploads/2026/05/source-duplicate-a.jpg', "source duplicate original a\n");
+    write_test_file($wp_media_source_root . '/wp-content/uploads/2026/05/source-duplicate-b.jpg', "source duplicate original b\n");
+    write_test_file($wp_media_source_root . '/wp-content/uploads/2026/05/source-duplicate-shared-150x150.jpg', "source duplicate shared generated size\n");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, guid) VALUES ('Source media duplicate generated file A', '', 'inherit', 'attachment', 'wp-content/uploads/2026/05/source-duplicate-a.jpg')");
+    $wp_media_duplicate_a_id = (int)$db->lastInsertRowID();
+    $wp_media_duplicate_a_metadata = serialize([
+        'file' => '2026/05/source-duplicate-a.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'source-duplicate-shared-150x150.jpg',
+                'width' => 150,
+                'height' => 150,
+            ],
+        ],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', :file), (:post_id, '_wp_attachment_metadata', :metadata)");
+    $stmt->bindValue(':post_id', $wp_media_duplicate_a_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':file', '2026/05/source-duplicate-a.jpg', SQLITE3_TEXT);
+    $stmt->bindValue(':metadata', $wp_media_duplicate_a_metadata, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, guid) VALUES ('Source media duplicate generated file B', '', 'inherit', 'attachment', 'wp-content/uploads/2026/05/source-duplicate-b.jpg')");
+    $wp_media_duplicate_b_id = (int)$db->lastInsertRowID();
+    $wp_media_duplicate_b_metadata = serialize([
+        'file' => '2026/05/source-duplicate-b.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'source-duplicate-shared-150x150.jpg',
+                'width' => 150,
+                'height' => 150,
+            ],
+        ],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', :file), (:post_id, '_wp_attachment_metadata', :metadata)");
+    $stmt->bindValue(':post_id', $wp_media_duplicate_b_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':file', '2026/05/source-duplicate-b.jpg', SQLITE3_TEXT);
+    $stmt->bindValue(':metadata', $wp_media_duplicate_b_metadata, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+    $wp_media_result = cow_merge_branch_state(
+        $wp_media_base,
+        $wp_media_source,
+        $wp_media_target,
+        $wp_media_metadata,
+        'feature-wp-media-source',
+        'feature-wp-media-target',
+        $wp_media_file_base,
+        $wp_media_source_root,
+        $wp_media_target_root
+    );
+    assert_same($wp_media_result['status'], 'completed_with_conflicts', 'WordPress media validator holds missing generated upload files for review');
+    assert_same((int)($wp_media_result['plugin_validators'] ?? 0), 1, 'WordPress media validator is discovered from mu-plugins during merge');
+    assert_same((int)($wp_media_result['plugin_validator_conflicts'] ?? 0), 14, 'WordPress media validator records missing files, duplicate files, media metadata drift, and metadata mismatches');
+    assert_same(
+        scalar($wp_media_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $wp_media_attachment_id AND meta_key = '_wp_attached_file'"),
+        '2026/05/source-original.jpg',
+        'WordPress media validator leaves the staged attachment metadata available for review'
+    );
+    assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-original.jpg'), 'WordPress media validator keeps the merged original upload file');
+    assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-attached-file.jpg'), 'WordPress media validator keeps the mismatched attached upload file');
+    assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-metadata-file.jpg'), 'WordPress media validator keeps the mismatched metadata upload file');
+    assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-invalid-metadata.jpg'), 'WordPress media validator keeps the upload for unreadable attachment metadata');
+    assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-original-dimensions-drift.jpg'), 'WordPress media validator keeps original dimension drift files for review');
+    assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-unsafe-path.jpg'), 'WordPress media validator keeps the upload for unsafe generated-size metadata');
+    assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/nested/source-generated-path-drift-150x150.jpg'), 'WordPress media validator keeps generated-size path drift files for review');
+    assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-generated-empty-drift.jpg'), 'WordPress media validator keeps generated-size empty filename drift originals for review');
+    assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-self-duplicate.jpg'), 'WordPress media validator keeps same-attachment duplicate upload files for review');
+    assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-generated-dimensions-drift-150x150.jpg'), 'WordPress media validator keeps generated-size dimension drift files for review');
+    assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-duplicate-shared-150x150.jpg'), 'WordPress media validator keeps duplicated generated upload files for review');
+    assert_true(!is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-original-150x150.jpg'), 'WordPress media validator does not invent missing generated upload files');
+    assert_true(!is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-missing-original.jpg'), 'WordPress media validator does not invent missing original upload files');
+    $wp_media_audit = cow_merge_audit_report($wp_media_metadata, (int)$wp_media_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-media-missing-file',
+    ]);
+    assert_same(count($wp_media_audit['conflicts']), 2, 'WordPress media validator exposes missing upload files as plugin-scoped audit conflicts');
+    $wp_media_audit_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $wp_media_audit['conflicts']));
+    assert_true(str_contains($wp_media_audit_preview, 'source-original-150x150.jpg'), 'WordPress media validator audit includes the missing generated upload filename');
+    assert_true(str_contains($wp_media_audit_preview, 'source-missing-original.jpg'), 'WordPress media validator audit includes the missing original upload filename');
+    $wp_media_mismatch_audit = cow_merge_audit_report($wp_media_metadata, (int)$wp_media_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-media-file-mismatch',
+    ]);
+    assert_same(count($wp_media_mismatch_audit['conflicts']), 1, 'WordPress media validator exposes attachment file mismatches as plugin-scoped audit conflicts');
+    $wp_media_mismatch_preview = (string)($wp_media_mismatch_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_true(str_contains($wp_media_mismatch_preview, 'source-attached-file.jpg'), 'WordPress media mismatch audit includes the attached file');
+    assert_true(str_contains($wp_media_mismatch_preview, 'source-metadata-file.jpg'), 'WordPress media mismatch audit includes the metadata file');
+    $wp_media_invalid_audit = cow_merge_audit_report($wp_media_metadata, (int)$wp_media_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-media-invalid-metadata',
+    ]);
+    assert_same(count($wp_media_invalid_audit['conflicts']), 2, 'WordPress media validator exposes unreadable attachment metadata as a plugin-scoped audit conflict');
+    $wp_media_invalid_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $wp_media_invalid_audit['conflicts']));
+    assert_true(str_contains($wp_media_invalid_preview, 'source-invalid-metadata.jpg'), 'WordPress media invalid metadata audit includes the attached file');
+    assert_true(str_contains($wp_media_invalid_preview, 'source-nul'), 'WordPress media invalid metadata audit includes the NUL-corrupted attached file');
+    $wp_media_original_dimensions_drift_audit = cow_merge_audit_report($wp_media_metadata, (int)$wp_media_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-media-original-dimensions-drift',
+    ]);
+    assert_same(count($wp_media_original_dimensions_drift_audit['conflicts']), 1, 'WordPress media validator exposes original image dimension drift as a plugin-scoped audit conflict');
+    $wp_media_original_dimensions_drift_preview = (string)($wp_media_original_dimensions_drift_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_true(str_contains($wp_media_original_dimensions_drift_preview, 'source-original-dimensions-drift.jpg'), 'WordPress media original dimension drift audit includes the affected attachment');
+    $wp_media_unsafe_path_audit = cow_merge_audit_report($wp_media_metadata, (int)$wp_media_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-media-unsafe-path',
+    ]);
+    assert_same(count($wp_media_unsafe_path_audit['conflicts']), 3, 'WordPress media validator exposes unsafe upload metadata paths as plugin-scoped audit conflicts');
+    $wp_media_unsafe_path_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $wp_media_unsafe_path_audit['conflicts']));
+    assert_true(str_contains($wp_media_unsafe_path_preview, '../source-unsafe-path-150x150.jpg'), 'WordPress media unsafe path audit includes the traversal path');
+    assert_true(str_contains($wp_media_unsafe_path_preview, '/tmp/source-unsafe-attached.jpg'), 'WordPress media unsafe path audit includes the absolute attached path');
+    $wp_media_generated_path_drift_audit = cow_merge_audit_report($wp_media_metadata, (int)$wp_media_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-media-generated-file-drift',
+    ]);
+    assert_same(count($wp_media_generated_path_drift_audit['conflicts']), 2, 'WordPress media validator exposes generated-size filename drift as plugin-scoped audit conflicts');
+    $wp_media_generated_path_drift_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $wp_media_generated_path_drift_audit['conflicts']));
+    assert_true(str_contains($wp_media_generated_path_drift_preview, 'nested/source-generated-path-drift-150x150.jpg'), 'WordPress media generated path drift audit includes the nested generated filename');
+    assert_true(str_contains($wp_media_generated_path_drift_preview, 'source-generated-empty-drift.jpg'), 'WordPress media generated file drift audit includes the empty generated filename attachment');
+    $wp_media_generated_dimensions_drift_audit = cow_merge_audit_report($wp_media_metadata, (int)$wp_media_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-media-generated-dimensions-drift',
+    ]);
+    assert_same(count($wp_media_generated_dimensions_drift_audit['conflicts']), 1, 'WordPress media validator exposes generated-size dimension drift as a plugin-scoped audit conflict');
+    $wp_media_generated_dimensions_drift_preview = (string)($wp_media_generated_dimensions_drift_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_true(str_contains($wp_media_generated_dimensions_drift_preview, 'source-generated-dimensions-drift.jpg'), 'WordPress media generated dimension drift audit includes the affected attachment');
+    $wp_media_empty_path_recorded = false;
+    $wp_media_meta_db = open_db($wp_media_metadata);
+    $wp_media_payloads = $wp_media_meta_db->query("SELECT chosen_payload FROM merge_conflicts WHERE conflict_type = 'plugin-wp-media-unsafe-path'");
+    while ($wp_media_payload = $wp_media_payloads->fetchArray(SQLITE3_ASSOC)) {
+        $decoded = cow_merge_decode_payload_json((string)$wp_media_payload['chosen_payload'], 'wp media unsafe path payload');
+        if (($decoded['reason'] ?? '') === 'attachment metadata references an unsafe upload path: upload path is empty') {
+            $wp_media_empty_path_recorded = true;
+        }
+    }
+    $wp_media_payloads->finalize();
+    $wp_media_meta_db->close();
+    assert_true($wp_media_empty_path_recorded, 'WordPress media unsafe path audit records the empty attached path reason');
+    $wp_media_duplicate_file_audit = cow_merge_audit_report($wp_media_metadata, (int)$wp_media_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-media-duplicate-file',
+    ]);
+    assert_same(count($wp_media_duplicate_file_audit['conflicts']), 2, 'WordPress media validator exposes duplicate upload ownership as plugin-scoped audit conflicts');
+    $wp_media_duplicate_file_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $wp_media_duplicate_file_audit['conflicts']));
+    assert_true(str_contains($wp_media_duplicate_file_preview, 'source-self-duplicate.jpg'), 'WordPress media duplicate upload audit includes the same-attachment duplicate filename');
+    assert_true(str_contains($wp_media_duplicate_file_preview, (string)$wp_media_self_duplicate_id), 'WordPress media duplicate upload audit includes the same-attachment duplicate ID');
+    assert_true(str_contains($wp_media_duplicate_file_preview, 'source-duplicate-shared-150x150.jpg'), 'WordPress media duplicate upload audit includes the shared generated filename');
+    assert_true(str_contains($wp_media_duplicate_file_preview, (string)$wp_media_duplicate_a_id), 'WordPress media duplicate upload audit includes the first attachment ID');
+    assert_true(str_contains($wp_media_duplicate_file_preview, (string)$wp_media_duplicate_b_id), 'WordPress media duplicate upload audit includes the second attachment ID');
+
+    $wp_block_ref_base_root = $tmp . '/wp-block-ref-validator-files-base';
+    $wp_block_ref_source_root = $tmp . '/wp-block-ref-validator-files-source';
+    $wp_block_ref_target_root = $tmp . '/wp-block-ref-validator-files-target';
+    $wp_block_ref_base = $wp_block_ref_base_root . '/wp-content/database/.ht.sqlite';
+    $wp_block_ref_source = $wp_block_ref_source_root . '/wp-content/database/.ht.sqlite';
+    $wp_block_ref_target = $wp_block_ref_target_root . '/wp-content/database/.ht.sqlite';
+    $wp_block_ref_metadata = $tmp . '/.forkpress/cow/merge/wp-block-ref-validator-metadata.sqlite';
+    mkdir($wp_block_ref_base_root . '/wp-content/database', 0777, true);
+    create_base_db($wp_block_ref_base);
+    $db = open_db($wp_block_ref_base);
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_type TEXT NOT NULL DEFAULT 'post'");
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_name TEXT NOT NULL DEFAULT ''");
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (30, 'Shared reusable block', '<!-- wp:paragraph --><p>Shared block</p><!-- /wp:paragraph -->', 'publish', 'wp_block', 'shared-reusable-block'),
+        (31, 'Page with reusable block', '<!-- wp:block {\"ref\":30} /--><!-- wp:paragraph --><p>Base page content</p><!-- /wp:paragraph -->', 'publish', 'page', 'page-with-reusable-block'),
+        (32, 'Shared synced pattern', '<!-- wp:paragraph --><p>Shared synced pattern</p><!-- /wp:paragraph -->', 'publish', 'wp_block', 'shared-synced-pattern'),
+        (33, 'Page with synced pattern', '<!-- wp:block {\"ref\":32} /--><!-- wp:paragraph --><p>Base synced pattern content</p><!-- /wp:paragraph -->', 'publish', 'page', 'page-with-synced-pattern')");
+    $db->exec("INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES (34, 32, 'wp_pattern_sync_status', 'synced')");
+    $db->close();
+    write_test_file($wp_block_ref_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type IN ('page', 'post', 'wp_template_part', 'wp_template')");
+$findings = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    $content = (string)$row['post_content'];
+    if (!preg_match_all('/<!--\s+wp:block\s+\{[^}]*"ref"\s*:\s*(\d+)/', $content, $matches)) {
+        continue;
+    }
+    foreach ($matches[1] as $ref) {
+        $ref_id = (int)$ref;
+        $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $ref_id AND post_type = 'wp_block'");
+        if ($exists === 0) {
+            $findings[] = [
+                'plugin' => 'forkpress-wp-block-refs',
+                'object' => 'post:' . $row['ID'],
+                'reason' => 'post content references a missing reusable block',
+                'type' => 'plugin-wp-block-missing-reference',
+                'tables' => ['wp_posts'],
+                'validator' => 'forkpress-wp-block-refs@1',
+                'candidate' => [
+                    'post_id' => (int)$row['ID'],
+                    'missing_ref' => $ref_id,
+                ],
+            ];
+        }
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    copy_tree_for_test($wp_block_ref_base_root, $wp_block_ref_source_root);
+    copy_tree_for_test($wp_block_ref_base_root, $wp_block_ref_target_root);
+    $wp_block_ref_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-block-ref-validator.json';
+    cow_merge_capture_file_base($wp_block_ref_base_root, $wp_block_ref_file_base);
+    cow_merge_allocate_autoincrement_bands($wp_block_ref_source, $wp_block_ref_metadata, 'feature-wp-block-ref-source');
+    cow_merge_allocate_autoincrement_bands($wp_block_ref_target, $wp_block_ref_metadata, 'feature-wp-block-ref-target');
+    $db = open_db($wp_block_ref_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID = 30');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 32');
+    $db->exec('DELETE FROM wp_postmeta WHERE post_id = 32');
+    $db->close();
+    $db = open_db($wp_block_ref_target);
+    $db->exec("UPDATE wp_posts SET post_title = 'Target page still using reusable block' WHERE ID = 31");
+    $db->exec("UPDATE wp_posts SET post_title = 'Target page still using synced pattern' WHERE ID = 33");
+    $db->close();
+    $wp_block_ref_result = cow_merge_branch_state(
+        $wp_block_ref_base,
+        $wp_block_ref_source,
+        $wp_block_ref_target,
+        $wp_block_ref_metadata,
+        'feature-wp-block-ref-source',
+        'feature-wp-block-ref-target',
+        $wp_block_ref_file_base,
+        $wp_block_ref_source_root,
+        $wp_block_ref_target_root
+    );
+    assert_same($wp_block_ref_result['status'], 'completed_with_conflicts', 'WordPress block reference validator holds missing reusable blocks and synced patterns for review');
+    assert_same((int)($wp_block_ref_result['plugin_validators'] ?? 0), 1, 'WordPress block reference validator is discovered from mu-plugins during merge');
+    assert_same((int)($wp_block_ref_result['plugin_validator_conflicts'] ?? 0), 2, 'WordPress block reference validator records missing reusable block and synced pattern references');
+    assert_same((int)scalar($wp_block_ref_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 30'), 0, 'WordPress block reference validator leaves the source block deletion staged for review');
+    assert_same((int)scalar($wp_block_ref_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 32'), 0, 'WordPress block reference validator leaves the source synced pattern deletion staged for review');
+    assert_same((int)scalar($wp_block_ref_target, 'SELECT COUNT(*) FROM wp_postmeta WHERE post_id = 32'), 0, 'WordPress block reference validator leaves the source synced pattern metadata deletion staged for review');
+    assert_same(scalar($wp_block_ref_target, 'SELECT post_title FROM wp_posts WHERE ID = 31'), 'Target page still using reusable block', 'WordPress block reference validator preserves the target page edit');
+    assert_same(scalar($wp_block_ref_target, 'SELECT post_title FROM wp_posts WHERE ID = 33'), 'Target page still using synced pattern', 'WordPress block reference validator preserves the target synced pattern page edit');
+    $wp_block_ref_audit = cow_merge_audit_report($wp_block_ref_metadata, (int)$wp_block_ref_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-block-missing-reference',
+    ]);
+    assert_same(count($wp_block_ref_audit['conflicts']), 2, 'WordPress block reference validator exposes missing block and synced pattern refs as plugin-scoped audit conflicts');
+    $wp_block_ref_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $wp_block_ref_audit['conflicts']));
+    assert_true(str_contains($wp_block_ref_preview, '"missing_ref":30'), 'WordPress block reference audit includes the missing reusable block ID');
+    assert_true(str_contains($wp_block_ref_preview, '"missing_ref":32'), 'WordPress block reference audit includes the missing synced pattern ID');
+    assert_true(str_contains($wp_block_ref_preview, '"post_id":33'), 'WordPress block reference audit includes the synced pattern consumer page ID');
+
+    $wp_menu_ref_base_root = $tmp . '/wp-menu-ref-validator-files-base';
+    $wp_menu_ref_source_root = $tmp . '/wp-menu-ref-validator-files-source';
+    $wp_menu_ref_target_root = $tmp . '/wp-menu-ref-validator-files-target';
+    $wp_menu_ref_base = $wp_menu_ref_base_root . '/wp-content/database/.ht.sqlite';
+    $wp_menu_ref_source = $wp_menu_ref_source_root . '/wp-content/database/.ht.sqlite';
+    $wp_menu_ref_target = $wp_menu_ref_target_root . '/wp-content/database/.ht.sqlite';
+    $wp_menu_ref_metadata = $tmp . '/.forkpress/cow/merge/wp-menu-ref-validator-metadata.sqlite';
+    mkdir($wp_menu_ref_base_root . '/wp-content/database', 0777, true);
+    create_base_db($wp_menu_ref_base);
+    $db = open_db($wp_menu_ref_base);
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_type TEXT NOT NULL DEFAULT 'post'");
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_name TEXT NOT NULL DEFAULT ''");
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (40, 'Shared menu page', '<!-- wp:paragraph --><p>Menu page</p><!-- /wp:paragraph -->', 'publish', 'page', 'shared-menu-page'),
+        (41, 'Menu item for shared page', '', 'publish', 'nav_menu_item', 'menu-item-shared-page')");
+    $db->exec("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES
+        (41, '_menu_item_type', 'post_type'),
+        (41, '_menu_item_object', 'page'),
+        (41, '_menu_item_object_id', '40'),
+        (41, '_menu_item_menu_item_parent', '0')");
+    $db->close();
+    write_test_file($wp_menu_ref_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query("SELECT item.ID AS menu_item_id, object.meta_value AS object_type, object_id.meta_value AS object_id
+    FROM wp_posts item
+    JOIN wp_postmeta item_type ON item_type.post_id = item.ID AND item_type.meta_key = '_menu_item_type'
+    JOIN wp_postmeta object ON object.post_id = item.ID AND object.meta_key = '_menu_item_object'
+    JOIN wp_postmeta object_id ON object_id.post_id = item.ID AND object_id.meta_key = '_menu_item_object_id'
+    WHERE item.post_type = 'nav_menu_item' AND item_type.meta_value = 'post_type'");
+$findings = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    $object_type = (string)$row['object_type'];
+    $object_id = (int)$row['object_id'];
+    $escaped_type = SQLite3::escapeString($object_type);
+    $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $object_id AND post_type = '$escaped_type'");
+    if ($exists === 0) {
+        $findings[] = [
+            'plugin' => 'forkpress-wp-menu-refs',
+            'object' => 'nav_menu_item:' . $row['menu_item_id'],
+            'reason' => 'nav menu item references a missing post object',
+            'type' => 'plugin-wp-menu-missing-object',
+            'tables' => ['wp_posts', 'wp_postmeta'],
+            'validator' => 'forkpress-wp-menu-refs@1',
+            'candidate' => [
+                'menu_item_id' => (int)$row['menu_item_id'],
+                'object_type' => $object_type,
+                'missing_object_id' => $object_id,
+            ],
+        ];
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    copy_tree_for_test($wp_menu_ref_base_root, $wp_menu_ref_source_root);
+    copy_tree_for_test($wp_menu_ref_base_root, $wp_menu_ref_target_root);
+    $wp_menu_ref_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-menu-ref-validator.json';
+    cow_merge_capture_file_base($wp_menu_ref_base_root, $wp_menu_ref_file_base);
+    cow_merge_allocate_autoincrement_bands($wp_menu_ref_source, $wp_menu_ref_metadata, 'feature-wp-menu-ref-source');
+    cow_merge_allocate_autoincrement_bands($wp_menu_ref_target, $wp_menu_ref_metadata, 'feature-wp-menu-ref-target');
+    $db = open_db($wp_menu_ref_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID = 40');
+    $db->close();
+    $db = open_db($wp_menu_ref_target);
+    $db->exec("UPDATE wp_posts SET post_title = 'Target menu item still pointing at deleted page' WHERE ID = 41");
+    $db->close();
+    $wp_menu_ref_result = cow_merge_branch_state(
+        $wp_menu_ref_base,
+        $wp_menu_ref_source,
+        $wp_menu_ref_target,
+        $wp_menu_ref_metadata,
+        'feature-wp-menu-ref-source',
+        'feature-wp-menu-ref-target',
+        $wp_menu_ref_file_base,
+        $wp_menu_ref_source_root,
+        $wp_menu_ref_target_root
+    );
+    assert_same($wp_menu_ref_result['status'], 'completed_with_conflicts', 'WordPress menu reference validator holds missing menu objects for review');
+    assert_same((int)($wp_menu_ref_result['plugin_validators'] ?? 0), 1, 'WordPress menu reference validator is discovered from mu-plugins during merge');
+    assert_same((int)($wp_menu_ref_result['plugin_validator_conflicts'] ?? 0), 1, 'WordPress menu reference validator records the missing page object');
+    assert_same((int)scalar($wp_menu_ref_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 40'), 0, 'WordPress menu reference validator leaves the source page deletion staged for review');
+    assert_same(scalar($wp_menu_ref_target, 'SELECT post_title FROM wp_posts WHERE ID = 41'), 'Target menu item still pointing at deleted page', 'WordPress menu reference validator preserves the target menu item edit');
+    $wp_menu_ref_audit = cow_merge_audit_report($wp_menu_ref_metadata, (int)$wp_menu_ref_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-menu-missing-object',
+    ]);
+    assert_same(count($wp_menu_ref_audit['conflicts']), 1, 'WordPress menu reference validator exposes the missing menu object as a plugin-scoped audit conflict');
+    $wp_menu_ref_preview = (string)($wp_menu_ref_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_true(str_contains($wp_menu_ref_preview, '"missing_object_id":40'), 'WordPress menu reference audit includes the missing page ID');
+    assert_true(str_contains($wp_menu_ref_preview, '"object_type":"page"'), 'WordPress menu reference audit includes the menu object type');
+
+    $wp_option_ref_base_root = $tmp . '/wp-option-ref-validator-files-base';
+    $wp_option_ref_source_root = $tmp . '/wp-option-ref-validator-files-source';
+    $wp_option_ref_target_root = $tmp . '/wp-option-ref-validator-files-target';
+    $wp_option_ref_base = $wp_option_ref_base_root . '/wp-content/database/.ht.sqlite';
+    $wp_option_ref_source = $wp_option_ref_source_root . '/wp-content/database/.ht.sqlite';
+    $wp_option_ref_target = $wp_option_ref_target_root . '/wp-content/database/.ht.sqlite';
+    $wp_option_ref_metadata = $tmp . '/.forkpress/cow/merge/wp-option-ref-validator-metadata.sqlite';
+    mkdir($wp_option_ref_base_root . '/wp-content/database', 0777, true);
+    create_base_db($wp_option_ref_base);
+    $db = open_db($wp_option_ref_base);
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_type TEXT NOT NULL DEFAULT 'post'");
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_name TEXT NOT NULL DEFAULT ''");
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN guid TEXT NOT NULL DEFAULT ''");
+    $db->exec('CREATE TABLE wp_terms (term_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, slug TEXT NOT NULL)');
+    $db->exec('CREATE TABLE wp_term_taxonomy (term_taxonomy_id INTEGER PRIMARY KEY AUTOINCREMENT, term_id INTEGER NOT NULL, taxonomy TEXT NOT NULL, description TEXT NOT NULL DEFAULT "", parent INTEGER NOT NULL DEFAULT 0, count INTEGER NOT NULL DEFAULT 0)');
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (50, 'Featured option page', '<!-- wp:paragraph --><p>Featured option page</p><!-- /wp:paragraph -->', 'publish', 'page', 'featured-option-page')");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (54, 'Posts option page', '<!-- wp:paragraph --><p>Posts option page</p><!-- /wp:paragraph -->', 'publish', 'page', 'posts-option-page')");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (53, 'Sticky option post', '<!-- wp:paragraph --><p>Sticky option post</p><!-- /wp:paragraph -->', 'publish', 'post', 'sticky-option-post')");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, guid) VALUES
+        (52, 'Option logo', '', 'inherit', 'attachment', 'option-logo', 'http://example.test/wp-content/uploads/2026/05/option-logo.jpg')");
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (51, 'Primary menu', 'primary-menu')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES (51, 51, 'nav_menu', '', 0, 1)");
+    $theme_mods_base = serialize([
+        'forkpress_featured_page' => 50,
+        'nav_menu_locations' => [
+            'primary' => 51,
+        ],
+        'custom_logo' => 52,
+        'forkpress_accent' => 'base',
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('theme_mods_forkpress_active', :value, 'yes')");
+    $stmt->bindValue(':value', $theme_mods_base, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->exec("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('site_icon', '52', 'yes')");
+    $db->exec("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('page_on_front', '50', 'yes')");
+    $db->exec("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('page_for_posts', '54', 'yes')");
+    $sticky_posts_base = serialize([53]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('sticky_posts', :value, 'yes')");
+    $stmt->bindValue(':value', $sticky_posts_base, SQLITE3_TEXT);
+    $stmt->execute();
+    $widget_nav_menu_base = serialize([
+        2 => [
+            'title' => 'Footer menu',
+            'nav_menu' => 51,
+        ],
+        '_multiwidget' => 1,
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_nav_menu', :value, 'yes')");
+    $stmt->bindValue(':value', $widget_nav_menu_base, SQLITE3_TEXT);
+    $stmt->execute();
+    $widget_media_image_base = serialize([
+        3 => [
+            'attachment_id' => 52,
+            'url' => 'http://example.test/wp-content/uploads/2026/05/option-logo.jpg',
+            'caption' => 'Base media image widget',
+        ],
+        '_multiwidget' => 1,
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_media_image', :value, 'yes')");
+    $stmt->bindValue(':value', $widget_media_image_base, SQLITE3_TEXT);
+    $stmt->execute();
+    $widget_text_base = serialize([
+        4 => [
+            'title' => 'Base text widget',
+            'text' => 'Base sidebar text',
+        ],
+        '_multiwidget' => 1,
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_text', :value, 'yes')");
+    $stmt->bindValue(':value', $widget_text_base, SQLITE3_TEXT);
+    $stmt->execute();
+    $sidebars_widgets_base = serialize([
+        'sidebar-1' => ['nav_menu-2', 'media_image-3', 'text-4'],
+        'array_version' => 3,
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('sidebars_widgets', :value, 'yes')");
+    $stmt->bindValue(':value', $sidebars_widgets_base, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+    write_test_file($wp_option_ref_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query("SELECT option_name, option_value FROM wp_options WHERE option_name LIKE 'theme_mods_%' OR option_name IN ('widget_nav_menu', 'widget_media_image', 'sidebars_widgets', 'site_icon', 'page_on_front', 'page_for_posts', 'sticky_posts')");
+$findings = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    if ((string)$row['option_name'] === 'page_on_front' || (string)$row['option_name'] === 'page_for_posts') {
+        $page_id = (int)$row['option_value'];
+        if ($page_id > 0) {
+            $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $page_id AND post_type = 'page'");
+            if ($exists === 0) {
+                $findings[] = [
+                    'plugin' => 'forkpress-wp-option-refs',
+                    'object' => 'option:' . $row['option_name'],
+                    'reason' => 'front page option references a missing page',
+                    'type' => 'plugin-wp-option-missing-object',
+                    'tables' => ['wp_options', 'wp_posts'],
+                    'validator' => 'forkpress-wp-option-refs@1',
+                    'candidate' => [
+                        'option_name' => (string)$row['option_name'],
+                        'field' => (string)$row['option_name'],
+                        'missing_object_id' => $page_id,
+                        'object_type' => 'page',
+                    ],
+                ];
+            }
+        }
+        continue;
+    }
+    if ((string)$row['option_name'] === 'site_icon') {
+        $attachment_id = (int)$row['option_value'];
+        if ($attachment_id > 0) {
+            $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $attachment_id AND post_type = 'attachment'");
+            if ($exists === 0) {
+                $findings[] = [
+                    'plugin' => 'forkpress-wp-option-refs',
+                    'object' => 'option:' . $row['option_name'],
+                    'reason' => 'site icon option references a missing attachment',
+                    'type' => 'plugin-wp-option-missing-object',
+                    'tables' => ['wp_options', 'wp_posts'],
+                    'validator' => 'forkpress-wp-option-refs@1',
+                    'candidate' => [
+                        'option_name' => (string)$row['option_name'],
+                        'field' => 'site_icon',
+                        'missing_object_id' => $attachment_id,
+                        'object_type' => 'attachment',
+                    ],
+                ];
+            }
+        }
+        continue;
+    }
+    if ((string)$row['option_name'] === 'sticky_posts') {
+        $sticky_posts = @unserialize((string)$row['option_value']);
+        if (is_array($sticky_posts)) {
+            foreach ($sticky_posts as $index => $post_id) {
+                $post_id = (int)$post_id;
+                if ($post_id <= 0) {
+                    continue;
+                }
+                $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $post_id AND post_type = 'post'");
+                if ($exists !== 0) {
+                    continue;
+                }
+                $findings[] = [
+                    'plugin' => 'forkpress-wp-option-refs',
+                    'object' => 'option:' . $row['option_name'],
+                    'reason' => 'sticky posts option references a missing post',
+                    'type' => 'plugin-wp-option-missing-object',
+                    'tables' => ['wp_options', 'wp_posts'],
+                    'validator' => 'forkpress-wp-option-refs@1',
+                    'candidate' => [
+                        'option_name' => (string)$row['option_name'],
+                        'field' => 'sticky_posts.' . (string)$index,
+                        'missing_object_id' => $post_id,
+                        'object_type' => 'post',
+                    ],
+                ];
+            }
+        }
+        continue;
+    }
+    $mods = @unserialize((string)$row['option_value']);
+    if (!is_array($mods)) {
+        continue;
+    }
+    if ((string)$row['option_name'] === 'sidebars_widgets') {
+        foreach ($mods as $sidebar_id => $widget_ids) {
+            if (!is_array($widget_ids)) {
+                continue;
+            }
+            foreach ($widget_ids as $index => $widget_id) {
+                if (!is_string($widget_id) || !preg_match('/^(.+)-([0-9]+)$/', $widget_id, $matches)) {
+                    continue;
+                }
+                $option_name = 'widget_' . $matches[1];
+                $widget_number = (int)$matches[2];
+                $option_name_sql = SQLite3::escapeString($option_name);
+                $option_value = $db->querySingle("SELECT option_value FROM wp_options WHERE option_name = '$option_name_sql'");
+                $instances = is_string($option_value) ? @unserialize($option_value) : null;
+                if (is_array($instances) && isset($instances[$widget_number])) {
+                    continue;
+                }
+                $findings[] = [
+                    'plugin' => 'forkpress-wp-option-refs',
+                    'object' => 'option:' . $row['option_name'],
+                    'reason' => 'sidebar references a missing widget instance',
+                    'type' => 'plugin-wp-option-missing-object',
+                    'tables' => ['wp_options'],
+                    'validator' => 'forkpress-wp-option-refs@1',
+                    'candidate' => [
+                        'option_name' => (string)$row['option_name'],
+                        'field' => (string)$sidebar_id . '.' . (string)$index,
+                        'missing_object_id' => $widget_id,
+                        'object_type' => 'widget',
+                        'widget_option_name' => $option_name,
+                    ],
+                ];
+            }
+        }
+        continue;
+    }
+    if (isset($mods['forkpress_featured_page'])) {
+        $page_id = (int)$mods['forkpress_featured_page'];
+        $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $page_id AND post_type = 'page'");
+        if ($exists === 0) {
+            $findings[] = [
+                'plugin' => 'forkpress-wp-option-refs',
+                'object' => 'option:' . $row['option_name'],
+                'reason' => 'theme option references a missing page',
+                'type' => 'plugin-wp-option-missing-object',
+                'tables' => ['wp_options', 'wp_posts'],
+                'validator' => 'forkpress-wp-option-refs@1',
+                'candidate' => [
+                    'option_name' => (string)$row['option_name'],
+                    'field' => 'forkpress_featured_page',
+                    'missing_object_id' => $page_id,
+                    'object_type' => 'page',
+                ],
+            ];
+        }
+    }
+    if (isset($mods['custom_logo'])) {
+        $attachment_id = (int)$mods['custom_logo'];
+        $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $attachment_id AND post_type = 'attachment'");
+        if ($attachment_id > 0 && $exists === 0) {
+            $findings[] = [
+                'plugin' => 'forkpress-wp-option-refs',
+                'object' => 'option:' . $row['option_name'],
+                'reason' => 'theme option references a missing custom logo attachment',
+                'type' => 'plugin-wp-option-missing-object',
+                'tables' => ['wp_options', 'wp_posts'],
+                'validator' => 'forkpress-wp-option-refs@1',
+                'candidate' => [
+                    'option_name' => (string)$row['option_name'],
+                    'field' => 'custom_logo',
+                    'missing_object_id' => $attachment_id,
+                    'object_type' => 'attachment',
+                ],
+            ];
+        }
+    }
+    if ((string)$row['option_name'] === 'widget_nav_menu') {
+        foreach ($mods as $widget_id => $widget) {
+            if (!is_array($widget) || !isset($widget['nav_menu'])) {
+                continue;
+            }
+            $term_id = (int)$widget['nav_menu'];
+            if ($term_id <= 0) {
+                continue;
+            }
+            $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_terms t JOIN wp_term_taxonomy tt ON tt.term_id = t.term_id AND tt.taxonomy = 'nav_menu' WHERE t.term_id = $term_id");
+            if ($exists !== 0) {
+                continue;
+            }
+            $findings[] = [
+                'plugin' => 'forkpress-wp-option-refs',
+                'object' => 'option:' . $row['option_name'],
+                'reason' => 'nav menu widget references a missing nav menu',
+                'type' => 'plugin-wp-option-missing-object',
+                'tables' => ['wp_options', 'wp_terms', 'wp_term_taxonomy'],
+                'validator' => 'forkpress-wp-option-refs@1',
+                'candidate' => [
+                    'option_name' => (string)$row['option_name'],
+                    'field' => 'widget.' . (string)$widget_id . '.nav_menu',
+                    'missing_object_id' => $term_id,
+                    'object_type' => 'nav_menu',
+                ],
+            ];
+        }
+    }
+    if ((string)$row['option_name'] === 'widget_media_image') {
+        foreach ($mods as $widget_id => $widget) {
+            if (!is_array($widget) || !isset($widget['attachment_id'])) {
+                continue;
+            }
+            $attachment_id = (int)$widget['attachment_id'];
+            if ($attachment_id <= 0) {
+                continue;
+            }
+            $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $attachment_id AND post_type = 'attachment'");
+            if ($exists !== 0) {
+                continue;
+            }
+            $findings[] = [
+                'plugin' => 'forkpress-wp-option-refs',
+                'object' => 'option:' . $row['option_name'],
+                'reason' => 'media image widget references a missing attachment',
+                'type' => 'plugin-wp-option-missing-object',
+                'tables' => ['wp_options', 'wp_posts'],
+                'validator' => 'forkpress-wp-option-refs@1',
+                'candidate' => [
+                    'option_name' => (string)$row['option_name'],
+                    'field' => 'widget.' . (string)$widget_id . '.attachment_id',
+                    'missing_object_id' => $attachment_id,
+                    'object_type' => 'attachment',
+                ],
+            ];
+        }
+    }
+    foreach (($mods['nav_menu_locations'] ?? []) as $location => $term_id) {
+        $term_id = (int)$term_id;
+        if ($term_id <= 0) {
+            continue;
+        }
+        $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_terms t JOIN wp_term_taxonomy tt ON tt.term_id = t.term_id AND tt.taxonomy = 'nav_menu' WHERE t.term_id = $term_id");
+        if ($exists !== 0) {
+            continue;
+        }
+        $findings[] = [
+            'plugin' => 'forkpress-wp-option-refs',
+            'object' => 'option:' . $row['option_name'],
+            'reason' => 'theme option references a missing nav menu',
+            'type' => 'plugin-wp-option-missing-object',
+            'tables' => ['wp_options', 'wp_terms', 'wp_term_taxonomy'],
+            'validator' => 'forkpress-wp-option-refs@1',
+            'candidate' => [
+                'option_name' => (string)$row['option_name'],
+                'field' => 'nav_menu_locations.' . (string)$location,
+                'missing_object_id' => $term_id,
+                'object_type' => 'nav_menu',
+            ],
+        ];
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    copy_tree_for_test($wp_option_ref_base_root, $wp_option_ref_source_root);
+    copy_tree_for_test($wp_option_ref_base_root, $wp_option_ref_target_root);
+    $wp_option_ref_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-option-ref-validator.json';
+    cow_merge_capture_file_base($wp_option_ref_base_root, $wp_option_ref_file_base);
+    cow_merge_allocate_autoincrement_bands($wp_option_ref_source, $wp_option_ref_metadata, 'feature-wp-option-ref-source');
+    cow_merge_allocate_autoincrement_bands($wp_option_ref_target, $wp_option_ref_metadata, 'feature-wp-option-ref-target');
+    $db = open_db($wp_option_ref_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID = 50');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 52');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 53');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 54');
+    $db->exec('DELETE FROM wp_term_taxonomy WHERE term_id = 51');
+    $db->exec('DELETE FROM wp_terms WHERE term_id = 51');
+    $db->exec("DELETE FROM wp_options WHERE option_name = 'widget_text'");
+    $db->close();
+    $db = open_db($wp_option_ref_target);
+    $theme_mods_target = serialize([
+        'forkpress_featured_page' => 50,
+        'nav_menu_locations' => [
+            'primary' => 51,
+        ],
+        'custom_logo' => 52,
+        'forkpress_accent' => 'target',
+    ]);
+    $stmt = $db->prepare("UPDATE wp_options SET option_value = :value WHERE option_name = 'theme_mods_forkpress_active'");
+    $stmt->bindValue(':value', $theme_mods_target, SQLITE3_TEXT);
+    $stmt->execute();
+    $widget_nav_menu_target = serialize([
+        2 => [
+            'title' => 'Target footer menu',
+            'nav_menu' => 51,
+        ],
+        '_multiwidget' => 1,
+    ]);
+    $stmt = $db->prepare("UPDATE wp_options SET option_value = :value WHERE option_name = 'widget_nav_menu'");
+    $stmt->bindValue(':value', $widget_nav_menu_target, SQLITE3_TEXT);
+    $stmt->execute();
+    $widget_media_image_target = serialize([
+        3 => [
+            'attachment_id' => 52,
+            'url' => 'http://example.test/wp-content/uploads/2026/05/option-logo.jpg',
+            'caption' => 'Target media image widget',
+        ],
+        '_multiwidget' => 1,
+    ]);
+    $stmt = $db->prepare("UPDATE wp_options SET option_value = :value WHERE option_name = 'widget_media_image'");
+    $stmt->bindValue(':value', $widget_media_image_target, SQLITE3_TEXT);
+    $stmt->execute();
+    $sidebars_widgets_target = serialize([
+        'sidebar-1' => ['nav_menu-2', 'media_image-3', 'text-4'],
+        'wp_inactive_widgets' => [],
+        'array_version' => 3,
+    ]);
+    $stmt = $db->prepare("UPDATE wp_options SET option_value = :value WHERE option_name = 'sidebars_widgets'");
+    $stmt->bindValue(':value', $sidebars_widgets_target, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+    $wp_option_ref_result = cow_merge_branch_state(
+        $wp_option_ref_base,
+        $wp_option_ref_source,
+        $wp_option_ref_target,
+        $wp_option_ref_metadata,
+        'feature-wp-option-ref-source',
+        'feature-wp-option-ref-target',
+        $wp_option_ref_file_base,
+        $wp_option_ref_source_root,
+        $wp_option_ref_target_root
+    );
+    assert_same($wp_option_ref_result['status'], 'completed_with_conflicts', 'WordPress option reference validator holds missing option objects for review');
+    assert_same((int)($wp_option_ref_result['plugin_validators'] ?? 0), 1, 'WordPress option reference validator is discovered from mu-plugins during merge');
+    assert_same((int)($wp_option_ref_result['plugin_validator_conflicts'] ?? 0), 10, 'WordPress option reference validator records missing featured pages, posts page, sticky posts, sidebar widgets, media widgets, menu locations, menu widgets, and option attachments');
+    assert_same((int)scalar($wp_option_ref_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 50'), 0, 'WordPress option reference validator leaves the source featured page deletion staged for review');
+    assert_same((int)scalar($wp_option_ref_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 52'), 0, 'WordPress option reference validator leaves the source attachment deletion staged for review');
+    assert_same((int)scalar($wp_option_ref_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 53'), 0, 'WordPress option reference validator leaves the source sticky post deletion staged for review');
+    assert_same((int)scalar($wp_option_ref_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 54'), 0, 'WordPress option reference validator leaves the source posts page deletion staged for review');
+    assert_same((int)scalar($wp_option_ref_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 51'), 0, 'WordPress option reference validator leaves the source nav menu deletion staged for review');
+    $wp_option_ref_value = scalar($wp_option_ref_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_forkpress_active'");
+    $wp_option_ref_mods = is_string($wp_option_ref_value) ? unserialize($wp_option_ref_value) : null;
+    assert_same($wp_option_ref_mods['forkpress_accent'] ?? null, 'target', 'WordPress option reference validator preserves the target option edit');
+    assert_same($wp_option_ref_mods['forkpress_featured_page'] ?? null, 50, 'WordPress option reference validator keeps the stale featured page reference visible for review');
+    assert_same($wp_option_ref_mods['nav_menu_locations']['primary'] ?? null, 51, 'WordPress option reference validator keeps the stale nav menu location visible for review');
+    assert_same($wp_option_ref_mods['custom_logo'] ?? null, 52, 'WordPress option reference validator keeps the stale custom logo reference visible for review');
+    assert_same(scalar($wp_option_ref_target, "SELECT option_value FROM wp_options WHERE option_name = 'site_icon'"), '52', 'WordPress option reference validator keeps the stale site icon option visible for review');
+    assert_same(scalar($wp_option_ref_target, "SELECT option_value FROM wp_options WHERE option_name = 'page_on_front'"), '50', 'WordPress option reference validator keeps the stale front page option visible for review');
+    assert_same(scalar($wp_option_ref_target, "SELECT option_value FROM wp_options WHERE option_name = 'page_for_posts'"), '54', 'WordPress option reference validator keeps the stale posts page option visible for review');
+    $wp_sticky_posts_value = scalar($wp_option_ref_target, "SELECT option_value FROM wp_options WHERE option_name = 'sticky_posts'");
+    $wp_sticky_posts = is_string($wp_sticky_posts_value) ? unserialize($wp_sticky_posts_value) : null;
+    assert_same($wp_sticky_posts[0] ?? null, 53, 'WordPress option reference validator keeps the stale sticky post reference visible for review');
+    $wp_widget_nav_menu_value = scalar($wp_option_ref_target, "SELECT option_value FROM wp_options WHERE option_name = 'widget_nav_menu'");
+    $wp_widget_nav_menu = is_string($wp_widget_nav_menu_value) ? unserialize($wp_widget_nav_menu_value) : null;
+    assert_same($wp_widget_nav_menu[2]['title'] ?? null, 'Target footer menu', 'WordPress option reference validator preserves the target nav menu widget edit');
+    assert_same($wp_widget_nav_menu[2]['nav_menu'] ?? null, 51, 'WordPress option reference validator keeps the stale nav menu widget reference visible for review');
+    $wp_widget_media_image_value = scalar($wp_option_ref_target, "SELECT option_value FROM wp_options WHERE option_name = 'widget_media_image'");
+    $wp_widget_media_image = is_string($wp_widget_media_image_value) ? unserialize($wp_widget_media_image_value) : null;
+    assert_same($wp_widget_media_image[3]['caption'] ?? null, 'Target media image widget', 'WordPress option reference validator preserves the target media image widget edit');
+    assert_same($wp_widget_media_image[3]['attachment_id'] ?? null, 52, 'WordPress option reference validator keeps the stale media image widget attachment visible for review');
+    assert_same(scalar($wp_option_ref_target, "SELECT option_value FROM wp_options WHERE option_name = 'widget_text'"), null, 'WordPress option reference validator leaves the source widget option deletion staged for review');
+    $wp_sidebars_widgets_value = scalar($wp_option_ref_target, "SELECT option_value FROM wp_options WHERE option_name = 'sidebars_widgets'");
+    $wp_sidebars_widgets = is_string($wp_sidebars_widgets_value) ? unserialize($wp_sidebars_widgets_value) : null;
+    assert_same($wp_sidebars_widgets['sidebar-1'][2] ?? null, 'text-4', 'WordPress option reference validator keeps the stale sidebar widget instance visible for review');
+    $wp_option_ref_audit = cow_merge_audit_report($wp_option_ref_metadata, (int)$wp_option_ref_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-option-missing-object',
+    ]);
+    assert_same(count($wp_option_ref_audit['conflicts']), 10, 'WordPress option reference validator exposes missing option objects as plugin-scoped audit conflicts');
+    $wp_option_ref_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $wp_option_ref_audit['conflicts']));
+    assert_true(str_contains($wp_option_ref_preview, '"missing_object_id":50'), 'WordPress option reference audit includes the missing page ID');
+    assert_true(str_contains($wp_option_ref_preview, '"missing_object_id":51'), 'WordPress option reference audit includes the missing nav menu term ID');
+    assert_true(str_contains($wp_option_ref_preview, '"missing_object_id":52'), 'WordPress option reference audit includes the missing attachment ID');
+    assert_true(str_contains($wp_option_ref_preview, '"missing_object_id":53'), 'WordPress option reference audit includes the missing sticky post ID');
+    assert_true(str_contains($wp_option_ref_preview, '"missing_object_id":54'), 'WordPress option reference audit includes the missing posts page ID');
+    assert_true(str_contains($wp_option_ref_preview, '"object_type":"nav_menu"'), 'WordPress option reference audit includes the nav menu object type');
+    assert_true(str_contains($wp_option_ref_preview, '"object_type":"attachment"'), 'WordPress option reference audit includes the attachment object type');
+    assert_true(str_contains($wp_option_ref_preview, '"object_type":"page"'), 'WordPress option reference audit includes the page object type');
+    assert_true(str_contains($wp_option_ref_preview, '"object_type":"post"'), 'WordPress option reference audit includes the post object type');
+    assert_true(str_contains($wp_option_ref_preview, '"object_type":"widget"'), 'WordPress option reference audit includes the widget object type');
+    assert_true(str_contains($wp_option_ref_preview, 'theme_mods_forkpress_active'), 'WordPress option reference audit includes the option name');
+    assert_true(str_contains($wp_option_ref_preview, 'widget_nav_menu'), 'WordPress option reference audit includes the nav menu widget option name');
+    assert_true(str_contains($wp_option_ref_preview, 'site_icon'), 'WordPress option reference audit includes the site icon option name');
+    assert_true(str_contains($wp_option_ref_preview, 'page_on_front'), 'WordPress option reference audit includes the front page option name');
+    assert_true(str_contains($wp_option_ref_preview, 'page_for_posts'), 'WordPress option reference audit includes the posts page option name');
+    assert_true(str_contains($wp_option_ref_preview, 'sticky_posts'), 'WordPress option reference audit includes the sticky posts option name');
+    assert_true(str_contains($wp_option_ref_preview, 'widget_media_image'), 'WordPress option reference audit includes the media image widget option name');
+    assert_true(str_contains($wp_option_ref_preview, 'sidebars_widgets'), 'WordPress option reference audit includes the sidebars widgets option name');
+    assert_true(str_contains($wp_option_ref_preview, 'widget_text'), 'WordPress option reference audit includes the missing widget option name');
+    assert_true(str_contains($wp_option_ref_preview, '"field":"custom_logo"'), 'WordPress option reference audit includes the custom logo field');
+    assert_true(str_contains($wp_option_ref_preview, '"field":"site_icon"'), 'WordPress option reference audit includes the site icon field');
+    assert_true(str_contains($wp_option_ref_preview, '"field":"page_on_front"'), 'WordPress option reference audit includes the front page option field');
+    assert_true(str_contains($wp_option_ref_preview, '"field":"page_for_posts"'), 'WordPress option reference audit includes the posts page option field');
+    assert_true(str_contains($wp_option_ref_preview, '"field":"sticky_posts.0"'), 'WordPress option reference audit includes the sticky posts field');
+    assert_true(str_contains($wp_option_ref_preview, '"field":"widget.2.nav_menu"'), 'WordPress option reference audit includes the nav menu widget field');
+    assert_true(str_contains($wp_option_ref_preview, '"field":"widget.3.attachment_id"'), 'WordPress option reference audit includes the media image widget attachment field');
+    assert_true(str_contains($wp_option_ref_preview, '"field":"sidebar-1.2"'), 'WordPress option reference audit includes the sidebar widget slot field');
+
+    $wp_featured_media_base_root = $tmp . '/wp-featured-media-validator-files-base';
+    $wp_featured_media_source_root = $tmp . '/wp-featured-media-validator-files-source';
+    $wp_featured_media_target_root = $tmp . '/wp-featured-media-validator-files-target';
+    $wp_featured_media_base = $wp_featured_media_base_root . '/wp-content/database/.ht.sqlite';
+    $wp_featured_media_source = $wp_featured_media_source_root . '/wp-content/database/.ht.sqlite';
+    $wp_featured_media_target = $wp_featured_media_target_root . '/wp-content/database/.ht.sqlite';
+    $wp_featured_media_metadata = $tmp . '/.forkpress/cow/merge/wp-featured-media-validator-metadata.sqlite';
+    mkdir($wp_featured_media_base_root . '/wp-content/database', 0777, true);
+    create_base_db($wp_featured_media_base);
+    $db = open_db($wp_featured_media_base);
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_type TEXT NOT NULL DEFAULT 'post'");
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_name TEXT NOT NULL DEFAULT ''");
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN guid TEXT NOT NULL DEFAULT ''");
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, guid) VALUES
+        (60, 'Featured media page', '<!-- wp:paragraph --><p>Featured media page</p><!-- /wp:paragraph -->', 'publish', 'page', 'featured-media-page', ''),
+        (61, 'Featured attachment', '', 'inherit', 'attachment', 'featured-attachment', 'wp-content/uploads/2026/05/featured-image.jpg')");
+    $db->exec("INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES
+        (6000, 60, '_thumbnail_id', '61')");
+    $db->close();
+    write_test_file($wp_featured_media_base_root . '/wp-content/uploads/2026/05/featured-image.jpg', 'featured image bytes');
+    write_test_file($wp_featured_media_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query("SELECT meta_id, post_id, meta_value FROM wp_postmeta WHERE meta_key = '_thumbnail_id'");
+$findings = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    $attachment_id = (int)$row['meta_value'];
+    if ($attachment_id <= 0) {
+        continue;
+    }
+    $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $attachment_id AND post_type = 'attachment'");
+    if ($exists === 0) {
+        $findings[] = [
+            'plugin' => 'forkpress-wp-featured-media',
+            'object' => 'postmeta:' . $row['meta_id'],
+            'reason' => 'featured image references a missing attachment',
+            'type' => 'plugin-wp-featured-image-missing-attachment',
+            'tables' => ['wp_postmeta', 'wp_posts'],
+            'validator' => 'forkpress-wp-featured-media@1',
+            'candidate' => [
+                'post_id' => (int)$row['post_id'],
+                'meta_id' => (int)$row['meta_id'],
+                'field' => '_thumbnail_id',
+                'missing_object_id' => $attachment_id,
+                'object_type' => 'attachment',
+            ],
+        ];
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    copy_tree_for_test($wp_featured_media_base_root, $wp_featured_media_source_root);
+    copy_tree_for_test($wp_featured_media_base_root, $wp_featured_media_target_root);
+    $wp_featured_media_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-featured-media-validator.json';
+    cow_merge_capture_file_base($wp_featured_media_base_root, $wp_featured_media_file_base);
+    cow_merge_allocate_autoincrement_bands($wp_featured_media_source, $wp_featured_media_metadata, 'feature-wp-featured-media-source');
+    cow_merge_allocate_autoincrement_bands($wp_featured_media_target, $wp_featured_media_metadata, 'feature-wp-featured-media-target');
+    $db = open_db($wp_featured_media_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID = 61');
+    $db->close();
+    unlink($wp_featured_media_source_root . '/wp-content/uploads/2026/05/featured-image.jpg');
+    $db = open_db($wp_featured_media_target);
+    $db->exec("UPDATE wp_posts SET post_title = 'Target page still using deleted featured image' WHERE ID = 60");
+    $db->close();
+    $wp_featured_media_result = cow_merge_branch_state(
+        $wp_featured_media_base,
+        $wp_featured_media_source,
+        $wp_featured_media_target,
+        $wp_featured_media_metadata,
+        'feature-wp-featured-media-source',
+        'feature-wp-featured-media-target',
+        $wp_featured_media_file_base,
+        $wp_featured_media_source_root,
+        $wp_featured_media_target_root
+    );
+    assert_same($wp_featured_media_result['status'], 'completed_with_conflicts', 'WordPress featured image validator holds missing attachments for review');
+    assert_same((int)($wp_featured_media_result['plugin_validators'] ?? 0), 1, 'WordPress featured image validator is discovered from mu-plugins during merge');
+    assert_same((int)($wp_featured_media_result['plugin_validator_conflicts'] ?? 0), 1, 'WordPress featured image validator records the missing attachment');
+    assert_same((int)scalar($wp_featured_media_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 61'), 0, 'WordPress featured image validator leaves the source attachment deletion staged for review');
+    assert_true(!file_exists($wp_featured_media_target_root . '/wp-content/uploads/2026/05/featured-image.jpg'), 'WordPress featured image validator leaves the source upload deletion staged for review');
+    assert_same(scalar($wp_featured_media_target, 'SELECT post_title FROM wp_posts WHERE ID = 60'), 'Target page still using deleted featured image', 'WordPress featured image validator preserves the target page edit');
+    assert_same(scalar($wp_featured_media_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 60 AND meta_key = '_thumbnail_id'"), '61', 'WordPress featured image validator keeps the stale thumbnail reference visible for review');
+    $wp_featured_media_audit = cow_merge_audit_report($wp_featured_media_metadata, (int)$wp_featured_media_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-featured-image-missing-attachment',
+    ]);
+    assert_same(count($wp_featured_media_audit['conflicts']), 1, 'WordPress featured image validator exposes the missing attachment as a plugin-scoped audit conflict');
+    $wp_featured_media_preview = (string)($wp_featured_media_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_true(str_contains($wp_featured_media_preview, '"missing_object_id":61'), 'WordPress featured image audit includes the missing attachment ID');
+    assert_true(str_contains($wp_featured_media_preview, '"field":"_thumbnail_id"'), 'WordPress featured image audit includes the thumbnail field');
+
+    $wp_image_block_ref_base_root = $tmp . '/wp-image-block-ref-validator-files-base';
+    $wp_image_block_ref_source_root = $tmp . '/wp-image-block-ref-validator-files-source';
+    $wp_image_block_ref_target_root = $tmp . '/wp-image-block-ref-validator-files-target';
+    $wp_image_block_ref_base = $wp_image_block_ref_base_root . '/wp-content/database/.ht.sqlite';
+    $wp_image_block_ref_source = $wp_image_block_ref_source_root . '/wp-content/database/.ht.sqlite';
+    $wp_image_block_ref_target = $wp_image_block_ref_target_root . '/wp-content/database/.ht.sqlite';
+    $wp_image_block_ref_metadata = $tmp . '/.forkpress/cow/merge/wp-image-block-ref-validator-metadata.sqlite';
+    mkdir($wp_image_block_ref_base_root . '/wp-content/database', 0777, true);
+    create_base_db($wp_image_block_ref_base);
+    $db = open_db($wp_image_block_ref_base);
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_type TEXT NOT NULL DEFAULT 'post'");
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_name TEXT NOT NULL DEFAULT ''");
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN guid TEXT NOT NULL DEFAULT ''");
+    $image_block_content = '<!-- wp:image {"id":71,"sizeSlug":"large"} --><figure class="wp-block-image size-large"><img src="wp-content/uploads/2026/05/block-image.jpg" class="wp-image-71"/></figure><!-- /wp:image -->';
+    $stmt = $db->prepare("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, guid) VALUES
+        (70, 'Image block page', :content, 'publish', 'page', 'image-block-page', ''),
+        (71, 'Image block attachment', '', 'inherit', 'attachment', 'block-image', 'wp-content/uploads/2026/05/block-image.jpg')");
+    $stmt->bindValue(':content', $image_block_content, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+    write_test_file($wp_image_block_ref_base_root . '/wp-content/uploads/2026/05/block-image.jpg', 'image block bytes');
+    write_test_file($wp_image_block_ref_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type IN ('post', 'page')");
+$findings = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    if (!preg_match_all('/<!--\s*wp:image\s+(\{.*?\})\s*-->/', (string)$row['post_content'], $matches)) {
+        continue;
+    }
+    foreach ($matches[1] as $raw_attrs) {
+        $attrs = json_decode($raw_attrs, true);
+        if (!is_array($attrs) || empty($attrs['id'])) {
+            continue;
+        }
+        $attachment_id = (int)$attrs['id'];
+        $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $attachment_id AND post_type = 'attachment'");
+        if ($exists === 0) {
+            $findings[] = [
+                'plugin' => 'forkpress-wp-image-block-refs',
+                'object' => 'post:' . $row['ID'],
+                'reason' => 'image block references a missing attachment',
+                'type' => 'plugin-wp-image-block-missing-attachment',
+                'tables' => ['wp_posts'],
+                'validator' => 'forkpress-wp-image-block-refs@1',
+                'candidate' => [
+                    'post_id' => (int)$row['ID'],
+                    'block_name' => 'core/image',
+                    'field' => 'attrs.id',
+                    'missing_object_id' => $attachment_id,
+                    'object_type' => 'attachment',
+                ],
+            ];
+        }
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    copy_tree_for_test($wp_image_block_ref_base_root, $wp_image_block_ref_source_root);
+    copy_tree_for_test($wp_image_block_ref_base_root, $wp_image_block_ref_target_root);
+    $wp_image_block_ref_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-image-block-ref-validator.json';
+    cow_merge_capture_file_base($wp_image_block_ref_base_root, $wp_image_block_ref_file_base);
+    cow_merge_allocate_autoincrement_bands($wp_image_block_ref_source, $wp_image_block_ref_metadata, 'feature-wp-image-block-ref-source');
+    cow_merge_allocate_autoincrement_bands($wp_image_block_ref_target, $wp_image_block_ref_metadata, 'feature-wp-image-block-ref-target');
+    $db = open_db($wp_image_block_ref_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID = 71');
+    $db->close();
+    unlink($wp_image_block_ref_source_root . '/wp-content/uploads/2026/05/block-image.jpg');
+    $db = open_db($wp_image_block_ref_target);
+    $db->exec("UPDATE wp_posts SET post_title = 'Target page still using deleted image block attachment' WHERE ID = 70");
+    $db->close();
+    $wp_image_block_ref_result = cow_merge_branch_state(
+        $wp_image_block_ref_base,
+        $wp_image_block_ref_source,
+        $wp_image_block_ref_target,
+        $wp_image_block_ref_metadata,
+        'feature-wp-image-block-ref-source',
+        'feature-wp-image-block-ref-target',
+        $wp_image_block_ref_file_base,
+        $wp_image_block_ref_source_root,
+        $wp_image_block_ref_target_root
+    );
+    assert_same($wp_image_block_ref_result['status'], 'completed_with_conflicts', 'WordPress image block validator holds missing attachments for review');
+    assert_same((int)($wp_image_block_ref_result['plugin_validators'] ?? 0), 1, 'WordPress image block validator is discovered from mu-plugins during merge');
+    assert_same((int)($wp_image_block_ref_result['plugin_validator_conflicts'] ?? 0), 1, 'WordPress image block validator records the missing attachment');
+    assert_same((int)scalar($wp_image_block_ref_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 71'), 0, 'WordPress image block validator leaves the source attachment deletion staged for review');
+    assert_true(!file_exists($wp_image_block_ref_target_root . '/wp-content/uploads/2026/05/block-image.jpg'), 'WordPress image block validator leaves the source upload deletion staged for review');
+    assert_same(scalar($wp_image_block_ref_target, 'SELECT post_title FROM wp_posts WHERE ID = 70'), 'Target page still using deleted image block attachment', 'WordPress image block validator preserves the target page edit');
+    assert_true(str_contains((string)scalar($wp_image_block_ref_target, 'SELECT post_content FROM wp_posts WHERE ID = 70'), '"id":71'), 'WordPress image block validator keeps the stale block attachment reference visible for review');
+    $wp_image_block_ref_audit = cow_merge_audit_report($wp_image_block_ref_metadata, (int)$wp_image_block_ref_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-image-block-missing-attachment',
+    ]);
+    assert_same(count($wp_image_block_ref_audit['conflicts']), 1, 'WordPress image block validator exposes the missing attachment as a plugin-scoped audit conflict');
+    $wp_image_block_ref_preview = (string)($wp_image_block_ref_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_true(str_contains($wp_image_block_ref_preview, '"missing_object_id":71'), 'WordPress image block audit includes the missing attachment ID');
+    assert_true(str_contains($wp_image_block_ref_preview, '"block_name":"core/image"') || str_contains($wp_image_block_ref_preview, '"block_name":"core\/image"'), 'WordPress image block audit includes the block name');
+
+    $wp_term_ref_base_root = $tmp . '/wp-term-ref-validator-files-base';
+    $wp_term_ref_source_root = $tmp . '/wp-term-ref-validator-files-source';
+    $wp_term_ref_target_root = $tmp . '/wp-term-ref-validator-files-target';
+    $wp_term_ref_base = $wp_term_ref_base_root . '/wp-content/database/.ht.sqlite';
+    $wp_term_ref_source = $wp_term_ref_source_root . '/wp-content/database/.ht.sqlite';
+    $wp_term_ref_target = $wp_term_ref_target_root . '/wp-content/database/.ht.sqlite';
+    $wp_term_ref_metadata = $tmp . '/.forkpress/cow/merge/wp-term-ref-validator-metadata.sqlite';
+    mkdir($wp_term_ref_base_root . '/wp-content/database', 0777, true);
+    create_base_db($wp_term_ref_base);
+    $db = open_db($wp_term_ref_base);
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_type TEXT NOT NULL DEFAULT 'post'");
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_name TEXT NOT NULL DEFAULT ''");
+    $db->exec('CREATE TABLE wp_terms (term_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, slug TEXT NOT NULL, term_group INTEGER NOT NULL DEFAULT 0)');
+    $db->exec('CREATE TABLE wp_term_taxonomy (term_taxonomy_id INTEGER PRIMARY KEY AUTOINCREMENT, term_id INTEGER NOT NULL, taxonomy TEXT NOT NULL, description TEXT NOT NULL DEFAULT "", parent INTEGER NOT NULL DEFAULT 0, count INTEGER NOT NULL DEFAULT 0)');
+    $db->exec('CREATE TABLE wp_term_relationships (object_id INTEGER NOT NULL, term_taxonomy_id INTEGER NOT NULL, term_order INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (object_id, term_taxonomy_id))');
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (80, 'Term relationship page', '<!-- wp:paragraph --><p>Term relationship page</p><!-- /wp:paragraph -->', 'publish', 'page', 'term-relationship-page')");
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (81, 'Retired category', 'retired-category')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, count) VALUES (82, 81, 'category', '', 0)");
+    $db->close();
+    write_test_file($wp_term_ref_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query("SELECT object_id, term_taxonomy_id FROM wp_term_relationships");
+$findings = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    $object_id = (int)$row['object_id'];
+    $term_taxonomy_id = (int)$row['term_taxonomy_id'];
+    $taxonomy = $db->querySingle("SELECT taxonomy FROM wp_term_taxonomy WHERE term_taxonomy_id = $term_taxonomy_id");
+    $term_id = $db->querySingle("SELECT term_id FROM wp_term_taxonomy WHERE term_taxonomy_id = $term_taxonomy_id");
+    $term_exists = $term_id === null ? 0 : (int)$db->querySingle("SELECT COUNT(*) FROM wp_terms WHERE term_id = " . (int)$term_id);
+    if ($taxonomy === null || $term_exists === 0) {
+        $findings[] = [
+            'plugin' => 'forkpress-wp-term-refs',
+            'object' => 'term_relationship:' . $object_id . ':' . $term_taxonomy_id,
+            'reason' => 'term relationship references a missing taxonomy term',
+            'type' => 'plugin-wp-term-relationship-missing-term',
+            'tables' => ['wp_term_relationships', 'wp_term_taxonomy', 'wp_terms'],
+            'validator' => 'forkpress-wp-term-refs@1',
+            'candidate' => [
+                'object_id' => $object_id,
+                'term_taxonomy_id' => $term_taxonomy_id,
+                'taxonomy' => $taxonomy,
+                'missing_object_id' => $term_taxonomy_id,
+                'object_type' => 'term_taxonomy',
+            ],
+        ];
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    copy_tree_for_test($wp_term_ref_base_root, $wp_term_ref_source_root);
+    copy_tree_for_test($wp_term_ref_base_root, $wp_term_ref_target_root);
+    $wp_term_ref_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-term-ref-validator.json';
+    cow_merge_capture_file_base($wp_term_ref_base_root, $wp_term_ref_file_base);
+    cow_merge_allocate_autoincrement_bands($wp_term_ref_source, $wp_term_ref_metadata, 'feature-wp-term-ref-source');
+    cow_merge_allocate_autoincrement_bands($wp_term_ref_target, $wp_term_ref_metadata, 'feature-wp-term-ref-target');
+    $db = open_db($wp_term_ref_source);
+    $db->exec('DELETE FROM wp_term_taxonomy WHERE term_taxonomy_id = 82');
+    $db->exec('DELETE FROM wp_terms WHERE term_id = 81');
+    $db->close();
+    $db = open_db($wp_term_ref_target);
+    $db->exec("UPDATE wp_posts SET post_title = 'Target page assigned to deleted term' WHERE ID = 80");
+    $db->exec('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id) VALUES (80, 82)');
+    $db->close();
+    $wp_term_ref_result = cow_merge_branch_state(
+        $wp_term_ref_base,
+        $wp_term_ref_source,
+        $wp_term_ref_target,
+        $wp_term_ref_metadata,
+        'feature-wp-term-ref-source',
+        'feature-wp-term-ref-target',
+        $wp_term_ref_file_base,
+        $wp_term_ref_source_root,
+        $wp_term_ref_target_root
+    );
+    assert_same($wp_term_ref_result['status'], 'completed_with_conflicts', 'WordPress term relationship validator holds missing taxonomy terms for review');
+    assert_same((int)($wp_term_ref_result['plugin_validators'] ?? 0), 1, 'WordPress term relationship validator is discovered from mu-plugins during merge');
+    assert_same((int)($wp_term_ref_result['plugin_validator_conflicts'] ?? 0), 1, 'WordPress term relationship validator records the missing taxonomy term');
+    assert_same((int)scalar($wp_term_ref_target, 'SELECT COUNT(*) FROM wp_term_taxonomy WHERE term_taxonomy_id = 82'), 0, 'WordPress term relationship validator leaves the source taxonomy deletion staged for review');
+    assert_same((int)scalar($wp_term_ref_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 81'), 0, 'WordPress term relationship validator leaves the source term deletion staged for review');
+    assert_same((int)scalar($wp_term_ref_target, 'SELECT COUNT(*) FROM wp_term_relationships WHERE object_id = 80 AND term_taxonomy_id = 82'), 1, 'WordPress term relationship validator preserves the target relationship assignment for review');
+    assert_same(scalar($wp_term_ref_target, 'SELECT post_title FROM wp_posts WHERE ID = 80'), 'Target page assigned to deleted term', 'WordPress term relationship validator preserves the target page edit');
+    $wp_term_ref_audit = cow_merge_audit_report($wp_term_ref_metadata, (int)$wp_term_ref_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-term-relationship-missing-term',
+    ]);
+    assert_same(count($wp_term_ref_audit['conflicts']), 1, 'WordPress term relationship validator exposes the missing taxonomy term as a plugin-scoped audit conflict');
+    $wp_term_ref_preview = (string)($wp_term_ref_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_true(str_contains($wp_term_ref_preview, '"term_taxonomy_id":82'), 'WordPress term relationship audit includes the missing term taxonomy ID');
+    assert_true(str_contains($wp_term_ref_preview, '"object_id":80'), 'WordPress term relationship audit includes the assigned object ID');
+
+    $wp_lifecycle_base = $tmp . '/wp-lifecycle-base.sqlite';
+    $wp_lifecycle_source = $tmp . '/wp-lifecycle-source.sqlite';
+    $wp_lifecycle_target = $tmp . '/wp-lifecycle-target.sqlite';
+    $wp_lifecycle_metadata = $tmp . '/.forkpress/cow/merge/wp-lifecycle-metadata.sqlite';
+    create_base_db($wp_lifecycle_base);
+    $db = open_db($wp_lifecycle_base);
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_type TEXT NOT NULL DEFAULT 'post'");
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_name TEXT NOT NULL DEFAULT ''");
+    $db->exec('ALTER TABLE wp_posts ADD COLUMN post_parent INTEGER NOT NULL DEFAULT 0');
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN guid TEXT NOT NULL DEFAULT ''");
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (10, 'Base source-edited page', 'base source-edit content', 'publish', 'page', 'source-edited-page'),
+        (11, 'Base source-deleted page', 'base source-delete content', 'publish', 'page', 'source-deleted-page'),
+        (12, 'Base target-deleted page', 'base target-delete content', 'publish', 'page', 'target-deleted-page'),
+        (13, 'Base target-edited page', 'base target-edit content', 'publish', 'page', 'target-edited-page')");
+    $db->exec("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES
+        (10, '_forkpress_lifecycle', 'base source edit meta'),
+        (11, '_forkpress_lifecycle', 'base source delete meta'),
+        (12, '_forkpress_lifecycle', 'base target delete meta'),
+        (13, '_forkpress_lifecycle', 'base target edit meta')");
+    $db->close();
+    copy($wp_lifecycle_base, $wp_lifecycle_source);
+    copy($wp_lifecycle_base, $wp_lifecycle_target);
+    cow_merge_allocate_autoincrement_bands($wp_lifecycle_source, $wp_lifecycle_metadata, 'feature-wp-lifecycle-source');
+    cow_merge_allocate_autoincrement_bands($wp_lifecycle_target, $wp_lifecycle_metadata, 'feature-wp-lifecycle-target');
+    $db = open_db($wp_lifecycle_source);
+    $db->exec("UPDATE wp_posts SET post_title = 'Source edited page', post_content = '<!-- wp:paragraph --><p>Source edited content</p><!-- /wp:paragraph -->' WHERE ID = 10");
+    $db->exec("UPDATE wp_postmeta SET meta_value = 'source edited meta' WHERE post_id = 10 AND meta_key = '_forkpress_lifecycle'");
+    $db->exec('DELETE FROM wp_postmeta WHERE post_id = 11');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 11');
+    $db->close();
+    $db = open_db($wp_lifecycle_target);
+    $db->exec("UPDATE wp_posts SET post_title = 'Target edited page', post_content = '<!-- wp:paragraph --><p>Target edited content</p><!-- /wp:paragraph -->' WHERE ID = 13");
+    $db->exec("UPDATE wp_postmeta SET meta_value = 'target edited meta' WHERE post_id = 13 AND meta_key = '_forkpress_lifecycle'");
+    $db->exec('DELETE FROM wp_postmeta WHERE post_id = 12');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 12');
+    $db->close();
+    $wp_lifecycle_result = cow_merge_databases(
+        $wp_lifecycle_base,
+        $wp_lifecycle_source,
+        $wp_lifecycle_target,
+        $wp_lifecycle_metadata,
+        'feature-wp-lifecycle-source',
+        'feature-wp-lifecycle-target'
+    );
+    assert_same($wp_lifecycle_result['status'], 'completed', 'WordPress page edit/delete lifecycle branches merge cleanly');
+    assert_same(scalar($wp_lifecycle_target, 'SELECT post_title FROM wp_posts WHERE ID = 10'), 'Source edited page', 'WordPress source page edit is applied');
+    assert_same(scalar($wp_lifecycle_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 10 AND meta_key = '_forkpress_lifecycle'"), 'source edited meta', 'WordPress source page meta edit is applied');
+    assert_same((int)scalar($wp_lifecycle_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 11'), 0, 'WordPress source page delete is applied');
+    assert_same((int)scalar($wp_lifecycle_target, 'SELECT COUNT(*) FROM wp_postmeta WHERE post_id = 11'), 0, 'WordPress source page delete removes related source-side meta');
+    assert_same((int)scalar($wp_lifecycle_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 12'), 0, 'WordPress target page delete is preserved');
+    assert_same(scalar($wp_lifecycle_target, 'SELECT post_title FROM wp_posts WHERE ID = 13'), 'Target edited page', 'WordPress target page edit is preserved');
+    assert_same(scalar($wp_lifecycle_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 13 AND meta_key = '_forkpress_lifecycle'"), 'target edited meta', 'WordPress target page meta edit is preserved');
+    assert_same((int)scalar($wp_lifecycle_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-wp-lifecycle-source'"), 0, 'WordPress lifecycle merge records no conflicts for independent edits and deletes');
+
+    $wp_edit_delete_base = $tmp . '/wp-edit-delete-base.sqlite';
+    $wp_edit_delete_source = $tmp . '/wp-edit-delete-source.sqlite';
+    $wp_edit_delete_target = $tmp . '/wp-edit-delete-target.sqlite';
+    $wp_edit_delete_metadata = $tmp . '/.forkpress/cow/merge/wp-edit-delete-metadata.sqlite';
+    create_base_db($wp_edit_delete_base);
+    $db = open_db($wp_edit_delete_base);
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_type TEXT NOT NULL DEFAULT 'post'");
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_name TEXT NOT NULL DEFAULT ''");
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (20, 'Base source-edit target-delete page', 'base source-edit target-delete content', 'publish', 'page', 'source-edit-target-delete-page'),
+        (21, 'Base source-delete target-edit page', 'base source-delete target-edit content', 'publish', 'page', 'source-delete-target-edit-page')");
+    $db->exec("INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES
+        (20, 20, '_forkpress_edit_delete', 'base source-edit target-delete meta'),
+        (21, 21, '_forkpress_edit_delete', 'base source-delete target-edit meta')");
+    $db->close();
+    copy($wp_edit_delete_base, $wp_edit_delete_source);
+    copy($wp_edit_delete_base, $wp_edit_delete_target);
+    cow_merge_allocate_autoincrement_bands($wp_edit_delete_source, $wp_edit_delete_metadata, 'feature-wp-edit-delete-source');
+    cow_merge_allocate_autoincrement_bands($wp_edit_delete_target, $wp_edit_delete_metadata, 'feature-wp-edit-delete-target');
+    $db = open_db($wp_edit_delete_source);
+    $db->exec("UPDATE wp_posts SET post_title = 'Source edited target-deleted page', post_content = '<!-- wp:paragraph --><p>Source edit versus target delete</p><!-- /wp:paragraph -->' WHERE ID = 20");
+    $db->exec("UPDATE wp_postmeta SET meta_value = 'source edited target-deleted meta' WHERE post_id = 20 AND meta_key = '_forkpress_edit_delete'");
+    $db->exec('DELETE FROM wp_postmeta WHERE post_id = 21');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 21');
+    $db->close();
+    $db = open_db($wp_edit_delete_target);
+    $db->exec('DELETE FROM wp_postmeta WHERE post_id = 20');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 20');
+    $db->exec("UPDATE wp_posts SET post_title = 'Target edited source-deleted page', post_content = '<!-- wp:paragraph --><p>Target edit versus source delete</p><!-- /wp:paragraph -->' WHERE ID = 21");
+    $db->exec("UPDATE wp_postmeta SET meta_value = 'target edited source-deleted meta' WHERE post_id = 21 AND meta_key = '_forkpress_edit_delete'");
+    $db->close();
+    $wp_edit_delete_result = cow_merge_databases(
+        $wp_edit_delete_base,
+        $wp_edit_delete_source,
+        $wp_edit_delete_target,
+        $wp_edit_delete_metadata,
+        'feature-wp-edit-delete-source',
+        'feature-wp-edit-delete-target'
+    );
+    assert_same($wp_edit_delete_result['status'], 'completed_with_conflicts', 'WordPress page edit/delete conflicts remain reviewable');
+    assert_same((int)scalar($wp_edit_delete_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 20'), 0, 'WordPress target page deletion wins before source edit/delete review');
+    assert_same((int)scalar($wp_edit_delete_target, 'SELECT COUNT(*) FROM wp_postmeta WHERE post_id = 20'), 0, 'WordPress target page metadata deletion wins before source edit/delete review');
+    assert_same(scalar($wp_edit_delete_target, 'SELECT post_title FROM wp_posts WHERE ID = 21'), 'Target edited source-deleted page', 'WordPress target page edit wins before source delete review');
+    assert_same(scalar($wp_edit_delete_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 21 AND meta_key = '_forkpress_edit_delete'"), 'target edited source-deleted meta', 'WordPress target metadata edit wins before source delete review');
+    assert_same(
+        (int)scalar($wp_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-wp-edit-delete-source' AND c.conflict_type = 'row-target-deleted' AND c.table_name IN ('wp_posts', 'wp_postmeta')"),
+        2,
+        'WordPress source edits against target deletes record page and metadata conflicts'
+    );
+    assert_same(
+        (int)scalar($wp_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-wp-edit-delete-source' AND c.conflict_type = 'row-source-deleted' AND c.table_name IN ('wp_posts', 'wp_postmeta')"),
+        2,
+        'WordPress source deletes against target edits record page and metadata conflicts'
+    );
+    assert_same(
+        (int)scalar($wp_edit_delete_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-wp-edit-delete-source' AND d.decision = 'target-wins' AND d.table_name IN ('wp_posts', 'wp_postmeta')"),
+        4,
+        'WordPress edit/delete conflict defaults are auditable as target-wins decisions'
+    );
+
+    $plugin_graph_base = $tmp . '/plugin-graph-base.sqlite';
+    $plugin_graph_source = $tmp . '/plugin-graph-source.sqlite';
+    $plugin_graph_target = $tmp . '/plugin-graph-target.sqlite';
+    $plugin_graph_metadata = $tmp . '/.forkpress/cow/merge/plugin-graph-metadata.sqlite';
+    create_base_db($plugin_graph_base);
+    $db = open_db($plugin_graph_base);
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER, meta_key TEXT, meta_value TEXT)');
+    $db->exec('CREATE TABLE plugin_graph_parent (id INTEGER PRIMARY KEY AUTOINCREMENT, branch TEXT NOT NULL, graph_json TEXT NOT NULL, graph_serialized TEXT NOT NULL)');
+    $db->exec('CREATE TABLE plugin_graph_child (id INTEGER PRIMARY KEY AUTOINCREMENT, parent_id INTEGER NOT NULL, branch TEXT NOT NULL, file_path TEXT NOT NULL, payload TEXT NOT NULL)');
+    $db->close();
+    copy($plugin_graph_base, $plugin_graph_source);
+    copy($plugin_graph_base, $plugin_graph_target);
+    $plugin_graph_base_root = $tmp . '/plugin-graph-files-base';
+    $plugin_graph_source_root = $tmp . '/plugin-graph-files-source';
+    $plugin_graph_target_root = $tmp . '/plugin-graph-files-target';
+    mkdir($plugin_graph_base_root . '/wp-content/uploads', 0777, true);
+    copy_tree_for_test($plugin_graph_base_root, $plugin_graph_source_root);
+    copy_tree_for_test($plugin_graph_base_root, $plugin_graph_target_root);
+    $plugin_graph_file_base = $tmp . '/.forkpress/cow/merge/file-bases/plugin-graph-source.json';
+    cow_merge_capture_file_base($plugin_graph_base_root, $plugin_graph_file_base);
+    cow_merge_allocate_autoincrement_bands($plugin_graph_source, $plugin_graph_metadata, 'feature-plugin-graph-source');
+    cow_merge_allocate_autoincrement_bands($plugin_graph_target, $plugin_graph_metadata, 'feature-plugin-graph-target');
+    $write_plugin_graph = static function (string $db_path, string $root, string $branch): array {
+        $db = open_db($db_path);
+        $suffix = ucfirst($branch);
+        $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status) VALUES ('Plugin $suffix Page', 'plugin graph page', 'publish')");
+        $page_id = (int)$db->lastInsertRowID();
+        $file_path = "wp-content/uploads/plugin-graph-$branch.dat";
+        write_test_file($root . '/' . $file_path, "plugin graph file for $branch\n");
+        $initial_graph = [
+            'branch' => $branch,
+            'page_id' => $page_id,
+            'file_path' => $file_path,
+        ];
+        $stmt = $db->prepare('INSERT INTO plugin_graph_parent (branch, graph_json, graph_serialized) VALUES (:branch, :graph_json, :graph_serialized)');
+        $stmt->bindValue(':branch', $branch, SQLITE3_TEXT);
+        $stmt->bindValue(':graph_json', json_encode($initial_graph, JSON_UNESCAPED_SLASHES), SQLITE3_TEXT);
+        $stmt->bindValue(':graph_serialized', serialize($initial_graph), SQLITE3_TEXT);
+        $stmt->execute();
+        $parent_id = (int)$db->lastInsertRowID();
+        $child_payload = [
+            'branch' => $branch,
+            'parent_id' => $parent_id,
+            'page_id' => $page_id,
+            'file_path' => $file_path,
+        ];
+        $stmt = $db->prepare('INSERT INTO plugin_graph_child (parent_id, branch, file_path, payload) VALUES (:parent_id, :branch, :file_path, :payload)');
+        $stmt->bindValue(':parent_id', $parent_id, SQLITE3_INTEGER);
+        $stmt->bindValue(':branch', $branch, SQLITE3_TEXT);
+        $stmt->bindValue(':file_path', $file_path, SQLITE3_TEXT);
+        $stmt->bindValue(':payload', json_encode($child_payload, JSON_UNESCAPED_SLASHES), SQLITE3_TEXT);
+        $stmt->execute();
+        $child_id = (int)$db->lastInsertRowID();
+        $graph = $initial_graph + [
+            'parent_id' => $parent_id,
+            'child_id' => $child_id,
+        ];
+        $stmt = $db->prepare('UPDATE plugin_graph_parent SET graph_json = :graph_json, graph_serialized = :graph_serialized WHERE id = :parent_id');
+        $stmt->bindValue(':graph_json', json_encode($graph, JSON_UNESCAPED_SLASHES), SQLITE3_TEXT);
+        $stmt->bindValue(':graph_serialized', serialize($graph), SQLITE3_TEXT);
+        $stmt->bindValue(':parent_id', $parent_id, SQLITE3_INTEGER);
+        $stmt->execute();
+        $stmt = $db->prepare('INSERT INTO wp_options (option_name, option_value, autoload) VALUES (:name, :value, :autoload)');
+        $stmt->bindValue(':name', "plugin_graph_$branch", SQLITE3_TEXT);
+        $stmt->bindValue(':value', serialize($graph), SQLITE3_TEXT);
+        $stmt->bindValue(':autoload', 'no', SQLITE3_TEXT);
+        $stmt->execute();
+        $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_plugin_graph_ref', :value)");
+        $stmt->bindValue(':post_id', $page_id, SQLITE3_INTEGER);
+        $stmt->bindValue(':value', json_encode($graph, JSON_UNESCAPED_SLASHES), SQLITE3_TEXT);
+        $stmt->execute();
+        $db->close();
+        return $graph;
+    };
+    $plugin_graph_source_graph = $write_plugin_graph($plugin_graph_source, $plugin_graph_source_root, 'source');
+    $plugin_graph_target_graph = $write_plugin_graph($plugin_graph_target, $plugin_graph_target_root, 'target');
+    assert_true($plugin_graph_source_graph['parent_id'] !== $plugin_graph_target_graph['parent_id'], 'plugin graph branches receive distinct parent IDs before references are written');
+    assert_true($plugin_graph_source_graph['child_id'] !== $plugin_graph_target_graph['child_id'], 'plugin graph branches receive distinct child IDs before references are written');
+    $plugin_graph_result = cow_merge_branch_state(
+        $plugin_graph_base,
+        $plugin_graph_source,
+        $plugin_graph_target,
+        $plugin_graph_metadata,
+        'feature-plugin-graph-source',
+        'feature-plugin-graph-target',
+        $plugin_graph_file_base,
+        $plugin_graph_source_root,
+        $plugin_graph_target_root
+    );
+    assert_same($plugin_graph_result['status'], 'completed', 'banded plugin graph with custom tables, references, and files merges cleanly');
+    $assert_plugin_graph = static function (string $db_path, string $root, array $graph, string $branch): void {
+        $parent_id = (int)$graph['parent_id'];
+        $child_id = (int)$graph['child_id'];
+        $page_id = (int)$graph['page_id'];
+        $db = open_db($db_path);
+        $parent = $db->querySingle("SELECT graph_json, graph_serialized FROM plugin_graph_parent WHERE id = $parent_id AND branch = '$branch'", true);
+        $child = $db->querySingle("SELECT parent_id, file_path, payload FROM plugin_graph_child WHERE id = $child_id AND branch = '$branch'", true);
+        $option = $db->querySingle("SELECT option_value FROM wp_options WHERE option_name = 'plugin_graph_$branch'");
+        $postmeta = $db->querySingle("SELECT meta_value FROM wp_postmeta WHERE post_id = $page_id AND meta_key = '_plugin_graph_ref'");
+        $db->close();
+        $parent_json = is_array($parent) ? json_decode((string)$parent['graph_json'], true) : null;
+        $parent_serialized = is_array($parent) ? unserialize((string)$parent['graph_serialized']) : null;
+        $child_payload = is_array($child) ? json_decode((string)$child['payload'], true) : null;
+        $option_graph = is_string($option) ? unserialize($option) : null;
+        $postmeta_graph = is_string($postmeta) ? json_decode($postmeta, true) : null;
+        assert_same($parent_json, $graph, "plugin $branch parent JSON graph references the merged object IDs");
+        assert_same($parent_serialized, $graph, "plugin $branch parent serialized graph references the merged object IDs");
+        assert_same($option_graph, $graph, "plugin $branch option graph references the merged object IDs");
+        assert_same($postmeta_graph, $graph, "plugin $branch postmeta graph references the merged object IDs");
+        assert_same((int)($child['parent_id'] ?? 0), $parent_id, "plugin $branch child row points at the merged parent");
+        assert_same($child_payload['parent_id'] ?? null, $parent_id, "plugin $branch child JSON payload points at the merged parent");
+        assert_true(file_exists($root . '/' . $graph['file_path']), "plugin $branch referenced file exists after merge");
+    };
+    $assert_plugin_graph($plugin_graph_target, $plugin_graph_target_root, $plugin_graph_source_graph, 'source');
+    $assert_plugin_graph($plugin_graph_target, $plugin_graph_target_root, $plugin_graph_target_graph, 'target');
+    assert_same((int)scalar($plugin_graph_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-plugin-graph-source'"), 0, 'plugin graph merge records no generic conflicts while IDs remain banded');
+
+    $plugin_validator_empty = cow_merge_record_plugin_validator_conflicts($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], []);
+    assert_same($plugin_validator_empty['status'], 'valid', 'plugin validator accepts empty finding batches');
+    assert_same($plugin_validator_empty['conflicts'], 0, 'plugin validator empty finding batch records no conflicts');
+    assert_throws(
+        fn() => cow_merge_record_plugin_validator_conflicts($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], [
+            ['plugin' => '', 'object' => 'graph:broken', 'reason' => 'missing plugin name'],
+        ]),
+        'require plugin, object, and reason',
+        'plugin validator rejects findings without plugin identity'
+    );
+    assert_throws(
+        fn() => cow_merge_record_plugin_validator_conflicts($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], [
+            ['plugin' => 'forkpress-graph', 'object' => 'graph:broken', 'reason' => 'invalid type', 'type' => 'row-conflict'],
+        ]),
+        'must start with plugin-',
+        'plugin validator rejects non-plugin conflict types'
+    );
+    assert_throws(
+        fn() => cow_merge_decode_plugin_validator_stdout(json_encode([
+            'status' => 'valid',
+            'findings' => [
+                [
+                    'plugin' => 'forkpress-graph',
+                    'object' => 'graph:broken',
+                    'reason' => 'contradictory valid status',
+                ],
+            ],
+        ], JSON_UNESCAPED_SLASHES), 'contradictory-valid-validator'),
+        'status valid with findings',
+        'plugin validator rejects valid status with findings'
+    );
+    assert_throws(
+        fn() => cow_merge_decode_plugin_validator_stdout(json_encode([
+            'status' => 'conflicts',
+            'findings' => [],
+        ], JSON_UNESCAPED_SLASHES), 'empty-conflicts-validator'),
+        'status conflicts without findings',
+        'plugin validator rejects conflicts status without findings'
+    );
+    $plugin_cli_empty_record = run_merge_cli([
+        'record-plugin-validator-conflicts',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', (string)$plugin_graph_result['run_id'],
+        '--findings-json', '[]',
+        '--format', 'json',
+    ]);
+    assert_same($plugin_cli_empty_record['status'], 0, 'plugin validator record CLI accepts empty finding batches');
+    $plugin_cli_empty_result = json_decode($plugin_cli_empty_record['output'], true);
+    assert_same($plugin_cli_empty_result['status'] ?? null, 'valid', 'plugin validator record CLI reports valid empty findings');
+    assert_same($plugin_cli_empty_result['conflicts'] ?? null, 0, 'plugin validator record CLI reports zero empty conflicts');
+    $plugin_cli_invalid_run = run_merge_cli([
+        'record-plugin-validator-conflicts',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', '999999',
+        '--findings-json', '[]',
+    ]);
+    assert_true($plugin_cli_invalid_run['status'] !== 0, 'plugin validator record CLI rejects missing merge runs');
+    assert_true(str_contains($plugin_cli_invalid_run['output'], 'merge run #999999 does not exist'), 'plugin validator record CLI explains missing merge runs');
+    $plugin_cli_invalid_json = run_merge_cli([
+        'record-plugin-validator-conflicts',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', (string)$plugin_graph_result['run_id'],
+        '--findings-json', '{"plugin":"forkpress-graph"}',
+    ]);
+    assert_true($plugin_cli_invalid_json['status'] !== 0, 'plugin validator record CLI rejects JSON objects');
+    assert_true(str_contains($plugin_cli_invalid_json['output'], '--findings-json must be a JSON array'), 'plugin validator record CLI explains findings JSON shape');
+    $plugin_cli_missing_findings = run_merge_cli([
+        'record-plugin-validator-conflicts',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', (string)$plugin_graph_result['run_id'],
+    ]);
+    assert_true($plugin_cli_missing_findings['status'] !== 0, 'plugin validator record CLI requires a findings source');
+    assert_true(str_contains($plugin_cli_missing_findings['output'], '--findings-json or --findings-file is required'), 'plugin validator record CLI explains missing findings input');
+    $plugin_validator_empty_file = $tmp . '/plugin-validator-empty-findings.json';
+    write_test_file($plugin_validator_empty_file, "[]\n");
+    $plugin_cli_empty_file_record = run_merge_cli([
+        'record-plugin-validator-conflicts',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', (string)$plugin_graph_result['run_id'],
+        '--findings-file', $plugin_validator_empty_file,
+        '--format', 'json',
+    ]);
+    assert_same($plugin_cli_empty_file_record['status'], 0, 'plugin validator record CLI accepts findings files');
+    $plugin_cli_empty_file_result = json_decode($plugin_cli_empty_file_record['output'], true);
+    assert_same($plugin_cli_empty_file_result['status'] ?? null, 'valid', 'plugin validator record CLI reports valid empty findings files');
+    $plugin_cli_both_findings = run_merge_cli([
+        'record-plugin-validator-conflicts',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', (string)$plugin_graph_result['run_id'],
+        '--findings-json', '[]',
+        '--findings-file', $plugin_validator_empty_file,
+    ]);
+    assert_true($plugin_cli_both_findings['status'] !== 0, 'plugin validator record CLI rejects multiple findings inputs');
+    assert_true(str_contains($plugin_cli_both_findings['output'], '--findings-json and --findings-file cannot be used together'), 'plugin validator record CLI explains conflicting findings inputs');
+    $plugin_cli_missing_file = run_merge_cli([
+        'record-plugin-validator-conflicts',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', (string)$plugin_graph_result['run_id'],
+        '--findings-file', $tmp . '/missing-plugin-validator-findings.json',
+    ]);
+    assert_true($plugin_cli_missing_file['status'] !== 0, 'plugin validator record CLI rejects missing findings files');
+    assert_true(str_contains($plugin_cli_missing_file['output'], '--findings-file must point to a readable file'), 'plugin validator record CLI explains missing findings files');
+    $plugin_validator_result = cow_merge_record_plugin_validator_conflicts($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], [
+        [
+            'plugin' => 'forkpress-graph',
+            'object' => 'graph:source-parent:' . $plugin_graph_source_graph['parent_id'],
+            'reason' => 'source graph references a missing child row after candidate validation',
+            'tables' => ['plugin_graph_parent', 'plugin_graph_child', 'wp_options', 'wp_postmeta'],
+            'files' => [$plugin_graph_source_graph['file_path']],
+            'validator' => 'forkpress-graph-validator@1',
+            'base' => ['parent_id' => null, 'child_id' => null],
+            'source' => $plugin_graph_source_graph,
+            'target' => $plugin_graph_target_graph,
+            'candidate' => $plugin_graph_source_graph + ['missing_child_id' => 999999],
+        ],
+    ]);
+    assert_same($plugin_validator_result['status'], 'completed_with_conflicts', 'plugin validator findings mark the merge run as conflicted');
+    assert_same($plugin_validator_result['conflicts'], 1, 'plugin validator records one active plugin conflict');
+    assert_same(scalar($plugin_graph_metadata, "SELECT status FROM merge_runs WHERE id = " . (int)$plugin_graph_result['run_id']), 'completed_with_conflicts', 'plugin validator updates the merge run status');
+
+    $plugin_audit = cow_merge_audit_report($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+    ]);
+    assert_same($plugin_audit['filters']['scope'], 'plugin', 'plugin audit preserves plugin scope');
+    assert_same(count($plugin_audit['conflicts']), 1, 'plugin audit returns validator conflicts');
+    assert_same($plugin_audit['conflicts'][0]['table_name'], '__plugins__', 'plugin validator conflicts use the plugin audit namespace');
+    assert_same($plugin_audit['conflicts'][0]['conflict_type'], 'plugin-validator-conflict', 'plugin validator conflicts use a plugin conflict type');
+    assert_true(str_contains($plugin_audit['conflicts'][0]['chosen_preview'], 'missing_child_id'), 'plugin audit exposes candidate validator payloads');
+    assert_true(str_contains($plugin_audit['conflicts'][0]['source_preview'], 'plugin-graph-source.dat'), 'plugin audit exposes source plugin file references');
+    assert_true(str_contains($plugin_audit['conflicts'][0]['target_preview'], 'plugin-graph-target.dat'), 'plugin audit exposes target plugin graph references');
+    assert_same(count($plugin_audit['autoincrement_bands']), 0, 'plugin audit scope omits DB AUTOINCREMENT band summaries');
+    assert_same(count($plugin_audit['row_identity_summary']), 0, 'plugin audit scope omits DB row identity summaries');
+    $plugin_conflict_id = (int)$plugin_audit['conflicts'][0]['id'];
+
+    $plugin_db_scope_audit = cow_merge_audit_report($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 10, [
+        'scope' => 'db',
+        'records' => 'conflicts',
+    ]);
+    assert_same(count(array_filter($plugin_db_scope_audit['conflicts'], fn($row) => $row['table_name'] === '__plugins__')), 0, 'DB audit scope excludes plugin validator conflicts');
+
+    $plugin_group_audit = cow_merge_audit_report($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'group_by' => 'severity',
+    ]);
+    assert_same(count($plugin_group_audit['conflict_groups']), 1, 'plugin audit can group validator conflicts');
+    assert_same($plugin_group_audit['conflict_groups'][0]['group_key'], 'plugin', 'plugin validator conflicts group under plugin severity');
+    assert_same((int)$plugin_group_audit['conflict_groups'][0]['plugin_count'], 1, 'plugin conflict grouping counts plugin rows separately');
+    assert_same((int)$plugin_group_audit['conflict_groups'][0]['db_count'], 0, 'plugin conflict grouping does not count plugin rows as DB rows');
+    ob_start();
+    cow_merge_print_audit_text($plugin_group_audit);
+    $plugin_group_text = ob_get_clean();
+    assert_true(str_contains($plugin_group_text, 'plugin=1 db=0'), 'plugin conflict grouping is visible in text audit output');
+
+    cow_merge_review_record(
+        $plugin_graph_metadata,
+        'conflict',
+        $plugin_conflict_id,
+        'needs-action',
+        'plugin graph validator needs an app-specific repair',
+        'cow-test'
+    );
+    $plugin_review_audit = cow_merge_audit_report($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'review_status' => 'needs-action',
+    ]);
+    assert_same(count($plugin_review_audit['conflicts']), 1, 'plugin conflict review queue returns reviewed plugin conflicts');
+    assert_same($plugin_review_audit['conflicts'][0]['review_status'], 'needs-action', 'plugin audit exposes latest plugin conflict review status');
+    assert_same($plugin_review_audit['conflicts'][0]['stale_status'] ?? null, 'unknown', 'plugin validator conflicts are not marked fresh or stale without rerunning validators');
+    $plugin_revalidate = cow_merge_revalidate_reviewed_conflicts($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 'cow-revalidate');
+    assert_same($plugin_revalidate['checked'], 1, 'plugin conflict revalidation inspects plugin conflicts in the selected run');
+    assert_same($plugin_revalidate['reviewed'], 1, 'plugin conflict revalidation sees reviewed plugin conflicts');
+    assert_same($plugin_revalidate['stale'], 0, 'plugin conflict revalidation does not infer stale state without rerunning validators');
+    assert_same($plugin_revalidate['carried'], 0, 'plugin conflict revalidation does not carry plugin conflicts without validator evidence');
+    assert_same((int)scalar($plugin_graph_metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $plugin_conflict_id"), 0, 'plugin conflict revalidation records no guarded payload without rerunning validators');
+    $plugin_validator_identical_result = cow_merge_record_plugin_validator_conflicts($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], [
+        [
+            'plugin' => 'forkpress-graph',
+            'object' => 'graph:source-parent:' . $plugin_graph_source_graph['parent_id'],
+            'reason' => 'source graph references a missing child row after candidate validation',
+            'tables' => ['plugin_graph_parent', 'plugin_graph_child', 'wp_options', 'wp_postmeta'],
+            'files' => [$plugin_graph_source_graph['file_path']],
+            'validator' => 'forkpress-graph-validator@1',
+            'base' => ['parent_id' => null, 'child_id' => null],
+            'source' => $plugin_graph_source_graph,
+            'target' => $plugin_graph_target_graph,
+            'candidate' => $plugin_graph_source_graph + ['missing_child_id' => 999999],
+        ],
+    ]);
+    assert_same($plugin_validator_identical_result['conflicts'], 1, 'plugin validator identical rerun keeps the same active plugin conflict');
+    $plugin_identical_conflict_id = (int)scalar($plugin_graph_metadata, "SELECT MAX(id) FROM merge_conflicts WHERE table_name = '__plugins__' AND id > $plugin_conflict_id");
+    $plugin_revalidate_after_identical_rerun = cow_merge_revalidate_reviewed_conflicts($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 'cow-revalidate');
+    assert_same($plugin_identical_conflict_id, 0, 'plugin validator identical rerun records no duplicate replacement conflict');
+    assert_same($plugin_revalidate_after_identical_rerun['checked'], 1, 'plugin conflict revalidation inspects only the original finding after an identical validator rerun');
+    assert_same($plugin_revalidate_after_identical_rerun['reviewed'], 1, 'plugin identical rerun keeps the reviewed original plugin conflict');
+    assert_same($plugin_revalidate_after_identical_rerun['fresh'], 0, 'plugin conflict revalidation does not infer freshness without replacement evidence');
+    assert_same($plugin_revalidate_after_identical_rerun['stale'], 0, 'plugin conflict revalidation does not mark identical validator evidence stale');
+    assert_same($plugin_revalidate_after_identical_rerun['carried'], 0, 'plugin conflict revalidation does not carry identical validator evidence to needs-action');
+    assert_same((int)scalar($plugin_graph_metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $plugin_conflict_id"), 0, 'plugin conflict revalidation records no replacement evidence when validator payloads are unchanged');
+    $plugin_identical_audit = cow_merge_audit_report($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'review_status' => 'needs-action',
+    ]);
+    $plugin_original_after_identical_rerun = array_values(array_filter($plugin_identical_audit['conflicts'], fn($row) => (int)$row['id'] === $plugin_conflict_id));
+    assert_same($plugin_original_after_identical_rerun[0]['stale_status'] ?? null, 'unknown', 'plugin audit keeps reviewed conflicts unknown after deduplicated identical validator evidence');
+    assert_same((int)($plugin_original_after_identical_rerun[0]['replacement_conflict_id'] ?? 0), 0, 'plugin identical rerun audit exposes no replacement conflict id');
+    $plugin_validator_updated_result = cow_merge_record_plugin_validator_conflicts($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], [
+        [
+            'plugin' => 'forkpress-graph',
+            'object' => 'graph:source-parent:' . $plugin_graph_source_graph['parent_id'],
+            'reason' => 'source graph still references a missing child row after validator rerun',
+            'tables' => ['plugin_graph_parent', 'plugin_graph_child', 'wp_options', 'wp_postmeta'],
+            'files' => [$plugin_graph_source_graph['file_path']],
+            'validator' => 'forkpress-graph-validator@1',
+            'base' => ['parent_id' => null, 'child_id' => null],
+            'source' => $plugin_graph_source_graph,
+            'target' => $plugin_graph_target_graph,
+            'candidate' => $plugin_graph_source_graph + ['missing_child_id' => 123456],
+        ],
+    ]);
+    assert_same($plugin_validator_updated_result['conflicts'], 1, 'plugin validator rerun records replacement evidence for the same plugin object');
+    $plugin_replacement_conflict_id = (int)scalar($plugin_graph_metadata, "SELECT MAX(id) FROM merge_conflicts WHERE table_name = '__plugins__' AND id > $plugin_conflict_id");
+    $plugin_cli_revalidate_after_rerun = run_merge_cli([
+        'audit',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', (string)$plugin_graph_result['run_id'],
+        '--revalidate',
+        '--reviewer', 'cow-revalidate',
+        '--format', 'json',
+    ]);
+    assert_same($plugin_cli_revalidate_after_rerun['status'], 0, 'plugin merge-audit --revalidate CLI exits successfully');
+    $plugin_revalidate_after_rerun = json_decode($plugin_cli_revalidate_after_rerun['output'], true);
+    assert_true(is_array($plugin_revalidate_after_rerun), 'plugin merge-audit --revalidate CLI emits JSON');
+    assert_same($plugin_revalidate_after_rerun['checked'], 2, 'plugin conflict revalidation inspects original and replacement validator findings');
+    assert_same($plugin_revalidate_after_rerun['reviewed'], 1, 'plugin conflict revalidation still only carries reviewed plugin conflicts');
+    assert_same($plugin_revalidate_after_rerun['stale'], 1, 'plugin conflict revalidation treats changed validator evidence as stale');
+    assert_same($plugin_revalidate_after_rerun['carried'], 1, 'plugin conflict revalidation carries changed validator evidence to needs-action');
+    assert_same((int)scalar($plugin_graph_metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $plugin_conflict_id"), 1, 'plugin conflict revalidation records replacement validator evidence for audit');
+    assert_same(scalar($plugin_graph_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $plugin_conflict_id ORDER BY id DESC LIMIT 1"), 'replacement-evidence', 'plugin revalidation classifies changed validator evidence');
+    assert_same((int)scalar($plugin_graph_metadata, "SELECT replacement_conflict_id FROM merge_revalidations WHERE conflict_id = $plugin_conflict_id ORDER BY id DESC LIMIT 1"), $plugin_replacement_conflict_id, 'plugin revalidation links to the replacement validator conflict');
+    $plugin_revalidated_audit = cow_merge_audit_report($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'review_status' => 'needs-action',
+    ]);
+    $plugin_original_after_rerun = array_values(array_filter($plugin_revalidated_audit['conflicts'], fn($row) => (int)$row['id'] === $plugin_conflict_id));
+    assert_same($plugin_original_after_rerun[0]['stale_status'] ?? null, 'stale', 'plugin audit marks reviewed conflicts stale after validator evidence changes');
+    assert_same((int)($plugin_original_after_rerun[0]['replacement_conflict_id'] ?? 0), $plugin_replacement_conflict_id, 'plugin stale audit exposes the live replacement conflict id');
+    assert_same((int)($plugin_original_after_rerun[0]['latest_revalidation_replacement_conflict_id'] ?? 0), $plugin_replacement_conflict_id, 'plugin stale audit exposes the stored replacement conflict id');
+    assert_true(str_contains((string)($plugin_original_after_rerun[0]['current_target_preview'] ?? ''), '123456'), 'plugin stale audit exposes replacement validator evidence');
+    assert_true(str_contains((string)($plugin_original_after_rerun[0]['review_note'] ?? ''), 'plugin graph validator needs an app-specific repair'), 'plugin stale revalidation preserves prior reviewer intent');
+    $plugin_revalidate_again = cow_merge_revalidate_reviewed_conflicts($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 'cow-revalidate');
+    assert_same($plugin_revalidate_again['carried'], 0, 'plugin conflict revalidation does not duplicate carried validator evidence notes');
+    assert_same($plugin_revalidate_again['already_needs_action'], 1, 'plugin conflict revalidation reports already-carried validator evidence');
+    assert_same((int)scalar($plugin_graph_metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $plugin_conflict_id"), 1, 'plugin conflict revalidation keeps replacement validator evidence idempotent');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($plugin_graph_metadata, $plugin_conflict_id, 'target', false, 'Try generic plugin resolution.', 'cow-test', true),
+        'plugin validator conflicts cannot be resolved by generic merge-resolve',
+        'plugin validator conflicts have an explicit generic resolution boundary'
+    );
+    $plugin_cli_audit = run_merge_cli([
+        'audit',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', (string)$plugin_graph_result['run_id'],
+        '--format', 'json',
+        '--scope', 'plugin',
+        '--records', 'conflicts',
+        '--review-status', 'needs-action',
+    ]);
+    assert_same($plugin_cli_audit['status'], 0, 'plugin audit CLI exits successfully');
+    $plugin_cli_report = json_decode($plugin_cli_audit['output'], true);
+    assert_true(is_array($plugin_cli_report), 'plugin audit CLI emits JSON');
+    assert_same($plugin_cli_report['filters']['scope'] ?? null, 'plugin', 'plugin audit CLI preserves plugin scope');
+    assert_same(count($plugin_cli_report['conflicts'] ?? []), 1, 'plugin audit CLI returns reviewed plugin conflicts');
+    assert_same($plugin_cli_report['conflicts'][0]['table_name'] ?? null, '__plugins__', 'plugin audit CLI exposes plugin conflict namespace');
+    $plugin_cli_text_group = run_merge_cli([
+        'audit',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', (string)$plugin_graph_result['run_id'],
+        '--scope', 'plugin',
+        '--records', 'conflicts',
+        '--group-by', 'severity',
+    ]);
+    assert_same($plugin_cli_text_group['status'], 0, 'plugin grouped audit CLI exits successfully');
+    assert_true(str_contains($plugin_cli_text_group['output'], 'scope=plugin') && str_contains($plugin_cli_text_group['output'], 'plugin=2 db=0'), 'plugin grouped audit CLI prints plugin counts separately from DB counts');
+    $plugin_cli_path_error = run_merge_cli([
+        'audit',
+        '--metadata-db', $plugin_graph_metadata,
+        '--scope', 'plugin',
+        '--path', 'wp-content/uploads/plugin-graph-source.dat',
+    ]);
+    assert_true($plugin_cli_path_error['status'] !== 0, 'plugin audit CLI rejects file path filters');
+    assert_true(str_contains($plugin_cli_path_error['output'], '--path and --path-prefix require file audit scope'), 'plugin audit CLI explains path filter scope errors');
+    $plugin_cli_record_finding = run_merge_cli([
+        'record-plugin-validator-conflicts',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', (string)$plugin_graph_result['run_id'],
+        '--findings-json', json_encode([
+            [
+                'plugin' => 'forkpress-graph',
+                'object' => 'graph:target-parent:' . $plugin_graph_target_graph['parent_id'],
+                'reason' => 'target graph validator found a conflicting external option reference',
+                'type' => 'plugin-target-conflict',
+                'tables' => ['plugin_graph_parent', 'wp_options'],
+                'files' => [$plugin_graph_target_graph['file_path']],
+                'validator' => 'forkpress-graph-validator@1',
+                'source' => $plugin_graph_source_graph,
+                'target' => $plugin_graph_target_graph,
+                'candidate' => $plugin_graph_target_graph + ['conflicting_option' => 'plugin_graph_target'],
+            ],
+        ], JSON_UNESCAPED_SLASHES),
+        '--format', 'json',
+    ]);
+    assert_same($plugin_cli_record_finding['status'], 0, 'plugin validator record CLI records plugin conflicts');
+    $plugin_cli_record_result = json_decode($plugin_cli_record_finding['output'], true);
+    assert_same($plugin_cli_record_result['status'] ?? null, 'completed_with_conflicts', 'plugin validator record CLI reports conflicted findings');
+    assert_same($plugin_cli_record_result['conflicts'] ?? null, 1, 'plugin validator record CLI reports recorded conflicts');
+    $plugin_cli_record_audit = cow_merge_audit_report($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-target-conflict',
+    ]);
+    assert_same(count($plugin_cli_record_audit['conflicts']), 1, 'plugin validator record CLI conflicts are visible in plugin audit scope');
+    assert_true(str_contains($plugin_cli_record_audit['conflicts'][0]['chosen_preview'], 'conflicting_option'), 'plugin validator record CLI stores candidate payloads');
+    $plugin_validator_file_findings = $tmp . '/plugin-validator-conflict-findings.json';
+    write_test_file($plugin_validator_file_findings, json_encode([
+        [
+            'plugin' => 'forkpress-graph',
+            'object' => 'graph:file-backed:' . $plugin_graph_target_graph['child_id'],
+            'reason' => 'file-backed validator finding recorded from a findings file',
+            'type' => 'plugin-file-backed-conflict',
+            'tables' => ['plugin_graph_child'],
+            'files' => [$plugin_graph_target_graph['file_path']],
+            'validator' => 'forkpress-graph-validator@1',
+            'candidate' => $plugin_graph_target_graph + ['file_backed_finding' => true],
+        ],
+    ], JSON_UNESCAPED_SLASHES) . "\n");
+    $plugin_cli_record_file_finding = run_merge_cli([
+        'record-plugin-validator-conflicts',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', (string)$plugin_graph_result['run_id'],
+        '--findings-file', $plugin_validator_file_findings,
+        '--format', 'json',
+    ]);
+    assert_same($plugin_cli_record_file_finding['status'], 0, 'plugin validator record CLI records conflicts from findings files');
+    $plugin_cli_record_file_result = json_decode($plugin_cli_record_file_finding['output'], true);
+    assert_same($plugin_cli_record_file_result['conflicts'] ?? null, 1, 'plugin validator record CLI reports file-backed conflicts');
+    $plugin_cli_record_file_audit = cow_merge_audit_report($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-file-backed-conflict',
+    ]);
+    assert_same(count($plugin_cli_record_file_audit['conflicts']), 1, 'plugin validator file-backed conflicts are visible in plugin audit scope');
+    assert_true(str_contains($plugin_cli_record_file_audit['conflicts'][0]['chosen_preview'], 'file_backed_finding'), 'plugin validator file-backed conflicts store candidate payloads');
+    $plugin_validator_runner = $tmp . '/plugin-validator-runner.php';
+    write_test_file($plugin_validator_runner, <<<'PHP'
+<?php
+$candidate = [
+    'run' => (int)getenv('FORKPRESS_MERGE_RUN'),
+    'source_branch' => getenv('FORKPRESS_MERGE_SOURCE_BRANCH'),
+    'target_branch' => getenv('FORKPRESS_MERGE_TARGET_BRANCH'),
+    'source_db' => basename((string)getenv('FORKPRESS_MERGE_SOURCE_DB')),
+    'target_db' => basename((string)getenv('FORKPRESS_MERGE_TARGET_DB')),
+];
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-graph',
+            'object' => 'graph:runner:' . $candidate['run'],
+            'reason' => 'runner validator received merge context and found a graph issue',
+            'type' => 'plugin-runner-conflict',
+            'tables' => ['plugin_graph_parent'],
+            'validator' => 'forkpress-graph-runner@1',
+            'candidate' => $candidate,
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $plugin_cli_run_validator = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', (string)$plugin_graph_result['run_id'],
+        '--validator', $plugin_validator_runner,
+        '--format', 'json',
+    ]);
+    assert_same($plugin_cli_run_validator['status'], 0, 'plugin validator runner CLI exits successfully');
+    $plugin_cli_run_validator_result = json_decode($plugin_cli_run_validator['output'], true);
+    assert_same($plugin_cli_run_validator_result['validator_status'] ?? null, 'conflicts', 'plugin validator runner CLI reports validator status');
+    assert_same($plugin_cli_run_validator_result['conflicts'] ?? null, 1, 'plugin validator runner CLI records emitted findings');
+    $plugin_runner_audit = cow_merge_audit_report($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-runner-conflict',
+    ]);
+    assert_same(count($plugin_runner_audit['conflicts']), 1, 'plugin validator runner conflicts are visible in plugin audit scope');
+    assert_true(str_contains($plugin_runner_audit['conflicts'][0]['chosen_preview'], 'feature-plugin-graph-source'), 'plugin validator runner passes source branch context to validators');
+
+    $plugin_validator_runner_contradictory_valid = $tmp . '/plugin-validator-runner-contradictory-valid.php';
+    write_test_file($plugin_validator_runner_contradictory_valid, <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'valid',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-graph',
+            'object' => 'graph:contradictory-valid',
+            'reason' => 'valid status must not carry findings',
+            'type' => 'plugin-contradictory-valid',
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $plugin_cli_run_validator_contradictory_valid = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', (string)$plugin_graph_result['run_id'],
+        '--validator', $plugin_validator_runner_contradictory_valid,
+        '--format', 'json',
+    ]);
+    assert_true($plugin_cli_run_validator_contradictory_valid['status'] !== 0, 'plugin validator runner CLI rejects valid status with findings');
+    assert_true(str_contains($plugin_cli_run_validator_contradictory_valid['output'], 'status valid with findings'), 'plugin validator runner CLI explains contradictory valid findings');
+    assert_same(
+        (int)scalar($plugin_graph_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE conflict_type = 'plugin-contradictory-valid'"),
+        0,
+        'plugin validator runner does not record contradictory valid findings'
+    );
+
+    $plugin_validator_runner_empty_conflicts = $tmp . '/plugin-validator-runner-empty-conflicts.php';
+    write_test_file($plugin_validator_runner_empty_conflicts, <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $plugin_cli_run_validator_empty_conflicts = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', (string)$plugin_graph_result['run_id'],
+        '--validator', $plugin_validator_runner_empty_conflicts,
+        '--format', 'json',
+    ]);
+    assert_true($plugin_cli_run_validator_empty_conflicts['status'] !== 0, 'plugin validator runner CLI rejects conflicts status without findings');
+    assert_true(str_contains($plugin_cli_run_validator_empty_conflicts['output'], 'status conflicts without findings'), 'plugin validator runner CLI explains empty conflicts status');
+
+    $plugin_validator_file_base_root = $tmp . '/plugin-validator-file-base';
+    $plugin_validator_file_source_root = $tmp . '/plugin-validator-file-source';
+    $plugin_validator_file_target_root = $tmp . '/plugin-validator-file-target';
+    foreach ([$plugin_validator_file_base_root, $plugin_validator_file_source_root, $plugin_validator_file_target_root] as $root) {
+        mkdir($root . '/wp-content/database', 0777, true);
+        mkdir($root . '/wp-content/uploads', 0777, true);
+    }
+    $plugin_validator_file_base_db = $plugin_validator_file_base_root . '/wp-content/database/.ht.sqlite';
+    $plugin_validator_file_source_db = $plugin_validator_file_source_root . '/wp-content/database/.ht.sqlite';
+    $plugin_validator_file_target_db = $plugin_validator_file_target_root . '/wp-content/database/.ht.sqlite';
+    $plugin_validator_file_metadata = $tmp . '/.forkpress/cow/merge/plugin-validator-file-env-metadata.sqlite';
+    $plugin_validator_file_base = $tmp . '/.forkpress/cow/merge/file-bases/plugin-validator-file-env.json';
+    create_base_db($plugin_validator_file_base_db);
+    copy($plugin_validator_file_base_db, $plugin_validator_file_source_db);
+    copy($plugin_validator_file_base_db, $plugin_validator_file_target_db);
+    cow_merge_capture_file_base($plugin_validator_file_base_root, $plugin_validator_file_base);
+    write_test_file($plugin_validator_file_source_root . '/wp-content/uploads/plugin-validator-env.txt', "source validator file\n");
+    $plugin_validator_file_merge = cow_merge_branch_state(
+        $plugin_validator_file_base_db,
+        $plugin_validator_file_source_db,
+        $plugin_validator_file_target_db,
+        $plugin_validator_file_metadata,
+        'feature-plugin-validator-file-source',
+        'feature-plugin-validator-file-target',
+        $plugin_validator_file_base,
+        $plugin_validator_file_source_root,
+        $plugin_validator_file_target_root
+    );
+    assert_same($plugin_validator_file_merge['status'], 'completed', 'validator file-root fixture merges source-only files cleanly');
+    $plugin_validator_file_runner = $tmp . '/plugin-validator-file-runner.php';
+    write_test_file($plugin_validator_file_runner, <<<'PHP'
+<?php
+$source_root = (string)getenv('FORKPRESS_MERGE_SOURCE_ROOT');
+$target_root = (string)getenv('FORKPRESS_MERGE_TARGET_ROOT');
+$relative = 'wp-content/uploads/plugin-validator-env.txt';
+$source_file = $source_root . '/' . $relative;
+$target_file = $target_root . '/' . $relative;
+if (!is_file($source_file) || !is_file($target_file)) {
+    fwrite(STDERR, 'validator could not inspect source and target roots');
+    exit(9);
+}
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-file-validator',
+            'object' => 'file:' . $relative,
+            'reason' => 'runner validator inspected source and candidate target files',
+            'type' => 'plugin-file-root-conflict',
+            'files' => [$relative],
+            'validator' => 'forkpress-file-runner@1',
+            'candidate' => [
+                'source_root_basename' => basename($source_root),
+                'target_root_basename' => basename($target_root),
+                'source_file' => trim((string)file_get_contents($source_file)),
+                'target_file' => trim((string)file_get_contents($target_file)),
+            ],
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $plugin_validator_file_run = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $plugin_validator_file_metadata,
+        '--run', (string)$plugin_validator_file_merge['run_id'],
+        '--validator', $plugin_validator_file_runner,
+        '--format', 'json',
+    ]);
+    assert_same($plugin_validator_file_run['status'], 0, 'plugin validator runner passes filesystem roots to validators');
+    $plugin_validator_file_result = json_decode($plugin_validator_file_run['output'], true);
+    assert_same($plugin_validator_file_result['conflicts'] ?? null, 1, 'file-root validator findings are recorded');
+    $plugin_validator_file_audit = cow_merge_audit_report($plugin_validator_file_metadata, (int)$plugin_validator_file_merge['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-file-root-conflict',
+    ]);
+    assert_same(count($plugin_validator_file_audit['conflicts']), 1, 'file-root validator conflicts are visible in plugin audit scope');
+    assert_true(str_contains($plugin_validator_file_audit['conflicts'][0]['chosen_preview'], 'source validator file'), 'file-root validator can inspect source files');
+    $plugin_validator_file_payload = cow_merge_decode_payload_json(
+        (string)scalar($plugin_validator_file_metadata, "SELECT chosen_payload FROM merge_conflicts WHERE conflict_type = 'plugin-file-root-conflict' ORDER BY id DESC LIMIT 1"),
+        'plugin validator file-root payload'
+    );
+    assert_same($plugin_validator_file_payload['candidate']['target_root_basename'] ?? null, 'plugin-validator-file-target', 'file-root validator receives the candidate target root');
+    assert_same($plugin_validator_file_payload['candidate']['target_file'] ?? null, 'source validator file', 'file-root validator can inspect candidate target files');
+
+    $plugin_discovery_root = $tmp . '/plugin-validator-discovery-root';
+    $plugin_discovery_db = $tmp . '/plugin-validator-discovery.sqlite';
+    create_base_db($plugin_discovery_db);
+    $db = open_db($plugin_discovery_db);
+    $db->exec(
+        "INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('active_plugins', '" .
+        SQLite3::escapeString(serialize(['active-plugin/active-plugin.php', 'single-plugin.php', '../unsafe/unsafe.php'])) .
+        "', 'yes')"
+    );
+    $db->close();
+    write_test_file($plugin_discovery_root . '/wp-content/plugins/active-plugin/forkpress-merge-validator.php', "<?php echo 'active';\n");
+    write_test_file($plugin_discovery_root . '/wp-content/plugins/single-plugin.forkpress-merge-validator.php', "<?php echo 'single';\n");
+    write_test_file($plugin_discovery_root . '/wp-content/plugins/inactive-plugin/forkpress-merge-validator.php', "<?php echo 'inactive';\n");
+    write_test_file($plugin_discovery_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', "<?php echo 'mu';\n");
+    write_test_file($plugin_discovery_root . '/wp-content/mu-plugins/mu-extra.forkpress-merge-validator.php', "<?php echo 'mu-extra';\n");
+    write_test_file($plugin_discovery_root . '/wp-content/mu-plugins/mu-dir/forkpress-merge-validator.php', "<?php echo 'mu-dir';\n");
+    $discovered_plugin_validators = array_map(
+        fn(string $path): string => str_replace($plugin_discovery_root . '/', '', $path),
+        cow_merge_discover_plugin_validators($plugin_discovery_db, $plugin_discovery_root)
+    );
+    assert_same($discovered_plugin_validators, [
+        'wp-content/mu-plugins/forkpress-merge-validator.php',
+        'wp-content/mu-plugins/mu-extra.forkpress-merge-validator.php',
+        'wp-content/mu-plugins/mu-dir/forkpress-merge-validator.php',
+        'wp-content/plugins/active-plugin/forkpress-merge-validator.php',
+        'wp-content/plugins/single-plugin.forkpress-merge-validator.php',
+    ], 'plugin validator discovery includes mu-plugin validators and active plugin validators only');
+
+    $auto_validator_base_root = $tmp . '/auto-validator-base';
+    $auto_validator_source_root = $tmp . '/auto-validator-source';
+    $auto_validator_target_root = $tmp . '/auto-validator-target';
+    foreach ([$auto_validator_base_root, $auto_validator_source_root, $auto_validator_target_root] as $root) {
+        mkdir($root . '/wp-content/database', 0777, true);
+        mkdir($root . '/wp-content/uploads', 0777, true);
+    }
+    $auto_validator_base_db = $auto_validator_base_root . '/wp-content/database/.ht.sqlite';
+    $auto_validator_source_db = $auto_validator_source_root . '/wp-content/database/.ht.sqlite';
+    $auto_validator_target_db = $auto_validator_target_root . '/wp-content/database/.ht.sqlite';
+    $auto_validator_metadata = $tmp . '/.forkpress/cow/merge/auto-validator-metadata.sqlite';
+    $auto_validator_file_base = $tmp . '/.forkpress/cow/merge/file-bases/auto-validator.json';
+    create_base_db($auto_validator_base_db);
+    copy($auto_validator_base_db, $auto_validator_source_db);
+    copy($auto_validator_base_db, $auto_validator_target_db);
+    cow_merge_capture_file_base($auto_validator_base_root, $auto_validator_file_base);
+    $db = open_db($auto_validator_source_db);
+    $db->exec("UPDATE wp_posts SET post_content = 'source automatic validator content' WHERE ID = 1");
+    $db->close();
+    $db = open_db($auto_validator_target_db);
+    $db->exec(
+        "INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('active_plugins', '" .
+        SQLite3::escapeString(serialize(['auto-validator/auto-validator.php'])) .
+        "', 'yes')"
+    );
+    $db->close();
+    write_test_file($auto_validator_target_root . '/wp-content/plugins/auto-validator/forkpress-merge-validator.php', <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-auto-validator',
+            'object' => 'candidate:' . basename((string)getenv('FORKPRESS_MERGE_TARGET_ROOT')),
+            'reason' => 'automatically discovered validator inspected the merge candidate',
+            'type' => 'plugin-auto-validator-conflict',
+            'validator' => 'forkpress-auto-validator@1',
+            'candidate' => [
+                'target_content' => trim((string)(new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB')))->querySingle('SELECT post_content FROM wp_posts WHERE ID = 1')),
+            ],
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    write_test_file($auto_validator_target_root . '/wp-content/plugins/inactive-validator/forkpress-merge-validator.php', <<<'PHP'
+<?php
+fwrite(STDERR, 'inactive plugin validator should not run');
+exit(41);
+PHP);
+    $auto_validator_merge = run_merge_cli([
+        'merge',
+        '--base-db', $auto_validator_base_db,
+        '--source-db', $auto_validator_source_db,
+        '--target-db', $auto_validator_target_db,
+        '--metadata-db', $auto_validator_metadata,
+        '--source', 'feature-auto-validator',
+        '--target', 'main',
+        '--base-files', $auto_validator_file_base,
+        '--source-root', $auto_validator_source_root,
+        '--target-root', $auto_validator_target_root,
+    ]);
+    assert_same($auto_validator_merge['status'], 0, 'automatic plugin validator discovery runs during normal file-backed merge');
+    assert_true(str_contains($auto_validator_merge['output'], 'plugins:   validators=1 conflicts=1'), 'automatic plugin validator discovery reports discovered validator conflicts');
+    assert_same(scalar($auto_validator_target_db, 'SELECT post_content FROM wp_posts WHERE ID = 1'), 'source automatic validator content', 'automatic validator conflict keeps the staged DB candidate');
+    assert_same(
+        (int)scalar($auto_validator_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-auto-validator-conflict'"),
+        1,
+        'automatically discovered validator records plugin-scoped conflicts during merge'
+    );
+
+    $plugin_explicit_import_base_root = $tmp . '/plugin-explicit-import-base';
+    $plugin_explicit_import_source_root = $tmp . '/plugin-explicit-import-source';
+    $plugin_explicit_import_target_root = $tmp . '/plugin-explicit-import-target';
+    foreach ([$plugin_explicit_import_base_root, $plugin_explicit_import_source_root, $plugin_explicit_import_target_root] as $root) {
+        mkdir($root . '/wp-content/database', 0777, true);
+    }
+    $plugin_explicit_import_base_db = $plugin_explicit_import_base_root . '/wp-content/database/.ht.sqlite';
+    $plugin_explicit_import_source_db = $plugin_explicit_import_source_root . '/wp-content/database/.ht.sqlite';
+    $plugin_explicit_import_target_db = $plugin_explicit_import_target_root . '/wp-content/database/.ht.sqlite';
+    $plugin_explicit_import_metadata = $tmp . '/.forkpress/cow/merge/plugin-explicit-import-metadata.sqlite';
+    $plugin_explicit_import_file_base = $tmp . '/.forkpress/cow/merge/file-bases/plugin-explicit-import.json';
+    create_base_db($plugin_explicit_import_base_db);
+    $db = open_db($plugin_explicit_import_base_db);
+    $db->exec('CREATE TABLE plugin_import_parent (id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT NOT NULL)');
+    $db->exec('CREATE TABLE plugin_import_child (id INTEGER PRIMARY KEY AUTOINCREMENT, parent_id INTEGER NOT NULL, label TEXT NOT NULL)');
+    $db->exec("INSERT INTO plugin_import_parent (label) VALUES ('base plugin parent')");
+    $db->close();
+    copy($plugin_explicit_import_base_db, $plugin_explicit_import_source_db);
+    copy($plugin_explicit_import_base_db, $plugin_explicit_import_target_db);
+    cow_merge_capture_file_base($plugin_explicit_import_base_root, $plugin_explicit_import_file_base);
+    cow_merge_allocate_autoincrement_bands($plugin_explicit_import_source_db, $plugin_explicit_import_metadata, 'feature-plugin-explicit-import');
+    $db = open_db($plugin_explicit_import_source_db);
+    $db->exec("INSERT INTO plugin_import_parent (id, label) VALUES (2, 'explicit imported plugin parent')");
+    $db->exec("INSERT INTO plugin_import_child (parent_id, label) VALUES (2, 'child behind explicit plugin parent')");
+    $plugin_explicit_import_child_id = (int)$db->lastInsertRowID();
+    $db->close();
+    $db = open_db($plugin_explicit_import_target_db);
+    $db->exec(
+        "INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('active_plugins', '" .
+        SQLite3::escapeString(serialize(['explicit-import-validator/explicit-import-validator.php'])) .
+        "', 'yes')"
+    );
+    $db->close();
+    write_test_file($plugin_explicit_import_target_root . '/wp-content/plugins/explicit-import-validator/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query(
+    'SELECT c.id, c.parent_id, c.label FROM plugin_import_child c ' .
+    'LEFT JOIN plugin_import_parent p ON p.id = c.parent_id ' .
+    'WHERE p.id IS NULL ORDER BY c.id'
+);
+$findings = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    $findings[] = [
+        'plugin' => 'forkpress-explicit-import-validator',
+        'object' => 'plugin_import_child:' . $row['id'],
+        'reason' => 'plugin child row references a parent that generic merge held for review',
+        'type' => 'plugin-explicit-import-missing-parent',
+        'tables' => ['plugin_import_parent', 'plugin_import_child'],
+        'validator' => 'forkpress-explicit-import-validator@1',
+        'candidate' => [
+            'child_id' => (int)$row['id'],
+            'parent_id' => (int)$row['parent_id'],
+            'label' => (string)$row['label'],
+        ],
+    ];
+}
+echo json_encode([
+    'status' => count($findings) > 0 ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $plugin_explicit_import_merge = run_merge_cli([
+        'merge',
+        '--base-db', $plugin_explicit_import_base_db,
+        '--source-db', $plugin_explicit_import_source_db,
+        '--target-db', $plugin_explicit_import_target_db,
+        '--metadata-db', $plugin_explicit_import_metadata,
+        '--source', 'feature-plugin-explicit-import',
+        '--target', 'main',
+        '--base-files', $plugin_explicit_import_file_base,
+        '--source-root', $plugin_explicit_import_source_root,
+        '--target-root', $plugin_explicit_import_target_root,
+    ]);
+    assert_same($plugin_explicit_import_merge['status'], 0, 'plugin validator runs after explicit-ID plugin import candidate is staged');
+    assert_true(str_contains($plugin_explicit_import_merge['output'], 'plugins:   validators=1 conflicts=1'), 'plugin validator reports explicit-ID plugin graph conflicts');
+    assert_same((int)scalar($plugin_explicit_import_target_db, 'SELECT COUNT(*) FROM plugin_import_parent WHERE id = 2'), 0, 'out-of-band explicit plugin parent remains held for review');
+    assert_same((int)scalar($plugin_explicit_import_target_db, "SELECT parent_id FROM plugin_import_child WHERE id = $plugin_explicit_import_child_id"), 2, 'generic merge leaves plugin child graph available for validator review');
+    assert_same(
+        (int)scalar($plugin_explicit_import_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_import_parent' AND conflict_type = 'row-target-constraint'"),
+        1,
+        'held explicit plugin parent remains a database conflict'
+    );
+    assert_same(
+        (int)scalar($plugin_explicit_import_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-explicit-import-missing-parent'"),
+        1,
+        'plugin validator records incoherent explicit-ID plugin graph as a plugin-scoped conflict'
+    );
+    $plugin_explicit_import_payload = cow_merge_decode_payload_json(
+        (string)scalar($plugin_explicit_import_metadata, "SELECT chosen_payload FROM merge_conflicts WHERE conflict_type = 'plugin-explicit-import-missing-parent' ORDER BY id DESC LIMIT 1"),
+        'plugin explicit import payload'
+    );
+    assert_same($plugin_explicit_import_payload['candidate']['parent_id'] ?? null, 2, 'plugin explicit import validator payload names the held parent ID');
+    assert_same($plugin_explicit_import_payload['candidate']['child_id'] ?? null, $plugin_explicit_import_child_id, 'plugin explicit import validator payload names the staged child ID');
+
+    $graph_validator_base_root = $tmp . '/graph-validator-base';
+    $graph_validator_source_root = $tmp . '/graph-validator-source';
+    $graph_validator_target_root = $tmp . '/graph-validator-target';
+    foreach ([$graph_validator_base_root, $graph_validator_source_root, $graph_validator_target_root] as $root) {
+        mkdir($root . '/wp-content/database', 0777, true);
+        mkdir($root . '/wp-content/uploads', 0777, true);
+    }
+    $graph_validator_base_db = $graph_validator_base_root . '/wp-content/database/.ht.sqlite';
+    $graph_validator_source_db = $graph_validator_source_root . '/wp-content/database/.ht.sqlite';
+    $graph_validator_target_db = $graph_validator_target_root . '/wp-content/database/.ht.sqlite';
+    $graph_validator_metadata = $tmp . '/.forkpress/cow/merge/graph-validator-metadata.sqlite';
+    $graph_validator_file_base = $tmp . '/.forkpress/cow/merge/file-bases/graph-validator.json';
+    create_base_db($graph_validator_base_db);
+    $db = open_db($graph_validator_base_db);
+    $db->exec('CREATE TABLE plugin_graph_validator_parent (parent_id INTEGER PRIMARY KEY AUTOINCREMENT, graph_json TEXT)');
+    $db->exec('CREATE TABLE plugin_graph_validator_child (child_id INTEGER PRIMARY KEY AUTOINCREMENT, parent_id INTEGER, label TEXT)');
+    $db->exec("INSERT INTO plugin_graph_validator_parent (parent_id, graph_json) VALUES (1, '" . SQLite3::escapeString(json_encode(['child_id' => 1], JSON_UNESCAPED_SLASHES)) . "')");
+    $db->exec("INSERT INTO plugin_graph_validator_child (child_id, parent_id, label) VALUES (1, 1, 'base child')");
+    $db->close();
+    copy($graph_validator_base_db, $graph_validator_source_db);
+    copy($graph_validator_base_db, $graph_validator_target_db);
+    cow_merge_capture_file_base($graph_validator_base_root, $graph_validator_file_base);
+    $db = open_db($graph_validator_source_db);
+    $db->exec("UPDATE plugin_graph_validator_parent SET graph_json = '" . SQLite3::escapeString(json_encode(['child_id' => 9999], JSON_UNESCAPED_SLASHES)) . "' WHERE parent_id = 1");
+    $db->close();
+    $db = open_db($graph_validator_target_db);
+    $db->exec(
+        "INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('active_plugins', '" .
+        SQLite3::escapeString(serialize(['graph-validator/graph-validator.php'])) .
+        "', 'yes')"
+    );
+    $db->close();
+    write_test_file($graph_validator_target_root . '/wp-content/plugins/graph-validator/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query('SELECT parent_id, graph_json FROM plugin_graph_validator_parent ORDER BY parent_id');
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    $graph = json_decode((string)$row['graph_json'], true);
+    $child_id = is_array($graph) ? (int)($graph['child_id'] ?? 0) : 0;
+    if ($child_id <= 0) {
+        continue;
+    }
+    $stmt = $db->prepare('SELECT COUNT(*) FROM plugin_graph_validator_child WHERE child_id = :child_id');
+    $stmt->bindValue(':child_id', $child_id, SQLITE3_INTEGER);
+    $count = (int)$stmt->execute()->fetchArray(SQLITE3_NUM)[0];
+    if ($count === 0) {
+        echo json_encode([
+            'status' => 'failed',
+            'reason' => 'plugin graph parent ' . $row['parent_id'] . ' references missing child ' . $child_id,
+            'findings' => [],
+        ], JSON_UNESCAPED_SLASHES);
+        exit(0);
+    }
+}
+echo json_encode(['status' => 'valid', 'findings' => []], JSON_UNESCAPED_SLASHES);
+PHP);
+    $graph_validator_merge = run_merge_cli([
+        'merge',
+        '--base-db', $graph_validator_base_db,
+        '--source-db', $graph_validator_source_db,
+        '--target-db', $graph_validator_target_db,
+        '--metadata-db', $graph_validator_metadata,
+        '--source', 'feature-graph-validator',
+        '--target', 'main',
+        '--base-files', $graph_validator_file_base,
+        '--source-root', $graph_validator_source_root,
+        '--target-root', $graph_validator_target_root,
+    ]);
+    assert_true($graph_validator_merge['status'] !== 0, 'automatically discovered graph validator can abort incoherent plugin candidates');
+    assert_true(str_contains($graph_validator_merge['output'], 'references missing child 9999'), 'graph validator failure explains the broken plugin reference');
+    assert_same(scalar($graph_validator_target_db, 'SELECT graph_json FROM plugin_graph_validator_parent WHERE parent_id = 1'), json_encode(['child_id' => 1], JSON_UNESCAPED_SLASHES), 'graph validator failure rolls back staged plugin graph changes');
+    assert_same(
+        (int)scalar($graph_validator_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-graph-validator' AND status = 'failed' AND failure_reason LIKE '%references missing child 9999%'"),
+        1,
+        'graph validator failure leaves an auditable failed run'
+    );
+
+    $serialized_graph_base_root = $tmp . '/serialized-graph-validator-base';
+    $serialized_graph_source_root = $tmp . '/serialized-graph-validator-source';
+    $serialized_graph_target_root = $tmp . '/serialized-graph-validator-target';
+    foreach ([$serialized_graph_base_root, $serialized_graph_source_root, $serialized_graph_target_root] as $root) {
+        mkdir($root . '/wp-content/database', 0777, true);
+    }
+    $serialized_graph_base_db = $serialized_graph_base_root . '/wp-content/database/.ht.sqlite';
+    $serialized_graph_source_db = $serialized_graph_source_root . '/wp-content/database/.ht.sqlite';
+    $serialized_graph_target_db = $serialized_graph_target_root . '/wp-content/database/.ht.sqlite';
+    $serialized_graph_metadata = $tmp . '/.forkpress/cow/merge/serialized-graph-validator-metadata.sqlite';
+    $serialized_graph_file_base = $tmp . '/.forkpress/cow/merge/file-bases/serialized-graph-validator.json';
+    create_base_db($serialized_graph_base_db);
+    $db = open_db($serialized_graph_base_db);
+    $db->exec('CREATE TABLE plugin_serialized_graph_parent (parent_id INTEGER PRIMARY KEY AUTOINCREMENT, graph_serialized TEXT NOT NULL)');
+    $db->exec('CREATE TABLE plugin_serialized_graph_child (child_id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT NOT NULL)');
+    $db->exec("INSERT INTO plugin_serialized_graph_parent (parent_id, graph_serialized) VALUES (1, '" . SQLite3::escapeString(serialize(['child_id' => 1, 'file_path' => 'wp-content/uploads/serialized-base.dat'])) . "')");
+    $db->exec("INSERT INTO plugin_serialized_graph_child (child_id, label) VALUES (1, 'base serialized child')");
+    $db->close();
+    write_test_file($serialized_graph_base_root . '/wp-content/uploads/serialized-base.dat', "base serialized plugin file\n");
+    copy($serialized_graph_base_db, $serialized_graph_source_db);
+    copy($serialized_graph_base_db, $serialized_graph_target_db);
+    copy_tree_for_test($serialized_graph_base_root . '/wp-content/uploads', $serialized_graph_source_root . '/wp-content/uploads');
+    copy_tree_for_test($serialized_graph_base_root . '/wp-content/uploads', $serialized_graph_target_root . '/wp-content/uploads');
+    cow_merge_capture_file_base($serialized_graph_base_root, $serialized_graph_file_base);
+    $db = open_db($serialized_graph_source_db);
+    $db->exec("UPDATE plugin_serialized_graph_parent SET graph_serialized = '" . SQLite3::escapeString(serialize(['child_id' => 9999, 'file_path' => 'wp-content/uploads/serialized-missing.dat'])) . "' WHERE parent_id = 1");
+    $db->close();
+    $db = open_db($serialized_graph_target_db);
+    $db->exec(
+        "INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('active_plugins', '" .
+        SQLite3::escapeString(serialize(['serialized-graph-validator/serialized-graph-validator.php'])) .
+        "', 'yes')"
+    );
+    $db->close();
+    write_test_file($serialized_graph_target_root . '/wp-content/plugins/serialized-graph-validator/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query('SELECT parent_id, graph_serialized FROM plugin_serialized_graph_parent ORDER BY parent_id');
+$findings = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    $graph = @unserialize((string)$row['graph_serialized']);
+    $child_id = is_array($graph) ? (int)($graph['child_id'] ?? 0) : 0;
+    if ($child_id > 0) {
+        $stmt = $db->prepare('SELECT COUNT(*) FROM plugin_serialized_graph_child WHERE child_id = :child_id');
+        $stmt->bindValue(':child_id', $child_id, SQLITE3_INTEGER);
+        $count = (int)$stmt->execute()->fetchArray(SQLITE3_NUM)[0];
+        if ($count === 0) {
+            $findings[] = [
+                'plugin' => 'forkpress-serialized-graph-validator',
+                'object' => 'parent:' . $row['parent_id'],
+                'reason' => 'serialized plugin graph references a missing child row',
+                'type' => 'plugin-serialized-graph-missing-child',
+                'tables' => ['plugin_serialized_graph_parent', 'plugin_serialized_graph_child'],
+                'validator' => 'forkpress-serialized-graph-validator@1',
+                'candidate' => [
+                    'parent_id' => (int)$row['parent_id'],
+                    'field' => 'graph_serialized.child_id',
+                    'missing_child_id' => $child_id,
+                ],
+            ];
+        }
+    }
+    $file_path = is_array($graph) ? (string)($graph['file_path'] ?? '') : '';
+    if ($file_path !== '') {
+        $target_root = rtrim((string)getenv('FORKPRESS_MERGE_TARGET_ROOT'), '/');
+        $target_path = $target_root . '/' . ltrim($file_path, '/');
+        if (!is_file($target_path)) {
+            $findings[] = [
+                'plugin' => 'forkpress-serialized-graph-validator',
+                'object' => 'parent:' . $row['parent_id'],
+                'reason' => 'serialized plugin graph references a missing file',
+                'type' => 'plugin-serialized-graph-missing-file',
+                'tables' => ['plugin_serialized_graph_parent'],
+                'files' => [$file_path],
+                'validator' => 'forkpress-serialized-graph-validator@1',
+                'candidate' => [
+                    'parent_id' => (int)$row['parent_id'],
+                    'field' => 'graph_serialized.file_path',
+                    'missing_file_path' => $file_path,
+                ],
+            ];
+        }
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $serialized_graph_merge = run_merge_cli([
+        'merge',
+        '--base-db', $serialized_graph_base_db,
+        '--source-db', $serialized_graph_source_db,
+        '--target-db', $serialized_graph_target_db,
+        '--metadata-db', $serialized_graph_metadata,
+        '--source', 'feature-serialized-graph-validator',
+        '--target', 'main',
+        '--base-files', $serialized_graph_file_base,
+        '--source-root', $serialized_graph_source_root,
+        '--target-root', $serialized_graph_target_root,
+    ]);
+    assert_same($serialized_graph_merge['status'], 0, 'serialized plugin graph validator completes the merge with review conflicts');
+    assert_true(str_contains($serialized_graph_merge['output'], 'plugins:   validators=1 conflicts=2'), 'serialized plugin graph validator reports plugin conflicts');
+    assert_same(
+        scalar($serialized_graph_target_db, 'SELECT graph_serialized FROM plugin_serialized_graph_parent WHERE parent_id = 1'),
+        serialize(['child_id' => 9999, 'file_path' => 'wp-content/uploads/serialized-missing.dat']),
+        'serialized plugin graph validator keeps the staged source serialized graph for review'
+    );
+    assert_same(
+        scalar($serialized_graph_metadata, "SELECT status FROM merge_runs WHERE source_branch = 'feature-serialized-graph-validator' ORDER BY id DESC LIMIT 1"),
+        'completed_with_conflicts',
+        'serialized plugin graph validator marks the merge run conflicted'
+    );
+    $serialized_graph_audit = cow_merge_audit_report($serialized_graph_metadata, (int)scalar($serialized_graph_metadata, "SELECT id FROM merge_runs WHERE source_branch = 'feature-serialized-graph-validator' ORDER BY id DESC LIMIT 1"), 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+    ]);
+    assert_same(count($serialized_graph_audit['conflicts']), 2, 'serialized plugin graph validator records plugin-scoped audit conflicts for missing rows and files');
+    $serialized_graph_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $serialized_graph_audit['conflicts']));
+    assert_true(str_contains($serialized_graph_preview, '"missing_child_id":9999'), 'serialized plugin graph validator exposes the missing child ID');
+    assert_true(str_contains($serialized_graph_preview, 'graph_serialized.child_id'), 'serialized plugin graph validator exposes the serialized child field path');
+    assert_true(str_contains($serialized_graph_preview, 'serialized-missing.dat'), 'serialized plugin graph validator exposes the missing file path');
+    assert_true(str_contains($serialized_graph_preview, 'graph_serialized.file_path'), 'serialized plugin graph validator exposes the serialized file field path');
+
+    $graph_conflict_base_root = $tmp . '/graph-validator-conflict-base';
+    $graph_conflict_source_root = $tmp . '/graph-validator-conflict-source';
+    $graph_conflict_target_root = $tmp . '/graph-validator-conflict-target';
+    foreach ([$graph_conflict_base_root, $graph_conflict_source_root, $graph_conflict_target_root] as $root) {
+        mkdir($root . '/wp-content/database', 0777, true);
+        mkdir($root . '/wp-content/uploads', 0777, true);
+    }
+    $graph_conflict_base_db = $graph_conflict_base_root . '/wp-content/database/.ht.sqlite';
+    $graph_conflict_source_db = $graph_conflict_source_root . '/wp-content/database/.ht.sqlite';
+    $graph_conflict_target_db = $graph_conflict_target_root . '/wp-content/database/.ht.sqlite';
+    $graph_conflict_metadata = $tmp . '/.forkpress/cow/merge/graph-validator-conflict-metadata.sqlite';
+    $graph_conflict_file_base = $tmp . '/.forkpress/cow/merge/file-bases/graph-validator-conflict.json';
+    create_base_db($graph_conflict_base_db);
+    $db = open_db($graph_conflict_base_db);
+    $db->exec('CREATE TABLE plugin_graph_conflict_parent (parent_key TEXT PRIMARY KEY, graph_json TEXT)');
+    $db->exec('CREATE TABLE plugin_graph_conflict_child (child_key TEXT PRIMARY KEY, label TEXT)');
+    $db->exec("INSERT INTO plugin_graph_conflict_child (child_key, label) VALUES ('shared-child', 'base shared child')");
+    $db->close();
+    copy($graph_conflict_base_db, $graph_conflict_source_db);
+    copy($graph_conflict_base_db, $graph_conflict_target_db);
+    cow_merge_capture_file_base($graph_conflict_base_root, $graph_conflict_file_base);
+    $db = open_db($graph_conflict_source_db);
+    $db->exec("INSERT INTO plugin_graph_conflict_parent (parent_key, graph_json) VALUES ('source-parent', '" . SQLite3::escapeString(json_encode(['child_key' => 'shared-child'], JSON_UNESCAPED_SLASHES)) . "')");
+    $db->close();
+    $db = open_db($graph_conflict_target_db);
+    $db->exec("UPDATE plugin_graph_conflict_child SET label = 'target-exclusive child' WHERE child_key = 'shared-child'");
+    $db->exec(
+        "INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('active_plugins', '" .
+        SQLite3::escapeString(serialize(['graph-conflict/graph-conflict.php'])) .
+        "', 'yes')"
+    );
+    $db->close();
+    write_test_file($graph_conflict_target_root . '/wp-content/plugins/graph-conflict/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query('SELECT parent_key, graph_json FROM plugin_graph_conflict_parent ORDER BY parent_key');
+$findings = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    $graph = json_decode((string)$row['graph_json'], true);
+    $child_key = is_array($graph) ? (string)($graph['child_key'] ?? '') : '';
+    if ($child_key === '') {
+        continue;
+    }
+    $stmt = $db->prepare('SELECT label FROM plugin_graph_conflict_child WHERE child_key = :child_key');
+    $stmt->bindValue(':child_key', $child_key, SQLITE3_TEXT);
+    $child = $stmt->execute()->fetchArray(SQLITE3_ASSOC);
+    if (is_array($child) && str_starts_with((string)$child['label'], 'target-exclusive')) {
+        $findings[] = [
+            'plugin' => 'forkpress-graph-conflict',
+            'object' => 'parent:' . $row['parent_key'],
+            'reason' => 'source graph references a target-exclusive child row',
+            'type' => 'plugin-graph-target-conflict',
+            'tables' => ['plugin_graph_conflict_parent', 'plugin_graph_conflict_child'],
+            'validator' => 'forkpress-graph-conflict@1',
+            'candidate' => [
+                'parent_key' => $row['parent_key'],
+                'child_key' => $child_key,
+                'child_label' => $child['label'],
+            ],
+        ];
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $graph_conflict_merge = run_merge_cli([
+        'merge',
+        '--base-db', $graph_conflict_base_db,
+        '--source-db', $graph_conflict_source_db,
+        '--target-db', $graph_conflict_target_db,
+        '--metadata-db', $graph_conflict_metadata,
+        '--source', 'feature-graph-conflict',
+        '--target', 'main',
+        '--base-files', $graph_conflict_file_base,
+        '--source-root', $graph_conflict_source_root,
+        '--target-root', $graph_conflict_target_root,
+    ]);
+    assert_same($graph_conflict_merge['status'], 0, 'target-conflicting plugin graph validator completes the merge with review conflicts');
+    assert_true(str_contains($graph_conflict_merge['output'], 'plugins:   validators=1 conflicts=1'), 'target-conflicting plugin graph validator reports a plugin conflict');
+    assert_same(
+        scalar($graph_conflict_target_db, "SELECT graph_json FROM plugin_graph_conflict_parent WHERE parent_key = 'source-parent'"),
+        json_encode(['child_key' => 'shared-child'], JSON_UNESCAPED_SLASHES),
+        'target-conflicting plugin graph validator keeps the staged source graph for review'
+    );
+    assert_same(
+        scalar($graph_conflict_target_db, "SELECT label FROM plugin_graph_conflict_child WHERE child_key = 'shared-child'"),
+        'target-exclusive child',
+        'target-conflicting plugin graph validator preserves target plugin child state'
+    );
+    assert_same(
+        scalar($graph_conflict_metadata, "SELECT status FROM merge_runs WHERE source_branch = 'feature-graph-conflict' ORDER BY id DESC LIMIT 1"),
+        'completed_with_conflicts',
+        'target-conflicting plugin graph validator marks the merge run conflicted'
+    );
+    $graph_conflict_audit = cow_merge_audit_report($graph_conflict_metadata, (int)scalar($graph_conflict_metadata, "SELECT id FROM merge_runs WHERE source_branch = 'feature-graph-conflict' ORDER BY id DESC LIMIT 1"), 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-graph-target-conflict',
+    ]);
+    assert_same(count($graph_conflict_audit['conflicts']), 1, 'target-conflicting plugin graph validator records a plugin-scoped audit conflict');
+    assert_true(str_contains($graph_conflict_audit['conflicts'][0]['chosen_preview'], 'target-exclusive child'), 'target-conflicting plugin graph validator exposes target conflict context');
+
+    $inline_validator_base_root = $tmp . '/inline-validator-base';
+    $inline_validator_source_root = $tmp . '/inline-validator-source';
+    $inline_validator_target_root = $tmp . '/inline-validator-target';
+    foreach ([$inline_validator_base_root, $inline_validator_source_root, $inline_validator_target_root] as $root) {
+        mkdir($root . '/wp-content/database', 0777, true);
+        mkdir($root . '/wp-content/uploads', 0777, true);
+    }
+    $inline_validator_base_db = $inline_validator_base_root . '/wp-content/database/.ht.sqlite';
+    $inline_validator_source_db = $inline_validator_source_root . '/wp-content/database/.ht.sqlite';
+    $inline_validator_target_db = $inline_validator_target_root . '/wp-content/database/.ht.sqlite';
+    $inline_validator_metadata = $tmp . '/.forkpress/cow/merge/inline-validator-metadata.sqlite';
+    $inline_validator_file_base = $tmp . '/.forkpress/cow/merge/file-bases/inline-validator.json';
+    create_base_db($inline_validator_base_db);
+    copy($inline_validator_base_db, $inline_validator_source_db);
+    copy($inline_validator_base_db, $inline_validator_target_db);
+    cow_merge_capture_file_base($inline_validator_base_root, $inline_validator_file_base);
+    $db = open_db($inline_validator_source_db);
+    $db->exec("UPDATE wp_posts SET post_content = 'source inline validator content' WHERE ID = 1");
+    $db->close();
+    write_test_file($inline_validator_source_root . '/wp-content/uploads/inline-validator.txt', "inline validator file\n");
+    $inline_validator_runner = $tmp . '/inline-plugin-validator.php';
+    write_test_file($inline_validator_runner, <<<'PHP'
+<?php
+$target_root = (string)getenv('FORKPRESS_MERGE_TARGET_ROOT');
+$relative = 'wp-content/uploads/inline-validator.txt';
+$target_file = $target_root . '/' . $relative;
+if (!is_file($target_file)) {
+    fwrite(STDERR, 'inline validator did not receive the staged candidate filesystem');
+    exit(8);
+}
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-inline-validator',
+            'object' => 'file:' . $relative,
+            'reason' => 'inline validator inspected the staged candidate before merge completion',
+            'type' => 'plugin-inline-validator-conflict',
+            'files' => [$relative],
+            'validator' => 'forkpress-inline-validator@1',
+            'candidate' => [
+                'target_file' => trim((string)file_get_contents($target_file)),
+            ],
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $inline_validator_merge = run_merge_cli([
+        'merge',
+        '--base-db', $inline_validator_base_db,
+        '--source-db', $inline_validator_source_db,
+        '--target-db', $inline_validator_target_db,
+        '--metadata-db', $inline_validator_metadata,
+        '--source', 'feature-inline-validator',
+        '--target', 'main',
+        '--base-files', $inline_validator_file_base,
+        '--source-root', $inline_validator_source_root,
+        '--target-root', $inline_validator_target_root,
+        '--plugin-validator', $inline_validator_runner,
+    ]);
+    assert_same($inline_validator_merge['status'], 0, 'inline plugin validator runs during merge');
+    assert_true(str_contains($inline_validator_merge['output'], 'plugins:   validators=1 conflicts=1'), 'inline plugin validator summary reports conflicts');
+    assert_same(scalar($inline_validator_target_db, 'SELECT post_content FROM wp_posts WHERE ID = 1'), 'source inline validator content', 'inline validator conflict keeps the staged DB candidate');
+    assert_same(file_get_contents($inline_validator_target_root . '/wp-content/uploads/inline-validator.txt'), "inline validator file\n", 'inline validator conflict keeps the staged file candidate');
+    assert_same(
+        scalar($inline_validator_metadata, "SELECT status FROM merge_runs WHERE source_branch = 'feature-inline-validator' ORDER BY id DESC LIMIT 1"),
+        'completed_with_conflicts',
+        'inline validator conflict marks the merge run conflicted before completion'
+    );
+    assert_same(
+        (int)scalar($inline_validator_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-inline-validator-conflict'"),
+        1,
+        'inline validator records plugin-scoped conflicts during merge'
+    );
+
+    $inline_validator_failure_base_root = $tmp . '/inline-validator-failure-base';
+    $inline_validator_failure_source_root = $tmp . '/inline-validator-failure-source';
+    $inline_validator_failure_target_root = $tmp . '/inline-validator-failure-target';
+    foreach ([$inline_validator_failure_base_root, $inline_validator_failure_source_root, $inline_validator_failure_target_root] as $root) {
+        mkdir($root . '/wp-content/database', 0777, true);
+        mkdir($root . '/wp-content/uploads', 0777, true);
+    }
+    $inline_validator_failure_base_db = $inline_validator_failure_base_root . '/wp-content/database/.ht.sqlite';
+    $inline_validator_failure_source_db = $inline_validator_failure_source_root . '/wp-content/database/.ht.sqlite';
+    $inline_validator_failure_target_db = $inline_validator_failure_target_root . '/wp-content/database/.ht.sqlite';
+    $inline_validator_failure_metadata = $tmp . '/.forkpress/cow/merge/inline-validator-failure-metadata.sqlite';
+    $inline_validator_failure_file_base = $tmp . '/.forkpress/cow/merge/file-bases/inline-validator-failure.json';
+    create_base_db($inline_validator_failure_base_db);
+    copy($inline_validator_failure_base_db, $inline_validator_failure_source_db);
+    copy($inline_validator_failure_base_db, $inline_validator_failure_target_db);
+    cow_merge_capture_file_base($inline_validator_failure_base_root, $inline_validator_failure_file_base);
+    $db = open_db($inline_validator_failure_source_db);
+    $db->exec("UPDATE wp_posts SET post_content = 'source failed validator content' WHERE ID = 1");
+    $db->close();
+    write_test_file($inline_validator_failure_source_root . '/wp-content/uploads/inline-validator-failure.txt', "failed validator file\n");
+    $inline_validator_failure_runner = $tmp . '/inline-plugin-validator-failure.php';
+    write_test_file($inline_validator_failure_runner, <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'failed',
+    'reason' => 'plugin coherence check could not inspect required generated assets',
+    'findings' => [],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $inline_validator_failed_merge = run_merge_cli([
+        'merge',
+        '--base-db', $inline_validator_failure_base_db,
+        '--source-db', $inline_validator_failure_source_db,
+        '--target-db', $inline_validator_failure_target_db,
+        '--metadata-db', $inline_validator_failure_metadata,
+        '--source', 'feature-inline-validator-failed',
+        '--target', 'main',
+        '--base-files', $inline_validator_failure_file_base,
+        '--source-root', $inline_validator_failure_source_root,
+        '--target-root', $inline_validator_failure_target_root,
+        '--plugin-validator', $inline_validator_failure_runner,
+    ]);
+    assert_true($inline_validator_failed_merge['status'] !== 0, 'failed inline plugin validator aborts the merge');
+    assert_true(str_contains($inline_validator_failed_merge['output'], 'plugin coherence check could not inspect required generated assets'), 'failed inline plugin validator reports its failure reason');
+    assert_same(scalar($inline_validator_failure_target_db, 'SELECT post_content FROM wp_posts WHERE ID = 1'), 'Base content', 'failed inline plugin validator rolls back staged DB changes');
+    assert_true(!file_exists($inline_validator_failure_target_root . '/wp-content/uploads/inline-validator-failure.txt'), 'failed inline plugin validator rolls back staged file changes');
+    assert_same(
+        (int)scalar($inline_validator_failure_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-inline-validator-failed' AND status = 'failed' AND failure_reason LIKE '%plugin coherence check could not inspect required generated assets%'"),
+        1,
+        'failed inline plugin validator leaves an auditable failed run after rollback'
+    );
+
+    $plugin_validator_runner_failure = $tmp . '/plugin-validator-runner-failure.php';
+    write_test_file($plugin_validator_runner_failure, <<<'PHP'
+<?php
+fwrite(STDERR, "validator crashed\n");
+exit(7);
+PHP);
+    $plugin_cli_run_validator_failure = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', (string)$plugin_graph_result['run_id'],
+        '--validator', $plugin_validator_runner_failure,
+    ]);
+    assert_true($plugin_cli_run_validator_failure['status'] !== 0, 'plugin validator runner CLI rejects failed validators');
+    assert_true(str_contains($plugin_cli_run_validator_failure['output'], 'exited with status 7'), 'plugin validator runner CLI explains validator process failures');
 
     copy($band_base, $band_feature_a_reset);
     $result = cow_merge_allocate_autoincrement_bands($band_feature_a_reset, $band_metadata, 'feature-band-a');

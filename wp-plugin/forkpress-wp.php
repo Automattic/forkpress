@@ -475,7 +475,11 @@ function forkpress_local_branches(string $current_branch): array {
 }
 
 function forkpress_branch_name_is_valid(string $branch): bool {
-    return (bool) preg_match('/^[a-zA-Z0-9_\-]{1,63}$/', $branch);
+    if (!preg_match('/^[a-zA-Z0-9_\-]{1,63}$/', $branch)) {
+        return false;
+    }
+
+    return !in_array(strtolower($branch), ['www', 'admin', 'api', 'mail', 'localhost', 'wp'], true);
 }
 
 function forkpress_branch_post_value(string $key): string {

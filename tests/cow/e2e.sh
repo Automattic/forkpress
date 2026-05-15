@@ -32,7 +32,18 @@ on_error() {
   local status=$?
   echo "FAIL cow materialized strategy e2e at line ${BASH_LINENO[0]}: ${BASH_COMMAND}" >&2
   dump_if_exists "$TMP/git-created.html"
+  dump_if_exists "$TMP/git-created-merge.out"
+  dump_if_exists "$TMP/git-created-http-crash.out"
+  dump_if_exists "$TMP/git-created-http-crash-after-restart.html"
+  dump_if_exists "$TMP/git-created-http-crash-merge.out"
   dump_if_exists "$TMP/autoinc-main-init.json"
+  dump_if_exists "$TMP/ui-create-admin.html"
+  dump_if_exists "$TMP/ui-create.json"
+  dump_if_exists "$TMP/ui-merge-admin.html"
+  dump_if_exists "$TMP/ui-merge.json"
+  dump_if_exists "$TMP/ui-main-after-merge-edit.html"
+  dump_if_exists "$TMP/public-create-crash.out"
+  dump_if_exists "$TMP/public-create-crash-retry.out"
   dump_if_exists "$TMP/autoinc-feature-insert.json"
   dump_if_exists "$TMP/branch-post-edit.html"
   dump_if_exists "$TMP/branch-post-frontend.html"
@@ -43,11 +54,19 @@ on_error() {
   dump_if_exists "$TMP/merge-band-posts.out"
   dump_if_exists "$TMP/band-merge-target-edit.html"
   dump_if_exists "$TMP/band-merge-target-source-post.html"
+  dump_if_exists "$TMP/semantic-seed.json"
+  dump_if_exists "$TMP/semantic-source.json"
+  dump_if_exists "$TMP/semantic-target.json"
+  dump_if_exists "$TMP/semantic-merge.out"
+  dump_if_exists "$TMP/semantic-after-merge.json"
   dump_if_exists "$TMP/band-merge-source-decision-queue.json"
   dump_if_exists "$TMP/git-multi-delete.out"
   dump_if_exists "$TMP/git-delete.out"
   dump_if_exists "$TMP/git-delete-main.out"
   dump_if_exists "$TMP/keyless-init.json"
+  dump_if_exists "$TMP/public-reset-crash.out"
+  dump_if_exists "$TMP/public-reset-crash-merge-blocked.out"
+  dump_if_exists "$TMP/public-reset-crash-retry.out"
   dump_if_exists "$TMP/keyless-source-reuse.json"
   dump_if_exists "$TMP/keyless-target-edit.json"
   dump_if_exists "$TMP/keyless-main-after-merge.json"
@@ -81,6 +100,37 @@ on_error() {
   dump_if_exists "$TMP/fk-keyless-update-after-merge.json"
   dump_if_exists "$TMP/merge-audit.out"
   dump_if_exists "$TMP/merge-audit.json"
+  dump_if_exists "$TMP/merge-pending-reset.out"
+  dump_if_exists "$TMP/public-crash-merge.out"
+  dump_if_exists "$TMP/public-crash-recover.json"
+  dump_if_exists "$TMP/public-crash-blocked.out"
+  dump_if_exists "$TMP/public-crash-restore.json"
+  dump_if_exists "$TMP/public-crash-retry.out"
+  dump_if_exists "$TMP/public-crash-main-edit.html"
+  dump_if_exists "$TMP/public-metadata-crash-merge.out"
+  dump_if_exists "$TMP/public-metadata-crash-recover.json"
+  dump_if_exists "$TMP/public-metadata-crash-blocked.out"
+  dump_if_exists "$TMP/public-metadata-crash-restore.json"
+  dump_if_exists "$TMP/public-metadata-crash-retry.out"
+  dump_if_exists "$TMP/public-metadata-crash-main-edit.html"
+  dump_if_exists "$TMP/public-before-file-crash-merge.out"
+  dump_if_exists "$TMP/public-before-file-crash-recover.json"
+  dump_if_exists "$TMP/public-before-file-crash-blocked.out"
+  dump_if_exists "$TMP/public-before-file-crash-restore.json"
+  dump_if_exists "$TMP/public-before-file-crash-retry.out"
+  dump_if_exists "$TMP/public-before-file-crash-main-edit.html"
+  dump_if_exists "$TMP/public-recovery-cleanup-crash-merge.out"
+  dump_if_exists "$TMP/public-recovery-cleanup-crash-recover.json"
+  dump_if_exists "$TMP/public-recovery-cleanup-crash-restore.out"
+  dump_if_exists "$TMP/public-recovery-cleanup-crash-retry-restore.json"
+  dump_if_exists "$TMP/public-recovery-cleanup-crash-retry.out"
+  dump_if_exists "$TMP/public-recovery-cleanup-crash-main-edit.html"
+  dump_if_exists "$TMP/public-file-crash-merge.out"
+  dump_if_exists "$TMP/public-file-crash-recover.json"
+  dump_if_exists "$TMP/public-file-crash-blocked.out"
+  dump_if_exists "$TMP/public-file-crash-restore.json"
+  dump_if_exists "$TMP/public-file-crash-retry.out"
+  dump_if_exists "$TMP/public-file-crash-main-edit.html"
   dump_if_exists "$TMP/merge-rollback-failures.json"
   dump_if_exists "$TMP/merge-rollback-failures.out"
   dump_if_exists "$TMP/file-conflict-pending.out"
@@ -227,6 +277,63 @@ unique_runtime_request() {
   fi
 }
 
+semantic_runtime_request() {
+  local branch="$1"
+  local action="$2"
+  local out="$3"
+  local host
+  host="$(branch_host "$branch")"
+
+  local http
+  http="$(
+    curl -sS -o "$out" -w '%{http_code}' \
+      -H "Host: $host" \
+      "http://127.0.0.1:$PORT/?forkpress_e2e_semantic=$action"
+  )"
+  if [ "$http" != "200" ]; then
+    echo "semantic runtime action $action on $branch returned $http" >&2
+    cat "$out" >&2
+    "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+    exit 1
+  fi
+}
+
+branch_ui_nonce() {
+  local branch="$1"
+  local field="$2"
+  local out="$3"
+  local cookie_jar="${4:-}"
+  local host
+  host="$(branch_host "$branch")"
+
+  if [ -n "$cookie_jar" ]; then
+    : > "$cookie_jar"
+    curl -sS -c "$cookie_jar" -b "$cookie_jar" \
+      -H "Host: $host" \
+      "http://127.0.0.1:$PORT/wp-admin/" \
+      -o "$out"
+  else
+    curl -sS -H "Host: $host" \
+      "http://127.0.0.1:$PORT/wp-admin/" \
+      -o "$out"
+  fi
+
+  node - <<'NODE' "$out" "$field"
+const fs = require('fs');
+const html = fs.readFileSync(process.argv[2], 'utf8');
+const field = process.argv[3];
+const match = html.match(/var actions = (\{.*?\}|null);/s);
+if (!match || match[1] === 'null') {
+  process.exit(2);
+}
+const actions = JSON.parse(match[1]);
+if (!actions || typeof actions[field] !== 'string' || !actions[field]) {
+  process.exit(3);
+}
+console.log(actions[field]);
+NODE
+}
+
 log_step "init COW site"
 "$BIN" init --work-dir "$WORK_DIR" --admin-password admin
 test -d "$WORK/.forkpress"
@@ -287,8 +394,648 @@ add_action('init', function () {
 }, 20);
 PHP
 
+cat > "$WORK/main/wp-content/mu-plugins/forkpress-e2e-semantic.php" <<'PHP'
+<?php
+add_action('init', function () {
+    register_post_type('forkpress_note', [
+        'public' => false,
+        'show_in_rest' => true,
+        'label' => 'ForkPress notes',
+        'supports' => ['title', 'editor', 'custom-fields'],
+    ]);
+    register_taxonomy('forkpress_topic', ['page', 'forkpress_note'], [
+        'public' => false,
+        'hierarchical' => true,
+        'show_in_rest' => true,
+        'label' => 'ForkPress topics',
+    ]);
+    register_nav_menus([
+        'forkpress_semantic_source' => 'ForkPress Semantic Source',
+        'forkpress_semantic_target' => 'ForkPress Semantic Target',
+    ]);
+}, 0);
+
+add_action('init', function () {
+    if (!isset($_GET['forkpress_e2e_semantic'])) {
+        return;
+    }
+
+    $action = sanitize_key(wp_unslash($_GET['forkpress_e2e_semantic']));
+    $branch = null;
+    if ($action === 'source') {
+        $branch = 'source';
+    } elseif ($action === 'target') {
+        $branch = 'target';
+    } elseif ($action !== 'seed' && $action !== 'inspect') {
+        wp_send_json_error(['error' => 'unknown action'], 400);
+    }
+
+    global $wpdb;
+    $plugin_parent_table = $wpdb->prefix . 'forkpress_semantic_plugin_parent';
+    $plugin_child_table = $wpdb->prefix . 'forkpress_semantic_plugin_child';
+    $quote_ident = static function (string $name): string {
+        return '`' . str_replace('`', '``', $name) . '`';
+    };
+    $query = static function (string $sql) use ($wpdb): void {
+        $result = $wpdb->query($sql);
+        if ($result === false) {
+            wp_send_json_error(['error' => $wpdb->last_error ?: 'query failed'], 500);
+        }
+    };
+    $find_page = static function ($title) {
+        $page = get_page_by_title($title, OBJECT, 'page');
+        return $page instanceof WP_Post ? (int)$page->ID : 0;
+    };
+    $must_insert_post = static function ($args) {
+        $id = wp_insert_post($args, true);
+        if (is_wp_error($id)) {
+            wp_send_json_error(['error' => $id->get_error_message()], 500);
+        }
+        return (int)$id;
+    };
+    $must_insert_user = static function (array $args): int {
+        $id = wp_insert_user($args);
+        if (is_wp_error($id)) {
+            wp_send_json_error(['error' => $id->get_error_message()], 500);
+        }
+        return (int)$id;
+    };
+    $must_set_terms = static function ($post_id, $terms) {
+        $result = wp_set_object_terms($post_id, $terms, 'forkpress_topic');
+        if (is_wp_error($result)) {
+            wp_send_json_error(['error' => $result->get_error_message()], 500);
+        }
+    };
+    $must_term = static function ($name, $parent = 0) {
+        $existing = term_exists($name, 'forkpress_topic', $parent);
+        if (is_array($existing) && !empty($existing['term_id'])) {
+            return (int)$existing['term_id'];
+        }
+        $created = wp_insert_term($name, 'forkpress_topic', ['parent' => (int)$parent]);
+        if (is_wp_error($created)) {
+            wp_send_json_error(['error' => $created->get_error_message()], 500);
+        }
+        return (int)$created['term_id'];
+    };
+
+    if ($action === 'seed') {
+        $query('CREATE TABLE IF NOT EXISTS ' . $quote_ident($plugin_parent_table) . ' (
+            id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+            branch text NOT NULL,
+            label text NOT NULL,
+            graph_json longtext NOT NULL,
+            graph_serialized longtext NOT NULL,
+            PRIMARY KEY (id)
+        )');
+        $query('CREATE TABLE IF NOT EXISTS ' . $quote_ident($plugin_child_table) . ' (
+            id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+            parent_id bigint(20) unsigned NOT NULL,
+            branch text NOT NULL,
+            file_path text NOT NULL,
+            payload longtext NOT NULL,
+            PRIMARY KEY (id)
+        )');
+        foreach (['Source Edit', 'Target Edit', 'Source Delete', 'Target Delete'] as $case) {
+            $title = "Semantic $case Page";
+            if ($find_page($title) !== 0) {
+                continue;
+            }
+            $id = $must_insert_post([
+                'post_type' => 'page',
+                'post_status' => 'publish',
+                'post_title' => $title,
+                'post_content' => "<!-- wp:paragraph --><p>Base $case page body</p><!-- /wp:paragraph -->",
+            ]);
+            update_post_meta($id, '_forkpress_semantic_base', $case);
+        }
+    }
+
+    if ($branch !== null) {
+        $suffix = ucfirst($branch);
+        $user_id = $must_insert_user([
+            'user_login' => "forkpress_semantic_$branch",
+            'user_pass' => wp_generate_password(32, true),
+            'display_name' => "Semantic $suffix Author",
+            'role' => 'author',
+        ]);
+        $user_graph = [
+            'branch' => $branch,
+            'user_id' => (int)$user_id,
+        ];
+        update_user_meta($user_id, '_forkpress_semantic_user_graph', $user_graph);
+        update_user_meta($user_id, '_forkpress_semantic_user_serialized_graph', serialize($user_graph));
+
+        $edit_id = $find_page("Semantic $suffix Edit Page");
+        if ($edit_id === 0) {
+            wp_send_json_error(['error' => "missing Semantic $suffix Edit Page"], 500);
+        }
+        $edit_result = wp_update_post([
+            'ID' => $edit_id,
+            'post_title' => "Semantic $suffix Edited Page",
+            'post_content' => "<!-- wp:paragraph --><p>Edited on $branch branch</p><!-- /wp:paragraph -->",
+            'post_author' => $user_id,
+        ], true);
+        if (is_wp_error($edit_result)) {
+            wp_send_json_error(['error' => $edit_result->get_error_message()], 500);
+        }
+
+        $delete_id = $find_page("Semantic $suffix Delete Page");
+        if ($delete_id === 0) {
+            wp_send_json_error(['error' => "missing Semantic $suffix Delete Page"], 500);
+        }
+        if (wp_delete_post($delete_id, true) === false) {
+            wp_send_json_error(['error' => "failed to delete Semantic $suffix Delete Page"], 500);
+        }
+
+        $page_id = wp_insert_post([
+            'post_type' => 'page',
+            'post_status' => 'publish',
+            'post_title' => "Semantic $suffix Page",
+            'post_content' => "<!-- wp:paragraph --><p>Semantic $branch page body</p><!-- /wp:paragraph -->",
+            'post_author' => $user_id,
+        ], true);
+        if (is_wp_error($page_id)) {
+            wp_send_json_error(['error' => $page_id->get_error_message()], 500);
+        }
+        update_post_meta($page_id, '_forkpress_semantic_branch', $branch);
+        $parent_term_id = $must_term("Semantic $suffix Parent Topic");
+        $topic_term_id = $must_term("Semantic $suffix Topic", $parent_term_id);
+        $must_set_terms($page_id, [$topic_term_id]);
+
+        $note_id = wp_insert_post([
+            'post_type' => 'forkpress_note',
+            'post_status' => 'publish',
+            'post_title' => "Semantic $suffix Note",
+            'post_content' => "CPT content for $branch",
+            'post_author' => $user_id,
+        ], true);
+        if (is_wp_error($note_id)) {
+            wp_send_json_error(['error' => $note_id->get_error_message()], 500);
+        }
+        update_post_meta($note_id, '_forkpress_semantic_note', $branch);
+        $must_set_terms($note_id, [$topic_term_id]);
+
+        $block_id = wp_insert_post([
+            'post_type' => 'wp_block',
+            'post_status' => 'publish',
+            'post_title' => "Semantic $suffix Block",
+            'post_content' => "<!-- wp:paragraph --><p>Reusable block for $branch</p><!-- /wp:paragraph -->",
+            'post_author' => $user_id,
+        ], true);
+        if (is_wp_error($block_id)) {
+            wp_send_json_error(['error' => $block_id->get_error_message()], 500);
+        }
+        $page_update = wp_update_post([
+            'ID' => (int)$page_id,
+            'post_content' => "<!-- wp:paragraph --><p>Semantic $branch page body</p><!-- /wp:paragraph -->\n<!-- wp:block {\"ref\":$block_id} /-->",
+        ], true);
+        if (is_wp_error($page_update)) {
+            wp_send_json_error(['error' => $page_update->get_error_message()], 500);
+        }
+
+        $menu_id = wp_create_nav_menu("Semantic $suffix Menu");
+        if (is_wp_error($menu_id)) {
+            wp_send_json_error(['error' => $menu_id->get_error_message()], 500);
+        }
+        $menu_item_id = wp_update_nav_menu_item($menu_id, 0, [
+            'menu-item-title' => "Semantic $suffix Link",
+            'menu-item-status' => 'publish',
+            'menu-item-type' => 'post_type',
+            'menu-item-object' => 'page',
+            'menu-item-object-id' => (int)$page_id,
+        ]);
+        if (is_wp_error($menu_item_id)) {
+            wp_send_json_error(['error' => $menu_item_id->get_error_message()], 500);
+        }
+        $locations = get_theme_mod('nav_menu_locations', []);
+        if (!is_array($locations)) {
+            $locations = [];
+        }
+        $locations["forkpress_semantic_{$branch}"] = (int)$menu_id;
+        set_theme_mod('nav_menu_locations', $locations);
+
+        $upload = wp_upload_dir();
+        if (!empty($upload['error'])) {
+            wp_send_json_error(['error' => $upload['error']], 500);
+        }
+        if (!wp_mkdir_p($upload['path'])) {
+            wp_send_json_error(['error' => 'failed to create upload directory'], 500);
+        }
+        $png = base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=', true);
+        if ($png === false) {
+            wp_send_json_error(['error' => 'failed to decode test image'], 500);
+        }
+        $filename = "forkpress-semantic-$branch.png";
+        $path = trailingslashit($upload['path']) . $filename;
+        if (file_put_contents($path, $png) === false) {
+            wp_send_json_error(['error' => 'failed to write upload file'], 500);
+        }
+        $thumbnail_filename = "forkpress-semantic-$branch-150x150.png";
+        $thumbnail_path = trailingslashit($upload['path']) . $thumbnail_filename;
+        if (file_put_contents($thumbnail_path, $png) === false) {
+            wp_send_json_error(['error' => 'failed to write generated upload size'], 500);
+        }
+        $attachment_id = wp_insert_attachment([
+            'post_title' => "Semantic $suffix Media",
+            'post_mime_type' => 'image/png',
+            'post_status' => 'inherit',
+            'post_author' => $user_id,
+        ], $path, $page_id, true);
+        if (is_wp_error($attachment_id)) {
+            wp_send_json_error(['error' => $attachment_id->get_error_message()], 500);
+        }
+        wp_update_attachment_metadata($attachment_id, [
+            'width' => 300,
+            'height' => 300,
+            'file' => _wp_relative_upload_path($path),
+            'filesize' => filesize($path),
+            'sizes' => [
+                'thumbnail' => [
+                    'file' => $thumbnail_filename,
+                    'width' => 150,
+                    'height' => 150,
+                    'mime-type' => 'image/png',
+                    'filesize' => filesize($thumbnail_path),
+                ],
+            ],
+            'image_meta' => [],
+        ]);
+        update_post_meta($attachment_id, '_forkpress_semantic_media', $branch);
+
+        $comment_id = wp_insert_comment([
+            'comment_post_ID' => (int)$page_id,
+            'comment_content' => "Semantic $suffix Comment",
+            'comment_approved' => 1,
+            'user_id' => (int)$user_id,
+        ]);
+        if ($comment_id === false || (int)$comment_id <= 0) {
+            wp_send_json_error(['error' => 'failed to insert semantic comment'], 500);
+        }
+        $comment_id = (int)$comment_id;
+        $reply_id = wp_insert_comment([
+            'comment_post_ID' => (int)$page_id,
+            'comment_content' => "Semantic $suffix Reply",
+            'comment_parent' => $comment_id,
+            'comment_approved' => 1,
+            'user_id' => (int)$user_id,
+        ]);
+        if ($reply_id === false || (int)$reply_id <= 0) {
+            wp_send_json_error(['error' => 'failed to insert semantic reply'], 500);
+        }
+        $reply_id = (int)$reply_id;
+        $comment_graph = [
+            'branch' => $branch,
+            'page_id' => (int)$page_id,
+            'comment_id' => $comment_id,
+            'reply_id' => $reply_id,
+            'user_id' => (int)$user_id,
+        ];
+        add_comment_meta($comment_id, '_forkpress_semantic_comment_graph', $comment_graph);
+        add_comment_meta($reply_id, '_forkpress_semantic_comment_serialized_graph', serialize($comment_graph));
+
+        $graph = [
+            'branch' => $branch,
+            'user_id' => (int)$user_id,
+            'page_id' => (int)$page_id,
+            'note_id' => (int)$note_id,
+            'block_id' => (int)$block_id,
+            'menu_id' => (int)$menu_id,
+            'attachment_id' => (int)$attachment_id,
+            'comment_id' => $comment_id,
+            'reply_id' => $reply_id,
+        ];
+        update_option("forkpress_semantic_{$branch}_option", $graph, false);
+        update_option("forkpress_semantic_{$branch}_json_option", wp_json_encode($graph), false);
+
+        $plugin_file = trailingslashit($upload['path']) . "forkpress-plugin-graph-$branch.dat";
+        if (file_put_contents($plugin_file, "plugin graph file for $branch\n") === false) {
+            wp_send_json_error(['error' => 'failed to write plugin graph file'], 500);
+        }
+        $plugin_file_rel = _wp_relative_upload_path($plugin_file);
+        $initial_graph = [
+            'branch' => $branch,
+            'page_id' => (int)$page_id,
+            'note_id' => (int)$note_id,
+            'attachment_id' => (int)$attachment_id,
+            'file' => $plugin_file_rel,
+        ];
+        $inserted = $wpdb->insert($plugin_parent_table, [
+            'branch' => $branch,
+            'label' => "Semantic $suffix Plugin Parent",
+            'graph_json' => wp_json_encode($initial_graph),
+            'graph_serialized' => serialize($initial_graph),
+        ]);
+        if ($inserted === false) {
+            wp_send_json_error(['error' => $wpdb->last_error ?: 'failed to insert plugin parent'], 500);
+        }
+        $plugin_parent_id = (int)$wpdb->insert_id;
+        $inserted = $wpdb->insert($plugin_child_table, [
+            'parent_id' => $plugin_parent_id,
+            'branch' => $branch,
+            'file_path' => $plugin_file_rel,
+            'payload' => wp_json_encode([
+                'branch' => $branch,
+                'parent_id' => $plugin_parent_id,
+                'page_id' => (int)$page_id,
+                'note_id' => (int)$note_id,
+            ]),
+        ]);
+        if ($inserted === false) {
+            wp_send_json_error(['error' => $wpdb->last_error ?: 'failed to insert plugin child'], 500);
+        }
+        $plugin_child_id = (int)$wpdb->insert_id;
+        $plugin_graph = $initial_graph + [
+            'parent_id' => $plugin_parent_id,
+            'child_id' => $plugin_child_id,
+        ];
+        $updated = $wpdb->update($plugin_parent_table, [
+            'graph_json' => wp_json_encode($plugin_graph),
+            'graph_serialized' => serialize($plugin_graph),
+        ], ['id' => $plugin_parent_id]);
+        if ($updated === false) {
+            wp_send_json_error(['error' => $wpdb->last_error ?: 'failed to update plugin parent graph'], 500);
+        }
+        update_option("forkpress_semantic_plugin_{$branch}_option", $plugin_graph, false);
+        update_post_meta($page_id, '_forkpress_semantic_plugin_graph', wp_json_encode($plugin_graph));
+    }
+
+    $posts = get_posts([
+        'post_type' => ['page', 'forkpress_note', 'wp_block', 'attachment'],
+        'post_status' => 'any',
+        'numberposts' => -1,
+        'orderby' => 'ID',
+        'order' => 'ASC',
+    ]);
+    $rows = [];
+    foreach ($posts as $post) {
+        if (strpos($post->post_title, 'Semantic ') !== 0) {
+            continue;
+        }
+        $file = $post->post_type === 'attachment' ? get_attached_file($post->ID) : '';
+        $metadata = $post->post_type === 'attachment' ? wp_get_attachment_metadata($post->ID) : [];
+        $metadata_sizes = [];
+        $generated_files = [];
+        if (is_array($metadata) && is_array($metadata['sizes'] ?? null) && $file !== '') {
+            foreach ($metadata['sizes'] as $size_name => $size) {
+                $metadata_sizes[] = (string)$size_name;
+                $generated_files[(string)$size_name] = isset($size['file'])
+                    ? file_exists(trailingslashit(dirname($file)) . $size['file'])
+                    : false;
+            }
+            sort($metadata_sizes);
+            ksort($generated_files);
+        }
+        $term_objects = wp_get_object_terms($post->ID, 'forkpress_topic');
+        $terms = [];
+        $term_parents = [];
+        if (!is_wp_error($term_objects)) {
+            foreach ($term_objects as $term) {
+                $terms[] = $term->name;
+                if ((int)$term->parent > 0) {
+                    $parent = get_term((int)$term->parent, 'forkpress_topic');
+                    if ($parent && !is_wp_error($parent)) {
+                        $term_parents[$term->name] = $parent->name;
+                    }
+                }
+            }
+        }
+        sort($terms);
+        ksort($term_parents);
+        $block_refs = [];
+        if (preg_match_all('/<!--\s+wp:block\s+\{"ref":(\d+)\}\s+\/-->/', $post->post_content, $matches)) {
+            $block_refs = array_map('intval', $matches[1]);
+            sort($block_refs);
+        }
+        $rows[] = [
+            'id' => (int)$post->ID,
+            'type' => $post->post_type,
+            'title' => $post->post_title,
+            'content' => $post->post_content,
+            'block_refs' => $block_refs,
+            'author' => (int)$post->post_author,
+            'branch' => get_post_meta($post->ID, '_forkpress_semantic_branch', true)
+                ?: get_post_meta($post->ID, '_forkpress_semantic_note', true)
+                ?: get_post_meta($post->ID, '_forkpress_semantic_media', true),
+            'terms' => $terms,
+            'term_parents' => $term_parents,
+            'file_exists' => $file === '' ? null : file_exists($file),
+            'metadata_sizes' => $metadata_sizes,
+            'generated_files' => $generated_files,
+        ];
+    }
+
+    $users = [];
+    foreach (get_users(['search' => 'forkpress_semantic_*', 'search_columns' => ['user_login']]) as $user) {
+        $graph = get_user_meta($user->ID, '_forkpress_semantic_user_graph', true);
+        $serialized_graph = maybe_unserialize((string)get_user_meta($user->ID, '_forkpress_semantic_user_serialized_graph', true));
+        $users[$user->user_login] = [
+            'id' => (int)$user->ID,
+            'display_name' => $user->display_name,
+            'graph_user_id' => is_array($graph) ? (int)($graph['user_id'] ?? 0) : 0,
+            'serialized_graph_user_id' => is_array($serialized_graph) ? (int)($serialized_graph['user_id'] ?? 0) : 0,
+        ];
+    }
+    ksort($users);
+
+    $comments = [];
+    $comment_rows = get_comments([
+        'status' => 'all',
+        'orderby' => 'comment_ID',
+        'order' => 'ASC',
+    ]);
+    foreach ($comment_rows as $comment) {
+        if (strpos((string)$comment->comment_content, 'Semantic ') !== 0) {
+            continue;
+        }
+        $graph = get_comment_meta($comment->comment_ID, '_forkpress_semantic_comment_graph', true);
+        $serialized_graph = maybe_unserialize((string)get_comment_meta($comment->comment_ID, '_forkpress_semantic_comment_serialized_graph', true));
+        $comments[(string)$comment->comment_content] = [
+            'id' => (int)$comment->comment_ID,
+            'post_id' => (int)$comment->comment_post_ID,
+            'parent' => (int)$comment->comment_parent,
+            'user_id' => (int)$comment->user_id,
+            'graph_comment_id' => is_array($graph) ? (int)($graph['comment_id'] ?? 0) : 0,
+            'graph_reply_id' => is_array($graph) ? (int)($graph['reply_id'] ?? 0) : 0,
+            'graph_user_id' => is_array($graph) ? (int)($graph['user_id'] ?? 0) : 0,
+            'serialized_graph_comment_id' => is_array($serialized_graph) ? (int)($serialized_graph['comment_id'] ?? 0) : 0,
+            'serialized_graph_reply_id' => is_array($serialized_graph) ? (int)($serialized_graph['reply_id'] ?? 0) : 0,
+            'serialized_graph_user_id' => is_array($serialized_graph) ? (int)($serialized_graph['user_id'] ?? 0) : 0,
+        ];
+    }
+    ksort($comments);
+
+    $menus = [];
+    $menu_items = [];
+    foreach (wp_get_nav_menus(['hide_empty' => false]) as $menu) {
+        if (strpos($menu->name, 'Semantic ') === 0) {
+            $menus[] = $menu->name;
+            $items = wp_get_nav_menu_items($menu->term_id);
+            if (is_array($items)) {
+                foreach ($items as $item) {
+                    if (strpos($item->title, 'Semantic ') !== 0) {
+                        continue;
+                    }
+                    $menu_items[$item->title] = [
+                        'menu' => $menu->name,
+                        'type' => $item->type,
+                        'object' => $item->object,
+                        'object_id' => (int)$item->object_id,
+                    ];
+                }
+            }
+        }
+    }
+    sort($menus);
+    ksort($menu_items);
+    $locations = [];
+    foreach (get_nav_menu_locations() as $location => $menu_id) {
+        if (strpos((string)$location, 'forkpress_semantic_') !== 0 || (int)$menu_id <= 0) {
+            continue;
+        }
+        $menu = wp_get_nav_menu_object((int)$menu_id);
+        if ($menu && !is_wp_error($menu)) {
+            $locations[$location] = $menu->name;
+        }
+    }
+    ksort($locations);
+
+    $plugin_graphs = [];
+    $parent_table_exists = (string)$wpdb->get_var($wpdb->prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = %s", $plugin_parent_table));
+    $child_table_exists = (string)$wpdb->get_var($wpdb->prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = %s", $plugin_child_table));
+    if ($parent_table_exists === $plugin_parent_table && $child_table_exists === $plugin_child_table) {
+        $upload_dir = wp_upload_dir();
+        $parents = $wpdb->get_results('SELECT id, branch, label, graph_json, graph_serialized FROM ' . $quote_ident($plugin_parent_table) . ' ORDER BY id', ARRAY_A);
+        if (!is_array($parents)) {
+            wp_send_json_error(['error' => $wpdb->last_error ?: 'failed to select plugin parents'], 500);
+        }
+        foreach ($parents as $parent) {
+            $parent_id = (int)$parent['id'];
+            $child = $wpdb->get_row($wpdb->prepare('SELECT id, parent_id, branch, file_path, payload FROM ' . $quote_ident($plugin_child_table) . ' WHERE parent_id = %d', $parent_id), ARRAY_A);
+            $graph_json = json_decode((string)$parent['graph_json'], true);
+            $graph_serialized = maybe_unserialize((string)$parent['graph_serialized']);
+            $child_payload = is_array($child) ? json_decode((string)($child['payload'] ?? ''), true) : [];
+            $postmeta_json = [];
+            $page_id = is_array($graph_json) ? (int)($graph_json['page_id'] ?? 0) : 0;
+            if ($page_id > 0) {
+                $postmeta_json = json_decode((string)get_post_meta($page_id, '_forkpress_semantic_plugin_graph', true), true);
+            }
+            $option_graph = get_option("forkpress_semantic_plugin_{$parent['branch']}_option");
+            $file_path = is_array($child) ? (string)($child['file_path'] ?? '') : '';
+            $plugin_graphs[(string)$parent['branch']] = [
+                'parent_id' => $parent_id,
+                'child_id' => is_array($child) ? (int)$child['id'] : 0,
+                'child_parent_id' => is_array($child) ? (int)$child['parent_id'] : 0,
+                'label' => (string)$parent['label'],
+                'json_parent_id' => is_array($graph_json) ? (int)($graph_json['parent_id'] ?? 0) : 0,
+                'json_child_id' => is_array($graph_json) ? (int)($graph_json['child_id'] ?? 0) : 0,
+                'json_note_id' => is_array($graph_json) ? (int)($graph_json['note_id'] ?? 0) : 0,
+                'serialized_parent_id' => is_array($graph_serialized) ? (int)($graph_serialized['parent_id'] ?? 0) : 0,
+                'serialized_note_id' => is_array($graph_serialized) ? (int)($graph_serialized['note_id'] ?? 0) : 0,
+                'option_parent_id' => is_array($option_graph) ? (int)($option_graph['parent_id'] ?? 0) : 0,
+                'option_note_id' => is_array($option_graph) ? (int)($option_graph['note_id'] ?? 0) : 0,
+                'postmeta_parent_id' => is_array($postmeta_json) ? (int)($postmeta_json['parent_id'] ?? 0) : 0,
+                'postmeta_note_id' => is_array($postmeta_json) ? (int)($postmeta_json['note_id'] ?? 0) : 0,
+                'child_payload_note_id' => is_array($child_payload) ? (int)($child_payload['note_id'] ?? 0) : 0,
+                'file_exists' => $file_path !== '' && file_exists(trailingslashit($upload_dir['basedir']) . $file_path),
+            ];
+        }
+        ksort($plugin_graphs);
+    }
+
+    wp_send_json([
+        'action' => $action,
+        'posts' => $rows,
+        'users' => $users,
+        'comments' => $comments,
+        'menus' => $menus,
+        'menu_items' => $menu_items,
+        'menu_locations' => $locations,
+        'plugin_graphs' => $plugin_graphs,
+        'source_option' => get_option('forkpress_semantic_source_option'),
+        'target_option' => get_option('forkpress_semantic_target_option'),
+        'source_json_option' => json_decode((string)get_option('forkpress_semantic_source_json_option'), true),
+        'target_json_option' => json_decode((string)get_option('forkpress_semantic_target_json_option'), true),
+    ]);
+}, 20);
+PHP
+
 autoinc_runtime_request main init "$TMP/autoinc-main-init.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(($data["max_id"] ?? null) === 1 ? 0 : 1);' "$TMP/autoinc-main-init.json"
+
+log_step "create and merge branch through WordPress admin UI"
+UI_CREATE_COOKIES="$TMP/ui-create-cookies.txt"
+UI_CREATE_NONCE="$(branch_ui_nonce main createNonce "$TMP/ui-create-admin.html" "$UI_CREATE_COOKIES")"
+UI_CREATE_HTTP="$(
+  curl -sS -o "$TMP/ui-create.json" -w '%{http_code}' \
+    -b "$UI_CREATE_COOKIES" \
+    -H "Host: wp.localhost:$PORT" \
+    -H "Accept: application/json" \
+    -H "X-ForkPress-Async: 1" \
+    --data-urlencode "action=forkpress_branch_create" \
+    --data-urlencode "_wpnonce=$UI_CREATE_NONCE" \
+    --data-urlencode "branch=ui-created" \
+    --data-urlencode "from=main" \
+    "http://127.0.0.1:$PORT/wp-admin/admin-post.php"
+)"
+if [ "$UI_CREATE_HTTP" != "200" ]; then
+  echo "WP UI branch create returned $UI_CREATE_HTTP" >&2
+  cat "$TMP/ui-create.json" >&2
+  "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+  exit 1
+fi
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $branches = array_map(fn($row) => $row["name"] ?? "", $data["branches"] ?? []); exit(($data["success"] ?? null) === true && ($data["message"] ?? null) === "Created branch ui-created." && in_array("ui-created", $branches, true) ? 0 : 1);' "$TMP/ui-create.json"
+test -d "$WORK/ui-created"
+test -f "$WORK_DIR/cow/merge/bases/ui-created.sqlite"
+test -f "$WORK_DIR/cow/merge/file-bases/ui-created.json"
+php -r '$db = new SQLite3($argv[1]); exit((int)$db->querySingle("SELECT MAX(id) FROM wp_forkpress_e2e_autoinc") === 1 ? 0 : 1);' "$WORK_DIR/cow/merge/bases/ui-created.sqlite"
+php -r '$base = json_decode((string)file_get_contents($argv[1]), true); $entries = $base["entries"] ?? []; exit(is_array($entries) && count($entries) > 0 && !isset($entries["wp-content/ui-created-file.txt"]) ? 0 : 1);' "$WORK_DIR/cow/merge/file-bases/ui-created.json"
+php -r '$meta = new SQLite3($argv[1]); $branch = new SQLite3($argv[2]); $band = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''ui-created'\'' AND table_name = '\''wp_forkpress_e2e_autoinc'\''", true); $seq = (int)$branch->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''wp_forkpress_e2e_autoinc'\''"); exit($band && (int)$band["band_start"] >= 1000000 && $seq === (int)$band["band_start"] - 1 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite" "$WORK/ui-created/wp-content/database/.ht.sqlite"
+
+UI_MERGE_TITLE="UI branch merge $(date +%s)"
+create_branch_post ui-created "$UI_MERGE_TITLE"
+echo "merged through WP branch UI" > "$WORK/ui-created/wp-content/ui-created-file.txt"
+UI_MERGE_COOKIES="$TMP/ui-merge-cookies.txt"
+UI_MERGE_NONCE="$(branch_ui_nonce main mergeNonce "$TMP/ui-merge-admin.html" "$UI_MERGE_COOKIES")"
+UI_MERGE_HTTP="$(
+  curl -sS -o "$TMP/ui-merge.json" -w '%{http_code}' \
+    -b "$UI_MERGE_COOKIES" \
+    -H "Host: wp.localhost:$PORT" \
+    -H "Accept: application/json" \
+    -H "X-ForkPress-Async: 1" \
+    --data-urlencode "action=forkpress_branch_merge" \
+    --data-urlencode "_wpnonce=$UI_MERGE_NONCE" \
+    --data-urlencode "source=ui-created" \
+    --data-urlencode "target=main" \
+    "http://127.0.0.1:$PORT/wp-admin/admin-post.php"
+)"
+if [ "$UI_MERGE_HTTP" != "200" ]; then
+  echo "WP UI branch merge returned $UI_MERGE_HTTP" >&2
+  cat "$TMP/ui-merge.json" >&2
+  "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+  exit 1
+fi
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(($data["success"] ?? null) === true && ($data["message"] ?? null) === "Merged ui-created into main." ? 0 : 1);' "$TMP/ui-merge.json"
+test -f "$WORK/main/wp-content/ui-created-file.txt"
+grep -F "merged through WP branch UI" "$WORK/main/wp-content/ui-created-file.txt" >/dev/null
+curl -sS -H "Host: wp.localhost:$PORT" \
+  "http://127.0.0.1:$PORT/wp-admin/edit.php" \
+  -o "$TMP/ui-main-after-merge-edit.html"
+grep -F "$UI_MERGE_TITLE" "$TMP/ui-main-after-merge-edit.html" >/dev/null
+php -r '$db = new SQLite3($argv[1]); $count = (int)$db->querySingle("SELECT COUNT(*) FROM merge_runs WHERE source_branch = '\''ui-created'\'' AND target_branch = '\''main'\'' AND status = '\''completed'\''"); exit($count > 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
+
+log_step "public branch create crash retry"
+if FORKPRESS_COW_STORAGE_TEST_FAILPOINT=after-branch-create-birth-metadata FORKPRESS_COW_STORAGE_TEST_FAILPOINT_ACTION=exit \
+  "$BIN" branch --work-dir "$WORK_DIR" create public-create-crash > "$TMP/public-create-crash.out" 2>&1; then
+  echo "public branch create unexpectedly survived after-branch-create-birth-metadata failpoint" >&2
+  exit 1
+fi
+test ! -e "$WORK/public-create-crash"
+"$BIN" branch --work-dir "$WORK_DIR" create public-create-crash > "$TMP/public-create-crash-retry.out"
+grep -F "public-create-crash.wp.localhost:$PORT" "$TMP/public-create-crash-retry.out" >/dev/null
+test -d "$WORK/public-create-crash"
+test -f "$WORK_DIR/cow/merge/bases/public-create-crash.sqlite"
+test -f "$WORK_DIR/cow/merge/file-bases/public-create-crash.json"
+php -r '$meta = new SQLite3($argv[1]); $count = (int)$meta->querySingle("SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = '\''public-create-crash'\''"); exit($count > 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
 
 log_step "create CLI branch"
 "$BIN" branch --work-dir "$WORK_DIR" create feature-cow > "$TMP/branch-create.out"
@@ -296,6 +1043,10 @@ grep -F "feature-cow.wp.localhost:$PORT" "$TMP/branch-create.out" >/dev/null
 test -d "$WORK/feature-cow"
 echo "feature only" > "$WORK/feature-cow/wp-content/forkpress-branch.txt"
 test ! -e "$WORK/main/wp-content/forkpress-branch.txt"
+test -f "$WORK_DIR/cow/merge/bases/feature-cow.sqlite"
+test -f "$WORK_DIR/cow/merge/file-bases/feature-cow.json"
+php -r '$db = new SQLite3($argv[1]); exit((int)$db->querySingle("SELECT MAX(id) FROM wp_forkpress_e2e_autoinc") === 1 ? 0 : 1);' "$WORK_DIR/cow/merge/bases/feature-cow.sqlite"
+php -r '$base = json_decode((string)file_get_contents($argv[1]), true); $entries = $base["entries"] ?? []; exit(is_array($entries) && count($entries) > 0 && !isset($entries["wp-content/forkpress-branch.txt"]) ? 0 : 1);' "$WORK_DIR/cow/merge/file-bases/feature-cow.json"
 php -r '$meta = new SQLite3($argv[1]); $branch = new SQLite3($argv[2]); $band = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''feature-cow'\'' AND table_name = '\''wp_forkpress_e2e_autoinc'\''", true); $seq = (int)$branch->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''wp_forkpress_e2e_autoinc'\''"); exit($band && (int)$band["band_start"] >= 1000000 && $seq === (int)$band["band_start"] - 1 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite" "$WORK/feature-cow/wp-content/database/.ht.sqlite"
 autoinc_runtime_request feature-cow insert "$TMP/autoinc-feature-insert.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); $meta = new SQLite3($argv[2]); $branch = new SQLite3($argv[3]); $max = (int)($data["max_id"] ?? 0); $band = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''feature-cow'\'' AND table_name = '\''wp_forkpress_e2e_autoinc'\''", true); $seq = (int)$branch->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''wp_forkpress_e2e_autoinc'\''"); exit($band && $max >= (int)$band["band_start"] && $max <= (int)$band["band_end"] && $seq === $max ? 0 : 1);' "$TMP/autoinc-feature-insert.json" "$WORK_DIR/cow/merge/metadata.sqlite" "$WORK/feature-cow/wp-content/database/.ht.sqlite"
@@ -431,6 +1182,52 @@ curl -sS -H "Host: git-created.wp.localhost:$PORT" \
   -o "$TMP/git-created.html"
 grep -F "Branch: git-created" "$TMP/git-created.html" >/dev/null
 grep -F "Branch not found" "$TMP/git-created.html" && exit 1
+test -f "$WORK_DIR/cow/merge/bases/git-created.sqlite"
+test -f "$WORK_DIR/cow/merge/file-bases/git-created.json"
+"$BIN" branch --work-dir "$WORK_DIR" merge git-created --into main > "$TMP/git-created-merge.out"
+grep -F "forkpress: merged git-created into main" "$TMP/git-created-merge.out" >/dev/null
+grep -F "status:    completed" "$TMP/git-created-merge.out" >/dev/null
+test -f "$WORK/main/wp-content/git-created.txt"
+grep -F "created through git" "$WORK/main/wp-content/git-created.txt" >/dev/null
+
+log_step "actual Git push created-branch crash recovery"
+git -C "$TMP/checkout" fetch origin main:refs/remotes/origin/main
+git -C "$TMP/checkout" checkout -B git-created-http-crash origin/main
+git -C "$TMP/checkout" reset --hard origin/main
+git -C "$TMP/checkout" clean -fd
+printf "created through crashed git push\n" > "$TMP/checkout/wordpress/wp-content/git-created-http-crash.txt"
+"$BIN" stop --work-dir "$WORK_DIR" >/dev/null 2>&1 || true
+FORKPRESS_COW_GIT_TEST_FAILPOINT=after-created-branch-list FORKPRESS_COW_GIT_TEST_FAILPOINT_ACTION=exit \
+  "$BIN" serve --work-dir "$WORK_DIR" --port "$PORT" --root-host wp.localhost --workers 1
+if "$BIN" commit "$TMP/checkout" --message "create cow branch through crashed git push" > "$TMP/git-created-http-crash.out" 2>&1; then
+  echo "Git push unexpectedly survived after-created-branch-list server exit failpoint" >&2
+  exit 1
+fi
+for _ in $(seq 1 40); do
+  if ! "$BIN" server list | grep -F "$WORK_DIR" >/dev/null; then
+    break
+  fi
+  sleep 0.25
+done
+"$BIN" stop --work-dir "$WORK_DIR" >/dev/null 2>&1 || true
+"$BIN" serve --work-dir "$WORK_DIR" --port "$PORT" --root-host wp.localhost --workers 1
+"$BIN" branch --work-dir "$WORK_DIR" list | grep -F "git-created-http-crash" >/dev/null
+curl -sS -H "Host: git-created-http-crash.wp.localhost:$PORT" \
+  "http://127.0.0.1:$PORT/" \
+  -o "$TMP/git-created-http-crash-after-restart.html"
+grep -F "Branch: git-created-http-crash" "$TMP/git-created-http-crash-after-restart.html" >/dev/null
+grep -F "Branch not found" "$TMP/git-created-http-crash-after-restart.html" && exit 1
+test -f "$WORK/git-created-http-crash/wp-content/git-created-http-crash.txt"
+grep -F "created through crashed git push" "$WORK/git-created-http-crash/wp-content/git-created-http-crash.txt" >/dev/null
+test -f "$WORK_DIR/cow/merge/bases/git-created-http-crash.sqlite"
+test -f "$WORK_DIR/cow/merge/file-bases/git-created-http-crash.json"
+git -C "$TMP/checkout" fetch origin git-created-http-crash:refs/remotes/origin/git-created-http-crash
+test "$(git -C "$TMP/checkout" rev-parse git-created-http-crash)" = "$(git -C "$TMP/checkout" rev-parse refs/remotes/origin/git-created-http-crash)"
+"$BIN" branch --work-dir "$WORK_DIR" merge git-created-http-crash --into main > "$TMP/git-created-http-crash-merge.out"
+grep -F "forkpress: merged git-created-http-crash into main" "$TMP/git-created-http-crash-merge.out" >/dev/null
+grep -F "status:    completed" "$TMP/git-created-http-crash-merge.out" >/dev/null
+test -f "$WORK/main/wp-content/git-created-http-crash.txt"
+grep -F "created through crashed git push" "$WORK/main/wp-content/git-created-http-crash.txt" >/dev/null
 
 log_step "reject multi-branch Git delete without mutation"
 if git -C "$TMP/checkout" push origin --delete git-created feature-cow > "$TMP/git-multi-delete.out" 2>&1; then
@@ -520,6 +1317,32 @@ if "$BIN" branch --work-dir "$WORK_DIR" reset main --from reset-source > "$TMP/r
 fi
 grep -F "refusing to reset main without --force" "$TMP/reset-main.out" >/dev/null
 
+log_step "public branch reset crash retry"
+"$BIN" branch --work-dir "$WORK_DIR" create public-reset-crash-source
+"$BIN" branch --work-dir "$WORK_DIR" create public-reset-crash-target
+echo "public reset crash source" > "$WORK/public-reset-crash-source/wp-content/public-reset-crash-source.txt"
+echo "public reset crash target" > "$WORK/public-reset-crash-target/wp-content/public-reset-crash-target.txt"
+if FORKPRESS_COW_STORAGE_TEST_FAILPOINT=after-branch-reset-publish FORKPRESS_COW_STORAGE_TEST_FAILPOINT_ACTION=exit \
+  "$BIN" branch --work-dir "$WORK_DIR" reset public-reset-crash-target --from public-reset-crash-source > "$TMP/public-reset-crash.out" 2>&1; then
+  echo "public branch reset unexpectedly survived after-branch-reset-publish failpoint" >&2
+  exit 1
+fi
+test -f "$WORK/public-reset-crash-target/wp-content/public-reset-crash-source.txt"
+test -f "$WORK_DIR/cow/reset-pending/public-reset-crash-target.txt"
+if "$BIN" branch --work-dir "$WORK_DIR" merge public-reset-crash-target --into main > "$TMP/public-reset-crash-merge-blocked.out" 2>&1; then
+  echo "public branch merge unexpectedly accepted a reset-pending branch" >&2
+  exit 1
+fi
+grep -F "unfinished reset" "$TMP/public-reset-crash-merge-blocked.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" reset public-reset-crash-target --from public-reset-crash-source > "$TMP/public-reset-crash-retry.out"
+grep -F "reset COW branch 'public-reset-crash-target' from 'public-reset-crash-source'" "$TMP/public-reset-crash-retry.out" >/dev/null
+test ! -e "$WORK_DIR/cow/reset-pending/public-reset-crash-target.txt"
+test -f "$WORK/public-reset-crash-target/wp-content/public-reset-crash-source.txt"
+test ! -e "$WORK/public-reset-crash-target/wp-content/public-reset-crash-target.txt"
+test -f "$WORK_DIR/cow/merge/bases/public-reset-crash-target.sqlite"
+test -f "$WORK_DIR/cow/merge/file-bases/public-reset-crash-target.json"
+php -r '$meta = new SQLite3($argv[1]); $count = (int)$meta->querySingle("SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = '\''public-reset-crash-target'\''"); exit($count > 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
+
 log_step "merge independently banded WordPress posts"
 "$BIN" branch --work-dir "$WORK_DIR" create band-merge-source > "$TMP/band-merge-source-create.out"
 "$BIN" branch --work-dir "$WORK_DIR" create band-merge-target > "$TMP/band-merge-target-create.out"
@@ -567,6 +1390,149 @@ fi
 "$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --review --review-status unreviewed --records decisions --scope db --limit 80 > "$TMP/band-merge-source-decision-queue.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["review"] ?? false) === true) && (($data["filters"]["review_status"] ?? null) === "unreviewed") && (($data["filters"]["records"] ?? null) === "decisions") && (($data["filters"]["scope"] ?? null) === "db"); $has_source = false; foreach (($data["decisions"] ?? []) as $row) { if (($row["review_status"] ?? null) !== null) $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[2] && ($row["table_name"] ?? null) === "wp_posts" && ($row["decision"] ?? null) === "source-applied") $has_source = true; } exit($ok && $has_source ? 0 : 1);' "$TMP/band-merge-source-decision-queue.json" "$BAND_SOURCE_POST_DECISION_ID"
 
+log_step "merge WordPress semantic object graphs"
+semantic_runtime_request main seed "$TMP/semantic-seed.json"
+"$BIN" branch --work-dir "$WORK_DIR" create semantic-source > "$TMP/semantic-source-create.out"
+"$BIN" branch --work-dir "$WORK_DIR" create semantic-target > "$TMP/semantic-target-create.out"
+semantic_runtime_request semantic-source source "$TMP/semantic-source.json"
+semantic_runtime_request semantic-target target "$TMP/semantic-target.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $posts = []; foreach (($data["posts"] ?? []) as $post) { $posts[$post["title"] ?? ""] = $post; } $menus = $data["menus"] ?? []; $locations = $data["menu_locations"] ?? []; $graph = $data["plugin_graphs"]["source"] ?? []; $note_id = $posts["Semantic Source Note"]["id"] ?? null; $graph_ok = (int)($graph["parent_id"] ?? 0) > 0 && (int)($graph["child_id"] ?? 0) > 0 && ($graph["child_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["json_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["serialized_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["option_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["postmeta_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["json_note_id"] ?? null) === $note_id && ($graph["serialized_note_id"] ?? null) === $note_id && ($graph["option_note_id"] ?? null) === $note_id && ($graph["postmeta_note_id"] ?? null) === $note_id && ($graph["child_payload_note_id"] ?? null) === $note_id && (($graph["file_exists"] ?? null) === true); $ok = isset($posts["Semantic Source Page"], $posts["Semantic Source Note"], $posts["Semantic Source Block"], $posts["Semantic Source Media"], $posts["Semantic Source Edited Page"]) && !isset($posts["Semantic Source Delete Page"]) && in_array("Semantic Source Menu", $menus, true) && (($locations["forkpress_semantic_source"] ?? null) === "Semantic Source Menu") && in_array("Semantic Source Topic", $posts["Semantic Source Page"]["terms"] ?? [], true) && (($posts["Semantic Source Page"]["term_parents"]["Semantic Source Topic"] ?? null) === "Semantic Source Parent Topic") && in_array("Semantic Source Topic", $posts["Semantic Source Note"]["terms"] ?? [], true) && (($posts["Semantic Source Media"]["file_exists"] ?? null) === true) && in_array("thumbnail", $posts["Semantic Source Media"]["metadata_sizes"] ?? [], true) && (($posts["Semantic Source Media"]["generated_files"]["thumbnail"] ?? null) === true) && (($data["source_option"]["branch"] ?? null) === "source") && $graph_ok; exit($ok ? 0 : 1);' "$TMP/semantic-source.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $posts = []; foreach (($data["posts"] ?? []) as $post) { $posts[$post["title"] ?? ""] = $post; } $menus = $data["menus"] ?? []; $locations = $data["menu_locations"] ?? []; $graph = $data["plugin_graphs"]["target"] ?? []; $note_id = $posts["Semantic Target Note"]["id"] ?? null; $graph_ok = (int)($graph["parent_id"] ?? 0) > 0 && (int)($graph["child_id"] ?? 0) > 0 && ($graph["child_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["json_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["serialized_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["option_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["postmeta_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["json_note_id"] ?? null) === $note_id && ($graph["serialized_note_id"] ?? null) === $note_id && ($graph["option_note_id"] ?? null) === $note_id && ($graph["postmeta_note_id"] ?? null) === $note_id && ($graph["child_payload_note_id"] ?? null) === $note_id && (($graph["file_exists"] ?? null) === true); $ok = isset($posts["Semantic Target Page"], $posts["Semantic Target Note"], $posts["Semantic Target Block"], $posts["Semantic Target Media"], $posts["Semantic Target Edited Page"]) && !isset($posts["Semantic Target Delete Page"]) && in_array("Semantic Target Menu", $menus, true) && (($locations["forkpress_semantic_target"] ?? null) === "Semantic Target Menu") && in_array("Semantic Target Topic", $posts["Semantic Target Page"]["terms"] ?? [], true) && (($posts["Semantic Target Page"]["term_parents"]["Semantic Target Topic"] ?? null) === "Semantic Target Parent Topic") && in_array("Semantic Target Topic", $posts["Semantic Target Note"]["terms"] ?? [], true) && (($posts["Semantic Target Media"]["file_exists"] ?? null) === true) && in_array("thumbnail", $posts["Semantic Target Media"]["metadata_sizes"] ?? [], true) && (($posts["Semantic Target Media"]["generated_files"]["thumbnail"] ?? null) === true) && (($data["target_option"]["branch"] ?? null) === "target") && $graph_ok; exit($ok ? 0 : 1);' "$TMP/semantic-target.json"
+"$BIN" branch --work-dir "$WORK_DIR" merge semantic-source --into semantic-target > "$TMP/semantic-merge.out"
+grep -F "forkpress: merged semantic-source into semantic-target" "$TMP/semantic-merge.out" >/dev/null
+grep -E "status:    completed(_with_conflicts)?" "$TMP/semantic-merge.out" >/dev/null
+semantic_runtime_request semantic-target inspect "$TMP/semantic-after-merge.json"
+php -r '
+$data = json_decode(file_get_contents($argv[1]), true);
+$posts = [];
+foreach (($data["posts"] ?? []) as $post) {
+    $posts[$post["title"] ?? ""] = $post;
+}
+$menus = $data["menus"] ?? [];
+$menu_items = $data["menu_items"] ?? [];
+$locations = $data["menu_locations"] ?? [];
+$users = $data["users"] ?? [];
+$comments = $data["comments"] ?? [];
+$required = [
+    "Semantic Source Page" => "page",
+    "Semantic Target Page" => "page",
+    "Semantic Source Edited Page" => "page",
+    "Semantic Target Edited Page" => "page",
+    "Semantic Source Note" => "forkpress_note",
+    "Semantic Target Note" => "forkpress_note",
+    "Semantic Source Block" => "wp_block",
+    "Semantic Target Block" => "wp_block",
+    "Semantic Source Media" => "attachment",
+    "Semantic Target Media" => "attachment",
+];
+$ok = true;
+foreach ($required as $title => $type) {
+    $ok = $ok && (($posts[$title]["type"] ?? null) === $type);
+}
+$optionRefsValid = static function (array $option, string $branch, string $suffix) use ($posts): bool {
+    return (($option["branch"] ?? null) === $branch)
+        && ((int)($option["user_id"] ?? 0) > 0)
+        && ((int)($option["page_id"] ?? 0) === (int)($posts["Semantic $suffix Page"]["id"] ?? 0))
+        && ((int)($option["note_id"] ?? 0) === (int)($posts["Semantic $suffix Note"]["id"] ?? 0))
+        && ((int)($option["block_id"] ?? 0) === (int)($posts["Semantic $suffix Block"]["id"] ?? 0))
+        && ((int)($option["attachment_id"] ?? 0) === (int)($posts["Semantic $suffix Media"]["id"] ?? 0))
+        && ((int)($option["comment_id"] ?? 0) > 0)
+        && ((int)($option["reply_id"] ?? 0) > 0);
+};
+$pluginGraphValid = static function (array $graphs, array $posts, string $branch, string $suffix): bool {
+    $graph = $graphs[$branch] ?? [];
+    $note_id = $posts["Semantic $suffix Note"]["id"] ?? null;
+    return (int)($graph["parent_id"] ?? 0) > 0
+        && (int)($graph["child_id"] ?? 0) > 0
+        && (($graph["child_parent_id"] ?? null) === ($graph["parent_id"] ?? null))
+        && (($graph["json_parent_id"] ?? null) === ($graph["parent_id"] ?? null))
+        && (($graph["serialized_parent_id"] ?? null) === ($graph["parent_id"] ?? null))
+        && (($graph["option_parent_id"] ?? null) === ($graph["parent_id"] ?? null))
+        && (($graph["postmeta_parent_id"] ?? null) === ($graph["parent_id"] ?? null))
+        && (($graph["json_note_id"] ?? null) === $note_id)
+        && (($graph["serialized_note_id"] ?? null) === $note_id)
+        && (($graph["option_note_id"] ?? null) === $note_id)
+        && (($graph["postmeta_note_id"] ?? null) === $note_id)
+        && (($graph["child_payload_note_id"] ?? null) === $note_id)
+        && (($graph["file_exists"] ?? null) === true);
+};
+$menuItemValid = static function (array $items, array $posts, string $suffix): bool {
+    $item = $items["Semantic $suffix Link"] ?? [];
+    return (($item["menu"] ?? null) === "Semantic $suffix Menu")
+        && (($item["type"] ?? null) === "post_type")
+        && (($item["object"] ?? null) === "page")
+        && ((int)($item["object_id"] ?? 0) === (int)($posts["Semantic $suffix Page"]["id"] ?? 0));
+};
+$userValid = static function (array $users, array $posts, array $comments, string $branch, string $suffix): bool {
+    $user = $users["forkpress_semantic_$branch"] ?? [];
+    $userId = (int)($user["id"] ?? 0);
+    return $userId > 0
+        && (($user["display_name"] ?? null) === "Semantic $suffix Author")
+        && ((int)($user["graph_user_id"] ?? 0) === $userId)
+        && ((int)($user["serialized_graph_user_id"] ?? 0) === $userId)
+        && ((int)($posts["Semantic $suffix Page"]["author"] ?? 0) === $userId)
+        && ((int)($posts["Semantic $suffix Note"]["author"] ?? 0) === $userId)
+        && ((int)($posts["Semantic $suffix Media"]["author"] ?? 0) === $userId)
+        && ((int)($comments["Semantic $suffix Comment"]["user_id"] ?? 0) === $userId)
+        && ((int)($comments["Semantic $suffix Reply"]["user_id"] ?? 0) === $userId);
+};
+$commentValid = static function (array $comments, array $posts, string $suffix): bool {
+    $comment = $comments["Semantic $suffix Comment"] ?? [];
+    $reply = $comments["Semantic $suffix Reply"] ?? [];
+    $pageId = (int)($posts["Semantic $suffix Page"]["id"] ?? 0);
+    $commentId = (int)($comment["id"] ?? 0);
+    $replyId = (int)($reply["id"] ?? 0);
+    return $commentId > 0
+        && $replyId > 0
+        && ((int)($comment["post_id"] ?? 0) === $pageId)
+        && ((int)($reply["post_id"] ?? 0) === $pageId)
+        && ((int)($reply["parent"] ?? 0) === $commentId)
+        && ((int)($comment["graph_comment_id"] ?? 0) === $commentId)
+        && ((int)($comment["graph_reply_id"] ?? 0) === $replyId)
+        && ((int)($reply["serialized_graph_comment_id"] ?? 0) === $commentId)
+        && ((int)($reply["serialized_graph_reply_id"] ?? 0) === $replyId);
+};
+$reusableBlockValid = static function (array $posts, string $suffix): bool {
+    $blockId = (int)($posts["Semantic $suffix Block"]["id"] ?? 0);
+    $refs = array_map("intval", $posts["Semantic $suffix Page"]["block_refs"] ?? []);
+    return $blockId > 0 && in_array($blockId, $refs, true);
+};
+$ok = $ok
+    && (($posts["Semantic Source Media"]["file_exists"] ?? null) === true)
+    && (($posts["Semantic Target Media"]["file_exists"] ?? null) === true)
+    && in_array("thumbnail", $posts["Semantic Source Media"]["metadata_sizes"] ?? [], true)
+    && in_array("thumbnail", $posts["Semantic Target Media"]["metadata_sizes"] ?? [], true)
+    && (($posts["Semantic Source Media"]["generated_files"]["thumbnail"] ?? null) === true)
+    && (($posts["Semantic Target Media"]["generated_files"]["thumbnail"] ?? null) === true)
+    && !isset($posts["Semantic Source Delete Page"])
+    && !isset($posts["Semantic Target Delete Page"])
+    && in_array("Semantic Source Topic", $posts["Semantic Source Page"]["terms"] ?? [], true)
+    && in_array("Semantic Target Topic", $posts["Semantic Target Page"]["terms"] ?? [], true)
+    && (($posts["Semantic Source Page"]["term_parents"]["Semantic Source Topic"] ?? null) === "Semantic Source Parent Topic")
+    && (($posts["Semantic Target Page"]["term_parents"]["Semantic Target Topic"] ?? null) === "Semantic Target Parent Topic")
+    && in_array("Semantic Source Topic", $posts["Semantic Source Note"]["terms"] ?? [], true)
+    && in_array("Semantic Target Topic", $posts["Semantic Target Note"]["terms"] ?? [], true)
+    && in_array("Semantic Source Menu", $menus, true)
+    && in_array("Semantic Target Menu", $menus, true)
+    && (($locations["forkpress_semantic_source"] ?? null) === "Semantic Source Menu")
+    && (($locations["forkpress_semantic_target"] ?? null) === "Semantic Target Menu")
+    && $menuItemValid($menu_items, $posts, "Source")
+    && $menuItemValid($menu_items, $posts, "Target")
+    && $userValid($users, $posts, $comments, "source", "Source")
+    && $userValid($users, $posts, $comments, "target", "Target")
+    && $commentValid($comments, $posts, "Source")
+    && $commentValid($comments, $posts, "Target")
+    && $reusableBlockValid($posts, "Source")
+    && $reusableBlockValid($posts, "Target")
+    && $optionRefsValid($data["source_option"] ?? [], "source", "Source")
+    && $optionRefsValid($data["target_option"] ?? [], "target", "Target")
+    && $optionRefsValid($data["source_json_option"] ?? [], "source", "Source")
+    && $optionRefsValid($data["target_json_option"] ?? [], "target", "Target")
+    && $pluginGraphValid($data["plugin_graphs"] ?? [], $posts, "source", "Source")
+    && $pluginGraphValid($data["plugin_graphs"] ?? [], $posts, "target", "Target");
+exit($ok ? 0 : 1);
+' "$TMP/semantic-after-merge.json"
+
 log_step "merge branch into main"
 php -r '$db = new SQLite3($argv[1]); $db->exec("CREATE TABLE IF NOT EXISTS forkpress_e2e_target_kept (id INTEGER PRIMARY KEY, label TEXT NOT NULL)");' "$WORK/main/wp-content/database/.ht.sqlite"
 "$BIN" branch --work-dir "$WORK_DIR" create merge-source
@@ -575,6 +1541,14 @@ create_branch_post merge-source "$MERGE_TITLE"
 php -r '$db = new SQLite3($argv[1]); $db->exec("INSERT INTO forkpress_e2e_target_kept (id, label) VALUES (1, '\''target-only row'\'')");' "$WORK/main/wp-content/database/.ht.sqlite"
 echo "merged through branch merge" > "$WORK/merge-source/wp-content/merge-source-file.txt"
 echo "kept on target through branch merge" > "$WORK/main/wp-content/main-target-file.txt"
+mkdir -p "$WORK_DIR/cow/reset-pending"
+printf 'branch=merge-source\nfrom=main\n' > "$WORK_DIR/cow/reset-pending/merge-source.txt"
+if "$BIN" branch --work-dir "$WORK_DIR" merge merge-source --into main > "$TMP/merge-pending-reset.out" 2>&1; then
+  echo "branch merge unexpectedly accepted a source branch with pending reset metadata" >&2
+  exit 1
+fi
+grep -F "unfinished reset" "$TMP/merge-pending-reset.out" >/dev/null
+rm -f "$WORK_DIR/cow/reset-pending/merge-source.txt"
 "$BIN" branch --work-dir "$WORK_DIR" merge merge-source --into main > "$TMP/merge.out"
 grep -F "forkpress: merged merge-source into main" "$TMP/merge.out" >/dev/null
 grep -F "status:    completed" "$TMP/merge.out" >/dev/null
@@ -594,6 +1568,143 @@ grep -F "forkpress: COW merge audit" "$TMP/merge-audit.out" >/dev/null
 grep -F "merge-source -> main" "$TMP/merge-audit.out" >/dev/null
 "$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --limit 3 > "$TMP/merge-audit.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && !empty($data["runs"]) ? 0 : 1);' "$TMP/merge-audit.json"
+
+log_step "public branch merge crash recovery"
+"$BIN" branch --work-dir "$WORK_DIR" create public-crash-merge
+PUBLIC_CRASH_TITLE="Public crash merge $(date +%s)"
+create_branch_post public-crash-merge "$PUBLIC_CRASH_TITLE"
+if FORKPRESS_COW_MERGE_TEST_FAILPOINT=before-target-db-commit FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION=kill \
+  "$BIN" branch --work-dir "$WORK_DIR" merge public-crash-merge --into main > "$TMP/public-crash-merge.out" 2>&1; then
+  echo "public branch merge unexpectedly survived before-target-db-commit kill failpoint" >&2
+  exit 1
+fi
+"$BIN" branch --work-dir "$WORK_DIR" recover-crash --format json > "$TMP/public-crash-recover.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && (int)($data["pending"] ?? 0) >= 1 ? 0 : 1);' "$TMP/public-crash-recover.json"
+if "$BIN" branch --work-dir "$WORK_DIR" merge public-crash-merge --into main > "$TMP/public-crash-blocked.out" 2>&1; then
+  echo "public branch merge unexpectedly ignored pending crash recovery artifact" >&2
+  exit 1
+fi
+grep -F "pending COW merge crash recovery artifact" "$TMP/public-crash-blocked.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" recover-crash --restore-target-db --format json > "$TMP/public-crash-restore.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && (int)($data["pending"] ?? 0) === 0 && (int)($data["restored"] ?? 0) >= 1 ? 0 : 1);' "$TMP/public-crash-restore.json"
+"$BIN" branch --work-dir "$WORK_DIR" merge public-crash-merge --into main > "$TMP/public-crash-retry.out"
+grep -F "forkpress: merged public-crash-merge into main" "$TMP/public-crash-retry.out" >/dev/null
+grep -F "status:    completed" "$TMP/public-crash-retry.out" >/dev/null
+curl -sS -H "Host: wp.localhost:$PORT" \
+  "http://127.0.0.1:$PORT/wp-admin/edit.php" \
+  -o "$TMP/public-crash-main-edit.html"
+grep -F "$PUBLIC_CRASH_TITLE" "$TMP/public-crash-main-edit.html" >/dev/null
+
+log_step "public branch merge metadata crash recovery"
+"$BIN" branch --work-dir "$WORK_DIR" create public-metadata-crash-merge
+PUBLIC_METADATA_CRASH_TITLE="Public metadata crash merge $(date +%s)"
+create_branch_post public-metadata-crash-merge "$PUBLIC_METADATA_CRASH_TITLE"
+if FORKPRESS_COW_MERGE_TEST_FAILPOINT=before-metadata-commit FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION=kill \
+  "$BIN" branch --work-dir "$WORK_DIR" merge public-metadata-crash-merge --into main > "$TMP/public-metadata-crash-merge.out" 2>&1; then
+  echo "public branch merge unexpectedly survived before-metadata-commit kill failpoint" >&2
+  exit 1
+fi
+"$BIN" branch --work-dir "$WORK_DIR" recover-crash --format json > "$TMP/public-metadata-crash-recover.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && (int)($data["pending"] ?? 0) >= 1 ? 0 : 1);' "$TMP/public-metadata-crash-recover.json"
+if "$BIN" branch --work-dir "$WORK_DIR" merge public-metadata-crash-merge --into main > "$TMP/public-metadata-crash-blocked.out" 2>&1; then
+  echo "public branch merge unexpectedly ignored pending metadata crash recovery artifact" >&2
+  exit 1
+fi
+grep -F "pending COW merge crash recovery artifact" "$TMP/public-metadata-crash-blocked.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" recover-crash --restore-target-db --format json > "$TMP/public-metadata-crash-restore.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && (int)($data["pending"] ?? 0) === 0 && (int)($data["restored"] ?? 0) >= 1 ? 0 : 1);' "$TMP/public-metadata-crash-restore.json"
+"$BIN" branch --work-dir "$WORK_DIR" merge public-metadata-crash-merge --into main > "$TMP/public-metadata-crash-retry.out"
+grep -F "forkpress: merged public-metadata-crash-merge into main" "$TMP/public-metadata-crash-retry.out" >/dev/null
+grep -F "status:    completed" "$TMP/public-metadata-crash-retry.out" >/dev/null
+curl -sS -H "Host: wp.localhost:$PORT" \
+  "http://127.0.0.1:$PORT/wp-admin/edit.php" \
+  -o "$TMP/public-metadata-crash-main-edit.html"
+grep -F "$PUBLIC_METADATA_CRASH_TITLE" "$TMP/public-metadata-crash-main-edit.html" >/dev/null
+
+log_step "public branch merge before-file crash recovery"
+"$BIN" branch --work-dir "$WORK_DIR" create public-before-file-crash-merge
+PUBLIC_BEFORE_FILE_CRASH_TITLE="Public before-file crash merge $(date +%s)"
+create_branch_post public-before-file-crash-merge "$PUBLIC_BEFORE_FILE_CRASH_TITLE"
+echo "public before-file crash merge" > "$WORK/public-before-file-crash-merge/wp-content/public-before-file-crash.txt"
+if FORKPRESS_COW_MERGE_TEST_FAILPOINT=before-file-op FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION=kill \
+  "$BIN" branch --work-dir "$WORK_DIR" merge public-before-file-crash-merge --into main > "$TMP/public-before-file-crash-merge.out" 2>&1; then
+  echo "public branch merge unexpectedly survived before-file-op kill failpoint" >&2
+  exit 1
+fi
+"$BIN" branch --work-dir "$WORK_DIR" recover-crash --format json > "$TMP/public-before-file-crash-recover.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && (int)($data["pending"] ?? 0) >= 1 ? 0 : 1);' "$TMP/public-before-file-crash-recover.json"
+if "$BIN" branch --work-dir "$WORK_DIR" merge public-before-file-crash-merge --into main > "$TMP/public-before-file-crash-blocked.out" 2>&1; then
+  echo "public branch merge unexpectedly ignored pending before-file crash recovery artifact" >&2
+  exit 1
+fi
+grep -F "pending COW merge crash recovery artifact" "$TMP/public-before-file-crash-blocked.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" recover-crash --restore-target-db --restore-files --format json > "$TMP/public-before-file-crash-restore.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && (int)($data["pending"] ?? 0) === 0 && (int)($data["restored"] ?? 0) >= 1 ? 0 : 1);' "$TMP/public-before-file-crash-restore.json"
+"$BIN" branch --work-dir "$WORK_DIR" merge public-before-file-crash-merge --into main > "$TMP/public-before-file-crash-retry.out"
+grep -F "forkpress: merged public-before-file-crash-merge into main" "$TMP/public-before-file-crash-retry.out" >/dev/null
+grep -F "status:    completed" "$TMP/public-before-file-crash-retry.out" >/dev/null
+test -f "$WORK/main/wp-content/public-before-file-crash.txt"
+grep -F "public before-file crash merge" "$WORK/main/wp-content/public-before-file-crash.txt" >/dev/null
+curl -sS -H "Host: wp.localhost:$PORT" \
+  "http://127.0.0.1:$PORT/wp-admin/edit.php" \
+  -o "$TMP/public-before-file-crash-main-edit.html"
+grep -F "$PUBLIC_BEFORE_FILE_CRASH_TITLE" "$TMP/public-before-file-crash-main-edit.html" >/dev/null
+
+log_step "public crash recovery cleanup interruption"
+"$BIN" branch --work-dir "$WORK_DIR" create public-recovery-cleanup-crash
+PUBLIC_RECOVERY_CLEANUP_CRASH_TITLE="Public recovery cleanup crash $(date +%s)"
+create_branch_post public-recovery-cleanup-crash "$PUBLIC_RECOVERY_CLEANUP_CRASH_TITLE"
+if FORKPRESS_COW_MERGE_TEST_FAILPOINT=before-target-db-commit FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION=kill \
+  "$BIN" branch --work-dir "$WORK_DIR" merge public-recovery-cleanup-crash --into main > "$TMP/public-recovery-cleanup-crash-merge.out" 2>&1; then
+  echo "public branch merge unexpectedly survived recovery-cleanup fixture kill failpoint" >&2
+  exit 1
+fi
+"$BIN" branch --work-dir "$WORK_DIR" recover-crash --format json > "$TMP/public-recovery-cleanup-crash-recover.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && (int)($data["pending"] ?? 0) >= 1 ? 0 : 1);' "$TMP/public-recovery-cleanup-crash-recover.json"
+if FORKPRESS_COW_MERGE_TEST_FAILPOINT=after-crash-recovery-restore FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION=exit \
+  "$BIN" branch --work-dir "$WORK_DIR" recover-crash --restore-target-db --format json > "$TMP/public-recovery-cleanup-crash-restore.out" 2>&1; then
+  echo "public crash recovery unexpectedly survived after-crash-recovery-restore failpoint" >&2
+  exit 1
+fi
+"$BIN" branch --work-dir "$WORK_DIR" recover-crash --restore-target-db --format json > "$TMP/public-recovery-cleanup-crash-retry-restore.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && (int)($data["pending"] ?? 0) === 0 && (int)($data["restored"] ?? 0) >= 1 ? 0 : 1);' "$TMP/public-recovery-cleanup-crash-retry-restore.json"
+"$BIN" branch --work-dir "$WORK_DIR" merge public-recovery-cleanup-crash --into main > "$TMP/public-recovery-cleanup-crash-retry.out"
+grep -F "forkpress: merged public-recovery-cleanup-crash into main" "$TMP/public-recovery-cleanup-crash-retry.out" >/dev/null
+grep -F "status:    completed" "$TMP/public-recovery-cleanup-crash-retry.out" >/dev/null
+curl -sS -H "Host: wp.localhost:$PORT" \
+  "http://127.0.0.1:$PORT/wp-admin/edit.php" \
+  -o "$TMP/public-recovery-cleanup-crash-main-edit.html"
+grep -F "$PUBLIC_RECOVERY_CLEANUP_CRASH_TITLE" "$TMP/public-recovery-cleanup-crash-main-edit.html" >/dev/null
+
+log_step "public branch merge filesystem crash recovery"
+"$BIN" branch --work-dir "$WORK_DIR" create public-file-crash-merge
+PUBLIC_FILE_CRASH_TITLE="Public file crash merge $(date +%s)"
+create_branch_post public-file-crash-merge "$PUBLIC_FILE_CRASH_TITLE"
+echo "public file crash merge" > "$WORK/public-file-crash-merge/wp-content/public-file-crash.txt"
+if FORKPRESS_COW_MERGE_TEST_FAILPOINT=after-file-op FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION=kill \
+  "$BIN" branch --work-dir "$WORK_DIR" merge public-file-crash-merge --into main > "$TMP/public-file-crash-merge.out" 2>&1; then
+  echo "public branch merge unexpectedly survived after-file-op kill failpoint" >&2
+  exit 1
+fi
+"$BIN" branch --work-dir "$WORK_DIR" recover-crash --format json > "$TMP/public-file-crash-recover.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && (int)($data["pending"] ?? 0) >= 1 ? 0 : 1);' "$TMP/public-file-crash-recover.json"
+if "$BIN" branch --work-dir "$WORK_DIR" merge public-file-crash-merge --into main > "$TMP/public-file-crash-blocked.out" 2>&1; then
+  echo "public branch merge unexpectedly ignored pending filesystem crash recovery artifact" >&2
+  exit 1
+fi
+grep -F "pending COW merge crash recovery artifact" "$TMP/public-file-crash-blocked.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" recover-crash --restore-target-db --restore-files --format json > "$TMP/public-file-crash-restore.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && (int)($data["pending"] ?? 0) === 0 && (int)($data["restored"] ?? 0) >= 1 ? 0 : 1);' "$TMP/public-file-crash-restore.json"
+"$BIN" branch --work-dir "$WORK_DIR" merge public-file-crash-merge --into main > "$TMP/public-file-crash-retry.out"
+grep -F "forkpress: merged public-file-crash-merge into main" "$TMP/public-file-crash-retry.out" >/dev/null
+grep -F "status:    completed" "$TMP/public-file-crash-retry.out" >/dev/null
+test -f "$WORK/main/wp-content/public-file-crash.txt"
+grep -F "public file crash merge" "$WORK/main/wp-content/public-file-crash.txt" >/dev/null
+curl -sS -H "Host: wp.localhost:$PORT" \
+  "http://127.0.0.1:$PORT/wp-admin/edit.php" \
+  -o "$TMP/public-file-crash-main-edit.html"
+grep -F "$PUBLIC_FILE_CRASH_TITLE" "$TMP/public-file-crash-main-edit.html" >/dev/null
+
 ROLLBACK_FAILURE_ARTIFACT="$WORK_DIR/cow/merge/e2e-rollback-failures.jsonl"
 printf '%s\n' '{"source_branch":"feature-e2e-rollback","rollback_failure":"forced runtime rollback failure"}' > "$ROLLBACK_FAILURE_ARTIFACT"
 ROLLBACK_FAILURE_RUN_ID="$(

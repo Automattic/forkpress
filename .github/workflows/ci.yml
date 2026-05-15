@@ -27,7 +27,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential clang curl git pkg-config unzip \
+            automake build-essential clang curl git pkg-config unzip \
             musl-tools php-cli composer re2c bison nodejs
 
       - uses: dtolnay/rust-toolchain@stable
@@ -44,6 +44,9 @@ jobs:
 
       - name: Rust unit tests (dev experiments)
         run: FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli --features dev-experiments --bin forkpress-dev
+
+      - name: Release preflight checks
+        run: make test-release
 
       - name: Build production dist bundle
         run: scripts/build-dist.sh
@@ -99,9 +102,13 @@ jobs:
       - name: Rust unit tests (dev experiments)
         run: FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test --target ${{ matrix.target }} -p forkpress-cli --features dev-experiments --bin forkpress-dev
 
+      - name: Release preflight checks
+        run: make test-release
+
       - name: Install runtime build tools
         run: |
-          brew install composer gpatch
+          brew update
+          brew install composer gpatch automake re2c bison pkg-config
           brew install php || true
 
       - name: Build production dist bundle

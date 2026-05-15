@@ -8,6 +8,17 @@ PHP_DEV_DIR ?= $(firstword $(wildcard /nix/store/*-php-*-dev))
 SQLITE_INC  ?= $(firstword $(wildcard /nix/store/*-sqlite-*-dev/include))
 SQLITE_LIB  ?= $(firstword $(filter-out /nix/store/*-sqlite-*-dev/lib,$(wildcard /nix/store/*-sqlite-*/lib)))
 
+BRANCHFS_EXT_DIR := experiments/branchfs/php-ext
+BRANCHFS_EXT_SO := $(BRANCHFS_EXT_DIR)/branchfs.so
+BRANCHFS_TEST_DIR := experiments/branchfs/tests
+COW_TEST_DIR := tests/cow
+RELEASE_TEST_DIR := tests/release
+BRANCHFS_HEADER_GOALS := all init-db test test-compat test-branchfs test-all $(BRANCHFS_EXT_SO)
+NEEDS_BRANCHFS_HEADERS := $(filter $(BRANCHFS_HEADER_GOALS),$(MAKECMDGOALS))
+ifeq ($(strip $(MAKECMDGOALS)),)
+NEEDS_BRANCHFS_HEADERS := all
+endif
+
 PHP_INCLUDE_DIR ?= $(if $(PHP_CONFIG),$(shell $(PHP_CONFIG) --include-dir 2>/dev/null))
 PHP_EXTRA_INCS  :=
 
@@ -25,7 +36,7 @@ PHP_EXTRA_INCS += -I$(PHP_DEV_DIR)/include/php \
                   -I$(PHP_DEV_DIR)/include/php/Zend \
                   -I$(PHP_DEV_DIR)/include/php/ext \
                   -I$(PHP_DEV_DIR)/include/php/ext/date/lib
-else
+else ifneq ($(strip $(NEEDS_BRANCHFS_HEADERS)),)
 $(error Could not determine PHP headers. Install php-config or set PHP_DEV_DIR)
 endif
 
@@ -47,10 +58,6 @@ CC      ?= gcc
 CFLAGS  := -fPIC -O2 -Wall -DCOMPILE_DL_BRANCHFS -DHAVE_CONFIG_H=0 $(SQLITE_CFLAGS)
 INCLUDES := $(PHP_EXTRA_INCS)
 LDFLAGS := $(SQLITE_LIBS)
-BRANCHFS_EXT_DIR := experiments/branchfs/php-ext
-BRANCHFS_EXT_SO := $(BRANCHFS_EXT_DIR)/branchfs.so
-BRANCHFS_TEST_DIR := experiments/branchfs/tests
-COW_TEST_DIR := tests/cow
 RUSTUP ?= $(shell command -v rustup 2>/dev/null)
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
@@ -68,7 +75,7 @@ else ifeq ($(UNAME_S)-$(UNAME_M),Linux-aarch64)
 FORKPRESS_TARGET ?= aarch64-unknown-linux-musl
 endif
 
-.PHONY: all clean test test-compat test-branchfs test-cow init-db test-all forkpress forkpress-dev dist dist-dev
+.PHONY: all clean test test-compat test-branchfs test-cow test-release init-db test-all forkpress forkpress-dev dist dist-dev
 
 all: $(BRANCHFS_EXT_SO)
 
@@ -100,10 +107,14 @@ test-branchfs: $(BRANCHFS_EXT_SO)
 test-cow:
 	php $(COW_TEST_DIR)/git_server.php
 	php $(COW_TEST_DIR)/merge.php
+	php $(COW_TEST_DIR)/branch_ui.php
 	php $(COW_TEST_DIR)/router_paths.php
 	php $(COW_TEST_DIR)/router_lock.php
 
-test-all: test-branchfs test-cow
+test-release:
+	bash $(RELEASE_TEST_DIR)/build-dist-preflight.sh
+
+test-all: test-branchfs test-cow test-release
 
 clean:
 	rm -f $(BRANCHFS_EXT_SO) /tmp/branchfs_test*.db /tmp/branchfs_wp*.db

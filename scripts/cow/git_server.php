@@ -21,6 +21,28 @@ use WordPress\Git\Model\TreeEntry;
 use WordPress\Git\Protocol\GitProtocolEncoderPipe;
 use WordPress\HttpServer\Response\StreamingResponseWriter;
 
+function cow_git_failpoint(string $name): void {
+    $configured = getenv('FORKPRESS_COW_GIT_TEST_FAILPOINT');
+    if (!is_string($configured) || trim($configured) === '') {
+        return;
+    }
+    $failpoints = array_map('trim', explode(',', $configured));
+    if (!in_array($name, $failpoints, true)) {
+        return;
+    }
+
+    $action = getenv('FORKPRESS_COW_GIT_TEST_FAILPOINT_ACTION');
+    $action = is_string($action) && $action !== '' ? $action : 'throw';
+    if ($action === 'exit') {
+        exit(97);
+    }
+    if ($action === 'kill' && function_exists('posix_kill') && defined('SIGKILL')) {
+        posix_kill(getmypid(), SIGKILL);
+        exit(137);
+    }
+    throw new \RuntimeException("forced COW Git failpoint: $name");
+}
+
 function cow_git_server_handle(
     string $branches_dir,
     string $git_repo_dir,
@@ -490,11 +512,13 @@ function cow_git_apply_push_to_branches(
         $branches_to_sync = array_values(array_filter($changed_branches, static function($branch) use ($branches_dir) {
             return is_dir(rtrim($branches_dir, "/\\") . '/' . $branch);
         }));
-        cow_git_prepare_created_branch_merge_metadata($git_repo_dir, $branch_list_path, $transaction['created']);
         if ($branches_to_sync) {
             cow_git_sync_repository($repo, $branches_dir, $branches_to_sync);
         }
         cow_git_commit_apply_transaction($transaction);
+        cow_git_write_branch_list($branches_dir, $branch_list_path);
+        cow_git_cleanup_stale_update_artifacts($branches_dir, $storage_branches_dir);
+        cow_git_cleanup_stale_delete_artifacts($branches_dir, $storage_branches_dir);
     } catch (\Throwable $e) {
         cow_git_rollback_apply_transaction($transaction);
         cow_git_cleanup_created_branch_merge_base_artifacts($git_repo_dir, $branch_list_path, $transaction['created']);
@@ -780,6 +804,7 @@ function cow_git_apply_all_refs_to_branches(
         );
         if ($transaction !== null && $updated !== null) {
             $transaction['updates'][] = $updated;
+            cow_git_failpoint('after-existing-branch-update-publish');
         }
     }
 
@@ -816,6 +841,7 @@ function cow_git_delete_removed_branches(
         if (!$staged) {
             return [];
         }
+        cow_git_failpoint('after-branch-delete-stage');
 
         cow_git_write_branch_list($branches_dir, $branch_list_path);
     } catch (\Throwable $e) {
@@ -1033,24 +1059,47 @@ function cow_git_create_branch_for_ref(
 
     $dest_storage = cow_git_branch_storage_root($storage_branches_dir, $branches_dir, $branch);
     $dest_public = rtrim($branches_dir, "/\\") . '/' . $branch;
+    if (
+        cow_git_normalize_path($dest_storage) !== cow_git_normalize_path($dest_public)
+        && (file_exists($dest_storage) || is_link($dest_storage))
+        && !file_exists($dest_public)
+        && !is_link($dest_public)
+    ) {
+        cow_git_remove_tree($dest_storage);
+        cow_git_cleanup_created_branch_merge_base_artifacts($git_repo_dir, $branch_list_path, [['branch' => $branch]]);
+        cow_git_cleanup_created_branch_id_band_metadata($git_repo_dir, $branch_list_path, [['branch' => $branch]]);
+    }
     if (file_exists($dest_storage) || is_link($dest_storage) || file_exists($dest_public) || is_link($dest_public)) {
         throw new \RuntimeException("branch '$branch' already exists");
     }
+    cow_git_cleanup_created_branch_merge_base_artifacts($git_repo_dir, $branch_list_path, [['branch' => $branch]]);
+    cow_git_cleanup_created_branch_id_band_metadata($git_repo_dir, $branch_list_path, [['branch' => $branch]]);
 
     $tmp = dirname($dest_storage) . '/.forkpress-new-' . $branch . '-' . getmypid() . '-' . bin2hex(random_bytes(4));
     $published_storage = false;
     $linked_public = false;
     $captured_merge_bases = false;
+    $attempted_merge_metadata = false;
     try {
         cow_git_clone_branch_tree($source_root, $tmp, $file_view);
         cow_git_capture_created_branch_merge_bases($git_repo_dir, $branch_list_path, $branch, $source_root);
         $captured_merge_bases = true;
         cow_git_apply_wp_files($repo, $tmp, $wp_files);
 
+        cow_git_failpoint('before-created-branch-metadata');
+        $attempted_merge_metadata = true;
+        cow_git_prepare_created_branch_merge_metadata($git_repo_dir, $branch_list_path, [[
+            'branch' => $branch,
+            'source' => $source,
+            'storage' => $tmp,
+        ]]);
+        cow_git_failpoint('after-created-branch-metadata');
+
         if (!rename($tmp, $dest_storage)) {
             throw new \RuntimeException("failed to publish git-created branch '$branch'");
         }
         $published_storage = true;
+        cow_git_failpoint('after-created-branch-storage');
 
         if (cow_git_normalize_path($dest_storage) !== cow_git_normalize_path($dest_public)) {
             if (!symlink($dest_storage, $dest_public)) {
@@ -1059,19 +1108,26 @@ function cow_git_create_branch_for_ref(
                 throw new \RuntimeException("failed to link git-created branch '$branch' into public branch directory");
             }
             $linked_public = true;
+            cow_git_failpoint('after-created-branch-public-link');
         }
 
         cow_git_rewrite_wp_config($dest_public, $debug_log);
-        cow_git_write_branch_list($branches_dir, $branch_list_path);
-        error_log("ForkPress COW git created branch '$branch' from '$source'");
-        return [
+        $created = [
             'branch' => $branch,
             'source' => $source,
             'public' => $dest_public,
             'storage' => $dest_storage,
             'linked_public' => $linked_public,
         ];
+        cow_git_failpoint('before-created-branch-list');
+        cow_git_write_branch_list($branches_dir, $branch_list_path);
+        cow_git_failpoint('after-created-branch-list');
+        error_log("ForkPress COW git created branch '$branch' from '$source'");
+        return $created;
     } catch (\Throwable $e) {
+        if ($attempted_merge_metadata) {
+            cow_git_cleanup_created_branch_id_band_metadata($git_repo_dir, $branch_list_path, [['branch' => $branch]]);
+        }
         if ($captured_merge_bases) {
             cow_git_cleanup_created_branch_merge_base_artifacts($git_repo_dir, $branch_list_path, [['branch' => $branch]]);
         }
@@ -1172,6 +1228,58 @@ function cow_git_commit_apply_transaction(array $transaction): void {
         cow_git_remove_tree($update['backup']);
     }
     cow_git_discard_staged_branch_deletes($transaction['deletes']);
+}
+
+function cow_git_cleanup_stale_update_artifacts(string $branches_dir, string $storage_branches_dir): void {
+    $parents = [rtrim($branches_dir, "/\\")];
+    $storage_parent = rtrim($storage_branches_dir, "/\\");
+    if ($storage_parent !== '' && !in_array($storage_parent, $parents, true)) {
+        $parents[] = $storage_parent;
+    }
+
+    foreach ($parents as $parent) {
+        foreach (glob($parent . '/.forkpress-update-{backup,stage,failed}-*', GLOB_BRACE) ?: [] as $path) {
+            $name = basename($path);
+            if (!preg_match('/^\.forkpress-update-(?:backup|stage|failed)-(.+)-[0-9]+-[0-9a-f]+$/', $name, $matches)) {
+                continue;
+            }
+            $branch = $matches[1];
+            if (!cow_git_valid_branch_name($branch)) {
+                continue;
+            }
+            $storage = cow_git_branch_storage_root($storage_branches_dir, $branches_dir, $branch);
+            if (is_dir($storage) && is_file(rtrim($storage, "/\\") . '/wp-load.php')) {
+                cow_git_remove_tree($path);
+            }
+        }
+    }
+}
+
+function cow_git_cleanup_stale_delete_artifacts(string $branches_dir, string $storage_branches_dir): void {
+    $parents = [[rtrim($branches_dir, "/\\"), 'public']];
+    $storage_parent = rtrim($storage_branches_dir, "/\\");
+    if ($storage_parent !== '' && $storage_parent !== rtrim($branches_dir, "/\\")) {
+        $parents[] = [$storage_parent, 'storage'];
+    }
+
+    foreach ($parents as [$parent, $label]) {
+        foreach (glob($parent . '/.forkpress-delete-' . $label . '-*') ?: [] as $path) {
+            $name = basename($path);
+            if (!preg_match('/^\.forkpress-delete-' . preg_quote($label, '/') . '-(.+)-[0-9]+-[0-9a-f]+$/', $name, $matches)) {
+                continue;
+            }
+            $branch = $matches[1];
+            if (!cow_git_valid_branch_name($branch)) {
+                continue;
+            }
+            $original = $label === 'public'
+                ? rtrim($branches_dir, "/\\") . '/' . $branch
+                : cow_git_branch_storage_root($storage_branches_dir, $branches_dir, $branch);
+            if (!file_exists($original) && !is_link($original)) {
+                cow_git_remove_tree($path);
+            }
+        }
+    }
 }
 
 function cow_git_rollback_apply_transaction(array $transaction): void {
@@ -1655,6 +1763,7 @@ function cow_git_prune_unreachable_objects(GitRepository $repo, string $git_repo
                 throw new \RuntimeException("failed to prune unreachable COW Git object $oid");
             }
             ++$deleted;
+            cow_git_failpoint('after-git-object-prune');
         }
         @rmdir($dir);
     }
