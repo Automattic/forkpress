@@ -41,6 +41,7 @@ on_error() {
   dump_if_exists "$TMP/ui-create.json"
   dump_if_exists "$TMP/ui-merge-admin.html"
   dump_if_exists "$TMP/ui-merge.json"
+  dump_if_exists "$TMP/ui-merge-metadata.json"
   dump_if_exists "$TMP/ui-main-after-merge-edit.html"
   dump_if_exists "$TMP/public-create-crash.out"
   dump_if_exists "$TMP/public-create-crash-retry.out"
@@ -180,74 +181,46 @@ create_branch_post() {
   local host
   host="$(branch_host "$branch")"
   local host_name="${host%%:*}"
-  local html="$TMP/${branch}-post-new.html"
-  local json="$TMP/${branch}-rest-save.json"
-  local cookie_jar="$TMP/${branch}-post-cookies.txt"
-  local login_html="$TMP/${branch}-post-login.html"
-
-  : > "$cookie_jar"
-  if ! curl -sS -L -c "$cookie_jar" -b "$cookie_jar" \
-    --resolve "$host_name:$PORT:127.0.0.1" \
-    "http://$host/wp-login.php" \
-    -o "$login_html"; then
-    echo "failed to warm post editor login cookies on $branch" >&2
-    dump_if_exists "$login_html"
-    "$BIN" logs --work-dir "$WORK_DIR" --file all -n 160 >&2 || true
-    exit 1
-  fi
-
-  local html_http
-  if ! html_http="$(
-    curl -sS -L -c "$cookie_jar" -b "$cookie_jar" -o "$html" -w '%{http_code}' \
-      --resolve "$host_name:$PORT:127.0.0.1" \
-      "http://$host/wp-admin/post-new.php"
-  )"; then
-    echo "failed to fetch post editor on $branch" >&2
-    "$BIN" logs --work-dir "$WORK_DIR" --file all -n 160 >&2 || true
-    exit 1
-  fi
-  if [ "$html_http" != "200" ]; then
-    echo "post editor on $branch returned $html_http" >&2
-    dump_if_exists "$html"
-    "$BIN" logs --work-dir "$WORK_DIR" --file all -n 160 >&2 || true
-    exit 1
-  fi
-
-  local nonce
-  if ! nonce="$(node - "$html" <<'NODE'
-const fs = require('fs');
-const html = fs.readFileSync(process.argv[2], 'utf8');
-const match = html.match(/wp\.apiFetch\.createNonceMiddleware\(\s*"([^"]+)"\s*\)/)
-  || html.match(/var wpApiSettings = .*?"nonce":"([^"]+)"/s);
-if (!match) process.exit(2);
-console.log(match[1]);
-NODE
-)"; then
-    echo "failed to read REST nonce from post editor on $branch" >&2
-    dump_if_exists "$html"
-    "$BIN" logs --work-dir "$WORK_DIR" --file all -n 160 >&2 || true
-    exit 1
-  fi
+  local json="$TMP/${branch}-post-save.json"
+  local headers="$TMP/${branch}-post-save.headers"
 
   local http
   if ! http="$(
-    curl -sS -o "$json" -w '%{http_code}' \
-      -b "$cookie_jar" \
+    curl -sS -D "$headers" -o "$json" -w '%{http_code}' \
       --resolve "$host_name:$PORT:127.0.0.1" \
-      -H "Content-Type: application/json" \
-      -H "X-WP-Nonce: $nonce" \
-      --data "{\"title\":\"$title\",\"content\":\"Saved from ForkPress COW reset e2e\",\"status\":\"publish\"}" \
-      "http://$host/index.php?rest_route=/wp/v2/posts"
+      --get \
+      --data-urlencode "forkpress_e2e_post=create" \
+      --data-urlencode "title=$title" \
+      "http://$host/index.php"
   )"; then
-    echo "REST save request on $branch failed" >&2
+    echo "test post create request on $branch failed" >&2
+    dump_if_exists "$headers"
     dump_if_exists "$json"
     "$BIN" logs --work-dir "$WORK_DIR" --file all -n 160 >&2 || true
     exit 1
   fi
-  if [ "$http" != "201" ]; then
-    echo "REST save on $branch returned $http" >&2
+  if [ "$http" != "200" ]; then
+    echo "test post create on $branch returned $http" >&2
+    dump_if_exists "$headers"
+    dump_if_exists "$json"
+    "$BIN" logs --work-dir "$WORK_DIR" --file all -n 160 >&2 || true
+    exit 1
+  fi
+  if ! php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(($data["success"] ?? null) === true && ($data["title"] ?? null) === $argv[2] && (int)($data["id"] ?? 0) > 0 ? 0 : 1);' "$json" "$title"; then
+    echo "test post create on $branch returned an unexpected payload" >&2
     cat "$json" >&2
     "$BIN" logs --work-dir "$WORK_DIR" --file all -n 160 >&2 || true
+    exit 1
+  fi
+}
+
+assert_branch_config_uses_final_db() {
+  local branch="$1"
+  local config="$WORK/$branch/wp-config.php"
+  grep -F "/$branch/wp-content/database/.ht.sqlite" "$config" >/dev/null
+  if grep -F "branch-create-stage" "$config" >/dev/null; then
+    echo "created branch $branch wp-config.php still points at a staging path" >&2
+    cat "$config" >&2
     exit 1
   fi
 }
@@ -410,6 +383,62 @@ log_step "start server"
 
 log_step "install runtime AUTOINCREMENT probe"
 mkdir -p "$WORK/main/wp-content/mu-plugins"
+cat > "$WORK/main/wp-content/mu-plugins/forkpress-e2e-deterministic-admin.php" <<'PHP'
+<?php
+add_filter('automatic_updater_disabled', '__return_true');
+
+add_filter('pre_site_transient_update_core', function () {
+    return (object) [
+        'updates' => [],
+        'last_checked' => 2147483647,
+        'version_checked' => get_bloginfo('version'),
+    ];
+});
+
+add_filter('pre_site_transient_update_plugins', function () {
+    return (object) [
+        'response' => [],
+        'translations' => [],
+        'no_update' => [],
+        'last_checked' => 2147483647,
+        'checked' => [],
+    ];
+});
+
+add_filter('pre_site_transient_update_themes', function () {
+    return (object) [
+        'response' => [],
+        'translations' => [],
+        'no_update' => [],
+        'last_checked' => 2147483647,
+        'checked' => [],
+    ];
+});
+
+add_action('admin_init', function () {
+    remove_action('admin_init', '_maybe_update_core');
+    remove_action('admin_init', '_maybe_update_plugins');
+    remove_action('admin_init', '_maybe_update_themes');
+}, 0);
+
+add_filter('pre_http_request', function ($preempt, $args, $url) {
+    if (is_string($url) && preg_match('#^https?://api\.wordpress\.org/#', $url)) {
+        return [
+            'headers' => [],
+            'body' => '',
+            'response' => [
+                'code' => 204,
+                'message' => 'No Content',
+            ],
+            'cookies' => [],
+            'filename' => null,
+        ];
+    }
+
+    return $preempt;
+}, 10, 3);
+PHP
+
 cat > "$WORK/main/wp-content/mu-plugins/forkpress-e2e-autoinc.php" <<'PHP'
 <?php
 add_action('init', function () {
@@ -449,6 +478,41 @@ add_action('init', function () {
     $max_id = (int)$wpdb->get_var("SELECT COALESCE(MAX(id), 0) FROM $quoted");
     $seq = (int)$wpdb->get_var($wpdb->prepare("SELECT seq FROM sqlite_sequence WHERE name = %s", $table));
     wp_send_json(['action' => $action, 'rows' => $rows, 'max_id' => $max_id, 'seq' => $seq]);
+}, 20);
+PHP
+
+cat > "$WORK/main/wp-content/mu-plugins/forkpress-e2e-post.php" <<'PHP'
+<?php
+add_action('init', function () {
+    if (!isset($_GET['forkpress_e2e_post'])) {
+        return;
+    }
+
+    $action = sanitize_key(wp_unslash($_GET['forkpress_e2e_post']));
+    if ($action !== 'create') {
+        wp_send_json_error(['error' => 'unknown action'], 400);
+    }
+
+    $title = isset($_GET['title']) ? sanitize_text_field(wp_unslash($_GET['title'])) : '';
+    if ($title === '') {
+        wp_send_json_error(['error' => 'missing title'], 400);
+    }
+
+    $post_id = wp_insert_post([
+        'post_type' => 'post',
+        'post_status' => 'publish',
+        'post_title' => $title,
+        'post_content' => 'Saved from ForkPress COW reset e2e',
+    ], true);
+    if (is_wp_error($post_id)) {
+        wp_send_json_error(['error' => $post_id->get_error_message()], 500);
+    }
+
+    wp_send_json([
+        'success' => true,
+        'id' => (int)$post_id,
+        'title' => get_post_field('post_title', $post_id),
+    ]);
 }, 20);
 PHP
 
@@ -1070,6 +1134,7 @@ fi
 php -r '$db = new SQLite3($argv[1]); exit((int)$db->querySingle("SELECT MAX(id) FROM wp_forkpress_e2e_autoinc") === 1 ? 0 : 1);' "$WORK_DIR/cow/merge/bases/ui-created.sqlite"
 php -r '$base = json_decode((string)file_get_contents($argv[1]), true); $entries = $base["entries"] ?? []; exit(is_array($entries) && count($entries) > 0 && !isset($entries["wp-content/ui-created-file.txt"]) ? 0 : 1);' "$WORK_DIR/cow/merge/file-bases/ui-created.json"
 php -r '$meta = new SQLite3($argv[1]); $branch = new SQLite3($argv[2]); $band = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''ui-created'\'' AND table_name = '\''wp_forkpress_e2e_autoinc'\''", true); $seq = (int)$branch->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''wp_forkpress_e2e_autoinc'\''"); exit($band && (int)$band["band_start"] >= 1000000 && $seq === (int)$band["band_start"] - 1 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite" "$WORK/ui-created/wp-content/database/.ht.sqlite"
+assert_branch_config_uses_final_db ui-created
 
 UI_MERGE_TITLE="UI branch merge $(date +%s)"
 create_branch_post ui-created "$UI_MERGE_TITLE"
@@ -1118,6 +1183,7 @@ curl -sS -H "Host: wp.localhost:$PORT" \
   "http://127.0.0.1:$PORT/wp-admin/edit.php" \
   -o "$TMP/ui-main-after-merge-edit.html"
 grep -F "$UI_MERGE_TITLE" "$TMP/ui-main-after-merge-edit.html" >/dev/null
+php -r '$db = new SQLite3($argv[1]); $run = $db->querySingle("SELECT id, source_branch, target_branch, status, failure_reason FROM merge_runs WHERE source_branch = '\''ui-created'\'' AND target_branch = '\''main'\'' ORDER BY id DESC LIMIT 1", true); $conflicts = []; if ($run) { $stmt = $db->prepare("SELECT table_name, column_name, conflict_type, row_identity FROM merge_conflicts WHERE run_id = :run_id ORDER BY id ASC LIMIT 40"); $stmt->bindValue(":run_id", (int)$run["id"], SQLITE3_INTEGER); $res = $stmt->execute(); while ($row = $res->fetchArray(SQLITE3_ASSOC)) { $conflicts[] = $row; } } file_put_contents($argv[2], json_encode(["run" => $run ?: null, "conflicts" => $conflicts], JSON_PRETTY_PRINT));' "$WORK_DIR/cow/merge/metadata.sqlite" "$TMP/ui-merge-metadata.json"
 php -r '$db = new SQLite3($argv[1]); $count = (int)$db->querySingle("SELECT COUNT(*) FROM merge_runs WHERE source_branch = '\''ui-created'\'' AND target_branch = '\''main'\'' AND status IN ('\''completed'\'', '\''completed_with_conflicts'\'')"); exit($count > 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
 
 log_step "public branch create crash retry"
@@ -1145,6 +1211,7 @@ test -f "$WORK_DIR/cow/merge/file-bases/feature-cow.json"
 php -r '$db = new SQLite3($argv[1]); exit((int)$db->querySingle("SELECT MAX(id) FROM wp_forkpress_e2e_autoinc") === 1 ? 0 : 1);' "$WORK_DIR/cow/merge/bases/feature-cow.sqlite"
 php -r '$base = json_decode((string)file_get_contents($argv[1]), true); $entries = $base["entries"] ?? []; exit(is_array($entries) && count($entries) > 0 && !isset($entries["wp-content/forkpress-branch.txt"]) ? 0 : 1);' "$WORK_DIR/cow/merge/file-bases/feature-cow.json"
 php -r '$meta = new SQLite3($argv[1]); $branch = new SQLite3($argv[2]); $band = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''feature-cow'\'' AND table_name = '\''wp_forkpress_e2e_autoinc'\''", true); $seq = (int)$branch->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''wp_forkpress_e2e_autoinc'\''"); exit($band && (int)$band["band_start"] >= 1000000 && $seq === (int)$band["band_start"] - 1 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite" "$WORK/feature-cow/wp-content/database/.ht.sqlite"
+assert_branch_config_uses_final_db feature-cow
 autoinc_runtime_request feature-cow insert "$TMP/autoinc-feature-insert.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); $meta = new SQLite3($argv[2]); $branch = new SQLite3($argv[3]); $max = (int)($data["max_id"] ?? 0); $band = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''feature-cow'\'' AND table_name = '\''wp_forkpress_e2e_autoinc'\''", true); $seq = (int)$branch->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''wp_forkpress_e2e_autoinc'\''"); exit($band && $max >= (int)$band["band_start"] && $max <= (int)$band["band_end"] && $seq === $max ? 0 : 1);' "$TMP/autoinc-feature-insert.json" "$WORK_DIR/cow/merge/metadata.sqlite" "$WORK/feature-cow/wp-content/database/.ht.sqlite"
 
