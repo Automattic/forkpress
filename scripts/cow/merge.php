@@ -3909,32 +3909,39 @@ function cow_merge_recover_crash_artifacts(
             $restored_metadata_snapshot = null;
             $restored_filesystem_transaction = null;
             $restored_filesystem_snapshot = null;
+            $restored_any_artifact = false;
             if ($restore_target_db) {
                 $snapshot = $artifact['target_db_snapshot'] ?? null;
-                if (!is_array($snapshot)) {
+                if (!is_array($snapshot) && !$restore_files) {
                     throw new RuntimeException("crash recovery artifact has no target DB snapshot: {$artifact['artifact_path']}");
                 }
-                cow_merge_restore_sqlite_snapshot($snapshot);
-                $restored_snapshot = $snapshot;
-                $metadata_snapshot = $artifact['metadata_db_snapshot'] ?? null;
-                if (is_array($metadata_snapshot)) {
-                    cow_merge_restore_sqlite_snapshot($metadata_snapshot);
-                    $restored_metadata_snapshot = $metadata_snapshot;
+                if (is_array($snapshot)) {
+                    cow_merge_restore_sqlite_snapshot($snapshot);
+                    $restored_snapshot = $snapshot;
+                    $restored_any_artifact = true;
+                    $metadata_snapshot = $artifact['metadata_db_snapshot'] ?? null;
+                    if (is_array($metadata_snapshot)) {
+                        cow_merge_restore_sqlite_snapshot($metadata_snapshot);
+                        $restored_metadata_snapshot = $metadata_snapshot;
+                    }
                 }
             }
             if ($restore_files) {
                 $filesystem_transaction = $artifact['filesystem_transaction'] ?? null;
                 $filesystem_snapshot = $artifact['filesystem_snapshot'] ?? null;
                 $target_root = (string)($artifact['target_root'] ?? '');
-                if ((!is_array($filesystem_transaction) && !is_array($filesystem_snapshot)) || $target_root === '') {
+                $can_restore_filesystem = (is_array($filesystem_transaction) || is_array($filesystem_snapshot)) && $target_root !== '';
+                if (!$can_restore_filesystem && !$restored_any_artifact) {
                     throw new RuntimeException("crash recovery artifact has no filesystem transaction: {$artifact['artifact_path']}");
                 }
-                if (is_array($filesystem_snapshot)) {
+                if ($can_restore_filesystem && is_array($filesystem_snapshot)) {
                     cow_merge_file_root_snapshot_restore($filesystem_snapshot, $target_root);
                     $restored_filesystem_snapshot = $filesystem_snapshot;
-                } else {
+                    $restored_any_artifact = true;
+                } elseif ($can_restore_filesystem && is_array($filesystem_transaction)) {
                     cow_merge_file_transaction_restore($filesystem_transaction, $target_root);
                     $restored_filesystem_transaction = $filesystem_transaction;
+                    $restored_any_artifact = true;
                 }
             }
             cow_merge_failpoint('after-crash-recovery-restore');
@@ -12980,8 +12987,6 @@ function cow_merge_branch_state(
                 $filesystem_snapshot
             );
             cow_merge_failpoint('before-file-op');
-            cow_merge_remove_crash_recovery_artifact($whole_branch_crash_recovery_artifact);
-            $whole_branch_crash_recovery_artifact = null;
             $file_result = cow_merge_files($base_files, $source_root, $target_root, $metadata_db, (int)$result['run_id']);
             $result['file_applied'] = $file_result['applied'];
             $result['file_conflicts'] = $file_result['conflicts'];
@@ -13008,6 +13013,8 @@ function cow_merge_branch_state(
             }
         }
 
+        cow_merge_remove_crash_recovery_artifact($whole_branch_crash_recovery_artifact);
+        $whole_branch_crash_recovery_artifact = null;
         return $result;
     } catch (Throwable $e) {
         if ($target_snapshot !== null && $metadata_snapshot !== null) {

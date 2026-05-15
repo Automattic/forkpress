@@ -37,9 +37,11 @@ The PHP merge suite covers these rollback classes:
   completed, blocks retries while pending, and can be inspected/restored
   through `recover-crash --restore-target-db`.
 - Process death immediately after an individual filesystem operation but before
-  filesystem metadata commit, with a durable crash-recovery artifact that points
-  at the staged filesystem transaction and can be restored through
-  `recover-crash --restore-files`.
+  filesystem metadata commit, with durable crash-recovery artifacts that point
+  at both the staged filesystem transaction and the whole-branch pre-merge DB,
+  metadata, and filesystem snapshots. File-only recovery can use
+  `recover-crash --restore-files`; whole-branch recovery uses
+  `recover-crash --restore-target-db --restore-files`.
 - Process death after the DB phase of a DB+file merge but before the first file
   operation, with a durable whole-branch crash-recovery artifact that points at
   the pre-merge target DB, metadata DB, and filesystem-root snapshots and can be
@@ -107,12 +109,11 @@ OS-level interruption, not just deliberate exceptions:
   the direct DB merge path; the remaining work is to extend the same
   process-death harness to full DB+file+Git branch publication.
 - Kill after metadata commit but before file publish is covered for the
-  DB+file merge path before the first file operation; the remaining work is to
-  extend the same whole-branch recovery model across later file publish and
-  product-level publication boundaries.
+  DB+file merge path before the first file operation.
 - Kill after one file publish but before later file publishes is covered for
-  direct filesystem merge rollback; the remaining work is to extend the same
-  recovery model to full branch publication after DB+file completion.
+  direct filesystem merge rollback and DB+file whole-branch recovery; the
+  remaining work is to extend the same recovery model to product-level
+  publication after DB+file completion.
 - Kill after file publish but before Git ref update.
 - Kill after Git ref update but before branch list update.
 - Kill during public branch symlink/tree publication after storage/link state is
