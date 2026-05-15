@@ -564,10 +564,51 @@ pub fn ensure_cow_branch_exists(
     let public_root = cow_branch_root(layout, branch);
     let storage_root = cow_branch_storage_root(layout, branch, file_view);
     if public_root.join("wp-load.php").is_file() || storage_root.join("wp-load.php").is_file() {
+        let root = if storage_root.join("wp-load.php").is_file() {
+            &storage_root
+        } else {
+            &public_root
+        };
+        let db = validate_existing_cow_branch_birth_files(layout, branch, root)?;
+        validate_cow_branch_birth_metadata(layout, runtime, shared, branch, &db)
+            .with_context(|| {
+                format!(
+                    "existing COW branch '{branch}' is missing required merge metadata; reset or delete/recreate it before reuse"
+                )
+            })?;
         println!("forkpress: reusing existing branch {branch}");
         return Ok(());
     }
     create_cow_branch(layout, runtime, shared, branch, from, url_hint)
+}
+
+fn validate_existing_cow_branch_birth_files(
+    layout: &Layout,
+    branch: &str,
+    root: &Path,
+) -> Result<PathBuf> {
+    let db = cow_sqlite_db_path(root);
+    if !db.is_file() {
+        bail!(
+            "existing COW branch '{branch}' is missing its database at {}. Reset or delete/recreate it before reuse.",
+            db.display()
+        );
+    }
+    let base_db = cow_merge_base_db_path(layout, branch)?;
+    if !base_db.is_file() {
+        bail!(
+            "existing COW branch '{branch}' is missing its DB merge base at {}. Reset or delete/recreate it before reuse.",
+            base_db.display()
+        );
+    }
+    let file_base = cow_merge_file_base_path(layout, branch)?;
+    if !file_base.is_file() {
+        bail!(
+            "existing COW branch '{branch}' is missing its filesystem merge base at {}. Reset or delete/recreate it before reuse.",
+            file_base.display()
+        );
+    }
+    Ok(db)
 }
 
 pub fn show_cow_branch(layout: &Layout, branch: &str) -> Result<()> {
@@ -3582,6 +3623,51 @@ mod tests {
             &base_db, "-shm"
         )));
         assert!(!path_exists_no_follow(&file_base));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn existing_branch_reuse_requires_merge_bases() {
+        let root = std::env::temp_dir().join(format!(
+            "forkpress-branch-reuse-metadata-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let layout = Layout::new(root.join(".forkpress")).unwrap();
+        let branch_root = cow_branch_root(&layout, "feature");
+        fs::create_dir_all(branch_root.join("wp-content/database")).unwrap();
+        fs::write(branch_root.join("wp-load.php"), b"<?php\n").unwrap();
+        fs::write(
+            branch_root.join("wp-content/database/.ht.sqlite"),
+            b"sqlite placeholder",
+        )
+        .unwrap();
+
+        let missing_base =
+            validate_existing_cow_branch_birth_files(&layout, "feature", &branch_root)
+                .unwrap_err()
+                .to_string();
+        assert!(missing_base.contains("missing its DB merge base"));
+
+        let base_db = cow_merge_base_db_path(&layout, "feature").unwrap();
+        fs::create_dir_all(base_db.parent().unwrap()).unwrap();
+        fs::write(&base_db, b"base").unwrap();
+        let missing_file_base =
+            validate_existing_cow_branch_birth_files(&layout, "feature", &branch_root)
+                .unwrap_err()
+                .to_string();
+        assert!(missing_file_base.contains("missing its filesystem merge base"));
+
+        let file_base = cow_merge_file_base_path(&layout, "feature").unwrap();
+        fs::create_dir_all(file_base.parent().unwrap()).unwrap();
+        fs::write(&file_base, b"{}").unwrap();
+        let db = validate_existing_cow_branch_birth_files(&layout, "feature", &branch_root)
+            .expect("existing branch has the required birth files");
+        assert_eq!(db, branch_root.join("wp-content/database/.ht.sqlite"));
 
         fs::remove_dir_all(root).unwrap();
     }
