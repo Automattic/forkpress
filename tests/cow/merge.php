@@ -1330,6 +1330,70 @@ try {
     assert_true(str_contains((string)$merge_restore_failure_artifact, '"backup_exists":true'), 'rollback-failure artifact keeps the target DB snapshot backup for recovery');
 
     if (function_exists('posix_kill') && defined('SIGKILL')) {
+        $crash_before_commit_base = $tmp . '/crash-before-commit-base.sqlite';
+        $crash_before_commit_source = $tmp . '/crash-before-commit-source.sqlite';
+        $crash_before_commit_target = $tmp . '/crash-before-commit-target.sqlite';
+        $crash_before_commit_metadata = $tmp . '/.forkpress/cow/merge/crash-before-commit/metadata.sqlite';
+        create_base_db($crash_before_commit_base);
+        copy($crash_before_commit_base, $crash_before_commit_source);
+        copy($crash_before_commit_base, $crash_before_commit_target);
+        $db = open_db($crash_before_commit_source);
+        $db->exec("UPDATE wp_posts SET post_content = 'Source crash before commit content' WHERE ID = 1");
+        $db->close();
+        $crash_before_commit_result = run_merge_cli_env(
+            [
+                'merge',
+                '--base-db', $crash_before_commit_base,
+                '--source-db', $crash_before_commit_source,
+                '--target-db', $crash_before_commit_target,
+                '--metadata-db', $crash_before_commit_metadata,
+                '--source', 'feature-crash-before-commit',
+                '--target', 'main',
+            ],
+            [
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT' => 'before-target-db-commit',
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION' => 'kill',
+            ]
+        );
+        assert_true($crash_before_commit_result['status'] !== 0, 'crash failpoint terminates the merge subprocess before target DB commit');
+        assert_same(
+            scalar($crash_before_commit_target, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Base content',
+            'process death before target DB commit leaves the target DB transaction rolled back'
+        );
+        $crash_before_commit_files = glob(dirname($crash_before_commit_metadata) . '/crash-recovery/*.json');
+        assert_true(is_array($crash_before_commit_files) && count($crash_before_commit_files) === 1, 'process death before target DB commit leaves one crash recovery artifact');
+        $crash_before_commit_recovery = json_decode(file_get_contents($crash_before_commit_files[0]), true);
+        assert_same($crash_before_commit_recovery['checkpoint'] ?? null, 'target-db-commit', 'pre-target-commit crash recovery artifact uses the target DB commit checkpoint');
+        assert_same($crash_before_commit_recovery['source_branch'] ?? null, 'feature-crash-before-commit', 'pre-target-commit crash recovery artifact preserves source branch context');
+        $crash_before_commit_backup = $crash_before_commit_recovery['artifacts']['target_db_snapshot']['backup'] ?? null;
+        assert_true(is_string($crash_before_commit_backup) && is_file($crash_before_commit_backup), 'pre-target-commit crash recovery artifact preserves the target DB snapshot');
+        $blocked_crash_before_commit_rematch = run_merge_cli([
+            'merge',
+            '--base-db', $crash_before_commit_base,
+            '--source-db', $crash_before_commit_source,
+            '--target-db', $crash_before_commit_target,
+            '--metadata-db', $crash_before_commit_metadata,
+            '--source', 'feature-crash-before-commit',
+            '--target', 'main',
+        ]);
+        assert_true($blocked_crash_before_commit_rematch['status'] !== 0, 'pending pre-target-commit crash recovery blocks a subsequent merge');
+        assert_true(str_contains($blocked_crash_before_commit_rematch['output'], 'pending COW merge crash recovery artifact'), 'pending pre-target-commit crash recovery error explains the recovery queue');
+        $crash_before_commit_restore = run_merge_cli([
+            'recover-crash',
+            '--metadata-db', $crash_before_commit_metadata,
+            '--restore-target-db',
+            '--format', 'json',
+        ]);
+        assert_same($crash_before_commit_restore['status'], 0, 'crash recovery CLI restores pre-target-commit target DB snapshots');
+        $crash_before_commit_restore_json = json_decode($crash_before_commit_restore['output'], true);
+        assert_same($crash_before_commit_restore_json['restored'] ?? null, 1, 'crash recovery CLI reports one restored pre-target-commit artifact');
+        assert_same(
+            scalar($crash_before_commit_target, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Base content',
+            'crash recovery CLI leaves the pre-target-commit target DB at base content'
+        );
+
         $crash_commit_base = $tmp . '/crash-commit-base.sqlite';
         $crash_commit_source = $tmp . '/crash-commit-source.sqlite';
         $crash_commit_target = $tmp . '/crash-commit-target.sqlite';
