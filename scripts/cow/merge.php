@@ -4807,6 +4807,20 @@ function cow_merge_wordpress_post_content_reference_violation(
             $source_action
         );
     };
+    $check_user = function (mixed $id, string $label) use ($source, $target, $meta, $source_branch, $source_action): ?string {
+        return cow_merge_wordpress_parent_reference_violation(
+            $source,
+            $target,
+            $meta,
+            $source_branch,
+            "wp_posts post_content $label",
+            'wp_users',
+            'ID',
+            $id,
+            'user',
+            $source_action
+        );
+    };
 
     $blocks = cow_merge_wordpress_post_content_blocks($content);
     if (!$blocks) {
@@ -4848,6 +4862,13 @@ function cow_merge_wordpress_post_content_reference_violation(
                 if ($violation !== null) {
                     return $violation;
                 }
+            }
+        }
+
+        if ($block_name === 'avatar' && array_key_exists('userId', $attrs)) {
+            $violation = $check_user($attrs['userId'], 'wp:avatar.userId');
+            if ($violation !== null) {
+                return $violation;
             }
         }
     }

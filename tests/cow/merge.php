@@ -14882,6 +14882,7 @@ SQL);
     $db->exec("INSERT INTO wp_users (ID, user_login, user_email) VALUES (1, 'base-user', 'base@example.test')");
     $db->exec("INSERT INTO wp_usermeta (user_id, meta_key, meta_value) VALUES (1, 'nickname', 'base-user')");
     $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_author) VALUES ('Base authored post', 'base author should remain', 'publish', 1)");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_author) VALUES ('Base avatar block consumer', '<!-- wp:paragraph --><p>base avatar content</p><!-- /wp:paragraph -->', 'publish', 1)");
     $db->exec("INSERT INTO wp_comments (comment_post_ID, comment_content, user_id) VALUES (1, 'Base user comment', 1)");
     $db->close();
     copy($band_explicit_user_base, $band_explicit_user_source);
@@ -14892,6 +14893,7 @@ SQL);
     $db->exec("INSERT INTO wp_usermeta (user_id, meta_key, meta_value) VALUES (2, 'description', 'metadata behind held explicit user')");
     $db->exec("UPDATE wp_usermeta SET user_id = 2 WHERE meta_key = 'nickname'");
     $db->exec("UPDATE wp_posts SET post_author = 2 WHERE post_title = 'Base authored post'");
+    $db->exec("UPDATE wp_posts SET post_content = '<!-- wp:avatar {\"userId\":2,\"size\":96} /-->' WHERE post_title = 'Base avatar block consumer'");
     $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_author) VALUES ('Post behind explicit author', 'author should be review-held', 'publish', 2)");
     $db->exec("UPDATE wp_comments SET user_id = 2 WHERE comment_content = 'Base user comment'");
     $db->exec("INSERT INTO wp_comments (comment_post_ID, comment_content, user_id) VALUES (1, 'Comment behind held explicit user', 2)");
@@ -14909,6 +14911,7 @@ SQL);
     assert_same((int)scalar($band_explicit_user_target, 'SELECT COUNT(*) FROM wp_usermeta WHERE user_id = 2'), 0, 'usermeta pointing at a held explicit source user is not applied automatically');
     assert_same((int)scalar($band_explicit_user_target, "SELECT user_id FROM wp_usermeta WHERE meta_key = 'nickname'"), 1, 'updated usermeta pointing at a held explicit source user is not applied automatically');
     assert_same((int)scalar($band_explicit_user_target, "SELECT post_author FROM wp_posts WHERE post_title = 'Base authored post'"), 1, 'updated post authors pointing at a held explicit source user are not applied automatically');
+    assert_same(scalar($band_explicit_user_target, "SELECT post_content FROM wp_posts WHERE post_title = 'Base avatar block consumer'"), '<!-- wp:paragraph --><p>base avatar content</p><!-- /wp:paragraph -->', 'updated avatar block refs pointing at a held explicit source user are not applied automatically');
     assert_same((int)scalar($band_explicit_user_target, 'SELECT COUNT(*) FROM wp_posts WHERE post_author = 2'), 0, 'posts authored by a held explicit source user are not applied automatically');
     assert_same((int)scalar($band_explicit_user_target, "SELECT user_id FROM wp_comments WHERE comment_content = 'Base user comment'"), 1, 'updated comments pointing at a held explicit source user are not applied automatically');
     assert_same((int)scalar($band_explicit_user_target, 'SELECT COUNT(*) FROM wp_comments WHERE user_id = 2'), 0, 'comments pointing at a held explicit source user are not applied automatically');
@@ -14924,8 +14927,8 @@ SQL);
     );
     assert_same(
         (int)scalar($band_explicit_user_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-user-source' AND c.table_name = 'wp_posts' AND c.conflict_type = 'row-target-constraint'"),
-        2,
-        'posts authored by a held explicit source user record a reviewable row conflict'
+        3,
+        'posts authored by or referencing a held explicit source user record a reviewable row conflict'
     );
     assert_same(
         (int)scalar($band_explicit_user_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-user-source' AND c.table_name = 'wp_comments' AND c.conflict_type = 'row-target-constraint'"),
@@ -14933,11 +14936,11 @@ SQL);
         'comments pointing at a held explicit source user record a reviewable row conflict'
     );
     assert_true(
-        (int)scalar($band_explicit_user_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-user-source' AND d.table_name IN ('wp_usermeta', 'wp_posts', 'wp_comments') AND d.decision = 'target-wins' AND d.reason LIKE '%parent user must merge before child row%'") === 6,
+        (int)scalar($band_explicit_user_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-user-source' AND d.table_name IN ('wp_usermeta', 'wp_posts', 'wp_comments') AND d.decision = 'target-wins' AND d.reason LIKE '%parent user must merge before child row%'") === 7,
         'child rows held behind an explicit source user explain the missing parent'
     );
     assert_true(
-        (int)scalar($band_explicit_user_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-user-source' AND d.table_name IN ('wp_usermeta', 'wp_posts', 'wp_comments') AND d.decision = 'target-wins' AND d.reason LIKE 'source changed%'") === 3,
+        (int)scalar($band_explicit_user_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-user-source' AND d.table_name IN ('wp_usermeta', 'wp_posts', 'wp_comments') AND d.decision = 'target-wins' AND d.reason LIKE 'source changed%'") === 4,
         'updated child rows held behind an explicit source user explain that the source changed the row'
     );
 
