@@ -935,6 +935,7 @@ add_action('init', function () {
             'content' => $post->post_content,
             'block_refs' => $block_refs,
             'author' => (int)$post->post_author,
+            'parent' => (int)$post->post_parent,
             'branch' => get_post_meta($post->ID, '_forkpress_semantic_branch', true)
                 ?: get_post_meta($post->ID, '_forkpress_semantic_note', true)
                 ?: get_post_meta($post->ID, '_forkpress_semantic_media', true),
@@ -1681,13 +1682,18 @@ $editedPageValid = static function (array $posts, array $users, string $branch, 
     return (($edited["content"] ?? null) === $expectedContent)
         && ((int)($edited["author"] ?? 0) === (int)($user["id"] ?? 0));
 };
+$attachmentValid = static function (array $posts, string $suffix): bool {
+    $media = $posts["Semantic $suffix Media"] ?? [];
+    $pageId = (int)($posts["Semantic $suffix Page"]["id"] ?? 0);
+    return $pageId > 0
+        && (($media["file_exists"] ?? null) === true)
+        && in_array("thumbnail", $media["metadata_sizes"] ?? [], true)
+        && (($media["generated_files"]["thumbnail"] ?? null) === true)
+        && ((int)($media["parent"] ?? 0) === $pageId);
+};
 $ok = $ok
-    && (($posts["Semantic Source Media"]["file_exists"] ?? null) === true)
-    && (($posts["Semantic Target Media"]["file_exists"] ?? null) === true)
-    && in_array("thumbnail", $posts["Semantic Source Media"]["metadata_sizes"] ?? [], true)
-    && in_array("thumbnail", $posts["Semantic Target Media"]["metadata_sizes"] ?? [], true)
-    && (($posts["Semantic Source Media"]["generated_files"]["thumbnail"] ?? null) === true)
-    && (($posts["Semantic Target Media"]["generated_files"]["thumbnail"] ?? null) === true)
+    && $attachmentValid($posts, "Source")
+    && $attachmentValid($posts, "Target")
     && !isset($posts["Semantic Source Delete Page"])
     && !isset($posts["Semantic Target Delete Page"])
     && in_array("Semantic Source Topic", $posts["Semantic Source Page"]["terms"] ?? [], true)
