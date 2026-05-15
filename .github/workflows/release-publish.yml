@@ -174,14 +174,14 @@ jobs:
       - name: Build forkpress
         run: cargo build --release --target ${{ matrix.target }} -p forkpress-cli --bin forkpress
 
-      - name: Require signing for published Windows releases
-        if: matrix.os == 'windows' && env.WINDOWS_CODESIGN_CERT_BASE64 == ''
+      - name: Warn when Windows signing is unavailable
+        if: matrix.os == 'windows' && (env.WINDOWS_CODESIGN_CERT_BASE64 == '' || env.WINDOWS_CODESIGN_PASSWORD == '')
         shell: pwsh
         run: |
-          throw 'Published Windows releases require WINDOWS_CODESIGN_CERT_BASE64 and WINDOWS_CODESIGN_PASSWORD secrets.'
+          Write-Output '::warning::WINDOWS_CODESIGN_CERT_BASE64 and WINDOWS_CODESIGN_PASSWORD are not fully configured; publishing unsigned Windows artifacts.'
 
       - name: Sign forkpress.exe (windows)
-        if: matrix.os == 'windows' && env.WINDOWS_CODESIGN_CERT_BASE64 != ''
+        if: matrix.os == 'windows' && env.WINDOWS_CODESIGN_CERT_BASE64 != '' && env.WINDOWS_CODESIGN_PASSWORD != ''
         shell: pwsh
         run: scripts/windows/sign.ps1 -Files "target/${{ matrix.target }}/release/forkpress.exe"
 
@@ -225,7 +225,7 @@ jobs:
             /O"${{ github.workspace }}"
 
       - name: Sign installer (windows)
-        if: matrix.os == 'windows' && env.WINDOWS_CODESIGN_CERT_BASE64 != ''
+        if: matrix.os == 'windows' && env.WINDOWS_CODESIGN_CERT_BASE64 != '' && env.WINDOWS_CODESIGN_PASSWORD != ''
         shell: pwsh
         run: scripts/windows/sign.ps1 -Files ForkPressSetup.exe
 

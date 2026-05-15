@@ -166,7 +166,7 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }} -p forkpress-cli --bin forkpress
 
       - name: Sign forkpress.exe (windows)
-        if: matrix.os == 'windows' && env.WINDOWS_CODESIGN_CERT_BASE64 != ''
+        if: matrix.os == 'windows' && env.WINDOWS_CODESIGN_CERT_BASE64 != '' && env.WINDOWS_CODESIGN_PASSWORD != ''
         shell: pwsh
         run: scripts/windows/sign.ps1 -Files "target/${{ matrix.target }}/release/forkpress.exe"
 
@@ -210,7 +210,7 @@ jobs:
             /O"${{ github.workspace }}"
 
       - name: Sign installer (windows)
-        if: matrix.os == 'windows' && env.WINDOWS_CODESIGN_CERT_BASE64 != ''
+        if: matrix.os == 'windows' && env.WINDOWS_CODESIGN_CERT_BASE64 != '' && env.WINDOWS_CODESIGN_PASSWORD != ''
         shell: pwsh
         run: scripts/windows/sign.ps1 -Files ForkPressSetup.exe
 
