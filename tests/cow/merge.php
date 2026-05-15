@@ -13815,9 +13815,13 @@ PHP);
     $db = open_db($wp_block_ref_base);
     $db->exec("ALTER TABLE wp_posts ADD COLUMN post_type TEXT NOT NULL DEFAULT 'post'");
     $db->exec("ALTER TABLE wp_posts ADD COLUMN post_name TEXT NOT NULL DEFAULT ''");
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
     $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
         (30, 'Shared reusable block', '<!-- wp:paragraph --><p>Shared block</p><!-- /wp:paragraph -->', 'publish', 'wp_block', 'shared-reusable-block'),
-        (31, 'Page with reusable block', '<!-- wp:block {\"ref\":30} /--><!-- wp:paragraph --><p>Base page content</p><!-- /wp:paragraph -->', 'publish', 'page', 'page-with-reusable-block')");
+        (31, 'Page with reusable block', '<!-- wp:block {\"ref\":30} /--><!-- wp:paragraph --><p>Base page content</p><!-- /wp:paragraph -->', 'publish', 'page', 'page-with-reusable-block'),
+        (32, 'Shared synced pattern', '<!-- wp:paragraph --><p>Shared synced pattern</p><!-- /wp:paragraph -->', 'publish', 'wp_block', 'shared-synced-pattern'),
+        (33, 'Page with synced pattern', '<!-- wp:block {\"ref\":32} /--><!-- wp:paragraph --><p>Base synced pattern content</p><!-- /wp:paragraph -->', 'publish', 'page', 'page-with-synced-pattern')");
+    $db->exec("INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES (34, 32, 'wp_pattern_sync_status', 'synced')");
     $db->close();
     write_test_file($wp_block_ref_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
 <?php
@@ -13861,9 +13865,12 @@ PHP);
     cow_merge_allocate_autoincrement_bands($wp_block_ref_target, $wp_block_ref_metadata, 'feature-wp-block-ref-target');
     $db = open_db($wp_block_ref_source);
     $db->exec('DELETE FROM wp_posts WHERE ID = 30');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 32');
+    $db->exec('DELETE FROM wp_postmeta WHERE post_id = 32');
     $db->close();
     $db = open_db($wp_block_ref_target);
     $db->exec("UPDATE wp_posts SET post_title = 'Target page still using reusable block' WHERE ID = 31");
+    $db->exec("UPDATE wp_posts SET post_title = 'Target page still using synced pattern' WHERE ID = 33");
     $db->close();
     $wp_block_ref_result = cow_merge_branch_state(
         $wp_block_ref_base,
@@ -13876,18 +13883,24 @@ PHP);
         $wp_block_ref_source_root,
         $wp_block_ref_target_root
     );
-    assert_same($wp_block_ref_result['status'], 'completed_with_conflicts', 'WordPress block reference validator holds missing reusable blocks for review');
+    assert_same($wp_block_ref_result['status'], 'completed_with_conflicts', 'WordPress block reference validator holds missing reusable blocks and synced patterns for review');
     assert_same((int)($wp_block_ref_result['plugin_validators'] ?? 0), 1, 'WordPress block reference validator is discovered from mu-plugins during merge');
-    assert_same((int)($wp_block_ref_result['plugin_validator_conflicts'] ?? 0), 1, 'WordPress block reference validator records the missing reusable block');
+    assert_same((int)($wp_block_ref_result['plugin_validator_conflicts'] ?? 0), 2, 'WordPress block reference validator records missing reusable block and synced pattern references');
     assert_same((int)scalar($wp_block_ref_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 30'), 0, 'WordPress block reference validator leaves the source block deletion staged for review');
+    assert_same((int)scalar($wp_block_ref_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 32'), 0, 'WordPress block reference validator leaves the source synced pattern deletion staged for review');
+    assert_same((int)scalar($wp_block_ref_target, 'SELECT COUNT(*) FROM wp_postmeta WHERE post_id = 32'), 0, 'WordPress block reference validator leaves the source synced pattern metadata deletion staged for review');
     assert_same(scalar($wp_block_ref_target, 'SELECT post_title FROM wp_posts WHERE ID = 31'), 'Target page still using reusable block', 'WordPress block reference validator preserves the target page edit');
+    assert_same(scalar($wp_block_ref_target, 'SELECT post_title FROM wp_posts WHERE ID = 33'), 'Target page still using synced pattern', 'WordPress block reference validator preserves the target synced pattern page edit');
     $wp_block_ref_audit = cow_merge_audit_report($wp_block_ref_metadata, (int)$wp_block_ref_result['run_id'], 10, [
         'scope' => 'plugin',
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-block-missing-reference',
     ]);
-    assert_same(count($wp_block_ref_audit['conflicts']), 1, 'WordPress block reference validator exposes the missing block as a plugin-scoped audit conflict');
-    assert_true(str_contains((string)($wp_block_ref_audit['conflicts'][0]['chosen_preview'] ?? ''), '"missing_ref":30'), 'WordPress block reference audit includes the missing reusable block ID');
+    assert_same(count($wp_block_ref_audit['conflicts']), 2, 'WordPress block reference validator exposes missing block and synced pattern refs as plugin-scoped audit conflicts');
+    $wp_block_ref_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $wp_block_ref_audit['conflicts']));
+    assert_true(str_contains($wp_block_ref_preview, '"missing_ref":30'), 'WordPress block reference audit includes the missing reusable block ID');
+    assert_true(str_contains($wp_block_ref_preview, '"missing_ref":32'), 'WordPress block reference audit includes the missing synced pattern ID');
+    assert_true(str_contains($wp_block_ref_preview, '"post_id":33'), 'WordPress block reference audit includes the synced pattern consumer page ID');
 
     $wp_menu_ref_base_root = $tmp . '/wp-menu-ref-validator-files-base';
     $wp_menu_ref_source_root = $tmp . '/wp-menu-ref-validator-files-source';
