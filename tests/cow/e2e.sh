@@ -1062,6 +1062,11 @@ fi
 test -d "$WORK/ui-created"
 test -f "$WORK_DIR/cow/merge/bases/ui-created.sqlite"
 test -f "$WORK_DIR/cow/merge/file-bases/ui-created.json"
+grep -F "$WORK/ui-created/wp-content/database/.ht.sqlite" "$WORK/ui-created/wp-config.php" >/dev/null
+if grep -F "branch-create-stage" "$WORK/ui-created/wp-config.php" >/dev/null; then
+  echo "WP UI branch create left wp-config.php pointing at the staging directory" >&2
+  exit 1
+fi
 php -r '$db = new SQLite3($argv[1]); exit((int)$db->querySingle("SELECT MAX(id) FROM wp_forkpress_e2e_autoinc") === 1 ? 0 : 1);' "$WORK_DIR/cow/merge/bases/ui-created.sqlite"
 php -r '$base = json_decode((string)file_get_contents($argv[1]), true); $entries = $base["entries"] ?? []; exit(is_array($entries) && count($entries) > 0 && !isset($entries["wp-content/ui-created-file.txt"]) ? 0 : 1);' "$WORK_DIR/cow/merge/file-bases/ui-created.json"
 php -r '$meta = new SQLite3($argv[1]); $branch = new SQLite3($argv[2]); $band = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''ui-created'\'' AND table_name = '\''wp_forkpress_e2e_autoinc'\''", true); $seq = (int)$branch->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''wp_forkpress_e2e_autoinc'\''"); exit($band && (int)$band["band_start"] >= 1000000 && $seq === (int)$band["band_start"] - 1 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite" "$WORK/ui-created/wp-content/database/.ht.sqlite"
