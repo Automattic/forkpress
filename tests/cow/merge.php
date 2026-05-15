@@ -14635,6 +14635,48 @@ SQL);
         'term relationships held behind an explicit source post explain the missing parent'
     );
 
+    $band_explicit_sticky_base = $tmp . '/band-explicit-sticky-base.sqlite';
+    $band_explicit_sticky_source = $tmp . '/band-explicit-sticky-source.sqlite';
+    $band_explicit_sticky_target = $tmp . '/band-explicit-sticky-target.sqlite';
+    $band_explicit_sticky_metadata = $tmp . '/.forkpress/cow/merge/band-explicit-sticky-metadata.sqlite';
+    copy($band_base, $band_explicit_sticky_base);
+    $band_explicit_sticky_base_value = serialize([1]);
+    $db = open_db($band_explicit_sticky_base);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('sticky_posts', :value, 'yes')");
+    $stmt->bindValue(':value', $band_explicit_sticky_base_value, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+    copy($band_explicit_sticky_base, $band_explicit_sticky_source);
+    copy($band_explicit_sticky_base, $band_explicit_sticky_target);
+    cow_merge_allocate_autoincrement_bands($band_explicit_sticky_source, $band_explicit_sticky_metadata, 'feature-band-explicit-sticky-source');
+    $db = open_db($band_explicit_sticky_source);
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status) VALUES (2, 'Imported explicit sticky post', 'explicit sticky id', 'publish')");
+    $band_explicit_sticky_updated_value = serialize([2]);
+    $stmt = $db->prepare("UPDATE wp_options SET option_value = :value WHERE option_name = 'sticky_posts'");
+    $stmt->bindValue(':value', $band_explicit_sticky_updated_value, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+    $band_explicit_sticky_result = cow_merge_databases(
+        $band_explicit_sticky_base,
+        $band_explicit_sticky_source,
+        $band_explicit_sticky_target,
+        $band_explicit_sticky_metadata,
+        'feature-band-explicit-sticky-source',
+        'main'
+    );
+    assert_same($band_explicit_sticky_result['status'], 'completed_with_conflicts', 'updated sticky posts behind explicit source post IDs remain reviewable');
+    assert_same((int)scalar($band_explicit_sticky_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 2'), 0, 'out-of-band explicit sticky source post remains unapplied');
+    assert_same(scalar($band_explicit_sticky_target, "SELECT option_value FROM wp_options WHERE option_name = 'sticky_posts'"), $band_explicit_sticky_base_value, 'updated sticky posts pointing at a held explicit source post are not applied automatically');
+    assert_same(
+        (int)scalar($band_explicit_sticky_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-sticky-source' AND c.table_name = 'wp_options' AND c.conflict_type = 'row-target-constraint'"),
+        1,
+        'updated sticky posts pointing at a held explicit source post record a reviewable option conflict'
+    );
+    assert_true(
+        str_contains((string)scalar($band_explicit_sticky_metadata, "SELECT reason FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-sticky-source' AND d.table_name = 'wp_options' AND d.decision = 'target-wins' ORDER BY d.id DESC LIMIT 1"), 'parent post must merge before child row'),
+        'updated sticky posts held behind an explicit source post explain the missing parent'
+    );
+
     $band_explicit_term_base = $tmp . '/band-explicit-term-base.sqlite';
     $band_explicit_term_source = $tmp . '/band-explicit-term-source.sqlite';
     $band_explicit_term_target = $tmp . '/band-explicit-term-target.sqlite';
