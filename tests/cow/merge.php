@@ -14477,6 +14477,19 @@ SQL);
     $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('sticky_posts', :value, 'yes')");
     $stmt->bindValue(':value', $band_explicit_ref_sticky_posts, SQLITE3_TEXT);
     $stmt->execute();
+    $band_explicit_ref_theme_mods = serialize(['custom_logo' => 2]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('theme_mods_imported_post_refs', :value, 'yes')");
+    $stmt->bindValue(':value', $band_explicit_ref_theme_mods, SQLITE3_TEXT);
+    $stmt->execute();
+    $band_explicit_ref_media_widget = serialize([
+        2 => [
+            'attachment_id' => 2,
+            'caption' => 'Imported media widget behind held explicit attachment',
+        ],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_media_image', :value, 'yes')");
+    $stmt->bindValue(':value', $band_explicit_ref_media_widget, SQLITE3_TEXT);
+    $stmt->execute();
     $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type) VALUES ('Post type menu item behind explicit post', '', 'publish', 'nav_menu_item')");
     $band_explicit_ref_menu_item_id = (int)$db->lastInsertRowID();
     $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:menu_item_id, '_menu_item_type', 'post_type'), (:menu_item_id, '_menu_item_object_id', '2')");
@@ -14512,6 +14525,8 @@ SQL);
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_postmeta WHERE meta_key = '_thumbnail_id' AND meta_value = '2'"), 0, 'postmeta values pointing at a held explicit source post are not applied automatically');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'page_on_front' AND option_value = '2'"), 0, 'scalar options pointing at a held explicit source post are not applied automatically');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'sticky_posts'"), 0, 'serialized options pointing at a held explicit source post are not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'theme_mods_imported_post_refs'"), 0, 'theme mods pointing at a held explicit source attachment are not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'widget_media_image'"), 0, 'media widgets pointing at a held explicit source attachment are not applied automatically');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_postmeta WHERE post_id = $band_explicit_ref_menu_item_id AND meta_key = '_menu_item_object_id' AND meta_value = '2'"), 0, 'post-type menu item object references pointing at a held explicit source post are not applied automatically');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_comments WHERE comment_post_ID = 2"), 0, 'comments pointing at a held explicit source post are not applied automatically');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_commentmeta WHERE comment_id = $band_explicit_ref_comment_id"), 0, 'comment metadata behind a held explicit source post is not applied automatically');
@@ -14525,7 +14540,7 @@ SQL);
     );
     assert_same(
         (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND c.table_name = 'wp_options' AND c.conflict_type = 'row-target-constraint'"),
-        2,
+        4,
         'options pointing at a held explicit source post record reviewable row conflicts'
     );
     assert_same(
@@ -14553,7 +14568,7 @@ SQL);
         'postmeta held behind an explicit source post explains the missing parent'
     );
     assert_true(
-        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_options' AND d.decision = 'target-wins' AND d.reason LIKE '%parent post must merge before child row%'") === 2,
+        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_options' AND d.decision = 'target-wins' AND d.reason LIKE '%parent post must merge before child row%'") === 4,
         'options held behind an explicit source post explain the missing parent'
     );
     assert_true(
@@ -14601,6 +14616,23 @@ SQL);
     $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:menu_item_id, '_menu_item_type', 'taxonomy'), (:menu_item_id, '_menu_item_object_id', '2')");
     $stmt->bindValue(':menu_item_id', $band_explicit_term_menu_item_id, SQLITE3_INTEGER);
     $stmt->execute();
+    $band_explicit_term_theme_mods = serialize([
+        'nav_menu_locations' => [
+            'primary' => 2,
+        ],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('theme_mods_imported_term_refs', :value, 'yes')");
+    $stmt->bindValue(':value', $band_explicit_term_theme_mods, SQLITE3_TEXT);
+    $stmt->execute();
+    $band_explicit_term_nav_widget = serialize([
+        2 => [
+            'nav_menu' => 2,
+            'title' => 'Imported nav widget behind held explicit menu',
+        ],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_nav_menu', :value, 'yes')");
+    $stmt->bindValue(':value', $band_explicit_term_nav_widget, SQLITE3_TEXT);
+    $stmt->execute();
     $db->close();
     $band_explicit_term_result = cow_merge_databases(
         $band_explicit_term_base,
@@ -14617,6 +14649,8 @@ SQL);
     assert_same((int)scalar($band_explicit_term_target, 'SELECT COUNT(*) FROM wp_term_taxonomy WHERE parent = 2'), 0, 'hierarchical term taxonomy pointing at a held explicit parent term is not applied automatically');
     assert_same((int)scalar($band_explicit_term_target, "SELECT COUNT(*) FROM wp_term_relationships WHERE term_taxonomy_id = $band_explicit_term_taxonomy_id"), 0, 'term relationships pointing at held explicit source term taxonomy are not applied automatically');
     assert_same((int)scalar($band_explicit_term_target, "SELECT COUNT(*) FROM wp_postmeta WHERE post_id = $band_explicit_term_menu_item_id AND meta_key = '_menu_item_object_id' AND meta_value = '2'"), 0, 'taxonomy menu item object references pointing at a held explicit source term are not applied automatically');
+    assert_same((int)scalar($band_explicit_term_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'theme_mods_imported_term_refs'"), 0, 'theme mods pointing at a held explicit source nav menu are not applied automatically');
+    assert_same((int)scalar($band_explicit_term_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'widget_nav_menu'"), 0, 'nav menu widgets pointing at a held explicit source menu are not applied automatically');
     assert_same(
         (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND c.table_name = 'wp_terms' AND c.conflict_type = 'row-target-constraint'"),
         1,
@@ -14641,6 +14675,15 @@ SQL);
         (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND c.table_name = 'wp_postmeta' AND c.conflict_type = 'row-target-constraint'"),
         1,
         'taxonomy menu item object references pointing at a held explicit source term record a reviewable row conflict'
+    );
+    assert_same(
+        (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND c.table_name = 'wp_options' AND c.conflict_type = 'row-target-constraint'"),
+        2,
+        'options pointing at a held explicit source term record reviewable row conflicts'
+    );
+    assert_true(
+        (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND d.table_name = 'wp_options' AND d.decision = 'target-wins' AND d.reason LIKE '%parent term must merge before child row%'") === 2,
+        'options held behind an explicit source term explain the missing parent'
     );
 
     $band_explicit_user_base = $tmp . '/band-explicit-user-base.sqlite';
