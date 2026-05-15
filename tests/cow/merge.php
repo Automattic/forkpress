@@ -13896,10 +13896,13 @@ SQL);
     $db->exec("ALTER TABLE wp_posts ADD COLUMN post_type TEXT NOT NULL DEFAULT 'post'");
     $db->exec("ALTER TABLE wp_posts ADD COLUMN post_name TEXT NOT NULL DEFAULT ''");
     $db->exec('ALTER TABLE wp_posts ADD COLUMN post_parent INTEGER NOT NULL DEFAULT 0');
+    $db->exec('ALTER TABLE wp_posts ADD COLUMN post_author INTEGER NOT NULL DEFAULT 0');
     $db->exec("ALTER TABLE wp_posts ADD COLUMN guid TEXT NOT NULL DEFAULT ''");
     $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
-    $db->exec('CREATE TABLE wp_comments (comment_ID INTEGER PRIMARY KEY AUTOINCREMENT, comment_post_ID INTEGER NOT NULL, comment_content TEXT NOT NULL, comment_parent INTEGER NOT NULL DEFAULT 0)');
+    $db->exec('CREATE TABLE wp_comments (comment_ID INTEGER PRIMARY KEY AUTOINCREMENT, comment_post_ID INTEGER NOT NULL, comment_content TEXT NOT NULL, comment_parent INTEGER NOT NULL DEFAULT 0, user_id INTEGER NOT NULL DEFAULT 0)');
     $db->exec('CREATE TABLE wp_commentmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, comment_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec('CREATE TABLE wp_users (ID INTEGER PRIMARY KEY AUTOINCREMENT, user_login TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL)');
+    $db->exec('CREATE TABLE wp_usermeta (umeta_id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
     $db->exec('CREATE TABLE wp_terms (term_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, slug TEXT NOT NULL, term_group INTEGER NOT NULL DEFAULT 0)');
     $db->exec('CREATE TABLE wp_term_taxonomy (term_taxonomy_id INTEGER PRIMARY KEY AUTOINCREMENT, term_id INTEGER NOT NULL, taxonomy TEXT NOT NULL, description TEXT NOT NULL DEFAULT "", parent INTEGER NOT NULL DEFAULT 0, count INTEGER NOT NULL DEFAULT 0)');
     $db->exec('CREATE TABLE wp_term_relationships (object_id INTEGER NOT NULL, term_taxonomy_id INTEGER NOT NULL, term_order INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (object_id, term_taxonomy_id))');
@@ -13919,6 +13922,20 @@ SQL);
     $write_wp_semantic_bundle = static function (string $db_path, string $root, string $branch): array {
         $db = open_db($db_path);
         $suffix = ucfirst($branch);
+        $stmt = $db->prepare('INSERT INTO wp_users (user_login, display_name) VALUES (:login, :display_name)');
+        $stmt->bindValue(':login', "forkpress_$branch", SQLITE3_TEXT);
+        $stmt->bindValue(':display_name', "$suffix Author", SQLITE3_TEXT);
+        $stmt->execute();
+        $user_id = (int)$db->lastInsertRowID();
+        $user_graph = [
+            'branch' => $branch,
+            'user_id' => $user_id,
+        ];
+        $stmt = $db->prepare("INSERT INTO wp_usermeta (user_id, meta_key, meta_value) VALUES (:user_id, '_forkpress_user_graph', :json), (:user_id, '_forkpress_user_serialized_graph', :serialized)");
+        $stmt->bindValue(':user_id', $user_id, SQLITE3_INTEGER);
+        $stmt->bindValue(':json', json_encode($user_graph, JSON_UNESCAPED_SLASHES), SQLITE3_TEXT);
+        $stmt->bindValue(':serialized', serialize($user_graph), SQLITE3_TEXT);
+        $stmt->execute();
         $block_content = "<!-- wp:paragraph --><p>$suffix reusable block</p><!-- /wp:paragraph -->";
         $stmt = $db->prepare('INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name) VALUES (:title, :content, :status, :type, :slug)');
         $stmt->bindValue(':title', "$suffix Reusable Block", SQLITE3_TEXT);
@@ -13969,15 +13986,17 @@ SQL);
         $stmt->execute();
         $page_id = (int)$db->lastInsertRowID();
 
-        $stmt = $db->prepare('INSERT INTO wp_comments (comment_post_ID, comment_content) VALUES (:post_id, :content)');
+        $stmt = $db->prepare('INSERT INTO wp_comments (comment_post_ID, comment_content, user_id) VALUES (:post_id, :content, :user_id)');
         $stmt->bindValue(':post_id', $page_id, SQLITE3_INTEGER);
         $stmt->bindValue(':content', "$suffix page comment", SQLITE3_TEXT);
+        $stmt->bindValue(':user_id', $user_id, SQLITE3_INTEGER);
         $stmt->execute();
         $comment_id = (int)$db->lastInsertRowID();
-        $stmt = $db->prepare('INSERT INTO wp_comments (comment_post_ID, comment_content, comment_parent) VALUES (:post_id, :content, :parent)');
+        $stmt = $db->prepare('INSERT INTO wp_comments (comment_post_ID, comment_content, comment_parent, user_id) VALUES (:post_id, :content, :parent, :user_id)');
         $stmt->bindValue(':post_id', $page_id, SQLITE3_INTEGER);
         $stmt->bindValue(':content', "$suffix threaded reply", SQLITE3_TEXT);
         $stmt->bindValue(':parent', $comment_id, SQLITE3_INTEGER);
+        $stmt->bindValue(':user_id', $user_id, SQLITE3_INTEGER);
         $stmt->execute();
         $reply_comment_id = (int)$db->lastInsertRowID();
         $comment_graph = [
@@ -14026,8 +14045,10 @@ SQL);
         $stmt->bindValue(':term_taxonomy_id', $term_taxonomy_id, SQLITE3_INTEGER);
         $stmt->execute();
 
+        $db->exec("UPDATE wp_posts SET post_author = $user_id WHERE ID IN ($block_id, $attachment_id, $page_id, $menu_item_id)");
         $graph = [
             'branch' => $branch,
+            'user_id' => $user_id,
             'page_id' => $page_id,
             'block_id' => $block_id,
             'attachment_id' => $attachment_id,
@@ -14060,6 +14081,7 @@ SQL);
     };
     $wp_semantic_source_graph = $write_wp_semantic_bundle($wp_semantic_source, $wp_semantic_source_root, 'source');
     $wp_semantic_target_graph = $write_wp_semantic_bundle($wp_semantic_target, $wp_semantic_target_root, 'target');
+    assert_true($wp_semantic_source_graph['user_id'] !== $wp_semantic_target_graph['user_id'], 'WordPress semantic branches receive distinct user IDs before post authors and usermeta are written');
     assert_true($wp_semantic_source_graph['page_id'] !== $wp_semantic_target_graph['page_id'], 'WordPress semantic branches receive distinct page IDs before block JSON is written');
     assert_true($wp_semantic_source_graph['attachment_id'] !== $wp_semantic_target_graph['attachment_id'], 'WordPress semantic branches receive distinct attachment IDs before upload metadata is written');
     assert_true($wp_semantic_source_graph['comment_id'] !== $wp_semantic_target_graph['comment_id'], 'WordPress semantic branches receive distinct comment IDs before commentmeta is written');
@@ -14078,6 +14100,7 @@ SQL);
     assert_same($wp_semantic_result['status'], 'completed', 'banded WordPress semantic object bundles merge cleanly');
     $assert_wp_semantic_bundle = static function (string $db_path, string $root, array $graph, string $branch): void {
         $page_id = (int)$graph['page_id'];
+        $user_id = (int)$graph['user_id'];
         $block_id = (int)$graph['block_id'];
         $attachment_id = (int)$graph['attachment_id'];
         $comment_id = (int)$graph['comment_id'];
@@ -14087,11 +14110,17 @@ SQL);
         $term_taxonomy_id = (int)$graph['term_taxonomy_id'];
         $db = open_db($db_path);
         $page = $db->querySingle("SELECT post_content, post_type FROM wp_posts WHERE ID = $page_id", true);
+        $user_login = $db->querySingle("SELECT user_login FROM wp_users WHERE ID = $user_id");
+        $user_graph_json = $db->querySingle("SELECT meta_value FROM wp_usermeta WHERE user_id = $user_id AND meta_key = '_forkpress_user_graph'");
+        $user_graph_serialized = $db->querySingle("SELECT meta_value FROM wp_usermeta WHERE user_id = $user_id AND meta_key = '_forkpress_user_serialized_graph'");
+        $page_author = (int)$db->querySingle("SELECT post_author FROM wp_posts WHERE ID = $page_id");
         $block_type = $db->querySingle("SELECT post_type FROM wp_posts WHERE ID = $block_id");
         $attachment_type = $db->querySingle("SELECT post_type FROM wp_posts WHERE ID = $attachment_id");
         $attached_file = $db->querySingle("SELECT meta_value FROM wp_postmeta WHERE post_id = $attachment_id AND meta_key = '_wp_attached_file'");
         $comment_post_id = (int)$db->querySingle("SELECT comment_post_ID FROM wp_comments WHERE comment_ID = $comment_id");
+        $comment_user_id = (int)$db->querySingle("SELECT user_id FROM wp_comments WHERE comment_ID = $comment_id");
         $reply_parent = (int)$db->querySingle("SELECT comment_parent FROM wp_comments WHERE comment_ID = $reply_comment_id");
+        $reply_user_id = (int)$db->querySingle("SELECT user_id FROM wp_comments WHERE comment_ID = $reply_comment_id");
         $comment_graph_json = $db->querySingle("SELECT meta_value FROM wp_commentmeta WHERE comment_id = $comment_id AND meta_key = '_forkpress_comment_graph'");
         $reply_graph_serialized = $db->querySingle("SELECT meta_value FROM wp_commentmeta WHERE comment_id = $reply_comment_id AND meta_key = '_forkpress_comment_serialized_graph'");
         $menu_object_id = $db->querySingle("SELECT meta_value FROM wp_postmeta WHERE post_id = $menu_item_id AND meta_key = '_menu_item_object_id'");
@@ -14100,11 +14129,23 @@ SQL);
         $bundle = $db->querySingle("SELECT meta_value FROM wp_postmeta WHERE post_id = $page_id AND meta_key = '_forkpress_semantic_bundle'");
         $theme_mods = $db->querySingle("SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_forkpress_$branch'");
         $db->close();
+        $decoded_user_graph = is_string($user_graph_json) ? json_decode($user_graph_json, true) : null;
+        $decoded_serialized_user_graph = is_string($user_graph_serialized) ? unserialize($user_graph_serialized) : null;
         $decoded_bundle = is_string($bundle) ? json_decode($bundle, true) : null;
         $decoded_comment_graph = is_string($comment_graph_json) ? json_decode($comment_graph_json, true) : null;
         $decoded_reply_graph = is_string($reply_graph_serialized) ? unserialize($reply_graph_serialized) : null;
         $decoded_theme_mods = is_string($theme_mods) ? unserialize($theme_mods) : null;
+        assert_same($user_login, "forkpress_$branch", "WordPress $branch user survives semantic merge");
+        assert_same($decoded_user_graph, [
+            'branch' => $branch,
+            'user_id' => $user_id,
+        ], "WordPress $branch user JSON metadata keeps branch-local IDs");
+        assert_same($decoded_serialized_user_graph, [
+            'branch' => $branch,
+            'user_id' => $user_id,
+        ], "WordPress $branch user serialized metadata keeps branch-local IDs");
         assert_same($page['post_type'] ?? null, 'page', "WordPress $branch page survives semantic merge");
+        assert_same($page_author, $user_id, "WordPress $branch page author points at merged user");
         assert_true(str_contains((string)($page['post_content'] ?? ''), '"ref":' . $block_id), "WordPress $branch page keeps reusable block reference");
         assert_true(str_contains((string)($page['post_content'] ?? ''), '"id":' . $attachment_id), "WordPress $branch page keeps image block attachment reference");
         assert_same($block_type, 'wp_block', "WordPress $branch reusable block survives semantic merge");
@@ -14112,7 +14153,9 @@ SQL);
         assert_same($attached_file, $graph['file'], "WordPress $branch attachment metadata keeps upload path");
         assert_true(file_exists($root . '/wp-content/uploads/' . $graph['file']), "WordPress $branch upload file survives semantic merge");
         assert_same($comment_post_id, $page_id, "WordPress $branch page comment still points at merged page");
+        assert_same($comment_user_id, $user_id, "WordPress $branch page comment author points at merged user");
         assert_same($reply_parent, $comment_id, "WordPress $branch threaded comment still points at merged parent comment");
+        assert_same($reply_user_id, $user_id, "WordPress $branch threaded comment author points at merged user");
         assert_same($decoded_comment_graph, [
             'branch' => $branch,
             'page_id' => $page_id,
