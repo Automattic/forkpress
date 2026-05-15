@@ -4900,6 +4900,27 @@ function cow_merge_wordpress_post_content_reference_violation(
                 }
             }
         }
+
+        if ($block_name === 'query' && isset($attrs['query']) && is_array($attrs['query'])) {
+            $query = $attrs['query'];
+            if (array_key_exists('author', $query)) {
+                $violation = $check_user($query['author'], 'wp:query.author');
+                if ($violation !== null) {
+                    return $violation;
+                }
+            }
+            foreach (['categoryIds', 'tagIds'] as $field) {
+                if (!isset($query[$field]) || !is_array($query[$field])) {
+                    continue;
+                }
+                foreach ($query[$field] as $index => $term_id) {
+                    $violation = $check_term($term_id, 'wp:query.' . $field . '.' . (string)$index);
+                    if ($violation !== null) {
+                        return $violation;
+                    }
+                }
+            }
+        }
     }
 
     return null;
