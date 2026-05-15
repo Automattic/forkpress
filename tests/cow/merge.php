@@ -14286,6 +14286,102 @@ PHP);
     assert_true(str_contains($wp_image_block_ref_preview, '"missing_object_id":71'), 'WordPress image block audit includes the missing attachment ID');
     assert_true(str_contains($wp_image_block_ref_preview, '"block_name":"core/image"') || str_contains($wp_image_block_ref_preview, '"block_name":"core\/image"'), 'WordPress image block audit includes the block name');
 
+    $wp_term_ref_base_root = $tmp . '/wp-term-ref-validator-files-base';
+    $wp_term_ref_source_root = $tmp . '/wp-term-ref-validator-files-source';
+    $wp_term_ref_target_root = $tmp . '/wp-term-ref-validator-files-target';
+    $wp_term_ref_base = $wp_term_ref_base_root . '/wp-content/database/.ht.sqlite';
+    $wp_term_ref_source = $wp_term_ref_source_root . '/wp-content/database/.ht.sqlite';
+    $wp_term_ref_target = $wp_term_ref_target_root . '/wp-content/database/.ht.sqlite';
+    $wp_term_ref_metadata = $tmp . '/.forkpress/cow/merge/wp-term-ref-validator-metadata.sqlite';
+    mkdir($wp_term_ref_base_root . '/wp-content/database', 0777, true);
+    create_base_db($wp_term_ref_base);
+    $db = open_db($wp_term_ref_base);
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_type TEXT NOT NULL DEFAULT 'post'");
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_name TEXT NOT NULL DEFAULT ''");
+    $db->exec('CREATE TABLE wp_terms (term_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, slug TEXT NOT NULL, term_group INTEGER NOT NULL DEFAULT 0)');
+    $db->exec('CREATE TABLE wp_term_taxonomy (term_taxonomy_id INTEGER PRIMARY KEY AUTOINCREMENT, term_id INTEGER NOT NULL, taxonomy TEXT NOT NULL, description TEXT NOT NULL DEFAULT "", parent INTEGER NOT NULL DEFAULT 0, count INTEGER NOT NULL DEFAULT 0)');
+    $db->exec('CREATE TABLE wp_term_relationships (object_id INTEGER NOT NULL, term_taxonomy_id INTEGER NOT NULL, term_order INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (object_id, term_taxonomy_id))');
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (80, 'Term relationship page', '<!-- wp:paragraph --><p>Term relationship page</p><!-- /wp:paragraph -->', 'publish', 'page', 'term-relationship-page')");
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (81, 'Retired category', 'retired-category')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, count) VALUES (82, 81, 'category', '', 0)");
+    $db->close();
+    write_test_file($wp_term_ref_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query("SELECT object_id, term_taxonomy_id FROM wp_term_relationships");
+$findings = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    $object_id = (int)$row['object_id'];
+    $term_taxonomy_id = (int)$row['term_taxonomy_id'];
+    $taxonomy = $db->querySingle("SELECT taxonomy FROM wp_term_taxonomy WHERE term_taxonomy_id = $term_taxonomy_id");
+    $term_id = $db->querySingle("SELECT term_id FROM wp_term_taxonomy WHERE term_taxonomy_id = $term_taxonomy_id");
+    $term_exists = $term_id === null ? 0 : (int)$db->querySingle("SELECT COUNT(*) FROM wp_terms WHERE term_id = " . (int)$term_id);
+    if ($taxonomy === null || $term_exists === 0) {
+        $findings[] = [
+            'plugin' => 'forkpress-wp-term-refs',
+            'object' => 'term_relationship:' . $object_id . ':' . $term_taxonomy_id,
+            'reason' => 'term relationship references a missing taxonomy term',
+            'type' => 'plugin-wp-term-relationship-missing-term',
+            'tables' => ['wp_term_relationships', 'wp_term_taxonomy', 'wp_terms'],
+            'validator' => 'forkpress-wp-term-refs@1',
+            'candidate' => [
+                'object_id' => $object_id,
+                'term_taxonomy_id' => $term_taxonomy_id,
+                'taxonomy' => $taxonomy,
+                'missing_object_id' => $term_taxonomy_id,
+                'object_type' => 'term_taxonomy',
+            ],
+        ];
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    copy_tree_for_test($wp_term_ref_base_root, $wp_term_ref_source_root);
+    copy_tree_for_test($wp_term_ref_base_root, $wp_term_ref_target_root);
+    $wp_term_ref_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-term-ref-validator.json';
+    cow_merge_capture_file_base($wp_term_ref_base_root, $wp_term_ref_file_base);
+    cow_merge_allocate_autoincrement_bands($wp_term_ref_source, $wp_term_ref_metadata, 'feature-wp-term-ref-source');
+    cow_merge_allocate_autoincrement_bands($wp_term_ref_target, $wp_term_ref_metadata, 'feature-wp-term-ref-target');
+    $db = open_db($wp_term_ref_source);
+    $db->exec('DELETE FROM wp_term_taxonomy WHERE term_taxonomy_id = 82');
+    $db->exec('DELETE FROM wp_terms WHERE term_id = 81');
+    $db->close();
+    $db = open_db($wp_term_ref_target);
+    $db->exec("UPDATE wp_posts SET post_title = 'Target page assigned to deleted term' WHERE ID = 80");
+    $db->exec('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id) VALUES (80, 82)');
+    $db->close();
+    $wp_term_ref_result = cow_merge_branch_state(
+        $wp_term_ref_base,
+        $wp_term_ref_source,
+        $wp_term_ref_target,
+        $wp_term_ref_metadata,
+        'feature-wp-term-ref-source',
+        'feature-wp-term-ref-target',
+        $wp_term_ref_file_base,
+        $wp_term_ref_source_root,
+        $wp_term_ref_target_root
+    );
+    assert_same($wp_term_ref_result['status'], 'completed_with_conflicts', 'WordPress term relationship validator holds missing taxonomy terms for review');
+    assert_same((int)($wp_term_ref_result['plugin_validators'] ?? 0), 1, 'WordPress term relationship validator is discovered from mu-plugins during merge');
+    assert_same((int)($wp_term_ref_result['plugin_validator_conflicts'] ?? 0), 1, 'WordPress term relationship validator records the missing taxonomy term');
+    assert_same((int)scalar($wp_term_ref_target, 'SELECT COUNT(*) FROM wp_term_taxonomy WHERE term_taxonomy_id = 82'), 0, 'WordPress term relationship validator leaves the source taxonomy deletion staged for review');
+    assert_same((int)scalar($wp_term_ref_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 81'), 0, 'WordPress term relationship validator leaves the source term deletion staged for review');
+    assert_same((int)scalar($wp_term_ref_target, 'SELECT COUNT(*) FROM wp_term_relationships WHERE object_id = 80 AND term_taxonomy_id = 82'), 1, 'WordPress term relationship validator preserves the target relationship assignment for review');
+    assert_same(scalar($wp_term_ref_target, 'SELECT post_title FROM wp_posts WHERE ID = 80'), 'Target page assigned to deleted term', 'WordPress term relationship validator preserves the target page edit');
+    $wp_term_ref_audit = cow_merge_audit_report($wp_term_ref_metadata, (int)$wp_term_ref_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-term-relationship-missing-term',
+    ]);
+    assert_same(count($wp_term_ref_audit['conflicts']), 1, 'WordPress term relationship validator exposes the missing taxonomy term as a plugin-scoped audit conflict');
+    $wp_term_ref_preview = (string)($wp_term_ref_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_true(str_contains($wp_term_ref_preview, '"term_taxonomy_id":82'), 'WordPress term relationship audit includes the missing term taxonomy ID');
+    assert_true(str_contains($wp_term_ref_preview, '"object_id":80'), 'WordPress term relationship audit includes the assigned object ID');
+
     $wp_lifecycle_base = $tmp . '/wp-lifecycle-base.sqlite';
     $wp_lifecycle_source = $tmp . '/wp-lifecycle-source.sqlite';
     $wp_lifecycle_target = $tmp . '/wp-lifecycle-target.sqlite';
