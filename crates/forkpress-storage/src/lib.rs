@@ -1246,6 +1246,71 @@ pub fn revalidate_cow_merge_reviews(
     )
 }
 
+pub fn record_cow_plugin_validator_conflicts(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    run_id: &str,
+    findings_json: Option<&str>,
+    findings_file: Option<&Path>,
+    format: &str,
+) -> Result<()> {
+    let metadata_db = cow_merge_metadata_db_path(layout);
+    let mut args: Vec<OsString> = vec![
+        "record-plugin-validator-conflicts".into(),
+        "--metadata-db".into(),
+        metadata_db.as_os_str().to_os_string(),
+        "--run".into(),
+        run_id.into(),
+        "--format".into(),
+        format.into(),
+    ];
+    if let Some(findings_json) = findings_json {
+        args.push("--findings-json".into());
+        args.push(findings_json.into());
+    }
+    if let Some(findings_file) = findings_file {
+        args.push("--findings-file".into());
+        args.push(findings_file.as_os_str().to_os_string());
+    }
+    run_php_script(
+        layout,
+        runtime,
+        shared,
+        "scripts/cow/merge.php",
+        args.iter().map(|arg| arg.as_os_str()),
+    )
+}
+
+pub fn run_cow_plugin_validator(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    run_id: &str,
+    validator: &Path,
+    format: &str,
+) -> Result<()> {
+    let metadata_db = cow_merge_metadata_db_path(layout);
+    let args: Vec<OsString> = vec![
+        "run-plugin-validator".into(),
+        "--metadata-db".into(),
+        metadata_db.as_os_str().to_os_string(),
+        "--run".into(),
+        run_id.into(),
+        "--validator".into(),
+        validator.as_os_str().to_os_string(),
+        "--format".into(),
+        format.into(),
+    ];
+    run_php_script(
+        layout,
+        runtime,
+        shared,
+        "scripts/cow/merge.php",
+        args.iter().map(|arg| arg.as_os_str()),
+    )
+}
+
 pub fn review_cow_merge_audit_record(
     layout: &Layout,
     runtime: &PortableRuntime,

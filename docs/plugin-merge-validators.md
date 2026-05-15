@@ -68,8 +68,7 @@ mark that run as `completed_with_conflicts`, filter `merge-audit` output with
 attach review notes. External validator runners can hand findings back through:
 
 ```bash
-php scripts/cow/merge.php record-plugin-validator-conflicts \
-  --metadata-db .forkpress/cow/merge/metadata.sqlite \
+forkpress branch record-plugin-validator-conflicts \
   --run 123 \
   --findings-file /tmp/forkpress-plugin-findings.json
 ```
@@ -82,8 +81,7 @@ ForkPress can also execute one explicit validator command and record its JSON
 findings:
 
 ```bash
-php scripts/cow/merge.php run-plugin-validator \
-  --metadata-db .forkpress/cow/merge/metadata.sqlite \
+forkpress branch run-plugin-validator \
   --run 123 \
   --validator ./vendor/bin/my-plugin-merge-validator
 ```
@@ -94,6 +92,21 @@ The runner passes merge context through environment variables:
 `FORKPRESS_MERGE_BASE_DB`, `FORKPRESS_MERGE_SOURCE_DB`, and
 `FORKPRESS_MERGE_TARGET_DB`. A validator may emit either a raw findings array
 or an object with `status` and `findings`.
+
+The lower-level PHP helper commands remain available for focused fixtures and
+runtime integration:
+
+```bash
+php scripts/cow/merge.php record-plugin-validator-conflicts \
+  --metadata-db .forkpress/cow/merge/metadata.sqlite \
+  --run 123 \
+  --findings-file /tmp/forkpress-plugin-findings.json
+
+php scripts/cow/merge.php run-plugin-validator \
+  --metadata-db .forkpress/cow/merge/metadata.sqlite \
+  --run 123 \
+  --validator ./vendor/bin/my-plugin-merge-validator
+```
 
 Automatic runtime validator discovery is still missing.
 

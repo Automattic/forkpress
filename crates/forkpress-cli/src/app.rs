@@ -52,8 +52,9 @@ use forkpress_storage::{
     ensure_cow_main_branch, inspect_cow_merge_audit, list_remote_sites, lock_cow_lifecycle,
     lock_cow_operations, merge_cow_branch, prepare_cow_file_view, print_cow_storage_status,
     print_linux_xfs_loop_storage_status, print_macos_cow_storage_status, probe_reflink_dir,
-    probe_remote_site, recover_cow_merge_crash, reset_cow_branch, resolve_cow_merge_conflict,
-    revalidate_cow_merge_reviews, review_cow_merge_audit_record, show_cow_branch,
+    probe_remote_site, record_cow_plugin_validator_conflicts, recover_cow_merge_crash,
+    reset_cow_branch, resolve_cow_merge_conflict, revalidate_cow_merge_reviews,
+    review_cow_merge_audit_record, run_cow_plugin_validator, show_cow_branch,
     write_cow_branch_list, write_cow_strategy_notes,
 };
 #[cfg(feature = "dev-experiments")]
@@ -3072,6 +3073,31 @@ fn cow_branch_command(
             )?;
             Ok(0)
         }
+        "record-plugin-validator-conflicts" => {
+            let record = parse_cow_branch_record_plugin_validator_args(&args.args)?;
+            record_cow_plugin_validator_conflicts(
+                &layout,
+                &runtime,
+                &args.shared,
+                &record.run_id,
+                record.findings_json.as_deref(),
+                record.findings_file.as_deref(),
+                &record.format,
+            )?;
+            Ok(0)
+        }
+        "run-plugin-validator" => {
+            let validator = parse_cow_branch_run_plugin_validator_args(&args.args)?;
+            run_cow_plugin_validator(
+                &layout,
+                &runtime,
+                &args.shared,
+                &validator.run_id,
+                &validator.validator,
+                &validator.format,
+            )?;
+            Ok(0)
+        }
         "merge-audit" | "audit" => {
             let mut format = "text".to_string();
             let mut limit = "20".to_string();
@@ -3400,6 +3426,12 @@ fn branch_help_text(command: Option<&str>) -> &'static str {
         Some("revalidate-reviews") | Some("merge-revalidate") => {
             "Usage: forkpress branch revalidate-reviews [--run <id>] [--reviewer <name>] [--format text|json]\n\nRecheck reviewed merge conflicts against current target state. Stale reviewed conflicts are carried back into the needs-action queue without applying a resolution.\nExample: forkpress branch revalidate-reviews --reviewer alice\n"
         }
+        Some("record-plugin-validator-conflicts") => {
+            "Usage: forkpress branch record-plugin-validator-conflicts --run <id> (--findings-file <path>|--findings-json <json>) [--format text|json]\n\nRecord plugin-scoped validator findings against an existing merge run. Prefer --findings-file for real validators.\n"
+        }
+        Some("run-plugin-validator") => {
+            "Usage: forkpress branch run-plugin-validator --run <id> --validator <path> [--format text|json]\n\nRun one plugin validator and record emitted findings as plugin-scoped merge conflicts.\n"
+        }
         Some("merge-audit") | Some("audit") => {
             "Usage: forkpress branch merge-audit [options]\n\nInspect merge runs, decisions, conflicts, resolutions, and rollback failures.\nCommon options: --format text|json, --run <id>, --scope all|db|files, --records all|conflicts|decisions|resolutions|rollback-failures, --review, --review-status <status>.\n"
         }
@@ -3413,7 +3445,7 @@ fn branch_help_text(command: Option<&str>) -> &'static str {
             "Usage: forkpress branch delete <branch>\n\nDelete a materialized branch. Use with care.\n"
         }
         _ => {
-            "Usage: forkpress branch <command> [options]\n\nCommands:\n  list                         List branches\n  show [branch]                Show branch storage details\n  create <branch> [--from b]   Create a branch; defaults to --from main\n  reset <branch> --from b      Replace a branch from another branch\n  merge <source> --into target Merge one branch into another\n  recover-crash [options]      Inspect or restore pending merge crash artifacts\n  revalidate-reviews [options] Recheck reviewed conflicts for stale target drift\n  merge-audit [options]        Inspect merge audit records\n  merge-review <type> <id>     Mark an audit record as reviewed\n  merge-resolve conflict <id>  Validate or apply a conflict choice\n  delete <branch>              Delete a branch\n\nExamples:\n  forkpress branch list\n  forkpress branch create feature --from main\n  forkpress branch merge feature --into main\n  forkpress branch recover-crash --restore-target-db --restore-files\n  forkpress branch revalidate-reviews --reviewer alice\n  forkpress branch merge-audit --review --records conflicts\n\nRun `forkpress branch <command> --help` for command-specific help.\n"
+            "Usage: forkpress branch <command> [options]\n\nCommands:\n  list                         List branches\n  show [branch]                Show branch storage details\n  create <branch> [--from b]   Create a branch; defaults to --from main\n  reset <branch> --from b      Replace a branch from another branch\n  merge <source> --into target Merge one branch into another\n  recover-crash [options]      Inspect or restore pending merge crash artifacts\n  revalidate-reviews [options] Recheck reviewed conflicts for stale target drift\n  run-plugin-validator [opts]  Run one plugin validator for a merge run\n  record-plugin-validator-conflicts [opts]\n                               Record plugin-scoped validator findings\n  merge-audit [options]        Inspect merge audit records\n  merge-review <type> <id>     Mark an audit record as reviewed\n  merge-resolve conflict <id>  Validate or apply a conflict choice\n  delete <branch>              Delete a branch\n\nExamples:\n  forkpress branch list\n  forkpress branch create feature --from main\n  forkpress branch merge feature --into main\n  forkpress branch recover-crash --restore-target-db --restore-files\n  forkpress branch revalidate-reviews --reviewer alice\n  forkpress branch run-plugin-validator --run 12 --validator ./validator.php\n  forkpress branch merge-audit --review --records conflicts\n\nRun `forkpress branch <command> --help` for command-specific help.\n"
         }
     }
 }
@@ -3562,6 +3594,201 @@ fn parse_cow_branch_revalidate_reviews_args(
     Ok(CowBranchRevalidateReviewsArgs {
         run_id,
         reviewer,
+        format,
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CowBranchRecordPluginValidatorArgs {
+    run_id: String,
+    findings_json: Option<String>,
+    findings_file: Option<PathBuf>,
+    format: String,
+}
+
+fn parse_cow_branch_record_plugin_validator_args(
+    args: &[String],
+) -> Result<CowBranchRecordPluginValidatorArgs> {
+    let mut run_id: Option<String> = None;
+    let mut findings_json: Option<String> = None;
+    let mut findings_file: Option<PathBuf> = None;
+    let mut format = "text".to_string();
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--run" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--run requires a merge run id");
+                };
+                run_id = Some(value.clone());
+                index += 2;
+            }
+            value if value.starts_with("--run=") => {
+                let value = value.trim_start_matches("--run=");
+                if value.is_empty() {
+                    bail!("--run requires a merge run id");
+                }
+                run_id = Some(value.to_string());
+                index += 1;
+            }
+            "--findings-json" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--findings-json requires a JSON array");
+                };
+                findings_json = Some(value.clone());
+                index += 2;
+            }
+            value if value.starts_with("--findings-json=") => {
+                let value = value.trim_start_matches("--findings-json=");
+                if value.is_empty() {
+                    bail!("--findings-json requires a JSON array");
+                }
+                findings_json = Some(value.to_string());
+                index += 1;
+            }
+            "--findings-file" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--findings-file requires a path");
+                };
+                findings_file = Some(PathBuf::from(value));
+                index += 2;
+            }
+            value if value.starts_with("--findings-file=") => {
+                let value = value.trim_start_matches("--findings-file=");
+                if value.is_empty() {
+                    bail!("--findings-file requires a path");
+                }
+                findings_file = Some(PathBuf::from(value));
+                index += 1;
+            }
+            "--format" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--format requires text or json");
+                };
+                format = value.clone();
+                index += 2;
+            }
+            value if value.starts_with("--format=") => {
+                let value = value.trim_start_matches("--format=");
+                if value.is_empty() {
+                    bail!("--format requires text or json");
+                }
+                format = value.to_string();
+                index += 1;
+            }
+            other => bail!(
+                "unsupported argument for `forkpress branch record-plugin-validator-conflicts`: {other}\n\n{}",
+                branch_help_text(Some("record-plugin-validator-conflicts"))
+            ),
+        }
+    }
+    let Some(run_id) = run_id else {
+        bail!(
+            "record-plugin-validator-conflicts requires --run <id>.\n\n{}",
+            branch_help_text(Some("record-plugin-validator-conflicts"))
+        );
+    };
+    if findings_json.is_some() == findings_file.is_some() {
+        bail!(
+            "record-plugin-validator-conflicts requires exactly one of --findings-json or --findings-file"
+        );
+    }
+    if format != "text" && format != "json" {
+        bail!("--format requires text or json");
+    }
+    Ok(CowBranchRecordPluginValidatorArgs {
+        run_id,
+        findings_json,
+        findings_file,
+        format,
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CowBranchRunPluginValidatorArgs {
+    run_id: String,
+    validator: PathBuf,
+    format: String,
+}
+
+fn parse_cow_branch_run_plugin_validator_args(
+    args: &[String],
+) -> Result<CowBranchRunPluginValidatorArgs> {
+    let mut run_id: Option<String> = None;
+    let mut validator: Option<PathBuf> = None;
+    let mut format = "text".to_string();
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--run" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--run requires a merge run id");
+                };
+                run_id = Some(value.clone());
+                index += 2;
+            }
+            value if value.starts_with("--run=") => {
+                let value = value.trim_start_matches("--run=");
+                if value.is_empty() {
+                    bail!("--run requires a merge run id");
+                }
+                run_id = Some(value.to_string());
+                index += 1;
+            }
+            "--validator" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--validator requires a path");
+                };
+                validator = Some(PathBuf::from(value));
+                index += 2;
+            }
+            value if value.starts_with("--validator=") => {
+                let value = value.trim_start_matches("--validator=");
+                if value.is_empty() {
+                    bail!("--validator requires a path");
+                }
+                validator = Some(PathBuf::from(value));
+                index += 1;
+            }
+            "--format" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--format requires text or json");
+                };
+                format = value.clone();
+                index += 2;
+            }
+            value if value.starts_with("--format=") => {
+                let value = value.trim_start_matches("--format=");
+                if value.is_empty() {
+                    bail!("--format requires text or json");
+                }
+                format = value.to_string();
+                index += 1;
+            }
+            other => bail!(
+                "unsupported argument for `forkpress branch run-plugin-validator`: {other}\n\n{}",
+                branch_help_text(Some("run-plugin-validator"))
+            ),
+        }
+    }
+    let Some(run_id) = run_id else {
+        bail!(
+            "run-plugin-validator requires --run <id>.\n\n{}",
+            branch_help_text(Some("run-plugin-validator"))
+        );
+    };
+    let Some(validator) = validator else {
+        bail!(
+            "run-plugin-validator requires --validator <path>.\n\n{}",
+            branch_help_text(Some("run-plugin-validator"))
+        );
+    };
+    if format != "text" && format != "json" {
+        bail!("--format requires text or json");
+    }
+    Ok(CowBranchRunPluginValidatorArgs {
+        run_id,
+        validator,
         format,
     })
 }
@@ -4603,6 +4830,16 @@ mod git_helper_tests {
     }
 
     #[test]
+    fn branch_help_lists_plugin_validator_commands() {
+        assert!(branch_help_text(None).contains("run-plugin-validator"));
+        assert!(branch_help_text(None).contains("record-plugin-validator-conflicts"));
+        assert!(branch_help_text(Some("run-plugin-validator")).contains("--validator"));
+        assert!(
+            branch_help_text(Some("record-plugin-validator-conflicts")).contains("--findings-file")
+        );
+    }
+
+    #[test]
     fn parses_branch_recover_crash_defaults() {
         let args = vec!["recover-crash".to_string()];
         let parsed = parse_cow_branch_recover_crash_args(&args).unwrap();
@@ -4669,6 +4906,92 @@ mod git_helper_tests {
             .to_string();
         assert!(err.contains("unsupported argument"));
         assert!(err.contains("forkpress branch revalidate-reviews"));
+    }
+
+    #[test]
+    fn parses_branch_record_plugin_validator_findings_file() {
+        let args = vec![
+            "record-plugin-validator-conflicts".to_string(),
+            "--run=12".to_string(),
+            "--findings-file=validator-findings.json".to_string(),
+            "--format=json".to_string(),
+        ];
+        let parsed = parse_cow_branch_record_plugin_validator_args(&args).unwrap();
+        assert_eq!(parsed.run_id, "12");
+        assert_eq!(parsed.findings_json, None);
+        assert_eq!(
+            parsed.findings_file.as_deref(),
+            Some(Path::new("validator-findings.json"))
+        );
+        assert_eq!(parsed.format, "json");
+    }
+
+    #[test]
+    fn parses_branch_record_plugin_validator_findings_json() {
+        let args = vec![
+            "record-plugin-validator-conflicts".to_string(),
+            "--run".to_string(),
+            "12".to_string(),
+            "--findings-json".to_string(),
+            "[]".to_string(),
+        ];
+        let parsed = parse_cow_branch_record_plugin_validator_args(&args).unwrap();
+        assert_eq!(parsed.run_id, "12");
+        assert_eq!(parsed.findings_json.as_deref(), Some("[]"));
+        assert_eq!(parsed.findings_file, None);
+        assert_eq!(parsed.format, "text");
+    }
+
+    #[test]
+    fn branch_record_plugin_validator_requires_one_findings_source() {
+        let args = vec![
+            "record-plugin-validator-conflicts".to_string(),
+            "--run=12".to_string(),
+        ];
+        let err = parse_cow_branch_record_plugin_validator_args(&args)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("exactly one"));
+        assert!(err.contains("--findings-json"));
+        assert!(err.contains("--findings-file"));
+    }
+
+    #[test]
+    fn branch_record_plugin_validator_rejects_multiple_findings_sources() {
+        let args = vec![
+            "record-plugin-validator-conflicts".to_string(),
+            "--run=12".to_string(),
+            "--findings-json=[]".to_string(),
+            "--findings-file=validator-findings.json".to_string(),
+        ];
+        let err = parse_cow_branch_record_plugin_validator_args(&args)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("exactly one"));
+    }
+
+    #[test]
+    fn parses_branch_run_plugin_validator() {
+        let args = vec![
+            "run-plugin-validator".to_string(),
+            "--run=12".to_string(),
+            "--validator=./validator.php".to_string(),
+            "--format=json".to_string(),
+        ];
+        let parsed = parse_cow_branch_run_plugin_validator_args(&args).unwrap();
+        assert_eq!(parsed.run_id, "12");
+        assert_eq!(parsed.validator, PathBuf::from("./validator.php"));
+        assert_eq!(parsed.format, "json");
+    }
+
+    #[test]
+    fn branch_run_plugin_validator_requires_validator() {
+        let args = vec!["run-plugin-validator".to_string(), "--run=12".to_string()];
+        let err = parse_cow_branch_run_plugin_validator_args(&args)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--validator <path>"));
+        assert!(err.contains("forkpress branch run-plugin-validator"));
     }
 
     #[test]
