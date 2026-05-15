@@ -17,7 +17,6 @@ const docs = defineCollection({
 			'README.{md,mdx}',
 			'docs/**/*.{md,mdx}',
 			'crates/**/README.{md,mdx}',
-			'experiments/**/README.{md,mdx}',
 			'installer/**/README.{md,mdx}',
 			'packages/**/README.{md,mdx}',
 			'components/**/README.{md,mdx}',

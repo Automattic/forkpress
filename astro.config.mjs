@@ -35,17 +35,40 @@ export default defineConfig({
 			sidebar: [
 				{ label: 'Overview', slug: 'index' },
 				{
-					label: 'Architecture',
+					label: 'Core workflows',
 					items: [
-						{ label: 'Storage Drivers', slug: 'docs/storage-drivers' },
-						{ label: 'Lazy Overlay COW', slug: 'docs/lazy-overlay-cow' },
-						{ label: 'Windows COW Setup', slug: 'docs/windows-cow' },
+						{ label: 'Branching', slug: 'docs/branching' },
+						{ label: 'Merging', slug: 'docs/merging' },
+						{ label: 'Git workflow', slug: 'docs/git-workflow' },
+						{ label: 'Agents', slug: 'docs/agents' },
+					],
+				},
+				{
+					label: 'Storage',
+					items: [
+						{ label: 'Overview', slug: 'docs/storage/overview' },
+						{ label: 'macOS', slug: 'docs/storage/macos' },
+						{ label: 'Linux', slug: 'docs/storage/linux' },
+						{ label: 'Windows', slug: 'docs/storage/windows' },
+						{ label: 'Engines', slug: 'docs/storage/engines' },
+					],
+				},
+				{
+					label: 'Reference',
+					items: [
+						{ label: 'Commands', slug: 'docs/commands' },
+						{ label: 'Logs', slug: 'docs/logs' },
 					],
 				},
 				{
 					label: 'Project',
-					items: [{ label: 'Documentation Site', slug: 'docs/documentation-site' }],
+					items: [
+						{ label: 'Architecture', slug: 'docs/architecture' },
+						{ label: 'Development', slug: 'docs/development' },
+						{ label: 'Documentation site', slug: 'docs/documentation-site' },
+					],
 				},
+				{ label: 'Experiments', slug: 'docs/experiments' },
 			],
 			plugins: [
 				starlightLlmsTxt({
