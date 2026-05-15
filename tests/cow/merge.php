@@ -14336,6 +14336,110 @@ PHP);
         'graph validator failure leaves an auditable failed run'
     );
 
+    $graph_conflict_base_root = $tmp . '/graph-validator-conflict-base';
+    $graph_conflict_source_root = $tmp . '/graph-validator-conflict-source';
+    $graph_conflict_target_root = $tmp . '/graph-validator-conflict-target';
+    foreach ([$graph_conflict_base_root, $graph_conflict_source_root, $graph_conflict_target_root] as $root) {
+        mkdir($root . '/wp-content/database', 0777, true);
+        mkdir($root . '/wp-content/uploads', 0777, true);
+    }
+    $graph_conflict_base_db = $graph_conflict_base_root . '/wp-content/database/.ht.sqlite';
+    $graph_conflict_source_db = $graph_conflict_source_root . '/wp-content/database/.ht.sqlite';
+    $graph_conflict_target_db = $graph_conflict_target_root . '/wp-content/database/.ht.sqlite';
+    $graph_conflict_metadata = $tmp . '/.forkpress/cow/merge/graph-validator-conflict-metadata.sqlite';
+    $graph_conflict_file_base = $tmp . '/.forkpress/cow/merge/file-bases/graph-validator-conflict.json';
+    create_base_db($graph_conflict_base_db);
+    $db = open_db($graph_conflict_base_db);
+    $db->exec('CREATE TABLE plugin_graph_conflict_parent (parent_key TEXT PRIMARY KEY, graph_json TEXT)');
+    $db->exec('CREATE TABLE plugin_graph_conflict_child (child_key TEXT PRIMARY KEY, label TEXT)');
+    $db->exec("INSERT INTO plugin_graph_conflict_child (child_key, label) VALUES ('shared-child', 'base shared child')");
+    $db->close();
+    copy($graph_conflict_base_db, $graph_conflict_source_db);
+    copy($graph_conflict_base_db, $graph_conflict_target_db);
+    cow_merge_capture_file_base($graph_conflict_base_root, $graph_conflict_file_base);
+    $db = open_db($graph_conflict_source_db);
+    $db->exec("INSERT INTO plugin_graph_conflict_parent (parent_key, graph_json) VALUES ('source-parent', '" . SQLite3::escapeString(json_encode(['child_key' => 'shared-child'], JSON_UNESCAPED_SLASHES)) . "')");
+    $db->close();
+    $db = open_db($graph_conflict_target_db);
+    $db->exec("UPDATE plugin_graph_conflict_child SET label = 'target-exclusive child' WHERE child_key = 'shared-child'");
+    $db->exec(
+        "INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('active_plugins', '" .
+        SQLite3::escapeString(serialize(['graph-conflict/graph-conflict.php'])) .
+        "', 'yes')"
+    );
+    $db->close();
+    write_test_file($graph_conflict_target_root . '/wp-content/plugins/graph-conflict/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query('SELECT parent_key, graph_json FROM plugin_graph_conflict_parent ORDER BY parent_key');
+$findings = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    $graph = json_decode((string)$row['graph_json'], true);
+    $child_key = is_array($graph) ? (string)($graph['child_key'] ?? '') : '';
+    if ($child_key === '') {
+        continue;
+    }
+    $stmt = $db->prepare('SELECT label FROM plugin_graph_conflict_child WHERE child_key = :child_key');
+    $stmt->bindValue(':child_key', $child_key, SQLITE3_TEXT);
+    $child = $stmt->execute()->fetchArray(SQLITE3_ASSOC);
+    if (is_array($child) && str_starts_with((string)$child['label'], 'target-exclusive')) {
+        $findings[] = [
+            'plugin' => 'forkpress-graph-conflict',
+            'object' => 'parent:' . $row['parent_key'],
+            'reason' => 'source graph references a target-exclusive child row',
+            'type' => 'plugin-graph-target-conflict',
+            'tables' => ['plugin_graph_conflict_parent', 'plugin_graph_conflict_child'],
+            'validator' => 'forkpress-graph-conflict@1',
+            'candidate' => [
+                'parent_key' => $row['parent_key'],
+                'child_key' => $child_key,
+                'child_label' => $child['label'],
+            ],
+        ];
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $graph_conflict_merge = run_merge_cli([
+        'merge',
+        '--base-db', $graph_conflict_base_db,
+        '--source-db', $graph_conflict_source_db,
+        '--target-db', $graph_conflict_target_db,
+        '--metadata-db', $graph_conflict_metadata,
+        '--source', 'feature-graph-conflict',
+        '--target', 'main',
+        '--base-files', $graph_conflict_file_base,
+        '--source-root', $graph_conflict_source_root,
+        '--target-root', $graph_conflict_target_root,
+    ]);
+    assert_same($graph_conflict_merge['status'], 0, 'target-conflicting plugin graph validator completes the merge with review conflicts');
+    assert_true(str_contains($graph_conflict_merge['output'], 'plugins:   validators=1 conflicts=1'), 'target-conflicting plugin graph validator reports a plugin conflict');
+    assert_same(
+        scalar($graph_conflict_target_db, "SELECT graph_json FROM plugin_graph_conflict_parent WHERE parent_key = 'source-parent'"),
+        json_encode(['child_key' => 'shared-child'], JSON_UNESCAPED_SLASHES),
+        'target-conflicting plugin graph validator keeps the staged source graph for review'
+    );
+    assert_same(
+        scalar($graph_conflict_target_db, "SELECT label FROM plugin_graph_conflict_child WHERE child_key = 'shared-child'"),
+        'target-exclusive child',
+        'target-conflicting plugin graph validator preserves target plugin child state'
+    );
+    assert_same(
+        scalar($graph_conflict_metadata, "SELECT status FROM merge_runs WHERE source_branch = 'feature-graph-conflict' ORDER BY id DESC LIMIT 1"),
+        'completed_with_conflicts',
+        'target-conflicting plugin graph validator marks the merge run conflicted'
+    );
+    $graph_conflict_audit = cow_merge_audit_report($graph_conflict_metadata, (int)scalar($graph_conflict_metadata, "SELECT id FROM merge_runs WHERE source_branch = 'feature-graph-conflict' ORDER BY id DESC LIMIT 1"), 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-graph-target-conflict',
+    ]);
+    assert_same(count($graph_conflict_audit['conflicts']), 1, 'target-conflicting plugin graph validator records a plugin-scoped audit conflict');
+    assert_true(str_contains($graph_conflict_audit['conflicts'][0]['chosen_preview'], 'target-exclusive child'), 'target-conflicting plugin graph validator exposes target conflict context');
+
     $inline_validator_base_root = $tmp . '/inline-validator-base';
     $inline_validator_source_root = $tmp . '/inline-validator-source';
     $inline_validator_target_root = $tmp . '/inline-validator-target';
