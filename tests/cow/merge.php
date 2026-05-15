@@ -13588,6 +13588,7 @@ SQL);
     $db->exec("ALTER TABLE wp_posts ADD COLUMN post_type TEXT NOT NULL DEFAULT 'post'");
     $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
     $db->exec('CREATE TABLE wp_terms (term_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, slug TEXT NOT NULL)');
+    $db->exec('CREATE TABLE wp_termmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, term_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
     $db->exec('CREATE TABLE wp_term_taxonomy (term_taxonomy_id INTEGER PRIMARY KEY AUTOINCREMENT, term_id INTEGER NOT NULL, taxonomy TEXT NOT NULL, description TEXT NOT NULL DEFAULT "", parent INTEGER NOT NULL DEFAULT 0, count INTEGER NOT NULL DEFAULT 0)');
     $db->exec('CREATE TABLE wp_term_relationships (object_id INTEGER NOT NULL, term_taxonomy_id INTEGER NOT NULL, term_order INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (object_id, term_taxonomy_id))');
     $db->close();
@@ -13599,6 +13600,7 @@ SQL);
     $stmt = $db->prepare("INSERT INTO wp_term_taxonomy (term_id, taxonomy, description, count) VALUES (2, 'category', '', 1)");
     $stmt->execute();
     $band_explicit_term_taxonomy_id = (int)$db->lastInsertRowID();
+    $db->exec("INSERT INTO wp_termmeta (term_id, meta_key, meta_value) VALUES (2, '_forkpress_term_ref', 'term metadata behind held explicit term')");
     $db->exec("INSERT INTO wp_terms (name, slug) VALUES ('Imported child term behind explicit parent', 'imported-child-term')");
     $band_explicit_child_term_id = (int)$db->lastInsertRowID();
     $stmt = $db->prepare("INSERT INTO wp_term_taxonomy (term_id, taxonomy, description, parent, count) VALUES (:term_id, 'category', '', 2, 1)");
@@ -13623,6 +13625,7 @@ SQL);
     );
     assert_same($band_explicit_term_result['status'], 'completed_with_conflicts', 'explicit source term IDs hold dependent taxonomy rows for review');
     assert_same((int)scalar($band_explicit_term_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 2'), 0, 'out-of-band explicit source term remains unapplied');
+    assert_same((int)scalar($band_explicit_term_target, 'SELECT COUNT(*) FROM wp_termmeta WHERE term_id = 2'), 0, 'term metadata pointing at a held explicit source term is not applied automatically');
     assert_same((int)scalar($band_explicit_term_target, 'SELECT COUNT(*) FROM wp_term_taxonomy WHERE term_id = 2'), 0, 'term taxonomy pointing at a held explicit source term is not applied automatically');
     assert_same((int)scalar($band_explicit_term_target, 'SELECT COUNT(*) FROM wp_term_taxonomy WHERE parent = 2'), 0, 'hierarchical term taxonomy pointing at a held explicit parent term is not applied automatically');
     assert_same((int)scalar($band_explicit_term_target, "SELECT COUNT(*) FROM wp_term_relationships WHERE term_taxonomy_id = $band_explicit_term_taxonomy_id"), 0, 'term relationships pointing at held explicit source term taxonomy are not applied automatically');
@@ -13636,6 +13639,11 @@ SQL);
         (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND c.table_name = 'wp_term_taxonomy' AND c.conflict_type = 'row-target-constraint'"),
         2,
         'term taxonomy pointing at a held explicit source term records a reviewable row conflict'
+    );
+    assert_same(
+        (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND c.table_name = 'wp_termmeta' AND c.conflict_type = 'row-target-constraint'"),
+        1,
+        'term metadata pointing at a held explicit source term records a reviewable row conflict'
     );
     assert_same(
         (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND c.table_name = 'wp_term_relationships' AND c.conflict_type = 'row-target-constraint'"),

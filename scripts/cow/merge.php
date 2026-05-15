@@ -4672,6 +4672,9 @@ function cow_merge_wordpress_insert_reference_violation(
             return cow_merge_wordpress_comment_reference_violation($source, $target, $meta, $source_branch, 'wp_commentmeta row', $comment);
         }
     }
+    if ($table === 'wp_termmeta') {
+        return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_termmeta row', 'wp_terms', 'term_id', $source_row['term_id'] ?? null, 'term');
+    }
     if ($table === 'wp_term_taxonomy') {
         $term_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_term_taxonomy row', 'wp_terms', 'term_id', $source_row['term_id'] ?? null, 'term');
         if ($term_violation !== null) {
