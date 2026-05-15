@@ -270,7 +270,7 @@ function cow_merge_file_manifest_for_root(string $root): array {
 
     while ($stack) {
         $dir = array_pop($stack);
-        $children = scandir($dir);
+        $children = @scandir($dir);
         if ($children === false) {
             throw new RuntimeException("failed to read filesystem merge directory: $dir");
         }
