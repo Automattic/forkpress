@@ -111,6 +111,12 @@ on_error() {
   dump_if_exists "$TMP/public-before-file-crash-restore.json"
   dump_if_exists "$TMP/public-before-file-crash-retry.out"
   dump_if_exists "$TMP/public-before-file-crash-main-edit.html"
+  dump_if_exists "$TMP/public-recovery-cleanup-crash-merge.out"
+  dump_if_exists "$TMP/public-recovery-cleanup-crash-recover.json"
+  dump_if_exists "$TMP/public-recovery-cleanup-crash-restore.out"
+  dump_if_exists "$TMP/public-recovery-cleanup-crash-retry-restore.json"
+  dump_if_exists "$TMP/public-recovery-cleanup-crash-retry.out"
+  dump_if_exists "$TMP/public-recovery-cleanup-crash-main-edit.html"
   dump_if_exists "$TMP/public-file-crash-merge.out"
   dump_if_exists "$TMP/public-file-crash-recover.json"
   dump_if_exists "$TMP/public-file-crash-blocked.out"
@@ -1523,6 +1529,32 @@ curl -sS -H "Host: wp.localhost:$PORT" \
   "http://127.0.0.1:$PORT/wp-admin/edit.php" \
   -o "$TMP/public-before-file-crash-main-edit.html"
 grep -F "$PUBLIC_BEFORE_FILE_CRASH_TITLE" "$TMP/public-before-file-crash-main-edit.html" >/dev/null
+
+log_step "public crash recovery cleanup interruption"
+"$BIN" branch --work-dir "$WORK_DIR" create public-recovery-cleanup-crash
+PUBLIC_RECOVERY_CLEANUP_CRASH_TITLE="Public recovery cleanup crash $(date +%s)"
+create_branch_post public-recovery-cleanup-crash "$PUBLIC_RECOVERY_CLEANUP_CRASH_TITLE"
+if FORKPRESS_COW_MERGE_TEST_FAILPOINT=before-target-db-commit FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION=kill \
+  "$BIN" branch --work-dir "$WORK_DIR" merge public-recovery-cleanup-crash --into main > "$TMP/public-recovery-cleanup-crash-merge.out" 2>&1; then
+  echo "public branch merge unexpectedly survived recovery-cleanup fixture kill failpoint" >&2
+  exit 1
+fi
+"$BIN" branch --work-dir "$WORK_DIR" recover-crash --format json > "$TMP/public-recovery-cleanup-crash-recover.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && (int)($data["pending"] ?? 0) >= 1 ? 0 : 1);' "$TMP/public-recovery-cleanup-crash-recover.json"
+if FORKPRESS_COW_MERGE_TEST_FAILPOINT=after-crash-recovery-restore FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION=exit \
+  "$BIN" branch --work-dir "$WORK_DIR" recover-crash --restore-target-db --format json > "$TMP/public-recovery-cleanup-crash-restore.out" 2>&1; then
+  echo "public crash recovery unexpectedly survived after-crash-recovery-restore failpoint" >&2
+  exit 1
+fi
+"$BIN" branch --work-dir "$WORK_DIR" recover-crash --restore-target-db --format json > "$TMP/public-recovery-cleanup-crash-retry-restore.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && (int)($data["pending"] ?? 0) === 0 && (int)($data["restored"] ?? 0) >= 1 ? 0 : 1);' "$TMP/public-recovery-cleanup-crash-retry-restore.json"
+"$BIN" branch --work-dir "$WORK_DIR" merge public-recovery-cleanup-crash --into main > "$TMP/public-recovery-cleanup-crash-retry.out"
+grep -F "forkpress: merged public-recovery-cleanup-crash into main" "$TMP/public-recovery-cleanup-crash-retry.out" >/dev/null
+grep -F "status:    completed" "$TMP/public-recovery-cleanup-crash-retry.out" >/dev/null
+curl -sS -H "Host: wp.localhost:$PORT" \
+  "http://127.0.0.1:$PORT/wp-admin/edit.php" \
+  -o "$TMP/public-recovery-cleanup-crash-main-edit.html"
+grep -F "$PUBLIC_RECOVERY_CLEANUP_CRASH_TITLE" "$TMP/public-recovery-cleanup-crash-main-edit.html" >/dev/null
 
 log_step "public branch merge filesystem crash recovery"
 "$BIN" branch --work-dir "$WORK_DIR" create public-file-crash-merge

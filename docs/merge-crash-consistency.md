@@ -68,6 +68,10 @@ The PHP merge suite covers these rollback classes:
   `forkpress branch merge`, verifying that a DB-complete but pre-filesystem
   public merge is reported, blocks retries, restores DB and files through
   public recovery, and can be retried.
+- The product E2E suite drives `after-crash-recovery-restore` through public
+  `forkpress branch recover-crash`, verifying that an interrupted recovery
+  cleanup remains retryable and a second public recovery clears the pending
+  artifact.
 - The product E2E suite also drives `after-file-op` through public
   `forkpress branch merge`, verifies the pending filesystem crash recovery
   blocks retries, restores both DB and files through public recovery, and
