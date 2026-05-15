@@ -12901,6 +12901,10 @@ SQL);
     }
 
     require_once __DIR__ . '/../../wp-plugin/forkpress-wp.php';
+    assert_true(forkpress_branch_name_is_valid('feature_safe-1'), 'WP branch UI accepts CLI-compatible branch names');
+    assert_true(!forkpress_branch_name_is_valid('feature branch'), 'WP branch UI rejects branch names with spaces');
+    assert_true(!forkpress_branch_name_is_valid('wp'), 'WP branch UI rejects reserved routing branch names');
+    assert_true(!forkpress_branch_name_is_valid('Admin'), 'WP branch UI rejects reserved routing branch names case-insensitively');
     $GLOBALS['wpdb']->query('CREATE TABLE plugin_runtime_keyless (label TEXT, value TEXT)');
     $GLOBALS['wpdb']->query("INSERT INTO plugin_runtime_keyless (label, value) VALUES ('First runtime row', 'base')");
     $GLOBALS['wpdb']->query('DELETE FROM plugin_runtime_keyless WHERE rowid = 1');
