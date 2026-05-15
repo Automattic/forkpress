@@ -5780,6 +5780,43 @@ function cow_merge_apply_dir_entry(string $source_root, string $target_root, str
     @chmod($target, (int)($entry['mode'] ?? 0755));
 }
 
+function cow_merge_apply_dir_tree_entry(string $source_root, string $target_root, string $path, array $entry): void {
+    cow_merge_apply_dir_entry($source_root, $target_root, $path, $entry);
+    $source_entries = cow_merge_file_manifest_for_root($source_root)['entries'];
+    $children = [];
+    foreach ($source_entries as $child_path => $child_entry) {
+        if (cow_merge_file_has_prefix($child_path, $path)) {
+            $children[$child_path] = $child_entry;
+        }
+    }
+    uksort($children, static function (string $a, string $b) use ($children): int {
+        $rank = ['dir' => 0, 'symlink' => 1, 'file' => 2];
+        $rank_a = $rank[(string)($children[$a]['type'] ?? '')] ?? 99;
+        $rank_b = $rank[(string)($children[$b]['type'] ?? '')] ?? 99;
+        if ($rank_a !== $rank_b) {
+            return $rank_a <=> $rank_b;
+        }
+        return strlen($a) <=> strlen($b) ?: strcmp($a, $b);
+    });
+
+    foreach ($children as $child_path => $child_entry) {
+        $child_type = (string)($child_entry['type'] ?? '');
+        if ($child_type === 'dir') {
+            cow_merge_apply_dir_entry($source_root, $target_root, $child_path, $child_entry);
+        } elseif ($child_type === 'symlink') {
+            $reason = cow_merge_symlink_safety_reason($child_path, $child_entry);
+            if ($reason !== null) {
+                throw new RuntimeException("cannot apply source filesystem directory subtree $path (file-unsafe-symlink): $reason");
+            }
+            cow_merge_apply_symlink_entry($source_root, $target_root, $child_path, $child_entry);
+        } elseif ($child_type === 'file') {
+            cow_merge_copy_file_entry($source_root, $target_root, $child_path, $child_entry);
+        } else {
+            throw new RuntimeException("cannot apply unsupported source filesystem directory subtree entry: $child_path");
+        }
+    }
+}
+
 function cow_merge_delete_file_entry(string $target_root, string $path): void {
     $target = cow_merge_file_target_path($target_root, $path);
     if (!file_exists($target) && !is_link($target)) {
@@ -6086,7 +6123,7 @@ function cow_merge_apply_file_resolution(
         cow_merge_remove_tree($target_path);
     }
     if ($source_type === 'dir') {
-        cow_merge_apply_dir_entry($source_root, $target_root, $path, $source);
+        cow_merge_apply_dir_tree_entry($source_root, $target_root, $path, $source);
     } elseif ($source_type === 'symlink') {
         cow_merge_apply_symlink_entry($source_root, $target_root, $path, $source);
     } elseif ($source_type === 'file') {
@@ -6641,8 +6678,10 @@ function cow_merge_files(
                     }
                     if (
                         $conflict_type === 'file-type-replacement-conflict'
-                        && (($base['type'] ?? null) === 'dir' || ($target['type'] ?? null) === 'dir')
-                        && ($source['type'] ?? null) !== 'dir'
+                        && (
+                            (($base['type'] ?? null) === 'dir' || ($target['type'] ?? null) === 'dir')
+                            || ($source['type'] ?? null) === 'dir'
+                        )
                     ) {
                         $target_kept_subtree_conflict_prefixes[] = $path;
                     }
