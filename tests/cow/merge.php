@@ -13657,8 +13657,23 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
         ];
         continue;
     }
-    $relative_files = [$attached_file];
-    $directory = trim(dirname($attached_file), '.');
+    $metadata_file = isset($metadata['file']) ? (string)$metadata['file'] : '';
+    if ($metadata_file !== '' && $metadata_file !== $attached_file) {
+        $findings[] = [
+            'plugin' => 'forkpress-wp-media',
+            'object' => 'attachment:' . $row['ID'],
+            'reason' => '_wp_attached_file does not match _wp_attachment_metadata file',
+            'type' => 'plugin-wp-media-file-mismatch',
+            'tables' => ['wp_posts', 'wp_postmeta'],
+            'validator' => 'forkpress-wp-media@1',
+            'candidate' => [
+                'attached_file' => $attached_file,
+                'metadata_file' => $metadata_file,
+            ],
+        ];
+    }
+    $relative_files = array_values(array_unique(array_filter([$attached_file, $metadata_file], 'strlen')));
+    $directory = trim(dirname($metadata_file !== '' ? $metadata_file : $attached_file), '.');
     foreach (($metadata['sizes'] ?? []) as $size_name => $size) {
         if (!is_array($size) || !isset($size['file'])) {
             continue;
@@ -13729,6 +13744,21 @@ PHP);
     $stmt->bindValue(':file', '2026/05/source-missing-original.jpg', SQLITE3_TEXT);
     $stmt->bindValue(':metadata', $wp_media_missing_original_metadata, SQLITE3_TEXT);
     $stmt->execute();
+    write_test_file($wp_media_source_root . '/wp-content/uploads/2026/05/source-attached-file.jpg', "source attached file bytes\n");
+    write_test_file($wp_media_source_root . '/wp-content/uploads/2026/05/source-metadata-file.jpg', "source metadata file bytes\n");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, guid) VALUES ('Source media mismatched metadata file', '', 'inherit', 'attachment', 'wp-content/uploads/2026/05/source-attached-file.jpg')");
+    $wp_media_mismatch_id = (int)$db->lastInsertRowID();
+    $wp_media_mismatch_metadata = serialize([
+        'file' => '2026/05/source-metadata-file.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', :file), (:post_id, '_wp_attachment_metadata', :metadata)");
+    $stmt->bindValue(':post_id', $wp_media_mismatch_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':file', '2026/05/source-attached-file.jpg', SQLITE3_TEXT);
+    $stmt->bindValue(':metadata', $wp_media_mismatch_metadata, SQLITE3_TEXT);
+    $stmt->execute();
     $db->close();
     $wp_media_result = cow_merge_branch_state(
         $wp_media_base,
@@ -13743,13 +13773,15 @@ PHP);
     );
     assert_same($wp_media_result['status'], 'completed_with_conflicts', 'WordPress media validator holds missing generated upload files for review');
     assert_same((int)($wp_media_result['plugin_validators'] ?? 0), 1, 'WordPress media validator is discovered from mu-plugins during merge');
-    assert_same((int)($wp_media_result['plugin_validator_conflicts'] ?? 0), 2, 'WordPress media validator records missing original and generated-file conflicts');
+    assert_same((int)($wp_media_result['plugin_validator_conflicts'] ?? 0), 3, 'WordPress media validator records missing files and metadata mismatches');
     assert_same(
         scalar($wp_media_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $wp_media_attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-original.jpg',
         'WordPress media validator leaves the staged attachment metadata available for review'
     );
     assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-original.jpg'), 'WordPress media validator keeps the merged original upload file');
+    assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-attached-file.jpg'), 'WordPress media validator keeps the mismatched attached upload file');
+    assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-metadata-file.jpg'), 'WordPress media validator keeps the mismatched metadata upload file');
     assert_true(!is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-original-150x150.jpg'), 'WordPress media validator does not invent missing generated upload files');
     assert_true(!is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-missing-original.jpg'), 'WordPress media validator does not invent missing original upload files');
     $wp_media_audit = cow_merge_audit_report($wp_media_metadata, (int)$wp_media_result['run_id'], 10, [
@@ -13761,6 +13793,15 @@ PHP);
     $wp_media_audit_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $wp_media_audit['conflicts']));
     assert_true(str_contains($wp_media_audit_preview, 'source-original-150x150.jpg'), 'WordPress media validator audit includes the missing generated upload filename');
     assert_true(str_contains($wp_media_audit_preview, 'source-missing-original.jpg'), 'WordPress media validator audit includes the missing original upload filename');
+    $wp_media_mismatch_audit = cow_merge_audit_report($wp_media_metadata, (int)$wp_media_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-media-file-mismatch',
+    ]);
+    assert_same(count($wp_media_mismatch_audit['conflicts']), 1, 'WordPress media validator exposes attachment file mismatches as plugin-scoped audit conflicts');
+    $wp_media_mismatch_preview = (string)($wp_media_mismatch_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_true(str_contains($wp_media_mismatch_preview, 'source-attached-file.jpg'), 'WordPress media mismatch audit includes the attached file');
+    assert_true(str_contains($wp_media_mismatch_preview, 'source-metadata-file.jpg'), 'WordPress media mismatch audit includes the metadata file');
 
     $wp_block_ref_base_root = $tmp . '/wp-block-ref-validator-files-base';
     $wp_block_ref_source_root = $tmp . '/wp-block-ref-validator-files-source';
