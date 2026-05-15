@@ -13617,6 +13617,135 @@ SQL);
     $assert_wp_semantic_bundle($wp_semantic_target, $wp_semantic_target_root, $wp_semantic_target_graph, 'target');
     assert_same((int)scalar($wp_semantic_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-wp-semantic-source'"), 0, 'WordPress semantic merge records no generic conflicts while IDs remain banded');
 
+    $wp_media_base_root = $tmp . '/wp-media-validator-files-base';
+    $wp_media_source_root = $tmp . '/wp-media-validator-files-source';
+    $wp_media_target_root = $tmp . '/wp-media-validator-files-target';
+    $wp_media_base = $wp_media_base_root . '/wp-content/database/.ht.sqlite';
+    $wp_media_source = $wp_media_source_root . '/wp-content/database/.ht.sqlite';
+    $wp_media_target = $wp_media_target_root . '/wp-content/database/.ht.sqlite';
+    $wp_media_metadata = $tmp . '/.forkpress/cow/merge/wp-media-validator-metadata.sqlite';
+    mkdir($wp_media_base_root . '/wp-content/database', 0777, true);
+    create_base_db($wp_media_base);
+    $db = open_db($wp_media_base);
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_type TEXT NOT NULL DEFAULT 'post'");
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN guid TEXT NOT NULL DEFAULT ''");
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->close();
+    write_test_file($wp_media_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$target_root = rtrim((string)getenv('FORKPRESS_MERGE_TARGET_ROOT'), '/');
+$res = $db->query("SELECT p.ID, f.meta_value AS attached_file, m.meta_value AS metadata
+    FROM wp_posts p
+    JOIN wp_postmeta f ON f.post_id = p.ID AND f.meta_key = '_wp_attached_file'
+    JOIN wp_postmeta m ON m.post_id = p.ID AND m.meta_key = '_wp_attachment_metadata'
+    WHERE p.post_type = 'attachment'
+    ORDER BY p.ID");
+$findings = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    $attached_file = (string)$row['attached_file'];
+    $metadata = @unserialize((string)$row['metadata']);
+    if (!is_array($metadata)) {
+        $findings[] = [
+            'plugin' => 'forkpress-wp-media',
+            'object' => 'attachment:' . $row['ID'],
+            'reason' => 'attachment metadata is not readable',
+            'type' => 'plugin-wp-media-invalid-metadata',
+            'tables' => ['wp_posts', 'wp_postmeta'],
+            'validator' => 'forkpress-wp-media@1',
+            'candidate' => ['attached_file' => $attached_file],
+        ];
+        continue;
+    }
+    $relative_files = [$attached_file];
+    $directory = trim(dirname($attached_file), '.');
+    foreach (($metadata['sizes'] ?? []) as $size_name => $size) {
+        if (!is_array($size) || !isset($size['file'])) {
+            continue;
+        }
+        $relative_files[] = trim($directory . '/' . (string)$size['file'], '/');
+    }
+    foreach ($relative_files as $relative_file) {
+        $path = $target_root . '/wp-content/uploads/' . ltrim((string)$relative_file, '/');
+        if (!is_file($path)) {
+            $findings[] = [
+                'plugin' => 'forkpress-wp-media',
+                'object' => 'attachment:' . $row['ID'],
+                'reason' => 'attachment metadata references a missing upload file',
+                'type' => 'plugin-wp-media-missing-file',
+                'tables' => ['wp_posts', 'wp_postmeta'],
+                'paths' => ['wp-content/uploads/' . ltrim((string)$relative_file, '/')],
+                'validator' => 'forkpress-wp-media@1',
+                'candidate' => [
+                    'attached_file' => $attached_file,
+                    'missing_file' => $relative_file,
+                ],
+            ];
+        }
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    copy_tree_for_test($wp_media_base_root, $wp_media_source_root);
+    copy_tree_for_test($wp_media_base_root, $wp_media_target_root);
+    $wp_media_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-media-validator.json';
+    cow_merge_capture_file_base($wp_media_base_root, $wp_media_file_base);
+    cow_merge_allocate_autoincrement_bands($wp_media_source, $wp_media_metadata, 'feature-wp-media-source');
+    cow_merge_allocate_autoincrement_bands($wp_media_target, $wp_media_metadata, 'feature-wp-media-target');
+    write_test_file($wp_media_source_root . '/wp-content/uploads/2026/05/source-original.jpg', "source original image\n");
+    $wp_media_attachment_metadata = serialize([
+        'file' => '2026/05/source-original.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'source-original-150x150.jpg',
+                'width' => 150,
+                'height' => 150,
+            ],
+        ],
+    ]);
+    $db = open_db($wp_media_source);
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, guid) VALUES ('Source media missing generated file', '', 'inherit', 'attachment', 'wp-content/uploads/2026/05/source-original.jpg')");
+    $wp_media_attachment_id = (int)$db->lastInsertRowID();
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', :file), (:post_id, '_wp_attachment_metadata', :metadata)");
+    $stmt->bindValue(':post_id', $wp_media_attachment_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':file', '2026/05/source-original.jpg', SQLITE3_TEXT);
+    $stmt->bindValue(':metadata', $wp_media_attachment_metadata, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+    $wp_media_result = cow_merge_branch_state(
+        $wp_media_base,
+        $wp_media_source,
+        $wp_media_target,
+        $wp_media_metadata,
+        'feature-wp-media-source',
+        'feature-wp-media-target',
+        $wp_media_file_base,
+        $wp_media_source_root,
+        $wp_media_target_root
+    );
+    assert_same($wp_media_result['status'], 'completed_with_conflicts', 'WordPress media validator holds missing generated upload files for review');
+    assert_same((int)($wp_media_result['plugin_validators'] ?? 0), 1, 'WordPress media validator is discovered from mu-plugins during merge');
+    assert_same((int)($wp_media_result['plugin_validator_conflicts'] ?? 0), 1, 'WordPress media validator records one missing-file conflict');
+    assert_same(
+        scalar($wp_media_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $wp_media_attachment_id AND meta_key = '_wp_attached_file'"),
+        '2026/05/source-original.jpg',
+        'WordPress media validator leaves the staged attachment metadata available for review'
+    );
+    assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-original.jpg'), 'WordPress media validator keeps the merged original upload file');
+    assert_true(!is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-original-150x150.jpg'), 'WordPress media validator does not invent missing generated upload files');
+    $wp_media_audit = cow_merge_audit_report($wp_media_metadata, (int)$wp_media_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-media-missing-file',
+    ]);
+    assert_same(count($wp_media_audit['conflicts']), 1, 'WordPress media validator exposes missing generated upload files as plugin-scoped audit conflicts');
+    assert_true(str_contains($wp_media_audit['conflicts'][0]['chosen_preview'], 'source-original-150x150.jpg'), 'WordPress media validator audit includes the missing generated upload filename');
+
     $wp_lifecycle_base = $tmp . '/wp-lifecycle-base.sqlite';
     $wp_lifecycle_source = $tmp . '/wp-lifecycle-source.sqlite';
     $wp_lifecycle_target = $tmp . '/wp-lifecycle-target.sqlite';

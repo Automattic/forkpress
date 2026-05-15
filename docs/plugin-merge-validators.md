@@ -186,4 +186,7 @@ plugin exclusion, automatic validator execution during a normal merge, a
 discovered custom-table graph validator that aborts and rolls back a candidate
 whose JSON points at a missing child row, and a discovered target-conflict
 validator that completes the merge with plugin-scoped review conflicts when a
-source graph references target-exclusive plugin state.
+source graph references target-exclusive plugin state. It also covers a
+WordPress media-shaped mu-plugin validator that inspects the candidate target
+root and records plugin-scoped conflicts when attachment metadata references a
+missing generated upload file.
