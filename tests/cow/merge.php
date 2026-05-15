@@ -15523,11 +15523,11 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
             continue;
         }
         $size_file = str_replace('\\', '/', (string)$size['file']);
-        if (str_contains($size_file, '/') && $unsafe_upload_path($size_file) === null) {
+        if ($size_file === '' || (str_contains($size_file, '/') && $unsafe_upload_path($size_file) === null)) {
             $findings[] = [
                 'plugin' => 'forkpress-wp-media',
                 'object' => 'attachment:' . $row['ID'],
-                'reason' => 'attachment generated size file is not a basename',
+                'reason' => 'attachment generated size file is not a non-empty basename',
                 'type' => 'plugin-wp-media-generated-file-drift',
                 'tables' => ['wp_posts', 'wp_postmeta'],
                 'validator' => 'forkpress-wp-media@1',
@@ -15537,6 +15537,9 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
                     'generated_file' => (string)$size['file'],
                 ],
             ];
+            if ($size_file === '') {
+                continue;
+            }
         }
         $relative_files[] = trim($directory . '/' . $size_file, '/');
     }
@@ -15706,6 +15709,26 @@ PHP);
     $stmt->bindValue(':file', '2026/05/source-generated-path-drift.jpg', SQLITE3_TEXT);
     $stmt->bindValue(':metadata', $wp_media_generated_path_drift_metadata, SQLITE3_TEXT);
     $stmt->execute();
+    write_test_file($wp_media_source_root . '/wp-content/uploads/2026/05/source-generated-empty-drift.jpg', "source generated empty drift original bytes\n");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, guid) VALUES ('Source media generated empty drift', '', 'inherit', 'attachment', 'wp-content/uploads/2026/05/source-generated-empty-drift.jpg')");
+    $wp_media_generated_empty_drift_id = (int)$db->lastInsertRowID();
+    $wp_media_generated_empty_drift_metadata = serialize([
+        'file' => '2026/05/source-generated-empty-drift.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => '',
+                'width' => 150,
+                'height' => 150,
+            ],
+        ],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', :file), (:post_id, '_wp_attachment_metadata', :metadata)");
+    $stmt->bindValue(':post_id', $wp_media_generated_empty_drift_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':file', '2026/05/source-generated-empty-drift.jpg', SQLITE3_TEXT);
+    $stmt->bindValue(':metadata', $wp_media_generated_empty_drift_metadata, SQLITE3_TEXT);
+    $stmt->execute();
     $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, guid) VALUES ('Source media unsafe attached path', '', 'inherit', 'attachment', '/tmp/source-unsafe-attached.jpg')");
     $wp_media_unsafe_attached_path_id = (int)$db->lastInsertRowID();
     $wp_media_unsafe_attached_path_metadata = serialize([
@@ -15803,7 +15826,7 @@ PHP);
     );
     assert_same($wp_media_result['status'], 'completed_with_conflicts', 'WordPress media validator holds missing generated upload files for review');
     assert_same((int)($wp_media_result['plugin_validators'] ?? 0), 1, 'WordPress media validator is discovered from mu-plugins during merge');
-    assert_same((int)($wp_media_result['plugin_validator_conflicts'] ?? 0), 10, 'WordPress media validator records missing files, duplicate files, generated path drift, and metadata mismatches');
+    assert_same((int)($wp_media_result['plugin_validator_conflicts'] ?? 0), 11, 'WordPress media validator records missing files, duplicate files, generated file drift, and metadata mismatches');
     assert_same(
         scalar($wp_media_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $wp_media_attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-original.jpg',
@@ -15815,6 +15838,7 @@ PHP);
     assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-invalid-metadata.jpg'), 'WordPress media validator keeps the upload for unreadable attachment metadata');
     assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-unsafe-path.jpg'), 'WordPress media validator keeps the upload for unsafe generated-size metadata');
     assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/nested/source-generated-path-drift-150x150.jpg'), 'WordPress media validator keeps generated-size path drift files for review');
+    assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-generated-empty-drift.jpg'), 'WordPress media validator keeps generated-size empty filename drift originals for review');
     assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-duplicate-shared-150x150.jpg'), 'WordPress media validator keeps duplicated generated upload files for review');
     assert_true(!is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-original-150x150.jpg'), 'WordPress media validator does not invent missing generated upload files');
     assert_true(!is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-missing-original.jpg'), 'WordPress media validator does not invent missing original upload files');
@@ -15859,9 +15883,10 @@ PHP);
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-media-generated-file-drift',
     ]);
-    assert_same(count($wp_media_generated_path_drift_audit['conflicts']), 1, 'WordPress media validator exposes generated-size basename drift as a plugin-scoped audit conflict');
-    $wp_media_generated_path_drift_preview = (string)($wp_media_generated_path_drift_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_same(count($wp_media_generated_path_drift_audit['conflicts']), 2, 'WordPress media validator exposes generated-size filename drift as plugin-scoped audit conflicts');
+    $wp_media_generated_path_drift_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $wp_media_generated_path_drift_audit['conflicts']));
     assert_true(str_contains($wp_media_generated_path_drift_preview, 'nested/source-generated-path-drift-150x150.jpg'), 'WordPress media generated path drift audit includes the nested generated filename');
+    assert_true(str_contains($wp_media_generated_path_drift_preview, 'source-generated-empty-drift.jpg'), 'WordPress media generated file drift audit includes the empty generated filename attachment');
     $wp_media_empty_path_recorded = false;
     $wp_media_meta_db = open_db($wp_media_metadata);
     $wp_media_payloads = $wp_media_meta_db->query("SELECT chosen_payload FROM merge_conflicts WHERE conflict_type = 'plugin-wp-media-unsafe-path'");
