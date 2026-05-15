@@ -182,10 +182,19 @@ create_branch_post() {
   local html="$TMP/${branch}-post-new.html"
   local json="$TMP/${branch}-rest-save.json"
 
-  if ! curl -sS -H "Host: $host" \
-    "http://127.0.0.1:$PORT/wp-admin/post-new.php" \
-    -o "$html"; then
+  local html_http
+  if ! html_http="$(
+    curl -sS -L -o "$html" -w '%{http_code}' \
+      -H "Host: $host" \
+      "http://127.0.0.1:$PORT/wp-admin/post-new.php"
+  )"; then
     echo "failed to fetch post editor on $branch" >&2
+    "$BIN" logs --work-dir "$WORK_DIR" --file all -n 160 >&2 || true
+    exit 1
+  fi
+  if [ "$html_http" != "200" ]; then
+    echo "post editor on $branch returned $html_http" >&2
+    dump_if_exists "$html"
     "$BIN" logs --work-dir "$WORK_DIR" --file all -n 160 >&2 || true
     exit 1
   fi
