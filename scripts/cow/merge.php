@@ -4510,10 +4510,19 @@ function cow_merge_wordpress_insert_reference_violation(
     string $table,
     array $source_row
 ): ?string {
-    if ($table !== 'wp_postmeta' || !array_key_exists('post_id', $source_row)) {
+    if ($table === 'wp_postmeta') {
+        $reference_column = 'post_id';
+        $child_label = 'wp_postmeta row';
+    } elseif ($table === 'wp_term_relationships') {
+        $reference_column = 'object_id';
+        $child_label = 'wp_term_relationships row';
+    } else {
         return null;
     }
-    $post_id = $source_row['post_id'];
+    if (!array_key_exists($reference_column, $source_row)) {
+        return null;
+    }
+    $post_id = $source_row[$reference_column];
     if (!is_int($post_id) && !(is_string($post_id) && preg_match('/^-?\d+$/', $post_id))) {
         return null;
     }
@@ -4536,7 +4545,7 @@ function cow_merge_wordpress_insert_reference_violation(
         cow_merge_result_finalize_checked($res, 'failed to finalize WordPress postmeta parent lookup');
     }
     if (!cow_merge_schema_object_exists($source, 'wp_posts')) {
-        return "source inserted wp_postmeta row references missing wp_posts.ID $post_id; parent post must merge before child metadata";
+        return "source inserted $child_label references missing wp_posts.ID $post_id; parent post must merge before child row";
     }
     $stmt = cow_merge_prepare_checked(
         $source,
@@ -4551,11 +4560,11 @@ function cow_merge_wordpress_insert_reference_violation(
         cow_merge_result_finalize_checked($res, 'failed to finalize WordPress postmeta source parent lookup');
     }
     if (!$parent) {
-        return "source inserted wp_postmeta row references missing wp_posts.ID $post_id; parent post must merge before child metadata";
+        return "source inserted $child_label references missing wp_posts.ID $post_id; parent post must merge before child row";
     }
     $parent_band_violation = cow_merge_autoincrement_id_band_violation($meta, $source_branch, 'wp_posts', $parent, ['ID']);
     if ($parent_band_violation !== null) {
-        return "source inserted wp_postmeta row references wp_posts.ID $post_id that is outside the source branch ID band; parent post must merge before child metadata";
+        return "source inserted $child_label references wp_posts.ID $post_id that is outside the source branch ID band; parent post must merge before child row";
     }
     return null;
 }
