@@ -181,10 +181,23 @@ create_branch_post() {
   host="$(branch_host "$branch")"
   local html="$TMP/${branch}-post-new.html"
   local json="$TMP/${branch}-rest-save.json"
+  local cookie_jar="$TMP/${branch}-post-cookies.txt"
+  local login_html="$TMP/${branch}-post-login.html"
+
+  : > "$cookie_jar"
+  if ! curl -sS -L -c "$cookie_jar" -b "$cookie_jar" \
+    -H "Host: $host" \
+    "http://127.0.0.1:$PORT/wp-login.php" \
+    -o "$login_html"; then
+    echo "failed to warm post editor login cookies on $branch" >&2
+    dump_if_exists "$login_html"
+    "$BIN" logs --work-dir "$WORK_DIR" --file all -n 160 >&2 || true
+    exit 1
+  fi
 
   local html_http
   if ! html_http="$(
-    curl -sS -L -o "$html" -w '%{http_code}' \
+    curl -sS -L -c "$cookie_jar" -b "$cookie_jar" -o "$html" -w '%{http_code}' \
       -H "Host: $host" \
       "http://127.0.0.1:$PORT/wp-admin/post-new.php"
   )"; then
@@ -218,6 +231,7 @@ NODE
   local http
   if ! http="$(
     curl -sS -o "$json" -w '%{http_code}' \
+      -b "$cookie_jar" \
       -H "Host: $host" \
       -H "Content-Type: application/json" \
       -H "X-WP-Nonce: $nonce" \

@@ -149,7 +149,7 @@ add_action('init', function () {
         return;
     }
 
-    if (forkpress_current_branch() !== 'main' || headers_sent()) {
+    if (headers_sent()) {
         return;
     }
 
