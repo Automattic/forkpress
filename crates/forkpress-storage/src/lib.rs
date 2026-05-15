@@ -515,6 +515,7 @@ pub fn create_cow_branch_from_tree(
         allocate_cow_autoincrement_bands(layout, runtime, shared, branch, &branch_db)?;
         capture_cow_row_identities(layout, runtime, shared, branch, &branch_db, seed_branch)?;
         record_cow_file_merge_base_snapshot(layout, runtime, shared, branch, &staging)?;
+        cow_storage_failpoint("after-branch-create-birth-metadata")?;
 
         if path_exists_no_follow(&dest) {
             bail!("branch already exists: {branch}");
@@ -673,6 +674,28 @@ fn ensure_no_pending_cow_reset(layout: &Layout, branch: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn cow_storage_failpoint(name: &str) -> Result<()> {
+    let configured = match std::env::var("FORKPRESS_COW_STORAGE_TEST_FAILPOINT") {
+        Ok(value) if !value.is_empty() => value,
+        _ => return Ok(()),
+    };
+    if !configured
+        .split(',')
+        .map(str::trim)
+        .any(|candidate| candidate == name)
+    {
+        return Ok(());
+    }
+
+    match std::env::var("FORKPRESS_COW_STORAGE_TEST_FAILPOINT_ACTION")
+        .unwrap_or_else(|_| "throw".to_string())
+        .as_str()
+    {
+        "exit" => std::process::exit(86),
+        _ => bail!("forced COW storage failpoint: {name}"),
+    }
 }
 
 fn clear_cow_reset_pending_if_rollback_complete(

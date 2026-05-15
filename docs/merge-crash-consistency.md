@@ -125,6 +125,10 @@ The Git server suite covers these publication classes:
   a retry after an interrupted create cannot inherit stale ID bands or merge
   bases. It also clears stale pending-reset markers for deleted/recreated
   branches.
+- The product E2E suite drives a public `forkpress branch create` exit after
+  branch-birth metadata is captured but before publication, then retries the
+  same public branch creation and verifies fresh DB/file merge bases and ID-band
+  metadata.
 - Branch reset writes a pending-reset marker before publishing replacement
   branch contents and clears it only after merge-base, file-base, ID-band, row
   identity, and Git-ref metadata are finalized. Public branch reuse and merge

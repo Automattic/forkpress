@@ -39,6 +39,8 @@ on_error() {
   dump_if_exists "$TMP/ui-merge-admin.html"
   dump_if_exists "$TMP/ui-merge.json"
   dump_if_exists "$TMP/ui-main-after-merge-edit.html"
+  dump_if_exists "$TMP/public-create-crash.out"
+  dump_if_exists "$TMP/public-create-crash-retry.out"
   dump_if_exists "$TMP/autoinc-feature-insert.json"
   dump_if_exists "$TMP/branch-post-edit.html"
   dump_if_exists "$TMP/branch-post-frontend.html"
@@ -988,6 +990,20 @@ curl -sS -H "Host: wp.localhost:$PORT" \
   -o "$TMP/ui-main-after-merge-edit.html"
 grep -F "$UI_MERGE_TITLE" "$TMP/ui-main-after-merge-edit.html" >/dev/null
 php -r '$db = new SQLite3($argv[1]); $count = (int)$db->querySingle("SELECT COUNT(*) FROM merge_runs WHERE source_branch = '\''ui-created'\'' AND target_branch = '\''main'\'' AND status = '\''completed'\''"); exit($count > 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
+
+log_step "public branch create crash retry"
+if FORKPRESS_COW_STORAGE_TEST_FAILPOINT=after-branch-create-birth-metadata FORKPRESS_COW_STORAGE_TEST_FAILPOINT_ACTION=exit \
+  "$BIN" branch --work-dir "$WORK_DIR" create public-create-crash > "$TMP/public-create-crash.out" 2>&1; then
+  echo "public branch create unexpectedly survived after-branch-create-birth-metadata failpoint" >&2
+  exit 1
+fi
+test ! -e "$WORK/public-create-crash"
+"$BIN" branch --work-dir "$WORK_DIR" create public-create-crash > "$TMP/public-create-crash-retry.out"
+grep -F "public-create-crash.wp.localhost:$PORT" "$TMP/public-create-crash-retry.out" >/dev/null
+test -d "$WORK/public-create-crash"
+test -f "$WORK_DIR/cow/merge/bases/public-create-crash.sqlite"
+test -f "$WORK_DIR/cow/merge/file-bases/public-create-crash.json"
+php -r '$meta = new SQLite3($argv[1]); $count = (int)$meta->querySingle("SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = '\''public-create-crash'\''"); exit($count > 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
 
 log_step "create CLI branch"
 "$BIN" branch --work-dir "$WORK_DIR" create feature-cow > "$TMP/branch-create.out"
