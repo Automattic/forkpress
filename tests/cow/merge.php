@@ -15582,21 +15582,29 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
     }
 }
 foreach ($claimed_uploads as $relative_file => $attachment_ids) {
-    $attachment_ids = array_values(array_unique($attachment_ids));
-    if (count($attachment_ids) < 2) {
+    $attachment_counts = array_count_values($attachment_ids);
+    $duplicate_attachment_ids = array_values(array_map('intval', array_keys(array_filter(
+        $attachment_counts,
+        static fn(int $count): bool => $count > 1
+    ))));
+    $unique_attachment_ids = array_values(array_unique($attachment_ids));
+    if (count($unique_attachment_ids) < 2 && $duplicate_attachment_ids === []) {
         continue;
     }
     $findings[] = [
         'plugin' => 'forkpress-wp-media',
         'object' => 'upload:' . $relative_file,
-        'reason' => 'multiple attachment metadata records claim the same upload file',
+        'reason' => $duplicate_attachment_ids !== []
+            ? 'attachment metadata claims the same upload file multiple times'
+            : 'multiple attachment metadata records claim the same upload file',
         'type' => 'plugin-wp-media-duplicate-file',
         'tables' => ['wp_posts', 'wp_postmeta'],
         'paths' => ['wp-content/uploads/' . ltrim((string)$relative_file, '/')],
         'validator' => 'forkpress-wp-media@1',
         'candidate' => [
             'file' => $relative_file,
-            'attachment_ids' => $attachment_ids,
+            'attachment_ids' => $unique_attachment_ids,
+            'duplicate_attachment_ids' => $duplicate_attachment_ids,
         ],
     ];
 }
@@ -15729,6 +15737,26 @@ PHP);
     $stmt->bindValue(':file', '2026/05/source-generated-empty-drift.jpg', SQLITE3_TEXT);
     $stmt->bindValue(':metadata', $wp_media_generated_empty_drift_metadata, SQLITE3_TEXT);
     $stmt->execute();
+    write_test_file($wp_media_source_root . '/wp-content/uploads/2026/05/source-self-duplicate.jpg', "source self duplicate original bytes\n");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, guid) VALUES ('Source media self duplicate generated file', '', 'inherit', 'attachment', 'wp-content/uploads/2026/05/source-self-duplicate.jpg')");
+    $wp_media_self_duplicate_id = (int)$db->lastInsertRowID();
+    $wp_media_self_duplicate_metadata = serialize([
+        'file' => '2026/05/source-self-duplicate.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'source-self-duplicate.jpg',
+                'width' => 150,
+                'height' => 150,
+            ],
+        ],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', :file), (:post_id, '_wp_attachment_metadata', :metadata)");
+    $stmt->bindValue(':post_id', $wp_media_self_duplicate_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':file', '2026/05/source-self-duplicate.jpg', SQLITE3_TEXT);
+    $stmt->bindValue(':metadata', $wp_media_self_duplicate_metadata, SQLITE3_TEXT);
+    $stmt->execute();
     $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, guid) VALUES ('Source media unsafe attached path', '', 'inherit', 'attachment', '/tmp/source-unsafe-attached.jpg')");
     $wp_media_unsafe_attached_path_id = (int)$db->lastInsertRowID();
     $wp_media_unsafe_attached_path_metadata = serialize([
@@ -15826,7 +15854,7 @@ PHP);
     );
     assert_same($wp_media_result['status'], 'completed_with_conflicts', 'WordPress media validator holds missing generated upload files for review');
     assert_same((int)($wp_media_result['plugin_validators'] ?? 0), 1, 'WordPress media validator is discovered from mu-plugins during merge');
-    assert_same((int)($wp_media_result['plugin_validator_conflicts'] ?? 0), 11, 'WordPress media validator records missing files, duplicate files, generated file drift, and metadata mismatches');
+    assert_same((int)($wp_media_result['plugin_validator_conflicts'] ?? 0), 12, 'WordPress media validator records missing files, duplicate files, generated file drift, and metadata mismatches');
     assert_same(
         scalar($wp_media_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $wp_media_attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-original.jpg',
@@ -15839,6 +15867,7 @@ PHP);
     assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-unsafe-path.jpg'), 'WordPress media validator keeps the upload for unsafe generated-size metadata');
     assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/nested/source-generated-path-drift-150x150.jpg'), 'WordPress media validator keeps generated-size path drift files for review');
     assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-generated-empty-drift.jpg'), 'WordPress media validator keeps generated-size empty filename drift originals for review');
+    assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-self-duplicate.jpg'), 'WordPress media validator keeps same-attachment duplicate upload files for review');
     assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-duplicate-shared-150x150.jpg'), 'WordPress media validator keeps duplicated generated upload files for review');
     assert_true(!is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-original-150x150.jpg'), 'WordPress media validator does not invent missing generated upload files');
     assert_true(!is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-missing-original.jpg'), 'WordPress media validator does not invent missing original upload files');
@@ -15904,8 +15933,10 @@ PHP);
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-media-duplicate-file',
     ]);
-    assert_same(count($wp_media_duplicate_file_audit['conflicts']), 1, 'WordPress media validator exposes duplicate upload ownership as a plugin-scoped audit conflict');
-    $wp_media_duplicate_file_preview = (string)($wp_media_duplicate_file_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_same(count($wp_media_duplicate_file_audit['conflicts']), 2, 'WordPress media validator exposes duplicate upload ownership as plugin-scoped audit conflicts');
+    $wp_media_duplicate_file_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $wp_media_duplicate_file_audit['conflicts']));
+    assert_true(str_contains($wp_media_duplicate_file_preview, 'source-self-duplicate.jpg'), 'WordPress media duplicate upload audit includes the same-attachment duplicate filename');
+    assert_true(str_contains($wp_media_duplicate_file_preview, (string)$wp_media_self_duplicate_id), 'WordPress media duplicate upload audit includes the same-attachment duplicate ID');
     assert_true(str_contains($wp_media_duplicate_file_preview, 'source-duplicate-shared-150x150.jpg'), 'WordPress media duplicate upload audit includes the shared generated filename');
     assert_true(str_contains($wp_media_duplicate_file_preview, (string)$wp_media_duplicate_a_id), 'WordPress media duplicate upload audit includes the first attachment ID');
     assert_true(str_contains($wp_media_duplicate_file_preview, (string)$wp_media_duplicate_b_id), 'WordPress media duplicate upload audit includes the second attachment ID');
