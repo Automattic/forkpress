@@ -14161,6 +14161,133 @@ PHP);
     assert_same($plugin_validator_file_payload['candidate']['target_root_basename'] ?? null, 'plugin-validator-file-target', 'file-root validator receives the candidate target root');
     assert_same($plugin_validator_file_payload['candidate']['target_file'] ?? null, 'source validator file', 'file-root validator can inspect candidate target files');
 
+    $inline_validator_base_root = $tmp . '/inline-validator-base';
+    $inline_validator_source_root = $tmp . '/inline-validator-source';
+    $inline_validator_target_root = $tmp . '/inline-validator-target';
+    foreach ([$inline_validator_base_root, $inline_validator_source_root, $inline_validator_target_root] as $root) {
+        mkdir($root . '/wp-content/database', 0777, true);
+        mkdir($root . '/wp-content/uploads', 0777, true);
+    }
+    $inline_validator_base_db = $inline_validator_base_root . '/wp-content/database/.ht.sqlite';
+    $inline_validator_source_db = $inline_validator_source_root . '/wp-content/database/.ht.sqlite';
+    $inline_validator_target_db = $inline_validator_target_root . '/wp-content/database/.ht.sqlite';
+    $inline_validator_metadata = $tmp . '/.forkpress/cow/merge/inline-validator-metadata.sqlite';
+    $inline_validator_file_base = $tmp . '/.forkpress/cow/merge/file-bases/inline-validator.json';
+    create_base_db($inline_validator_base_db);
+    copy($inline_validator_base_db, $inline_validator_source_db);
+    copy($inline_validator_base_db, $inline_validator_target_db);
+    cow_merge_capture_file_base($inline_validator_base_root, $inline_validator_file_base);
+    $db = open_db($inline_validator_source_db);
+    $db->exec("UPDATE wp_posts SET post_content = 'source inline validator content' WHERE ID = 1");
+    $db->close();
+    write_test_file($inline_validator_source_root . '/wp-content/uploads/inline-validator.txt', "inline validator file\n");
+    $inline_validator_runner = $tmp . '/inline-plugin-validator.php';
+    write_test_file($inline_validator_runner, <<<'PHP'
+<?php
+$target_root = (string)getenv('FORKPRESS_MERGE_TARGET_ROOT');
+$relative = 'wp-content/uploads/inline-validator.txt';
+$target_file = $target_root . '/' . $relative;
+if (!is_file($target_file)) {
+    fwrite(STDERR, 'inline validator did not receive the staged candidate filesystem');
+    exit(8);
+}
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-inline-validator',
+            'object' => 'file:' . $relative,
+            'reason' => 'inline validator inspected the staged candidate before merge completion',
+            'type' => 'plugin-inline-validator-conflict',
+            'files' => [$relative],
+            'validator' => 'forkpress-inline-validator@1',
+            'candidate' => [
+                'target_file' => trim((string)file_get_contents($target_file)),
+            ],
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $inline_validator_merge = run_merge_cli([
+        'merge',
+        '--base-db', $inline_validator_base_db,
+        '--source-db', $inline_validator_source_db,
+        '--target-db', $inline_validator_target_db,
+        '--metadata-db', $inline_validator_metadata,
+        '--source', 'feature-inline-validator',
+        '--target', 'main',
+        '--base-files', $inline_validator_file_base,
+        '--source-root', $inline_validator_source_root,
+        '--target-root', $inline_validator_target_root,
+        '--plugin-validator', $inline_validator_runner,
+    ]);
+    assert_same($inline_validator_merge['status'], 0, 'inline plugin validator runs during merge');
+    assert_true(str_contains($inline_validator_merge['output'], 'plugins:   validators=1 conflicts=1'), 'inline plugin validator summary reports conflicts');
+    assert_same(scalar($inline_validator_target_db, 'SELECT post_content FROM wp_posts WHERE ID = 1'), 'source inline validator content', 'inline validator conflict keeps the staged DB candidate');
+    assert_same(file_get_contents($inline_validator_target_root . '/wp-content/uploads/inline-validator.txt'), "inline validator file\n", 'inline validator conflict keeps the staged file candidate');
+    assert_same(
+        scalar($inline_validator_metadata, "SELECT status FROM merge_runs WHERE source_branch = 'feature-inline-validator' ORDER BY id DESC LIMIT 1"),
+        'completed_with_conflicts',
+        'inline validator conflict marks the merge run conflicted before completion'
+    );
+    assert_same(
+        (int)scalar($inline_validator_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-inline-validator-conflict'"),
+        1,
+        'inline validator records plugin-scoped conflicts during merge'
+    );
+
+    $inline_validator_failure_base_root = $tmp . '/inline-validator-failure-base';
+    $inline_validator_failure_source_root = $tmp . '/inline-validator-failure-source';
+    $inline_validator_failure_target_root = $tmp . '/inline-validator-failure-target';
+    foreach ([$inline_validator_failure_base_root, $inline_validator_failure_source_root, $inline_validator_failure_target_root] as $root) {
+        mkdir($root . '/wp-content/database', 0777, true);
+        mkdir($root . '/wp-content/uploads', 0777, true);
+    }
+    $inline_validator_failure_base_db = $inline_validator_failure_base_root . '/wp-content/database/.ht.sqlite';
+    $inline_validator_failure_source_db = $inline_validator_failure_source_root . '/wp-content/database/.ht.sqlite';
+    $inline_validator_failure_target_db = $inline_validator_failure_target_root . '/wp-content/database/.ht.sqlite';
+    $inline_validator_failure_metadata = $tmp . '/.forkpress/cow/merge/inline-validator-failure-metadata.sqlite';
+    $inline_validator_failure_file_base = $tmp . '/.forkpress/cow/merge/file-bases/inline-validator-failure.json';
+    create_base_db($inline_validator_failure_base_db);
+    copy($inline_validator_failure_base_db, $inline_validator_failure_source_db);
+    copy($inline_validator_failure_base_db, $inline_validator_failure_target_db);
+    cow_merge_capture_file_base($inline_validator_failure_base_root, $inline_validator_failure_file_base);
+    $db = open_db($inline_validator_failure_source_db);
+    $db->exec("UPDATE wp_posts SET post_content = 'source failed validator content' WHERE ID = 1");
+    $db->close();
+    write_test_file($inline_validator_failure_source_root . '/wp-content/uploads/inline-validator-failure.txt', "failed validator file\n");
+    $inline_validator_failure_runner = $tmp . '/inline-plugin-validator-failure.php';
+    write_test_file($inline_validator_failure_runner, <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'failed',
+    'reason' => 'plugin coherence check could not inspect required generated assets',
+    'findings' => [],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $inline_validator_failed_merge = run_merge_cli([
+        'merge',
+        '--base-db', $inline_validator_failure_base_db,
+        '--source-db', $inline_validator_failure_source_db,
+        '--target-db', $inline_validator_failure_target_db,
+        '--metadata-db', $inline_validator_failure_metadata,
+        '--source', 'feature-inline-validator-failed',
+        '--target', 'main',
+        '--base-files', $inline_validator_failure_file_base,
+        '--source-root', $inline_validator_failure_source_root,
+        '--target-root', $inline_validator_failure_target_root,
+        '--plugin-validator', $inline_validator_failure_runner,
+    ]);
+    assert_true($inline_validator_failed_merge['status'] !== 0, 'failed inline plugin validator aborts the merge');
+    assert_true(str_contains($inline_validator_failed_merge['output'], 'plugin coherence check could not inspect required generated assets'), 'failed inline plugin validator reports its failure reason');
+    assert_same(scalar($inline_validator_failure_target_db, 'SELECT post_content FROM wp_posts WHERE ID = 1'), 'Base content', 'failed inline plugin validator rolls back staged DB changes');
+    assert_true(!file_exists($inline_validator_failure_target_root . '/wp-content/uploads/inline-validator-failure.txt'), 'failed inline plugin validator rolls back staged file changes');
+    assert_same(
+        (int)scalar($inline_validator_failure_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-inline-validator-failed' AND status = 'failed' AND failure_reason LIKE '%plugin coherence check could not inspect required generated assets%'"),
+        1,
+        'failed inline plugin validator leaves an auditable failed run after rollback'
+    );
+
     $plugin_validator_runner_failure = $tmp . '/plugin-validator-runner-failure.php';
     write_test_file($plugin_validator_runner_failure, <<<'PHP'
 <?php

@@ -111,6 +111,29 @@ php scripts/cow/merge.php run-plugin-validator \
 
 Automatic runtime validator discovery is still missing.
 
+The lower-level merge helper can also run one explicit validator before
+reporting the merge complete:
+
+```bash
+php scripts/cow/merge.php merge \
+  --base-db .forkpress/cow/merge/bases/feature.sqlite \
+  --source-db branches/feature/wp-content/database/.ht.sqlite \
+  --target-db branches/main/wp-content/database/.ht.sqlite \
+  --metadata-db .forkpress/cow/merge/metadata.sqlite \
+  --source feature \
+  --target main \
+  --base-files .forkpress/cow/merge/file-bases/feature.json \
+  --source-root branches/feature \
+  --target-root branches/main \
+  --plugin-validator ./vendor/bin/my-plugin-merge-validator
+```
+
+When this inline validator returns `conflicts`, the merge completes as
+`completed_with_conflicts` and records plugin-scoped conflict rows before the
+result is reported. When it returns `failed` or exits unsuccessfully, the merge
+helper restores the pre-merge target database, metadata database, and target
+file tree using the same rollback path as other late merge failures.
+
 ## Review Metadata
 
 Plugin conflicts should be exported by `forkpress branch merge-audit` with:

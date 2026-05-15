@@ -10,7 +10,7 @@
 function cow_merge_usage(): void {
     fwrite(STDERR, "Usage:\n");
     fwrite(STDERR, "  php merge.php [merge] --base-db <path> --source-db <path> --target-db <path> --metadata-db <path> --source <branch> --target <branch>\n");
-    fwrite(STDERR, "    [--base-files <manifest> --source-root <path> --target-root <path>]\n");
+    fwrite(STDERR, "    [--base-files <manifest> --source-root <path> --target-root <path>] [--plugin-validator <path>]\n");
     fwrite(STDERR, "  php merge.php capture-files --root <path> --file-base <path>\n");
     fwrite(STDERR, "  php merge.php capture-identities --db <path> --metadata-db <path> --branch <branch> [--seed-branch <branch>]\n");
     fwrite(STDERR, "  php merge.php track-identity-events --db <path> --metadata-db <path> --branch <branch> --events-json <json>\n");
@@ -12330,7 +12330,8 @@ function cow_merge_branch_state(
     string $target_branch,
     ?string $base_files = null,
     ?string $source_root = null,
-    ?string $target_root = null
+    ?string $target_root = null,
+    array $plugin_validators = []
 ): array {
     $file_args = [$base_files, $source_root, $target_root];
     $has_file_args = array_filter($file_args, fn($value) => $value !== null && $value !== '');
@@ -12339,14 +12340,17 @@ function cow_merge_branch_state(
             throw new InvalidArgumentException('--base-files, --source-root, and --target-root must be provided together');
         }
     }
+    $plugin_validators = array_values(array_filter(array_map('strval', $plugin_validators), fn($value) => trim($value) !== ''));
     cow_merge_assert_no_pending_crash_recovery($metadata_db);
 
     $target_snapshot = null;
     $metadata_snapshot = null;
     $filesystem_snapshot = null;
-    if ($has_file_args) {
+    if ($has_file_args || count($plugin_validators) > 0) {
         $target_snapshot = cow_merge_snapshot_sqlite_db($target_db);
         $metadata_snapshot = cow_merge_snapshot_sqlite_db($metadata_db);
+    }
+    if ($has_file_args) {
         $filesystem_snapshot = cow_merge_file_root_snapshot_begin((string)$target_root);
     }
 
@@ -12359,6 +12363,8 @@ function cow_merge_branch_state(
         $result['db_conflicts'] = $result['conflicts'];
         $result['file_applied'] = 0;
         $result['file_conflicts'] = 0;
+        $result['plugin_validators'] = 0;
+        $result['plugin_validator_conflicts'] = 0;
 
         if ($has_file_args) {
             $file_result = cow_merge_files($base_files, $source_root, $target_root, $metadata_db, (int)$result['run_id']);
@@ -12368,6 +12374,17 @@ function cow_merge_branch_state(
             $result['conflicts'] += $file_result['conflicts'];
             $result['status'] = $result['conflicts'] > 0 ? 'completed_with_conflicts' : 'completed';
             cow_merge_set_run_status($metadata_db, (int)$result['run_id'], $result['status']);
+        }
+
+        foreach ($plugin_validators as $validator) {
+            $validator_result = cow_merge_run_plugin_validator($metadata_db, (int)$result['run_id'], $validator);
+            $result['plugin_validators']++;
+            $validator_conflicts = (int)($validator_result['conflicts'] ?? 0);
+            $result['plugin_validator_conflicts'] += $validator_conflicts;
+            if ($validator_conflicts > 0) {
+                $result['conflicts'] += $validator_conflicts;
+                $result['status'] = 'completed_with_conflicts';
+            }
         }
 
         return $result;
@@ -12775,7 +12792,8 @@ if (realpath($argv[0] ?? '') === __FILE__) {
             $args['target'],
             $args['base-files'] ?? null,
             $args['source-root'] ?? null,
-            $args['target-root'] ?? null
+            $args['target-root'] ?? null,
+            isset($args['plugin-validator']) ? [$args['plugin-validator']] : []
         );
         echo "forkpress: merged {$args['source']} into {$args['target']}\n";
         echo "  run:       {$result['run_id']}\n";
@@ -12784,6 +12802,9 @@ if (realpath($argv[0] ?? '') === __FILE__) {
         echo "  conflicts: {$result['conflicts']}\n";
         if (isset($result['file_applied']) && ($result['file_applied'] > 0 || $result['file_conflicts'] > 0)) {
             echo "  files:     applied={$result['file_applied']} conflicts={$result['file_conflicts']}\n";
+        }
+        if (isset($result['plugin_validators']) && $result['plugin_validators'] > 0) {
+            echo "  plugins:   validators={$result['plugin_validators']} conflicts={$result['plugin_validator_conflicts']}\n";
         }
         echo "  metadata:  {$result['metadata_db']}\n";
         exit(0);
