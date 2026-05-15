@@ -60,6 +60,10 @@ The PHP merge suite covers these rollback classes:
   reports the pending artifact, verifies a second public merge is blocked while
   recovery is pending, restores the target DB through the public recovery
   command, and reruns the public merge successfully.
+- The product E2E suite also drives `after-file-op` through public
+  `forkpress branch merge`, verifies the pending filesystem crash recovery
+  blocks retries, restores both DB and files through public recovery, and
+  reruns the public merge successfully.
 
 The Git server suite covers these publication classes:
 

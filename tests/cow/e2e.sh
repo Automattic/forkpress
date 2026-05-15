@@ -99,6 +99,12 @@ on_error() {
   dump_if_exists "$TMP/public-crash-restore.json"
   dump_if_exists "$TMP/public-crash-retry.out"
   dump_if_exists "$TMP/public-crash-main-edit.html"
+  dump_if_exists "$TMP/public-file-crash-merge.out"
+  dump_if_exists "$TMP/public-file-crash-recover.json"
+  dump_if_exists "$TMP/public-file-crash-blocked.out"
+  dump_if_exists "$TMP/public-file-crash-restore.json"
+  dump_if_exists "$TMP/public-file-crash-retry.out"
+  dump_if_exists "$TMP/public-file-crash-main-edit.html"
   dump_if_exists "$TMP/merge-rollback-failures.json"
   dump_if_exists "$TMP/merge-rollback-failures.out"
   dump_if_exists "$TMP/file-conflict-pending.out"
@@ -1450,6 +1456,35 @@ curl -sS -H "Host: wp.localhost:$PORT" \
   "http://127.0.0.1:$PORT/wp-admin/edit.php" \
   -o "$TMP/public-crash-main-edit.html"
 grep -F "$PUBLIC_CRASH_TITLE" "$TMP/public-crash-main-edit.html" >/dev/null
+
+log_step "public branch merge filesystem crash recovery"
+"$BIN" branch --work-dir "$WORK_DIR" create public-file-crash-merge
+PUBLIC_FILE_CRASH_TITLE="Public file crash merge $(date +%s)"
+create_branch_post public-file-crash-merge "$PUBLIC_FILE_CRASH_TITLE"
+echo "public file crash merge" > "$WORK/public-file-crash-merge/wp-content/public-file-crash.txt"
+if FORKPRESS_COW_MERGE_TEST_FAILPOINT=after-file-op FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION=kill \
+  "$BIN" branch --work-dir "$WORK_DIR" merge public-file-crash-merge --into main > "$TMP/public-file-crash-merge.out" 2>&1; then
+  echo "public branch merge unexpectedly survived after-file-op kill failpoint" >&2
+  exit 1
+fi
+"$BIN" branch --work-dir "$WORK_DIR" recover-crash --format json > "$TMP/public-file-crash-recover.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && (int)($data["pending"] ?? 0) >= 1 ? 0 : 1);' "$TMP/public-file-crash-recover.json"
+if "$BIN" branch --work-dir "$WORK_DIR" merge public-file-crash-merge --into main > "$TMP/public-file-crash-blocked.out" 2>&1; then
+  echo "public branch merge unexpectedly ignored pending filesystem crash recovery artifact" >&2
+  exit 1
+fi
+grep -F "pending COW merge crash recovery artifact" "$TMP/public-file-crash-blocked.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" recover-crash --restore-target-db --restore-files --format json > "$TMP/public-file-crash-restore.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && (int)($data["pending"] ?? 0) === 0 && (int)($data["restored"] ?? 0) >= 1 ? 0 : 1);' "$TMP/public-file-crash-restore.json"
+"$BIN" branch --work-dir "$WORK_DIR" merge public-file-crash-merge --into main > "$TMP/public-file-crash-retry.out"
+grep -F "forkpress: merged public-file-crash-merge into main" "$TMP/public-file-crash-retry.out" >/dev/null
+grep -F "status:    completed" "$TMP/public-file-crash-retry.out" >/dev/null
+test -f "$WORK/main/wp-content/public-file-crash.txt"
+grep -F "public file crash merge" "$WORK/main/wp-content/public-file-crash.txt" >/dev/null
+curl -sS -H "Host: wp.localhost:$PORT" \
+  "http://127.0.0.1:$PORT/wp-admin/edit.php" \
+  -o "$TMP/public-file-crash-main-edit.html"
+grep -F "$PUBLIC_FILE_CRASH_TITLE" "$TMP/public-file-crash-main-edit.html" >/dev/null
 
 ROLLBACK_FAILURE_ARTIFACT="$WORK_DIR/cow/merge/e2e-rollback-failures.jsonl"
 printf '%s\n' '{"source_branch":"feature-e2e-rollback","rollback_failure":"forced runtime rollback failure"}' > "$ROLLBACK_FAILURE_ARTIFACT"
