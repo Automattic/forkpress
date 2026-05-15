@@ -14691,10 +14691,17 @@ PHP);
     $db = open_db($wp_option_ref_base);
     $db->exec("ALTER TABLE wp_posts ADD COLUMN post_type TEXT NOT NULL DEFAULT 'post'");
     $db->exec("ALTER TABLE wp_posts ADD COLUMN post_name TEXT NOT NULL DEFAULT ''");
+    $db->exec('CREATE TABLE wp_terms (term_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, slug TEXT NOT NULL)');
+    $db->exec('CREATE TABLE wp_term_taxonomy (term_taxonomy_id INTEGER PRIMARY KEY AUTOINCREMENT, term_id INTEGER NOT NULL, taxonomy TEXT NOT NULL, description TEXT NOT NULL DEFAULT "", parent INTEGER NOT NULL DEFAULT 0, count INTEGER NOT NULL DEFAULT 0)');
     $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
         (50, 'Featured option page', '<!-- wp:paragraph --><p>Featured option page</p><!-- /wp:paragraph -->', 'publish', 'page', 'featured-option-page')");
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (51, 'Primary menu', 'primary-menu')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES (51, 51, 'nav_menu', '', 0, 1)");
     $theme_mods_base = serialize([
         'forkpress_featured_page' => 50,
+        'nav_menu_locations' => [
+            'primary' => 51,
+        ],
         'forkpress_accent' => 'base',
     ]);
     $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('theme_mods_forkpress_active', :value, 'yes')");
@@ -14708,24 +14715,50 @@ $res = $db->query("SELECT option_name, option_value FROM wp_options WHERE option
 $findings = [];
 while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
     $mods = @unserialize((string)$row['option_value']);
-    if (!is_array($mods) || !isset($mods['forkpress_featured_page'])) {
+    if (!is_array($mods)) {
         continue;
     }
-    $page_id = (int)$mods['forkpress_featured_page'];
-    $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $page_id AND post_type = 'page'");
-    if ($exists === 0) {
+    if (isset($mods['forkpress_featured_page'])) {
+        $page_id = (int)$mods['forkpress_featured_page'];
+        $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $page_id AND post_type = 'page'");
+        if ($exists === 0) {
+            $findings[] = [
+                'plugin' => 'forkpress-wp-option-refs',
+                'object' => 'option:' . $row['option_name'],
+                'reason' => 'theme option references a missing page',
+                'type' => 'plugin-wp-option-missing-object',
+                'tables' => ['wp_options', 'wp_posts'],
+                'validator' => 'forkpress-wp-option-refs@1',
+                'candidate' => [
+                    'option_name' => (string)$row['option_name'],
+                    'field' => 'forkpress_featured_page',
+                    'missing_object_id' => $page_id,
+                    'object_type' => 'page',
+                ],
+            ];
+        }
+    }
+    foreach (($mods['nav_menu_locations'] ?? []) as $location => $term_id) {
+        $term_id = (int)$term_id;
+        if ($term_id <= 0) {
+            continue;
+        }
+        $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_terms t JOIN wp_term_taxonomy tt ON tt.term_id = t.term_id AND tt.taxonomy = 'nav_menu' WHERE t.term_id = $term_id");
+        if ($exists !== 0) {
+            continue;
+        }
         $findings[] = [
             'plugin' => 'forkpress-wp-option-refs',
             'object' => 'option:' . $row['option_name'],
-            'reason' => 'theme option references a missing page',
+            'reason' => 'theme option references a missing nav menu',
             'type' => 'plugin-wp-option-missing-object',
-            'tables' => ['wp_options', 'wp_posts'],
+            'tables' => ['wp_options', 'wp_terms', 'wp_term_taxonomy'],
             'validator' => 'forkpress-wp-option-refs@1',
             'candidate' => [
                 'option_name' => (string)$row['option_name'],
-                'field' => 'forkpress_featured_page',
-                'missing_object_id' => $page_id,
-                'object_type' => 'page',
+                'field' => 'nav_menu_locations.' . (string)$location,
+                'missing_object_id' => $term_id,
+                'object_type' => 'nav_menu',
             ],
         ];
     }
@@ -14743,10 +14776,15 @@ PHP);
     cow_merge_allocate_autoincrement_bands($wp_option_ref_target, $wp_option_ref_metadata, 'feature-wp-option-ref-target');
     $db = open_db($wp_option_ref_source);
     $db->exec('DELETE FROM wp_posts WHERE ID = 50');
+    $db->exec('DELETE FROM wp_term_taxonomy WHERE term_id = 51');
+    $db->exec('DELETE FROM wp_terms WHERE term_id = 51');
     $db->close();
     $db = open_db($wp_option_ref_target);
     $theme_mods_target = serialize([
         'forkpress_featured_page' => 50,
+        'nav_menu_locations' => [
+            'primary' => 51,
+        ],
         'forkpress_accent' => 'target',
     ]);
     $stmt = $db->prepare("UPDATE wp_options SET option_value = :value WHERE option_name = 'theme_mods_forkpress_active'");
@@ -14766,20 +14804,24 @@ PHP);
     );
     assert_same($wp_option_ref_result['status'], 'completed_with_conflicts', 'WordPress option reference validator holds missing option objects for review');
     assert_same((int)($wp_option_ref_result['plugin_validators'] ?? 0), 1, 'WordPress option reference validator is discovered from mu-plugins during merge');
-    assert_same((int)($wp_option_ref_result['plugin_validator_conflicts'] ?? 0), 1, 'WordPress option reference validator records the missing featured page');
+    assert_same((int)($wp_option_ref_result['plugin_validator_conflicts'] ?? 0), 2, 'WordPress option reference validator records missing featured pages and nav menus');
     assert_same((int)scalar($wp_option_ref_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 50'), 0, 'WordPress option reference validator leaves the source featured page deletion staged for review');
+    assert_same((int)scalar($wp_option_ref_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 51'), 0, 'WordPress option reference validator leaves the source nav menu deletion staged for review');
     $wp_option_ref_value = scalar($wp_option_ref_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_forkpress_active'");
     $wp_option_ref_mods = is_string($wp_option_ref_value) ? unserialize($wp_option_ref_value) : null;
     assert_same($wp_option_ref_mods['forkpress_accent'] ?? null, 'target', 'WordPress option reference validator preserves the target option edit');
     assert_same($wp_option_ref_mods['forkpress_featured_page'] ?? null, 50, 'WordPress option reference validator keeps the stale featured page reference visible for review');
+    assert_same($wp_option_ref_mods['nav_menu_locations']['primary'] ?? null, 51, 'WordPress option reference validator keeps the stale nav menu location visible for review');
     $wp_option_ref_audit = cow_merge_audit_report($wp_option_ref_metadata, (int)$wp_option_ref_result['run_id'], 10, [
         'scope' => 'plugin',
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-option-missing-object',
     ]);
-    assert_same(count($wp_option_ref_audit['conflicts']), 1, 'WordPress option reference validator exposes the missing option object as a plugin-scoped audit conflict');
-    $wp_option_ref_preview = (string)($wp_option_ref_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_same(count($wp_option_ref_audit['conflicts']), 2, 'WordPress option reference validator exposes missing option objects as plugin-scoped audit conflicts');
+    $wp_option_ref_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $wp_option_ref_audit['conflicts']));
     assert_true(str_contains($wp_option_ref_preview, '"missing_object_id":50'), 'WordPress option reference audit includes the missing page ID');
+    assert_true(str_contains($wp_option_ref_preview, '"missing_object_id":51'), 'WordPress option reference audit includes the missing nav menu term ID');
+    assert_true(str_contains($wp_option_ref_preview, '"object_type":"nav_menu"'), 'WordPress option reference audit includes the nav menu object type');
     assert_true(str_contains($wp_option_ref_preview, 'theme_mods_forkpress_active'), 'WordPress option reference audit includes the option name');
 
     $wp_featured_media_base_root = $tmp . '/wp-featured-media-validator-files-base';
