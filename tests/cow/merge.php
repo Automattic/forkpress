@@ -13317,6 +13317,62 @@ SQL);
     $assert_wp_semantic_bundle($wp_semantic_target, $wp_semantic_target_root, $wp_semantic_target_graph, 'target');
     assert_same((int)scalar($wp_semantic_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-wp-semantic-source'"), 0, 'WordPress semantic merge records no generic conflicts while IDs remain banded');
 
+    $wp_lifecycle_base = $tmp . '/wp-lifecycle-base.sqlite';
+    $wp_lifecycle_source = $tmp . '/wp-lifecycle-source.sqlite';
+    $wp_lifecycle_target = $tmp . '/wp-lifecycle-target.sqlite';
+    $wp_lifecycle_metadata = $tmp . '/.forkpress/cow/merge/wp-lifecycle-metadata.sqlite';
+    create_base_db($wp_lifecycle_base);
+    $db = open_db($wp_lifecycle_base);
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_type TEXT NOT NULL DEFAULT 'post'");
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_name TEXT NOT NULL DEFAULT ''");
+    $db->exec('ALTER TABLE wp_posts ADD COLUMN post_parent INTEGER NOT NULL DEFAULT 0');
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN guid TEXT NOT NULL DEFAULT ''");
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (10, 'Base source-edited page', 'base source-edit content', 'publish', 'page', 'source-edited-page'),
+        (11, 'Base source-deleted page', 'base source-delete content', 'publish', 'page', 'source-deleted-page'),
+        (12, 'Base target-deleted page', 'base target-delete content', 'publish', 'page', 'target-deleted-page'),
+        (13, 'Base target-edited page', 'base target-edit content', 'publish', 'page', 'target-edited-page')");
+    $db->exec("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES
+        (10, '_forkpress_lifecycle', 'base source edit meta'),
+        (11, '_forkpress_lifecycle', 'base source delete meta'),
+        (12, '_forkpress_lifecycle', 'base target delete meta'),
+        (13, '_forkpress_lifecycle', 'base target edit meta')");
+    $db->close();
+    copy($wp_lifecycle_base, $wp_lifecycle_source);
+    copy($wp_lifecycle_base, $wp_lifecycle_target);
+    cow_merge_allocate_autoincrement_bands($wp_lifecycle_source, $wp_lifecycle_metadata, 'feature-wp-lifecycle-source');
+    cow_merge_allocate_autoincrement_bands($wp_lifecycle_target, $wp_lifecycle_metadata, 'feature-wp-lifecycle-target');
+    $db = open_db($wp_lifecycle_source);
+    $db->exec("UPDATE wp_posts SET post_title = 'Source edited page', post_content = '<!-- wp:paragraph --><p>Source edited content</p><!-- /wp:paragraph -->' WHERE ID = 10");
+    $db->exec("UPDATE wp_postmeta SET meta_value = 'source edited meta' WHERE post_id = 10 AND meta_key = '_forkpress_lifecycle'");
+    $db->exec('DELETE FROM wp_postmeta WHERE post_id = 11');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 11');
+    $db->close();
+    $db = open_db($wp_lifecycle_target);
+    $db->exec("UPDATE wp_posts SET post_title = 'Target edited page', post_content = '<!-- wp:paragraph --><p>Target edited content</p><!-- /wp:paragraph -->' WHERE ID = 13");
+    $db->exec("UPDATE wp_postmeta SET meta_value = 'target edited meta' WHERE post_id = 13 AND meta_key = '_forkpress_lifecycle'");
+    $db->exec('DELETE FROM wp_postmeta WHERE post_id = 12');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 12');
+    $db->close();
+    $wp_lifecycle_result = cow_merge_databases(
+        $wp_lifecycle_base,
+        $wp_lifecycle_source,
+        $wp_lifecycle_target,
+        $wp_lifecycle_metadata,
+        'feature-wp-lifecycle-source',
+        'feature-wp-lifecycle-target'
+    );
+    assert_same($wp_lifecycle_result['status'], 'completed', 'WordPress page edit/delete lifecycle branches merge cleanly');
+    assert_same(scalar($wp_lifecycle_target, 'SELECT post_title FROM wp_posts WHERE ID = 10'), 'Source edited page', 'WordPress source page edit is applied');
+    assert_same(scalar($wp_lifecycle_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 10 AND meta_key = '_forkpress_lifecycle'"), 'source edited meta', 'WordPress source page meta edit is applied');
+    assert_same((int)scalar($wp_lifecycle_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 11'), 0, 'WordPress source page delete is applied');
+    assert_same((int)scalar($wp_lifecycle_target, 'SELECT COUNT(*) FROM wp_postmeta WHERE post_id = 11'), 0, 'WordPress source page delete removes related source-side meta');
+    assert_same((int)scalar($wp_lifecycle_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 12'), 0, 'WordPress target page delete is preserved');
+    assert_same(scalar($wp_lifecycle_target, 'SELECT post_title FROM wp_posts WHERE ID = 13'), 'Target edited page', 'WordPress target page edit is preserved');
+    assert_same(scalar($wp_lifecycle_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 13 AND meta_key = '_forkpress_lifecycle'"), 'target edited meta', 'WordPress target page meta edit is preserved');
+    assert_same((int)scalar($wp_lifecycle_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-wp-lifecycle-source'"), 0, 'WordPress lifecycle merge records no conflicts for independent edits and deletes');
+
     $plugin_graph_base = $tmp . '/plugin-graph-base.sqlite';
     $plugin_graph_source = $tmp . '/plugin-graph-source.sqlite';
     $plugin_graph_target = $tmp . '/plugin-graph-target.sqlite';
