@@ -17374,6 +17374,38 @@ PHP);
     assert_same($plugin_revalidate['stale'], 0, 'plugin conflict revalidation does not infer stale state without rerunning validators');
     assert_same($plugin_revalidate['carried'], 0, 'plugin conflict revalidation does not carry plugin conflicts without validator evidence');
     assert_same((int)scalar($plugin_graph_metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $plugin_conflict_id"), 0, 'plugin conflict revalidation records no guarded payload without rerunning validators');
+    $plugin_validator_identical_result = cow_merge_record_plugin_validator_conflicts($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], [
+        [
+            'plugin' => 'forkpress-graph',
+            'object' => 'graph:source-parent:' . $plugin_graph_source_graph['parent_id'],
+            'reason' => 'source graph references a missing child row after candidate validation',
+            'tables' => ['plugin_graph_parent', 'plugin_graph_child', 'wp_options', 'wp_postmeta'],
+            'files' => [$plugin_graph_source_graph['file_path']],
+            'validator' => 'forkpress-graph-validator@1',
+            'base' => ['parent_id' => null, 'child_id' => null],
+            'source' => $plugin_graph_source_graph,
+            'target' => $plugin_graph_target_graph,
+            'candidate' => $plugin_graph_source_graph + ['missing_child_id' => 999999],
+        ],
+    ]);
+    assert_same($plugin_validator_identical_result['conflicts'], 1, 'plugin validator identical rerun keeps the same active plugin conflict');
+    $plugin_identical_conflict_id = (int)scalar($plugin_graph_metadata, "SELECT MAX(id) FROM merge_conflicts WHERE table_name = '__plugins__' AND id > $plugin_conflict_id");
+    $plugin_revalidate_after_identical_rerun = cow_merge_revalidate_reviewed_conflicts($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 'cow-revalidate');
+    assert_same($plugin_identical_conflict_id, 0, 'plugin validator identical rerun records no duplicate replacement conflict');
+    assert_same($plugin_revalidate_after_identical_rerun['checked'], 1, 'plugin conflict revalidation inspects only the original finding after an identical validator rerun');
+    assert_same($plugin_revalidate_after_identical_rerun['reviewed'], 1, 'plugin identical rerun keeps the reviewed original plugin conflict');
+    assert_same($plugin_revalidate_after_identical_rerun['fresh'], 0, 'plugin conflict revalidation does not infer freshness without replacement evidence');
+    assert_same($plugin_revalidate_after_identical_rerun['stale'], 0, 'plugin conflict revalidation does not mark identical validator evidence stale');
+    assert_same($plugin_revalidate_after_identical_rerun['carried'], 0, 'plugin conflict revalidation does not carry identical validator evidence to needs-action');
+    assert_same((int)scalar($plugin_graph_metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $plugin_conflict_id"), 0, 'plugin conflict revalidation records no replacement evidence when validator payloads are unchanged');
+    $plugin_identical_audit = cow_merge_audit_report($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'review_status' => 'needs-action',
+    ]);
+    $plugin_original_after_identical_rerun = array_values(array_filter($plugin_identical_audit['conflicts'], fn($row) => (int)$row['id'] === $plugin_conflict_id));
+    assert_same($plugin_original_after_identical_rerun[0]['stale_status'] ?? null, 'unknown', 'plugin audit keeps reviewed conflicts unknown after deduplicated identical validator evidence');
+    assert_same((int)($plugin_original_after_identical_rerun[0]['replacement_conflict_id'] ?? 0), 0, 'plugin identical rerun audit exposes no replacement conflict id');
     $plugin_validator_updated_result = cow_merge_record_plugin_validator_conflicts($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], [
         [
             'plugin' => 'forkpress-graph',

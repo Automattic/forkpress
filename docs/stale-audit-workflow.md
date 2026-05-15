@@ -140,10 +140,11 @@ for stale database row/cell drift, source-drifted database row/cell and
 filesystem conflicts, deleted database target rows, deleted filesystem target
 paths, incompatible no-primary-key rowid replacement, incompatible replacement
 for every currently supported source- and target-side WordPress row semantic
-fingerprint, and plugin validator reruns that carry reviewed plugin conflicts
-back to `needs-action` with `replacement-evidence`, replacement validator
-payloads, and replacement conflict links when the validator reports changed
-evidence for the same plugin object.
+fingerprint, and plugin validator reruns that deduplicate unchanged evidence or
+carry reviewed plugin conflicts back to `needs-action` with
+`replacement-evidence`, replacement validator payloads, and replacement
+conflict links when the validator reports changed evidence for the same plugin
+object.
 
 Future classifier tests should cover plugin/custom primary-key row conflicts
 where the row keeps the same key but a higher-level logical fingerprint proves
