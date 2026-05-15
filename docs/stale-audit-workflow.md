@@ -79,20 +79,28 @@ To support this cleanly, audit metadata should retain:
 Logical identity matters because payload hashes alone cannot distinguish
 unrelated edits from “same object, newer title”.
 
-## Future CLI Shape
+## Guarded Resolution After Revalidation
 
 ```bash
-forkpress branch resolve-conflict <id> --choice source --after-revalidate
+forkpress branch merge-resolve conflict <id> --choice source --after-revalidate --apply
 ```
 
-`--after-revalidate` should require that the target/source payloads match the
-latest revalidated audit record, not the stale original record.
+`--after-revalidate` requires the latest review status to be `needs-action` and
+the current source/target payload hashes to match the latest payloads recorded
+by `merge-audit --revalidate` or `revalidate-reviews`. If the target drifts
+again after revalidation, guarded resolution fails and asks for another
+revalidation instead of applying the stale original conflict.
+
+The first implementation is intentionally narrow: it supports database cell
+conflicts. Row, file, plugin, and schema conflicts still use the conservative
+stale-target guard until they have conflict-specific revalidation payloads.
 
 ## Test Shape
 
 The implemented tests in `tests/cow/merge.php` cover stale cell/file detection,
 carrying reviewed conflicts into `needs-action`, preserving prior reviewer
-intent in the carried note, and idempotent reruns.
+intent in the carried note, idempotent reruns, replacement revalidation payloads
+after further target drift, and guarded source resolution after revalidation.
 
 Future classifier tests should cover three records:
 

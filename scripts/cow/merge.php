@@ -27,7 +27,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "    --group-by supports resolutions by table/status/path, conflicts by table/type/path/severity, and decisions by table/type/path.\n");
     fwrite(STDERR, "  php merge.php revalidate-reviews --metadata-db <path> [--run ID] [--reviewer NAME] [--format text|json]\n");
     fwrite(STDERR, "  php merge.php review-record --metadata-db <path> --record conflict|decision|resolution --id ID --status pending|needs-action|reviewed --note TEXT [--reviewer NAME]\n");
-    fwrite(STDERR, "  php merge.php resolve-conflict --metadata-db <path> --id ID --choice source|target [--apply] [--note TEXT] [--reviewer NAME]\n");
+    fwrite(STDERR, "  php merge.php resolve-conflict --metadata-db <path> --id ID --choice source|target [--apply] [--after-revalidate] [--note TEXT] [--reviewer NAME]\n");
 }
 
 const COW_MERGE_AUTOINCREMENT_BAND_SIZE = 1000000;
@@ -3451,6 +3451,23 @@ CREATE TABLE IF NOT EXISTS merge_conflicts (
 )
 SQL, 'failed to create metadata table merge_conflicts');
     cow_merge_exec_checked($meta, <<<'SQL'
+CREATE TABLE IF NOT EXISTS merge_revalidations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conflict_id INTEGER NOT NULL,
+    review_note_id INTEGER NOT NULL,
+    run_id INTEGER NOT NULL,
+    source_payload TEXT NOT NULL,
+    target_payload TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    target_hash TEXT NOT NULL,
+    stale_reason TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(conflict_id) REFERENCES merge_conflicts(id),
+    FOREIGN KEY(review_note_id) REFERENCES merge_review_notes(id),
+    FOREIGN KEY(run_id) REFERENCES merge_runs(id)
+)
+SQL, 'failed to create metadata table merge_revalidations');
+    cow_merge_exec_checked($meta, <<<'SQL'
 CREATE TABLE IF NOT EXISTS merge_row_identities (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     branch_name TEXT NOT NULL,
@@ -6407,10 +6424,19 @@ function cow_merge_revalidate_reviewed_conflicts(
             $latest_status = (string)($review['status'] ?? '');
             $latest_note = (string)($review['note'] ?? '');
             if ($latest_status === 'needs-action' && str_contains($latest_note, 'Revalidation required after target drift')) {
-                $already_needs_action++;
-                continue;
+                $latest_revalidation = cow_merge_latest_revalidation($meta, $conflict_id);
+                $current_target_payload = $staleness['current_target_payload'] ?? null;
+                if (
+                    is_string($current_target_payload)
+                    && $latest_revalidation !== null
+                    && hash_equals((string)$latest_revalidation['source_hash'], hash('sha256', (string)$conflict['source_payload']))
+                    && hash_equals((string)$latest_revalidation['target_hash'], hash('sha256', $current_target_payload))
+                ) {
+                    $already_needs_action++;
+                    continue;
+                }
             }
-            cow_merge_insert_review_note(
+            $review_note_id = cow_merge_insert_review_note(
                 $meta,
                 'conflict',
                 $conflict_id,
@@ -6418,6 +6444,18 @@ function cow_merge_revalidate_reviewed_conflicts(
                 cow_merge_revalidation_note($review, $staleness),
                 $reviewer
             );
+            $current_target_payload = $staleness['current_target_payload'] ?? null;
+            if (is_string($current_target_payload)) {
+                cow_merge_record_revalidation(
+                    $meta,
+                    $conflict_id,
+                    $review_note_id,
+                    (int)$conflict['run_id'],
+                    (string)$conflict['source_payload'],
+                    $current_target_payload,
+                    (string)($staleness['stale_reason'] ?? 'target payload changed')
+                );
+            }
             $carried++;
         }
         cow_merge_exec_checked($meta, 'COMMIT', 'failed to commit review revalidation transaction');
@@ -6464,6 +6502,70 @@ function cow_merge_insert_review_note(
     cow_merge_bind($stmt, ':reviewer', $reviewer);
     cow_merge_execute_checked($stmt, $meta, 'failed to record review note');
     return (int)$meta->lastInsertRowID();
+}
+
+function cow_merge_record_revalidation(
+    SQLite3 $meta,
+    int $conflict_id,
+    int $review_note_id,
+    int $run_id,
+    string $source_payload,
+    string $target_payload,
+    string $stale_reason
+): int {
+    $stmt = cow_merge_prepare_checked(
+        $meta,
+        'INSERT INTO merge_revalidations ' .
+        '(conflict_id, review_note_id, run_id, source_payload, target_payload, source_hash, target_hash, stale_reason) ' .
+        'VALUES (:conflict_id, :review_note_id, :run_id, :source_payload, :target_payload, :source_hash, :target_hash, :stale_reason)',
+        'failed to prepare merge revalidation insert'
+    );
+    cow_merge_bind($stmt, ':conflict_id', $conflict_id);
+    cow_merge_bind($stmt, ':review_note_id', $review_note_id);
+    cow_merge_bind($stmt, ':run_id', $run_id);
+    cow_merge_bind($stmt, ':source_payload', $source_payload);
+    cow_merge_bind($stmt, ':target_payload', $target_payload);
+    cow_merge_bind($stmt, ':source_hash', hash('sha256', $source_payload));
+    cow_merge_bind($stmt, ':target_hash', hash('sha256', $target_payload));
+    cow_merge_bind($stmt, ':stale_reason', $stale_reason);
+    cow_merge_execute_checked($stmt, $meta, 'failed to record merge revalidation');
+    return (int)$meta->lastInsertRowID();
+}
+
+function cow_merge_latest_revalidation(SQLite3 $meta, int $conflict_id): ?array {
+    $stmt = cow_merge_prepare_checked(
+        $meta,
+        'SELECT id, conflict_id, review_note_id, run_id, source_payload, target_payload, source_hash, target_hash, stale_reason, created_at ' .
+        'FROM merge_revalidations WHERE conflict_id = :conflict_id ORDER BY id DESC LIMIT 1',
+        'failed to prepare latest merge revalidation lookup'
+    );
+    cow_merge_bind($stmt, ':conflict_id', $conflict_id);
+    $res = cow_merge_execute_checked($stmt, $meta, 'failed to look up latest merge revalidation');
+    $row = $res->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($res, 'failed to finalize latest merge revalidation lookup');
+    return $row ? $row : null;
+}
+
+function cow_merge_require_after_revalidate(
+    SQLite3 $meta,
+    int $conflict_id,
+    string $source_payload,
+    string $current_target_payload
+): void {
+    $review = cow_merge_latest_review_note($meta, 'conflict', $conflict_id);
+    if ($review === null || (string)($review['status'] ?? '') !== 'needs-action') {
+        throw new RuntimeException('--after-revalidate requires a latest needs-action review from merge-audit --revalidate');
+    }
+    $revalidation = cow_merge_latest_revalidation($meta, $conflict_id);
+    if ($revalidation === null) {
+        throw new RuntimeException('--after-revalidate requires merge-audit --revalidate to record the stale target payload before resolving');
+    }
+    if (!hash_equals((string)$revalidation['source_hash'], hash('sha256', $source_payload))) {
+        throw new RuntimeException('source payload changed after latest merge revalidation; rerun merge-audit --revalidate before resolving');
+    }
+    if (!hash_equals((string)$revalidation['target_hash'], hash('sha256', $current_target_payload))) {
+        throw new RuntimeException('target payload changed after latest merge revalidation; rerun merge-audit --revalidate before resolving');
+    }
 }
 
 function cow_merge_resolution_review_note(string $choice, string $note): string {
@@ -8726,7 +8828,8 @@ function cow_merge_resolve_conflict(
     string $choice,
     bool $apply,
     string $note,
-    string $reviewer
+    string $reviewer,
+    bool $after_revalidate = false
 ): array {
     if (!is_file($metadata_db)) {
         throw new InvalidArgumentException("merge metadata database does not exist: $metadata_db");
@@ -8752,6 +8855,9 @@ function cow_merge_resolve_conflict(
         $table = (string)$conflict['table_name'];
         $column = (string)($conflict['column_name'] ?? '');
         $conflict_type = (string)$conflict['conflict_type'];
+        if ($after_revalidate && $conflict_type !== 'cell-conflict') {
+            throw new InvalidArgumentException('--after-revalidate currently supports database cell conflicts only');
+        }
         if ($table === '__files__') {
             $file_conflict_types = [
                 'file-conflict',
@@ -8941,7 +9047,16 @@ function cow_merge_resolve_conflict(
                 throw new RuntimeException("cannot resolve $table.$column conflict because the target row no longer exists");
             }
             $current_value = cow_merge_select_current_cell($target, $table, $where_identity, $pk_cols, $column);
-            if (!cow_merge_values_equal($current_value, $target_value)) {
+            if ($after_revalidate) {
+                cow_merge_require_after_revalidate(
+                    $meta,
+                    $conflict_id,
+                    (string)$conflict['source_payload'],
+                    cow_merge_payload_json($current_value)
+                );
+                $target_value = $current_value;
+                $resolved_value = $choice === 'source' ? $source_value : $target_value;
+            } elseif (!cow_merge_values_equal($current_value, $target_value)) {
                 throw new RuntimeException('target cell no longer matches the audited conflict target value; rerun merge-audit before resolving');
             }
         } else {
@@ -12625,7 +12740,7 @@ function cow_merge_parse_cli(array $argv, array $required, int $start_index = 1)
             throw new InvalidArgumentException("unexpected argument: $arg");
         }
         $key = substr($arg, 2);
-        if (in_array($key, ['id-band-skips', 'target-kept', 'review', 'apply', 'restore-target-db', 'restore-files'], true) && (!isset($argv[$i + 1]) || str_starts_with($argv[$i + 1], '--'))) {
+        if (in_array($key, ['id-band-skips', 'target-kept', 'review', 'apply', 'after-revalidate', 'restore-target-db', 'restore-files'], true) && (!isset($argv[$i + 1]) || str_starts_with($argv[$i + 1], '--'))) {
             $args[$key] = '1';
             continue;
         }
@@ -12915,7 +13030,8 @@ if (realpath($argv[0] ?? '') === __FILE__) {
                 cow_merge_resolution_choice($args['choice'] ?? null),
                 $apply,
                 cow_merge_review_text($args['note'] ?? 'deterministic conflict resolution', 'note'),
-                cow_merge_review_text($args['reviewer'] ?? 'user', 'reviewer')
+                cow_merge_review_text($args['reviewer'] ?? 'user', 'reviewer'),
+                cow_merge_bool_flag($args['after-revalidate'] ?? '0')
             );
             if (($args['quiet'] ?? '0') !== '1') {
                 echo "forkpress: validated COW merge conflict resolution\n";

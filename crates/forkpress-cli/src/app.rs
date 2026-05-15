@@ -3348,6 +3348,7 @@ fn cow_branch_command(
             };
             let mut choice: Option<String> = None;
             let mut apply = false;
+            let mut after_revalidate = false;
             let mut note: Option<String> = None;
             let mut reviewer: Option<String> = None;
             let mut index = 3;
@@ -3362,6 +3363,10 @@ fn cow_branch_command(
                     }
                     "--apply" => {
                         apply = true;
+                        index += 1;
+                    }
+                    "--after-revalidate" => {
+                        after_revalidate = true;
                         index += 1;
                     }
                     "--note" => {
@@ -3393,6 +3398,7 @@ fn cow_branch_command(
                 record_id,
                 &choice,
                 apply,
+                after_revalidate,
                 note.as_deref(),
                 reviewer.as_deref(),
             )?;
@@ -3470,7 +3476,7 @@ fn branch_help_text(command: Option<&str>) -> &'static str {
             "Usage: forkpress branch merge-review <conflict|decision|resolution> <id> --status <pending|needs-action|reviewed> --note <text> [--reviewer <name>]\n\nAttach review metadata to an audit record.\n"
         }
         Some("merge-resolve") => {
-            "Usage: forkpress branch merge-resolve conflict <id> --choice <source|target> [--apply] [--note <text>] [--reviewer <name>]\n\nValidate or apply a reviewed merge conflict choice.\n"
+            "Usage: forkpress branch merge-resolve conflict <id> --choice <source|target> [--apply] [--after-revalidate] [--note <text>] [--reviewer <name>]\n\nValidate or apply a reviewed merge conflict choice. Use --after-revalidate only after merge-audit --revalidate has carried a stale cell conflict back to needs-action.\n"
         }
         Some("delete") | Some("rm") => {
             "Usage: forkpress branch delete <branch>\n\nDelete a materialized branch. Use with care.\n"
@@ -5527,6 +5533,7 @@ mod git_helper_tests {
             "--choice",
             "source",
             "--apply",
+            "--after-revalidate",
             "--note",
             "Use source title",
             "--reviewer",
@@ -5545,6 +5552,7 @@ mod git_helper_tests {
                 "--choice".to_string(),
                 "source".to_string(),
                 "--apply".to_string(),
+                "--after-revalidate".to_string(),
                 "--note".to_string(),
                 "Use source title".to_string(),
                 "--reviewer".to_string(),

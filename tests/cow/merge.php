@@ -3034,6 +3034,39 @@ SQL);
     $revalidated_again_json = json_decode($revalidated_again['output'], true);
     assert_same($revalidated_again_json['carried'] ?? null, 0, 'review revalidation CLI does not duplicate carried notes');
     assert_same($revalidated_again_json['already_needs_action'] ?? null, 1, 'review revalidation CLI reports already-carried stale reviews');
+    assert_same((int)scalar($revalidate_metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $revalidate_conflict_id"), 1, 'review revalidation records the stale target payload for guarded resolution');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($revalidate_metadata, $revalidate_conflict_id, 'source', true, 'Try stale source apply before guarded revalidation.', 'cow-test'),
+        'target cell no longer matches the audited conflict target value',
+        'stale conflict resolution still fails without the after-revalidate guard'
+    );
+    $db = open_db($revalidate_target);
+    $db->exec("UPDATE plugin_items SET value = 'target drift after revalidation' WHERE item_id = 'alpha'");
+    $db->close();
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($revalidate_metadata, $revalidate_conflict_id, 'source', true, 'Try stale source apply after new target drift.', 'cow-test', true),
+        'target payload changed after latest merge revalidation',
+        'after-revalidate resolution fails if target drifted again after revalidation'
+    );
+    $revalidated_after_drift = cow_merge_revalidate_reviewed_conflicts($revalidate_metadata, $revalidate_run_id, 'cow-revalidate');
+    assert_same($revalidated_after_drift['carried'], 1, 'review revalidation carries a new needs-action note after further target drift');
+    assert_same((int)scalar($revalidate_metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $revalidate_conflict_id"), 2, 'review revalidation records the replacement stale target payload after further drift');
+    $after_revalidate_resolution = cow_merge_resolve_conflict(
+        $revalidate_metadata,
+        $revalidate_conflict_id,
+        'source',
+        true,
+        'Apply source after revalidating target drift.',
+        'cow-test',
+        true
+    );
+    assert_same($after_revalidate_resolution['status'], 'applied', 'after-revalidate source resolution applies a revalidated stale cell conflict');
+    assert_same(scalar($revalidate_target, "SELECT value FROM plugin_items WHERE item_id = 'alpha'"), 'source revalidate conflict', 'after-revalidate source resolution writes the audited source value');
+    assert_same(
+        scalar($revalidate_metadata, "SELECT previous_payload FROM merge_resolutions WHERE conflict_id = $revalidate_conflict_id ORDER BY id DESC LIMIT 1"),
+        cow_merge_payload_json('target drift after revalidation'),
+        'after-revalidate resolution audits the latest revalidated target payload'
+    );
 
     $row_resolution_rollback_base = $tmp . '/row-resolution-rollback-base.sqlite';
     $row_resolution_rollback_source = $tmp . '/row-resolution-rollback-source.sqlite';

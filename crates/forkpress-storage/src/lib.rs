@@ -1401,6 +1401,7 @@ pub fn resolve_cow_merge_conflict(
     conflict_id: &str,
     choice: &str,
     apply: bool,
+    after_revalidate: bool,
     note: Option<&str>,
     reviewer: Option<&str>,
 ) -> Result<()> {
@@ -1416,6 +1417,9 @@ pub fn resolve_cow_merge_conflict(
     ];
     if apply {
         args.push("--apply".into());
+    }
+    if after_revalidate {
+        args.push("--after-revalidate".into());
     }
     if let Some(note) = note {
         args.push("--note".into());
