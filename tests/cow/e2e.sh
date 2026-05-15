@@ -33,6 +33,9 @@ on_error() {
   echo "FAIL cow materialized strategy e2e at line ${BASH_LINENO[0]}: ${BASH_COMMAND}" >&2
   dump_if_exists "$TMP/git-created.html"
   dump_if_exists "$TMP/git-created-merge.out"
+  dump_if_exists "$TMP/git-created-http-crash.out"
+  dump_if_exists "$TMP/git-created-http-crash-after-restart.html"
+  dump_if_exists "$TMP/git-created-http-crash-merge.out"
   dump_if_exists "$TMP/autoinc-main-init.json"
   dump_if_exists "$TMP/ui-create-admin.html"
   dump_if_exists "$TMP/ui-create.json"
@@ -1173,6 +1176,45 @@ grep -F "forkpress: merged git-created into main" "$TMP/git-created-merge.out" >
 grep -F "status:    completed" "$TMP/git-created-merge.out" >/dev/null
 test -f "$WORK/main/wp-content/git-created.txt"
 grep -F "created through git" "$WORK/main/wp-content/git-created.txt" >/dev/null
+
+log_step "actual Git push created-branch crash recovery"
+git -C "$TMP/checkout" fetch origin main:refs/remotes/origin/main
+git -C "$TMP/checkout" checkout -B git-created-http-crash origin/main
+git -C "$TMP/checkout" reset --hard origin/main
+git -C "$TMP/checkout" clean -fd
+printf "created through crashed git push\n" > "$TMP/checkout/wordpress/wp-content/git-created-http-crash.txt"
+"$BIN" stop --work-dir "$WORK_DIR" >/dev/null 2>&1 || true
+FORKPRESS_COW_GIT_TEST_FAILPOINT=after-created-branch-list FORKPRESS_COW_GIT_TEST_FAILPOINT_ACTION=exit \
+  "$BIN" serve --work-dir "$WORK_DIR" --port "$PORT" --root-host wp.localhost --workers 1
+if "$BIN" commit "$TMP/checkout" --message "create cow branch through crashed git push" > "$TMP/git-created-http-crash.out" 2>&1; then
+  echo "Git push unexpectedly survived after-created-branch-list server exit failpoint" >&2
+  exit 1
+fi
+for _ in $(seq 1 40); do
+  if ! "$BIN" server list | grep -F "$WORK_DIR" >/dev/null; then
+    break
+  fi
+  sleep 0.25
+done
+"$BIN" stop --work-dir "$WORK_DIR" >/dev/null 2>&1 || true
+"$BIN" serve --work-dir "$WORK_DIR" --port "$PORT" --root-host wp.localhost --workers 1
+"$BIN" branch --work-dir "$WORK_DIR" list | grep -F "git-created-http-crash" >/dev/null
+curl -sS -H "Host: git-created-http-crash.wp.localhost:$PORT" \
+  "http://127.0.0.1:$PORT/" \
+  -o "$TMP/git-created-http-crash-after-restart.html"
+grep -F "Branch: git-created-http-crash" "$TMP/git-created-http-crash-after-restart.html" >/dev/null
+grep -F "Branch not found" "$TMP/git-created-http-crash-after-restart.html" && exit 1
+test -f "$WORK/git-created-http-crash/wp-content/git-created-http-crash.txt"
+grep -F "created through crashed git push" "$WORK/git-created-http-crash/wp-content/git-created-http-crash.txt" >/dev/null
+test -f "$WORK_DIR/cow/merge/bases/git-created-http-crash.sqlite"
+test -f "$WORK_DIR/cow/merge/file-bases/git-created-http-crash.json"
+git -C "$TMP/checkout" fetch origin git-created-http-crash:refs/remotes/origin/git-created-http-crash
+test "$(git -C "$TMP/checkout" rev-parse git-created-http-crash)" = "$(git -C "$TMP/checkout" rev-parse refs/remotes/origin/git-created-http-crash)"
+"$BIN" branch --work-dir "$WORK_DIR" merge git-created-http-crash --into main > "$TMP/git-created-http-crash-merge.out"
+grep -F "forkpress: merged git-created-http-crash into main" "$TMP/git-created-http-crash-merge.out" >/dev/null
+grep -F "status:    completed" "$TMP/git-created-http-crash-merge.out" >/dev/null
+test -f "$WORK/main/wp-content/git-created-http-crash.txt"
+grep -F "created through crashed git push" "$WORK/main/wp-content/git-created-http-crash.txt" >/dev/null
 
 log_step "reject multi-branch Git delete without mutation"
 if git -C "$TMP/checkout" push origin --delete git-created feature-cow > "$TMP/git-multi-delete.out" 2>&1; then
