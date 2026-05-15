@@ -13723,6 +13723,65 @@ SQL);
         'taxonomy menu item object references pointing at a held explicit source term record a reviewable row conflict'
     );
 
+    $band_explicit_user_base = $tmp . '/band-explicit-user-base.sqlite';
+    $band_explicit_user_source = $tmp . '/band-explicit-user-source.sqlite';
+    $band_explicit_user_target = $tmp . '/band-explicit-user-target.sqlite';
+    $band_explicit_user_metadata = $tmp . '/.forkpress/cow/merge/band-explicit-user-metadata.sqlite';
+    copy($band_base, $band_explicit_user_base);
+    $db = open_db($band_explicit_user_base);
+    $db->exec('ALTER TABLE wp_posts ADD COLUMN post_author INTEGER NOT NULL DEFAULT 0');
+    $db->exec('CREATE TABLE wp_users (ID INTEGER PRIMARY KEY AUTOINCREMENT, user_login TEXT NOT NULL, user_email TEXT NOT NULL DEFAULT "")');
+    $db->exec('CREATE TABLE wp_usermeta (umeta_id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec('CREATE TABLE wp_comments (comment_ID INTEGER PRIMARY KEY AUTOINCREMENT, comment_post_ID INTEGER NOT NULL, comment_content TEXT NOT NULL, comment_parent INTEGER NOT NULL DEFAULT 0, user_id INTEGER NOT NULL DEFAULT 0)');
+    $db->exec("INSERT INTO wp_users (ID, user_login, user_email) VALUES (1, 'base-user', 'base@example.test')");
+    $db->close();
+    copy($band_explicit_user_base, $band_explicit_user_source);
+    copy($band_explicit_user_base, $band_explicit_user_target);
+    cow_merge_allocate_autoincrement_bands($band_explicit_user_source, $band_explicit_user_metadata, 'feature-band-explicit-user-source');
+    $db = open_db($band_explicit_user_source);
+    $db->exec("INSERT INTO wp_users (ID, user_login, user_email) VALUES (2, 'imported-explicit-user', 'imported@example.test')");
+    $db->exec("INSERT INTO wp_usermeta (user_id, meta_key, meta_value) VALUES (2, 'description', 'metadata behind held explicit user')");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_author) VALUES ('Post behind explicit author', 'author should be review-held', 'publish', 2)");
+    $db->exec("INSERT INTO wp_comments (comment_post_ID, comment_content, user_id) VALUES (1, 'Comment behind held explicit user', 2)");
+    $db->close();
+    $band_explicit_user_result = cow_merge_databases(
+        $band_explicit_user_base,
+        $band_explicit_user_source,
+        $band_explicit_user_target,
+        $band_explicit_user_metadata,
+        'feature-band-explicit-user-source',
+        'main'
+    );
+    assert_same($band_explicit_user_result['status'], 'completed_with_conflicts', 'explicit source user IDs hold dependent user rows for review');
+    assert_same((int)scalar($band_explicit_user_target, 'SELECT COUNT(*) FROM wp_users WHERE ID = 2'), 0, 'out-of-band explicit source user remains unapplied');
+    assert_same((int)scalar($band_explicit_user_target, 'SELECT COUNT(*) FROM wp_usermeta WHERE user_id = 2'), 0, 'usermeta pointing at a held explicit source user is not applied automatically');
+    assert_same((int)scalar($band_explicit_user_target, 'SELECT COUNT(*) FROM wp_posts WHERE post_author = 2'), 0, 'posts authored by a held explicit source user are not applied automatically');
+    assert_same((int)scalar($band_explicit_user_target, 'SELECT COUNT(*) FROM wp_comments WHERE user_id = 2'), 0, 'comments pointing at a held explicit source user are not applied automatically');
+    assert_same(
+        (int)scalar($band_explicit_user_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-user-source' AND c.table_name = 'wp_users' AND c.conflict_type = 'row-target-constraint'"),
+        1,
+        'out-of-band explicit source user records a reviewable row conflict'
+    );
+    assert_same(
+        (int)scalar($band_explicit_user_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-user-source' AND c.table_name = 'wp_usermeta' AND c.conflict_type = 'row-target-constraint'"),
+        1,
+        'usermeta pointing at a held explicit source user records a reviewable row conflict'
+    );
+    assert_same(
+        (int)scalar($band_explicit_user_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-user-source' AND c.table_name = 'wp_posts' AND c.conflict_type = 'row-target-constraint'"),
+        1,
+        'posts authored by a held explicit source user record a reviewable row conflict'
+    );
+    assert_same(
+        (int)scalar($band_explicit_user_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-user-source' AND c.table_name = 'wp_comments' AND c.conflict_type = 'row-target-constraint'"),
+        1,
+        'comments pointing at a held explicit source user record a reviewable row conflict'
+    );
+    assert_true(
+        (int)scalar($band_explicit_user_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-user-source' AND d.table_name IN ('wp_usermeta', 'wp_posts', 'wp_comments') AND d.decision = 'target-wins' AND d.reason LIKE '%parent user must merge before child row%'") === 3,
+        'child rows held behind an explicit source user explain the missing parent'
+    );
+
     $plain_graph_base = $tmp . '/plain-ipk-graph-base.sqlite';
     $plain_graph_source = $tmp . '/plain-ipk-graph-source.sqlite';
     $plain_graph_target = $tmp . '/plain-ipk-graph-target.sqlite';

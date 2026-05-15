@@ -4646,7 +4646,14 @@ function cow_merge_wordpress_insert_reference_violation(
     array $source_row
 ): ?string {
     if ($table === 'wp_posts') {
+        $author_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_posts row', 'wp_users', 'ID', $source_row['post_author'] ?? null, 'user');
+        if ($author_violation !== null) {
+            return $author_violation;
+        }
         return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_posts row', 'wp_posts', 'ID', $source_row['post_parent'] ?? null, 'post');
+    }
+    if ($table === 'wp_usermeta') {
+        return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_usermeta row', 'wp_users', 'ID', $source_row['user_id'] ?? null, 'user');
     }
     if ($table === 'wp_postmeta') {
         $post_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_postmeta row', 'wp_posts', 'ID', $source_row['post_id'] ?? null, 'post');
@@ -4669,7 +4676,11 @@ function cow_merge_wordpress_insert_reference_violation(
         return null;
     }
     if ($table === 'wp_comments') {
-        return cow_merge_wordpress_comment_reference_violation($source, $target, $meta, $source_branch, 'wp_comments row', $source_row);
+        $comment_violation = cow_merge_wordpress_comment_reference_violation($source, $target, $meta, $source_branch, 'wp_comments row', $source_row);
+        if ($comment_violation !== null) {
+            return $comment_violation;
+        }
+        return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_comments row', 'wp_users', 'ID', $source_row['user_id'] ?? null, 'user');
     }
     if ($table === 'wp_commentmeta') {
         $comment_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_commentmeta row', 'wp_comments', 'comment_ID', $source_row['comment_id'] ?? null, 'comment');
