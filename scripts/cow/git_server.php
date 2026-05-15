@@ -517,6 +517,7 @@ function cow_git_apply_push_to_branches(
         }
         cow_git_commit_apply_transaction($transaction);
         cow_git_write_branch_list($branches_dir, $branch_list_path);
+        cow_git_cleanup_stale_update_artifacts($branches_dir, $storage_branches_dir);
     } catch (\Throwable $e) {
         cow_git_rollback_apply_transaction($transaction);
         cow_git_cleanup_created_branch_merge_base_artifacts($git_repo_dir, $branch_list_path, $transaction['created']);
@@ -802,6 +803,7 @@ function cow_git_apply_all_refs_to_branches(
         );
         if ($transaction !== null && $updated !== null) {
             $transaction['updates'][] = $updated;
+            cow_git_failpoint('after-existing-branch-update-publish');
         }
     }
 
@@ -1210,6 +1212,31 @@ function cow_git_commit_apply_transaction(array $transaction): void {
         cow_git_remove_tree($update['backup']);
     }
     cow_git_discard_staged_branch_deletes($transaction['deletes']);
+}
+
+function cow_git_cleanup_stale_update_artifacts(string $branches_dir, string $storage_branches_dir): void {
+    $parents = [rtrim($branches_dir, "/\\")];
+    $storage_parent = rtrim($storage_branches_dir, "/\\");
+    if ($storage_parent !== '' && !in_array($storage_parent, $parents, true)) {
+        $parents[] = $storage_parent;
+    }
+
+    foreach ($parents as $parent) {
+        foreach (glob($parent . '/.forkpress-update-{backup,stage,failed}-*', GLOB_BRACE) ?: [] as $path) {
+            $name = basename($path);
+            if (!preg_match('/^\.forkpress-update-(?:backup|stage|failed)-(.+)-[0-9]+-[0-9a-f]+$/', $name, $matches)) {
+                continue;
+            }
+            $branch = $matches[1];
+            if (!cow_git_valid_branch_name($branch)) {
+                continue;
+            }
+            $storage = cow_git_branch_storage_root($storage_branches_dir, $branches_dir, $branch);
+            if (is_dir($storage) && is_file(rtrim($storage, "/\\") . '/wp-load.php')) {
+                cow_git_remove_tree($path);
+            }
+        }
+    }
 }
 
 function cow_git_rollback_apply_transaction(array $transaction): void {

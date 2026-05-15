@@ -937,6 +937,61 @@ assert_same($reconciled_band_count, 1, 'branch-list reconciliation preserves fin
 assert_same($reconciled_identity_count, 1, 'branch-list reconciliation preserves finalized row identity metadata');
 cow_git_remove_tree($tmp);
 
+$tmp = sys_get_temp_dir() . '/forkpress-cow-git-existing-update-crash-' . getmypid() . '-' . bin2hex(random_bytes(4));
+$branches = $tmp . '/branches';
+$git = $tmp . '/git';
+$branch_list = $tmp . '/branches.txt';
+mkdir($branches . '/main/wp-content', 0777, true);
+file_put_contents($branches . '/main/wp-load.php', "<?php\n");
+file_put_contents($branches . '/main/wp-content/crash-update.txt', "old\n");
+
+$fs = WordPress\Filesystem\LocalFilesystem::create($git);
+$repo = new WordPress\Git\GitRepository($fs, ['default_branch' => 'main']);
+$repo->set_config_value(['user', 'name'], 'ForkPress COW');
+$repo->set_config_value(['user', 'email'], 'forkpress-cow@local');
+cow_git_sync_repository($repo, $branches);
+cow_git_write_branch_list($branches, $branch_list);
+$main_tip = $repo->get_branch_tip('refs/heads/main');
+$repo->checkout('refs/heads/main');
+$updated_tip = $repo->commit([
+    'commit' => [
+        'message' => 'update branch with crash',
+        'author' => 'ForkPress Test <forkpress-test@local>',
+        'committer' => 'ForkPress Test <forkpress-test@local>',
+        'parents' => [$main_tip],
+    ],
+    'updates' => ['wordpress/wp-content/crash-update.txt' => "new\n"],
+]);
+$repo->set_branch_tip('refs/heads/main', $updated_tip);
+$crash_result = run_php_code_env(<<<'PHP'
+require_once getenv('FORKPRESS_COW_GIT_SERVER_HELPER');
+
+$git = getenv('FORKPRESS_COW_GIT_REPO');
+$branches = getenv('FORKPRESS_COW_GIT_BRANCHES');
+$branch_list = getenv('FORKPRESS_COW_GIT_BRANCH_LIST');
+$main_tip = getenv('FORKPRESS_COW_GIT_MAIN_TIP');
+$fs = WordPress\Filesystem\LocalFilesystem::create($git);
+$repo = new WordPress\Git\GitRepository($fs, ['default_branch' => 'main']);
+$repo->set_config_value(['user', 'name'], 'ForkPress COW');
+$repo->set_config_value(['user', 'email'], 'forkpress-cow@local');
+cow_git_apply_push_to_branches($repo, $git, $branches, $branches, $branch_list, 'file-copy', '', ['main' => $main_tip]);
+PHP, [
+    'FORKPRESS_COW_GIT_SERVER_HELPER' => realpath(__DIR__ . '/../../scripts/cow/git_server.php'),
+    'FORKPRESS_COW_GIT_REPO' => $git,
+    'FORKPRESS_COW_GIT_BRANCHES' => $branches,
+    'FORKPRESS_COW_GIT_BRANCH_LIST' => $branch_list,
+    'FORKPRESS_COW_GIT_MAIN_TIP' => $main_tip,
+    'FORKPRESS_COW_GIT_TEST_FAILPOINT' => 'after-existing-branch-update-publish',
+    'FORKPRESS_COW_GIT_TEST_FAILPOINT_ACTION' => 'exit',
+]);
+assert_true($crash_result['status'] !== 0, 'existing branch update crash terminates the push apply subprocess');
+assert_same(file_get_contents($branches . '/main/wp-content/crash-update.txt'), "new\n", 'existing branch update crash leaves the fully published new file');
+assert_true(count(glob($branches . '/.forkpress-update-backup-main-*') ?: []) >= 1, 'existing branch update crash leaves a rollback backup artifact');
+cow_git_apply_push_to_branches($repo, $git, $branches, $branches, $branch_list, 'file-copy', '', ['main' => $main_tip]);
+assert_same(file_get_contents($branches . '/main/wp-content/crash-update.txt'), "new\n", 'next Git apply preserves the published branch update after crash');
+assert_same(glob($branches . '/.forkpress-update-*') ?: [], [], 'next Git apply cleans stale update artifacts after crash');
+cow_git_remove_tree($tmp);
+
 $tmp = sys_get_temp_dir() . '/forkpress-cow-git-created-id-band-metadata-rollback-' . getmypid() . '-' . bin2hex(random_bytes(4));
 $branches = $tmp . '/branches';
 $git = $tmp . '/git';

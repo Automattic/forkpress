@@ -66,6 +66,9 @@ The Git server suite covers these publication classes:
   publication can leave `branches.txt` stale; the next Git apply refreshes the
   branch list from the durable branch tree while preserving the finalized DB/file
   bases, ID-band metadata, and row identity metadata.
+- Process exit after an existing Git branch update publishes its staged tree can
+  leave an old update backup; the next successful Git apply keeps the published
+  branch state and removes stale update artifacts for valid branch storage.
 - Multi-branch Git-created ID-band metadata failure rolls back created branch
   metadata and merge-base artifacts.
 - Stale-source Git-created branch publication is rejected.
