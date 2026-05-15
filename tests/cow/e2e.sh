@@ -1294,7 +1294,7 @@ git -C "$TMP/checkout" reset --hard origin/main
 git -C "$TMP/checkout" clean -fd
 printf "created through crashed git push\n" > "$TMP/checkout/wordpress/wp-content/git-created-http-crash.txt"
 "$BIN" stop --work-dir "$WORK_DIR" >/dev/null 2>&1 || true
-FORKPRESS_COW_GIT_TEST_FAILPOINT=after-created-branch-list FORKPRESS_COW_GIT_TEST_FAILPOINT_ACTION=exit \
+FORKPRESS_COW_GIT_TEST_FAILPOINT=after-created-branch-list FORKPRESS_COW_GIT_TEST_FAILPOINT_ACTION=kill \
   "$BIN" serve --work-dir "$WORK_DIR" --port "$PORT" --root-host wp.localhost --workers 1
 GIT_CREATED_HTTP_CRASH_PUSH_SURVIVED=0
 if "$BIN" commit "$TMP/checkout" --message "create cow branch through crashed git push" > "$TMP/git-created-http-crash.out" 2>&1; then
