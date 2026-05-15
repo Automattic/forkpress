@@ -56,6 +56,9 @@ The Git server suite covers these publication classes:
 - Git-created branch-list publication failure after the list write removes
   branch storage, DB merge base artifacts, file-base artifacts, merge metadata,
   and restores the branch list.
+- Process exit immediately after Git-created branch-list publication leaves the
+  created branch visible with DB/file merge bases, ID-band metadata, and row
+  identity metadata already finalized.
 - Multi-branch Git-created ID-band metadata failure rolls back created branch
   metadata and merge-base artifacts.
 - Stale-source Git-created branch publication is rejected.
@@ -74,7 +77,8 @@ OS-level interruption, not just deliberate exceptions:
   recovery model to full branch publication after DB+file completion.
 - Kill after file publish but before Git ref update.
 - Kill after Git ref update but before branch list update.
-- Kill after branch list update but before public branch symlink/tree update.
+- Kill after Git-created branch metadata capture but before branch list update.
+- Kill during public branch symlink/tree publication before metadata capture.
 - Kill during sparsebundle detach or compact.
 - Kill during cleanup/pruning of rollback artifacts.
 

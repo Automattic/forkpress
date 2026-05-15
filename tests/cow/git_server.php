@@ -23,6 +23,34 @@ function consume_git_response($git_response): string {
     }
     return $out;
 }
+function run_php_code_env(string $code, array $env): array {
+    $base_env = getenv();
+    if (!is_array($base_env)) {
+        $base_env = [];
+    }
+    $pipes = [];
+    $process = proc_open(
+        [PHP_BINARY, '-r', $code],
+        [
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w'],
+        ],
+        $pipes,
+        null,
+        array_merge($base_env, $env)
+    );
+    if (!is_resource($process)) {
+        throw new RuntimeException('failed to start PHP subprocess');
+    }
+    $stdout = stream_get_contents($pipes[1]);
+    $stderr = stream_get_contents($pipes[2]);
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+    return [
+        'status' => proc_close($process),
+        'output' => (is_string($stdout) ? $stdout : '') . (is_string($stderr) ? $stderr : ''),
+    ];
+}
 
 require_once __DIR__ . '/../../scripts/cow/git_server.php';
 
@@ -678,6 +706,75 @@ $stale_identity_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_
 $metadata->close();
 assert_same($stale_band_count, 0, 'Git-created branch metadata publication failure removes ID-band metadata');
 assert_same($stale_identity_count, 0, 'Git-created branch metadata publication failure removes row identity metadata');
+cow_git_remove_tree($tmp);
+
+$tmp = sys_get_temp_dir() . '/forkpress-cow-git-created-branch-list-crash-' . getmypid() . '-' . bin2hex(random_bytes(4));
+$branches = $tmp . '/branches';
+$git = $tmp . '/git';
+$branch_list = $tmp . '/branches.txt';
+mkdir($branches . '/main/wp-content/database', 0777, true);
+file_put_contents($branches . '/main/wp-load.php', "<?php\n");
+file_put_contents($branches . '/main/wp-content/base.txt', "base\n");
+$db = new SQLite3($branches . '/main/wp-content/database/.ht.sqlite');
+$db->exec('CREATE TABLE wp_posts (ID INTEGER PRIMARY KEY AUTOINCREMENT, post_title TEXT)');
+$db->exec("INSERT INTO wp_posts (post_title) VALUES ('Base post')");
+$db->exec('CREATE TABLE plugin_keyless (label TEXT, value TEXT)');
+$db->exec("INSERT INTO plugin_keyless (label, value) VALUES ('Base keyless', 'base')");
+$db->close();
+
+$fs = WordPress\Filesystem\LocalFilesystem::create($git);
+$repo = new WordPress\Git\GitRepository($fs, ['default_branch' => 'main']);
+$repo->set_config_value(['user', 'name'], 'ForkPress COW');
+$repo->set_config_value(['user', 'email'], 'forkpress-cow@local');
+cow_git_sync_repository($repo, $branches);
+cow_git_write_branch_list($branches, $branch_list);
+$main_tip = $repo->get_branch_tip('refs/heads/main');
+$repo->checkout('refs/heads/main');
+$created_tip = $repo->commit([
+    'commit' => [
+        'message' => 'create branch with branch-list crash',
+        'author' => 'ForkPress Test <forkpress-test@local>',
+        'committer' => 'ForkPress Test <forkpress-test@local>',
+        'parents' => [$main_tip],
+    ],
+    'updates' => ['wordpress/wp-content/git-created-list-crash.txt' => "created\n"],
+]);
+$repo->set_branch_tip('refs/heads/git-created-list-crash', $created_tip);
+$crash_result = run_php_code_env(<<<'PHP'
+require_once getenv('FORKPRESS_COW_GIT_SERVER_HELPER');
+
+$git = getenv('FORKPRESS_COW_GIT_REPO');
+$branches = getenv('FORKPRESS_COW_GIT_BRANCHES');
+$branch_list = getenv('FORKPRESS_COW_GIT_BRANCH_LIST');
+$main_tip = getenv('FORKPRESS_COW_GIT_MAIN_TIP');
+$fs = WordPress\Filesystem\LocalFilesystem::create($git);
+$repo = new WordPress\Git\GitRepository($fs, ['default_branch' => 'main']);
+$repo->set_config_value(['user', 'name'], 'ForkPress COW');
+$repo->set_config_value(['user', 'email'], 'forkpress-cow@local');
+cow_git_apply_push_to_branches($repo, $git, $branches, $branches, $branch_list, 'file-copy', '', ['main' => $main_tip]);
+PHP, [
+    'FORKPRESS_COW_GIT_SERVER_HELPER' => realpath(__DIR__ . '/../../scripts/cow/git_server.php'),
+    'FORKPRESS_COW_GIT_REPO' => $git,
+    'FORKPRESS_COW_GIT_BRANCHES' => $branches,
+    'FORKPRESS_COW_GIT_BRANCH_LIST' => $branch_list,
+    'FORKPRESS_COW_GIT_MAIN_TIP' => $main_tip,
+    'FORKPRESS_COW_GIT_TEST_FAILPOINT' => 'after-created-branch-list',
+    'FORKPRESS_COW_GIT_TEST_FAILPOINT_ACTION' => 'exit',
+]);
+assert_true($crash_result['status'] !== 0, 'Git-created branch-list crash terminates the push apply subprocess');
+assert_true(is_dir($branches . '/git-created-list-crash'), 'Git-created branch-list crash leaves the created branch published');
+assert_same(file_get_contents($branches . '/git-created-list-crash/wp-content/git-created-list-crash.txt'), "created\n", 'Git-created branch-list crash leaves pushed WordPress files published');
+assert_true(file_exists($tmp . '/merge/bases/git-created-list-crash.sqlite'), 'Git-created branch-list crash leaves DB merge base artifacts');
+assert_true(file_exists($tmp . '/merge/file-bases/git-created-list-crash.json'), 'Git-created branch-list crash leaves filesystem merge base artifacts');
+$crashed_branch_list = (string)file_get_contents($branch_list);
+assert_true(str_contains($crashed_branch_list, "main\n"), 'Git-created branch-list crash keeps main in the branch list');
+assert_true(str_contains($crashed_branch_list, "git-created-list-crash\n"), 'Git-created branch-list crash leaves the created branch in the branch list');
+$metadata = new SQLite3($tmp . '/merge/metadata.sqlite');
+$crash_band_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'git-created-list-crash' AND table_name = 'wp_posts'");
+$crash_identity_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = 'git-created-list-crash' AND table_name = 'plugin_keyless'");
+$metadata->close();
+assert_same($crash_band_count, 1, 'Git-created branch-list crash leaves ID-band metadata finalized before publication');
+assert_same($crash_identity_count, 1, 'Git-created branch-list crash leaves row identity metadata finalized before publication');
 cow_git_remove_tree($tmp);
 
 $tmp = sys_get_temp_dir() . '/forkpress-cow-git-created-id-band-metadata-rollback-' . getmypid() . '-' . bin2hex(random_bytes(4));
