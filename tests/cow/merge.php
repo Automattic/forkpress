@@ -5764,6 +5764,13 @@ SQL);
     $file_revalidated = cow_merge_revalidate_reviewed_conflicts($metadata, null, 'cow-revalidate');
     assert_true($file_revalidated['carried'] >= 1, 'review revalidation carries stale filesystem conflicts to needs-action');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $file_revalidate_conflict_id"), 1, 'filesystem revalidation records the stale target file payload');
+    assert_same(scalar($metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $file_revalidate_conflict_id ORDER BY id DESC LIMIT 1"), 'compatible-target-drift', 'filesystem revalidation classifies changed target files');
+    $file_revalidated_class_audit = cow_merge_audit_report($metadata, null, 10, [
+        'records' => 'conflicts',
+        'scope' => 'files',
+        'path' => 'wp-content/uploads/revalidate-conflict.txt',
+    ]);
+    assert_same($file_revalidated_class_audit['conflicts'][0]['revalidation_class'] ?? null, 'compatible-target-drift', 'filesystem audit exposes the revalidation classifier');
     assert_throws(
         fn() => cow_merge_resolve_conflict($metadata, $file_revalidate_conflict_id, 'source', true, 'Try stale file source before guarded revalidation.', 'cow-test'),
         'target filesystem path no longer matches',
@@ -5778,6 +5785,7 @@ SQL);
     $file_revalidated_after_drift = cow_merge_revalidate_reviewed_conflicts($metadata, null, 'cow-revalidate');
     assert_true($file_revalidated_after_drift['carried'] >= 1, 'review revalidation carries a new filesystem note after further target drift');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $file_revalidate_conflict_id"), 2, 'filesystem revalidation records the replacement stale target file payload');
+    assert_same(scalar($metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $file_revalidate_conflict_id ORDER BY id DESC LIMIT 1"), 'compatible-target-drift', 'filesystem replacement revalidation keeps same-path drift classified');
     $file_revalidated_target_entry = cow_merge_file_manifest_for_root($file_resolve_target_root)['entries']['wp-content/uploads/revalidate-conflict.txt'];
     $file_revalidated_target_payload = cow_merge_payload_json(cow_merge_file_path_payload('wp-content/uploads/revalidate-conflict.txt', $file_revalidated_target_entry));
     $file_after_revalidate_resolution = cow_merge_resolve_conflict(
