@@ -5305,6 +5305,7 @@ SQL);
     write_test_file($file_resolve_base_root . '/wp-content/uploads/delete-conflict.txt', 'base delete conflict');
     write_test_file($file_resolve_base_root . '/wp-content/uploads/rollback-conflict.txt', 'base rollback conflict');
     write_test_file($file_resolve_base_root . '/wp-content/uploads/commit-rollback-conflict.txt', 'base commit rollback conflict');
+    write_test_file($file_resolve_base_root . '/wp-content/uploads/revalidate-conflict.txt', 'base revalidate conflict');
     mkdir($file_resolve_base_root . '/wp-content/uploads/replace-dir-with-file', 0777, true);
     write_test_file($file_resolve_base_root . '/wp-content/uploads/replace-dir-with-file/base-child.txt', 'base replacement child');
     copy_tree_for_test($file_resolve_base_root, $file_resolve_source_root);
@@ -5323,6 +5324,7 @@ SQL);
     write_test_file($file_resolve_source_root . '/wp-content/uploads/conflict.txt', 'source conflict resolution');
     write_test_file($file_resolve_source_root . '/wp-content/uploads/rollback-conflict.txt', 'source rollback resolution');
     write_test_file($file_resolve_source_root . '/wp-content/uploads/commit-rollback-conflict.txt', 'source commit rollback resolution');
+    write_test_file($file_resolve_source_root . '/wp-content/uploads/revalidate-conflict.txt', 'source revalidate resolution');
     create_test_symlink('/etc/passwd', $file_resolve_source_root . '/wp-content/uploads/unsafe-link.txt');
     unlink($file_resolve_source_root . '/wp-content/uploads/delete-conflict.txt');
     unlink($file_resolve_source_root . '/wp-content/uploads/replace-dir-with-file/base-child.txt');
@@ -5332,6 +5334,7 @@ SQL);
     write_test_file($file_resolve_target_root . '/wp-content/uploads/delete-conflict.txt', 'target changed before source deletion');
     write_test_file($file_resolve_target_root . '/wp-content/uploads/rollback-conflict.txt', 'target rollback resolution');
     write_test_file($file_resolve_target_root . '/wp-content/uploads/commit-rollback-conflict.txt', 'target commit rollback resolution');
+    write_test_file($file_resolve_target_root . '/wp-content/uploads/revalidate-conflict.txt', 'target revalidate resolution');
     cow_merge_branch_state(
         $file_resolve_base_db,
         $file_resolve_source_db,
@@ -5380,6 +5383,51 @@ SQL);
     assert_true(
         ($stale_file_audit['conflicts'][0]['current_target_preview'] ?? null) !== ($stale_file_audit['conflicts'][0]['target_preview'] ?? null),
         'stale filesystem audit distinguishes current target file state from the audited target state'
+    );
+    $file_revalidate_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/revalidate-conflict.txt')) . "' ORDER BY id DESC LIMIT 1");
+    cow_merge_review_record(
+        $metadata,
+        'conflict',
+        $file_revalidate_conflict_id,
+        'reviewed',
+        'Keep target uploaded file until revalidation.',
+        'cow-test'
+    );
+    write_test_file($file_resolve_target_root . '/wp-content/uploads/revalidate-conflict.txt', 'target file drift after review');
+    $file_revalidated = cow_merge_revalidate_reviewed_conflicts($metadata, null, 'cow-revalidate');
+    assert_true($file_revalidated['carried'] >= 1, 'review revalidation carries stale filesystem conflicts to needs-action');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $file_revalidate_conflict_id"), 1, 'filesystem revalidation records the stale target file payload');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $file_revalidate_conflict_id, 'source', true, 'Try stale file source before guarded revalidation.', 'cow-test'),
+        'target filesystem path no longer matches',
+        'stale filesystem source resolution still fails without the after-revalidate guard'
+    );
+    write_test_file($file_resolve_target_root . '/wp-content/uploads/revalidate-conflict.txt', 'target file drift after revalidation');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $file_revalidate_conflict_id, 'source', true, 'Try stale file source after new target drift.', 'cow-test', true),
+        'target payload changed after latest merge revalidation',
+        'after-revalidate filesystem resolution fails if target drifted again after revalidation'
+    );
+    $file_revalidated_after_drift = cow_merge_revalidate_reviewed_conflicts($metadata, null, 'cow-revalidate');
+    assert_true($file_revalidated_after_drift['carried'] >= 1, 'review revalidation carries a new filesystem note after further target drift');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $file_revalidate_conflict_id"), 2, 'filesystem revalidation records the replacement stale target file payload');
+    $file_revalidated_target_entry = cow_merge_file_manifest_for_root($file_resolve_target_root)['entries']['wp-content/uploads/revalidate-conflict.txt'];
+    $file_revalidated_target_payload = cow_merge_payload_json(cow_merge_file_path_payload('wp-content/uploads/revalidate-conflict.txt', $file_revalidated_target_entry));
+    $file_after_revalidate_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $file_revalidate_conflict_id,
+        'source',
+        true,
+        'Apply source file after revalidating target drift.',
+        'cow-test',
+        true
+    );
+    assert_same($file_after_revalidate_resolution['status'], 'applied', 'after-revalidate source resolution applies a revalidated stale filesystem conflict');
+    assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/revalidate-conflict.txt'), 'source revalidate resolution', 'after-revalidate filesystem resolution copies the audited source file');
+    assert_same(
+        scalar($metadata, "SELECT previous_payload FROM merge_resolutions WHERE conflict_id = $file_revalidate_conflict_id ORDER BY id DESC LIMIT 1"),
+        $file_revalidated_target_payload,
+        'after-revalidate filesystem resolution audits the latest revalidated target file payload'
     );
     $file_rollback_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/rollback-conflict.txt')) . "' ORDER BY id DESC LIMIT 1");
     $file_rollback_meta = open_db($metadata);

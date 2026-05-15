@@ -92,15 +92,17 @@ again after revalidation, guarded resolution fails and asks for another
 revalidation instead of applying the stale original conflict.
 
 The first implementation is intentionally narrow: it supports database cell
-conflicts. Row, file, plugin, and schema conflicts still use the conservative
-stale-target guard until they have conflict-specific revalidation payloads.
+conflicts and filesystem conflicts. Row, plugin, and schema conflicts still use
+the conservative stale-target guard until they have conflict-specific
+revalidation payloads.
 
 ## Test Shape
 
 The implemented tests in `tests/cow/merge.php` cover stale cell/file detection,
 carrying reviewed conflicts into `needs-action`, preserving prior reviewer
 intent in the carried note, idempotent reruns, replacement revalidation payloads
-after further target drift, and guarded source resolution after revalidation.
+after further target drift, and guarded source resolution for database cells and
+filesystem paths after revalidation.
 
 Future classifier tests should cover three records:
 

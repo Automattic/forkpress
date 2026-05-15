@@ -8855,8 +8855,8 @@ function cow_merge_resolve_conflict(
         $table = (string)$conflict['table_name'];
         $column = (string)($conflict['column_name'] ?? '');
         $conflict_type = (string)$conflict['conflict_type'];
-        if ($after_revalidate && $conflict_type !== 'cell-conflict') {
-            throw new InvalidArgumentException('--after-revalidate currently supports database cell conflicts only');
+        if ($after_revalidate && $table !== '__files__' && $conflict_type !== 'cell-conflict') {
+            throw new InvalidArgumentException('--after-revalidate currently supports database cell conflicts and filesystem conflicts only');
         }
         if ($table === '__files__') {
             $file_conflict_types = [
@@ -8895,7 +8895,19 @@ function cow_merge_resolve_conflict(
                 throw new RuntimeException("target root for conflict #$conflict_id does not exist: $target_root");
             }
 
-            $current_value = cow_merge_validate_current_file_entry($target_root, $path, $target_value, 'target');
+            if ($after_revalidate) {
+                $target_entries = cow_merge_file_manifest_for_root($target_root)['entries'];
+                $current_value = $target_entries[$path] ?? null;
+                cow_merge_require_after_revalidate(
+                    $meta,
+                    $conflict_id,
+                    (string)$conflict['source_payload'],
+                    cow_merge_payload_json(cow_merge_file_path_payload($path, $current_value))
+                );
+                $target_value = $current_value;
+            } else {
+                $current_value = cow_merge_validate_current_file_entry($target_root, $path, $target_value, 'target');
+            }
             if ($choice === 'source' && $source_value !== null) {
                 cow_merge_validate_current_file_entry($source_root, $path, $source_value, 'source');
             }
