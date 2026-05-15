@@ -13889,6 +13889,102 @@ PHP);
     assert_same(count($wp_block_ref_audit['conflicts']), 1, 'WordPress block reference validator exposes the missing block as a plugin-scoped audit conflict');
     assert_true(str_contains((string)($wp_block_ref_audit['conflicts'][0]['chosen_preview'] ?? ''), '"missing_ref":30'), 'WordPress block reference audit includes the missing reusable block ID');
 
+    $wp_menu_ref_base_root = $tmp . '/wp-menu-ref-validator-files-base';
+    $wp_menu_ref_source_root = $tmp . '/wp-menu-ref-validator-files-source';
+    $wp_menu_ref_target_root = $tmp . '/wp-menu-ref-validator-files-target';
+    $wp_menu_ref_base = $wp_menu_ref_base_root . '/wp-content/database/.ht.sqlite';
+    $wp_menu_ref_source = $wp_menu_ref_source_root . '/wp-content/database/.ht.sqlite';
+    $wp_menu_ref_target = $wp_menu_ref_target_root . '/wp-content/database/.ht.sqlite';
+    $wp_menu_ref_metadata = $tmp . '/.forkpress/cow/merge/wp-menu-ref-validator-metadata.sqlite';
+    mkdir($wp_menu_ref_base_root . '/wp-content/database', 0777, true);
+    create_base_db($wp_menu_ref_base);
+    $db = open_db($wp_menu_ref_base);
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_type TEXT NOT NULL DEFAULT 'post'");
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_name TEXT NOT NULL DEFAULT ''");
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (40, 'Shared menu page', '<!-- wp:paragraph --><p>Menu page</p><!-- /wp:paragraph -->', 'publish', 'page', 'shared-menu-page'),
+        (41, 'Menu item for shared page', '', 'publish', 'nav_menu_item', 'menu-item-shared-page')");
+    $db->exec("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES
+        (41, '_menu_item_type', 'post_type'),
+        (41, '_menu_item_object', 'page'),
+        (41, '_menu_item_object_id', '40'),
+        (41, '_menu_item_menu_item_parent', '0')");
+    $db->close();
+    write_test_file($wp_menu_ref_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query("SELECT item.ID AS menu_item_id, object.meta_value AS object_type, object_id.meta_value AS object_id
+    FROM wp_posts item
+    JOIN wp_postmeta item_type ON item_type.post_id = item.ID AND item_type.meta_key = '_menu_item_type'
+    JOIN wp_postmeta object ON object.post_id = item.ID AND object.meta_key = '_menu_item_object'
+    JOIN wp_postmeta object_id ON object_id.post_id = item.ID AND object_id.meta_key = '_menu_item_object_id'
+    WHERE item.post_type = 'nav_menu_item' AND item_type.meta_value = 'post_type'");
+$findings = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    $object_type = (string)$row['object_type'];
+    $object_id = (int)$row['object_id'];
+    $escaped_type = SQLite3::escapeString($object_type);
+    $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $object_id AND post_type = '$escaped_type'");
+    if ($exists === 0) {
+        $findings[] = [
+            'plugin' => 'forkpress-wp-menu-refs',
+            'object' => 'nav_menu_item:' . $row['menu_item_id'],
+            'reason' => 'nav menu item references a missing post object',
+            'type' => 'plugin-wp-menu-missing-object',
+            'tables' => ['wp_posts', 'wp_postmeta'],
+            'validator' => 'forkpress-wp-menu-refs@1',
+            'candidate' => [
+                'menu_item_id' => (int)$row['menu_item_id'],
+                'object_type' => $object_type,
+                'missing_object_id' => $object_id,
+            ],
+        ];
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    copy_tree_for_test($wp_menu_ref_base_root, $wp_menu_ref_source_root);
+    copy_tree_for_test($wp_menu_ref_base_root, $wp_menu_ref_target_root);
+    $wp_menu_ref_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-menu-ref-validator.json';
+    cow_merge_capture_file_base($wp_menu_ref_base_root, $wp_menu_ref_file_base);
+    cow_merge_allocate_autoincrement_bands($wp_menu_ref_source, $wp_menu_ref_metadata, 'feature-wp-menu-ref-source');
+    cow_merge_allocate_autoincrement_bands($wp_menu_ref_target, $wp_menu_ref_metadata, 'feature-wp-menu-ref-target');
+    $db = open_db($wp_menu_ref_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID = 40');
+    $db->close();
+    $db = open_db($wp_menu_ref_target);
+    $db->exec("UPDATE wp_posts SET post_title = 'Target menu item still pointing at deleted page' WHERE ID = 41");
+    $db->close();
+    $wp_menu_ref_result = cow_merge_branch_state(
+        $wp_menu_ref_base,
+        $wp_menu_ref_source,
+        $wp_menu_ref_target,
+        $wp_menu_ref_metadata,
+        'feature-wp-menu-ref-source',
+        'feature-wp-menu-ref-target',
+        $wp_menu_ref_file_base,
+        $wp_menu_ref_source_root,
+        $wp_menu_ref_target_root
+    );
+    assert_same($wp_menu_ref_result['status'], 'completed_with_conflicts', 'WordPress menu reference validator holds missing menu objects for review');
+    assert_same((int)($wp_menu_ref_result['plugin_validators'] ?? 0), 1, 'WordPress menu reference validator is discovered from mu-plugins during merge');
+    assert_same((int)($wp_menu_ref_result['plugin_validator_conflicts'] ?? 0), 1, 'WordPress menu reference validator records the missing page object');
+    assert_same((int)scalar($wp_menu_ref_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 40'), 0, 'WordPress menu reference validator leaves the source page deletion staged for review');
+    assert_same(scalar($wp_menu_ref_target, 'SELECT post_title FROM wp_posts WHERE ID = 41'), 'Target menu item still pointing at deleted page', 'WordPress menu reference validator preserves the target menu item edit');
+    $wp_menu_ref_audit = cow_merge_audit_report($wp_menu_ref_metadata, (int)$wp_menu_ref_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-menu-missing-object',
+    ]);
+    assert_same(count($wp_menu_ref_audit['conflicts']), 1, 'WordPress menu reference validator exposes the missing menu object as a plugin-scoped audit conflict');
+    $wp_menu_ref_preview = (string)($wp_menu_ref_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_true(str_contains($wp_menu_ref_preview, '"missing_object_id":40'), 'WordPress menu reference audit includes the missing page ID');
+    assert_true(str_contains($wp_menu_ref_preview, '"object_type":"page"'), 'WordPress menu reference audit includes the menu object type');
+
     $wp_lifecycle_base = $tmp . '/wp-lifecycle-base.sqlite';
     $wp_lifecycle_source = $tmp . '/wp-lifecycle-source.sqlite';
     $wp_lifecycle_target = $tmp . '/wp-lifecycle-target.sqlite';
