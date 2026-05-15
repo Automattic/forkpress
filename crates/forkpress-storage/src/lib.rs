@@ -1,15 +1,17 @@
 use anyhow::{Context, Result, anyhow, bail};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::ffi::CString;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(target_os = "linux")]
+use flate2::read::GzDecoder;
 #[cfg(target_os = "macos")]
 use forkpress_core::absolutize;
 use forkpress_core::{
@@ -47,18 +49,22 @@ streams, SQL COW views, tombstones, triggers, or per-branch table prefixes.
 Branch creation uses the file view recorded in `.forkpress/site.toml`.
 ForkPress first tries materialized COW branch directories with host filesystem
 clone primitives (Linux `FICLONE`, macOS `clonefile`, Windows ReFS block
-clone). On macOS, if the current location cannot clone files, ForkPress creates
-a rootless APFS sparsebundle under `.forkpress/macos-cow`, mounts it at
-`.forkpress/macos-cow/mount`, and links each public branch directory, such as
-`./main`, into that APFS volume. On Windows, put the site on a ReFS Dev Drive
-created by `ForkPressSetup.exe`. A regular full copy is only the last-resort
-file view on platforms where ForkPress can make that tradeoff explicit.
+clone). On Linux, if the current location cannot clone files, ForkPress writes
+a sparse XFS image under the user's ForkPress data directory, attaches it to a
+loop device, mounts one shared XFS volume for all ForkPress sites, and links
+each public branch directory, such as `./main`, into that volume. On macOS, if
+the current location cannot clone files, ForkPress creates a rootless APFS
+sparsebundle under `.forkpress/macos-cow`, mounts it at
+`.forkpress/macos-cow/mount`, and links public branches into that APFS volume.
+On Windows, put the site on a ReFS Dev Drive created by `ForkPressSetup.exe`.
+A regular full copy is only the last-resort file view on platforms where
+ForkPress can make that tradeoff explicit.
 
-APFS clone sharing is not visible to tools that add up path sizes. `du`, Finder,
-and many disk analyzers can count shared clone extents once for every branch, so
-a COW branch can appear to consume another full WordPress tree. To inspect
-physical growth on macOS, compare `df -h .forkpress/macos-cow/mount` before and
-after branch creation, or inspect the allocated size of
+APFS/XFS clone sharing is not visible to tools that add up path sizes. `du`,
+Finder, and many disk analyzers can count shared clone extents once for every
+branch, so a COW branch can appear to consume another full WordPress tree. To
+inspect physical growth on macOS, compare `df -h .forkpress/macos-cow/mount`
+before and after branch creation, or inspect the allocated size of
 `.forkpress/macos-cow/branches.sparsebundle`.
 
 Manage mount-backed COW storage through ForkPress:
@@ -93,19 +99,24 @@ pub fn print_cow_storage_status(
     file_view: Option<FileViewStrategy>,
 ) -> Result<()> {
     println!("  project:   {}", layout.project_dir.display());
-    let sparsebundle_detached = file_view == Some(FileViewStrategy::MacosApfsSparsebundle)
-        && !layout.macos_cow_branches_dir.exists();
-    if sparsebundle_detached {
-        println!("  branches:  unavailable while sparsebundle is detached");
+    let mount_backed_detached = file_view
+        .map(|file_view| cow_file_view_detached(layout, file_view))
+        .unwrap_or(false);
+    let detached_label = if file_view == Some(FileViewStrategy::MacosApfsSparsebundle) {
+        "sparsebundle"
+    } else {
+        "mount-backed storage"
+    };
+    if mount_backed_detached {
+        println!("  branches:  unavailable while {detached_label} is detached");
     } else {
         println!("  branches:  {}", cow_branch_names(layout)?.len());
     }
     println!("  public:    {}", layout.cow_branches_dir.display());
-    if file_view == Some(FileViewStrategy::MacosApfsSparsebundle) {
-        println!("  storage:   {}", layout.macos_cow_branches_dir.display());
-    } else {
-        println!("  storage:   {}", layout.cow_branches_dir.display());
-    }
+    println!(
+        "  storage:   {}",
+        cow_file_view_storage_dir(layout, file_view).display()
+    );
     println!(
         "  lock:      {}",
         layout.cow_dir.join("operations.lock").display()
@@ -115,8 +126,8 @@ pub fn print_cow_storage_status(
         layout.cow_dir.join("lifecycle.lock").display()
     );
 
-    if sparsebundle_detached {
-        println!("  leftovers: unavailable while sparsebundle is detached");
+    if mount_backed_detached {
+        println!("  leftovers: unavailable while {detached_label} is detached");
     } else {
         let leftovers = cow_stale_operation_entries(layout)?;
         if leftovers.is_empty() {
@@ -133,6 +144,24 @@ pub fn print_cow_storage_status(
     }
 
     Ok(())
+}
+
+fn cow_file_view_detached(layout: &Layout, file_view: FileViewStrategy) -> bool {
+    match file_view {
+        FileViewStrategy::MacosApfsSparsebundle => !layout.macos_cow_branches_dir.exists(),
+        FileViewStrategy::LinuxXfsLoop => !layout.linux_xfs_branches_dir.exists(),
+        FileViewStrategy::Reflink | FileViewStrategy::Copy => false,
+    }
+}
+
+fn cow_file_view_storage_dir(layout: &Layout, file_view: Option<FileViewStrategy>) -> &Path {
+    match file_view {
+        Some(FileViewStrategy::MacosApfsSparsebundle) => &layout.macos_cow_branches_dir,
+        Some(FileViewStrategy::LinuxXfsLoop) => &layout.linux_xfs_branches_dir,
+        Some(FileViewStrategy::Reflink) | Some(FileViewStrategy::Copy) | None => {
+            &layout.cow_branches_dir
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -163,6 +192,34 @@ pub fn print_macos_cow_storage_status(layout: &Layout) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+pub fn print_linux_xfs_loop_storage_status(layout: &Layout) -> Result<()> {
+    println!("  image:     {}", layout.linux_xfs_image.display());
+    println!("  mount:     {}", layout.linux_xfs_mount.display());
+    match linux_xfs_mount_info(&layout.linux_xfs_mount)? {
+        Some(info) => {
+            println!("  attached:  yes");
+            println!("  device:    {}", info.device);
+        }
+        None => {
+            println!("  attached:  no");
+            println!(
+                "  attach:    forkpress storage mount --work-dir {}",
+                shell_quote_path(&layout.work_dir)
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn print_linux_xfs_loop_storage_status(layout: &Layout) -> Result<()> {
+    println!("  image:     {}", layout.linux_xfs_image.display());
+    println!("  mount:     {}", layout.linux_xfs_mount.display());
+    println!("  attached:  not available on this OS");
+    Ok(())
+}
+
 pub fn prepare_cow_file_view(layout: &Layout) -> Result<FileViewStrategy> {
     fs::create_dir_all(&layout.cow_dir)
         .with_context(|| format!("failed to create {}", layout.cow_dir.display()))?;
@@ -174,6 +231,16 @@ pub fn prepare_cow_file_view(layout: &Layout) -> Result<FileViewStrategy> {
         if std::env::var_os("FORKPRESS_FORCE_MACOS_APFS_SPARSEBUNDLE").is_some() {
             prepare_macos_apfs_sparsebundle_file_view(layout)?;
             return Ok(FileViewStrategy::MacosApfsSparsebundle);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var_os("FORKPRESS_FORCE_LINUX_XFS_LOOP").is_some() {
+            if let Err(err) = prepare_linux_xfs_loop_file_view(layout) {
+                return Err(cleanup_failed_linux_xfs_loop_prepare(layout, err)?);
+            }
+            return Ok(FileViewStrategy::LinuxXfsLoop);
         }
     }
 
@@ -194,6 +261,18 @@ pub fn prepare_cow_file_view(layout: &Layout) -> Result<FileViewStrategy> {
             Ok(()) => return Ok(FileViewStrategy::MacosApfsSparsebundle),
             Err(err) => {
                 eprintln!("forkpress: macOS APFS sparsebundle COW setup failed: {err:#}");
+                eprintln!("forkpress: falling back to full file-copy materialization");
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        match prepare_linux_xfs_loop_file_view(layout) {
+            Ok(()) => return Ok(FileViewStrategy::LinuxXfsLoop),
+            Err(err) => {
+                let err = cleanup_failed_linux_xfs_loop_prepare(layout, err)?;
+                eprintln!("forkpress: Linux XFS loop COW setup failed: {err:#}");
                 eprintln!("forkpress: falling back to full file-copy materialization");
             }
         }
@@ -231,6 +310,9 @@ pub fn ensure_cow_file_view_available(layout: &Layout, file_view: FileViewStrate
         }
         FileViewStrategy::MacosApfsSparsebundle => {
             ensure_macos_apfs_sparsebundle_file_view(layout)?;
+        }
+        FileViewStrategy::LinuxXfsLoop => {
+            ensure_linux_xfs_loop_file_view(layout)?;
         }
     }
     Ok(())
@@ -1170,6 +1252,9 @@ pub fn cow_stale_operation_entries(layout: &Layout) -> Result<Vec<PathBuf>> {
     if layout.macos_cow_branches_dir.exists() {
         roots.push(layout.macos_cow_branches_dir.clone());
     }
+    if layout.linux_xfs_branches_dir.exists() {
+        roots.push(layout.linux_xfs_branches_dir.clone());
+    }
 
     let mut entries = Vec::new();
     for root in roots {
@@ -1352,6 +1437,14 @@ pub fn compact_macos_apfs_sparsebundle_file_view(layout: &Layout) -> Result<()> 
     compact_macos_apfs_sparsebundle_file_view_impl(layout)
 }
 
+pub fn detach_linux_xfs_loop_file_view(
+    layout: &Layout,
+    force: bool,
+    print_remove_site_hint: bool,
+) -> Result<()> {
+    detach_linux_xfs_loop_file_view_impl(layout, force, print_remove_site_hint)
+}
+
 fn cow_branch_copies_require_cow(layout: &Layout) -> Result<bool> {
     Ok(read_site_manifest(layout)?
         .and_then(|manifest| manifest.file_view)
@@ -1362,6 +1455,7 @@ fn cow_branch_copies_require_cow(layout: &Layout) -> Result<bool> {
 fn cow_branch_storage_root(layout: &Layout, branch: &str, file_view: FileViewStrategy) -> PathBuf {
     match file_view {
         FileViewStrategy::MacosApfsSparsebundle => layout.macos_cow_branches_dir.join(branch),
+        FileViewStrategy::LinuxXfsLoop => layout.linux_xfs_branches_dir.join(branch),
         FileViewStrategy::Reflink | FileViewStrategy::Copy => cow_branch_root(layout, branch),
     }
 }
@@ -1386,14 +1480,28 @@ fn ensure_cow_public_branch_root(
     file_view: FileViewStrategy,
 ) -> Result<PathBuf> {
     let public_root = cow_branch_root(layout, branch);
-    if file_view == FileViewStrategy::MacosApfsSparsebundle {
-        ensure_macos_cow_public_branch_link(&public_root, storage_root)?;
+    match file_view {
+        FileViewStrategy::MacosApfsSparsebundle => {
+            ensure_mount_backed_cow_public_branch_link(
+                &public_root,
+                storage_root,
+                "APFS sparsebundle",
+            )?;
+        }
+        FileViewStrategy::LinuxXfsLoop => {
+            ensure_mount_backed_cow_public_branch_link(&public_root, storage_root, "XFS loop")?;
+        }
+        FileViewStrategy::Reflink | FileViewStrategy::Copy => {}
     }
     Ok(public_root)
 }
 
-#[cfg(target_os = "macos")]
-fn ensure_macos_cow_public_branch_link(public_root: &Path, storage_root: &Path) -> Result<()> {
+#[cfg(unix)]
+fn ensure_mount_backed_cow_public_branch_link(
+    public_root: &Path,
+    storage_root: &Path,
+    label: &str,
+) -> Result<()> {
     use std::os::unix::fs::symlink;
 
     match fs::symlink_metadata(public_root) {
@@ -1415,8 +1523,9 @@ fn ensure_macos_cow_public_branch_link(public_root: &Path, storage_root: &Path) 
                 return Ok(());
             }
             bail!(
-                "{} already exists; cannot link it to APFS sparsebundle storage at {}",
+                "{} already exists; cannot link it to {} storage at {}",
                 public_root.display(),
+                label,
                 storage_root.display()
             );
         }
@@ -1440,9 +1549,13 @@ fn ensure_macos_cow_public_branch_link(public_root: &Path, storage_root: &Path) 
     })
 }
 
-#[cfg(not(target_os = "macos"))]
-fn ensure_macos_cow_public_branch_link(_public_root: &Path, _storage_root: &Path) -> Result<()> {
-    bail!("macOS APFS sparsebundle file view is only available on macOS")
+#[cfg(not(unix))]
+fn ensure_mount_backed_cow_public_branch_link(
+    _public_root: &Path,
+    _storage_root: &Path,
+    label: &str,
+) -> Result<()> {
+    bail!("{label} file view requires Unix symlinks")
 }
 
 #[cfg(target_os = "macos")]
@@ -1525,6 +1638,474 @@ fn ensure_macos_apfs_sparsebundle_file_view(layout: &Layout) -> Result<()> {
 #[cfg(not(target_os = "macos"))]
 fn ensure_macos_apfs_sparsebundle_file_view(_layout: &Layout) -> Result<()> {
     bail!("macOS APFS sparsebundle file view is only available on macOS")
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_linux_xfs_loop_file_view(
+    layout: &Layout,
+) -> std::result::Result<(), LinuxXfsLoopPrepareError> {
+    let mut mounted_here = false;
+    let result = (|| -> Result<()> {
+        if layout.cow_branches_dir == layout.cow_dir.join("branches")
+            && layout.cow_branches_dir.exists()
+            && is_empty_dir(&layout.cow_branches_dir)?
+        {
+            fs::remove_dir(&layout.cow_branches_dir).with_context(|| {
+                format!(
+                    "failed to remove empty {}",
+                    layout.cow_branches_dir.display()
+                )
+            })?;
+        }
+        ensure_linux_xfs_loop_file_view_impl(layout, Some(&mut mounted_here))?;
+        if !probe_reflink_dir(&layout.linux_xfs_branches_dir)? {
+            bail!(
+                "mounted Linux XFS loop volume does not support reflinks at {}",
+                layout.linux_xfs_branches_dir.display()
+            );
+        }
+        Ok(())
+    })();
+
+    result.map_err(|source| LinuxXfsLoopPrepareError {
+        source,
+        mounted_here,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_linux_xfs_loop_file_view(layout: &Layout) -> Result<()> {
+    ensure_linux_xfs_loop_file_view_impl(layout, None)
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_linux_xfs_loop_file_view_impl(
+    layout: &Layout,
+    mut mounted_here: Option<&mut bool>,
+) -> Result<()> {
+    fs::create_dir_all(&layout.linux_xfs_dir)
+        .with_context(|| format!("failed to create {}", layout.linux_xfs_dir.display()))?;
+    let _lock = lock_linux_xfs_global_storage(layout)?;
+
+    ensure_linux_xfs_image(layout)?;
+    if linux_xfs_mount_info(&layout.linux_xfs_mount)?.is_none() {
+        mount_linux_xfs_image(layout)?;
+        if let Some(mounted_here) = &mut mounted_here {
+            **mounted_here = true;
+        }
+    }
+
+    fs::create_dir_all(&layout.linux_xfs_branches_dir).with_context(|| {
+        format!(
+            "failed to create {}",
+            layout.linux_xfs_branches_dir.display()
+        )
+    })?;
+    link_cow_branches_to_mount_backed_storage(layout, &layout.linux_xfs_branches_dir, "XFS loop")
+}
+
+#[cfg(not(target_os = "linux"))]
+fn ensure_linux_xfs_loop_file_view(_layout: &Layout) -> Result<()> {
+    bail!("Linux XFS loop file view is only available on Linux")
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_linux_xfs_image(layout: &Layout) -> Result<()> {
+    if layout.linux_xfs_image.exists() {
+        return Ok(());
+    }
+
+    write_sparse_gzip_template(&layout.linux_xfs_image, LINUX_XFS_REFLINK_TEMPLATE_GZ).with_context(
+        || {
+            format!(
+                "failed to write XFS image template to {}",
+                layout.linux_xfs_image.display()
+            )
+        },
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn write_sparse_gzip_template(path: &Path, template_gz: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("image path has no parent: {}", path.display()))?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    let tmp = parent.join(format!(
+        ".forkpress-xfs-image-{}-{}.tmp",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+
+    let result = (|| -> Result<()> {
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .with_context(|| format!("failed to create {}", tmp.display()))?;
+        let mut input = GzDecoder::new(template_gz);
+        let mut buffer = vec![0u8; 64 * 1024];
+        let mut written = 0u64;
+        loop {
+            let len = input
+                .read(&mut buffer)
+                .context("failed to inflate embedded XFS image template")?;
+            if len == 0 {
+                break;
+            }
+            if buffer[..len].iter().all(|byte| *byte == 0) {
+                output
+                    .seek(SeekFrom::Current(len as i64))
+                    .with_context(|| format!("failed to seek in {}", tmp.display()))?;
+            } else {
+                output
+                    .write_all(&buffer[..len])
+                    .with_context(|| format!("failed to write {}", tmp.display()))?;
+            }
+            written += len as u64;
+        }
+        output
+            .set_len(written)
+            .with_context(|| format!("failed to size {}", tmp.display()))?;
+        output
+            .sync_all()
+            .with_context(|| format!("failed to sync {}", tmp.display()))?;
+        fs::rename(&tmp, path).with_context(|| format!("failed to publish {}", path.display()))?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+#[cfg(target_os = "linux")]
+fn mount_linux_xfs_image(layout: &Layout) -> Result<()> {
+    fs::create_dir_all(&layout.linux_xfs_mount)
+        .with_context(|| format!("failed to create {}", layout.linux_xfs_mount.display()))?;
+    let loop_device = attach_linux_loop_device(&layout.linux_xfs_image)?;
+    let mount_result = linux_mount_xfs_device(&loop_device.path, &layout.linux_xfs_mount);
+    if let Err(err) = mount_result {
+        let _ = loop_device.detach();
+        return Err(err).with_context(|| {
+            format!(
+                "failed to mount XFS image {} at {}",
+                layout.linux_xfs_image.display(),
+                layout.linux_xfs_mount.display()
+            )
+        });
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn attach_linux_loop_device(image: &Path) -> Result<LinuxLoopDevice> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let control = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_CLOEXEC)
+        .open("/dev/loop-control")
+        .context(
+            "failed to open /dev/loop-control; Linux XFS loop storage requires loop-device access",
+        )?;
+    let number = unsafe { libc::ioctl(control.as_raw_fd(), LOOP_CTL_GET_FREE) };
+    if number < 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("failed to allocate a free loop device");
+    }
+
+    let path = PathBuf::from(format!("/dev/loop{number}"));
+    let loop_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_CLOEXEC)
+        .open(&path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    let image_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_CLOEXEC)
+        .open(image)
+        .with_context(|| format!("failed to open {}", image.display()))?;
+
+    let rc = unsafe { libc::ioctl(loop_file.as_raw_fd(), LOOP_SET_FD, image_file.as_raw_fd()) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| {
+            format!("failed to attach {} to {}", image.display(), path.display())
+        });
+    }
+
+    let device = LinuxLoopDevice {
+        path,
+        file: loop_file,
+    };
+    if let Err(err) = device.set_autoclear(image) {
+        let _ = device.detach();
+        return Err(err);
+    }
+    Ok(device)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_mount_xfs_device(device: &Path, mount: &Path) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let source = CString::new(device.as_os_str().as_bytes())
+        .with_context(|| format!("{} contains an interior NUL byte", device.display()))?;
+    let target = CString::new(mount.as_os_str().as_bytes())
+        .with_context(|| format!("{} contains an interior NUL byte", mount.display()))?;
+    let fs_type = CString::new("xfs").unwrap();
+    let data = CString::new("nouuid").unwrap();
+    let flags = libc::MS_NOATIME;
+    let rc = unsafe {
+        libc::mount(
+            source.as_ptr(),
+            target.as_ptr(),
+            fs_type.as_ptr(),
+            flags,
+            data.as_ptr().cast(),
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error()).context("mount(2) failed for XFS loop volume")
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone)]
+pub struct LinuxXfsMountInfo {
+    pub device: String,
+}
+
+#[cfg(target_os = "linux")]
+fn linux_xfs_mount_info(mount: &Path) -> Result<Option<LinuxXfsMountInfo>> {
+    if !mount.exists() {
+        return Ok(None);
+    }
+
+    let mount = fs::canonicalize(mount).unwrap_or_else(|_| mount.to_path_buf());
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo")
+        .context("failed to read /proc/self/mountinfo")?;
+    for line in mountinfo.lines() {
+        let Some(info) = parse_linux_mountinfo_line(line) else {
+            continue;
+        };
+        let mounted_on = PathBuf::from(info.mount_point);
+        let mounted_on = fs::canonicalize(&mounted_on).unwrap_or(mounted_on);
+        if mounted_on == mount && info.fs_type == "xfs" {
+            return Ok(Some(LinuxXfsMountInfo {
+                device: info.source,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_mountinfo_line(line: &str) -> Option<ParsedLinuxMountInfo> {
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    let separator = fields.iter().position(|field| *field == "-")?;
+    if separator < 5 || fields.len() <= separator + 2 {
+        return None;
+    }
+    Some(ParsedLinuxMountInfo {
+        mount_point: unescape_linux_mountinfo_field(fields[4]),
+        fs_type: fields[separator + 1].to_string(),
+        source: unescape_linux_mountinfo_field(fields[separator + 2]),
+    })
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedLinuxMountInfo {
+    mount_point: String,
+    fs_type: String,
+    source: String,
+}
+
+#[cfg(target_os = "linux")]
+fn unescape_linux_mountinfo_field(value: &str) -> String {
+    let mut out = Vec::with_capacity(value.len());
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\'
+            && index + 3 < bytes.len()
+            && bytes[index + 1].is_ascii_digit()
+            && bytes[index + 2].is_ascii_digit()
+            && bytes[index + 3].is_ascii_digit()
+        {
+            let decoded = (bytes[index + 1] - b'0') * 64
+                + (bytes[index + 2] - b'0') * 8
+                + (bytes[index + 3] - b'0');
+            out.push(decoded);
+            index += 4;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(target_os = "linux")]
+const LINUX_XFS_REFLINK_TEMPLATE_GZ: &[u8] =
+    include_bytes!("../assets/linux-xfs-reflink-template.img.gz");
+
+#[cfg(target_os = "linux")]
+const LOOP_SET_FD: libc::Ioctl = 0x4C00;
+#[cfg(target_os = "linux")]
+const LOOP_CLR_FD: libc::Ioctl = 0x4C01;
+#[cfg(target_os = "linux")]
+const LOOP_SET_STATUS64: libc::Ioctl = 0x4C04;
+#[cfg(target_os = "linux")]
+const LOOP_CTL_GET_FREE: libc::Ioctl = 0x4C82;
+#[cfg(target_os = "linux")]
+const LO_FLAGS_AUTOCLEAR: u32 = 4;
+
+#[cfg(target_os = "linux")]
+struct LinuxXfsLoopPrepareError {
+    source: anyhow::Error,
+    mounted_here: bool,
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LoopInfo64 {
+    lo_device: u64,
+    lo_inode: u64,
+    lo_rdevice: u64,
+    lo_offset: u64,
+    lo_sizelimit: u64,
+    lo_number: u32,
+    lo_encrypt_type: u32,
+    lo_encrypt_key_size: u32,
+    lo_flags: u32,
+    lo_file_name: [u8; 64],
+    lo_crypt_name: [u8; 64],
+    lo_encrypt_key: [u8; 32],
+    lo_init: [u64; 2],
+}
+
+#[cfg(target_os = "linux")]
+impl Default for LoopInfo64 {
+    fn default() -> Self {
+        Self {
+            lo_device: 0,
+            lo_inode: 0,
+            lo_rdevice: 0,
+            lo_offset: 0,
+            lo_sizelimit: 0,
+            lo_number: 0,
+            lo_encrypt_type: 0,
+            lo_encrypt_key_size: 0,
+            lo_flags: 0,
+            lo_file_name: [0; 64],
+            lo_crypt_name: [0; 64],
+            lo_encrypt_key: [0; 32],
+            lo_init: [0; 2],
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxLoopDevice {
+    path: PathBuf,
+    file: File,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxLoopDevice {
+    fn set_autoclear(&self, image: &Path) -> Result<()> {
+        use std::os::fd::AsRawFd;
+
+        let mut info = LoopInfo64 {
+            lo_flags: LO_FLAGS_AUTOCLEAR,
+            ..LoopInfo64::default()
+        };
+        copy_loop_file_name(image, &mut info.lo_file_name);
+        let rc = unsafe {
+            libc::ioctl(
+                self.file.as_raw_fd(),
+                LOOP_SET_STATUS64,
+                &info as *const LoopInfo64,
+            )
+        };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+                .with_context(|| format!("failed to set loop flags on {}", self.path.display()))
+        }
+    }
+
+    fn detach(&self) -> Result<()> {
+        use std::os::fd::AsRawFd;
+
+        let rc = unsafe { libc::ioctl(self.file.as_raw_fd(), LOOP_CLR_FD) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+                .with_context(|| format!("failed to detach {}", self.path.display()))
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn copy_loop_file_name(image: &Path, out: &mut [u8; 64]) {
+    use std::os::unix::ffi::OsStrExt;
+
+    out.fill(0);
+    let bytes = image.as_os_str().as_bytes();
+    let len = bytes.len().min(out.len().saturating_sub(1));
+    out[..len].copy_from_slice(&bytes[..len]);
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxXfsGlobalLock {
+    file: File,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for LinuxXfsGlobalLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn lock_linux_xfs_global_storage(layout: &Layout) -> Result<LinuxXfsGlobalLock> {
+    use std::os::fd::AsRawFd;
+
+    fs::create_dir_all(&layout.linux_xfs_dir)
+        .with_context(|| format!("failed to create {}", layout.linux_xfs_dir.display()))?;
+    let path = layout.linux_xfs_dir.join("setup.lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    let status = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    if status != 0 {
+        bail!("failed to lock {}", path.display());
+    }
+    Ok(LinuxXfsGlobalLock { file })
 }
 
 #[derive(Debug, Clone)]
@@ -1696,6 +2277,137 @@ fn compact_macos_apfs_sparsebundle_file_view_impl(_layout: &Layout) -> Result<()
     bail!("macOS APFS sparsebundle compact is only available on macOS")
 }
 
+#[cfg(target_os = "linux")]
+fn detach_linux_xfs_loop_file_view_impl(
+    layout: &Layout,
+    force: bool,
+    print_remove_site_hint: bool,
+) -> Result<()> {
+    let _lock = lock_linux_xfs_global_storage(layout)?;
+    let Some(info) = linux_xfs_mount_info(&layout.linux_xfs_mount)? else {
+        println!(
+            "forkpress: shared Linux XFS COW storage is already detached at {}",
+            layout.linux_xfs_mount.display()
+        );
+        println!(
+            "Attach:     forkpress storage mount --work-dir {}",
+            shell_quote_path(&layout.work_dir)
+        );
+        return Ok(());
+    };
+
+    if print_remove_site_hint {
+        println!("{}", linux_xfs_remove_site_hint(layout));
+    }
+
+    unmount_linux_xfs_loop_file_view(layout, force, &info)?;
+
+    println!(
+        "forkpress: detached shared Linux XFS COW storage mounted at {}",
+        layout.linux_xfs_mount.display()
+    );
+    println!(
+        "Attach again: forkpress storage mount --work-dir {}",
+        shell_quote_path(&layout.work_dir)
+    );
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_xfs_remove_site_hint(layout: &Layout) -> String {
+    let mut paths = vec![layout.work_dir.clone()];
+    if let Ok(branches) = cow_branch_names(layout) {
+        for branch in branches {
+            let public_root = cow_branch_root(layout, &branch);
+            if !paths.iter().any(|path| path == &public_root) {
+                paths.push(public_root);
+            }
+        }
+    }
+    if !paths.iter().any(|path| path == &layout.linux_xfs_site_dir) {
+        paths.push(layout.linux_xfs_site_dir.clone());
+    }
+
+    let paths = paths
+        .iter()
+        .map(|path| shell_quote_path(path))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("Remove site before detaching shared storage:\n  rm -rf {paths}")
+}
+
+#[cfg(target_os = "linux")]
+fn cleanup_failed_linux_xfs_loop_prepare(
+    layout: &Layout,
+    err: LinuxXfsLoopPrepareError,
+) -> Result<anyhow::Error> {
+    if err.mounted_here {
+        let _lock = lock_linux_xfs_global_storage(layout)?;
+        if let Some(info) = linux_xfs_mount_info(&layout.linux_xfs_mount)? {
+            unmount_linux_xfs_loop_file_view(layout, false, &info).with_context(|| {
+                format!(
+                    "failed to detach partial Linux XFS COW storage at {} after setup failure",
+                    layout.linux_xfs_mount.display()
+                )
+            })?;
+        }
+    }
+    Ok(err.source)
+}
+
+#[cfg(target_os = "linux")]
+fn unmount_linux_xfs_loop_file_view(
+    layout: &Layout,
+    force: bool,
+    info: &LinuxXfsMountInfo,
+) -> Result<()> {
+    let target = CString::new(path_bytes(&layout.linux_xfs_mount)).with_context(|| {
+        format!(
+            "{} contains an interior NUL byte",
+            layout.linux_xfs_mount.display()
+        )
+    })?;
+    let flags = if force { libc::MNT_FORCE } else { 0 };
+    let rc = unsafe { libc::umount2(target.as_ptr(), flags) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EBUSY) {
+            bail!(
+                "shared Linux XFS COW storage is still busy at {}.\nStop other ForkPress sites using linux-xfs-loop storage, close terminals/editors using that path, or inspect open files with:\n  lsof +D {}\nThen run:\n  forkpress storage detach --work-dir {}{}",
+                layout.linux_xfs_mount.display(),
+                shell_quote_path(&layout.linux_xfs_mount),
+                shell_quote_path(&layout.work_dir),
+                if force { "" } else { " --force" }
+            );
+        }
+        return Err(err).with_context(|| {
+            format!(
+                "failed to unmount shared Linux XFS COW storage {} mounted from {}",
+                layout.linux_xfs_mount.display(),
+                info.device
+            )
+        });
+    }
+
+    if linux_xfs_mount_info(&layout.linux_xfs_mount)?.is_some() {
+        bail!(
+            "umount2 reported success, but COW storage is still attached at {}",
+            layout.linux_xfs_mount.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn detach_linux_xfs_loop_file_view_impl(
+    _layout: &Layout,
+    _force: bool,
+    _print_remove_site_hint: bool,
+) -> Result<()> {
+    bail!("Linux XFS loop detach is only available on Linux")
+}
+
 #[cfg(target_os = "macos")]
 fn run_hdiutil(args: impl IntoIterator<Item = OsString>) -> Result<()> {
     let output = hdiutil_output(args)?;
@@ -1737,6 +2449,19 @@ fn hdiutil_failure_message(output: &std::process::Output) -> String {
 
 #[cfg(target_os = "macos")]
 fn link_cow_branches_to_macos_cow(layout: &Layout) -> Result<()> {
+    link_cow_branches_to_mount_backed_storage(
+        layout,
+        &layout.macos_cow_branches_dir,
+        "APFS sparsebundle",
+    )
+}
+
+#[cfg(unix)]
+fn link_cow_branches_to_mount_backed_storage(
+    layout: &Layout,
+    storage_branches_dir: &Path,
+    label: &str,
+) -> Result<()> {
     use std::os::unix::fs::symlink;
 
     if layout.cow_branches_dir != layout.cow_dir.join("branches") {
@@ -1754,21 +2479,22 @@ fn link_cow_branches_to_macos_cow(layout: &Layout) -> Result<()> {
                     layout.cow_branches_dir.display()
                 )
             })?;
-            if target == layout.macos_cow_branches_dir {
+            if target == storage_branches_dir {
                 return Ok(());
             }
             bail!(
                 "{} already points to {}; expected {}",
                 layout.cow_branches_dir.display(),
                 target.display(),
-                layout.macos_cow_branches_dir.display()
+                storage_branches_dir.display()
             );
         }
         Ok(meta) if meta.is_dir() => {
             if !is_empty_dir(&layout.cow_branches_dir)? {
                 bail!(
-                    "{} already contains branch data and cannot be replaced with APFS sparsebundle storage",
-                    layout.cow_branches_dir.display()
+                    "{} already contains branch data and cannot be replaced with {} storage",
+                    layout.cow_branches_dir.display(),
+                    label
                 );
             }
             fs::remove_dir(&layout.cow_branches_dir).with_context(|| {
@@ -1790,16 +2516,25 @@ fn link_cow_branches_to_macos_cow(layout: &Layout) -> Result<()> {
         }
     }
 
-    symlink(&layout.macos_cow_branches_dir, &layout.cow_branches_dir).with_context(|| {
+    symlink(storage_branches_dir, &layout.cow_branches_dir).with_context(|| {
         format!(
             "failed to link {} -> {}",
             layout.cow_branches_dir.display(),
-            layout.macos_cow_branches_dir.display()
+            storage_branches_dir.display()
         )
     })
 }
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg(not(unix))]
+fn link_cow_branches_to_mount_backed_storage(
+    _layout: &Layout,
+    _storage_branches_dir: &Path,
+    label: &str,
+) -> Result<()> {
+    bail!("{label} file view requires Unix symlinks")
+}
+
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 fn is_empty_dir(path: &Path) -> Result<bool> {
     let mut entries =
         fs::read_dir(path).with_context(|| format!("failed to read {}", path.display()))?;
@@ -2143,12 +2878,12 @@ fn try_clone_file(_source: &Path, _dest: &Path) -> Result<()> {
     bail!("platform file clone unsupported")
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn shell_quote_path(path: &std::path::Path) -> String {
     shell_quote(&path.to_string_lossy())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn shell_quote(value: &str) -> String {
     if value
         .chars()
@@ -2157,6 +2892,13 @@ fn shell_quote(value: &str) -> String {
         return value.to_string();
     }
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(target_os = "linux")]
+fn path_bytes(path: &Path) -> &[u8] {
+    use std::os::unix::ffi::OsStrExt;
+
+    path.as_os_str().as_bytes()
 }
 
 #[cfg(test)]
@@ -2227,5 +2969,98 @@ mod tests {
         assert_eq!(bytes.len() as u64, WINDOWS_REFS_CLONE_ALIGNMENT * 2);
         #[cfg(not(target_os = "windows"))]
         assert_eq!(bytes, b"canonical");
+    }
+
+    #[test]
+    fn cow_file_view_storage_dir_selects_physical_mount_roots() {
+        let root = std::env::temp_dir().join(format!(
+            "forkpress-storage-dir-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let layout = Layout::new(root.join(".forkpress")).unwrap();
+
+        assert_eq!(
+            cow_file_view_storage_dir(&layout, Some(FileViewStrategy::Reflink)),
+            layout.cow_branches_dir.as_path()
+        );
+        assert_eq!(
+            cow_file_view_storage_dir(&layout, Some(FileViewStrategy::MacosApfsSparsebundle)),
+            layout.macos_cow_branches_dir.as_path()
+        );
+        assert_eq!(
+            cow_file_view_storage_dir(&layout, Some(FileViewStrategy::LinuxXfsLoop)),
+            layout.linux_xfs_branches_dir.as_path()
+        );
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn linux_xfs_remove_site_hint_includes_hidden_site_dir() {
+        let root = std::env::temp_dir().join(format!(
+            "forkpress-xfs-remove-hint-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let layout = Layout::new(root.join(".forkpress")).unwrap();
+        let main = cow_branch_root(&layout, "main");
+        fs::create_dir_all(&main).unwrap();
+        fs::write(main.join("wp-load.php"), b"<?php\n").unwrap();
+
+        let hint = linux_xfs_remove_site_hint(&layout);
+
+        assert!(hint.contains("Remove site before detaching shared storage"));
+        assert!(hint.contains(&shell_quote_path(&layout.work_dir)));
+        assert!(hint.contains(&shell_quote_path(&main)));
+        assert!(hint.contains(&shell_quote_path(&layout.linux_xfs_site_dir)));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn mount_backed_public_branch_link_points_to_storage_root() {
+        let root = std::env::temp_dir().join(format!(
+            "forkpress-storage-link-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let public_root = root.join("main");
+        let storage_root = root.join("storage/main");
+        fs::create_dir_all(&storage_root).unwrap();
+
+        ensure_mount_backed_cow_public_branch_link(&public_root, &storage_root, "test").unwrap();
+
+        assert_eq!(fs::read_link(&public_root).unwrap(), storage_root);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn linux_mountinfo_parser_decodes_mount_source_and_type() {
+        let line = "42 23 7:1 / /tmp/forkpress\\040mount rw,nosuid - xfs /dev/loop7 rw,attr2";
+        let parsed = parse_linux_mountinfo_line(line).unwrap();
+        assert_eq!(parsed.mount_point, "/tmp/forkpress mount");
+        assert_eq!(parsed.fs_type, "xfs");
+        assert_eq!(parsed.source, "/dev/loop7");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn loop_file_name_is_nul_terminated_after_truncation() {
+        let long_path = PathBuf::from(format!("/{}", "a".repeat(128)));
+        let mut out = [0xff; 64];
+        copy_loop_file_name(&long_path, &mut out);
+        assert_eq!(out[63], 0);
+        assert_eq!(out[62], b'a');
     }
 }

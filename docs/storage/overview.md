@@ -82,3 +82,7 @@ ForkPress:
 ```bash
 forkpress stop
 ```
+
+On Linux XFS-loop sites, remove the hidden per-site directory inside the shared
+mount before deleting the project. `forkpress storage detach` prints the exact
+cleanup command while the volume is still attached.

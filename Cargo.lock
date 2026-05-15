@@ -372,6 +372,7 @@ name = "forkpress-storage"
 version = "0.1.13-cow.1"
 dependencies = [
  "anyhow",
+ "flate2",
  "forkpress-core",
  "forkpress-runtime",
  "libc",

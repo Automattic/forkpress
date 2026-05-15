@@ -46,5 +46,10 @@ shared XFS file view:
 forkpress storage detach
 ```
 
+Before deleting a Linux XFS-loop site, remove the site work dir, public branch
+symlinks, and hidden per-site directory inside the shared mount while storage is
+attached. `forkpress storage detach` prints the exact `rm -rf` command before it
+unmounts the shared volume.
+
 `du` can over-count reflink sharing on XFS. Compare filesystem free space before
 and after branch operations when you need to measure physical growth.

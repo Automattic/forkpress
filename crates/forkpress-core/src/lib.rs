@@ -25,6 +25,7 @@ pub enum StorageStrategy {
 pub enum FileViewStrategy {
     Reflink,
     MacosApfsSparsebundle,
+    LinuxXfsLoop,
     Copy,
 }
 
@@ -33,6 +34,7 @@ impl FileViewStrategy {
         match self {
             Self::Reflink => "reflink",
             Self::MacosApfsSparsebundle => "macos-apfs-sparsebundle",
+            Self::LinuxXfsLoop => "linux-xfs-loop",
             Self::Copy => "file-copy",
         }
     }
@@ -41,6 +43,7 @@ impl FileViewStrategy {
         match value.trim() {
             "reflink" | "clonefile" | "ficlone" => Ok(Self::Reflink),
             "macos-apfs-sparsebundle" | "apfs-sparsebundle" => Ok(Self::MacosApfsSparsebundle),
+            "linux-xfs-loop" | "xfs-loop" | "linux-xfs" => Ok(Self::LinuxXfsLoop),
             "file-copy" | "copy" => Ok(Self::Copy),
             other => bail!("unknown file_view strategy in site manifest: {other}"),
         }
@@ -165,6 +168,16 @@ pub struct Layout {
     pub macos_cow_mount: PathBuf,
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub macos_cow_branches_dir: PathBuf,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub linux_xfs_dir: PathBuf,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub linux_xfs_image: PathBuf,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub linux_xfs_mount: PathBuf,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub linux_xfs_site_dir: PathBuf,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub linux_xfs_branches_dir: PathBuf,
     #[cfg(feature = "dev-experiments")]
     pub cas_dir: PathBuf,
     #[cfg(feature = "dev-experiments")]
@@ -217,6 +230,11 @@ impl Layout {
         };
         let cow_branch_list = cow_dir.join("branches.txt");
         let cow_git_dir = cow_dir.join("git");
+        let linux_xfs_dir = forkpress_data_dir(&work_dir).join("linux-xfs");
+        let linux_xfs_mount = linux_xfs_dir.join("mount");
+        let linux_xfs_site_dir = linux_xfs_mount
+            .join("sites")
+            .join(linux_xfs_site_slug(&project_dir, &work_dir));
 
         Ok(Self {
             project_dir,
@@ -232,6 +250,11 @@ impl Layout {
             macos_cow_image: work_dir.join("macos-cow/branches.sparsebundle"),
             macos_cow_mount: work_dir.join("macos-cow/mount"),
             macos_cow_branches_dir: work_dir.join("macos-cow/mount/branches"),
+            linux_xfs_dir: linux_xfs_dir.clone(),
+            linux_xfs_image: linux_xfs_dir.join("forkpress-branches.xfs"),
+            linux_xfs_mount,
+            linux_xfs_branches_dir: linux_xfs_site_dir.join("branches"),
+            linux_xfs_site_dir,
             #[cfg(feature = "dev-experiments")]
             cas_dir: work_dir.join("cas"),
             #[cfg(feature = "dev-experiments")]
@@ -256,6 +279,66 @@ impl Layout {
             work_dir,
         })
     }
+}
+
+fn forkpress_data_dir(work_dir: &Path) -> PathBuf {
+    if let Some(path) = non_empty_env_path("FORKPRESS_DATA_DIR") {
+        return path;
+    }
+    if let Some(path) = non_empty_env_path("XDG_DATA_HOME") {
+        return path.join("forkpress");
+    }
+    if let Some(path) = non_empty_env_path("HOME") {
+        return path.join(".local/share/forkpress");
+    }
+    work_dir.join("data")
+}
+
+fn non_empty_env_path(name: &str) -> Option<PathBuf> {
+    let value = std::env::var_os(name)?;
+    if value.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(value))
+    }
+}
+
+fn linux_xfs_site_slug(project_dir: &Path, work_dir: &Path) -> String {
+    let name = project_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(sanitize_linux_xfs_slug_name)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "site".to_string());
+    format!(
+        "{name}-{}",
+        fnv1a_hex(work_dir.as_os_str().as_encoded_bytes())
+    )
+}
+
+fn sanitize_linux_xfs_slug_name(value: &str) -> String {
+    value
+        .chars()
+        .filter_map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                Some(ch.to_ascii_lowercase())
+            } else if ch == '-' || ch == '_' {
+                Some(ch)
+            } else {
+                None
+            }
+        })
+        .take(40)
+        .collect()
+}
+
+fn fnv1a_hex(bytes: &[u8]) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 pub fn read_site_manifest(layout: &Layout) -> Result<Option<SiteManifest>> {
@@ -408,6 +491,10 @@ mod tests {
 
         let manifest = SiteManifest::parse("strategy = \"cow\"\nfile_view = \"copy\"\n").unwrap();
         assert_eq!(manifest.file_view, Some(FileViewStrategy::Copy));
+
+        let manifest =
+            SiteManifest::parse("strategy = \"cow\"\nfile_view = \"linux-xfs\"\n").unwrap();
+        assert_eq!(manifest.file_view, Some(FileViewStrategy::LinuxXfsLoop));
     }
 
     #[test]
@@ -428,6 +515,25 @@ mod tests {
         assert!(rendered.contains("strategy = \"cow\""));
         assert_eq!(parsed.strategy, StorageStrategy::Cow);
         assert_eq!(parsed.file_view, Some(FileViewStrategy::Reflink));
+    }
+
+    #[test]
+    fn linux_xfs_site_slug_is_stable_and_ascii() {
+        let slug = linux_xfs_site_slug(
+            Path::new("/tmp/Client Site!"),
+            Path::new("/tmp/Client Site!/.forkpress"),
+        );
+        assert!(slug.starts_with("clientsite-"));
+        assert!(slug.chars().all(|ch| {
+            ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' || ch == '_'
+        }));
+        assert_eq!(
+            slug,
+            linux_xfs_site_slug(
+                Path::new("/tmp/Client Site!"),
+                Path::new("/tmp/Client Site!/.forkpress")
+            )
+        );
     }
 
     #[test]
