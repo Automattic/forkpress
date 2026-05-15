@@ -3906,6 +3906,23 @@ function cow_merge_recover_crash_artifacts(
     ];
 }
 
+function cow_merge_assert_no_pending_crash_recovery(string $metadata_db): void {
+    $artifacts = cow_merge_crash_recovery_artifacts($metadata_db);
+    if (count($artifacts) === 0) {
+        return;
+    }
+
+    $first = $artifacts[0];
+    $run = (int)($first['run_id'] ?? 0);
+    $checkpoint = (string)($first['checkpoint'] ?? 'unknown');
+    $command = PHP_BINARY . ' ' . __FILE__ . ' recover-crash --metadata-db ' . escapeshellarg($metadata_db) . ' --format json';
+    throw new RuntimeException(
+        'refusing to start merge while ' . count($artifacts) . ' pending COW merge crash recovery artifact(s) exist'
+        . " for metadata DB $metadata_db; first pending artifact is run #$run at checkpoint $checkpoint. "
+        . "Inspect pending recovery with `$command`, then restore with --restore-target-db and/or --restore-files before merging again."
+    );
+}
+
 function cow_merge_file_root_snapshot_artifact(?array $snapshot, ?string $target_root): ?array {
     if ($snapshot === null) {
         return null;
@@ -11925,6 +11942,7 @@ function cow_merge_databases(
         }
     }
     cow_merge_mkdir_p(dirname($metadata_db));
+    cow_merge_assert_no_pending_crash_recovery($metadata_db);
 
     $base = cow_merge_open_db($base_db, SQLITE3_OPEN_READONLY);
     $source = cow_merge_open_db($source_db, SQLITE3_OPEN_READONLY);
@@ -12318,6 +12336,7 @@ function cow_merge_branch_state(
             throw new InvalidArgumentException('--base-files, --source-root, and --target-root must be provided together');
         }
     }
+    cow_merge_assert_no_pending_crash_recovery($metadata_db);
 
     $target_snapshot = null;
     $metadata_snapshot = null;

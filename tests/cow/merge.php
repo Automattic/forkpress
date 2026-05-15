@@ -1388,6 +1388,22 @@ try {
         $crash_recovery_report_json = json_decode($crash_recovery_report['output'], true);
         assert_same($crash_recovery_report_json['pending'] ?? null, 1, 'crash recovery CLI reports one pending artifact');
         assert_same($crash_recovery_report_json['artifacts'][0]['checkpoint'] ?? null, 'target-db-commit', 'crash recovery CLI reports the commit checkpoint');
+        $blocked_crash_rematch = run_merge_cli([
+            'merge',
+            '--base-db', $crash_commit_base,
+            '--source-db', $crash_commit_source,
+            '--target-db', $crash_commit_target,
+            '--metadata-db', $crash_commit_metadata,
+            '--source', 'feature-crash-commit',
+            '--target', 'main',
+        ]);
+        assert_true($blocked_crash_rematch['status'] !== 0, 'pending DB crash recovery blocks a subsequent merge');
+        assert_true(str_contains($blocked_crash_rematch['output'], 'pending COW merge crash recovery artifact'), 'pending DB crash recovery error explains the recovery queue');
+        assert_same(
+            scalar($crash_commit_target, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Source crash commit content',
+            'blocked merge leaves the pending DB crash state untouched'
+        );
         $crash_restore_report = run_merge_cli([
             'recover-crash',
             '--metadata-db', $crash_commit_metadata,
@@ -1456,6 +1472,25 @@ try {
         assert_same($crash_file_report_json['pending'] ?? null, 1, 'crash recovery CLI reports one pending filesystem artifact');
         assert_same($crash_file_report_json['artifacts'][0]['checkpoint'] ?? null, 'file-op', 'crash recovery CLI reports the filesystem operation checkpoint');
         assert_same($crash_file_report_json['artifacts'][0]['filesystem_transaction_summary']['backup_count'] ?? null, 1, 'filesystem crash recovery artifact preserves file backup metadata');
+        $blocked_crash_file_rematch = run_merge_cli([
+            'merge',
+            '--base-db', $crash_file_base_db,
+            '--source-db', $crash_file_source_db,
+            '--target-db', $crash_file_target_db,
+            '--metadata-db', $crash_file_metadata,
+            '--source', 'feature-crash-file',
+            '--target', 'main',
+            '--base-files', $crash_file_base_manifest,
+            '--source-root', $crash_file_source_root,
+            '--target-root', $crash_file_target_root,
+        ]);
+        assert_true($blocked_crash_file_rematch['status'] !== 0, 'pending filesystem crash recovery blocks a subsequent merge');
+        assert_true(str_contains($blocked_crash_file_rematch['output'], 'pending COW merge crash recovery artifact'), 'pending filesystem crash recovery error explains the recovery queue');
+        assert_same(
+            file_get_contents($crash_file_target_root . '/wp-content/uploads/crash-file.txt'),
+            'source file crash content',
+            'blocked merge leaves the pending filesystem crash state untouched'
+        );
         $crash_file_restore = run_merge_cli([
             'recover-crash',
             '--metadata-db', $crash_file_metadata,

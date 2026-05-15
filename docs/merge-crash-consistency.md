@@ -39,6 +39,9 @@ The PHP merge suite covers these rollback classes:
   filesystem metadata commit, with a durable crash-recovery artifact that points
   at the staged filesystem transaction and can be restored through
   `recover-crash --restore-files`.
+- A subsequent merge against metadata with pending crash-recovery artifacts is
+  rejected before DB or file mutation, forcing the operator to inspect and
+  restore the pending recovery state first.
 
 The Git server suite covers these publication classes:
 
@@ -103,6 +106,10 @@ Each crash test should assert one of:
 
 Any state that has changed target content, no completed run, and no recovery
 artifact is a release blocker.
+
+If a crash-recovery artifact is present, new merges using the same metadata DB
+must fail before mutation until `recover-crash` has inspected and restored the
+pending DB snapshot and/or filesystem transaction.
 
 ## Test Shape
 
