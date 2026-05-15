@@ -13559,6 +13559,11 @@ SQL);
     $stmt = $db->prepare("INSERT INTO wp_term_taxonomy (term_id, taxonomy, description, count) VALUES (2, 'category', '', 1)");
     $stmt->execute();
     $band_explicit_term_taxonomy_id = (int)$db->lastInsertRowID();
+    $db->exec("INSERT INTO wp_terms (name, slug) VALUES ('Imported child term behind explicit parent', 'imported-child-term')");
+    $band_explicit_child_term_id = (int)$db->lastInsertRowID();
+    $stmt = $db->prepare("INSERT INTO wp_term_taxonomy (term_id, taxonomy, description, parent, count) VALUES (:term_id, 'category', '', 2, 1)");
+    $stmt->bindValue(':term_id', $band_explicit_child_term_id, SQLITE3_INTEGER);
+    $stmt->execute();
     $stmt = $db->prepare('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (1, :term_taxonomy_id, 0)');
     $stmt->bindValue(':term_taxonomy_id', $band_explicit_term_taxonomy_id, SQLITE3_INTEGER);
     $stmt->execute();
@@ -13574,6 +13579,7 @@ SQL);
     assert_same($band_explicit_term_result['status'], 'completed_with_conflicts', 'explicit source term IDs hold dependent taxonomy rows for review');
     assert_same((int)scalar($band_explicit_term_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 2'), 0, 'out-of-band explicit source term remains unapplied');
     assert_same((int)scalar($band_explicit_term_target, 'SELECT COUNT(*) FROM wp_term_taxonomy WHERE term_id = 2'), 0, 'term taxonomy pointing at a held explicit source term is not applied automatically');
+    assert_same((int)scalar($band_explicit_term_target, 'SELECT COUNT(*) FROM wp_term_taxonomy WHERE parent = 2'), 0, 'hierarchical term taxonomy pointing at a held explicit parent term is not applied automatically');
     assert_same((int)scalar($band_explicit_term_target, "SELECT COUNT(*) FROM wp_term_relationships WHERE term_taxonomy_id = $band_explicit_term_taxonomy_id"), 0, 'term relationships pointing at held explicit source term taxonomy are not applied automatically');
     assert_same(
         (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND c.table_name = 'wp_terms' AND c.conflict_type = 'row-target-constraint'"),
@@ -13582,7 +13588,7 @@ SQL);
     );
     assert_same(
         (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND c.table_name = 'wp_term_taxonomy' AND c.conflict_type = 'row-target-constraint'"),
-        1,
+        2,
         'term taxonomy pointing at a held explicit source term records a reviewable row conflict'
     );
     assert_same(

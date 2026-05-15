@@ -4596,7 +4596,11 @@ function cow_merge_wordpress_insert_reference_violation(
         return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_postmeta row', 'wp_posts', 'ID', $source_row['post_id'] ?? null, 'post');
     }
     if ($table === 'wp_term_taxonomy') {
-        return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_term_taxonomy row', 'wp_terms', 'term_id', $source_row['term_id'] ?? null, 'term');
+        $term_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_term_taxonomy row', 'wp_terms', 'term_id', $source_row['term_id'] ?? null, 'term');
+        if ($term_violation !== null) {
+            return $term_violation;
+        }
+        return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_term_taxonomy row', 'wp_terms', 'term_id', $source_row['parent'] ?? null, 'parent term');
     }
     if ($table === 'wp_term_relationships') {
         $post_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_term_relationships row', 'wp_posts', 'ID', $source_row['object_id'] ?? null, 'post');
