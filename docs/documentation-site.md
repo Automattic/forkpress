@@ -1,52 +1,31 @@
 # Documentation site
 
-The documentation site is an Astro Starlight project at the repository root. It
-loads Markdown and MDX files from their existing locations instead of requiring a
-separate docs source tree.
+The documentation site is an Astro Starlight project at the repository root.
+It loads Markdown and MDX files from their existing locations instead of
+requiring a separate docs source tree.
 
 ## Content sources
 
 The `docs` content collection loads:
 
-- `README.md`
-- `docs/**/*.{md,mdx}`
-- package and component `README.md` files under existing project directories
+- `README.md` (becomes the site index);
+- `docs/**/*.{md,mdx}`;
+- nested `README.md` files under existing project directories (their parent
+  directory becomes the route path).
 
-Route IDs are generated from repository-relative source paths. The root
-`README.md` becomes the site index, and nested `README.md` files use their parent
-directory path.
+Route IDs are generated from repository-relative source paths. A first H1
+heading in a Markdown file is removed at build time and reused as the page
+title.
 
 ## Commands
 
-Install dependencies:
-
 ```bash
-npm install
+npm install        # install dependencies
+npm run dev        # local development server
+npm run build      # static site, Pagefind index, llms.txt
+npm run validate   # checks, tests, and the static build (CI)
+npm run preview    # preview the built site locally
 ```
 
-Run the local development server:
-
-```bash
-npm run dev
-```
-
-Build the static site, Pagefind search index, and LLM text files:
-
-```bash
-npm run build
-```
-
-Validate the documentation site in CI:
-
-```bash
-npm run validate
-```
-
-Preview the built site locally:
-
-```bash
-npm run preview
-```
-
-The build publishes `docs-dist/`, including `llms.txt`, `llms-full.txt`, and the
-Pagefind search index.
+The build publishes `docs-dist/`, including `llms.txt`, `llms-full.txt`, and
+the Pagefind search index.

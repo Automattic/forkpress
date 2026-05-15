@@ -1,8 +1,8 @@
 # Storage overview
 
-ForkPress production storage is the materialized copy-on-write model. Branches
-are ordinary WordPress directories, and branch creation uses filesystem
-copy-on-write when the machine can provide it.
+ForkPress production storage is the materialized copy-on-write model.
+Branches are ordinary WordPress directories, and branch creation uses
+filesystem copy-on-write whenever the host filesystem can provide it.
 
 ```mermaid
 flowchart TB
@@ -33,8 +33,8 @@ flowchart TB
     linux -. physical storage when needed .-> branch
 ```
 
-The durable WordPress state for a branch is the branch directory itself. Git is
-only a protocol adapter over those directories.
+The durable WordPress state for a branch is the branch directory itself. Git
+is only a protocol adapter over those directories.
 
 ## Selected file view
 
@@ -51,12 +51,15 @@ copy-on-write primitive is available.
 
 | Platform | Default | Fallback |
 | --- | --- | --- |
-| macOS | APFS `clonefile` in the project directory. | Rootless APFS sparsebundle under `.forkpress/macos-cow`. |
-| Linux | `FICLONE` reflinks in the project directory. | Shared XFS loop volume under the user's ForkPress data directory. |
-| Windows | ReFS block cloning on a Dev Drive. | Dev Drive setup through the Windows installer. |
+| macOS | APFS `clonefile` in the project directory | Rootless APFS sparsebundle under `.forkpress/macos-cow` |
+| Linux | `FICLONE` reflinks in the project directory | Shared XFS loop volume under the user's ForkPress data directory |
+| Windows | ReFS block cloning on a Dev Drive | Dev Drive setup through the Windows installer |
 
-Full file-copy materialization is available only when explicitly requested. It
-is not part of the automatic copy-on-write cascade.
+Full file-copy materialization is available only when explicitly requested.
+It is not part of the automatic copy-on-write cascade.
+
+See per-platform pages for details: [macOS](macos.md), [Linux](linux.md),
+[Windows](windows.md), and the underlying [engines](engines.md).
 
 ## Diagnostics
 
@@ -71,10 +74,9 @@ forkpress doctor storage
 storage root, lifecycle lock paths, and leftover staging directories from
 interrupted branch operations.
 
-Tools such as `du`, Finder, Explorer, and many disk analyzers can over-count
-cloned files because they add up path sizes rather than unique allocated
-extents. Prefer filesystem-level free-space measurements when checking physical
-growth.
+`du`, Finder, Explorer, and many disk analyzers can over-count cloned files
+because they add up path sizes rather than unique allocated extents. Prefer
+filesystem-level free-space measurements when checking physical growth.
 
 Before moving or deleting a site with mount-backed storage, stop it through
 ForkPress:
@@ -83,6 +85,6 @@ ForkPress:
 forkpress stop
 ```
 
-On Linux XFS-loop sites, remove the hidden per-site directory inside the shared
-mount before deleting the project. `forkpress storage detach` prints the exact
-cleanup command while the volume is still attached.
+On Linux XFS-loop sites, remove the hidden per-site directory inside the
+shared mount before deleting the project. `forkpress storage detach` prints
+the exact cleanup command while the volume is still attached.

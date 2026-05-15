@@ -1,6 +1,6 @@
 # Git workflow
 
-ForkPress exposes each site as a Git smart-HTTP remote:
+ForkPress exposes every site as a Git smart-HTTP remote:
 
 ```text
 http://wp.localhost:18080/site.git
@@ -43,7 +43,8 @@ database.sql        # generated database snapshot for model context
 wordpress/          # editable WordPress files
 ```
 
-Edit files under `wordpress/`, then push the current branch back to ForkPress:
+Edit files under `wordpress/`, then push the current branch back to
+ForkPress:
 
 ```bash
 forkpress commit -m "Update marketing page"
@@ -57,19 +58,20 @@ http://marketing.wp.localhost:18080/
 
 ## Database snapshots
 
-`database.sql` is generated from the branch-local SQLite database. It includes
-user tables, rows, explicit indexes, triggers, and views. SQLite internals and
-ForkPress SQLite-driver metadata are omitted.
+`database.sql` is generated from the branch-local SQLite database. It
+includes user tables, rows, explicit indexes, triggers, and views. SQLite
+internals and ForkPress driver metadata are omitted.
 
-Credential-shaped columns and key/value rows, such as WordPress password
-hashes, session tokens, application passwords, and plugin API tokens, are
-redacted before the snapshot is written into the Git view.
+Credential-shaped columns and key/value rows — WordPress password hashes,
+session tokens, application passwords, and plugin API tokens — are redacted
+before the snapshot is written into the Git view.
 
 Edits to `database.sql` are ignored on push. Database changes should happen
-through WordPress, WP-CLI, or another tool operating on the branch database.
+through WordPress, WP-CLI, or another tool that operates on the branch
+database.
 
-`wordpress/wp-content/database/` is private runtime state. ForkPress omits that
-directory from snapshots and ignores pushed files under that path.
+`wordpress/wp-content/database/` is private runtime state. ForkPress omits
+that directory from snapshots and ignores pushed files under that path.
 
 ## Push normalization
 
@@ -79,12 +81,12 @@ to Git on the next clone or fetch.
 
 After a push, ForkPress applies only the pushed `wordpress/` tree back to the
 target branch directory, excluding private runtime paths. It immediately
-snapshots the branch again so the remote ref matches the server-side source of
-truth. That normalized ref removes pushed `database.sql` edits and ignored
+snapshots the branch again so the remote ref matches the server-side source
+of truth. That normalized ref removes pushed `database.sql` edits and ignored
 private runtime paths.
 
 `forkpress commit` fetches the normalized ref after a successful push and
 fast-forwards the local checkout when possible.
 
-ForkPress accepts one branch update per Git push. Creating, updating, or
-deleting preview branches should happen one branch at a time.
+ForkPress accepts one branch update per Git push. Create, update, or delete
+preview branches one at a time.

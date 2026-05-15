@@ -1,6 +1,6 @@
 # Commands
 
-This page summarizes the main production commands. Run
+The main production commands, grouped by purpose. Run
 `forkpress <command> --help` or `forkpress branch <command> --help` for the
 full CLI help.
 
@@ -22,10 +22,10 @@ full CLI help.
 | --- | --- |
 | `forkpress branch list` | List local branches. |
 | `forkpress branch show <name>` | Show branch storage details. |
-| `forkpress branch create <name> [--from main]` | Create a branch. |
+| `forkpress branch create <name> [--from <source>]` | Create a branch. |
 | `forkpress branch reset <name> --from <source>` | Replace a branch from another branch. |
 | `forkpress branch merge <source> --into <target>` | Merge one branch into another. |
-| `forkpress branch merge-audit` | Inspect merge runs, decisions, conflicts, and resolutions. |
+| `forkpress branch merge-audit` | Inspect merge runs, decisions, conflicts, resolutions. |
 | `forkpress branch merge-review <type> <id>` | Attach review status to an audit record. |
 | `forkpress branch merge-resolve conflict <id>` | Validate or apply a conflict choice. |
 | `forkpress branch delete <name>` | Delete a branch other than `main`. |
@@ -35,7 +35,7 @@ full CLI help.
 | Command | Purpose |
 | --- | --- |
 | `forkpress clone [remote] [dir]` | Clone the ForkPress Git remote. |
-| `forkpress commit -m "message"` | Commit and push the current Git branch back to ForkPress. |
+| `forkpress commit -m "<message>"` | Commit and push the current Git branch. |
 | `forkpress pull` | Pull with rebase and autostash. |
 | `forkpress agents [dir]` | Create agent branches and Git worktrees. |
 
