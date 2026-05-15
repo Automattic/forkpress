@@ -44,7 +44,7 @@ New-Item -ItemType Directory -Force -Path $scriptDest | Out-Null
 Copy-Item -Force -LiteralPath (Join-Path $PSScriptRoot 'install.ps1') -Destination $scriptDest
 Copy-Item -Force -LiteralPath (Join-Path $PSScriptRoot 'setup-dev-drive.ps1') -Destination $scriptDest
 
-Copy-Item -Force -LiteralPath (Join-Path $repoRoot 'docs\windows-cow.md') -Destination (Join-Path $stage 'README-WINDOWS.md')
+Copy-Item -Force -LiteralPath (Join-Path $repoRoot 'docs\storage\windows.md') -Destination (Join-Path $stage 'README-WINDOWS.md')
 
 Remove-Item -Force -LiteralPath $Output -ErrorAction SilentlyContinue
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $Output

@@ -1,10 +1,10 @@
-# Documentation Site
+# Documentation site
 
 The documentation site is an Astro Starlight project at the repository root. It
 loads Markdown and MDX files from their existing locations instead of requiring a
 separate docs source tree.
 
-## Content Sources
+## Content sources
 
 The `docs` content collection loads:
 
