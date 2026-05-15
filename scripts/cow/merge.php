@@ -18,7 +18,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "  php merge.php validate-branch-birth-metadata --db <path> --metadata-db <path> --branch <branch>\n");
     fwrite(STDERR, "  php merge.php record-plugin-validator-conflicts --metadata-db <path> --run ID (--findings-json <json>|--findings-file <path>) [--format text|json]\n");
     fwrite(STDERR, "  php merge.php run-plugin-validator --metadata-db <path> --run ID --validator <path> [--format text|json]\n");
-    fwrite(STDERR, "  php merge.php recover-crash --metadata-db <path> [--run ID] [--restore-target-db] [--format text|json]\n");
+    fwrite(STDERR, "  php merge.php recover-crash --metadata-db <path> [--run ID] [--restore-target-db] [--restore-files] [--format text|json]\n");
     fwrite(STDERR, "  php merge.php audit --metadata-db <path> [--format text|json] [--limit N] [--run ID]\n");
     fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|decisions|resolutions|rollback-failures] [--path <path>] [--path-prefix <prefix>]\n");
     fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|decisions|resolutions|rollback-failures] [--conflict-type TYPE] [--decision DECISION]\n");
@@ -3776,9 +3776,19 @@ function cow_merge_write_crash_recovery_artifact(
     int $run_id,
     string $checkpoint,
     array $run_context,
-    array $target_snapshot
+    ?array $target_snapshot,
+    ?array $filesystem_transaction = null,
+    ?string $filesystem_target_root = null
 ): string {
     $path = cow_merge_crash_recovery_artifact_path($metadata_db, $run_id, $checkpoint);
+    $artifacts = [];
+    if ($target_snapshot !== null) {
+        $artifacts['target_db_snapshot'] = cow_merge_sqlite_snapshot_artifact($target_snapshot);
+    }
+    if ($filesystem_transaction !== null) {
+        $artifacts['filesystem_transaction'] = $filesystem_transaction;
+        $artifacts['filesystem_transaction_summary'] = cow_merge_file_transaction_artifact($filesystem_transaction, $filesystem_target_root);
+    }
     cow_merge_write_json_file($path, [
         'version' => 1,
         'created_at' => gmdate('c'),
@@ -3789,9 +3799,8 @@ function cow_merge_write_crash_recovery_artifact(
         'base_db' => (string)($run_context['base_db'] ?? ''),
         'source_db' => (string)($run_context['source_db'] ?? ''),
         'target_db' => (string)($run_context['target_db'] ?? ''),
-        'artifacts' => [
-            'target_db_snapshot' => cow_merge_sqlite_snapshot_artifact($target_snapshot),
-        ],
+        'target_root' => $filesystem_target_root,
+        'artifacts' => $artifacts,
     ]);
     return $path;
 }
@@ -3836,6 +3845,8 @@ function cow_merge_crash_recovery_artifacts(string $metadata_db, ?int $run_id = 
             continue;
         }
         $snapshot = $decoded['artifacts']['target_db_snapshot'] ?? null;
+        $filesystem_transaction = $decoded['artifacts']['filesystem_transaction'] ?? null;
+        $filesystem_summary = $decoded['artifacts']['filesystem_transaction_summary'] ?? null;
         $artifacts[] = [
             'artifact_path' => $file,
             'checkpoint' => (string)($decoded['checkpoint'] ?? 'unknown'),
@@ -3843,7 +3854,10 @@ function cow_merge_crash_recovery_artifacts(string $metadata_db, ?int $run_id = 
             'source_branch' => (string)($decoded['source_branch'] ?? ''),
             'target_branch' => (string)($decoded['target_branch'] ?? ''),
             'target_db' => (string)($decoded['target_db'] ?? ''),
+            'target_root' => (string)($decoded['target_root'] ?? ''),
             'target_db_snapshot' => is_array($snapshot) ? $snapshot : null,
+            'filesystem_transaction' => is_array($filesystem_transaction) ? $filesystem_transaction : null,
+            'filesystem_transaction_summary' => is_array($filesystem_summary) ? $filesystem_summary : null,
         ];
     }
     return $artifacts;
@@ -3852,18 +3866,30 @@ function cow_merge_crash_recovery_artifacts(string $metadata_db, ?int $run_id = 
 function cow_merge_recover_crash_artifacts(
     string $metadata_db,
     ?int $run_id = null,
-    bool $restore_target_db = false
+    bool $restore_target_db = false,
+    bool $restore_files = false
 ): array {
     $artifacts = cow_merge_crash_recovery_artifacts($metadata_db, $run_id);
     $restored = 0;
-    if ($restore_target_db) {
+    if ($restore_target_db || $restore_files) {
         foreach ($artifacts as $artifact) {
-            $snapshot = $artifact['target_db_snapshot'] ?? null;
-            if (!is_array($snapshot)) {
-                throw new RuntimeException("crash recovery artifact has no target DB snapshot: {$artifact['artifact_path']}");
+            if ($restore_target_db) {
+                $snapshot = $artifact['target_db_snapshot'] ?? null;
+                if (!is_array($snapshot)) {
+                    throw new RuntimeException("crash recovery artifact has no target DB snapshot: {$artifact['artifact_path']}");
+                }
+                cow_merge_restore_sqlite_snapshot($snapshot);
+                cow_merge_cleanup_sqlite_snapshot($snapshot);
             }
-            cow_merge_restore_sqlite_snapshot($snapshot);
-            cow_merge_cleanup_sqlite_snapshot($snapshot);
+            if ($restore_files) {
+                $filesystem_transaction = $artifact['filesystem_transaction'] ?? null;
+                $target_root = (string)($artifact['target_root'] ?? '');
+                if (!is_array($filesystem_transaction) || $target_root === '') {
+                    throw new RuntimeException("crash recovery artifact has no filesystem transaction: {$artifact['artifact_path']}");
+                }
+                cow_merge_file_transaction_restore($filesystem_transaction, $target_root);
+                cow_merge_file_transaction_cleanup($filesystem_transaction);
+            }
             cow_merge_remove_crash_recovery_artifact((string)$artifact['artifact_path']);
             $restored++;
         }
@@ -3873,6 +3899,7 @@ function cow_merge_recover_crash_artifacts(
         'metadata_db' => $metadata_db,
         'run_id' => $run_id,
         'restore_target_db' => $restore_target_db,
+        'restore_files' => $restore_files,
         'pending' => count($artifacts),
         'restored' => $restored,
         'artifacts' => $artifacts,
@@ -5831,6 +5858,7 @@ function cow_merge_files(
     $file_tx = cow_merge_file_transaction_begin();
     $file_tx_committed = false;
     $preserve_file_tx = false;
+    $crash_recovery_artifact = null;
     try {
         foreach ($operations as $op) {
             cow_merge_file_transaction_snapshot_path($file_tx, $target_root, $op['path']);
@@ -5856,6 +5884,16 @@ function cow_merge_files(
                     ? 'source added filesystem path and target did not have it'
                     : 'source changed filesystem path and target did not change it';
             }
+            $crash_recovery_artifact = cow_merge_write_crash_recovery_artifact(
+                $metadata_db,
+                $run_id,
+                'file-op',
+                $run_context,
+                null,
+                $file_tx,
+                $target_root
+            );
+            cow_merge_failpoint('after-file-op');
             cow_merge_record_decision(
                 $meta,
                 $run_id,
@@ -5874,6 +5912,8 @@ function cow_merge_files(
         cow_merge_exec_checked($meta, 'COMMIT', 'failed to commit filesystem merge metadata transaction');
         $metadata_transaction_active = false;
         $file_tx_committed = true;
+        cow_merge_remove_crash_recovery_artifact($crash_recovery_artifact);
+        $crash_recovery_artifact = null;
     } catch (Throwable $e) {
         if ($metadata_transaction_active) {
             @$meta->exec('ROLLBACK');
@@ -5882,6 +5922,8 @@ function cow_merge_files(
         if (!$file_tx_committed) {
             try {
                 cow_merge_file_transaction_restore($file_tx, $target_root);
+                cow_merge_remove_crash_recovery_artifact($crash_recovery_artifact);
+                $crash_recovery_artifact = null;
             } catch (Throwable $rollback_error) {
                 $preserve_file_tx = true;
                 $original_failure = cow_merge_failure_reason($e);
@@ -12393,7 +12435,7 @@ function cow_merge_parse_cli(array $argv, array $required, int $start_index = 1)
             throw new InvalidArgumentException("unexpected argument: $arg");
         }
         $key = substr($arg, 2);
-        if (in_array($key, ['id-band-skips', 'target-kept', 'review', 'apply', 'restore-target-db'], true) && (!isset($argv[$i + 1]) || str_starts_with($argv[$i + 1], '--'))) {
+        if (in_array($key, ['id-band-skips', 'target-kept', 'review', 'apply', 'restore-target-db', 'restore-files'], true) && (!isset($argv[$i + 1]) || str_starts_with($argv[$i + 1], '--'))) {
             $args[$key] = '1';
             continue;
         }
@@ -12566,7 +12608,8 @@ if (realpath($argv[0] ?? '') === __FILE__) {
             $result = cow_merge_recover_crash_artifacts(
                 $args['metadata-db'],
                 cow_merge_audit_run_id($args['run'] ?? null),
-                cow_merge_bool_flag($args['restore-target-db'] ?? '0')
+                cow_merge_bool_flag($args['restore-target-db'] ?? '0'),
+                cow_merge_bool_flag($args['restore-files'] ?? '0')
             );
             if ($format === 'json') {
                 $encoded = json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
@@ -12579,12 +12622,16 @@ if (realpath($argv[0] ?? '') === __FILE__) {
                 echo "  pending:           {$result['pending']}\n";
                 echo "  restored:          {$result['restored']}\n";
                 echo "  restore-target-db: " . ($result['restore_target_db'] ? 'yes' : 'no') . "\n";
+                echo "  restore-files:     " . ($result['restore_files'] ? 'yes' : 'no') . "\n";
                 echo "  metadata:          {$result['metadata_db']}\n";
                 foreach ($result['artifacts'] as $artifact) {
                     echo "  artifact:          {$artifact['artifact_path']}\n";
                     echo "    run:             {$artifact['run_id']}\n";
                     echo "    checkpoint:      {$artifact['checkpoint']}\n";
                     echo "    target-db:       {$artifact['target_db']}\n";
+                    if (($artifact['target_root'] ?? '') !== '') {
+                        echo "    target-root:     {$artifact['target_root']}\n";
+                    }
                 }
             }
             exit(0);

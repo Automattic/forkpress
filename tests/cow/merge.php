@@ -1405,6 +1405,72 @@ try {
         );
         $restored_crash_recovery_files = glob(dirname($crash_commit_metadata) . '/crash-recovery/*.json');
         assert_true(is_array($restored_crash_recovery_files) && count($restored_crash_recovery_files) === 0, 'crash recovery CLI removes restored artifact files');
+
+        $crash_file_base_db = $tmp . '/crash-file-base.sqlite';
+        $crash_file_source_db = $tmp . '/crash-file-source.sqlite';
+        $crash_file_target_db = $tmp . '/crash-file-target.sqlite';
+        $crash_file_metadata = $tmp . '/.forkpress/cow/merge/crash-file/metadata.sqlite';
+        create_base_db($crash_file_base_db);
+        copy($crash_file_base_db, $crash_file_source_db);
+        copy($crash_file_base_db, $crash_file_target_db);
+        $crash_file_base_root = $tmp . '/crash-file-base-root';
+        $crash_file_source_root = $tmp . '/crash-file-source-root';
+        $crash_file_target_root = $tmp . '/crash-file-target-root';
+        write_test_file($crash_file_base_root . '/wp-content/uploads/crash-file.txt', 'base file crash content');
+        copy_tree_for_test($crash_file_base_root, $crash_file_source_root);
+        copy_tree_for_test($crash_file_base_root, $crash_file_target_root);
+        write_test_file($crash_file_source_root . '/wp-content/uploads/crash-file.txt', 'source file crash content');
+        $crash_file_base_manifest = $tmp . '/.forkpress/cow/merge/file-bases/feature-crash-file.json';
+        cow_merge_capture_file_base($crash_file_base_root, $crash_file_base_manifest);
+        $crash_file_result = run_merge_cli_env(
+            [
+                'merge',
+                '--base-db', $crash_file_base_db,
+                '--source-db', $crash_file_source_db,
+                '--target-db', $crash_file_target_db,
+                '--metadata-db', $crash_file_metadata,
+                '--source', 'feature-crash-file',
+                '--target', 'main',
+                '--base-files', $crash_file_base_manifest,
+                '--source-root', $crash_file_source_root,
+                '--target-root', $crash_file_target_root,
+            ],
+            [
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT' => 'after-file-op',
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION' => 'kill',
+            ]
+        );
+        assert_true($crash_file_result['status'] !== 0, 'crash failpoint terminates the merge subprocess after a filesystem operation');
+        assert_same(
+            file_get_contents($crash_file_target_root . '/wp-content/uploads/crash-file.txt'),
+            'source file crash content',
+            'process death after filesystem operation leaves the durable file change visible'
+        );
+        $crash_file_report = run_merge_cli([
+            'recover-crash',
+            '--metadata-db', $crash_file_metadata,
+            '--format', 'json',
+        ]);
+        assert_same($crash_file_report['status'], 0, 'crash recovery CLI lists pending filesystem artifacts');
+        $crash_file_report_json = json_decode($crash_file_report['output'], true);
+        assert_same($crash_file_report_json['pending'] ?? null, 1, 'crash recovery CLI reports one pending filesystem artifact');
+        assert_same($crash_file_report_json['artifacts'][0]['checkpoint'] ?? null, 'file-op', 'crash recovery CLI reports the filesystem operation checkpoint');
+        assert_same($crash_file_report_json['artifacts'][0]['filesystem_transaction_summary']['backup_count'] ?? null, 1, 'filesystem crash recovery artifact preserves file backup metadata');
+        $crash_file_restore = run_merge_cli([
+            'recover-crash',
+            '--metadata-db', $crash_file_metadata,
+            '--restore-files',
+            '--format', 'json',
+        ]);
+        assert_same($crash_file_restore['status'], 0, 'crash recovery CLI restores filesystem transactions explicitly');
+        $crash_file_restore_json = json_decode($crash_file_restore['output'], true);
+        assert_same($crash_file_restore_json['restored'] ?? null, 1, 'crash recovery CLI reports one restored filesystem artifact');
+        assert_same($crash_file_restore_json['pending'] ?? null, 0, 'crash recovery CLI clears the filesystem crash queue after restore');
+        assert_same(
+            file_get_contents($crash_file_target_root . '/wp-content/uploads/crash-file.txt'),
+            'base file crash content',
+            'crash recovery CLI restores the pre-merge filesystem content'
+        );
     } else {
         assert_true(true, 'process-death crash failpoint requires POSIX SIGKILL support');
     }
