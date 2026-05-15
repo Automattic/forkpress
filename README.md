@@ -316,6 +316,9 @@ forkpress stop
 
 On Linux XFS-loop sites, `forkpress storage detach` unmounts the shared volume
 only after other running ForkPress servers using that storage view are stopped.
+Before deleting a Linux XFS-loop site, remove the hidden per-site directory
+inside the shared mount too. `forkpress storage detach` prints the exact
+`rm -rf` command while the volume is still attached.
 
 ## Logs
 

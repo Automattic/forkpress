@@ -47,22 +47,13 @@ use forkpress_server::{
 use forkpress_storage::{
     CowMergeAuditQuery, CowSiteInit, RemoteBranchOptions, RemoteSiteAdd, add_remote_site,
     branch_remote_site, compact_macos_apfs_sparsebundle_file_view, cow_branch_names,
-    cow_branch_root, create_cow_branch, delete_cow_branch,
+    cow_branch_root, create_cow_branch, delete_cow_branch, detach_linux_xfs_loop_file_view,
     detach_macos_apfs_sparsebundle_file_view, ensure_cow_branch_exists, ensure_cow_file_view_ready,
     ensure_cow_main_branch, inspect_cow_merge_audit, list_remote_sites, lock_cow_lifecycle,
     lock_cow_operations, merge_cow_branch, prepare_cow_file_view, print_cow_storage_status,
-    print_macos_cow_storage_status, probe_reflink_dir, probe_remote_site, reset_cow_branch,
-    resolve_cow_merge_conflict, review_cow_merge_audit_record, show_cow_branch,
-    write_cow_branch_list, write_cow_strategy_notes,
-};
-use forkpress_storage::{
-    CowSiteInit, compact_macos_apfs_sparsebundle_file_view, cow_branch_names, cow_branch_root,
-    create_cow_branch, delete_cow_branch, detach_linux_xfs_loop_file_view,
-    detach_macos_apfs_sparsebundle_file_view, ensure_cow_branch_exists, ensure_cow_file_view_ready,
-    ensure_cow_main_branch, lock_cow_lifecycle, lock_cow_operations, prepare_cow_file_view,
-    print_cow_storage_status, print_linux_xfs_loop_storage_status, print_macos_cow_storage_status,
-    probe_reflink_dir, reset_cow_branch, show_cow_branch, write_cow_branch_list,
-    write_cow_strategy_notes,
+    print_linux_xfs_loop_storage_status, print_macos_cow_storage_status, probe_reflink_dir,
+    probe_remote_site, reset_cow_branch, resolve_cow_merge_conflict, review_cow_merge_audit_record,
+    show_cow_branch, write_cow_branch_list, write_cow_strategy_notes,
 };
 #[cfg(feature = "dev-experiments")]
 use forkpress_storage::{copy_tree_cow, plain_branch_names};
@@ -1097,6 +1088,7 @@ fn storage_detach_command(args: StorageDetachArgs) -> Result<i32> {
         args.force,
         args.keep_server,
         Duration::from_secs(args.timeout),
+        DetachStorageMode::Explicit,
     )? {
         println!(
             "forkpress: no detachable storage found for {}",
@@ -1144,10 +1136,10 @@ fn detach_storage_for_layout_if_present(
     force: bool,
     keep_server: bool,
     timeout: Duration,
+    mode: DetachStorageMode,
 ) -> Result<bool> {
     let manifest = read_site_manifest(layout)?;
-    let has_linux_xfs = manifest.as_ref().and_then(|manifest| manifest.file_view)
-        == Some(FileViewStrategy::LinuxXfsLoop);
+    let has_linux_xfs = has_linux_xfs_detachable_storage(layout, manifest.as_ref());
     let has_macos_cow = manifest.as_ref().and_then(|manifest| manifest.file_view)
         == Some(FileViewStrategy::MacosApfsSparsebundle)
         || layout.macos_cow_image.exists()
@@ -1159,8 +1151,22 @@ fn detach_storage_for_layout_if_present(
 
     with_stopped_cow_server_for_storage(layout, keep_server, timeout, || {
         if has_linux_xfs {
-            ensure_no_other_linux_xfs_servers(layout)?;
-            detach_linux_xfs_loop_file_view(layout, force, true)
+            if let Some(record) = other_linux_xfs_server(layout)? {
+                if should_detach_linux_xfs_storage(mode, Some(&record))? {
+                    detach_linux_xfs_loop_file_view(layout, force, true)
+                } else {
+                    println!(
+                        "forkpress: leaving shared Linux XFS COW storage mounted at {} because server pid {} at {} is still using it",
+                        layout.linux_xfs_mount.display(),
+                        record.pid,
+                        record.work_dir.display()
+                    );
+                    Ok(())
+                }
+            } else {
+                should_detach_linux_xfs_storage(mode, None)?;
+                detach_linux_xfs_loop_file_view(layout, force, true)
+            }
         } else {
             detach_macos_apfs_sparsebundle_file_view(layout, force, true)
         }
@@ -1168,23 +1174,61 @@ fn detach_storage_for_layout_if_present(
     Ok(true)
 }
 
-fn ensure_no_other_linux_xfs_servers(layout: &Layout) -> Result<()> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DetachStorageMode {
+    Automatic,
+    Explicit,
+}
+
+fn has_linux_xfs_detachable_storage(layout: &Layout, manifest: Option<&SiteManifest>) -> bool {
+    has_linux_xfs_detachable_storage_state(
+        manifest,
+        layout.linux_xfs_site_dir.exists(),
+        layout.linux_xfs_branches_dir.exists(),
+    )
+}
+
+fn has_linux_xfs_detachable_storage_state(
+    manifest: Option<&SiteManifest>,
+    linux_xfs_site_dir_exists: bool,
+    linux_xfs_branches_dir_exists: bool,
+) -> bool {
+    manifest.and_then(|manifest| manifest.file_view) == Some(FileViewStrategy::LinuxXfsLoop)
+        || linux_xfs_site_dir_exists
+        || linux_xfs_branches_dir_exists
+}
+
+fn other_linux_xfs_server(layout: &Layout) -> Result<Option<ServerRecord>> {
     for record in live_server_records()? {
         if record.work_dir == layout.work_dir {
             continue;
         }
         let other_layout = Layout::new(record.work_dir.clone())?;
-        if read_site_manifest(&other_layout)?.and_then(|manifest| manifest.file_view)
-            == Some(FileViewStrategy::LinuxXfsLoop)
-        {
-            bail!(
-                "shared Linux XFS COW storage is still used by server pid {} at {}. Stop all ForkPress sites before detaching the shared volume.",
-                record.pid,
-                other_layout.work_dir.display()
-            );
+        let manifest = read_site_manifest(&other_layout)?;
+        if has_linux_xfs_detachable_storage(&other_layout, manifest.as_ref()) {
+            return Ok(Some(record));
         }
     }
-    Ok(())
+    Ok(None)
+}
+
+fn should_detach_linux_xfs_storage(
+    mode: DetachStorageMode,
+    other: Option<&ServerRecord>,
+) -> Result<bool> {
+    if let Some(record) = other {
+        return match mode {
+            DetachStorageMode::Automatic => Ok(false),
+            DetachStorageMode::Explicit => {
+                bail!(
+                    "shared Linux XFS COW storage is still used by server pid {} at {}. Stop all ForkPress sites before detaching the shared volume.",
+                    record.pid,
+                    record.work_dir.display()
+                );
+            }
+        };
+    }
+    Ok(true)
 }
 
 fn with_stopped_cow_server_for_storage<T>(
@@ -1616,6 +1660,54 @@ mod storage_strategy_tests {
         assert!(args.keep_server);
     }
 
+    #[test]
+    fn linux_xfs_detachable_storage_is_detected_without_manifest() {
+        assert!(!has_linux_xfs_detachable_storage_state(None, false, false));
+        assert!(has_linux_xfs_detachable_storage_state(None, true, false));
+        assert!(has_linux_xfs_detachable_storage_state(None, false, true));
+
+        let reflink_manifest =
+            SiteManifest::new(StorageStrategy::Cow).with_file_view(FileViewStrategy::Reflink);
+        assert!(!has_linux_xfs_detachable_storage_state(
+            Some(&reflink_manifest),
+            false,
+            false
+        ));
+
+        let linux_xfs_manifest =
+            SiteManifest::new(StorageStrategy::Cow).with_file_view(FileViewStrategy::LinuxXfsLoop);
+        assert!(has_linux_xfs_detachable_storage_state(
+            Some(&linux_xfs_manifest),
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn automatic_linux_xfs_detach_leaves_shared_mount_for_other_servers() {
+        let record = ServerRecord {
+            pid: 12345,
+            child_pid: None,
+            work_dir: PathBuf::from("/tmp/forkpress-other/.forkpress"),
+            host: "127.0.0.1".to_string(),
+            port: 18080,
+            root_host: "wp.localhost".to_string(),
+            log: PathBuf::from("/tmp/forkpress-other/.forkpress/logs/forkpress-server.log"),
+        };
+
+        assert!(
+            !should_detach_linux_xfs_storage(DetachStorageMode::Automatic, Some(&record)).unwrap()
+        );
+        assert!(should_detach_linux_xfs_storage(DetachStorageMode::Automatic, None).unwrap());
+
+        let err = should_detach_linux_xfs_storage(DetachStorageMode::Explicit, Some(&record))
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Stop all ForkPress sites before detaching the shared volume")
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn cow_storage_lifecycle_waits_for_background_start_lock() {
@@ -2013,7 +2105,13 @@ fn start_command(args: StartArgs) -> Result<i32> {
 
     drop(php);
     drop(_registration);
-    detach_storage_for_layout_if_present(&layout, false, false, Duration::from_secs(10))?;
+    detach_storage_for_layout_if_present(
+        &layout,
+        false,
+        false,
+        Duration::from_secs(10),
+        DetachStorageMode::Automatic,
+    )?;
 
     Ok(0)
 }
@@ -2240,6 +2338,7 @@ fn server_stop_command(args: ServerStopArgs) -> Result<i32> {
             args.force,
             false,
             Duration::from_secs(args.timeout),
+            DetachStorageMode::Automatic,
         )?;
     }
 

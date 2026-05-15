@@ -2296,20 +2296,45 @@ fn detach_linux_xfs_loop_file_view_impl(
         return Ok(());
     };
 
+    if print_remove_site_hint {
+        println!("{}", linux_xfs_remove_site_hint(layout));
+    }
+
     unmount_linux_xfs_loop_file_view(layout, force, &info)?;
 
     println!(
         "forkpress: detached shared Linux XFS COW storage mounted at {}",
         layout.linux_xfs_mount.display()
     );
-    if print_remove_site_hint {
-        println!("Remove site: rm -rf {}", shell_quote_path(&layout.work_dir));
-    }
     println!(
         "Attach again: forkpress storage mount --work-dir {}",
         shell_quote_path(&layout.work_dir)
     );
     Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_xfs_remove_site_hint(layout: &Layout) -> String {
+    let mut paths = vec![layout.work_dir.clone()];
+    if let Ok(branches) = cow_branch_names(layout) {
+        for branch in branches {
+            let public_root = cow_branch_root(layout, &branch);
+            if !paths.iter().any(|path| path == &public_root) {
+                paths.push(public_root);
+            }
+        }
+    }
+    if !paths.iter().any(|path| path == &layout.linux_xfs_site_dir) {
+        paths.push(layout.linux_xfs_site_dir.clone());
+    }
+
+    let paths = paths
+        .iter()
+        .map(|path| shell_quote_path(path))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("Remove site before detaching shared storage:\n  rm -rf {paths}")
 }
 
 #[cfg(target_os = "linux")]
@@ -2970,6 +2995,32 @@ mod tests {
             cow_file_view_storage_dir(&layout, Some(FileViewStrategy::LinuxXfsLoop)),
             layout.linux_xfs_branches_dir.as_path()
         );
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn linux_xfs_remove_site_hint_includes_hidden_site_dir() {
+        let root = std::env::temp_dir().join(format!(
+            "forkpress-xfs-remove-hint-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let layout = Layout::new(root.join(".forkpress")).unwrap();
+        let main = cow_branch_root(&layout, "main");
+        fs::create_dir_all(&main).unwrap();
+        fs::write(main.join("wp-load.php"), b"<?php\n").unwrap();
+
+        let hint = linux_xfs_remove_site_hint(&layout);
+
+        assert!(hint.contains("Remove site before detaching shared storage"));
+        assert!(hint.contains(&shell_quote_path(&layout.work_dir)));
+        assert!(hint.contains(&shell_quote_path(&main)));
+        assert!(hint.contains(&shell_quote_path(&layout.linux_xfs_site_dir)));
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
