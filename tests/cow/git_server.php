@@ -647,6 +647,37 @@ assert_true(!is_dir($branches . '/git-created-list-fail'), 'Git-created branch-l
 assert_true(!file_exists($tmp . '/merge/bases/git-created-list-fail.sqlite'), 'Git-created branch-list publication failure removes DB merge base artifacts');
 assert_true(!file_exists($tmp . '/merge/file-bases/git-created-list-fail.json'), 'Git-created branch-list publication failure removes filesystem merge base artifacts');
 assert_same(trim((string)file_get_contents($branch_list)), 'main', 'Git-created branch-list publication failure restores the branch list');
+$metadata = new SQLite3($tmp . '/merge/metadata.sqlite');
+$stale_band_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'git-created-list-fail'");
+$stale_identity_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = 'git-created-list-fail'");
+$metadata->close();
+assert_same($stale_band_count, 0, 'Git-created branch-list publication failure removes ID-band metadata');
+assert_same($stale_identity_count, 0, 'Git-created branch-list publication failure removes row identity metadata');
+$failed = false;
+$failure_message = '';
+putenv('FORKPRESS_COW_GIT_TEST_FAILPOINT=after-created-branch-metadata');
+putenv('FORKPRESS_COW_GIT_TEST_FAILPOINT_ACTION=throw');
+try {
+    cow_git_apply_push_to_branches($repo, $git, $branches, $branches, $branch_list, 'file-copy', '', ['main' => $main_tip]);
+} catch (Throwable $e) {
+    $failed = true;
+    $failure_message = $e->getMessage();
+} finally {
+    putenv('FORKPRESS_COW_GIT_TEST_FAILPOINT');
+    putenv('FORKPRESS_COW_GIT_TEST_FAILPOINT_ACTION');
+}
+assert_true($failed, 'Git-created branch metadata publication failure rejects push apply');
+assert_true(str_contains($failure_message, 'after-created-branch-metadata'), 'Git-created branch metadata publication failure reports the failpoint');
+assert_true(!is_dir($branches . '/git-created-list-fail'), 'Git-created branch metadata publication failure removes published branch storage');
+assert_true(!file_exists($tmp . '/merge/bases/git-created-list-fail.sqlite'), 'Git-created branch metadata publication failure removes DB merge base artifacts');
+assert_true(!file_exists($tmp . '/merge/file-bases/git-created-list-fail.json'), 'Git-created branch metadata publication failure removes filesystem merge base artifacts');
+assert_same(trim((string)file_get_contents($branch_list)), 'main', 'Git-created branch metadata publication failure restores the branch list');
+$metadata = new SQLite3($tmp . '/merge/metadata.sqlite');
+$stale_band_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'git-created-list-fail'");
+$stale_identity_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = 'git-created-list-fail'");
+$metadata->close();
+assert_same($stale_band_count, 0, 'Git-created branch metadata publication failure removes ID-band metadata');
+assert_same($stale_identity_count, 0, 'Git-created branch metadata publication failure removes row identity metadata');
 cow_git_remove_tree($tmp);
 
 $tmp = sys_get_temp_dir() . '/forkpress-cow-git-created-id-band-metadata-rollback-' . getmypid() . '-' . bin2hex(random_bytes(4));

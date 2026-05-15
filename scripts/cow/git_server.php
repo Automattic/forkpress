@@ -512,7 +512,6 @@ function cow_git_apply_push_to_branches(
         $branches_to_sync = array_values(array_filter($changed_branches, static function($branch) use ($branches_dir) {
             return is_dir(rtrim($branches_dir, "/\\") . '/' . $branch);
         }));
-        cow_git_prepare_created_branch_merge_metadata($git_repo_dir, $branch_list_path, $transaction['created']);
         if ($branches_to_sync) {
             cow_git_sync_repository($repo, $branches_dir, $branches_to_sync);
         }
@@ -1063,6 +1062,7 @@ function cow_git_create_branch_for_ref(
     $published_storage = false;
     $linked_public = false;
     $captured_merge_bases = false;
+    $attempted_merge_metadata = false;
     try {
         cow_git_clone_branch_tree($source_root, $tmp, $file_view);
         cow_git_capture_created_branch_merge_bases($git_repo_dir, $branch_list_path, $branch, $source_root);
@@ -1084,18 +1084,26 @@ function cow_git_create_branch_for_ref(
         }
 
         cow_git_rewrite_wp_config($dest_public, $debug_log);
-        cow_git_failpoint('before-created-branch-list');
-        cow_git_write_branch_list($branches_dir, $branch_list_path);
-        cow_git_failpoint('after-created-branch-list');
-        error_log("ForkPress COW git created branch '$branch' from '$source'");
-        return [
+        $created = [
             'branch' => $branch,
             'source' => $source,
             'public' => $dest_public,
             'storage' => $dest_storage,
             'linked_public' => $linked_public,
         ];
+        cow_git_failpoint('before-created-branch-metadata');
+        $attempted_merge_metadata = true;
+        cow_git_prepare_created_branch_merge_metadata($git_repo_dir, $branch_list_path, [$created]);
+        cow_git_failpoint('after-created-branch-metadata');
+        cow_git_failpoint('before-created-branch-list');
+        cow_git_write_branch_list($branches_dir, $branch_list_path);
+        cow_git_failpoint('after-created-branch-list');
+        error_log("ForkPress COW git created branch '$branch' from '$source'");
+        return $created;
     } catch (\Throwable $e) {
+        if ($attempted_merge_metadata) {
+            cow_git_cleanup_created_branch_id_band_metadata($git_repo_dir, $branch_list_path, [['branch' => $branch]]);
+        }
         if ($captured_merge_bases) {
             cow_git_cleanup_created_branch_merge_base_artifacts($git_repo_dir, $branch_list_path, [['branch' => $branch]]);
         }
