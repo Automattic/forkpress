@@ -4596,7 +4596,8 @@ function cow_merge_wordpress_parent_reference_violation(
     string $parent_table,
     string $parent_pk,
     mixed $parent_id,
-    string $parent_label
+    string $parent_label,
+    string $source_action = 'inserted'
 ): ?string {
     if (!is_int($parent_id) && !(is_string($parent_id) && preg_match('/^-?\d+$/', (string)$parent_id))) {
         return null;
@@ -4620,7 +4621,7 @@ function cow_merge_wordpress_parent_reference_violation(
         cow_merge_result_finalize_checked($res, "failed to finalize WordPress $parent_label parent lookup");
     }
     if (!cow_merge_schema_object_exists($source, $parent_table)) {
-        return "source inserted $child_label references missing $parent_table.$parent_pk $parent_id; parent $parent_label must merge before child row";
+        return "source $source_action $child_label references missing $parent_table.$parent_pk $parent_id; parent $parent_label must merge before child row";
     }
     $stmt = cow_merge_prepare_checked(
         $source,
@@ -4635,11 +4636,11 @@ function cow_merge_wordpress_parent_reference_violation(
         cow_merge_result_finalize_checked($res, "failed to finalize WordPress $parent_label source parent lookup");
     }
     if (!$parent) {
-        return "source inserted $child_label references missing $parent_table.$parent_pk $parent_id; parent $parent_label must merge before child row";
+        return "source $source_action $child_label references missing $parent_table.$parent_pk $parent_id; parent $parent_label must merge before child row";
     }
     $parent_band_violation = cow_merge_autoincrement_id_band_violation($meta, $source_branch, $parent_table, $parent, [$parent_pk]);
     if ($parent_band_violation !== null) {
-        return "source inserted $child_label references $parent_table.$parent_pk $parent_id that is outside the source branch ID band; parent $parent_label must merge before child row";
+        return "source $source_action $child_label references $parent_table.$parent_pk $parent_id that is outside the source branch ID band; parent $parent_label must merge before child row";
     }
     return null;
 }
@@ -4695,20 +4696,21 @@ function cow_merge_wordpress_comment_reference_violation(
     SQLite3 $meta,
     string $source_branch,
     string $child_label,
-    array $comment
+    array $comment,
+    string $source_action = 'inserted'
 ): ?string {
-    $post_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, $child_label, 'wp_posts', 'ID', $comment['comment_post_ID'] ?? null, 'post');
+    $post_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, $child_label, 'wp_posts', 'ID', $comment['comment_post_ID'] ?? null, 'post', $source_action);
     if ($post_violation !== null) {
         return $post_violation;
     }
     $comment_parent = $comment['comment_parent'] ?? null;
-    $comment_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, $child_label, 'wp_comments', 'comment_ID', $comment_parent, 'parent comment');
+    $comment_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, $child_label, 'wp_comments', 'comment_ID', $comment_parent, 'parent comment', $source_action);
     if ($comment_violation !== null) {
         return $comment_violation;
     }
     $parent_comment = cow_merge_wordpress_source_row($source, 'wp_comments', 'comment_ID', $comment_parent);
     if ($parent_comment !== null) {
-        return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, $child_label, 'wp_posts', 'ID', $parent_comment['comment_post_ID'] ?? null, 'parent comment post');
+        return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, $child_label, 'wp_posts', 'ID', $parent_comment['comment_post_ID'] ?? null, 'parent comment post', $source_action);
     }
     return null;
 }
@@ -4718,7 +4720,8 @@ function cow_merge_wordpress_option_reference_violation(
     SQLite3 $target,
     SQLite3 $meta,
     string $source_branch,
-    array $source_row
+    array $source_row,
+    string $source_action = 'inserted'
 ): ?string {
     $option_name = (string)($source_row['option_name'] ?? '');
     $option_value = (string)($source_row['option_value'] ?? '');
@@ -4726,7 +4729,7 @@ function cow_merge_wordpress_option_reference_violation(
         return null;
     }
 
-    $check_post = function (mixed $id, string $label) use ($source, $target, $meta, $source_branch, $option_name): ?string {
+    $check_post = function (mixed $id, string $label) use ($source, $target, $meta, $source_branch, $option_name, $source_action): ?string {
         return cow_merge_wordpress_parent_reference_violation(
             $source,
             $target,
@@ -4736,10 +4739,11 @@ function cow_merge_wordpress_option_reference_violation(
             'wp_posts',
             'ID',
             $id,
-            'post'
+            'post',
+            $source_action
         );
     };
-    $check_term = function (mixed $id, string $label) use ($source, $target, $meta, $source_branch, $option_name): ?string {
+    $check_term = function (mixed $id, string $label) use ($source, $target, $meta, $source_branch, $option_name, $source_action): ?string {
         return cow_merge_wordpress_parent_reference_violation(
             $source,
             $target,
@@ -4749,7 +4753,8 @@ function cow_merge_wordpress_option_reference_violation(
             'wp_terms',
             'term_id',
             $id,
-            'term'
+            'term',
+            $source_action
         );
     };
 
@@ -4827,78 +4832,101 @@ function cow_merge_wordpress_insert_reference_violation(
     string $table,
     array $source_row
 ): ?string {
+    return cow_merge_wordpress_row_reference_violation($source, $target, $meta, $source_branch, $table, $source_row, 'inserted');
+}
+
+function cow_merge_wordpress_update_reference_violation(
+    SQLite3 $source,
+    SQLite3 $target,
+    SQLite3 $meta,
+    string $source_branch,
+    string $table,
+    array $source_row
+): ?string {
+    return cow_merge_wordpress_row_reference_violation($source, $target, $meta, $source_branch, $table, $source_row, 'changed');
+}
+
+function cow_merge_wordpress_row_reference_violation(
+    SQLite3 $source,
+    SQLite3 $target,
+    SQLite3 $meta,
+    string $source_branch,
+    string $table,
+    array $source_row,
+    string $source_action
+): ?string {
     if ($table === 'wp_posts') {
-        $author_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_posts row', 'wp_users', 'ID', $source_row['post_author'] ?? null, 'user');
+        $author_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_posts row', 'wp_users', 'ID', $source_row['post_author'] ?? null, 'user', $source_action);
         if ($author_violation !== null) {
             return $author_violation;
         }
-        return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_posts row', 'wp_posts', 'ID', $source_row['post_parent'] ?? null, 'post');
+        return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_posts row', 'wp_posts', 'ID', $source_row['post_parent'] ?? null, 'post', $source_action);
     }
     if ($table === 'wp_usermeta') {
-        return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_usermeta row', 'wp_users', 'ID', $source_row['user_id'] ?? null, 'user');
+        return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_usermeta row', 'wp_users', 'ID', $source_row['user_id'] ?? null, 'user', $source_action);
     }
     if ($table === 'wp_postmeta') {
-        $post_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_postmeta row', 'wp_posts', 'ID', $source_row['post_id'] ?? null, 'post');
+        $post_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_postmeta row', 'wp_posts', 'ID', $source_row['post_id'] ?? null, 'post', $source_action);
         if ($post_violation !== null) {
             return $post_violation;
         }
         $meta_key = (string)($source_row['meta_key'] ?? '');
         if (in_array($meta_key, ['_thumbnail_id', '_menu_item_menu_item_parent'], true)) {
-            return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_postmeta row', 'wp_posts', 'ID', $source_row['meta_value'] ?? null, 'referenced post');
+            return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_postmeta row', 'wp_posts', 'ID', $source_row['meta_value'] ?? null, 'referenced post', $source_action);
         }
         if ($meta_key === '_menu_item_object_id') {
             $menu_item_type = cow_merge_wordpress_source_postmeta_value($source, $source_row['post_id'] ?? null, '_menu_item_type');
             if ($menu_item_type === 'taxonomy') {
-                return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_postmeta row', 'wp_terms', 'term_id', $source_row['meta_value'] ?? null, 'referenced term');
+                return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_postmeta row', 'wp_terms', 'term_id', $source_row['meta_value'] ?? null, 'referenced term', $source_action);
             }
             if ($menu_item_type === 'post_type') {
-                return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_postmeta row', 'wp_posts', 'ID', $source_row['meta_value'] ?? null, 'referenced post');
+                return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_postmeta row', 'wp_posts', 'ID', $source_row['meta_value'] ?? null, 'referenced post', $source_action);
             }
         }
         return null;
     }
     if ($table === 'wp_comments') {
-        $comment_violation = cow_merge_wordpress_comment_reference_violation($source, $target, $meta, $source_branch, 'wp_comments row', $source_row);
+        $comment_violation = cow_merge_wordpress_comment_reference_violation($source, $target, $meta, $source_branch, 'wp_comments row', $source_row, $source_action);
         if ($comment_violation !== null) {
             return $comment_violation;
         }
-        return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_comments row', 'wp_users', 'ID', $source_row['user_id'] ?? null, 'user');
+        return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_comments row', 'wp_users', 'ID', $source_row['user_id'] ?? null, 'user', $source_action);
     }
     if ($table === 'wp_commentmeta') {
-        $comment_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_commentmeta row', 'wp_comments', 'comment_ID', $source_row['comment_id'] ?? null, 'comment');
+        $comment_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_commentmeta row', 'wp_comments', 'comment_ID', $source_row['comment_id'] ?? null, 'comment', $source_action);
         if ($comment_violation !== null) {
             return $comment_violation;
         }
         $comment = cow_merge_wordpress_source_row($source, 'wp_comments', 'comment_ID', $source_row['comment_id'] ?? null);
         if ($comment !== null) {
-            return cow_merge_wordpress_comment_reference_violation($source, $target, $meta, $source_branch, 'wp_commentmeta row', $comment);
+            return cow_merge_wordpress_comment_reference_violation($source, $target, $meta, $source_branch, 'wp_commentmeta row', $comment, $source_action);
         }
     }
     if ($table === 'wp_options' || str_ends_with($table, '_options')) {
-        return cow_merge_wordpress_option_reference_violation($source, $target, $meta, $source_branch, $source_row);
+        return cow_merge_wordpress_option_reference_violation($source, $target, $meta, $source_branch, $source_row, $source_action);
     }
     if ($table === 'wp_termmeta') {
-        return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_termmeta row', 'wp_terms', 'term_id', $source_row['term_id'] ?? null, 'term');
+        return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_termmeta row', 'wp_terms', 'term_id', $source_row['term_id'] ?? null, 'term', $source_action);
     }
     if ($table === 'wp_term_taxonomy') {
-        $term_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_term_taxonomy row', 'wp_terms', 'term_id', $source_row['term_id'] ?? null, 'term');
+        $term_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_term_taxonomy row', 'wp_terms', 'term_id', $source_row['term_id'] ?? null, 'term', $source_action);
         if ($term_violation !== null) {
             return $term_violation;
         }
-        return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_term_taxonomy row', 'wp_terms', 'term_id', $source_row['parent'] ?? null, 'parent term');
+        return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_term_taxonomy row', 'wp_terms', 'term_id', $source_row['parent'] ?? null, 'parent term', $source_action);
     }
     if ($table === 'wp_term_relationships') {
-        $post_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_term_relationships row', 'wp_posts', 'ID', $source_row['object_id'] ?? null, 'post');
+        $post_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_term_relationships row', 'wp_posts', 'ID', $source_row['object_id'] ?? null, 'post', $source_action);
         if ($post_violation !== null) {
             return $post_violation;
         }
-        $taxonomy_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_term_relationships row', 'wp_term_taxonomy', 'term_taxonomy_id', $source_row['term_taxonomy_id'] ?? null, 'term taxonomy');
+        $taxonomy_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_term_relationships row', 'wp_term_taxonomy', 'term_taxonomy_id', $source_row['term_taxonomy_id'] ?? null, 'term taxonomy', $source_action);
         if ($taxonomy_violation !== null) {
             return $taxonomy_violation;
         }
         $term_taxonomy = cow_merge_wordpress_source_row($source, 'wp_term_taxonomy', 'term_taxonomy_id', $source_row['term_taxonomy_id'] ?? null);
         if ($term_taxonomy !== null) {
-            return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_term_relationships row', 'wp_terms', 'term_id', $term_taxonomy['term_id'] ?? null, 'term');
+            return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_term_relationships row', 'wp_terms', 'term_id', $term_taxonomy['term_id'] ?? null, 'term', $source_action);
         }
     }
     return null;
@@ -12677,6 +12705,23 @@ function cow_merge_table_rows(
             if ($where_identity === null) {
                 throw new RuntimeException("cannot update $table row without a target identity");
             }
+            $wp_reference_violation = cow_merge_wordpress_update_reference_violation($source, $target, $meta, $source_branch, $table, $source_row);
+            if ($wp_reference_violation !== null) {
+                if (cow_merge_record_row_target_constraint(
+                    $meta,
+                    $run_id,
+                    $table,
+                    $key,
+                    $base_row,
+                    $source_row,
+                    $target_row,
+                    'update',
+                    $wp_reference_violation
+                )) {
+                    $conflicts++;
+                }
+                continue;
+            }
             $unique_collision = cow_merge_find_unique_collision(
                 $target,
                 $table,
@@ -12743,6 +12788,24 @@ function cow_merge_table_rows(
         }
 
         if ($base_row === null || $source_row === null || $target_row === null) {
+            continue;
+        }
+
+        $wp_reference_violation = cow_merge_wordpress_update_reference_violation($source, $target, $meta, $source_branch, $table, $source_row);
+        if ($wp_reference_violation !== null) {
+            if (cow_merge_record_row_target_constraint(
+                $meta,
+                $run_id,
+                $table,
+                $key,
+                $base_row,
+                $source_row,
+                $target_row,
+                'update',
+                $wp_reference_violation
+            )) {
+                $conflicts++;
+            }
             continue;
         }
 
