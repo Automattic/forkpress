@@ -2654,6 +2654,8 @@ SQL);
     assert_same(count($audit['runs']), 1, 'merge audit report can focus on one run');
     assert_same((int)$audit['runs'][0]['conflict_count'], 2, 'merge audit run summary includes conflict count');
     assert_same(count($audit['conflicts']), 2, 'merge audit report exports conflict records for a run');
+    $title_audit_conflicts = array_values(array_filter($audit['conflicts'], fn($row) => ($row['table_name'] ?? null) === 'wp_posts' && ($row['column_name'] ?? null) === 'post_title'));
+    assert_same($title_audit_conflicts[0]['stale_status'] ?? null, 'fresh', 'merge audit marks unchanged target conflicts as fresh');
     $title_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'wp_posts' AND column_name = 'post_title'");
     $GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize'] = [
         static function (SQLite3Result $result, string $message): void {
@@ -2767,6 +2769,10 @@ SQL);
         'target cell no longer matches',
         'stale conflict resolution is blocked when target has changed since audit'
     );
+    $stale_cell_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['records' => 'conflicts']);
+    $stale_cell_conflicts = array_values(array_filter($stale_cell_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $title_conflict_id));
+    assert_same($stale_cell_conflicts[0]['stale_status'] ?? null, 'stale', 'merge audit marks drifted target cell conflicts as stale');
+    assert_true(str_contains((string)($stale_cell_conflicts[0]['current_target_preview'] ?? ''), 'Source title'), 'stale target cell audit exposes the current target value');
     $row_resolution_rollback_base = $tmp . '/row-resolution-rollback-base.sqlite';
     $row_resolution_rollback_source = $tmp . '/row-resolution-rollback-source.sqlite';
     $row_resolution_rollback_target = $tmp . '/row-resolution-rollback-target.sqlite';
@@ -5062,6 +5068,17 @@ SQL);
         fn() => cow_merge_resolve_conflict($metadata, $file_conflict_id, 'target', true, 'Try stale file keep.', 'cow-test'),
         'target filesystem path no longer matches',
         'stale filesystem conflict resolution is blocked after the target path changes'
+    );
+    $stale_file_audit = cow_merge_audit_report($metadata, null, 10, [
+        'records' => 'conflicts',
+        'scope' => 'files',
+        'path' => 'wp-content/uploads/conflict.txt',
+    ]);
+    assert_same($stale_file_audit['conflicts'][0]['stale_status'] ?? null, 'stale', 'merge audit marks drifted filesystem conflicts as stale');
+    assert_true(isset($stale_file_audit['conflicts'][0]['current_target_preview']), 'stale filesystem audit exposes the current target file manifest');
+    assert_true(
+        ($stale_file_audit['conflicts'][0]['current_target_preview'] ?? null) !== ($stale_file_audit['conflicts'][0]['target_preview'] ?? null),
+        'stale filesystem audit distinguishes current target file state from the audited target state'
     );
     $file_rollback_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/rollback-conflict.txt')) . "' ORDER BY id DESC LIMIT 1");
     $file_rollback_meta = open_db($metadata);

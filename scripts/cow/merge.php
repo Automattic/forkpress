@@ -9284,7 +9284,7 @@ function cow_merge_audit_json_preview(?string $json): string {
 
 function cow_merge_audit_add_payload_previews(array $rows): array {
     foreach ($rows as &$row) {
-        foreach (['base', 'source', 'target', 'chosen'] as $name) {
+        foreach (['base', 'source', 'target', 'chosen', 'current_target'] as $name) {
             $payload_key = $name . '_payload';
             if (array_key_exists($payload_key, $row)) {
                 $row[$name . '_preview'] = cow_merge_audit_payload_preview($row[$payload_key]);
@@ -9292,6 +9292,146 @@ function cow_merge_audit_add_payload_previews(array $rows): array {
         }
         if (array_key_exists('row_identity', $row)) {
             $row['row_identity_preview'] = cow_merge_audit_json_preview($row['row_identity']);
+        }
+    }
+    unset($row);
+    return $rows;
+}
+
+function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflict): array {
+    $status = [
+        'stale_status' => 'unknown',
+        'stale_reason' => 'conflict type is not checked for target drift',
+        'current_target_payload' => null,
+    ];
+
+    $table = (string)($conflict['table_name'] ?? '');
+    $conflict_type = (string)($conflict['conflict_type'] ?? '');
+    try {
+        if ($table === '__plugins__' || str_starts_with($conflict_type, 'schema-')) {
+            return $status;
+        }
+
+        if ($table === '__files__') {
+            $target_db = (string)($conflict['target_db'] ?? '');
+            if ($target_db === '') {
+                return ['stale_status' => 'error', 'stale_reason' => 'conflict run does not include a target database path', 'current_target_payload' => null];
+            }
+            $target_root = cow_merge_branch_root_from_db_path($target_db);
+            if (!is_dir($target_root)) {
+                return ['stale_status' => 'error', 'stale_reason' => "target root does not exist: $target_root", 'current_target_payload' => null];
+            }
+            $path = cow_merge_file_path_from_identity($conflict['row_identity'] ?? null);
+            if ($path === null) {
+                return ['stale_status' => 'error', 'stale_reason' => 'filesystem conflict has an invalid path identity', 'current_target_payload' => null];
+            }
+            $target_payload = cow_merge_decode_payload_json((string)($conflict['target_payload'] ?? ''), 'target');
+            $expected = cow_merge_file_entry_without_path(is_array($target_payload) ? $target_payload : null);
+            $entries = cow_merge_file_manifest_for_root($target_root)['entries'];
+            $current = $entries[$path] ?? null;
+            return [
+                'stale_status' => cow_merge_file_entries_equal($current, $expected) ? 'fresh' : 'stale',
+                'stale_reason' => cow_merge_file_entries_equal($current, $expected)
+                    ? 'target filesystem path still matches audited target payload'
+                    : 'target filesystem path no longer matches audited target payload; rerun merge-audit before resolving',
+                'current_target_payload' => cow_merge_payload_json(cow_merge_file_path_payload($path, $current)),
+            ];
+        }
+
+        $db_conflict_types = [
+            'cell-conflict',
+            'row-insert-collision',
+            'row-unique-collision',
+            'row-target-constraint',
+            'row-identity-ambiguous',
+            'row-target-deleted',
+            'row-source-deleted',
+        ];
+        if (!in_array($conflict_type, $db_conflict_types, true)) {
+            return $status;
+        }
+
+        $target_db = (string)($conflict['target_db'] ?? '');
+        if ($target_db === '' || !is_file($target_db)) {
+            return ['stale_status' => 'error', 'stale_reason' => "target database does not exist: $target_db", 'current_target_payload' => null];
+        }
+        $target = cow_merge_open_db($target_db, SQLITE3_OPEN_READONLY);
+        try {
+            $identity = cow_merge_decode_payload_json((string)($conflict['row_identity'] ?? ''), 'row identity');
+            if (!is_array($identity)) {
+                return ['stale_status' => 'error', 'stale_reason' => 'database conflict has an invalid row identity', 'current_target_payload' => null];
+            }
+            $target_value = cow_merge_decode_payload_json((string)($conflict['target_payload'] ?? ''), 'target');
+            $source_value = cow_merge_decode_payload_json((string)($conflict['source_payload'] ?? ''), 'source');
+            $pk_cols = cow_merge_pk_cols($target, $table);
+            $where_identity = $identity;
+            if (!$pk_cols) {
+                $target_branch = (string)($conflict['target_branch'] ?? '');
+                $target_rowid = $target_branch === '' ? null : cow_merge_lookup_active_rowid_by_identity($meta, $target_branch, $table, $identity);
+                $where_identity = $target_rowid === null ? [] : ['rowid' => $target_rowid];
+            }
+
+            if ($conflict_type === 'cell-conflict') {
+                $column = (string)($conflict['column_name'] ?? '');
+                if ($column === '') {
+                    return ['stale_status' => 'error', 'stale_reason' => 'cell conflict has no audited column name', 'current_target_payload' => null];
+                }
+                $current_row = ($pk_cols || array_key_exists('rowid', $where_identity))
+                    ? cow_merge_select_current_row($target, $table, $where_identity, $pk_cols)
+                    : null;
+                $current = $current_row === null ? null : ($current_row[$column] ?? null);
+                return [
+                    'stale_status' => cow_merge_values_equal($current, $target_value) ? 'fresh' : 'stale',
+                    'stale_reason' => cow_merge_values_equal($current, $target_value)
+                        ? 'target cell still matches audited target payload'
+                        : 'target cell no longer matches audited target payload; rerun merge-audit before resolving',
+                    'current_target_payload' => cow_merge_payload_json($current),
+                ];
+            }
+
+            if ($conflict_type === 'row-unique-collision' && is_array($source_value)) {
+                $unique_collision = cow_merge_find_unique_collision($target, $table, $source_value, true);
+                $current = is_array($unique_collision) ? ($unique_collision['row'] ?? null) : null;
+            } else {
+                $current = ($pk_cols || array_key_exists('rowid', $where_identity))
+                    ? cow_merge_select_current_row($target, $table, $where_identity, $pk_cols)
+                    : null;
+            }
+
+            if ($conflict_type === 'row-target-deleted' || ($conflict_type === 'row-target-constraint' && $target_value === null)) {
+                $fresh = $current === null;
+            } elseif ($current === null || !is_array($target_value)) {
+                $fresh = false;
+            } else {
+                $fresh = cow_merge_row_values_equal($current, $target_value, cow_merge_all_columns(array_keys($target_value), array_keys($current)));
+            }
+
+            return [
+                'stale_status' => $fresh ? 'fresh' : 'stale',
+                'stale_reason' => $fresh
+                    ? 'target row still matches audited target payload'
+                    : 'target row no longer matches audited target payload; rerun merge-audit before resolving',
+                'current_target_payload' => cow_merge_payload_json($current),
+            ];
+        } finally {
+            $target->close();
+        }
+    } catch (Throwable $e) {
+        return [
+            'stale_status' => 'error',
+            'stale_reason' => $e->getMessage(),
+            'current_target_payload' => null,
+        ];
+    }
+}
+
+function cow_merge_audit_add_conflict_staleness(SQLite3 $meta, array $rows): array {
+    foreach ($rows as &$row) {
+        $staleness = cow_merge_audit_conflict_target_staleness($meta, $row);
+        $row['stale_status'] = $staleness['stale_status'];
+        $row['stale_reason'] = $staleness['stale_reason'];
+        if ($staleness['current_target_payload'] !== null) {
+            $row['current_target_payload'] = $staleness['current_target_payload'];
         }
     }
     unset($row);
@@ -9378,14 +9518,14 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
         [$conflict_filter, $conflict_params] = cow_merge_audit_where_sql($run_id, $filters, 'conflicts', '', $review_notes_exist);
         $conflict_params[':limit'] = $limit;
         if ($filters['records'] === 'all' || $filters['records'] === 'conflicts') {
-            $report['conflicts'] = cow_merge_audit_add_payload_previews(cow_merge_audit_table_rows(
+            $report['conflicts'] = cow_merge_audit_add_payload_previews(cow_merge_audit_add_conflict_staleness($db, cow_merge_audit_table_rows(
                 $db,
                 'merge_conflicts',
-                "SELECT id, run_id, table_name, row_identity, column_name, conflict_type, resolver, resolved_at, created_at, " .
-                "base_payload, source_payload, target_payload, chosen_payload$conflict_review_select " .
-                "FROM merge_conflicts $conflict_filter ORDER BY id DESC LIMIT :limit",
+                "SELECT merge_conflicts.id AS id, run_id, table_name, row_identity, column_name, conflict_type, resolver, resolved_at, created_at, " .
+                "base_payload, source_payload, target_payload, chosen_payload, r.target_db, r.target_branch$conflict_review_select " .
+                "FROM merge_conflicts JOIN merge_runs r ON r.id = merge_conflicts.run_id $conflict_filter ORDER BY merge_conflicts.id DESC LIMIT :limit",
                 $conflict_params
-            ));
+            )));
             if ($filters['records'] === 'conflicts' && $filters['group_by'] !== 'none') {
                 [$conflict_group_filter, $conflict_group_params] = cow_merge_audit_where_sql($run_id, $filters, 'conflicts', 'c', $review_notes_exist);
                 $conflict_group_params[':limit'] = $limit;
@@ -9609,6 +9749,12 @@ function cow_merge_print_audit_text(array $report): void {
             $object = cow_merge_audit_object_label($conflict);
             echo "  #{$conflict['id']} run={$conflict['run_id']} {$conflict['conflict_type']} $object resolver={$conflict['resolver']} resolved_at={$conflict['resolved_at']}\n";
             cow_merge_print_audit_review_text($conflict, $filters);
+            if (isset($conflict['stale_status']) && $conflict['stale_status'] !== 'unknown') {
+                echo "     stale={$conflict['stale_status']} reason=" . cow_merge_audit_truncate((string)$conflict['stale_reason'], 240) . "\n";
+                if (array_key_exists('current_target_preview', $conflict)) {
+                    echo "     current-target={$conflict['current_target_preview']}\n";
+                }
+            }
             echo "     source={$conflict['source_preview']}\n";
             echo "     target={$conflict['target_preview']}\n";
             echo "     chosen={$conflict['chosen_preview']}\n";
