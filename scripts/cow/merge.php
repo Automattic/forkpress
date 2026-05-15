@@ -4715,6 +4715,63 @@ function cow_merge_wordpress_comment_reference_violation(
     return null;
 }
 
+function cow_merge_wordpress_post_content_reference_violation(
+    SQLite3 $source,
+    SQLite3 $target,
+    SQLite3 $meta,
+    string $source_branch,
+    array $source_row,
+    string $source_action = 'inserted'
+): ?string {
+    $content = (string)($source_row['post_content'] ?? '');
+    if ($content === '') {
+        return null;
+    }
+
+    $check_post = function (mixed $id, string $label) use ($source, $target, $meta, $source_branch, $source_action): ?string {
+        return cow_merge_wordpress_parent_reference_violation(
+            $source,
+            $target,
+            $meta,
+            $source_branch,
+            "wp_posts post_content $label",
+            'wp_posts',
+            'ID',
+            $id,
+            'post',
+            $source_action
+        );
+    };
+
+    if (preg_match_all('/<!--\s*wp:block\s+(\{.*?\})\s*\/\s*-->/s', $content, $matches)) {
+        foreach ($matches[1] as $raw_attrs) {
+            $attrs = json_decode($raw_attrs, true);
+            if (!is_array($attrs) || !array_key_exists('ref', $attrs)) {
+                continue;
+            }
+            $violation = $check_post($attrs['ref'], 'wp:block.ref');
+            if ($violation !== null) {
+                return $violation;
+            }
+        }
+    }
+
+    if (preg_match_all('/<!--\s*wp:image\s+(\{.*?\})\s*-->/s', $content, $matches)) {
+        foreach ($matches[1] as $raw_attrs) {
+            $attrs = json_decode($raw_attrs, true);
+            if (!is_array($attrs) || !array_key_exists('id', $attrs)) {
+                continue;
+            }
+            $violation = $check_post($attrs['id'], 'wp:image.id');
+            if ($violation !== null) {
+                return $violation;
+            }
+        }
+    }
+
+    return null;
+}
+
 function cow_merge_wordpress_option_reference_violation(
     SQLite3 $source,
     SQLite3 $target,
@@ -4860,7 +4917,11 @@ function cow_merge_wordpress_row_reference_violation(
         if ($author_violation !== null) {
             return $author_violation;
         }
-        return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_posts row', 'wp_posts', 'ID', $source_row['post_parent'] ?? null, 'post', $source_action);
+        $parent_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_posts row', 'wp_posts', 'ID', $source_row['post_parent'] ?? null, 'post', $source_action);
+        if ($parent_violation !== null) {
+            return $parent_violation;
+        }
+        return cow_merge_wordpress_post_content_reference_violation($source, $target, $meta, $source_branch, $source_row, $source_action);
     }
     if ($table === 'wp_usermeta') {
         return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_usermeta row', 'wp_users', 'ID', $source_row['user_id'] ?? null, 'user', $source_action);
