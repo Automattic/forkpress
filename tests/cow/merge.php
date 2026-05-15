@@ -7777,6 +7777,31 @@ SQL);
     $manual_meta->close();
 
     $schema_column_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND column_name = 'review_note' AND conflict_type = 'schema-source-changed' ORDER BY id DESC LIMIT 1");
+    cow_merge_review_record(
+        $metadata,
+        'conflict',
+        $schema_column_conflict_id,
+        'reviewed',
+        'Schema column reviewed before revalidation.',
+        'cow-test'
+    );
+    $schema_review_audit = cow_merge_audit_report($metadata, $manual_run_id, 10, [
+        'records' => 'conflicts',
+        'review_status' => 'reviewed',
+    ]);
+    assert_same(count($schema_review_audit['conflicts']), 1, 'schema review audit returns reviewed schema conflicts');
+    assert_same($schema_review_audit['conflicts'][0]['stale_status'] ?? null, 'unknown', 'schema conflicts are not marked fresh or stale by generic audit');
+    $schema_revalidate = cow_merge_revalidate_reviewed_conflicts($metadata, $manual_run_id, 'cow-revalidate');
+    assert_same($schema_revalidate['checked'], 2, 'schema conflict revalidation checks conflicts in the selected run');
+    assert_same($schema_revalidate['reviewed'], 1, 'schema conflict revalidation sees reviewed schema conflicts');
+    assert_same($schema_revalidate['stale'], 0, 'schema conflict revalidation does not infer stale state generically');
+    assert_same($schema_revalidate['carried'], 0, 'schema conflict revalidation does not carry schema conflicts without schema-specific evidence');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $schema_column_conflict_id"), 0, 'schema conflict revalidation records no guarded payload without schema-specific evidence');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $schema_column_conflict_id, 'source', false, 'Try guarded schema resolution.', 'cow-test', true),
+        '--after-revalidate currently supports database row/cell conflicts and filesystem conflicts only',
+        'schema conflicts have an explicit guarded revalidation boundary'
+    );
     $schema_column_dry = cow_merge_resolve_conflict(
         $metadata,
         $schema_column_conflict_id,
