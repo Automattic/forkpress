@@ -14696,6 +14696,8 @@ PHP);
     $db->exec('CREATE TABLE wp_term_taxonomy (term_taxonomy_id INTEGER PRIMARY KEY AUTOINCREMENT, term_id INTEGER NOT NULL, taxonomy TEXT NOT NULL, description TEXT NOT NULL DEFAULT "", parent INTEGER NOT NULL DEFAULT 0, count INTEGER NOT NULL DEFAULT 0)');
     $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
         (50, 'Featured option page', '<!-- wp:paragraph --><p>Featured option page</p><!-- /wp:paragraph -->', 'publish', 'page', 'featured-option-page')");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (53, 'Sticky option post', '<!-- wp:paragraph --><p>Sticky option post</p><!-- /wp:paragraph -->', 'publish', 'post', 'sticky-option-post')");
     $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, guid) VALUES
         (52, 'Option logo', '', 'inherit', 'attachment', 'option-logo', 'http://example.test/wp-content/uploads/2026/05/option-logo.jpg')");
     $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (51, 'Primary menu', 'primary-menu')");
@@ -14712,6 +14714,11 @@ PHP);
     $stmt->bindValue(':value', $theme_mods_base, SQLITE3_TEXT);
     $stmt->execute();
     $db->exec("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('site_icon', '52', 'yes')");
+    $db->exec("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('page_on_front', '50', 'yes')");
+    $sticky_posts_base = serialize([53]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('sticky_posts', :value, 'yes')");
+    $stmt->bindValue(':value', $sticky_posts_base, SQLITE3_TEXT);
+    $stmt->execute();
     $widget_nav_menu_base = serialize([
         2 => [
             'title' => 'Footer menu',
@@ -14726,9 +14733,32 @@ PHP);
     write_test_file($wp_option_ref_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
 <?php
 $db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
-$res = $db->query("SELECT option_name, option_value FROM wp_options WHERE option_name LIKE 'theme_mods_%' OR option_name IN ('widget_nav_menu', 'site_icon')");
+$res = $db->query("SELECT option_name, option_value FROM wp_options WHERE option_name LIKE 'theme_mods_%' OR option_name IN ('widget_nav_menu', 'site_icon', 'page_on_front', 'sticky_posts')");
 $findings = [];
 while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    if ((string)$row['option_name'] === 'page_on_front') {
+        $page_id = (int)$row['option_value'];
+        if ($page_id > 0) {
+            $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $page_id AND post_type = 'page'");
+            if ($exists === 0) {
+                $findings[] = [
+                    'plugin' => 'forkpress-wp-option-refs',
+                    'object' => 'option:' . $row['option_name'],
+                    'reason' => 'front page option references a missing page',
+                    'type' => 'plugin-wp-option-missing-object',
+                    'tables' => ['wp_options', 'wp_posts'],
+                    'validator' => 'forkpress-wp-option-refs@1',
+                    'candidate' => [
+                        'option_name' => (string)$row['option_name'],
+                        'field' => 'page_on_front',
+                        'missing_object_id' => $page_id,
+                        'object_type' => 'page',
+                    ],
+                ];
+            }
+        }
+        continue;
+    }
     if ((string)$row['option_name'] === 'site_icon') {
         $attachment_id = (int)$row['option_value'];
         if ($attachment_id > 0) {
@@ -14746,6 +14776,36 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
                         'field' => 'site_icon',
                         'missing_object_id' => $attachment_id,
                         'object_type' => 'attachment',
+                    ],
+                ];
+            }
+        }
+        continue;
+    }
+    if ((string)$row['option_name'] === 'sticky_posts') {
+        $sticky_posts = @unserialize((string)$row['option_value']);
+        if (is_array($sticky_posts)) {
+            foreach ($sticky_posts as $index => $post_id) {
+                $post_id = (int)$post_id;
+                if ($post_id <= 0) {
+                    continue;
+                }
+                $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $post_id AND post_type = 'post'");
+                if ($exists !== 0) {
+                    continue;
+                }
+                $findings[] = [
+                    'plugin' => 'forkpress-wp-option-refs',
+                    'object' => 'option:' . $row['option_name'],
+                    'reason' => 'sticky posts option references a missing post',
+                    'type' => 'plugin-wp-option-missing-object',
+                    'tables' => ['wp_options', 'wp_posts'],
+                    'validator' => 'forkpress-wp-option-refs@1',
+                    'candidate' => [
+                        'option_name' => (string)$row['option_name'],
+                        'field' => 'sticky_posts.' . (string)$index,
+                        'missing_object_id' => $post_id,
+                        'object_type' => 'post',
                     ],
                 ];
             }
@@ -14864,6 +14924,7 @@ PHP);
     $db = open_db($wp_option_ref_source);
     $db->exec('DELETE FROM wp_posts WHERE ID = 50');
     $db->exec('DELETE FROM wp_posts WHERE ID = 52');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 53');
     $db->exec('DELETE FROM wp_term_taxonomy WHERE term_id = 51');
     $db->exec('DELETE FROM wp_terms WHERE term_id = 51');
     $db->close();
@@ -14903,9 +14964,10 @@ PHP);
     );
     assert_same($wp_option_ref_result['status'], 'completed_with_conflicts', 'WordPress option reference validator holds missing option objects for review');
     assert_same((int)($wp_option_ref_result['plugin_validators'] ?? 0), 1, 'WordPress option reference validator is discovered from mu-plugins during merge');
-    assert_same((int)($wp_option_ref_result['plugin_validator_conflicts'] ?? 0), 5, 'WordPress option reference validator records missing featured pages, menu locations, menu widgets, and option attachments');
+    assert_same((int)($wp_option_ref_result['plugin_validator_conflicts'] ?? 0), 7, 'WordPress option reference validator records missing featured pages, sticky posts, menu locations, menu widgets, and option attachments');
     assert_same((int)scalar($wp_option_ref_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 50'), 0, 'WordPress option reference validator leaves the source featured page deletion staged for review');
     assert_same((int)scalar($wp_option_ref_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 52'), 0, 'WordPress option reference validator leaves the source attachment deletion staged for review');
+    assert_same((int)scalar($wp_option_ref_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 53'), 0, 'WordPress option reference validator leaves the source sticky post deletion staged for review');
     assert_same((int)scalar($wp_option_ref_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 51'), 0, 'WordPress option reference validator leaves the source nav menu deletion staged for review');
     $wp_option_ref_value = scalar($wp_option_ref_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_forkpress_active'");
     $wp_option_ref_mods = is_string($wp_option_ref_value) ? unserialize($wp_option_ref_value) : null;
@@ -14914,6 +14976,10 @@ PHP);
     assert_same($wp_option_ref_mods['nav_menu_locations']['primary'] ?? null, 51, 'WordPress option reference validator keeps the stale nav menu location visible for review');
     assert_same($wp_option_ref_mods['custom_logo'] ?? null, 52, 'WordPress option reference validator keeps the stale custom logo reference visible for review');
     assert_same(scalar($wp_option_ref_target, "SELECT option_value FROM wp_options WHERE option_name = 'site_icon'"), '52', 'WordPress option reference validator keeps the stale site icon option visible for review');
+    assert_same(scalar($wp_option_ref_target, "SELECT option_value FROM wp_options WHERE option_name = 'page_on_front'"), '50', 'WordPress option reference validator keeps the stale front page option visible for review');
+    $wp_sticky_posts_value = scalar($wp_option_ref_target, "SELECT option_value FROM wp_options WHERE option_name = 'sticky_posts'");
+    $wp_sticky_posts = is_string($wp_sticky_posts_value) ? unserialize($wp_sticky_posts_value) : null;
+    assert_same($wp_sticky_posts[0] ?? null, 53, 'WordPress option reference validator keeps the stale sticky post reference visible for review');
     $wp_widget_nav_menu_value = scalar($wp_option_ref_target, "SELECT option_value FROM wp_options WHERE option_name = 'widget_nav_menu'");
     $wp_widget_nav_menu = is_string($wp_widget_nav_menu_value) ? unserialize($wp_widget_nav_menu_value) : null;
     assert_same($wp_widget_nav_menu[2]['title'] ?? null, 'Target footer menu', 'WordPress option reference validator preserves the target nav menu widget edit');
@@ -14923,18 +14989,24 @@ PHP);
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-option-missing-object',
     ]);
-    assert_same(count($wp_option_ref_audit['conflicts']), 5, 'WordPress option reference validator exposes missing option objects as plugin-scoped audit conflicts');
+    assert_same(count($wp_option_ref_audit['conflicts']), 7, 'WordPress option reference validator exposes missing option objects as plugin-scoped audit conflicts');
     $wp_option_ref_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $wp_option_ref_audit['conflicts']));
     assert_true(str_contains($wp_option_ref_preview, '"missing_object_id":50'), 'WordPress option reference audit includes the missing page ID');
     assert_true(str_contains($wp_option_ref_preview, '"missing_object_id":51'), 'WordPress option reference audit includes the missing nav menu term ID');
     assert_true(str_contains($wp_option_ref_preview, '"missing_object_id":52'), 'WordPress option reference audit includes the missing attachment ID');
+    assert_true(str_contains($wp_option_ref_preview, '"missing_object_id":53'), 'WordPress option reference audit includes the missing sticky post ID');
     assert_true(str_contains($wp_option_ref_preview, '"object_type":"nav_menu"'), 'WordPress option reference audit includes the nav menu object type');
     assert_true(str_contains($wp_option_ref_preview, '"object_type":"attachment"'), 'WordPress option reference audit includes the attachment object type');
+    assert_true(str_contains($wp_option_ref_preview, '"object_type":"post"'), 'WordPress option reference audit includes the post object type');
     assert_true(str_contains($wp_option_ref_preview, 'theme_mods_forkpress_active'), 'WordPress option reference audit includes the option name');
     assert_true(str_contains($wp_option_ref_preview, 'widget_nav_menu'), 'WordPress option reference audit includes the nav menu widget option name');
     assert_true(str_contains($wp_option_ref_preview, 'site_icon'), 'WordPress option reference audit includes the site icon option name');
+    assert_true(str_contains($wp_option_ref_preview, 'page_on_front'), 'WordPress option reference audit includes the front page option name');
+    assert_true(str_contains($wp_option_ref_preview, 'sticky_posts'), 'WordPress option reference audit includes the sticky posts option name');
     assert_true(str_contains($wp_option_ref_preview, '"field":"custom_logo"'), 'WordPress option reference audit includes the custom logo field');
     assert_true(str_contains($wp_option_ref_preview, '"field":"site_icon"'), 'WordPress option reference audit includes the site icon field');
+    assert_true(str_contains($wp_option_ref_preview, '"field":"page_on_front"'), 'WordPress option reference audit includes the front page option field');
+    assert_true(str_contains($wp_option_ref_preview, '"field":"sticky_posts.0"'), 'WordPress option reference audit includes the sticky posts field');
     assert_true(str_contains($wp_option_ref_preview, '"field":"widget.2.nav_menu"'), 'WordPress option reference audit includes the nav menu widget field');
 
     $wp_featured_media_base_root = $tmp . '/wp-featured-media-validator-files-base';
