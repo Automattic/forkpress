@@ -4595,6 +4595,19 @@ function cow_merge_wordpress_insert_reference_violation(
     if ($table === 'wp_postmeta') {
         return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_postmeta row', 'wp_posts', 'ID', $source_row['post_id'] ?? null, 'post');
     }
+    if ($table === 'wp_comments') {
+        return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_comments row', 'wp_posts', 'ID', $source_row['comment_post_ID'] ?? null, 'post');
+    }
+    if ($table === 'wp_commentmeta') {
+        $comment_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_commentmeta row', 'wp_comments', 'comment_ID', $source_row['comment_id'] ?? null, 'comment');
+        if ($comment_violation !== null) {
+            return $comment_violation;
+        }
+        $comment = cow_merge_wordpress_source_row($source, 'wp_comments', 'comment_ID', $source_row['comment_id'] ?? null);
+        if ($comment !== null) {
+            return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_commentmeta row', 'wp_posts', 'ID', $comment['comment_post_ID'] ?? null, 'post');
+        }
+    }
     if ($table === 'wp_term_taxonomy') {
         $term_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_term_taxonomy row', 'wp_terms', 'term_id', $source_row['term_id'] ?? null, 'term');
         if ($term_violation !== null) {
