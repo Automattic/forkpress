@@ -102,7 +102,8 @@ The Git server suite covers these publication classes:
 - Normal branch creation removes stale unpublished merge-base and branch-birth
   metadata for the requested branch before allocating fresh birth metadata, so
   a retry after an interrupted create cannot inherit stale ID bands or merge
-  bases.
+  bases. It also clears stale pending-reset markers for deleted/recreated
+  branches.
 - Branch reset writes a pending-reset marker before publishing replacement
   branch contents and clears it only after merge-base, file-base, ID-band, row
   identity, and Git-ref metadata are finalized. Public branch reuse and merge

@@ -3169,6 +3169,9 @@ fn cleanup_unpublished_cow_branch_birth_artifacts(
     if let Err(err) = cleanup_cow_branch_birth_metadata(layout, runtime, shared, branch) {
         errors.push(err.to_string());
     }
+    if let Err(err) = clear_cow_reset_pending(layout, branch) {
+        errors.push(err.to_string());
+    }
     if errors.is_empty() {
         Ok(())
     } else {
@@ -3861,6 +3864,26 @@ mod tests {
         assert!(err.contains("unfinished reset"));
         assert!(err.contains("forkpress branch reset feature --from <source>"));
 
+        clear_cow_reset_pending(&layout, "feature").unwrap();
+        write_cow_reset_pending(&layout, "feature", "main").unwrap();
+        let staging = root.join(".forkpress-branch-create-stage-feature");
+        let dest = root.join("feature");
+        cleanup_unpublished_cow_branch_birth_artifacts(
+            &layout,
+            &PortableRuntime::from_layout(&layout),
+            &SharedPaths {
+                work_dir: layout.work_dir.clone(),
+                php_bin: None,
+            },
+            "feature",
+            &staging,
+            &dest,
+            FileViewStrategy::Copy,
+        )
+        .unwrap();
+        ensure_no_pending_cow_reset(&layout, "feature").unwrap();
+
+        write_cow_reset_pending(&layout, "feature", "main").unwrap();
         clear_cow_reset_pending_if_rollback_complete(
             &layout,
             "feature",
