@@ -9,6 +9,7 @@ import {
 	assertReleaseVersion,
 	cargoLock,
 	installerManifest,
+	isPrereleaseVersion,
 	productionCrateManifests,
 	productionPackageNames,
 	readCargoLockPackageVersions,
@@ -23,6 +24,9 @@ test('validates release versions and derived names', () => {
 	assert.equal(assertReleaseVersion('0.1.13'), '0.1.13');
 	assert.equal(tagForVersion('0.2.0'), 'v0.2.0');
 	assert.equal(releaseBranchForVersion('1.0.0'), 'release/v1.0.0');
+	assert.equal(isPrereleaseVersion('0.1.14'), false);
+	assert.equal(isPrereleaseVersion('0.1.14-rc.1'), true);
+	assert.equal(isPrereleaseVersion('0.1.14+build.1'), false);
 	assert.throws(() => assertReleaseVersion('v0.1.13'), ReleaseMetadataError);
 	assert.throws(() => assertReleaseVersion('1.2'), ReleaseMetadataError);
 });
@@ -61,6 +65,7 @@ test('validates consistent release metadata in a project fixture', (t) => {
 		version: '0.1.13',
 		tag: 'v0.1.13',
 		branch: 'release/v0.1.13',
+		isPrerelease: false,
 		files: [...productionCrateManifests, installerManifest, cargoLock],
 	});
 });

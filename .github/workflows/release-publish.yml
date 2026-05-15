@@ -42,6 +42,7 @@ jobs:
       version: ${{ steps.metadata.outputs.version }}
       tag: ${{ steps.metadata.outputs.tag }}
       branch: ${{ steps.metadata.outputs.branch }}
+      is_prerelease: ${{ steps.metadata.outputs.is_prerelease }}
       checkout_ref: ${{ steps.ref.outputs.checkout_ref }}
       should_publish: ${{ steps.mode.outputs.should_publish }}
     steps:
@@ -326,6 +327,7 @@ jobs:
           fetch-depth: 0
 
       - name: Require Homebrew tap token
+        if: needs.preflight.outputs.is_prerelease != 'true'
         run: |
           if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
             echo "HOMEBREW_TAP_TOKEN is required to update Automattic/homebrew-tap." >&2
@@ -380,8 +382,10 @@ jobs:
             ForkPressSetup.exe
             SHA256SUMS
           generate_release_notes: true
+          prerelease: ${{ needs.preflight.outputs.is_prerelease }}
 
       - uses: actions/checkout@v4
+        if: needs.preflight.outputs.is_prerelease != 'true'
         with:
           repository: Automattic/homebrew-tap
           ref: master
@@ -389,6 +393,7 @@ jobs:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
       - name: Update Homebrew tap
+        if: needs.preflight.outputs.is_prerelease != 'true'
         run: |
           node scripts/release-homebrew-formula.mjs "${{ needs.preflight.outputs.version }}" SHA256SUMS > homebrew-tap/forkpress.rb
           ruby -c homebrew-tap/forkpress.rb

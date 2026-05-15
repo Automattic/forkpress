@@ -45,6 +45,10 @@ export function tagForVersion(version) {
 	return `v${assertReleaseVersion(version)}`;
 }
 
+export function isPrereleaseVersion(version) {
+	return assertReleaseVersion(version).split('+')[0].includes('-');
+}
+
 export function releaseBranchForVersion(version) {
 	return `release/${tagForVersion(version)}`;
 }
@@ -189,6 +193,7 @@ export function validateReleaseMetadata(repoRoot, options = {}) {
 		version,
 		tag,
 		branch: releaseBranchForVersion(version),
+		isPrerelease: isPrereleaseVersion(version),
 		files: [
 			...productionCrateManifests,
 			installerManifest,
