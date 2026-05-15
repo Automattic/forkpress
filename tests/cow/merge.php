@@ -13801,6 +13801,24 @@ SQL);
 <?php
 $db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
 $target_root = rtrim((string)getenv('FORKPRESS_MERGE_TARGET_ROOT'), '/');
+$unsafe_upload_path = static function (string $relative_file): ?string {
+    $path = str_replace('\\', '/', $relative_file);
+    if ($path === '') {
+        return 'upload path is empty';
+    }
+    if (str_contains($path, "\0")) {
+        return 'upload path contains a NUL byte';
+    }
+    if (str_starts_with($path, '/')) {
+        return 'upload path is absolute';
+    }
+    foreach (explode('/', $path) as $segment) {
+        if ($segment === '..') {
+            return 'upload path contains parent traversal';
+        }
+    }
+    return null;
+};
 $res = $db->query("SELECT p.ID, f.meta_value AS attached_file, m.meta_value AS metadata
     FROM wp_posts p
     JOIN wp_postmeta f ON f.post_id = p.ID AND f.meta_key = '_wp_attached_file'
@@ -13847,7 +13865,24 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
         $relative_files[] = trim($directory . '/' . (string)$size['file'], '/');
     }
     foreach ($relative_files as $relative_file) {
-        $path = $target_root . '/wp-content/uploads/' . ltrim((string)$relative_file, '/');
+        $relative_file = (string)$relative_file;
+        $unsafe_reason = $unsafe_upload_path($relative_file);
+        if ($unsafe_reason !== null) {
+            $findings[] = [
+                'plugin' => 'forkpress-wp-media',
+                'object' => 'attachment:' . $row['ID'],
+                'reason' => 'attachment metadata references an unsafe upload path: ' . $unsafe_reason,
+                'type' => 'plugin-wp-media-unsafe-path',
+                'tables' => ['wp_posts', 'wp_postmeta'],
+                'validator' => 'forkpress-wp-media@1',
+                'candidate' => [
+                    'attached_file' => $attached_file,
+                    'unsafe_file' => $relative_file,
+                ],
+            ];
+            continue;
+        }
+        $path = $target_root . '/wp-content/uploads/' . ltrim($relative_file, '/');
         if (!is_file($path)) {
             $findings[] = [
                 'plugin' => 'forkpress-wp-media',
@@ -13933,6 +13968,26 @@ PHP);
     $stmt->bindValue(':file', '2026/05/source-invalid-metadata.jpg', SQLITE3_TEXT);
     $stmt->bindValue(':metadata', 'not-a-serialized-attachment-metadata-payload', SQLITE3_TEXT);
     $stmt->execute();
+    write_test_file($wp_media_source_root . '/wp-content/uploads/2026/05/source-unsafe-path.jpg', "source unsafe path original bytes\n");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, guid) VALUES ('Source media unsafe generated path', '', 'inherit', 'attachment', 'wp-content/uploads/2026/05/source-unsafe-path.jpg')");
+    $wp_media_unsafe_path_id = (int)$db->lastInsertRowID();
+    $wp_media_unsafe_path_metadata = serialize([
+        'file' => '2026/05/source-unsafe-path.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => '../source-unsafe-path-150x150.jpg',
+                'width' => 150,
+                'height' => 150,
+            ],
+        ],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', :file), (:post_id, '_wp_attachment_metadata', :metadata)");
+    $stmt->bindValue(':post_id', $wp_media_unsafe_path_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':file', '2026/05/source-unsafe-path.jpg', SQLITE3_TEXT);
+    $stmt->bindValue(':metadata', $wp_media_unsafe_path_metadata, SQLITE3_TEXT);
+    $stmt->execute();
     $db->close();
     $wp_media_result = cow_merge_branch_state(
         $wp_media_base,
@@ -13947,7 +14002,7 @@ PHP);
     );
     assert_same($wp_media_result['status'], 'completed_with_conflicts', 'WordPress media validator holds missing generated upload files for review');
     assert_same((int)($wp_media_result['plugin_validators'] ?? 0), 1, 'WordPress media validator is discovered from mu-plugins during merge');
-    assert_same((int)($wp_media_result['plugin_validator_conflicts'] ?? 0), 4, 'WordPress media validator records missing files and metadata mismatches');
+    assert_same((int)($wp_media_result['plugin_validator_conflicts'] ?? 0), 5, 'WordPress media validator records missing files and metadata mismatches');
     assert_same(
         scalar($wp_media_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $wp_media_attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-original.jpg',
@@ -13957,6 +14012,7 @@ PHP);
     assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-attached-file.jpg'), 'WordPress media validator keeps the mismatched attached upload file');
     assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-metadata-file.jpg'), 'WordPress media validator keeps the mismatched metadata upload file');
     assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-invalid-metadata.jpg'), 'WordPress media validator keeps the upload for unreadable attachment metadata');
+    assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-unsafe-path.jpg'), 'WordPress media validator keeps the upload for unsafe generated-size metadata');
     assert_true(!is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-original-150x150.jpg'), 'WordPress media validator does not invent missing generated upload files');
     assert_true(!is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-missing-original.jpg'), 'WordPress media validator does not invent missing original upload files');
     $wp_media_audit = cow_merge_audit_report($wp_media_metadata, (int)$wp_media_result['run_id'], 10, [
@@ -13985,6 +14041,14 @@ PHP);
     assert_same(count($wp_media_invalid_audit['conflicts']), 1, 'WordPress media validator exposes unreadable attachment metadata as a plugin-scoped audit conflict');
     $wp_media_invalid_preview = (string)($wp_media_invalid_audit['conflicts'][0]['chosen_preview'] ?? '');
     assert_true(str_contains($wp_media_invalid_preview, 'source-invalid-metadata.jpg'), 'WordPress media invalid metadata audit includes the attached file');
+    $wp_media_unsafe_path_audit = cow_merge_audit_report($wp_media_metadata, (int)$wp_media_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-media-unsafe-path',
+    ]);
+    assert_same(count($wp_media_unsafe_path_audit['conflicts']), 1, 'WordPress media validator exposes unsafe upload metadata paths as plugin-scoped audit conflicts');
+    $wp_media_unsafe_path_preview = (string)($wp_media_unsafe_path_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_true(str_contains($wp_media_unsafe_path_preview, '../source-unsafe-path-150x150.jpg'), 'WordPress media unsafe path audit includes the traversal path');
 
     $wp_block_ref_base_root = $tmp . '/wp-block-ref-validator-files-base';
     $wp_block_ref_source_root = $tmp . '/wp-block-ref-validator-files-source';
