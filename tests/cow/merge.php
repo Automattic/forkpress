@@ -1513,6 +1513,26 @@ try {
             'source file crash content',
             'blocked merge leaves the pending filesystem crash state untouched'
         );
+        $crash_file_restore_interrupted = run_merge_cli_env(
+            [
+                'recover-crash',
+                '--metadata-db', $crash_file_metadata,
+                '--restore-files',
+                '--format', 'json',
+            ],
+            [
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT' => 'after-crash-recovery-restore',
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION' => 'exit',
+            ]
+        );
+        assert_true($crash_file_restore_interrupted['status'] !== 0, 'filesystem crash recovery cleanup failpoint terminates the recovery subprocess');
+        assert_same(
+            file_get_contents($crash_file_target_root . '/wp-content/uploads/crash-file.txt'),
+            'base file crash content',
+            'interrupted filesystem crash recovery restores pre-merge file content before artifact cleanup'
+        );
+        $interrupted_crash_file_recovery_files = glob(dirname($crash_file_metadata) . '/crash-recovery/*.json');
+        assert_true(is_array($interrupted_crash_file_recovery_files) && count($interrupted_crash_file_recovery_files) === 1, 'interrupted filesystem crash recovery leaves the recovery artifact retryable');
         $crash_file_restore = run_merge_cli([
             'recover-crash',
             '--metadata-db', $crash_file_metadata,

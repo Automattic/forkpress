@@ -44,10 +44,10 @@ The PHP merge suite covers these rollback classes:
   restore the pending recovery state first. The product-level entry point is
   `forkpress branch recover-crash`; the lower-level PHP helper remains available
   as `recover-crash` for focused test fixtures.
-- Process exit after crash recovery restores a target DB but before recovery
-  artifact cleanup leaves the artifact and DB snapshot backup retryable; a
-  second recovery removes the artifact and backup after confirming the target is
-  restored.
+- Process exit after crash recovery restores a target DB or filesystem
+  transaction but before recovery artifact cleanup leaves the artifact and
+  rollback material retryable; a second recovery removes the artifact and
+  cleanup material after confirming the target is restored.
 
 The Git server suite covers these publication classes:
 
@@ -107,7 +107,7 @@ OS-level interruption, not just deliberate exceptions:
   partially visible in ways not yet covered by the separate-storage retry test.
 - Kill during sparsebundle detach or compact.
 - Kill during cleanup of rollback artifacts outside the Git object-pruning and
-  crash-recovery DB restore paths.
+  crash-recovery restore paths.
 
 These should be tested by an external harness that can terminate the process at
 named checkpoints and then run a recovery/audit command in a new process.
