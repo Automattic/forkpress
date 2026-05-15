@@ -1379,6 +1379,32 @@ try {
             ? (int)scalar($crash_commit_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-crash-commit' AND status = 'completed'")
             : 0;
         assert_same($crash_commit_runs, 0, 'process death before metadata commit does not falsely record a completed run');
+        $crash_recovery_report = run_merge_cli([
+            'recover-crash',
+            '--metadata-db', $crash_commit_metadata,
+            '--format', 'json',
+        ]);
+        assert_same($crash_recovery_report['status'], 0, 'crash recovery CLI lists pending artifacts');
+        $crash_recovery_report_json = json_decode($crash_recovery_report['output'], true);
+        assert_same($crash_recovery_report_json['pending'] ?? null, 1, 'crash recovery CLI reports one pending artifact');
+        assert_same($crash_recovery_report_json['artifacts'][0]['checkpoint'] ?? null, 'target-db-commit', 'crash recovery CLI reports the commit checkpoint');
+        $crash_restore_report = run_merge_cli([
+            'recover-crash',
+            '--metadata-db', $crash_commit_metadata,
+            '--restore-target-db',
+            '--format', 'json',
+        ]);
+        assert_same($crash_restore_report['status'], 0, 'crash recovery CLI restores target DB snapshots explicitly');
+        $crash_restore_report_json = json_decode($crash_restore_report['output'], true);
+        assert_same($crash_restore_report_json['restored'] ?? null, 1, 'crash recovery CLI reports one restored artifact');
+        assert_same($crash_restore_report_json['pending'] ?? null, 0, 'crash recovery CLI removes restored artifacts from the pending queue');
+        assert_same(
+            scalar($crash_commit_target, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Base content',
+            'crash recovery CLI restores the pre-merge target DB content'
+        );
+        $restored_crash_recovery_files = glob(dirname($crash_commit_metadata) . '/crash-recovery/*.json');
+        assert_true(is_array($restored_crash_recovery_files) && count($restored_crash_recovery_files) === 0, 'crash recovery CLI removes restored artifact files');
     } else {
         assert_true(true, 'process-death crash failpoint requires POSIX SIGKILL support');
     }
