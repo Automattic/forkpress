@@ -92,6 +92,7 @@ on_error() {
   dump_if_exists "$TMP/fk-keyless-update-after-merge.json"
   dump_if_exists "$TMP/merge-audit.out"
   dump_if_exists "$TMP/merge-audit.json"
+  dump_if_exists "$TMP/merge-pending-reset.out"
   dump_if_exists "$TMP/merge-rollback-failures.json"
   dump_if_exists "$TMP/merge-rollback-failures.out"
   dump_if_exists "$TMP/file-conflict-pending.out"
@@ -1390,6 +1391,14 @@ create_branch_post merge-source "$MERGE_TITLE"
 php -r '$db = new SQLite3($argv[1]); $db->exec("INSERT INTO forkpress_e2e_target_kept (id, label) VALUES (1, '\''target-only row'\'')");' "$WORK/main/wp-content/database/.ht.sqlite"
 echo "merged through branch merge" > "$WORK/merge-source/wp-content/merge-source-file.txt"
 echo "kept on target through branch merge" > "$WORK/main/wp-content/main-target-file.txt"
+mkdir -p "$WORK_DIR/cow/reset-pending"
+printf 'branch=merge-source\nfrom=main\n' > "$WORK_DIR/cow/reset-pending/merge-source.txt"
+if "$BIN" branch --work-dir "$WORK_DIR" merge merge-source --into main > "$TMP/merge-pending-reset.out" 2>&1; then
+  echo "branch merge unexpectedly accepted a source branch with pending reset metadata" >&2
+  exit 1
+fi
+grep -F "unfinished reset" "$TMP/merge-pending-reset.out" >/dev/null
+rm -f "$WORK_DIR/cow/reset-pending/merge-source.txt"
 "$BIN" branch --work-dir "$WORK_DIR" merge merge-source --into main > "$TMP/merge.out"
 grep -F "forkpress: merged merge-source into main" "$TMP/merge.out" >/dev/null
 grep -F "status:    completed" "$TMP/merge.out" >/dev/null

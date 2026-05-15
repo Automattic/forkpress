@@ -99,6 +99,11 @@ The Git server suite covers these publication classes:
 - Multi-branch Git-created ID-band metadata failure rolls back created branch
   metadata and merge-base artifacts.
 - Stale-source Git-created branch publication is rejected.
+- Branch reset writes a pending-reset marker before publishing replacement
+  branch contents and clears it only after merge-base, file-base, ID-band, row
+  identity, and Git-ref metadata are finalized. Public branch reuse and merge
+  refuse branches with an unfinished reset marker so a hard kill in the reset
+  publication window cannot silently merge with stale branch-birth metadata.
 
 ## Missing Fault Injection
 

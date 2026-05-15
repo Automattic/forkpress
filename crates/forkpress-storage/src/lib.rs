@@ -564,6 +564,7 @@ pub fn ensure_cow_branch_exists(
     let public_root = cow_branch_root(layout, branch);
     let storage_root = cow_branch_storage_root(layout, branch, file_view);
     if public_root.join("wp-load.php").is_file() || storage_root.join("wp-load.php").is_file() {
+        ensure_no_pending_cow_reset(layout, branch)?;
         let root = if storage_root.join("wp-load.php").is_file() {
             &storage_root
         } else {
@@ -609,6 +610,76 @@ fn validate_existing_cow_branch_birth_files(
         );
     }
     Ok(db)
+}
+
+fn cow_reset_pending_path(layout: &Layout, branch: &str) -> Result<PathBuf> {
+    validate_branch_name(branch)?;
+    Ok(layout
+        .cow_dir
+        .join("reset-pending")
+        .join(format!("{branch}.txt")))
+}
+
+fn write_cow_reset_pending(layout: &Layout, branch: &str, from: &str) -> Result<()> {
+    let path = cow_reset_pending_path(layout, branch)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(
+        &path,
+        format!(
+            "branch={branch}\nfrom={from}\ncreated_at_unix={}\n",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        ),
+    )
+    .with_context(|| {
+        format!(
+            "failed to record pending COW branch reset at {}",
+            path.display()
+        )
+    })
+}
+
+fn clear_cow_reset_pending(layout: &Layout, branch: &str) -> Result<()> {
+    let path = cow_reset_pending_path(layout, branch)?;
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| {
+            format!(
+                "failed to clear pending COW branch reset marker {}",
+                path.display()
+            )
+        }),
+    }
+}
+
+fn ensure_no_pending_cow_reset(layout: &Layout, branch: &str) -> Result<()> {
+    let path = cow_reset_pending_path(layout, branch)?;
+    if path.exists() {
+        bail!(
+            "COW branch '{branch}' has an unfinished reset recorded at {}. Rerun `forkpress branch reset {branch} --from <source>` or delete/recreate the branch before reuse or merge.",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn clear_cow_reset_pending_if_rollback_complete(
+    layout: &Layout,
+    branch: &str,
+    rollback_notes: &[&str],
+) {
+    if rollback_notes
+        .iter()
+        .all(|note| !note.contains("incomplete"))
+    {
+        let _ = clear_cow_reset_pending(layout, branch);
+    }
 }
 
 pub fn show_cow_branch(layout: &Layout, branch: &str) -> Result<()> {
@@ -667,6 +738,8 @@ pub fn reset_cow_branch(
     if !target.join("wp-load.php").is_file() {
         bail!("target branch does not exist: {branch}");
     }
+    ensure_no_pending_cow_reset(layout, branch)?;
+    ensure_no_pending_cow_reset(layout, from)?;
 
     let source_db = cow_sqlite_db_path(&source);
     if !source_db.is_file() {
@@ -707,6 +780,7 @@ pub fn reset_cow_branch(
         return Err(err).context("failed to stage COW branch reset");
     }
 
+    write_cow_reset_pending(layout, branch, from)?;
     let mut target_moved_to_backup = false;
     let mut staging_published = false;
     let publish = (|| -> Result<()> {
@@ -744,6 +818,7 @@ pub fn reset_cow_branch(
             target_moved_to_backup,
             staging_published,
         );
+        clear_cow_reset_pending_if_rollback_complete(layout, branch, &[&rollback]);
         return Err(err).context(format!("failed to reset COW branch; {rollback}"));
     }
 
@@ -761,6 +836,7 @@ pub fn reset_cow_branch(
                 target_moved_to_backup,
                 staging_published,
             );
+            clear_cow_reset_pending_if_rollback_complete(layout, branch, &[&rollback]);
             return Err(err).context(format!(
                 "failed to snapshot COW reset metadata before finalizing reset; {rollback}"
             ));
@@ -790,10 +866,16 @@ pub fn reset_cow_branch(
             target_moved_to_backup,
             staging_published,
         );
+        clear_cow_reset_pending_if_rollback_complete(
+            layout,
+            branch,
+            &[&metadata_rollback, &branch_rollback],
+        );
         return Err(err).context(format!(
             "failed to finalize COW branch reset metadata; {metadata_rollback}; {branch_rollback}"
         ));
     }
+    clear_cow_reset_pending(layout, branch)?;
     metadata_backup.cleanup();
 
     if let Err(err) = fs::remove_dir_all(&backup) {
@@ -1061,6 +1143,8 @@ pub fn merge_cow_branch(
     if !target_root.join("wp-load.php").is_file() {
         bail!("target branch does not exist: {target}");
     }
+    ensure_no_pending_cow_reset(layout, source)?;
+    ensure_no_pending_cow_reset(layout, target)?;
 
     let source_db = cow_sqlite_db_path(&source_root);
     let target_db = cow_sqlite_db_path(&target_root);
@@ -3677,6 +3761,48 @@ mod tests {
         let db = validate_existing_cow_branch_birth_files(&layout, "feature", &branch_root)
             .expect("existing branch has the required birth files");
         assert_eq!(db, branch_root.join("wp-content/database/.ht.sqlite"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pending_reset_marker_blocks_branch_reuse_and_merge_guards() {
+        let root = std::env::temp_dir().join(format!(
+            "forkpress-pending-reset-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let layout = Layout::new(root.join(".forkpress")).unwrap();
+
+        ensure_no_pending_cow_reset(&layout, "feature").unwrap();
+        write_cow_reset_pending(&layout, "feature", "main").unwrap();
+
+        let err = ensure_no_pending_cow_reset(&layout, "feature")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unfinished reset"));
+        assert!(err.contains("forkpress branch reset feature --from <source>"));
+
+        clear_cow_reset_pending_if_rollback_complete(
+            &layout,
+            "feature",
+            &["restored previous branch contents"],
+        );
+        ensure_no_pending_cow_reset(&layout, "feature").unwrap();
+
+        write_cow_reset_pending(&layout, "feature", "main").unwrap();
+        clear_cow_reset_pending_if_rollback_complete(
+            &layout,
+            "feature",
+            &["rollback incomplete: previous branch backup is missing"],
+        );
+        assert!(cow_reset_pending_path(&layout, "feature").unwrap().exists());
+        clear_cow_reset_pending(&layout, "feature").unwrap();
+        ensure_no_pending_cow_reset(&layout, "feature").unwrap();
+        assert!(!cow_reset_pending_path(&layout, "feature").unwrap().exists());
 
         fs::remove_dir_all(root).unwrap();
     }
