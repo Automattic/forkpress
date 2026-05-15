@@ -172,10 +172,10 @@ if [ "$NEED_PHP_BUILD" = "1" ]; then
   # etc) use that default instead of arm64, producing mixed-arch objects that
   # fail to link. Relaunch the spc subcommands in a native arm64 shell so every
   # vendored lib compiles for arm64 consistently.
-  SPC_RUN=( )
+  SPC_RUN_UNDER_ARM64=0
   if [ "$UNAME_S" = "Darwin" ] && [ "$TRIPLE" = "aarch64-apple-darwin" ] && [ "$(uname -m)" != "arm64" ]; then
     if arch -arm64 /usr/bin/true >/dev/null 2>&1; then
-      SPC_RUN=( arch -arm64 )
+      SPC_RUN_UNDER_ARM64=1
     else
       echo "ERROR: aarch64-apple-darwin dist builds must run in a native arm64 shell." >&2
       echo "       Re-run from Apple Silicon without Rosetta, or use: arch -arm64 scripts/build-dist.sh" >&2
@@ -184,7 +184,11 @@ if [ "$NEED_PHP_BUILD" = "1" ]; then
   fi
 
   run_spc() {
-    "${SPC_RUN[@]}" ./bin/spc "$@"
+    if [ "$SPC_RUN_UNDER_ARM64" = "1" ]; then
+      arch -arm64 ./bin/spc "$@"
+    else
+      ./bin/spc "$@"
+    fi
   }
 
   run_spc doctor --auto-fix

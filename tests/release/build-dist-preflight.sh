@@ -55,5 +55,11 @@ grep -q 'Refusing to let static-php-cli auto-install prerequisites' "$out_file"
 
 grep -q 'TRIPLE" = "aarch64-apple-darwin"' scripts/build-dist.sh
 grep -q 'arch -arm64 /usr/bin/true' scripts/build-dist.sh
+grep -q 'SPC_RUN_UNDER_ARM64=1' scripts/build-dist.sh
+grep -q 'arch -arm64 ./bin/spc "$@"' scripts/build-dist.sh
+if grep -q 'SPC_RUN\[@\]' scripts/build-dist.sh; then
+  echo "build-dist must not expand an empty bash array under macOS bash with set -u" >&2
+  exit 1
+fi
 
 echo "build-dist preflight checks passed"
