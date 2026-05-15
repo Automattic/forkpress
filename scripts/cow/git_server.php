@@ -516,6 +516,7 @@ function cow_git_apply_push_to_branches(
             cow_git_sync_repository($repo, $branches_dir, $branches_to_sync);
         }
         cow_git_commit_apply_transaction($transaction);
+        cow_git_write_branch_list($branches_dir, $branch_list_path);
     } catch (\Throwable $e) {
         cow_git_rollback_apply_transaction($transaction);
         cow_git_cleanup_created_branch_merge_base_artifacts($git_repo_dir, $branch_list_path, $transaction['created']);
