@@ -14468,6 +14468,7 @@ SQL);
     $db->exec("INSERT INTO wp_comments (comment_post_ID, comment_content) VALUES (1, 'Base comment reference')");
     $db->exec("INSERT INTO wp_comments (comment_post_ID, comment_content) VALUES (1, 'Base threaded comment reference')");
     $db->exec("INSERT INTO wp_commentmeta (comment_id, meta_key, meta_value) VALUES (1, '_forkpress_base_comment_ref', 'base comment metadata')");
+    $db->exec('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (1, 20, 0)');
     $db->close();
     copy($band_explicit_ref_base, $band_explicit_ref_source);
     copy($band_explicit_ref_base, $band_explicit_ref_target);
@@ -14530,7 +14531,7 @@ SQL);
     $stmt = $db->prepare("INSERT INTO wp_commentmeta (comment_id, meta_key, meta_value) VALUES (:comment_id, '_forkpress_child_comment_ref', 'child comment metadata behind held explicit post comment')");
     $stmt->bindValue(':comment_id', $band_explicit_ref_child_comment_id, SQLITE3_INTEGER);
     $stmt->execute();
-    $db->exec('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (2, 20, 0)');
+    $db->exec('UPDATE wp_term_relationships SET object_id = 2 WHERE object_id = 1 AND term_taxonomy_id = 20');
     $db->close();
     $band_explicit_ref_result = cow_merge_databases(
         $band_explicit_ref_base,
@@ -14563,6 +14564,7 @@ SQL);
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_comments WHERE comment_parent = $band_explicit_ref_comment_id"), 0, 'threaded comments pointing at a held explicit source comment are not applied automatically');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_commentmeta WHERE comment_id = $band_explicit_ref_child_comment_id"), 0, 'threaded comment metadata behind a held explicit source comment is not applied automatically');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_term_relationships WHERE object_id = 2"), 0, 'term relationships pointing at a held explicit source post are not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_term_relationships WHERE object_id = 1 AND term_taxonomy_id = 20"), 1, 'updated term relationship object IDs pointing at a held explicit source post are not applied automatically');
     assert_same(
         (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND c.table_name = 'wp_postmeta' AND c.conflict_type = 'row-target-constraint'"),
         5,
@@ -14590,7 +14592,7 @@ SQL);
     );
     assert_same(
         (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND c.table_name = 'wp_term_relationships' AND c.conflict_type = 'row-target-constraint'"),
-        1,
+        2,
         'term relationships pointing at a held explicit source post record a reviewable row conflict'
     );
     assert_true(
@@ -14626,7 +14628,7 @@ SQL);
         'updated comment metadata held behind an explicit source post comment explains that the source changed the row'
     );
     assert_true(
-        str_contains((string)scalar($band_explicit_ref_metadata, "SELECT reason FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_term_relationships' AND d.decision = 'target-wins' ORDER BY d.id DESC LIMIT 1"), 'parent post must merge before child row'),
+        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_term_relationships' AND d.decision = 'target-wins' AND d.reason LIKE '%parent post must merge before child row%'") === 2,
         'term relationships held behind an explicit source post explain the missing parent'
     );
 

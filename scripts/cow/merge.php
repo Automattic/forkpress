@@ -4948,17 +4948,24 @@ function cow_merge_wordpress_delete_reference_violation(
     if (!is_int($object_id) && !(is_string($object_id) && preg_match('/^-?\d+$/', (string)$object_id))) {
         return null;
     }
+    if (!is_int($base_term_taxonomy_id) && !(is_string($base_term_taxonomy_id) && preg_match('/^-?\d+$/', (string)$base_term_taxonomy_id))) {
+        return null;
+    }
 
     $stmt = cow_merge_prepare_checked(
         $source,
-        'SELECT * FROM wp_term_relationships WHERE object_id = :object_id',
+        'SELECT * FROM wp_term_relationships WHERE object_id = :object_id OR term_taxonomy_id = :term_taxonomy_id',
         'failed to prepare WordPress source term relationship replacement lookup'
     );
     cow_merge_bind($stmt, ':object_id', (int)$object_id);
+    cow_merge_bind($stmt, ':term_taxonomy_id', (int)$base_term_taxonomy_id);
     $res = cow_merge_execute_checked($stmt, $source, 'failed to inspect WordPress source term relationship replacements');
     try {
         while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
-            if (cow_merge_values_equal($row['term_taxonomy_id'] ?? null, $base_term_taxonomy_id)) {
+            if (
+                cow_merge_values_equal($row['object_id'] ?? null, $object_id)
+                && cow_merge_values_equal($row['term_taxonomy_id'] ?? null, $base_term_taxonomy_id)
+            ) {
                 continue;
             }
             $violation = cow_merge_wordpress_row_reference_violation($source, $target, $meta, $source_branch, $table, $row, 'changed');
