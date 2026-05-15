@@ -13925,6 +13925,14 @@ PHP);
     $stmt->bindValue(':file', '2026/05/source-attached-file.jpg', SQLITE3_TEXT);
     $stmt->bindValue(':metadata', $wp_media_mismatch_metadata, SQLITE3_TEXT);
     $stmt->execute();
+    write_test_file($wp_media_source_root . '/wp-content/uploads/2026/05/source-invalid-metadata.jpg', "source invalid metadata bytes\n");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, guid) VALUES ('Source media invalid attachment metadata', '', 'inherit', 'attachment', 'wp-content/uploads/2026/05/source-invalid-metadata.jpg')");
+    $wp_media_invalid_metadata_id = (int)$db->lastInsertRowID();
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', :file), (:post_id, '_wp_attachment_metadata', :metadata)");
+    $stmt->bindValue(':post_id', $wp_media_invalid_metadata_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':file', '2026/05/source-invalid-metadata.jpg', SQLITE3_TEXT);
+    $stmt->bindValue(':metadata', 'not-a-serialized-attachment-metadata-payload', SQLITE3_TEXT);
+    $stmt->execute();
     $db->close();
     $wp_media_result = cow_merge_branch_state(
         $wp_media_base,
@@ -13939,7 +13947,7 @@ PHP);
     );
     assert_same($wp_media_result['status'], 'completed_with_conflicts', 'WordPress media validator holds missing generated upload files for review');
     assert_same((int)($wp_media_result['plugin_validators'] ?? 0), 1, 'WordPress media validator is discovered from mu-plugins during merge');
-    assert_same((int)($wp_media_result['plugin_validator_conflicts'] ?? 0), 3, 'WordPress media validator records missing files and metadata mismatches');
+    assert_same((int)($wp_media_result['plugin_validator_conflicts'] ?? 0), 4, 'WordPress media validator records missing files and metadata mismatches');
     assert_same(
         scalar($wp_media_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $wp_media_attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-original.jpg',
@@ -13948,6 +13956,7 @@ PHP);
     assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-original.jpg'), 'WordPress media validator keeps the merged original upload file');
     assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-attached-file.jpg'), 'WordPress media validator keeps the mismatched attached upload file');
     assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-metadata-file.jpg'), 'WordPress media validator keeps the mismatched metadata upload file');
+    assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-invalid-metadata.jpg'), 'WordPress media validator keeps the upload for unreadable attachment metadata');
     assert_true(!is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-original-150x150.jpg'), 'WordPress media validator does not invent missing generated upload files');
     assert_true(!is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-missing-original.jpg'), 'WordPress media validator does not invent missing original upload files');
     $wp_media_audit = cow_merge_audit_report($wp_media_metadata, (int)$wp_media_result['run_id'], 10, [
@@ -13968,6 +13977,14 @@ PHP);
     $wp_media_mismatch_preview = (string)($wp_media_mismatch_audit['conflicts'][0]['chosen_preview'] ?? '');
     assert_true(str_contains($wp_media_mismatch_preview, 'source-attached-file.jpg'), 'WordPress media mismatch audit includes the attached file');
     assert_true(str_contains($wp_media_mismatch_preview, 'source-metadata-file.jpg'), 'WordPress media mismatch audit includes the metadata file');
+    $wp_media_invalid_audit = cow_merge_audit_report($wp_media_metadata, (int)$wp_media_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-media-invalid-metadata',
+    ]);
+    assert_same(count($wp_media_invalid_audit['conflicts']), 1, 'WordPress media validator exposes unreadable attachment metadata as a plugin-scoped audit conflict');
+    $wp_media_invalid_preview = (string)($wp_media_invalid_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_true(str_contains($wp_media_invalid_preview, 'source-invalid-metadata.jpg'), 'WordPress media invalid metadata audit includes the attached file');
 
     $wp_block_ref_base_root = $tmp . '/wp-block-ref-validator-files-base';
     $wp_block_ref_source_root = $tmp . '/wp-block-ref-validator-files-source';
