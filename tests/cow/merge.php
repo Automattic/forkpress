@@ -16232,6 +16232,106 @@ PHP);
         'graph validator failure leaves an auditable failed run'
     );
 
+    $serialized_graph_base_root = $tmp . '/serialized-graph-validator-base';
+    $serialized_graph_source_root = $tmp . '/serialized-graph-validator-source';
+    $serialized_graph_target_root = $tmp . '/serialized-graph-validator-target';
+    foreach ([$serialized_graph_base_root, $serialized_graph_source_root, $serialized_graph_target_root] as $root) {
+        mkdir($root . '/wp-content/database', 0777, true);
+        mkdir($root . '/wp-content/uploads', 0777, true);
+    }
+    $serialized_graph_base_db = $serialized_graph_base_root . '/wp-content/database/.ht.sqlite';
+    $serialized_graph_source_db = $serialized_graph_source_root . '/wp-content/database/.ht.sqlite';
+    $serialized_graph_target_db = $serialized_graph_target_root . '/wp-content/database/.ht.sqlite';
+    $serialized_graph_metadata = $tmp . '/.forkpress/cow/merge/serialized-graph-validator-metadata.sqlite';
+    $serialized_graph_file_base = $tmp . '/.forkpress/cow/merge/file-bases/serialized-graph-validator.json';
+    create_base_db($serialized_graph_base_db);
+    $db = open_db($serialized_graph_base_db);
+    $db->exec('CREATE TABLE plugin_serialized_graph_parent (parent_id INTEGER PRIMARY KEY AUTOINCREMENT, graph_serialized TEXT NOT NULL)');
+    $db->exec('CREATE TABLE plugin_serialized_graph_child (child_id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT NOT NULL)');
+    $db->exec("INSERT INTO plugin_serialized_graph_parent (parent_id, graph_serialized) VALUES (1, '" . SQLite3::escapeString(serialize(['child_id' => 1])) . "')");
+    $db->exec("INSERT INTO plugin_serialized_graph_child (child_id, label) VALUES (1, 'base serialized child')");
+    $db->close();
+    copy($serialized_graph_base_db, $serialized_graph_source_db);
+    copy($serialized_graph_base_db, $serialized_graph_target_db);
+    cow_merge_capture_file_base($serialized_graph_base_root, $serialized_graph_file_base);
+    $db = open_db($serialized_graph_source_db);
+    $db->exec("UPDATE plugin_serialized_graph_parent SET graph_serialized = '" . SQLite3::escapeString(serialize(['child_id' => 9999])) . "' WHERE parent_id = 1");
+    $db->close();
+    $db = open_db($serialized_graph_target_db);
+    $db->exec(
+        "INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('active_plugins', '" .
+        SQLite3::escapeString(serialize(['serialized-graph-validator/serialized-graph-validator.php'])) .
+        "', 'yes')"
+    );
+    $db->close();
+    write_test_file($serialized_graph_target_root . '/wp-content/plugins/serialized-graph-validator/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query('SELECT parent_id, graph_serialized FROM plugin_serialized_graph_parent ORDER BY parent_id');
+$findings = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    $graph = @unserialize((string)$row['graph_serialized']);
+    $child_id = is_array($graph) ? (int)($graph['child_id'] ?? 0) : 0;
+    if ($child_id <= 0) {
+        continue;
+    }
+    $stmt = $db->prepare('SELECT COUNT(*) FROM plugin_serialized_graph_child WHERE child_id = :child_id');
+    $stmt->bindValue(':child_id', $child_id, SQLITE3_INTEGER);
+    $count = (int)$stmt->execute()->fetchArray(SQLITE3_NUM)[0];
+    if ($count === 0) {
+        $findings[] = [
+            'plugin' => 'forkpress-serialized-graph-validator',
+            'object' => 'parent:' . $row['parent_id'],
+            'reason' => 'serialized plugin graph references a missing child row',
+            'type' => 'plugin-serialized-graph-missing-child',
+            'tables' => ['plugin_serialized_graph_parent', 'plugin_serialized_graph_child'],
+            'validator' => 'forkpress-serialized-graph-validator@1',
+            'candidate' => [
+                'parent_id' => (int)$row['parent_id'],
+                'field' => 'graph_serialized.child_id',
+                'missing_child_id' => $child_id,
+            ],
+        ];
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $serialized_graph_merge = run_merge_cli([
+        'merge',
+        '--base-db', $serialized_graph_base_db,
+        '--source-db', $serialized_graph_source_db,
+        '--target-db', $serialized_graph_target_db,
+        '--metadata-db', $serialized_graph_metadata,
+        '--source', 'feature-serialized-graph-validator',
+        '--target', 'main',
+        '--base-files', $serialized_graph_file_base,
+        '--source-root', $serialized_graph_source_root,
+        '--target-root', $serialized_graph_target_root,
+    ]);
+    assert_same($serialized_graph_merge['status'], 0, 'serialized plugin graph validator completes the merge with review conflicts');
+    assert_true(str_contains($serialized_graph_merge['output'], 'plugins:   validators=1 conflicts=1'), 'serialized plugin graph validator reports a plugin conflict');
+    assert_same(
+        scalar($serialized_graph_target_db, 'SELECT graph_serialized FROM plugin_serialized_graph_parent WHERE parent_id = 1'),
+        serialize(['child_id' => 9999]),
+        'serialized plugin graph validator keeps the staged source serialized graph for review'
+    );
+    assert_same(
+        scalar($serialized_graph_metadata, "SELECT status FROM merge_runs WHERE source_branch = 'feature-serialized-graph-validator' ORDER BY id DESC LIMIT 1"),
+        'completed_with_conflicts',
+        'serialized plugin graph validator marks the merge run conflicted'
+    );
+    $serialized_graph_audit = cow_merge_audit_report($serialized_graph_metadata, (int)scalar($serialized_graph_metadata, "SELECT id FROM merge_runs WHERE source_branch = 'feature-serialized-graph-validator' ORDER BY id DESC LIMIT 1"), 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-serialized-graph-missing-child',
+    ]);
+    assert_same(count($serialized_graph_audit['conflicts']), 1, 'serialized plugin graph validator records a plugin-scoped audit conflict');
+    assert_true(str_contains($serialized_graph_audit['conflicts'][0]['chosen_preview'], '"missing_child_id":9999'), 'serialized plugin graph validator exposes the missing child ID');
+    assert_true(str_contains($serialized_graph_audit['conflicts'][0]['chosen_preview'], 'graph_serialized.child_id'), 'serialized plugin graph validator exposes the serialized field path');
+
     $graph_conflict_base_root = $tmp . '/graph-validator-conflict-base';
     $graph_conflict_source_root = $tmp . '/graph-validator-conflict-source';
     $graph_conflict_target_root = $tmp . '/graph-validator-conflict-target';
