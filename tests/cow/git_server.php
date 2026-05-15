@@ -859,6 +859,83 @@ assert_same($reconciled_band_count, 1, 'next Git apply finalizes ID-band metadat
 assert_same($reconciled_identity_count, 1, 'next Git apply finalizes row identity metadata after pre-metadata crash');
 cow_git_remove_tree($tmp);
 
+$tmp = sys_get_temp_dir() . '/forkpress-cow-git-created-after-metadata-crash-' . getmypid() . '-' . bin2hex(random_bytes(4));
+$branches = $tmp . '/branches';
+$git = $tmp . '/git';
+$branch_list = $tmp . '/branches.txt';
+mkdir($branches . '/main/wp-content/database', 0777, true);
+file_put_contents($branches . '/main/wp-load.php', "<?php\n");
+file_put_contents($branches . '/main/wp-content/base.txt', "base\n");
+$db = new SQLite3($branches . '/main/wp-content/database/.ht.sqlite');
+$db->exec('CREATE TABLE wp_posts (ID INTEGER PRIMARY KEY AUTOINCREMENT, post_title TEXT)');
+$db->exec("INSERT INTO wp_posts (post_title) VALUES ('Base post')");
+$db->exec('CREATE TABLE plugin_keyless (label TEXT, value TEXT)');
+$db->exec("INSERT INTO plugin_keyless (label, value) VALUES ('Base keyless', 'base')");
+$db->close();
+
+$fs = WordPress\Filesystem\LocalFilesystem::create($git);
+$repo = new WordPress\Git\GitRepository($fs, ['default_branch' => 'main']);
+$repo->set_config_value(['user', 'name'], 'ForkPress COW');
+$repo->set_config_value(['user', 'email'], 'forkpress-cow@local');
+cow_git_sync_repository($repo, $branches);
+cow_git_write_branch_list($branches, $branch_list);
+$main_tip = $repo->get_branch_tip('refs/heads/main');
+$repo->checkout('refs/heads/main');
+$created_tip = $repo->commit([
+    'commit' => [
+        'message' => 'create branch with post-metadata crash',
+        'author' => 'ForkPress Test <forkpress-test@local>',
+        'committer' => 'ForkPress Test <forkpress-test@local>',
+        'parents' => [$main_tip],
+    ],
+    'updates' => ['wordpress/wp-content/git-created-after-metadata-crash.txt' => "created\n"],
+]);
+$repo->set_branch_tip('refs/heads/git-created-after-metadata-crash', $created_tip);
+$crash_result = run_php_code_env(<<<'PHP'
+require_once getenv('FORKPRESS_COW_GIT_SERVER_HELPER');
+
+$git = getenv('FORKPRESS_COW_GIT_REPO');
+$branches = getenv('FORKPRESS_COW_GIT_BRANCHES');
+$branch_list = getenv('FORKPRESS_COW_GIT_BRANCH_LIST');
+$main_tip = getenv('FORKPRESS_COW_GIT_MAIN_TIP');
+$fs = WordPress\Filesystem\LocalFilesystem::create($git);
+$repo = new WordPress\Git\GitRepository($fs, ['default_branch' => 'main']);
+$repo->set_config_value(['user', 'name'], 'ForkPress COW');
+$repo->set_config_value(['user', 'email'], 'forkpress-cow@local');
+cow_git_apply_push_to_branches($repo, $git, $branches, $branches, $branch_list, 'file-copy', '', ['main' => $main_tip]);
+PHP, [
+    'FORKPRESS_COW_GIT_SERVER_HELPER' => realpath(__DIR__ . '/../../scripts/cow/git_server.php'),
+    'FORKPRESS_COW_GIT_REPO' => $git,
+    'FORKPRESS_COW_GIT_BRANCHES' => $branches,
+    'FORKPRESS_COW_GIT_BRANCH_LIST' => $branch_list,
+    'FORKPRESS_COW_GIT_MAIN_TIP' => $main_tip,
+    'FORKPRESS_COW_GIT_TEST_FAILPOINT' => 'after-created-branch-metadata',
+    'FORKPRESS_COW_GIT_TEST_FAILPOINT_ACTION' => 'exit',
+]);
+assert_true($crash_result['status'] !== 0, 'Git-created post-metadata crash terminates the push apply subprocess');
+assert_true(!is_dir($branches . '/git-created-after-metadata-crash'), 'Git-created post-metadata crash does not publish the branch tree');
+$metadata_path = $tmp . '/merge/metadata.sqlite';
+$metadata = new SQLite3($metadata_path);
+$stale_band_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'git-created-after-metadata-crash' AND table_name = 'wp_posts'");
+$stale_identity_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = 'git-created-after-metadata-crash' AND table_name = 'plugin_keyless'");
+$metadata->close();
+assert_same($stale_band_count, 1, 'Git-created post-metadata crash can leave unpublished ID-band metadata');
+assert_same($stale_identity_count, 1, 'Git-created post-metadata crash can leave unpublished row identity metadata');
+cow_git_apply_push_to_branches($repo, $git, $branches, $branches, $branch_list, 'file-copy', '', ['main' => $main_tip]);
+assert_true(is_dir($branches . '/git-created-after-metadata-crash'), 'next Git apply publishes branch after post-metadata crash');
+assert_same(file_get_contents($branches . '/git-created-after-metadata-crash/wp-content/git-created-after-metadata-crash.txt'), "created\n", 'next Git apply preserves pushed WordPress files after post-metadata crash');
+$reconciled_branch_list = (string)file_get_contents($branch_list);
+assert_true(str_contains($reconciled_branch_list, "git-created-after-metadata-crash\n"), 'next Git apply publishes branch list after post-metadata crash');
+$metadata = new SQLite3($metadata_path);
+$reconciled_band_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'git-created-after-metadata-crash' AND table_name = 'wp_posts'");
+$reconciled_identity_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = 'git-created-after-metadata-crash' AND table_name = 'plugin_keyless'");
+$stale_run_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'git-created-after-metadata-crash' AND target_branch = 'git-created-after-metadata-crash' AND status = 'failed'");
+$metadata->close();
+assert_same($reconciled_band_count, 1, 'retry after post-metadata crash has one active ID-band row');
+assert_same($reconciled_identity_count, 1, 'retry after post-metadata crash has one active row identity');
+assert_same($stale_run_count, 0, 'retry after post-metadata crash removes stale unpublished birth runs');
+cow_git_remove_tree($tmp);
+
 $tmp = sys_get_temp_dir() . '/forkpress-cow-git-created-before-branch-list-crash-' . getmypid() . '-' . bin2hex(random_bytes(4));
 $branches = $tmp . '/branches';
 $git = $tmp . '/git';
