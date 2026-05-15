@@ -4604,6 +4604,30 @@ function cow_merge_wordpress_source_postmeta_value(SQLite3 $source, mixed $post_
     }
 }
 
+function cow_merge_wordpress_comment_reference_violation(
+    SQLite3 $source,
+    SQLite3 $target,
+    SQLite3 $meta,
+    string $source_branch,
+    string $child_label,
+    array $comment
+): ?string {
+    $post_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, $child_label, 'wp_posts', 'ID', $comment['comment_post_ID'] ?? null, 'post');
+    if ($post_violation !== null) {
+        return $post_violation;
+    }
+    $comment_parent = $comment['comment_parent'] ?? null;
+    $comment_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, $child_label, 'wp_comments', 'comment_ID', $comment_parent, 'parent comment');
+    if ($comment_violation !== null) {
+        return $comment_violation;
+    }
+    $parent_comment = cow_merge_wordpress_source_row($source, 'wp_comments', 'comment_ID', $comment_parent);
+    if ($parent_comment !== null) {
+        return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, $child_label, 'wp_posts', 'ID', $parent_comment['comment_post_ID'] ?? null, 'parent comment post');
+    }
+    return null;
+}
+
 function cow_merge_wordpress_insert_reference_violation(
     SQLite3 $source,
     SQLite3 $target,
@@ -4636,7 +4660,7 @@ function cow_merge_wordpress_insert_reference_violation(
         return null;
     }
     if ($table === 'wp_comments') {
-        return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_comments row', 'wp_posts', 'ID', $source_row['comment_post_ID'] ?? null, 'post');
+        return cow_merge_wordpress_comment_reference_violation($source, $target, $meta, $source_branch, 'wp_comments row', $source_row);
     }
     if ($table === 'wp_commentmeta') {
         $comment_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_commentmeta row', 'wp_comments', 'comment_ID', $source_row['comment_id'] ?? null, 'comment');
@@ -4645,7 +4669,7 @@ function cow_merge_wordpress_insert_reference_violation(
         }
         $comment = cow_merge_wordpress_source_row($source, 'wp_comments', 'comment_ID', $source_row['comment_id'] ?? null);
         if ($comment !== null) {
-            return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_commentmeta row', 'wp_posts', 'ID', $comment['comment_post_ID'] ?? null, 'post');
+            return cow_merge_wordpress_comment_reference_violation($source, $target, $meta, $source_branch, 'wp_commentmeta row', $comment);
         }
     }
     if ($table === 'wp_term_taxonomy') {
