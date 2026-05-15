@@ -1,6 +1,12 @@
 name: "Release: publish"
 
 on:
+  workflow_dispatch:
+    inputs:
+      release_ref:
+        description: "Commit/ref to publish, for example trunk or 99ce78f"
+        required: true
+        type: string
   pull_request:
     types: [closed]
     branches: ["trunk"]
@@ -32,26 +38,40 @@ jobs:
   preflight:
     name: "Release: publish metadata"
     if: >-
-      startsWith(github.event.pull_request.head.ref, 'release/v') &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.merged == true
+      github.event_name == 'workflow_dispatch' ||
+      (
+        startsWith(github.event.pull_request.head.ref, 'release/v') &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        github.event.pull_request.merged == true
+      )
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.metadata.outputs.version }}
       tag: ${{ steps.metadata.outputs.tag }}
       branch: ${{ steps.metadata.outputs.branch }}
       is_prerelease: ${{ steps.metadata.outputs.is_prerelease }}
-      checkout_ref: ${{ steps.ref.outputs.checkout_ref }}
+      checkout_ref: ${{ steps.resolved_ref.outputs.checkout_ref }}
     steps:
-      - name: Select checkout ref
-        id: ref
+      - name: Select requested ref
+        id: requested_ref
+        env:
+          RELEASE_REF: ${{ inputs.release_ref }}
+          MERGE_COMMIT_SHA: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
-          echo "checkout_ref=${{ github.event.pull_request.merge_commit_sha }}" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            printf 'ref=%s\n' "$RELEASE_REF" >> "$GITHUB_OUTPUT"
+          else
+            printf 'ref=%s\n' "$MERGE_COMMIT_SHA" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: actions/checkout@v4
         with:
-          ref: ${{ steps.ref.outputs.checkout_ref }}
+          ref: ${{ steps.requested_ref.outputs.ref }}
           fetch-depth: 0
+
+      - name: Resolve checkout ref
+        id: resolved_ref
+        run: echo "checkout_ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Validate merged release commit
         run: |
@@ -67,7 +87,14 @@ jobs:
 
       - name: Validate release metadata
         id: metadata
-        run: node scripts/release-validate.mjs --release-branch "${{ github.event.pull_request.head.ref }}" --github-output
+        env:
+          RELEASE_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          args=(--github-output)
+          if [ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]; then
+            args=(--release-branch "$RELEASE_BRANCH" "${args[@]}")
+          fi
+          node scripts/release-validate.mjs "${args[@]}"
 
       - name: Validate tag state
         run: |
@@ -75,8 +102,8 @@ jobs:
           tag="${{ steps.metadata.outputs.tag }}"
           sha="$(git rev-parse HEAD)"
           existing="$(git rev-parse -q --verify "refs/tags/${tag}^{}" 2>/dev/null || true)"
-          if [ -n "$existing" ] && [ "$existing" != "$sha" ]; then
-            echo "Tag $tag already points at $existing, expected $sha." >&2
+          if [ -n "$existing" ]; then
+            echo "Tag $tag already exists at $existing." >&2
             exit 1
           fi
 
@@ -354,10 +381,8 @@ jobs:
           if [ -z "$existing" ]; then
             git tag -a "$tag" "$sha" -m "Release $tag"
             git push origin "$tag"
-          elif [ "$existing" = "$sha" ]; then
-            echo "Tag $tag already points at $sha; continuing."
           else
-            echo "Tag $tag already points at $existing, expected $sha." >&2
+            echo "Tag $tag already exists at $existing." >&2
             exit 1
           fi
 
