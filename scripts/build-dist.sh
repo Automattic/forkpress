@@ -39,6 +39,19 @@ require_static_php_build_tools() {
   exit 1
 }
 
+ensure_static_php_cli_checkout() {
+  mkdir -p "$BUILD_DIR"
+  if [ ! -d "$SPC_DIR/.git" ]; then
+    rm -rf "$SPC_DIR"
+    git clone --no-checkout https://github.com/crazywhalecc/static-php-cli.git "$SPC_DIR"
+  fi
+
+  git -C "$SPC_DIR" fetch --depth 1 origin "$SPC_REF"
+  git -C "$SPC_DIR" checkout --detach FETCH_HEAD
+  git -C "$SPC_DIR" reset --hard FETCH_HEAD
+  printf '%s\n' "$SPC_REF" > "$SPC_REF_MARKER"
+}
+
 # --- Target detection ------------------------------------------------------
 UNAME_S=$(uname -s)
 UNAME_M=$(uname -m)
@@ -72,6 +85,8 @@ fi
 DIST_DIR="${FORKPRESS_DIST_DIR:-$REPO_ROOT/dist/$DIST_NAME}"
 BUILD_DIR="${FORKPRESS_BUILD_DIR:-$REPO_ROOT/.build/$DIST_NAME}"
 SPC_DIR="$BUILD_DIR/static-php-cli"
+SPC_REF="${FORKPRESS_STATIC_PHP_CLI_REF:-8d038f435da7845926ba425dfbae0278cd0e0746}"
+SPC_REF_MARKER="$SPC_DIR/.forkpress-static-php-cli-ref"
 CAS_TARGET_DIR="$BUILD_DIR/cas-ffi-target"
 CAS_LIB_DIR="$CAS_TARGET_DIR/$TRIPLE/release"
 
@@ -121,6 +136,9 @@ if [ -x "$SPC_DIR/buildroot/bin/php" ]; then
         break
       fi
     done
+    if [ ! -f "$SPC_REF_MARKER" ] || [ "$(cat "$SPC_REF_MARKER")" != "$SPC_REF" ]; then
+      NEED_PHP_BUILD=1
+    fi
   else
     rm -f "$SPC_DIR/buildroot/bin/php"
   fi
@@ -129,10 +147,7 @@ fi
 if [ "$NEED_PHP_BUILD" = "1" ]; then
   echo "==> Building static PHP via static-php-cli (first-time: 3-5 minutes)"
   require_static_php_build_tools
-  if [ ! -d "$SPC_DIR" ]; then
-    mkdir -p "$BUILD_DIR"
-    git clone --depth 1 https://github.com/crazywhalecc/static-php-cli.git "$SPC_DIR"
-  fi
+  ensure_static_php_cli_checkout
   cd "$SPC_DIR"
   # --ignore-platform-reqs skips strict checking of the PHP version constraint
   # in static-php-cli's composer.lock (which can float up to PHP >= 8.4 as
