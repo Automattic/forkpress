@@ -47,8 +47,11 @@ Database row/cell and filesystem conflicts are classified as `unchanged`,
 `compatible-target-drift`, `compatible-source-drift`, or `missing`.
 No-primary-key database conflicts can also be classified as `incompatible` when
 the reviewed logical row disappeared and its old physical rowid now belongs to
-a different active sidecar identity. Plugin validator conflicts are classified
-as `unchanged` when the rerun reports the same evidence and
+a different active sidecar identity. Supported WordPress primary-key row
+conflicts, such as `wp_posts` rows whose `post_type` changes after review, are
+also classified as `incompatible` when the key remains but the semantic object
+identity changes. Plugin validator conflicts are classified as `unchanged` when
+the rerun reports the same evidence and
 `replacement-evidence` when the validator reports changed evidence for the same
 plugin object. These classes are audit metadata only. They do not make stale
 reviews apply automatically.
@@ -87,8 +90,8 @@ To support this cleanly, audit metadata should retain:
   stores `unchanged`, `compatible-target-drift`, `compatible-source-drift`,
   `missing`, `incompatible`, `replacement-evidence`, or `unclassified`; future
   work should broaden source-drift coverage into plugin/schema-specific
-  evidence and add broader incompatible logical-identity cases beyond
-  no-primary-key rowid reuse.
+  evidence and add broader incompatible logical-identity cases beyond the
+  currently supported WordPress row fingerprints and no-primary-key rowid reuse.
 - Logical identity fingerprint separate from the raw payload.
 - Re-audit timestamp and merge run id.
 
@@ -104,8 +107,9 @@ forkpress branch merge-resolve conflict <id> --choice source --after-revalidate 
 `--after-revalidate` requires the latest review status to be `needs-action` and
 the current source/target payload hashes to match the latest payloads recorded
 by `merge-audit --revalidate` or `revalidate-reviews`. If the source or target
-drifts again after revalidation, guarded resolution fails and asks for another
-revalidation instead of applying the stale original conflict.
+drifts again after revalidation, or if the latest revalidation was classified
+as `incompatible`, guarded resolution fails and asks for another revalidation
+instead of applying the stale original conflict.
 
 The first implementation supports database cell, database row, and filesystem
 conflicts. Plugin validator conflicts now have a conservative validator-evidence
@@ -125,14 +129,14 @@ after further target drift, guarded source resolution for database cells,
 database rows, and filesystem paths after revalidation, revalidation classifiers
 for stale database row/cell drift, source-drifted database row/cell and
 filesystem conflicts, deleted database target rows, deleted filesystem target
-paths, incompatible no-primary-key rowid replacement, and plugin validator
-reruns that carry reviewed plugin conflicts back to `needs-action` with
-`replacement-evidence` when the validator reports changed evidence for the same
-plugin object.
+paths, incompatible no-primary-key rowid replacement, incompatible `wp_posts`
+semantic replacement by `post_type`, and plugin validator reruns that carry
+reviewed plugin conflicts back to `needs-action` with `replacement-evidence`
+when the validator reports changed evidence for the same plugin object.
 
-Future classifier tests should cover primary-key row conflicts where the target
-row keeps the same key but a higher-level logical fingerprint proves it now
-represents a different object.
+Future classifier tests should cover broader primary-key row conflicts where
+the target row keeps the same key but a higher-level logical fingerprint proves
+it now represents a different object.
 
 The existing stale-resolution tests in `tests/cow/merge.php` should remain.
 They prove stale resolutions are blocked. New tests should prove reviewers get

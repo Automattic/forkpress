@@ -1497,6 +1497,36 @@ function cow_merge_row_values_equal(?array $a, ?array $b, array $columns): bool 
     return true;
 }
 
+function cow_merge_row_semantic_identity(string $table, ?array $row): ?array {
+    if ($row === null) {
+        return null;
+    }
+    $profiles = [
+        'wp_posts' => ['post_type'],
+        'wp_postmeta' => ['post_id', 'meta_key'],
+        'wp_terms' => ['slug'],
+        'wp_term_taxonomy' => ['term_id', 'taxonomy'],
+        'wp_termmeta' => ['term_id', 'meta_key'],
+        'wp_users' => ['user_login'],
+        'wp_usermeta' => ['user_id', 'meta_key'],
+        'wp_comments' => ['comment_post_ID', 'comment_type'],
+        'wp_commentmeta' => ['comment_id', 'meta_key'],
+        'wp_options' => ['option_name'],
+    ];
+    $columns = $profiles[$table] ?? null;
+    if ($columns === null) {
+        return null;
+    }
+    $identity = ['table' => $table];
+    foreach ($columns as $column) {
+        if (!array_key_exists($column, $row)) {
+            return null;
+        }
+        $identity[$column] = $row[$column];
+    }
+    return $identity;
+}
+
 function cow_merge_keyless_row_identity_ambiguous(?array $base_row, ?array $source_row, ?array $target_row, array $columns): bool {
     if ($base_row === null || $source_row === null || $target_row === null || !$columns) {
         return false;
@@ -6826,6 +6856,9 @@ function cow_merge_require_after_revalidate(
     if ($revalidation === null) {
         throw new RuntimeException('--after-revalidate requires merge-audit --revalidate to record the stale target payload before resolving');
     }
+    if ((string)($revalidation['revalidation_class'] ?? '') === 'incompatible') {
+        throw new RuntimeException('latest merge revalidation is incompatible; rerun merge-audit and review manually before resolving');
+    }
     if (!hash_equals((string)$revalidation['source_hash'], hash('sha256', $source_payload))) {
         throw new RuntimeException('source payload changed after latest merge revalidation; rerun merge-audit --revalidate before resolving');
     }
@@ -10589,6 +10622,21 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
                 $fresh = cow_merge_row_values_equal($current, $target_value, cow_merge_all_columns(array_keys($target_value), array_keys($current)));
             }
 
+            $semantic_revalidation_class = null;
+            $semantic_stale_reason = null;
+            if (!$fresh && is_array($current) && is_array($target_value)) {
+                $audited_semantic_identity = cow_merge_row_semantic_identity($table, $target_value);
+                $current_semantic_identity = cow_merge_row_semantic_identity($table, $current);
+                if (
+                    $audited_semantic_identity !== null
+                    && $current_semantic_identity !== null
+                    && !cow_merge_values_equal($audited_semantic_identity, $current_semantic_identity)
+                ) {
+                    $semantic_revalidation_class = 'incompatible';
+                    $semantic_stale_reason = 'target row semantic identity no longer matches audited target payload; rerun merge-audit before resolving';
+                }
+            }
+
             if ($fresh && !$source_fresh) {
                 return [
                     'stale_status' => 'stale',
@@ -10601,12 +10649,12 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
 
             return [
                 'stale_status' => $fresh ? 'fresh' : 'stale',
-                'stale_reason' => $fresh
+                'stale_reason' => $semantic_stale_reason ?? ($fresh
                     ? 'target row still matches audited target payload'
-                    : 'target row no longer matches audited target payload; rerun merge-audit before resolving',
+                    : 'target row no longer matches audited target payload; rerun merge-audit before resolving'),
                 'revalidation_class' => $fresh
                     ? 'unchanged'
-                    : ($identity_replacement_class ?? ($current === null ? $missing_revalidation_class : 'compatible-target-drift')),
+                    : ($semantic_revalidation_class ?? $identity_replacement_class ?? ($current === null ? $missing_revalidation_class : 'compatible-target-drift')),
                 'current_source_payload' => $current_source_payload,
                 'current_target_payload' => cow_merge_payload_json($current),
             ];
