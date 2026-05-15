@@ -13291,6 +13291,7 @@ SQL);
     cow_merge_allocate_autoincrement_bands($band_explicit_source, $band_explicit_metadata, 'feature-band-explicit-source');
     $db = open_db($band_explicit_source);
     $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status) VALUES (2, 'Imported explicit post', 'explicit id import', 'publish')");
+    $db->exec("INSERT INTO plugin_autoinc (id, label) VALUES (2, 'imported explicit plugin row')");
     $db->close();
     $band_explicit_result = cow_merge_databases(
         $band_explicit_base,
@@ -13302,14 +13303,24 @@ SQL);
     );
     assert_same($band_explicit_result['status'], 'completed_with_conflicts', 'explicit source IDs outside the branch band are held for review');
     assert_same((int)scalar($band_explicit_target, "SELECT COUNT(*) FROM wp_posts WHERE ID = 2"), 0, 'out-of-band explicit source ID is not applied automatically');
+    assert_same((int)scalar($band_explicit_target, "SELECT COUNT(*) FROM plugin_autoinc WHERE id = 2"), 0, 'out-of-band explicit plugin AUTOINCREMENT ID is not applied automatically');
     assert_same(
         (int)scalar($band_explicit_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-source' AND c.table_name = 'wp_posts' AND c.conflict_type = 'row-target-constraint'"),
         1,
         'out-of-band explicit source ID records a reviewable row conflict'
     );
+    assert_same(
+        (int)scalar($band_explicit_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-source' AND c.table_name = 'plugin_autoinc' AND c.conflict_type = 'row-target-constraint'"),
+        1,
+        'out-of-band explicit plugin AUTOINCREMENT ID records a reviewable row conflict'
+    );
     assert_true(
         str_contains((string)scalar($band_explicit_metadata, "SELECT reason FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-source' AND d.table_name = 'wp_posts' AND d.decision = 'target-wins' ORDER BY d.id DESC LIMIT 1"), 'outside reserved branch band'),
         'out-of-band explicit source ID explains the reserved-band violation'
+    );
+    assert_true(
+        str_contains((string)scalar($band_explicit_metadata, "SELECT reason FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-source' AND d.table_name = 'plugin_autoinc' AND d.decision = 'target-wins' ORDER BY d.id DESC LIMIT 1"), 'outside reserved branch band'),
+        'out-of-band explicit plugin AUTOINCREMENT ID explains the reserved-band violation'
     );
 
     $plain_graph_base = $tmp . '/plain-ipk-graph-base.sqlite';
