@@ -109,22 +109,11 @@ php scripts/cow/merge.php run-plugin-validator \
   --validator ./vendor/bin/my-plugin-merge-validator
 ```
 
-Automatic runtime validator discovery is still missing.
-
-The lower-level merge helper can also run one explicit validator before
-reporting the merge complete:
+Automatic runtime validator discovery is still missing, but a normal branch
+merge can run one explicit validator before reporting the merge complete:
 
 ```bash
-php scripts/cow/merge.php merge \
-  --base-db .forkpress/cow/merge/bases/feature.sqlite \
-  --source-db branches/feature/wp-content/database/.ht.sqlite \
-  --target-db branches/main/wp-content/database/.ht.sqlite \
-  --metadata-db .forkpress/cow/merge/metadata.sqlite \
-  --source feature \
-  --target main \
-  --base-files .forkpress/cow/merge/file-bases/feature.json \
-  --source-root branches/feature \
-  --target-root branches/main \
+forkpress branch merge feature --into main \
   --plugin-validator ./vendor/bin/my-plugin-merge-validator
 ```
 

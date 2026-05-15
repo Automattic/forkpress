@@ -1042,6 +1042,7 @@ pub fn merge_cow_branch(
     shared: &SharedPaths,
     source: &str,
     target: &str,
+    plugin_validator: Option<&Path>,
 ) -> Result<()> {
     validate_branch_name(source)?;
     validate_branch_name(target)?;
@@ -1093,7 +1094,7 @@ pub fn merge_cow_branch(
         .with_context(|| format!("branch '{source}' is missing required merge metadata"))?;
 
     let metadata_db = cow_merge_metadata_db_path(layout);
-    let args: Vec<OsString> = vec![
+    let mut args: Vec<OsString> = vec![
         "--base-db".into(),
         base_db.as_os_str().to_os_string(),
         "--source-db".into(),
@@ -1113,6 +1114,10 @@ pub fn merge_cow_branch(
         "--target-root".into(),
         target_root.as_os_str().to_os_string(),
     ];
+    if let Some(plugin_validator) = plugin_validator {
+        args.push("--plugin-validator".into());
+        args.push(plugin_validator.as_os_str().to_os_string());
+    }
     run_php_script(
         layout,
         runtime,

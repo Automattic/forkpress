@@ -3044,8 +3044,15 @@ fn cow_branch_command(
             Ok(0)
         }
         "merge" => {
-            let (source, target) = parse_cow_branch_merge_args(&args.args)?;
-            merge_cow_branch(&layout, &runtime, &args.shared, source, &target)?;
+            let merge = parse_cow_branch_merge_args(&args.args)?;
+            merge_cow_branch(
+                &layout,
+                &runtime,
+                &args.shared,
+                &merge.source,
+                &merge.target,
+                merge.plugin_validator.as_deref(),
+            )?;
             Ok(0)
         }
         "recover-crash" | "merge-recover" => {
@@ -3442,7 +3449,7 @@ fn branch_help_text(command: Option<&str>) -> &'static str {
             "Usage: forkpress branch reset <branch> --from <source> [--force]\n\nReplace a branch with a fresh copy of another branch. Resetting main requires --force.\nExample: forkpress branch reset feature --from main\n"
         }
         Some("merge") => {
-            "Usage: forkpress branch merge <source> --into <target>\n\nMerge source branch changes into the target branch and record audit metadata.\nExample: forkpress branch merge feature --into main\n"
+            "Usage: forkpress branch merge <source> --into <target> [--plugin-validator <path>]\n\nMerge source branch changes into the target branch and record audit metadata. Use --plugin-validator to run one plugin validator before reporting completion.\nExample: forkpress branch merge feature --into main\n"
         }
         Some("recover-crash") | Some("merge-recover") => {
             "Usage: forkpress branch recover-crash [--run <id>] [--restore-target-db] [--restore-files] [--format text|json]\n\nInspect or restore pending COW merge crash-recovery artifacts. Run without restore flags to list pending artifacts first.\nExamples:\n  forkpress branch recover-crash\n  forkpress branch recover-crash --restore-target-db --restore-files\n"
@@ -3469,7 +3476,7 @@ fn branch_help_text(command: Option<&str>) -> &'static str {
             "Usage: forkpress branch delete <branch>\n\nDelete a materialized branch. Use with care.\n"
         }
         _ => {
-            "Usage: forkpress branch <command> [options]\n\nCommands:\n  list                         List branches\n  show [branch]                Show branch storage details\n  create <branch> [--from b]   Create a branch; defaults to --from main\n  reset <branch> --from b      Replace a branch from another branch\n  merge <source> --into target Merge one branch into another\n  recover-crash [options]      Inspect or restore pending merge crash artifacts\n  revalidate-reviews [options] Recheck reviewed conflicts for stale target drift\n  run-plugin-validator [opts]  Run one plugin validator for a merge run\n  record-plugin-validator-conflicts [opts]\n                               Record plugin-scoped validator findings\n  merge-audit [options]        Inspect merge audit records\n  merge-review <type> <id>     Mark an audit record as reviewed\n  merge-resolve conflict <id>  Validate or apply a conflict choice\n  delete <branch>              Delete a branch\n\nExamples:\n  forkpress branch list\n  forkpress branch create feature --from main\n  forkpress branch merge feature --into main\n  forkpress branch recover-crash --restore-target-db --restore-files\n  forkpress branch revalidate-reviews --reviewer alice\n  forkpress branch run-plugin-validator --run 12 --validator ./validator.php\n  forkpress branch merge-audit --review --records conflicts\n\nRun `forkpress branch <command> --help` for command-specific help.\n"
+            "Usage: forkpress branch <command> [options]\n\nCommands:\n  list                         List branches\n  show [branch]                Show branch storage details\n  create <branch> [--from b]   Create a branch; defaults to --from main\n  reset <branch> --from b      Replace a branch from another branch\n  merge <source> --into target Merge one branch into another; accepts --plugin-validator\n  recover-crash [options]      Inspect or restore pending merge crash artifacts\n  revalidate-reviews [options] Recheck reviewed conflicts for stale target drift\n  run-plugin-validator [opts]  Run one plugin validator for a merge run\n  record-plugin-validator-conflicts [opts]\n                               Record plugin-scoped validator findings\n  merge-audit [options]        Inspect merge audit records\n  merge-review <type> <id>     Mark an audit record as reviewed\n  merge-resolve conflict <id>  Validate or apply a conflict choice\n  delete <branch>              Delete a branch\n\nExamples:\n  forkpress branch list\n  forkpress branch create feature --from main\n  forkpress branch merge feature --into main\n  forkpress branch merge feature --into main --plugin-validator ./validator.php\n  forkpress branch recover-crash --restore-target-db --restore-files\n  forkpress branch revalidate-reviews --reviewer alice\n  forkpress branch run-plugin-validator --run 12 --validator ./validator.php\n  forkpress branch merge-audit --review --records conflicts\n\nRun `forkpress branch <command> --help` for command-specific help.\n"
         }
     }
 }
@@ -3817,9 +3824,17 @@ fn parse_cow_branch_run_plugin_validator_args(
     })
 }
 
-fn parse_cow_branch_merge_args(args: &[String]) -> Result<(&str, String)> {
-    let mut source: Option<&str> = None;
+#[derive(Debug, PartialEq, Eq)]
+struct CowBranchMergeArgs {
+    source: String,
+    target: String,
+    plugin_validator: Option<PathBuf>,
+}
+
+fn parse_cow_branch_merge_args(args: &[String]) -> Result<CowBranchMergeArgs> {
+    let mut source: Option<String> = None;
     let mut target: Option<String> = None;
+    let mut plugin_validator: Option<PathBuf> = None;
     let mut index = 1;
     while index < args.len() {
         let arg = args[index].as_str();
@@ -3840,6 +3855,28 @@ fn parse_cow_branch_merge_args(args: &[String]) -> Result<(&str, String)> {
                     branch_help_text(Some("merge"))
                 );
             }
+            "--plugin-validator" => {
+                if plugin_validator.is_some() {
+                    bail!(
+                        "`--plugin-validator` may only be provided once.\n\n{}",
+                        branch_help_text(Some("merge"))
+                    );
+                }
+                let Some(value) = args.get(index + 1) else {
+                    bail!(
+                        "`--plugin-validator` requires a path.\n\n{}",
+                        branch_help_text(Some("merge"))
+                    );
+                };
+                if value.is_empty() {
+                    bail!(
+                        "`--plugin-validator` requires a path.\n\n{}",
+                        branch_help_text(Some("merge"))
+                    );
+                }
+                plugin_validator = Some(PathBuf::from(value));
+                index += 2;
+            }
             value if value.starts_with("--into=") => {
                 let value = value.trim_start_matches("--into=");
                 if value.is_empty() {
@@ -3849,6 +3886,23 @@ fn parse_cow_branch_merge_args(args: &[String]) -> Result<(&str, String)> {
                     );
                 }
                 target = Some(value.to_string());
+                index += 1;
+            }
+            value if value.starts_with("--plugin-validator=") => {
+                if plugin_validator.is_some() {
+                    bail!(
+                        "`--plugin-validator` may only be provided once.\n\n{}",
+                        branch_help_text(Some("merge"))
+                    );
+                }
+                let value = value.trim_start_matches("--plugin-validator=");
+                if value.is_empty() {
+                    bail!(
+                        "`--plugin-validator` requires a path.\n\n{}",
+                        branch_help_text(Some("merge"))
+                    );
+                }
+                plugin_validator = Some(PathBuf::from(value));
                 index += 1;
             }
             value if value.starts_with("--") => {
@@ -3864,7 +3918,7 @@ fn parse_cow_branch_merge_args(args: &[String]) -> Result<(&str, String)> {
                         branch_help_text(Some("merge"))
                     );
                 }
-                source = Some(value);
+                source = Some(value.to_string());
                 index += 1;
             }
         }
@@ -3881,7 +3935,11 @@ fn parse_cow_branch_merge_args(args: &[String]) -> Result<(&str, String)> {
             branch_help_text(Some("merge"))
         );
     };
-    Ok((source, target))
+    Ok(CowBranchMergeArgs {
+        source,
+        target,
+        plugin_validator,
+    })
 }
 
 #[cfg(feature = "dev-experiments")]
@@ -4858,6 +4916,8 @@ mod git_helper_tests {
     fn branch_help_lists_plugin_validator_commands() {
         assert!(branch_help_text(None).contains("run-plugin-validator"));
         assert!(branch_help_text(None).contains("record-plugin-validator-conflicts"));
+        assert!(branch_help_text(None).contains("--plugin-validator ./validator.php"));
+        assert!(branch_help_text(Some("merge")).contains("--plugin-validator <path>"));
         assert!(branch_help_text(Some("run-plugin-validator")).contains("--validator"));
         assert!(
             branch_help_text(Some("record-plugin-validator-conflicts")).contains("--findings-file")
@@ -5027,9 +5087,10 @@ mod git_helper_tests {
             "--into".to_string(),
             "main".to_string(),
         ];
-        let (source, target) = parse_cow_branch_merge_args(&args).unwrap();
-        assert_eq!(source, "feature");
-        assert_eq!(target, "main");
+        let parsed = parse_cow_branch_merge_args(&args).unwrap();
+        assert_eq!(parsed.source, "feature");
+        assert_eq!(parsed.target, "main");
+        assert_eq!(parsed.plugin_validator, None);
     }
 
     #[test]
@@ -5040,9 +5101,10 @@ mod git_helper_tests {
             "main".to_string(),
             "feature".to_string(),
         ];
-        let (source, target) = parse_cow_branch_merge_args(&args).unwrap();
-        assert_eq!(source, "feature");
-        assert_eq!(target, "main");
+        let parsed = parse_cow_branch_merge_args(&args).unwrap();
+        assert_eq!(parsed.source, "feature");
+        assert_eq!(parsed.target, "main");
+        assert_eq!(parsed.plugin_validator, None);
     }
 
     #[test]
@@ -5052,9 +5114,75 @@ mod git_helper_tests {
             "feature".to_string(),
             "--into=main".to_string(),
         ];
-        let (source, target) = parse_cow_branch_merge_args(&args).unwrap();
-        assert_eq!(source, "feature");
-        assert_eq!(target, "main");
+        let parsed = parse_cow_branch_merge_args(&args).unwrap();
+        assert_eq!(parsed.source, "feature");
+        assert_eq!(parsed.target, "main");
+        assert_eq!(parsed.plugin_validator, None);
+    }
+
+    #[test]
+    fn parses_branch_merge_plugin_validator_equals_form() {
+        let args = vec![
+            "merge".to_string(),
+            "feature".to_string(),
+            "--into=main".to_string(),
+            "--plugin-validator=./validator.php".to_string(),
+        ];
+        let parsed = parse_cow_branch_merge_args(&args).unwrap();
+        assert_eq!(parsed.source, "feature");
+        assert_eq!(parsed.target, "main");
+        assert_eq!(
+            parsed.plugin_validator.as_deref(),
+            Some(Path::new("./validator.php"))
+        );
+    }
+
+    #[test]
+    fn parses_branch_merge_plugin_validator_space_form() {
+        let args = vec![
+            "merge".to_string(),
+            "--plugin-validator".to_string(),
+            "./validator.php".to_string(),
+            "feature".to_string(),
+            "--into".to_string(),
+            "main".to_string(),
+        ];
+        let parsed = parse_cow_branch_merge_args(&args).unwrap();
+        assert_eq!(parsed.source, "feature");
+        assert_eq!(parsed.target, "main");
+        assert_eq!(
+            parsed.plugin_validator.as_deref(),
+            Some(Path::new("./validator.php"))
+        );
+    }
+
+    #[test]
+    fn branch_merge_errors_on_empty_plugin_validator() {
+        let args = vec![
+            "merge".to_string(),
+            "feature".to_string(),
+            "--into=main".to_string(),
+            "--plugin-validator=".to_string(),
+        ];
+        let err = parse_cow_branch_merge_args(&args).unwrap_err().to_string();
+        assert!(err.contains("--plugin-validator"));
+        assert!(err.contains("requires a path"));
+        assert!(err.contains("forkpress branch merge"));
+    }
+
+    #[test]
+    fn branch_merge_errors_on_duplicate_plugin_validator() {
+        let args = vec![
+            "merge".to_string(),
+            "feature".to_string(),
+            "--into=main".to_string(),
+            "--plugin-validator=./first.php".to_string(),
+            "--plugin-validator=./second.php".to_string(),
+        ];
+        let err = parse_cow_branch_merge_args(&args).unwrap_err().to_string();
+        assert!(err.contains("--plugin-validator"));
+        assert!(err.contains("only be provided once"));
+        assert!(err.contains("forkpress branch merge"));
     }
 
     #[test]
