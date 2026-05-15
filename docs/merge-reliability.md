@@ -84,3 +84,24 @@ workflow.
 
 See `docs/merge-crash-consistency.md` for the merge crash-consistency boundary
 map.
+
+## Follow-Up Work
+
+PR #46 should be treated as a merge-reliability hardening milestone, not the
+final proof that all merges are automatic or fully reliable. The next work
+should stay focused on these areas:
+
+- Add validators for real plugins with known cross-table, serialized, JSON, and
+  file graphs. Add plugin-owned merge drivers only when the plugin can prove a
+  deterministic repair.
+- Build broader external kill harnesses for public Git push/serve entry points,
+  then verify recovery from a fresh process after each interruption.
+- Expand explicit-ID/import handling beyond the currently covered
+  AUTOINCREMENT row insert/rewrite and known WordPress reference cases.
+- Add richer plugin/schema stale-audit evidence and guarded resolution flows
+  where the plugin or schema planner can prove the reviewed choice is still
+  valid.
+- Improve deterministic schema dependency planning for safe view/trigger
+  reorderings while keeping cyclic or semantic ambiguity review-only.
+- Keep aarch64 macOS release artifacts and APFS sparsebundle E2E runs green
+  before treating Apple Silicon merge/release behavior as trustworthy.
