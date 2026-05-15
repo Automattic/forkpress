@@ -14,6 +14,7 @@ on:
       - "scripts/cow/**"
       - "scripts/git/**"
       - "scripts/shared/**"
+      - "tests/release/**"
       - "installer/windows/**"
       - "wp-plugin/**"
       - "vendor/**"
@@ -49,6 +50,10 @@ jobs:
       WINDOWS_CODESIGN_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Release preflight checks
+        if: matrix.os != 'windows'
+        run: make test-release
 
       - name: Install toolchain (mac)
         if: matrix.os == 'darwin'

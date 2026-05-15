@@ -45,6 +45,9 @@ jobs:
       - name: Rust unit tests (dev experiments)
         run: FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli --features dev-experiments --bin forkpress-dev
 
+      - name: Release preflight checks
+        run: make test-release
+
       - name: Build production dist bundle
         run: scripts/build-dist.sh
         env:
@@ -98,6 +101,9 @@ jobs:
 
       - name: Rust unit tests (dev experiments)
         run: FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test --target ${{ matrix.target }} -p forkpress-cli --features dev-experiments --bin forkpress-dev
+
+      - name: Release preflight checks
+        run: make test-release
 
       - name: Install runtime build tools
         run: |
