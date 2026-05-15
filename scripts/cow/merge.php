@@ -10637,11 +10637,26 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
                 }
             }
 
+            $source_semantic_revalidation_class = null;
+            $source_semantic_stale_reason = null;
+            if (!$source_fresh && is_array($source_current_row) && is_array($source_value)) {
+                $audited_source_semantic_identity = cow_merge_row_semantic_identity($table, $source_value);
+                $current_source_semantic_identity = cow_merge_row_semantic_identity($table, $source_current_row);
+                if (
+                    $audited_source_semantic_identity !== null
+                    && $current_source_semantic_identity !== null
+                    && !cow_merge_values_equal($audited_source_semantic_identity, $current_source_semantic_identity)
+                ) {
+                    $source_semantic_revalidation_class = 'incompatible';
+                    $source_semantic_stale_reason = 'source row semantic identity no longer matches audited source payload; rerun merge-audit before resolving';
+                }
+            }
+
             if ($fresh && !$source_fresh) {
                 return [
                     'stale_status' => 'stale',
-                    'stale_reason' => 'source row no longer matches audited source payload; rerun merge-audit before resolving',
-                    'revalidation_class' => 'compatible-source-drift',
+                    'stale_reason' => $source_semantic_stale_reason ?? 'source row no longer matches audited source payload; rerun merge-audit before resolving',
+                    'revalidation_class' => $source_semantic_revalidation_class ?? 'compatible-source-drift',
                     'current_source_payload' => $current_source_payload,
                     'current_target_payload' => cow_merge_payload_json($current),
                 ];

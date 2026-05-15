@@ -3489,6 +3489,49 @@ SQL);
         'after-revalidate row resolution fails if the source row changed after review'
     );
 
+    $source_semantic_base = $tmp . '/source-semantic-base.sqlite';
+    $source_semantic_source = $tmp . '/source-semantic-source.sqlite';
+    $source_semantic_target = $tmp . '/source-semantic-target.sqlite';
+    $source_semantic_metadata = $tmp . '/.forkpress/cow/merge/source-semantic-metadata.sqlite';
+    foreach ([$source_semantic_base, $source_semantic_source, $source_semantic_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE wp_posts (ID INTEGER PRIMARY KEY, post_type TEXT, post_title TEXT, post_content TEXT)');
+        $db->close();
+    }
+    $db = open_db($source_semantic_source);
+    $db->exec("INSERT INTO wp_posts (ID, post_type, post_title, post_content) VALUES (110, 'page', 'Source reviewed page', 'source reviewed page content')");
+    $db->close();
+    $db = open_db($source_semantic_target);
+    $db->exec("INSERT INTO wp_posts (ID, post_type, post_title, post_content) VALUES (110, 'page', 'Target reviewed page', 'target reviewed page content')");
+    $db->close();
+    $source_semantic_merge = cow_merge_databases($source_semantic_base, $source_semantic_source, $source_semantic_target, $source_semantic_metadata, 'feature-source-semantic-review', 'main');
+    $source_semantic_run_id = (int)$source_semantic_merge['run_id'];
+    assert_same($source_semantic_merge['status'], 'completed_with_conflicts', 'source semantic identity fixture starts with a same-ID row conflict');
+    $source_semantic_conflict_id = (int)scalar($source_semantic_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'wp_posts' AND conflict_type = 'row-insert-collision'");
+    cow_merge_review_record(
+        $source_semantic_metadata,
+        'conflict',
+        $source_semantic_conflict_id,
+        'reviewed',
+        'Apply reviewed source page only if it is still the same semantic object.',
+        'cow-test'
+    );
+    $db = open_db($source_semantic_source);
+    $db->exec("UPDATE wp_posts SET post_type = 'attachment', post_title = 'Source replacement attachment', post_content = 'source replacement attachment content' WHERE ID = 110");
+    $db->close();
+    $source_semantic_revalidated = cow_merge_revalidate_reviewed_conflicts($source_semantic_metadata, $source_semantic_run_id, 'cow-revalidate');
+    assert_same($source_semantic_revalidated['carried'], 1, 'review revalidation carries semantically replaced source rows to needs-action');
+    assert_same(scalar($source_semantic_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $source_semantic_conflict_id ORDER BY id DESC LIMIT 1"), 'incompatible', 'source row revalidation classifies changed post_type as incompatible');
+    $source_semantic_audit = cow_merge_audit_report($source_semantic_metadata, $source_semantic_run_id, 10, ['records' => 'conflicts']);
+    $source_semantic_conflicts = array_values(array_filter($source_semantic_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $source_semantic_conflict_id));
+    assert_same($source_semantic_conflicts[0]['revalidation_class'] ?? null, 'incompatible', 'source row audit exposes incompatible semantic replacement');
+    assert_true(str_contains((string)($source_semantic_conflicts[0]['stale_reason'] ?? ''), 'source row semantic identity'), 'source row stale reason explains semantic identity drift');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($source_semantic_metadata, $source_semantic_conflict_id, 'source', true, 'Do not apply reviewed source page after source replacement.', 'cow-test', true),
+        'latest merge revalidation is incompatible',
+        'after-revalidate blocks source resolution from an incompatible source semantic replacement'
+    );
+
     $row_resolution_rollback_base = $tmp . '/row-resolution-rollback-base.sqlite';
     $row_resolution_rollback_source = $tmp . '/row-resolution-rollback-source.sqlite';
     $row_resolution_rollback_target = $tmp . '/row-resolution-rollback-target.sqlite';
