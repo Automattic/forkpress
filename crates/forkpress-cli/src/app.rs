@@ -3111,7 +3111,9 @@ fn cow_branch_command(
             let mut id_band_skips = false;
             let mut target_kept = false;
             let mut review = false;
+            let mut revalidate = false;
             let mut review_status: Option<String> = None;
+            let mut reviewer: Option<String> = None;
             let mut resolution_status: Option<String> = None;
             let mut group_by = "none".to_string();
             let mut index = 1;
@@ -3194,6 +3196,10 @@ fn cow_branch_command(
                         review = true;
                         index += 1;
                     }
+                    "--revalidate" => {
+                        revalidate = true;
+                        index += 1;
+                    }
                     "--review-status" => {
                         let Some(value) = args.args.get(index + 1) else {
                             bail!(
@@ -3201,6 +3207,13 @@ fn cow_branch_command(
                             );
                         };
                         review_status = Some(value.clone());
+                        index += 2;
+                    }
+                    "--reviewer" => {
+                        let Some(value) = args.args.get(index + 1) else {
+                            bail!("--reviewer requires a name");
+                        };
+                        reviewer = Some(value.clone());
                         index += 2;
                     }
                     "--resolution-status" => {
@@ -3223,6 +3236,17 @@ fn cow_branch_command(
                         bail!("unsupported argument for `forkpress branch merge-audit`: {other}")
                     }
                 }
+            }
+            if revalidate {
+                revalidate_cow_merge_reviews(
+                    &layout,
+                    &runtime,
+                    &args.shared,
+                    run_id.as_deref(),
+                    reviewer.as_deref(),
+                    &format,
+                )?;
+                return Ok(0);
             }
             inspect_cow_merge_audit(
                 &layout,
@@ -3433,7 +3457,7 @@ fn branch_help_text(command: Option<&str>) -> &'static str {
             "Usage: forkpress branch run-plugin-validator --run <id> --validator <path> [--format text|json]\n\nRun one plugin validator and record emitted findings as plugin-scoped merge conflicts.\n"
         }
         Some("merge-audit") | Some("audit") => {
-            "Usage: forkpress branch merge-audit [options]\n\nInspect merge runs, decisions, conflicts, resolutions, and rollback failures.\nCommon options: --format text|json, --run <id>, --scope all|db|files, --records all|conflicts|decisions|resolutions|rollback-failures, --review, --review-status <status>.\n"
+            "Usage: forkpress branch merge-audit [options]\n\nInspect merge runs, decisions, conflicts, resolutions, and rollback failures. Use --revalidate to carry stale reviewed conflicts back into needs-action before resolving.\nCommon options: --format text|json, --run <id>, --scope all|db|files, --records all|conflicts|decisions|resolutions|rollback-failures, --review, --review-status <status>, --revalidate.\n"
         }
         Some("merge-review") => {
             "Usage: forkpress branch merge-review <conflict|decision|resolution> <id> --status <pending|needs-action|reviewed> --note <text> [--reviewer <name>]\n\nAttach review metadata to an audit record.\n"
@@ -4827,6 +4851,7 @@ mod git_helper_tests {
         assert!(branch_help_text(None).contains("revalidate-reviews"));
         assert!(branch_help_text(Some("revalidate-reviews")).contains("--reviewer"));
         assert!(branch_help_text(Some("revalidate-reviews")).contains("needs-action"));
+        assert!(branch_help_text(Some("merge-audit")).contains("--revalidate"));
     }
 
     #[test]
@@ -5098,6 +5123,41 @@ mod git_helper_tests {
                 "file-unsafe-symlink".to_string(),
                 "--path-prefix".to_string(),
                 "wp-content/uploads".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_branch_merge_audit_revalidate_alias_args() {
+        let cli = Cli::try_parse_from([
+            "forkpress",
+            "branch",
+            "--work-dir",
+            ".forkpress",
+            "merge-audit",
+            "--revalidate",
+            "--run",
+            "7",
+            "--reviewer",
+            "alice",
+            "--format",
+            "json",
+        ])
+        .unwrap();
+        let Commands::Branch(args) = cli.command else {
+            panic!("expected branch command");
+        };
+        assert_eq!(
+            args.args,
+            vec![
+                "merge-audit".to_string(),
+                "--revalidate".to_string(),
+                "--run".to_string(),
+                "7".to_string(),
+                "--reviewer".to_string(),
+                "alice".to_string(),
+                "--format".to_string(),
+                "json".to_string(),
             ]
         );
     }

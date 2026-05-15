@@ -33,6 +33,7 @@ from silently overwriting newer target work.
 forkpress branch revalidate-reviews
 forkpress branch revalidate-reviews --run 12 --reviewer alice
 forkpress branch revalidate-reviews --format json
+forkpress branch merge-audit --revalidate --run 12 --reviewer alice
 forkpress branch merge-audit --review --review-status needs-action
 ```
 
@@ -81,13 +82,8 @@ unrelated edits from “same object, newer title”.
 ## Future CLI Shape
 
 ```bash
-forkpress branch merge-audit --revalidate --format json
-forkpress branch merge-audit --revalidate --review-status needs-action
 forkpress branch resolve-conflict <id> --choice source --after-revalidate
 ```
-
-`--revalidate` should not mutate the target branch. It should only write
-review metadata and replacement links into the merge metadata database.
 
 `--after-revalidate` should require that the target/source payloads match the
 latest revalidated audit record, not the stale original record.
