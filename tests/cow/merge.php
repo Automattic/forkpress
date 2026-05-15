@@ -17657,6 +17657,54 @@ PHP);
     assert_same(count($plugin_runner_audit['conflicts']), 1, 'plugin validator runner conflicts are visible in plugin audit scope');
     assert_true(str_contains($plugin_runner_audit['conflicts'][0]['chosen_preview'], 'feature-plugin-graph-source'), 'plugin validator runner passes source branch context to validators');
 
+    $plugin_validator_runner_contradictory_valid = $tmp . '/plugin-validator-runner-contradictory-valid.php';
+    write_test_file($plugin_validator_runner_contradictory_valid, <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'valid',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-graph',
+            'object' => 'graph:contradictory-valid',
+            'reason' => 'valid status must not carry findings',
+            'type' => 'plugin-contradictory-valid',
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $plugin_cli_run_validator_contradictory_valid = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', (string)$plugin_graph_result['run_id'],
+        '--validator', $plugin_validator_runner_contradictory_valid,
+        '--format', 'json',
+    ]);
+    assert_true($plugin_cli_run_validator_contradictory_valid['status'] !== 0, 'plugin validator runner CLI rejects valid status with findings');
+    assert_true(str_contains($plugin_cli_run_validator_contradictory_valid['output'], 'status valid with findings'), 'plugin validator runner CLI explains contradictory valid findings');
+    assert_same(
+        (int)scalar($plugin_graph_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE conflict_type = 'plugin-contradictory-valid'"),
+        0,
+        'plugin validator runner does not record contradictory valid findings'
+    );
+
+    $plugin_validator_runner_empty_conflicts = $tmp . '/plugin-validator-runner-empty-conflicts.php';
+    write_test_file($plugin_validator_runner_empty_conflicts, <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $plugin_cli_run_validator_empty_conflicts = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $plugin_graph_metadata,
+        '--run', (string)$plugin_graph_result['run_id'],
+        '--validator', $plugin_validator_runner_empty_conflicts,
+        '--format', 'json',
+    ]);
+    assert_true($plugin_cli_run_validator_empty_conflicts['status'] !== 0, 'plugin validator runner CLI rejects conflicts status without findings');
+    assert_true(str_contains($plugin_cli_run_validator_empty_conflicts['output'], 'status conflicts without findings'), 'plugin validator runner CLI explains empty conflicts status');
+
     $plugin_validator_file_base_root = $tmp . '/plugin-validator-file-base';
     $plugin_validator_file_source_root = $tmp . '/plugin-validator-file-source';
     $plugin_validator_file_target_root = $tmp . '/plugin-validator-file-target';

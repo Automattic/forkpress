@@ -302,12 +302,21 @@ branch_ui_nonce() {
   local branch="$1"
   local field="$2"
   local out="$3"
+  local cookie_jar="${4:-}"
   local host
   host="$(branch_host "$branch")"
 
-  curl -sS -H "Host: $host" \
-    "http://127.0.0.1:$PORT/wp-admin/" \
-    -o "$out"
+  if [ -n "$cookie_jar" ]; then
+    : > "$cookie_jar"
+    curl -sS -c "$cookie_jar" -b "$cookie_jar" \
+      -H "Host: $host" \
+      "http://127.0.0.1:$PORT/wp-admin/" \
+      -o "$out"
+  else
+    curl -sS -H "Host: $host" \
+      "http://127.0.0.1:$PORT/wp-admin/" \
+      -o "$out"
+  fi
 
   node - <<'NODE' "$out" "$field"
 const fs = require('fs');
@@ -954,9 +963,11 @@ autoinc_runtime_request main init "$TMP/autoinc-main-init.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(($data["max_id"] ?? null) === 1 ? 0 : 1);' "$TMP/autoinc-main-init.json"
 
 log_step "create and merge branch through WordPress admin UI"
-UI_CREATE_NONCE="$(branch_ui_nonce main createNonce "$TMP/ui-create-admin.html")"
+UI_CREATE_COOKIES="$TMP/ui-create-cookies.txt"
+UI_CREATE_NONCE="$(branch_ui_nonce main createNonce "$TMP/ui-create-admin.html" "$UI_CREATE_COOKIES")"
 UI_CREATE_HTTP="$(
   curl -sS -o "$TMP/ui-create.json" -w '%{http_code}' \
+    -b "$UI_CREATE_COOKIES" \
     -H "Host: wp.localhost:$PORT" \
     -H "Accept: application/json" \
     -H "X-ForkPress-Async: 1" \
@@ -983,9 +994,11 @@ php -r '$meta = new SQLite3($argv[1]); $branch = new SQLite3($argv[2]); $band = 
 UI_MERGE_TITLE="UI branch merge $(date +%s)"
 create_branch_post ui-created "$UI_MERGE_TITLE"
 echo "merged through WP branch UI" > "$WORK/ui-created/wp-content/ui-created-file.txt"
-UI_MERGE_NONCE="$(branch_ui_nonce main mergeNonce "$TMP/ui-merge-admin.html")"
+UI_MERGE_COOKIES="$TMP/ui-merge-cookies.txt"
+UI_MERGE_NONCE="$(branch_ui_nonce main mergeNonce "$TMP/ui-merge-admin.html" "$UI_MERGE_COOKIES")"
 UI_MERGE_HTTP="$(
   curl -sS -o "$TMP/ui-merge.json" -w '%{http_code}' \
+    -b "$UI_MERGE_COOKIES" \
     -H "Host: wp.localhost:$PORT" \
     -H "Accept: application/json" \
     -H "X-ForkPress-Async: 1" \
