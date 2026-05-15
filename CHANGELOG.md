@@ -136,6 +136,7 @@
 - Added focused `forkpress branch merge-audit --records rollback-failures` inspection for failed rollback artifact records.
 - Added runtime-backed COW e2e coverage for the real `forkpress branch merge-audit --records rollback-failures` CLI route.
 - Moved runtime-backed COW `forkpress agents` e2e coverage to the early single-branch Git-server phase, avoiding multi-minute all-branch Git resyncs after the mergeback-heavy branch matrix accumulates.
+- Added runtime-backed COW e2e coverage for branching a registered remote-site cache, allocating AUTOINCREMENT bands on that branch, and merging it back to `main`.
 - Recorded known-good checkpoint `known-good/cow-mergeback-schema-rollback-stability-2026-05-14` for the accumulated generic schema dependency validation and rollback/audit atomicity work after the identity-stability checkpoint.
 - Recorded known-good checkpoint `known-good/cow-mergeback-rollback-atomicity-2026-05-14` for the accumulated DB/filesystem resolver, sidecar identity, AUTOINCREMENT, and direct merge rollback/audit atomicity work after the schema rollback checkpoint.
 - Tightened filesystem conflict resolution rollback so metadata transaction failures restore target paths, preserve rollback artifacts if restore fails, and do not record partial resolution metadata.

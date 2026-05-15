@@ -62,6 +62,21 @@ The issue #2 workflow is Git/worktree based:
 
 ## Tests
 
+## Verification Budget
+
+Default to the smallest verification that proves the touched behavior. Run
+focused unit tests, syntax checks, and changed-file lint while iterating.
+
+Run full verification only at natural integration points: before creating a
+known-good tag, before asking for PR review, after touching build/release/test
+infrastructure, after changing shared runtime behavior, or after several
+focused slices have accumulated. Do not run full CI-equivalent suites after
+every small change.
+
+Do not poll remote CI from an implementation session unless the active task is
+explicitly to diagnose CI. Check once after pushing, record the result, and
+continue with local work or a focused fix.
+
 Run Rust tests with:
 
 ```bash

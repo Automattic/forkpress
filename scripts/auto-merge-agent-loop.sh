@@ -138,6 +138,14 @@ Hard constraints:
 - Keep context lean. Treat the issue and local files as durable state, but use
   targeted `rg`, `sed`, `git`, and focused log reads instead of broad history
   dumps whenever possible.
+- Use a verification budget. While iterating, run the smallest relevant checks
+  for the files and behavior touched. Do not run full workspace, release, or
+  CI-equivalent suites after every small edit. Save broad verification for
+  known-good tags, review handoffs, build/release/test infrastructure changes,
+  shared runtime changes, or after several focused slices have accumulated.
+- Do not poll remote CI from this implementation run unless the active task is
+  explicitly to diagnose CI. Check once after pushing, record the result, and
+  continue with local implementation or a focused fix.
 - For unusually important architecture, data-loss, security, or irreversible
   product decisions, write the decision reasoning effort value to the next
   reasoning request file named in the run metadata below. The next iteration
