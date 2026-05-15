@@ -14259,6 +14259,83 @@ PHP);
         'automatically discovered validator records plugin-scoped conflicts during merge'
     );
 
+    $graph_validator_base_root = $tmp . '/graph-validator-base';
+    $graph_validator_source_root = $tmp . '/graph-validator-source';
+    $graph_validator_target_root = $tmp . '/graph-validator-target';
+    foreach ([$graph_validator_base_root, $graph_validator_source_root, $graph_validator_target_root] as $root) {
+        mkdir($root . '/wp-content/database', 0777, true);
+        mkdir($root . '/wp-content/uploads', 0777, true);
+    }
+    $graph_validator_base_db = $graph_validator_base_root . '/wp-content/database/.ht.sqlite';
+    $graph_validator_source_db = $graph_validator_source_root . '/wp-content/database/.ht.sqlite';
+    $graph_validator_target_db = $graph_validator_target_root . '/wp-content/database/.ht.sqlite';
+    $graph_validator_metadata = $tmp . '/.forkpress/cow/merge/graph-validator-metadata.sqlite';
+    $graph_validator_file_base = $tmp . '/.forkpress/cow/merge/file-bases/graph-validator.json';
+    create_base_db($graph_validator_base_db);
+    $db = open_db($graph_validator_base_db);
+    $db->exec('CREATE TABLE plugin_graph_validator_parent (parent_id INTEGER PRIMARY KEY AUTOINCREMENT, graph_json TEXT)');
+    $db->exec('CREATE TABLE plugin_graph_validator_child (child_id INTEGER PRIMARY KEY AUTOINCREMENT, parent_id INTEGER, label TEXT)');
+    $db->exec("INSERT INTO plugin_graph_validator_parent (parent_id, graph_json) VALUES (1, '" . SQLite3::escapeString(json_encode(['child_id' => 1], JSON_UNESCAPED_SLASHES)) . "')");
+    $db->exec("INSERT INTO plugin_graph_validator_child (child_id, parent_id, label) VALUES (1, 1, 'base child')");
+    $db->close();
+    copy($graph_validator_base_db, $graph_validator_source_db);
+    copy($graph_validator_base_db, $graph_validator_target_db);
+    cow_merge_capture_file_base($graph_validator_base_root, $graph_validator_file_base);
+    $db = open_db($graph_validator_source_db);
+    $db->exec("UPDATE plugin_graph_validator_parent SET graph_json = '" . SQLite3::escapeString(json_encode(['child_id' => 9999], JSON_UNESCAPED_SLASHES)) . "' WHERE parent_id = 1");
+    $db->close();
+    $db = open_db($graph_validator_target_db);
+    $db->exec(
+        "INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('active_plugins', '" .
+        SQLite3::escapeString(serialize(['graph-validator/graph-validator.php'])) .
+        "', 'yes')"
+    );
+    $db->close();
+    write_test_file($graph_validator_target_root . '/wp-content/plugins/graph-validator/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query('SELECT parent_id, graph_json FROM plugin_graph_validator_parent ORDER BY parent_id');
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    $graph = json_decode((string)$row['graph_json'], true);
+    $child_id = is_array($graph) ? (int)($graph['child_id'] ?? 0) : 0;
+    if ($child_id <= 0) {
+        continue;
+    }
+    $stmt = $db->prepare('SELECT COUNT(*) FROM plugin_graph_validator_child WHERE child_id = :child_id');
+    $stmt->bindValue(':child_id', $child_id, SQLITE3_INTEGER);
+    $count = (int)$stmt->execute()->fetchArray(SQLITE3_NUM)[0];
+    if ($count === 0) {
+        echo json_encode([
+            'status' => 'failed',
+            'reason' => 'plugin graph parent ' . $row['parent_id'] . ' references missing child ' . $child_id,
+            'findings' => [],
+        ], JSON_UNESCAPED_SLASHES);
+        exit(0);
+    }
+}
+echo json_encode(['status' => 'valid', 'findings' => []], JSON_UNESCAPED_SLASHES);
+PHP);
+    $graph_validator_merge = run_merge_cli([
+        'merge',
+        '--base-db', $graph_validator_base_db,
+        '--source-db', $graph_validator_source_db,
+        '--target-db', $graph_validator_target_db,
+        '--metadata-db', $graph_validator_metadata,
+        '--source', 'feature-graph-validator',
+        '--target', 'main',
+        '--base-files', $graph_validator_file_base,
+        '--source-root', $graph_validator_source_root,
+        '--target-root', $graph_validator_target_root,
+    ]);
+    assert_true($graph_validator_merge['status'] !== 0, 'automatically discovered graph validator can abort incoherent plugin candidates');
+    assert_true(str_contains($graph_validator_merge['output'], 'references missing child 9999'), 'graph validator failure explains the broken plugin reference');
+    assert_same(scalar($graph_validator_target_db, 'SELECT graph_json FROM plugin_graph_validator_parent WHERE parent_id = 1'), json_encode(['child_id' => 1], JSON_UNESCAPED_SLASHES), 'graph validator failure rolls back staged plugin graph changes');
+    assert_same(
+        (int)scalar($graph_validator_metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-graph-validator' AND status = 'failed' AND failure_reason LIKE '%references missing child 9999%'"),
+        1,
+        'graph validator failure leaves an auditable failed run'
+    );
+
     $inline_validator_base_root = $tmp . '/inline-validator-base';
     $inline_validator_source_root = $tmp . '/inline-validator-source';
     $inline_validator_target_root = $tmp . '/inline-validator-target';

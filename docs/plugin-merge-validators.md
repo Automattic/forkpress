@@ -182,6 +182,8 @@ The clean branch-ID-band case is covered by:
 The PHP unit suite also covers a simulated broken-reference validator finding
 for that graph, plugin-scoped audit output, review metadata, automatic
 validator discovery from active plugin and mu-plugin locations, inactive
-plugin exclusion, and automatic validator execution during a normal merge.
-Real broken-reference and target-conflicting plugin validators still need
-plugin-owned fixtures before they can be checked during an actual merge.
+plugin exclusion, automatic validator execution during a normal merge, and a
+discovered custom-table graph validator that aborts and rolls back a candidate
+whose JSON points at a missing child row. Target-conflicting plugin validators
+still need plugin-owned fixtures before they can be checked during an actual
+merge.
