@@ -308,14 +308,27 @@ branch_ui_nonce() {
 
   if [ -n "$cookie_jar" ]; then
     : > "$cookie_jar"
-    curl -sS -c "$cookie_jar" -b "$cookie_jar" \
+    if ! curl -sS -L -c "$cookie_jar" -b "$cookie_jar" \
+      -H "Host: $host" \
+      "http://127.0.0.1:$PORT/wp-login.php" \
+      -o "$TMP/${branch}-${field}-login.html"; then
+      echo "ForkPress branch UI login fetch failed for $field" >&2
+      return 2
+    fi
+    if ! curl -sS -L -c "$cookie_jar" -b "$cookie_jar" \
       -H "Host: $host" \
       "http://127.0.0.1:$PORT/wp-admin/" \
-      -o "$out"
+      -o "$out"; then
+      echo "ForkPress branch UI admin fetch failed for $field" >&2
+      return 2
+    fi
   else
-    curl -sS -H "Host: $host" \
+    if ! curl -sS -L -H "Host: $host" \
       "http://127.0.0.1:$PORT/wp-admin/" \
-      -o "$out"
+      -o "$out"; then
+      echo "ForkPress branch UI admin fetch failed for $field" >&2
+      return 2
+    fi
   fi
 
   node - <<'NODE' "$out" "$field"
@@ -323,14 +336,21 @@ const fs = require('fs');
 const html = fs.readFileSync(process.argv[2], 'utf8');
 const field = process.argv[3];
 const match = html.match(/var actions = (\{.*?\}|null);/s);
-if (!match || match[1] === 'null') {
-  process.exit(2);
+if (match && match[1] !== 'null') {
+  const actions = JSON.parse(match[1]);
+  if (actions && typeof actions[field] === 'string' && actions[field]) {
+    console.log(actions[field]);
+    process.exit(0);
+  }
 }
-const actions = JSON.parse(match[1]);
-if (!actions || typeof actions[field] !== 'string' || !actions[field]) {
-  process.exit(3);
+const fieldPattern = new RegExp('"' + field.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '"\\s*:\\s*"([^"]+)"');
+const fieldMatch = html.match(fieldPattern);
+if (fieldMatch) {
+  console.log(JSON.parse('"' + fieldMatch[1] + '"'));
+  process.exit(0);
 }
-console.log(actions[field]);
+console.error('ForkPress branch UI nonce field not found: ' + field);
+process.exit(2);
 NODE
 }
 
@@ -964,7 +984,18 @@ php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(($data["max
 
 log_step "create and merge branch through WordPress admin UI"
 UI_CREATE_COOKIES="$TMP/ui-create-cookies.txt"
-UI_CREATE_NONCE="$(branch_ui_nonce main createNonce "$TMP/ui-create-admin.html" "$UI_CREATE_COOKIES")"
+set +e
+branch_ui_nonce main createNonce "$TMP/ui-create-admin.html" "$UI_CREATE_COOKIES" > "$TMP/ui-create-nonce.txt"
+UI_CREATE_NONCE_STATUS=$?
+set -e
+if [ "$UI_CREATE_NONCE_STATUS" -ne 0 ]; then
+  echo "failed to read WP UI branch create nonce" >&2
+  dump_if_exists "$TMP/main-createNonce-login.html"
+  dump_if_exists "$TMP/ui-create-admin.html"
+  "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+  exit 1
+fi
+UI_CREATE_NONCE="$(cat "$TMP/ui-create-nonce.txt")"
 UI_CREATE_HTTP="$(
   curl -sS -o "$TMP/ui-create.json" -w '%{http_code}' \
     -b "$UI_CREATE_COOKIES" \
@@ -995,7 +1026,18 @@ UI_MERGE_TITLE="UI branch merge $(date +%s)"
 create_branch_post ui-created "$UI_MERGE_TITLE"
 echo "merged through WP branch UI" > "$WORK/ui-created/wp-content/ui-created-file.txt"
 UI_MERGE_COOKIES="$TMP/ui-merge-cookies.txt"
-UI_MERGE_NONCE="$(branch_ui_nonce main mergeNonce "$TMP/ui-merge-admin.html" "$UI_MERGE_COOKIES")"
+set +e
+branch_ui_nonce main mergeNonce "$TMP/ui-merge-admin.html" "$UI_MERGE_COOKIES" > "$TMP/ui-merge-nonce.txt"
+UI_MERGE_NONCE_STATUS=$?
+set -e
+if [ "$UI_MERGE_NONCE_STATUS" -ne 0 ]; then
+  echo "failed to read WP UI branch merge nonce" >&2
+  dump_if_exists "$TMP/main-mergeNonce-login.html"
+  dump_if_exists "$TMP/ui-merge-admin.html"
+  "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+  exit 1
+fi
+UI_MERGE_NONCE="$(cat "$TMP/ui-merge-nonce.txt")"
 UI_MERGE_HTTP="$(
   curl -sS -o "$TMP/ui-merge.json" -w '%{http_code}' \
     -b "$UI_MERGE_COOKIES" \
