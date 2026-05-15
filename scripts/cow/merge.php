@@ -4510,7 +4510,10 @@ function cow_merge_wordpress_insert_reference_violation(
     string $table,
     array $source_row
 ): ?string {
-    if ($table === 'wp_postmeta') {
+    if ($table === 'wp_posts') {
+        $reference_column = 'post_parent';
+        $child_label = 'wp_posts row';
+    } elseif ($table === 'wp_postmeta') {
         $reference_column = 'post_id';
         $child_label = 'wp_postmeta row';
     } elseif ($table === 'wp_term_relationships') {
@@ -4523,7 +4526,7 @@ function cow_merge_wordpress_insert_reference_violation(
         return null;
     }
     $post_id = $source_row[$reference_column];
-    if (!is_int($post_id) && !(is_string($post_id) && preg_match('/^-?\d+$/', $post_id))) {
+    if (!is_int($post_id) && !(is_string($post_id) && preg_match('/^-?\d+$/', (string)$post_id))) {
         return null;
     }
     $post_id = (int)$post_id;
