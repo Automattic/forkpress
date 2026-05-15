@@ -17818,6 +17818,101 @@ PHP);
         'automatically discovered validator records plugin-scoped conflicts during merge'
     );
 
+    $plugin_explicit_import_base_root = $tmp . '/plugin-explicit-import-base';
+    $plugin_explicit_import_source_root = $tmp . '/plugin-explicit-import-source';
+    $plugin_explicit_import_target_root = $tmp . '/plugin-explicit-import-target';
+    foreach ([$plugin_explicit_import_base_root, $plugin_explicit_import_source_root, $plugin_explicit_import_target_root] as $root) {
+        mkdir($root . '/wp-content/database', 0777, true);
+    }
+    $plugin_explicit_import_base_db = $plugin_explicit_import_base_root . '/wp-content/database/.ht.sqlite';
+    $plugin_explicit_import_source_db = $plugin_explicit_import_source_root . '/wp-content/database/.ht.sqlite';
+    $plugin_explicit_import_target_db = $plugin_explicit_import_target_root . '/wp-content/database/.ht.sqlite';
+    $plugin_explicit_import_metadata = $tmp . '/.forkpress/cow/merge/plugin-explicit-import-metadata.sqlite';
+    $plugin_explicit_import_file_base = $tmp . '/.forkpress/cow/merge/file-bases/plugin-explicit-import.json';
+    create_base_db($plugin_explicit_import_base_db);
+    $db = open_db($plugin_explicit_import_base_db);
+    $db->exec('CREATE TABLE plugin_import_parent (id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT NOT NULL)');
+    $db->exec('CREATE TABLE plugin_import_child (id INTEGER PRIMARY KEY AUTOINCREMENT, parent_id INTEGER NOT NULL, label TEXT NOT NULL)');
+    $db->exec("INSERT INTO plugin_import_parent (label) VALUES ('base plugin parent')");
+    $db->close();
+    copy($plugin_explicit_import_base_db, $plugin_explicit_import_source_db);
+    copy($plugin_explicit_import_base_db, $plugin_explicit_import_target_db);
+    cow_merge_capture_file_base($plugin_explicit_import_base_root, $plugin_explicit_import_file_base);
+    cow_merge_allocate_autoincrement_bands($plugin_explicit_import_source_db, $plugin_explicit_import_metadata, 'feature-plugin-explicit-import');
+    $db = open_db($plugin_explicit_import_source_db);
+    $db->exec("INSERT INTO plugin_import_parent (id, label) VALUES (2, 'explicit imported plugin parent')");
+    $db->exec("INSERT INTO plugin_import_child (parent_id, label) VALUES (2, 'child behind explicit plugin parent')");
+    $plugin_explicit_import_child_id = (int)$db->lastInsertRowID();
+    $db->close();
+    $db = open_db($plugin_explicit_import_target_db);
+    $db->exec(
+        "INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('active_plugins', '" .
+        SQLite3::escapeString(serialize(['explicit-import-validator/explicit-import-validator.php'])) .
+        "', 'yes')"
+    );
+    $db->close();
+    write_test_file($plugin_explicit_import_target_root . '/wp-content/plugins/explicit-import-validator/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query(
+    'SELECT c.id, c.parent_id, c.label FROM plugin_import_child c ' .
+    'LEFT JOIN plugin_import_parent p ON p.id = c.parent_id ' .
+    'WHERE p.id IS NULL ORDER BY c.id'
+);
+$findings = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    $findings[] = [
+        'plugin' => 'forkpress-explicit-import-validator',
+        'object' => 'plugin_import_child:' . $row['id'],
+        'reason' => 'plugin child row references a parent that generic merge held for review',
+        'type' => 'plugin-explicit-import-missing-parent',
+        'tables' => ['plugin_import_parent', 'plugin_import_child'],
+        'validator' => 'forkpress-explicit-import-validator@1',
+        'candidate' => [
+            'child_id' => (int)$row['id'],
+            'parent_id' => (int)$row['parent_id'],
+            'label' => (string)$row['label'],
+        ],
+    ];
+}
+echo json_encode([
+    'status' => count($findings) > 0 ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $plugin_explicit_import_merge = run_merge_cli([
+        'merge',
+        '--base-db', $plugin_explicit_import_base_db,
+        '--source-db', $plugin_explicit_import_source_db,
+        '--target-db', $plugin_explicit_import_target_db,
+        '--metadata-db', $plugin_explicit_import_metadata,
+        '--source', 'feature-plugin-explicit-import',
+        '--target', 'main',
+        '--base-files', $plugin_explicit_import_file_base,
+        '--source-root', $plugin_explicit_import_source_root,
+        '--target-root', $plugin_explicit_import_target_root,
+    ]);
+    assert_same($plugin_explicit_import_merge['status'], 0, 'plugin validator runs after explicit-ID plugin import candidate is staged');
+    assert_true(str_contains($plugin_explicit_import_merge['output'], 'plugins:   validators=1 conflicts=1'), 'plugin validator reports explicit-ID plugin graph conflicts');
+    assert_same((int)scalar($plugin_explicit_import_target_db, 'SELECT COUNT(*) FROM plugin_import_parent WHERE id = 2'), 0, 'out-of-band explicit plugin parent remains held for review');
+    assert_same((int)scalar($plugin_explicit_import_target_db, "SELECT parent_id FROM plugin_import_child WHERE id = $plugin_explicit_import_child_id"), 2, 'generic merge leaves plugin child graph available for validator review');
+    assert_same(
+        (int)scalar($plugin_explicit_import_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_import_parent' AND conflict_type = 'row-target-constraint'"),
+        1,
+        'held explicit plugin parent remains a database conflict'
+    );
+    assert_same(
+        (int)scalar($plugin_explicit_import_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-explicit-import-missing-parent'"),
+        1,
+        'plugin validator records incoherent explicit-ID plugin graph as a plugin-scoped conflict'
+    );
+    $plugin_explicit_import_payload = cow_merge_decode_payload_json(
+        (string)scalar($plugin_explicit_import_metadata, "SELECT chosen_payload FROM merge_conflicts WHERE conflict_type = 'plugin-explicit-import-missing-parent' ORDER BY id DESC LIMIT 1"),
+        'plugin explicit import payload'
+    );
+    assert_same($plugin_explicit_import_payload['candidate']['parent_id'] ?? null, 2, 'plugin explicit import validator payload names the held parent ID');
+    assert_same($plugin_explicit_import_payload['candidate']['child_id'] ?? null, $plugin_explicit_import_child_id, 'plugin explicit import validator payload names the staged child ID');
+
     $graph_validator_base_root = $tmp . '/graph-validator-base';
     $graph_validator_source_root = $tmp . '/graph-validator-source';
     $graph_validator_target_root = $tmp . '/graph-validator-target';
