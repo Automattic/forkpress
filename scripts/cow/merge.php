@@ -4715,6 +4715,71 @@ function cow_merge_wordpress_comment_reference_violation(
     return null;
 }
 
+function cow_merge_json_object_end(string $text, int $start): ?int {
+    if (($text[$start] ?? '') !== '{') {
+        return null;
+    }
+    $depth = 0;
+    $in_string = false;
+    $escaped = false;
+    $length = strlen($text);
+    for ($i = $start; $i < $length; $i++) {
+        $char = $text[$i];
+        if ($in_string) {
+            if ($escaped) {
+                $escaped = false;
+            } elseif ($char === '\\') {
+                $escaped = true;
+            } elseif ($char === '"') {
+                $in_string = false;
+            }
+            continue;
+        }
+        if ($char === '"') {
+            $in_string = true;
+            continue;
+        }
+        if ($char === '{') {
+            $depth++;
+            continue;
+        }
+        if ($char === '}') {
+            $depth--;
+            if ($depth === 0) {
+                return $i;
+            }
+        }
+    }
+    return null;
+}
+
+function cow_merge_wordpress_post_content_blocks(string $content): array {
+    if (!preg_match_all('/<!--\s*wp:([A-Za-z0-9_\/-]+)\s*/', $content, $matches, PREG_OFFSET_CAPTURE)) {
+        return [];
+    }
+
+    $blocks = [];
+    foreach ($matches[0] as $index => $match) {
+        $cursor = (int)$match[1] + strlen((string)$match[0]);
+        $length = strlen($content);
+        while ($cursor < $length && ctype_space($content[$cursor])) {
+            $cursor++;
+        }
+        if (($content[$cursor] ?? '') !== '{') {
+            continue;
+        }
+        $end = cow_merge_json_object_end($content, $cursor);
+        if ($end === null) {
+            continue;
+        }
+        $blocks[] = [
+            'name' => (string)$matches[1][$index][0],
+            'attrs' => substr($content, $cursor, $end - $cursor + 1),
+        ];
+    }
+    return $blocks;
+}
+
 function cow_merge_wordpress_post_content_reference_violation(
     SQLite3 $source,
     SQLite3 $target,
@@ -4743,14 +4808,15 @@ function cow_merge_wordpress_post_content_reference_violation(
         );
     };
 
-    if (!preg_match_all('/<!--\s*wp:([A-Za-z0-9_\/-]+)\s+(\{.*?\})\s*(?:\/)?-->/s', $content, $matches, PREG_SET_ORDER)) {
+    $blocks = cow_merge_wordpress_post_content_blocks($content);
+    if (!$blocks) {
         return null;
     }
 
     $media_id_blocks = ['audio', 'cover', 'file', 'image', 'video'];
-    foreach ($matches as $match) {
-        $block_name = (string)$match[1];
-        $attrs = json_decode((string)$match[2], true);
+    foreach ($blocks as $block) {
+        $block_name = (string)$block['name'];
+        $attrs = json_decode((string)$block['attrs'], true);
         if (!is_array($attrs)) {
             continue;
         }
