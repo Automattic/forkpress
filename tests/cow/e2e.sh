@@ -1612,9 +1612,10 @@ $ok = true;
 foreach ($required as $title => $type) {
     $ok = $ok && (($posts[$title]["type"] ?? null) === $type);
 }
-$optionRefsValid = static function (array $option, string $branch, string $suffix) use ($posts): bool {
+$optionRefsValid = static function (array $option, string $branch, string $suffix) use ($posts, $users): bool {
+    $user = $users["forkpress_semantic_$branch"] ?? [];
     return (($option["branch"] ?? null) === $branch)
-        && ((int)($option["user_id"] ?? 0) > 0)
+        && ((int)($option["user_id"] ?? 0) === (int)($user["id"] ?? 0))
         && ((int)($option["page_id"] ?? 0) === (int)($posts["Semantic $suffix Page"]["id"] ?? 0))
         && ((int)($option["note_id"] ?? 0) === (int)($posts["Semantic $suffix Note"]["id"] ?? 0))
         && ((int)($option["block_id"] ?? 0) === (int)($posts["Semantic $suffix Block"]["id"] ?? 0))
