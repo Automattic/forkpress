@@ -44,13 +44,14 @@ preserves the prior reviewer, status, and note text.
 
 Each recorded revalidation now includes a conservative `revalidation_class`.
 Database row/cell and filesystem conflicts are classified as `unchanged`,
-`compatible-target-drift`, or `missing`. No-primary-key database conflicts can
-also be classified as `incompatible` when the reviewed logical row disappeared
-and its old physical rowid now belongs to a different active sidecar identity.
-Plugin validator conflicts are classified as `unchanged` when the rerun reports
-the same evidence and `replacement-evidence` when the validator reports changed
-evidence for the same plugin object. These classes are audit metadata only.
-They do not make stale reviews apply automatically.
+`compatible-target-drift`, `compatible-source-drift`, or `missing`.
+No-primary-key database conflicts can also be classified as `incompatible` when
+the reviewed logical row disappeared and its old physical rowid now belongs to
+a different active sidecar identity. Plugin validator conflicts are classified
+as `unchanged` when the rerun reports the same evidence and
+`replacement-evidence` when the validator reports changed evidence for the same
+plugin object. These classes are audit metadata only. They do not make stale
+reviews apply automatically.
 
 ## Future Re-Audit Model
 
@@ -83,9 +84,10 @@ To support this cleanly, audit metadata should retain:
 - Latest replacement conflict or decision id.
 - Previous review status and note.
 - Re-audit classifier. The current `merge_revalidations.revalidation_class`
-  stores `unchanged`, `compatible-target-drift`, `missing`,
-  `incompatible`, `replacement-evidence`, or `unclassified`; future work should
-  add source-drift and broader incompatible logical-identity cases beyond
+  stores `unchanged`, `compatible-target-drift`, `compatible-source-drift`,
+  `missing`, `incompatible`, `replacement-evidence`, or `unclassified`; future
+  work should broaden source-drift coverage into plugin/schema-specific
+  evidence and add broader incompatible logical-identity cases beyond
   no-primary-key rowid reuse.
 - Logical identity fingerprint separate from the raw payload.
 - Re-audit timestamp and merge run id.
@@ -101,8 +103,8 @@ forkpress branch merge-resolve conflict <id> --choice source --after-revalidate 
 
 `--after-revalidate` requires the latest review status to be `needs-action` and
 the current source/target payload hashes to match the latest payloads recorded
-by `merge-audit --revalidate` or `revalidate-reviews`. If the target drifts
-again after revalidation, guarded resolution fails and asks for another
+by `merge-audit --revalidate` or `revalidate-reviews`. If the source or target
+drifts again after revalidation, guarded resolution fails and asks for another
 revalidation instead of applying the stale original conflict.
 
 The first implementation supports database cell, database row, and filesystem
@@ -121,11 +123,12 @@ carrying reviewed conflicts into `needs-action`, preserving prior reviewer
 intent in the carried note, idempotent reruns, replacement revalidation payloads
 after further target drift, guarded source resolution for database cells,
 database rows, and filesystem paths after revalidation, revalidation classifiers
-for stale database row/cell drift, deleted database target rows, deleted
-filesystem target paths, incompatible no-primary-key rowid replacement, and
-plugin validator reruns that carry reviewed plugin conflicts back to
-`needs-action` with `replacement-evidence` when the validator reports changed
-evidence for the same plugin object.
+for stale database row/cell drift, source-drifted database row/cell and
+filesystem conflicts, deleted database target rows, deleted filesystem target
+paths, incompatible no-primary-key rowid replacement, and plugin validator
+reruns that carry reviewed plugin conflicts back to `needs-action` with
+`replacement-evidence` when the validator reports changed evidence for the same
+plugin object.
 
 Future classifier tests should cover primary-key row conflicts where the target
 row keeps the same key but a higher-level logical fingerprint proves it now

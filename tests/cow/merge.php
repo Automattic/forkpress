@@ -3405,6 +3405,90 @@ SQL);
         'after-revalidate cell resolution does not recreate a missing target row through a cell update'
     );
 
+    $source_drift_base = $tmp . '/source-drift-base.sqlite';
+    $source_drift_source = $tmp . '/source-drift-source.sqlite';
+    $source_drift_target = $tmp . '/source-drift-target.sqlite';
+    $source_drift_metadata = $tmp . '/.forkpress/cow/merge/source-drift-metadata.sqlite';
+    create_base_db($source_drift_base);
+    copy($source_drift_base, $source_drift_source);
+    copy($source_drift_base, $source_drift_target);
+    $db = open_db($source_drift_source);
+    $db->exec("UPDATE plugin_items SET value = 'source drift original conflict' WHERE item_id = 'alpha'");
+    $db->close();
+    $db = open_db($source_drift_target);
+    $db->exec("UPDATE plugin_items SET value = 'target source-drift conflict' WHERE item_id = 'alpha'");
+    $db->close();
+    $source_drift_merge = cow_merge_databases($source_drift_base, $source_drift_source, $source_drift_target, $source_drift_metadata, 'feature-source-drift-review', 'main');
+    $source_drift_run_id = (int)$source_drift_merge['run_id'];
+    $source_drift_conflict_id = (int)scalar($source_drift_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND column_name = 'value'");
+    cow_merge_review_record(
+        $source_drift_metadata,
+        'conflict',
+        $source_drift_conflict_id,
+        'reviewed',
+        'Apply source after confirming it still matches review.',
+        'cow-test'
+    );
+    $db = open_db($source_drift_source);
+    $db->exec("UPDATE plugin_items SET value = 'source drift after review' WHERE item_id = 'alpha'");
+    $db->close();
+    $source_drift_revalidated = cow_merge_revalidate_reviewed_conflicts($source_drift_metadata, $source_drift_run_id, 'cow-revalidate');
+    assert_same($source_drift_revalidated['carried'], 1, 'review revalidation carries source-drifted cell conflicts to needs-action');
+    assert_same(scalar($source_drift_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $source_drift_conflict_id ORDER BY id DESC LIMIT 1"), 'compatible-source-drift', 'cell revalidation classifies changed source payloads');
+    assert_same(scalar($source_drift_metadata, "SELECT source_payload FROM merge_revalidations WHERE conflict_id = $source_drift_conflict_id ORDER BY id DESC LIMIT 1"), cow_merge_payload_json('source drift after review'), 'source-drift revalidation records the current source payload');
+    $source_drift_audit = cow_merge_audit_report($source_drift_metadata, $source_drift_run_id, 10, ['records' => 'conflicts']);
+    $source_drift_conflicts = array_values(array_filter($source_drift_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $source_drift_conflict_id));
+    assert_same($source_drift_conflicts[0]['revalidation_class'] ?? null, 'compatible-source-drift', 'cell audit exposes source-drift revalidation class');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($source_drift_metadata, $source_drift_conflict_id, 'source', true, 'Try source after source-drift revalidation.', 'cow-test', true),
+        'source payload changed after latest merge revalidation',
+        'after-revalidate source resolution fails if the source payload changed after review'
+    );
+
+    $row_source_drift_base = $tmp . '/row-source-drift-base.sqlite';
+    $row_source_drift_source = $tmp . '/row-source-drift-source.sqlite';
+    $row_source_drift_target = $tmp . '/row-source-drift-target.sqlite';
+    $row_source_drift_metadata = $tmp . '/.forkpress/cow/merge/row-source-drift-metadata.sqlite';
+    create_base_db($row_source_drift_base);
+    copy($row_source_drift_base, $row_source_drift_source);
+    copy($row_source_drift_base, $row_source_drift_target);
+    $db = open_db($row_source_drift_source);
+    $db->exec("INSERT INTO plugin_items (item_id, label, value) VALUES ('source-drift-row', 'source row original label', 'source row original value')");
+    $db->close();
+    $db = open_db($row_source_drift_target);
+    $db->exec("INSERT INTO plugin_items (item_id, label, value) VALUES ('source-drift-row', 'target row conflict label', 'target row conflict value')");
+    $db->close();
+    $row_source_drift_merge = cow_merge_databases($row_source_drift_base, $row_source_drift_source, $row_source_drift_target, $row_source_drift_metadata, 'feature-row-source-drift-review', 'main');
+    $row_source_drift_run_id = (int)$row_source_drift_merge['run_id'];
+    $row_source_drift_conflict_id = (int)scalar($row_source_drift_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND row_identity = '" . SQLite3::escapeString(cow_merge_identity_json(['item_id' => 'source-drift-row'])) . "'");
+    cow_merge_review_record(
+        $row_source_drift_metadata,
+        'conflict',
+        $row_source_drift_conflict_id,
+        'reviewed',
+        'Apply source row after confirming it still matches review.',
+        'cow-test'
+    );
+    $db = open_db($row_source_drift_source);
+    $db->exec("UPDATE plugin_items SET label = 'source row drifted label', value = 'source row drifted value' WHERE item_id = 'source-drift-row'");
+    $db->close();
+    $row_source_drift_revalidated = cow_merge_revalidate_reviewed_conflicts($row_source_drift_metadata, $row_source_drift_run_id, 'cow-revalidate');
+    assert_same($row_source_drift_revalidated['carried'], 1, 'review revalidation carries source-drifted row conflicts to needs-action');
+    assert_same(scalar($row_source_drift_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $row_source_drift_conflict_id ORDER BY id DESC LIMIT 1"), 'compatible-source-drift', 'row revalidation classifies changed source payloads');
+    assert_same(
+        scalar($row_source_drift_metadata, "SELECT source_payload FROM merge_revalidations WHERE conflict_id = $row_source_drift_conflict_id ORDER BY id DESC LIMIT 1"),
+        cow_merge_payload_json(['item_id' => 'source-drift-row', 'label' => 'source row drifted label', 'value' => 'source row drifted value']),
+        'row source-drift revalidation records the current source row payload'
+    );
+    $row_source_drift_audit = cow_merge_audit_report($row_source_drift_metadata, $row_source_drift_run_id, 10, ['records' => 'conflicts']);
+    $row_source_drift_conflicts = array_values(array_filter($row_source_drift_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $row_source_drift_conflict_id));
+    assert_same($row_source_drift_conflicts[0]['revalidation_class'] ?? null, 'compatible-source-drift', 'row audit exposes source-drift revalidation class');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($row_source_drift_metadata, $row_source_drift_conflict_id, 'source', true, 'Try source row after source-drift revalidation.', 'cow-test', true),
+        'source payload changed after latest merge revalidation',
+        'after-revalidate row resolution fails if the source row changed after review'
+    );
+
     $row_resolution_rollback_base = $tmp . '/row-resolution-rollback-base.sqlite';
     $row_resolution_rollback_source = $tmp . '/row-resolution-rollback-source.sqlite';
     $row_resolution_rollback_target = $tmp . '/row-resolution-rollback-target.sqlite';
@@ -5763,6 +5847,7 @@ SQL);
     write_test_file($file_resolve_base_root . '/wp-content/uploads/commit-rollback-conflict.txt', 'base commit rollback conflict');
     write_test_file($file_resolve_base_root . '/wp-content/uploads/revalidate-conflict.txt', 'base revalidate conflict');
     write_test_file($file_resolve_base_root . '/wp-content/uploads/revalidate-missing.txt', 'base revalidate missing');
+    write_test_file($file_resolve_base_root . '/wp-content/uploads/revalidate-source-drift.txt', 'base revalidate source drift');
     mkdir($file_resolve_base_root . '/wp-content/uploads/replace-dir-with-file', 0777, true);
     write_test_file($file_resolve_base_root . '/wp-content/uploads/replace-dir-with-file/base-child.txt', 'base replacement child');
     copy_tree_for_test($file_resolve_base_root, $file_resolve_source_root);
@@ -5783,6 +5868,7 @@ SQL);
     write_test_file($file_resolve_source_root . '/wp-content/uploads/commit-rollback-conflict.txt', 'source commit rollback resolution');
     write_test_file($file_resolve_source_root . '/wp-content/uploads/revalidate-conflict.txt', 'source revalidate resolution');
     write_test_file($file_resolve_source_root . '/wp-content/uploads/revalidate-missing.txt', 'source revalidate missing');
+    write_test_file($file_resolve_source_root . '/wp-content/uploads/revalidate-source-drift.txt', 'source revalidate original');
     create_test_symlink('/etc/passwd', $file_resolve_source_root . '/wp-content/uploads/unsafe-link.txt');
     unlink($file_resolve_source_root . '/wp-content/uploads/delete-conflict.txt');
     unlink($file_resolve_source_root . '/wp-content/uploads/replace-dir-with-file/base-child.txt');
@@ -5794,6 +5880,7 @@ SQL);
     write_test_file($file_resolve_target_root . '/wp-content/uploads/commit-rollback-conflict.txt', 'target commit rollback resolution');
     write_test_file($file_resolve_target_root . '/wp-content/uploads/revalidate-conflict.txt', 'target revalidate resolution');
     write_test_file($file_resolve_target_root . '/wp-content/uploads/revalidate-missing.txt', 'target revalidate missing');
+    write_test_file($file_resolve_target_root . '/wp-content/uploads/revalidate-source-drift.txt', 'target revalidate source drift');
     cow_merge_branch_state(
         $file_resolve_base_db,
         $file_resolve_source_db,
@@ -5926,6 +6013,36 @@ SQL);
     );
     assert_same($file_missing_resolution['status'], 'applied', 'after-revalidate source resolution can restore a reviewed missing filesystem path');
     assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/revalidate-missing.txt'), 'source revalidate missing', 'after-revalidate filesystem resolution restores the audited source path');
+    $file_source_drift_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/revalidate-source-drift.txt')) . "' ORDER BY id DESC LIMIT 1");
+    cow_merge_review_record(
+        $metadata,
+        'conflict',
+        $file_source_drift_conflict_id,
+        'reviewed',
+        'Revalidate before applying a source file whose source branch may change.',
+        'cow-test'
+    );
+    write_test_file($file_resolve_source_root . '/wp-content/uploads/revalidate-source-drift.txt', 'source file drift after review');
+    $file_source_drift_revalidated = cow_merge_revalidate_reviewed_conflicts($metadata, null, 'cow-revalidate');
+    assert_true($file_source_drift_revalidated['carried'] >= 1, 'review revalidation carries source-drifted filesystem paths to needs-action');
+    assert_same(scalar($metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $file_source_drift_conflict_id ORDER BY id DESC LIMIT 1"), 'compatible-source-drift', 'filesystem revalidation classifies changed source files');
+    $file_source_drift_entry = cow_merge_file_manifest_for_root($file_resolve_source_root)['entries']['wp-content/uploads/revalidate-source-drift.txt'];
+    assert_same(
+        scalar($metadata, "SELECT source_payload FROM merge_revalidations WHERE conflict_id = $file_source_drift_conflict_id ORDER BY id DESC LIMIT 1"),
+        cow_merge_payload_json(cow_merge_file_path_payload('wp-content/uploads/revalidate-source-drift.txt', $file_source_drift_entry)),
+        'filesystem source-drift revalidation records the current source file payload'
+    );
+    $file_source_drift_audit = cow_merge_audit_report($metadata, null, 10, [
+        'records' => 'conflicts',
+        'scope' => 'files',
+        'path' => 'wp-content/uploads/revalidate-source-drift.txt',
+    ]);
+    assert_same($file_source_drift_audit['conflicts'][0]['revalidation_class'] ?? null, 'compatible-source-drift', 'filesystem audit exposes source-drift revalidation class');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $file_source_drift_conflict_id, 'source', true, 'Try source file after source-drift revalidation.', 'cow-test', true),
+        'source payload changed after latest merge revalidation',
+        'after-revalidate filesystem resolution fails if the source file changed after review'
+    );
     $file_rollback_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/rollback-conflict.txt')) . "' ORDER BY id DESC LIMIT 1");
     $file_rollback_meta = open_db($metadata);
     $file_rollback_meta->exec(<<<'SQL'

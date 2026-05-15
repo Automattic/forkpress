@@ -6616,7 +6616,7 @@ function cow_merge_revalidation_note(array $review, array $staleness): string {
     $previous_at = (string)($review['created_at'] ?? 'unknown time');
     $previous_note = trim((string)($review['note'] ?? ''));
     $reason = (string)($staleness['stale_reason'] ?? 'target payload changed');
-    $note = "Revalidation required after target drift ($reason). Previous $previous_status review by $previous_reviewer at $previous_at";
+    $note = "Revalidation required after merge drift ($reason). Previous $previous_status review by $previous_reviewer at $previous_at";
     if ($previous_note !== '') {
         $note .= ": $previous_note";
     }
@@ -6644,7 +6644,7 @@ function cow_merge_revalidate_reviewed_conflicts(
         $conflicts = cow_merge_fetch_rows(
             $meta,
             "SELECT c.id AS id, c.run_id, c.table_name, c.row_identity, c.column_name, c.conflict_type, c.resolver, c.resolved_at, c.created_at, " .
-            "c.base_payload, c.source_payload, c.target_payload, c.chosen_payload, r.target_db, r.target_branch " .
+            "c.base_payload, c.source_payload, c.target_payload, c.chosen_payload, r.source_db, r.target_db, r.source_branch, r.target_branch " .
             "FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id $where ORDER BY c.id ASC",
             $params
         );
@@ -6683,13 +6683,15 @@ function cow_merge_revalidate_reviewed_conflicts(
 
             $latest_status = (string)($review['status'] ?? '');
             $latest_note = (string)($review['note'] ?? '');
-            if ($latest_status === 'needs-action' && str_contains($latest_note, 'Revalidation required after target drift')) {
+            if ($latest_status === 'needs-action' && str_contains($latest_note, 'Revalidation required after')) {
                 $latest_revalidation = cow_merge_latest_revalidation($meta, $conflict_id);
+                $current_source_payload = $staleness['current_source_payload'] ?? (string)$conflict['source_payload'];
                 $current_target_payload = $staleness['current_target_payload'] ?? null;
                 if (
-                    is_string($current_target_payload)
+                    is_string($current_source_payload)
+                    && is_string($current_target_payload)
                     && $latest_revalidation !== null
-                    && hash_equals((string)$latest_revalidation['source_hash'], hash('sha256', (string)$conflict['source_payload']))
+                    && hash_equals((string)$latest_revalidation['source_hash'], hash('sha256', $current_source_payload))
                     && hash_equals((string)$latest_revalidation['target_hash'], hash('sha256', $current_target_payload))
                 ) {
                     $already_needs_action++;
@@ -6704,15 +6706,16 @@ function cow_merge_revalidate_reviewed_conflicts(
                 cow_merge_revalidation_note($review, $staleness),
                 $reviewer
             );
+            $current_source_payload = $staleness['current_source_payload'] ?? (string)$conflict['source_payload'];
             $current_target_payload = $staleness['current_target_payload'] ?? null;
-            if (is_string($current_target_payload)) {
+            if (is_string($current_source_payload) && is_string($current_target_payload)) {
                 cow_merge_record_revalidation(
                     $meta,
                     $conflict_id,
                     $review_note_id,
                     (int)$conflict['run_id'],
                     (string)($staleness['revalidation_class'] ?? 'unclassified'),
-                    (string)$conflict['source_payload'],
+                    $current_source_payload,
                     $current_target_payload,
                     (string)($staleness['stale_reason'] ?? 'target payload changed')
                 );
@@ -10352,6 +10355,7 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
         'stale_status' => 'unknown',
         'stale_reason' => 'conflict type is not checked for target drift',
         'revalidation_class' => 'unclassified',
+        'current_source_payload' => null,
         'current_target_payload' => null,
     ];
 
@@ -10391,6 +10395,7 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
                     ? 'plugin validator finding still matches audited conflict payload'
                     : 'plugin validator reported updated evidence for this plugin object; rerun plugin audit before resolving',
                 'revalidation_class' => $same_validator_payload ? 'unchanged' : 'replacement-evidence',
+                'current_source_payload' => (string)($latest['source_payload'] ?? ''),
                 'current_target_payload' => (string)($latest['chosen_payload'] ?? ''),
             ];
         }
@@ -10413,9 +10418,32 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
                 return ['stale_status' => 'error', 'stale_reason' => 'filesystem conflict has an invalid path identity', 'revalidation_class' => 'unclassified', 'current_target_payload' => null];
             }
             $target_payload = cow_merge_decode_payload_json((string)($conflict['target_payload'] ?? ''), 'target');
+            $source_payload = cow_merge_decode_payload_json((string)($conflict['source_payload'] ?? ''), 'source');
             $expected = cow_merge_file_entry_without_path(is_array($target_payload) ? $target_payload : null);
+            $expected_source = cow_merge_file_entry_without_path(is_array($source_payload) ? $source_payload : null);
             $entries = cow_merge_file_manifest_for_root($target_root)['entries'];
             $current = $entries[$path] ?? null;
+            $current_source_payload = (string)($conflict['source_payload'] ?? '');
+            $source_fresh = true;
+            $source_db = (string)($conflict['source_db'] ?? '');
+            if ($source_db !== '') {
+                $source_root = cow_merge_branch_root_from_db_path($source_db);
+                if (is_dir($source_root)) {
+                    $source_entries = cow_merge_file_manifest_for_root($source_root)['entries'];
+                    $current_source = $source_entries[$path] ?? null;
+                    $source_fresh = cow_merge_file_entries_equal($current_source, $expected_source);
+                    $current_source_payload = cow_merge_payload_json(cow_merge_file_path_payload($path, $current_source));
+                }
+            }
+            if (cow_merge_file_entries_equal($current, $expected) && !$source_fresh) {
+                return [
+                    'stale_status' => 'stale',
+                    'stale_reason' => 'source filesystem path no longer matches audited source payload; rerun merge-audit before resolving',
+                    'revalidation_class' => 'compatible-source-drift',
+                    'current_source_payload' => $current_source_payload,
+                    'current_target_payload' => cow_merge_payload_json(cow_merge_file_path_payload($path, $current)),
+                ];
+            }
             return [
                 'stale_status' => cow_merge_file_entries_equal($current, $expected) ? 'fresh' : 'stale',
                 'stale_reason' => cow_merge_file_entries_equal($current, $expected)
@@ -10424,6 +10452,7 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
                 'revalidation_class' => cow_merge_file_entries_equal($current, $expected)
                     ? 'unchanged'
                     : ($current === null ? 'missing' : 'compatible-target-drift'),
+                'current_source_payload' => $current_source_payload,
                 'current_target_payload' => cow_merge_payload_json(cow_merge_file_path_payload($path, $current)),
             ];
         }
@@ -10455,12 +10484,16 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
             $source_value = cow_merge_decode_payload_json((string)($conflict['source_payload'] ?? ''), 'source');
             $pk_cols = cow_merge_pk_cols($target, $table);
             $where_identity = $identity;
+            $source_where_identity = $identity;
             $missing_revalidation_class = 'missing';
             $identity_replacement_class = null;
             if (!$pk_cols) {
                 $target_branch = (string)($conflict['target_branch'] ?? '');
                 $target_rowid = $target_branch === '' ? null : cow_merge_lookup_active_rowid_by_identity($meta, $target_branch, $table, $identity);
                 $where_identity = $target_rowid === null ? [] : ['rowid' => $target_rowid];
+                $source_branch = (string)($conflict['source_branch'] ?? '');
+                $source_rowid = $source_branch === '' ? null : cow_merge_lookup_active_rowid_by_identity($meta, $source_branch, $table, $identity);
+                $source_where_identity = $source_rowid === null ? [] : ['rowid' => $source_rowid];
                 if ($target_branch !== '' && $target_rowid === null) {
                     $identity_rowid = cow_merge_keyless_identity_rowid_hint($identity);
                     if ($identity_rowid !== null) {
@@ -10474,6 +10507,40 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
                 }
             }
 
+            $source_fresh = true;
+            $current_source_payload = (string)($conflict['source_payload'] ?? '');
+            $source_db = (string)($conflict['source_db'] ?? '');
+            $source_current_row = null;
+            if ($source_db !== '' && is_file($source_db)) {
+                $source = cow_merge_open_db($source_db, SQLITE3_OPEN_READONLY);
+                try {
+                    $source_pk_cols = cow_merge_pk_cols($source, $table);
+                    if ($source_pk_cols || array_key_exists('rowid', $source_where_identity)) {
+                        $source_current_row = cow_merge_select_current_row($source, $table, $source_where_identity, $source_pk_cols);
+                    }
+                    if ($conflict_type === 'cell-conflict') {
+                        $source_column = (string)($conflict['column_name'] ?? '');
+                        $current_source = $source_current_row === null ? null : ($source_current_row[$source_column] ?? null);
+                        $source_fresh = cow_merge_values_equal($current_source, $source_value);
+                        $current_source_payload = cow_merge_payload_json($current_source);
+                    } elseif ($source_value === null) {
+                        $source_fresh = $source_current_row === null;
+                        $current_source_payload = cow_merge_payload_json($source_current_row);
+                    } elseif ($source_current_row === null || !is_array($source_value)) {
+                        $source_fresh = false;
+                        $current_source_payload = cow_merge_payload_json($source_current_row);
+                    } else {
+                        $source_fresh = cow_merge_row_values_equal($source_current_row, $source_value, cow_merge_all_columns(array_keys($source_value), array_keys($source_current_row)));
+                        $current_source_payload = cow_merge_payload_json($source_current_row);
+                    }
+                } catch (Throwable) {
+                    $source_fresh = true;
+                    $current_source_payload = (string)($conflict['source_payload'] ?? '');
+                } finally {
+                    $source->close();
+                }
+            }
+
             if ($conflict_type === 'cell-conflict') {
                 $column = (string)($conflict['column_name'] ?? '');
                 if ($column === '') {
@@ -10483,6 +10550,15 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
                     ? cow_merge_select_current_row($target, $table, $where_identity, $pk_cols)
                     : null;
                 $current = $current_row === null ? null : ($current_row[$column] ?? null);
+                if (cow_merge_values_equal($current, $target_value) && !$source_fresh) {
+                    return [
+                        'stale_status' => 'stale',
+                        'stale_reason' => 'source cell no longer matches audited source payload; rerun merge-audit before resolving',
+                        'revalidation_class' => 'compatible-source-drift',
+                        'current_source_payload' => $current_source_payload,
+                        'current_target_payload' => cow_merge_payload_json($current),
+                    ];
+                }
                 return [
                     'stale_status' => cow_merge_values_equal($current, $target_value) ? 'fresh' : 'stale',
                     'stale_reason' => cow_merge_values_equal($current, $target_value)
@@ -10491,6 +10567,7 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
                     'revalidation_class' => cow_merge_values_equal($current, $target_value)
                         ? 'unchanged'
                         : ($identity_replacement_class ?? ($current_row === null ? $missing_revalidation_class : 'compatible-target-drift')),
+                    'current_source_payload' => $current_source_payload,
                     'current_target_payload' => cow_merge_payload_json($current),
                 ];
             }
@@ -10512,6 +10589,16 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
                 $fresh = cow_merge_row_values_equal($current, $target_value, cow_merge_all_columns(array_keys($target_value), array_keys($current)));
             }
 
+            if ($fresh && !$source_fresh) {
+                return [
+                    'stale_status' => 'stale',
+                    'stale_reason' => 'source row no longer matches audited source payload; rerun merge-audit before resolving',
+                    'revalidation_class' => 'compatible-source-drift',
+                    'current_source_payload' => $current_source_payload,
+                    'current_target_payload' => cow_merge_payload_json($current),
+                ];
+            }
+
             return [
                 'stale_status' => $fresh ? 'fresh' : 'stale',
                 'stale_reason' => $fresh
@@ -10520,6 +10607,7 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
                 'revalidation_class' => $fresh
                     ? 'unchanged'
                     : ($identity_replacement_class ?? ($current === null ? $missing_revalidation_class : 'compatible-target-drift')),
+                'current_source_payload' => $current_source_payload,
                 'current_target_payload' => cow_merge_payload_json($current),
             ];
         } finally {
@@ -10633,7 +10721,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
                 $db,
                 'merge_conflicts',
                 "SELECT merge_conflicts.id AS id, run_id, table_name, row_identity, column_name, conflict_type, resolver, resolved_at, created_at, " .
-                "base_payload, source_payload, target_payload, chosen_payload, r.target_db, r.target_branch$conflict_review_select " .
+                "base_payload, source_payload, target_payload, chosen_payload, r.source_db, r.target_db, r.source_branch, r.target_branch$conflict_review_select " .
                 "FROM merge_conflicts JOIN merge_runs r ON r.id = merge_conflicts.run_id $conflict_filter ORDER BY merge_conflicts.id DESC LIMIT :limit",
                 $conflict_params
             )));
