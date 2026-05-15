@@ -1070,6 +1070,15 @@ function cow_git_create_branch_for_ref(
         $captured_merge_bases = true;
         cow_git_apply_wp_files($repo, $tmp, $wp_files);
 
+        cow_git_failpoint('before-created-branch-metadata');
+        $attempted_merge_metadata = true;
+        cow_git_prepare_created_branch_merge_metadata($git_repo_dir, $branch_list_path, [[
+            'branch' => $branch,
+            'source' => $source,
+            'storage' => $tmp,
+        ]]);
+        cow_git_failpoint('after-created-branch-metadata');
+
         if (!rename($tmp, $dest_storage)) {
             throw new \RuntimeException("failed to publish git-created branch '$branch'");
         }
@@ -1092,10 +1101,6 @@ function cow_git_create_branch_for_ref(
             'storage' => $dest_storage,
             'linked_public' => $linked_public,
         ];
-        cow_git_failpoint('before-created-branch-metadata');
-        $attempted_merge_metadata = true;
-        cow_git_prepare_created_branch_merge_metadata($git_repo_dir, $branch_list_path, [$created]);
-        cow_git_failpoint('after-created-branch-metadata');
         cow_git_failpoint('before-created-branch-list');
         cow_git_write_branch_list($branches_dir, $branch_list_path);
         cow_git_failpoint('after-created-branch-list');
