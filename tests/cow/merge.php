@@ -2773,6 +2773,57 @@ SQL);
     $stale_cell_conflicts = array_values(array_filter($stale_cell_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $title_conflict_id));
     assert_same($stale_cell_conflicts[0]['stale_status'] ?? null, 'stale', 'merge audit marks drifted target cell conflicts as stale');
     assert_true(str_contains((string)($stale_cell_conflicts[0]['current_target_preview'] ?? ''), 'Source title'), 'stale target cell audit exposes the current target value');
+
+    $revalidate_base = $tmp . '/revalidate-base.sqlite';
+    $revalidate_source = $tmp . '/revalidate-source.sqlite';
+    $revalidate_target = $tmp . '/revalidate-target.sqlite';
+    $revalidate_metadata = $tmp . '/.forkpress/cow/merge/revalidate-metadata.sqlite';
+    create_base_db($revalidate_base);
+    copy($revalidate_base, $revalidate_source);
+    copy($revalidate_base, $revalidate_target);
+    $db = open_db($revalidate_source);
+    $db->exec("UPDATE plugin_items SET value = 'source revalidate conflict' WHERE item_id = 'alpha'");
+    $db->close();
+    $db = open_db($revalidate_target);
+    $db->exec("UPDATE plugin_items SET value = 'target revalidate conflict' WHERE item_id = 'alpha'");
+    $db->close();
+    $revalidate_merge = cow_merge_databases($revalidate_base, $revalidate_source, $revalidate_target, $revalidate_metadata, 'feature-revalidate-review', 'main');
+    $revalidate_run_id = (int)$revalidate_merge['run_id'];
+    $revalidate_conflict_id = (int)scalar($revalidate_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND column_name = 'value'");
+    cow_merge_review_record(
+        $revalidate_metadata,
+        'conflict',
+        $revalidate_conflict_id,
+        'reviewed',
+        'Keep target plugin value for launch.',
+        'cow-test'
+    );
+    $db = open_db($revalidate_target);
+    $db->exec("UPDATE plugin_items SET value = 'target drift after review' WHERE item_id = 'alpha'");
+    $db->close();
+    $revalidated = cow_merge_revalidate_reviewed_conflicts($revalidate_metadata, $revalidate_run_id, 'cow-revalidate');
+    assert_same($revalidated['checked'], 1, 'review revalidation checks conflicts in the selected run');
+    assert_same($revalidated['reviewed'], 1, 'review revalidation inspects reviewed conflicts');
+    assert_same($revalidated['stale'], 1, 'review revalidation detects target drift');
+    assert_same($revalidated['carried'], 1, 'review revalidation carries stale reviewer intent to needs-action');
+    $revalidated_audit = cow_merge_audit_report($revalidate_metadata, $revalidate_run_id, 10, [
+        'records' => 'conflicts',
+        'review_status' => 'needs-action',
+    ]);
+    assert_same(count($revalidated_audit['conflicts']), 1, 'revalidated stale reviews enter the needs-action queue');
+    assert_same($revalidated_audit['conflicts'][0]['stale_status'] ?? null, 'stale', 'revalidated review keeps stale audit context visible');
+    assert_true(str_contains((string)$revalidated_audit['conflicts'][0]['review_note'], 'Keep target plugin value for launch.'), 'revalidated review preserves the prior reviewer note');
+    $revalidated_again = run_merge_cli([
+        'revalidate-reviews',
+        '--metadata-db', $revalidate_metadata,
+        '--run', (string)$revalidate_run_id,
+        '--format', 'json',
+    ]);
+    assert_same($revalidated_again['status'], 0, 'review revalidation CLI accepts already-carried stale reviews');
+    $revalidated_again_json = json_decode($revalidated_again['output'], true);
+    assert_same($revalidated_again_json['carried'] ?? null, 0, 'review revalidation CLI does not duplicate carried notes');
+    assert_same($revalidated_again_json['already_needs_action'] ?? null, 1, 'review revalidation CLI reports already-carried stale reviews');
+
     $row_resolution_rollback_base = $tmp . '/row-resolution-rollback-base.sqlite';
     $row_resolution_rollback_source = $tmp . '/row-resolution-rollback-source.sqlite';
     $row_resolution_rollback_target = $tmp . '/row-resolution-rollback-target.sqlite';

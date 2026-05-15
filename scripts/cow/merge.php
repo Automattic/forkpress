@@ -24,6 +24,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "    [--id-band-skips] [--target-kept] [--review] [--review-status unreviewed|pending|needs-action|reviewed]\n");
     fwrite(STDERR, "    [--resolution-status validated|applied] [--group-by none|table|status|path|type|severity]\n");
     fwrite(STDERR, "    --group-by supports resolutions by table/status/path, conflicts by table/type/path/severity, and decisions by table/type/path.\n");
+    fwrite(STDERR, "  php merge.php revalidate-reviews --metadata-db <path> [--run ID] [--reviewer NAME] [--format text|json]\n");
     fwrite(STDERR, "  php merge.php review-record --metadata-db <path> --record conflict|decision|resolution --id ID --status pending|needs-action|reviewed --note TEXT [--reviewer NAME]\n");
     fwrite(STDERR, "  php merge.php resolve-conflict --metadata-db <path> --id ID --choice source|target [--apply] [--note TEXT] [--reviewer NAME]\n");
 }
@@ -5955,6 +5956,131 @@ function cow_merge_review_record(
             'note' => $note,
             'reviewer' => $reviewer,
             'review_note_id' => $review_note_id,
+        ];
+    } catch (Throwable $e) {
+        if ($transaction_started) {
+            @$meta->exec('ROLLBACK');
+        }
+        throw $e;
+    } finally {
+        $meta->close();
+    }
+}
+
+function cow_merge_latest_review_note(SQLite3 $meta, string $record_type, int $record_id): ?array {
+    $stmt = cow_merge_prepare_checked(
+        $meta,
+        'SELECT id, status, note, reviewer, created_at FROM merge_review_notes ' .
+        'WHERE record_type = :record_type AND record_id = :record_id ORDER BY id DESC LIMIT 1',
+        'failed to prepare latest review note lookup'
+    );
+    cow_merge_bind($stmt, ':record_type', $record_type);
+    cow_merge_bind($stmt, ':record_id', $record_id);
+    $res = cow_merge_execute_checked($stmt, $meta, 'failed to look up latest review note');
+    $row = $res->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($res, 'failed to finalize latest review note lookup');
+    return $row ? $row : null;
+}
+
+function cow_merge_revalidation_note(array $review, array $staleness): string {
+    $previous_status = (string)($review['status'] ?? 'unknown');
+    $previous_reviewer = (string)($review['reviewer'] ?? 'unknown');
+    $previous_at = (string)($review['created_at'] ?? 'unknown time');
+    $previous_note = trim((string)($review['note'] ?? ''));
+    $reason = (string)($staleness['stale_reason'] ?? 'target payload changed');
+    $note = "Revalidation required after target drift ($reason). Previous $previous_status review by $previous_reviewer at $previous_at";
+    if ($previous_note !== '') {
+        $note .= ": $previous_note";
+    }
+    return strlen($note) > 4096 ? substr($note, 0, 4093) . '...' : $note;
+}
+
+function cow_merge_revalidate_reviewed_conflicts(
+    string $metadata_db,
+    ?int $run_id = null,
+    string $reviewer = 'forkpress'
+): array {
+    if (!is_file($metadata_db)) {
+        throw new RuntimeException("merge metadata database does not exist: $metadata_db");
+    }
+    $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READWRITE);
+    $transaction_started = false;
+    try {
+        cow_merge_ensure_metadata($meta);
+        $params = [];
+        $where = '';
+        if ($run_id !== null) {
+            $where = 'WHERE c.run_id = :run_id';
+            $params[':run_id'] = $run_id;
+        }
+        $conflicts = cow_merge_fetch_rows(
+            $meta,
+            "SELECT c.id AS id, c.run_id, c.table_name, c.row_identity, c.column_name, c.conflict_type, c.resolver, c.resolved_at, c.created_at, " .
+            "c.base_payload, c.source_payload, c.target_payload, c.chosen_payload, r.target_db, r.target_branch " .
+            "FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id $where ORDER BY c.id ASC",
+            $params
+        );
+
+        cow_merge_exec_checked($meta, 'BEGIN IMMEDIATE', 'failed to start review revalidation transaction');
+        $transaction_started = true;
+        $checked = 0;
+        $reviewed = 0;
+        $fresh = 0;
+        $stale = 0;
+        $errors = 0;
+        $carried = 0;
+        $already_needs_action = 0;
+        foreach ($conflicts as $conflict) {
+            $checked++;
+            $conflict_id = (int)$conflict['id'];
+            $review = cow_merge_latest_review_note($meta, 'conflict', $conflict_id);
+            if ($review === null) {
+                continue;
+            }
+            $reviewed++;
+            $staleness = cow_merge_audit_conflict_target_staleness($meta, $conflict);
+            $status = (string)($staleness['stale_status'] ?? 'unknown');
+            if ($status === 'fresh') {
+                $fresh++;
+                continue;
+            }
+            if ($status === 'unknown') {
+                continue;
+            }
+            if ($status === 'error') {
+                $errors++;
+            } else {
+                $stale++;
+            }
+
+            $latest_status = (string)($review['status'] ?? '');
+            $latest_note = (string)($review['note'] ?? '');
+            if ($latest_status === 'needs-action' && str_contains($latest_note, 'Revalidation required after target drift')) {
+                $already_needs_action++;
+                continue;
+            }
+            cow_merge_insert_review_note(
+                $meta,
+                'conflict',
+                $conflict_id,
+                'needs-action',
+                cow_merge_revalidation_note($review, $staleness),
+                $reviewer
+            );
+            $carried++;
+        }
+        cow_merge_exec_checked($meta, 'COMMIT', 'failed to commit review revalidation transaction');
+        $transaction_started = false;
+        return [
+            'metadata_db' => $metadata_db,
+            'run_id' => $run_id,
+            'checked' => $checked,
+            'reviewed' => $reviewed,
+            'fresh' => $fresh,
+            'stale' => $stale,
+            'errors' => $errors,
+            'carried' => $carried,
+            'already_needs_action' => $already_needs_action,
         ];
     } catch (Throwable $e) {
         if ($transaction_started) {
@@ -12296,6 +12422,33 @@ if (realpath($argv[0] ?? '') === __FILE__) {
                 echo $encoded . "\n";
             } else {
                 cow_merge_print_audit_text($report);
+            }
+            exit(0);
+        }
+        if ($command === 'revalidate-reviews') {
+            $args = cow_merge_parse_cli($argv, ['metadata-db'], 2);
+            $format = cow_merge_audit_format($args['format'] ?? null);
+            $result = cow_merge_revalidate_reviewed_conflicts(
+                $args['metadata-db'],
+                cow_merge_audit_run_id($args['run'] ?? null),
+                cow_merge_review_text($args['reviewer'] ?? 'forkpress', 'reviewer')
+            );
+            if ($format === 'json') {
+                $encoded = json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+                if (!is_string($encoded)) {
+                    throw new RuntimeException('failed to encode review revalidation result');
+                }
+                echo $encoded . "\n";
+            } elseif (($args['quiet'] ?? '0') !== '1') {
+                echo "forkpress: revalidated reviewed COW merge conflicts\n";
+                echo "  checked:              {$result['checked']}\n";
+                echo "  reviewed:             {$result['reviewed']}\n";
+                echo "  fresh:                {$result['fresh']}\n";
+                echo "  stale:                {$result['stale']}\n";
+                echo "  errors:               {$result['errors']}\n";
+                echo "  carried:              {$result['carried']}\n";
+                echo "  already-needs-action: {$result['already_needs_action']}\n";
+                echo "  metadata:             {$result['metadata_db']}\n";
             }
             exit(0);
         }
