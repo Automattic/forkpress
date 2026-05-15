@@ -102,26 +102,28 @@ The Git server suite covers these publication classes:
 
 ## Missing Fault Injection
 
-The remaining work is finer-grained failure injection around process death or
-OS-level interruption, not just deliberate exceptions:
+The remaining work is a product-level kill harness that drives the public
+ForkPress commands through the same failure boundaries already covered by lower
+level PHP/Git tests. The direct merge tests already kill the merge subprocess
+before/after target DB commit, before metadata commit, before the file phase,
+after an individual file operation, and during crash-recovery cleanup. The Git
+server tests already kill created-branch publication before metadata capture,
+after metadata capture, after storage publish, after public-link creation,
+before/after branch-list publication, after existing-branch update publish,
+after branch-delete staging, and after object pruning.
 
-- Kill before/after target DB commit but before metadata commit is covered for
-  the direct DB merge path; the remaining work is to extend the same
-  process-death harness to full DB+file+Git branch publication.
-- Kill after metadata commit but before file publish is covered for the
-  DB+file merge path before the first file operation.
-- Kill after one file publish but before later file publishes is covered for
-  direct filesystem merge rollback and DB+file whole-branch recovery; the
-  remaining work is to extend the same recovery model to product-level
-  publication after DB+file completion.
-- Kill after file publish but before Git ref update.
-- Kill after Git ref update but before branch list update.
-- Kill during public branch symlink/tree publication after storage/link state is
-  partially visible in ways not covered by Git-created storage and public-link
-  retry tests.
-- Kill during sparsebundle detach or compact.
-- Kill during cleanup of rollback artifacts outside the Git object-pruning and
-  crash-recovery restore paths.
+The remaining release-hardening work is:
+
+- Run those DB, file, metadata, and Git failpoints through the actual
+  `forkpress branch merge`, `forkpress branch create`, `forkpress branch reset`,
+  and Git push entry points, then restart in a new process and verify the public
+  audit/recovery commands report the same state as the lower-level harnesses.
+- Add platform-specific kill coverage around APFS sparsebundle detach/compact.
+- Add kill coverage around cleanup of rollback artifacts outside the Git
+  object-pruning and crash-recovery restore paths.
+- Assert for each product-level checkpoint that the target branch is either the
+  pre-merge snapshot, the fully completed merged state, or a blocked
+  manual-recovery state with durable artifacts.
 
 These should be tested by an external harness that can terminate the process at
 named checkpoints and then run a recovery/audit command in a new process.
