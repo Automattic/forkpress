@@ -48,14 +48,16 @@ Database row/cell and filesystem conflicts are classified as `unchanged`,
 No-primary-key database conflicts can also be classified as `incompatible` when
 the reviewed logical row disappeared and its old physical rowid now belongs to
 a different active sidecar identity. Supported WordPress primary-key row
-conflicts, such as `wp_posts` rows whose `post_type` changes after review,
-`wp_options` rows whose `option_name` changes, or `wp_postmeta` rows whose
-`post_id`/`meta_key` identity changes, are also classified as `incompatible`
-when the key remains but the semantic object identity changes. Plugin validator
-conflicts are classified as `unchanged` when the rerun reports the same evidence
-and `replacement-evidence` when the validator reports changed evidence for the
-same plugin object. These classes are audit metadata only. They do not make
-stale reviews apply automatically.
+conflicts are also classified as `incompatible` when the key remains but the
+semantic object identity changes. Current fingerprints cover `wp_posts`
+`post_type`, `wp_options` `option_name`, `wp_postmeta` `post_id`/`meta_key`,
+term slugs, term taxonomy `term_id`/`taxonomy`, termmeta `term_id`/`meta_key`,
+user logins, usermeta `user_id`/`meta_key`, comment
+`comment_post_ID`/`comment_type`, and commentmeta `comment_id`/`meta_key`.
+Plugin validator conflicts are classified as `unchanged` when the rerun reports
+the same evidence and `replacement-evidence` when the validator reports changed
+evidence for the same plugin object. These classes are audit metadata only.
+They do not make stale reviews apply automatically.
 
 ## Future Re-Audit Model
 
@@ -130,12 +132,11 @@ after further target drift, guarded source resolution for database cells,
 database rows, and filesystem paths after revalidation, revalidation classifiers
 for stale database row/cell drift, source-drifted database row/cell and
 filesystem conflicts, deleted database target rows, deleted filesystem target
-paths, incompatible no-primary-key rowid replacement, incompatible `wp_posts`
-semantic replacement by `post_type`, incompatible `wp_options` replacement by
-`option_name`, incompatible `wp_postmeta` replacement by `post_id`/`meta_key`,
-and plugin validator reruns that carry reviewed plugin conflicts back to
-`needs-action` with `replacement-evidence` when the validator reports changed
-evidence for the same plugin object.
+paths, incompatible no-primary-key rowid replacement, incompatible replacement
+for every currently supported WordPress row semantic fingerprint, and plugin
+validator reruns that carry reviewed plugin conflicts back to `needs-action`
+with `replacement-evidence` when the validator reports changed evidence for the
+same plugin object.
 
 Future classifier tests should cover broader primary-key row conflicts where
 the target row keeps the same key but a higher-level logical fingerprint proves
