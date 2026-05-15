@@ -42,10 +42,19 @@ the merge metadata database. Fresh reviewed conflicts stay reviewed. Stale or
 errored reviewed conflicts are reopened as `needs-action` with a note that
 preserves the prior reviewer, status, and note text.
 
+Each recorded revalidation now includes a conservative `revalidation_class`.
+Database row/cell and filesystem conflicts are classified as `unchanged`,
+`compatible-target-drift`, or `missing`; plugin validator conflicts are
+classified as `unchanged` when the rerun reports the same evidence and
+`replacement-evidence` when the validator reports changed evidence for the same
+plugin object. These classes are audit metadata only. They do not make stale
+reviews apply automatically.
+
 ## Future Re-Audit Model
 
-A richer re-audit command should compare the old audited record with a fresh
-merge audit and classify reviewer intent:
+A richer re-audit command should build on the current conservative classifier by
+comparing the old audited record with a fresh merge audit and classifying
+reviewer intent:
 
 - `unchanged`: the reviewed target/source payload still matches; keep the
   existing resolution state.
@@ -71,8 +80,10 @@ To support this cleanly, audit metadata should retain:
 - Original conflict or decision id.
 - Latest replacement conflict or decision id.
 - Previous review status and note.
-- Re-audit classifier: `unchanged`, `compatible-target-drift`,
-  `compatible-source-drift`, `incompatible`, or `missing`.
+- Re-audit classifier. The current `merge_revalidations.revalidation_class`
+  stores `unchanged`, `compatible-target-drift`, `missing`,
+  `replacement-evidence`, or `unclassified`; future work should add
+  source-drift and incompatible logical-identity cases.
 - Logical identity fingerprint separate from the raw payload.
 - Re-audit timestamp and merge run id.
 
@@ -106,14 +117,13 @@ The implemented tests in `tests/cow/merge.php` cover stale cell/file detection,
 carrying reviewed conflicts into `needs-action`, preserving prior reviewer
 intent in the carried note, idempotent reruns, replacement revalidation payloads
 after further target drift, guarded source resolution for database cells,
-database rows, and filesystem paths after revalidation, and plugin validator
-reruns that carry reviewed plugin conflicts back to `needs-action` when the
-validator reports changed evidence for the same plugin object.
+database rows, and filesystem paths after revalidation, revalidation classifiers
+for stale database row/cell drift, and plugin validator reruns that carry
+reviewed plugin conflicts back to `needs-action` with `replacement-evidence`
+when the validator reports changed evidence for the same plugin object.
 
 Future classifier tests should cover three records:
 
-- A cell conflict where target drift is unrelated and can carry a note forward
-  as `compatible-target-drift`.
 - A row conflict where the target row identity changes to a different logical
   object and must become `incompatible`.
 - A filesystem conflict where the target file changed and must remain blocked

@@ -3329,6 +3329,10 @@ SQL);
     assert_same($revalidated_again_json['carried'] ?? null, 0, 'review revalidation CLI does not duplicate carried notes');
     assert_same($revalidated_again_json['already_needs_action'] ?? null, 1, 'review revalidation CLI reports already-carried stale reviews');
     assert_same((int)scalar($revalidate_metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $revalidate_conflict_id"), 1, 'review revalidation records the stale target payload for guarded resolution');
+    assert_same(scalar($revalidate_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $revalidate_conflict_id ORDER BY id DESC LIMIT 1"), 'compatible-target-drift', 'cell revalidation classifies same-object target drift');
+    $revalidated_class_audit = cow_merge_audit_report($revalidate_metadata, $revalidate_run_id, 10, ['records' => 'conflicts']);
+    $revalidated_class_conflicts = array_values(array_filter($revalidated_class_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $revalidate_conflict_id));
+    assert_same($revalidated_class_conflicts[0]['revalidation_class'] ?? null, 'compatible-target-drift', 'cell audit exposes the revalidation classifier');
     assert_throws(
         fn() => cow_merge_resolve_conflict($revalidate_metadata, $revalidate_conflict_id, 'source', true, 'Try stale source apply before guarded revalidation.', 'cow-test'),
         'target cell no longer matches the audited conflict target value',
@@ -3839,6 +3843,7 @@ SQL);
     $row_revalidated = cow_merge_revalidate_reviewed_conflicts($row_revalidate_metadata, $row_revalidate_run_id, 'cow-revalidate');
     assert_same($row_revalidated['carried'], 1, 'review revalidation carries stale row conflicts to needs-action');
     assert_same((int)scalar($row_revalidate_metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $row_revalidate_conflict_id"), 1, 'row revalidation records the stale target row payload');
+    assert_same(scalar($row_revalidate_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $row_revalidate_conflict_id ORDER BY id DESC LIMIT 1"), 'compatible-target-drift', 'row revalidation classifies same-identity target drift');
     assert_throws(
         fn() => cow_merge_resolve_conflict($row_revalidate_metadata, $row_revalidate_conflict_id, 'source', true, 'Try stale row source before guarded revalidation.', 'cow-test'),
         'target row no longer matches',
@@ -16240,6 +16245,7 @@ PHP);
     assert_same($plugin_revalidate_after_rerun['stale'], 1, 'plugin conflict revalidation treats changed validator evidence as stale');
     assert_same($plugin_revalidate_after_rerun['carried'], 1, 'plugin conflict revalidation carries changed validator evidence to needs-action');
     assert_same((int)scalar($plugin_graph_metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $plugin_conflict_id"), 1, 'plugin conflict revalidation records replacement validator evidence for audit');
+    assert_same(scalar($plugin_graph_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $plugin_conflict_id ORDER BY id DESC LIMIT 1"), 'replacement-evidence', 'plugin revalidation classifies changed validator evidence');
     $plugin_revalidated_audit = cow_merge_audit_report($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 10, [
         'scope' => 'plugin',
         'records' => 'conflicts',
