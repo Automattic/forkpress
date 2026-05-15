@@ -8,6 +8,17 @@ PHP_DEV_DIR ?= $(firstword $(wildcard /nix/store/*-php-*-dev))
 SQLITE_INC  ?= $(firstword $(wildcard /nix/store/*-sqlite-*-dev/include))
 SQLITE_LIB  ?= $(firstword $(filter-out /nix/store/*-sqlite-*-dev/lib,$(wildcard /nix/store/*-sqlite-*/lib)))
 
+BRANCHFS_EXT_DIR := experiments/branchfs/php-ext
+BRANCHFS_EXT_SO := $(BRANCHFS_EXT_DIR)/branchfs.so
+BRANCHFS_TEST_DIR := experiments/branchfs/tests
+COW_TEST_DIR := tests/cow
+RELEASE_TEST_DIR := tests/release
+BRANCHFS_HEADER_GOALS := all init-db test test-compat test-branchfs test-all $(BRANCHFS_EXT_SO)
+NEEDS_BRANCHFS_HEADERS := $(filter $(BRANCHFS_HEADER_GOALS),$(MAKECMDGOALS))
+ifeq ($(strip $(MAKECMDGOALS)),)
+NEEDS_BRANCHFS_HEADERS := all
+endif
+
 PHP_INCLUDE_DIR ?= $(if $(PHP_CONFIG),$(shell $(PHP_CONFIG) --include-dir 2>/dev/null))
 PHP_EXTRA_INCS  :=
 
@@ -25,7 +36,7 @@ PHP_EXTRA_INCS += -I$(PHP_DEV_DIR)/include/php \
                   -I$(PHP_DEV_DIR)/include/php/Zend \
                   -I$(PHP_DEV_DIR)/include/php/ext \
                   -I$(PHP_DEV_DIR)/include/php/ext/date/lib
-else
+else ifneq ($(strip $(NEEDS_BRANCHFS_HEADERS)),)
 $(error Could not determine PHP headers. Install php-config or set PHP_DEV_DIR)
 endif
 
@@ -47,11 +58,6 @@ CC      ?= gcc
 CFLAGS  := -fPIC -O2 -Wall -DCOMPILE_DL_BRANCHFS -DHAVE_CONFIG_H=0 $(SQLITE_CFLAGS)
 INCLUDES := $(PHP_EXTRA_INCS)
 LDFLAGS := $(SQLITE_LIBS)
-BRANCHFS_EXT_DIR := experiments/branchfs/php-ext
-BRANCHFS_EXT_SO := $(BRANCHFS_EXT_DIR)/branchfs.so
-BRANCHFS_TEST_DIR := experiments/branchfs/tests
-COW_TEST_DIR := tests/cow
-RELEASE_TEST_DIR := tests/release
 RUSTUP ?= $(shell command -v rustup 2>/dev/null)
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
