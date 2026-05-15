@@ -99,6 +99,12 @@ on_error() {
   dump_if_exists "$TMP/public-crash-restore.json"
   dump_if_exists "$TMP/public-crash-retry.out"
   dump_if_exists "$TMP/public-crash-main-edit.html"
+  dump_if_exists "$TMP/public-metadata-crash-merge.out"
+  dump_if_exists "$TMP/public-metadata-crash-recover.json"
+  dump_if_exists "$TMP/public-metadata-crash-blocked.out"
+  dump_if_exists "$TMP/public-metadata-crash-restore.json"
+  dump_if_exists "$TMP/public-metadata-crash-retry.out"
+  dump_if_exists "$TMP/public-metadata-crash-main-edit.html"
   dump_if_exists "$TMP/public-file-crash-merge.out"
   dump_if_exists "$TMP/public-file-crash-recover.json"
   dump_if_exists "$TMP/public-file-crash-blocked.out"
@@ -1456,6 +1462,32 @@ curl -sS -H "Host: wp.localhost:$PORT" \
   "http://127.0.0.1:$PORT/wp-admin/edit.php" \
   -o "$TMP/public-crash-main-edit.html"
 grep -F "$PUBLIC_CRASH_TITLE" "$TMP/public-crash-main-edit.html" >/dev/null
+
+log_step "public branch merge metadata crash recovery"
+"$BIN" branch --work-dir "$WORK_DIR" create public-metadata-crash-merge
+PUBLIC_METADATA_CRASH_TITLE="Public metadata crash merge $(date +%s)"
+create_branch_post public-metadata-crash-merge "$PUBLIC_METADATA_CRASH_TITLE"
+if FORKPRESS_COW_MERGE_TEST_FAILPOINT=before-metadata-commit FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION=kill \
+  "$BIN" branch --work-dir "$WORK_DIR" merge public-metadata-crash-merge --into main > "$TMP/public-metadata-crash-merge.out" 2>&1; then
+  echo "public branch merge unexpectedly survived before-metadata-commit kill failpoint" >&2
+  exit 1
+fi
+"$BIN" branch --work-dir "$WORK_DIR" recover-crash --format json > "$TMP/public-metadata-crash-recover.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && (int)($data["pending"] ?? 0) >= 1 ? 0 : 1);' "$TMP/public-metadata-crash-recover.json"
+if "$BIN" branch --work-dir "$WORK_DIR" merge public-metadata-crash-merge --into main > "$TMP/public-metadata-crash-blocked.out" 2>&1; then
+  echo "public branch merge unexpectedly ignored pending metadata crash recovery artifact" >&2
+  exit 1
+fi
+grep -F "pending COW merge crash recovery artifact" "$TMP/public-metadata-crash-blocked.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" recover-crash --restore-target-db --format json > "$TMP/public-metadata-crash-restore.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && (int)($data["pending"] ?? 0) === 0 && (int)($data["restored"] ?? 0) >= 1 ? 0 : 1);' "$TMP/public-metadata-crash-restore.json"
+"$BIN" branch --work-dir "$WORK_DIR" merge public-metadata-crash-merge --into main > "$TMP/public-metadata-crash-retry.out"
+grep -F "forkpress: merged public-metadata-crash-merge into main" "$TMP/public-metadata-crash-retry.out" >/dev/null
+grep -F "status:    completed" "$TMP/public-metadata-crash-retry.out" >/dev/null
+curl -sS -H "Host: wp.localhost:$PORT" \
+  "http://127.0.0.1:$PORT/wp-admin/edit.php" \
+  -o "$TMP/public-metadata-crash-main-edit.html"
+grep -F "$PUBLIC_METADATA_CRASH_TITLE" "$TMP/public-metadata-crash-main-edit.html" >/dev/null
 
 log_step "public branch merge filesystem crash recovery"
 "$BIN" branch --work-dir "$WORK_DIR" create public-file-crash-merge
