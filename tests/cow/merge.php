@@ -13898,6 +13898,8 @@ SQL);
     $db->exec('ALTER TABLE wp_posts ADD COLUMN post_parent INTEGER NOT NULL DEFAULT 0');
     $db->exec("ALTER TABLE wp_posts ADD COLUMN guid TEXT NOT NULL DEFAULT ''");
     $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec('CREATE TABLE wp_comments (comment_ID INTEGER PRIMARY KEY AUTOINCREMENT, comment_post_ID INTEGER NOT NULL, comment_content TEXT NOT NULL, comment_parent INTEGER NOT NULL DEFAULT 0)');
+    $db->exec('CREATE TABLE wp_commentmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, comment_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
     $db->exec('CREATE TABLE wp_terms (term_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, slug TEXT NOT NULL, term_group INTEGER NOT NULL DEFAULT 0)');
     $db->exec('CREATE TABLE wp_term_taxonomy (term_taxonomy_id INTEGER PRIMARY KEY AUTOINCREMENT, term_id INTEGER NOT NULL, taxonomy TEXT NOT NULL, description TEXT NOT NULL DEFAULT "", parent INTEGER NOT NULL DEFAULT 0, count INTEGER NOT NULL DEFAULT 0)');
     $db->exec('CREATE TABLE wp_term_relationships (object_id INTEGER NOT NULL, term_taxonomy_id INTEGER NOT NULL, term_order INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (object_id, term_taxonomy_id))');
@@ -13967,6 +13969,30 @@ SQL);
         $stmt->execute();
         $page_id = (int)$db->lastInsertRowID();
 
+        $stmt = $db->prepare('INSERT INTO wp_comments (comment_post_ID, comment_content) VALUES (:post_id, :content)');
+        $stmt->bindValue(':post_id', $page_id, SQLITE3_INTEGER);
+        $stmt->bindValue(':content', "$suffix page comment", SQLITE3_TEXT);
+        $stmt->execute();
+        $comment_id = (int)$db->lastInsertRowID();
+        $stmt = $db->prepare('INSERT INTO wp_comments (comment_post_ID, comment_content, comment_parent) VALUES (:post_id, :content, :parent)');
+        $stmt->bindValue(':post_id', $page_id, SQLITE3_INTEGER);
+        $stmt->bindValue(':content', "$suffix threaded reply", SQLITE3_TEXT);
+        $stmt->bindValue(':parent', $comment_id, SQLITE3_INTEGER);
+        $stmt->execute();
+        $reply_comment_id = (int)$db->lastInsertRowID();
+        $comment_graph = [
+            'branch' => $branch,
+            'page_id' => $page_id,
+            'comment_id' => $comment_id,
+            'reply_comment_id' => $reply_comment_id,
+        ];
+        $stmt = $db->prepare("INSERT INTO wp_commentmeta (comment_id, meta_key, meta_value) VALUES (:comment_id, '_forkpress_comment_graph', :json), (:reply_comment_id, '_forkpress_comment_serialized_graph', :serialized)");
+        $stmt->bindValue(':comment_id', $comment_id, SQLITE3_INTEGER);
+        $stmt->bindValue(':reply_comment_id', $reply_comment_id, SQLITE3_INTEGER);
+        $stmt->bindValue(':json', json_encode($comment_graph, JSON_UNESCAPED_SLASHES), SQLITE3_TEXT);
+        $stmt->bindValue(':serialized', serialize($comment_graph), SQLITE3_TEXT);
+        $stmt->execute();
+
         $stmt = $db->prepare('INSERT INTO wp_terms (name, slug) VALUES (:name, :slug)');
         $stmt->bindValue(':name', "$suffix Primary Menu", SQLITE3_TEXT);
         $stmt->bindValue(':slug', "$branch-primary-menu", SQLITE3_TEXT);
@@ -14005,6 +14031,8 @@ SQL);
             'page_id' => $page_id,
             'block_id' => $block_id,
             'attachment_id' => $attachment_id,
+            'comment_id' => $comment_id,
+            'reply_comment_id' => $reply_comment_id,
             'menu_item_id' => $menu_item_id,
             'term_id' => $term_id,
             'term_taxonomy_id' => $term_taxonomy_id,
@@ -14034,6 +14062,7 @@ SQL);
     $wp_semantic_target_graph = $write_wp_semantic_bundle($wp_semantic_target, $wp_semantic_target_root, 'target');
     assert_true($wp_semantic_source_graph['page_id'] !== $wp_semantic_target_graph['page_id'], 'WordPress semantic branches receive distinct page IDs before block JSON is written');
     assert_true($wp_semantic_source_graph['attachment_id'] !== $wp_semantic_target_graph['attachment_id'], 'WordPress semantic branches receive distinct attachment IDs before upload metadata is written');
+    assert_true($wp_semantic_source_graph['comment_id'] !== $wp_semantic_target_graph['comment_id'], 'WordPress semantic branches receive distinct comment IDs before commentmeta is written');
     assert_true($wp_semantic_source_graph['term_id'] !== $wp_semantic_target_graph['term_id'], 'WordPress semantic branches receive distinct menu term IDs before theme mods are written');
     $wp_semantic_result = cow_merge_branch_state(
         $wp_semantic_base,
@@ -14051,6 +14080,8 @@ SQL);
         $page_id = (int)$graph['page_id'];
         $block_id = (int)$graph['block_id'];
         $attachment_id = (int)$graph['attachment_id'];
+        $comment_id = (int)$graph['comment_id'];
+        $reply_comment_id = (int)$graph['reply_comment_id'];
         $menu_item_id = (int)$graph['menu_item_id'];
         $term_id = (int)$graph['term_id'];
         $term_taxonomy_id = (int)$graph['term_taxonomy_id'];
@@ -14059,6 +14090,10 @@ SQL);
         $block_type = $db->querySingle("SELECT post_type FROM wp_posts WHERE ID = $block_id");
         $attachment_type = $db->querySingle("SELECT post_type FROM wp_posts WHERE ID = $attachment_id");
         $attached_file = $db->querySingle("SELECT meta_value FROM wp_postmeta WHERE post_id = $attachment_id AND meta_key = '_wp_attached_file'");
+        $comment_post_id = (int)$db->querySingle("SELECT comment_post_ID FROM wp_comments WHERE comment_ID = $comment_id");
+        $reply_parent = (int)$db->querySingle("SELECT comment_parent FROM wp_comments WHERE comment_ID = $reply_comment_id");
+        $comment_graph_json = $db->querySingle("SELECT meta_value FROM wp_commentmeta WHERE comment_id = $comment_id AND meta_key = '_forkpress_comment_graph'");
+        $reply_graph_serialized = $db->querySingle("SELECT meta_value FROM wp_commentmeta WHERE comment_id = $reply_comment_id AND meta_key = '_forkpress_comment_serialized_graph'");
         $menu_object_id = $db->querySingle("SELECT meta_value FROM wp_postmeta WHERE post_id = $menu_item_id AND meta_key = '_menu_item_object_id'");
         $relationship_count = (int)$db->querySingle("SELECT COUNT(*) FROM wp_term_relationships WHERE object_id = $menu_item_id AND term_taxonomy_id = $term_taxonomy_id");
         $menu_taxonomy = $db->querySingle("SELECT taxonomy FROM wp_term_taxonomy WHERE term_taxonomy_id = $term_taxonomy_id AND term_id = $term_id");
@@ -14066,6 +14101,8 @@ SQL);
         $theme_mods = $db->querySingle("SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_forkpress_$branch'");
         $db->close();
         $decoded_bundle = is_string($bundle) ? json_decode($bundle, true) : null;
+        $decoded_comment_graph = is_string($comment_graph_json) ? json_decode($comment_graph_json, true) : null;
+        $decoded_reply_graph = is_string($reply_graph_serialized) ? unserialize($reply_graph_serialized) : null;
         $decoded_theme_mods = is_string($theme_mods) ? unserialize($theme_mods) : null;
         assert_same($page['post_type'] ?? null, 'page', "WordPress $branch page survives semantic merge");
         assert_true(str_contains((string)($page['post_content'] ?? ''), '"ref":' . $block_id), "WordPress $branch page keeps reusable block reference");
@@ -14074,6 +14111,20 @@ SQL);
         assert_same($attachment_type, 'attachment', "WordPress $branch attachment post survives semantic merge");
         assert_same($attached_file, $graph['file'], "WordPress $branch attachment metadata keeps upload path");
         assert_true(file_exists($root . '/wp-content/uploads/' . $graph['file']), "WordPress $branch upload file survives semantic merge");
+        assert_same($comment_post_id, $page_id, "WordPress $branch page comment still points at merged page");
+        assert_same($reply_parent, $comment_id, "WordPress $branch threaded comment still points at merged parent comment");
+        assert_same($decoded_comment_graph, [
+            'branch' => $branch,
+            'page_id' => $page_id,
+            'comment_id' => $comment_id,
+            'reply_comment_id' => $reply_comment_id,
+        ], "WordPress $branch comment JSON metadata keeps branch-local IDs");
+        assert_same($decoded_reply_graph, [
+            'branch' => $branch,
+            'page_id' => $page_id,
+            'comment_id' => $comment_id,
+            'reply_comment_id' => $reply_comment_id,
+        ], "WordPress $branch threaded comment serialized metadata keeps branch-local IDs");
         assert_same($menu_object_id, (string)$page_id, "WordPress $branch menu item still points at merged page");
         assert_same($relationship_count, 1, "WordPress $branch menu relationship survives semantic merge");
         assert_same($menu_taxonomy, 'nav_menu', "WordPress $branch nav menu taxonomy survives semantic merge");
