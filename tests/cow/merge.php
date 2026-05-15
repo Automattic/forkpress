@@ -3489,48 +3489,144 @@ SQL);
         'after-revalidate row resolution fails if the source row changed after review'
     );
 
-    $source_semantic_base = $tmp . '/source-semantic-base.sqlite';
-    $source_semantic_source = $tmp . '/source-semantic-source.sqlite';
-    $source_semantic_target = $tmp . '/source-semantic-target.sqlite';
-    $source_semantic_metadata = $tmp . '/.forkpress/cow/merge/source-semantic-metadata.sqlite';
-    foreach ([$source_semantic_base, $source_semantic_source, $source_semantic_target] as $path) {
-        $db = open_db($path);
-        $db->exec('CREATE TABLE wp_posts (ID INTEGER PRIMARY KEY, post_type TEXT, post_title TEXT, post_content TEXT)');
+    $source_semantic_identity_cases = [
+        'post' => [
+            'table' => 'wp_posts',
+            'create' => 'CREATE TABLE wp_posts (ID INTEGER PRIMARY KEY, post_type TEXT, post_title TEXT, post_content TEXT)',
+            'source_insert' => "INSERT INTO wp_posts (ID, post_type, post_title, post_content) VALUES (110, 'page', 'Source reviewed page', 'source reviewed page content')",
+            'target_insert' => "INSERT INTO wp_posts (ID, post_type, post_title, post_content) VALUES (110, 'page', 'Target reviewed page', 'target reviewed page content')",
+            'source_update' => "UPDATE wp_posts SET post_type = 'attachment', post_title = 'Source replacement attachment', post_content = 'source replacement attachment content' WHERE ID = 110",
+            'branch' => 'feature-source-post-identity-review',
+            'label' => 'source post_type',
+        ],
+        'option' => [
+            'table' => 'wp_options',
+            'create' => 'CREATE TABLE wp_options (option_id INTEGER PRIMARY KEY, option_name TEXT, option_value TEXT)',
+            'source_insert' => "INSERT INTO wp_options (option_id, option_name, option_value) VALUES (120, 'source_setting', 'source value')",
+            'target_insert' => "INSERT INTO wp_options (option_id, option_name, option_value) VALUES (120, 'target_setting', 'target value')",
+            'source_update' => "UPDATE wp_options SET option_name = 'replacement_setting', option_value = 'replacement value' WHERE option_id = 120",
+            'branch' => 'feature-source-option-identity-review',
+            'label' => 'source option_name',
+        ],
+        'postmeta' => [
+            'table' => 'wp_postmeta',
+            'create' => 'CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY, post_id INTEGER, meta_key TEXT, meta_value TEXT)',
+            'source_insert' => "INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES (130, 10, 'source_key', 'source value')",
+            'target_insert' => "INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES (130, 10, 'target_key', 'target value')",
+            'source_update' => "UPDATE wp_postmeta SET post_id = 11, meta_key = 'replacement_key', meta_value = 'replacement value' WHERE meta_id = 130",
+            'branch' => 'feature-source-postmeta-identity-review',
+            'label' => 'source post_id/meta_key',
+        ],
+        'term' => [
+            'table' => 'wp_terms',
+            'create' => 'CREATE TABLE wp_terms (term_id INTEGER PRIMARY KEY, name TEXT, slug TEXT, term_group INTEGER)',
+            'source_insert' => "INSERT INTO wp_terms (term_id, name, slug, term_group) VALUES (140, 'Source term', 'source-term', 0)",
+            'target_insert' => "INSERT INTO wp_terms (term_id, name, slug, term_group) VALUES (140, 'Target term', 'target-term', 0)",
+            'source_update' => "UPDATE wp_terms SET name = 'Replacement term', slug = 'replacement-term' WHERE term_id = 140",
+            'branch' => 'feature-source-term-identity-review',
+            'label' => 'source term slug',
+        ],
+        'term-taxonomy' => [
+            'table' => 'wp_term_taxonomy',
+            'create' => 'CREATE TABLE wp_term_taxonomy (term_taxonomy_id INTEGER PRIMARY KEY, term_id INTEGER, taxonomy TEXT, description TEXT)',
+            'source_insert' => "INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description) VALUES (150, 40, 'category', 'source taxonomy')",
+            'target_insert' => "INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description) VALUES (150, 40, 'post_tag', 'target taxonomy')",
+            'source_update' => "UPDATE wp_term_taxonomy SET term_id = 41, taxonomy = 'nav_menu', description = 'replacement taxonomy' WHERE term_taxonomy_id = 150",
+            'branch' => 'feature-source-term-taxonomy-identity-review',
+            'label' => 'source term_id/taxonomy',
+        ],
+        'termmeta' => [
+            'table' => 'wp_termmeta',
+            'create' => 'CREATE TABLE wp_termmeta (meta_id INTEGER PRIMARY KEY, term_id INTEGER, meta_key TEXT, meta_value TEXT)',
+            'source_insert' => "INSERT INTO wp_termmeta (meta_id, term_id, meta_key, meta_value) VALUES (160, 40, 'source_key', 'source value')",
+            'target_insert' => "INSERT INTO wp_termmeta (meta_id, term_id, meta_key, meta_value) VALUES (160, 40, 'target_key', 'target value')",
+            'source_update' => "UPDATE wp_termmeta SET term_id = 41, meta_key = 'replacement_key', meta_value = 'replacement value' WHERE meta_id = 160",
+            'branch' => 'feature-source-termmeta-identity-review',
+            'label' => 'source term_id/meta_key',
+        ],
+        'user' => [
+            'table' => 'wp_users',
+            'create' => 'CREATE TABLE wp_users (ID INTEGER PRIMARY KEY, user_login TEXT, user_email TEXT)',
+            'source_insert' => "INSERT INTO wp_users (ID, user_login, user_email) VALUES (170, 'source_user', 'source@example.test')",
+            'target_insert' => "INSERT INTO wp_users (ID, user_login, user_email) VALUES (170, 'target_user', 'target@example.test')",
+            'source_update' => "UPDATE wp_users SET user_login = 'replacement_user', user_email = 'replacement@example.test' WHERE ID = 170",
+            'branch' => 'feature-source-user-identity-review',
+            'label' => 'source user_login',
+        ],
+        'usermeta' => [
+            'table' => 'wp_usermeta',
+            'create' => 'CREATE TABLE wp_usermeta (umeta_id INTEGER PRIMARY KEY, user_id INTEGER, meta_key TEXT, meta_value TEXT)',
+            'source_insert' => "INSERT INTO wp_usermeta (umeta_id, user_id, meta_key, meta_value) VALUES (180, 70, 'source_key', 'source value')",
+            'target_insert' => "INSERT INTO wp_usermeta (umeta_id, user_id, meta_key, meta_value) VALUES (180, 70, 'target_key', 'target value')",
+            'source_update' => "UPDATE wp_usermeta SET user_id = 71, meta_key = 'replacement_key', meta_value = 'replacement value' WHERE umeta_id = 180",
+            'branch' => 'feature-source-usermeta-identity-review',
+            'label' => 'source user_id/meta_key',
+        ],
+        'comment' => [
+            'table' => 'wp_comments',
+            'create' => 'CREATE TABLE wp_comments (comment_ID INTEGER PRIMARY KEY, comment_post_ID INTEGER, comment_type TEXT, comment_content TEXT)',
+            'source_insert' => "INSERT INTO wp_comments (comment_ID, comment_post_ID, comment_type, comment_content) VALUES (190, 10, 'comment', 'source comment')",
+            'target_insert' => "INSERT INTO wp_comments (comment_ID, comment_post_ID, comment_type, comment_content) VALUES (190, 10, 'review', 'target comment')",
+            'source_update' => "UPDATE wp_comments SET comment_post_ID = 11, comment_type = 'pingback', comment_content = 'replacement comment' WHERE comment_ID = 190",
+            'branch' => 'feature-source-comment-identity-review',
+            'label' => 'source comment_post_ID/comment_type',
+        ],
+        'commentmeta' => [
+            'table' => 'wp_commentmeta',
+            'create' => 'CREATE TABLE wp_commentmeta (meta_id INTEGER PRIMARY KEY, comment_id INTEGER, meta_key TEXT, meta_value TEXT)',
+            'source_insert' => "INSERT INTO wp_commentmeta (meta_id, comment_id, meta_key, meta_value) VALUES (200, 90, 'source_key', 'source value')",
+            'target_insert' => "INSERT INTO wp_commentmeta (meta_id, comment_id, meta_key, meta_value) VALUES (200, 90, 'target_key', 'target value')",
+            'source_update' => "UPDATE wp_commentmeta SET comment_id = 91, meta_key = 'replacement_key', meta_value = 'replacement value' WHERE meta_id = 200",
+            'branch' => 'feature-source-commentmeta-identity-review',
+            'label' => 'source comment_id/meta_key',
+        ],
+    ];
+    foreach ($source_semantic_identity_cases as $case_name => $case) {
+        $case_base = $tmp . "/source-semantic-$case_name-base.sqlite";
+        $case_source = $tmp . "/source-semantic-$case_name-source.sqlite";
+        $case_target = $tmp . "/source-semantic-$case_name-target.sqlite";
+        $case_metadata = $tmp . "/.forkpress/cow/merge/source-semantic-$case_name-metadata.sqlite";
+        foreach ([$case_base, $case_source, $case_target] as $path) {
+            $db = open_db($path);
+            $db->exec($case['create']);
+            $db->close();
+        }
+        $db = open_db($case_source);
+        $db->exec($case['source_insert']);
         $db->close();
+        $db = open_db($case_target);
+        $db->exec($case['target_insert']);
+        $db->close();
+        $case_merge = cow_merge_databases($case_base, $case_source, $case_target, $case_metadata, $case['branch'], 'main');
+        $case_run_id = (int)$case_merge['run_id'];
+        assert_same($case_merge['status'], 'completed_with_conflicts', $case['label'] . ' source semantic identity fixture starts with a same-ID row conflict');
+        $case_conflict_id = (int)scalar($case_metadata, "SELECT id FROM merge_conflicts WHERE table_name = '{$case['table']}' AND conflict_type = 'row-insert-collision'");
+        cow_merge_review_record(
+            $case_metadata,
+            'conflict',
+            $case_conflict_id,
+            'reviewed',
+            'Apply reviewed source row only if it is still the same semantic object.',
+            'cow-test'
+        );
+        $db = open_db($case_source);
+        $db->exec($case['source_update']);
+        $db->close();
+        $case_revalidated = cow_merge_revalidate_reviewed_conflicts($case_metadata, $case_run_id, 'cow-revalidate');
+        assert_same($case_revalidated['carried'], 1, $case['label'] . ' source semantic replacement is carried to needs-action');
+        assert_same(scalar($case_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $case_conflict_id ORDER BY id DESC LIMIT 1"), 'incompatible', $case['label'] . ' source semantic replacement is classified as incompatible');
+        $case_audit = cow_merge_audit_report($case_metadata, $case_run_id, 10, ['records' => 'conflicts']);
+        $case_conflicts = array_values(array_filter($case_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $case_conflict_id));
+        assert_same($case_conflicts[0]['revalidation_class'] ?? null, 'incompatible', $case['label'] . ' source audit exposes incompatible semantic replacement');
+        assert_true(str_contains((string)($case_conflicts[0]['stale_reason'] ?? ''), 'source row semantic identity'), $case['label'] . ' source stale reason explains semantic identity drift');
+        if ($case_name === 'post') {
+            assert_throws(
+                fn() => cow_merge_resolve_conflict($case_metadata, $case_conflict_id, 'source', true, 'Do not apply reviewed source row after source replacement.', 'cow-test', true),
+                'latest merge revalidation is incompatible',
+                'after-revalidate blocks source resolution from an incompatible source semantic replacement'
+            );
+        }
     }
-    $db = open_db($source_semantic_source);
-    $db->exec("INSERT INTO wp_posts (ID, post_type, post_title, post_content) VALUES (110, 'page', 'Source reviewed page', 'source reviewed page content')");
-    $db->close();
-    $db = open_db($source_semantic_target);
-    $db->exec("INSERT INTO wp_posts (ID, post_type, post_title, post_content) VALUES (110, 'page', 'Target reviewed page', 'target reviewed page content')");
-    $db->close();
-    $source_semantic_merge = cow_merge_databases($source_semantic_base, $source_semantic_source, $source_semantic_target, $source_semantic_metadata, 'feature-source-semantic-review', 'main');
-    $source_semantic_run_id = (int)$source_semantic_merge['run_id'];
-    assert_same($source_semantic_merge['status'], 'completed_with_conflicts', 'source semantic identity fixture starts with a same-ID row conflict');
-    $source_semantic_conflict_id = (int)scalar($source_semantic_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'wp_posts' AND conflict_type = 'row-insert-collision'");
-    cow_merge_review_record(
-        $source_semantic_metadata,
-        'conflict',
-        $source_semantic_conflict_id,
-        'reviewed',
-        'Apply reviewed source page only if it is still the same semantic object.',
-        'cow-test'
-    );
-    $db = open_db($source_semantic_source);
-    $db->exec("UPDATE wp_posts SET post_type = 'attachment', post_title = 'Source replacement attachment', post_content = 'source replacement attachment content' WHERE ID = 110");
-    $db->close();
-    $source_semantic_revalidated = cow_merge_revalidate_reviewed_conflicts($source_semantic_metadata, $source_semantic_run_id, 'cow-revalidate');
-    assert_same($source_semantic_revalidated['carried'], 1, 'review revalidation carries semantically replaced source rows to needs-action');
-    assert_same(scalar($source_semantic_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $source_semantic_conflict_id ORDER BY id DESC LIMIT 1"), 'incompatible', 'source row revalidation classifies changed post_type as incompatible');
-    $source_semantic_audit = cow_merge_audit_report($source_semantic_metadata, $source_semantic_run_id, 10, ['records' => 'conflicts']);
-    $source_semantic_conflicts = array_values(array_filter($source_semantic_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $source_semantic_conflict_id));
-    assert_same($source_semantic_conflicts[0]['revalidation_class'] ?? null, 'incompatible', 'source row audit exposes incompatible semantic replacement');
-    assert_true(str_contains((string)($source_semantic_conflicts[0]['stale_reason'] ?? ''), 'source row semantic identity'), 'source row stale reason explains semantic identity drift');
-    assert_throws(
-        fn() => cow_merge_resolve_conflict($source_semantic_metadata, $source_semantic_conflict_id, 'source', true, 'Do not apply reviewed source page after source replacement.', 'cow-test', true),
-        'latest merge revalidation is incompatible',
-        'after-revalidate blocks source resolution from an incompatible source semantic replacement'
-    );
 
     $row_resolution_rollback_base = $tmp . '/row-resolution-rollback-base.sqlite';
     $row_resolution_rollback_source = $tmp . '/row-resolution-rollback-source.sqlite';

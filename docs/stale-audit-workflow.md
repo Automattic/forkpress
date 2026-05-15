@@ -133,14 +133,13 @@ database rows, and filesystem paths after revalidation, revalidation classifiers
 for stale database row/cell drift, source-drifted database row/cell and
 filesystem conflicts, deleted database target rows, deleted filesystem target
 paths, incompatible no-primary-key rowid replacement, incompatible replacement
-for every currently supported target-side WordPress row semantic fingerprint,
-incompatible source-side `wp_posts` semantic replacement, and plugin validator
-reruns that carry reviewed plugin conflicts back to `needs-action` with
-`replacement-evidence` when the validator reports changed evidence for the same
-plugin object.
+for every currently supported source- and target-side WordPress row semantic
+fingerprint, and plugin validator reruns that carry reviewed plugin conflicts
+back to `needs-action` with `replacement-evidence` when the validator reports
+changed evidence for the same plugin object.
 
-Future classifier tests should cover broader primary-key row conflicts where
-the target row keeps the same key but a higher-level logical fingerprint proves
+Future classifier tests should cover plugin/custom primary-key row conflicts
+where the row keeps the same key but a higher-level logical fingerprint proves
 it now represents a different object.
 
 The existing stale-resolution tests in `tests/cow/merge.php` should remain.
