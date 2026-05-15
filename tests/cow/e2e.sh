@@ -179,6 +179,7 @@ create_branch_post() {
   local title="$2"
   local host
   host="$(branch_host "$branch")"
+  local host_name="${host%%:*}"
   local html="$TMP/${branch}-post-new.html"
   local json="$TMP/${branch}-rest-save.json"
   local cookie_jar="$TMP/${branch}-post-cookies.txt"
@@ -186,8 +187,8 @@ create_branch_post() {
 
   : > "$cookie_jar"
   if ! curl -sS -L -c "$cookie_jar" -b "$cookie_jar" \
-    -H "Host: $host" \
-    "http://127.0.0.1:$PORT/wp-login.php" \
+    --resolve "$host_name:$PORT:127.0.0.1" \
+    "http://$host/wp-login.php" \
     -o "$login_html"; then
     echo "failed to warm post editor login cookies on $branch" >&2
     dump_if_exists "$login_html"
@@ -198,8 +199,8 @@ create_branch_post() {
   local html_http
   if ! html_http="$(
     curl -sS -L -c "$cookie_jar" -b "$cookie_jar" -o "$html" -w '%{http_code}' \
-      -H "Host: $host" \
-      "http://127.0.0.1:$PORT/wp-admin/post-new.php"
+      --resolve "$host_name:$PORT:127.0.0.1" \
+      "http://$host/wp-admin/post-new.php"
   )"; then
     echo "failed to fetch post editor on $branch" >&2
     "$BIN" logs --work-dir "$WORK_DIR" --file all -n 160 >&2 || true
@@ -232,11 +233,11 @@ NODE
   if ! http="$(
     curl -sS -o "$json" -w '%{http_code}' \
       -b "$cookie_jar" \
-      -H "Host: $host" \
+      --resolve "$host_name:$PORT:127.0.0.1" \
       -H "Content-Type: application/json" \
       -H "X-WP-Nonce: $nonce" \
       --data "{\"title\":\"$title\",\"content\":\"Saved from ForkPress COW reset e2e\",\"status\":\"publish\"}" \
-      "http://127.0.0.1:$PORT/index.php?rest_route=/wp/v2/posts"
+      "http://$host/index.php?rest_route=/wp/v2/posts"
   )"; then
     echo "REST save request on $branch failed" >&2
     dump_if_exists "$json"
