@@ -1044,6 +1044,7 @@ add_action('init', function () {
             }
             $option_graph = get_option("forkpress_semantic_plugin_{$parent['branch']}_option");
             $file_path = is_array($child) ? (string)($child['file_path'] ?? '') : '';
+            $absolute_file_path = $file_path !== '' ? trailingslashit($upload_dir['basedir']) . $file_path : '';
             $plugin_graphs[(string)$parent['branch']] = [
                 'parent_id' => $parent_id,
                 'child_id' => is_array($child) ? (int)$child['id'] : 0,
@@ -1060,7 +1061,10 @@ add_action('init', function () {
                 'postmeta_note_id' => is_array($postmeta_json) ? (int)($postmeta_json['note_id'] ?? 0) : 0,
                 'child_payload_parent_id' => is_array($child_payload) ? (int)($child_payload['parent_id'] ?? 0) : 0,
                 'child_payload_note_id' => is_array($child_payload) ? (int)($child_payload['note_id'] ?? 0) : 0,
-                'file_exists' => $file_path !== '' && file_exists(trailingslashit($upload_dir['basedir']) . $file_path),
+                'file_exists' => $absolute_file_path !== '' && file_exists($absolute_file_path),
+                'file_contents' => $absolute_file_path !== '' && file_exists($absolute_file_path)
+                    ? file_get_contents($absolute_file_path)
+                    : null,
             ];
         }
         ksort($plugin_graphs);
@@ -1634,7 +1638,8 @@ $pluginGraphValid = static function (array $graphs, array $posts, string $branch
         && (($graph["postmeta_note_id"] ?? null) === $note_id)
         && (($graph["child_payload_parent_id"] ?? null) === ($graph["parent_id"] ?? null))
         && (($graph["child_payload_note_id"] ?? null) === $note_id)
-        && (($graph["file_exists"] ?? null) === true);
+        && (($graph["file_exists"] ?? null) === true)
+        && (($graph["file_contents"] ?? null) === "plugin graph file for $branch\n");
 };
 $menuItemValid = static function (array $items, array $posts, string $suffix): bool {
     $item = $items["Semantic $suffix Link"] ?? [];
