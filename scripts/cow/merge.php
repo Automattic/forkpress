@@ -4743,28 +4743,45 @@ function cow_merge_wordpress_post_content_reference_violation(
         );
     };
 
-    if (preg_match_all('/<!--\s*wp:block\s+(\{.*?\})\s*\/\s*-->/s', $content, $matches)) {
-        foreach ($matches[1] as $raw_attrs) {
-            $attrs = json_decode($raw_attrs, true);
-            if (!is_array($attrs) || !array_key_exists('ref', $attrs)) {
-                continue;
-            }
+    if (!preg_match_all('/<!--\s*wp:([A-Za-z0-9_\/-]+)\s+(\{.*?\})\s*(?:\/)?-->/s', $content, $matches, PREG_SET_ORDER)) {
+        return null;
+    }
+
+    $media_id_blocks = ['audio', 'cover', 'file', 'image', 'video'];
+    foreach ($matches as $match) {
+        $block_name = (string)$match[1];
+        $attrs = json_decode((string)$match[2], true);
+        if (!is_array($attrs)) {
+            continue;
+        }
+
+        if ($block_name === 'block' && array_key_exists('ref', $attrs)) {
             $violation = $check_post($attrs['ref'], 'wp:block.ref');
             if ($violation !== null) {
                 return $violation;
             }
         }
-    }
 
-    if (preg_match_all('/<!--\s*wp:image\s+(\{.*?\})\s*-->/s', $content, $matches)) {
-        foreach ($matches[1] as $raw_attrs) {
-            $attrs = json_decode($raw_attrs, true);
-            if (!is_array($attrs) || !array_key_exists('id', $attrs)) {
-                continue;
-            }
-            $violation = $check_post($attrs['id'], 'wp:image.id');
+        if (in_array($block_name, $media_id_blocks, true) && array_key_exists('id', $attrs)) {
+            $violation = $check_post($attrs['id'], 'wp:' . $block_name . '.id');
             if ($violation !== null) {
                 return $violation;
+            }
+        }
+
+        if ($block_name === 'media-text' && array_key_exists('mediaId', $attrs)) {
+            $violation = $check_post($attrs['mediaId'], 'wp:media-text.mediaId');
+            if ($violation !== null) {
+                return $violation;
+            }
+        }
+
+        if ($block_name === 'gallery' && isset($attrs['ids']) && is_array($attrs['ids'])) {
+            foreach ($attrs['ids'] as $index => $id) {
+                $violation = $check_post($id, 'wp:gallery.ids.' . (string)$index);
+                if ($violation !== null) {
+                    return $violation;
+                }
             }
         }
     }
