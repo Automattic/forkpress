@@ -13675,6 +13675,38 @@ SQL);
         'out-of-band explicit plugin AUTOINCREMENT ID explains the reserved-band violation'
     );
 
+    $band_rewrite_base = $tmp . '/band-rewrite-base.sqlite';
+    $band_rewrite_source = $tmp . '/band-rewrite-source.sqlite';
+    $band_rewrite_target = $tmp . '/band-rewrite-target.sqlite';
+    $band_rewrite_metadata = $tmp . '/.forkpress/cow/merge/band-rewrite-metadata.sqlite';
+    copy($band_base, $band_rewrite_base);
+    copy($band_base, $band_rewrite_source);
+    copy($band_base, $band_rewrite_target);
+    cow_merge_allocate_autoincrement_bands($band_rewrite_source, $band_rewrite_metadata, 'feature-band-rewrite-source');
+    $db = open_db($band_rewrite_source);
+    $db->exec("UPDATE wp_posts SET ID = 2, post_title = 'Rewritten explicit post ID' WHERE ID = 1");
+    $db->close();
+    $band_rewrite_result = cow_merge_databases(
+        $band_rewrite_base,
+        $band_rewrite_source,
+        $band_rewrite_target,
+        $band_rewrite_metadata,
+        'feature-band-rewrite-source',
+        'main'
+    );
+    assert_same($band_rewrite_result['status'], 'completed_with_conflicts', 'out-of-band AUTOINCREMENT primary-key rewrites remain reviewable');
+    assert_same((int)scalar($band_rewrite_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 1'), 1, 'out-of-band primary-key rewrite does not delete the original target row by default');
+    assert_same((int)scalar($band_rewrite_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 2'), 0, 'out-of-band primary-key rewrite does not insert the rewritten explicit ID by default');
+    assert_same(
+        (int)scalar($band_rewrite_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-rewrite-source' AND c.table_name = 'wp_posts' AND c.conflict_type = 'row-target-constraint'"),
+        2,
+        'out-of-band primary-key rewrite records reviewable insert and paired delete conflicts'
+    );
+    assert_true(
+        str_contains((string)scalar($band_rewrite_metadata, "SELECT reason FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-rewrite-source' AND d.table_name = 'wp_posts' AND d.row_identity = '" . SQLite3::escapeString(cow_merge_identity_json(['ID' => 1])) . "' ORDER BY d.id DESC LIMIT 1"), 'held explicit AUTOINCREMENT insert'),
+        'out-of-band primary-key rewrite explains why the paired source delete is held'
+    );
+
     $band_explicit_ref_base = $tmp . '/band-explicit-ref-base.sqlite';
     $band_explicit_ref_source = $tmp . '/band-explicit-ref-source.sqlite';
     $band_explicit_ref_target = $tmp . '/band-explicit-ref-target.sqlite';

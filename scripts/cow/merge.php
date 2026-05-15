@@ -11870,6 +11870,22 @@ function cow_merge_table_rows(
     $applied = 0;
     $conflicts = 0;
     $externally_applied = [];
+    $held_explicit_autoincrement_insert_reason = null;
+    if ($pk_cols) {
+        foreach ($all_keys as $key) {
+            $base_entry = $base_rows[$key] ?? null;
+            $source_entry = $source_rows[$key] ?? null;
+            $target_entry = $target_rows[$key] ?? null;
+            $source_row = $source_entry['row'] ?? null;
+            if (($base_entry['row'] ?? null) !== null || !is_array($source_row) || ($target_entry['row'] ?? null) !== null) {
+                continue;
+            }
+            $held_explicit_autoincrement_insert_reason = cow_merge_autoincrement_id_band_violation($meta, $source_branch, $table, $source_row, $pk_cols);
+            if ($held_explicit_autoincrement_insert_reason !== null) {
+                break;
+            }
+        }
+    }
     foreach ($all_keys as $key) {
         if (isset($externally_applied[$key])) {
             continue;
@@ -12102,6 +12118,22 @@ function cow_merge_table_rows(
         }
 
         if ($base_row !== null && $source_row === null && cow_merge_row_values_equal($target_row, $base_row, $row_columns)) {
+            if ($held_explicit_autoincrement_insert_reason !== null) {
+                if (cow_merge_record_row_target_constraint(
+                    $meta,
+                    $run_id,
+                    $table,
+                    $key,
+                    $base_row,
+                    null,
+                    $target_row,
+                    'delete',
+                    'source deleted row while the same table has a held explicit AUTOINCREMENT insert: ' . $held_explicit_autoincrement_insert_reason
+                )) {
+                    $conflicts++;
+                }
+                continue;
+            }
             $where_identity = cow_merge_entry_where_identity($target_entry, $pk_cols);
             if ($where_identity === null) {
                 throw new RuntimeException("cannot delete $table row without a target identity");
