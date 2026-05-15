@@ -105,6 +105,12 @@ on_error() {
   dump_if_exists "$TMP/public-metadata-crash-restore.json"
   dump_if_exists "$TMP/public-metadata-crash-retry.out"
   dump_if_exists "$TMP/public-metadata-crash-main-edit.html"
+  dump_if_exists "$TMP/public-before-file-crash-merge.out"
+  dump_if_exists "$TMP/public-before-file-crash-recover.json"
+  dump_if_exists "$TMP/public-before-file-crash-blocked.out"
+  dump_if_exists "$TMP/public-before-file-crash-restore.json"
+  dump_if_exists "$TMP/public-before-file-crash-retry.out"
+  dump_if_exists "$TMP/public-before-file-crash-main-edit.html"
   dump_if_exists "$TMP/public-file-crash-merge.out"
   dump_if_exists "$TMP/public-file-crash-recover.json"
   dump_if_exists "$TMP/public-file-crash-blocked.out"
@@ -1488,6 +1494,35 @@ curl -sS -H "Host: wp.localhost:$PORT" \
   "http://127.0.0.1:$PORT/wp-admin/edit.php" \
   -o "$TMP/public-metadata-crash-main-edit.html"
 grep -F "$PUBLIC_METADATA_CRASH_TITLE" "$TMP/public-metadata-crash-main-edit.html" >/dev/null
+
+log_step "public branch merge before-file crash recovery"
+"$BIN" branch --work-dir "$WORK_DIR" create public-before-file-crash-merge
+PUBLIC_BEFORE_FILE_CRASH_TITLE="Public before-file crash merge $(date +%s)"
+create_branch_post public-before-file-crash-merge "$PUBLIC_BEFORE_FILE_CRASH_TITLE"
+echo "public before-file crash merge" > "$WORK/public-before-file-crash-merge/wp-content/public-before-file-crash.txt"
+if FORKPRESS_COW_MERGE_TEST_FAILPOINT=before-file-op FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION=kill \
+  "$BIN" branch --work-dir "$WORK_DIR" merge public-before-file-crash-merge --into main > "$TMP/public-before-file-crash-merge.out" 2>&1; then
+  echo "public branch merge unexpectedly survived before-file-op kill failpoint" >&2
+  exit 1
+fi
+"$BIN" branch --work-dir "$WORK_DIR" recover-crash --format json > "$TMP/public-before-file-crash-recover.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && (int)($data["pending"] ?? 0) >= 1 ? 0 : 1);' "$TMP/public-before-file-crash-recover.json"
+if "$BIN" branch --work-dir "$WORK_DIR" merge public-before-file-crash-merge --into main > "$TMP/public-before-file-crash-blocked.out" 2>&1; then
+  echo "public branch merge unexpectedly ignored pending before-file crash recovery artifact" >&2
+  exit 1
+fi
+grep -F "pending COW merge crash recovery artifact" "$TMP/public-before-file-crash-blocked.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" recover-crash --restore-target-db --restore-files --format json > "$TMP/public-before-file-crash-restore.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && (int)($data["pending"] ?? 0) === 0 && (int)($data["restored"] ?? 0) >= 1 ? 0 : 1);' "$TMP/public-before-file-crash-restore.json"
+"$BIN" branch --work-dir "$WORK_DIR" merge public-before-file-crash-merge --into main > "$TMP/public-before-file-crash-retry.out"
+grep -F "forkpress: merged public-before-file-crash-merge into main" "$TMP/public-before-file-crash-retry.out" >/dev/null
+grep -F "status:    completed" "$TMP/public-before-file-crash-retry.out" >/dev/null
+test -f "$WORK/main/wp-content/public-before-file-crash.txt"
+grep -F "public before-file crash merge" "$WORK/main/wp-content/public-before-file-crash.txt" >/dev/null
+curl -sS -H "Host: wp.localhost:$PORT" \
+  "http://127.0.0.1:$PORT/wp-admin/edit.php" \
+  -o "$TMP/public-before-file-crash-main-edit.html"
+grep -F "$PUBLIC_BEFORE_FILE_CRASH_TITLE" "$TMP/public-before-file-crash-main-edit.html" >/dev/null
 
 log_step "public branch merge filesystem crash recovery"
 "$BIN" branch --work-dir "$WORK_DIR" create public-file-crash-merge
