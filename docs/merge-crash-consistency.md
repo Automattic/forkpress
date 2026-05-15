@@ -40,6 +40,10 @@ The PHP merge suite covers these rollback classes:
   filesystem metadata commit, with a durable crash-recovery artifact that points
   at the staged filesystem transaction and can be restored through
   `recover-crash --restore-files`.
+- Process death after the DB phase of a DB+file merge but before the first file
+  operation, with a durable whole-branch crash-recovery artifact that points at
+  the pre-merge target DB, metadata DB, and filesystem-root snapshots and can be
+  restored through `recover-crash --restore-target-db --restore-files`.
 - A subsequent merge against metadata with pending crash-recovery artifacts is
   rejected before DB or file mutation, forcing the operator to inspect and
   restore the pending recovery state first. The product-level entry point is
@@ -102,7 +106,10 @@ OS-level interruption, not just deliberate exceptions:
 - Kill before/after target DB commit but before metadata commit is covered for
   the direct DB merge path; the remaining work is to extend the same
   process-death harness to full DB+file+Git branch publication.
-- Kill after metadata commit but before file publish.
+- Kill after metadata commit but before file publish is covered for the
+  DB+file merge path before the first file operation; the remaining work is to
+  extend the same whole-branch recovery model across later file publish and
+  product-level publication boundaries.
 - Kill after one file publish but before later file publishes is covered for
   direct filesystem merge rollback; the remaining work is to extend the same
   recovery model to full branch publication after DB+file completion.

@@ -3795,16 +3795,25 @@ function cow_merge_write_crash_recovery_artifact(
     array $run_context,
     ?array $target_snapshot,
     ?array $filesystem_transaction = null,
-    ?string $filesystem_target_root = null
+    ?string $filesystem_target_root = null,
+    ?array $metadata_snapshot = null,
+    ?array $filesystem_snapshot = null
 ): string {
     $path = cow_merge_crash_recovery_artifact_path($metadata_db, $run_id, $checkpoint);
     $artifacts = [];
     if ($target_snapshot !== null) {
         $artifacts['target_db_snapshot'] = cow_merge_sqlite_snapshot_artifact($target_snapshot);
     }
+    if ($metadata_snapshot !== null) {
+        $artifacts['metadata_db_snapshot'] = cow_merge_sqlite_snapshot_artifact($metadata_snapshot);
+    }
     if ($filesystem_transaction !== null) {
         $artifacts['filesystem_transaction'] = $filesystem_transaction;
         $artifacts['filesystem_transaction_summary'] = cow_merge_file_transaction_artifact($filesystem_transaction, $filesystem_target_root);
+    }
+    if ($filesystem_snapshot !== null) {
+        $artifacts['filesystem_snapshot'] = $filesystem_snapshot;
+        $artifacts['filesystem_snapshot_summary'] = cow_merge_file_root_snapshot_artifact($filesystem_snapshot, $filesystem_target_root);
     }
     cow_merge_write_json_file($path, [
         'version' => 1,
@@ -3862,8 +3871,11 @@ function cow_merge_crash_recovery_artifacts(string $metadata_db, ?int $run_id = 
             continue;
         }
         $snapshot = $decoded['artifacts']['target_db_snapshot'] ?? null;
+        $metadata_snapshot = $decoded['artifacts']['metadata_db_snapshot'] ?? null;
         $filesystem_transaction = $decoded['artifacts']['filesystem_transaction'] ?? null;
         $filesystem_summary = $decoded['artifacts']['filesystem_transaction_summary'] ?? null;
+        $filesystem_snapshot = $decoded['artifacts']['filesystem_snapshot'] ?? null;
+        $filesystem_snapshot_summary = $decoded['artifacts']['filesystem_snapshot_summary'] ?? null;
         $artifacts[] = [
             'artifact_path' => $file,
             'checkpoint' => (string)($decoded['checkpoint'] ?? 'unknown'),
@@ -3873,8 +3885,11 @@ function cow_merge_crash_recovery_artifacts(string $metadata_db, ?int $run_id = 
             'target_db' => (string)($decoded['target_db'] ?? ''),
             'target_root' => (string)($decoded['target_root'] ?? ''),
             'target_db_snapshot' => is_array($snapshot) ? $snapshot : null,
+            'metadata_db_snapshot' => is_array($metadata_snapshot) ? $metadata_snapshot : null,
             'filesystem_transaction' => is_array($filesystem_transaction) ? $filesystem_transaction : null,
             'filesystem_transaction_summary' => is_array($filesystem_summary) ? $filesystem_summary : null,
+            'filesystem_snapshot' => is_array($filesystem_snapshot) ? $filesystem_snapshot : null,
+            'filesystem_snapshot_summary' => is_array($filesystem_snapshot_summary) ? $filesystem_snapshot_summary : null,
         ];
     }
     return $artifacts;
@@ -3891,7 +3906,9 @@ function cow_merge_recover_crash_artifacts(
     if ($restore_target_db || $restore_files) {
         foreach ($artifacts as $artifact) {
             $restored_snapshot = null;
+            $restored_metadata_snapshot = null;
             $restored_filesystem_transaction = null;
+            $restored_filesystem_snapshot = null;
             if ($restore_target_db) {
                 $snapshot = $artifact['target_db_snapshot'] ?? null;
                 if (!is_array($snapshot)) {
@@ -3899,23 +3916,40 @@ function cow_merge_recover_crash_artifacts(
                 }
                 cow_merge_restore_sqlite_snapshot($snapshot);
                 $restored_snapshot = $snapshot;
+                $metadata_snapshot = $artifact['metadata_db_snapshot'] ?? null;
+                if (is_array($metadata_snapshot)) {
+                    cow_merge_restore_sqlite_snapshot($metadata_snapshot);
+                    $restored_metadata_snapshot = $metadata_snapshot;
+                }
             }
             if ($restore_files) {
                 $filesystem_transaction = $artifact['filesystem_transaction'] ?? null;
+                $filesystem_snapshot = $artifact['filesystem_snapshot'] ?? null;
                 $target_root = (string)($artifact['target_root'] ?? '');
-                if (!is_array($filesystem_transaction) || $target_root === '') {
+                if ((!is_array($filesystem_transaction) && !is_array($filesystem_snapshot)) || $target_root === '') {
                     throw new RuntimeException("crash recovery artifact has no filesystem transaction: {$artifact['artifact_path']}");
                 }
-                cow_merge_file_transaction_restore($filesystem_transaction, $target_root);
-                $restored_filesystem_transaction = $filesystem_transaction;
+                if (is_array($filesystem_snapshot)) {
+                    cow_merge_file_root_snapshot_restore($filesystem_snapshot, $target_root);
+                    $restored_filesystem_snapshot = $filesystem_snapshot;
+                } else {
+                    cow_merge_file_transaction_restore($filesystem_transaction, $target_root);
+                    $restored_filesystem_transaction = $filesystem_transaction;
+                }
             }
             cow_merge_failpoint('after-crash-recovery-restore');
             cow_merge_remove_crash_recovery_artifact((string)$artifact['artifact_path']);
             if ($restored_snapshot !== null) {
                 cow_merge_cleanup_sqlite_snapshot($restored_snapshot);
             }
+            if ($restored_metadata_snapshot !== null) {
+                cow_merge_cleanup_sqlite_snapshot($restored_metadata_snapshot);
+            }
             if ($restored_filesystem_transaction !== null) {
                 cow_merge_file_transaction_cleanup($restored_filesystem_transaction);
+            }
+            if ($restored_filesystem_snapshot !== null) {
+                cow_merge_file_root_snapshot_cleanup($restored_filesystem_snapshot);
             }
             $restored++;
         }
@@ -12915,6 +12949,7 @@ function cow_merge_branch_state(
 
     $attempted_run_id = null;
     $preserve_rollback_snapshots = false;
+    $whole_branch_crash_recovery_artifact = null;
     try {
         $result = cow_merge_databases($base_db, $source_db, $target_db, $metadata_db, $source_branch, $target_branch);
         $attempted_run_id = (int)$result['run_id'];
@@ -12927,6 +12962,26 @@ function cow_merge_branch_state(
         $result['plugin_validators_discovered'] = 0;
 
         if ($has_file_args) {
+            $whole_branch_crash_recovery_artifact = cow_merge_write_crash_recovery_artifact(
+                $metadata_db,
+                (int)$result['run_id'],
+                'before-file-op',
+                [
+                    'source_branch' => $source_branch,
+                    'target_branch' => $target_branch,
+                    'base_db' => $base_db,
+                    'source_db' => $source_db,
+                    'target_db' => $target_db,
+                ],
+                $target_snapshot,
+                null,
+                (string)$target_root,
+                $metadata_snapshot,
+                $filesystem_snapshot
+            );
+            cow_merge_failpoint('before-file-op');
+            cow_merge_remove_crash_recovery_artifact($whole_branch_crash_recovery_artifact);
+            $whole_branch_crash_recovery_artifact = null;
             $file_result = cow_merge_files($base_files, $source_root, $target_root, $metadata_db, (int)$result['run_id']);
             $result['file_applied'] = $file_result['applied'];
             $result['file_conflicts'] = $file_result['conflicts'];
@@ -12971,6 +13026,8 @@ function cow_merge_branch_state(
                     $target_db,
                     $e
                 );
+                cow_merge_remove_crash_recovery_artifact($whole_branch_crash_recovery_artifact);
+                $whole_branch_crash_recovery_artifact = null;
             } catch (Throwable $rollback_error) {
                 $preserve_rollback_snapshots = true;
                 $failure_reason = cow_merge_failure_reason($e);

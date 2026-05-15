@@ -1574,6 +1574,102 @@ try {
             'crash recovery CLI restores the pre-metadata target DB content'
         );
 
+        $crash_before_file_base_db = $tmp . '/crash-before-file-base.sqlite';
+        $crash_before_file_source_db = $tmp . '/crash-before-file-source.sqlite';
+        $crash_before_file_target_db = $tmp . '/crash-before-file-target.sqlite';
+        $crash_before_file_metadata = $tmp . '/.forkpress/cow/merge/crash-before-file/metadata.sqlite';
+        create_base_db($crash_before_file_base_db);
+        copy($crash_before_file_base_db, $crash_before_file_source_db);
+        copy($crash_before_file_base_db, $crash_before_file_target_db);
+        $db = open_db($crash_before_file_source_db);
+        $db->exec("UPDATE wp_posts SET post_content = 'Source crash before file content' WHERE ID = 1");
+        $db->close();
+        $crash_before_file_base_root = $tmp . '/crash-before-file-base-root';
+        $crash_before_file_source_root = $tmp . '/crash-before-file-source-root';
+        $crash_before_file_target_root = $tmp . '/crash-before-file-target-root';
+        write_test_file($crash_before_file_base_root . '/wp-content/uploads/before-file.txt', 'base before-file content');
+        copy_tree_for_test($crash_before_file_base_root, $crash_before_file_source_root);
+        copy_tree_for_test($crash_before_file_base_root, $crash_before_file_target_root);
+        write_test_file($crash_before_file_source_root . '/wp-content/uploads/before-file.txt', 'source before-file content');
+        $crash_before_file_manifest = $tmp . '/.forkpress/cow/merge/file-bases/feature-crash-before-file.json';
+        cow_merge_capture_file_base($crash_before_file_base_root, $crash_before_file_manifest);
+        $crash_before_file_result = run_merge_cli_env(
+            [
+                'merge',
+                '--base-db', $crash_before_file_base_db,
+                '--source-db', $crash_before_file_source_db,
+                '--target-db', $crash_before_file_target_db,
+                '--metadata-db', $crash_before_file_metadata,
+                '--source', 'feature-crash-before-file',
+                '--target', 'main',
+                '--base-files', $crash_before_file_manifest,
+                '--source-root', $crash_before_file_source_root,
+                '--target-root', $crash_before_file_target_root,
+            ],
+            [
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT' => 'before-file-op',
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION' => 'kill',
+            ]
+        );
+        assert_true($crash_before_file_result['status'] !== 0, 'crash failpoint terminates the merge subprocess before filesystem operations begin');
+        assert_same(
+            scalar($crash_before_file_target_db, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Source crash before file content',
+            'process death before filesystem operations can leave the already committed DB phase visible'
+        );
+        assert_same(
+            file_get_contents($crash_before_file_target_root . '/wp-content/uploads/before-file.txt'),
+            'base before-file content',
+            'process death before filesystem operations leaves files at the pre-merge content'
+        );
+        $crash_before_file_report = run_merge_cli([
+            'recover-crash',
+            '--metadata-db', $crash_before_file_metadata,
+            '--format', 'json',
+        ]);
+        assert_same($crash_before_file_report['status'], 0, 'crash recovery CLI lists pending before-file artifacts');
+        $crash_before_file_report_json = json_decode($crash_before_file_report['output'], true);
+        assert_same($crash_before_file_report_json['pending'] ?? null, 1, 'crash recovery CLI reports one pending before-file artifact');
+        assert_same($crash_before_file_report_json['artifacts'][0]['checkpoint'] ?? null, 'before-file-op', 'crash recovery CLI reports the before-file checkpoint');
+        assert_true(is_array($crash_before_file_report_json['artifacts'][0]['target_db_snapshot'] ?? null), 'before-file crash artifact preserves the target DB snapshot');
+        assert_true(is_array($crash_before_file_report_json['artifacts'][0]['metadata_db_snapshot'] ?? null), 'before-file crash artifact preserves the metadata DB snapshot');
+        assert_true(is_array($crash_before_file_report_json['artifacts'][0]['filesystem_snapshot_summary'] ?? null), 'before-file crash artifact preserves the filesystem root snapshot summary');
+        $blocked_crash_before_file_rematch = run_merge_cli([
+            'merge',
+            '--base-db', $crash_before_file_base_db,
+            '--source-db', $crash_before_file_source_db,
+            '--target-db', $crash_before_file_target_db,
+            '--metadata-db', $crash_before_file_metadata,
+            '--source', 'feature-crash-before-file',
+            '--target', 'main',
+            '--base-files', $crash_before_file_manifest,
+            '--source-root', $crash_before_file_source_root,
+            '--target-root', $crash_before_file_target_root,
+        ]);
+        assert_true($blocked_crash_before_file_rematch['status'] !== 0, 'pending before-file crash recovery blocks a subsequent merge');
+        assert_true(str_contains($blocked_crash_before_file_rematch['output'], 'pending COW merge crash recovery artifact'), 'pending before-file crash recovery error explains the recovery queue');
+        $crash_before_file_restore = run_merge_cli([
+            'recover-crash',
+            '--metadata-db', $crash_before_file_metadata,
+            '--restore-target-db',
+            '--restore-files',
+            '--format', 'json',
+        ]);
+        assert_same($crash_before_file_restore['status'], 0, 'crash recovery CLI restores before-file whole-branch snapshots');
+        $crash_before_file_restore_json = json_decode($crash_before_file_restore['output'], true);
+        assert_same($crash_before_file_restore_json['restored'] ?? null, 1, 'crash recovery CLI reports one restored before-file artifact');
+        assert_same($crash_before_file_restore_json['pending'] ?? null, 0, 'crash recovery CLI clears the before-file crash queue after restore');
+        assert_same(
+            scalar($crash_before_file_target_db, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Base content',
+            'before-file crash recovery restores the pre-merge target DB content'
+        );
+        assert_same(
+            file_get_contents($crash_before_file_target_root . '/wp-content/uploads/before-file.txt'),
+            'base before-file content',
+            'before-file crash recovery leaves files at the pre-merge content'
+        );
+
         $crash_file_base_db = $tmp . '/crash-file-base.sqlite';
         $crash_file_source_db = $tmp . '/crash-file-source.sqlite';
         $crash_file_target_db = $tmp . '/crash-file-target.sqlite';
