@@ -61,6 +61,9 @@ on_error() {
   dump_if_exists "$TMP/git-delete.out"
   dump_if_exists "$TMP/git-delete-main.out"
   dump_if_exists "$TMP/keyless-init.json"
+  dump_if_exists "$TMP/public-reset-crash.out"
+  dump_if_exists "$TMP/public-reset-crash-merge-blocked.out"
+  dump_if_exists "$TMP/public-reset-crash-retry.out"
   dump_if_exists "$TMP/keyless-source-reuse.json"
   dump_if_exists "$TMP/keyless-target-edit.json"
   dump_if_exists "$TMP/keyless-main-after-merge.json"
@@ -1245,6 +1248,32 @@ if "$BIN" branch --work-dir "$WORK_DIR" reset main --from reset-source > "$TMP/r
   exit 1
 fi
 grep -F "refusing to reset main without --force" "$TMP/reset-main.out" >/dev/null
+
+log_step "public branch reset crash retry"
+"$BIN" branch --work-dir "$WORK_DIR" create public-reset-crash-source
+"$BIN" branch --work-dir "$WORK_DIR" create public-reset-crash-target
+echo "public reset crash source" > "$WORK/public-reset-crash-source/wp-content/public-reset-crash-source.txt"
+echo "public reset crash target" > "$WORK/public-reset-crash-target/wp-content/public-reset-crash-target.txt"
+if FORKPRESS_COW_STORAGE_TEST_FAILPOINT=after-branch-reset-publish FORKPRESS_COW_STORAGE_TEST_FAILPOINT_ACTION=exit \
+  "$BIN" branch --work-dir "$WORK_DIR" reset public-reset-crash-target --from public-reset-crash-source > "$TMP/public-reset-crash.out" 2>&1; then
+  echo "public branch reset unexpectedly survived after-branch-reset-publish failpoint" >&2
+  exit 1
+fi
+test -f "$WORK/public-reset-crash-target/wp-content/public-reset-crash-source.txt"
+test -f "$WORK_DIR/cow/reset-pending/public-reset-crash-target.txt"
+if "$BIN" branch --work-dir "$WORK_DIR" merge public-reset-crash-target --into main > "$TMP/public-reset-crash-merge-blocked.out" 2>&1; then
+  echo "public branch merge unexpectedly accepted a reset-pending branch" >&2
+  exit 1
+fi
+grep -F "unfinished reset" "$TMP/public-reset-crash-merge-blocked.out" >/dev/null
+"$BIN" branch --work-dir "$WORK_DIR" reset public-reset-crash-target --from public-reset-crash-source > "$TMP/public-reset-crash-retry.out"
+grep -F "reset COW branch 'public-reset-crash-target' from 'public-reset-crash-source'" "$TMP/public-reset-crash-retry.out" >/dev/null
+test ! -e "$WORK_DIR/cow/reset-pending/public-reset-crash-target.txt"
+test -f "$WORK/public-reset-crash-target/wp-content/public-reset-crash-source.txt"
+test ! -e "$WORK/public-reset-crash-target/wp-content/public-reset-crash-target.txt"
+test -f "$WORK_DIR/cow/merge/bases/public-reset-crash-target.sqlite"
+test -f "$WORK_DIR/cow/merge/file-bases/public-reset-crash-target.json"
+php -r '$meta = new SQLite3($argv[1]); $count = (int)$meta->querySingle("SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = '\''public-reset-crash-target'\''"); exit($count > 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
 
 log_step "merge independently banded WordPress posts"
 "$BIN" branch --work-dir "$WORK_DIR" create band-merge-source > "$TMP/band-merge-source-create.out"

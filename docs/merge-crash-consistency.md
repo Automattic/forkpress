@@ -134,6 +134,10 @@ The Git server suite covers these publication classes:
   identity, and Git-ref metadata are finalized. Public branch reuse and merge
   refuse branches with an unfinished reset marker so a hard kill in the reset
   publication window cannot silently merge with stale branch-birth metadata.
+- The product E2E suite drives a public `forkpress branch reset` exit after the
+  replacement branch is published but before reset metadata finalization,
+  verifies public merge is blocked by the pending-reset marker, then reruns the
+  public reset and verifies fresh DB/file merge bases and ID-band metadata.
 
 ## Missing Fault Injection
 

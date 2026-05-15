@@ -850,6 +850,7 @@ pub fn reset_cow_branch(
         return Err(err).context(format!("failed to reset COW branch; {rollback}"));
     }
 
+    cow_storage_failpoint("after-branch-reset-publish")?;
     let metadata_backup = match snapshot_cow_reset_metadata(layout, runtime, shared, branch, parent)
     {
         Ok(backup) => backup,
