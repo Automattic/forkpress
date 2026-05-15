@@ -1444,6 +1444,72 @@ try {
         assert_true(is_array($restored_crash_recovery_files) && count($restored_crash_recovery_files) === 0, 'crash recovery CLI removes restored artifact files');
         assert_true(!file_exists($crash_backup), 'completed crash recovery cleanup removes target DB snapshot backup');
 
+        $crash_metadata_base = $tmp . '/crash-metadata-base.sqlite';
+        $crash_metadata_source = $tmp . '/crash-metadata-source.sqlite';
+        $crash_metadata_target = $tmp . '/crash-metadata-target.sqlite';
+        $crash_metadata_db = $tmp . '/.forkpress/cow/merge/crash-metadata/metadata.sqlite';
+        create_base_db($crash_metadata_base);
+        copy($crash_metadata_base, $crash_metadata_source);
+        copy($crash_metadata_base, $crash_metadata_target);
+        $db = open_db($crash_metadata_source);
+        $db->exec("UPDATE wp_posts SET post_content = 'Source crash metadata content' WHERE ID = 1");
+        $db->close();
+        $crash_metadata_result = run_merge_cli_env(
+            [
+                'merge',
+                '--base-db', $crash_metadata_base,
+                '--source-db', $crash_metadata_source,
+                '--target-db', $crash_metadata_target,
+                '--metadata-db', $crash_metadata_db,
+                '--source', 'feature-crash-metadata',
+                '--target', 'main',
+            ],
+            [
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT' => 'before-metadata-commit',
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION' => 'kill',
+            ]
+        );
+        assert_true($crash_metadata_result['status'] !== 0, 'crash failpoint terminates the merge subprocess before metadata commit');
+        assert_same(
+            scalar($crash_metadata_target, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Source crash metadata content',
+            'process death before metadata commit leaves the durable target change visible'
+        );
+        $crash_metadata_files = glob(dirname($crash_metadata_db) . '/crash-recovery/*.json');
+        assert_true(is_array($crash_metadata_files) && count($crash_metadata_files) === 1, 'process death before metadata commit leaves one crash recovery artifact');
+        $crash_metadata_recovery = json_decode(file_get_contents($crash_metadata_files[0]), true);
+        assert_same($crash_metadata_recovery['checkpoint'] ?? null, 'target-db-commit', 'pre-metadata crash recovery artifact uses the target DB commit checkpoint');
+        assert_same($crash_metadata_recovery['source_branch'] ?? null, 'feature-crash-metadata', 'pre-metadata crash recovery artifact preserves source branch context');
+        $crash_metadata_completed = is_file($crash_metadata_db)
+            ? (int)scalar($crash_metadata_db, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-crash-metadata' AND status = 'completed'")
+            : 0;
+        assert_same($crash_metadata_completed, 0, 'process death before metadata commit does not publish a completed merge run');
+        $blocked_crash_metadata_rematch = run_merge_cli([
+            'merge',
+            '--base-db', $crash_metadata_base,
+            '--source-db', $crash_metadata_source,
+            '--target-db', $crash_metadata_target,
+            '--metadata-db', $crash_metadata_db,
+            '--source', 'feature-crash-metadata',
+            '--target', 'main',
+        ]);
+        assert_true($blocked_crash_metadata_rematch['status'] !== 0, 'pending pre-metadata crash recovery blocks a subsequent merge');
+        assert_true(str_contains($blocked_crash_metadata_rematch['output'], 'pending COW merge crash recovery artifact'), 'pending pre-metadata crash recovery error explains the recovery queue');
+        $crash_metadata_restore = run_merge_cli([
+            'recover-crash',
+            '--metadata-db', $crash_metadata_db,
+            '--restore-target-db',
+            '--format', 'json',
+        ]);
+        assert_same($crash_metadata_restore['status'], 0, 'crash recovery CLI restores pre-metadata target DB snapshots');
+        $crash_metadata_restore_json = json_decode($crash_metadata_restore['output'], true);
+        assert_same($crash_metadata_restore_json['restored'] ?? null, 1, 'crash recovery CLI reports one restored pre-metadata artifact');
+        assert_same(
+            scalar($crash_metadata_target, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Base content',
+            'crash recovery CLI restores the pre-metadata target DB content'
+        );
+
         $crash_file_base_db = $tmp . '/crash-file-base.sqlite';
         $crash_file_source_db = $tmp . '/crash-file-source.sqlite';
         $crash_file_target_db = $tmp . '/crash-file-target.sqlite';
