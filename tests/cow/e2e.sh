@@ -488,9 +488,10 @@ add_action('init', function () {
         }
         $menu_item_id = wp_update_nav_menu_item($menu_id, 0, [
             'menu-item-title' => "Semantic $suffix Link",
-            'menu-item-url' => home_url("/semantic-$branch/"),
             'menu-item-status' => 'publish',
-            'menu-item-type' => 'custom',
+            'menu-item-type' => 'post_type',
+            'menu-item-object' => 'page',
+            'menu-item-object-id' => (int)$page_id,
         ]);
         if (is_wp_error($menu_item_id)) {
             wp_send_json_error(['error' => $menu_item_id->get_error_message()], 500);
@@ -671,12 +672,28 @@ add_action('init', function () {
     }
 
     $menus = [];
+    $menu_items = [];
     foreach (wp_get_nav_menus(['hide_empty' => false]) as $menu) {
         if (strpos($menu->name, 'Semantic ') === 0) {
             $menus[] = $menu->name;
+            $items = wp_get_nav_menu_items($menu->term_id);
+            if (is_array($items)) {
+                foreach ($items as $item) {
+                    if (strpos($item->title, 'Semantic ') !== 0) {
+                        continue;
+                    }
+                    $menu_items[$item->title] = [
+                        'menu' => $menu->name,
+                        'type' => $item->type,
+                        'object' => $item->object,
+                        'object_id' => (int)$item->object_id,
+                    ];
+                }
+            }
         }
     }
     sort($menus);
+    ksort($menu_items);
     $locations = [];
     foreach (get_nav_menu_locations() as $location => $menu_id) {
         if (strpos((string)$location, 'forkpress_semantic_') !== 0 || (int)$menu_id <= 0) {
@@ -736,6 +753,7 @@ add_action('init', function () {
         'action' => $action,
         'posts' => $rows,
         'menus' => $menus,
+        'menu_items' => $menu_items,
         'menu_locations' => $locations,
         'plugin_graphs' => $plugin_graphs,
         'source_option' => get_option('forkpress_semantic_source_option'),
@@ -1056,6 +1074,7 @@ foreach (($data["posts"] ?? []) as $post) {
     $posts[$post["title"] ?? ""] = $post;
 }
 $menus = $data["menus"] ?? [];
+$menu_items = $data["menu_items"] ?? [];
 $locations = $data["menu_locations"] ?? [];
 $required = [
     "Semantic Source Page" => "page",
@@ -1097,6 +1116,13 @@ $pluginGraphValid = static function (array $graphs, array $posts, string $branch
         && (($graph["child_payload_note_id"] ?? null) === $note_id)
         && (($graph["file_exists"] ?? null) === true);
 };
+$menuItemValid = static function (array $items, array $posts, string $suffix): bool {
+    $item = $items["Semantic $suffix Link"] ?? [];
+    return (($item["menu"] ?? null) === "Semantic $suffix Menu")
+        && (($item["type"] ?? null) === "post_type")
+        && (($item["object"] ?? null) === "page")
+        && ((int)($item["object_id"] ?? 0) === (int)($posts["Semantic $suffix Page"]["id"] ?? 0));
+};
 $ok = $ok
     && (($posts["Semantic Source Media"]["file_exists"] ?? null) === true)
     && (($posts["Semantic Target Media"]["file_exists"] ?? null) === true)
@@ -1116,6 +1142,8 @@ $ok = $ok
     && in_array("Semantic Target Menu", $menus, true)
     && (($locations["forkpress_semantic_source"] ?? null) === "Semantic Source Menu")
     && (($locations["forkpress_semantic_target"] ?? null) === "Semantic Target Menu")
+    && $menuItemValid($menu_items, $posts, "Source")
+    && $menuItemValid($menu_items, $posts, "Target")
     && $optionRefsValid($data["source_option"] ?? [], "source", "Source")
     && $optionRefsValid($data["target_option"] ?? [], "target", "Target")
     && $optionRefsValid($data["source_json_option"] ?? [], "source", "Source")
