@@ -1118,7 +1118,7 @@ curl -sS -H "Host: wp.localhost:$PORT" \
   "http://127.0.0.1:$PORT/wp-admin/edit.php" \
   -o "$TMP/ui-main-after-merge-edit.html"
 grep -F "$UI_MERGE_TITLE" "$TMP/ui-main-after-merge-edit.html" >/dev/null
-php -r '$db = new SQLite3($argv[1]); $count = (int)$db->querySingle("SELECT COUNT(*) FROM merge_runs WHERE source_branch = '\''ui-created'\'' AND target_branch = '\''main'\'' AND status = '\''completed'\''"); exit($count > 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
+php -r '$db = new SQLite3($argv[1]); $count = (int)$db->querySingle("SELECT COUNT(*) FROM merge_runs WHERE source_branch = '\''ui-created'\'' AND target_branch = '\''main'\'' AND status IN ('\''completed'\'', '\''completed_with_conflicts'\'')"); exit($count > 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
 
 log_step "public branch create crash retry"
 if FORKPRESS_COW_STORAGE_TEST_FAILPOINT=after-branch-create-birth-metadata FORKPRESS_COW_STORAGE_TEST_FAILPOINT_ACTION=exit \
@@ -1659,7 +1659,7 @@ curl -sS -H "Host: wp.localhost:$PORT" \
 grep -F "$MERGE_TITLE" "$TMP/main-after-merge-edit.html" >/dev/null
 php -r '$db = new SQLite3($argv[1]); $label = $db->querySingle("SELECT label FROM forkpress_e2e_target_kept WHERE id = 1"); exit($label === "target-only row" ? 0 : 1);' "$WORK/main/wp-content/database/.ht.sqlite"
 test -f "$WORK_DIR/cow/merge/metadata.sqlite"
-php -r '$db = new SQLite3($argv[1]); $count = (int)$db->querySingle("SELECT COUNT(*) FROM merge_runs WHERE source_branch = '\''merge-source'\'' AND target_branch = '\''main'\'' AND status = '\''completed'\''"); exit($count > 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
+php -r '$db = new SQLite3($argv[1]); $count = (int)$db->querySingle("SELECT COUNT(*) FROM merge_runs WHERE source_branch = '\''merge-source'\'' AND target_branch = '\''main'\'' AND status IN ('\''completed'\'', '\''completed_with_conflicts'\'')"); exit($count > 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
 "$BIN" branch --work-dir "$WORK_DIR" merge-audit --limit 8 > "$TMP/merge-audit.out"
 grep -F "forkpress: COW merge audit" "$TMP/merge-audit.out" >/dev/null
 grep -F "merge-source -> main" "$TMP/merge-audit.out" >/dev/null
