@@ -744,7 +744,6 @@ pub fn reset_cow_branch(
     if !target.join("wp-load.php").is_file() {
         bail!("target branch does not exist: {branch}");
     }
-    ensure_no_pending_cow_reset(layout, branch)?;
     ensure_no_pending_cow_reset(layout, from)?;
 
     let source_db = cow_sqlite_db_path(&source);
