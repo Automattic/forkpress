@@ -1,15 +1,17 @@
 # Stale Merge Audits
 
-Status: design target
+Status: partial implementation
 
 ForkPress already protects reviewed resolutions from applying to a target that
 has changed since the conflict was audited. Resolution code checks the current
 target payload against the audited payload and stops with `rerun merge-audit`
 when they differ.
 
-That is correct for safety, but it is rough for reviewers: the reviewer may
-have made a valid choice, then unrelated target drift forces them to start over
-without a structured way to carry that intent forward.
+That is correct for safety. The implemented revalidation path now gives
+reviewers a way back to the queue: `forkpress branch revalidate-reviews` scans
+reviewed conflicts, detects stale or errored target payloads, and carries the
+latest reviewed note into a new `needs-action` review note without applying any
+resolution. It is idempotent, so rerunning it does not duplicate carried notes.
 
 ## Current Safety Contract
 
@@ -25,9 +27,23 @@ Today a resolution may apply only when:
 If any precondition changed, resolution fails. This prevents stale review notes
 from silently overwriting newer target work.
 
-## Desired Re-Audit Flow
+## Implemented Revalidation Flow
 
-A future re-audit command should compare the old audited record with a fresh
+```bash
+forkpress branch revalidate-reviews
+forkpress branch revalidate-reviews --run 12 --reviewer alice
+forkpress branch revalidate-reviews --format json
+forkpress branch merge-audit --review --review-status needs-action
+```
+
+The command does not mutate the target branch. It only writes review metadata in
+the merge metadata database. Fresh reviewed conflicts stay reviewed. Stale or
+errored reviewed conflicts are reopened as `needs-action` with a note that
+preserves the prior reviewer, status, and note text.
+
+## Future Re-Audit Model
+
+A richer re-audit command should compare the old audited record with a fresh
 merge audit and classify reviewer intent:
 
 - `unchanged`: the reviewed target/source payload still matches; keep the
@@ -62,7 +78,7 @@ To support this cleanly, audit metadata should retain:
 Logical identity matters because payload hashes alone cannot distinguish
 unrelated edits from “same object, newer title”.
 
-## Suggested CLI
+## Future CLI Shape
 
 ```bash
 forkpress branch merge-audit --revalidate --format json
@@ -78,7 +94,11 @@ latest revalidated audit record, not the stale original record.
 
 ## Test Shape
 
-The first test should cover three records:
+The implemented tests in `tests/cow/merge.php` cover stale cell/file detection,
+carrying reviewed conflicts into `needs-action`, preserving prior reviewer
+intent in the carried note, and idempotent reruns.
+
+Future classifier tests should cover three records:
 
 - A cell conflict where target drift is unrelated and can carry a note forward
   as `compatible-target-drift`.

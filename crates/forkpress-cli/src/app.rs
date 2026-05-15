@@ -50,9 +50,11 @@ use forkpress_storage::{
     cow_branch_root, create_cow_branch, delete_cow_branch, detach_linux_xfs_loop_file_view,
     detach_macos_apfs_sparsebundle_file_view, ensure_cow_branch_exists, ensure_cow_file_view_ready,
     ensure_cow_main_branch, inspect_cow_merge_audit, list_remote_sites, lock_cow_lifecycle,
+    lock_cow_operations, merge_cow_branch, prepare_cow_file_view, print_cow_storage_status,
     print_linux_xfs_loop_storage_status, print_macos_cow_storage_status, probe_reflink_dir,
     probe_remote_site, recover_cow_merge_crash, reset_cow_branch, resolve_cow_merge_conflict,
-    review_cow_merge_audit_record, show_cow_branch, write_cow_branch_list, write_cow_strategy_notes,
+    revalidate_cow_merge_reviews, review_cow_merge_audit_record, show_cow_branch,
+    write_cow_branch_list, write_cow_strategy_notes,
 };
 #[cfg(feature = "dev-experiments")]
 use forkpress_storage::{copy_tree_cow, plain_branch_names};
@@ -3058,6 +3060,18 @@ fn cow_branch_command(
             )?;
             Ok(0)
         }
+        "revalidate-reviews" | "merge-revalidate" => {
+            let revalidation = parse_cow_branch_revalidate_reviews_args(&args.args)?;
+            revalidate_cow_merge_reviews(
+                &layout,
+                &runtime,
+                &args.shared,
+                revalidation.run_id.as_deref(),
+                revalidation.reviewer.as_deref(),
+                &revalidation.format,
+            )?;
+            Ok(0)
+        }
         "merge-audit" | "audit" => {
             let mut format = "text".to_string();
             let mut limit = "20".to_string();
@@ -3383,6 +3397,9 @@ fn branch_help_text(command: Option<&str>) -> &'static str {
         Some("recover-crash") | Some("merge-recover") => {
             "Usage: forkpress branch recover-crash [--run <id>] [--restore-target-db] [--restore-files] [--format text|json]\n\nInspect or restore pending COW merge crash-recovery artifacts. Run without restore flags to list pending artifacts first.\nExamples:\n  forkpress branch recover-crash\n  forkpress branch recover-crash --restore-target-db --restore-files\n"
         }
+        Some("revalidate-reviews") | Some("merge-revalidate") => {
+            "Usage: forkpress branch revalidate-reviews [--run <id>] [--reviewer <name>] [--format text|json]\n\nRecheck reviewed merge conflicts against current target state. Stale reviewed conflicts are carried back into the needs-action queue without applying a resolution.\nExample: forkpress branch revalidate-reviews --reviewer alice\n"
+        }
         Some("merge-audit") | Some("audit") => {
             "Usage: forkpress branch merge-audit [options]\n\nInspect merge runs, decisions, conflicts, resolutions, and rollback failures.\nCommon options: --format text|json, --run <id>, --scope all|db|files, --records all|conflicts|decisions|resolutions|rollback-failures, --review, --review-status <status>.\n"
         }
@@ -3396,7 +3413,7 @@ fn branch_help_text(command: Option<&str>) -> &'static str {
             "Usage: forkpress branch delete <branch>\n\nDelete a materialized branch. Use with care.\n"
         }
         _ => {
-            "Usage: forkpress branch <command> [options]\n\nCommands:\n  list                         List branches\n  show [branch]                Show branch storage details\n  create <branch> [--from b]   Create a branch; defaults to --from main\n  reset <branch> --from b      Replace a branch from another branch\n  merge <source> --into target Merge one branch into another\n  recover-crash [options]      Inspect or restore pending merge crash artifacts\n  merge-audit [options]        Inspect merge audit records\n  merge-review <type> <id>     Mark an audit record as reviewed\n  merge-resolve conflict <id>  Validate or apply a conflict choice\n  delete <branch>              Delete a branch\n\nExamples:\n  forkpress branch list\n  forkpress branch create feature --from main\n  forkpress branch merge feature --into main\n  forkpress branch recover-crash --restore-target-db --restore-files\n  forkpress branch merge-audit --review --records conflicts\n\nRun `forkpress branch <command> --help` for command-specific help.\n"
+            "Usage: forkpress branch <command> [options]\n\nCommands:\n  list                         List branches\n  show [branch]                Show branch storage details\n  create <branch> [--from b]   Create a branch; defaults to --from main\n  reset <branch> --from b      Replace a branch from another branch\n  merge <source> --into target Merge one branch into another\n  recover-crash [options]      Inspect or restore pending merge crash artifacts\n  revalidate-reviews [options] Recheck reviewed conflicts for stale target drift\n  merge-audit [options]        Inspect merge audit records\n  merge-review <type> <id>     Mark an audit record as reviewed\n  merge-resolve conflict <id>  Validate or apply a conflict choice\n  delete <branch>              Delete a branch\n\nExamples:\n  forkpress branch list\n  forkpress branch create feature --from main\n  forkpress branch merge feature --into main\n  forkpress branch recover-crash --restore-target-db --restore-files\n  forkpress branch revalidate-reviews --reviewer alice\n  forkpress branch merge-audit --review --records conflicts\n\nRun `forkpress branch <command> --help` for command-specific help.\n"
         }
     }
 }
@@ -3468,6 +3485,83 @@ fn parse_cow_branch_recover_crash_args(args: &[String]) -> Result<CowBranchRecov
         run_id,
         restore_target_db,
         restore_files,
+        format,
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CowBranchRevalidateReviewsArgs {
+    run_id: Option<String>,
+    reviewer: Option<String>,
+    format: String,
+}
+
+fn parse_cow_branch_revalidate_reviews_args(
+    args: &[String],
+) -> Result<CowBranchRevalidateReviewsArgs> {
+    let mut run_id: Option<String> = None;
+    let mut reviewer: Option<String> = None;
+    let mut format = "text".to_string();
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--run" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--run requires a merge run id");
+                };
+                run_id = Some(value.clone());
+                index += 2;
+            }
+            value if value.starts_with("--run=") => {
+                let value = value.trim_start_matches("--run=");
+                if value.is_empty() {
+                    bail!("--run requires a merge run id");
+                }
+                run_id = Some(value.to_string());
+                index += 1;
+            }
+            "--reviewer" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--reviewer requires a name");
+                };
+                reviewer = Some(value.clone());
+                index += 2;
+            }
+            value if value.starts_with("--reviewer=") => {
+                let value = value.trim_start_matches("--reviewer=");
+                if value.is_empty() {
+                    bail!("--reviewer requires a name");
+                }
+                reviewer = Some(value.to_string());
+                index += 1;
+            }
+            "--format" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--format requires text or json");
+                };
+                format = value.clone();
+                index += 2;
+            }
+            value if value.starts_with("--format=") => {
+                let value = value.trim_start_matches("--format=");
+                if value.is_empty() {
+                    bail!("--format requires text or json");
+                }
+                format = value.to_string();
+                index += 1;
+            }
+            other => bail!(
+                "unsupported argument for `forkpress branch revalidate-reviews`: {other}\n\n{}",
+                branch_help_text(Some("revalidate-reviews"))
+            ),
+        }
+    }
+    if format != "text" && format != "json" {
+        bail!("--format requires text or json");
+    }
+    Ok(CowBranchRevalidateReviewsArgs {
+        run_id,
+        reviewer,
         format,
     })
 }
@@ -4502,6 +4596,13 @@ mod git_helper_tests {
     }
 
     #[test]
+    fn branch_help_lists_review_revalidation_command() {
+        assert!(branch_help_text(None).contains("revalidate-reviews"));
+        assert!(branch_help_text(Some("revalidate-reviews")).contains("--reviewer"));
+        assert!(branch_help_text(Some("revalidate-reviews")).contains("needs-action"));
+    }
+
+    #[test]
     fn parses_branch_recover_crash_defaults() {
         let args = vec!["recover-crash".to_string()];
         let parsed = parse_cow_branch_recover_crash_args(&args).unwrap();
@@ -4535,6 +4636,39 @@ mod git_helper_tests {
             .to_string();
         assert!(err.contains("unsupported argument"));
         assert!(err.contains("forkpress branch recover-crash"));
+    }
+
+    #[test]
+    fn parses_branch_revalidate_reviews_defaults() {
+        let args = vec!["revalidate-reviews".to_string()];
+        let parsed = parse_cow_branch_revalidate_reviews_args(&args).unwrap();
+        assert_eq!(parsed.run_id, None);
+        assert_eq!(parsed.reviewer, None);
+        assert_eq!(parsed.format, "text");
+    }
+
+    #[test]
+    fn parses_branch_revalidate_reviews_filters() {
+        let args = vec![
+            "revalidate-reviews".to_string(),
+            "--run=9".to_string(),
+            "--reviewer=alice".to_string(),
+            "--format=json".to_string(),
+        ];
+        let parsed = parse_cow_branch_revalidate_reviews_args(&args).unwrap();
+        assert_eq!(parsed.run_id.as_deref(), Some("9"));
+        assert_eq!(parsed.reviewer.as_deref(), Some("alice"));
+        assert_eq!(parsed.format, "json");
+    }
+
+    #[test]
+    fn branch_revalidate_reviews_errors_on_unknown_flags() {
+        let args = vec!["revalidate-reviews".to_string(), "--apply".to_string()];
+        let err = parse_cow_branch_revalidate_reviews_args(&args)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unsupported argument"));
+        assert!(err.contains("forkpress branch revalidate-reviews"));
     }
 
     #[test]

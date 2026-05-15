@@ -1213,6 +1213,39 @@ pub fn recover_cow_merge_crash(
     )
 }
 
+pub fn revalidate_cow_merge_reviews(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    run_id: Option<&str>,
+    reviewer: Option<&str>,
+    format: &str,
+) -> Result<()> {
+    let metadata_db = cow_merge_metadata_db_path(layout);
+    let mut args: Vec<OsString> = vec![
+        "revalidate-reviews".into(),
+        "--metadata-db".into(),
+        metadata_db.as_os_str().to_os_string(),
+        "--format".into(),
+        format.into(),
+    ];
+    if let Some(run_id) = run_id {
+        args.push("--run".into());
+        args.push(run_id.into());
+    }
+    if let Some(reviewer) = reviewer {
+        args.push("--reviewer".into());
+        args.push(reviewer.into());
+    }
+    run_php_script(
+        layout,
+        runtime,
+        shared,
+        "scripts/cow/merge.php",
+        args.iter().map(|arg| arg.as_os_str()),
+    )
+}
+
 pub fn review_cow_merge_audit_record(
     layout: &Layout,
     runtime: &PortableRuntime,
