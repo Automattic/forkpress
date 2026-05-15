@@ -182,12 +182,16 @@ create_branch_post() {
   local html="$TMP/${branch}-post-new.html"
   local json="$TMP/${branch}-rest-save.json"
 
-  curl -sS -H "Host: $host" \
+  if ! curl -sS -H "Host: $host" \
     "http://127.0.0.1:$PORT/wp-admin/post-new.php" \
-    -o "$html"
+    -o "$html"; then
+    echo "failed to fetch post editor on $branch" >&2
+    "$BIN" logs --work-dir "$WORK_DIR" --file all -n 160 >&2 || true
+    exit 1
+  fi
 
   local nonce
-  nonce="$(node - <<'NODE' "$html"
+  if ! nonce="$(node - "$html" <<'NODE'
 const fs = require('fs');
 const html = fs.readFileSync(process.argv[2], 'utf8');
 const match = html.match(/wp\.apiFetch\.createNonceMiddleware\(\s*"([^"]+)"\s*\)/)
@@ -195,17 +199,27 @@ const match = html.match(/wp\.apiFetch\.createNonceMiddleware\(\s*"([^"]+)"\s*\)
 if (!match) process.exit(2);
 console.log(match[1]);
 NODE
-)"
+)"; then
+    echo "failed to read REST nonce from post editor on $branch" >&2
+    dump_if_exists "$html"
+    "$BIN" logs --work-dir "$WORK_DIR" --file all -n 160 >&2 || true
+    exit 1
+  fi
 
   local http
-  http="$(
+  if ! http="$(
     curl -sS -o "$json" -w '%{http_code}' \
       -H "Host: $host" \
       -H "Content-Type: application/json" \
       -H "X-WP-Nonce: $nonce" \
       --data "{\"title\":\"$title\",\"content\":\"Saved from ForkPress COW reset e2e\",\"status\":\"publish\"}" \
       "http://127.0.0.1:$PORT/index.php?rest_route=/wp/v2/posts"
-  )"
+  )"; then
+    echo "REST save request on $branch failed" >&2
+    dump_if_exists "$json"
+    "$BIN" logs --work-dir "$WORK_DIR" --file all -n 160 >&2 || true
+    exit 1
+  fi
   if [ "$http" != "201" ]; then
     echo "REST save on $branch returned $http" >&2
     cat "$json" >&2
