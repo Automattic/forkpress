@@ -6,12 +6,26 @@ cd "$repo_root"
 
 bash -n scripts/build-dist.sh
 
+make -n test-release PHP_CONFIG= PHP_DEV_DIR= PKG_CONFIG= >/dev/null
+
+branchfs_header_log="$(mktemp "${TMPDIR:-/tmp}/forkpress-branchfs-header-preflight.XXXXXX.log")"
 fake_bin="$(mktemp -d "${TMPDIR:-/tmp}/forkpress-build-dist-preflight-bin.XXXXXX")"
 build_dir="$(mktemp -d "${TMPDIR:-/tmp}/forkpress-build-dist-preflight-build.XXXXXX")"
 dist_dir="$(mktemp -d "${TMPDIR:-/tmp}/forkpress-build-dist-preflight-dist.XXXXXX")"
 out_file="$(mktemp "${TMPDIR:-/tmp}/forkpress-build-dist-preflight.XXXXXX.log")"
-trap 'rm -rf "$fake_bin" "$build_dir" "$dist_dir" "$out_file"' EXIT
+trap 'rm -rf "$fake_bin" "$build_dir" "$dist_dir" "$out_file" "$branchfs_header_log"' EXIT
 chmod 755 "$fake_bin" "$build_dir" "$dist_dir"
+
+set +e
+make -n test-branchfs PHP_CONFIG= PHP_DEV_DIR= PKG_CONFIG= > "$branchfs_header_log" 2>&1
+branchfs_header_status=$?
+set -e
+if [ "$branchfs_header_status" -eq 0 ]; then
+  echo "expected branchfs targets to fail when PHP headers are missing" >&2
+  cat "$branchfs_header_log" >&2
+  exit 1
+fi
+grep -q 'Could not determine PHP headers' "$branchfs_header_log"
 
 for cmd in bash dirname uname mkdir; do
   ln -s "$(command -v "$cmd")" "$fake_bin/$cmd"
