@@ -13988,6 +13988,19 @@ PHP);
     $stmt->bindValue(':file', '2026/05/source-unsafe-path.jpg', SQLITE3_TEXT);
     $stmt->bindValue(':metadata', $wp_media_unsafe_path_metadata, SQLITE3_TEXT);
     $stmt->execute();
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, guid) VALUES ('Source media unsafe attached path', '', 'inherit', 'attachment', '/tmp/source-unsafe-attached.jpg')");
+    $wp_media_unsafe_attached_path_id = (int)$db->lastInsertRowID();
+    $wp_media_unsafe_attached_path_metadata = serialize([
+        'file' => '/tmp/source-unsafe-attached.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', :file), (:post_id, '_wp_attachment_metadata', :metadata)");
+    $stmt->bindValue(':post_id', $wp_media_unsafe_attached_path_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':file', '/tmp/source-unsafe-attached.jpg', SQLITE3_TEXT);
+    $stmt->bindValue(':metadata', $wp_media_unsafe_attached_path_metadata, SQLITE3_TEXT);
+    $stmt->execute();
     $db->close();
     $wp_media_result = cow_merge_branch_state(
         $wp_media_base,
@@ -14002,7 +14015,7 @@ PHP);
     );
     assert_same($wp_media_result['status'], 'completed_with_conflicts', 'WordPress media validator holds missing generated upload files for review');
     assert_same((int)($wp_media_result['plugin_validators'] ?? 0), 1, 'WordPress media validator is discovered from mu-plugins during merge');
-    assert_same((int)($wp_media_result['plugin_validator_conflicts'] ?? 0), 5, 'WordPress media validator records missing files and metadata mismatches');
+    assert_same((int)($wp_media_result['plugin_validator_conflicts'] ?? 0), 6, 'WordPress media validator records missing files and metadata mismatches');
     assert_same(
         scalar($wp_media_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $wp_media_attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-original.jpg',
@@ -14046,9 +14059,10 @@ PHP);
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-media-unsafe-path',
     ]);
-    assert_same(count($wp_media_unsafe_path_audit['conflicts']), 1, 'WordPress media validator exposes unsafe upload metadata paths as plugin-scoped audit conflicts');
-    $wp_media_unsafe_path_preview = (string)($wp_media_unsafe_path_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_same(count($wp_media_unsafe_path_audit['conflicts']), 2, 'WordPress media validator exposes unsafe upload metadata paths as plugin-scoped audit conflicts');
+    $wp_media_unsafe_path_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $wp_media_unsafe_path_audit['conflicts']));
     assert_true(str_contains($wp_media_unsafe_path_preview, '../source-unsafe-path-150x150.jpg'), 'WordPress media unsafe path audit includes the traversal path');
+    assert_true(str_contains($wp_media_unsafe_path_preview, '/tmp/source-unsafe-attached.jpg'), 'WordPress media unsafe path audit includes the absolute attached path');
 
     $wp_block_ref_base_root = $tmp . '/wp-block-ref-validator-files-base';
     $wp_block_ref_source_root = $tmp . '/wp-block-ref-validator-files-source';
