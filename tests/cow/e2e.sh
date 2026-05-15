@@ -568,6 +568,7 @@ add_action('init', function () {
         $initial_graph = [
             'branch' => $branch,
             'page_id' => (int)$page_id,
+            'note_id' => (int)$note_id,
             'attachment_id' => (int)$attachment_id,
             'file' => $plugin_file_rel,
         ];
@@ -589,6 +590,7 @@ add_action('init', function () {
                 'branch' => $branch,
                 'parent_id' => $plugin_parent_id,
                 'page_id' => (int)$page_id,
+                'note_id' => (int)$note_id,
             ]),
         ]);
         if ($inserted === false) {
@@ -701,6 +703,7 @@ add_action('init', function () {
             $child = $wpdb->get_row($wpdb->prepare('SELECT id, parent_id, branch, file_path, payload FROM ' . $quote_ident($plugin_child_table) . ' WHERE parent_id = %d', $parent_id), ARRAY_A);
             $graph_json = json_decode((string)$parent['graph_json'], true);
             $graph_serialized = maybe_unserialize((string)$parent['graph_serialized']);
+            $child_payload = is_array($child) ? json_decode((string)($child['payload'] ?? ''), true) : [];
             $postmeta_json = [];
             $page_id = is_array($graph_json) ? (int)($graph_json['page_id'] ?? 0) : 0;
             if ($page_id > 0) {
@@ -715,9 +718,14 @@ add_action('init', function () {
                 'label' => (string)$parent['label'],
                 'json_parent_id' => is_array($graph_json) ? (int)($graph_json['parent_id'] ?? 0) : 0,
                 'json_child_id' => is_array($graph_json) ? (int)($graph_json['child_id'] ?? 0) : 0,
+                'json_note_id' => is_array($graph_json) ? (int)($graph_json['note_id'] ?? 0) : 0,
                 'serialized_parent_id' => is_array($graph_serialized) ? (int)($graph_serialized['parent_id'] ?? 0) : 0,
+                'serialized_note_id' => is_array($graph_serialized) ? (int)($graph_serialized['note_id'] ?? 0) : 0,
                 'option_parent_id' => is_array($option_graph) ? (int)($option_graph['parent_id'] ?? 0) : 0,
+                'option_note_id' => is_array($option_graph) ? (int)($option_graph['note_id'] ?? 0) : 0,
                 'postmeta_parent_id' => is_array($postmeta_json) ? (int)($postmeta_json['parent_id'] ?? 0) : 0,
+                'postmeta_note_id' => is_array($postmeta_json) ? (int)($postmeta_json['note_id'] ?? 0) : 0,
+                'child_payload_note_id' => is_array($child_payload) ? (int)($child_payload['note_id'] ?? 0) : 0,
                 'file_exists' => $file_path !== '' && file_exists(trailingslashit($upload_dir['basedir']) . $file_path),
             ];
         }
@@ -1035,8 +1043,8 @@ semantic_runtime_request main seed "$TMP/semantic-seed.json"
 "$BIN" branch --work-dir "$WORK_DIR" create semantic-target > "$TMP/semantic-target-create.out"
 semantic_runtime_request semantic-source source "$TMP/semantic-source.json"
 semantic_runtime_request semantic-target target "$TMP/semantic-target.json"
-php -r '$data = json_decode(file_get_contents($argv[1]), true); $posts = []; foreach (($data["posts"] ?? []) as $post) { $posts[$post["title"] ?? ""] = $post; } $menus = $data["menus"] ?? []; $locations = $data["menu_locations"] ?? []; $graph = $data["plugin_graphs"]["source"] ?? []; $graph_ok = (int)($graph["parent_id"] ?? 0) > 0 && (int)($graph["child_id"] ?? 0) > 0 && ($graph["child_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["json_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["serialized_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["option_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["postmeta_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && (($graph["file_exists"] ?? null) === true); $ok = isset($posts["Semantic Source Page"], $posts["Semantic Source Note"], $posts["Semantic Source Block"], $posts["Semantic Source Media"], $posts["Semantic Source Edited Page"]) && !isset($posts["Semantic Source Delete Page"]) && in_array("Semantic Source Menu", $menus, true) && (($locations["forkpress_semantic_source"] ?? null) === "Semantic Source Menu") && in_array("Semantic Source Topic", $posts["Semantic Source Page"]["terms"] ?? [], true) && (($posts["Semantic Source Page"]["term_parents"]["Semantic Source Topic"] ?? null) === "Semantic Source Parent Topic") && in_array("Semantic Source Topic", $posts["Semantic Source Note"]["terms"] ?? [], true) && (($posts["Semantic Source Media"]["file_exists"] ?? null) === true) && in_array("thumbnail", $posts["Semantic Source Media"]["metadata_sizes"] ?? [], true) && (($posts["Semantic Source Media"]["generated_files"]["thumbnail"] ?? null) === true) && (($data["source_option"]["branch"] ?? null) === "source") && $graph_ok; exit($ok ? 0 : 1);' "$TMP/semantic-source.json"
-php -r '$data = json_decode(file_get_contents($argv[1]), true); $posts = []; foreach (($data["posts"] ?? []) as $post) { $posts[$post["title"] ?? ""] = $post; } $menus = $data["menus"] ?? []; $locations = $data["menu_locations"] ?? []; $graph = $data["plugin_graphs"]["target"] ?? []; $graph_ok = (int)($graph["parent_id"] ?? 0) > 0 && (int)($graph["child_id"] ?? 0) > 0 && ($graph["child_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["json_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["serialized_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["option_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["postmeta_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && (($graph["file_exists"] ?? null) === true); $ok = isset($posts["Semantic Target Page"], $posts["Semantic Target Note"], $posts["Semantic Target Block"], $posts["Semantic Target Media"], $posts["Semantic Target Edited Page"]) && !isset($posts["Semantic Target Delete Page"]) && in_array("Semantic Target Menu", $menus, true) && (($locations["forkpress_semantic_target"] ?? null) === "Semantic Target Menu") && in_array("Semantic Target Topic", $posts["Semantic Target Page"]["terms"] ?? [], true) && (($posts["Semantic Target Page"]["term_parents"]["Semantic Target Topic"] ?? null) === "Semantic Target Parent Topic") && in_array("Semantic Target Topic", $posts["Semantic Target Note"]["terms"] ?? [], true) && (($posts["Semantic Target Media"]["file_exists"] ?? null) === true) && in_array("thumbnail", $posts["Semantic Target Media"]["metadata_sizes"] ?? [], true) && (($posts["Semantic Target Media"]["generated_files"]["thumbnail"] ?? null) === true) && (($data["target_option"]["branch"] ?? null) === "target") && $graph_ok; exit($ok ? 0 : 1);' "$TMP/semantic-target.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $posts = []; foreach (($data["posts"] ?? []) as $post) { $posts[$post["title"] ?? ""] = $post; } $menus = $data["menus"] ?? []; $locations = $data["menu_locations"] ?? []; $graph = $data["plugin_graphs"]["source"] ?? []; $note_id = $posts["Semantic Source Note"]["id"] ?? null; $graph_ok = (int)($graph["parent_id"] ?? 0) > 0 && (int)($graph["child_id"] ?? 0) > 0 && ($graph["child_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["json_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["serialized_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["option_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["postmeta_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["json_note_id"] ?? null) === $note_id && ($graph["serialized_note_id"] ?? null) === $note_id && ($graph["option_note_id"] ?? null) === $note_id && ($graph["postmeta_note_id"] ?? null) === $note_id && ($graph["child_payload_note_id"] ?? null) === $note_id && (($graph["file_exists"] ?? null) === true); $ok = isset($posts["Semantic Source Page"], $posts["Semantic Source Note"], $posts["Semantic Source Block"], $posts["Semantic Source Media"], $posts["Semantic Source Edited Page"]) && !isset($posts["Semantic Source Delete Page"]) && in_array("Semantic Source Menu", $menus, true) && (($locations["forkpress_semantic_source"] ?? null) === "Semantic Source Menu") && in_array("Semantic Source Topic", $posts["Semantic Source Page"]["terms"] ?? [], true) && (($posts["Semantic Source Page"]["term_parents"]["Semantic Source Topic"] ?? null) === "Semantic Source Parent Topic") && in_array("Semantic Source Topic", $posts["Semantic Source Note"]["terms"] ?? [], true) && (($posts["Semantic Source Media"]["file_exists"] ?? null) === true) && in_array("thumbnail", $posts["Semantic Source Media"]["metadata_sizes"] ?? [], true) && (($posts["Semantic Source Media"]["generated_files"]["thumbnail"] ?? null) === true) && (($data["source_option"]["branch"] ?? null) === "source") && $graph_ok; exit($ok ? 0 : 1);' "$TMP/semantic-source.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $posts = []; foreach (($data["posts"] ?? []) as $post) { $posts[$post["title"] ?? ""] = $post; } $menus = $data["menus"] ?? []; $locations = $data["menu_locations"] ?? []; $graph = $data["plugin_graphs"]["target"] ?? []; $note_id = $posts["Semantic Target Note"]["id"] ?? null; $graph_ok = (int)($graph["parent_id"] ?? 0) > 0 && (int)($graph["child_id"] ?? 0) > 0 && ($graph["child_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["json_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["serialized_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["option_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["postmeta_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["json_note_id"] ?? null) === $note_id && ($graph["serialized_note_id"] ?? null) === $note_id && ($graph["option_note_id"] ?? null) === $note_id && ($graph["postmeta_note_id"] ?? null) === $note_id && ($graph["child_payload_note_id"] ?? null) === $note_id && (($graph["file_exists"] ?? null) === true); $ok = isset($posts["Semantic Target Page"], $posts["Semantic Target Note"], $posts["Semantic Target Block"], $posts["Semantic Target Media"], $posts["Semantic Target Edited Page"]) && !isset($posts["Semantic Target Delete Page"]) && in_array("Semantic Target Menu", $menus, true) && (($locations["forkpress_semantic_target"] ?? null) === "Semantic Target Menu") && in_array("Semantic Target Topic", $posts["Semantic Target Page"]["terms"] ?? [], true) && (($posts["Semantic Target Page"]["term_parents"]["Semantic Target Topic"] ?? null) === "Semantic Target Parent Topic") && in_array("Semantic Target Topic", $posts["Semantic Target Note"]["terms"] ?? [], true) && (($posts["Semantic Target Media"]["file_exists"] ?? null) === true) && in_array("thumbnail", $posts["Semantic Target Media"]["metadata_sizes"] ?? [], true) && (($posts["Semantic Target Media"]["generated_files"]["thumbnail"] ?? null) === true) && (($data["target_option"]["branch"] ?? null) === "target") && $graph_ok; exit($ok ? 0 : 1);' "$TMP/semantic-target.json"
 "$BIN" branch --work-dir "$WORK_DIR" merge semantic-source --into semantic-target > "$TMP/semantic-merge.out"
 grep -F "forkpress: merged semantic-source into semantic-target" "$TMP/semantic-merge.out" >/dev/null
 grep -E "status:    completed(_with_conflicts)?" "$TMP/semantic-merge.out" >/dev/null
@@ -1072,8 +1080,9 @@ $optionRefsValid = static function (array $option, string $branch, string $suffi
         && ((int)($option["block_id"] ?? 0) === (int)($posts["Semantic $suffix Block"]["id"] ?? 0))
         && ((int)($option["attachment_id"] ?? 0) === (int)($posts["Semantic $suffix Media"]["id"] ?? 0));
 };
-$pluginGraphValid = static function (array $graphs, string $branch): bool {
+$pluginGraphValid = static function (array $graphs, array $posts, string $branch, string $suffix): bool {
     $graph = $graphs[$branch] ?? [];
+    $note_id = $posts["Semantic $suffix Note"]["id"] ?? null;
     return (int)($graph["parent_id"] ?? 0) > 0
         && (int)($graph["child_id"] ?? 0) > 0
         && (($graph["child_parent_id"] ?? null) === ($graph["parent_id"] ?? null))
@@ -1081,6 +1090,11 @@ $pluginGraphValid = static function (array $graphs, string $branch): bool {
         && (($graph["serialized_parent_id"] ?? null) === ($graph["parent_id"] ?? null))
         && (($graph["option_parent_id"] ?? null) === ($graph["parent_id"] ?? null))
         && (($graph["postmeta_parent_id"] ?? null) === ($graph["parent_id"] ?? null))
+        && (($graph["json_note_id"] ?? null) === $note_id)
+        && (($graph["serialized_note_id"] ?? null) === $note_id)
+        && (($graph["option_note_id"] ?? null) === $note_id)
+        && (($graph["postmeta_note_id"] ?? null) === $note_id)
+        && (($graph["child_payload_note_id"] ?? null) === $note_id)
         && (($graph["file_exists"] ?? null) === true);
 };
 $ok = $ok
@@ -1106,8 +1120,8 @@ $ok = $ok
     && $optionRefsValid($data["target_option"] ?? [], "target", "Target")
     && $optionRefsValid($data["source_json_option"] ?? [], "source", "Source")
     && $optionRefsValid($data["target_json_option"] ?? [], "target", "Target")
-    && $pluginGraphValid($data["plugin_graphs"] ?? [], "source")
-    && $pluginGraphValid($data["plugin_graphs"] ?? [], "target");
+    && $pluginGraphValid($data["plugin_graphs"] ?? [], $posts, "source", "Source")
+    && $pluginGraphValid($data["plugin_graphs"] ?? [], $posts, "target", "Target");
 exit($ok ? 0 : 1);
 ' "$TMP/semantic-after-merge.json"
 
