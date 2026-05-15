@@ -6192,6 +6192,7 @@ SQL);
     unlink($file_resolve_source_root . '/wp-content/uploads/replace-file-with-dir');
     mkdir($file_resolve_source_root . '/wp-content/uploads/replace-file-with-dir', 0777, true);
     write_test_file($file_resolve_source_root . '/wp-content/uploads/replace-file-with-dir/source-child.txt', 'source resolved replacement child');
+    create_test_symlink('source-child.txt', $file_resolve_source_root . '/wp-content/uploads/replace-file-with-dir/source-link.txt');
     write_test_file($file_resolve_target_root . '/wp-content/uploads/conflict.txt', 'target conflict resolution');
     write_test_file($file_resolve_target_root . '/wp-content/uploads/delete-conflict.txt', 'target changed before source deletion');
     write_test_file($file_resolve_target_root . '/wp-content/uploads/rollback-conflict.txt', 'target rollback resolution');
@@ -6466,6 +6467,8 @@ SQL);
     assert_same($file_type_replacement_inverse_resolution['status'], 'applied', 'source file-to-directory resolution records applied status');
     assert_true(is_dir($file_resolve_target_root . '/wp-content/uploads/replace-file-with-dir'), 'source file-to-directory resolution replaces the target file with a directory');
     assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/replace-file-with-dir/source-child.txt'), 'source resolved replacement child', 'source file-to-directory resolution copies the audited source directory child');
+    assert_true(is_link($file_resolve_target_root . '/wp-content/uploads/replace-file-with-dir/source-link.txt'), 'source file-to-directory resolution copies safe source symlink child');
+    assert_same(readlink($file_resolve_target_root . '/wp-content/uploads/replace-file-with-dir/source-link.txt'), 'source-child.txt', 'source file-to-directory resolution preserves safe source symlink child target');
     $file_resolve_rerun = cow_merge_branch_state(
         $file_resolve_base_db,
         $file_resolve_source_db,
@@ -6482,6 +6485,8 @@ SQL);
     assert_true(!file_exists($file_resolve_target_root . '/wp-content/uploads/delete-conflict.txt'), 'rerunning after source filesystem deletion keeps the target path deleted');
     assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/replace-dir-with-file'), 'source resolved replacement file', 'rerunning after source directory-to-file resolution keeps the audited source file');
     assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/replace-file-with-dir/source-child.txt'), 'source resolved replacement child', 'rerunning after source file-to-directory resolution keeps the audited source directory');
+    assert_true(is_link($file_resolve_target_root . '/wp-content/uploads/replace-file-with-dir/source-link.txt'), 'rerunning after source file-to-directory resolution keeps the audited source symlink child');
+    assert_same(readlink($file_resolve_target_root . '/wp-content/uploads/replace-file-with-dir/source-link.txt'), 'source-child.txt', 'rerunning after source file-to-directory resolution keeps the audited source symlink target');
     assert_same(
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = '__files__' AND c.conflict_type = 'file-conflict' AND c.row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/conflict.txt')) . "' AND r.source_branch = 'feature-file-resolve'"),
         1,
