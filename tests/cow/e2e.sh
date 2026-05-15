@@ -573,6 +573,13 @@ add_action('init', function () {
         if (is_wp_error($block_id)) {
             wp_send_json_error(['error' => $block_id->get_error_message()], 500);
         }
+        $page_update = wp_update_post([
+            'ID' => (int)$page_id,
+            'post_content' => "<!-- wp:paragraph --><p>Semantic $branch page body</p><!-- /wp:paragraph -->\n<!-- wp:block {\"ref\":$block_id} /-->",
+        ], true);
+        if (is_wp_error($page_update)) {
+            wp_send_json_error(['error' => $page_update->get_error_message()], 500);
+        }
 
         $menu_id = wp_create_nav_menu("Semantic $suffix Menu");
         if (is_wp_error($menu_id)) {
@@ -782,11 +789,17 @@ add_action('init', function () {
         }
         sort($terms);
         ksort($term_parents);
+        $block_refs = [];
+        if (preg_match_all('/<!--\s+wp:block\s+\{"ref":(\d+)\}\s+\/-->/', $post->post_content, $matches)) {
+            $block_refs = array_map('intval', $matches[1]);
+            sort($block_refs);
+        }
         $rows[] = [
             'id' => (int)$post->ID,
             'type' => $post->post_type,
             'title' => $post->post_title,
             'content' => $post->post_content,
+            'block_refs' => $block_refs,
             'author' => (int)$post->post_author,
             'branch' => get_post_meta($post->ID, '_forkpress_semantic_branch', true)
                 ?: get_post_meta($post->ID, '_forkpress_semantic_note', true)
@@ -1424,6 +1437,11 @@ $commentValid = static function (array $comments, array $posts, string $suffix):
         && ((int)($reply["serialized_graph_comment_id"] ?? 0) === $commentId)
         && ((int)($reply["serialized_graph_reply_id"] ?? 0) === $replyId);
 };
+$reusableBlockValid = static function (array $posts, string $suffix): bool {
+    $blockId = (int)($posts["Semantic $suffix Block"]["id"] ?? 0);
+    $refs = array_map("intval", $posts["Semantic $suffix Page"]["block_refs"] ?? []);
+    return $blockId > 0 && in_array($blockId, $refs, true);
+};
 $ok = $ok
     && (($posts["Semantic Source Media"]["file_exists"] ?? null) === true)
     && (($posts["Semantic Target Media"]["file_exists"] ?? null) === true)
@@ -1449,6 +1467,8 @@ $ok = $ok
     && $userValid($users, $posts, $comments, "target", "Target")
     && $commentValid($comments, $posts, "Source")
     && $commentValid($comments, $posts, "Target")
+    && $reusableBlockValid($posts, "Source")
+    && $reusableBlockValid($posts, "Target")
     && $optionRefsValid($data["source_option"] ?? [], "source", "Source")
     && $optionRefsValid($data["target_option"] ?? [], "target", "Target")
     && $optionRefsValid($data["source_json_option"] ?? [], "source", "Source")
