@@ -51,6 +51,9 @@ The Git server suite covers these publication classes:
   captures file merge base, and captures row identities.
 - Git-created branch publication failure removes branch storage and file-base
   artifacts.
+- Git-created branch-list publication failure after the list write removes
+  branch storage, DB merge base artifacts, file-base artifacts, and restores
+  the branch list.
 - Multi-branch Git-created ID-band metadata failure rolls back created branch
   metadata and merge-base artifacts.
 - Stale-source Git-created branch publication is rejected.

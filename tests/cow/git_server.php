@@ -598,6 +598,57 @@ assert_true(!file_exists($tmp . '/merge/file-bases/git-created-no-db.json'), 'Gi
 assert_same(trim((string)file_get_contents($branch_list)), 'main', 'Git-created branch ID-band allocation failure restores the branch list');
 cow_git_remove_tree($tmp);
 
+$tmp = sys_get_temp_dir() . '/forkpress-cow-git-created-branch-list-rollback-' . getmypid() . '-' . bin2hex(random_bytes(4));
+$branches = $tmp . '/branches';
+$git = $tmp . '/git';
+$branch_list = $tmp . '/branches.txt';
+mkdir($branches . '/main/wp-content/database', 0777, true);
+file_put_contents($branches . '/main/wp-load.php', "<?php\n");
+file_put_contents($branches . '/main/wp-content/base.txt', "base\n");
+$db = new SQLite3($branches . '/main/wp-content/database/.ht.sqlite');
+$db->exec('CREATE TABLE wp_posts (ID INTEGER PRIMARY KEY AUTOINCREMENT, post_title TEXT)');
+$db->exec("INSERT INTO wp_posts (post_title) VALUES ('Base post')");
+$db->close();
+
+$fs = WordPress\Filesystem\LocalFilesystem::create($git);
+$repo = new WordPress\Git\GitRepository($fs, ['default_branch' => 'main']);
+$repo->set_config_value(['user', 'name'], 'ForkPress COW');
+$repo->set_config_value(['user', 'email'], 'forkpress-cow@local');
+cow_git_sync_repository($repo, $branches);
+cow_git_write_branch_list($branches, $branch_list);
+$main_tip = $repo->get_branch_tip('refs/heads/main');
+$repo->checkout('refs/heads/main');
+$created_tip = $repo->commit([
+    'commit' => [
+        'message' => 'create branch with branch-list publication failure',
+        'author' => 'ForkPress Test <forkpress-test@local>',
+        'committer' => 'ForkPress Test <forkpress-test@local>',
+        'parents' => [$main_tip],
+    ],
+    'updates' => ['wordpress/wp-content/git-created-list-fail.txt' => "created\n"],
+]);
+$repo->set_branch_tip('refs/heads/git-created-list-fail', $created_tip);
+$failed = false;
+$failure_message = '';
+putenv('FORKPRESS_COW_GIT_TEST_FAILPOINT=after-created-branch-list');
+putenv('FORKPRESS_COW_GIT_TEST_FAILPOINT_ACTION=throw');
+try {
+    cow_git_apply_push_to_branches($repo, $git, $branches, $branches, $branch_list, 'file-copy', '', ['main' => $main_tip]);
+} catch (Throwable $e) {
+    $failed = true;
+    $failure_message = $e->getMessage();
+} finally {
+    putenv('FORKPRESS_COW_GIT_TEST_FAILPOINT');
+    putenv('FORKPRESS_COW_GIT_TEST_FAILPOINT_ACTION');
+}
+assert_true($failed, 'Git-created branch-list publication failure rejects push apply');
+assert_true(str_contains($failure_message, 'after-created-branch-list'), 'Git-created branch-list publication failure reports the failpoint');
+assert_true(!is_dir($branches . '/git-created-list-fail'), 'Git-created branch-list publication failure removes published branch storage');
+assert_true(!file_exists($tmp . '/merge/bases/git-created-list-fail.sqlite'), 'Git-created branch-list publication failure removes DB merge base artifacts');
+assert_true(!file_exists($tmp . '/merge/file-bases/git-created-list-fail.json'), 'Git-created branch-list publication failure removes filesystem merge base artifacts');
+assert_same(trim((string)file_get_contents($branch_list)), 'main', 'Git-created branch-list publication failure restores the branch list');
+cow_git_remove_tree($tmp);
+
 $tmp = sys_get_temp_dir() . '/forkpress-cow-git-created-id-band-metadata-rollback-' . getmypid() . '-' . bin2hex(random_bytes(4));
 $branches = $tmp . '/branches';
 $git = $tmp . '/git';

@@ -21,6 +21,28 @@ use WordPress\Git\Model\TreeEntry;
 use WordPress\Git\Protocol\GitProtocolEncoderPipe;
 use WordPress\HttpServer\Response\StreamingResponseWriter;
 
+function cow_git_failpoint(string $name): void {
+    $configured = getenv('FORKPRESS_COW_GIT_TEST_FAILPOINT');
+    if (!is_string($configured) || trim($configured) === '') {
+        return;
+    }
+    $failpoints = array_map('trim', explode(',', $configured));
+    if (!in_array($name, $failpoints, true)) {
+        return;
+    }
+
+    $action = getenv('FORKPRESS_COW_GIT_TEST_FAILPOINT_ACTION');
+    $action = is_string($action) && $action !== '' ? $action : 'throw';
+    if ($action === 'exit') {
+        exit(97);
+    }
+    if ($action === 'kill' && function_exists('posix_kill') && defined('SIGKILL')) {
+        posix_kill(getmypid(), SIGKILL);
+        exit(137);
+    }
+    throw new \RuntimeException("forced COW Git failpoint: $name");
+}
+
 function cow_git_server_handle(
     string $branches_dir,
     string $git_repo_dir,
@@ -1062,7 +1084,9 @@ function cow_git_create_branch_for_ref(
         }
 
         cow_git_rewrite_wp_config($dest_public, $debug_log);
+        cow_git_failpoint('before-created-branch-list');
         cow_git_write_branch_list($branches_dir, $branch_list_path);
+        cow_git_failpoint('after-created-branch-list');
         error_log("ForkPress COW git created branch '$branch' from '$source'");
         return [
             'branch' => $branch,
