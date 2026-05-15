@@ -141,22 +141,23 @@ The Git server suite covers these publication classes:
 
 ## Missing Fault Injection
 
-The remaining work is a broader product-level kill harness that drives the
-public ForkPress commands through the same failure boundaries already covered by
-lower level PHP/Git tests. The direct merge tests already kill the merge subprocess
-before/after target DB commit, before metadata commit, before the file phase,
-after an individual file operation, and during crash-recovery cleanup. The Git
-server tests already kill created-branch publication before metadata capture,
-after metadata capture, after storage publish, after public-link creation,
-before/after branch-list publication, after existing-branch update publish,
-after branch-delete staging, and after object pruning.
+The remaining work is a broader product-level kill harness for entry points that
+are not yet covered by the targeted public CLI failpoint tests. The public E2E
+suite already kills `forkpress branch merge`, `forkpress branch create`,
+`forkpress branch reset`, and `forkpress branch recover-crash` at representative
+durable boundaries. The lower-level PHP/Git suites cover additional internals,
+including merge subprocess death before/after target DB commit, before metadata
+commit, before the file phase, after an individual file operation, and during
+crash-recovery cleanup; plus Git-created branch publication before metadata
+capture, after metadata capture, after storage publish, after public-link
+creation, before/after branch-list publication, after existing-branch update
+publish, after branch-delete staging, and after object pruning.
 
 The remaining release-hardening work is:
 
-- Run those DB, file, metadata, and Git failpoints through the actual
-  `forkpress branch merge`, `forkpress branch create`, `forkpress branch reset`,
-  and Git push entry points, then restart in a new process and verify the public
-  audit/recovery commands report the same state as the lower-level harnesses.
+- Run the remaining Git publication failpoints through actual Git push entry
+  points, then restart in a new process and verify the public audit/recovery
+  commands report the same state as the lower-level harnesses.
 - Add platform-specific kill coverage around APFS sparsebundle detach/compact.
 - Add kill coverage around cleanup of rollback artifacts outside the Git
   object-pruning and crash-recovery restore paths.
