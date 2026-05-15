@@ -56,6 +56,7 @@ export default defineConfig({
 				{
 					label: 'Reference',
 					items: [
+						{ label: 'Installation', slug: 'docs/installation' },
 						{ label: 'Commands', slug: 'docs/commands' },
 						{ label: 'Logs', slug: 'docs/logs' },
 					],
@@ -64,6 +65,7 @@ export default defineConfig({
 					label: 'Project',
 					items: [
 						{ label: 'Architecture', slug: 'docs/architecture' },
+						{ label: 'Releases', slug: 'docs/releases' },
 						{ label: 'Development', slug: 'docs/development' },
 						{ label: 'Documentation site', slug: 'docs/documentation-site' },
 					],

@@ -42,3 +42,12 @@ npm run validate
 
 `npm run validate` runs Astro checks, documentation tests, and the static site
 build.
+
+## Releases
+
+Release automation is documented in [Releases](releases.md). In short:
+
+- `Release: prepare` updates release metadata and opens a release PR.
+- `Release: verify` builds and smoke-tests release artifacts before merge.
+- `Release: publish` rebuilds from the merge commit, creates the GitHub release,
+  and updates Homebrew for stable releases.

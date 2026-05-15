@@ -55,7 +55,43 @@ archive in the current directory, use `./forkpress` instead.
 
 ## Installation
 
-Download the release for your platform from
+### macOS
+
+```bash
+brew install automattic/tap/forkpress
+```
+
+### Linux
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Automattic/forkpress/trunk/scripts/install.sh | sh
+```
+
+This installs `forkpress` into `$HOME/.local/bin`.
+
+### Windows
+
+Download `ForkPressSetup.exe` from
+<https://github.com/Automattic/forkpress/releases> and run it.
+
+The installer adds `forkpress.exe` to the user `PATH` and prepares the ReFS Dev
+Drive setup ForkPress uses on Windows.
+
+### Local launcher
+
+To keep ForkPress local to one macOS or Linux project:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Automattic/forkpress/trunk/scripts/forkpress -o forkpress
+chmod +x forkpress
+./forkpress init
+```
+
+The launcher caches the real binary in `.forkpress-bin/` next to the launcher.
+
+### Manual download
+
+Release artifacts are available from
 <https://github.com/Automattic/forkpress/releases>.
 
 | Platform | Artifact | Notes |
@@ -66,36 +102,7 @@ Download the release for your platform from
 | Linux&nbsp;x86_64 | `forkpress-x86_64-unknown-linux-musl.tar.gz` | Static musl-linked `forkpress` binary. |
 | Windows&nbsp;x86_64 | `ForkPressSetup.exe` | Installer with Dev Drive setup and shortcuts. |
 
-### macOS and Linux
-
-Install the latest release into `$HOME/.local/bin`:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Automattic/forkpress/trunk/scripts/install.sh | sh
-```
-
-Install a specific release:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Automattic/forkpress/trunk/scripts/install.sh | FORKPRESS_VERSION=0.1.13 sh
-```
-
-To keep ForkPress local to one project, download the launcher instead:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Automattic/forkpress/trunk/scripts/forkpress -o forkpress
-chmod +x forkpress
-./forkpress init
-```
-
-The launcher caches the real binary in `.forkpress-bin/` next to the launcher.
-Pin a project to a specific release with:
-
-```bash
-FORKPRESS_VERSION=0.1.13 ./forkpress serve
-```
-
-Or download an archive manually:
+For macOS and Linux:
 
 ```bash
 curl -L -o forkpress.tar.gz \
@@ -105,16 +112,10 @@ chmod +x forkpress
 ./forkpress --version
 ```
 
-Replace `<target>` with one of the macOS or Linux target names from the table.
+Use a tag like `v0.1.14` and a target from the table.
 
-### Windows
-
-Download `ForkPressSetup.exe`, open it, and follow the prompts.
-
-The installer adds `forkpress.exe` to the user `PATH`, prepares a clone-capable
-ReFS Dev Drive, creates a starter site, and installs Start Menu and desktop
-shortcuts. It does not require WSL, Docker, WinFsp, or manual Windows feature
-setup.
+See [Installation](docs/installation.md) for install options, pinning, and
+checksum behavior.
 
 ## Branching
 
@@ -428,3 +429,5 @@ cargo test --workspace --exclude forkpress-cli
 FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli
 make test-all
 ```
+
+Release automation is documented in [Releases](docs/releases.md).
