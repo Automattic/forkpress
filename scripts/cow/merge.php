@@ -3890,13 +3890,15 @@ function cow_merge_recover_crash_artifacts(
     $restored = 0;
     if ($restore_target_db || $restore_files) {
         foreach ($artifacts as $artifact) {
+            $restored_snapshot = null;
+            $restored_filesystem_transaction = null;
             if ($restore_target_db) {
                 $snapshot = $artifact['target_db_snapshot'] ?? null;
                 if (!is_array($snapshot)) {
                     throw new RuntimeException("crash recovery artifact has no target DB snapshot: {$artifact['artifact_path']}");
                 }
                 cow_merge_restore_sqlite_snapshot($snapshot);
-                cow_merge_cleanup_sqlite_snapshot($snapshot);
+                $restored_snapshot = $snapshot;
             }
             if ($restore_files) {
                 $filesystem_transaction = $artifact['filesystem_transaction'] ?? null;
@@ -3905,9 +3907,16 @@ function cow_merge_recover_crash_artifacts(
                     throw new RuntimeException("crash recovery artifact has no filesystem transaction: {$artifact['artifact_path']}");
                 }
                 cow_merge_file_transaction_restore($filesystem_transaction, $target_root);
-                cow_merge_file_transaction_cleanup($filesystem_transaction);
+                $restored_filesystem_transaction = $filesystem_transaction;
             }
+            cow_merge_failpoint('after-crash-recovery-restore');
             cow_merge_remove_crash_recovery_artifact((string)$artifact['artifact_path']);
+            if ($restored_snapshot !== null) {
+                cow_merge_cleanup_sqlite_snapshot($restored_snapshot);
+            }
+            if ($restored_filesystem_transaction !== null) {
+                cow_merge_file_transaction_cleanup($restored_filesystem_transaction);
+            }
             $restored++;
         }
         $artifacts = cow_merge_crash_recovery_artifacts($metadata_db, $run_id);

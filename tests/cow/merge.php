@@ -1404,6 +1404,27 @@ try {
             'Source crash commit content',
             'blocked merge leaves the pending DB crash state untouched'
         );
+        $crash_restore_interrupted = run_merge_cli_env(
+            [
+                'recover-crash',
+                '--metadata-db', $crash_commit_metadata,
+                '--restore-target-db',
+                '--format', 'json',
+            ],
+            [
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT' => 'after-crash-recovery-restore',
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION' => 'exit',
+            ]
+        );
+        assert_true($crash_restore_interrupted['status'] !== 0, 'crash recovery restore cleanup failpoint terminates the recovery subprocess');
+        assert_same(
+            scalar($crash_commit_target, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Base content',
+            'interrupted crash recovery restores the pre-merge target DB content before artifact cleanup'
+        );
+        $interrupted_crash_recovery_files = glob(dirname($crash_commit_metadata) . '/crash-recovery/*.json');
+        assert_true(is_array($interrupted_crash_recovery_files) && count($interrupted_crash_recovery_files) === 1, 'interrupted crash recovery leaves the recovery artifact retryable');
+        assert_true(is_file($crash_backup), 'interrupted crash recovery keeps the target DB snapshot backup for retry');
         $crash_restore_report = run_merge_cli([
             'recover-crash',
             '--metadata-db', $crash_commit_metadata,
@@ -1421,6 +1442,7 @@ try {
         );
         $restored_crash_recovery_files = glob(dirname($crash_commit_metadata) . '/crash-recovery/*.json');
         assert_true(is_array($restored_crash_recovery_files) && count($restored_crash_recovery_files) === 0, 'crash recovery CLI removes restored artifact files');
+        assert_true(!file_exists($crash_backup), 'completed crash recovery cleanup removes target DB snapshot backup');
 
         $crash_file_base_db = $tmp . '/crash-file-base.sqlite';
         $crash_file_source_db = $tmp . '/crash-file-source.sqlite';
