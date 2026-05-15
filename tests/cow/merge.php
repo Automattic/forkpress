@@ -14647,6 +14647,7 @@ SQL);
     $db->exec('CREATE TABLE wp_term_relationships (object_id INTEGER NOT NULL, term_taxonomy_id INTEGER NOT NULL, term_order INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (object_id, term_taxonomy_id))');
     $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (1, 'Base category term', 'base-category-term')");
     $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, count) VALUES (1, 1, 'category', '', 1)");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES (3, 1, 'category', '', 0, 1)");
     $db->exec("INSERT INTO wp_termmeta (term_id, meta_key, meta_value) VALUES (1, '_forkpress_base_term_ref', 'base term metadata')");
     $db->exec('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (1, 1, 0)');
     $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type) VALUES ('Base taxonomy menu item', '', 'publish', 'nav_menu_item')");
@@ -14683,6 +14684,7 @@ SQL);
     $stmt->execute();
     $db->exec("UPDATE wp_termmeta SET term_id = 2 WHERE meta_key = '_forkpress_base_term_ref'");
     $db->exec("UPDATE wp_term_taxonomy SET term_id = 2 WHERE term_taxonomy_id = 1");
+    $db->exec("UPDATE wp_term_taxonomy SET parent = 2 WHERE term_taxonomy_id = 3");
     $stmt = $db->prepare('UPDATE wp_term_relationships SET term_taxonomy_id = :term_taxonomy_id WHERE object_id = :object_id AND term_taxonomy_id = 1');
     $stmt->bindValue(':term_taxonomy_id', $band_explicit_term_taxonomy_id, SQLITE3_INTEGER);
     $stmt->bindValue(':object_id', $band_explicit_term_base_menu_item_id, SQLITE3_INTEGER);
@@ -14725,6 +14727,7 @@ SQL);
     assert_same((int)scalar($band_explicit_term_target, 'SELECT COUNT(*) FROM wp_term_taxonomy WHERE term_id = 2'), 0, 'term taxonomy pointing at a held explicit source term is not applied automatically');
     assert_same((int)scalar($band_explicit_term_target, 'SELECT term_id FROM wp_term_taxonomy WHERE term_taxonomy_id = 1'), 1, 'updated term taxonomy pointing at a held explicit source term is not applied automatically');
     assert_same((int)scalar($band_explicit_term_target, 'SELECT COUNT(*) FROM wp_term_taxonomy WHERE parent = 2'), 0, 'hierarchical term taxonomy pointing at a held explicit parent term is not applied automatically');
+    assert_same((int)scalar($band_explicit_term_target, 'SELECT parent FROM wp_term_taxonomy WHERE term_taxonomy_id = 3'), 0, 'updated term taxonomy parents pointing at a held explicit source term are not applied automatically');
     assert_same((int)scalar($band_explicit_term_target, "SELECT COUNT(*) FROM wp_term_relationships WHERE term_taxonomy_id = $band_explicit_term_taxonomy_id"), 0, 'term relationships pointing at held explicit source term taxonomy are not applied automatically');
     assert_same((int)scalar($band_explicit_term_target, "SELECT COUNT(*) FROM wp_term_relationships WHERE object_id = $band_explicit_term_base_menu_item_id AND term_taxonomy_id = 1"), 1, 'updated term relationships pointing at held explicit source term taxonomy are not applied automatically');
     assert_same(scalar($band_explicit_term_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $band_explicit_term_base_menu_item_id AND meta_key = '_menu_item_object_id'"), '1', 'updated taxonomy menu item object references pointing at a held explicit source term are not applied automatically');
@@ -14739,7 +14742,7 @@ SQL);
     );
     assert_same(
         (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND c.table_name = 'wp_term_taxonomy' AND c.conflict_type = 'row-target-constraint'"),
-        3,
+        4,
         'term taxonomy pointing at a held explicit source term records a reviewable row conflict'
     );
     assert_same(
@@ -14767,7 +14770,7 @@ SQL);
         'options held behind an explicit source term explain the missing parent'
     );
     assert_true(
-        (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND d.table_name IN ('wp_termmeta', 'wp_term_taxonomy', 'wp_term_relationships', 'wp_postmeta', 'wp_options') AND d.decision = 'target-wins' AND d.reason LIKE 'source changed%'") === 6,
+        (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND d.table_name IN ('wp_termmeta', 'wp_term_taxonomy', 'wp_term_relationships', 'wp_postmeta', 'wp_options') AND d.decision = 'target-wins' AND d.reason LIKE 'source changed%'") === 7,
         'updated rows held behind an explicit source term explain that the source changed the row'
     );
 
