@@ -1020,6 +1020,92 @@ assert_same($reconciled_identity_count, 1, 'retry after post-metadata crash has 
 assert_same($stale_run_count, 0, 'retry after post-metadata crash removes stale unpublished birth runs');
 cow_git_remove_tree($tmp);
 
+$tmp = sys_get_temp_dir() . '/forkpress-cow-git-created-public-link-crash-' . getmypid() . '-' . bin2hex(random_bytes(4));
+$branches = $tmp . '/public-branches';
+$storage_branches = $tmp . '/storage-branches';
+$git = $tmp . '/git';
+$branch_list = $tmp . '/branches.txt';
+mkdir($storage_branches . '/main/wp-content/database', 0777, true);
+mkdir($branches, 0777, true);
+file_put_contents($storage_branches . '/main/wp-load.php', "<?php\n");
+file_put_contents($storage_branches . '/main/wp-content/base.txt', "base\n");
+$db = new SQLite3($storage_branches . '/main/wp-content/database/.ht.sqlite');
+$db->exec('CREATE TABLE wp_posts (ID INTEGER PRIMARY KEY AUTOINCREMENT, post_title TEXT)');
+$db->exec("INSERT INTO wp_posts (post_title) VALUES ('Base post')");
+$db->exec('CREATE TABLE plugin_keyless (label TEXT, value TEXT)');
+$db->exec("INSERT INTO plugin_keyless (label, value) VALUES ('Base keyless', 'base')");
+$db->close();
+if (@symlink($storage_branches . '/main', $branches . '/main')) {
+    $fs = WordPress\Filesystem\LocalFilesystem::create($git);
+    $repo = new WordPress\Git\GitRepository($fs, ['default_branch' => 'main']);
+    $repo->set_config_value(['user', 'name'], 'ForkPress COW');
+    $repo->set_config_value(['user', 'email'], 'forkpress-cow@local');
+    cow_git_sync_repository($repo, $branches);
+    cow_git_write_branch_list($branches, $branch_list);
+    $main_tip = $repo->get_branch_tip('refs/heads/main');
+    $repo->checkout('refs/heads/main');
+    $created_tip = $repo->commit([
+        'commit' => [
+            'message' => 'create branch with public link crash',
+            'author' => 'ForkPress Test <forkpress-test@local>',
+            'committer' => 'ForkPress Test <forkpress-test@local>',
+            'parents' => [$main_tip],
+        ],
+        'updates' => ['wordpress/wp-content/git-created-public-link-crash.txt' => "created\n"],
+    ]);
+    $repo->set_branch_tip('refs/heads/git-created-public-link-crash', $created_tip);
+    $crash_result = run_php_code_env(<<<'PHP'
+require_once getenv('FORKPRESS_COW_GIT_SERVER_HELPER');
+
+$git = getenv('FORKPRESS_COW_GIT_REPO');
+$branches = getenv('FORKPRESS_COW_GIT_BRANCHES');
+$storage = getenv('FORKPRESS_COW_GIT_STORAGE_BRANCHES');
+$branch_list = getenv('FORKPRESS_COW_GIT_BRANCH_LIST');
+$main_tip = getenv('FORKPRESS_COW_GIT_MAIN_TIP');
+$fs = WordPress\Filesystem\LocalFilesystem::create($git);
+$repo = new WordPress\Git\GitRepository($fs, ['default_branch' => 'main']);
+$repo->set_config_value(['user', 'name'], 'ForkPress COW');
+$repo->set_config_value(['user', 'email'], 'forkpress-cow@local');
+cow_git_apply_push_to_branches($repo, $git, $branches, $storage, $branch_list, 'file-copy', '', ['main' => $main_tip]);
+PHP, [
+        'FORKPRESS_COW_GIT_SERVER_HELPER' => realpath(__DIR__ . '/../../scripts/cow/git_server.php'),
+        'FORKPRESS_COW_GIT_REPO' => $git,
+        'FORKPRESS_COW_GIT_BRANCHES' => $branches,
+        'FORKPRESS_COW_GIT_STORAGE_BRANCHES' => $storage_branches,
+        'FORKPRESS_COW_GIT_BRANCH_LIST' => $branch_list,
+        'FORKPRESS_COW_GIT_MAIN_TIP' => $main_tip,
+        'FORKPRESS_COW_GIT_TEST_FAILPOINT' => 'after-created-branch-public-link',
+        'FORKPRESS_COW_GIT_TEST_FAILPOINT_ACTION' => 'exit',
+    ]);
+    assert_true($crash_result['status'] !== 0, 'Git-created public-link crash terminates the push apply subprocess');
+    assert_true(is_dir($storage_branches . '/git-created-public-link-crash'), 'Git-created public-link crash leaves storage branch published');
+    assert_true(is_link($branches . '/git-created-public-link-crash'), 'Git-created public-link crash leaves public branch linked');
+    assert_same(file_get_contents($branches . '/git-created-public-link-crash/wp-content/git-created-public-link-crash.txt'), "created\n", 'Git-created public-link crash leaves pushed WordPress files visible');
+    $stale_branch_list = (string)file_get_contents($branch_list);
+    assert_true(!str_contains($stale_branch_list, "git-created-public-link-crash\n"), 'Git-created public-link crash can leave branch list stale');
+    $metadata = new SQLite3($tmp . '/merge/metadata.sqlite');
+    $crash_band_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'git-created-public-link-crash' AND table_name = 'wp_posts'");
+    $crash_identity_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = 'git-created-public-link-crash' AND table_name = 'plugin_keyless'");
+    $metadata->close();
+    assert_same($crash_band_count, 1, 'Git-created public-link crash leaves ID-band metadata finalized');
+    assert_same($crash_identity_count, 1, 'Git-created public-link crash leaves row identity metadata finalized');
+    cow_git_apply_push_to_branches($repo, $git, $branches, $storage_branches, $branch_list, 'file-copy', '', ['main' => $main_tip]);
+    assert_true(is_link($branches . '/git-created-public-link-crash'), 'next Git apply keeps public branch link after public-link crash');
+    assert_true(is_dir($storage_branches . '/git-created-public-link-crash'), 'next Git apply keeps storage branch after public-link crash');
+    assert_same(file_get_contents($branches . '/git-created-public-link-crash/wp-content/git-created-public-link-crash.txt'), "created\n", 'next Git apply preserves pushed files after public-link crash');
+    $reconciled_branch_list = (string)file_get_contents($branch_list);
+    assert_true(str_contains($reconciled_branch_list, "git-created-public-link-crash\n"), 'next Git apply reconciles branch list after public-link crash');
+    $metadata = new SQLite3($tmp . '/merge/metadata.sqlite');
+    $reconciled_band_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'git-created-public-link-crash' AND table_name = 'wp_posts'");
+    $reconciled_identity_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = 'git-created-public-link-crash' AND table_name = 'plugin_keyless'");
+    $metadata->close();
+    assert_same($reconciled_band_count, 1, 'branch-list reconciliation after public-link crash preserves finalized ID-band metadata');
+    assert_same($reconciled_identity_count, 1, 'branch-list reconciliation after public-link crash preserves finalized row identity metadata');
+} else {
+    echo "  SKIP: separate storage public-link crash symlink test\n";
+}
+cow_git_remove_tree($tmp);
+
 $tmp = sys_get_temp_dir() . '/forkpress-cow-git-created-storage-crash-' . getmypid() . '-' . bin2hex(random_bytes(4));
 $branches = $tmp . '/public-branches';
 $storage_branches = $tmp . '/storage-branches';

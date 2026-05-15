@@ -1108,6 +1108,7 @@ function cow_git_create_branch_for_ref(
                 throw new \RuntimeException("failed to link git-created branch '$branch' into public branch directory");
             }
             $linked_public = true;
+            cow_git_failpoint('after-created-branch-public-link');
         }
 
         cow_git_rewrite_wp_config($dest_public, $debug_log);

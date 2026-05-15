@@ -64,6 +64,10 @@ The Git server suite covers these publication classes:
 - Process exit after Git-created storage publication but before public branch
   linking can leave orphan storage; a retry removes the unpublished storage and
   stale birth artifacts, then recreates and links the branch from the pushed ref.
+- Process exit after separate-storage Git-created public branch linking but
+  before branch-list publication can leave a visible public symlink and stale
+  branch list; the next Git apply reconciles the branch list while preserving
+  finalized DB/file bases, ID-band metadata, and row identity metadata.
 - Git-created branch metadata publication failure after ID-band and row-identity
   capture removes branch storage, merge-base artifacts, and merge metadata.
 - Git-created branch-list publication failure after the list write removes
@@ -104,7 +108,8 @@ OS-level interruption, not just deliberate exceptions:
 - Kill after file publish but before Git ref update.
 - Kill after Git ref update but before branch list update.
 - Kill during public branch symlink/tree publication after storage/link state is
-  partially visible in ways not yet covered by the separate-storage retry test.
+  partially visible in ways not covered by Git-created storage and public-link
+  retry tests.
 - Kill during sparsebundle detach or compact.
 - Kill during cleanup of rollback artifacts outside the Git object-pruning and
   crash-recovery restore paths.
