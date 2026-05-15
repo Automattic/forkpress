@@ -984,11 +984,7 @@ php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(($data["max
 
 log_step "create and merge branch through WordPress admin UI"
 UI_CREATE_COOKIES="$TMP/ui-create-cookies.txt"
-set +e
-branch_ui_nonce main createNonce "$TMP/ui-create-admin.html" "$UI_CREATE_COOKIES" > "$TMP/ui-create-nonce.txt"
-UI_CREATE_NONCE_STATUS=$?
-set -e
-if [ "$UI_CREATE_NONCE_STATUS" -ne 0 ]; then
+if ! branch_ui_nonce main createNonce "$TMP/ui-create-admin.html" "$UI_CREATE_COOKIES" > "$TMP/ui-create-nonce.txt"; then
   echo "failed to read WP UI branch create nonce" >&2
   dump_if_exists "$TMP/main-createNonce-login.html"
   dump_if_exists "$TMP/ui-create-admin.html"
@@ -996,7 +992,7 @@ if [ "$UI_CREATE_NONCE_STATUS" -ne 0 ]; then
   exit 1
 fi
 UI_CREATE_NONCE="$(cat "$TMP/ui-create-nonce.txt")"
-UI_CREATE_HTTP="$(
+if ! UI_CREATE_HTTP="$(
   curl -sS -o "$TMP/ui-create.json" -w '%{http_code}' \
     -b "$UI_CREATE_COOKIES" \
     -H "Host: wp.localhost:$PORT" \
@@ -1007,14 +1003,24 @@ UI_CREATE_HTTP="$(
     --data-urlencode "branch=ui-created" \
     --data-urlencode "from=main" \
     "http://127.0.0.1:$PORT/wp-admin/admin-post.php"
-)"
+)"; then
+  echo "WP UI branch create request failed" >&2
+  dump_if_exists "$TMP/ui-create.json"
+  "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+  exit 1
+fi
 if [ "$UI_CREATE_HTTP" != "200" ]; then
   echo "WP UI branch create returned $UI_CREATE_HTTP" >&2
   cat "$TMP/ui-create.json" >&2
   "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
   exit 1
 fi
-php -r '$data = json_decode(file_get_contents($argv[1]), true); $branches = array_map(fn($row) => $row["name"] ?? "", $data["branches"] ?? []); exit(($data["success"] ?? null) === true && ($data["message"] ?? null) === "Created branch ui-created." && in_array("ui-created", $branches, true) ? 0 : 1);' "$TMP/ui-create.json"
+if ! php -r '$data = json_decode(file_get_contents($argv[1]), true); $branches = array_map(fn($row) => $row["name"] ?? "", $data["branches"] ?? []); exit(($data["success"] ?? null) === true && ($data["message"] ?? null) === "Created branch ui-created." && in_array("ui-created", $branches, true) ? 0 : 1);' "$TMP/ui-create.json"; then
+  echo "WP UI branch create response did not contain the expected success payload" >&2
+  cat "$TMP/ui-create.json" >&2
+  "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+  exit 1
+fi
 test -d "$WORK/ui-created"
 test -f "$WORK_DIR/cow/merge/bases/ui-created.sqlite"
 test -f "$WORK_DIR/cow/merge/file-bases/ui-created.json"
@@ -1026,11 +1032,7 @@ UI_MERGE_TITLE="UI branch merge $(date +%s)"
 create_branch_post ui-created "$UI_MERGE_TITLE"
 echo "merged through WP branch UI" > "$WORK/ui-created/wp-content/ui-created-file.txt"
 UI_MERGE_COOKIES="$TMP/ui-merge-cookies.txt"
-set +e
-branch_ui_nonce main mergeNonce "$TMP/ui-merge-admin.html" "$UI_MERGE_COOKIES" > "$TMP/ui-merge-nonce.txt"
-UI_MERGE_NONCE_STATUS=$?
-set -e
-if [ "$UI_MERGE_NONCE_STATUS" -ne 0 ]; then
+if ! branch_ui_nonce main mergeNonce "$TMP/ui-merge-admin.html" "$UI_MERGE_COOKIES" > "$TMP/ui-merge-nonce.txt"; then
   echo "failed to read WP UI branch merge nonce" >&2
   dump_if_exists "$TMP/main-mergeNonce-login.html"
   dump_if_exists "$TMP/ui-merge-admin.html"
@@ -1038,7 +1040,7 @@ if [ "$UI_MERGE_NONCE_STATUS" -ne 0 ]; then
   exit 1
 fi
 UI_MERGE_NONCE="$(cat "$TMP/ui-merge-nonce.txt")"
-UI_MERGE_HTTP="$(
+if ! UI_MERGE_HTTP="$(
   curl -sS -o "$TMP/ui-merge.json" -w '%{http_code}' \
     -b "$UI_MERGE_COOKIES" \
     -H "Host: wp.localhost:$PORT" \
@@ -1049,14 +1051,24 @@ UI_MERGE_HTTP="$(
     --data-urlencode "source=ui-created" \
     --data-urlencode "target=main" \
     "http://127.0.0.1:$PORT/wp-admin/admin-post.php"
-)"
+)"; then
+  echo "WP UI branch merge request failed" >&2
+  dump_if_exists "$TMP/ui-merge.json"
+  "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+  exit 1
+fi
 if [ "$UI_MERGE_HTTP" != "200" ]; then
   echo "WP UI branch merge returned $UI_MERGE_HTTP" >&2
   cat "$TMP/ui-merge.json" >&2
   "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
   exit 1
 fi
-php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(($data["success"] ?? null) === true && ($data["message"] ?? null) === "Merged ui-created into main." ? 0 : 1);' "$TMP/ui-merge.json"
+if ! php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(($data["success"] ?? null) === true && ($data["message"] ?? null) === "Merged ui-created into main." ? 0 : 1);' "$TMP/ui-merge.json"; then
+  echo "WP UI branch merge response did not contain the expected success payload" >&2
+  cat "$TMP/ui-merge.json" >&2
+  "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+  exit 1
+fi
 test -f "$WORK/main/wp-content/ui-created-file.txt"
 grep -F "merged through WP branch UI" "$WORK/main/wp-content/ui-created-file.txt" >/dev/null
 curl -sS -H "Host: wp.localhost:$PORT" \
