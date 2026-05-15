@@ -188,5 +188,5 @@ whose JSON points at a missing child row, and a discovered target-conflict
 validator that completes the merge with plugin-scoped review conflicts when a
 source graph references target-exclusive plugin state. It also covers a
 WordPress media-shaped mu-plugin validator that inspects the candidate target
-root and records plugin-scoped conflicts when attachment metadata references a
-missing generated upload file.
+root and records plugin-scoped conflicts when attachment metadata references
+missing original or generated upload files.

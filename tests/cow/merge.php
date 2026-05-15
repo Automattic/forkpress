@@ -13716,6 +13716,19 @@ PHP);
     $stmt->bindValue(':file', '2026/05/source-original.jpg', SQLITE3_TEXT);
     $stmt->bindValue(':metadata', $wp_media_attachment_metadata, SQLITE3_TEXT);
     $stmt->execute();
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, guid) VALUES ('Source media missing original file', '', 'inherit', 'attachment', 'wp-content/uploads/2026/05/source-missing-original.jpg')");
+    $wp_media_missing_original_id = (int)$db->lastInsertRowID();
+    $wp_media_missing_original_metadata = serialize([
+        'file' => '2026/05/source-missing-original.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', :file), (:post_id, '_wp_attachment_metadata', :metadata)");
+    $stmt->bindValue(':post_id', $wp_media_missing_original_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':file', '2026/05/source-missing-original.jpg', SQLITE3_TEXT);
+    $stmt->bindValue(':metadata', $wp_media_missing_original_metadata, SQLITE3_TEXT);
+    $stmt->execute();
     $db->close();
     $wp_media_result = cow_merge_branch_state(
         $wp_media_base,
@@ -13730,7 +13743,7 @@ PHP);
     );
     assert_same($wp_media_result['status'], 'completed_with_conflicts', 'WordPress media validator holds missing generated upload files for review');
     assert_same((int)($wp_media_result['plugin_validators'] ?? 0), 1, 'WordPress media validator is discovered from mu-plugins during merge');
-    assert_same((int)($wp_media_result['plugin_validator_conflicts'] ?? 0), 1, 'WordPress media validator records one missing-file conflict');
+    assert_same((int)($wp_media_result['plugin_validator_conflicts'] ?? 0), 2, 'WordPress media validator records missing original and generated-file conflicts');
     assert_same(
         scalar($wp_media_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $wp_media_attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-original.jpg',
@@ -13738,13 +13751,16 @@ PHP);
     );
     assert_true(is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-original.jpg'), 'WordPress media validator keeps the merged original upload file');
     assert_true(!is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-original-150x150.jpg'), 'WordPress media validator does not invent missing generated upload files');
+    assert_true(!is_file($wp_media_target_root . '/wp-content/uploads/2026/05/source-missing-original.jpg'), 'WordPress media validator does not invent missing original upload files');
     $wp_media_audit = cow_merge_audit_report($wp_media_metadata, (int)$wp_media_result['run_id'], 10, [
         'scope' => 'plugin',
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-media-missing-file',
     ]);
-    assert_same(count($wp_media_audit['conflicts']), 1, 'WordPress media validator exposes missing generated upload files as plugin-scoped audit conflicts');
-    assert_true(str_contains($wp_media_audit['conflicts'][0]['chosen_preview'], 'source-original-150x150.jpg'), 'WordPress media validator audit includes the missing generated upload filename');
+    assert_same(count($wp_media_audit['conflicts']), 2, 'WordPress media validator exposes missing upload files as plugin-scoped audit conflicts');
+    $wp_media_audit_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $wp_media_audit['conflicts']));
+    assert_true(str_contains($wp_media_audit_preview, 'source-original-150x150.jpg'), 'WordPress media validator audit includes the missing generated upload filename');
+    assert_true(str_contains($wp_media_audit_preview, 'source-missing-original.jpg'), 'WordPress media validator audit includes the missing original upload filename');
 
     $wp_lifecycle_base = $tmp . '/wp-lifecycle-base.sqlite';
     $wp_lifecycle_source = $tmp . '/wp-lifecycle-source.sqlite';
