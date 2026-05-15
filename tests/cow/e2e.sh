@@ -1296,9 +1296,9 @@ printf "created through crashed git push\n" > "$TMP/checkout/wordpress/wp-conten
 "$BIN" stop --work-dir "$WORK_DIR" >/dev/null 2>&1 || true
 FORKPRESS_COW_GIT_TEST_FAILPOINT=after-created-branch-list FORKPRESS_COW_GIT_TEST_FAILPOINT_ACTION=exit \
   "$BIN" serve --work-dir "$WORK_DIR" --port "$PORT" --root-host wp.localhost --workers 1
+GIT_CREATED_HTTP_CRASH_PUSH_SURVIVED=0
 if "$BIN" commit "$TMP/checkout" --message "create cow branch through crashed git push" > "$TMP/git-created-http-crash.out" 2>&1; then
-  echo "Git push unexpectedly survived after-created-branch-list server exit failpoint" >&2
-  exit 1
+  GIT_CREATED_HTTP_CRASH_PUSH_SURVIVED=1
 fi
 for _ in $(seq 1 40); do
   if ! "$BIN" server list | grep -F "$WORK_DIR" >/dev/null; then
@@ -1306,6 +1306,14 @@ for _ in $(seq 1 40); do
   fi
   sleep 0.25
 done
+if "$BIN" server list | grep -F "$WORK_DIR" >/dev/null; then
+  if [ "$GIT_CREATED_HTTP_CRASH_PUSH_SURVIVED" = "1" ]; then
+    echo "Git push unexpectedly survived after-created-branch-list server exit failpoint" >&2
+  else
+    echo "ForkPress server survived after-created-branch-list server exit failpoint" >&2
+  fi
+  exit 1
+fi
 "$BIN" stop --work-dir "$WORK_DIR" >/dev/null 2>&1 || true
 "$BIN" serve --work-dir "$WORK_DIR" --port "$PORT" --root-host wp.localhost --workers 1
 "$BIN" branch --work-dir "$WORK_DIR" list | grep -F "git-created-http-crash" >/dev/null
