@@ -13762,6 +13762,92 @@ PHP);
     assert_true(str_contains($wp_media_audit_preview, 'source-original-150x150.jpg'), 'WordPress media validator audit includes the missing generated upload filename');
     assert_true(str_contains($wp_media_audit_preview, 'source-missing-original.jpg'), 'WordPress media validator audit includes the missing original upload filename');
 
+    $wp_block_ref_base_root = $tmp . '/wp-block-ref-validator-files-base';
+    $wp_block_ref_source_root = $tmp . '/wp-block-ref-validator-files-source';
+    $wp_block_ref_target_root = $tmp . '/wp-block-ref-validator-files-target';
+    $wp_block_ref_base = $wp_block_ref_base_root . '/wp-content/database/.ht.sqlite';
+    $wp_block_ref_source = $wp_block_ref_source_root . '/wp-content/database/.ht.sqlite';
+    $wp_block_ref_target = $wp_block_ref_target_root . '/wp-content/database/.ht.sqlite';
+    $wp_block_ref_metadata = $tmp . '/.forkpress/cow/merge/wp-block-ref-validator-metadata.sqlite';
+    mkdir($wp_block_ref_base_root . '/wp-content/database', 0777, true);
+    create_base_db($wp_block_ref_base);
+    $db = open_db($wp_block_ref_base);
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_type TEXT NOT NULL DEFAULT 'post'");
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_name TEXT NOT NULL DEFAULT ''");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (30, 'Shared reusable block', '<!-- wp:paragraph --><p>Shared block</p><!-- /wp:paragraph -->', 'publish', 'wp_block', 'shared-reusable-block'),
+        (31, 'Page with reusable block', '<!-- wp:block {\"ref\":30} /--><!-- wp:paragraph --><p>Base page content</p><!-- /wp:paragraph -->', 'publish', 'page', 'page-with-reusable-block')");
+    $db->close();
+    write_test_file($wp_block_ref_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type IN ('page', 'post', 'wp_template_part', 'wp_template')");
+$findings = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    $content = (string)$row['post_content'];
+    if (!preg_match_all('/<!--\s+wp:block\s+\{[^}]*"ref"\s*:\s*(\d+)/', $content, $matches)) {
+        continue;
+    }
+    foreach ($matches[1] as $ref) {
+        $ref_id = (int)$ref;
+        $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $ref_id AND post_type = 'wp_block'");
+        if ($exists === 0) {
+            $findings[] = [
+                'plugin' => 'forkpress-wp-block-refs',
+                'object' => 'post:' . $row['ID'],
+                'reason' => 'post content references a missing reusable block',
+                'type' => 'plugin-wp-block-missing-reference',
+                'tables' => ['wp_posts'],
+                'validator' => 'forkpress-wp-block-refs@1',
+                'candidate' => [
+                    'post_id' => (int)$row['ID'],
+                    'missing_ref' => $ref_id,
+                ],
+            ];
+        }
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    copy_tree_for_test($wp_block_ref_base_root, $wp_block_ref_source_root);
+    copy_tree_for_test($wp_block_ref_base_root, $wp_block_ref_target_root);
+    $wp_block_ref_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-block-ref-validator.json';
+    cow_merge_capture_file_base($wp_block_ref_base_root, $wp_block_ref_file_base);
+    cow_merge_allocate_autoincrement_bands($wp_block_ref_source, $wp_block_ref_metadata, 'feature-wp-block-ref-source');
+    cow_merge_allocate_autoincrement_bands($wp_block_ref_target, $wp_block_ref_metadata, 'feature-wp-block-ref-target');
+    $db = open_db($wp_block_ref_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID = 30');
+    $db->close();
+    $db = open_db($wp_block_ref_target);
+    $db->exec("UPDATE wp_posts SET post_title = 'Target page still using reusable block' WHERE ID = 31");
+    $db->close();
+    $wp_block_ref_result = cow_merge_branch_state(
+        $wp_block_ref_base,
+        $wp_block_ref_source,
+        $wp_block_ref_target,
+        $wp_block_ref_metadata,
+        'feature-wp-block-ref-source',
+        'feature-wp-block-ref-target',
+        $wp_block_ref_file_base,
+        $wp_block_ref_source_root,
+        $wp_block_ref_target_root
+    );
+    assert_same($wp_block_ref_result['status'], 'completed_with_conflicts', 'WordPress block reference validator holds missing reusable blocks for review');
+    assert_same((int)($wp_block_ref_result['plugin_validators'] ?? 0), 1, 'WordPress block reference validator is discovered from mu-plugins during merge');
+    assert_same((int)($wp_block_ref_result['plugin_validator_conflicts'] ?? 0), 1, 'WordPress block reference validator records the missing reusable block');
+    assert_same((int)scalar($wp_block_ref_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 30'), 0, 'WordPress block reference validator leaves the source block deletion staged for review');
+    assert_same(scalar($wp_block_ref_target, 'SELECT post_title FROM wp_posts WHERE ID = 31'), 'Target page still using reusable block', 'WordPress block reference validator preserves the target page edit');
+    $wp_block_ref_audit = cow_merge_audit_report($wp_block_ref_metadata, (int)$wp_block_ref_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-block-missing-reference',
+    ]);
+    assert_same(count($wp_block_ref_audit['conflicts']), 1, 'WordPress block reference validator exposes the missing block as a plugin-scoped audit conflict');
+    assert_true(str_contains((string)($wp_block_ref_audit['conflicts'][0]['chosen_preview'] ?? ''), '"missing_ref":30'), 'WordPress block reference audit includes the missing reusable block ID');
+
     $wp_lifecycle_base = $tmp . '/wp-lifecycle-base.sqlite';
     $wp_lifecycle_source = $tmp . '/wp-lifecycle-source.sqlite';
     $wp_lifecycle_target = $tmp . '/wp-lifecycle-target.sqlite';
