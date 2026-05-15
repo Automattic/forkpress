@@ -1,15 +1,15 @@
-name: release
+name: release:publish
 
 on:
-  push:
-    tags: ["v*"]
-  workflow_dispatch:
   pull_request:
+    types: [opened, synchronize, reopened, closed]
+    branches: ["trunk"]
     paths:
       - "crates/**"
       - "runtime/cow/**"
       - "runtime/wp.zip"
       - "scripts/build-dist.sh"
+      - "scripts/release-*.mjs"
       - "scripts/windows/**"
       - "scripts/cow/**"
       - "scripts/git/**"
@@ -20,11 +20,80 @@ on:
       - "vendor/**"
       - "Cargo.toml"
       - "Cargo.lock"
-      - ".github/workflows/release.yml"
+      - "package.json"
+      - ".github/workflows/release-prepare.yml"
+      - ".github/workflows/release-publish.yml"
+
+permissions:
+  contents: read
 
 jobs:
+  preflight:
+    name: preflight
+    if: >-
+      startsWith(github.event.pull_request.head.ref, 'release/v') &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (
+        github.event.action != 'closed' ||
+        github.event.pull_request.merged == true
+      )
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      tag: ${{ steps.metadata.outputs.tag }}
+      branch: ${{ steps.metadata.outputs.branch }}
+      checkout_ref: ${{ steps.ref.outputs.checkout_ref }}
+      should_publish: ${{ steps.mode.outputs.should_publish }}
+    steps:
+      - name: Select checkout ref
+        id: ref
+        run: |
+          if [ "${{ github.event.pull_request.merged }}" = "true" ]; then
+            echo "checkout_ref=${{ github.event.pull_request.merge_commit_sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "checkout_ref=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ref.outputs.checkout_ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Validate release metadata
+        id: metadata
+        run: node scripts/release-validate.mjs --release-branch "${{ github.event.pull_request.head.ref }}" --github-output
+
+      - name: Validate tag state
+        run: |
+          git fetch --force --tags origin
+          tag="${{ steps.metadata.outputs.tag }}"
+          sha="$(git rev-parse HEAD)"
+          existing="$(git rev-parse -q --verify "refs/tags/${tag}^{}" 2>/dev/null || true)"
+          if [ -n "$existing" ] && [ "$existing" != "$sha" ]; then
+            echo "Tag $tag already points at $existing, expected $sha." >&2
+            exit 1
+          fi
+
+      - name: Select publish mode
+        id: mode
+        run: |
+          should_publish=false
+          if [ "${{ github.event.action }}" = "closed" ]; then
+            git fetch origin trunk:refs/remotes/origin/trunk
+            sha="$(git rev-parse HEAD)"
+            git merge-base --is-ancestor "$sha" origin/trunk
+            should_publish=true
+          fi
+          echo "should_publish=$should_publish" >> "$GITHUB_OUTPUT"
+
   build:
     name: build ${{ matrix.target }}
+    needs: preflight
+    if: needs.preflight.result == 'success'
     strategy:
       fail-fast: false
       matrix:
@@ -50,6 +119,8 @@ jobs:
       WINDOWS_CODESIGN_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.checkout_ref }}
 
       - name: Release preflight checks
         if: matrix.os != 'windows'
@@ -113,11 +184,11 @@ jobs:
       - name: Build forkpress
         run: cargo build --release --target ${{ matrix.target }} -p forkpress-cli --bin forkpress
 
-      - name: Require signing for tagged Windows releases
-        if: matrix.os == 'windows' && startsWith(github.ref, 'refs/tags/v') && env.WINDOWS_CODESIGN_CERT_BASE64 == ''
+      - name: Require signing for published Windows releases
+        if: matrix.os == 'windows' && needs.preflight.outputs.should_publish == 'true' && env.WINDOWS_CODESIGN_CERT_BASE64 == ''
         shell: pwsh
         run: |
-          throw 'Tagged Windows releases require WINDOWS_CODESIGN_CERT_BASE64 and WINDOWS_CODESIGN_PASSWORD secrets.'
+          throw 'Published Windows releases require WINDOWS_CODESIGN_CERT_BASE64 and WINDOWS_CODESIGN_PASSWORD secrets.'
 
       - name: Sign forkpress.exe (windows)
         if: matrix.os == 'windows' && env.WINDOWS_CODESIGN_CERT_BASE64 != ''
@@ -129,6 +200,23 @@ jobs:
         run: |
           cd target/${{ matrix.target }}/release
           tar -czf ${{ github.workspace }}/forkpress-${{ matrix.target }}.tar.gz forkpress
+
+      - name: Smoke packaged artifact
+        if: matrix.os != 'windows'
+        run: |
+          archive="${{ github.workspace }}/forkpress-${{ matrix.target }}.tar.gz"
+          test -f "$archive"
+          extract="$(mktemp -d)"
+          tar -xzf "$archive" -C "$extract"
+          test -x "$extract/forkpress"
+          "$extract/forkpress" --version
+          site="$extract/site"
+          mkdir -p "$site"
+          (
+            cd "$site"
+            "$extract/forkpress" init --work-dir "$site/.forkpress" --site-title "CI Smoke Site"
+          )
+          test -f "$site/.forkpress/site.toml"
 
       - name: Package (windows)
         if: matrix.os == 'windows'
@@ -143,7 +231,7 @@ jobs:
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           & $iscc installer/windows/ForkPress.iss `
             /DSourceDir="$stage" `
-            /DAppVersion="${{ github.ref_name }}" `
+            /DAppVersion="${{ needs.preflight.outputs.version }}" `
             /O"${{ github.workspace }}"
 
       - name: Sign installer (windows)
@@ -222,20 +310,96 @@ jobs:
 
   release:
     name: publish release
-    needs: build
+    needs:
+      - preflight
+      - build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: needs.preflight.outputs.should_publish == 'true'
     permissions:
       contents: write
+    env:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.checkout_ref }}
+          fetch-depth: 0
+
+      - name: Require Homebrew tap token
+        run: |
+          if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
+            echo "HOMEBREW_TAP_TOKEN is required to update Automattic/homebrew-tap." >&2
+            exit 1
+          fi
+
       - uses: actions/download-artifact@v4
         with:
           pattern: forkpress-*
           merge-multiple: true
+
+      - name: Verify release artifacts
+        run: |
+          expected=(
+            forkpress-aarch64-apple-darwin.tar.gz
+            forkpress-x86_64-apple-darwin.tar.gz
+            forkpress-aarch64-unknown-linux-musl.tar.gz
+            forkpress-x86_64-unknown-linux-musl.tar.gz
+            forkpress-x86_64-pc-windows-msvc.zip
+            ForkPressSetup.exe
+          )
+          for file in "${expected[@]}"; do
+            test -f "$file"
+          done
+          sha256sum "${expected[@]}" > SHA256SUMS
+
+      - name: Create release tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --force --tags origin
+          tag="${{ needs.preflight.outputs.tag }}"
+          sha="$(git rev-parse HEAD)"
+          existing="$(git rev-parse -q --verify "refs/tags/${tag}^{}" 2>/dev/null || true)"
+          if [ -z "$existing" ]; then
+            git tag -a "$tag" "$sha" -m "Release $tag"
+            git push origin "$tag"
+          elif [ "$existing" = "$sha" ]; then
+            echo "Tag $tag already points at $sha; continuing."
+          else
+            echo "Tag $tag already points at $existing, expected $sha." >&2
+            exit 1
+          fi
+
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.preflight.outputs.tag }}
+          target_commitish: ${{ needs.preflight.outputs.checkout_ref }}
           files: |
             forkpress-*.tar.gz
             forkpress-*.zip
             ForkPressSetup.exe
+            SHA256SUMS
           generate_release_notes: true
+
+      - uses: actions/checkout@v4
+        with:
+          repository: Automattic/homebrew-tap
+          ref: master
+          path: homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Update Homebrew tap
+        run: |
+          node scripts/release-homebrew-formula.mjs "${{ needs.preflight.outputs.version }}" SHA256SUMS > homebrew-tap/forkpress.rb
+          ruby -c homebrew-tap/forkpress.rb
+          git -C homebrew-tap config user.name "github-actions[bot]"
+          git -C homebrew-tap config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git -C homebrew-tap diff --quiet -- forkpress.rb; then
+            echo "Automattic/homebrew-tap already has forkpress.rb for ${{ needs.preflight.outputs.tag }}."
+            exit 0
+          fi
+          git -C homebrew-tap add forkpress.rb
+          git -C homebrew-tap commit \
+            -m "Update ForkPress to ${{ needs.preflight.outputs.tag }}" \
+            -m "Release: https://github.com/Automattic/forkpress/releases/tag/${{ needs.preflight.outputs.tag }}"
+          git -C homebrew-tap push origin HEAD:master

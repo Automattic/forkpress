@@ -68,6 +68,35 @@ Download the release for your platform from
 
 ### macOS and Linux
 
+Install the latest release into `$HOME/.local/bin`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Automattic/forkpress/trunk/scripts/install.sh | sh
+```
+
+Install a specific release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Automattic/forkpress/trunk/scripts/install.sh | FORKPRESS_VERSION=0.1.13 sh
+```
+
+To keep ForkPress local to one project, download the launcher instead:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Automattic/forkpress/trunk/scripts/forkpress -o forkpress
+chmod +x forkpress
+./forkpress init
+```
+
+The launcher caches the real binary in `.forkpress-bin/` next to the launcher.
+Pin a project to a specific release with:
+
+```bash
+FORKPRESS_VERSION=0.1.13 ./forkpress serve
+```
+
+Or download an archive manually:
+
 ```bash
 curl -L -o forkpress.tar.gz \
   "https://github.com/Automattic/forkpress/releases/download/<tag>/forkpress-<target>.tar.gz"

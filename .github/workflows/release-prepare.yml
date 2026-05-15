@@ -1,0 +1,48 @@
+name: release:prepare
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, for example 0.1.13"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    env:
+      ASTRO_TELEMETRY_DISABLED: "1"
+      GH_TOKEN: ${{ secrets.RELEASE_PREPARE_TOKEN != '' && secrets.RELEASE_PREPARE_TOKEN || github.token }}
+      RELEASE_PREPARE_TOKEN_PRESENT: ${{ secrets.RELEASE_PREPARE_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: trunk
+          token: ${{ secrets.RELEASE_PREPARE_TOKEN != '' && secrets.RELEASE_PREPARE_TOKEN || github.token }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Configure Git author
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Warn when using GITHUB_TOKEN
+        if: env.RELEASE_PREPARE_TOKEN_PRESENT != 'true'
+        run: |
+          echo "::warning::RELEASE_PREPARE_TOKEN is not configured. The PR can be created with GITHUB_TOKEN, but PR-triggered checks may not run until manually retriggered."
+
+      - name: Prepare release PR
+        run: npm run release:prepare -- "${{ inputs.version }}"

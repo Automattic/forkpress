@@ -28,14 +28,14 @@ function Assert-Contains {
 
 $installPath = Join-Path $repoRoot 'scripts\windows\install.ps1'
 $setupPath = Join-Path $repoRoot 'scripts\windows\setup-dev-drive.ps1'
-$releasePath = Join-Path $repoRoot '.github\workflows\release.yml'
+$releasePublishPath = Join-Path $repoRoot '.github\workflows\release-publish.yml'
 
 Assert-ScriptParses -Path $installPath
 Assert-ScriptParses -Path $setupPath
 
 $install = Get-Content -Raw -LiteralPath $installPath
 $setup = Get-Content -Raw -LiteralPath $setupPath
-$release = Get-Content -Raw -LiteralPath $releasePath
+$releasePublish = Get-Content -Raw -LiteralPath $releasePublishPath
 
 Assert-Contains $install '\[switch\]\s+\$NoPauseOnError' 'install.ps1 must keep a CI-safe no-pause switch.'
 Assert-Contains $install 'trap\s*\{' 'install.ps1 must have a top-level trap so installer errors stay visible.'
@@ -49,6 +49,6 @@ Assert-Contains $setup 'Get-ForkPressMinimumMemoryBytes' 'setup-dev-drive.ps1 mu
 Assert-Contains $setup '8000000000' 'Dev Drive RAM threshold should use decimal 8 GB, not 8 GiB.'
 Assert-Contains $setup 'ForkPress Dev Drive setup cannot continue' 'setup-dev-drive.ps1 must print a visible red fatal error.'
 
-Assert-Contains $release '-NoPauseOnError' 'release smoke tests must pass -NoPauseOnError so CI cannot hang on a visible error prompt.'
+Assert-Contains $releasePublish '-NoPauseOnError' 'release publish smoke tests must pass -NoPauseOnError so CI cannot hang on a visible error prompt.'
 
 Write-Host 'Windows installer error-surface checks passed.'
