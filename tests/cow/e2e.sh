@@ -1283,7 +1283,7 @@ test -f "$WORK/main/wp-content/git-created.txt"
 grep -F "created through git" "$WORK/main/wp-content/git-created.txt" >/dev/null
 
 log_step "actual Git push created-branch crash recovery"
-git -C "$TMP/checkout" fetch origin main:refs/remotes/origin/main
+git -C "$TMP/checkout" fetch origin +main:refs/remotes/origin/main
 git -C "$TMP/checkout" checkout -B git-created-http-crash origin/main
 git -C "$TMP/checkout" reset --hard origin/main
 git -C "$TMP/checkout" clean -fd
