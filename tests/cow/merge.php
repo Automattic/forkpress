@@ -14161,6 +14161,104 @@ PHP);
     assert_same($plugin_validator_file_payload['candidate']['target_root_basename'] ?? null, 'plugin-validator-file-target', 'file-root validator receives the candidate target root');
     assert_same($plugin_validator_file_payload['candidate']['target_file'] ?? null, 'source validator file', 'file-root validator can inspect candidate target files');
 
+    $plugin_discovery_root = $tmp . '/plugin-validator-discovery-root';
+    $plugin_discovery_db = $tmp . '/plugin-validator-discovery.sqlite';
+    create_base_db($plugin_discovery_db);
+    $db = open_db($plugin_discovery_db);
+    $db->exec(
+        "INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('active_plugins', '" .
+        SQLite3::escapeString(serialize(['active-plugin/active-plugin.php', 'single-plugin.php', '../unsafe/unsafe.php'])) .
+        "', 'yes')"
+    );
+    $db->close();
+    write_test_file($plugin_discovery_root . '/wp-content/plugins/active-plugin/forkpress-merge-validator.php', "<?php echo 'active';\n");
+    write_test_file($plugin_discovery_root . '/wp-content/plugins/single-plugin.forkpress-merge-validator.php', "<?php echo 'single';\n");
+    write_test_file($plugin_discovery_root . '/wp-content/plugins/inactive-plugin/forkpress-merge-validator.php', "<?php echo 'inactive';\n");
+    write_test_file($plugin_discovery_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', "<?php echo 'mu';\n");
+    write_test_file($plugin_discovery_root . '/wp-content/mu-plugins/mu-extra.forkpress-merge-validator.php', "<?php echo 'mu-extra';\n");
+    write_test_file($plugin_discovery_root . '/wp-content/mu-plugins/mu-dir/forkpress-merge-validator.php', "<?php echo 'mu-dir';\n");
+    $discovered_plugin_validators = array_map(
+        fn(string $path): string => str_replace($plugin_discovery_root . '/', '', $path),
+        cow_merge_discover_plugin_validators($plugin_discovery_db, $plugin_discovery_root)
+    );
+    assert_same($discovered_plugin_validators, [
+        'wp-content/mu-plugins/forkpress-merge-validator.php',
+        'wp-content/mu-plugins/mu-extra.forkpress-merge-validator.php',
+        'wp-content/mu-plugins/mu-dir/forkpress-merge-validator.php',
+        'wp-content/plugins/active-plugin/forkpress-merge-validator.php',
+        'wp-content/plugins/single-plugin.forkpress-merge-validator.php',
+    ], 'plugin validator discovery includes mu-plugin validators and active plugin validators only');
+
+    $auto_validator_base_root = $tmp . '/auto-validator-base';
+    $auto_validator_source_root = $tmp . '/auto-validator-source';
+    $auto_validator_target_root = $tmp . '/auto-validator-target';
+    foreach ([$auto_validator_base_root, $auto_validator_source_root, $auto_validator_target_root] as $root) {
+        mkdir($root . '/wp-content/database', 0777, true);
+        mkdir($root . '/wp-content/uploads', 0777, true);
+    }
+    $auto_validator_base_db = $auto_validator_base_root . '/wp-content/database/.ht.sqlite';
+    $auto_validator_source_db = $auto_validator_source_root . '/wp-content/database/.ht.sqlite';
+    $auto_validator_target_db = $auto_validator_target_root . '/wp-content/database/.ht.sqlite';
+    $auto_validator_metadata = $tmp . '/.forkpress/cow/merge/auto-validator-metadata.sqlite';
+    $auto_validator_file_base = $tmp . '/.forkpress/cow/merge/file-bases/auto-validator.json';
+    create_base_db($auto_validator_base_db);
+    copy($auto_validator_base_db, $auto_validator_source_db);
+    copy($auto_validator_base_db, $auto_validator_target_db);
+    cow_merge_capture_file_base($auto_validator_base_root, $auto_validator_file_base);
+    $db = open_db($auto_validator_source_db);
+    $db->exec("UPDATE wp_posts SET post_content = 'source automatic validator content' WHERE ID = 1");
+    $db->close();
+    $db = open_db($auto_validator_target_db);
+    $db->exec(
+        "INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('active_plugins', '" .
+        SQLite3::escapeString(serialize(['auto-validator/auto-validator.php'])) .
+        "', 'yes')"
+    );
+    $db->close();
+    write_test_file($auto_validator_target_root . '/wp-content/plugins/auto-validator/forkpress-merge-validator.php', <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-auto-validator',
+            'object' => 'candidate:' . basename((string)getenv('FORKPRESS_MERGE_TARGET_ROOT')),
+            'reason' => 'automatically discovered validator inspected the merge candidate',
+            'type' => 'plugin-auto-validator-conflict',
+            'validator' => 'forkpress-auto-validator@1',
+            'candidate' => [
+                'target_content' => trim((string)(new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB')))->querySingle('SELECT post_content FROM wp_posts WHERE ID = 1')),
+            ],
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    write_test_file($auto_validator_target_root . '/wp-content/plugins/inactive-validator/forkpress-merge-validator.php', <<<'PHP'
+<?php
+fwrite(STDERR, 'inactive plugin validator should not run');
+exit(41);
+PHP);
+    $auto_validator_merge = run_merge_cli([
+        'merge',
+        '--base-db', $auto_validator_base_db,
+        '--source-db', $auto_validator_source_db,
+        '--target-db', $auto_validator_target_db,
+        '--metadata-db', $auto_validator_metadata,
+        '--source', 'feature-auto-validator',
+        '--target', 'main',
+        '--base-files', $auto_validator_file_base,
+        '--source-root', $auto_validator_source_root,
+        '--target-root', $auto_validator_target_root,
+    ]);
+    assert_same($auto_validator_merge['status'], 0, 'automatic plugin validator discovery runs during normal file-backed merge');
+    assert_true(str_contains($auto_validator_merge['output'], 'plugins:   validators=1 conflicts=1'), 'automatic plugin validator discovery reports discovered validator conflicts');
+    assert_same(scalar($auto_validator_target_db, 'SELECT post_content FROM wp_posts WHERE ID = 1'), 'source automatic validator content', 'automatic validator conflict keeps the staged DB candidate');
+    assert_same(
+        (int)scalar($auto_validator_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-auto-validator-conflict'"),
+        1,
+        'automatically discovered validator records plugin-scoped conflicts during merge'
+    );
+
     $inline_validator_base_root = $tmp . '/inline-validator-base';
     $inline_validator_source_root = $tmp . '/inline-validator-source';
     $inline_validator_target_root = $tmp . '/inline-validator-target';

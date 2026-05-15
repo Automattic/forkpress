@@ -109,8 +109,20 @@ php scripts/cow/merge.php run-plugin-validator \
   --validator ./vendor/bin/my-plugin-merge-validator
 ```
 
-Automatic runtime validator discovery is still missing, but a normal branch
-merge can run one explicit validator before reporting the merge complete:
+Normal branch merges automatically discover validators from the staged
+candidate target:
+
+- active plugins may ship `forkpress-merge-validator.php` next to the active
+  plugin file's directory, such as
+  `wp-content/plugins/my-plugin/forkpress-merge-validator.php`;
+- single-file active plugins may ship
+  `wp-content/plugins/my-plugin.forkpress-merge-validator.php`;
+- mu-plugins may ship `wp-content/mu-plugins/forkpress-merge-validator.php`,
+  `wp-content/mu-plugins/*.forkpress-merge-validator.php`, or
+  `wp-content/mu-plugins/*/forkpress-merge-validator.php`.
+
+Inactive plugin validators are not run. A normal branch merge can also run one
+explicit validator before reporting the merge complete:
 
 ```bash
 forkpress branch merge feature --into main \
@@ -168,6 +180,8 @@ The clean branch-ID-band case is covered by:
   through branch-local requests before merging.
 
 The PHP unit suite also covers a simulated broken-reference validator finding
-for that graph and verifies plugin-scoped audit output and review metadata.
-Real broken-reference and target-conflicting cases still need runtime validator
-discovery/execution before they can be checked during an actual merge.
+for that graph, plugin-scoped audit output, review metadata, automatic
+validator discovery from active plugin and mu-plugin locations, inactive
+plugin exclusion, and automatic validator execution during a normal merge.
+Real broken-reference and target-conflicting plugin validators still need
+plugin-owned fixtures before they can be checked during an actual merge.

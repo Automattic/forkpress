@@ -5643,6 +5643,150 @@ function cow_merge_run_plugin_validator(string $metadata_db, int $run_id, string
     return $result;
 }
 
+function cow_merge_unique_plugin_validator_paths(array $validators): array {
+    $seen = [];
+    $out = [];
+    foreach ($validators as $validator) {
+        $validator = trim((string)$validator);
+        if ($validator === '') {
+            continue;
+        }
+        $key = realpath($validator);
+        if (!is_string($key)) {
+            $key = $validator;
+        }
+        if (isset($seen[$key])) {
+            continue;
+        }
+        $seen[$key] = true;
+        $out[] = $validator;
+    }
+    return $out;
+}
+
+function cow_merge_wordpress_option_tables(SQLite3 $db): array {
+    $tables = [];
+    $res = cow_merge_query_checked(
+        $db,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+        'failed to list WordPress option tables for plugin validator discovery'
+    );
+    while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+        $name = (string)$row['name'];
+        if ($name === 'wp_options' || str_ends_with($name, '_options')) {
+            $tables[] = $name;
+        }
+    }
+    cow_merge_result_finalize_checked($res, 'failed to finalize WordPress option table discovery');
+    usort($tables, function (string $a, string $b): int {
+        if ($a === 'wp_options') {
+            return $b === 'wp_options' ? 0 : -1;
+        }
+        if ($b === 'wp_options') {
+            return 1;
+        }
+        return strcmp($a, $b);
+    });
+    return $tables;
+}
+
+function cow_merge_active_wordpress_plugins(string $target_db): array {
+    if (!is_file($target_db)) {
+        return [];
+    }
+    $db = cow_merge_open_db($target_db, SQLITE3_OPEN_READONLY);
+    try {
+        foreach (cow_merge_wordpress_option_tables($db) as $table) {
+            $stmt = cow_merge_prepare_checked(
+                $db,
+                'SELECT option_value FROM ' . cow_merge_quote_ident($table) . ' WHERE option_name = :name LIMIT 1',
+                "failed to prepare active plugin lookup in $table"
+            );
+            cow_merge_bind($stmt, ':name', 'active_plugins');
+            $res = cow_merge_execute_checked($stmt, $db, "failed to read active plugins from $table");
+            $row = $res->fetchArray(SQLITE3_ASSOC);
+            cow_merge_result_finalize_checked($res, "failed to finalize active plugin lookup in $table");
+            if (!is_array($row)) {
+                continue;
+            }
+            $decoded = @unserialize((string)($row['option_value'] ?? ''), ['allowed_classes' => false]);
+            if (!is_array($decoded)) {
+                continue;
+            }
+            $plugins = [];
+            foreach ($decoded as $plugin) {
+                if (!is_string($plugin)) {
+                    continue;
+                }
+                $plugin = cow_merge_normalize_relative_path($plugin);
+                if ($plugin === null || $plugin === '') {
+                    continue;
+                }
+                $plugins[] = $plugin;
+            }
+            return array_values(array_unique($plugins));
+        }
+        return [];
+    } finally {
+        $db->close();
+    }
+}
+
+function cow_merge_discover_mu_plugin_validators(string $target_root): array {
+    $mu_dir = rtrim($target_root, DIRECTORY_SEPARATOR) . '/wp-content/mu-plugins';
+    if (!is_dir($mu_dir)) {
+        return [];
+    }
+    $validators = [];
+    $direct = $mu_dir . '/forkpress-merge-validator.php';
+    if (is_file($direct)) {
+        $validators[] = $direct;
+    }
+    foreach ([$mu_dir . '/*.forkpress-merge-validator.php', $mu_dir . '/*/forkpress-merge-validator.php'] as $pattern) {
+        $matches = glob($pattern);
+        if (!is_array($matches)) {
+            continue;
+        }
+        sort($matches, SORT_STRING);
+        foreach ($matches as $match) {
+            if (is_file($match)) {
+                $validators[] = $match;
+            }
+        }
+    }
+    return $validators;
+}
+
+function cow_merge_active_plugin_validator_path(string $target_root, string $active_plugin): ?string {
+    $active_plugin = cow_merge_normalize_relative_path($active_plugin);
+    if ($active_plugin === null || $active_plugin === '') {
+        return null;
+    }
+    $plugins_dir = rtrim($target_root, DIRECTORY_SEPARATOR) . '/wp-content/plugins';
+    $plugin_dir = dirname($active_plugin);
+    if ($plugin_dir === '.' || $plugin_dir === '') {
+        $base = pathinfo($active_plugin, PATHINFO_FILENAME);
+        $validator = $plugins_dir . '/' . $base . '.forkpress-merge-validator.php';
+    } else {
+        $validator = $plugins_dir . '/' . $plugin_dir . '/forkpress-merge-validator.php';
+    }
+    return is_file($validator) ? $validator : null;
+}
+
+function cow_merge_discover_plugin_validators(string $target_db, ?string $target_root): array {
+    if ($target_root === null || $target_root === '' || !is_dir($target_root)) {
+        return [];
+    }
+    $validators = cow_merge_discover_mu_plugin_validators($target_root);
+    foreach (cow_merge_active_wordpress_plugins($target_db) as $active_plugin) {
+        $validator = cow_merge_active_plugin_validator_path($target_root, $active_plugin);
+        if ($validator !== null) {
+            $validators[] = $validator;
+        }
+    }
+    return cow_merge_unique_plugin_validator_paths($validators);
+}
+
 function cow_merge_record_matching_file_decision(
     SQLite3 $meta,
     int $run_id,
@@ -12340,7 +12484,7 @@ function cow_merge_branch_state(
             throw new InvalidArgumentException('--base-files, --source-root, and --target-root must be provided together');
         }
     }
-    $plugin_validators = array_values(array_filter(array_map('strval', $plugin_validators), fn($value) => trim($value) !== ''));
+    $plugin_validators = cow_merge_unique_plugin_validator_paths($plugin_validators);
     cow_merge_assert_no_pending_crash_recovery($metadata_db);
 
     $target_snapshot = null;
@@ -12365,6 +12509,7 @@ function cow_merge_branch_state(
         $result['file_conflicts'] = 0;
         $result['plugin_validators'] = 0;
         $result['plugin_validator_conflicts'] = 0;
+        $result['plugin_validators_discovered'] = 0;
 
         if ($has_file_args) {
             $file_result = cow_merge_files($base_files, $source_root, $target_root, $metadata_db, (int)$result['run_id']);
@@ -12374,6 +12519,12 @@ function cow_merge_branch_state(
             $result['conflicts'] += $file_result['conflicts'];
             $result['status'] = $result['conflicts'] > 0 ? 'completed_with_conflicts' : 'completed';
             cow_merge_set_run_status($metadata_db, (int)$result['run_id'], $result['status']);
+            $discovered_plugin_validators = cow_merge_discover_plugin_validators($target_db, $target_root);
+            $result['plugin_validators_discovered'] = count($discovered_plugin_validators);
+            $plugin_validators = cow_merge_unique_plugin_validator_paths(array_merge(
+                $plugin_validators,
+                $discovered_plugin_validators
+            ));
         }
 
         foreach ($plugin_validators as $validator) {
