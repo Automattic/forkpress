@@ -4593,7 +4593,15 @@ function cow_merge_wordpress_insert_reference_violation(
         return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_posts row', 'wp_posts', 'ID', $source_row['post_parent'] ?? null, 'post');
     }
     if ($table === 'wp_postmeta') {
-        return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_postmeta row', 'wp_posts', 'ID', $source_row['post_id'] ?? null, 'post');
+        $post_violation = cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_postmeta row', 'wp_posts', 'ID', $source_row['post_id'] ?? null, 'post');
+        if ($post_violation !== null) {
+            return $post_violation;
+        }
+        $meta_key = (string)($source_row['meta_key'] ?? '');
+        if (in_array($meta_key, ['_thumbnail_id', '_menu_item_object_id'], true)) {
+            return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_postmeta row', 'wp_posts', 'ID', $source_row['meta_value'] ?? null, 'referenced post');
+        }
+        return null;
     }
     if ($table === 'wp_comments') {
         return cow_merge_wordpress_parent_reference_violation($source, $target, $meta, $source_branch, 'wp_comments row', 'wp_posts', 'ID', $source_row['comment_post_ID'] ?? null, 'post');

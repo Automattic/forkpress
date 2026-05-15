@@ -13499,6 +13499,7 @@ SQL);
     $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (2, '_forkpress_import_ref', :value)");
     $stmt->bindValue(':value', json_encode(['post_id' => 2, 'origin' => 'import'], JSON_UNESCAPED_SLASHES), SQLITE3_TEXT);
     $stmt->execute();
+    $db->exec("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (1, '_thumbnail_id', '2')");
     $stmt = $db->prepare("INSERT INTO wp_comments (comment_post_ID, comment_content) VALUES (2, 'Comment behind held explicit post')");
     $stmt->execute();
     $band_explicit_ref_comment_id = (int)$db->lastInsertRowID();
@@ -13519,13 +13520,14 @@ SQL);
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_posts WHERE ID = 2"), 0, 'out-of-band explicit source post remains unapplied');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_posts WHERE post_parent = 2"), 0, 'child posts pointing at a held explicit source post are not applied automatically');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_postmeta WHERE post_id = 2"), 0, 'postmeta pointing at a held explicit source post is not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_postmeta WHERE meta_key = '_thumbnail_id' AND meta_value = '2'"), 0, 'postmeta values pointing at a held explicit source post are not applied automatically');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_comments WHERE comment_post_ID = 2"), 0, 'comments pointing at a held explicit source post are not applied automatically');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_commentmeta WHERE comment_id = $band_explicit_ref_comment_id"), 0, 'comment metadata behind a held explicit source post is not applied automatically');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_term_relationships WHERE object_id = 2"), 0, 'term relationships pointing at a held explicit source post are not applied automatically');
     assert_same(
         (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND c.table_name = 'wp_postmeta' AND c.conflict_type = 'row-target-constraint'"),
-        1,
-        'postmeta pointing at a held explicit source post records a reviewable row conflict'
+        2,
+        'postmeta pointing at a held explicit source post records reviewable row conflicts'
     );
     assert_same(
         (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND c.table_name = 'wp_posts' AND c.conflict_type = 'row-target-constraint'"),
@@ -13548,7 +13550,7 @@ SQL);
         'term relationships pointing at a held explicit source post record a reviewable row conflict'
     );
     assert_true(
-        str_contains((string)scalar($band_explicit_ref_metadata, "SELECT reason FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_postmeta' AND d.decision = 'target-wins' ORDER BY d.id DESC LIMIT 1"), 'parent post must merge before child row'),
+        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_postmeta' AND d.decision = 'target-wins' AND d.reason LIKE '%must merge before child row%'") === 2,
         'postmeta held behind an explicit source post explains the missing parent'
     );
     assert_true(
