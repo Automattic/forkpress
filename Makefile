@@ -51,6 +51,7 @@ BRANCHFS_EXT_DIR := experiments/branchfs/php-ext
 BRANCHFS_EXT_SO := $(BRANCHFS_EXT_DIR)/branchfs.so
 BRANCHFS_TEST_DIR := experiments/branchfs/tests
 COW_TEST_DIR := tests/cow
+RELEASE_TEST_DIR := tests/release
 RUSTUP ?= $(shell command -v rustup 2>/dev/null)
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
@@ -68,7 +69,7 @@ else ifeq ($(UNAME_S)-$(UNAME_M),Linux-aarch64)
 FORKPRESS_TARGET ?= aarch64-unknown-linux-musl
 endif
 
-.PHONY: all clean test test-compat test-branchfs test-cow init-db test-all forkpress forkpress-dev dist dist-dev
+.PHONY: all clean test test-compat test-branchfs test-cow test-release init-db test-all forkpress forkpress-dev dist dist-dev
 
 all: $(BRANCHFS_EXT_SO)
 
@@ -104,7 +105,10 @@ test-cow:
 	php $(COW_TEST_DIR)/router_paths.php
 	php $(COW_TEST_DIR)/router_lock.php
 
-test-all: test-branchfs test-cow
+test-release:
+	bash $(RELEASE_TEST_DIR)/build-dist-preflight.sh
+
+test-all: test-branchfs test-cow test-release
 
 clean:
 	rm -f $(BRANCHFS_EXT_SO) /tmp/branchfs_test*.db /tmp/branchfs_wp*.db
