@@ -4048,6 +4048,66 @@ SQL);
         'after-revalidate blocks source resolution over an incompatible post semantic replacement'
     );
 
+    $semantic_identity_cases = [
+        'option' => [
+            'table' => 'wp_options',
+            'create' => 'CREATE TABLE wp_options (option_id INTEGER PRIMARY KEY, option_name TEXT, option_value TEXT)',
+            'source_insert' => "INSERT INTO wp_options (option_id, option_name, option_value) VALUES (20, 'source_setting', 'source value')",
+            'target_insert' => "INSERT INTO wp_options (option_id, option_name, option_value) VALUES (20, 'target_setting', 'target value')",
+            'target_update' => "UPDATE wp_options SET option_name = 'replacement_setting', option_value = 'replacement value' WHERE option_id = 20",
+            'branch' => 'feature-option-identity-review',
+            'label' => 'option_name',
+        ],
+        'postmeta' => [
+            'table' => 'wp_postmeta',
+            'create' => 'CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY, post_id INTEGER, meta_key TEXT, meta_value TEXT)',
+            'source_insert' => "INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES (30, 10, 'source_key', 'source value')",
+            'target_insert' => "INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES (30, 10, 'target_key', 'target value')",
+            'target_update' => "UPDATE wp_postmeta SET post_id = 11, meta_key = 'replacement_key', meta_value = 'replacement value' WHERE meta_id = 30",
+            'branch' => 'feature-postmeta-identity-review',
+            'label' => 'post_id/meta_key',
+        ],
+    ];
+    foreach ($semantic_identity_cases as $case_name => $case) {
+        $case_base = $tmp . "/semantic-$case_name-base.sqlite";
+        $case_source = $tmp . "/semantic-$case_name-source.sqlite";
+        $case_target = $tmp . "/semantic-$case_name-target.sqlite";
+        $case_metadata = $tmp . "/.forkpress/cow/merge/semantic-$case_name-metadata.sqlite";
+        foreach ([$case_base, $case_source, $case_target] as $path) {
+            $db = open_db($path);
+            $db->exec($case['create']);
+            $db->close();
+        }
+        $db = open_db($case_source);
+        $db->exec($case['source_insert']);
+        $db->close();
+        $db = open_db($case_target);
+        $db->exec($case['target_insert']);
+        $db->close();
+        $case_merge = cow_merge_databases($case_base, $case_source, $case_target, $case_metadata, $case['branch'], 'main');
+        $case_run_id = (int)$case_merge['run_id'];
+        assert_same($case_merge['status'], 'completed_with_conflicts', $case['label'] . ' semantic identity fixture starts with a same-ID row conflict');
+        $case_conflict_id = (int)scalar($case_metadata, "SELECT id FROM merge_conflicts WHERE table_name = '{$case['table']}' AND conflict_type = 'row-insert-collision'");
+        cow_merge_review_record(
+            $case_metadata,
+            'conflict',
+            $case_conflict_id,
+            'reviewed',
+            'Review source row before applying over target semantic identity.',
+            'cow-test'
+        );
+        $db = open_db($case_target);
+        $db->exec($case['target_update']);
+        $db->close();
+        $case_revalidated = cow_merge_revalidate_reviewed_conflicts($case_metadata, $case_run_id, 'cow-revalidate');
+        assert_same($case_revalidated['carried'], 1, $case['label'] . ' semantic replacement is carried to needs-action');
+        assert_same(scalar($case_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $case_conflict_id ORDER BY id DESC LIMIT 1"), 'incompatible', $case['label'] . ' semantic replacement is classified as incompatible');
+        $case_audit = cow_merge_audit_report($case_metadata, $case_run_id, 10, ['records' => 'conflicts']);
+        $case_conflicts = array_values(array_filter($case_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $case_conflict_id));
+        assert_same($case_conflicts[0]['revalidation_class'] ?? null, 'incompatible', $case['label'] . ' audit exposes incompatible semantic replacement');
+        assert_true(str_contains((string)($case_conflicts[0]['stale_reason'] ?? ''), 'semantic identity'), $case['label'] . ' stale reason explains semantic identity drift');
+    }
+
     $row_missing_base = $tmp . '/row-missing-base.sqlite';
     $row_missing_source = $tmp . '/row-missing-source.sqlite';
     $row_missing_target = $tmp . '/row-missing-target.sqlite';
