@@ -91,25 +91,24 @@ by `merge-audit --revalidate` or `revalidate-reviews`. If the target drifts
 again after revalidation, guarded resolution fails and asks for another
 revalidation instead of applying the stale original conflict.
 
-The first implementation is intentionally narrow: it supports database cell
-conflicts and filesystem conflicts. Row, plugin, and schema conflicts still use
-the conservative stale-target guard until they have conflict-specific
-revalidation payloads.
+The first implementation supports database cell, database row, and filesystem
+conflicts. Plugin and schema conflicts still use the conservative stale-target
+guard until they have conflict-specific revalidation payloads.
 
 ## Test Shape
 
 The implemented tests in `tests/cow/merge.php` cover stale cell/file detection,
 carrying reviewed conflicts into `needs-action`, preserving prior reviewer
 intent in the carried note, idempotent reruns, replacement revalidation payloads
-after further target drift, and guarded source resolution for database cells and
-filesystem paths after revalidation.
+after further target drift, and guarded source resolution for database cells,
+database rows, and filesystem paths after revalidation.
 
 Future classifier tests should cover three records:
 
 - A cell conflict where target drift is unrelated and can carry a note forward
   as `compatible-target-drift`.
-- A row conflict where the target row identity changed and must become
-  `incompatible`.
+- A row conflict where the target row identity changes to a different logical
+  object and must become `incompatible`.
 - A filesystem conflict where the target file changed and must remain blocked
   until the reviewer confirms the new payload.
 

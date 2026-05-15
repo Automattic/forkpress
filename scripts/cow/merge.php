@@ -8855,9 +8855,6 @@ function cow_merge_resolve_conflict(
         $table = (string)$conflict['table_name'];
         $column = (string)($conflict['column_name'] ?? '');
         $conflict_type = (string)$conflict['conflict_type'];
-        if ($after_revalidate && $table !== '__files__' && $conflict_type !== 'cell-conflict') {
-            throw new InvalidArgumentException('--after-revalidate currently supports database cell conflicts and filesystem conflicts only');
-        }
         if ($table === '__files__') {
             $file_conflict_types = [
                 'file-conflict',
@@ -9004,6 +9001,9 @@ function cow_merge_resolve_conflict(
             ];
         }
         if (str_starts_with($conflict_type, 'schema-')) {
+            if ($after_revalidate) {
+                throw new InvalidArgumentException('--after-revalidate currently supports database row/cell conflicts and filesystem conflicts only');
+            }
             return cow_merge_resolve_schema_conflict(
                 $meta,
                 $conflict,
@@ -9132,16 +9132,34 @@ function cow_merge_resolve_conflict(
                         }
                     }
                 }
-                $row_columns = cow_merge_all_columns(array_keys($target_value), array_keys($current_value));
-                if (!cow_merge_row_values_equal($current_value, $target_value, $row_columns)) {
-                    throw new RuntimeException('target row no longer matches the audited conflict target value; rerun merge-audit before resolving');
+                if ($after_revalidate) {
+                    cow_merge_require_after_revalidate(
+                        $meta,
+                        $conflict_id,
+                        (string)$conflict['source_payload'],
+                        cow_merge_payload_json($current_value)
+                    );
+                    $target_value = $current_value;
+                } else {
+                    $row_columns = cow_merge_all_columns(array_keys($target_value), array_keys($current_value));
+                    if (!cow_merge_row_values_equal($current_value, $target_value, $row_columns)) {
+                        throw new RuntimeException('target row no longer matches the audited conflict target value; rerun merge-audit before resolving');
+                    }
                 }
             } else {
                 $current_value = $pk_cols || array_key_exists('rowid', $where_identity)
                     ? cow_merge_select_current_row($target, $table, $where_identity, $pk_cols)
                     : null;
             }
-            if ($conflict_type === 'row-target-deleted' || ($conflict_type === 'row-target-constraint' && $target_value === null)) {
+            if ($after_revalidate && $conflict_type !== 'row-unique-collision') {
+                cow_merge_require_after_revalidate(
+                    $meta,
+                    $conflict_id,
+                    (string)$conflict['source_payload'],
+                    cow_merge_payload_json($current_value)
+                );
+                $target_value = $current_value;
+            } elseif ($conflict_type === 'row-target-deleted' || ($conflict_type === 'row-target-constraint' && $target_value === null)) {
                 if ($current_value !== null) {
                     throw new RuntimeException('target row no longer matches the audited conflict target value; rerun merge-audit before resolving');
                 }
@@ -9153,6 +9171,7 @@ function cow_merge_resolve_conflict(
                     throw new RuntimeException('target row no longer matches the audited conflict target value; rerun merge-audit before resolving');
                 }
             }
+            $resolved_value = $choice === 'source' ? $source_value : $target_value;
         }
 
         if ($apply) {

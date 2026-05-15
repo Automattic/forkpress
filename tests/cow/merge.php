@@ -3515,6 +3515,74 @@ SQL);
         'stale row conflict resolution is blocked when target row has changed since audit'
     );
 
+    $row_revalidate_base = $tmp . '/row-revalidate-base.sqlite';
+    $row_revalidate_source = $tmp . '/row-revalidate-source.sqlite';
+    $row_revalidate_target = $tmp . '/row-revalidate-target.sqlite';
+    $row_revalidate_metadata = $tmp . '/.forkpress/cow/merge/row-revalidate-metadata.sqlite';
+    create_base_db($row_revalidate_base);
+    copy($row_revalidate_base, $row_revalidate_source);
+    copy($row_revalidate_base, $row_revalidate_target);
+    $db = open_db($row_revalidate_source);
+    $db->exec("INSERT INTO plugin_items (item_id, label, value) VALUES ('row-revalidate', 'Source row revalidate', 'source row revalidate')");
+    $db->close();
+    $db = open_db($row_revalidate_target);
+    $db->exec("INSERT INTO plugin_items (item_id, label, value) VALUES ('row-revalidate', 'Target row revalidate', 'target row revalidate')");
+    $db->close();
+    $row_revalidate_merge = cow_merge_databases($row_revalidate_base, $row_revalidate_source, $row_revalidate_target, $row_revalidate_metadata, 'feature-row-revalidate', 'main');
+    $row_revalidate_run_id = (int)$row_revalidate_merge['run_id'];
+    $row_revalidate_conflict_id = (int)scalar($row_revalidate_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND conflict_type = 'row-insert-collision'");
+    cow_merge_review_record(
+        $row_revalidate_metadata,
+        'conflict',
+        $row_revalidate_conflict_id,
+        'reviewed',
+        'Keep target plugin row until revalidation.',
+        'cow-test'
+    );
+    $db = open_db($row_revalidate_target);
+    $db->exec("UPDATE plugin_items SET label = 'Target row drift after review', value = 'target row drift after review' WHERE item_id = 'row-revalidate'");
+    $db->close();
+    $row_revalidated = cow_merge_revalidate_reviewed_conflicts($row_revalidate_metadata, $row_revalidate_run_id, 'cow-revalidate');
+    assert_same($row_revalidated['carried'], 1, 'review revalidation carries stale row conflicts to needs-action');
+    assert_same((int)scalar($row_revalidate_metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $row_revalidate_conflict_id"), 1, 'row revalidation records the stale target row payload');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($row_revalidate_metadata, $row_revalidate_conflict_id, 'source', true, 'Try stale row source before guarded revalidation.', 'cow-test'),
+        'target row no longer matches',
+        'stale row source resolution still fails without the after-revalidate guard'
+    );
+    $db = open_db($row_revalidate_target);
+    $db->exec("UPDATE plugin_items SET label = 'Target row drift after revalidation', value = 'target row drift after revalidation' WHERE item_id = 'row-revalidate'");
+    $db->close();
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($row_revalidate_metadata, $row_revalidate_conflict_id, 'source', true, 'Try stale row source after new target drift.', 'cow-test', true),
+        'target payload changed after latest merge revalidation',
+        'after-revalidate row resolution fails if target drifted again after revalidation'
+    );
+    $row_revalidated_after_drift = cow_merge_revalidate_reviewed_conflicts($row_revalidate_metadata, $row_revalidate_run_id, 'cow-revalidate');
+    assert_same($row_revalidated_after_drift['carried'], 1, 'review revalidation carries a new row note after further target drift');
+    assert_same((int)scalar($row_revalidate_metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $row_revalidate_conflict_id"), 2, 'row revalidation records the replacement stale target row payload');
+    $row_revalidated_target_payload = cow_merge_payload_json([
+        'item_id' => 'row-revalidate',
+        'label' => 'Target row drift after revalidation',
+        'value' => 'target row drift after revalidation',
+    ]);
+    $row_after_revalidate_resolution = cow_merge_resolve_conflict(
+        $row_revalidate_metadata,
+        $row_revalidate_conflict_id,
+        'source',
+        true,
+        'Apply source row after revalidating target drift.',
+        'cow-test',
+        true
+    );
+    assert_same($row_after_revalidate_resolution['status'], 'applied', 'after-revalidate source resolution applies a revalidated stale row conflict');
+    assert_same(scalar($row_revalidate_target, "SELECT label FROM plugin_items WHERE item_id = 'row-revalidate'"), 'Source row revalidate', 'after-revalidate row resolution writes the audited source row');
+    assert_same(
+        scalar($row_revalidate_metadata, "SELECT previous_payload FROM merge_resolutions WHERE conflict_id = $row_revalidate_conflict_id ORDER BY id DESC LIMIT 1"),
+        $row_revalidated_target_payload,
+        'after-revalidate row resolution audits the latest revalidated target row payload'
+    );
+
     $row_target_choice_base = $tmp . '/row-target-choice-base.sqlite';
     $row_target_choice_source = $tmp . '/row-target-choice-source.sqlite';
     $row_target_choice_target = $tmp . '/row-target-choice-target.sqlite';
