@@ -4901,6 +4901,13 @@ function cow_merge_wordpress_post_content_reference_violation(
             }
         }
 
+        if ($block_name === 'navigation' && array_key_exists('ref', $attrs)) {
+            $violation = $check_post($attrs['ref'], 'wp:navigation.ref');
+            if ($violation !== null) {
+                return $violation;
+            }
+        }
+
         if ($block_name === 'query' && isset($attrs['query']) && is_array($attrs['query'])) {
             $query = $attrs['query'];
             if (array_key_exists('author', $query)) {
