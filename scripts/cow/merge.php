@@ -4502,6 +4502,64 @@ function cow_merge_autoincrement_id_band_violation(
     return "source inserted explicit AUTOINCREMENT id $id outside reserved branch band $band_start-$band_end";
 }
 
+function cow_merge_wordpress_insert_reference_violation(
+    SQLite3 $source,
+    SQLite3 $target,
+    SQLite3 $meta,
+    string $source_branch,
+    string $table,
+    array $source_row
+): ?string {
+    if ($table !== 'wp_postmeta' || !array_key_exists('post_id', $source_row)) {
+        return null;
+    }
+    $post_id = $source_row['post_id'];
+    if (!is_int($post_id) && !(is_string($post_id) && preg_match('/^-?\d+$/', $post_id))) {
+        return null;
+    }
+    $post_id = (int)$post_id;
+    if ($post_id <= 0 || !cow_merge_schema_object_exists($target, 'wp_posts')) {
+        return null;
+    }
+    $stmt = cow_merge_prepare_checked(
+        $target,
+        'SELECT 1 FROM wp_posts WHERE ID = :post_id LIMIT 1',
+        'failed to prepare WordPress postmeta parent lookup'
+    );
+    cow_merge_bind($stmt, ':post_id', $post_id);
+    $res = cow_merge_execute_checked($stmt, $target, 'failed to inspect WordPress postmeta parent row');
+    try {
+        if ($res->fetchArray(SQLITE3_NUM)) {
+            return null;
+        }
+    } finally {
+        cow_merge_result_finalize_checked($res, 'failed to finalize WordPress postmeta parent lookup');
+    }
+    if (!cow_merge_schema_object_exists($source, 'wp_posts')) {
+        return "source inserted wp_postmeta row references missing wp_posts.ID $post_id; parent post must merge before child metadata";
+    }
+    $stmt = cow_merge_prepare_checked(
+        $source,
+        'SELECT * FROM wp_posts WHERE ID = :post_id LIMIT 1',
+        'failed to prepare WordPress postmeta source parent lookup'
+    );
+    cow_merge_bind($stmt, ':post_id', $post_id);
+    $res = cow_merge_execute_checked($stmt, $source, 'failed to inspect WordPress postmeta source parent row');
+    try {
+        $parent = $res->fetchArray(SQLITE3_ASSOC);
+    } finally {
+        cow_merge_result_finalize_checked($res, 'failed to finalize WordPress postmeta source parent lookup');
+    }
+    if (!$parent) {
+        return "source inserted wp_postmeta row references missing wp_posts.ID $post_id; parent post must merge before child metadata";
+    }
+    $parent_band_violation = cow_merge_autoincrement_id_band_violation($meta, $source_branch, 'wp_posts', $parent, ['ID']);
+    if ($parent_band_violation !== null) {
+        return "source inserted wp_postmeta row references wp_posts.ID $post_id that is outside the source branch ID band; parent post must merge before child metadata";
+    }
+    return null;
+}
+
 function cow_merge_round_up_to_band(int $value, int $band_size): int {
     $remainder = $value % $band_size;
     if ($remainder === 0) {
@@ -11752,6 +11810,23 @@ function cow_merge_table_rows(
                     null,
                     'insert',
                     $id_band_violation
+                )) {
+                    $conflicts++;
+                }
+                continue;
+            }
+            $wp_reference_violation = cow_merge_wordpress_insert_reference_violation($source, $target, $meta, $source_branch, $table, $source_row);
+            if ($wp_reference_violation !== null) {
+                if (cow_merge_record_row_target_constraint(
+                    $meta,
+                    $run_id,
+                    $table,
+                    $key,
+                    null,
+                    $source_row,
+                    null,
+                    'insert',
+                    $wp_reference_violation
                 )) {
                     $conflicts++;
                 }

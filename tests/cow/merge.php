@@ -13478,6 +13478,44 @@ SQL);
         'out-of-band explicit plugin AUTOINCREMENT ID explains the reserved-band violation'
     );
 
+    $band_explicit_ref_base = $tmp . '/band-explicit-ref-base.sqlite';
+    $band_explicit_ref_source = $tmp . '/band-explicit-ref-source.sqlite';
+    $band_explicit_ref_target = $tmp . '/band-explicit-ref-target.sqlite';
+    $band_explicit_ref_metadata = $tmp . '/.forkpress/cow/merge/band-explicit-ref-metadata.sqlite';
+    copy($band_base, $band_explicit_ref_base);
+    $db = open_db($band_explicit_ref_base);
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->close();
+    copy($band_explicit_ref_base, $band_explicit_ref_source);
+    copy($band_explicit_ref_base, $band_explicit_ref_target);
+    cow_merge_allocate_autoincrement_bands($band_explicit_ref_source, $band_explicit_ref_metadata, 'feature-band-explicit-ref-source');
+    $db = open_db($band_explicit_ref_source);
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status) VALUES (2, 'Imported explicit post with metadata', 'explicit id import with child rows', 'publish')");
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (2, '_forkpress_import_ref', :value)");
+    $stmt->bindValue(':value', json_encode(['post_id' => 2, 'origin' => 'import'], JSON_UNESCAPED_SLASHES), SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+    $band_explicit_ref_result = cow_merge_databases(
+        $band_explicit_ref_base,
+        $band_explicit_ref_source,
+        $band_explicit_ref_target,
+        $band_explicit_ref_metadata,
+        'feature-band-explicit-ref-source',
+        'main'
+    );
+    assert_same($band_explicit_ref_result['status'], 'completed_with_conflicts', 'explicit source post IDs hold dependent postmeta for review');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_posts WHERE ID = 2"), 0, 'out-of-band explicit source post remains unapplied');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_postmeta WHERE post_id = 2"), 0, 'postmeta pointing at a held explicit source post is not applied automatically');
+    assert_same(
+        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND c.table_name = 'wp_postmeta' AND c.conflict_type = 'row-target-constraint'"),
+        1,
+        'postmeta pointing at a held explicit source post records a reviewable row conflict'
+    );
+    assert_true(
+        str_contains((string)scalar($band_explicit_ref_metadata, "SELECT reason FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_postmeta' AND d.decision = 'target-wins' ORDER BY d.id DESC LIMIT 1"), 'parent post must merge before child metadata'),
+        'postmeta held behind an explicit source post explains the missing parent'
+    );
+
     $plain_graph_base = $tmp . '/plain-ipk-graph-base.sqlite';
     $plain_graph_source = $tmp . '/plain-ipk-graph-source.sqlite';
     $plain_graph_target = $tmp . '/plain-ipk-graph-target.sqlite';
