@@ -9212,6 +9212,9 @@ function cow_merge_resolve_conflict(
                 $reviewer
             );
         }
+        if ($table === '__plugins__') {
+            throw new InvalidArgumentException('plugin validator conflicts cannot be resolved by generic merge-resolve; rerun the plugin validator or record updated validator findings');
+        }
         $row_conflict_types = ['row-insert-collision', 'row-unique-collision', 'row-target-constraint', 'row-identity-ambiguous', 'row-target-deleted', 'row-source-deleted'];
         if ($conflict_type !== 'cell-conflict' && !in_array($conflict_type, $row_conflict_types, true)) {
             throw new InvalidArgumentException('resolve-conflict currently supports DB cell-conflict, row-insert-collision, row-unique-collision, row-target-constraint, row-identity-ambiguous, row-target-deleted, and row-source-deleted records only');

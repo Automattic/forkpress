@@ -15258,6 +15258,18 @@ PHP);
     ]);
     assert_same(count($plugin_review_audit['conflicts']), 1, 'plugin conflict review queue returns reviewed plugin conflicts');
     assert_same($plugin_review_audit['conflicts'][0]['review_status'], 'needs-action', 'plugin audit exposes latest plugin conflict review status');
+    assert_same($plugin_review_audit['conflicts'][0]['stale_status'] ?? null, 'unknown', 'plugin validator conflicts are not marked fresh or stale without rerunning validators');
+    $plugin_revalidate = cow_merge_revalidate_reviewed_conflicts($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 'cow-revalidate');
+    assert_same($plugin_revalidate['checked'], 1, 'plugin conflict revalidation inspects plugin conflicts in the selected run');
+    assert_same($plugin_revalidate['reviewed'], 1, 'plugin conflict revalidation sees reviewed plugin conflicts');
+    assert_same($plugin_revalidate['stale'], 0, 'plugin conflict revalidation does not infer stale state without rerunning validators');
+    assert_same($plugin_revalidate['carried'], 0, 'plugin conflict revalidation does not carry plugin conflicts without validator evidence');
+    assert_same((int)scalar($plugin_graph_metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $plugin_conflict_id"), 0, 'plugin conflict revalidation records no guarded payload without rerunning validators');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($plugin_graph_metadata, $plugin_conflict_id, 'target', false, 'Try generic plugin resolution.', 'cow-test', true),
+        'plugin validator conflicts cannot be resolved by generic merge-resolve',
+        'plugin validator conflicts have an explicit generic resolution boundary'
+    );
     $plugin_cli_audit = run_merge_cli([
         'audit',
         '--metadata-db', $plugin_graph_metadata,
