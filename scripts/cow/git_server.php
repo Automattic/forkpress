@@ -518,6 +518,7 @@ function cow_git_apply_push_to_branches(
         cow_git_commit_apply_transaction($transaction);
         cow_git_write_branch_list($branches_dir, $branch_list_path);
         cow_git_cleanup_stale_update_artifacts($branches_dir, $storage_branches_dir);
+        cow_git_cleanup_stale_delete_artifacts($branches_dir, $storage_branches_dir);
     } catch (\Throwable $e) {
         cow_git_rollback_apply_transaction($transaction);
         cow_git_cleanup_created_branch_merge_base_artifacts($git_repo_dir, $branch_list_path, $transaction['created']);
@@ -840,6 +841,7 @@ function cow_git_delete_removed_branches(
         if (!$staged) {
             return [];
         }
+        cow_git_failpoint('after-branch-delete-stage');
 
         cow_git_write_branch_list($branches_dir, $branch_list_path);
     } catch (\Throwable $e) {
@@ -1246,6 +1248,33 @@ function cow_git_cleanup_stale_update_artifacts(string $branches_dir, string $st
             }
             $storage = cow_git_branch_storage_root($storage_branches_dir, $branches_dir, $branch);
             if (is_dir($storage) && is_file(rtrim($storage, "/\\") . '/wp-load.php')) {
+                cow_git_remove_tree($path);
+            }
+        }
+    }
+}
+
+function cow_git_cleanup_stale_delete_artifacts(string $branches_dir, string $storage_branches_dir): void {
+    $parents = [[rtrim($branches_dir, "/\\"), 'public']];
+    $storage_parent = rtrim($storage_branches_dir, "/\\");
+    if ($storage_parent !== '' && $storage_parent !== rtrim($branches_dir, "/\\")) {
+        $parents[] = [$storage_parent, 'storage'];
+    }
+
+    foreach ($parents as [$parent, $label]) {
+        foreach (glob($parent . '/.forkpress-delete-' . $label . '-*') ?: [] as $path) {
+            $name = basename($path);
+            if (!preg_match('/^\.forkpress-delete-' . preg_quote($label, '/') . '-(.+)-[0-9]+-[0-9a-f]+$/', $name, $matches)) {
+                continue;
+            }
+            $branch = $matches[1];
+            if (!cow_git_valid_branch_name($branch)) {
+                continue;
+            }
+            $original = $label === 'public'
+                ? rtrim($branches_dir, "/\\") . '/' . $branch
+                : cow_git_branch_storage_root($storage_branches_dir, $branches_dir, $branch);
+            if (!file_exists($original) && !is_link($original)) {
                 cow_git_remove_tree($path);
             }
         }

@@ -297,6 +297,55 @@ assert_true(!$repo->branch_exists('refs/heads/feature'), 'Git branch deletion le
 assert_true(!file_exists($feature_tip_path), 'Git branch deletion prunes unreachable COW Git commit object');
 cow_git_remove_tree($tmp);
 
+$tmp = sys_get_temp_dir() . '/forkpress-cow-git-delete-crash-' . getmypid() . '-' . bin2hex(random_bytes(4));
+$branches = $tmp . '/branches';
+$git = $tmp . '/git';
+$branch_list = $tmp . '/branches.txt';
+mkdir($branches . '/main', 0777, true);
+mkdir($branches . '/feature', 0777, true);
+file_put_contents($branches . '/main/wp-load.php', "<?php\n");
+file_put_contents($branches . '/feature/wp-load.php', "<?php\n");
+file_put_contents($branches . '/feature/wp-content-feature.txt', "feature-only\n");
+
+$fs = WordPress\Filesystem\LocalFilesystem::create($git);
+$repo = new WordPress\Git\GitRepository($fs, ['default_branch' => 'main']);
+$repo->set_config_value(['user', 'name'], 'ForkPress COW');
+$repo->set_config_value(['user', 'email'], 'forkpress-cow@local');
+cow_git_sync_repository($repo, $branches);
+cow_git_write_branch_list($branches, $branch_list);
+$feature_tip = $repo->get_branch_tip('refs/heads/feature');
+$repo->delete_branch('refs/heads/feature');
+$delete_crash = run_php_code_env(<<<'PHP'
+require_once getenv('FORKPRESS_COW_GIT_SERVER_HELPER');
+
+$git = getenv('FORKPRESS_COW_GIT_REPO');
+$branches = getenv('FORKPRESS_COW_GIT_BRANCHES');
+$branch_list = getenv('FORKPRESS_COW_GIT_BRANCH_LIST');
+$feature_tip = getenv('FORKPRESS_COW_GIT_FEATURE_TIP');
+$fs = WordPress\Filesystem\LocalFilesystem::create($git);
+$repo = new WordPress\Git\GitRepository($fs, ['default_branch' => 'main']);
+$repo->set_config_value(['user', 'name'], 'ForkPress COW');
+$repo->set_config_value(['user', 'email'], 'forkpress-cow@local');
+cow_git_apply_push_to_branches($repo, $git, $branches, $branches, $branch_list, 'file-copy', '', ['feature' => $feature_tip]);
+PHP, [
+    'FORKPRESS_COW_GIT_SERVER_HELPER' => realpath(__DIR__ . '/../../scripts/cow/git_server.php'),
+    'FORKPRESS_COW_GIT_REPO' => $git,
+    'FORKPRESS_COW_GIT_BRANCHES' => $branches,
+    'FORKPRESS_COW_GIT_BRANCH_LIST' => $branch_list,
+    'FORKPRESS_COW_GIT_FEATURE_TIP' => $feature_tip,
+    'FORKPRESS_COW_GIT_TEST_FAILPOINT' => 'after-branch-delete-stage',
+    'FORKPRESS_COW_GIT_TEST_FAILPOINT_ACTION' => 'exit',
+]);
+assert_true($delete_crash['status'] !== 0, 'Git branch delete crash terminates the push apply subprocess');
+assert_true(!is_dir($branches . '/feature'), 'Git branch delete crash leaves branch tree removed');
+assert_true(count(glob($branches . '/.forkpress-delete-public-feature-*') ?: []) >= 1, 'Git branch delete crash leaves staged delete backup');
+assert_true(str_contains((string)file_get_contents($branch_list), "feature\n"), 'Git branch delete crash can leave stale branch-list entry');
+cow_git_apply_push_to_branches($repo, $git, $branches, $branches, $branch_list, 'file-copy', '', ['feature' => $feature_tip]);
+assert_true(!is_dir($branches . '/feature'), 'next Git apply keeps branch deleted after delete crash');
+assert_true(!str_contains((string)file_get_contents($branch_list), "feature\n"), 'next Git apply reconciles branch list after delete crash');
+assert_same(glob($branches . '/.forkpress-delete-*') ?: [], [], 'next Git apply cleans stale branch delete artifacts');
+cow_git_remove_tree($tmp);
+
 $tmp = sys_get_temp_dir() . '/forkpress-cow-git-force-gc-' . getmypid() . '-' . bin2hex(random_bytes(4));
 $branches = $tmp . '/branches';
 $git = $tmp . '/git';

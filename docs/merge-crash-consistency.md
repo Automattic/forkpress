@@ -75,6 +75,9 @@ The Git server suite covers these publication classes:
 - Process exit after an existing Git branch update publishes its staged tree can
   leave an old update backup; the next successful Git apply keeps the published
   branch state and removes stale update artifacts for valid branch storage.
+- Process exit after staging a Git branch deletion can leave stale delete
+  backups and a stale branch-list entry; the next Git apply keeps the branch
+  deleted, reconciles the branch list, and removes stale delete artifacts.
 - Multi-branch Git-created ID-band metadata failure rolls back created branch
   metadata and merge-base artifacts.
 - Stale-source Git-created branch publication is rejected.
