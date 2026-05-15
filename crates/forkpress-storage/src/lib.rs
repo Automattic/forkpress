@@ -481,6 +481,12 @@ pub fn create_cow_branch_from_tree(
     if path_exists_no_follow(&staging) {
         bail!("temporary branch creation path already exists");
     }
+    cleanup_unpublished_cow_branch_birth_artifacts(
+        layout, runtime, shared, branch, &staging, &dest, file_view,
+    )
+    .with_context(|| {
+        format!("failed to clean stale unpublished COW branch birth artifacts for '{branch}'")
+    })?;
 
     let source_db = cow_sqlite_db_path(source);
     let mut staging_published = false;
@@ -3149,6 +3155,27 @@ fn cleanup_failed_cow_branch_create(
     }
 }
 
+fn cleanup_unpublished_cow_branch_birth_artifacts(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    branch: &str,
+    staging: &Path,
+    dest: &Path,
+    file_view: FileViewStrategy,
+) -> Result<()> {
+    let mut errors =
+        cleanup_cow_branch_birth_files(layout, branch, staging, dest, file_view, false);
+    if let Err(err) = cleanup_cow_branch_birth_metadata(layout, runtime, shared, branch) {
+        errors.push(err.to_string());
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        bail!("{}", errors.join("; "))
+    }
+}
+
 struct CowResetMetadataBackup {
     branch: String,
     root: PathBuf,
@@ -3708,6 +3735,54 @@ mod tests {
         assert!(errors.is_empty(), "{errors:?}");
         assert!(!path_exists_no_follow(&staging));
         assert!(!path_exists_no_follow(&dest));
+        assert!(!path_exists_no_follow(&base_db));
+        assert!(!path_exists_no_follow(&sqlite_sidecar_path(
+            &base_db, "-wal"
+        )));
+        assert!(!path_exists_no_follow(&sqlite_sidecar_path(
+            &base_db, "-shm"
+        )));
+        assert!(!path_exists_no_follow(&file_base));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unpublished_branch_birth_cleanup_keeps_branch_tree_but_removes_merge_bases() {
+        let root = std::env::temp_dir().join(format!(
+            "forkpress-unpublished-branch-birth-cleanup-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let layout = Layout::new(root.join(".forkpress")).unwrap();
+        let staging = root.join(".forkpress-branch-create-stage-feature");
+        let dest = root.join("feature");
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(dest.join("wp-load.php"), b"<?php\n").unwrap();
+        let base_db = cow_merge_base_db_path(&layout, "feature").unwrap();
+        fs::create_dir_all(base_db.parent().unwrap()).unwrap();
+        fs::write(&base_db, b"base").unwrap();
+        fs::write(sqlite_sidecar_path(&base_db, "-wal"), b"wal").unwrap();
+        fs::write(sqlite_sidecar_path(&base_db, "-shm"), b"shm").unwrap();
+        let file_base = cow_merge_file_base_path(&layout, "feature").unwrap();
+        fs::create_dir_all(file_base.parent().unwrap()).unwrap();
+        fs::write(&file_base, b"{}").unwrap();
+
+        let errors = cleanup_cow_branch_birth_files(
+            &layout,
+            "feature",
+            &staging,
+            &dest,
+            FileViewStrategy::Copy,
+            false,
+        );
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(path_exists_no_follow(&dest));
+        assert!(dest.join("wp-load.php").is_file());
         assert!(!path_exists_no_follow(&base_db));
         assert!(!path_exists_no_follow(&sqlite_sidecar_path(
             &base_db, "-wal"
