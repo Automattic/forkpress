@@ -46,12 +46,56 @@ function forkpress_current_branch(): ?string {
     return null;
 }
 
+function forkpress_auto_login_user_id(): ?int {
+    $user = get_user_by('login', 'admin');
+    if (!$user) {
+        $admins = get_users([
+            'role'   => 'administrator',
+            'number' => 1,
+            'fields' => 'all',
+        ]);
+        $user = $admins[0] ?? null;
+    }
+
+    if (!$user || empty($user->ID)) {
+        return null;
+    }
+
+    return (int) $user->ID;
+}
+
+function forkpress_maybe_auto_login_current_user(): ?int {
+    if (!forkpress_auto_login_enabled()) {
+        return null;
+    }
+
+    $current = wp_get_current_user();
+    if ($current && !empty($current->ID)) {
+        return (int) $current->ID;
+    }
+
+    if ((defined('WP_INSTALLING') && WP_INSTALLING) || (defined('DOING_CRON') && DOING_CRON)) {
+        return null;
+    }
+    if (($_REQUEST['action'] ?? '') === 'logout') {
+        return null;
+    }
+
+    $user_id = forkpress_auto_login_user_id();
+    if ($user_id === null) {
+        return null;
+    }
+
+    wp_set_current_user($user_id);
+    return $user_id;
+}
+
 if (!function_exists('auth_redirect')) {
     function auth_redirect() {
         if (forkpress_auto_login_enabled()) {
-            $user = wp_get_current_user();
-            if ($user && !empty($user->ID)) {
-                do_action('auth_redirect', (int) $user->ID);
+            $user_id = forkpress_maybe_auto_login_current_user();
+            if ($user_id !== null) {
+                do_action('auth_redirect', $user_id);
                 return;
             }
         }
@@ -99,28 +143,11 @@ add_action('init', function () {
     if (!forkpress_auto_login_enabled() || is_user_logged_in()) {
         return;
     }
-    if ((defined('WP_INSTALLING') && WP_INSTALLING) || (defined('DOING_CRON') && DOING_CRON)) {
-        return;
-    }
-    if (($_REQUEST['action'] ?? '') === 'logout') {
-        return;
-    }
 
-    $user = get_user_by('login', 'admin');
-    if (!$user) {
-        $admins = get_users([
-            'role'   => 'administrator',
-            'number' => 1,
-            'fields' => 'all',
-        ]);
-        $user = $admins[0] ?? null;
-    }
-    if (!$user || empty($user->ID)) {
+    $user_id = forkpress_maybe_auto_login_current_user();
+    if ($user_id === null) {
         return;
     }
-
-    $user_id = (int) $user->ID;
-    wp_set_current_user($user_id);
 
     if (forkpress_current_branch() !== 'main' || headers_sent()) {
         return;
