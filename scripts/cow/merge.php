@@ -5606,6 +5606,9 @@ function cow_merge_run_plugin_validator(string $metadata_db, int $run_id, string
         'FORKPRESS_MERGE_BASE_DB' => $context['base_db'],
         'FORKPRESS_MERGE_SOURCE_DB' => $context['source_db'],
         'FORKPRESS_MERGE_TARGET_DB' => $context['target_db'],
+        'FORKPRESS_MERGE_BASE_ROOT' => $context['base_db'] === '' ? '' : cow_merge_branch_root_from_db_path($context['base_db']),
+        'FORKPRESS_MERGE_SOURCE_ROOT' => $context['source_db'] === '' ? '' : cow_merge_branch_root_from_db_path($context['source_db']),
+        'FORKPRESS_MERGE_TARGET_ROOT' => $context['target_db'] === '' ? '' : cow_merge_branch_root_from_db_path($context['target_db']),
     ]);
     $shell_command = implode(' ', array_map('escapeshellarg', $command));
     $pipes = [];

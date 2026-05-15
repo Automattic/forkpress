@@ -89,9 +89,10 @@ forkpress branch run-plugin-validator \
 The runner passes merge context through environment variables:
 `FORKPRESS_MERGE_METADATA_DB`, `FORKPRESS_MERGE_RUN`,
 `FORKPRESS_MERGE_SOURCE_BRANCH`, `FORKPRESS_MERGE_TARGET_BRANCH`,
-`FORKPRESS_MERGE_BASE_DB`, `FORKPRESS_MERGE_SOURCE_DB`, and
-`FORKPRESS_MERGE_TARGET_DB`. A validator may emit either a raw findings array
-or an object with `status` and `findings`.
+`FORKPRESS_MERGE_BASE_DB`, `FORKPRESS_MERGE_SOURCE_DB`,
+`FORKPRESS_MERGE_TARGET_DB`, `FORKPRESS_MERGE_BASE_ROOT`,
+`FORKPRESS_MERGE_SOURCE_ROOT`, and `FORKPRESS_MERGE_TARGET_ROOT`. A validator
+may emit either a raw findings array or an object with `status` and `findings`.
 
 The lower-level PHP helper commands remain available for focused fixtures and
 runtime integration:

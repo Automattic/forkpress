@@ -14075,6 +14075,92 @@ PHP);
     ]);
     assert_same(count($plugin_runner_audit['conflicts']), 1, 'plugin validator runner conflicts are visible in plugin audit scope');
     assert_true(str_contains($plugin_runner_audit['conflicts'][0]['chosen_preview'], 'feature-plugin-graph-source'), 'plugin validator runner passes source branch context to validators');
+
+    $plugin_validator_file_base_root = $tmp . '/plugin-validator-file-base';
+    $plugin_validator_file_source_root = $tmp . '/plugin-validator-file-source';
+    $plugin_validator_file_target_root = $tmp . '/plugin-validator-file-target';
+    foreach ([$plugin_validator_file_base_root, $plugin_validator_file_source_root, $plugin_validator_file_target_root] as $root) {
+        mkdir($root . '/wp-content/database', 0777, true);
+        mkdir($root . '/wp-content/uploads', 0777, true);
+    }
+    $plugin_validator_file_base_db = $plugin_validator_file_base_root . '/wp-content/database/.ht.sqlite';
+    $plugin_validator_file_source_db = $plugin_validator_file_source_root . '/wp-content/database/.ht.sqlite';
+    $plugin_validator_file_target_db = $plugin_validator_file_target_root . '/wp-content/database/.ht.sqlite';
+    $plugin_validator_file_metadata = $tmp . '/.forkpress/cow/merge/plugin-validator-file-env-metadata.sqlite';
+    $plugin_validator_file_base = $tmp . '/.forkpress/cow/merge/file-bases/plugin-validator-file-env.json';
+    create_base_db($plugin_validator_file_base_db);
+    copy($plugin_validator_file_base_db, $plugin_validator_file_source_db);
+    copy($plugin_validator_file_base_db, $plugin_validator_file_target_db);
+    cow_merge_capture_file_base($plugin_validator_file_base_root, $plugin_validator_file_base);
+    write_test_file($plugin_validator_file_source_root . '/wp-content/uploads/plugin-validator-env.txt', "source validator file\n");
+    $plugin_validator_file_merge = cow_merge_branch_state(
+        $plugin_validator_file_base_db,
+        $plugin_validator_file_source_db,
+        $plugin_validator_file_target_db,
+        $plugin_validator_file_metadata,
+        'feature-plugin-validator-file-source',
+        'feature-plugin-validator-file-target',
+        $plugin_validator_file_base,
+        $plugin_validator_file_source_root,
+        $plugin_validator_file_target_root
+    );
+    assert_same($plugin_validator_file_merge['status'], 'completed', 'validator file-root fixture merges source-only files cleanly');
+    $plugin_validator_file_runner = $tmp . '/plugin-validator-file-runner.php';
+    write_test_file($plugin_validator_file_runner, <<<'PHP'
+<?php
+$source_root = (string)getenv('FORKPRESS_MERGE_SOURCE_ROOT');
+$target_root = (string)getenv('FORKPRESS_MERGE_TARGET_ROOT');
+$relative = 'wp-content/uploads/plugin-validator-env.txt';
+$source_file = $source_root . '/' . $relative;
+$target_file = $target_root . '/' . $relative;
+if (!is_file($source_file) || !is_file($target_file)) {
+    fwrite(STDERR, 'validator could not inspect source and target roots');
+    exit(9);
+}
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-file-validator',
+            'object' => 'file:' . $relative,
+            'reason' => 'runner validator inspected source and candidate target files',
+            'type' => 'plugin-file-root-conflict',
+            'files' => [$relative],
+            'validator' => 'forkpress-file-runner@1',
+            'candidate' => [
+                'source_root_basename' => basename($source_root),
+                'target_root_basename' => basename($target_root),
+                'source_file' => trim((string)file_get_contents($source_file)),
+                'target_file' => trim((string)file_get_contents($target_file)),
+            ],
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $plugin_validator_file_run = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $plugin_validator_file_metadata,
+        '--run', (string)$plugin_validator_file_merge['run_id'],
+        '--validator', $plugin_validator_file_runner,
+        '--format', 'json',
+    ]);
+    assert_same($plugin_validator_file_run['status'], 0, 'plugin validator runner passes filesystem roots to validators');
+    $plugin_validator_file_result = json_decode($plugin_validator_file_run['output'], true);
+    assert_same($plugin_validator_file_result['conflicts'] ?? null, 1, 'file-root validator findings are recorded');
+    $plugin_validator_file_audit = cow_merge_audit_report($plugin_validator_file_metadata, (int)$plugin_validator_file_merge['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-file-root-conflict',
+    ]);
+    assert_same(count($plugin_validator_file_audit['conflicts']), 1, 'file-root validator conflicts are visible in plugin audit scope');
+    assert_true(str_contains($plugin_validator_file_audit['conflicts'][0]['chosen_preview'], 'source validator file'), 'file-root validator can inspect source files');
+    $plugin_validator_file_payload = cow_merge_decode_payload_json(
+        (string)scalar($plugin_validator_file_metadata, "SELECT chosen_payload FROM merge_conflicts WHERE conflict_type = 'plugin-file-root-conflict' ORDER BY id DESC LIMIT 1"),
+        'plugin validator file-root payload'
+    );
+    assert_same($plugin_validator_file_payload['candidate']['target_root_basename'] ?? null, 'plugin-validator-file-target', 'file-root validator receives the candidate target root');
+    assert_same($plugin_validator_file_payload['candidate']['target_file'] ?? null, 'source validator file', 'file-root validator can inspect candidate target files');
+
     $plugin_validator_runner_failure = $tmp . '/plugin-validator-runner-failure.php';
     write_test_file($plugin_validator_runner_failure, <<<'PHP'
 <?php
