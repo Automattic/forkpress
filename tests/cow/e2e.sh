@@ -331,7 +331,7 @@ branch_ui_nonce() {
     fi
   fi
 
-  node - <<'NODE' "$out" "$field"
+  node - "$out" "$field" <<'NODE'
 const fs = require('fs');
 const html = fs.readFileSync(process.argv[2], 'utf8');
 const field = process.argv[3];
