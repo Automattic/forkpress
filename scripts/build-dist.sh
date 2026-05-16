@@ -191,8 +191,16 @@ if [ "$NEED_PHP_BUILD" = "1" ]; then
     fi
   }
 
-  run_spc doctor --auto-fix
-  run_spc download --for-extensions="$EXTENSIONS" --with-php=8.3
+  run_spc_phase() {
+    local label="$1"
+    shift
+    echo "==> static-php-cli: $label"
+    run_spc "$@"
+    echo "==> static-php-cli: $label complete"
+  }
+
+  run_spc_phase "doctor" doctor --auto-fix
+  run_spc_phase "download PHP and extension sources" download --for-extensions="$EXTENSIONS" --with-php=8.3
 
   if [ "$PROFILE" = "dev" ]; then
     # Register branchfs as a builtin extension in spc's ext.json so its
@@ -208,11 +216,11 @@ file_put_contents($p, json_encode($c, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES
     # re-runs ./buildconf --force so the new extension is visible to configure.
     # Using the hook (rather than manual pre-extraction) is robust against spc
     # re-extracting php-src during the build phase.
-    run_spc build \
+    run_spc_phase "build dev PHP runtime" build \
       --with-added-patch="$REPO_ROOT/experiments/branchfs/build/spc-patch.php" \
       "$EXTENSIONS,branchfs" --build-cli
   else
-    run_spc build "$EXTENSIONS" --build-cli
+    run_spc_phase "build production PHP runtime" build "$EXTENSIONS" --build-cli
   fi
   cd "$REPO_ROOT"
 fi
