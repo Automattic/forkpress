@@ -61,6 +61,13 @@ function scalar(string $db_path, string $sql): mixed {
     return $value;
 }
 
+function write_test_file(string $path, string $contents): void {
+    if (!is_dir(dirname($path))) {
+        mkdir(dirname($path), 0777, true);
+    }
+    file_put_contents($path, $contents);
+}
+
 function create_branch_birth_db(string $path): void {
     $db = open_db($path);
     $db->exec('CREATE TABLE wp_posts (ID INTEGER PRIMARY KEY AUTOINCREMENT, post_title TEXT NOT NULL)');
@@ -115,6 +122,32 @@ try {
     ]);
     assert_same($cli_validation['status'], 0, 'branch birth validation CLI accepts complete metadata');
     assert_true(str_contains($cli_validation['output'], 'validated branch birth metadata'), 'branch birth validation CLI reports success');
+
+    $branch_root = $tmp . '/branch-root';
+    $file_base = $tmp . '/.forkpress/cow/merge/file-bases/feature-birth.json';
+    write_test_file($branch_root . '/wp-content/index.php', "<?php echo 'branch';\n");
+    write_test_file($branch_root . '/wp-content/uploads/2026/05/photo.jpg', "image bytes\n");
+    write_test_file($branch_root . '/wp-content/database/.ht.sqlite', "managed db bytes\n");
+    write_test_file($branch_root . '/database.sql', "managed dump\n");
+    write_test_file($branch_root . '/wp-config.php', "managed config\n");
+    write_test_file($branch_root . '/.git/config', "managed git config\n");
+    $file_capture = run_merge_cli([
+        'capture-files',
+        '--root', $branch_root,
+        '--file-base', $file_base,
+    ]);
+    assert_same($file_capture['status'], 0, 'branch birth file-base capture CLI succeeds');
+    assert_true(str_contains($file_capture['output'], 'captured filesystem merge base'), 'branch birth file-base capture CLI reports success');
+    assert_true(is_file($file_base), 'branch birth file-base capture writes an artifact');
+    $file_base_json = json_decode((string)file_get_contents($file_base), true);
+    assert_true(is_array($file_base_json), 'branch birth file-base artifact is valid JSON');
+    $entries = is_array($file_base_json['entries'] ?? null) ? $file_base_json['entries'] : [];
+    assert_true(isset($entries['wp-content/index.php']), 'branch birth file-base captures WordPress content files');
+    assert_true(isset($entries['wp-content/uploads/2026/05/photo.jpg']), 'branch birth file-base captures upload files');
+    assert_true(!isset($entries['wp-content/database/.ht.sqlite']), 'branch birth file-base excludes managed branch SQLite files');
+    assert_true(!isset($entries['database.sql']), 'branch birth file-base excludes generated database dumps');
+    assert_true(!isset($entries['wp-config.php']), 'branch birth file-base excludes managed wp-config.php');
+    assert_true(!isset($entries['.git/config']), 'branch birth file-base excludes Git internals');
 
     assert_true(
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'feature-birth'") > 0,
