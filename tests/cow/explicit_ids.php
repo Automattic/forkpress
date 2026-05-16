@@ -83,6 +83,17 @@ function create_explicit_comment_graph_db(string $path): void {
     $db->close();
 }
 
+function create_explicit_term_graph_db(string $path): void {
+    $db = open_db($path);
+    $db->exec('CREATE TABLE wp_terms (term_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, slug TEXT NOT NULL)');
+    $db->exec('CREATE TABLE wp_termmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, term_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec('CREATE TABLE wp_term_taxonomy (term_taxonomy_id INTEGER PRIMARY KEY AUTOINCREMENT, term_id INTEGER NOT NULL, taxonomy TEXT NOT NULL, description TEXT NOT NULL DEFAULT "", parent INTEGER NOT NULL DEFAULT 0, count INTEGER NOT NULL DEFAULT 0)');
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (1, 'Base term', 'base-term')");
+    $db->exec("INSERT INTO wp_termmeta (meta_id, term_id, meta_key, meta_value) VALUES (1, 1, 'base_term_key', 'base term value')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES (1, 1, 'category', '', 0, 1)");
+    $db->close();
+}
+
 define('FORKPRESS_COW_MERGE_TESTS', true);
 require_once __DIR__ . '/../../scripts/cow/merge.php';
 
@@ -338,6 +349,76 @@ try {
         (int)scalar($comment_graph_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-explicit-comment-graph' AND d.table_name = 'wp_comments' AND d.decision = 'target-wins' AND d.reason LIKE '%outside the source branch ID band%' AND d.reason LIKE '%wp_comments%'"),
         1,
         'threaded comment conflict explains that it is held behind the explicit WordPress comment ID'
+    );
+
+    $term_graph_base = $tmp . '/term-graph-base.sqlite';
+    $term_graph_source = $tmp . '/term-graph-source.sqlite';
+    $term_graph_target = $tmp . '/term-graph-target.sqlite';
+    $term_graph_metadata = $tmp . '/.forkpress/cow/merge/explicit-term-graph-metadata.sqlite';
+    create_explicit_term_graph_db($term_graph_base);
+    copy($term_graph_base, $term_graph_source);
+    copy($term_graph_base, $term_graph_target);
+    cow_merge_allocate_autoincrement_bands($term_graph_source, $term_graph_metadata, 'feature-explicit-term-graph');
+
+    $term_graph_source_db = open_db($term_graph_source);
+    $term_graph_source_db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (2, 'Imported explicit term', 'imported-explicit-term')");
+    $term_graph_source_db->exec("INSERT INTO wp_termmeta (term_id, meta_key, meta_value) VALUES (2, 'term_graph_json', '{\"term_id\":2}')");
+    $term_graph_source_db->exec("UPDATE wp_termmeta SET term_id = 2 WHERE meta_id = 1");
+    $term_graph_source_db->exec("INSERT INTO wp_term_taxonomy (term_id, taxonomy, description, parent, count) VALUES (2, 'category', '', 0, 1)");
+    $term_graph_source_db->exec("UPDATE wp_term_taxonomy SET term_id = 2 WHERE term_taxonomy_id = 1");
+    $term_graph_source_db->close();
+
+    $term_graph_result = cow_merge_databases($term_graph_base, $term_graph_source, $term_graph_target, $term_graph_metadata, 'feature-explicit-term-graph', 'main');
+    assert_same($term_graph_result['status'], 'completed_with_conflicts', 'out-of-band explicit WordPress term import keeps its dependent graph review-held');
+    assert_same(
+        (int)scalar($term_graph_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 2'),
+        0,
+        'out-of-band explicit WordPress term ID is not applied automatically'
+    );
+    assert_same(
+        (int)scalar($term_graph_target, 'SELECT COUNT(*) FROM wp_termmeta WHERE term_id = 2'),
+        0,
+        'termmeta behind a held explicit WordPress term ID is not applied automatically'
+    );
+    assert_same(
+        (int)scalar($term_graph_target, "SELECT term_id FROM wp_termmeta WHERE meta_key = 'base_term_key'"),
+        1,
+        'updated termmeta behind a held explicit WordPress term ID is not applied automatically'
+    );
+    assert_same(
+        (int)scalar($term_graph_target, 'SELECT COUNT(*) FROM wp_term_taxonomy WHERE term_id = 2'),
+        0,
+        'term taxonomy behind a held explicit WordPress term ID is not applied automatically'
+    );
+    assert_same(
+        (int)scalar($term_graph_target, 'SELECT term_id FROM wp_term_taxonomy WHERE term_taxonomy_id = 1'),
+        1,
+        'updated term taxonomy behind a held explicit WordPress term ID is not applied automatically'
+    );
+    assert_same(
+        (int)scalar($term_graph_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-explicit-term-graph' AND c.table_name = 'wp_terms' AND c.conflict_type = 'row-target-constraint'"),
+        1,
+        'out-of-band explicit WordPress term records a review conflict'
+    );
+    assert_same(
+        (int)scalar($term_graph_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-explicit-term-graph' AND c.table_name = 'wp_termmeta' AND c.conflict_type = 'row-target-constraint'"),
+        2,
+        'termmeta behind a held explicit WordPress term records review conflicts'
+    );
+    assert_same(
+        (int)scalar($term_graph_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-explicit-term-graph' AND c.table_name = 'wp_term_taxonomy' AND c.conflict_type = 'row-target-constraint'"),
+        2,
+        'term taxonomy behind a held explicit WordPress term records review conflicts'
+    );
+    $term_meta_reason = (string)scalar($term_graph_metadata, "SELECT reason FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-explicit-term-graph' AND d.table_name = 'wp_termmeta' AND d.decision = 'target-wins' ORDER BY d.id DESC LIMIT 1");
+    assert_true(
+        str_contains($term_meta_reason, 'outside the source branch ID band') && str_contains($term_meta_reason, 'wp_terms'),
+        'termmeta conflict explains that it is held behind the explicit WordPress term ID'
+    );
+    $term_taxonomy_reason = (string)scalar($term_graph_metadata, "SELECT reason FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-explicit-term-graph' AND d.table_name = 'wp_term_taxonomy' AND d.decision = 'target-wins' ORDER BY d.id DESC LIMIT 1");
+    assert_true(
+        str_contains($term_taxonomy_reason, 'outside the source branch ID band') && str_contains($term_taxonomy_reason, 'wp_terms'),
+        'term taxonomy conflict explains that it is held behind the explicit WordPress term ID'
     );
 } finally {
     remove_tree($tmp);
