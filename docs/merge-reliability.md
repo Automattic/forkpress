@@ -292,6 +292,10 @@ should stay focused on these areas:
   AUTOINCREMENT row insert/rewrite and known WordPress reference cases.
 - Add guarded plugin/schema stale-audit resolution flows where the plugin or
   schema planner can prove the reviewed choice is still valid.
+- Keep conflict resolution modeled as a first-class contract in audit output:
+  every conflict class should advertise its legal executable choices,
+  resolution strategy, generic resolver support, and revalidation support before
+  the CLI or UI offers an action.
 - Improve deterministic schema dependency planning for safe view/trigger
   reorderings while keeping cyclic or semantic ambiguity review-only.
 - Keep aarch64 macOS release artifacts and APFS sparsebundle E2E runs green for

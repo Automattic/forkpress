@@ -11326,6 +11326,101 @@ function cow_merge_audit_add_payload_previews(array $rows): array {
     return $rows;
 }
 
+function cow_merge_conflict_class(string $table, string $conflict_type): string {
+    if ($table === '__plugins__') {
+        return 'plugin';
+    }
+    if ($table === '__files__') {
+        return 'file';
+    }
+    if (str_starts_with($conflict_type, 'schema-')) {
+        return 'schema';
+    }
+    if ($conflict_type === 'cell-conflict') {
+        return 'cell';
+    }
+    if (in_array($conflict_type, [
+        'row-insert-collision',
+        'row-unique-collision',
+        'row-target-constraint',
+        'row-identity-ambiguous',
+        'row-target-deleted',
+        'row-source-deleted',
+    ], true)) {
+        return 'row';
+    }
+    return 'unknown';
+}
+
+function cow_merge_conflict_resolution_contract(string $table, string $conflict_type): array {
+    $class = cow_merge_conflict_class($table, $conflict_type);
+    $contract = [
+        'class' => $class,
+        'generic_resolver' => false,
+        'choices' => [],
+        'after_revalidate' => false,
+        'strategy' => 'manual-review',
+    ];
+
+    if ($class === 'plugin') {
+        $contract['strategy'] = 'plugin-validator';
+        return $contract;
+    }
+
+    if ($class === 'schema') {
+        $contract['generic_resolver'] = true;
+        $contract['choices'] = ['source', 'target'];
+        $contract['strategy'] = 'schema-choice';
+        return $contract;
+    }
+
+    if ($class === 'file') {
+        $supported = [
+            'file-conflict',
+            'file-add-collision',
+            'file-target-deleted',
+            'file-source-deleted',
+            'file-directory-delete-conflict',
+            'file-unsafe-symlink',
+            'file-type-replacement-conflict',
+            'file-unsupported-source-change',
+        ];
+        if (in_array($conflict_type, $supported, true)) {
+            $contract['generic_resolver'] = true;
+            $contract['choices'] = ['source', 'target'];
+            $contract['after_revalidate'] = true;
+            $contract['strategy'] = 'file-choice';
+        }
+        return $contract;
+    }
+
+    if (in_array($class, ['row', 'cell'], true)) {
+        $contract['generic_resolver'] = true;
+        $contract['choices'] = ['source', 'target'];
+        $contract['after_revalidate'] = true;
+        $contract['strategy'] = $class . '-choice';
+        return $contract;
+    }
+
+    return $contract;
+}
+
+function cow_merge_audit_add_conflict_contracts(array $rows): array {
+    foreach ($rows as &$row) {
+        $contract = cow_merge_conflict_resolution_contract(
+            (string)($row['table_name'] ?? ''),
+            (string)($row['conflict_type'] ?? '')
+        );
+        $row['conflict_class'] = $contract['class'];
+        $row['resolution_strategy'] = $contract['strategy'];
+        $row['resolution_choices'] = $contract['choices'];
+        $row['generic_resolver'] = $contract['generic_resolver'];
+        $row['after_revalidate_supported'] = $contract['after_revalidate'];
+    }
+    unset($row);
+    return $rows;
+}
+
 function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflict): array {
     $status = [
         'stale_status' => 'unknown',
@@ -12004,14 +12099,14 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
         [$conflict_filter, $conflict_params] = cow_merge_audit_where_sql($run_id, $filters, 'conflicts', '', $review_notes_exist);
         $conflict_params[':limit'] = $limit;
         if ($filters['records'] === 'all' || $filters['records'] === 'conflicts') {
-            $report['conflicts'] = cow_merge_audit_add_payload_previews(cow_merge_audit_add_conflict_staleness($db, cow_merge_audit_table_rows(
+            $report['conflicts'] = cow_merge_audit_add_payload_previews(cow_merge_audit_add_conflict_contracts(cow_merge_audit_add_conflict_staleness($db, cow_merge_audit_table_rows(
                 $db,
                 'merge_conflicts',
                 "SELECT merge_conflicts.id AS id, run_id, table_name, row_identity, column_name, conflict_type, resolver, resolved_at, created_at, " .
                 "base_payload, source_payload, target_payload, chosen_payload, r.source_db, r.target_db, r.source_branch, r.target_branch$conflict_review_select " .
                 "FROM merge_conflicts JOIN merge_runs r ON r.id = merge_conflicts.run_id $conflict_filter ORDER BY merge_conflicts.id DESC LIMIT :limit",
                 $conflict_params
-            )));
+            ))));
             if ($filters['records'] === 'conflicts' && $filters['group_by'] !== 'none') {
                 [$conflict_group_filter, $conflict_group_params] = cow_merge_audit_where_sql($run_id, $filters, 'conflicts', 'c', $review_notes_exist);
                 $conflict_group_params[':limit'] = $limit;
@@ -12234,6 +12329,13 @@ function cow_merge_print_audit_text(array $report): void {
         foreach ($report['conflicts'] as $conflict) {
             $object = cow_merge_audit_object_label($conflict);
             echo "  #{$conflict['id']} run={$conflict['run_id']} {$conflict['conflict_type']} $object resolver={$conflict['resolver']} resolved_at={$conflict['resolved_at']}\n";
+            $choices = implode(',', $conflict['resolution_choices'] ?? []);
+            if ($choices === '') {
+                $choices = 'none';
+            }
+            $generic = !empty($conflict['generic_resolver']) ? 'yes' : 'no';
+            $after_revalidate = !empty($conflict['after_revalidate_supported']) ? 'yes' : 'no';
+            echo "     class={$conflict['conflict_class']} strategy={$conflict['resolution_strategy']} choices=$choices generic-resolver=$generic after-revalidate=$after_revalidate\n";
             cow_merge_print_audit_review_text($conflict, $filters);
             if (isset($conflict['stale_status']) && $conflict['stale_status'] !== 'unknown') {
                 echo "     stale={$conflict['stale_status']} reason=" . cow_merge_audit_truncate((string)$conflict['stale_reason'], 240) . "\n";
