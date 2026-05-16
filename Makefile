@@ -13,6 +13,7 @@ BRANCHFS_EXT_SO := $(BRANCHFS_EXT_DIR)/branchfs.so
 BRANCHFS_TEST_DIR := experiments/branchfs/tests
 COW_TEST_DIR := tests/cow
 RELEASE_TEST_DIR := tests/release
+FORKPRESS_E2E_BIN ?= target/x86_64-unknown-linux-musl/debug/forkpress
 BRANCHFS_HEADER_GOALS := all init-db test test-compat test-branchfs test-all $(BRANCHFS_EXT_SO)
 NEEDS_BRANCHFS_HEADERS := $(filter $(BRANCHFS_HEADER_GOALS),$(MAKECMDGOALS))
 ifeq ($(strip $(MAKECMDGOALS)),)
@@ -75,7 +76,7 @@ else ifeq ($(UNAME_S)-$(UNAME_M),Linux-aarch64)
 FORKPRESS_TARGET ?= aarch64-unknown-linux-musl
 endif
 
-.PHONY: all clean test test-compat test-branchfs test-cow test-cow-branch-birth test-cow-branch-ui test-cow-explicit-ids test-cow-fast test-cow-filesystem test-cow-git-server test-cow-id-bands test-cow-media-validator test-cow-merge test-cow-merge-smoke test-cow-plugin-validator test-cow-schema-review test-cow-stale-audit test-cow-wp-semantic-validator test-release init-db test-all forkpress forkpress-dev dist dist-dev
+.PHONY: all clean test test-compat test-branchfs test-cow test-cow-branch-birth test-cow-branch-ui test-cow-e2e-remote-cache test-cow-explicit-ids test-cow-fast test-cow-filesystem test-cow-git-server test-cow-id-bands test-cow-media-validator test-cow-merge test-cow-merge-smoke test-cow-plugin-validator test-cow-schema-review test-cow-stale-audit test-cow-wp-semantic-validator test-branch-cli-fast test-release init-db test-all forkpress forkpress-dev dist dist-dev
 
 all: $(BRANCHFS_EXT_SO)
 
@@ -123,6 +124,12 @@ test-cow-branch-ui:
 	php $(COW_TEST_DIR)/branch_ui.php
 	php $(COW_TEST_DIR)/router_branch_actions.php
 	php $(COW_TEST_DIR)/router_lock.php
+
+test-cow-e2e-remote-cache:
+	FORKPRESS_E2E_ONLY=remote-cache $(COW_TEST_DIR)/e2e.sh $(FORKPRESS_E2E_BIN)
+
+test-branch-cli-fast:
+	FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli branch
 
 test-cow-explicit-ids:
 	php $(COW_TEST_DIR)/explicit_ids.php

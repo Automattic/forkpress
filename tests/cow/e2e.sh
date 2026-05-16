@@ -1144,6 +1144,12 @@ grep -F "forkpress: merged remote-cache-branch into main" "$TMP/remote-cache-mer
 grep -F "status:    completed" "$TMP/remote-cache-merge.out" >/dev/null
 grep -F "merged from remote cache branch" "$WORK/main/wp-content/remote-cache-branch.txt" >/dev/null
 php -r '$db = new SQLite3($argv[1]); $rows = (int)$db->querySingle("SELECT COUNT(*) FROM wp_forkpress_e2e_autoinc WHERE label = '\''Branch runtime plugin row'\''"); exit($rows === 1 ? 0 : 1);' "$WORK/main/wp-content/database/.ht.sqlite"
+
+if [ "${FORKPRESS_E2E_ONLY:-}" = "remote-cache" ]; then
+  log_step "remote cache branch slice complete"
+  exit 0
+fi
+
 MAIN_AUTOINC_MAX_BEFORE_UI="$(autoinc_db_max_id "$WORK/main/wp-content/database/.ht.sqlite")"
 
 log_step "create and merge branch through WordPress admin UI"
