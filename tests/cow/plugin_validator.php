@@ -856,6 +856,29 @@ PHP);
         'plugin validator runner does not record contradictory valid findings'
     );
 
+    $empty_conflicts_validator = $tmp . '/plugin-validator-empty-conflicts.php';
+    write_test_file($empty_conflicts_validator, <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $empty_conflicts = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $metadata,
+        '--run', (string)$result['run_id'],
+        '--validator', $empty_conflicts_validator,
+        '--format', 'json',
+    ]);
+    assert_true($empty_conflicts['status'] !== 0, 'plugin validator runner rejects conflicts status without findings');
+    assert_true(str_contains($empty_conflicts['output'], 'status conflicts without findings'), 'plugin validator runner explains empty conflict findings');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE conflict_type = 'plugin-validator-conflict' AND row_identity LIKE '%plugin-validator%'"),
+        0,
+        'plugin validator runner does not record empty conflict findings'
+    );
+
     $malformed_validator = $tmp . '/plugin-validator-malformed-finding.php';
     write_test_file($malformed_validator, <<<'PHP'
 <?php
