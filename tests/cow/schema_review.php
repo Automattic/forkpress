@@ -519,7 +519,9 @@ try {
 
     $source_db = open_db($trigger_source_table_source);
     $source_db->exec('CREATE TABLE plugin_trigger_source_table_audit (item_id TEXT, label TEXT)');
-    $source_db->exec('CREATE TRIGGER plugin_trigger_source_table_items_after AFTER INSERT ON plugin_trigger_source_table_items BEGIN INSERT INTO plugin_trigger_source_table_audit (item_id, label) VALUES (NEW.item_id, NEW.label); END');
+    $source_db->exec('CREATE TABLE plugin_trigger_source_table_gate (enabled INTEGER NOT NULL)');
+    $source_db->exec('INSERT INTO plugin_trigger_source_table_gate (enabled) VALUES (1)');
+    $source_db->exec('CREATE TRIGGER plugin_trigger_source_table_items_after AFTER INSERT ON plugin_trigger_source_table_items WHEN EXISTS (SELECT 1 FROM plugin_trigger_source_table_gate WHERE enabled = 1) BEGIN INSERT INTO plugin_trigger_source_table_audit (item_id, label) VALUES (NEW.item_id, NEW.label); END');
     $source_db->close();
 
     $trigger_source_table_result = cow_merge_databases(
@@ -535,7 +537,12 @@ try {
     assert_same(
         (int)scalar($trigger_source_table_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_trigger_source_table_audit'"),
         1,
-        'source-added trigger dependency table installs before trigger validation'
+        'source-added trigger body dependency table installs before trigger validation'
+    );
+    assert_same(
+        (int)scalar($trigger_source_table_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_trigger_source_table_gate'"),
+        1,
+        'source-added trigger WHEN dependency table installs before trigger validation'
     );
     assert_same(
         (int)scalar($trigger_source_table_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_trigger_source_table_items_after'"),
@@ -558,7 +565,7 @@ try {
     assert_same(
         scalar($trigger_source_table_target, "SELECT label FROM plugin_trigger_source_table_audit WHERE item_id = 'source-table-trigger'"),
         'Source Table Trigger',
-        'source-added trigger can use its source-added dependency table after merge'
+        'source-added trigger can use source-added body and WHEN dependency tables after merge'
     );
 
     $trigger_dependency_base = $tmp . '/trigger-dependency-base.sqlite';
