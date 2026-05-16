@@ -120,6 +120,7 @@ function run_branch_ui_action(array $post, array $branches, bool $cli_fail = fal
     @unlink($cli_log);
     file_put_contents($branch_list, implode("\n", $branches) . "\n");
     $env = [
+        'PATH' => getenv('PATH') ?: '',
         'FORKPRESS_BIN' => $fake_bin,
         'FORKPRESS_WORK_DIR' => $work_dir,
         'FORKPRESS_BRANCH' => 'feature',
@@ -173,7 +174,7 @@ assert_same($create_payload['message'] ?? null, 'Created branch new_feature.', '
 assert_same($create_payload['url'] ?? null, 'http://new_feature.wp.localhost:18080/wp-admin/', 'branch create admin action redirects to the new branch admin');
 assert_same(count($create['argv']), 1, 'branch create admin action invokes ForkPress CLI once');
 assert_same(
-    array_slice($create['argv'][0], 1),
+    array_slice($create['argv'][0] ?? [], 1),
     ['branch', '--work-dir', $work_dir, 'create', 'new_feature', '--from', 'feature'],
     'branch create admin action uses safe branch birth CLI path'
 );
@@ -189,7 +190,7 @@ assert_same($merge_payload['message'] ?? null, 'Merged feature into main.', 'bra
 assert_same($merge_payload['url'] ?? null, 'http://wp.localhost:18080/wp-admin/', 'branch merge admin action redirects to target branch admin');
 assert_same(count($merge['argv']), 1, 'branch merge admin action invokes ForkPress CLI once');
 assert_same(
-    array_slice($merge['argv'][0], 1),
+    array_slice($merge['argv'][0] ?? [], 1),
     ['branch', '--work-dir', $work_dir, 'merge', 'feature', '--into', 'main'],
     'branch merge admin action uses audited branch merge CLI path'
 );
