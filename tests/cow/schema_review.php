@@ -258,6 +258,50 @@ try {
         'source-added dependent view creation order is auditable'
     );
 
+    $view_source_table_base = $tmp . '/view-source-table-base.sqlite';
+    $view_source_table_source = $tmp . '/view-source-table-source.sqlite';
+    $view_source_table_target = $tmp . '/view-source-table-target.sqlite';
+    $view_source_table_metadata = $tmp . '/.forkpress/cow/merge/schema-view-source-table-metadata.sqlite';
+
+    $db = open_db($view_source_table_base);
+    $db->exec('CREATE TABLE plugin_view_source_table_anchor (anchor_id TEXT PRIMARY KEY)');
+    $db->exec("INSERT INTO plugin_view_source_table_anchor (anchor_id) VALUES ('base-anchor')");
+    $db->close();
+    copy($view_source_table_base, $view_source_table_source);
+    copy($view_source_table_base, $view_source_table_target);
+
+    $source_db = open_db($view_source_table_source);
+    $source_db->exec('CREATE TABLE plugin_view_source_table_items (item_id TEXT PRIMARY KEY, label TEXT NOT NULL)');
+    $source_db->exec("INSERT INTO plugin_view_source_table_items (item_id, label) VALUES ('source-view-table', 'Source View Table')");
+    $source_db->exec('CREATE VIEW plugin_view_source_table_labels AS SELECT label FROM plugin_view_source_table_items');
+    $source_db->close();
+
+    $view_source_table_result = cow_merge_databases(
+        $view_source_table_base,
+        $view_source_table_source,
+        $view_source_table_target,
+        $view_source_table_metadata,
+        'feature-schema-view-source-table',
+        'main'
+    );
+    $view_source_table_run_id = (int)$view_source_table_result['run_id'];
+    assert_same($view_source_table_result['status'], 'completed', 'source-added views depending on source-added tables merge automatically');
+    assert_same(
+        scalar($view_source_table_target, "SELECT label FROM plugin_view_source_table_labels WHERE label = 'Source View Table'"),
+        'Source View Table',
+        'source-added view can query its source-added dependency table after merge'
+    );
+    assert_same(
+        (int)scalar($view_source_table_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE run_id = $view_source_table_run_id AND conflict_type = 'schema-source-added-view'"),
+        0,
+        'source-added view dependencies on source-added tables create no review-only schema conflicts'
+    );
+    assert_same(
+        (int)scalar($view_source_table_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE run_id = $view_source_table_run_id AND column_name = 'plugin_view_source_table_labels' AND decision = 'source-applied'"),
+        1,
+        'source-added view creation after its dependency table is auditable'
+    );
+
     $trigger_order_base = $tmp . '/trigger-order-base.sqlite';
     $trigger_order_source = $tmp . '/trigger-order-source.sqlite';
     $trigger_order_target = $tmp . '/trigger-order-target.sqlite';
