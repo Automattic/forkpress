@@ -72,6 +72,17 @@ function create_explicit_user_graph_db(string $path): void {
     $db->close();
 }
 
+function create_explicit_comment_graph_db(string $path): void {
+    $db = open_db($path);
+    $db->exec('CREATE TABLE wp_posts (ID INTEGER PRIMARY KEY AUTOINCREMENT, post_title TEXT NOT NULL, post_content TEXT NOT NULL, post_status TEXT NOT NULL)');
+    $db->exec('CREATE TABLE wp_comments (comment_ID INTEGER PRIMARY KEY AUTOINCREMENT, comment_post_ID INTEGER NOT NULL, comment_content TEXT NOT NULL, comment_parent INTEGER NOT NULL DEFAULT 0)');
+    $db->exec('CREATE TABLE wp_commentmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, comment_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status) VALUES (1, 'Base comment page', 'Base content', 'publish')");
+    $db->exec("INSERT INTO wp_comments (comment_ID, comment_post_ID, comment_content, comment_parent) VALUES (1, 1, 'base explicit comment', 0)");
+    $db->exec("INSERT INTO wp_commentmeta (meta_id, comment_id, meta_key, meta_value) VALUES (1, 1, 'base_comment_key', 'base comment value')");
+    $db->close();
+}
+
 define('FORKPRESS_COW_MERGE_TESTS', true);
 require_once __DIR__ . '/../../scripts/cow/merge.php';
 
@@ -267,6 +278,66 @@ try {
     assert_true(
         str_contains($user_comment_reason, 'outside the source branch ID band') && str_contains($user_comment_reason, 'wp_users'),
         'comment conflict explains that it is held behind the explicit WordPress user ID'
+    );
+
+    $comment_graph_base = $tmp . '/comment-graph-base.sqlite';
+    $comment_graph_source = $tmp . '/comment-graph-source.sqlite';
+    $comment_graph_target = $tmp . '/comment-graph-target.sqlite';
+    $comment_graph_metadata = $tmp . '/.forkpress/cow/merge/explicit-comment-graph-metadata.sqlite';
+    create_explicit_comment_graph_db($comment_graph_base);
+    copy($comment_graph_base, $comment_graph_source);
+    copy($comment_graph_base, $comment_graph_target);
+    cow_merge_allocate_autoincrement_bands($comment_graph_source, $comment_graph_metadata, 'feature-explicit-comment-graph');
+    $comment_band_start = (int)scalar($comment_graph_metadata, "SELECT band_start FROM merge_autoincrement_bands WHERE branch_name = 'feature-explicit-comment-graph' AND table_name = 'wp_comments'");
+
+    $comment_graph_source_db = open_db($comment_graph_source);
+    $comment_graph_source_db->exec("INSERT INTO wp_comments (comment_ID, comment_post_ID, comment_content, comment_parent) VALUES (2, 1, 'imported explicit comment', 0)");
+    $comment_graph_source_db->exec("INSERT INTO wp_commentmeta (comment_id, meta_key, meta_value) VALUES (2, 'comment_graph_json', '{\"comment_id\":2}')");
+    $comment_graph_source_db->exec("UPDATE wp_commentmeta SET comment_id = 2 WHERE meta_id = 1");
+    $comment_graph_source_db->exec("INSERT INTO wp_comments (comment_ID, comment_post_ID, comment_content, comment_parent) VALUES ($comment_band_start, 1, 'threaded comment behind explicit comment', 2)");
+    $comment_graph_source_db->close();
+
+    $comment_graph_result = cow_merge_databases($comment_graph_base, $comment_graph_source, $comment_graph_target, $comment_graph_metadata, 'feature-explicit-comment-graph', 'main');
+    assert_same($comment_graph_result['status'], 'completed_with_conflicts', 'out-of-band explicit WordPress comment import keeps its dependent graph review-held');
+    assert_same(
+        (int)scalar($comment_graph_target, 'SELECT COUNT(*) FROM wp_comments WHERE comment_ID = 2'),
+        0,
+        'out-of-band explicit WordPress comment ID is not applied automatically'
+    );
+    assert_same(
+        (int)scalar($comment_graph_target, 'SELECT COUNT(*) FROM wp_commentmeta WHERE comment_id = 2'),
+        0,
+        'commentmeta behind a held explicit WordPress comment ID is not applied automatically'
+    );
+    assert_same(
+        (int)scalar($comment_graph_target, "SELECT comment_id FROM wp_commentmeta WHERE meta_key = 'base_comment_key'"),
+        1,
+        'updated commentmeta behind a held explicit WordPress comment ID is not applied automatically'
+    );
+    assert_same(
+        (int)scalar($comment_graph_target, "SELECT COUNT(*) FROM wp_comments WHERE comment_parent = 2"),
+        0,
+        'threaded comments behind a held explicit WordPress comment ID are not applied automatically'
+    );
+    assert_same(
+        (int)scalar($comment_graph_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-explicit-comment-graph' AND c.table_name = 'wp_comments' AND c.conflict_type = 'row-target-constraint'"),
+        2,
+        'explicit comment imports and threaded comments behind them record review conflicts'
+    );
+    assert_same(
+        (int)scalar($comment_graph_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-explicit-comment-graph' AND c.table_name = 'wp_commentmeta' AND c.conflict_type = 'row-target-constraint'"),
+        2,
+        'commentmeta behind a held explicit WordPress comment records review conflicts'
+    );
+    $comment_meta_reason = (string)scalar($comment_graph_metadata, "SELECT reason FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-explicit-comment-graph' AND d.table_name = 'wp_commentmeta' AND d.decision = 'target-wins' ORDER BY d.id DESC LIMIT 1");
+    assert_true(
+        str_contains($comment_meta_reason, 'outside the source branch ID band') && str_contains($comment_meta_reason, 'wp_comments'),
+        'commentmeta conflict explains that it is held behind the explicit WordPress comment ID'
+    );
+    assert_same(
+        (int)scalar($comment_graph_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-explicit-comment-graph' AND d.table_name = 'wp_comments' AND d.decision = 'target-wins' AND d.reason LIKE '%outside the source branch ID band%' AND d.reason LIKE '%wp_comments%'"),
+        1,
+        'threaded comment conflict explains that it is held behind the explicit WordPress comment ID'
     );
 } finally {
     remove_tree($tmp);
