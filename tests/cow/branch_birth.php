@@ -148,6 +148,15 @@ try {
     assert_true(!isset($entries['database.sql']), 'branch birth file-base excludes generated database dumps');
     assert_true(!isset($entries['wp-config.php']), 'branch birth file-base excludes managed wp-config.php');
     assert_true(!isset($entries['.git/config']), 'branch birth file-base excludes Git internals');
+    write_test_file($branch_root . '/wp-content/uploads/2026/05/after-capture.jpg', "after capture\n");
+    write_test_file($branch_root . '/wp-content/uploads/2026/05/photo.jpg', "mutated image bytes\n");
+    $captured_entries = json_decode((string)file_get_contents($file_base), true)['entries'] ?? [];
+    assert_true(!isset($captured_entries['wp-content/uploads/2026/05/after-capture.jpg']), 'branch birth file-base remains a pre-write snapshot after later branch files are added');
+    assert_same(
+        $captured_entries['wp-content/uploads/2026/05/photo.jpg']['sha256'] ?? null,
+        hash('sha256', "image bytes\n"),
+        'branch birth file-base keeps the pre-write upload hash after later file mutation'
+    );
 
     assert_true(
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'feature-birth'") > 0,
