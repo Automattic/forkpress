@@ -238,6 +238,61 @@ try {
         'dependent source-added trigger chain fires after ordered materialization'
     );
 
+    $trigger_source_table_base = $tmp . '/trigger-source-table-base.sqlite';
+    $trigger_source_table_source = $tmp . '/trigger-source-table-source.sqlite';
+    $trigger_source_table_target = $tmp . '/trigger-source-table-target.sqlite';
+    $trigger_source_table_metadata = $tmp . '/.forkpress/cow/merge/schema-trigger-source-table-metadata.sqlite';
+
+    $db = open_db($trigger_source_table_base);
+    $db->exec('CREATE TABLE plugin_trigger_source_table_items (item_id TEXT PRIMARY KEY, label TEXT NOT NULL)');
+    $db->close();
+    copy($trigger_source_table_base, $trigger_source_table_source);
+    copy($trigger_source_table_base, $trigger_source_table_target);
+
+    $source_db = open_db($trigger_source_table_source);
+    $source_db->exec('CREATE TABLE plugin_trigger_source_table_audit (item_id TEXT, label TEXT)');
+    $source_db->exec('CREATE TRIGGER plugin_trigger_source_table_items_after AFTER INSERT ON plugin_trigger_source_table_items BEGIN INSERT INTO plugin_trigger_source_table_audit (item_id, label) VALUES (NEW.item_id, NEW.label); END');
+    $source_db->close();
+
+    $trigger_source_table_result = cow_merge_databases(
+        $trigger_source_table_base,
+        $trigger_source_table_source,
+        $trigger_source_table_target,
+        $trigger_source_table_metadata,
+        'feature-schema-trigger-source-table',
+        'main'
+    );
+    $trigger_source_table_run_id = (int)$trigger_source_table_result['run_id'];
+    assert_same($trigger_source_table_result['status'], 'completed', 'source-added triggers depending on source-added tables merge automatically');
+    assert_same(
+        (int)scalar($trigger_source_table_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_trigger_source_table_audit'"),
+        1,
+        'source-added trigger dependency table installs before trigger validation'
+    );
+    assert_same(
+        (int)scalar($trigger_source_table_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_trigger_source_table_items_after'"),
+        1,
+        'source-added trigger depending on a source-added table installs'
+    );
+    assert_same(
+        (int)scalar($trigger_source_table_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE run_id = $trigger_source_table_run_id AND conflict_type = 'schema-source-added-trigger'"),
+        0,
+        'source-added trigger dependencies on source-added tables create no review-only schema conflicts'
+    );
+    assert_same(
+        (int)scalar($trigger_source_table_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE run_id = $trigger_source_table_run_id AND column_name = 'plugin_trigger_source_table_items_after' AND decision = 'source-applied'"),
+        1,
+        'source-added trigger creation order is auditable'
+    );
+    $target_db = open_db($trigger_source_table_target);
+    $target_db->exec("INSERT INTO plugin_trigger_source_table_items (item_id, label) VALUES ('source-table-trigger', 'Source Table Trigger')");
+    $target_db->close();
+    assert_same(
+        scalar($trigger_source_table_target, "SELECT label FROM plugin_trigger_source_table_audit WHERE item_id = 'source-table-trigger'"),
+        'Source Table Trigger',
+        'source-added trigger can use its source-added dependency table after merge'
+    );
+
     $trigger_dependency_base = $tmp . '/trigger-dependency-base.sqlite';
     $trigger_dependency_source = $tmp . '/trigger-dependency-source.sqlite';
     $trigger_dependency_target = $tmp . '/trigger-dependency-target.sqlite';
