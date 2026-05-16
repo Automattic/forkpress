@@ -909,6 +909,17 @@ function cow_git_unique_branch_temp_path(string $parent, string $prefix, string 
     return $path;
 }
 
+function cow_git_cleanup_stale_created_branch_temp_paths(string $parent, string $branch): void {
+    $safe_branch = preg_replace('/[^A-Za-z0-9_-]/', '-', $branch) ?: 'branch';
+    $prefix = '.forkpress-new-' . $safe_branch . '-';
+    foreach (scandir($parent) ?: [] as $entry) {
+        if ($entry === '.' || $entry === '..' || !str_starts_with($entry, $prefix)) {
+            continue;
+        }
+        cow_git_remove_tree(rtrim($parent, "/\\") . '/' . $entry);
+    }
+}
+
 function cow_git_restore_staged_branch_deletes(array $staged): void {
     foreach (array_reverse($staged, true) as $branch => $entries) {
         foreach (array_reverse($entries) as $entry) {
@@ -1072,10 +1083,11 @@ function cow_git_create_branch_for_ref(
     if (file_exists($dest_storage) || is_link($dest_storage) || file_exists($dest_public) || is_link($dest_public)) {
         throw new \RuntimeException("branch '$branch' already exists");
     }
+    cow_git_cleanup_stale_created_branch_temp_paths(dirname($dest_storage), $branch);
     cow_git_cleanup_created_branch_merge_base_artifacts($git_repo_dir, $branch_list_path, [['branch' => $branch]]);
     cow_git_cleanup_created_branch_id_band_metadata($git_repo_dir, $branch_list_path, [['branch' => $branch]]);
 
-    $tmp = dirname($dest_storage) . '/.forkpress-new-' . $branch . '-' . getmypid() . '-' . bin2hex(random_bytes(4));
+    $tmp = cow_git_unique_branch_temp_path(dirname($dest_storage), 'new', $branch);
     $published_storage = false;
     $linked_public = false;
     $captured_merge_bases = false;

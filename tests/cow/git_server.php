@@ -941,6 +941,7 @@ $reconciled_identity_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM m
 $metadata->close();
 assert_same($reconciled_band_count, 1, 'next Git apply finalizes ID-band metadata after pre-metadata crash');
 assert_same($reconciled_identity_count, 1, 'next Git apply finalizes row identity metadata after pre-metadata crash');
+assert_same(glob($branches . '/.forkpress-new-git-created-before-metadata-crash-*') ?: [], [], 'retry after pre-metadata crash cleans stale created-branch temp paths');
 cow_git_remove_tree($tmp);
 
 $tmp = sys_get_temp_dir() . '/forkpress-cow-git-created-after-metadata-crash-' . getmypid() . '-' . bin2hex(random_bytes(4));
