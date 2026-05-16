@@ -269,6 +269,34 @@ function create_wp_image_block_db(string $path): void {
     $db->close();
 }
 
+function create_wp_media_block_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_title TEXT NOT NULL DEFAULT '',
+        post_content TEXT NOT NULL DEFAULT '',
+        post_status TEXT NOT NULL DEFAULT 'publish',
+        post_type TEXT NOT NULL DEFAULT 'post',
+        post_name TEXT NOT NULL DEFAULT '',
+        guid TEXT NOT NULL DEFAULT ''
+    )");
+    $media_block_content = '<!-- wp:audio {"id":182} --><figure class="wp-block-audio"><audio controls src="wp-content/uploads/2026/05/block-audio.mp3"></audio></figure><!-- /wp:audio -->'
+        . '<!-- wp:cover {"id":183,"url":"wp-content/uploads/2026/05/block-cover.jpg"} --><div class="wp-block-cover"><span aria-hidden="true" class="wp-block-cover__background"></span><img class="wp-block-cover__image-background wp-image-183" alt="" src="wp-content/uploads/2026/05/block-cover.jpg"/></div><!-- /wp:cover -->'
+        . '<!-- wp:file {"id":184,"href":"wp-content/uploads/2026/05/block-file.pdf"} --><div class="wp-block-file"><a href="wp-content/uploads/2026/05/block-file.pdf">Download</a></div><!-- /wp:file -->'
+        . '<!-- wp:video {"id":185} --><figure class="wp-block-video"><video controls src="wp-content/uploads/2026/05/block-video.mp4"></video></figure><!-- /wp:video -->'
+        . '<!-- wp:media-text {"mediaId":186,"mediaType":"image"} --><div class="wp-block-media-text"><figure class="wp-block-media-text__media"><img src="wp-content/uploads/2026/05/block-media-text.jpg" class="wp-image-186"/></figure><div class="wp-block-media-text__content"><p>Media text</p></div></div><!-- /wp:media-text -->';
+    $stmt = $db->prepare("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, guid) VALUES
+        (181, 'Media block page', :content, 'publish', 'page', 'media-block-page', ''),
+        (182, 'Audio block attachment', '', 'inherit', 'attachment', 'block-audio', 'wp-content/uploads/2026/05/block-audio.mp3'),
+        (183, 'Cover block attachment', '', 'inherit', 'attachment', 'block-cover', 'wp-content/uploads/2026/05/block-cover.jpg'),
+        (184, 'File block attachment', '', 'inherit', 'attachment', 'block-file', 'wp-content/uploads/2026/05/block-file.pdf'),
+        (185, 'Video block attachment', '', 'inherit', 'attachment', 'block-video', 'wp-content/uploads/2026/05/block-video.mp4'),
+        (186, 'Media text attachment', '', 'inherit', 'attachment', 'block-media-text', 'wp-content/uploads/2026/05/block-media-text.jpg')");
+    $stmt->bindValue(':content', $media_block_content, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+}
+
 function create_wp_gallery_block_db(string $path): void {
     $db = open_db($path);
     $db->exec("CREATE TABLE wp_posts (
@@ -1372,6 +1400,144 @@ PHP);
         str_contains($image_block_preview, '"block_name":"core/image"') || str_contains($image_block_preview, '"block_name":"core\/image"'),
         'WordPress image block audit includes the block name'
     );
+
+    $media_block_base_root = $tmp . '/media-block-base';
+    $media_block_source_root = $tmp . '/media-block-source';
+    $media_block_target_root = $tmp . '/media-block-target';
+    $media_block_base = $media_block_base_root . '/wp-content/database/.ht.sqlite';
+    $media_block_source = $media_block_source_root . '/wp-content/database/.ht.sqlite';
+    $media_block_target = $media_block_target_root . '/wp-content/database/.ht.sqlite';
+    $media_block_metadata = $tmp . '/.forkpress/cow/merge/wp-media-block-validator-metadata.sqlite';
+    $media_block_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-media-block-validator.json';
+    $media_block_files = [
+        'block-audio.mp3',
+        'block-cover.jpg',
+        'block-file.pdf',
+        'block-video.mp4',
+        'block-media-text.jpg',
+    ];
+
+    mkdir($media_block_base_root . '/wp-content/database', 0777, true);
+    create_wp_media_block_db($media_block_base);
+    foreach ($media_block_files as $filename) {
+        write_test_file($media_block_base_root . '/wp-content/uploads/2026/05/' . $filename, $filename . ' bytes');
+    }
+    write_test_file($media_block_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type IN ('post', 'page')");
+$findings = [];
+$media_id_blocks = ['audio', 'cover', 'file', 'video'];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    if (!preg_match_all('/<!--\s*wp:([A-Za-z0-9_\/-]+)\s+(\{.*?\})\s*-->/', (string)$row['post_content'], $matches, PREG_SET_ORDER)) {
+        continue;
+    }
+    foreach ($matches as $match) {
+        $block_name = (string)$match[1];
+        $attrs = json_decode((string)$match[2], true);
+        if (!is_array($attrs)) {
+            continue;
+        }
+        $field = null;
+        $attachment_id = 0;
+        if (in_array($block_name, $media_id_blocks, true) && isset($attrs['id'])) {
+            $field = 'attrs.id';
+            $attachment_id = (int)$attrs['id'];
+        } elseif ($block_name === 'media-text' && isset($attrs['mediaId'])) {
+            $field = 'attrs.mediaId';
+            $attachment_id = (int)$attrs['mediaId'];
+        }
+        if ($field === null || $attachment_id <= 0) {
+            continue;
+        }
+        $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $attachment_id AND post_type = 'attachment'");
+        if ($exists === 0) {
+            $findings[] = [
+                'plugin' => 'forkpress-wp-media-block-refs',
+                'object' => 'post:' . $row['ID'],
+                'reason' => 'media block references a missing attachment',
+                'type' => 'plugin-wp-media-block-missing-attachment',
+                'tables' => ['wp_posts'],
+                'validator' => 'forkpress-wp-media-block-refs@1',
+                'candidate' => [
+                    'post_id' => (int)$row['ID'],
+                    'block_name' => 'core/' . $block_name,
+                    'field' => $field,
+                    'missing_object_id' => $attachment_id,
+                    'object_type' => 'attachment',
+                ],
+            ];
+        }
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    copy_tree_for_test($media_block_base_root, $media_block_source_root);
+    copy_tree_for_test($media_block_base_root, $media_block_target_root);
+    cow_merge_capture_file_base($media_block_base_root, $media_block_file_base);
+    cow_merge_allocate_autoincrement_bands($media_block_source, $media_block_metadata, 'feature-wp-media-block-source');
+    cow_merge_allocate_autoincrement_bands($media_block_target, $media_block_metadata, 'main');
+
+    $db = open_db($media_block_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID IN (182, 183, 184, 185, 186)');
+    $db->close();
+    foreach ($media_block_files as $filename) {
+        unlink($media_block_source_root . '/wp-content/uploads/2026/05/' . $filename);
+    }
+
+    $db = open_db($media_block_target);
+    $db->exec("UPDATE wp_posts SET post_title = 'Target page still using deleted media block attachments' WHERE ID = 181");
+    $db->close();
+
+    $media_block_result = cow_merge_branch_state(
+        $media_block_base,
+        $media_block_source,
+        $media_block_target,
+        $media_block_metadata,
+        'feature-wp-media-block-source',
+        'main',
+        $media_block_file_base,
+        $media_block_source_root,
+        $media_block_target_root
+    );
+
+    assert_same($media_block_result['status'], 'completed_with_conflicts', 'WordPress media block validator holds missing media attachments for review');
+    assert_same((int)($media_block_result['plugin_validators'] ?? 0), 1, 'WordPress media block validator is discovered from mu-plugins during merge');
+    assert_same((int)($media_block_result['plugin_validator_conflicts'] ?? 0), 5, 'WordPress media block validator records missing audio, cover, file, video, and media-text attachments');
+    assert_same((int)scalar($media_block_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID IN (182, 183, 184, 185, 186)'), 0, 'WordPress media block validator leaves source attachment deletions staged for review');
+    foreach ($media_block_files as $filename) {
+        assert_true(!file_exists($media_block_target_root . '/wp-content/uploads/2026/05/' . $filename), 'WordPress media block validator leaves deleted upload file staged for review: ' . $filename);
+    }
+    assert_same(scalar($media_block_target, 'SELECT post_title FROM wp_posts WHERE ID = 181'), 'Target page still using deleted media block attachments', 'WordPress media block validator preserves the target page edit');
+    $media_block_content = (string)scalar($media_block_target, 'SELECT post_content FROM wp_posts WHERE ID = 181');
+    assert_true(str_contains($media_block_content, '"id":182'), 'WordPress media block validator keeps the stale audio attachment visible for review');
+    assert_true(str_contains($media_block_content, '"id":183'), 'WordPress media block validator keeps the stale cover attachment visible for review');
+    assert_true(str_contains($media_block_content, '"id":184'), 'WordPress media block validator keeps the stale file attachment visible for review');
+    assert_true(str_contains($media_block_content, '"id":185'), 'WordPress media block validator keeps the stale video attachment visible for review');
+    assert_true(str_contains($media_block_content, '"mediaId":186'), 'WordPress media block validator keeps the stale media-text attachment visible for review');
+
+    $media_block_audit = cow_merge_audit_report($media_block_metadata, (int)$media_block_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-media-block-missing-attachment',
+    ]);
+    assert_same(count($media_block_audit['conflicts']), 5, 'WordPress media block validator exposes media block refs as plugin-scoped audit conflicts');
+    $media_block_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $media_block_audit['conflicts']));
+    foreach ([182, 183, 184, 185, 186] as $attachment_id) {
+        assert_true(str_contains($media_block_preview, '"missing_object_id":' . (string)$attachment_id), 'WordPress media block audit includes missing attachment ID ' . (string)$attachment_id);
+    }
+    foreach (['core/audio', 'core/cover', 'core/file', 'core/video', 'core/media-text'] as $block_name) {
+        $encoded_block_name = str_replace('/', '\\/', $block_name);
+        assert_true(
+            str_contains($media_block_preview, '"block_name":"' . $block_name . '"') || str_contains($media_block_preview, '"block_name":"' . $encoded_block_name . '"'),
+            'WordPress media block audit includes block name ' . $block_name
+        );
+    }
+    assert_true(str_contains($media_block_preview, '"field":"attrs.id"'), 'WordPress media block audit includes generic media block ID fields');
+    assert_true(str_contains($media_block_preview, '"field":"attrs.mediaId"'), 'WordPress media block audit includes media-text ID fields');
 
     $gallery_block_base_root = $tmp . '/gallery-block-base';
     $gallery_block_source_root = $tmp . '/gallery-block-source';
