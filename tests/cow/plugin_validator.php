@@ -855,6 +855,36 @@ PHP);
         0,
         'plugin validator runner does not record contradictory valid findings'
     );
+
+    $malformed_validator = $tmp . '/plugin-validator-malformed-finding.php';
+    write_test_file($malformed_validator, <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-plugin-graph',
+            'object' => 'child:malformed',
+            'reason' => 'malformed finding uses a non-plugin conflict type',
+            'type' => 'row-target-deleted',
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $malformed = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $metadata,
+        '--run', (string)$result['run_id'],
+        '--validator', $malformed_validator,
+        '--format', 'json',
+    ]);
+    assert_true($malformed['status'] !== 0, 'plugin validator runner rejects malformed finding conflict types');
+    assert_true(str_contains($malformed['output'], 'conflict type must start with plugin-'), 'plugin validator runner explains malformed conflict types');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE row_identity LIKE '%child:malformed%'"),
+        0,
+        'plugin validator runner does not record malformed findings'
+    );
 } finally {
     remove_tree($tmp);
 }
