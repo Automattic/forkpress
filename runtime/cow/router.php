@@ -143,11 +143,14 @@ function forkpress_cow_acquire_request_lock(): bool {
 }
 
 function forkpress_cow_is_admin_branch_action(string $path): bool {
-    if ($path !== '/wp-admin/admin-post.php') {
+    $action = $_REQUEST['action'] ?? '';
+    if (!is_string($action) || !in_array($action, ['forkpress_branch_create', 'forkpress_branch_merge'], true)) {
         return false;
     }
-    $action = $_REQUEST['action'] ?? '';
-    return is_string($action) && in_array($action, ['forkpress_branch_create', 'forkpress_branch_merge'], true);
+    if ($path === '/wp-admin/admin-post.php') {
+        return true;
+    }
+    return strtoupper((string)($_SERVER['REQUEST_METHOD'] ?? 'GET')) === 'POST';
 }
 
 function forkpress_cow_branch_name_is_valid(string $branch): bool {

@@ -945,6 +945,53 @@ try {
         'page-plus-reusable-block smoke merge audits the target page and block inserts'
     );
 
+    $block_edit_delete_base = $tmp . '/block-edit-delete-base.sqlite';
+    $block_edit_delete_source = $tmp . '/block-edit-delete-source.sqlite';
+    $block_edit_delete_target = $tmp . '/block-edit-delete-target.sqlite';
+    $block_edit_delete_metadata = $tmp . '/.forkpress/cow/merge/block-edit-delete-metadata.sqlite';
+
+    smoke_create_posts_db($block_edit_delete_base);
+    $shared_block_content = '<!-- wp:paragraph --><p>Shared reusable block body</p><!-- /wp:paragraph -->';
+    $shared_page_content = '<!-- wp:paragraph --><p>Page before shared block</p><!-- /wp:paragraph -->' . "\n" .
+        '<!-- wp:block {"ref":17000121} /-->';
+    $target_without_block_content = '<!-- wp:paragraph --><p>Target removed the shared block</p><!-- /wp:paragraph -->';
+    $source_edited_block_content = '<!-- wp:paragraph --><p>Source edited reusable block body</p><!-- /wp:paragraph -->';
+
+    $db = smoke_open_db($block_edit_delete_base);
+    smoke_insert_post($db, 17000120, 'Shared Page With Reusable Block', $shared_page_content, 'page', 'shared-page-with-reusable-block');
+    smoke_insert_post($db, 17000121, 'Shared Reusable Block', $shared_block_content, 'wp_block', 'shared-reusable-block');
+    $db->close();
+    copy($block_edit_delete_base, $block_edit_delete_source);
+    copy($block_edit_delete_base, $block_edit_delete_target);
+
+    $db = smoke_open_db($block_edit_delete_source);
+    $stmt = $db->prepare("UPDATE wp_posts SET post_title = 'Source Edited Shared Reusable Block', post_content = :content WHERE ID = 17000121");
+    $stmt->bindValue(':content', $source_edited_block_content, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+
+    $db = smoke_open_db($block_edit_delete_target);
+    $stmt = $db->prepare('UPDATE wp_posts SET post_content = :content WHERE ID = 17000120');
+    $stmt->bindValue(':content', $target_without_block_content, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->exec('DELETE FROM wp_posts WHERE ID = 17000121');
+    $db->close();
+
+    $block_edit_delete_result = cow_merge_databases($block_edit_delete_base, $block_edit_delete_source, $block_edit_delete_target, $block_edit_delete_metadata, 'feature-smoke-reusable-block-edit-delete', 'main');
+    assert_same($block_edit_delete_result['status'], 'completed_with_conflicts', 'reusable block edit/delete graph stays reviewable');
+    assert_same((int)smoke_scalar($block_edit_delete_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 17000121'), 0, 'reusable block edit/delete preserves target block deletion before review');
+    assert_same(smoke_scalar($block_edit_delete_target, 'SELECT post_content FROM wp_posts WHERE ID = 17000120'), $target_without_block_content, 'reusable block edit/delete preserves target page cleanup before review');
+    assert_same(
+        (int)smoke_scalar($block_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_posts' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'reusable block edit/delete records the edited block delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($block_edit_delete_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-wins'"),
+        1,
+        'reusable block edit/delete defaults the edited source block to target-wins before review'
+    );
+
     $attachment_base_root = $tmp . '/attachment-base-root';
     $attachment_source_root = $tmp . '/attachment-source-root';
     $attachment_target_root = $tmp . '/attachment-target-root';
