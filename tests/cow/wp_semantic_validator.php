@@ -95,7 +95,9 @@ function create_wp_semantic_db(string $path): void {
         (30, 'Shared reusable block', '<!-- wp:paragraph --><p>Shared block</p><!-- /wp:paragraph -->', 'publish', 'wp_block', 'shared-reusable-block'),
         (31, 'Page with reusable block', '<!-- wp:block {\"ref\":30} /--><!-- wp:paragraph --><p>Base page content</p><!-- /wp:paragraph -->', 'publish', 'page', 'page-with-reusable-block'),
         (32, 'Shared synced pattern', '<!-- wp:paragraph --><p>Shared synced pattern</p><!-- /wp:paragraph -->', 'publish', 'wp_block', 'shared-synced-pattern'),
-        (33, 'Page with synced pattern', '<!-- wp:block {\"ref\":32} /--><!-- wp:paragraph --><p>Base synced pattern content</p><!-- /wp:paragraph -->', 'publish', 'page', 'page-with-synced-pattern')");
+        (33, 'Page with synced pattern', '<!-- wp:block {\"ref\":32} /--><!-- wp:paragraph --><p>Base synced pattern content</p><!-- /wp:paragraph -->', 'publish', 'page', 'page-with-synced-pattern'),
+        (35, 'Shared navigation', '<!-- wp:navigation-link {\"label\":\"Home\",\"url\":\"/\"} /-->', 'publish', 'wp_navigation', 'shared-navigation'),
+        (36, 'Page with navigation block', '<!-- wp:navigation {\"ref\":35} /--><!-- wp:paragraph --><p>Base navigation page content</p><!-- /wp:paragraph -->', 'publish', 'page', 'page-with-navigation-block')");
     $db->exec("INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES (34, 32, 'wp_pattern_sync_status', 'synced')");
     $db->close();
 }
@@ -344,10 +346,8 @@ $res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type IN ('pa
 $findings = [];
 while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
     $content = (string)$row['post_content'];
-    if (!preg_match_all('/<!--\s+wp:block\s+\{[^}]*"ref"\s*:\s*(\d+)/', $content, $matches)) {
-        continue;
-    }
-    foreach ($matches[1] as $ref) {
+    preg_match_all('/<!--\s+wp:block\s+\{[^}]*"ref"\s*:\s*(\d+)/', $content, $block_matches);
+    foreach ($block_matches[1] as $ref) {
         $ref_id = (int)$ref;
         $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $ref_id AND post_type = 'wp_block'");
         if ($exists === 0) {
@@ -361,6 +361,27 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
                 'candidate' => [
                     'post_id' => (int)$row['ID'],
                     'missing_ref' => $ref_id,
+                ],
+            ];
+        }
+    }
+    preg_match_all('/<!--\s+wp:navigation\s+\{[^}]*"ref"\s*:\s*(\d+)/', $content, $navigation_matches);
+    foreach ($navigation_matches[1] as $ref) {
+        $ref_id = (int)$ref;
+        $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $ref_id AND post_type = 'wp_navigation'");
+        if ($exists === 0) {
+            $findings[] = [
+                'plugin' => 'forkpress-wp-block-refs',
+                'object' => 'post:' . $row['ID'],
+                'reason' => 'post content references a missing navigation block',
+                'type' => 'plugin-wp-block-missing-reference',
+                'tables' => ['wp_posts'],
+                'validator' => 'forkpress-wp-block-refs@1',
+                'candidate' => [
+                    'post_id' => (int)$row['ID'],
+                    'missing_ref' => $ref_id,
+                    'block_name' => 'core/navigation',
+                    'expected_post_type' => 'wp_navigation',
                 ],
             ];
         }
@@ -381,12 +402,14 @@ PHP);
     $db = open_db($source);
     $db->exec('DELETE FROM wp_posts WHERE ID = 30');
     $db->exec('DELETE FROM wp_posts WHERE ID = 32');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 35');
     $db->exec('DELETE FROM wp_postmeta WHERE post_id = 32');
     $db->close();
 
     $db = open_db($target);
     $db->exec("UPDATE wp_posts SET post_title = 'Target page still using reusable block' WHERE ID = 31");
     $db->exec("UPDATE wp_posts SET post_title = 'Target page still using synced pattern' WHERE ID = 33");
+    $db->exec("UPDATE wp_posts SET post_title = 'Target page still using navigation block' WHERE ID = 36");
     $db->close();
 
     $result = cow_merge_branch_state(
@@ -401,25 +424,29 @@ PHP);
         $target_root
     );
 
-    assert_same($result['status'], 'completed_with_conflicts', 'WordPress block-reference validator holds missing reusable blocks and synced patterns for review');
+    assert_same($result['status'], 'completed_with_conflicts', 'WordPress block-reference validator holds missing reusable blocks, synced patterns, and navigation blocks for review');
     assert_same((int)($result['plugin_validators'] ?? 0), 1, 'WordPress block-reference validator is discovered from mu-plugins during merge');
-    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 2, 'WordPress block-reference validator records missing reusable block and synced pattern references');
+    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 3, 'WordPress block-reference validator records missing reusable block, synced pattern, and navigation references');
     assert_same((int)scalar($target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 30'), 0, 'WordPress block-reference validator leaves the source block deletion staged for review');
     assert_same((int)scalar($target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 32'), 0, 'WordPress block-reference validator leaves the source synced pattern deletion staged for review');
+    assert_same((int)scalar($target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 35'), 0, 'WordPress block-reference validator leaves the source navigation deletion staged for review');
     assert_same((int)scalar($target, 'SELECT COUNT(*) FROM wp_postmeta WHERE post_id = 32'), 0, 'WordPress block-reference validator leaves the synced pattern metadata deletion staged for review');
     assert_same(scalar($target, 'SELECT post_title FROM wp_posts WHERE ID = 31'), 'Target page still using reusable block', 'WordPress block-reference validator preserves the target page edit');
     assert_same(scalar($target, 'SELECT post_title FROM wp_posts WHERE ID = 33'), 'Target page still using synced pattern', 'WordPress block-reference validator preserves the target synced pattern page edit');
+    assert_same(scalar($target, 'SELECT post_title FROM wp_posts WHERE ID = 36'), 'Target page still using navigation block', 'WordPress block-reference validator preserves the target navigation page edit');
 
     $audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'plugin',
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-block-missing-reference',
     ]);
-    assert_same(count($audit['conflicts']), 2, 'WordPress block-reference validator exposes missing refs as plugin-scoped audit conflicts');
+    assert_same(count($audit['conflicts']), 3, 'WordPress block-reference validator exposes missing refs as plugin-scoped audit conflicts');
     $preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $audit['conflicts']));
     assert_true(str_contains($preview, '"missing_ref":30'), 'WordPress block-reference audit includes the missing reusable block ID');
     assert_true(str_contains($preview, '"missing_ref":32'), 'WordPress block-reference audit includes the missing synced pattern ID');
+    assert_true(str_contains($preview, '"missing_ref":35'), 'WordPress block-reference audit includes the missing navigation ID');
     assert_true(str_contains($preview, '"post_id":33'), 'WordPress block-reference audit includes the synced pattern consumer page ID');
+    assert_true(str_contains($preview, '"block_name":"core/navigation"'), 'WordPress block-reference audit includes the navigation block name');
 
     $menu_base_root = $tmp . '/menu-base';
     $menu_source_root = $tmp . '/menu-source';
