@@ -783,6 +783,16 @@ add_action('init', function () {
             'image_meta' => [],
         ]);
         update_post_meta($attachment_id, '_forkpress_semantic_media', $branch);
+        update_post_meta($page_id, '_thumbnail_id', (int)$attachment_id);
+        $page_update = wp_update_post([
+            'ID' => (int)$page_id,
+            'post_content' => "<!-- wp:paragraph --><p>Semantic $branch page body</p><!-- /wp:paragraph -->\n"
+                . "<!-- wp:block {\"ref\":$block_id} /-->\n"
+                . "<!-- wp:image {\"id\":$attachment_id,\"sizeSlug\":\"full\",\"linkDestination\":\"none\"} --><figure class=\"wp-block-image size-full\"><img class=\"wp-image-$attachment_id\" /></figure><!-- /wp:image -->",
+        ], true);
+        if (is_wp_error($page_update)) {
+            wp_send_json_error(['error' => $page_update->get_error_message()], 500);
+        }
 
         $comment_id = wp_insert_comment([
             'comment_post_ID' => (int)$page_id,
@@ -928,13 +938,21 @@ add_action('init', function () {
             $block_refs = array_map('intval', $matches[1]);
             sort($block_refs);
         }
+        $image_block_refs = [];
+        if (preg_match_all('/<!--\s+wp:image\s+\{[^}]*"id"\s*:\s*(\d+)/', $post->post_content, $matches)) {
+            $image_block_refs = array_map('intval', $matches[1]);
+            sort($image_block_refs);
+        }
         $rows[] = [
             'id' => (int)$post->ID,
             'type' => $post->post_type,
             'title' => $post->post_title,
             'content' => $post->post_content,
             'block_refs' => $block_refs,
+            'image_block_refs' => $image_block_refs,
             'author' => (int)$post->post_author,
+            'parent' => (int)$post->post_parent,
+            'featured_media' => (int)get_post_thumbnail_id($post->ID),
             'branch' => get_post_meta($post->ID, '_forkpress_semantic_branch', true)
                 ?: get_post_meta($post->ID, '_forkpress_semantic_note', true)
                 ?: get_post_meta($post->ID, '_forkpress_semantic_media', true),
@@ -1043,6 +1061,7 @@ add_action('init', function () {
             }
             $option_graph = get_option("forkpress_semantic_plugin_{$parent['branch']}_option");
             $file_path = is_array($child) ? (string)($child['file_path'] ?? '') : '';
+            $absolute_file_path = $file_path !== '' ? trailingslashit($upload_dir['basedir']) . $file_path : '';
             $plugin_graphs[(string)$parent['branch']] = [
                 'parent_id' => $parent_id,
                 'child_id' => is_array($child) ? (int)$child['id'] : 0,
@@ -1057,8 +1076,12 @@ add_action('init', function () {
                 'option_note_id' => is_array($option_graph) ? (int)($option_graph['note_id'] ?? 0) : 0,
                 'postmeta_parent_id' => is_array($postmeta_json) ? (int)($postmeta_json['parent_id'] ?? 0) : 0,
                 'postmeta_note_id' => is_array($postmeta_json) ? (int)($postmeta_json['note_id'] ?? 0) : 0,
+                'child_payload_parent_id' => is_array($child_payload) ? (int)($child_payload['parent_id'] ?? 0) : 0,
                 'child_payload_note_id' => is_array($child_payload) ? (int)($child_payload['note_id'] ?? 0) : 0,
-                'file_exists' => $file_path !== '' && file_exists(trailingslashit($upload_dir['basedir']) . $file_path),
+                'file_exists' => $absolute_file_path !== '' && file_exists($absolute_file_path),
+                'file_contents' => $absolute_file_path !== '' && file_exists($absolute_file_path)
+                    ? file_get_contents($absolute_file_path)
+                    : null,
             ];
         }
         ksort($plugin_graphs);
@@ -1538,7 +1561,8 @@ php -r '$db = new SQLite3($argv[1]); $id = (int)$argv[2]; $json = json_encode(["
 php -r '$db = new SQLite3($argv[1]); $id = (int)$argv[2]; $json = json_encode(["linkedPostId" => $id, "branch" => "target"], JSON_UNESCAPED_SLASHES); $serialized = "a:2:{s:12:\"linkedPostId\";i:$id;s:6:\"branch\";s:6:\"target\";}"; $stmt = $db->prepare("UPDATE wp_posts SET post_content = :content WHERE ID = :id"); $stmt->bindValue(":content", $json, SQLITE3_TEXT); $stmt->bindValue(":id", $id, SQLITE3_INTEGER); $stmt->execute(); $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:id, '\''_forkpress_json_ref'\'', :json), (:id, '\''_forkpress_serialized_ref'\'', :serialized)"); $stmt->bindValue(":id", $id, SQLITE3_INTEGER); $stmt->bindValue(":json", $json, SQLITE3_TEXT); $stmt->bindValue(":serialized", $serialized, SQLITE3_TEXT); $stmt->execute();' "$WORK/band-merge-target/wp-content/database/.ht.sqlite" "$BAND_TARGET_POST_ID"
 "$BIN" branch --work-dir "$WORK_DIR" merge band-merge-source --into band-merge-target > "$TMP/merge-band-posts.out"
 grep -F "forkpress: merged band-merge-source into band-merge-target" "$TMP/merge-band-posts.out" >/dev/null
-grep -F "status:    completed_with_conflicts" "$TMP/merge-band-posts.out" >/dev/null
+grep -Fx "status:    completed" "$TMP/merge-band-posts.out" >/dev/null
+php -r '$db = new SQLite3($argv[1]); $run = $db->querySingle("SELECT id FROM merge_runs WHERE source_branch = '\''band-merge-source'\'' AND target_branch = '\''band-merge-target'\'' ORDER BY id DESC LIMIT 1"); $conflicts = $run ? (int)$db->querySingle("SELECT COUNT(*) FROM merge_conflicts WHERE run_id = " . (int)$run) : -1; exit($run && $conflicts === 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
 curl -sS -H "Host: band-merge-target.wp.localhost:$PORT" \
   "http://127.0.0.1:$PORT/wp-admin/edit.php" \
   -o "$TMP/band-merge-target-edit.html"
@@ -1573,9 +1597,12 @@ semantic_runtime_request semantic-source source "$TMP/semantic-source.json"
 semantic_runtime_request semantic-target target "$TMP/semantic-target.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); $posts = []; foreach (($data["posts"] ?? []) as $post) { $posts[$post["title"] ?? ""] = $post; } $menus = $data["menus"] ?? []; $locations = $data["menu_locations"] ?? []; $graph = $data["plugin_graphs"]["source"] ?? []; $note_id = $posts["Semantic Source Note"]["id"] ?? null; $graph_ok = (int)($graph["parent_id"] ?? 0) > 0 && (int)($graph["child_id"] ?? 0) > 0 && ($graph["child_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["json_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["serialized_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["option_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["postmeta_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["json_note_id"] ?? null) === $note_id && ($graph["serialized_note_id"] ?? null) === $note_id && ($graph["option_note_id"] ?? null) === $note_id && ($graph["postmeta_note_id"] ?? null) === $note_id && ($graph["child_payload_note_id"] ?? null) === $note_id && (($graph["file_exists"] ?? null) === true); $ok = isset($posts["Semantic Source Page"], $posts["Semantic Source Note"], $posts["Semantic Source Block"], $posts["Semantic Source Media"], $posts["Semantic Source Edited Page"]) && !isset($posts["Semantic Source Delete Page"]) && in_array("Semantic Source Menu", $menus, true) && (($locations["forkpress_semantic_source"] ?? null) === "Semantic Source Menu") && in_array("Semantic Source Topic", $posts["Semantic Source Page"]["terms"] ?? [], true) && (($posts["Semantic Source Page"]["term_parents"]["Semantic Source Topic"] ?? null) === "Semantic Source Parent Topic") && in_array("Semantic Source Topic", $posts["Semantic Source Note"]["terms"] ?? [], true) && (($posts["Semantic Source Media"]["file_exists"] ?? null) === true) && in_array("thumbnail", $posts["Semantic Source Media"]["metadata_sizes"] ?? [], true) && (($posts["Semantic Source Media"]["generated_files"]["thumbnail"] ?? null) === true) && (($data["source_option"]["branch"] ?? null) === "source") && $graph_ok; exit($ok ? 0 : 1);' "$TMP/semantic-source.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); $posts = []; foreach (($data["posts"] ?? []) as $post) { $posts[$post["title"] ?? ""] = $post; } $menus = $data["menus"] ?? []; $locations = $data["menu_locations"] ?? []; $graph = $data["plugin_graphs"]["target"] ?? []; $note_id = $posts["Semantic Target Note"]["id"] ?? null; $graph_ok = (int)($graph["parent_id"] ?? 0) > 0 && (int)($graph["child_id"] ?? 0) > 0 && ($graph["child_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["json_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["serialized_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["option_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["postmeta_parent_id"] ?? null) === ($graph["parent_id"] ?? null) && ($graph["json_note_id"] ?? null) === $note_id && ($graph["serialized_note_id"] ?? null) === $note_id && ($graph["option_note_id"] ?? null) === $note_id && ($graph["postmeta_note_id"] ?? null) === $note_id && ($graph["child_payload_note_id"] ?? null) === $note_id && (($graph["file_exists"] ?? null) === true); $ok = isset($posts["Semantic Target Page"], $posts["Semantic Target Note"], $posts["Semantic Target Block"], $posts["Semantic Target Media"], $posts["Semantic Target Edited Page"]) && !isset($posts["Semantic Target Delete Page"]) && in_array("Semantic Target Menu", $menus, true) && (($locations["forkpress_semantic_target"] ?? null) === "Semantic Target Menu") && in_array("Semantic Target Topic", $posts["Semantic Target Page"]["terms"] ?? [], true) && (($posts["Semantic Target Page"]["term_parents"]["Semantic Target Topic"] ?? null) === "Semantic Target Parent Topic") && in_array("Semantic Target Topic", $posts["Semantic Target Note"]["terms"] ?? [], true) && (($posts["Semantic Target Media"]["file_exists"] ?? null) === true) && in_array("thumbnail", $posts["Semantic Target Media"]["metadata_sizes"] ?? [], true) && (($posts["Semantic Target Media"]["generated_files"]["thumbnail"] ?? null) === true) && (($data["target_option"]["branch"] ?? null) === "target") && $graph_ok; exit($ok ? 0 : 1);' "$TMP/semantic-target.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $branch = $argv[2]; $suffix = ucfirst($branch); $posts = []; foreach (($data["posts"] ?? []) as $post) { $posts[$post["title"] ?? ""] = $post; } $users = $data["users"] ?? []; $graph = $data["plugin_graphs"][$branch] ?? []; $option = $data[$branch . "_option"] ?? []; $json_option = $data[$branch . "_json_option"] ?? []; $user = $users["forkpress_semantic_$branch"] ?? []; $note_id = (int)($posts["Semantic $suffix Note"]["id"] ?? 0); $page = $posts["Semantic $suffix Page"] ?? []; $page_id = (int)($page["id"] ?? 0); $media = $posts["Semantic $suffix Media"] ?? []; $media_id = (int)($media["id"] ?? 0); $image_refs = array_map("intval", $page["image_block_refs"] ?? []); $ok = ((int)($media["parent"] ?? 0) === $page_id) && ((int)($page["featured_media"] ?? 0) === $media_id) && in_array($media_id, $image_refs, true) && ((int)($option["user_id"] ?? 0) === (int)($user["id"] ?? 0)) && ((int)($json_option["user_id"] ?? 0) === (int)($user["id"] ?? 0)) && (($graph["child_payload_parent_id"] ?? null) === ($graph["parent_id"] ?? null)) && (($graph["child_payload_note_id"] ?? null) === $note_id) && (($graph["file_contents"] ?? null) === "plugin graph file for $branch\n"); exit($ok ? 0 : 1);' "$TMP/semantic-source.json" source
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $branch = $argv[2]; $suffix = ucfirst($branch); $posts = []; foreach (($data["posts"] ?? []) as $post) { $posts[$post["title"] ?? ""] = $post; } $users = $data["users"] ?? []; $graph = $data["plugin_graphs"][$branch] ?? []; $option = $data[$branch . "_option"] ?? []; $json_option = $data[$branch . "_json_option"] ?? []; $user = $users["forkpress_semantic_$branch"] ?? []; $note_id = (int)($posts["Semantic $suffix Note"]["id"] ?? 0); $page = $posts["Semantic $suffix Page"] ?? []; $page_id = (int)($page["id"] ?? 0); $media = $posts["Semantic $suffix Media"] ?? []; $media_id = (int)($media["id"] ?? 0); $image_refs = array_map("intval", $page["image_block_refs"] ?? []); $ok = ((int)($media["parent"] ?? 0) === $page_id) && ((int)($page["featured_media"] ?? 0) === $media_id) && in_array($media_id, $image_refs, true) && ((int)($option["user_id"] ?? 0) === (int)($user["id"] ?? 0)) && ((int)($json_option["user_id"] ?? 0) === (int)($user["id"] ?? 0)) && (($graph["child_payload_parent_id"] ?? null) === ($graph["parent_id"] ?? null)) && (($graph["child_payload_note_id"] ?? null) === $note_id) && (($graph["file_contents"] ?? null) === "plugin graph file for $branch\n"); exit($ok ? 0 : 1);' "$TMP/semantic-target.json" target
 "$BIN" branch --work-dir "$WORK_DIR" merge semantic-source --into semantic-target > "$TMP/semantic-merge.out"
 grep -F "forkpress: merged semantic-source into semantic-target" "$TMP/semantic-merge.out" >/dev/null
-grep -E "status:    completed(_with_conflicts)?" "$TMP/semantic-merge.out" >/dev/null
+grep -Fx "status:    completed" "$TMP/semantic-merge.out" >/dev/null
+php -r '$db = new SQLite3($argv[1]); $run = $db->querySingle("SELECT id FROM merge_runs WHERE source_branch = '\''semantic-source'\'' AND target_branch = '\''semantic-target'\'' ORDER BY id DESC LIMIT 1"); $conflicts = $run ? (int)$db->querySingle("SELECT COUNT(*) FROM merge_conflicts WHERE run_id = " . (int)$run) : -1; exit($run && $conflicts === 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
 semantic_runtime_request semantic-target inspect "$TMP/semantic-after-merge.json"
 php -r '
 $data = json_decode(file_get_contents($argv[1]), true);
@@ -1604,9 +1631,10 @@ $ok = true;
 foreach ($required as $title => $type) {
     $ok = $ok && (($posts[$title]["type"] ?? null) === $type);
 }
-$optionRefsValid = static function (array $option, string $branch, string $suffix) use ($posts): bool {
+$optionRefsValid = static function (array $option, string $branch, string $suffix) use ($posts, $users): bool {
+    $user = $users["forkpress_semantic_$branch"] ?? [];
     return (($option["branch"] ?? null) === $branch)
-        && ((int)($option["user_id"] ?? 0) > 0)
+        && ((int)($option["user_id"] ?? 0) === (int)($user["id"] ?? 0))
         && ((int)($option["page_id"] ?? 0) === (int)($posts["Semantic $suffix Page"]["id"] ?? 0))
         && ((int)($option["note_id"] ?? 0) === (int)($posts["Semantic $suffix Note"]["id"] ?? 0))
         && ((int)($option["block_id"] ?? 0) === (int)($posts["Semantic $suffix Block"]["id"] ?? 0))
@@ -1628,8 +1656,10 @@ $pluginGraphValid = static function (array $graphs, array $posts, string $branch
         && (($graph["serialized_note_id"] ?? null) === $note_id)
         && (($graph["option_note_id"] ?? null) === $note_id)
         && (($graph["postmeta_note_id"] ?? null) === $note_id)
+        && (($graph["child_payload_parent_id"] ?? null) === ($graph["parent_id"] ?? null))
         && (($graph["child_payload_note_id"] ?? null) === $note_id)
-        && (($graph["file_exists"] ?? null) === true);
+        && (($graph["file_exists"] ?? null) === true)
+        && (($graph["file_contents"] ?? null) === "plugin graph file for $branch\n");
 };
 $menuItemValid = static function (array $items, array $posts, string $suffix): bool {
     $item = $items["Semantic $suffix Link"] ?? [];
@@ -1672,13 +1702,30 @@ $reusableBlockValid = static function (array $posts, string $suffix): bool {
     $refs = array_map("intval", $posts["Semantic $suffix Page"]["block_refs"] ?? []);
     return $blockId > 0 && in_array($blockId, $refs, true);
 };
+$editedPageValid = static function (array $posts, array $users, string $branch, string $suffix): bool {
+    $edited = $posts["Semantic $suffix Edited Page"] ?? [];
+    $user = $users["forkpress_semantic_$branch"] ?? [];
+    $expectedContent = "<!-- wp:paragraph --><p>Edited on $branch branch</p><!-- /wp:paragraph -->";
+    return (($edited["content"] ?? null) === $expectedContent)
+        && ((int)($edited["author"] ?? 0) === (int)($user["id"] ?? 0));
+};
+$attachmentValid = static function (array $posts, string $suffix): bool {
+    $media = $posts["Semantic $suffix Media"] ?? [];
+    $pageId = (int)($posts["Semantic $suffix Page"]["id"] ?? 0);
+    $mediaId = (int)($media["id"] ?? 0);
+    $imageBlockRefs = array_map("intval", $posts["Semantic $suffix Page"]["image_block_refs"] ?? []);
+    return $pageId > 0
+        && $mediaId > 0
+        && (($media["file_exists"] ?? null) === true)
+        && in_array("thumbnail", $media["metadata_sizes"] ?? [], true)
+        && (($media["generated_files"]["thumbnail"] ?? null) === true)
+        && ((int)($media["parent"] ?? 0) === $pageId)
+        && ((int)($posts["Semantic $suffix Page"]["featured_media"] ?? 0) === $mediaId)
+        && in_array($mediaId, $imageBlockRefs, true);
+};
 $ok = $ok
-    && (($posts["Semantic Source Media"]["file_exists"] ?? null) === true)
-    && (($posts["Semantic Target Media"]["file_exists"] ?? null) === true)
-    && in_array("thumbnail", $posts["Semantic Source Media"]["metadata_sizes"] ?? [], true)
-    && in_array("thumbnail", $posts["Semantic Target Media"]["metadata_sizes"] ?? [], true)
-    && (($posts["Semantic Source Media"]["generated_files"]["thumbnail"] ?? null) === true)
-    && (($posts["Semantic Target Media"]["generated_files"]["thumbnail"] ?? null) === true)
+    && $attachmentValid($posts, "Source")
+    && $attachmentValid($posts, "Target")
     && !isset($posts["Semantic Source Delete Page"])
     && !isset($posts["Semantic Target Delete Page"])
     && in_array("Semantic Source Topic", $posts["Semantic Source Page"]["terms"] ?? [], true)
@@ -1697,6 +1744,8 @@ $ok = $ok
     && $userValid($users, $posts, $comments, "target", "Target")
     && $commentValid($comments, $posts, "Source")
     && $commentValid($comments, $posts, "Target")
+    && $editedPageValid($posts, $users, "source", "Source")
+    && $editedPageValid($posts, $users, "target", "Target")
     && $reusableBlockValid($posts, "Source")
     && $reusableBlockValid($posts, "Target")
     && $optionRefsValid($data["source_option"] ?? [], "source", "Source")
