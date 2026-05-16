@@ -289,6 +289,17 @@ function create_wp_term_relationship_db(string $path): void {
     $db->close();
 }
 
+function create_wp_term_taxonomy_reference_db(string $path): void {
+    $db = open_db($path);
+    $db->exec('CREATE TABLE wp_terms (term_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, slug TEXT NOT NULL, term_group INTEGER NOT NULL DEFAULT 0)');
+    $db->exec('CREATE TABLE wp_term_taxonomy (term_taxonomy_id INTEGER PRIMARY KEY AUTOINCREMENT, term_id INTEGER NOT NULL, taxonomy TEXT NOT NULL, description TEXT NOT NULL DEFAULT "", parent INTEGER NOT NULL DEFAULT 0, count INTEGER NOT NULL DEFAULT 0)');
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (89, 'Deleted taxonomy owner', 'deleted-taxonomy-owner')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, count) VALUES
+        (90, 89, 'category', 'Base category taxonomy', 0),
+        (91, 89, 'post_tag', 'Base tag taxonomy', 0)");
+    $db->close();
+}
+
 function create_wp_term_parent_reference_db(string $path): void {
     $db = open_db($path);
     $db->exec('CREATE TABLE wp_terms (term_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, slug TEXT NOT NULL, term_group INTEGER NOT NULL DEFAULT 0)');
@@ -1390,6 +1401,92 @@ PHP);
     assert_same(count($term_audit['conflicts']), 1, 'WordPress term relationship validator exposes the missing taxonomy term as a plugin-scoped audit conflict');
     $term_preview = (string)($term_audit['conflicts'][0]['chosen_preview'] ?? '');
     assert_true(str_contains($term_preview, '"term_taxonomy_id":82'), 'WordPress term relationship audit includes the missing term taxonomy ID');
+
+    $term_taxonomy_base_root = $tmp . '/term-taxonomy-base';
+    $term_taxonomy_source_root = $tmp . '/term-taxonomy-source';
+    $term_taxonomy_target_root = $tmp . '/term-taxonomy-target';
+    $term_taxonomy_base = $term_taxonomy_base_root . '/wp-content/database/.ht.sqlite';
+    $term_taxonomy_source = $term_taxonomy_source_root . '/wp-content/database/.ht.sqlite';
+    $term_taxonomy_target = $term_taxonomy_target_root . '/wp-content/database/.ht.sqlite';
+    $term_taxonomy_metadata = $tmp . '/.forkpress/cow/merge/wp-term-taxonomy-validator-metadata.sqlite';
+    $term_taxonomy_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-term-taxonomy-validator.json';
+
+    mkdir($term_taxonomy_base_root . '/wp-content/database', 0777, true);
+    create_wp_term_taxonomy_reference_db($term_taxonomy_base);
+    write_test_file($term_taxonomy_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query("SELECT term_taxonomy_id, term_id, taxonomy FROM wp_term_taxonomy WHERE term_id > 0");
+$findings = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    $term_id = (int)$row['term_id'];
+    $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_terms WHERE term_id = $term_id");
+    if ($exists === 0) {
+        $findings[] = [
+            'plugin' => 'forkpress-wp-term-taxonomy-refs',
+            'object' => 'term_taxonomy:' . $row['term_taxonomy_id'],
+            'reason' => 'term taxonomy references a missing term',
+            'type' => 'plugin-wp-term-taxonomy-missing-term',
+            'tables' => ['wp_term_taxonomy', 'wp_terms'],
+            'validator' => 'forkpress-wp-term-taxonomy-refs@1',
+            'candidate' => [
+                'term_taxonomy_id' => (int)$row['term_taxonomy_id'],
+                'taxonomy' => (string)$row['taxonomy'],
+                'field' => 'term_id',
+                'missing_term_id' => $term_id,
+            ],
+        ];
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    copy_tree_for_test($term_taxonomy_base_root, $term_taxonomy_source_root);
+    copy_tree_for_test($term_taxonomy_base_root, $term_taxonomy_target_root);
+    cow_merge_capture_file_base($term_taxonomy_base_root, $term_taxonomy_file_base);
+    cow_merge_allocate_autoincrement_bands($term_taxonomy_source, $term_taxonomy_metadata, 'feature-wp-term-taxonomy-source');
+    cow_merge_allocate_autoincrement_bands($term_taxonomy_target, $term_taxonomy_metadata, 'main');
+
+    $db = open_db($term_taxonomy_source);
+    $db->exec('DELETE FROM wp_terms WHERE term_id = 89');
+    $db->close();
+
+    $db = open_db($term_taxonomy_target);
+    $db->exec("UPDATE wp_term_taxonomy SET description = 'Target category taxonomy still pointing at deleted term' WHERE term_taxonomy_id = 90");
+    $db->exec("UPDATE wp_term_taxonomy SET description = 'Target tag taxonomy still pointing at deleted term' WHERE term_taxonomy_id = 91");
+    $db->close();
+
+    $term_taxonomy_result = cow_merge_branch_state(
+        $term_taxonomy_base,
+        $term_taxonomy_source,
+        $term_taxonomy_target,
+        $term_taxonomy_metadata,
+        'feature-wp-term-taxonomy-source',
+        'main',
+        $term_taxonomy_file_base,
+        $term_taxonomy_source_root,
+        $term_taxonomy_target_root
+    );
+
+    assert_same($term_taxonomy_result['status'], 'completed_with_conflicts', 'WordPress term-taxonomy validator holds missing terms for review');
+    assert_same((int)($term_taxonomy_result['plugin_validators'] ?? 0), 1, 'WordPress term-taxonomy validator is discovered from mu-plugins during merge');
+    assert_same((int)($term_taxonomy_result['plugin_validator_conflicts'] ?? 0), 2, 'WordPress term-taxonomy validator records missing term owners for multiple taxonomies');
+    assert_same((int)scalar($term_taxonomy_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 89'), 0, 'WordPress term-taxonomy validator leaves the source term deletion staged for review');
+    assert_same(scalar($term_taxonomy_target, 'SELECT description FROM wp_term_taxonomy WHERE term_taxonomy_id = 90'), 'Target category taxonomy still pointing at deleted term', 'WordPress term-taxonomy validator preserves the target category taxonomy edit');
+    assert_same(scalar($term_taxonomy_target, 'SELECT description FROM wp_term_taxonomy WHERE term_taxonomy_id = 91'), 'Target tag taxonomy still pointing at deleted term', 'WordPress term-taxonomy validator preserves the target tag taxonomy edit');
+
+    $term_taxonomy_audit = cow_merge_audit_report($term_taxonomy_metadata, (int)$term_taxonomy_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-term-taxonomy-missing-term',
+    ]);
+    assert_same(count($term_taxonomy_audit['conflicts']), 2, 'WordPress term-taxonomy validator exposes missing terms as plugin-scoped audit conflicts');
+    $term_taxonomy_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $term_taxonomy_audit['conflicts']));
+    assert_true(str_contains($term_taxonomy_preview, '"missing_term_id":89'), 'WordPress term-taxonomy audit includes the missing term ID');
+    assert_true(str_contains($term_taxonomy_preview, '"field":"term_id"'), 'WordPress term-taxonomy audit includes the stale field name');
+    assert_true(str_contains($term_taxonomy_preview, '"taxonomy":"post_tag"'), 'WordPress term-taxonomy audit includes the affected taxonomy');
 
     $term_parent_base_root = $tmp . '/term-parent-base';
     $term_parent_source_root = $tmp . '/term-parent-source';
