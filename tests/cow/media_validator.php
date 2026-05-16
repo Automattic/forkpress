@@ -135,6 +135,7 @@ $res = $db->query("SELECT p.ID, f.meta_value AS attached_file, m.meta_value AS m
     WHERE p.post_type = 'attachment'
     ORDER BY p.ID");
 $findings = [];
+$claimed_uploads = [];
 while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
     $metadata = @unserialize((string)$row['metadata']);
     if (!is_array($metadata)) {
@@ -142,6 +143,10 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
     }
     $attached_file = (string)$row['attached_file'];
     $metadata_file = (string)($metadata['file'] ?? '');
+    $relative_files = [$attached_file];
+    if ($metadata_file !== '' && $metadata_file !== $attached_file) {
+        $relative_files[] = $metadata_file;
+    }
     if ($metadata_file !== '' && $metadata_file !== $attached_file) {
         $findings[] = [
             'plugin' => 'forkpress-wp-media',
@@ -169,8 +174,10 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
             ],
         ];
     }
+    $directory = trim(dirname($metadata_file !== '' ? $metadata_file : $attached_file), '.');
     foreach (($metadata['sizes'] ?? []) as $size_name => $size) {
         if (is_array($size) && isset($size['file'])) {
+            $relative_files[] = trim($directory . '/' . str_replace('\\', '/', (string)$size['file']), '/');
             continue;
         }
         $findings[] = [
@@ -187,6 +194,36 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
             ],
         ];
     }
+    foreach ($relative_files as $relative_file) {
+        $claimed_uploads[$relative_file] ??= [];
+        $claimed_uploads[$relative_file][] = (int)$row['ID'];
+    }
+}
+foreach ($claimed_uploads as $relative_file => $attachment_ids) {
+    $attachment_counts = array_count_values($attachment_ids);
+    $duplicate_attachment_ids = array_values(array_map('intval', array_keys(array_filter(
+        $attachment_counts,
+        static fn(int $count): bool => $count > 1
+    ))));
+    $unique_attachment_ids = array_values(array_unique($attachment_ids));
+    if (count($unique_attachment_ids) < 2 && $duplicate_attachment_ids === []) {
+        continue;
+    }
+    $findings[] = [
+        'plugin' => 'forkpress-wp-media',
+        'object' => 'upload:' . $relative_file,
+        'reason' => $duplicate_attachment_ids !== []
+            ? 'attachment metadata claims the same upload file multiple times'
+            : 'multiple attachment metadata records claim the same upload file',
+        'type' => 'plugin-wp-media-duplicate-file',
+        'tables' => ['wp_posts', 'wp_postmeta'],
+        'validator' => 'forkpress-wp-media@1',
+        'candidate' => [
+            'file' => $relative_file,
+            'attachment_ids' => $unique_attachment_ids,
+            'duplicate_attachment_ids' => $duplicate_attachment_ids,
+        ],
+    ];
 }
 echo json_encode([
     'status' => $findings ? 'conflicts' : 'valid',
@@ -202,6 +239,10 @@ PHP);
 
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-missing-file-key.jpg', "source generated missing file key original bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-metadata-file-mismatch-attached.jpg', "source metadata mismatch attached file bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-self-duplicate.jpg', "source self duplicate original bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-duplicate-a.jpg', "source duplicate original a\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-duplicate-b.jpg', "source duplicate original b\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-duplicate-shared-150x150.jpg', "source duplicate shared generated size\n");
     $db = open_db($source);
     $attachment_id = insert_attachment($db, 'Source media generated missing file key', '2026/05/source-generated-missing-file-key.jpg', [
         'file' => '2026/05/source-generated-missing-file-key.jpg',
@@ -226,6 +267,42 @@ PHP);
         'height' => 480,
         'sizes' => [],
     ]);
+    $self_duplicate_id = insert_attachment($db, 'Source media self duplicate generated file', '2026/05/source-self-duplicate.jpg', [
+        'file' => '2026/05/source-self-duplicate.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'source-self-duplicate.jpg',
+                'width' => 150,
+                'height' => 150,
+            ],
+        ],
+    ]);
+    $duplicate_a_id = insert_attachment($db, 'Source media duplicate generated file A', '2026/05/source-duplicate-a.jpg', [
+        'file' => '2026/05/source-duplicate-a.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'source-duplicate-shared-150x150.jpg',
+                'width' => 150,
+                'height' => 150,
+            ],
+        ],
+    ]);
+    $duplicate_b_id = insert_attachment($db, 'Source media duplicate generated file B', '2026/05/source-duplicate-b.jpg', [
+        'file' => '2026/05/source-duplicate-b.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'source-duplicate-shared-150x150.jpg',
+                'width' => 150,
+                'height' => 150,
+            ],
+        ],
+    ]);
     $db->close();
 
     $result = cow_merge_branch_state(
@@ -242,7 +319,7 @@ PHP);
 
     assert_same($result['status'], 'completed_with_conflicts', 'media validator holds incomplete generated-size metadata for review');
     assert_same((int)($result['plugin_validators'] ?? 0), 1, 'media validator is discovered from mu-plugins during merge');
-    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 3, 'media validator records generated-size, missing-file, and metadata-file drift conflicts');
+    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 5, 'media validator records generated-size, missing-file, metadata-file drift, and duplicate upload conflicts');
     assert_same(
         scalar($target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-generated-missing-file-key.jpg',
@@ -289,6 +366,19 @@ PHP);
     $mismatch_preview = (string)($mismatch_audit['conflicts'][0]['chosen_preview'] ?? '');
     assert_true(str_contains($mismatch_preview, 'source-metadata-file-mismatch-attached.jpg'), 'media validator mismatch audit includes the attached file');
     assert_true(str_contains($mismatch_preview, 'source-metadata-file-mismatch-metadata.jpg'), 'media validator mismatch audit includes the metadata file');
+
+    $duplicate_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-media-duplicate-file',
+    ]);
+    assert_same(count($duplicate_audit['conflicts']), 2, 'media validator exposes duplicate upload ownership as plugin-scoped audit conflicts');
+    $duplicate_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $duplicate_audit['conflicts']));
+    assert_true(str_contains($duplicate_preview, 'source-self-duplicate.jpg'), 'media validator duplicate audit includes the same-attachment duplicate filename');
+    assert_true(str_contains($duplicate_preview, (string)$self_duplicate_id), 'media validator duplicate audit includes the same-attachment duplicate ID');
+    assert_true(str_contains($duplicate_preview, 'source-duplicate-shared-150x150.jpg'), 'media validator duplicate audit includes the shared generated filename');
+    assert_true(str_contains($duplicate_preview, (string)$duplicate_a_id), 'media validator duplicate audit includes the first shared generated attachment ID');
+    assert_true(str_contains($duplicate_preview, (string)$duplicate_b_id), 'media validator duplicate audit includes the second shared generated attachment ID');
 } finally {
     remove_tree($tmp);
 }
