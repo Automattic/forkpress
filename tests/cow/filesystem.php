@@ -127,6 +127,7 @@ try {
     create_filesystem_db($base);
     write_test_file($base_root . '/wp-content/uploads/shared.txt', 'base shared');
     write_test_file($base_root . '/wp-content/uploads/binary.bin', "base\0binary");
+    write_test_file($base_root . '/wp-content/uploads/binary-conflict.bin', "base\0binary conflict");
     create_test_symlink('shared.txt', $base_root . '/wp-content/uploads/shared-link.txt');
     write_test_file($base_root . '/wp-content/uploads/replace-dir-with-file/base-child.txt', 'base child');
     write_test_file($base_root . '/wp-content/uploads/replace-file-with-dir', 'base file');
@@ -138,6 +139,7 @@ try {
 
     write_test_file($source_root . '/wp-content/uploads/shared.txt', 'source shared');
     write_test_file($source_root . '/wp-content/uploads/binary.bin', "source\0binary\xff");
+    write_test_file($source_root . '/wp-content/uploads/binary-conflict.bin', "source\0binary conflict\xff");
     write_test_file($source_root . '/wp-content/uploads/new-source.txt', 'source symlink target');
     create_test_symlink('new-source.txt', $source_root . '/wp-content/uploads/shared-link.txt');
     create_test_symlink('../new-source.txt', $source_root . '/wp-content/uploads/links/source-link.txt');
@@ -147,6 +149,7 @@ try {
     write_test_file($source_root . '/wp-content/uploads/replace-file-with-dir/source-child.txt', 'source replacement child');
     remove_tree($source_root . '/wp-content/uploads/delete-dir-conflict');
     create_test_symlink('/etc/passwd', $source_root . '/wp-content/uploads/absolute-link.txt');
+    write_test_file($target_root . '/wp-content/uploads/binary-conflict.bin', "target\0binary conflict\xfe");
     write_test_file($target_root . '/wp-content/uploads/delete-dir-conflict/target-child.txt', 'target delete-dir child');
 
     $result = cow_merge_branch_state(
@@ -163,9 +166,10 @@ try {
 
     assert_same($result['status'], 'completed_with_conflicts', 'filesystem merge completes with review conflicts for unsafe source paths and type replacements');
     assert_same($result['file_applied'], 7, 'filesystem merge applies safe text, binary, directory, and symlink changes');
-    assert_same($result['file_conflicts'], 4, 'filesystem merge records unsafe symlink, type replacement, and directory-delete conflicts');
+    assert_same($result['file_conflicts'], 5, 'filesystem merge records binary, unsafe symlink, type replacement, and directory-delete conflicts');
     assert_same(file_get_contents($target_root . '/wp-content/uploads/shared.txt'), 'source shared', 'safe source text file change is applied');
     assert_same(file_get_contents($target_root . '/wp-content/uploads/binary.bin'), "source\0binary\xff", 'safe source binary file change is applied exactly');
+    assert_same(file_get_contents($target_root . '/wp-content/uploads/binary-conflict.bin'), "target\0binary conflict\xfe", 'target binary file wins conflicting binary edits before review');
     assert_same(file_get_contents($target_root . '/wp-content/uploads/new-source.txt'), 'source symlink target', 'safe source symlink target file is applied');
     assert_true(is_link($target_root . '/wp-content/uploads/shared-link.txt'), 'safe source symlink target change is applied');
     assert_same(readlink($target_root . '/wp-content/uploads/shared-link.txt'), 'new-source.txt', 'merged symlink keeps the changed relative target');
@@ -191,6 +195,18 @@ try {
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-directory-delete-conflict'"),
         1,
         'filesystem directory deletion with target descendants is auditable'
+    );
+    $binary_conflict_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/binary-conflict.bin'));
+    $base_entries = cow_merge_file_manifest_for_root($base_root)['entries'];
+    $source_entries = cow_merge_file_manifest_for_root($source_root)['entries'];
+    $target_entries = cow_merge_file_manifest_for_root($target_root)['entries'];
+    $binary_conflict_base_payload = SQLite3::escapeString(cow_merge_payload_json(cow_merge_file_path_payload('wp-content/uploads/binary-conflict.bin', $base_entries['wp-content/uploads/binary-conflict.bin'])));
+    $binary_conflict_source_payload = SQLite3::escapeString(cow_merge_payload_json(cow_merge_file_path_payload('wp-content/uploads/binary-conflict.bin', $source_entries['wp-content/uploads/binary-conflict.bin'])));
+    $binary_conflict_target_payload = SQLite3::escapeString(cow_merge_payload_json(cow_merge_file_path_payload('wp-content/uploads/binary-conflict.bin', $target_entries['wp-content/uploads/binary-conflict.bin'])));
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-conflict' AND row_identity = '$binary_conflict_identity' AND base_payload = '$binary_conflict_base_payload' AND source_payload = '$binary_conflict_source_payload' AND target_payload = '$binary_conflict_target_payload' AND chosen_payload = '$binary_conflict_target_payload'"),
+        1,
+        'binary filesystem content conflicts record hash payloads without text decoding'
     );
     $source_changed_link_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/shared-link.txt'));
     $source_added_link_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/links/source-link.txt'));
