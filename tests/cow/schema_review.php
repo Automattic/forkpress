@@ -225,6 +225,26 @@ try {
     foreach ($schema_object_needs_action as $conflict) {
         assert_same($conflict['revalidation_class'] ?? null, 'unclassified', 'schema object audit exposes conservative unclassified revalidation');
     }
+    $schema_object_revalidation_ids = [
+        $view_conflict_id => (int)scalar($metadata, "SELECT id FROM merge_revalidations WHERE conflict_id = $view_conflict_id ORDER BY id DESC LIMIT 1"),
+        $trigger_conflict_id => (int)scalar($metadata, "SELECT id FROM merge_revalidations WHERE conflict_id = $trigger_conflict_id ORDER BY id DESC LIMIT 1"),
+    ];
+    $schema_object_event_audit = cow_merge_audit_report($metadata, $schema_review_run_id, 6, [
+        'records' => 'conflict-events',
+    ]);
+    $schema_object_revalidation_events = array_values(array_filter(
+        $schema_object_event_audit['conflict_events'],
+        fn($event) => ($event['event_type'] ?? null) === 'revalidation-required' &&
+            in_array((int)($event['conflict_id'] ?? 0), [$view_conflict_id, $trigger_conflict_id], true)
+    ));
+    assert_same(count($schema_object_revalidation_events), 2, 'schema object revalidation is visible in the conflict event stream');
+    foreach ($schema_object_revalidation_events as $event) {
+        $event_conflict_id = (int)$event['conflict_id'];
+        assert_same($event['related_record_type'], 'revalidation', 'schema revalidation event links to the revalidation record');
+        assert_same((int)$event['related_record_id'], $schema_object_revalidation_ids[$event_conflict_id], 'schema revalidation event exposes the revalidation id');
+        assert_same($event['lifecycle_state'], 'needs-action', 'schema revalidation event records the needs-action lifecycle state');
+        assert_same($event['actor'], 'cow-revalidate', 'schema revalidation event preserves the revalidation actor');
+    }
 
     $schema_target_drift_base = $tmp . '/schema-target-drift-base.sqlite';
     $schema_target_drift_source = $tmp . '/schema-target-drift-source.sqlite';
