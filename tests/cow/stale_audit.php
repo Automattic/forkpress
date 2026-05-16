@@ -152,6 +152,10 @@ try {
     assert_same(count($audit['conflicts']), 1, 'revalidated conflict enters the needs-action queue');
     assert_true(str_contains((string)$audit['conflicts'][0]['review_note'], 'Keep target plugin value for launch.'), 'revalidated note preserves prior reviewer intent');
     assert_same($audit['conflicts'][0]['revalidation_class'] ?? null, 'compatible-target-drift', 'audit exposes the revalidation classifier');
+    assert_same((int)$audit['conflicts'][0]['event_count'], 3, 'revalidated conflict appends a lifecycle event');
+    assert_same($audit['conflicts'][0]['latest_event_type'], 'revalidation-required', 'revalidated conflict advertises latest lifecycle event');
+    assert_same($audit['conflicts'][0]['latest_event_lifecycle_state'], 'needs-action', 'revalidated conflict advertises latest event state');
+    assert_same($audit['conflicts'][0]['latest_event_actor'], 'cow-revalidate', 'revalidated conflict advertises latest event actor');
 
     $again = run_merge_cli([
         'revalidate-reviews',
@@ -184,6 +188,10 @@ try {
         cow_merge_payload_json('target drift after review'),
         'after-revalidate resolution audits the latest revalidated target payload'
     );
+    $resolved_audit = cow_merge_audit_report($metadata, $run_id, 10, ['records' => 'conflicts']);
+    assert_same((int)$resolved_audit['conflicts'][0]['event_count'], 4, 'after-revalidate resolution appends a lifecycle event');
+    assert_same($resolved_audit['conflicts'][0]['latest_event_type'], 'resolution-applied', 'after-revalidate resolution advertises latest lifecycle event');
+    assert_same($resolved_audit['conflicts'][0]['latest_event_lifecycle_state'], 'resolved', 'after-revalidate resolution advertises latest event state');
 
     $source_drift_base = $tmp . '/source-drift-base.sqlite';
     $source_drift_source = $tmp . '/source-drift-source.sqlite';

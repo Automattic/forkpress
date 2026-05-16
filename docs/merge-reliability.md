@@ -297,7 +297,10 @@ should stay focused on these areas:
   resolution strategy, generic resolver support, and revalidation support before
   the CLI or UI offers an action. Audit output should also expose lifecycle and
   next-action fields so deferred, needs-action, reviewed, validated, and
-  resolved conflicts are not inferred from free-form review notes.
+  resolved conflicts are not inferred from free-form review notes. Conflict
+  state changes now append `merge_conflict_events`, giving UI and API clients a
+  durable event stream for recorded, reviewed, revalidated, and resolved
+  conflicts.
 - Improve deterministic schema dependency planning for safe view/trigger
   reorderings while keeping cyclic or semantic ambiguity review-only.
 - Keep aarch64 macOS release artifacts and APFS sparsebundle E2E runs green for

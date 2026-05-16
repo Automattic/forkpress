@@ -76,8 +76,10 @@ first-class records. Each conflict includes a `conflict_class`, a
 available. It also includes the conflict `lifecycle_state`, `next_action`, and
 latest resolution metadata so clients can distinguish unreviewed, deferred,
 needs-action, reviewed, validated, and resolved conflicts without parsing review
-notes. UI clients should consume those fields instead of inferring behavior from
-raw `conflict_type` strings.
+notes. Conflict lifecycle changes are also recorded in an append-only
+`merge_conflict_events` stream, and audit JSON exposes the latest event summary.
+UI clients should consume those fields instead of inferring behavior from raw
+`conflict_type` strings or free-form notes.
 
 ## What gets audited
 

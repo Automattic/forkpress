@@ -2126,22 +2126,34 @@ try {
         assert_same($contract_conflict['lifecycle_state'], 'unreviewed', 'unreviewed row delete conflict advertises lifecycle state');
         assert_same($contract_conflict['next_action'], 'review', 'unreviewed row delete conflict advertises review as next action');
         assert_same((int)$contract_conflict['resolution_count'], 0, 'unreviewed row delete conflict advertises no resolutions');
+        assert_same((int)$contract_conflict['event_count'], 1, 'unreviewed row delete conflict records one lifecycle event');
+        assert_same($contract_conflict['latest_event_type'], 'recorded', 'unreviewed row delete conflict advertises recorded event');
+        assert_same($contract_conflict['latest_event_lifecycle_state'], 'unreviewed', 'unreviewed row delete conflict advertises event lifecycle state');
     }
 
     cow_merge_review_record($options_edit_delete_metadata, 'conflict', $options_contract_conflict_id, 'pending', 'Defer option conflict review.', 'cow-smoke');
     $pending_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts']);
     assert_same($pending_audit['conflicts'][0]['lifecycle_state'], 'deferred', 'pending review note advertises deferred lifecycle state');
     assert_same($pending_audit['conflicts'][0]['next_action'], 'wait', 'pending review note advertises wait next action');
+    assert_same((int)$pending_audit['conflicts'][0]['event_count'], 2, 'pending review appends a conflict lifecycle event');
+    assert_same($pending_audit['conflicts'][0]['latest_event_type'], 'review-pending', 'pending review advertises latest conflict event');
+    assert_same($pending_audit['conflicts'][0]['latest_event_lifecycle_state'], 'deferred', 'pending review advertises latest event lifecycle state');
 
     cow_merge_review_record($options_edit_delete_metadata, 'conflict', $options_contract_conflict_id, 'needs-action', 'Revalidate option conflict before resolving.', 'cow-smoke');
     $needs_action_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts']);
     assert_same($needs_action_audit['conflicts'][0]['lifecycle_state'], 'needs-action', 'needs-action review note advertises needs-action lifecycle state');
     assert_same($needs_action_audit['conflicts'][0]['next_action'], 'revalidate', 'needs-action row conflict advertises revalidate next action');
+    assert_same((int)$needs_action_audit['conflicts'][0]['event_count'], 3, 'needs-action review appends a conflict lifecycle event');
+    assert_same($needs_action_audit['conflicts'][0]['latest_event_type'], 'review-needs-action', 'needs-action review advertises latest conflict event');
+    assert_same($needs_action_audit['conflicts'][0]['latest_event_lifecycle_state'], 'needs-action', 'needs-action review advertises latest event lifecycle state');
 
     cow_merge_review_record($options_edit_delete_metadata, 'conflict', $options_contract_conflict_id, 'reviewed', 'Reviewed option conflict.', 'cow-smoke');
     $reviewed_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts']);
     assert_same($reviewed_audit['conflicts'][0]['lifecycle_state'], 'reviewed', 'reviewed conflict advertises reviewed lifecycle state');
     assert_same($reviewed_audit['conflicts'][0]['next_action'], 'resolve', 'reviewed generic conflict advertises resolve next action');
+    assert_same((int)$reviewed_audit['conflicts'][0]['event_count'], 4, 'reviewed note appends a conflict lifecycle event');
+    assert_same($reviewed_audit['conflicts'][0]['latest_event_type'], 'review-reviewed', 'reviewed conflict advertises latest conflict event');
+    assert_same($reviewed_audit['conflicts'][0]['latest_event_lifecycle_state'], 'reviewed', 'reviewed conflict advertises latest event lifecycle state');
 
     cow_merge_resolve_conflict($options_edit_delete_metadata, $options_contract_conflict_id, 'target', true, 'Keep target option deletion.', 'cow-smoke');
     $resolved_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts']);
@@ -2150,6 +2162,10 @@ try {
     assert_same((int)$resolved_audit['conflicts'][0]['resolution_count'], 1, 'applied resolution increments conflict resolution count');
     assert_same($resolved_audit['conflicts'][0]['latest_resolution_choice'], 'target', 'applied resolution advertises latest resolution choice');
     assert_same((int)$resolved_audit['conflicts'][0]['latest_resolution_applied'], 1, 'applied resolution advertises latest resolution applied flag');
+    assert_same((int)$resolved_audit['conflicts'][0]['event_count'], 5, 'applied resolution appends a conflict lifecycle event');
+    assert_same($resolved_audit['conflicts'][0]['latest_event_type'], 'resolution-applied', 'resolved conflict advertises latest resolution event');
+    assert_same($resolved_audit['conflicts'][0]['latest_event_lifecycle_state'], 'resolved', 'resolved conflict advertises latest event lifecycle state');
+    assert_same($resolved_audit['conflicts'][0]['latest_event_actor'], 'cow-smoke', 'resolved conflict advertises latest event actor');
 
     $plugin_contract = cow_merge_conflict_resolution_contract('__plugins__', 'plugin-demo-finding');
     assert_same($plugin_contract['class'], 'plugin', 'plugin conflicts advertise plugin class');

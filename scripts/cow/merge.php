@@ -3706,6 +3706,23 @@ SQL, 'failed to create metadata table merge_conflicts');
     cow_merge_ensure_metadata_column($meta, 'merge_conflicts', 'source_row_payload', 'TEXT');
     cow_merge_ensure_metadata_column($meta, 'merge_conflicts', 'target_row_payload', 'TEXT');
     cow_merge_exec_checked($meta, <<<'SQL'
+CREATE TABLE IF NOT EXISTS merge_conflict_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conflict_id INTEGER NOT NULL,
+    run_id INTEGER NOT NULL,
+    event_type TEXT NOT NULL CHECK(event_type IN ('recorded', 'review-pending', 'review-needs-action', 'review-reviewed', 'resolution-applied', 'revalidation-required')),
+    actor TEXT NOT NULL,
+    note TEXT NOT NULL,
+    related_record_type TEXT,
+    related_record_id INTEGER,
+    lifecycle_state TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(conflict_id) REFERENCES merge_conflicts(id),
+    FOREIGN KEY(run_id) REFERENCES merge_runs(id)
+)
+SQL, 'failed to create metadata table merge_conflict_events');
+    cow_merge_exec_checked($meta, 'CREATE INDEX IF NOT EXISTS merge_conflict_events_conflict_idx ON merge_conflict_events(conflict_id, id)', 'failed to create metadata index merge_conflict_events_conflict_idx');
+    cow_merge_exec_checked($meta, <<<'SQL'
 CREATE TABLE IF NOT EXISTS merge_revalidations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     conflict_id INTEGER NOT NULL,
@@ -5941,6 +5958,54 @@ function cow_merge_latest_applied_resolution_choice(SQLite3 $meta, int $conflict
     return (string)$row['choice'];
 }
 
+function cow_merge_record_conflict_event(
+    SQLite3 $meta,
+    int $conflict_id,
+    int $run_id,
+    string $event_type,
+    string $actor,
+    string $note,
+    ?string $related_record_type,
+    ?int $related_record_id,
+    string $lifecycle_state
+): int {
+    $stmt = cow_merge_prepare_checked(
+        $meta,
+        'INSERT INTO merge_conflict_events ' .
+        '(conflict_id, run_id, event_type, actor, note, related_record_type, related_record_id, lifecycle_state) ' .
+        'VALUES (:conflict_id, :run_id, :event_type, :actor, :note, :related_record_type, :related_record_id, :lifecycle_state)',
+        'failed to prepare conflict event insert'
+    );
+    cow_merge_bind($stmt, ':conflict_id', $conflict_id);
+    cow_merge_bind($stmt, ':run_id', $run_id);
+    cow_merge_bind($stmt, ':event_type', $event_type);
+    cow_merge_bind($stmt, ':actor', $actor);
+    cow_merge_bind($stmt, ':note', $note);
+    cow_merge_bind($stmt, ':related_record_type', $related_record_type);
+    cow_merge_bind($stmt, ':related_record_id', $related_record_id);
+    cow_merge_bind($stmt, ':lifecycle_state', $lifecycle_state);
+    cow_merge_execute_checked($stmt, $meta, 'failed to record conflict event');
+    return (int)$meta->lastInsertRowID();
+}
+
+function cow_merge_review_conflict_event_type(string $status): string {
+    return match ($status) {
+        'pending' => 'review-pending',
+        'needs-action' => 'review-needs-action',
+        'reviewed' => 'review-reviewed',
+        default => throw new InvalidArgumentException('--status must be pending, needs-action, or reviewed'),
+    };
+}
+
+function cow_merge_review_conflict_lifecycle_state(string $status): string {
+    return match ($status) {
+        'pending' => 'deferred',
+        'needs-action' => 'needs-action',
+        'reviewed' => 'reviewed',
+        default => throw new InvalidArgumentException('--status must be pending, needs-action, or reviewed'),
+    };
+}
+
 function cow_merge_record_conflict(
     SQLite3 $meta,
     int $run_id,
@@ -6022,6 +6087,20 @@ function cow_merge_record_conflict(
     cow_merge_bind($stmt, ':chosen_hash', $chosen_hash);
     cow_merge_bind($stmt, ':resolver', 'target-wins');
     cow_merge_execute_checked($stmt, $meta, 'failed to record merge conflict');
+    if ($meta->changes() > 0) {
+        $conflict_id = (int)$meta->lastInsertRowID();
+        cow_merge_record_conflict_event(
+            $meta,
+            $conflict_id,
+            $run_id,
+            'recorded',
+            'forkpress',
+            "Recorded $type conflict for $table",
+            'conflict',
+            $conflict_id,
+            'unreviewed'
+        );
+    }
     return true;
 }
 
@@ -7530,16 +7609,31 @@ function cow_merge_review_record(
             'resolution' => 'merge_resolutions',
             default => throw new InvalidArgumentException('--record must be conflict, decision, or resolution'),
         };
-        $stmt = cow_merge_prepare_checked($meta, "SELECT id FROM $table WHERE id = :id", "failed to prepare $record_type lookup");
+        $select = $record_type === 'conflict' ? 'id, run_id' : 'id';
+        $stmt = cow_merge_prepare_checked($meta, "SELECT $select FROM $table WHERE id = :id", "failed to prepare $record_type lookup");
         cow_merge_bind($stmt, ':id', $record_id);
         $res = cow_merge_execute_checked($stmt, $meta, "failed to execute $record_type lookup");
-        if (!$res->fetchArray(SQLITE3_ASSOC)) {
+        $record = $res->fetchArray(SQLITE3_ASSOC);
+        if (!$record) {
             cow_merge_result_finalize_checked($res, "failed to finalize $record_type lookup");
             throw new InvalidArgumentException("$record_type #$record_id does not exist in merge metadata");
         }
         cow_merge_result_finalize_checked($res, "failed to finalize $record_type lookup");
 
         $review_note_id = cow_merge_insert_review_note($meta, $record_type, $record_id, $status, $note, $reviewer);
+        if ($record_type === 'conflict') {
+            cow_merge_record_conflict_event(
+                $meta,
+                $record_id,
+                (int)$record['run_id'],
+                cow_merge_review_conflict_event_type($status),
+                $reviewer,
+                $note,
+                'review_note',
+                $review_note_id,
+                cow_merge_review_conflict_lifecycle_state($status)
+            );
+        }
         cow_merge_exec_checked($meta, 'COMMIT', 'failed to commit review note metadata transaction');
         $transaction_started = false;
         return [
@@ -7674,8 +7768,9 @@ function cow_merge_revalidate_reviewed_conflicts(
             );
             $current_source_payload = $staleness['current_source_payload'] ?? (string)$conflict['source_payload'];
             $current_target_payload = $staleness['current_target_payload'] ?? null;
+            $revalidation_id = null;
             if (is_string($current_source_payload) && is_string($current_target_payload)) {
-                cow_merge_record_revalidation(
+                $revalidation_id = cow_merge_record_revalidation(
                     $meta,
                     $conflict_id,
                     $review_note_id,
@@ -7687,6 +7782,17 @@ function cow_merge_revalidate_reviewed_conflicts(
                     isset($staleness['replacement_conflict_id']) ? (int)$staleness['replacement_conflict_id'] : null
                 );
             }
+            cow_merge_record_conflict_event(
+                $meta,
+                $conflict_id,
+                (int)$conflict['run_id'],
+                'revalidation-required',
+                $reviewer,
+                cow_merge_revalidation_note($review, $staleness),
+                $revalidation_id === null ? 'review_note' : 'revalidation',
+                $revalidation_id ?? $review_note_id,
+                'needs-action'
+            );
             $carried++;
         }
         cow_merge_exec_checked($meta, 'COMMIT', 'failed to commit review revalidation transaction');
@@ -8060,7 +8166,31 @@ function cow_merge_record_resolution(
     cow_merge_bind($stmt, ':previous_payload', cow_merge_payload_json($previous));
     cow_merge_bind($stmt, ':resolved_payload', cow_merge_payload_json($resolved));
     cow_merge_execute_checked($stmt, $meta, 'failed to record merge resolution');
-    return (int)$meta->lastInsertRowID();
+    $resolution_id = (int)$meta->lastInsertRowID();
+    $run_stmt = cow_merge_prepare_checked(
+        $meta,
+        'SELECT run_id FROM merge_conflicts WHERE id = :conflict_id',
+        'failed to prepare conflict run lookup for resolution event'
+    );
+    cow_merge_bind($run_stmt, ':conflict_id', $conflict_id);
+    $run_res = cow_merge_execute_checked($run_stmt, $meta, 'failed to read conflict run for resolution event');
+    $run_row = $run_res->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($run_res, 'failed to finalize conflict run lookup for resolution event');
+    if (!$run_row) {
+        throw new RuntimeException("conflict #$conflict_id does not exist in merge metadata");
+    }
+    cow_merge_record_conflict_event(
+        $meta,
+        $conflict_id,
+        (int)$run_row['run_id'],
+        'resolution-applied',
+        $reviewer,
+        $note,
+        'resolution',
+        $resolution_id,
+        'resolved'
+    );
+    return $resolution_id;
 }
 
 function cow_merge_exec_checked(SQLite3 $db, string $sql, string $message): void {
@@ -12097,6 +12227,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
         }
         $review_notes_exist = cow_merge_audit_has_table($db, 'merge_review_notes');
         $resolutions_exist = cow_merge_audit_has_table($db, 'merge_resolutions');
+        $conflict_events_exist = cow_merge_audit_has_table($db, 'merge_conflict_events');
         $conflict_review_select = $review_notes_exist
             ? ", (SELECT rn.status FROM merge_review_notes rn WHERE rn.record_type = 'conflict' AND rn.record_id = merge_conflicts.id ORDER BY rn.id DESC LIMIT 1) AS review_status, " .
               "(SELECT rn.note FROM merge_review_notes rn WHERE rn.record_type = 'conflict' AND rn.record_id = merge_conflicts.id ORDER BY rn.id DESC LIMIT 1) AS review_note, " .
@@ -12110,6 +12241,14 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
               "(SELECT mr.applied FROM merge_resolutions mr WHERE mr.conflict_id = merge_conflicts.id ORDER BY mr.id DESC LIMIT 1) AS latest_resolution_applied, " .
               "(SELECT mr.status FROM merge_resolutions mr WHERE mr.conflict_id = merge_conflicts.id ORDER BY mr.id DESC LIMIT 1) AS latest_resolution_status"
             : ', 0 AS resolution_count, NULL AS latest_resolution_id, NULL AS latest_resolution_choice, NULL AS latest_resolution_applied, NULL AS latest_resolution_status';
+        $conflict_event_select = $conflict_events_exist
+            ? ", (SELECT COUNT(*) FROM merge_conflict_events ce WHERE ce.conflict_id = merge_conflicts.id) AS event_count, " .
+              "(SELECT ce.id FROM merge_conflict_events ce WHERE ce.conflict_id = merge_conflicts.id ORDER BY ce.id DESC LIMIT 1) AS latest_event_id, " .
+              "(SELECT ce.event_type FROM merge_conflict_events ce WHERE ce.conflict_id = merge_conflicts.id ORDER BY ce.id DESC LIMIT 1) AS latest_event_type, " .
+              "(SELECT ce.lifecycle_state FROM merge_conflict_events ce WHERE ce.conflict_id = merge_conflicts.id ORDER BY ce.id DESC LIMIT 1) AS latest_event_lifecycle_state, " .
+              "(SELECT ce.actor FROM merge_conflict_events ce WHERE ce.conflict_id = merge_conflicts.id ORDER BY ce.id DESC LIMIT 1) AS latest_event_actor, " .
+              "(SELECT ce.created_at FROM merge_conflict_events ce WHERE ce.conflict_id = merge_conflicts.id ORDER BY ce.id DESC LIMIT 1) AS latest_event_at"
+            : ', 0 AS event_count, NULL AS latest_event_id, NULL AS latest_event_type, NULL AS latest_event_lifecycle_state, NULL AS latest_event_actor, NULL AS latest_event_at';
         $decision_review_select = $review_notes_exist
             ? ", (SELECT rn.status FROM merge_review_notes rn WHERE rn.record_type = 'decision' AND rn.record_id = merge_decisions.id ORDER BY rn.id DESC LIMIT 1) AS review_status, " .
               "(SELECT rn.note FROM merge_review_notes rn WHERE rn.record_type = 'decision' AND rn.record_id = merge_decisions.id ORDER BY rn.id DESC LIMIT 1) AS review_note, " .
@@ -12158,7 +12297,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
                 $db,
                 'merge_conflicts',
                 "SELECT merge_conflicts.id AS id, run_id, table_name, row_identity, column_name, conflict_type, resolver, resolved_at, created_at, " .
-                "base_payload, source_payload, target_payload, chosen_payload, r.source_db, r.target_db, r.source_branch, r.target_branch$conflict_review_select$conflict_resolution_select " .
+                "base_payload, source_payload, target_payload, chosen_payload, r.source_db, r.target_db, r.source_branch, r.target_branch$conflict_review_select$conflict_resolution_select$conflict_event_select " .
                 "FROM merge_conflicts JOIN merge_runs r ON r.id = merge_conflicts.run_id $conflict_filter ORDER BY merge_conflicts.id DESC LIMIT :limit",
                 $conflict_params
             )))));
@@ -12392,6 +12531,9 @@ function cow_merge_print_audit_text(array $report): void {
             $after_revalidate = !empty($conflict['after_revalidate_supported']) ? 'yes' : 'no';
             echo "     class={$conflict['conflict_class']} strategy={$conflict['resolution_strategy']} choices=$choices generic-resolver=$generic after-revalidate=$after_revalidate\n";
             echo "     lifecycle={$conflict['lifecycle_state']} next-action={$conflict['next_action']} resolutions={$conflict['resolution_count']}\n";
+            if (($conflict['latest_event_id'] ?? null) !== null && (string)$conflict['latest_event_id'] !== '') {
+                echo "     latest-event=#{$conflict['latest_event_id']} type={$conflict['latest_event_type']} state={$conflict['latest_event_lifecycle_state']} actor={$conflict['latest_event_actor']} at={$conflict['latest_event_at']} events={$conflict['event_count']}\n";
+            }
             if (($conflict['latest_resolution_id'] ?? null) !== null && (string)$conflict['latest_resolution_id'] !== '') {
                 echo "     latest-resolution=#{$conflict['latest_resolution_id']} choice={$conflict['latest_resolution_choice']} status={$conflict['latest_resolution_status']} applied={$conflict['latest_resolution_applied']}\n";
             }
