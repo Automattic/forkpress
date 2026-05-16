@@ -69,6 +69,13 @@ Source and target choices are validated before they mutate target state. If a
 resolution cannot be recorded after a file or database mutation, ForkPress rolls
 the target back rather than keeping a partial result.
 
+`merge-audit --format json --records conflicts` treats conflicts as
+first-class records. Each conflict includes a `conflict_class`, a
+`resolution_strategy`, executable `resolution_choices`, whether the generic
+`merge-resolve conflict` path supports it, and whether `--after-revalidate` is
+available. UI clients should consume those fields instead of inferring behavior
+from raw `conflict_type` strings.
+
 ## What gets audited
 
 ForkPress records:

@@ -2114,6 +2114,26 @@ try {
         2,
         'options edit/delete defaults the changed source options to target-wins before review'
     );
+    $options_contract_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts']);
+    assert_same(count($options_contract_audit['conflicts']), 2, 'conflict audit returns both option edit/delete conflicts');
+    foreach ($options_contract_audit['conflicts'] as $contract_conflict) {
+        assert_same($contract_conflict['conflict_class'], 'row', 'row delete conflict advertises row class');
+        assert_same($contract_conflict['resolution_strategy'], 'row-choice', 'row delete conflict advertises row choice strategy');
+        assert_same($contract_conflict['resolution_choices'], ['source', 'target'], 'row delete conflict advertises executable source and target choices');
+        assert_same($contract_conflict['generic_resolver'], true, 'row delete conflict advertises generic resolver support');
+        assert_same($contract_conflict['after_revalidate_supported'], true, 'row delete conflict advertises after-revalidate support');
+    }
+
+    $plugin_contract = cow_merge_conflict_resolution_contract('__plugins__', 'plugin-demo-finding');
+    assert_same($plugin_contract['class'], 'plugin', 'plugin conflicts advertise plugin class');
+    assert_same($plugin_contract['strategy'], 'plugin-validator', 'plugin conflicts require validator strategy');
+    assert_same($plugin_contract['choices'], [], 'plugin conflicts do not advertise generic source/target choices');
+    assert_same($plugin_contract['generic_resolver'], false, 'plugin conflicts do not advertise generic resolver support');
+
+    $schema_contract = cow_merge_conflict_resolution_contract('plugin_items', 'schema-source-added-view');
+    assert_same($schema_contract['class'], 'schema', 'schema conflicts advertise schema class');
+    assert_same($schema_contract['choices'], ['source', 'target'], 'schema conflicts advertise source and target choices');
+    assert_same($schema_contract['after_revalidate'], false, 'schema conflicts do not advertise after-revalidate support yet');
 } finally {
     smoke_remove_tree($tmp);
 }
