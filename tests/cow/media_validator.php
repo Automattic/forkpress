@@ -119,6 +119,21 @@ function insert_attachment_raw_metadata(SQLite3 $db, string $title, string $atta
     return $attachment_id;
 }
 
+function insert_attachment_with_single_meta(SQLite3 $db, string $title, string $meta_key, string $meta_value): int {
+    $stmt = $db->prepare("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, guid) VALUES (:title, '', 'inherit', 'attachment', '')");
+    $stmt->bindValue(':title', $title, SQLITE3_TEXT);
+    $stmt->execute();
+    $attachment_id = (int)$db->lastInsertRowID();
+
+    $meta_stmt = $db->prepare('INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, :meta_key, :meta_value)');
+    $meta_stmt->bindValue(':post_id', $attachment_id, SQLITE3_INTEGER);
+    $meta_stmt->bindValue(':meta_key', $meta_key, SQLITE3_TEXT);
+    $meta_stmt->bindValue(':meta_value', $meta_value, SQLITE3_TEXT);
+    $meta_stmt->execute();
+
+    return $attachment_id;
+}
+
 define('FORKPRESS_COW_MERGE_TESTS', true);
 require_once __DIR__ . '/../../scripts/cow/merge.php';
 
@@ -146,8 +161,8 @@ $target_root = rtrim((string)getenv('FORKPRESS_MERGE_TARGET_ROOT'), '/');
 $uploads_root = $target_root === '' ? '' : $target_root . '/wp-content/uploads';
 $res = $db->query("SELECT p.ID, f.meta_value AS attached_file, m.meta_value AS metadata
     FROM wp_posts p
-    JOIN wp_postmeta f ON f.post_id = p.ID AND f.meta_key = '_wp_attached_file'
-    JOIN wp_postmeta m ON m.post_id = p.ID AND m.meta_key = '_wp_attachment_metadata'
+    LEFT JOIN wp_postmeta f ON f.post_id = p.ID AND f.meta_key = '_wp_attached_file'
+    LEFT JOIN wp_postmeta m ON m.post_id = p.ID AND m.meta_key = '_wp_attachment_metadata'
     WHERE p.post_type = 'attachment'
     ORDER BY p.ID");
 $findings = [];
@@ -159,6 +174,26 @@ $unsafe_upload_path = static function (string $relative_file): bool {
         in_array('..', explode('/', str_replace('\\', '/', $relative_file)), true);
 };
 while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    if ($row['attached_file'] === null || $row['metadata'] === null) {
+        foreach (['_wp_attached_file' => $row['attached_file'], '_wp_attachment_metadata' => $row['metadata']] as $meta_key => $meta_value) {
+            if ($meta_value !== null) {
+                continue;
+            }
+            $findings[] = [
+                'plugin' => 'forkpress-wp-media',
+                'object' => 'attachment:' . $row['ID'],
+                'reason' => 'attachment is missing required media metadata',
+                'type' => 'plugin-wp-media-missing-metadata',
+                'tables' => ['wp_posts', 'wp_postmeta'],
+                'validator' => 'forkpress-wp-media@1',
+                'candidate' => [
+                    'attachment_id' => (int)$row['ID'],
+                    'missing_meta_key' => $meta_key,
+                ],
+            ];
+        }
+        continue;
+    }
     $metadata = @unserialize((string)$row['metadata']);
     if (!is_array($metadata)) {
         $findings[] = [
@@ -650,6 +685,23 @@ PHP);
         '2026/05/source-invalid-metadata.jpg',
         'not serialized attachment metadata'
     );
+    $missing_attachment_metadata_id = insert_attachment_with_single_meta(
+        $db,
+        'Source media missing attachment metadata',
+        '_wp_attached_file',
+        '2026/05/source-missing-attachment-metadata.jpg'
+    );
+    $missing_attached_file_id = insert_attachment_with_single_meta(
+        $db,
+        'Source media missing attached file metadata',
+        '_wp_attachment_metadata',
+        serialize([
+            'file' => '2026/05/source-missing-attached-file.jpg',
+            'width' => 640,
+            'height' => 480,
+            'sizes' => [],
+        ])
+    );
     $db->close();
 
     $result = cow_merge_branch_state(
@@ -666,7 +718,7 @@ PHP);
 
     assert_same($result['status'], 'completed_with_conflicts', 'media validator holds incomplete generated-size metadata for review');
     assert_same((int)($result['plugin_validators'] ?? 0), 1, 'media validator is discovered from mu-plugins during merge');
-    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 19, 'media validator records invalid metadata, dimensions, filesize drift, generated-size, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
+    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 21, 'media validator records missing required metadata, invalid metadata, dimensions, filesize drift, generated-size, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
     assert_same(
         scalar($target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-generated-missing-file-key.jpg',
@@ -703,6 +755,18 @@ PHP);
     $invalid_preview = (string)($invalid_audit['conflicts'][0]['chosen_preview'] ?? '');
     assert_true(str_contains($invalid_preview, 'source-invalid-metadata.jpg'), 'media validator invalid-metadata audit includes the affected attachment');
     assert_true(str_contains($invalid_preview, (string)$invalid_metadata_id), 'media validator invalid-metadata audit includes the affected attachment ID');
+
+    $missing_metadata_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-media-missing-metadata',
+    ]);
+    assert_same(count($missing_metadata_audit['conflicts']), 2, 'media validator exposes missing required attachment metadata as plugin-scoped audit conflicts');
+    $missing_metadata_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $missing_metadata_audit['conflicts']));
+    assert_true(str_contains($missing_metadata_preview, '_wp_attachment_metadata'), 'media validator missing-metadata audit includes the missing attachment metadata key');
+    assert_true(str_contains($missing_metadata_preview, '_wp_attached_file'), 'media validator missing-metadata audit includes the missing attached-file key');
+    assert_true(str_contains($missing_metadata_preview, (string)$missing_attachment_metadata_id), 'media validator missing-metadata audit includes the missing attachment metadata ID');
+    assert_true(str_contains($missing_metadata_preview, (string)$missing_attached_file_id), 'media validator missing-metadata audit includes the missing attached-file ID');
 
     $audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'plugin',
