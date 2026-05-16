@@ -120,6 +120,29 @@ function create_wp_post_parent_reference_db(string $path): void {
     $db->close();
 }
 
+function create_wp_post_author_reference_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_users (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_login TEXT NOT NULL,
+        user_email TEXT NOT NULL DEFAULT ''
+    )");
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_title TEXT NOT NULL DEFAULT '',
+        post_content TEXT NOT NULL DEFAULT '',
+        post_status TEXT NOT NULL DEFAULT 'publish',
+        post_type TEXT NOT NULL DEFAULT 'post',
+        post_name TEXT NOT NULL DEFAULT '',
+        post_author INTEGER NOT NULL DEFAULT 0
+    )");
+    $db->exec("INSERT INTO wp_users (ID, user_login, user_email) VALUES (44, 'deleted_post_author', 'deleted-post-author@example.test')");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, post_author) VALUES
+        (45, 'Page by deleted author', '<!-- wp:paragraph --><p>Authored page</p><!-- /wp:paragraph -->', 'publish', 'page', 'page-by-deleted-author', 44),
+        (46, 'Attachment by deleted author', '', 'inherit', 'attachment', 'attachment-by-deleted-author', 44)");
+    $db->close();
+}
+
 function create_wp_menu_ref_db(string $path): void {
     $db = open_db($path);
     $db->exec("CREATE TABLE wp_posts (
@@ -564,6 +587,92 @@ PHP);
     assert_true(str_contains($post_parent_preview, '"missing_parent_id":37'), 'WordPress post-parent audit includes the missing parent ID');
     assert_true(str_contains($post_parent_preview, '"field":"post_parent"'), 'WordPress post-parent audit includes the stale field name');
     assert_true(str_contains($post_parent_preview, '"post_type":"attachment"'), 'WordPress post-parent audit includes attachment children');
+
+    $post_author_base_root = $tmp . '/post-author-base';
+    $post_author_source_root = $tmp . '/post-author-source';
+    $post_author_target_root = $tmp . '/post-author-target';
+    $post_author_base = $post_author_base_root . '/wp-content/database/.ht.sqlite';
+    $post_author_source = $post_author_source_root . '/wp-content/database/.ht.sqlite';
+    $post_author_target = $post_author_target_root . '/wp-content/database/.ht.sqlite';
+    $post_author_metadata = $tmp . '/.forkpress/cow/merge/wp-post-author-validator-metadata.sqlite';
+    $post_author_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-post-author-validator.json';
+
+    mkdir($post_author_base_root . '/wp-content/database', 0777, true);
+    create_wp_post_author_reference_db($post_author_base);
+    write_test_file($post_author_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query("SELECT ID, post_type, post_author FROM wp_posts WHERE post_author > 0");
+$findings = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    $author_id = (int)$row['post_author'];
+    $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_users WHERE ID = $author_id");
+    if ($exists === 0) {
+        $findings[] = [
+            'plugin' => 'forkpress-wp-post-author-refs',
+            'object' => 'post:' . $row['ID'],
+            'reason' => 'post author references a missing user',
+            'type' => 'plugin-wp-post-author-missing-user',
+            'tables' => ['wp_posts', 'wp_users'],
+            'validator' => 'forkpress-wp-post-author-refs@1',
+            'candidate' => [
+                'post_id' => (int)$row['ID'],
+                'post_type' => (string)$row['post_type'],
+                'field' => 'post_author',
+                'missing_user_id' => $author_id,
+            ],
+        ];
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    copy_tree_for_test($post_author_base_root, $post_author_source_root);
+    copy_tree_for_test($post_author_base_root, $post_author_target_root);
+    cow_merge_capture_file_base($post_author_base_root, $post_author_file_base);
+    cow_merge_allocate_autoincrement_bands($post_author_source, $post_author_metadata, 'feature-wp-post-author-source');
+    cow_merge_allocate_autoincrement_bands($post_author_target, $post_author_metadata, 'main');
+
+    $db = open_db($post_author_source);
+    $db->exec('DELETE FROM wp_users WHERE ID = 44');
+    $db->close();
+
+    $db = open_db($post_author_target);
+    $db->exec("UPDATE wp_posts SET post_title = 'Target page still pointing at deleted author' WHERE ID = 45");
+    $db->exec("UPDATE wp_posts SET post_title = 'Target attachment still pointing at deleted author' WHERE ID = 46");
+    $db->close();
+
+    $post_author_result = cow_merge_branch_state(
+        $post_author_base,
+        $post_author_source,
+        $post_author_target,
+        $post_author_metadata,
+        'feature-wp-post-author-source',
+        'main',
+        $post_author_file_base,
+        $post_author_source_root,
+        $post_author_target_root
+    );
+
+    assert_same($post_author_result['status'], 'completed_with_conflicts', 'WordPress post-author validator holds missing author users for review');
+    assert_same((int)($post_author_result['plugin_validators'] ?? 0), 1, 'WordPress post-author validator is discovered from mu-plugins during merge');
+    assert_same((int)($post_author_result['plugin_validator_conflicts'] ?? 0), 2, 'WordPress post-author validator records missing author references for posts and attachments');
+    assert_same((int)scalar($post_author_target, 'SELECT COUNT(*) FROM wp_users WHERE ID = 44'), 0, 'WordPress post-author validator leaves the source author deletion staged for review');
+    assert_same(scalar($post_author_target, 'SELECT post_title FROM wp_posts WHERE ID = 45'), 'Target page still pointing at deleted author', 'WordPress post-author validator preserves the target page edit');
+    assert_same(scalar($post_author_target, 'SELECT post_title FROM wp_posts WHERE ID = 46'), 'Target attachment still pointing at deleted author', 'WordPress post-author validator preserves the target attachment edit');
+
+    $post_author_audit = cow_merge_audit_report($post_author_metadata, (int)$post_author_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-post-author-missing-user',
+    ]);
+    assert_same(count($post_author_audit['conflicts']), 2, 'WordPress post-author validator exposes missing authors as plugin-scoped audit conflicts');
+    $post_author_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $post_author_audit['conflicts']));
+    assert_true(str_contains($post_author_preview, '"missing_user_id":44'), 'WordPress post-author audit includes the missing user ID');
+    assert_true(str_contains($post_author_preview, '"field":"post_author"'), 'WordPress post-author audit includes the stale field name');
+    assert_true(str_contains($post_author_preview, '"post_type":"attachment"'), 'WordPress post-author audit includes attachment authors');
 
     $menu_base_root = $tmp . '/menu-base';
     $menu_source_root = $tmp . '/menu-source';
