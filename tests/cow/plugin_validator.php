@@ -213,6 +213,99 @@ PHP);
     $preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $audit['conflicts']));
     assert_true(str_contains($preview, 'plugin-validator-missing.dat'), 'plugin audit exposes missing plugin file context');
     assert_true(str_contains($preview, '"child_id":9999'), 'plugin audit exposes mismatched JSON graph context');
+
+    $json_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-graph-json-drift' ORDER BY id ASC LIMIT 1");
+    assert_true($json_conflict_id > 0, 'plugin validator fixture records a JSON graph conflict for revalidation');
+    cow_merge_review_record(
+        $metadata,
+        'conflict',
+        $json_conflict_id,
+        'reviewed',
+        'plugin graph validator needs an app-specific repair',
+        'cow-test'
+    );
+
+    $initial_revalidation = cow_merge_revalidate_reviewed_conflicts($metadata, (int)$result['run_id'], 'cow-revalidate');
+    assert_same($initial_revalidation['reviewed'], 1, 'plugin revalidation sees the reviewed validator conflict');
+    assert_same($initial_revalidation['stale'], 0, 'plugin revalidation does not infer stale state without replacement validator evidence');
+    assert_same($initial_revalidation['carried'], 0, 'plugin revalidation does not carry plugin conflicts without replacement evidence');
+
+    $identical = cow_merge_record_plugin_validator_conflicts($metadata, (int)$result['run_id'], [
+        [
+            'plugin' => 'forkpress-plugin-graph',
+            'object' => 'child:' . $child_id,
+            'reason' => 'plugin child JSON graph does not match the merged row graph',
+            'type' => 'plugin-graph-json-drift',
+            'tables' => ['plugin_graph_child'],
+            'validator' => 'forkpress-plugin-graph@1',
+            'candidate' => [
+                'child_id' => $child_id,
+                'parent_id' => $parent_id,
+                'graph' => [
+                    'child_id' => 9999,
+                    'parent_id' => $parent_id,
+                ],
+            ],
+        ],
+    ]);
+    assert_same($identical['conflicts'], 1, 'identical plugin validator rerun keeps the same active conflict');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-graph-json-drift'"),
+        1,
+        'identical plugin validator rerun records no duplicate replacement conflict'
+    );
+
+    $replacement = cow_merge_record_plugin_validator_conflicts($metadata, (int)$result['run_id'], [
+        [
+            'plugin' => 'forkpress-plugin-graph',
+            'object' => 'child:' . $child_id,
+            'reason' => 'plugin child JSON graph still does not match after validator rerun',
+            'type' => 'plugin-graph-json-drift',
+            'tables' => ['plugin_graph_child'],
+            'validator' => 'forkpress-plugin-graph@1',
+            'candidate' => [
+                'child_id' => $child_id,
+                'parent_id' => $parent_id,
+                'graph' => [
+                    'child_id' => 123456,
+                    'parent_id' => $parent_id,
+                ],
+            ],
+        ],
+    ]);
+    assert_same($replacement['conflicts'], 1, 'plugin validator rerun records replacement evidence for changed graph findings');
+    $replacement_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-graph-json-drift' AND id > $json_conflict_id ORDER BY id DESC LIMIT 1");
+    assert_true($replacement_conflict_id > $json_conflict_id, 'plugin validator replacement evidence is stored as a newer conflict');
+
+    $revalidated = cow_merge_revalidate_reviewed_conflicts($metadata, (int)$result['run_id'], 'cow-revalidate');
+    assert_same($revalidated['reviewed'], 1, 'plugin revalidation still only carries reviewed validator conflicts');
+    assert_same($revalidated['stale'], 1, 'plugin revalidation treats changed validator evidence as stale');
+    assert_same($revalidated['carried'], 1, 'plugin revalidation carries changed validator evidence to needs-action');
+    assert_same(
+        scalar($metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $json_conflict_id ORDER BY id DESC LIMIT 1"),
+        'replacement-evidence',
+        'plugin revalidation classifies changed validator evidence'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT replacement_conflict_id FROM merge_revalidations WHERE conflict_id = $json_conflict_id ORDER BY id DESC LIMIT 1"),
+        $replacement_conflict_id,
+        'plugin revalidation links to the replacement validator conflict'
+    );
+
+    $revalidated_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'review_status' => 'needs-action',
+    ]);
+    $reviewed_json_conflicts = array_values(array_filter($revalidated_audit['conflicts'], fn($conflict) => (int)($conflict['id'] ?? 0) === $json_conflict_id));
+    assert_same(count($reviewed_json_conflicts), 1, 'plugin replacement evidence returns the original reviewed conflict to needs-action');
+    assert_same($reviewed_json_conflicts[0]['stale_status'] ?? null, 'stale', 'plugin audit marks changed validator evidence as stale');
+    assert_same((int)($reviewed_json_conflicts[0]['replacement_conflict_id'] ?? 0), $replacement_conflict_id, 'plugin audit exposes the live replacement conflict id');
+    assert_true(str_contains((string)($reviewed_json_conflicts[0]['current_target_preview'] ?? ''), '123456'), 'plugin audit exposes replacement validator evidence');
+
+    $revalidated_again = cow_merge_revalidate_reviewed_conflicts($metadata, (int)$result['run_id'], 'cow-revalidate');
+    assert_same($revalidated_again['carried'], 0, 'plugin revalidation does not duplicate carried replacement-evidence notes');
+    assert_same($revalidated_again['already_needs_action'], 1, 'plugin revalidation reports already-carried replacement evidence');
 } finally {
     remove_tree($tmp);
 }
