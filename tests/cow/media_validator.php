@@ -801,6 +801,14 @@ PHP);
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-original-image-subdir-scaled.jpg', "source subdir original_image scaled bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/nested/source-original-image-subdir-original.jpg', "source subdir original_image original bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-backup-missing-current.jpg', "source backup missing current image bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-backup-sizes-not-array.jpg', "source backup sizes not array bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-backup-incomplete.jpg', "source incomplete backup metadata bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-backup-filesize-current.jpg', "source backup filesize current bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-backup-filesize-original.jpg', "source backup filesize original bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-backup-mime-current.jpg', "source backup MIME current bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-backup-mime-original.png', "source backup MIME original bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-backup-dimensions-current.jpg', "source backup dimensions current bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-backup-dimensions-original.jpg', "source backup dimensions original bytes\n");
     $db = open_db($source);
     $attachment_id = insert_attachment($db, 'Source media generated missing file key', '2026/05/source-generated-missing-file-key.jpg', [
         'file' => '2026/05/source-generated-missing-file-key.jpg',
@@ -966,6 +974,68 @@ PHP);
         ],
         'sizes' => [],
     ]);
+    $backup_sizes_not_array_id = insert_attachment($db, 'Source media backup sizes not array', '2026/05/source-backup-sizes-not-array.jpg', [
+        'file' => '2026/05/source-backup-sizes-not-array.jpg',
+        'width' => 640,
+        'height' => 480,
+        'backup_sizes' => 'full-orig',
+        'sizes' => [],
+    ]);
+    $backup_incomplete_id = insert_attachment($db, 'Source media incomplete backup metadata', '2026/05/source-backup-incomplete.jpg', [
+        'file' => '2026/05/source-backup-incomplete.jpg',
+        'width' => 640,
+        'height' => 480,
+        'backup_sizes' => [
+            'full-orig' => [
+                'width' => 1200,
+                'height' => 900,
+            ],
+        ],
+        'sizes' => [],
+    ]);
+    $backup_filesize_drift_id = insert_attachment($db, 'Source media backup filesize drift', '2026/05/source-backup-filesize-current.jpg', [
+        'file' => '2026/05/source-backup-filesize-current.jpg',
+        'width' => 640,
+        'height' => 480,
+        'backup_sizes' => [
+            'full-orig' => [
+                'file' => 'source-backup-filesize-original.jpg',
+                'width' => 1200,
+                'height' => 900,
+                'filesize' => 1,
+                'mime-type' => 'image/jpeg',
+            ],
+        ],
+        'sizes' => [],
+    ]);
+    $backup_mime_drift_id = insert_attachment($db, 'Source media backup MIME drift', '2026/05/source-backup-mime-current.jpg', [
+        'file' => '2026/05/source-backup-mime-current.jpg',
+        'width' => 640,
+        'height' => 480,
+        'backup_sizes' => [
+            'full-orig' => [
+                'file' => 'source-backup-mime-original.png',
+                'width' => 1200,
+                'height' => 900,
+                'mime-type' => 'image/jpeg',
+            ],
+        ],
+        'sizes' => [],
+    ]);
+    $backup_dimensions_drift_id = insert_attachment($db, 'Source media backup dimensions drift', '2026/05/source-backup-dimensions-current.jpg', [
+        'file' => '2026/05/source-backup-dimensions-current.jpg',
+        'width' => 640,
+        'height' => 480,
+        'backup_sizes' => [
+            'full-orig' => [
+                'file' => 'source-backup-dimensions-original.jpg',
+                'width' => 0,
+                'height' => 900,
+                'mime-type' => 'image/jpeg',
+            ],
+        ],
+        'sizes' => [],
+    ]);
     $self_duplicate_id = insert_attachment($db, 'Source media self duplicate generated file', '2026/05/source-self-duplicate.jpg', [
         'file' => '2026/05/source-self-duplicate.jpg',
         'width' => 640,
@@ -1071,7 +1141,7 @@ PHP);
 
     assert_same($result['status'], 'completed_with_conflicts', 'media validator holds incomplete generated-size metadata for review');
     assert_same((int)($result['plugin_validators'] ?? 0), 1, 'media validator is discovered from mu-plugins during merge');
-    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 29, 'media validator records missing required metadata, invalid metadata, dimensions, image metadata, filesize and MIME drift, generated-size, original-image, backup-size, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
+    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 34, 'media validator records missing required metadata, invalid metadata, dimensions, image metadata, filesize and MIME drift, generated-size, original-image, backup-size, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
     assert_same(
         scalar($target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-generated-missing-file-key.jpg',
@@ -1178,12 +1248,13 @@ PHP);
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-media-filesize-drift',
     ]);
-    assert_same(count($filesize_audit['conflicts']), 2, 'media validator exposes original and generated filesize drift as plugin-scoped audit conflicts');
+    assert_same(count($filesize_audit['conflicts']), 3, 'media validator exposes original, generated, and backup filesize drift as plugin-scoped audit conflicts');
     $filesize_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $filesize_audit['conflicts']));
     assert_true(str_contains($filesize_preview, 'source-filesize-drift.jpg'), 'media validator filesize audit includes the affected attachment');
     assert_true(str_contains($filesize_preview, '"declared_filesize":1'), 'media validator filesize audit includes the declared filesize');
     assert_true(str_contains($filesize_preview, (string)$filesize_drift_id), 'media validator filesize audit includes the affected attachment ID');
     $generated_filesize_recorded = false;
+    $backup_filesize_recorded = false;
     $meta_db = open_db($metadata);
     $payloads = $meta_db->query("SELECT chosen_payload FROM merge_conflicts WHERE conflict_type = 'plugin-wp-media-filesize-drift'");
     while ($payload = $payloads->fetchArray(SQLITE3_ASSOC)) {
@@ -1191,18 +1262,23 @@ PHP);
         if (($decoded['candidate']['generated_file'] ?? null) === '2026/05/source-generated-filesize-150x150.jpg') {
             $generated_filesize_recorded = true;
         }
+        if (($decoded['candidate']['backup_file'] ?? null) === '2026/05/source-backup-filesize-original.jpg') {
+            $backup_filesize_recorded = true;
+        }
     }
     $payloads->finalize();
     $meta_db->close();
     assert_true($generated_filesize_recorded, 'media validator filesize audit payload identifies the affected generated file');
     assert_true(str_contains($filesize_preview, (string)$generated_filesize_drift_id), 'media validator filesize audit includes the generated filesize attachment ID');
+    assert_true($backup_filesize_recorded, 'media validator filesize audit payload identifies the affected backup file');
+    assert_true(str_contains($filesize_preview, (string)$backup_filesize_drift_id), 'media validator filesize audit includes the backup filesize attachment ID');
 
     $mime_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'plugin',
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-media-mime-drift',
     ]);
-    assert_same(count($mime_audit['conflicts']), 3, 'media validator exposes attachment, AVIF attachment, and generated-size MIME drift as plugin-scoped audit conflicts');
+    assert_same(count($mime_audit['conflicts']), 4, 'media validator exposes attachment, AVIF attachment, generated-size, and backup-size MIME drift as plugin-scoped audit conflicts');
     $mime_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $mime_audit['conflicts']));
     assert_true(str_contains($mime_preview, 'source-mime-drift.jpg'), 'media validator MIME drift audit includes the affected attachment');
     assert_true(str_contains($mime_preview, 'application/pdf'), 'media validator MIME drift audit includes the declared MIME type');
@@ -1214,6 +1290,7 @@ PHP);
     assert_true(str_contains($mime_preview, 'image/png'), 'media validator MIME drift audit includes the expected generated MIME type');
     assert_true(str_contains($mime_preview, (string)$generated_mime_drift_id), 'media validator MIME drift audit includes the generated-size attachment ID');
     $generated_mime_recorded = false;
+    $backup_mime_recorded = false;
     $meta_db = open_db($metadata);
     $payloads = $meta_db->query("SELECT chosen_payload FROM merge_conflicts WHERE conflict_type = 'plugin-wp-media-mime-drift'");
     while ($payload = $payloads->fetchArray(SQLITE3_ASSOC)) {
@@ -1221,10 +1298,15 @@ PHP);
         if (($decoded['candidate']['generated_file'] ?? null) === '2026/05/source-generated-mime-thumb.png') {
             $generated_mime_recorded = true;
         }
+        if (($decoded['candidate']['backup_file'] ?? null) === '2026/05/source-backup-mime-original.png') {
+            $backup_mime_recorded = true;
+        }
     }
     $payloads->finalize();
     $meta_db->close();
     assert_true($generated_mime_recorded, 'media validator MIME drift audit payload identifies the affected generated size');
+    assert_true($backup_mime_recorded, 'media validator MIME drift audit payload identifies the affected backup size');
+    assert_true(str_contains($mime_preview, (string)$backup_mime_drift_id), 'media validator MIME drift audit includes the backup-size attachment ID');
 
     $generated_dimension_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'plugin',
@@ -1236,6 +1318,21 @@ PHP);
     assert_true(str_contains($generated_dimension_preview, 'source-generated-dimensions.jpg'), 'media validator generated-dimensions audit includes the affected attachment');
     assert_true(str_contains($generated_dimension_preview, '"width":0'), 'media validator generated-dimensions audit includes the invalid generated width');
     assert_true(str_contains($generated_dimension_preview, (string)$generated_dimensions_id), 'media validator generated-dimensions audit includes the affected attachment ID');
+
+    $backup_dimension_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-media-backup-dimensions-drift',
+    ]);
+    assert_same(count($backup_dimension_audit['conflicts']), 1, 'media validator exposes invalid backup-size dimensions as a plugin-scoped audit conflict');
+    $backup_dimension_preview = (string)($backup_dimension_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_true(str_contains($backup_dimension_preview, 'source-backup-dimensions-current.jpg'), 'media validator backup-dimensions audit includes the affected attachment');
+    assert_true(str_contains($backup_dimension_preview, '"width":0'), 'media validator backup-dimensions audit includes the invalid backup width');
+    $backup_dimension_payload = cow_merge_decode_payload_json(
+        (string)scalar($metadata, "SELECT chosen_payload FROM merge_conflicts WHERE conflict_type = 'plugin-wp-media-backup-dimensions-drift' ORDER BY id DESC LIMIT 1"),
+        'media validator backup-dimensions payload'
+    );
+    assert_same($backup_dimension_payload['object'] ?? null, 'attachment:' . $backup_dimensions_drift_id, 'media validator backup-dimensions audit includes the affected attachment ID');
 
     $missing_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'plugin',
@@ -1266,6 +1363,20 @@ PHP);
     assert_true(str_contains($missing_preview, (string)$original_image_missing_id), 'media validator missing-file audit includes the missing original_image attachment ID');
     assert_true(str_contains($missing_preview, 'source-backup-missing-original.jpg'), 'media validator missing-file audit includes the affected backup image file');
     assert_true(str_contains($missing_preview, (string)$backup_missing_id), 'media validator missing-file audit includes the missing backup image attachment ID');
+
+    $backup_file_drift_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-media-backup-file-drift',
+    ]);
+    assert_same(count($backup_file_drift_audit['conflicts']), 2, 'media validator exposes malformed and incomplete backup-size metadata as plugin-scoped audit conflicts');
+    $backup_file_drift_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $backup_file_drift_audit['conflicts']));
+    assert_true(str_contains($backup_file_drift_preview, 'source-backup-sizes-not-array.jpg'), 'media validator backup-file drift audit includes malformed backup_sizes attachment');
+    assert_true(str_contains($backup_file_drift_preview, '"backup_sizes_type":"string"'), 'media validator backup-file drift audit records malformed backup_sizes type');
+    assert_true(str_contains($backup_file_drift_preview, (string)$backup_sizes_not_array_id), 'media validator backup-file drift audit includes malformed backup_sizes attachment ID');
+    assert_true(str_contains($backup_file_drift_preview, 'source-backup-incomplete.jpg'), 'media validator backup-file drift audit includes incomplete backup metadata attachment');
+    assert_true(str_contains($backup_file_drift_preview, '"backup_file":null'), 'media validator backup-file drift audit records missing backup file field');
+    assert_true(str_contains($backup_file_drift_preview, (string)$backup_incomplete_id), 'media validator backup-file drift audit includes incomplete backup metadata attachment ID');
 
     $mismatch_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'plugin',
