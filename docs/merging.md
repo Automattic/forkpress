@@ -44,7 +44,7 @@ forkpress branch merge-audit --format json --review --records conflicts
 ```
 
 Useful filters include `--run`, `--scope all|db|files`,
-`--records all|conflicts|decisions|resolutions|rollback-failures`,
+`--records all|conflicts|conflict-events|decisions|resolutions|rollback-failures`,
 `--review-status unreviewed|pending|needs-action|reviewed`, `--target-kept`,
 `--path`, and `--path-prefix`.
 
@@ -80,6 +80,9 @@ notes. Conflict lifecycle changes are also recorded in an append-only
 `merge_conflict_events` stream, and audit JSON exposes the latest event summary.
 UI clients should consume those fields instead of inferring behavior from raw
 `conflict_type` strings or free-form notes.
+
+Use `--records conflict-events` to inspect the full append-only lifecycle
+history for conflict records.
 
 ## What gets audited
 

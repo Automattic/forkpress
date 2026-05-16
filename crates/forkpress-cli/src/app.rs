@@ -3165,7 +3165,7 @@ fn cow_branch_command(
                     "--records" => {
                         let Some(value) = args.args.get(index + 1) else {
                             bail!(
-                                "--records requires all, conflicts, decisions, resolutions, or rollback-failures"
+                                "--records requires all, conflicts, conflict-events, decisions, resolutions, or rollback-failures"
                             );
                         };
                         records = value.clone();
@@ -3478,7 +3478,7 @@ fn branch_help_text(command: Option<&str>) -> &'static str {
             "Usage: forkpress branch run-plugin-validator --run <id> --validator <path> [--format text|json]\n\nRun one plugin validator and record emitted findings as plugin-scoped merge conflicts.\n"
         }
         Some("merge-audit") | Some("audit") => {
-            "Usage: forkpress branch merge-audit [options]\n\nInspect merge runs, decisions, conflicts, resolutions, and rollback failures. Use --revalidate to carry stale reviewed conflicts back into needs-action before resolving.\nCommon options: --format text|json, --run <id>, --scope all|db|files, --records all|conflicts|decisions|resolutions|rollback-failures, --review, --review-status <status>, --revalidate.\n"
+            "Usage: forkpress branch merge-audit [options]\n\nInspect merge runs, decisions, conflicts, conflict events, resolutions, and rollback failures. Use --revalidate to carry stale reviewed conflicts back into needs-action before resolving.\nCommon options: --format text|json, --run <id>, --scope all|db|files, --records all|conflicts|conflict-events|decisions|resolutions|rollback-failures, --review, --review-status <status>, --revalidate.\n"
         }
         Some("merge-review") => {
             "Usage: forkpress branch merge-review <conflict|decision|resolution> <id> --status <pending|needs-action|reviewed> --note <text> [--reviewer <name>]\n\nAttach review metadata to an audit record.\n"
@@ -5432,6 +5432,39 @@ mod git_helper_tests {
                 "conflicts".to_string(),
                 "--group-by".to_string(),
                 "severity".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_branch_merge_audit_conflict_events() {
+        let cli = Cli::try_parse_from([
+            "forkpress",
+            "branch",
+            "--work-dir",
+            ".forkpress",
+            "merge-audit",
+            "--records",
+            "conflict-events",
+            "--scope",
+            "db",
+            "--conflict-type",
+            "row-target-deleted",
+        ])
+        .unwrap();
+        let Commands::Branch(args) = cli.command else {
+            panic!("expected branch command");
+        };
+        assert_eq!(
+            args.args,
+            vec![
+                "merge-audit".to_string(),
+                "--records".to_string(),
+                "conflict-events".to_string(),
+                "--scope".to_string(),
+                "db".to_string(),
+                "--conflict-type".to_string(),
+                "row-target-deleted".to_string(),
             ]
         );
     }
