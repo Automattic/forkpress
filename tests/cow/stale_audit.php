@@ -156,6 +156,15 @@ try {
     assert_same($audit['conflicts'][0]['latest_event_type'], 'revalidation-required', 'revalidated conflict advertises latest lifecycle event');
     assert_same($audit['conflicts'][0]['latest_event_lifecycle_state'], 'needs-action', 'revalidated conflict advertises latest event state');
     assert_same($audit['conflicts'][0]['latest_event_actor'], 'cow-revalidate', 'revalidated conflict advertises latest event actor');
+    $revalidation_id = (int)scalar($metadata, "SELECT id FROM merge_revalidations WHERE conflict_id = $conflict_id ORDER BY id DESC LIMIT 1");
+    $event_audit = cow_merge_audit_report($metadata, $run_id, 3, [
+        'records' => 'conflict-events',
+    ]);
+    assert_same(array_column($event_audit['conflict_events'], 'event_type'), ['revalidation-required', 'review-reviewed', 'recorded'], 'stale revalidation is visible in the conflict event stream');
+    assert_same($event_audit['conflict_events'][0]['related_record_type'], 'revalidation', 'revalidation event links to the revalidation record');
+    assert_same((int)$event_audit['conflict_events'][0]['related_record_id'], $revalidation_id, 'revalidation event exposes the revalidation id');
+    assert_same($event_audit['conflict_events'][0]['lifecycle_state'], 'needs-action', 'revalidation event records the needs-action lifecycle state');
+    assert_same($event_audit['conflict_events'][0]['actor'], 'cow-revalidate', 'revalidation event preserves the revalidation actor');
 
     $again = run_merge_cli([
         'revalidate-reviews',
