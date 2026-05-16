@@ -157,6 +157,16 @@ audits, and WordPress semantic reference validators, run:
 make test-cow-semantic-fast
 ```
 
+For the focused runtime WordPress semantic E2E slice, which starts a real
+ForkPress site and merges branch-created page/edit/delete, media upload,
+menus, reusable blocks, options, comments, users, terms, CPT data, and
+plugin-shaped DB/JSON/serialized/file graphs before exiting the larger E2E
+script, run:
+
+```bash
+make test-cow-e2e-semantic FORKPRESS_E2E_BIN=/path/to/forkpress
+```
+
 For schema dependency planning and review-only cases such as dependent
 source-added views/triggers, source-added views or triggers that depend on
 source-added tables, cyclic source-added views/triggers, source-added expression unique

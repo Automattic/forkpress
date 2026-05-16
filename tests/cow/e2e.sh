@@ -1122,6 +1122,7 @@ PHP
 autoinc_runtime_request main init "$TMP/autoinc-main-init.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(($data["max_id"] ?? null) === 1 ? 0 : 1);' "$TMP/autoinc-main-init.json"
 
+if [ "${FORKPRESS_E2E_ONLY:-}" != "semantic" ]; then
 log_step "branch remote cache and merge back"
 "$BIN" remote --work-dir "$WORK_DIR" add cache-main \
   --cache-root "$WORK/main" \
@@ -1771,6 +1772,7 @@ if [ "$BAND_SOURCE_POST_DECISION_ID" = "0" ] || [ "$BAND_TARGET_POST_DECISION_ID
 fi
 "$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --review --review-status unreviewed --records decisions --scope db --limit 80 > "$TMP/band-merge-source-decision-queue.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); $ok = is_array($data) && (($data["filters"]["review"] ?? false) === true) && (($data["filters"]["review_status"] ?? null) === "unreviewed") && (($data["filters"]["records"] ?? null) === "decisions") && (($data["filters"]["scope"] ?? null) === "db"); $has_source = false; foreach (($data["decisions"] ?? []) as $row) { if (($row["review_status"] ?? null) !== null) $ok = false; if ((int)($row["id"] ?? 0) === (int)$argv[2] && ($row["table_name"] ?? null) === "wp_posts" && ($row["decision"] ?? null) === "source-applied") $has_source = true; } exit($ok && $has_source ? 0 : 1);' "$TMP/band-merge-source-decision-queue.json" "$BAND_SOURCE_POST_DECISION_ID"
+fi
 
 log_step "merge WordPress semantic object graphs"
 semantic_runtime_request main seed "$TMP/semantic-seed.json"
@@ -1940,6 +1942,11 @@ $ok = $ok
     && $pluginGraphValid($data["plugin_graphs"] ?? [], $posts, "target", "Target");
 exit($ok ? 0 : 1);
 ' "$TMP/semantic-after-merge.json"
+
+if [ "${FORKPRESS_E2E_ONLY:-}" = "semantic" ]; then
+  log_step "WordPress semantic merge slice complete"
+  exit 0
+fi
 
 log_step "merge branch into main"
 php -r '$db = new SQLite3($argv[1]); $db->exec("CREATE TABLE IF NOT EXISTS forkpress_e2e_target_kept (id INTEGER PRIMARY KEY, label TEXT NOT NULL)");' "$WORK/main/wp-content/database/.ht.sqlite"
