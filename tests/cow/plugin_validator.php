@@ -369,6 +369,7 @@ PHP);
         $replacement_conflict_id,
         'plugin revalidation links to the replacement validator conflict'
     );
+    $plugin_revalidation_id = (int)scalar($metadata, "SELECT id FROM merge_revalidations WHERE conflict_id = $json_conflict_id ORDER BY id DESC LIMIT 1");
 
     $revalidated_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'plugin',
@@ -380,6 +381,15 @@ PHP);
     assert_same($reviewed_json_conflicts[0]['stale_status'] ?? null, 'stale', 'plugin audit marks changed validator evidence as stale');
     assert_same((int)($reviewed_json_conflicts[0]['replacement_conflict_id'] ?? 0), $replacement_conflict_id, 'plugin audit exposes the live replacement conflict id');
     assert_true(str_contains((string)($reviewed_json_conflicts[0]['current_target_preview'] ?? ''), '123456'), 'plugin audit exposes replacement validator evidence');
+    $plugin_event_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 4, [
+        'scope' => 'plugin',
+        'records' => 'conflict-events',
+    ]);
+    assert_same($plugin_event_audit['conflict_events'][0]['event_type'], 'revalidation-required', 'plugin replacement revalidation is visible in the conflict event stream');
+    assert_same((int)$plugin_event_audit['conflict_events'][0]['conflict_id'], $json_conflict_id, 'plugin revalidation event belongs to the reviewed plugin conflict');
+    assert_same($plugin_event_audit['conflict_events'][0]['related_record_type'], 'revalidation', 'plugin revalidation event links to the revalidation record');
+    assert_same((int)$plugin_event_audit['conflict_events'][0]['related_record_id'], $plugin_revalidation_id, 'plugin revalidation event exposes the revalidation id');
+    assert_same($plugin_event_audit['conflict_events'][0]['lifecycle_state'], 'needs-action', 'plugin revalidation event records the needs-action lifecycle state');
 
     $revalidated_again = cow_merge_revalidate_reviewed_conflicts($metadata, (int)$result['run_id'], 'cow-revalidate');
     assert_same($revalidated_again['carried'], 0, 'plugin revalidation does not duplicate carried replacement-evidence notes');
