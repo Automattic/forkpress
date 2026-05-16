@@ -75,8 +75,22 @@ For fast local iteration on merge logic, start with:
 make test-cow-merge-smoke
 ```
 
-The CI e2e jobs run this smoke target before building the production runtime
-bundle, so helper-level merge regressions fail before the static PHP build.
+For all cheap COW helper/UI/router checks, run:
+
+```bash
+make test-cow-fast
+```
+
+The CI e2e jobs run this fast target before building the production runtime
+bundle, so helper-level merge, Git publication, branch UI, and router
+regressions fail before the static PHP build.
+
+For Git-created branch, branch-birth metadata, push rollback, and Git
+publication crash/failpoint changes, run:
+
+```bash
+make test-cow-git-server
+```
 
 For the broader PHP merge gate without building ForkPress or starting the full
 WordPress E2E harness, run:
