@@ -79,8 +79,12 @@ now record current source/target SQL when revalidation finds drift and carry
 reviewed conflicts back to `needs-action`. They remain `unclassified`: treating
 changed DDL as compatible source drift requires a schema-specific planner that
 can prove the same dependency graph and target preconditions still hold.
-Dependency rebuild plans still need richer schema-specific revalidation payloads
-and should be rerun manually while kept review-only.
+Table rebuild conflicts also record rebuild-plan evidence for direct
+indexes/triggers, dependent views, and dependent view triggers. That closes the
+specific stale-audit blind spot where table SQL stayed unchanged but a source
+index, trigger, or dependent view changed after review. These conflicts should
+still be rerun manually while kept review-only until the schema planner can
+prove a guarded resolution remains compatible.
 
 ## Future Re-Audit Model
 
@@ -155,8 +159,9 @@ to `needs-action` with the replacement validator payload and replacement
 conflict id visible in audit. Generic merge resolution still cannot apply
 plugin conflicts; the plugin validator or a plugin-specific repair flow remains
 the authority. Schema index conflicts can now return to the review queue with
-current SQL evidence, but guarded `--after-revalidate` schema resolution remains
-disabled until schema-specific planners can prove compatibility.
+current SQL evidence, and table rebuild conflicts include dependency-plan
+evidence, but guarded `--after-revalidate` schema resolution remains disabled
+until schema-specific planners can prove compatibility.
 
 ## Test Shape
 
@@ -181,11 +186,14 @@ database cell conflicts where the reviewed cell value itself did not change.
 Schema
 index/view/trigger/table-restore/table-rebuild conflicts record changed
 source/target SQL and carry reviewed conflicts back to `needs-action` as
-`unclassified`.
+`unclassified`. Table rebuild fixtures also prove dependency-only source drift
+is caught through direct index/trigger, dependent-view, and dependent
+view-trigger evidence even when the reviewed table SQL itself is unchanged.
 
-Future classifier tests should cover richer dependency rebuild-plan evidence and
-explicit plugin-supplied logical fingerprints for primary-key row conflicts
-where schema `UNIQUE` keys are not enough to prove object identity.
+Future classifier tests should cover explicit plugin-supplied logical
+fingerprints for primary-key row conflicts where schema `UNIQUE` keys are not
+enough to prove object identity, plus guarded schema-specific resolution once a
+planner can prove dependency compatibility.
 
 The existing stale-resolution tests in `tests/cow/merge.php` should remain.
 They prove stale resolutions are blocked. New tests should prove reviewers get

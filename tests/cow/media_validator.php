@@ -410,6 +410,158 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
             }
         }
     }
+    $backup_sizes = $metadata['backup_sizes'] ?? [];
+    if (!is_array($backup_sizes)) {
+        $findings[] = [
+            'plugin' => 'forkpress-wp-media',
+            'object' => 'attachment:' . $row['ID'],
+            'reason' => 'attachment backup sizes metadata is not an array',
+            'type' => 'plugin-wp-media-backup-file-drift',
+            'tables' => ['wp_posts', 'wp_postmeta'],
+            'validator' => 'forkpress-wp-media@1',
+            'candidate' => [
+                'attachment_id' => (int)$row['ID'],
+                'attached_file' => $attached_file,
+                'backup_sizes_type' => gettype($backup_sizes),
+            ],
+        ];
+        $backup_sizes = [];
+    }
+    foreach ($backup_sizes as $backup_name => $backup_size) {
+        if (is_array($backup_size) && isset($backup_size['file'])) {
+            $backup_file = str_replace('\\', '/', (string)$backup_size['file']);
+            if ($backup_file === '' || (str_contains($backup_file, '/') && !$unsafe_upload_path($backup_file))) {
+                $findings[] = [
+                    'plugin' => 'forkpress-wp-media',
+                    'object' => 'attachment:' . $row['ID'],
+                    'reason' => 'attachment backup size file is not a non-empty basename',
+                    'type' => 'plugin-wp-media-backup-file-drift',
+                    'tables' => ['wp_posts', 'wp_postmeta'],
+                    'validator' => 'forkpress-wp-media@1',
+                    'candidate' => [
+                        'attachment_id' => (int)$row['ID'],
+                        'attached_file' => $attached_file,
+                        'backup_size' => (string)$backup_name,
+                        'backup_file' => (string)$backup_size['file'],
+                    ],
+                ];
+                if ($backup_file === '') {
+                    continue;
+                }
+            }
+            $backup_relative_file = trim($directory . '/' . $backup_file, '/');
+            if ($unsafe_upload_path($backup_relative_file)) {
+                $findings[] = [
+                    'plugin' => 'forkpress-wp-media',
+                    'object' => 'attachment:' . $row['ID'],
+                    'reason' => 'attachment backup size metadata points outside uploads',
+                    'type' => 'plugin-wp-media-unsafe-path',
+                    'tables' => ['wp_posts', 'wp_postmeta'],
+                    'validator' => 'forkpress-wp-media@1',
+                    'candidate' => [
+                        'attachment_id' => (int)$row['ID'],
+                        'attached_file' => $attached_file,
+                        'backup_size' => (string)$backup_name,
+                        'backup_file' => $backup_relative_file,
+                    ],
+                ];
+                continue;
+            }
+            $relative_files[] = $backup_relative_file;
+            if ($uploads_root !== '' && !is_file($uploads_root . '/' . $backup_relative_file)) {
+                $findings[] = [
+                    'plugin' => 'forkpress-wp-media',
+                    'object' => 'attachment:' . $row['ID'],
+                    'reason' => 'attachment backup size file is missing from uploads',
+                    'type' => 'plugin-wp-media-missing-file',
+                    'tables' => ['wp_posts', 'wp_postmeta'],
+                    'validator' => 'forkpress-wp-media@1',
+                    'candidate' => [
+                        'attachment_id' => (int)$row['ID'],
+                        'attached_file' => $attached_file,
+                        'backup_size' => (string)$backup_name,
+                        'backup_file' => $backup_relative_file,
+                    ],
+                ];
+            } elseif ($uploads_root !== '') {
+                $declared_backup_filesize = $backup_size['filesize'] ?? null;
+                $actual_backup_filesize = filesize($uploads_root . '/' . $backup_relative_file);
+                if ($declared_backup_filesize !== null && (!is_numeric($declared_backup_filesize) || (int)$declared_backup_filesize !== (int)$actual_backup_filesize)) {
+                    $findings[] = [
+                        'plugin' => 'forkpress-wp-media',
+                        'object' => 'attachment:' . $row['ID'],
+                        'reason' => 'attachment backup size filesize metadata does not match the upload file',
+                        'type' => 'plugin-wp-media-filesize-drift',
+                        'tables' => ['wp_posts', 'wp_postmeta'],
+                        'validator' => 'forkpress-wp-media@1',
+                        'candidate' => [
+                            'attachment_id' => (int)$row['ID'],
+                            'attached_file' => $attached_file,
+                            'backup_size' => (string)$backup_name,
+                            'backup_file' => $backup_relative_file,
+                            'declared_filesize' => $declared_backup_filesize,
+                            'actual_filesize' => (int)$actual_backup_filesize,
+                        ],
+                    ];
+                }
+            }
+            if (array_key_exists('mime-type', $backup_size)) {
+                $backup_extension = strtolower((string)pathinfo($backup_relative_file, PATHINFO_EXTENSION));
+                $expected_backup_mime_type = $expected_mime_by_extension[$backup_extension] ?? null;
+                $backup_mime_type = strtolower((string)$backup_size['mime-type']);
+                if ($expected_backup_mime_type !== null && $backup_mime_type !== $expected_backup_mime_type) {
+                    $findings[] = [
+                        'plugin' => 'forkpress-wp-media',
+                        'object' => 'attachment:' . $row['ID'],
+                        'reason' => 'attachment backup size MIME type does not match the backup file extension',
+                        'type' => 'plugin-wp-media-mime-drift',
+                        'tables' => ['wp_posts', 'wp_postmeta'],
+                        'validator' => 'forkpress-wp-media@1',
+                        'candidate' => [
+                            'attachment_id' => (int)$row['ID'],
+                            'attached_file' => $attached_file,
+                            'backup_size' => (string)$backup_name,
+                            'backup_file' => $backup_relative_file,
+                            'backup_mime_type' => (string)$backup_size['mime-type'],
+                            'expected_mime_type' => $expected_backup_mime_type,
+                        ],
+                    ];
+                }
+            }
+            $backup_width = $backup_size['width'] ?? null;
+            $backup_height = $backup_size['height'] ?? null;
+            if (!is_numeric($backup_width) || !is_numeric($backup_height) || (int)$backup_width <= 0 || (int)$backup_height <= 0) {
+                $findings[] = [
+                    'plugin' => 'forkpress-wp-media',
+                    'object' => 'attachment:' . $row['ID'],
+                    'reason' => 'attachment backup size dimensions are invalid',
+                    'type' => 'plugin-wp-media-backup-dimensions-drift',
+                    'tables' => ['wp_posts', 'wp_postmeta'],
+                    'validator' => 'forkpress-wp-media@1',
+                    'candidate' => [
+                        'attached_file' => $attached_file,
+                        'backup_size' => (string)$backup_name,
+                        'width' => $backup_width,
+                        'height' => $backup_height,
+                    ],
+                ];
+            }
+            continue;
+        }
+        $findings[] = [
+            'plugin' => 'forkpress-wp-media',
+            'object' => 'attachment:' . $row['ID'],
+            'reason' => 'attachment backup size metadata is incomplete',
+            'type' => 'plugin-wp-media-backup-file-drift',
+            'tables' => ['wp_posts', 'wp_postmeta'],
+            'validator' => 'forkpress-wp-media@1',
+            'candidate' => [
+                'attached_file' => $attached_file,
+                'backup_size' => (string)$backup_name,
+                'backup_file' => null,
+            ],
+        ];
+    }
     $sizes = $metadata['sizes'] ?? [];
     if (!is_array($sizes)) {
         $findings[] = [
@@ -632,6 +784,7 @@ PHP);
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-original-image-unsafe-scaled.jpg', "source unsafe original_image scaled bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-original-image-subdir-scaled.jpg', "source subdir original_image scaled bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/nested/source-original-image-subdir-original.jpg', "source subdir original_image original bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-backup-missing-current.jpg', "source backup missing current image bytes\n");
     $db = open_db($source);
     $attachment_id = insert_attachment($db, 'Source media generated missing file key', '2026/05/source-generated-missing-file-key.jpg', [
         'file' => '2026/05/source-generated-missing-file-key.jpg',
@@ -776,6 +929,20 @@ PHP);
         'original_image' => 'nested/source-original-image-subdir-original.jpg',
         'sizes' => [],
     ]);
+    $backup_missing_id = insert_attachment($db, 'Source media missing backup image file', '2026/05/source-backup-missing-current.jpg', [
+        'file' => '2026/05/source-backup-missing-current.jpg',
+        'width' => 640,
+        'height' => 480,
+        'backup_sizes' => [
+            'full-orig' => [
+                'file' => 'source-backup-missing-original.jpg',
+                'width' => 1200,
+                'height' => 900,
+                'mime-type' => 'image/jpeg',
+            ],
+        ],
+        'sizes' => [],
+    ]);
     $self_duplicate_id = insert_attachment($db, 'Source media self duplicate generated file', '2026/05/source-self-duplicate.jpg', [
         'file' => '2026/05/source-self-duplicate.jpg',
         'width' => 640,
@@ -881,7 +1048,7 @@ PHP);
 
     assert_same($result['status'], 'completed_with_conflicts', 'media validator holds incomplete generated-size metadata for review');
     assert_same((int)($result['plugin_validators'] ?? 0), 1, 'media validator is discovered from mu-plugins during merge');
-    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 27, 'media validator records missing required metadata, invalid metadata, dimensions, filesize and MIME drift, generated-size, original-image, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
+    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 28, 'media validator records missing required metadata, invalid metadata, dimensions, filesize and MIME drift, generated-size, original-image, backup-size, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
     assert_same(
         scalar($target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-generated-missing-file-key.jpg',
@@ -1041,7 +1208,7 @@ PHP);
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-media-missing-file',
     ]);
-    assert_same(count($missing_audit['conflicts']), 4, 'media validator exposes missing attached, metadata, generated, and original_image files as plugin-scoped audit conflicts');
+    assert_same(count($missing_audit['conflicts']), 5, 'media validator exposes missing attached, metadata, generated, original_image, and backup image files as plugin-scoped audit conflicts');
     $missing_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $missing_audit['conflicts']));
     assert_true(str_contains($missing_preview, 'source-missing-original.jpg'), 'media validator missing-file audit includes the affected original attachment');
     $missing_metadata_original_recorded = false;
@@ -1063,6 +1230,8 @@ PHP);
     assert_true(str_contains($missing_preview, 'source-missing-generated-150x150.jpg'), 'media validator missing-file audit includes the affected generated file');
     assert_true($missing_original_image_recorded, 'media validator missing-file audit payload identifies the missing original_image file');
     assert_true(str_contains($missing_preview, (string)$original_image_missing_id), 'media validator missing-file audit includes the missing original_image attachment ID');
+    assert_true(str_contains($missing_preview, 'source-backup-missing-original.jpg'), 'media validator missing-file audit includes the affected backup image file');
+    assert_true(str_contains($missing_preview, (string)$backup_missing_id), 'media validator missing-file audit includes the missing backup image attachment ID');
 
     $mismatch_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'plugin',
