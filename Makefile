@@ -75,7 +75,7 @@ else ifeq ($(UNAME_S)-$(UNAME_M),Linux-aarch64)
 FORKPRESS_TARGET ?= aarch64-unknown-linux-musl
 endif
 
-.PHONY: all clean test test-compat test-branchfs test-cow test-cow-fast test-cow-git-server test-cow-id-bands test-cow-media-validator test-cow-merge test-cow-merge-smoke test-release init-db test-all forkpress forkpress-dev dist dist-dev
+.PHONY: all clean test test-compat test-branchfs test-cow test-cow-fast test-cow-git-server test-cow-id-bands test-cow-media-validator test-cow-merge test-cow-merge-smoke test-cow-stale-audit test-release init-db test-all forkpress forkpress-dev dist dist-dev
 
 all: $(BRANCHFS_EXT_SO)
 
@@ -119,9 +119,13 @@ test-cow-id-bands:
 test-cow-media-validator:
 	php $(COW_TEST_DIR)/media_validator.php
 
+test-cow-stale-audit:
+	php $(COW_TEST_DIR)/stale_audit.php
+
 test-cow-fast: test-cow-git-server test-cow-merge-smoke
 	php $(COW_TEST_DIR)/id_bands.php
 	php $(COW_TEST_DIR)/media_validator.php
+	php $(COW_TEST_DIR)/stale_audit.php
 	php $(COW_TEST_DIR)/branch_ui.php
 	php $(COW_TEST_DIR)/router_paths.php
 	php $(COW_TEST_DIR)/router_lock.php
