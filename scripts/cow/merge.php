@@ -6528,6 +6528,9 @@ function cow_merge_record_plugin_validator_conflicts(
                 'validator' => (string)($finding['validator'] ?? ''),
                 'candidate' => $finding['candidate'] ?? null,
             ];
+            if (array_key_exists('logical_identity', $finding)) {
+                $payload['logical_identity'] = $finding['logical_identity'];
+            }
             if (cow_merge_record_conflict(
                 $meta,
                 $run_id,

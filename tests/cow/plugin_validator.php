@@ -468,6 +468,90 @@ PHP);
         'plugin source-evidence revalidation records the updated source payload'
     );
 
+    $logical_identity_result = cow_merge_record_plugin_validator_conflicts($metadata, (int)$result['run_id'], [
+        [
+            'plugin' => 'forkpress-plugin-logical-id',
+            'object' => 'child-slot:' . $child_id,
+            'logical_identity' => [
+                'kind' => 'plugin-child',
+                'slug' => 'child-before-rerun',
+            ],
+            'reason' => 'plugin validator logical identity needs review',
+            'type' => 'plugin-graph-logical-identity',
+            'tables' => ['plugin_graph_child'],
+            'validator' => 'forkpress-plugin-graph@1',
+            'candidate' => [
+                'child_id' => $child_id,
+                'graph' => 'candidate-at-review',
+            ],
+        ],
+    ]);
+    assert_same($logical_identity_result['conflicts'], 1, 'plugin validator records explicit logical identity evidence');
+    $logical_identity_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-graph-logical-identity' ORDER BY id DESC LIMIT 1");
+    assert_true($logical_identity_conflict_id > 0, 'plugin logical-identity conflict is recorded');
+    $logical_identity_payload = cow_merge_decode_payload_json(
+        (string)scalar($metadata, "SELECT chosen_payload FROM merge_conflicts WHERE id = $logical_identity_conflict_id"),
+        'plugin logical identity payload'
+    );
+    assert_same(
+        $logical_identity_payload['logical_identity']['slug'] ?? null,
+        'child-before-rerun',
+        'plugin logical identity is stored as first-class validator evidence'
+    );
+    cow_merge_review_record(
+        $metadata,
+        'conflict',
+        $logical_identity_conflict_id,
+        'reviewed',
+        'plugin logical identity looked safe before rerun',
+        'cow-test'
+    );
+
+    $updated_logical_identity_result = cow_merge_record_plugin_validator_conflicts($metadata, (int)$result['run_id'], [
+        [
+            'plugin' => 'forkpress-plugin-logical-id',
+            'object' => 'child-slot:' . $child_id,
+            'logical_identity' => [
+                'kind' => 'plugin-child',
+                'slug' => 'child-after-rerun',
+            ],
+            'reason' => 'plugin validator logical identity changed after rerun',
+            'type' => 'plugin-graph-logical-identity',
+            'tables' => ['plugin_graph_child'],
+            'validator' => 'forkpress-plugin-graph@1',
+            'candidate' => [
+                'child_id' => $child_id,
+                'graph' => 'candidate-at-review',
+            ],
+        ],
+    ]);
+    assert_same($updated_logical_identity_result['conflicts'], 1, 'plugin validator rerun records replacement evidence when logical identity changes');
+    $logical_identity_replacement_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-graph-logical-identity' AND id > $logical_identity_conflict_id ORDER BY id DESC LIMIT 1");
+    assert_true($logical_identity_replacement_id > $logical_identity_conflict_id, 'plugin logical-identity rerun stores a newer conflict');
+
+    $logical_identity_revalidated = cow_merge_revalidate_reviewed_conflicts($metadata, (int)$result['run_id'], 'cow-revalidate');
+    assert_true($logical_identity_revalidated['stale'] >= 1, 'plugin revalidation treats changed logical identity as stale');
+    assert_true($logical_identity_revalidated['carried'] >= 1, 'plugin revalidation carries changed logical identity to needs-action');
+    assert_same(
+        scalar($metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $logical_identity_conflict_id ORDER BY id DESC LIMIT 1"),
+        'replacement-evidence',
+        'plugin logical-identity revalidation uses the replacement-evidence classifier'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT replacement_conflict_id FROM merge_revalidations WHERE conflict_id = $logical_identity_conflict_id ORDER BY id DESC LIMIT 1"),
+        $logical_identity_replacement_id,
+        'plugin logical-identity revalidation links to the newer validator finding'
+    );
+    $logical_identity_revalidated_payload = cow_merge_decode_payload_json(
+        (string)scalar($metadata, "SELECT target_payload FROM merge_revalidations WHERE conflict_id = $logical_identity_conflict_id ORDER BY id DESC LIMIT 1"),
+        'plugin logical identity revalidation target'
+    );
+    assert_same(
+        $logical_identity_revalidated_payload['logical_identity']['slug'] ?? null,
+        'child-after-rerun',
+        'plugin logical-identity revalidation records the updated validator identity'
+    );
+
     $serialized_base_root = $tmp . '/serialized-base';
     $serialized_source_root = $tmp . '/serialized-source';
     $serialized_target_root = $tmp . '/serialized-target';

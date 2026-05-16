@@ -67,12 +67,12 @@ different logical object that happens to reuse the same numeric primary key.
 Plugin validator conflicts are classified as `unchanged` when the rerun reports
 the same evidence and `replacement-evidence` when the validator reports changed
 evidence for the same plugin object. The replacement can come from changed
-candidate evidence, changed target evidence, or explicit changed `source`
-payloads emitted by the validator. Replacement evidence also links the stale
-review to the newer validator conflict row, so audit output can point reviewers
-at the exact validator record that superseded their prior review. These classes
-and links are audit metadata only. They do not make stale reviews apply
-automatically.
+candidate evidence, changed target evidence, explicit changed `source`
+payloads, or changed first-class `logical_identity` evidence emitted by the
+validator. Replacement evidence also links the stale review to the newer
+validator conflict row, so audit output can point reviewers at the exact
+validator record that superseded their prior review. These classes and links
+are audit metadata only. They do not make stale reviews apply automatically.
 
 Schema index, view, trigger, dropped-table restore, and table rebuild conflicts
 now record current source/target SQL when revalidation finds drift and carry
@@ -117,12 +117,12 @@ To support this cleanly, audit metadata should retain:
 - Re-audit classifier. The current `merge_revalidations.revalidation_class`
   stores `unchanged`, `compatible-target-drift`, `compatible-source-drift`,
   `missing`, `incompatible`, `replacement-evidence`, or `unclassified`;
-  plugin validators can supply changed `source`, `target`, and candidate
-  evidence through replacement findings. The same `incompatible` class is used
-  when a custom/plugin table's non-primary-key `UNIQUE` logical key changes
-  after review. Database cell conflicts can use recorded source/target row
-  context for this classifier when the conflict was audited after that metadata
-  became available.
+  plugin validators can supply changed `source`, `target`, candidate, and
+  `logical_identity` evidence through replacement findings. The same
+  `incompatible` class is used when a custom/plugin table's non-primary-key
+  `UNIQUE` logical key changes after review. Database cell conflicts can use
+  recorded source/target row context for this classifier when the conflict was
+  audited after that metadata became available.
   Schema index/view/trigger/table-restore/table-rebuild conflicts can record
   current source/target SQL but stay `unclassified`. Future work should add
   richer schema-specific evidence for dependency rebuild plans, plus explicit
@@ -173,7 +173,8 @@ fingerprint, and plugin validator reruns that deduplicate unchanged evidence or
 carry reviewed plugin conflicts back to `needs-action` with
 `replacement-evidence`, replacement validator payloads, and replacement
 conflict links when the validator reports changed evidence for the same plugin
-object, including explicit changed plugin source evidence. Custom/plugin
+object, including explicit changed plugin source evidence and first-class
+plugin `logical_identity` evidence. Custom/plugin
 non-primary-key `UNIQUE` logical-key replacements are also classified as
 `incompatible` for both source and target drift, including row-context-backed
 database cell conflicts where the reviewed cell value itself did not change.

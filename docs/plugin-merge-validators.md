@@ -153,6 +153,10 @@ validator can report a target-edited comment left pointing at a deleted post:
     {
       "plugin": "forkpress-wp-comment-refs",
       "object": "comment:122",
+      "logical_identity": {
+        "kind": "comment",
+        "comment_id": 122
+      },
       "reason": "comment references a missing post",
       "type": "plugin-wp-comment-missing-post",
       "tables": ["wp_comments", "wp_posts"],
@@ -173,6 +177,15 @@ The same pattern is used for `wp_comments.user_id`,
 payload names the stale field and the missing WordPress object so review can
 decide whether to restore the deleted object, edit the reference, or accept the
 deletion.
+
+`object` is the validator's stable review key for replacement evidence across
+reruns. `logical_identity` is optional first-class evidence for the plugin's
+semantic object identity. Validators should set it when the plugin has a
+domain identity that is not captured by SQLite primary keys or schema `UNIQUE`
+indexes, such as a slug, UUID, remote object id, or compound plugin key. If a
+rerun reports the same `plugin`, `object`, and conflict `type` but changes
+`logical_identity`, stale-audit revalidation treats the reviewed finding as
+replacement evidence and returns it to the review queue.
 
 ## Review Metadata
 
@@ -230,4 +243,6 @@ WordPress media-shaped mu-plugin validator that inspects the candidate target
 root and records plugin-scoped conflicts when attachment metadata references
 missing original or generated upload files, plus WordPress comment-reference
 validators for comments or commentmeta left pointing at deleted posts, users,
-parent comments, or comments.
+parent comments, or comments. Plugin validator reruns also cover changed
+source evidence and changed first-class `logical_identity` evidence returning
+reviewed findings to `needs-action` as replacement evidence.
