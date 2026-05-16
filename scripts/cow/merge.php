@@ -5233,10 +5233,10 @@ function cow_merge_wordpress_option_reference_violation(
 }
 
 function cow_merge_wordpress_theme_mods_nav_locations_merge(?string $base_value, ?string $source_value, ?string $target_value): ?string {
-    if ($base_value === null || $source_value === null || $target_value === null) {
+    if ($source_value === null || $target_value === null) {
         return null;
     }
-    $base = @unserialize($base_value, ['allowed_classes' => false]);
+    $base = $base_value === null ? [] : @unserialize($base_value, ['allowed_classes' => false]);
     $source = @unserialize($source_value, ['allowed_classes' => false]);
     $target = @unserialize($target_value, ['allowed_classes' => false]);
     if (!is_array($base) || !is_array($source) || !is_array($target)) {
@@ -13463,6 +13463,64 @@ function cow_merge_table_rows(
                     );
                     $applied++;
                     continue;
+                }
+                if (
+                    ($table === 'wp_options' || str_ends_with($table, '_options')) &&
+                    isset($source_row['option_name'], $source_row['option_value'], $unique_collision['row']['option_name'], $unique_collision['row']['option_value']) &&
+                    (string)$source_row['option_name'] === (string)$unique_collision['row']['option_name'] &&
+                    str_starts_with((string)$source_row['option_name'], 'theme_mods_')
+                ) {
+                    $merged_option_value = cow_merge_wordpress_theme_mods_nav_locations_merge(
+                        null,
+                        (string)$source_row['option_value'],
+                        (string)$unique_collision['row']['option_value']
+                    );
+                    if ($merged_option_value !== null) {
+                        $merged_row = $unique_collision['row'];
+                        $merged_row['option_value'] = $merged_option_value;
+                        $target_identity = $pk_cols
+                            ? array_intersect_key($unique_collision['row'], array_flip($pk_cols))
+                            : ['rowid' => $unique_collision['rowid'] ?? null];
+                        $update_result = cow_merge_try_update_row_preserving_payload(
+                            $target,
+                            $table,
+                            $target_identity,
+                            $pk_cols,
+                            $merged_row,
+                            $columns
+                        );
+                        if (!($update_result['ok'] ?? false)) {
+                            if (cow_merge_record_row_target_constraint(
+                                $meta,
+                                $run_id,
+                                $table,
+                                $key,
+                                null,
+                                $source_row,
+                                $unique_collision['row'],
+                                'update',
+                                (string)($update_result['error'] ?? 'SQLite constraint failed')
+                            )) {
+                                $conflicts++;
+                            }
+                            continue;
+                        }
+                        cow_merge_record_decision(
+                            $meta,
+                            $run_id,
+                            $table,
+                            $key,
+                            null,
+                            'source-applied',
+                            'source inserted theme_mods row merged disjoint WordPress nav_menu_locations into target unique option row',
+                            null,
+                            $source_row,
+                            $unique_collision['row'],
+                            $merged_row
+                        );
+                        $applied++;
+                        continue;
+                    }
                 }
                 $active = cow_merge_record_conflict(
                     $meta,

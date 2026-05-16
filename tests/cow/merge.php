@@ -3209,6 +3209,52 @@ SQL);
         'disjoint theme_mods nav menu location merge does not create a conflict'
     );
 
+    $theme_mods_insert_base = $tmp . '/theme-mods-insert-base.sqlite';
+    $theme_mods_insert_source = $tmp . '/theme-mods-insert-source.sqlite';
+    $theme_mods_insert_target = $tmp . '/theme-mods-insert-target.sqlite';
+    create_base_db($theme_mods_insert_base);
+    copy($theme_mods_insert_base, $theme_mods_insert_source);
+    copy($theme_mods_insert_base, $theme_mods_insert_target);
+    $theme_insert_source_value = serialize([
+        'nav_menu_locations' => [
+            'forkpress_semantic_source' => 1000002,
+        ],
+    ]);
+    $theme_insert_target_value = serialize([
+        'nav_menu_locations' => [
+            'forkpress_semantic_target' => 2000002,
+        ],
+    ]);
+    $db = open_db($theme_mods_insert_source);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_id, option_name, option_value, autoload) VALUES (1000007, 'theme_mods_twentytwentyfour', :value, 'yes')");
+    $stmt->bindValue(':value', $theme_insert_source_value, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+    $db = open_db($theme_mods_insert_target);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_id, option_name, option_value, autoload) VALUES (2000007, 'theme_mods_twentytwentyfour', :value, 'yes')");
+    $stmt->bindValue(':value', $theme_insert_target_value, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+
+    $theme_mods_insert_result = cow_merge_databases(
+        $theme_mods_insert_base,
+        $theme_mods_insert_source,
+        $theme_mods_insert_target,
+        $metadata,
+        'feature-theme-mods-insert',
+        'main'
+    );
+    assert_same($theme_mods_insert_result['status'], 'completed', 'independently inserted theme_mods rows merge disjoint nav menu locations cleanly');
+    $theme_mods_insert_run_id = (int)$theme_mods_insert_result['run_id'];
+    $merged_theme_mods_insert = unserialize((string)scalar($theme_mods_insert_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_twentytwentyfour'"), ['allowed_classes' => false]);
+    assert_same($merged_theme_mods_insert['nav_menu_locations']['forkpress_semantic_source'] ?? null, 1000002, 'insert-collision theme_mods merge preserves source menu location');
+    assert_same($merged_theme_mods_insert['nav_menu_locations']['forkpress_semantic_target'] ?? null, 2000002, 'insert-collision theme_mods merge preserves target menu location');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE run_id = $theme_mods_insert_run_id AND table_name = 'wp_options' AND conflict_type = 'row-unique-collision'"),
+        0,
+        'inserted theme_mods unique option-name collision is auto-merged without a row conflict'
+    );
+
     $conflict_base = $tmp . '/conflict-base.sqlite';
     $conflict_source = $tmp . '/conflict-source.sqlite';
     $conflict_target = $tmp . '/conflict-target.sqlite';
