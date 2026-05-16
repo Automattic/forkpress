@@ -295,7 +295,9 @@ should stay focused on these areas:
 - Keep conflict resolution modeled as a first-class contract in audit output:
   every conflict class should advertise its legal executable choices,
   resolution strategy, generic resolver support, and revalidation support before
-  the CLI or UI offers an action.
+  the CLI or UI offers an action. Audit output should also expose lifecycle and
+  next-action fields so deferred, needs-action, reviewed, validated, and
+  resolved conflicts are not inferred from free-form review notes.
 - Improve deterministic schema dependency planning for safe view/trigger
   reorderings while keeping cyclic or semantic ambiguity review-only.
 - Keep aarch64 macOS release artifacts and APFS sparsebundle E2E runs green for
