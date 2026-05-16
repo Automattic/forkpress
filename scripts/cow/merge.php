@@ -6770,6 +6770,72 @@ function cow_merge_active_wordpress_plugins(string $target_db): array {
     }
 }
 
+function cow_merge_wordpress_sitemeta_tables(SQLite3 $db): array {
+    $tables = [];
+    $res = cow_merge_query_checked(
+        $db,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+        'failed to list WordPress sitemeta tables for plugin validator discovery'
+    );
+    while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+        $name = (string)$row['name'];
+        if ($name === 'wp_sitemeta' || str_ends_with($name, '_sitemeta')) {
+            $tables[] = $name;
+        }
+    }
+    cow_merge_result_finalize_checked($res, 'failed to finalize WordPress sitemeta table discovery');
+    usort($tables, function (string $a, string $b): int {
+        if ($a === 'wp_sitemeta') {
+            return $b === 'wp_sitemeta' ? 0 : -1;
+        }
+        if ($b === 'wp_sitemeta') {
+            return 1;
+        }
+        return strcmp($a, $b);
+    });
+    return $tables;
+}
+
+function cow_merge_active_sitewide_wordpress_plugins(string $target_db): array {
+    if (!is_file($target_db)) {
+        return [];
+    }
+    $db = cow_merge_open_db($target_db, SQLITE3_OPEN_READONLY);
+    try {
+        foreach (cow_merge_wordpress_sitemeta_tables($db) as $table) {
+            $stmt = cow_merge_prepare_checked(
+                $db,
+                'SELECT meta_value FROM ' . cow_merge_quote_ident($table) . ' WHERE meta_key = :name LIMIT 1',
+                "failed to prepare active sitewide plugin lookup in $table"
+            );
+            cow_merge_bind($stmt, ':name', 'active_sitewide_plugins');
+            $res = cow_merge_execute_checked($stmt, $db, "failed to read active sitewide plugins from $table");
+            $row = $res->fetchArray(SQLITE3_ASSOC);
+            cow_merge_result_finalize_checked($res, "failed to finalize active sitewide plugin lookup in $table");
+            if (!is_array($row)) {
+                continue;
+            }
+            $decoded = @unserialize((string)($row['meta_value'] ?? ''), ['allowed_classes' => false]);
+            if (!is_array($decoded)) {
+                continue;
+            }
+            $plugins = [];
+            foreach ($decoded as $plugin => $enabled) {
+                $candidate = is_string($plugin) && $plugin !== '' ? $plugin : (is_string($enabled) ? $enabled : '');
+                $candidate = cow_merge_normalize_relative_path($candidate);
+                if ($candidate === null || $candidate === '') {
+                    continue;
+                }
+                $plugins[] = $candidate;
+            }
+            return array_values(array_unique($plugins));
+        }
+        return [];
+    } finally {
+        $db->close();
+    }
+}
+
 function cow_merge_discover_mu_plugin_validators(string $target_root): array {
     $mu_dir = rtrim($target_root, DIRECTORY_SEPARATOR) . '/wp-content/mu-plugins';
     if (!is_dir($mu_dir)) {
@@ -6816,7 +6882,10 @@ function cow_merge_discover_plugin_validators(string $target_db, ?string $target
         return [];
     }
     $validators = cow_merge_discover_mu_plugin_validators($target_root);
-    foreach (cow_merge_active_wordpress_plugins($target_db) as $active_plugin) {
+    foreach (array_merge(
+        cow_merge_active_wordpress_plugins($target_db),
+        cow_merge_active_sitewide_wordpress_plugins($target_db)
+    ) as $active_plugin) {
         $validator = cow_merge_active_plugin_validator_path($target_root, $active_plugin);
         if ($validator !== null) {
             $validators[] = $validator;
