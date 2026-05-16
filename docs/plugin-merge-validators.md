@@ -140,6 +140,40 @@ Validator status and findings must agree. `valid` must emit no findings, and
 treated as a validator failure so plugin state is not reported with ambiguous
 review evidence.
 
+## Finding Shape
+
+Findings should describe the semantic object, not just the row that happened
+to expose the problem. For example, a WordPress-style comment reference
+validator can report a target-edited comment left pointing at a deleted post:
+
+```json
+{
+  "status": "conflicts",
+  "findings": [
+    {
+      "plugin": "forkpress-wp-comment-refs",
+      "object": "comment:122",
+      "reason": "comment references a missing post",
+      "type": "plugin-wp-comment-missing-post",
+      "tables": ["wp_comments", "wp_posts"],
+      "validator": "forkpress-wp-comment-refs@1",
+      "candidate": {
+        "comment_id": 122,
+        "field": "comment_post_ID",
+        "missing_object_id": 120,
+        "object_type": "post"
+      }
+    }
+  ]
+}
+```
+
+The same pattern is used for `wp_comments.user_id`,
+`wp_comments.comment_parent`, and `wp_commentmeta.comment_id`: the candidate
+payload names the stale field and the missing WordPress object so review can
+decide whether to restore the deleted object, edit the reference, or accept the
+deletion.
+
 ## Review Metadata
 
 Plugin conflicts should be exported by `forkpress branch merge-audit` with:
@@ -194,4 +228,6 @@ validator that completes the merge with plugin-scoped review conflicts when a
 source graph references target-exclusive plugin state. It also covers a
 WordPress media-shaped mu-plugin validator that inspects the candidate target
 root and records plugin-scoped conflicts when attachment metadata references
-missing original or generated upload files.
+missing original or generated upload files, plus WordPress comment-reference
+validators for comments or commentmeta left pointing at deleted posts, users,
+parent comments, or comments.

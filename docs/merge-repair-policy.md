@@ -33,6 +33,7 @@ block JSON, options, upload files, or plugin tables, the safe default is:
 | `core/image` block IDs pointing at deleted attachments | Validator conflict by default. | Updating block JSON requires knowing whether the image should be removed, replaced, or restored. |
 | Reusable block or synced pattern refs pointing at deleted `wp_block` posts | Validator conflict by default. | The safe action depends on editorial intent: unlink, restore, replace, or accept deletion. |
 | Nav menu items pointing at deleted objects | Validator conflict by default. | Menu repair is content semantics, not row semantics. |
+| Comments or commentmeta pointing at deleted posts, users, parent comments, or comments | Validator conflict by default. | Deleting the comment, restoring the referenced object, reassigning authorship, or flattening a thread are editorial/moderation choices. |
 | Option/theme-mod object references pointing at deleted posts | Validator conflict by default. | Options often contain theme or plugin contracts that ForkPress cannot infer. |
 | Term relationships pointing at deleted taxonomy rows | Validator conflict by default. | Recreating terms may collide with slugs, hierarchy, counts, and plugin taxonomy semantics. |
 | Plugin-owned graph references | Plugin validator conflict or plugin merge driver only. | Only the plugin can reliably define graph identity, invariants, and safe repairs. |
