@@ -1475,6 +1475,52 @@ grep -F "status:    completed" "$TMP/git-created-http-pre-metadata-crash-merge.o
 test -f "$WORK/main/wp-content/git-created-http-pre-metadata-crash.txt"
 grep -F "created through retried pre-metadata git push" "$WORK/main/wp-content/git-created-http-pre-metadata-crash.txt" >/dev/null
 
+log_step "actual Git push pre-branch-list crash recovery"
+git -C "$TMP/checkout" fetch origin +main:refs/remotes/origin/main
+git -C "$TMP/checkout" checkout -B git-created-http-pre-list-crash origin/main
+git -C "$TMP/checkout" reset --hard origin/main
+git -C "$TMP/checkout" clean -fd
+printf "created through pre-list crashed git push\n" > "$TMP/checkout/wordpress/wp-content/git-created-http-pre-list-crash.txt"
+"$BIN" stop --work-dir "$WORK_DIR" >/dev/null 2>&1 || true
+FORKPRESS_COW_GIT_TEST_FAILPOINT=before-created-branch-list FORKPRESS_COW_GIT_TEST_FAILPOINT_ACTION=kill \
+  "$BIN" serve --work-dir "$WORK_DIR" --port "$PORT" --root-host wp.localhost --workers 1
+GIT_CREATED_HTTP_PRE_LIST_CRASH_PUSH_SURVIVED=0
+if "$BIN" commit "$TMP/checkout" --message "create cow branch through pre-list crashed git push" > "$TMP/git-created-http-pre-list-crash.out" 2>&1; then
+  GIT_CREATED_HTTP_PRE_LIST_CRASH_PUSH_SURVIVED=1
+fi
+for _ in $(seq 1 40); do
+  if ! "$BIN" server list | grep -F "$WORK_DIR" >/dev/null; then
+    break
+  fi
+  sleep 0.25
+done
+if "$BIN" server list | grep -F "$WORK_DIR" >/dev/null; then
+  if [ "$GIT_CREATED_HTTP_PRE_LIST_CRASH_PUSH_SURVIVED" = "1" ]; then
+    echo "Git push unexpectedly survived before-created-branch-list server exit failpoint" >&2
+  else
+    echo "ForkPress server survived before-created-branch-list server exit failpoint" >&2
+  fi
+  exit 1
+fi
+"$BIN" stop --work-dir "$WORK_DIR" >/dev/null 2>&1 || true
+"$BIN" serve --work-dir "$WORK_DIR" --port "$PORT" --root-host wp.localhost --workers 1
+test -f "$WORK/git-created-http-pre-list-crash/wp-content/git-created-http-pre-list-crash.txt"
+grep -F "created through pre-list crashed git push" "$WORK/git-created-http-pre-list-crash/wp-content/git-created-http-pre-list-crash.txt" >/dev/null
+curl -sS -H "Host: git-created-http-pre-list-crash.wp.localhost:$PORT" \
+  "http://127.0.0.1:$PORT/" \
+  -o "$TMP/git-created-http-pre-list-crash-after-restart.html"
+grep -F "Branch: git-created-http-pre-list-crash" "$TMP/git-created-http-pre-list-crash-after-restart.html" >/dev/null
+grep -F "Branch not found" "$TMP/git-created-http-pre-list-crash-after-restart.html" && exit 1
+test -f "$WORK_DIR/cow/merge/bases/git-created-http-pre-list-crash.sqlite"
+test -f "$WORK_DIR/cow/merge/file-bases/git-created-http-pre-list-crash.json"
+grep -Fx "git-created-http-pre-list-crash" "$WORK_DIR/cow/branches.txt" >/dev/null
+php -r '$meta = new SQLite3($argv[1]); $bands = (int)$meta->querySingle("SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = '\''git-created-http-pre-list-crash'\''"); $ids = (int)$meta->querySingle("SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = '\''git-created-http-pre-list-crash'\''"); exit($bands > 0 && $ids > 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
+"$BIN" branch --work-dir "$WORK_DIR" merge git-created-http-pre-list-crash --into main > "$TMP/git-created-http-pre-list-crash-merge.out"
+grep -F "forkpress: merged git-created-http-pre-list-crash into main" "$TMP/git-created-http-pre-list-crash-merge.out" >/dev/null
+grep -F "status:    completed" "$TMP/git-created-http-pre-list-crash-merge.out" >/dev/null
+test -f "$WORK/main/wp-content/git-created-http-pre-list-crash.txt"
+grep -F "created through pre-list crashed git push" "$WORK/main/wp-content/git-created-http-pre-list-crash.txt" >/dev/null
+
 log_step "actual Git push created-branch crash recovery"
 git -C "$TMP/checkout" fetch origin +main:refs/remotes/origin/main
 git -C "$TMP/checkout" checkout -B git-created-http-crash origin/main

@@ -139,13 +139,17 @@ The Git server suite covers these publication classes:
   verifies public merge is blocked by the pending-reset marker, then reruns the
   public reset and verifies fresh DB/file merge bases and ID-band metadata.
 - The product E2E suite drives actual smart-HTTP Git pushes for Git-created
-  branches with the server exiting before branch-birth metadata and immediately
-  after branch-list publication. The pre-metadata crash restarts ForkPress in a
-  fresh process, verifies the branch is not visible and has no ID-band or
-  row-identity metadata, then retries the push, verifies stale temp paths are
-  cleaned, and merges it into `main`. The post-list crash restarts ForkPress in
-  a fresh process, then verifies the branch is visible, has DB/file merge-base
-  artifacts, has a matching Git ref, and can merge into `main`.
+  branches with the server exiting before branch-birth metadata, before
+  branch-list publication, and immediately after branch-list publication. The
+  pre-metadata crash restarts ForkPress in a fresh process, verifies the branch
+  is not visible and has no ID-band or row-identity metadata, then retries the
+  push, verifies stale temp paths are cleaned, and merges it into `main`. The
+  pre-list crash restarts ForkPress in a fresh process, verifies the branch tree
+  and DB/file bases are visible, verifies `branches.txt` has been reconciled by
+  restart, verifies finalized ID-band and row-identity metadata, and merges it
+  into `main`. The post-list crash restarts ForkPress in a fresh process, then
+  verifies the branch is visible, has DB/file merge-base artifacts, has a
+  matching Git ref, and can merge into `main`.
 
 ## Missing Fault Injection
 
@@ -164,9 +168,9 @@ publish, after branch-delete staging, and after object pruning.
 The remaining release-hardening work is:
 
 - Broaden actual Git push failpoint coverage beyond the representative
-  Git-created pre-metadata and branch-list publication checkpoints, then restart
-  in a new process and verify the public audit/recovery commands report the
-  same state as the lower-level harnesses.
+  Git-created pre-metadata, pre-branch-list, and post-branch-list checkpoints,
+  then restart in a new process and verify the public audit/recovery commands
+  report the same state as the lower-level harnesses.
 - Add platform-specific kill coverage around APFS sparsebundle detach/compact.
 - Add kill coverage around cleanup of rollback artifacts outside the Git
   object-pruning and crash-recovery restore paths.
