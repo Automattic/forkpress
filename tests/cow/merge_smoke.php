@@ -1294,6 +1294,102 @@ try {
         'page-plus-gallery smoke merge audits target upload files'
     );
 
+    $file_block_base_root = $tmp . '/file-block-base-root';
+    $file_block_source_root = $tmp . '/file-block-source-root';
+    $file_block_target_root = $tmp . '/file-block-target-root';
+    $file_block_base = $file_block_base_root . '/wp-content/database/.ht.sqlite';
+    $file_block_source = $file_block_source_root . '/wp-content/database/.ht.sqlite';
+    $file_block_target = $file_block_target_root . '/wp-content/database/.ht.sqlite';
+    $file_block_file_base = $tmp . '/.forkpress/cow/merge/file-bases/feature-smoke-page-file-block.json';
+    $file_block_metadata = $tmp . '/.forkpress/cow/merge/file-block-metadata.sqlite';
+
+    mkdir(dirname($file_block_base), 0777, true);
+    mkdir(dirname($file_block_source), 0777, true);
+    mkdir(dirname($file_block_target), 0777, true);
+    smoke_create_posts_db($file_block_base);
+    copy($file_block_base, $file_block_source);
+    copy($file_block_base, $file_block_target);
+    cow_merge_capture_file_base($file_block_base_root, $file_block_file_base);
+
+    $source_file_block_content = '<!-- wp:file {"id":18000121,"href":"http://example.test/wp-content/uploads/2026/05/source-brief.pdf"} -->' .
+        '<div class="wp-block-file"><a id="wp-block-file--media-source" href="http://example.test/wp-content/uploads/2026/05/source-brief.pdf">source-brief.pdf</a>' .
+        '<a href="http://example.test/wp-content/uploads/2026/05/source-brief.pdf" class="wp-block-file__button wp-element-button" download>Download</a></div>' .
+        '<!-- /wp:file -->';
+    $target_file_block_content = '<!-- wp:file {"id":19000121,"href":"http://example.test/wp-content/uploads/2026/05/main-brief.pdf"} -->' .
+        '<div class="wp-block-file"><a id="wp-block-file--media-main" href="http://example.test/wp-content/uploads/2026/05/main-brief.pdf">main-brief.pdf</a>' .
+        '<a href="http://example.test/wp-content/uploads/2026/05/main-brief.pdf" class="wp-block-file__button wp-element-button" download>Main Download</a></div>' .
+        '<!-- /wp:file -->';
+
+    $db = smoke_open_db($file_block_source);
+    smoke_insert_post($db, 18000120, 'Branch Page With File Block', $source_file_block_content, 'page', 'branch-page-with-file-block');
+    smoke_insert_post($db, 18000121, 'source-brief.pdf', '', 'attachment', 'source-brief-pdf', 'inherit', 18000120, 'application/pdf', 'http://example.test/wp-content/uploads/2026/05/source-brief.pdf');
+    smoke_insert_postmeta($db, 18000122, 18000121, '_wp_attached_file', '2026/05/source-brief.pdf');
+    $db->close();
+    smoke_write_file($file_block_source_root . '/wp-content/uploads/2026/05/source-brief.pdf', 'source pdf bytes');
+
+    $db = smoke_open_db($file_block_target);
+    smoke_insert_post($db, 19000120, 'Main Page With File Block', $target_file_block_content, 'page', 'main-page-with-file-block');
+    smoke_insert_post($db, 19000121, 'main-brief.pdf', '', 'attachment', 'main-brief-pdf', 'inherit', 19000120, 'application/pdf', 'http://example.test/wp-content/uploads/2026/05/main-brief.pdf');
+    smoke_insert_postmeta($db, 19000122, 19000121, '_wp_attached_file', '2026/05/main-brief.pdf');
+    $db->close();
+    smoke_write_file($file_block_target_root . '/wp-content/uploads/2026/05/main-brief.pdf', 'main pdf bytes');
+
+    $file_block_result = cow_merge_branch_state(
+        $file_block_base,
+        $file_block_source,
+        $file_block_target,
+        $file_block_metadata,
+        'feature-smoke-page-file-block',
+        'main',
+        $file_block_file_base,
+        $file_block_source_root,
+        $file_block_target_root
+    );
+    assert_same($file_block_result['status'], 'completed', 'branch and main page-plus-file-block inserts complete cleanly');
+    assert_same((int)($file_block_result['conflicts'] ?? -1), 0, 'branch and main page-plus-file-block inserts do not create merge conflicts');
+    assert_same(smoke_scalar($file_block_target, 'SELECT post_content FROM wp_posts WHERE ID = 18000120'), $source_file_block_content, 'merged target preserves branch core/file block attachment reference');
+    assert_same(smoke_scalar($file_block_target, 'SELECT post_type FROM wp_posts WHERE ID = 18000121'), 'attachment', 'merged target includes the branch file-block attachment row');
+    assert_same((int)smoke_scalar($file_block_target, 'SELECT post_parent FROM wp_posts WHERE ID = 18000121'), 18000120, 'merged target keeps the branch file-block attachment parent page');
+    assert_same(smoke_scalar($file_block_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 18000121 AND meta_key = '_wp_attached_file'"), '2026/05/source-brief.pdf', 'merged target includes branch file-block attached-file metadata');
+    assert_same(file_get_contents($file_block_target_root . '/wp-content/uploads/2026/05/source-brief.pdf'), 'source pdf bytes', 'merged target includes the branch file-block upload file');
+    assert_same(smoke_scalar($file_block_target, 'SELECT post_content FROM wp_posts WHERE ID = 19000120'), $target_file_block_content, 'merged target preserves target core/file block attachment reference');
+    assert_same(smoke_scalar($file_block_target, 'SELECT post_type FROM wp_posts WHERE ID = 19000121'), 'attachment', 'merged target preserves the main file-block attachment row');
+    assert_same(file_get_contents($file_block_target_root . '/wp-content/uploads/2026/05/main-brief.pdf'), 'main pdf bytes', 'merged target preserves the main file-block upload file');
+    assert_same(
+        (int)smoke_scalar($file_block_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name IN ('wp_posts', 'wp_postmeta', '__files__')"),
+        0,
+        'page-plus-file-block smoke merge records no WordPress DB or file conflicts'
+    );
+    assert_same(
+        (int)smoke_scalar($file_block_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'source-applied'"),
+        2,
+        'page-plus-file-block smoke merge audits the source page and attachment inserts'
+    );
+    assert_same(
+        (int)smoke_scalar($file_block_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_postmeta' AND decision = 'source-applied'"),
+        1,
+        'page-plus-file-block smoke merge audits the source attachment metadata insert'
+    );
+    assert_same(
+        (int)smoke_scalar(
+            $file_block_metadata,
+            "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'source-applied' AND row_identity = '" .
+            SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/2026/05/source-brief.pdf')) . "'"
+        ),
+        1,
+        'page-plus-file-block smoke merge audits the source upload file'
+    );
+    assert_same(
+        (int)smoke_scalar($file_block_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_postmeta') AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
+        3,
+        'page-plus-file-block smoke merge audits target DB graph inserts'
+    );
+    assert_same(
+        (int)smoke_scalar($file_block_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'target-kept'"),
+        1,
+        'page-plus-file-block smoke merge audits target upload file'
+    );
+
     $options_base = $tmp . '/options-base.sqlite';
     $options_source = $tmp . '/options-source.sqlite';
     $options_target = $tmp . '/options-target.sqlite';
