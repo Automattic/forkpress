@@ -85,12 +85,18 @@ function create_explicit_comment_graph_db(string $path): void {
 
 function create_explicit_term_graph_db(string $path): void {
     $db = open_db($path);
+    $db->exec('CREATE TABLE wp_posts (ID INTEGER PRIMARY KEY AUTOINCREMENT, post_title TEXT NOT NULL, post_content TEXT NOT NULL, post_status TEXT NOT NULL)');
     $db->exec('CREATE TABLE wp_terms (term_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, slug TEXT NOT NULL)');
     $db->exec('CREATE TABLE wp_termmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, term_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
     $db->exec('CREATE TABLE wp_term_taxonomy (term_taxonomy_id INTEGER PRIMARY KEY AUTOINCREMENT, term_id INTEGER NOT NULL, taxonomy TEXT NOT NULL, description TEXT NOT NULL DEFAULT "", parent INTEGER NOT NULL DEFAULT 0, count INTEGER NOT NULL DEFAULT 0)');
+    $db->exec('CREATE TABLE wp_term_relationships (object_id INTEGER NOT NULL, term_taxonomy_id INTEGER NOT NULL, term_order INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (object_id, term_taxonomy_id))');
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status) VALUES (1, 'Base term relationship post', 'Base content', 'publish')");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status) VALUES (2, 'Base updated term relationship post', 'Base content', 'publish')");
     $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (1, 'Base term', 'base-term')");
     $db->exec("INSERT INTO wp_termmeta (meta_id, term_id, meta_key, meta_value) VALUES (1, 1, 'base_term_key', 'base term value')");
     $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES (1, 1, 'category', '', 0, 1)");
+    $db->exec("INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (1, 1, 0)");
+    $db->exec("INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (2, 1, 0)");
     $db->close();
 }
 
@@ -365,7 +371,10 @@ try {
     $term_graph_source_db->exec("INSERT INTO wp_termmeta (term_id, meta_key, meta_value) VALUES (2, 'term_graph_json', '{\"term_id\":2}')");
     $term_graph_source_db->exec("UPDATE wp_termmeta SET term_id = 2 WHERE meta_id = 1");
     $term_graph_source_db->exec("INSERT INTO wp_term_taxonomy (term_id, taxonomy, description, parent, count) VALUES (2, 'category', '', 0, 1)");
+    $term_graph_taxonomy_id = (int)$term_graph_source_db->lastInsertRowID();
     $term_graph_source_db->exec("UPDATE wp_term_taxonomy SET term_id = 2 WHERE term_taxonomy_id = 1");
+    $term_graph_source_db->exec("INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (1, $term_graph_taxonomy_id, 0)");
+    $term_graph_source_db->exec("UPDATE wp_term_relationships SET term_taxonomy_id = $term_graph_taxonomy_id WHERE object_id = 2 AND term_taxonomy_id = 1");
     $term_graph_source_db->close();
 
     $term_graph_result = cow_merge_databases($term_graph_base, $term_graph_source, $term_graph_target, $term_graph_metadata, 'feature-explicit-term-graph', 'main');
@@ -396,6 +405,16 @@ try {
         'updated term taxonomy behind a held explicit WordPress term ID is not applied automatically'
     );
     assert_same(
+        (int)scalar($term_graph_target, "SELECT COUNT(*) FROM wp_term_relationships WHERE term_taxonomy_id = $term_graph_taxonomy_id"),
+        0,
+        'term relationships behind a held explicit WordPress term taxonomy are not applied automatically'
+    );
+    assert_same(
+        (int)scalar($term_graph_target, 'SELECT COUNT(*) FROM wp_term_relationships WHERE object_id = 2 AND term_taxonomy_id = 1'),
+        1,
+        'updated term relationships behind a held explicit WordPress term taxonomy are not applied automatically'
+    );
+    assert_same(
         (int)scalar($term_graph_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-explicit-term-graph' AND c.table_name = 'wp_terms' AND c.conflict_type = 'row-target-constraint'"),
         1,
         'out-of-band explicit WordPress term records a review conflict'
@@ -410,6 +429,11 @@ try {
         2,
         'term taxonomy behind a held explicit WordPress term records review conflicts'
     );
+    assert_same(
+        (int)scalar($term_graph_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-explicit-term-graph' AND c.table_name = 'wp_term_relationships' AND c.conflict_type = 'row-target-constraint'"),
+        3,
+        'term relationships behind a held explicit WordPress term taxonomy record review conflicts'
+    );
     $term_meta_reason = (string)scalar($term_graph_metadata, "SELECT reason FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-explicit-term-graph' AND d.table_name = 'wp_termmeta' AND d.decision = 'target-wins' ORDER BY d.id DESC LIMIT 1");
     assert_true(
         str_contains($term_meta_reason, 'outside the source branch ID band') && str_contains($term_meta_reason, 'wp_terms'),
@@ -419,6 +443,10 @@ try {
     assert_true(
         str_contains($term_taxonomy_reason, 'outside the source branch ID band') && str_contains($term_taxonomy_reason, 'wp_terms'),
         'term taxonomy conflict explains that it is held behind the explicit WordPress term ID'
+    );
+    assert_true(
+        (int)scalar($term_graph_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-explicit-term-graph' AND d.table_name = 'wp_term_relationships' AND d.decision = 'target-wins' AND d.reason LIKE '%outside the source branch ID band%' AND d.reason LIKE '%wp_terms%'") >= 1,
+        'term relationship conflict explains that it is held behind the explicit WordPress term graph'
     );
 } finally {
     remove_tree($tmp);
