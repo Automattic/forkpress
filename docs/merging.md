@@ -86,6 +86,11 @@ notes. Conflict lifecycle changes are also recorded in an append-only
 UI clients should consume those fields instead of inferring behavior from raw
 `conflict_type` strings or free-form notes.
 
+Conflict rows are scoped to their merge run. Re-running the same source and
+target branch pair with the same conflict payload reuses the existing conflict
+record, but the same payload conflict on a different branch pair receives its
+own conflict row and `recorded` lifecycle event.
+
 Use `--records conflict-events` to inspect the full append-only lifecycle
 history for conflict records.
 

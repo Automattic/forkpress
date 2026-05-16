@@ -3282,6 +3282,120 @@ SQL);
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_posts' AND column_name = 'post_title'"), 1, 'rerunning the same conflict does not duplicate conflict records');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_options' AND column_name = 'option_value'"), 1, 'serialized-cell conflict is auditable without repeated noise');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE decision = 'target-wins' AND table_name IN ('wp_posts', 'wp_options')"), 4, 'target-wins decisions are recorded for each conflicting run');
+
+    $conflict_peer_target = $tmp . '/conflict-peer-target.sqlite';
+    copy($conflict_base, $conflict_peer_target);
+    $db = open_db($conflict_peer_target);
+    $db->exec("UPDATE wp_posts SET post_title = 'Target title' WHERE ID = 1");
+    $db->exec("UPDATE wp_options SET option_value = 'a:1:{s:5:\"color\";s:3:\"red\";}' WHERE option_name = 'theme_mods_test'");
+    $db->close();
+    $peer_result = cow_merge_databases($conflict_base, $conflict_source, $conflict_peer_target, $metadata, 'feature-conflict-peer', 'main');
+    $peer_conflict_run_id = (int)$peer_result['run_id'];
+    assert_same($peer_result['status'], 'completed_with_conflicts', 'same payload conflict on another source branch still completes with conflicts');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE run_id = $peer_conflict_run_id"),
+        2,
+        'identical conflicts on another branch pair receive their own first-class conflict rows'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflict_events WHERE run_id = $peer_conflict_run_id AND event_type = 'recorded'"),
+        2,
+        'identical conflicts on another branch pair receive their own recorded lifecycle events'
+    );
+
+    $legacy_conflict_metadata = $tmp . '/legacy-conflict-unique.sqlite';
+    $legacy_db = open_db($legacy_conflict_metadata);
+    $legacy_db->exec(<<<'SQL'
+CREATE TABLE merge_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_branch TEXT NOT NULL,
+    target_branch TEXT NOT NULL,
+    base_ref TEXT,
+    started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_at TEXT,
+    status TEXT NOT NULL,
+    policy TEXT NOT NULL,
+    source_db TEXT NOT NULL,
+    target_db TEXT NOT NULL,
+    base_db TEXT NOT NULL
+)
+SQL);
+    $legacy_db->exec(<<<'SQL'
+CREATE TABLE merge_conflicts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL,
+    table_name TEXT NOT NULL,
+    row_identity TEXT,
+    column_name TEXT,
+    conflict_type TEXT NOT NULL,
+    base_payload TEXT,
+    source_payload TEXT,
+    target_payload TEXT,
+    chosen_payload TEXT,
+    base_hash TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    target_hash TEXT NOT NULL,
+    chosen_hash TEXT NOT NULL,
+    resolver TEXT NOT NULL,
+    resolved_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(run_id) REFERENCES merge_runs(id),
+    UNIQUE(table_name, row_identity, column_name, conflict_type, base_hash, source_hash, target_hash, chosen_hash)
+)
+SQL);
+    $legacy_db->exec("INSERT INTO merge_runs (id, source_branch, target_branch, status, policy, source_db, target_db, base_db) VALUES (1, 'feature-legacy-old', 'main', 'completed_with_conflicts', 'target-wins', 'source.sqlite', 'target.sqlite', 'base.sqlite')");
+    $legacy_base_payload = cow_merge_payload_json('base');
+    $legacy_source_payload = cow_merge_payload_json('source');
+    $legacy_target_payload = cow_merge_payload_json('target');
+    $legacy_chosen_payload = cow_merge_payload_json('target');
+    $legacy_stmt = $legacy_db->prepare(
+        'INSERT INTO merge_conflicts ' .
+        '(run_id, table_name, row_identity, column_name, conflict_type, base_payload, source_payload, target_payload, chosen_payload, base_hash, source_hash, target_hash, chosen_hash, resolver, resolved_at) ' .
+        'VALUES (1, :table_name, :row_identity, :column_name, :conflict_type, :base_payload, :source_payload, :target_payload, :chosen_payload, :base_hash, :source_hash, :target_hash, :chosen_hash, :resolver, CURRENT_TIMESTAMP)'
+    );
+    $legacy_stmt->bindValue(':table_name', 'plugin_legacy_conflicts', SQLITE3_TEXT);
+    $legacy_stmt->bindValue(':row_identity', cow_merge_payload_json(['id' => 1]), SQLITE3_TEXT);
+    $legacy_stmt->bindValue(':column_name', 'value', SQLITE3_TEXT);
+    $legacy_stmt->bindValue(':conflict_type', 'cell-conflict', SQLITE3_TEXT);
+    $legacy_stmt->bindValue(':base_payload', $legacy_base_payload, SQLITE3_TEXT);
+    $legacy_stmt->bindValue(':source_payload', $legacy_source_payload, SQLITE3_TEXT);
+    $legacy_stmt->bindValue(':target_payload', $legacy_target_payload, SQLITE3_TEXT);
+    $legacy_stmt->bindValue(':chosen_payload', $legacy_chosen_payload, SQLITE3_TEXT);
+    $legacy_stmt->bindValue(':base_hash', hash('sha256', $legacy_base_payload), SQLITE3_TEXT);
+    $legacy_stmt->bindValue(':source_hash', hash('sha256', $legacy_source_payload), SQLITE3_TEXT);
+    $legacy_stmt->bindValue(':target_hash', hash('sha256', $legacy_target_payload), SQLITE3_TEXT);
+    $legacy_stmt->bindValue(':chosen_hash', hash('sha256', $legacy_chosen_payload), SQLITE3_TEXT);
+    $legacy_stmt->bindValue(':resolver', 'target-wins', SQLITE3_TEXT);
+    $legacy_stmt->execute();
+    cow_merge_ensure_metadata($legacy_db);
+    assert_true(
+        str_contains((string)$legacy_db->querySingle("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'merge_conflicts'"), 'UNIQUE(run_id, table_name'),
+        'legacy conflict metadata migrates to run-scoped conflict uniqueness'
+    );
+    $legacy_peer_run_id = cow_merge_start_run($legacy_db, 'feature-legacy-peer', 'main', 'base.sqlite', 'source.sqlite', 'target.sqlite');
+    cow_merge_record_conflict(
+        $legacy_db,
+        $legacy_peer_run_id,
+        'plugin_legacy_conflicts',
+        cow_merge_payload_json(['id' => 1]),
+        'value',
+        'cell-conflict',
+        'base',
+        'source',
+        'target',
+        'target'
+    );
+    assert_same(
+        (int)$legacy_db->querySingle("SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_legacy_conflicts'"),
+        2,
+        'migrated legacy conflict metadata accepts identical conflicts from another branch pair'
+    );
+    assert_same(
+        (int)$legacy_db->querySingle("SELECT COUNT(*) FROM merge_conflict_events WHERE run_id = $legacy_peer_run_id AND event_type = 'recorded'"),
+        1,
+        'migrated legacy conflict metadata records lifecycle events for new peer conflicts'
+    );
+    $legacy_db->close();
     $audit = cow_merge_audit_report($metadata, $conflict_run_id, 10);
     assert_same($audit['metadata_exists'], true, 'merge audit report reads existing metadata');
     assert_same(count($audit['runs']), 1, 'merge audit report can focus on one run');
@@ -3986,7 +4100,7 @@ SQL);
     assert_same($target_resolution_rerun['status'], 'completed', 'rerunning after target cell resolution treats the reviewed target choice as accepted');
     assert_same(scalar($conflict_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_test'"), 'a:1:{s:5:"color";s:3:"red";}', 'rerunning after target cell resolution keeps the audited target value');
     assert_same(
-        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_options' AND column_name = 'option_value'"),
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'wp_options' AND c.column_name = 'option_value' AND r.source_branch = 'feature-conflict'"),
         1,
         'rerunning after target cell resolution does not duplicate the unchanged conflict record'
     );

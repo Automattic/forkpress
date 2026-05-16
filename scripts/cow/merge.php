@@ -3700,11 +3700,86 @@ CREATE TABLE IF NOT EXISTS merge_conflicts (
     resolved_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(run_id) REFERENCES merge_runs(id),
-    UNIQUE(table_name, row_identity, column_name, conflict_type, base_hash, source_hash, target_hash, chosen_hash)
+    UNIQUE(run_id, table_name, row_identity, column_name, conflict_type, base_hash, source_hash, target_hash, chosen_hash)
 )
 SQL, 'failed to create metadata table merge_conflicts');
     cow_merge_ensure_metadata_column($meta, 'merge_conflicts', 'source_row_payload', 'TEXT');
     cow_merge_ensure_metadata_column($meta, 'merge_conflicts', 'target_row_payload', 'TEXT');
+    $conflicts_schema = cow_merge_query_checked(
+        $meta,
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'merge_conflicts'",
+        'failed to inspect conflict metadata schema'
+    );
+    $conflicts_row = $conflicts_schema->fetchArray(SQLITE3_ASSOC);
+    if ($conflicts_row === false) {
+        cow_merge_result_finalize_checked(
+            $conflicts_schema,
+            'failed to finalize conflict metadata schema inspection'
+        );
+        throw new RuntimeException('failed to inspect conflict metadata schema: missing merge_conflicts table');
+    }
+    $conflicts_sql = (string)$conflicts_row['sql'];
+    cow_merge_result_finalize_checked(
+        $conflicts_schema,
+        'failed to finalize conflict metadata schema inspection'
+    );
+    unset($conflicts_schema);
+    if (!str_contains($conflicts_sql, 'UNIQUE(run_id, table_name')) {
+        $migration_savepoint = 'migrate_merge_conflicts_run_scoped_unique';
+        cow_merge_exec_checked(
+            $meta,
+            'SAVEPOINT ' . $migration_savepoint,
+            'failed to create conflict metadata migration savepoint'
+        );
+        try {
+            cow_merge_exec_checked($meta, 'ALTER TABLE merge_conflicts RENAME TO merge_conflicts_old', 'failed to rename legacy conflict metadata table');
+            cow_merge_exec_checked($meta, <<<'SQL'
+CREATE TABLE merge_conflicts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL,
+    table_name TEXT NOT NULL,
+    row_identity TEXT,
+    column_name TEXT,
+    conflict_type TEXT NOT NULL,
+    base_payload TEXT,
+    source_payload TEXT,
+    target_payload TEXT,
+    chosen_payload TEXT,
+    source_row_payload TEXT,
+    target_row_payload TEXT,
+    base_hash TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    target_hash TEXT NOT NULL,
+    chosen_hash TEXT NOT NULL,
+    resolver TEXT NOT NULL,
+    resolved_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(run_id) REFERENCES merge_runs(id),
+    UNIQUE(run_id, table_name, row_identity, column_name, conflict_type, base_hash, source_hash, target_hash, chosen_hash)
+)
+SQL, 'failed to create migrated conflict metadata table');
+            cow_merge_exec_checked(
+                $meta,
+                'INSERT INTO merge_conflicts ' .
+                '(id, run_id, table_name, row_identity, column_name, conflict_type, base_payload, source_payload, target_payload, chosen_payload, source_row_payload, target_row_payload, base_hash, source_hash, target_hash, chosen_hash, resolver, resolved_at, created_at) ' .
+                'SELECT id, run_id, table_name, row_identity, column_name, conflict_type, base_payload, source_payload, target_payload, chosen_payload, source_row_payload, target_row_payload, base_hash, source_hash, target_hash, chosen_hash, resolver, resolved_at, created_at FROM merge_conflicts_old',
+                'failed to copy legacy conflict metadata'
+            );
+            cow_merge_exec_checked($meta, 'DROP TABLE merge_conflicts_old', 'failed to drop legacy conflict metadata table');
+            cow_merge_release_savepoint_checked($meta, $migration_savepoint, 'conflict metadata migration');
+        } catch (Throwable $e) {
+            $cleanup_error = cow_merge_rollback_release_savepoint_checked(
+                $meta,
+                $migration_savepoint,
+                'conflict metadata migration',
+                $e
+            );
+            if ($cleanup_error !== null) {
+                throw $cleanup_error;
+            }
+            throw $e;
+        }
+    }
     cow_merge_exec_checked($meta, <<<'SQL'
 CREATE TABLE IF NOT EXISTS merge_conflict_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
