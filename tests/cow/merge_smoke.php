@@ -14,6 +14,52 @@ function assert_same($actual, $expected, string $msg): void {
     $fail++;
 }
 
+function smoke_remove_tree(string $path): void {
+    if (!file_exists($path) && !is_link($path)) {
+        return;
+    }
+    if (is_file($path) || is_link($path)) {
+        unlink($path);
+        return;
+    }
+    $it = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($path, RecursiveDirectoryIterator::SKIP_DOTS),
+        RecursiveIteratorIterator::CHILD_FIRST
+    );
+    foreach ($it as $entry) {
+        $entry->isDir() && !$entry->isLink() ? rmdir($entry->getPathname()) : unlink($entry->getPathname());
+    }
+    rmdir($path);
+}
+
+function smoke_open_db(string $path): SQLite3 {
+    $db = new SQLite3($path);
+    $db->busyTimeout(5000);
+    return $db;
+}
+
+function smoke_scalar(string $path, string $sql): mixed {
+    $db = smoke_open_db($path);
+    $value = $db->querySingle($sql);
+    $db->close();
+    return $value;
+}
+
+function smoke_create_posts_db(string $path): void {
+    $db = smoke_open_db($path);
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_title TEXT NOT NULL DEFAULT '',
+        post_content TEXT NOT NULL DEFAULT '',
+        post_status TEXT NOT NULL DEFAULT 'publish',
+        post_type TEXT NOT NULL DEFAULT 'post',
+        post_name TEXT NOT NULL DEFAULT ''
+    )");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (1, 'Base Page', 'Base content', 'publish', 'page', 'base-page')");
+    $db->close();
+}
+
 define('FORKPRESS_COW_MERGE_TESTS', true);
 require_once __DIR__ . '/../../scripts/cow/merge.php';
 
@@ -145,6 +191,53 @@ assert_same(
     null,
     'content options remain reviewable'
 );
+
+$tmp = sys_get_temp_dir() . '/forkpress-cow-merge-smoke-' . getmypid() . '-' . bin2hex(random_bytes(4));
+mkdir($tmp, 0777, true);
+try {
+    $base = $tmp . '/base.sqlite';
+    $source = $tmp . '/source.sqlite';
+    $target = $tmp . '/target.sqlite';
+    $metadata = $tmp . '/.forkpress/cow/merge/metadata.sqlite';
+
+    smoke_create_posts_db($base);
+    copy($base, $source);
+    copy($base, $target);
+
+    $db = smoke_open_db($source);
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (18000000, 'Branch Page', 'Created on feature branch', 'publish', 'page', 'branch-page')");
+    $db->close();
+
+    $db = smoke_open_db($target);
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (19000000, 'Main Page', 'Created on main branch', 'publish', 'page', 'main-page')");
+    $db->close();
+
+    $result = cow_merge_databases($base, $source, $target, $metadata, 'feature-smoke-pages', 'main');
+    assert_same($result['status'], 'completed', 'independent branch and main page inserts complete cleanly');
+    assert_same((int)($result['conflicts'] ?? -1), 0, 'independent branch and main page inserts do not create merge conflicts');
+    assert_same(smoke_scalar($target, "SELECT post_content FROM wp_posts WHERE post_title = 'Branch Page'"), 'Created on feature branch', 'merged target includes the branch-created page');
+    assert_same(smoke_scalar($target, "SELECT post_content FROM wp_posts WHERE post_title = 'Main Page'"), 'Created on main branch', 'merged target preserves the main-created page');
+    assert_same((int)smoke_scalar($target, "SELECT COUNT(*) FROM wp_posts WHERE post_type = 'page'"), 3, 'merged target has base, branch, and main pages');
+    assert_same(
+        (int)smoke_scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_posts'"),
+        0,
+        'page smoke merge records no wp_posts conflicts'
+    );
+    assert_same(
+        (int)smoke_scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'source-applied'"),
+        1,
+        'page smoke merge audits the source page insert'
+    );
+    assert_same(
+        (int)smoke_scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
+        1,
+        'page smoke merge audits the target page insert'
+    );
+} finally {
+    smoke_remove_tree($tmp);
+}
 
 if ($fail > 0) {
     echo "COW merge smoke tests failed ($fail failures, $pass passes).\n";
