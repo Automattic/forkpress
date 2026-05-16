@@ -2155,7 +2155,7 @@ try {
         'Accept target constraint for insert.',
         'cow-test'
     );
-    assert_same($constraint_insert_target_resolution['status'], 'validated', 'target constraint insert resolution validates the audited target choice');
+    assert_same($constraint_insert_target_resolution['status'], 'applied', 'target constraint insert resolution records applied target choice');
     cow_merge_databases($constraint_insert_base, $constraint_insert_source, $constraint_insert_target, $constraint_insert_metadata, 'feature-constraint-insert', 'main');
     assert_same(
         (int)scalar($constraint_insert_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_constraint_inserts' AND decision = 'target-accepted' AND reason LIKE 'reviewed target resolution already accepts source insert blocked by target constraints%'"),
@@ -3384,7 +3384,7 @@ SQL);
     );
     assert_same($dry_resolution['status'], 'validated', 'dry-run source conflict resolution validates target preconditions');
     assert_same(scalar($conflict_target, "SELECT post_title FROM wp_posts WHERE ID = 1"), 'Target title', 'dry-run source resolution does not mutate target DB');
-    assert_same((int)scalar($metadata, 'SELECT COUNT(*) FROM merge_resolutions'), 0, 'dry-run conflict resolution does not write resolution audit records');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $title_conflict_id AND choice = 'source' AND applied = 0 AND status = 'validated'"), 1, 'dry-run conflict resolution records a validated resolution audit row');
     $source_resolution = cow_merge_resolve_conflict(
         $metadata,
         $title_conflict_id,
@@ -3399,8 +3399,8 @@ SQL);
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_review_notes WHERE record_type = 'conflict' AND record_id = $title_conflict_id AND status = 'reviewed' AND note LIKE 'Resolved with source choice:%'"), 1, 'applied source conflict resolution appends a reviewed note');
     assert_throws(
         fn() => cow_merge_resolve_conflict($metadata, $title_conflict_id, 'source', true, 'Try stale source apply.', 'cow-test'),
-        'target cell no longer matches',
-        'stale conflict resolution is blocked when target has changed since audit'
+        'already resolved',
+        'resolved cell conflicts reject later resolution attempts'
     );
     $stale_cell_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['records' => 'conflicts']);
     $stale_cell_conflicts = array_values(array_filter($stale_cell_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $title_conflict_id));
@@ -3978,7 +3978,7 @@ SQL);
         'Reviewed and kept target serialized option.',
         'cow-test'
     );
-    assert_same($target_resolution['status'], 'validated', 'target conflict resolution records validated status');
+    assert_same($target_resolution['status'], 'applied', 'target conflict resolution records applied status');
     assert_same(scalar($conflict_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_test'"), 'a:1:{s:5:"color";s:3:"red";}', 'target conflict resolution leaves target DB unchanged');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $option_conflict_id AND choice = 'target' AND applied = 1"), 1, 'target conflict resolution is auditable');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_review_notes WHERE record_type = 'conflict' AND record_id = $option_conflict_id AND status = 'reviewed' AND note LIKE 'Resolved with target choice:%'"), 1, 'applied target conflict resolution appends a reviewed note');
@@ -4098,13 +4098,13 @@ SQL);
         'failed direct review lookup finalize records no review note'
     );
     $resolution_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10);
-    assert_same(count($resolution_audit['resolutions']), 2, 'merge audit report exports deterministic resolution records');
+    assert_same(count($resolution_audit['resolutions']), 3, 'merge audit report exports deterministic resolution records');
     $applied_resolution_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['resolution_status' => 'applied']);
     assert_same($applied_resolution_audit['filters']['records'], 'resolutions', 'resolution status filter defaults audit records to resolutions');
     assert_same($applied_resolution_audit['filters']['resolution_status'], 'applied', 'merge audit JSON report includes resolution status filter');
     assert_same(count($applied_resolution_audit['conflicts']), 0, 'resolution status filter omits conflict records');
     assert_same(count($applied_resolution_audit['decisions']), 0, 'resolution status filter omits decision records');
-    assert_same(count($applied_resolution_audit['resolutions']), 1, 'resolution status filter returns applied resolution records');
+    assert_same(count($applied_resolution_audit['resolutions']), 2, 'resolution status filter returns applied resolution records');
     assert_same($applied_resolution_audit['resolutions'][0]['status'], 'applied', 'applied resolution status filter matches resolution rows');
     $applied_resolution_default_records_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, [
         'records' => 'all',
@@ -4114,7 +4114,7 @@ SQL);
     assert_same($applied_resolution_default_records_audit['filters']['records'], 'resolutions', 'resolution status filter normalizes default CLI records to resolutions');
     assert_same(count($applied_resolution_default_records_audit['conflicts']), 0, 'resolution status filter with CLI-style defaults omits conflict records');
     assert_same(count($applied_resolution_default_records_audit['decisions']), 0, 'resolution status filter with CLI-style defaults omits decision records');
-    assert_same(count($applied_resolution_default_records_audit['resolutions']), 1, 'resolution status filter with CLI-style defaults returns applied resolutions');
+    assert_same(count($applied_resolution_default_records_audit['resolutions']), 2, 'resolution status filter with CLI-style defaults returns applied resolutions');
     assert_true(count(array_filter($applied_resolution_default_records_audit['resolution_groups'], fn($row) => $row['group_key'] === 'applied')) === 1, 'resolution status grouping works through CLI-style default records');
     $validated_resolution_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['records' => 'resolutions', 'resolution_status' => 'validated']);
     assert_same(count($validated_resolution_audit['resolutions']), 1, 'validated resolution status filter returns validated resolution records');
@@ -4130,7 +4130,7 @@ SQL);
     foreach ($grouped_resolution_audit['resolution_groups'] as $group) {
         $group_counts[$group['group_key']] = (int)$group['resolution_count'];
     }
-    assert_same($group_counts['applied'] ?? 0, 1, 'resolution grouping counts applied records');
+    assert_same($group_counts['applied'] ?? 0, 2, 'resolution grouping counts applied records');
     assert_same($group_counts['validated'] ?? 0, 1, 'resolution grouping counts validated records');
     ob_start();
     cow_merge_print_audit_text($grouped_resolution_audit);
@@ -4202,8 +4202,8 @@ SQL);
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $row_conflict_id AND choice = 'source' AND applied = 1 AND column_name = ''"), 1, 'row conflict resolution is auditable without a column name');
     assert_throws(
         fn() => cow_merge_resolve_conflict($metadata, $row_conflict_id, 'target', true, 'Try stale target keep.', 'cow-test'),
-        'target row no longer matches',
-        'stale row conflict resolution is blocked when target row has changed since audit'
+        'already resolved',
+        'resolved row conflicts reject later resolution attempts'
     );
 
     $row_revalidate_base = $tmp . '/row-revalidate-base.sqlite';
@@ -4544,7 +4544,7 @@ SQL);
         'Keep audited target row.',
         'cow-test'
     );
-    assert_same($row_target_choice_resolution['status'], 'validated', 'target row resolution records validated status');
+    assert_same($row_target_choice_resolution['status'], 'applied', 'target row resolution records applied status');
     $row_target_choice_rerun = cow_merge_databases($row_target_choice_base, $row_target_choice_source, $row_target_choice_target, $metadata, 'feature-row-target-choice', 'main');
     assert_same($row_target_choice_rerun['status'], 'completed', 'rerunning after target row resolution treats the reviewed target choice as accepted');
     assert_same(scalar($row_target_choice_target, "SELECT value FROM plugin_items WHERE item_id = 'target-choice'"), 'target row', 'rerunning after target row resolution keeps the audited target row');
@@ -4696,8 +4696,8 @@ SQL);
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $row_source_deleted_id AND choice = 'source' AND applied = 1 AND column_name = ''"), 1, 'row deletion resolution is auditable');
     assert_throws(
         fn() => cow_merge_resolve_conflict($metadata, $row_source_deleted_id, 'target', true, 'Try stale keep after deletion.', 'cow-test'),
-        'target row no longer exists',
-        'stale source-deleted row resolution is blocked after the target row was removed'
+        'already resolved',
+        'resolved source-deleted row conflicts reject later resolution attempts'
     );
 
     $reviewed_conflict_id = (int)$audit['conflicts'][0]['id'];
@@ -6385,8 +6385,8 @@ SQL);
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $binary_file_conflict_id AND table_name = '__files__' AND column_name = 'path' AND choice = 'source' AND applied = 1"), 1, 'binary filesystem conflict resolution is auditable');
     assert_throws(
         fn() => cow_merge_resolve_conflict($metadata, $file_conflict_id, 'target', true, 'Try stale file keep.', 'cow-test'),
-        'target filesystem path no longer matches',
-        'stale filesystem conflict resolution is blocked after the target path changes'
+        'already resolved',
+        'resolved filesystem conflicts reject later resolution attempts'
     );
     $stale_file_audit = cow_merge_audit_report($metadata, null, 10, [
         'records' => 'conflicts',
@@ -6786,7 +6786,7 @@ SQL);
         'Keep audited target file.',
         'cow-test'
     );
-    assert_same($file_target_keep_resolution['status'], 'validated', 'target filesystem resolution records validated status');
+    assert_same($file_target_keep_resolution['status'], 'applied', 'target filesystem resolution records applied status');
     assert_same(file_get_contents($file_target_keep_target_root . '/wp-content/uploads/keep-target.txt'), 'target target-choice file', 'target filesystem resolution leaves target file unchanged');
     $file_target_keep_rerun = cow_merge_branch_state(
         $file_target_keep_base_db,
@@ -8161,7 +8161,7 @@ SQL);
         'Keep target schema type.',
         'test'
     );
-    assert_same($schema_target_resolution['status'], 'validated', 'target schema conflict resolution validates current target schema');
+    assert_same($schema_target_resolution['status'], 'applied', 'target schema conflict resolution records applied status');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_target_resolution_id AND table_name = 'plugin_items' AND column_name = 'extra' AND choice = 'target' AND applied = 1"), 1, 'target schema resolution is auditable');
     $schema_target_resolution_rerun = cow_merge_databases($schema_conflict_base, $schema_conflict_source, $schema_conflict_target, $metadata, 'feature-schema-conflict', 'main');
     assert_same($schema_target_resolution_rerun['status'], 'completed', 'rerunning after target schema resolution treats the reviewed target choice as accepted');
@@ -8888,7 +8888,7 @@ SQL);
     }
     assert_true($schema_column_apply_failure !== null && str_contains($schema_column_apply_failure, 'forced source column resolution DDL failure'), 'source column resolution DDL infrastructure failure is surfaced to the caller');
     assert_same(column_type($schema_resolve_target, 'plugin_items', 'review_note'), null, 'failed source column resolution DDL rolls back target schema');
-    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_column_conflict_id"), 0, 'failed source column resolution DDL records no resolution metadata');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_column_conflict_id"), 1, 'failed source column resolution DDL does not add resolution metadata after validation');
     $schema_column_resolution = cow_merge_resolve_conflict(
         $metadata,
         $schema_column_conflict_id,
