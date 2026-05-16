@@ -61,6 +61,25 @@ function smoke_create_posts_db(string $path): void {
         meta_key TEXT NOT NULL,
         meta_value TEXT NOT NULL
     )");
+    $db->exec("CREATE TABLE wp_terms (
+        term_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        slug TEXT NOT NULL
+    )");
+    $db->exec("CREATE TABLE wp_term_taxonomy (
+        term_taxonomy_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        term_id INTEGER NOT NULL,
+        taxonomy TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        parent INTEGER NOT NULL DEFAULT 0,
+        count INTEGER NOT NULL DEFAULT 0
+    )");
+    $db->exec("CREATE TABLE wp_term_relationships (
+        object_id INTEGER NOT NULL,
+        term_taxonomy_id INTEGER NOT NULL,
+        term_order INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (object_id, term_taxonomy_id)
+    )");
     $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
         (1, 'Base Page', 'Base content', 'publish', 'page', 'base-page')");
     $db->exec("INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES
@@ -366,6 +385,64 @@ try {
         (int)smoke_scalar($postmeta_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_postmeta' AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
         1,
         'page-plus-postmeta smoke merge audits the target metadata insert'
+    );
+
+    $taxonomy_base = $tmp . '/taxonomy-base.sqlite';
+    $taxonomy_source = $tmp . '/taxonomy-source.sqlite';
+    $taxonomy_target = $tmp . '/taxonomy-target.sqlite';
+    $taxonomy_metadata = $tmp . '/.forkpress/cow/merge/taxonomy-metadata.sqlite';
+
+    smoke_create_posts_db($taxonomy_base);
+    copy($taxonomy_base, $taxonomy_source);
+    copy($taxonomy_base, $taxonomy_target);
+
+    $db = smoke_open_db($taxonomy_source);
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (18000020, 'Branch Page With Term', 'Branch taxonomy content', 'publish', 'page', 'branch-page-with-term')");
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES
+        (18000021, 'Branch Topic', 'branch-topic')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES
+        (18000022, 18000021, 'category', 'Branch topic description', 0, 1)");
+    $db->exec("INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES
+        (18000020, 18000022, 0)");
+    $db->close();
+
+    $db = smoke_open_db($taxonomy_target);
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (19000020, 'Main Page With Term', 'Main taxonomy content', 'publish', 'page', 'main-page-with-term')");
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES
+        (19000021, 'Main Topic', 'main-topic')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES
+        (19000022, 19000021, 'category', 'Main topic description', 0, 1)");
+    $db->exec("INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES
+        (19000020, 19000022, 0)");
+    $db->close();
+
+    $taxonomy_result = cow_merge_databases($taxonomy_base, $taxonomy_source, $taxonomy_target, $taxonomy_metadata, 'feature-smoke-page-taxonomy', 'main');
+    assert_same($taxonomy_result['status'], 'completed', 'branch and main page-plus-taxonomy inserts complete cleanly');
+    assert_same((int)($taxonomy_result['conflicts'] ?? -1), 0, 'branch and main page-plus-taxonomy inserts do not create merge conflicts');
+    assert_same(smoke_scalar($taxonomy_target, 'SELECT post_title FROM wp_posts WHERE ID = 18000020'), 'Branch Page With Term', 'merged target includes the branch taxonomy page');
+    assert_same(smoke_scalar($taxonomy_target, 'SELECT name FROM wp_terms WHERE term_id = 18000021'), 'Branch Topic', 'merged target includes the branch term row');
+    assert_same(smoke_scalar($taxonomy_target, 'SELECT description FROM wp_term_taxonomy WHERE term_taxonomy_id = 18000022'), 'Branch topic description', 'merged target includes the branch term taxonomy row');
+    assert_same((int)smoke_scalar($taxonomy_target, 'SELECT COUNT(*) FROM wp_term_relationships WHERE object_id = 18000020 AND term_taxonomy_id = 18000022'), 1, 'merged target includes the branch page-term relationship');
+    assert_same(smoke_scalar($taxonomy_target, 'SELECT post_title FROM wp_posts WHERE ID = 19000020'), 'Main Page With Term', 'merged target preserves the main taxonomy page');
+    assert_same(smoke_scalar($taxonomy_target, 'SELECT name FROM wp_terms WHERE term_id = 19000021'), 'Main Topic', 'merged target preserves the main term row');
+    assert_same(smoke_scalar($taxonomy_target, 'SELECT description FROM wp_term_taxonomy WHERE term_taxonomy_id = 19000022'), 'Main topic description', 'merged target preserves the main term taxonomy row');
+    assert_same((int)smoke_scalar($taxonomy_target, 'SELECT COUNT(*) FROM wp_term_relationships WHERE object_id = 19000020 AND term_taxonomy_id = 19000022'), 1, 'merged target preserves the main page-term relationship');
+    assert_same(
+        (int)smoke_scalar($taxonomy_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name IN ('wp_posts', 'wp_terms', 'wp_term_taxonomy', 'wp_term_relationships')"),
+        0,
+        'page-plus-taxonomy smoke merge records no WordPress graph conflicts'
+    );
+    assert_same(
+        (int)smoke_scalar($taxonomy_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_terms', 'wp_term_taxonomy', 'wp_term_relationships') AND decision = 'source-applied'"),
+        4,
+        'page-plus-taxonomy smoke merge audits all source graph inserts'
+    );
+    assert_same(
+        (int)smoke_scalar($taxonomy_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_terms', 'wp_term_taxonomy', 'wp_term_relationships') AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
+        4,
+        'page-plus-taxonomy smoke merge audits all target graph inserts'
     );
 } finally {
     smoke_remove_tree($tmp);
