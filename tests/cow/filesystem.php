@@ -256,6 +256,23 @@ try {
     assert_true(str_contains($unsafe_symlink_preview, '../database/.ht.sqlite'), 'unsafe symlink audit exposes the rejected managed-path target');
     assert_true(str_contains($unsafe_symlink_preview, '../../../../outside-root.txt'), 'unsafe symlink audit exposes the rejected root-escaping target');
 
+    $absolute_link_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/absolute-link.txt'));
+    $absolute_link_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-unsafe-symlink' AND row_identity = '$absolute_link_identity' ORDER BY id DESC LIMIT 1");
+    $unsafe_resolution_error = null;
+    try {
+        cow_merge_resolve_conflict($metadata, $absolute_link_conflict_id, 'source', true, 'Try applying unsafe source symlink.', 'cow-test');
+    } catch (Throwable $e) {
+        $unsafe_resolution_error = $e->getMessage();
+    }
+    assert_true(
+        is_string($unsafe_resolution_error) && str_contains($unsafe_resolution_error, 'cannot apply source filesystem conflict wp-content/uploads/absolute-link.txt (file-unsafe-symlink): symlink target is absolute'),
+        'reviewed source resolution cannot force-apply an unsafe absolute symlink'
+    );
+    assert_true(
+        !file_exists($target_root . '/wp-content/uploads/absolute-link.txt') && !is_link($target_root . '/wp-content/uploads/absolute-link.txt'),
+        'failed unsafe symlink source resolution still leaves the target clean'
+    );
+
     $delete_dir_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'files',
         'records' => 'conflicts',
