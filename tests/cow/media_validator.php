@@ -239,7 +239,24 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
         ];
     }
     $directory = trim(dirname($metadata_file !== '' ? $metadata_file : $attached_file), '.');
-    foreach (($metadata['sizes'] ?? []) as $size_name => $size) {
+    $sizes = $metadata['sizes'] ?? [];
+    if (!is_array($sizes)) {
+        $findings[] = [
+            'plugin' => 'forkpress-wp-media',
+            'object' => 'attachment:' . $row['ID'],
+            'reason' => 'attachment generated sizes metadata is not an array',
+            'type' => 'plugin-wp-media-generated-file-drift',
+            'tables' => ['wp_posts', 'wp_postmeta'],
+            'validator' => 'forkpress-wp-media@1',
+            'candidate' => [
+                'attachment_id' => (int)$row['ID'],
+                'attached_file' => $attached_file,
+                'sizes_type' => gettype($sizes),
+            ],
+        ];
+        $sizes = [];
+    }
+    foreach ($sizes as $size_name => $size) {
         if (is_array($size) && isset($size['file'])) {
             $size_file = str_replace('\\', '/', (string)$size['file']);
             if ($size_file === '' || (str_contains($size_file, '/') && !$unsafe_upload_path($size_file))) {
@@ -373,6 +390,7 @@ PHP);
     cow_merge_allocate_autoincrement_bands($target, $metadata, 'main');
 
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-missing-file-key.jpg', "source generated missing file key original bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-sizes-not-array.jpg', "source generated sizes not array original bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-missing-generated.jpg', "source missing generated original bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-metadata-file-mismatch-attached.jpg', "source metadata mismatch attached file bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-self-duplicate.jpg', "source self duplicate original bytes\n");
@@ -398,6 +416,12 @@ PHP);
                 'height' => 150,
             ],
         ],
+    ]);
+    $sizes_not_array_id = insert_attachment($db, 'Source media generated sizes not array', '2026/05/source-generated-sizes-not-array.jpg', [
+        'file' => '2026/05/source-generated-sizes-not-array.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => 'thumbnail',
     ]);
     $missing_original_id = insert_attachment($db, 'Source media missing original file', '2026/05/source-missing-original.jpg', [
         'file' => '2026/05/source-missing-original.jpg',
@@ -541,7 +565,7 @@ PHP);
 
     assert_same($result['status'], 'completed_with_conflicts', 'media validator holds incomplete generated-size metadata for review');
     assert_same((int)($result['plugin_validators'] ?? 0), 1, 'media validator is discovered from mu-plugins during merge');
-    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 13, 'media validator records invalid metadata, dimensions, generated-size, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
+    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 14, 'media validator records invalid metadata, dimensions, generated-size, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
     assert_same(
         scalar($target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-generated-missing-file-key.jpg',
@@ -578,10 +602,13 @@ PHP);
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-media-generated-file-drift',
     ]);
-    assert_same(count($audit['conflicts']), 2, 'media validator exposes incomplete and non-basename generated-size metadata as plugin-scoped audit conflicts');
+    assert_same(count($audit['conflicts']), 3, 'media validator exposes malformed, incomplete, and non-basename generated-size metadata as plugin-scoped audit conflicts');
     $preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $audit['conflicts']));
     assert_true(str_contains($preview, 'source-generated-missing-file-key.jpg'), 'media validator audit includes the affected attachment');
     assert_true(str_contains($preview, '"generated_file":null'), 'media validator audit records the missing generated file field');
+    assert_true(str_contains($preview, 'source-generated-sizes-not-array.jpg'), 'media validator audit includes the malformed generated sizes attachment');
+    assert_true(str_contains($preview, '"sizes_type":"string"'), 'media validator audit records the malformed generated sizes type');
+    assert_true(str_contains($preview, (string)$sizes_not_array_id), 'media validator audit includes the malformed generated sizes attachment ID');
     assert_true(str_contains($preview, 'nested/source-generated-subdir-150x150.jpg'), 'media validator audit includes the non-basename generated filename');
     assert_true(str_contains($preview, (string)$generated_subdir_id), 'media validator audit includes the non-basename generated attachment ID');
 
