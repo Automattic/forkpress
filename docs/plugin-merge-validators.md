@@ -142,7 +142,9 @@ file tree using the same rollback path as other late merge failures.
 Validator status and findings must agree. `valid` must emit no findings, and
 `conflicts` must emit at least one finding. Contradictory validator output is
 treated as a validator failure so plugin state is not reported with ambiguous
-review evidence.
+review evidence. Each finding must include non-empty `plugin`, `object`, and
+`reason` fields, and its `type` must use the `plugin-*` namespace. Malformed
+findings fail the validator run before any plugin audit rows are recorded.
 
 ## Finding Shape
 
