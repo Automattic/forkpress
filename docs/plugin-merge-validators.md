@@ -144,7 +144,8 @@ Validator status and findings must agree. `valid` must emit no findings, and
 treated as a validator failure so plugin state is not reported with ambiguous
 review evidence. Each finding must include non-empty `plugin`, `object`, and
 `reason` fields, and its `type` must use the `plugin-*` namespace. Malformed
-findings fail the validator run before any plugin audit rows are recorded.
+object-shaped findings and malformed raw finding arrays fail the validator run
+before any plugin audit rows are recorded.
 
 ## Finding Shape
 
