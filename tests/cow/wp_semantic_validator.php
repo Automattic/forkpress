@@ -141,6 +141,26 @@ function create_wp_featured_media_db(string $path): void {
     $db->close();
 }
 
+function create_wp_image_block_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_title TEXT NOT NULL DEFAULT '',
+        post_content TEXT NOT NULL DEFAULT '',
+        post_status TEXT NOT NULL DEFAULT 'publish',
+        post_type TEXT NOT NULL DEFAULT 'post',
+        post_name TEXT NOT NULL DEFAULT '',
+        guid TEXT NOT NULL DEFAULT ''
+    )");
+    $image_block_content = '<!-- wp:image {"id":71,"sizeSlug":"large"} --><figure class="wp-block-image size-large"><img src="wp-content/uploads/2026/05/block-image.jpg" class="wp-image-71"/></figure><!-- /wp:image -->';
+    $stmt = $db->prepare("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, guid) VALUES
+        (70, 'Image block page', :content, 'publish', 'page', 'image-block-page', ''),
+        (71, 'Image block attachment', '', 'inherit', 'attachment', 'block-image', 'wp-content/uploads/2026/05/block-image.jpg')");
+    $stmt->bindValue(':content', $image_block_content, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+}
+
 define('FORKPRESS_COW_MERGE_TESTS', true);
 require_once __DIR__ . '/../../scripts/cow/merge.php';
 
@@ -424,6 +444,106 @@ PHP);
     $featured_preview = (string)($featured_audit['conflicts'][0]['chosen_preview'] ?? '');
     assert_true(str_contains($featured_preview, '"missing_object_id":61'), 'WordPress featured image audit includes the missing attachment ID');
     assert_true(str_contains($featured_preview, '"field":"_thumbnail_id"'), 'WordPress featured image audit includes the thumbnail field');
+
+    $image_block_base_root = $tmp . '/image-block-base';
+    $image_block_source_root = $tmp . '/image-block-source';
+    $image_block_target_root = $tmp . '/image-block-target';
+    $image_block_base = $image_block_base_root . '/wp-content/database/.ht.sqlite';
+    $image_block_source = $image_block_source_root . '/wp-content/database/.ht.sqlite';
+    $image_block_target = $image_block_target_root . '/wp-content/database/.ht.sqlite';
+    $image_block_metadata = $tmp . '/.forkpress/cow/merge/wp-image-block-validator-metadata.sqlite';
+    $image_block_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-image-block-validator.json';
+
+    mkdir($image_block_base_root . '/wp-content/database', 0777, true);
+    create_wp_image_block_db($image_block_base);
+    write_test_file($image_block_base_root . '/wp-content/uploads/2026/05/block-image.jpg', 'image block bytes');
+    write_test_file($image_block_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type IN ('post', 'page')");
+$findings = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    if (!preg_match_all('/<!--\s*wp:image\s+(\{.*?\})\s*-->/', (string)$row['post_content'], $matches)) {
+        continue;
+    }
+    foreach ($matches[1] as $raw_attrs) {
+        $attrs = json_decode($raw_attrs, true);
+        if (!is_array($attrs) || empty($attrs['id'])) {
+            continue;
+        }
+        $attachment_id = (int)$attrs['id'];
+        $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $attachment_id AND post_type = 'attachment'");
+        if ($exists === 0) {
+            $findings[] = [
+                'plugin' => 'forkpress-wp-image-block-refs',
+                'object' => 'post:' . $row['ID'],
+                'reason' => 'image block references a missing attachment',
+                'type' => 'plugin-wp-image-block-missing-attachment',
+                'tables' => ['wp_posts'],
+                'validator' => 'forkpress-wp-image-block-refs@1',
+                'candidate' => [
+                    'post_id' => (int)$row['ID'],
+                    'block_name' => 'core/image',
+                    'field' => 'attrs.id',
+                    'missing_object_id' => $attachment_id,
+                    'object_type' => 'attachment',
+                ],
+            ];
+        }
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    copy_tree_for_test($image_block_base_root, $image_block_source_root);
+    copy_tree_for_test($image_block_base_root, $image_block_target_root);
+    cow_merge_capture_file_base($image_block_base_root, $image_block_file_base);
+    cow_merge_allocate_autoincrement_bands($image_block_source, $image_block_metadata, 'feature-wp-image-block-source');
+    cow_merge_allocate_autoincrement_bands($image_block_target, $image_block_metadata, 'main');
+
+    $db = open_db($image_block_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID = 71');
+    $db->close();
+    unlink($image_block_source_root . '/wp-content/uploads/2026/05/block-image.jpg');
+
+    $db = open_db($image_block_target);
+    $db->exec("UPDATE wp_posts SET post_title = 'Target page still using deleted image block attachment' WHERE ID = 70");
+    $db->close();
+
+    $image_block_result = cow_merge_branch_state(
+        $image_block_base,
+        $image_block_source,
+        $image_block_target,
+        $image_block_metadata,
+        'feature-wp-image-block-source',
+        'main',
+        $image_block_file_base,
+        $image_block_source_root,
+        $image_block_target_root
+    );
+
+    assert_same($image_block_result['status'], 'completed_with_conflicts', 'WordPress image block validator holds missing attachments for review');
+    assert_same((int)($image_block_result['plugin_validators'] ?? 0), 1, 'WordPress image block validator is discovered from mu-plugins during merge');
+    assert_same((int)($image_block_result['plugin_validator_conflicts'] ?? 0), 1, 'WordPress image block validator records the missing attachment');
+    assert_same((int)scalar($image_block_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 71'), 0, 'WordPress image block validator leaves the source attachment deletion staged for review');
+    assert_true(!file_exists($image_block_target_root . '/wp-content/uploads/2026/05/block-image.jpg'), 'WordPress image block validator leaves the source upload deletion staged for review');
+    assert_same(scalar($image_block_target, 'SELECT post_title FROM wp_posts WHERE ID = 70'), 'Target page still using deleted image block attachment', 'WordPress image block validator preserves the target page edit');
+    assert_true(str_contains((string)scalar($image_block_target, 'SELECT post_content FROM wp_posts WHERE ID = 70'), '"id":71'), 'WordPress image block validator keeps the stale block attachment reference visible for review');
+
+    $image_block_audit = cow_merge_audit_report($image_block_metadata, (int)$image_block_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-image-block-missing-attachment',
+    ]);
+    assert_same(count($image_block_audit['conflicts']), 1, 'WordPress image block validator exposes the missing attachment as a plugin-scoped audit conflict');
+    $image_block_preview = (string)($image_block_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_true(str_contains($image_block_preview, '"missing_object_id":71'), 'WordPress image block audit includes the missing attachment ID');
+    assert_true(
+        str_contains($image_block_preview, '"block_name":"core/image"') || str_contains($image_block_preview, '"block_name":"core\/image"'),
+        'WordPress image block audit includes the block name'
+    );
 } finally {
     remove_tree($tmp);
 }
