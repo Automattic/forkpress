@@ -104,6 +104,40 @@ assert_same(
 assert_same(
     cow_merge_wordpress_target_local_row_reason(
         'wp_options',
+        null,
+        [
+            'option_name' => 'forkpress_topic_children',
+            'option_value' => serialize([18000000 => [18000001]]),
+        ],
+        [
+            'option_name' => 'forkpress_topic_children',
+            'option_value' => serialize([19000000 => [19000001]]),
+        ]
+    ),
+    'target kept branch-local WordPress runtime option cache; source cache state is not merged',
+    'taxonomy children cache conflicts keep target state'
+);
+
+assert_same(
+    cow_merge_wordpress_target_local_row_reason(
+        'wp_options',
+        null,
+        [
+            'option_name' => 'plugin_children',
+            'option_value' => 'source content',
+        ],
+        [
+            'option_name' => 'plugin_children',
+            'option_value' => 'target content',
+        ]
+    ),
+    null,
+    'non-cache children options remain reviewable'
+);
+
+assert_same(
+    cow_merge_wordpress_target_local_row_reason(
+        'wp_options',
         ['option_name' => 'blogname', 'option_value' => 'base'],
         ['option_name' => 'blogname', 'option_value' => 'source'],
         ['option_name' => 'blogname', 'option_value' => 'target']

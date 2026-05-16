@@ -1541,6 +1541,34 @@ function cow_merge_wordpress_target_local_option_name(string $option_name): bool
     return false;
 }
 
+function cow_merge_wordpress_taxonomy_children_option_row(array $row): bool {
+    $option_name = (string)($row['option_name'] ?? '');
+    if (!str_ends_with($option_name, '_children')) {
+        return false;
+    }
+
+    $decoded = @unserialize((string)($row['option_value'] ?? ''), ['allowed_classes' => false]);
+    if (!is_array($decoded)) {
+        return false;
+    }
+
+    foreach ($decoded as $parent_id => $child_ids) {
+        if (!is_int($parent_id) && !ctype_digit((string)$parent_id)) {
+            return false;
+        }
+        if (!is_array($child_ids)) {
+            return false;
+        }
+        foreach ($child_ids as $child_id) {
+            if (!is_int($child_id) && !ctype_digit((string)$child_id)) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
 function cow_merge_wordpress_target_local_row_reason(string $table, ?array $base_row, ?array $source_row, ?array $target_row): ?string {
     if ($table === 'wp_options') {
         $saw_row = false;
@@ -1549,7 +1577,10 @@ function cow_merge_wordpress_target_local_row_reason(string $table, ?array $base
                 continue;
             }
             $saw_row = true;
-            if (!cow_merge_wordpress_target_local_option_name((string)($row['option_name'] ?? ''))) {
+            if (
+                !cow_merge_wordpress_target_local_option_name((string)($row['option_name'] ?? ''))
+                && !cow_merge_wordpress_taxonomy_children_option_row($row)
+            ) {
                 return null;
             }
         }
