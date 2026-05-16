@@ -121,6 +121,40 @@ try {
     assert_true(in_array('wp_posts', $tables, true), 'audit report exposes the WordPress explicit-ID conflict');
     assert_true(in_array('plugin_autoinc', $tables, true), 'audit report exposes the plugin explicit-ID conflict');
 
+    $in_band_base = $tmp . '/in-band-base.sqlite';
+    $in_band_source = $tmp . '/in-band-source.sqlite';
+    $in_band_target = $tmp . '/in-band-target.sqlite';
+    $in_band_metadata = $tmp . '/.forkpress/cow/merge/explicit-id-in-band-metadata.sqlite';
+    create_explicit_id_db($in_band_base);
+    copy($in_band_base, $in_band_source);
+    copy($in_band_base, $in_band_target);
+    cow_merge_allocate_autoincrement_bands($in_band_source, $in_band_metadata, 'feature-explicit-in-band');
+    $wp_band_start = (int)scalar($in_band_metadata, "SELECT band_start FROM merge_autoincrement_bands WHERE branch_name = 'feature-explicit-in-band' AND table_name = 'wp_posts'");
+    $plugin_band_end = (int)scalar($in_band_metadata, "SELECT band_end FROM merge_autoincrement_bands WHERE branch_name = 'feature-explicit-in-band' AND table_name = 'plugin_autoinc'");
+
+    $in_band_source_db = open_db($in_band_source);
+    $in_band_source_db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status) VALUES ($wp_band_start, 'In-band explicit post', 'explicit in-band import', 'publish')");
+    $in_band_source_db->exec("INSERT INTO plugin_autoinc (id, label) VALUES ($plugin_band_end, 'in-band explicit plugin row')");
+    $in_band_source_db->close();
+
+    $in_band_result = cow_merge_databases($in_band_base, $in_band_source, $in_band_target, $in_band_metadata, 'feature-explicit-in-band', 'main');
+    assert_same($in_band_result['status'], 'completed', 'in-band explicit AUTOINCREMENT imports merge automatically');
+    assert_same(
+        scalar($in_band_target, "SELECT post_title FROM wp_posts WHERE ID = $wp_band_start"),
+        'In-band explicit post',
+        'in-band explicit WordPress post ID is preserved without rewrite'
+    );
+    assert_same(
+        scalar($in_band_target, "SELECT label FROM plugin_autoinc WHERE id = $plugin_band_end"),
+        'in-band explicit plugin row',
+        'in-band explicit plugin AUTOINCREMENT ID is preserved without rewrite'
+    );
+    assert_same(
+        (int)scalar($in_band_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-explicit-in-band' AND c.conflict_type = 'row-target-constraint'"),
+        0,
+        'in-band explicit AUTOINCREMENT imports do not create branch-band conflicts'
+    );
+
     $rewrite_base = $tmp . '/rewrite-base.sqlite';
     $rewrite_source = $tmp . '/rewrite-source.sqlite';
     $rewrite_target = $tmp . '/rewrite-target.sqlite';
