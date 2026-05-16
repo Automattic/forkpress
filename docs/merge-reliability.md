@@ -106,6 +106,12 @@ publication crash/failpoint changes, run:
 make test-cow-git-server
 ```
 
+For branch-birth metadata validation without the Git publication harness, run:
+
+```bash
+make test-cow-branch-birth
+```
+
 For ID-band allocation, JSON/serialized branch ID preservation, and
 non-bandable `INTEGER PRIMARY KEY` plugin collision checks, run:
 
