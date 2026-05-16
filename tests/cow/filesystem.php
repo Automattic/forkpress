@@ -121,6 +121,8 @@ try {
     create_filesystem_db($base);
     write_test_file($base_root . '/wp-content/uploads/shared.txt', 'base shared');
     write_test_file($base_root . '/wp-content/uploads/binary.bin', "base\0binary");
+    write_test_file($base_root . '/wp-content/uploads/replace-dir-with-file/base-child.txt', 'base child');
+    write_test_file($base_root . '/wp-content/uploads/replace-file-with-dir', 'base file');
     copy_tree_for_test($base_root, $source_root);
     copy_tree_for_test($base_root, $target_root);
 
@@ -128,6 +130,10 @@ try {
 
     write_test_file($source_root . '/wp-content/uploads/shared.txt', 'source shared');
     write_test_file($source_root . '/wp-content/uploads/binary.bin', "source\0binary\xff");
+    remove_tree($source_root . '/wp-content/uploads/replace-dir-with-file');
+    write_test_file($source_root . '/wp-content/uploads/replace-dir-with-file', 'source replacement file');
+    unlink($source_root . '/wp-content/uploads/replace-file-with-dir');
+    write_test_file($source_root . '/wp-content/uploads/replace-file-with-dir/source-child.txt', 'source replacement child');
     create_test_symlink('/etc/passwd', $source_root . '/wp-content/uploads/absolute-link.txt');
 
     $result = cow_merge_branch_state(
@@ -142,18 +148,39 @@ try {
         $target_root
     );
 
-    assert_same($result['status'], 'completed_with_conflicts', 'filesystem merge completes with review conflicts for unsafe source paths');
+    assert_same($result['status'], 'completed_with_conflicts', 'filesystem merge completes with review conflicts for unsafe source paths and type replacements');
     assert_same($result['file_applied'], 2, 'filesystem merge applies safe source-only text and binary file changes');
-    assert_same($result['file_conflicts'], 1, 'filesystem merge records one unsafe symlink conflict');
+    assert_same($result['file_conflicts'], 3, 'filesystem merge records unsafe symlink and type replacement conflicts');
     assert_same(file_get_contents($target_root . '/wp-content/uploads/shared.txt'), 'source shared', 'safe source text file change is applied');
     assert_same(file_get_contents($target_root . '/wp-content/uploads/binary.bin'), "source\0binary\xff", 'safe source binary file change is applied exactly');
     assert_true(!file_exists($target_root . '/wp-content/uploads/absolute-link.txt') && !is_link($target_root . '/wp-content/uploads/absolute-link.txt'), 'unsafe absolute symlink is not installed on target');
+    assert_true(is_dir($target_root . '/wp-content/uploads/replace-dir-with-file'), 'directory-to-file replacement keeps the target directory before review');
+    assert_same(file_get_contents($target_root . '/wp-content/uploads/replace-dir-with-file/base-child.txt'), 'base child', 'directory-to-file replacement keeps target descendants before review');
+    assert_same(file_get_contents($target_root . '/wp-content/uploads/replace-file-with-dir'), 'base file', 'file-to-directory replacement keeps the target file before review');
 
     assert_same(
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-unsafe-symlink'"),
         1,
         'unsafe filesystem symlink conflict is auditable'
     );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-type-replacement-conflict'"),
+        2,
+        'filesystem directory/file replacement conflicts are auditable'
+    );
+    $dir_to_file_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/replace-dir-with-file'));
+    $file_to_dir_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/replace-file-with-dir'));
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'target-wins' AND row_identity = '$dir_to_file_identity' AND reason LIKE 'source changed filesystem path type from dir to file%'"),
+        1,
+        'directory-to-file replacement records a type-specific target-wins decision'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'target-wins' AND row_identity = '$file_to_dir_identity' AND reason LIKE 'source changed filesystem path type from file to dir%'"),
+        1,
+        'file-to-directory replacement records a type-specific target-wins decision'
+    );
+
     $audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'files',
         'records' => 'conflicts',
@@ -162,6 +189,19 @@ try {
     assert_same(count($audit['conflicts']), 1, 'file audit can focus on unsafe symlink conflicts');
     assert_same($audit['conflicts'][0]['row_identity'], cow_merge_file_identity_json('wp-content/uploads/absolute-link.txt'), 'unsafe symlink audit points at the blocked path');
     assert_true(str_contains((string)$audit['conflicts'][0]['source_preview'], '/etc/passwd'), 'unsafe symlink audit exposes the rejected source target');
+
+    $dir_to_file_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-type-replacement-conflict' AND row_identity = '$dir_to_file_identity' ORDER BY id DESC LIMIT 1");
+    $dir_to_file_resolution = cow_merge_resolve_conflict($metadata, $dir_to_file_conflict_id, 'source', true, 'Apply reviewed source directory-to-file replacement.', 'cow-test');
+    assert_same($dir_to_file_resolution['status'], 'applied', 'reviewed source directory-to-file resolution records applied status');
+    assert_true(is_file($target_root . '/wp-content/uploads/replace-dir-with-file'), 'reviewed source directory-to-file resolution replaces the target directory with a file');
+    assert_same(file_get_contents($target_root . '/wp-content/uploads/replace-dir-with-file'), 'source replacement file', 'reviewed source directory-to-file resolution copies the audited source file');
+    assert_true(!file_exists($target_root . '/wp-content/uploads/replace-dir-with-file/base-child.txt'), 'reviewed source directory-to-file resolution removes target descendants');
+
+    $file_to_dir_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-type-replacement-conflict' AND row_identity = '$file_to_dir_identity' ORDER BY id DESC LIMIT 1");
+    $file_to_dir_resolution = cow_merge_resolve_conflict($metadata, $file_to_dir_conflict_id, 'source', true, 'Apply reviewed source file-to-directory replacement.', 'cow-test');
+    assert_same($file_to_dir_resolution['status'], 'applied', 'reviewed source file-to-directory resolution records applied status');
+    assert_true(is_dir($target_root . '/wp-content/uploads/replace-file-with-dir'), 'reviewed source file-to-directory resolution replaces the target file with a directory');
+    assert_same(file_get_contents($target_root . '/wp-content/uploads/replace-file-with-dir/source-child.txt'), 'source replacement child', 'reviewed source file-to-directory resolution copies the audited source directory subtree');
 } finally {
     remove_tree($tmp);
 }
