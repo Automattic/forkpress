@@ -174,6 +174,28 @@ function create_wp_menu_ref_db(string $path): void {
     $db->close();
 }
 
+function create_wp_menu_parent_reference_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_title TEXT NOT NULL DEFAULT '',
+        post_content TEXT NOT NULL DEFAULT '',
+        post_status TEXT NOT NULL DEFAULT 'publish',
+        post_type TEXT NOT NULL DEFAULT 'post',
+        post_name TEXT NOT NULL DEFAULT ''
+    )");
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (47, 'Deleted parent menu item', '', 'publish', 'nav_menu_item', 'deleted-parent-menu-item'),
+        (48, 'Child menu item', '', 'publish', 'nav_menu_item', 'child-menu-item')");
+    $db->exec("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES
+        (47, '_menu_item_type', 'custom'),
+        (47, '_menu_item_menu_item_parent', '0'),
+        (48, '_menu_item_type', 'custom'),
+        (48, '_menu_item_menu_item_parent', '47')");
+    $db->close();
+}
+
 function create_wp_featured_media_db(string $path): void {
     $db = open_db($path);
     $db->exec("CREATE TABLE wp_posts (
@@ -673,6 +695,95 @@ PHP);
     assert_true(str_contains($post_author_preview, '"missing_user_id":44'), 'WordPress post-author audit includes the missing user ID');
     assert_true(str_contains($post_author_preview, '"field":"post_author"'), 'WordPress post-author audit includes the stale field name');
     assert_true(str_contains($post_author_preview, '"post_type":"attachment"'), 'WordPress post-author audit includes attachment authors');
+
+    $menu_parent_base_root = $tmp . '/menu-parent-base';
+    $menu_parent_source_root = $tmp . '/menu-parent-source';
+    $menu_parent_target_root = $tmp . '/menu-parent-target';
+    $menu_parent_base = $menu_parent_base_root . '/wp-content/database/.ht.sqlite';
+    $menu_parent_source = $menu_parent_source_root . '/wp-content/database/.ht.sqlite';
+    $menu_parent_target = $menu_parent_target_root . '/wp-content/database/.ht.sqlite';
+    $menu_parent_metadata = $tmp . '/.forkpress/cow/merge/wp-menu-parent-validator-metadata.sqlite';
+    $menu_parent_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-menu-parent-validator.json';
+
+    mkdir($menu_parent_base_root . '/wp-content/database', 0777, true);
+    create_wp_menu_parent_reference_db($menu_parent_base);
+    write_test_file($menu_parent_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query("SELECT item.ID AS menu_item_id, parent_meta.meta_value AS parent_id
+    FROM wp_posts item
+    JOIN wp_postmeta parent_meta ON parent_meta.post_id = item.ID AND parent_meta.meta_key = '_menu_item_menu_item_parent'
+    WHERE item.post_type = 'nav_menu_item' AND CAST(parent_meta.meta_value AS INTEGER) > 0");
+$findings = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    $parent_id = (int)$row['parent_id'];
+    $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $parent_id AND post_type = 'nav_menu_item'");
+    if ($exists === 0) {
+        $findings[] = [
+            'plugin' => 'forkpress-wp-menu-parent-refs',
+            'object' => 'nav_menu_item:' . $row['menu_item_id'],
+            'reason' => 'nav menu item references a missing parent menu item',
+            'type' => 'plugin-wp-menu-parent-missing-reference',
+            'tables' => ['wp_posts', 'wp_postmeta'],
+            'validator' => 'forkpress-wp-menu-parent-refs@1',
+            'candidate' => [
+                'menu_item_id' => (int)$row['menu_item_id'],
+                'field' => '_menu_item_menu_item_parent',
+                'missing_parent_menu_item_id' => $parent_id,
+            ],
+        ];
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    copy_tree_for_test($menu_parent_base_root, $menu_parent_source_root);
+    copy_tree_for_test($menu_parent_base_root, $menu_parent_target_root);
+    cow_merge_capture_file_base($menu_parent_base_root, $menu_parent_file_base);
+    cow_merge_allocate_autoincrement_bands($menu_parent_source, $menu_parent_metadata, 'feature-wp-menu-parent-source');
+    cow_merge_allocate_autoincrement_bands($menu_parent_target, $menu_parent_metadata, 'main');
+
+    $db = open_db($menu_parent_source);
+    $db->exec('DELETE FROM wp_postmeta WHERE post_id = 47');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 47');
+    $db->close();
+
+    $db = open_db($menu_parent_target);
+    $db->exec("UPDATE wp_posts SET post_title = 'Target child menu item still pointing at deleted parent' WHERE ID = 48");
+    $db->close();
+
+    $menu_parent_result = cow_merge_branch_state(
+        $menu_parent_base,
+        $menu_parent_source,
+        $menu_parent_target,
+        $menu_parent_metadata,
+        'feature-wp-menu-parent-source',
+        'main',
+        $menu_parent_file_base,
+        $menu_parent_source_root,
+        $menu_parent_target_root
+    );
+
+    assert_same($menu_parent_result['status'], 'completed_with_conflicts', 'WordPress menu-parent validator holds missing parent menu items for review');
+    assert_same((int)($menu_parent_result['plugin_validators'] ?? 0), 1, 'WordPress menu-parent validator is discovered from mu-plugins during merge');
+    assert_same((int)($menu_parent_result['plugin_validator_conflicts'] ?? 0), 1, 'WordPress menu-parent validator records the missing parent menu item');
+    assert_same((int)scalar($menu_parent_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 47'), 0, 'WordPress menu-parent validator leaves the source parent menu item deletion staged for review');
+    assert_same((int)scalar($menu_parent_target, 'SELECT COUNT(*) FROM wp_postmeta WHERE post_id = 47'), 0, 'WordPress menu-parent validator leaves the source parent menu metadata deletion staged for review');
+    assert_same(scalar($menu_parent_target, 'SELECT post_title FROM wp_posts WHERE ID = 48'), 'Target child menu item still pointing at deleted parent', 'WordPress menu-parent validator preserves the target child menu item edit');
+    assert_same(scalar($menu_parent_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 48 AND meta_key = '_menu_item_menu_item_parent'"), '47', 'WordPress menu-parent validator keeps the stale menu parent reference visible for review');
+
+    $menu_parent_audit = cow_merge_audit_report($menu_parent_metadata, (int)$menu_parent_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-menu-parent-missing-reference',
+    ]);
+    assert_same(count($menu_parent_audit['conflicts']), 1, 'WordPress menu-parent validator exposes the missing parent menu item as a plugin-scoped audit conflict');
+    $menu_parent_preview = (string)($menu_parent_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_true(str_contains($menu_parent_preview, '"missing_parent_menu_item_id":47'), 'WordPress menu-parent audit includes the missing parent menu item ID');
+    assert_true(str_contains($menu_parent_preview, '"menu_item_id":48'), 'WordPress menu-parent audit includes the child menu item ID');
+    assert_true(str_contains($menu_parent_preview, '"field":"_menu_item_menu_item_parent"'), 'WordPress menu-parent audit includes the stale field name');
 
     $menu_base_root = $tmp . '/menu-base';
     $menu_source_root = $tmp . '/menu-source';
