@@ -1109,6 +1109,191 @@ try {
         'page-plus-image-block smoke merge audits target upload files'
     );
 
+    $gallery_base_root = $tmp . '/gallery-base-root';
+    $gallery_source_root = $tmp . '/gallery-source-root';
+    $gallery_target_root = $tmp . '/gallery-target-root';
+    $gallery_base = $gallery_base_root . '/wp-content/database/.ht.sqlite';
+    $gallery_source = $gallery_source_root . '/wp-content/database/.ht.sqlite';
+    $gallery_target = $gallery_target_root . '/wp-content/database/.ht.sqlite';
+    $gallery_file_base = $tmp . '/.forkpress/cow/merge/file-bases/feature-smoke-page-gallery.json';
+    $gallery_metadata = $tmp . '/.forkpress/cow/merge/gallery-metadata.sqlite';
+
+    mkdir(dirname($gallery_base), 0777, true);
+    mkdir(dirname($gallery_source), 0777, true);
+    mkdir(dirname($gallery_target), 0777, true);
+    smoke_create_posts_db($gallery_base);
+    copy($gallery_base, $gallery_source);
+    copy($gallery_base, $gallery_target);
+    cow_merge_capture_file_base($gallery_base_root, $gallery_file_base);
+
+    $source_gallery_content = '<!-- wp:gallery {"ids":[18000101,18000102],"linkTo":"none"} -->' .
+        '<figure class="wp-block-gallery has-nested-images columns-default is-cropped">' .
+        '<!-- wp:image {"id":18000101,"sizeSlug":"large","linkDestination":"none"} -->' .
+        '<figure class="wp-block-image size-large"><img src="http://example.test/wp-content/uploads/2026/05/source-gallery-a.jpg" alt="" class="wp-image-18000101"/></figure>' .
+        '<!-- /wp:image -->' .
+        '<!-- wp:image {"id":18000102,"sizeSlug":"large","linkDestination":"none"} -->' .
+        '<figure class="wp-block-image size-large"><img src="http://example.test/wp-content/uploads/2026/05/source-gallery-b.jpg" alt="" class="wp-image-18000102"/></figure>' .
+        '<!-- /wp:image -->' .
+        '</figure><!-- /wp:gallery -->';
+    $target_gallery_content = '<!-- wp:gallery {"ids":[19000101,19000102],"linkTo":"none"} -->' .
+        '<figure class="wp-block-gallery has-nested-images columns-default is-cropped">' .
+        '<!-- wp:image {"id":19000101,"sizeSlug":"large","linkDestination":"none"} -->' .
+        '<figure class="wp-block-image size-large"><img src="http://example.test/wp-content/uploads/2026/05/main-gallery-a.jpg" alt="" class="wp-image-19000101"/></figure>' .
+        '<!-- /wp:image -->' .
+        '<!-- wp:image {"id":19000102,"sizeSlug":"large","linkDestination":"none"} -->' .
+        '<figure class="wp-block-image size-large"><img src="http://example.test/wp-content/uploads/2026/05/main-gallery-b.jpg" alt="" class="wp-image-19000102"/></figure>' .
+        '<!-- /wp:image -->' .
+        '</figure><!-- /wp:gallery -->';
+    $source_gallery_a_meta = serialize([
+        'file' => '2026/05/source-gallery-a.jpg',
+        'width' => 900,
+        'height' => 600,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'source-gallery-a-150x150.jpg',
+                'width' => 150,
+                'height' => 150,
+                'mime-type' => 'image/jpeg',
+            ],
+        ],
+    ]);
+    $source_gallery_b_meta = serialize([
+        'file' => '2026/05/source-gallery-b.jpg',
+        'width' => 901,
+        'height' => 601,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'source-gallery-b-150x150.jpg',
+                'width' => 150,
+                'height' => 150,
+                'mime-type' => 'image/jpeg',
+            ],
+        ],
+    ]);
+    $target_gallery_a_meta = serialize([
+        'file' => '2026/05/main-gallery-a.jpg',
+        'width' => 902,
+        'height' => 602,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'main-gallery-a-150x150.jpg',
+                'width' => 150,
+                'height' => 150,
+                'mime-type' => 'image/jpeg',
+            ],
+        ],
+    ]);
+    $target_gallery_b_meta = serialize([
+        'file' => '2026/05/main-gallery-b.jpg',
+        'width' => 903,
+        'height' => 603,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'main-gallery-b-150x150.jpg',
+                'width' => 150,
+                'height' => 150,
+                'mime-type' => 'image/jpeg',
+            ],
+        ],
+    ]);
+
+    $db = smoke_open_db($gallery_source);
+    smoke_insert_post($db, 18000100, 'Branch Page With Gallery', $source_gallery_content, 'page', 'branch-page-with-gallery');
+    smoke_insert_post($db, 18000101, 'source-gallery-a.jpg', '', 'attachment', 'source-gallery-a-jpg', 'inherit', 18000100, 'image/jpeg', 'http://example.test/wp-content/uploads/2026/05/source-gallery-a.jpg');
+    smoke_insert_post($db, 18000102, 'source-gallery-b.jpg', '', 'attachment', 'source-gallery-b-jpg', 'inherit', 18000100, 'image/jpeg', 'http://example.test/wp-content/uploads/2026/05/source-gallery-b.jpg');
+    smoke_insert_postmeta($db, 18000103, 18000101, '_wp_attached_file', '2026/05/source-gallery-a.jpg');
+    smoke_insert_postmeta($db, 18000104, 18000101, '_wp_attachment_metadata', $source_gallery_a_meta);
+    smoke_insert_postmeta($db, 18000105, 18000102, '_wp_attached_file', '2026/05/source-gallery-b.jpg');
+    smoke_insert_postmeta($db, 18000106, 18000102, '_wp_attachment_metadata', $source_gallery_b_meta);
+    $db->close();
+    smoke_write_file($gallery_source_root . '/wp-content/uploads/2026/05/source-gallery-a.jpg', 'source gallery a original bytes');
+    smoke_write_file($gallery_source_root . '/wp-content/uploads/2026/05/source-gallery-a-150x150.jpg', 'source gallery a thumbnail bytes');
+    smoke_write_file($gallery_source_root . '/wp-content/uploads/2026/05/source-gallery-b.jpg', 'source gallery b original bytes');
+    smoke_write_file($gallery_source_root . '/wp-content/uploads/2026/05/source-gallery-b-150x150.jpg', 'source gallery b thumbnail bytes');
+
+    $db = smoke_open_db($gallery_target);
+    smoke_insert_post($db, 19000100, 'Main Page With Gallery', $target_gallery_content, 'page', 'main-page-with-gallery');
+    smoke_insert_post($db, 19000101, 'main-gallery-a.jpg', '', 'attachment', 'main-gallery-a-jpg', 'inherit', 19000100, 'image/jpeg', 'http://example.test/wp-content/uploads/2026/05/main-gallery-a.jpg');
+    smoke_insert_post($db, 19000102, 'main-gallery-b.jpg', '', 'attachment', 'main-gallery-b-jpg', 'inherit', 19000100, 'image/jpeg', 'http://example.test/wp-content/uploads/2026/05/main-gallery-b.jpg');
+    smoke_insert_postmeta($db, 19000103, 19000101, '_wp_attached_file', '2026/05/main-gallery-a.jpg');
+    smoke_insert_postmeta($db, 19000104, 19000101, '_wp_attachment_metadata', $target_gallery_a_meta);
+    smoke_insert_postmeta($db, 19000105, 19000102, '_wp_attached_file', '2026/05/main-gallery-b.jpg');
+    smoke_insert_postmeta($db, 19000106, 19000102, '_wp_attachment_metadata', $target_gallery_b_meta);
+    $db->close();
+    smoke_write_file($gallery_target_root . '/wp-content/uploads/2026/05/main-gallery-a.jpg', 'main gallery a original bytes');
+    smoke_write_file($gallery_target_root . '/wp-content/uploads/2026/05/main-gallery-a-150x150.jpg', 'main gallery a thumbnail bytes');
+    smoke_write_file($gallery_target_root . '/wp-content/uploads/2026/05/main-gallery-b.jpg', 'main gallery b original bytes');
+    smoke_write_file($gallery_target_root . '/wp-content/uploads/2026/05/main-gallery-b-150x150.jpg', 'main gallery b thumbnail bytes');
+
+    $gallery_result = cow_merge_branch_state(
+        $gallery_base,
+        $gallery_source,
+        $gallery_target,
+        $gallery_metadata,
+        'feature-smoke-page-gallery',
+        'main',
+        $gallery_file_base,
+        $gallery_source_root,
+        $gallery_target_root
+    );
+    assert_same($gallery_result['status'], 'completed', 'branch and main page-plus-gallery inserts complete cleanly');
+    assert_same((int)($gallery_result['conflicts'] ?? -1), 0, 'branch and main page-plus-gallery inserts do not create merge conflicts');
+    assert_same(smoke_scalar($gallery_target, 'SELECT post_content FROM wp_posts WHERE ID = 18000100'), $source_gallery_content, 'merged target preserves branch core/gallery attachment references');
+    assert_same(smoke_scalar($gallery_target, 'SELECT post_type FROM wp_posts WHERE ID = 18000101'), 'attachment', 'merged target includes the first branch gallery attachment row');
+    assert_same(smoke_scalar($gallery_target, 'SELECT post_type FROM wp_posts WHERE ID = 18000102'), 'attachment', 'merged target includes the second branch gallery attachment row');
+    assert_same((int)smoke_scalar($gallery_target, 'SELECT post_parent FROM wp_posts WHERE ID = 18000101'), 18000100, 'merged target keeps first branch gallery attachment parent page');
+    assert_same((int)smoke_scalar($gallery_target, 'SELECT post_parent FROM wp_posts WHERE ID = 18000102'), 18000100, 'merged target keeps second branch gallery attachment parent page');
+    assert_same(smoke_scalar($gallery_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 18000101 AND meta_key = '_wp_attached_file'"), '2026/05/source-gallery-a.jpg', 'merged target includes first branch gallery attached-file metadata');
+    assert_same(smoke_scalar($gallery_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 18000102 AND meta_key = '_wp_attached_file'"), '2026/05/source-gallery-b.jpg', 'merged target includes second branch gallery attached-file metadata');
+    assert_same(file_get_contents($gallery_target_root . '/wp-content/uploads/2026/05/source-gallery-a.jpg'), 'source gallery a original bytes', 'merged target includes first branch gallery original upload file');
+    assert_same(file_get_contents($gallery_target_root . '/wp-content/uploads/2026/05/source-gallery-a-150x150.jpg'), 'source gallery a thumbnail bytes', 'merged target includes first branch gallery generated upload file');
+    assert_same(file_get_contents($gallery_target_root . '/wp-content/uploads/2026/05/source-gallery-b.jpg'), 'source gallery b original bytes', 'merged target includes second branch gallery original upload file');
+    assert_same(file_get_contents($gallery_target_root . '/wp-content/uploads/2026/05/source-gallery-b-150x150.jpg'), 'source gallery b thumbnail bytes', 'merged target includes second branch gallery generated upload file');
+    assert_same(smoke_scalar($gallery_target, 'SELECT post_content FROM wp_posts WHERE ID = 19000100'), $target_gallery_content, 'merged target preserves target core/gallery attachment references');
+    assert_same(smoke_scalar($gallery_target, 'SELECT post_type FROM wp_posts WHERE ID = 19000101'), 'attachment', 'merged target preserves first main gallery attachment row');
+    assert_same(smoke_scalar($gallery_target, 'SELECT post_type FROM wp_posts WHERE ID = 19000102'), 'attachment', 'merged target preserves second main gallery attachment row');
+    assert_same(file_get_contents($gallery_target_root . '/wp-content/uploads/2026/05/main-gallery-a.jpg'), 'main gallery a original bytes', 'merged target preserves first main gallery original upload file');
+    assert_same(file_get_contents($gallery_target_root . '/wp-content/uploads/2026/05/main-gallery-a-150x150.jpg'), 'main gallery a thumbnail bytes', 'merged target preserves first main gallery generated upload file');
+    assert_same(file_get_contents($gallery_target_root . '/wp-content/uploads/2026/05/main-gallery-b.jpg'), 'main gallery b original bytes', 'merged target preserves second main gallery original upload file');
+    assert_same(file_get_contents($gallery_target_root . '/wp-content/uploads/2026/05/main-gallery-b-150x150.jpg'), 'main gallery b thumbnail bytes', 'merged target preserves second main gallery generated upload file');
+    assert_same(
+        (int)smoke_scalar($gallery_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name IN ('wp_posts', 'wp_postmeta', '__files__')"),
+        0,
+        'page-plus-gallery smoke merge records no WordPress DB or file conflicts'
+    );
+    assert_same(
+        (int)smoke_scalar($gallery_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'source-applied'"),
+        3,
+        'page-plus-gallery smoke merge audits the source page and attachment inserts'
+    );
+    assert_same(
+        (int)smoke_scalar($gallery_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_postmeta' AND decision = 'source-applied'"),
+        4,
+        'page-plus-gallery smoke merge audits the source attachment metadata inserts'
+    );
+    assert_same(
+        (int)smoke_scalar(
+            $gallery_metadata,
+            "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'source-applied' AND row_identity IN ('" .
+            SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/2026/05/source-gallery-a.jpg')) . "', '" .
+            SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/2026/05/source-gallery-a-150x150.jpg')) . "', '" .
+            SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/2026/05/source-gallery-b.jpg')) . "', '" .
+            SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/2026/05/source-gallery-b-150x150.jpg')) . "')"
+        ),
+        4,
+        'page-plus-gallery smoke merge audits the source upload files'
+    );
+    assert_same(
+        (int)smoke_scalar($gallery_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_postmeta') AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
+        7,
+        'page-plus-gallery smoke merge audits target DB graph inserts'
+    );
+    assert_same(
+        (int)smoke_scalar($gallery_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'target-kept'"),
+        4,
+        'page-plus-gallery smoke merge audits target upload files'
+    );
+
     $options_base = $tmp . '/options-base.sqlite';
     $options_source = $tmp . '/options-source.sqlite';
     $options_target = $tmp . '/options-target.sqlite';
