@@ -159,45 +159,47 @@ if (is_resource($lock)) {
     }
 }
 
-@unlink($entered);
-@unlink($started);
-$lock = fopen($lock_path, 'c');
-assert_true(is_resource($lock), 'test reopened operation lock for admin branch action');
-if (is_resource($lock)) {
-    assert_true(flock($lock, LOCK_EX), 'test holds exclusive operation lock for admin branch action');
+foreach (['forkpress_branch_create', 'forkpress_branch_merge'] as $action) {
+    @unlink($entered);
+    @unlink($started);
+    $lock = fopen($lock_path, 'c');
+    assert_true(is_resource($lock), "test reopened operation lock for admin branch action $action");
+    if (is_resource($lock)) {
+        assert_true(flock($lock, LOCK_EX), "test holds exclusive operation lock for admin branch action $action");
 
-    $descriptor = [
-        0 => ['pipe', 'r'],
-        1 => ['pipe', 'w'],
-        2 => ['pipe', 'w'],
-    ];
-    $process = proc_open([PHP_BINARY, $child, $branches, $cow, $router, '/wp-admin/admin-post.php?action=forkpress_branch_create', $entered], $descriptor, $pipes);
-    assert_true(is_resource($process), 'spawned admin branch action request process');
-    if (is_resource($process)) {
-        fclose($pipes[0]);
-        stream_set_blocking($pipes[1], false);
-        $deadline = microtime(true) + 2.0;
-        while (!file_exists($entered) && microtime(true) < $deadline) {
-            usleep(10000);
+        $descriptor = [
+            0 => ['pipe', 'r'],
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w'],
+        ];
+        $process = proc_open([PHP_BINARY, $child, $branches, $cow, $router, "/wp-admin/admin-post.php?action=$action", $entered], $descriptor, $pipes);
+        assert_true(is_resource($process), "spawned admin branch action request process for $action");
+        if (is_resource($process)) {
+            fclose($pipes[0]);
+            stream_set_blocking($pipes[1], false);
+            $deadline = microtime(true) + 2.0;
+            while (!file_exists($entered) && microtime(true) < $deadline) {
+                usleep(10000);
+            }
+            assert_true(file_exists($entered), "admin branch action reached pre-lock gate for $action");
+            usleep(150000);
+            assert_same(stream_get_contents($pipes[1]), 'OK', "admin branch action bypasses shared request lock for $action");
+
+            flock($lock, LOCK_UN);
+            fclose($lock);
+            stream_set_blocking($pipes[1], true);
+
+            $stdout = stream_get_contents($pipes[1]);
+            $stderr = stream_get_contents($pipes[2]);
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            $status = proc_close($process);
+
+            assert_same($status, 0, "admin branch action exits cleanly for $action");
+            assert_same($stdout, '', "admin branch action output was already consumed for $action");
+            assert_same($stderr, '', "admin branch action produced no stderr for $action");
+            assert_true(file_exists($started), "admin branch action executed without waiting for lock release for $action");
         }
-        assert_true(file_exists($entered), 'admin branch action reached pre-lock gate');
-        usleep(150000);
-        assert_same(stream_get_contents($pipes[1]), 'OK', 'admin branch action bypasses shared request lock');
-
-        flock($lock, LOCK_UN);
-        fclose($lock);
-        stream_set_blocking($pipes[1], true);
-
-        $stdout = stream_get_contents($pipes[1]);
-        $stderr = stream_get_contents($pipes[2]);
-        fclose($pipes[1]);
-        fclose($pipes[2]);
-        $status = proc_close($process);
-
-        assert_same($status, 0, 'admin branch action exits cleanly');
-        assert_same($stdout, '', 'admin branch action output was already consumed');
-        assert_same($stderr, '', 'admin branch action produced no stderr');
-        assert_true(file_exists($started), 'admin branch action executed without waiting for lock release');
     }
 }
 
