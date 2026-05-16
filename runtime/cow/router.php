@@ -150,16 +150,6 @@ function forkpress_cow_is_admin_branch_action(string $path): bool {
     return is_string($action) && in_array($action, ['forkpress_branch_create', 'forkpress_branch_merge'], true);
 }
 
-function forkpress_cow_branch_action_wants_json(): bool {
-    $async = $_SERVER['HTTP_X_FORKPRESS_ASYNC'] ?? '';
-    if (is_string($async) && $async === '1') {
-        return true;
-    }
-
-    $accept = $_SERVER['HTTP_ACCEPT'] ?? '';
-    return is_string($accept) && str_contains($accept, 'application/json');
-}
-
 function forkpress_cow_branch_name_is_valid(string $branch): bool {
     if (!preg_match('/^[a-zA-Z0-9_\-]{1,63}$/', $branch)) {
         return false;
@@ -262,8 +252,8 @@ function forkpress_cow_branch_run_cli(array $args): array {
     return [(int)$code, trim((string)$stdout . "\n" . (string)$stderr)];
 }
 
-function forkpress_cow_handle_async_admin_branch_action(string $path, string $current_branch): bool {
-    if (!forkpress_cow_is_admin_branch_action($path) || !forkpress_cow_branch_action_wants_json()) {
+function forkpress_cow_handle_admin_branch_action(string $path, string $current_branch): bool {
+    if (!forkpress_cow_is_admin_branch_action($path)) {
         return false;
     }
 
@@ -327,7 +317,7 @@ function forkpress_cow_handle_async_admin_branch_action(string $path, string $cu
     return false;
 }
 
-if (forkpress_cow_handle_async_admin_branch_action($path, $branch)) {
+if (forkpress_cow_handle_admin_branch_action($path, $branch)) {
     return true;
 }
 

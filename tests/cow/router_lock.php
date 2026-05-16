@@ -183,7 +183,10 @@ foreach (['forkpress_branch_create', 'forkpress_branch_merge'] as $action) {
             }
             assert_true(file_exists($entered), "admin branch action reached pre-lock gate for $action");
             usleep(150000);
-            assert_same(stream_get_contents($pipes[1]), 'OK', "admin branch action bypasses shared request lock for $action");
+            $early_body = stream_get_contents($pipes[1]);
+            $early_payload = json_decode($early_body, true);
+            assert_true(is_array($early_payload), "admin branch action returns ForkPress JSON before lock release for $action");
+            assert_same($early_payload['success'] ?? null, false, "admin branch action bypasses shared request lock for $action");
 
             flock($lock, LOCK_UN);
             fclose($lock);
@@ -198,7 +201,7 @@ foreach (['forkpress_branch_create', 'forkpress_branch_merge'] as $action) {
             assert_same($status, 0, "admin branch action exits cleanly for $action");
             assert_same($stdout, '', "admin branch action output was already consumed for $action");
             assert_same($stderr, '', "admin branch action produced no stderr for $action");
-            assert_true(file_exists($started), "admin branch action executed without waiting for lock release for $action");
+            assert_true(!file_exists($started), "admin branch action did not fall through to WordPress for $action");
         }
     }
 }

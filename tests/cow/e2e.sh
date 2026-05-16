@@ -1162,6 +1162,39 @@ if ! branch_ui_nonce main createNonce "$TMP/ui-create-admin.html" "$UI_CREATE_CO
   exit 1
 fi
 UI_CREATE_NONCE="$(cat "$TMP/ui-create-nonce.txt")"
+if ! UI_CREATE_NO_ASYNC_HTTP="$(
+  curl -sS -o "$TMP/ui-create-no-async.json" -w '%{http_code}' \
+    -b "$UI_CREATE_COOKIES" \
+    -H "Host: wp.localhost:$PORT" \
+    --data-urlencode "action=forkpress_branch_create" \
+    --data-urlencode "_wpnonce=$UI_CREATE_NONCE" \
+    --data-urlencode "branch=bad branch" \
+    --data-urlencode "from=main" \
+    "http://127.0.0.1:$PORT/wp-admin/admin-post.php"
+)"; then
+  echo "WP UI non-async branch create request failed" >&2
+  dump_if_exists "$TMP/ui-create-no-async.json"
+  "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+  exit 1
+fi
+if [ "$UI_CREATE_NO_ASYNC_HTTP" != "400" ]; then
+  echo "WP UI non-async branch create returned $UI_CREATE_NO_ASYNC_HTTP" >&2
+  cat "$TMP/ui-create-no-async.json" >&2
+  "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+  exit 1
+fi
+if grep -F "<!DOCTYPE html>" "$TMP/ui-create-no-async.json" >/dev/null; then
+  echo "WP UI non-async branch create reached WordPress HTML" >&2
+  cat "$TMP/ui-create-no-async.json" >&2
+  "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+  exit 1
+fi
+if ! php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(($data["success"] ?? null) === false && ($data["message"] ?? null) === "Branch names can use letters, numbers, hyphens, and underscores." ? 0 : 1);' "$TMP/ui-create-no-async.json"; then
+  echo "WP UI non-async branch create response did not contain the expected JSON failure payload" >&2
+  cat "$TMP/ui-create-no-async.json" >&2
+  "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+  exit 1
+fi
 if ! UI_CREATE_HTTP="$(
   curl -sS -o "$TMP/ui-create.json" -w '%{http_code}' \
     -b "$UI_CREATE_COOKIES" \
