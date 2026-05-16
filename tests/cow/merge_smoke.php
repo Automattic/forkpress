@@ -2155,22 +2155,34 @@ try {
     assert_same($reviewed_audit['conflicts'][0]['latest_event_type'], 'review-reviewed', 'reviewed conflict advertises latest conflict event');
     assert_same($reviewed_audit['conflicts'][0]['latest_event_lifecycle_state'], 'reviewed', 'reviewed conflict advertises latest event lifecycle state');
 
+    $validated_resolution = cow_merge_resolve_conflict($options_edit_delete_metadata, $options_contract_conflict_id, 'target', false, 'Validate target option deletion.', 'cow-smoke');
+    assert_same((int)($validated_resolution['resolution_id'] ?? 0) > 0, true, 'validation-only resolution records a durable resolution id');
+    assert_same($validated_resolution['status'], 'validated', 'validation-only resolution reports validated status');
+    assert_same($validated_resolution['applied'], false, 'validation-only resolution does not apply target state');
+    $validated_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts']);
+    assert_same($validated_audit['conflicts'][0]['lifecycle_state'], 'validated', 'validation-only resolution advertises validated lifecycle state');
+    assert_same($validated_audit['conflicts'][0]['next_action'], 'apply-reviewed-choice', 'validation-only resolution advertises apply as next action');
+    assert_same((int)$validated_audit['conflicts'][0]['resolution_count'], 1, 'validation-only resolution increments conflict resolution count');
+    assert_same((int)$validated_audit['conflicts'][0]['latest_resolution_applied'], 0, 'validation-only resolution records unapplied resolution');
+    assert_same($validated_audit['conflicts'][0]['latest_event_type'], 'resolution-validated', 'validation-only resolution advertises latest validation event');
+    assert_same($validated_audit['conflicts'][0]['latest_event_lifecycle_state'], 'validated', 'validation-only resolution advertises latest event lifecycle state');
+
     cow_merge_resolve_conflict($options_edit_delete_metadata, $options_contract_conflict_id, 'target', true, 'Keep target option deletion.', 'cow-smoke');
     $resolved_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts']);
     assert_same($resolved_audit['conflicts'][0]['lifecycle_state'], 'resolved', 'applied resolution advertises resolved lifecycle state');
     assert_same($resolved_audit['conflicts'][0]['next_action'], 'none', 'applied resolution advertises no next action');
-    assert_same((int)$resolved_audit['conflicts'][0]['resolution_count'], 1, 'applied resolution increments conflict resolution count');
+    assert_same((int)$resolved_audit['conflicts'][0]['resolution_count'], 2, 'applied resolution increments conflict resolution count');
     assert_same($resolved_audit['conflicts'][0]['latest_resolution_choice'], 'target', 'applied resolution advertises latest resolution choice');
     assert_same((int)$resolved_audit['conflicts'][0]['latest_resolution_applied'], 1, 'applied resolution advertises latest resolution applied flag');
-    assert_same((int)$resolved_audit['conflicts'][0]['event_count'], 5, 'applied resolution appends a conflict lifecycle event');
+    assert_same((int)$resolved_audit['conflicts'][0]['event_count'], 6, 'applied resolution appends a conflict lifecycle event');
     assert_same($resolved_audit['conflicts'][0]['latest_event_type'], 'resolution-applied', 'resolved conflict advertises latest resolution event');
     assert_same($resolved_audit['conflicts'][0]['latest_event_lifecycle_state'], 'resolved', 'resolved conflict advertises latest event lifecycle state');
     assert_same($resolved_audit['conflicts'][0]['latest_event_actor'], 'cow-smoke', 'resolved conflict advertises latest event actor');
-    $event_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflict-events']);
-    assert_same(count($event_audit['conflict_events']), 5, 'conflict event audit returns the selected conflict lifecycle history');
+    $event_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 6, ['records' => 'conflict-events']);
+    assert_same(count($event_audit['conflict_events']), 6, 'conflict event audit returns the selected conflict lifecycle history');
     assert_same(
         array_column($event_audit['conflict_events'], 'event_type'),
-        ['resolution-applied', 'review-reviewed', 'review-needs-action', 'review-pending', 'recorded'],
+        ['resolution-applied', 'resolution-validated', 'review-reviewed', 'review-needs-action', 'review-pending', 'recorded'],
         'conflict event audit returns lifecycle events newest first'
     );
     assert_same(

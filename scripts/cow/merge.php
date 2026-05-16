@@ -3710,7 +3710,7 @@ CREATE TABLE IF NOT EXISTS merge_conflict_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     conflict_id INTEGER NOT NULL,
     run_id INTEGER NOT NULL,
-    event_type TEXT NOT NULL CHECK(event_type IN ('recorded', 'review-pending', 'review-needs-action', 'review-reviewed', 'resolution-applied', 'revalidation-required')),
+    event_type TEXT NOT NULL CHECK(event_type IN ('recorded', 'review-pending', 'review-needs-action', 'review-reviewed', 'resolution-validated', 'resolution-applied', 'revalidation-required')),
     actor TEXT NOT NULL,
     note TEXT NOT NULL,
     related_record_type TEXT,
@@ -8183,12 +8183,12 @@ function cow_merge_record_resolution(
         $meta,
         $conflict_id,
         (int)$run_row['run_id'],
-        'resolution-applied',
+        $apply ? 'resolution-applied' : 'resolution-validated',
         $reviewer,
         $note,
         'resolution',
         $resolution_id,
-        'resolved'
+        $apply ? 'resolved' : 'validated'
     );
     return $resolution_id;
 }
@@ -10211,7 +10211,27 @@ function cow_merge_resolve_schema_conflict(
                 }
             }
         } else {
-            $resolution_id = null;
+            cow_merge_exec_checked($meta, 'BEGIN IMMEDIATE', 'failed to start schema validation metadata transaction');
+            try {
+                $resolution_id = cow_merge_record_resolution(
+                    $meta,
+                    $conflict_id,
+                    $choice,
+                    false,
+                    $note,
+                    $reviewer,
+                    $target_db,
+                    $table,
+                    '',
+                    $object,
+                    $previous,
+                    $resolved
+                );
+                cow_merge_exec_checked($meta, 'COMMIT', 'failed to commit schema validation metadata transaction');
+            } catch (Throwable $e) {
+                @$meta->exec('ROLLBACK');
+                throw $e;
+            }
         }
 
         return [
@@ -10396,7 +10416,27 @@ function cow_merge_resolve_conflict(
                     }
                 }
             } else {
-                $resolution_id = null;
+                cow_merge_exec_checked($meta, 'BEGIN IMMEDIATE', 'failed to start filesystem validation metadata transaction');
+                try {
+                    $resolution_id = cow_merge_record_resolution(
+                        $meta,
+                        $conflict_id,
+                        $choice,
+                        false,
+                        $note,
+                        $reviewer,
+                        $target_db,
+                        $table,
+                        (string)$conflict['row_identity'],
+                        'path',
+                        cow_merge_file_path_payload($path, $current_value),
+                        cow_merge_file_path_payload($path, $resolved_value)
+                    );
+                    cow_merge_exec_checked($meta, 'COMMIT', 'failed to commit filesystem validation metadata transaction');
+                } catch (Throwable $e) {
+                    @$meta->exec('ROLLBACK');
+                    throw $e;
+                }
             }
 
             return [
@@ -10777,7 +10817,27 @@ function cow_merge_resolve_conflict(
                 }
             }
         } else {
-            $resolution_id = null;
+            cow_merge_exec_checked($meta, 'BEGIN IMMEDIATE', 'failed to start row validation metadata transaction');
+            try {
+                $resolution_id = cow_merge_record_resolution(
+                    $meta,
+                    $conflict_id,
+                    $choice,
+                    false,
+                    $note,
+                    $reviewer,
+                    $target_db,
+                    $table,
+                    (string)$conflict['row_identity'],
+                    $conflict_type === 'cell-conflict' ? $column : '',
+                    $current_value,
+                    $resolved_value
+                );
+                cow_merge_exec_checked($meta, 'COMMIT', 'failed to commit row validation metadata transaction');
+            } catch (Throwable $e) {
+                @$meta->exec('ROLLBACK');
+                throw $e;
+            }
         }
 
         return [
