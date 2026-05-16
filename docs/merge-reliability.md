@@ -1,6 +1,6 @@
 # Merge Reliability Matrix
 
-Status: 2026-05-15
+Status: 2026-05-16
 
 ForkPress COW merge is intentionally conservative: it should either apply a
 source change exactly, preserve target state, or leave an auditable conflict.
@@ -68,6 +68,22 @@ Every new reliability claim should have one of these test shapes:
   platform-specific lifecycle behavior.
 - A CI workflow gate when the behavior only exists on a target platform, such
   as APFS sparsebundles or Windows ReFS.
+
+For fast local iteration on merge logic, start with:
+
+```bash
+make test-cow-merge-smoke
+```
+
+The CI e2e jobs run this smoke target before building the production runtime
+bundle, so helper-level merge regressions fail before the static PHP build.
+
+For the broader PHP merge gate without building ForkPress or starting the full
+WordPress E2E harness, run:
+
+```bash
+make test-cow-merge
+```
 
 Prefer adding validators before adding automatic conflict resolution for plugin
 or schema cases. A reliable reviewable conflict is better than an automatic
