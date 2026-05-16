@@ -3655,6 +3655,8 @@ CREATE TABLE IF NOT EXISTS merge_conflicts (
     source_payload TEXT,
     target_payload TEXT,
     chosen_payload TEXT,
+    source_row_payload TEXT,
+    target_row_payload TEXT,
     base_hash TEXT NOT NULL,
     source_hash TEXT NOT NULL,
     target_hash TEXT NOT NULL,
@@ -3666,6 +3668,8 @@ CREATE TABLE IF NOT EXISTS merge_conflicts (
     UNIQUE(table_name, row_identity, column_name, conflict_type, base_hash, source_hash, target_hash, chosen_hash)
 )
 SQL, 'failed to create metadata table merge_conflicts');
+    cow_merge_ensure_metadata_column($meta, 'merge_conflicts', 'source_row_payload', 'TEXT');
+    cow_merge_ensure_metadata_column($meta, 'merge_conflicts', 'target_row_payload', 'TEXT');
     cow_merge_exec_checked($meta, <<<'SQL'
 CREATE TABLE IF NOT EXISTS merge_revalidations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -5823,12 +5827,16 @@ function cow_merge_record_conflict(
     mixed $base,
     mixed $source,
     mixed $target,
-    mixed $chosen
+    mixed $chosen,
+    mixed $source_row = null,
+    mixed $target_row = null
 ): bool {
     $base_payload = cow_merge_payload_json($base);
     $source_payload = cow_merge_payload_json($source);
     $target_payload = cow_merge_payload_json($target);
     $chosen_payload = cow_merge_payload_json($chosen);
+    $source_row_payload = is_array($source_row) ? cow_merge_payload_json($source_row) : null;
+    $target_row_payload = is_array($target_row) ? cow_merge_payload_json($target_row) : null;
     $base_hash = hash('sha256', $base_payload);
     $source_hash = hash('sha256', $source_payload);
     $target_hash = hash('sha256', $target_payload);
@@ -5867,9 +5875,9 @@ function cow_merge_record_conflict(
     $stmt = cow_merge_prepare_checked(
         $meta,
         'INSERT OR IGNORE INTO merge_conflicts ' .
-        '(run_id, table_name, row_identity, column_name, conflict_type, base_payload, source_payload, target_payload, chosen_payload, ' .
+        '(run_id, table_name, row_identity, column_name, conflict_type, base_payload, source_payload, target_payload, chosen_payload, source_row_payload, target_row_payload, ' .
         'base_hash, source_hash, target_hash, chosen_hash, resolver, resolved_at) ' .
-        'VALUES (:run_id, :table_name, :row_identity, :column_name, :conflict_type, :base_payload, :source_payload, :target_payload, :chosen_payload, ' .
+        'VALUES (:run_id, :table_name, :row_identity, :column_name, :conflict_type, :base_payload, :source_payload, :target_payload, :chosen_payload, :source_row_payload, :target_row_payload, ' .
         ':base_hash, :source_hash, :target_hash, :chosen_hash, :resolver, CURRENT_TIMESTAMP)',
         'failed to prepare merge conflict insert'
     );
@@ -5882,6 +5890,8 @@ function cow_merge_record_conflict(
     cow_merge_bind($stmt, ':source_payload', $source_payload);
     cow_merge_bind($stmt, ':target_payload', $target_payload);
     cow_merge_bind($stmt, ':chosen_payload', $chosen_payload);
+    cow_merge_bind($stmt, ':source_row_payload', $source_row_payload);
+    cow_merge_bind($stmt, ':target_row_payload', $target_row_payload);
     cow_merge_bind($stmt, ':base_hash', $base_hash);
     cow_merge_bind($stmt, ':source_hash', $source_hash);
     cow_merge_bind($stmt, ':target_hash', $target_hash);
@@ -7394,7 +7404,7 @@ function cow_merge_revalidate_reviewed_conflicts(
         $conflicts = cow_merge_fetch_rows(
             $meta,
             "SELECT c.id AS id, c.run_id, c.table_name, c.row_identity, c.column_name, c.conflict_type, c.resolver, c.resolved_at, c.created_at, " .
-            "c.base_payload, c.source_payload, c.target_payload, c.chosen_payload, r.source_db, r.target_db, r.source_branch, r.target_branch " .
+            "c.base_payload, c.source_payload, c.target_payload, c.chosen_payload, c.source_row_payload, c.target_row_payload, r.source_db, r.target_db, r.source_branch, r.target_branch " .
             "FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id $where ORDER BY c.id ASC",
             $params
         );
@@ -11448,6 +11458,14 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
             }
             $target_value = cow_merge_decode_payload_json((string)($conflict['target_payload'] ?? ''), 'target');
             $source_value = cow_merge_decode_payload_json((string)($conflict['source_payload'] ?? ''), 'source');
+            $target_row_payload_json = $conflict['target_row_payload'] ?? null;
+            $target_row_value = is_string($target_row_payload_json) && $target_row_payload_json !== ''
+                ? cow_merge_decode_payload_json($target_row_payload_json, 'target row')
+                : null;
+            $source_row_payload_json = $conflict['source_row_payload'] ?? null;
+            $source_row_value = is_string($source_row_payload_json) && $source_row_payload_json !== ''
+                ? cow_merge_decode_payload_json($source_row_payload_json, 'source row')
+                : null;
             $pk_cols = cow_merge_pk_cols($target, $table);
             $where_identity = $identity;
             $source_where_identity = $identity;
@@ -11501,8 +11519,11 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
                         $source_fresh = cow_merge_row_values_equal($source_current_row, $source_value, cow_merge_all_columns(array_keys($source_value), array_keys($source_current_row)));
                         $current_source_payload = cow_merge_payload_json($source_current_row);
                     }
-                    if (is_array($source_value)) {
-                        $audited_source_semantic_identities = cow_merge_row_semantic_identities($source, $table, $source_value);
+                    $audited_source_row_for_identity = is_array($source_row_value)
+                        ? $source_row_value
+                        : (is_array($source_value) ? $source_value : null);
+                    if (is_array($audited_source_row_for_identity)) {
+                        $audited_source_semantic_identities = cow_merge_row_semantic_identities($source, $table, $audited_source_row_for_identity);
                     }
                     if (is_array($source_current_row)) {
                         $current_source_semantic_identities = cow_merge_row_semantic_identities($source, $table, $source_current_row);
@@ -11526,6 +11547,42 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
                     ? cow_merge_select_current_row($target, $table, $where_identity, $pk_cols)
                     : null;
                 $current = $current_row === null ? null : ($current_row[$column] ?? null);
+                $audited_target_semantic_identities = is_array($target_row_value)
+                    ? cow_merge_row_semantic_identities($target, $table, $target_row_value)
+                    : [];
+                $current_target_semantic_identities = is_array($current_row)
+                    ? cow_merge_row_semantic_identities($target, $table, $current_row)
+                    : [];
+                $target_semantic_revalidation_class = null;
+                $target_semantic_stale_reason = null;
+                if (
+                    ($audited_target_semantic_identities !== [] || $current_target_semantic_identities !== [])
+                    && !cow_merge_values_equal($audited_target_semantic_identities, $current_target_semantic_identities)
+                ) {
+                    $target_semantic_revalidation_class = 'incompatible';
+                    $target_semantic_stale_reason = 'target row semantic identity no longer matches audited target payload; rerun merge-audit before resolving';
+                }
+                if (
+                    ($audited_source_semantic_identities !== [] || $current_source_semantic_identities !== [])
+                    && !cow_merge_values_equal($audited_source_semantic_identities, $current_source_semantic_identities)
+                ) {
+                    return [
+                        'stale_status' => 'stale',
+                        'stale_reason' => 'source row semantic identity no longer matches audited source payload; rerun merge-audit before resolving',
+                        'revalidation_class' => 'incompatible',
+                        'current_source_payload' => cow_merge_payload_json($source_current_row),
+                        'current_target_payload' => cow_merge_payload_json($current),
+                    ];
+                }
+                if ($target_semantic_revalidation_class !== null) {
+                    return [
+                        'stale_status' => 'stale',
+                        'stale_reason' => $target_semantic_stale_reason,
+                        'revalidation_class' => $target_semantic_revalidation_class,
+                        'current_source_payload' => is_array($source_current_row) ? cow_merge_payload_json($source_current_row) : $current_source_payload,
+                        'current_target_payload' => cow_merge_payload_json($current_row),
+                    ];
+                }
                 if (cow_merge_values_equal($current, $target_value) && !$source_fresh) {
                     return [
                         'stale_status' => 'stale',
@@ -13742,7 +13799,7 @@ function cow_merge_table_rows(
                 $row_applied++;
                 continue;
             }
-            $active = cow_merge_record_conflict($meta, $run_id, $table, $key, $col, 'cell-conflict', $b, $s, $t, $t);
+            $active = cow_merge_record_conflict($meta, $run_id, $table, $key, $col, 'cell-conflict', $b, $s, $t, $t, $source_row, $target_row);
             cow_merge_record_decision($meta, $run_id, $table, $key, $col, $active ? 'target-wins' : 'target-accepted', $active ? 'source and target changed the same cell differently' : 'reviewed target resolution already accepts same-cell conflict', $b, $s, $t, $t);
             if ($active) {
                 $row_conflicts++;
