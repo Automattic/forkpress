@@ -65,8 +65,10 @@ function create_explicit_user_graph_db(string $path): void {
     $db = open_db($path);
     $db->exec('CREATE TABLE wp_users (ID INTEGER PRIMARY KEY AUTOINCREMENT, user_login TEXT NOT NULL)');
     $db->exec('CREATE TABLE wp_usermeta (umeta_id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec('CREATE TABLE wp_comments (comment_ID INTEGER PRIMARY KEY AUTOINCREMENT, comment_post_ID INTEGER NOT NULL, comment_content TEXT NOT NULL, user_id INTEGER NOT NULL DEFAULT 0)');
     $db->exec("INSERT INTO wp_users (ID, user_login) VALUES (1, 'base-user')");
     $db->exec("INSERT INTO wp_usermeta (umeta_id, user_id, meta_key, meta_value) VALUES (1, 1, 'base_key', 'base value')");
+    $db->exec("INSERT INTO wp_comments (comment_ID, comment_post_ID, comment_content, user_id) VALUES (1, 1, 'base explicit user comment', 1)");
     $db->close();
 }
 
@@ -215,10 +217,12 @@ try {
     $user_graph_source_db = open_db($user_graph_source);
     $user_graph_source_db->exec("INSERT INTO wp_users (ID, user_login) VALUES (2, 'imported-explicit-user')");
     $user_graph_source_db->exec("INSERT INTO wp_usermeta (user_id, meta_key, meta_value) VALUES (2, 'profile_json', '{\"user_id\":2}')");
+    $user_graph_source_db->exec("INSERT INTO wp_comments (comment_post_ID, comment_content, user_id) VALUES (1, 'comment behind explicit user import', 2)");
+    $user_graph_source_db->exec("UPDATE wp_comments SET user_id = 2 WHERE comment_ID = 1");
     $user_graph_source_db->close();
 
     $user_graph_result = cow_merge_databases($user_graph_base, $user_graph_source, $user_graph_target, $user_graph_metadata, 'feature-explicit-user-graph', 'main');
-    assert_same($user_graph_result['status'], 'completed_with_conflicts', 'out-of-band explicit WordPress user import keeps its usermeta graph review-held');
+    assert_same($user_graph_result['status'], 'completed_with_conflicts', 'out-of-band explicit WordPress user import keeps its dependent graph review-held');
     assert_same(
         (int)scalar($user_graph_target, 'SELECT COUNT(*) FROM wp_users WHERE ID = 2'),
         0,
@@ -230,6 +234,16 @@ try {
         'usermeta behind a held explicit WordPress user ID is not applied automatically'
     );
     assert_same(
+        (int)scalar($user_graph_target, "SELECT COUNT(*) FROM wp_comments WHERE user_id = 2"),
+        0,
+        'comments behind a held explicit WordPress user ID are not applied automatically'
+    );
+    assert_same(
+        (int)scalar($user_graph_target, "SELECT user_id FROM wp_comments WHERE comment_content = 'base explicit user comment'"),
+        1,
+        'updated comments behind a held explicit WordPress user ID are not applied automatically'
+    );
+    assert_same(
         (int)scalar($user_graph_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-explicit-user-graph' AND c.table_name = 'wp_users' AND c.conflict_type = 'row-target-constraint'"),
         1,
         'out-of-band explicit WordPress user records a review conflict'
@@ -239,10 +253,20 @@ try {
         1,
         'usermeta behind a held explicit WordPress user records a review conflict'
     );
+    assert_same(
+        (int)scalar($user_graph_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-explicit-user-graph' AND c.table_name = 'wp_comments' AND c.conflict_type = 'row-target-constraint'"),
+        2,
+        'comments behind a held explicit WordPress user record review conflicts'
+    );
     $user_meta_reason = (string)scalar($user_graph_metadata, "SELECT reason FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-explicit-user-graph' AND d.table_name = 'wp_usermeta' AND d.decision = 'target-wins' ORDER BY d.id DESC LIMIT 1");
     assert_true(
         str_contains($user_meta_reason, 'outside the source branch ID band') && str_contains($user_meta_reason, 'wp_users'),
         'usermeta conflict explains that it is held behind the explicit WordPress user ID'
+    );
+    $user_comment_reason = (string)scalar($user_graph_metadata, "SELECT reason FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-explicit-user-graph' AND d.table_name = 'wp_comments' AND d.decision = 'target-wins' ORDER BY d.id DESC LIMIT 1");
+    assert_true(
+        str_contains($user_comment_reason, 'outside the source branch ID band') && str_contains($user_comment_reason, 'wp_users'),
+        'comment conflict explains that it is held behind the explicit WordPress user ID'
     );
 } finally {
     remove_tree($tmp);
