@@ -45,6 +45,15 @@ function smoke_scalar(string $path, string $sql): mixed {
     return $value;
 }
 
+function smoke_insert_option(SQLite3 $db, int $id, string $name, string $value, string $autoload = 'yes'): void {
+    $stmt = $db->prepare('INSERT INTO wp_options (option_id, option_name, option_value, autoload) VALUES (:id, :name, :value, :autoload)');
+    $stmt->bindValue(':id', $id, SQLITE3_INTEGER);
+    $stmt->bindValue(':name', $name, SQLITE3_TEXT);
+    $stmt->bindValue(':value', $value, SQLITE3_TEXT);
+    $stmt->bindValue(':autoload', $autoload, SQLITE3_TEXT);
+    $stmt->execute();
+}
+
 function smoke_create_posts_db(string $path): void {
     $db = smoke_open_db($path);
     $db->exec("CREATE TABLE wp_posts (
@@ -80,10 +89,17 @@ function smoke_create_posts_db(string $path): void {
         term_order INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (object_id, term_taxonomy_id)
     )");
+    $db->exec("CREATE TABLE wp_options (
+        option_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        option_name TEXT NOT NULL UNIQUE,
+        option_value TEXT NOT NULL,
+        autoload TEXT NOT NULL DEFAULT 'yes'
+    )");
     $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
         (1, 'Base Page', 'Base content', 'publish', 'page', 'base-page')");
     $db->exec("INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES
         (2, 1, '_forkpress_smoke_note', 'Base note')");
+    smoke_insert_option($db, 3, 'forkpress_smoke_base', '{"base":true}');
     $db->close();
 }
 
@@ -443,6 +459,59 @@ try {
         (int)smoke_scalar($taxonomy_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_terms', 'wp_term_taxonomy', 'wp_term_relationships') AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
         4,
         'page-plus-taxonomy smoke merge audits all target graph inserts'
+    );
+
+    $options_base = $tmp . '/options-base.sqlite';
+    $options_source = $tmp . '/options-source.sqlite';
+    $options_target = $tmp . '/options-target.sqlite';
+    $options_metadata = $tmp . '/.forkpress/cow/merge/options-metadata.sqlite';
+
+    smoke_create_posts_db($options_base);
+    copy($options_base, $options_source);
+    copy($options_base, $options_target);
+
+    $source_option_json = json_encode(['branch' => 'source', 'post_id' => 18000030], JSON_UNESCAPED_SLASHES);
+    $source_option_serialized = serialize(['branch' => 'source', 'post_id' => 18000030]);
+    $target_option_json = json_encode(['branch' => 'target', 'post_id' => 19000030], JSON_UNESCAPED_SLASHES);
+    $target_option_serialized = serialize(['branch' => 'target', 'post_id' => 19000030]);
+
+    $db = smoke_open_db($options_source);
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (18000030, 'Branch Page With Options', 'Branch option content', 'publish', 'page', 'branch-page-with-options')");
+    smoke_insert_option($db, 18000031, 'forkpress_source_page_json', $source_option_json);
+    smoke_insert_option($db, 18000032, 'forkpress_source_page_serialized', $source_option_serialized);
+    $db->close();
+
+    $db = smoke_open_db($options_target);
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (19000030, 'Main Page With Options', 'Main option content', 'publish', 'page', 'main-page-with-options')");
+    smoke_insert_option($db, 19000031, 'forkpress_target_page_json', $target_option_json);
+    smoke_insert_option($db, 19000032, 'forkpress_target_page_serialized', $target_option_serialized);
+    $db->close();
+
+    $options_result = cow_merge_databases($options_base, $options_source, $options_target, $options_metadata, 'feature-smoke-page-options', 'main');
+    assert_same($options_result['status'], 'completed', 'branch and main page-plus-options inserts complete cleanly');
+    assert_same((int)($options_result['conflicts'] ?? -1), 0, 'branch and main page-plus-options inserts do not create merge conflicts');
+    assert_same(smoke_scalar($options_target, 'SELECT post_title FROM wp_posts WHERE ID = 18000030'), 'Branch Page With Options', 'merged target includes the branch options page');
+    assert_same(smoke_scalar($options_target, 'SELECT post_title FROM wp_posts WHERE ID = 19000030'), 'Main Page With Options', 'merged target preserves the main options page');
+    assert_same(smoke_scalar($options_target, "SELECT option_value FROM wp_options WHERE option_name = 'forkpress_source_page_json'"), $source_option_json, 'merged target includes branch JSON option with its source post ID reference');
+    assert_same(smoke_scalar($options_target, "SELECT option_value FROM wp_options WHERE option_name = 'forkpress_source_page_serialized'"), $source_option_serialized, 'merged target includes branch serialized option with its source post ID reference');
+    assert_same(smoke_scalar($options_target, "SELECT option_value FROM wp_options WHERE option_name = 'forkpress_target_page_json'"), $target_option_json, 'merged target preserves target JSON option with its target post ID reference');
+    assert_same(smoke_scalar($options_target, "SELECT option_value FROM wp_options WHERE option_name = 'forkpress_target_page_serialized'"), $target_option_serialized, 'merged target preserves target serialized option with its target post ID reference');
+    assert_same(
+        (int)smoke_scalar($options_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name IN ('wp_posts', 'wp_options')"),
+        0,
+        'page-plus-options smoke merge records no WordPress row conflicts'
+    );
+    assert_same(
+        (int)smoke_scalar($options_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_options') AND decision = 'source-applied'"),
+        3,
+        'page-plus-options smoke merge audits all source graph inserts'
+    );
+    assert_same(
+        (int)smoke_scalar($options_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_options') AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
+        3,
+        'page-plus-options smoke merge audits all target graph inserts'
     );
 } finally {
     smoke_remove_tree($tmp);
