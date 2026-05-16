@@ -70,6 +70,17 @@ function smoke_insert_postmeta(SQLite3 $db, int $id, int $post_id, string $key, 
     $stmt->execute();
 }
 
+function smoke_insert_post(SQLite3 $db, int $id, string $title, string $content, string $type, string $name, string $status = 'publish'): void {
+    $stmt = $db->prepare('INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES (:id, :title, :content, :status, :type, :name)');
+    $stmt->bindValue(':id', $id, SQLITE3_INTEGER);
+    $stmt->bindValue(':title', $title, SQLITE3_TEXT);
+    $stmt->bindValue(':content', $content, SQLITE3_TEXT);
+    $stmt->bindValue(':status', $status, SQLITE3_TEXT);
+    $stmt->bindValue(':type', $type, SQLITE3_TEXT);
+    $stmt->bindValue(':name', $name, SQLITE3_TEXT);
+    $stmt->execute();
+}
+
 function smoke_create_posts_db(string $path): void {
     $db = smoke_open_db($path);
     $db->exec("CREATE TABLE wp_posts (
@@ -570,6 +581,57 @@ try {
         (int)smoke_scalar($menu_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_postmeta', 'wp_terms', 'wp_term_taxonomy', 'wp_term_relationships') AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
         9,
         'page-plus-menu smoke merge audits all target graph inserts'
+    );
+
+    $block_base = $tmp . '/block-base.sqlite';
+    $block_source = $tmp . '/block-source.sqlite';
+    $block_target = $tmp . '/block-target.sqlite';
+    $block_metadata = $tmp . '/.forkpress/cow/merge/block-metadata.sqlite';
+
+    smoke_create_posts_db($block_base);
+    copy($block_base, $block_source);
+    copy($block_base, $block_target);
+
+    $source_block_content = '<!-- wp:paragraph --><p>Branch reusable block body</p><!-- /wp:paragraph -->';
+    $source_page_content = '<!-- wp:paragraph --><p>Branch page before block</p><!-- /wp:paragraph -->' . "\n" .
+        '<!-- wp:block {"ref":18000051} /-->';
+    $target_block_content = '<!-- wp:paragraph --><p>Main reusable block body</p><!-- /wp:paragraph -->';
+    $target_page_content = '<!-- wp:paragraph --><p>Main page before block</p><!-- /wp:paragraph -->' . "\n" .
+        '<!-- wp:block {"ref":19000051} /-->';
+
+    $db = smoke_open_db($block_source);
+    smoke_insert_post($db, 18000050, 'Branch Page With Reusable Block', $source_page_content, 'page', 'branch-page-with-reusable-block');
+    smoke_insert_post($db, 18000051, 'Branch Reusable Block', $source_block_content, 'wp_block', 'branch-reusable-block');
+    $db->close();
+
+    $db = smoke_open_db($block_target);
+    smoke_insert_post($db, 19000050, 'Main Page With Reusable Block', $target_page_content, 'page', 'main-page-with-reusable-block');
+    smoke_insert_post($db, 19000051, 'Main Reusable Block', $target_block_content, 'wp_block', 'main-reusable-block');
+    $db->close();
+
+    $block_result = cow_merge_databases($block_base, $block_source, $block_target, $block_metadata, 'feature-smoke-page-block', 'main');
+    assert_same($block_result['status'], 'completed', 'branch and main page-plus-reusable-block inserts complete cleanly');
+    assert_same((int)($block_result['conflicts'] ?? -1), 0, 'branch and main page-plus-reusable-block inserts do not create merge conflicts');
+    assert_same(smoke_scalar($block_target, 'SELECT post_type FROM wp_posts WHERE ID = 18000051'), 'wp_block', 'merged target includes the branch reusable block row');
+    assert_same(smoke_scalar($block_target, 'SELECT post_title FROM wp_posts WHERE ID = 18000050'), 'Branch Page With Reusable Block', 'merged target includes the branch page using a reusable block');
+    assert_same(smoke_scalar($block_target, 'SELECT post_content FROM wp_posts WHERE ID = 18000050'), $source_page_content, 'merged target preserves the branch page reusable-block reference');
+    assert_same(smoke_scalar($block_target, 'SELECT post_type FROM wp_posts WHERE ID = 19000051'), 'wp_block', 'merged target preserves the main reusable block row');
+    assert_same(smoke_scalar($block_target, 'SELECT post_title FROM wp_posts WHERE ID = 19000050'), 'Main Page With Reusable Block', 'merged target preserves the main page using a reusable block');
+    assert_same(smoke_scalar($block_target, 'SELECT post_content FROM wp_posts WHERE ID = 19000050'), $target_page_content, 'merged target preserves the main page reusable-block reference');
+    assert_same(
+        (int)smoke_scalar($block_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_posts'"),
+        0,
+        'page-plus-reusable-block smoke merge records no WordPress row conflicts'
+    );
+    assert_same(
+        (int)smoke_scalar($block_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'source-applied'"),
+        2,
+        'page-plus-reusable-block smoke merge audits the source page and block inserts'
+    );
+    assert_same(
+        (int)smoke_scalar($block_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
+        2,
+        'page-plus-reusable-block smoke merge audits the target page and block inserts'
     );
 
     $options_base = $tmp . '/options-base.sqlite';
