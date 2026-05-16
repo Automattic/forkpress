@@ -529,6 +529,90 @@ try {
     assert_same(count($table_restore_revalidate_conflicts), 1, 'schema table restore source drift returns the reviewed conflict to the needs-action audit queue');
     assert_same($table_restore_revalidate_conflicts[0]['revalidation_class'] ?? null, 'unclassified', 'schema table restore audit exposes conservative unclassified revalidation');
 
+    $table_rebuild_revalidate_base = $tmp . '/table-rebuild-revalidate-base.sqlite';
+    $table_rebuild_revalidate_source = $tmp . '/table-rebuild-revalidate-source.sqlite';
+    $table_rebuild_revalidate_target = $tmp . '/table-rebuild-revalidate-target.sqlite';
+    $table_rebuild_revalidate_metadata = $tmp . '/.forkpress/cow/merge/schema-table-rebuild-revalidate-metadata.sqlite';
+
+    $db = open_db($table_rebuild_revalidate_base);
+    $db->exec('CREATE TABLE plugin_rebuild_revalidate (id INTEGER PRIMARY KEY, value TEXT)');
+    $db->exec("INSERT INTO plugin_rebuild_revalidate (id, value) VALUES (1, 'Alpha')");
+    $db->close();
+    copy($table_rebuild_revalidate_base, $table_rebuild_revalidate_source);
+    copy($table_rebuild_revalidate_base, $table_rebuild_revalidate_target);
+
+    $source_db = open_db($table_rebuild_revalidate_source);
+    $source_db->exec('CREATE TABLE plugin_rebuild_revalidate_new (id INTEGER PRIMARY KEY, value INTEGER)');
+    $source_db->exec('INSERT INTO plugin_rebuild_revalidate_new (id, value) SELECT id, value FROM plugin_rebuild_revalidate');
+    $source_db->exec('DROP TABLE plugin_rebuild_revalidate');
+    $source_db->exec('ALTER TABLE plugin_rebuild_revalidate_new RENAME TO plugin_rebuild_revalidate');
+    $source_db->close();
+
+    $target_db = open_db($table_rebuild_revalidate_target);
+    $target_db->exec('CREATE TABLE plugin_rebuild_revalidate_new (id INTEGER PRIMARY KEY, value REAL)');
+    $target_db->exec('INSERT INTO plugin_rebuild_revalidate_new (id, value) SELECT id, value FROM plugin_rebuild_revalidate');
+    $target_db->exec('DROP TABLE plugin_rebuild_revalidate');
+    $target_db->exec('ALTER TABLE plugin_rebuild_revalidate_new RENAME TO plugin_rebuild_revalidate');
+    $target_db->close();
+
+    $table_rebuild_revalidate_result = cow_merge_databases(
+        $table_rebuild_revalidate_base,
+        $table_rebuild_revalidate_source,
+        $table_rebuild_revalidate_target,
+        $table_rebuild_revalidate_metadata,
+        'feature-schema-table-rebuild-revalidate',
+        'main'
+    );
+    assert_same($table_rebuild_revalidate_result['status'], 'completed_with_conflicts', 'reviewed table rebuild fixture starts reviewable');
+    $table_rebuild_revalidate_run_id = (int)$table_rebuild_revalidate_result['run_id'];
+    $table_rebuild_revalidate_conflict_id = (int)scalar($table_rebuild_revalidate_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_rebuild_revalidate' AND conflict_type = 'schema-conflict' ORDER BY id DESC LIMIT 1");
+    assert_true($table_rebuild_revalidate_conflict_id > 0, 'reviewed table rebuild fixture records a table conflict');
+    cow_merge_review_record(
+        $table_rebuild_revalidate_metadata,
+        'conflict',
+        $table_rebuild_revalidate_conflict_id,
+        'reviewed',
+        'Review table rebuild after source schema is stable.',
+        'cow-test'
+    );
+
+    $source_db = open_db($table_rebuild_revalidate_source);
+    $source_db->exec('CREATE TABLE plugin_rebuild_revalidate_new (id INTEGER PRIMARY KEY, value NUMERIC)');
+    $source_db->exec('INSERT INTO plugin_rebuild_revalidate_new (id, value) SELECT id, value FROM plugin_rebuild_revalidate');
+    $source_db->exec('DROP TABLE plugin_rebuild_revalidate');
+    $source_db->exec('ALTER TABLE plugin_rebuild_revalidate_new RENAME TO plugin_rebuild_revalidate');
+    $source_db->close();
+
+    $table_rebuild_revalidated = cow_merge_revalidate_reviewed_conflicts($table_rebuild_revalidate_metadata, $table_rebuild_revalidate_run_id, 'cow-revalidate');
+    assert_same($table_rebuild_revalidated['checked'], 1, 'schema table rebuild revalidation checks the reviewed conflict');
+    assert_same($table_rebuild_revalidated['reviewed'], 1, 'schema table rebuild revalidation sees the reviewed conflict');
+    assert_same($table_rebuild_revalidated['stale'], 1, 'schema table rebuild revalidation detects changed source table SQL');
+    assert_same($table_rebuild_revalidated['carried'], 1, 'schema table rebuild revalidation carries changed source evidence to needs-action');
+    assert_same(
+        scalar($table_rebuild_revalidate_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $table_rebuild_revalidate_conflict_id ORDER BY id DESC LIMIT 1"),
+        'unclassified',
+        'schema table rebuild source drift remains unclassified until a schema planner proves compatibility'
+    );
+    assert_true(
+        str_contains((string)scalar($table_rebuild_revalidate_metadata, "SELECT stale_reason FROM merge_revalidations WHERE conflict_id = $table_rebuild_revalidate_conflict_id ORDER BY id DESC LIMIT 1"), 'source changed'),
+        'schema table rebuild source drift explains that source schema changed after review'
+    );
+    $table_rebuild_revalidate_source_sql = cow_merge_decode_payload_json(
+        (string)scalar($table_rebuild_revalidate_metadata, "SELECT source_payload FROM merge_revalidations WHERE conflict_id = $table_rebuild_revalidate_conflict_id ORDER BY id DESC LIMIT 1"),
+        'schema table rebuild revalidation source'
+    );
+    assert_true(
+        str_contains((string)$table_rebuild_revalidate_source_sql, 'value NUMERIC'),
+        'schema table rebuild revalidation records the updated source table SQL'
+    );
+    $table_rebuild_revalidate_audit = cow_merge_audit_report($table_rebuild_revalidate_metadata, $table_rebuild_revalidate_run_id, 10, [
+        'records' => 'conflicts',
+        'review_status' => 'needs-action',
+    ]);
+    $table_rebuild_revalidate_conflicts = array_values(array_filter($table_rebuild_revalidate_audit['conflicts'], fn($conflict) => (int)($conflict['id'] ?? 0) === $table_rebuild_revalidate_conflict_id));
+    assert_same(count($table_rebuild_revalidate_conflicts), 1, 'schema table rebuild source drift returns the reviewed conflict to the needs-action audit queue');
+    assert_same($table_rebuild_revalidate_conflicts[0]['revalidation_class'] ?? null, 'unclassified', 'schema table rebuild audit exposes conservative unclassified revalidation');
+
     $index_validate_base = $tmp . '/index-validate-base.sqlite';
     $index_validate_source = $tmp . '/index-validate-source.sqlite';
     $index_validate_target = $tmp . '/index-validate-target.sqlite';
