@@ -2078,6 +2078,42 @@ try {
         3,
         'page-plus-options smoke merge audits all target graph inserts'
     );
+
+    $options_edit_delete_base = $tmp . '/options-edit-delete-base.sqlite';
+    $options_edit_delete_source = $tmp . '/options-edit-delete-source.sqlite';
+    $options_edit_delete_target = $tmp . '/options-edit-delete-target.sqlite';
+    $options_edit_delete_metadata = $tmp . '/.forkpress/cow/merge/options-edit-delete-metadata.sqlite';
+
+    smoke_create_posts_db($options_edit_delete_base);
+    $db = smoke_open_db($options_edit_delete_base);
+    smoke_insert_option($db, 17000200, 'forkpress_shared_page_json', '{"branch":"base","post_id":1}');
+    smoke_insert_option($db, 17000201, 'forkpress_shared_page_serialized', serialize(['branch' => 'base', 'post_id' => 1]));
+    $db->close();
+    copy($options_edit_delete_base, $options_edit_delete_source);
+    copy($options_edit_delete_base, $options_edit_delete_target);
+
+    $db = smoke_open_db($options_edit_delete_source);
+    smoke_update_option($db, 'forkpress_shared_page_json', '{"branch":"source","post_id":1,"edited":true}');
+    smoke_update_option($db, 'forkpress_shared_page_serialized', serialize(['branch' => 'source', 'post_id' => 1, 'edited' => true]));
+    $db->close();
+
+    $db = smoke_open_db($options_edit_delete_target);
+    $db->exec("DELETE FROM wp_options WHERE option_name IN ('forkpress_shared_page_json', 'forkpress_shared_page_serialized')");
+    $db->close();
+
+    $options_edit_delete_result = cow_merge_databases($options_edit_delete_base, $options_edit_delete_source, $options_edit_delete_target, $options_edit_delete_metadata, 'feature-smoke-options-edit-delete', 'main');
+    assert_same($options_edit_delete_result['status'], 'completed_with_conflicts', 'options edit/delete graph stays reviewable');
+    assert_same((int)smoke_scalar($options_edit_delete_target, "SELECT COUNT(*) FROM wp_options WHERE option_name IN ('forkpress_shared_page_json', 'forkpress_shared_page_serialized')"), 0, 'options edit/delete preserves target option deletion before review');
+    assert_same(
+        (int)smoke_scalar($options_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_options' AND conflict_type = 'row-target-deleted'"),
+        2,
+        'options edit/delete records the edited option delete conflicts'
+    );
+    assert_same(
+        (int)smoke_scalar($options_edit_delete_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_options' AND decision = 'target-wins'"),
+        2,
+        'options edit/delete defaults the changed source options to target-wins before review'
+    );
 } finally {
     smoke_remove_tree($tmp);
 }
