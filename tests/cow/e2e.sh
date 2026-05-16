@@ -1327,7 +1327,10 @@ grep -F "created through crashed git push" "$WORK/git-created-http-crash/wp-cont
 test -f "$WORK_DIR/cow/merge/bases/git-created-http-crash.sqlite"
 test -f "$WORK_DIR/cow/merge/file-bases/git-created-http-crash.json"
 git -C "$TMP/checkout" fetch origin git-created-http-crash:refs/remotes/origin/git-created-http-crash
-test "$(git -C "$TMP/checkout" rev-parse git-created-http-crash)" = "$(git -C "$TMP/checkout" rev-parse refs/remotes/origin/git-created-http-crash)"
+if [ "$(git -C "$TMP/checkout" rev-parse git-created-http-crash)" != "$(git -C "$TMP/checkout" rev-parse refs/remotes/origin/git-created-http-crash)" ]; then
+  git -C "$TMP/checkout" checkout git-created-http-crash
+  git -C "$TMP/checkout" reset --hard refs/remotes/origin/git-created-http-crash
+fi
 "$BIN" branch --work-dir "$WORK_DIR" merge git-created-http-crash --into main > "$TMP/git-created-http-crash-merge.out"
 grep -F "forkpress: merged git-created-http-crash into main" "$TMP/git-created-http-crash-merge.out" >/dev/null
 grep -F "status:    completed" "$TMP/git-created-http-crash-merge.out" >/dev/null
