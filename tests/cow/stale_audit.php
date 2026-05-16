@@ -596,6 +596,112 @@ try {
         'latest merge revalidation is incompatible',
         'after-revalidate blocks source resolution over an incompatible option semantic replacement'
     );
+
+    $term_identity_base = $tmp . '/term-identity-base.sqlite';
+    $term_identity_source = $tmp . '/term-identity-source.sqlite';
+    $term_identity_target = $tmp . '/term-identity-target.sqlite';
+    $term_identity_metadata = $tmp . '/.forkpress/cow/merge/term-identity-metadata.sqlite';
+    foreach ([$term_identity_base, $term_identity_source, $term_identity_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE wp_terms (term_id INTEGER PRIMARY KEY, name TEXT NOT NULL, slug TEXT NOT NULL)');
+        $db->close();
+    }
+    $db = open_db($term_identity_source);
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (40, 'Source topic', 'source-topic')");
+    $db->close();
+    $db = open_db($term_identity_target);
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (40, 'Target topic', 'target-topic')");
+    $db->close();
+
+    $term_identity_merge = cow_merge_databases($term_identity_base, $term_identity_source, $term_identity_target, $term_identity_metadata, 'feature-term-identity-review', 'main');
+    $term_identity_run_id = (int)$term_identity_merge['run_id'];
+    assert_same($term_identity_merge['status'], 'completed_with_conflicts', 'term semantic identity fixture starts with a same-ID row conflict');
+    $term_identity_conflict_id = (int)scalar($term_identity_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'wp_terms' AND conflict_type = 'row-insert-collision'");
+    assert_true($term_identity_conflict_id > 0, 'term semantic identity fixture records the row conflict');
+    cow_merge_review_record(
+        $term_identity_metadata,
+        'conflict',
+        $term_identity_conflict_id,
+        'reviewed',
+        'Review source term before applying over target term.',
+        'cow-test'
+    );
+
+    $db = open_db($term_identity_target);
+    $db->exec("UPDATE wp_terms SET name = 'Replacement topic', slug = 'replacement-topic' WHERE term_id = 40");
+    $db->close();
+
+    $term_identity_revalidated = cow_merge_revalidate_reviewed_conflicts($term_identity_metadata, $term_identity_run_id, 'cow-revalidate');
+    assert_same($term_identity_revalidated['checked'], 1, 'term semantic revalidation checks the reviewed row conflict');
+    assert_same($term_identity_revalidated['stale'], 1, 'term semantic revalidation detects target semantic replacement');
+    assert_same($term_identity_revalidated['carried'], 1, 'term semantic revalidation carries semantically replaced terms to needs-action');
+    assert_same(
+        scalar($term_identity_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $term_identity_conflict_id ORDER BY id DESC LIMIT 1"),
+        'incompatible',
+        'term semantic revalidation classifies changed slug identity as incompatible'
+    );
+    $term_identity_audit = cow_merge_audit_report($term_identity_metadata, $term_identity_run_id, 10, ['records' => 'conflicts']);
+    $term_identity_conflicts = array_values(array_filter($term_identity_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $term_identity_conflict_id));
+    assert_same($term_identity_conflicts[0]['revalidation_class'] ?? null, 'incompatible', 'term semantic audit exposes incompatible replacement');
+    assert_true(str_contains((string)($term_identity_conflicts[0]['stale_reason'] ?? ''), 'semantic identity'), 'term semantic stale reason explains semantic identity drift');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($term_identity_metadata, $term_identity_conflict_id, 'source', true, 'Do not apply source term over replacement term.', 'cow-test', true),
+        'latest merge revalidation is incompatible',
+        'after-revalidate blocks source resolution over an incompatible term semantic replacement'
+    );
+
+    $user_identity_base = $tmp . '/user-identity-base.sqlite';
+    $user_identity_source = $tmp . '/user-identity-source.sqlite';
+    $user_identity_target = $tmp . '/user-identity-target.sqlite';
+    $user_identity_metadata = $tmp . '/.forkpress/cow/merge/user-identity-metadata.sqlite';
+    foreach ([$user_identity_base, $user_identity_source, $user_identity_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE wp_users (ID INTEGER PRIMARY KEY, user_login TEXT NOT NULL, display_name TEXT NOT NULL)');
+        $db->close();
+    }
+    $db = open_db($user_identity_source);
+    $db->exec("INSERT INTO wp_users (ID, user_login, display_name) VALUES (50, 'source_user', 'Source User')");
+    $db->close();
+    $db = open_db($user_identity_target);
+    $db->exec("INSERT INTO wp_users (ID, user_login, display_name) VALUES (50, 'target_user', 'Target User')");
+    $db->close();
+
+    $user_identity_merge = cow_merge_databases($user_identity_base, $user_identity_source, $user_identity_target, $user_identity_metadata, 'feature-user-identity-review', 'main');
+    $user_identity_run_id = (int)$user_identity_merge['run_id'];
+    assert_same($user_identity_merge['status'], 'completed_with_conflicts', 'user semantic identity fixture starts with a same-ID row conflict');
+    $user_identity_conflict_id = (int)scalar($user_identity_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'wp_users' AND conflict_type = 'row-insert-collision'");
+    assert_true($user_identity_conflict_id > 0, 'user semantic identity fixture records the row conflict');
+    cow_merge_review_record(
+        $user_identity_metadata,
+        'conflict',
+        $user_identity_conflict_id,
+        'reviewed',
+        'Review source user before applying over target user.',
+        'cow-test'
+    );
+
+    $db = open_db($user_identity_target);
+    $db->exec("UPDATE wp_users SET user_login = 'replacement_user', display_name = 'Replacement User' WHERE ID = 50");
+    $db->close();
+
+    $user_identity_revalidated = cow_merge_revalidate_reviewed_conflicts($user_identity_metadata, $user_identity_run_id, 'cow-revalidate');
+    assert_same($user_identity_revalidated['checked'], 1, 'user semantic revalidation checks the reviewed row conflict');
+    assert_same($user_identity_revalidated['stale'], 1, 'user semantic revalidation detects target semantic replacement');
+    assert_same($user_identity_revalidated['carried'], 1, 'user semantic revalidation carries semantically replaced users to needs-action');
+    assert_same(
+        scalar($user_identity_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $user_identity_conflict_id ORDER BY id DESC LIMIT 1"),
+        'incompatible',
+        'user semantic revalidation classifies changed user_login identity as incompatible'
+    );
+    $user_identity_audit = cow_merge_audit_report($user_identity_metadata, $user_identity_run_id, 10, ['records' => 'conflicts']);
+    $user_identity_conflicts = array_values(array_filter($user_identity_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $user_identity_conflict_id));
+    assert_same($user_identity_conflicts[0]['revalidation_class'] ?? null, 'incompatible', 'user semantic audit exposes incompatible replacement');
+    assert_true(str_contains((string)($user_identity_conflicts[0]['stale_reason'] ?? ''), 'semantic identity'), 'user semantic stale reason explains semantic identity drift');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($user_identity_metadata, $user_identity_conflict_id, 'source', true, 'Do not apply source user over replacement user.', 'cow-test', true),
+        'latest merge revalidation is incompatible',
+        'after-revalidate blocks source resolution over an incompatible user semantic replacement'
+    );
 } finally {
     remove_tree($tmp);
 }
