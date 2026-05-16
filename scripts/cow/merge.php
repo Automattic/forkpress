@@ -3622,9 +3622,13 @@ CREATE TABLE IF NOT EXISTS merge_runs (
     source_db TEXT NOT NULL,
     target_db TEXT NOT NULL,
     base_db TEXT NOT NULL,
+    target_before_db TEXT NOT NULL DEFAULT '',
+    target_before_root TEXT NOT NULL DEFAULT '',
     failure_reason TEXT
 )
 SQL, 'failed to create metadata table merge_runs');
+    cow_merge_ensure_metadata_column($meta, 'merge_runs', 'target_before_db', "TEXT NOT NULL DEFAULT ''");
+    cow_merge_ensure_metadata_column($meta, 'merge_runs', 'target_before_root', "TEXT NOT NULL DEFAULT ''");
     cow_merge_ensure_metadata_column($meta, 'merge_runs', 'failure_reason', 'TEXT');
     cow_merge_exec_checked($meta, <<<'SQL'
 CREATE TABLE IF NOT EXISTS merge_decisions (
@@ -4281,7 +4285,7 @@ function cow_merge_start_identity_capture_run(
 function cow_merge_run_context(SQLite3 $meta, int $run_id): array {
     $stmt = cow_merge_prepare_checked(
         $meta,
-        'SELECT source_branch, target_branch, base_db, source_db, target_db FROM merge_runs WHERE id = :id',
+        'SELECT source_branch, target_branch, base_db, source_db, target_db, target_before_db, target_before_root FROM merge_runs WHERE id = :id',
         'failed to prepare merge run context lookup'
     );
     cow_merge_bind($stmt, ':id', $run_id);
@@ -4295,6 +4299,8 @@ function cow_merge_run_context(SQLite3 $meta, int $run_id): array {
             'base_db' => '',
             'source_db' => '',
             'target_db' => '',
+            'target_before_db' => '',
+            'target_before_root' => '',
         ];
     }
     return [
@@ -4303,6 +4309,93 @@ function cow_merge_run_context(SQLite3 $meta, int $run_id): array {
         'base_db' => (string)$row['base_db'],
         'source_db' => (string)$row['source_db'],
         'target_db' => (string)$row['target_db'],
+        'target_before_db' => (string)($row['target_before_db'] ?? ''),
+        'target_before_root' => (string)($row['target_before_root'] ?? ''),
+    ];
+}
+
+function cow_merge_validator_context_base_dir(string $metadata_db): string {
+    $name = preg_replace('/[^A-Za-z0-9._-]/', '-', basename($metadata_db));
+    $key = substr(hash('sha256', $metadata_db), 0, 16);
+    return dirname($metadata_db) . DIRECTORY_SEPARATOR . 'validator-context' . DIRECTORY_SEPARATOR . $name . '-' . $key;
+}
+
+function cow_merge_validator_context_dir(string $metadata_db, int $run_id): string {
+    return cow_merge_validator_context_base_dir($metadata_db) . DIRECTORY_SEPARATOR . 'run-' . $run_id;
+}
+
+function cow_merge_update_validator_context_paths(
+    string $metadata_db,
+    int $run_id,
+    string $target_before_db,
+    string $target_before_root
+): void {
+    $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READWRITE | SQLITE3_OPEN_CREATE);
+    $transaction_started = false;
+    try {
+        cow_merge_ensure_metadata($meta);
+        cow_merge_exec_checked($meta, 'BEGIN IMMEDIATE', 'failed to start validator context metadata transaction');
+        $transaction_started = true;
+        $stmt = cow_merge_prepare_checked(
+            $meta,
+            'UPDATE merge_runs SET target_before_db = :target_before_db, target_before_root = :target_before_root WHERE id = :run_id',
+            'failed to prepare validator context metadata update'
+        );
+        cow_merge_bind($stmt, ':target_before_db', $target_before_db);
+        cow_merge_bind($stmt, ':target_before_root', $target_before_root);
+        cow_merge_bind($stmt, ':run_id', $run_id);
+        cow_merge_execute_checked($stmt, $meta, 'failed to update validator context metadata');
+        cow_merge_exec_checked($meta, 'COMMIT', 'failed to commit validator context metadata transaction');
+        $transaction_started = false;
+    } catch (Throwable $e) {
+        if ($transaction_started) {
+            @$meta->exec('ROLLBACK');
+        }
+        throw $e;
+    } finally {
+        $meta->close();
+    }
+}
+
+function cow_merge_materialize_validator_context(
+    string $metadata_db,
+    int $run_id,
+    ?array $target_snapshot,
+    ?array $filesystem_snapshot,
+    ?string $target_root
+): array {
+    $context_dir = cow_merge_validator_context_dir($metadata_db, $run_id);
+    cow_merge_remove_tree($context_dir);
+    cow_merge_mkdir_p($context_dir);
+
+    $target_before_db = '';
+    if ($target_snapshot !== null && !empty($target_snapshot['existed'])) {
+        $backup = $target_snapshot['backup'] ?? null;
+        if (!is_string($backup) || !is_file($backup)) {
+            throw new RuntimeException('missing target-before database snapshot for plugin validators');
+        }
+        $target_before_db = $context_dir . DIRECTORY_SEPARATOR . 'target-before.sqlite';
+        $tmp = $target_before_db . '.tmp';
+        if (!@copy($backup, $tmp)) {
+            throw new RuntimeException("failed to materialize target-before database snapshot: $target_before_db");
+        }
+        if (!@rename($tmp, $target_before_db)) {
+            @unlink($tmp);
+            throw new RuntimeException("failed to publish target-before database snapshot: $target_before_db");
+        }
+    }
+
+    $target_before_root = '';
+    if ($filesystem_snapshot !== null && is_string($target_root) && $target_root !== '') {
+        $target_before_root = $context_dir . DIRECTORY_SEPARATOR . 'target-before-root';
+        cow_merge_mkdir_p($target_before_root);
+        cow_merge_file_root_snapshot_restore($filesystem_snapshot, $target_before_root);
+    }
+
+    cow_merge_update_validator_context_paths($metadata_db, $run_id, $target_before_db, $target_before_root);
+    return [
+        'target_before_db' => $target_before_db,
+        'target_before_root' => $target_before_root,
     ];
 }
 
@@ -6571,7 +6664,15 @@ function cow_merge_record_plugin_validator_conflicts(
 function cow_merge_decode_plugin_validator_stdout(string $stdout, string $validator): array {
     $decoded = json_decode($stdout, true);
     if (json_last_error() !== JSON_ERROR_NONE) {
-        throw new RuntimeException("plugin validator $validator did not emit valid JSON: " . json_last_error_msg());
+        $preview = trim($stdout);
+        if (strlen($preview) > 240) {
+            $preview = substr($preview, 0, 240) . '...';
+        }
+        throw new RuntimeException(
+            "plugin validator $validator did not emit valid JSON: "
+            . json_last_error_msg()
+            . ($preview === '' ? '' : "; stdout: $preview")
+        );
     }
     if (is_array($decoded) && array_is_list($decoded)) {
         return [
@@ -6644,9 +6745,11 @@ function cow_merge_run_plugin_validator(string $metadata_db, int $run_id, string
         'FORKPRESS_MERGE_BASE_DB' => $context['base_db'],
         'FORKPRESS_MERGE_SOURCE_DB' => $context['source_db'],
         'FORKPRESS_MERGE_TARGET_DB' => $context['target_db'],
+        'FORKPRESS_MERGE_TARGET_BEFORE_DB' => $context['target_before_db'],
         'FORKPRESS_MERGE_BASE_ROOT' => $context['base_db'] === '' ? '' : cow_merge_branch_root_from_db_path($context['base_db']),
         'FORKPRESS_MERGE_SOURCE_ROOT' => $context['source_db'] === '' ? '' : cow_merge_branch_root_from_db_path($context['source_db']),
         'FORKPRESS_MERGE_TARGET_ROOT' => $context['target_db'] === '' ? '' : cow_merge_branch_root_from_db_path($context['target_db']),
+        'FORKPRESS_MERGE_TARGET_BEFORE_ROOT' => $context['target_before_root'],
     ]);
     $shell_command = implode(' ', array_map('escapeshellarg', $command));
     $pipes = [];
@@ -14453,6 +14556,15 @@ function cow_merge_branch_state(
         $result['plugin_validators'] = 0;
         $result['plugin_validator_conflicts'] = 0;
         $result['plugin_validators_discovered'] = 0;
+        if ($target_snapshot !== null) {
+            cow_merge_materialize_validator_context(
+                $metadata_db,
+                (int)$result['run_id'],
+                $target_snapshot,
+                $filesystem_snapshot,
+                $has_file_args ? (string)$target_root : null
+            );
+        }
 
         if ($has_file_args) {
             $whole_branch_crash_recovery_artifact = cow_merge_write_crash_recovery_artifact(
