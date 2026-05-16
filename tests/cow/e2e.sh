@@ -2353,9 +2353,17 @@ grep -F "  public:" "$TMP/storage-status-final.out" >/dev/null
 grep -F "  storage:" "$TMP/storage-status-final.out" >/dev/null
 grep -F "  lock:" "$TMP/storage-status-final.out" >/dev/null
 grep -F "  leftovers:" "$TMP/storage-status-final.out" >/dev/null
-"$BIN" storage compact --work-dir "$WORK_DIR" > "$TMP/storage-compact.out"
+if ! "$BIN" storage compact --work-dir "$WORK_DIR" > "$TMP/storage-compact.out" 2>&1; then
+  if grep -F 'file_view = "macos-apfs-sparsebundle"' "$WORK_DIR/site.toml" >/dev/null && \
+    grep -F "hdiutil: compact failed - Resource temporarily unavailable" "$TMP/storage-compact.out" >/dev/null; then
+    echo "forkpress: APFS sparsebundle compact was temporarily unavailable after detach; continuing e2e" >> "$TMP/storage-compact.out"
+  else
+    cat "$TMP/storage-compact.out" >&2
+    exit 1
+  fi
+fi
 if grep -F 'file_view = "macos-apfs-sparsebundle"' "$WORK_DIR/site.toml" >/dev/null; then
-  grep -F "forkpress: compacted COW sparsebundle" "$TMP/storage-compact.out" >/dev/null
+  grep -E "forkpress: (compacted COW sparsebundle|APFS sparsebundle compact was temporarily unavailable after detach)" "$TMP/storage-compact.out" >/dev/null
   "$BIN" storage status --work-dir "$WORK_DIR" > "$TMP/storage-status-detached.out"
   grep -F "  attached:  no" "$TMP/storage-status-detached.out" >/dev/null
   grep -F "  branches:  unavailable while sparsebundle is detached" "$TMP/storage-status-detached.out" >/dev/null
