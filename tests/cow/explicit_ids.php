@@ -93,8 +93,10 @@ function create_explicit_attachment_graph_db(string $path): void {
         post_type TEXT NOT NULL DEFAULT 'post'
     )");
     $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec('CREATE TABLE wp_options (option_id INTEGER PRIMARY KEY AUTOINCREMENT, option_name TEXT NOT NULL, option_value TEXT NOT NULL, autoload TEXT NOT NULL DEFAULT "yes")');
     $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type) VALUES
         (1, 'Base attachment consumer', '<!-- wp:paragraph --><p>base image consumer</p><!-- /wp:paragraph -->', 'publish', 'page')");
+    $db->exec("INSERT INTO wp_options (option_id, option_name, option_value, autoload) VALUES (1, 'site_icon', '1', 'yes')");
     $db->close();
 }
 
@@ -385,6 +387,11 @@ try {
     $attachment_graph_source_db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type) VALUES (2, 'Imported explicit attachment', '', 'inherit', 'attachment')");
     $attachment_graph_source_db->exec("UPDATE wp_posts SET post_content = '<!-- wp:image {\"id\":2,\"sizeSlug\":\"large\"} --><figure class=\"wp-block-image size-large\"><img class=\"wp-image-2\"/></figure><!-- /wp:image -->' WHERE ID = 1");
     $attachment_graph_source_db->exec("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (1, '_thumbnail_id', '2')");
+    $attachment_graph_source_db->exec("UPDATE wp_options SET option_value = '2' WHERE option_name = 'site_icon'");
+    $theme_mods = SQLite3::escapeString(serialize(['custom_logo' => 2]));
+    $attachment_graph_source_db->exec("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('theme_mods_explicit_attachment', '$theme_mods', 'yes')");
+    $media_widget = SQLite3::escapeString(serialize([2 => ['attachment_id' => 2, 'url' => 'wp-content/uploads/explicit-attachment.jpg']]));
+    $attachment_graph_source_db->exec("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_media_image', '$media_widget', 'yes')");
     $attachment_graph_source_db->close();
 
     $attachment_graph_result = cow_merge_databases($attachment_graph_base, $attachment_graph_source, $attachment_graph_target, $attachment_graph_metadata, 'feature-explicit-attachment-graph', 'main');
@@ -405,6 +412,21 @@ try {
         'featured image refs behind a held explicit attachment ID are not applied automatically'
     );
     assert_same(
+        scalar($attachment_graph_target, "SELECT option_value FROM wp_options WHERE option_name = 'site_icon'"),
+        '1',
+        'updated site_icon option behind a held explicit attachment ID is not applied automatically'
+    );
+    assert_same(
+        (int)scalar($attachment_graph_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'theme_mods_explicit_attachment'"),
+        0,
+        'theme mods custom_logo refs behind a held explicit attachment ID are not applied automatically'
+    );
+    assert_same(
+        (int)scalar($attachment_graph_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'widget_media_image'"),
+        0,
+        'media widget refs behind a held explicit attachment ID are not applied automatically'
+    );
+    assert_same(
         (int)scalar($attachment_graph_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-explicit-attachment-graph' AND c.table_name = 'wp_posts' AND c.conflict_type = 'row-target-constraint'"),
         2,
         'explicit attachment import and image block consumer record review conflicts'
@@ -417,6 +439,15 @@ try {
     assert_true(
         (int)scalar($attachment_graph_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-explicit-attachment-graph' AND d.table_name = 'wp_postmeta' AND d.decision = 'target-wins' AND d.reason LIKE '%outside the source branch ID band%' AND d.reason LIKE '%wp_posts%'") >= 1,
         'featured image conflict explains that it is held behind the explicit attachment ID'
+    );
+    assert_same(
+        (int)scalar($attachment_graph_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-explicit-attachment-graph' AND c.table_name = 'wp_options' AND c.conflict_type = 'row-target-constraint'"),
+        3,
+        'option refs behind a held explicit attachment record review conflicts'
+    );
+    assert_true(
+        (int)scalar($attachment_graph_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-explicit-attachment-graph' AND d.table_name = 'wp_options' AND d.decision = 'target-wins' AND d.reason LIKE '%outside the source branch ID band%' AND d.reason LIKE '%wp_posts%'") >= 3,
+        'option conflicts explain that they are held behind the explicit attachment ID'
     );
 
     $term_graph_base = $tmp . '/term-graph-base.sqlite';
