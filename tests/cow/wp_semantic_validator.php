@@ -302,6 +302,17 @@ function create_wp_term_parent_reference_db(string $path): void {
     $db->close();
 }
 
+function create_wp_termmeta_reference_db(string $path): void {
+    $db = open_db($path);
+    $db->exec('CREATE TABLE wp_terms (term_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, slug TEXT NOT NULL, term_group INTEGER NOT NULL DEFAULT 0)');
+    $db->exec('CREATE TABLE wp_termmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, term_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (87, 'Deleted termmeta owner', 'deleted-termmeta-owner')");
+    $db->exec("INSERT INTO wp_termmeta (meta_id, term_id, meta_key, meta_value) VALUES
+        (88, 87, '_forkpress_term_note', 'Base termmeta note'),
+        (89, 87, '_forkpress_term_json', '{\"favorite\":\"base\"}')");
+    $db->close();
+}
+
 function create_wp_comment_reference_db(string $path): void {
     $db = open_db($path);
     $db->exec("CREATE TABLE wp_posts (
@@ -1470,6 +1481,92 @@ PHP);
     assert_true(str_contains($term_parent_preview, '"missing_parent_term_id":83'), 'WordPress term-parent audit includes the missing parent term ID');
     assert_true(str_contains($term_parent_preview, '"term_taxonomy_id":86'), 'WordPress term-parent audit includes the child term taxonomy ID');
     assert_true(str_contains($term_parent_preview, '"field":"parent"'), 'WordPress term-parent audit includes the stale field name');
+
+    $termmeta_base_root = $tmp . '/termmeta-base';
+    $termmeta_source_root = $tmp . '/termmeta-source';
+    $termmeta_target_root = $tmp . '/termmeta-target';
+    $termmeta_base = $termmeta_base_root . '/wp-content/database/.ht.sqlite';
+    $termmeta_source = $termmeta_source_root . '/wp-content/database/.ht.sqlite';
+    $termmeta_target = $termmeta_target_root . '/wp-content/database/.ht.sqlite';
+    $termmeta_metadata = $tmp . '/.forkpress/cow/merge/wp-termmeta-validator-metadata.sqlite';
+    $termmeta_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-termmeta-validator.json';
+
+    mkdir($termmeta_base_root . '/wp-content/database', 0777, true);
+    create_wp_termmeta_reference_db($termmeta_base);
+    write_test_file($termmeta_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query("SELECT meta_id, term_id, meta_key FROM wp_termmeta WHERE term_id > 0");
+$findings = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    $term_id = (int)$row['term_id'];
+    $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_terms WHERE term_id = $term_id");
+    if ($exists === 0) {
+        $findings[] = [
+            'plugin' => 'forkpress-wp-termmeta-refs',
+            'object' => 'termmeta:' . $row['meta_id'],
+            'reason' => 'termmeta references a missing term',
+            'type' => 'plugin-wp-termmeta-missing-term',
+            'tables' => ['wp_termmeta', 'wp_terms'],
+            'validator' => 'forkpress-wp-termmeta-refs@1',
+            'candidate' => [
+                'meta_id' => (int)$row['meta_id'],
+                'meta_key' => (string)$row['meta_key'],
+                'field' => 'term_id',
+                'missing_term_id' => $term_id,
+            ],
+        ];
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    copy_tree_for_test($termmeta_base_root, $termmeta_source_root);
+    copy_tree_for_test($termmeta_base_root, $termmeta_target_root);
+    cow_merge_capture_file_base($termmeta_base_root, $termmeta_file_base);
+    cow_merge_allocate_autoincrement_bands($termmeta_source, $termmeta_metadata, 'feature-wp-termmeta-source');
+    cow_merge_allocate_autoincrement_bands($termmeta_target, $termmeta_metadata, 'main');
+
+    $db = open_db($termmeta_source);
+    $db->exec('DELETE FROM wp_terms WHERE term_id = 87');
+    $db->close();
+
+    $db = open_db($termmeta_target);
+    $db->exec("UPDATE wp_termmeta SET meta_value = 'Target termmeta still pointing at deleted term' WHERE meta_id = 88");
+    $db->exec("UPDATE wp_termmeta SET meta_value = '{\"favorite\":\"target\"}' WHERE meta_id = 89");
+    $db->close();
+
+    $termmeta_result = cow_merge_branch_state(
+        $termmeta_base,
+        $termmeta_source,
+        $termmeta_target,
+        $termmeta_metadata,
+        'feature-wp-termmeta-source',
+        'main',
+        $termmeta_file_base,
+        $termmeta_source_root,
+        $termmeta_target_root
+    );
+
+    assert_same($termmeta_result['status'], 'completed_with_conflicts', 'WordPress termmeta validator holds missing term owners for review');
+    assert_same((int)($termmeta_result['plugin_validators'] ?? 0), 1, 'WordPress termmeta validator is discovered from mu-plugins during merge');
+    assert_same((int)($termmeta_result['plugin_validator_conflicts'] ?? 0), 2, 'WordPress termmeta validator records missing term owners for scalar and JSON metadata');
+    assert_same((int)scalar($termmeta_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 87'), 0, 'WordPress termmeta validator leaves the source term deletion staged for review');
+    assert_same(scalar($termmeta_target, 'SELECT meta_value FROM wp_termmeta WHERE meta_id = 88'), 'Target termmeta still pointing at deleted term', 'WordPress termmeta validator preserves the target scalar termmeta edit');
+    assert_same(scalar($termmeta_target, 'SELECT meta_value FROM wp_termmeta WHERE meta_id = 89'), '{"favorite":"target"}', 'WordPress termmeta validator preserves the target JSON termmeta edit');
+
+    $termmeta_audit = cow_merge_audit_report($termmeta_metadata, (int)$termmeta_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-termmeta-missing-term',
+    ]);
+    assert_same(count($termmeta_audit['conflicts']), 2, 'WordPress termmeta validator exposes missing terms as plugin-scoped audit conflicts');
+    $termmeta_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $termmeta_audit['conflicts']));
+    assert_true(str_contains($termmeta_preview, '"missing_term_id":87'), 'WordPress termmeta audit includes the missing term ID');
+    assert_true(str_contains($termmeta_preview, '"field":"term_id"'), 'WordPress termmeta audit includes the stale field name');
+    assert_true(str_contains($termmeta_preview, '"meta_key":"_forkpress_term_json"'), 'WordPress termmeta audit includes JSON metadata');
 
     $comment_base_root = $tmp . '/comment-ref-base';
     $comment_source_root = $tmp . '/comment-ref-source';
