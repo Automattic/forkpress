@@ -879,6 +879,29 @@ PHP);
         'plugin validator runner does not record empty conflict findings'
     );
 
+    $raw_malformed_validator = $tmp . '/plugin-validator-raw-malformed.php';
+    write_test_file($raw_malformed_validator, <<<'PHP'
+<?php
+echo json_encode([
+    'raw malformed finding entry',
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $conflicts_before_raw_malformed = (int)scalar($metadata, 'SELECT COUNT(*) FROM merge_conflicts');
+    $raw_malformed = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $metadata,
+        '--run', (string)$result['run_id'],
+        '--validator', $raw_malformed_validator,
+        '--format', 'json',
+    ]);
+    assert_true($raw_malformed['status'] !== 0, 'plugin validator runner rejects malformed raw findings arrays');
+    assert_true(str_contains($raw_malformed['output'], 'findings must be arrays'), 'plugin validator runner explains malformed raw findings arrays');
+    assert_same(
+        (int)scalar($metadata, 'SELECT COUNT(*) FROM merge_conflicts'),
+        $conflicts_before_raw_malformed,
+        'plugin validator runner does not record partial raw malformed findings'
+    );
+
     $malformed_validator = $tmp . '/plugin-validator-malformed-finding.php';
     write_test_file($malformed_validator, <<<'PHP'
 <?php
