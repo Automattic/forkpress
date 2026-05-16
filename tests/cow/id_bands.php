@@ -1,0 +1,161 @@
+<?php
+
+$pass = 0;
+$fail = 0;
+
+function assert_true($cond, $msg) {
+    global $pass, $fail;
+    if ($cond) {
+        echo "  PASS: $msg\n";
+        $pass++;
+    } else {
+        echo "  FAIL: $msg\n";
+        $fail++;
+    }
+}
+
+function assert_same($actual, $expected, $msg) {
+    assert_true(
+        $actual === $expected,
+        "$msg (got " . var_export($actual, true) . ", expected " . var_export($expected, true) . ")"
+    );
+}
+
+function remove_tree(string $path): void {
+    if (!file_exists($path) && !is_link($path)) {
+        return;
+    }
+    if (is_file($path) || is_link($path)) {
+        unlink($path);
+        return;
+    }
+    $it = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($path, RecursiveDirectoryIterator::SKIP_DOTS),
+        RecursiveIteratorIterator::CHILD_FIRST
+    );
+    foreach ($it as $entry) {
+        $entry->isDir() && !$entry->isLink() ? rmdir($entry->getPathname()) : unlink($entry->getPathname());
+    }
+    rmdir($path);
+}
+
+function open_db(string $path): SQLite3 {
+    $db = new SQLite3($path);
+    $db->busyTimeout(5000);
+    return $db;
+}
+
+function scalar(string $db_path, string $sql): mixed {
+    $db = open_db($db_path);
+    $value = $db->querySingle($sql);
+    $db->close();
+    return $value;
+}
+
+function create_id_band_db(string $path): void {
+    $db = open_db($path);
+    $db->exec('CREATE TABLE wp_posts (ID INTEGER PRIMARY KEY AUTOINCREMENT, post_title TEXT NOT NULL, post_content TEXT NOT NULL, post_status TEXT NOT NULL)');
+    $db->exec('CREATE TABLE wp_options (option_id INTEGER PRIMARY KEY AUTOINCREMENT, option_name TEXT UNIQUE, option_value TEXT NOT NULL, autoload TEXT NOT NULL)');
+    $db->exec('CREATE TABLE plugin_plain_ipk (id INTEGER PRIMARY KEY, payload TEXT NOT NULL)');
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status) VALUES (1, 'Base page', 'Base content', 'draft')");
+    $db->exec("INSERT INTO wp_options (option_id, option_name, option_value, autoload) VALUES (1, 'base_graph', '{}', 'yes')");
+    $db->close();
+}
+
+define('FORKPRESS_COW_MERGE_TESTS', true);
+require_once __DIR__ . '/../../scripts/cow/merge.php';
+
+echo "=== COW ID-band focused tests ===\n";
+
+$tmp = sys_get_temp_dir() . '/forkpress-cow-id-bands-' . getmypid() . '-' . bin2hex(random_bytes(4));
+mkdir($tmp, 0777, true);
+
+try {
+    $base = $tmp . '/base.sqlite';
+    $source = $tmp . '/source.sqlite';
+    $target = $tmp . '/target.sqlite';
+    $metadata = $tmp . '/.forkpress/cow/merge/id-band-metadata.sqlite';
+
+    create_id_band_db($base);
+    copy($base, $source);
+    copy($base, $target);
+
+    $source_band = cow_merge_allocate_autoincrement_bands($source, $metadata, 'feature-source');
+    $target_band = cow_merge_allocate_autoincrement_bands($target, $metadata, 'feature-target');
+    assert_same($source_band['allocated'], 2, 'source branch allocates AUTOINCREMENT bands for posts and options');
+    assert_same($target_band['allocated'], 2, 'target branch allocates independent AUTOINCREMENT bands for posts and options');
+
+    $source_db = open_db($source);
+    $source_db->exec("INSERT INTO wp_posts (post_title, post_content, post_status) VALUES ('Source page', 'Source content', 'publish')");
+    $source_post_id = (int)$source_db->lastInsertRowID();
+    $source_graph = [
+        'branch' => 'source',
+        'post_id' => $source_post_id,
+    ];
+    $source_stmt = $source_db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('source_json_graph', :json, 'yes'), ('source_serialized_graph', :serialized, 'yes')");
+    $source_stmt->bindValue(':json', json_encode($source_graph, JSON_UNESCAPED_SLASHES), SQLITE3_TEXT);
+    $source_stmt->bindValue(':serialized', serialize($source_graph), SQLITE3_TEXT);
+    $source_stmt->execute();
+    $source_db->exec("INSERT INTO plugin_plain_ipk (id, payload) VALUES (7, 'source explicit plain integer key')");
+    $source_db->close();
+
+    $target_db = open_db($target);
+    $target_db->exec("INSERT INTO wp_posts (post_title, post_content, post_status) VALUES ('Target page', 'Target content', 'publish')");
+    $target_post_id = (int)$target_db->lastInsertRowID();
+    $target_graph = [
+        'branch' => 'target',
+        'post_id' => $target_post_id,
+    ];
+    $target_stmt = $target_db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('target_json_graph', :json, 'yes'), ('target_serialized_graph', :serialized, 'yes')");
+    $target_stmt->bindValue(':json', json_encode($target_graph, JSON_UNESCAPED_SLASHES), SQLITE3_TEXT);
+    $target_stmt->bindValue(':serialized', serialize($target_graph), SQLITE3_TEXT);
+    $target_stmt->execute();
+    $target_db->exec("INSERT INTO plugin_plain_ipk (id, payload) VALUES (7, 'target explicit plain integer key')");
+    $target_db->close();
+
+    assert_true($source_post_id !== $target_post_id, 'source and target branch inserts receive different post IDs');
+    assert_true($source_post_id >= 1000000, 'source post ID lands inside an allocated branch band');
+    assert_true($target_post_id >= 2000000, 'target post ID lands inside a later allocated branch band');
+
+    $result = cow_merge_databases($base, $source, $target, $metadata, 'feature-source', 'feature-target');
+    assert_same($result['status'], 'completed_with_conflicts', 'plain INTEGER PRIMARY KEY collision remains reviewable while banded WordPress rows merge');
+
+    assert_same(
+        scalar($target, "SELECT post_title FROM wp_posts WHERE ID = $source_post_id"),
+        'Source page',
+        'source banded post merges into target without ID rewrite'
+    );
+    assert_same(
+        scalar($target, "SELECT post_title FROM wp_posts WHERE ID = $target_post_id"),
+        'Target page',
+        'target banded post remains in target'
+    );
+
+    $merged_source_json = json_decode((string)scalar($target, "SELECT option_value FROM wp_options WHERE option_name = 'source_json_graph'"), true);
+    $merged_target_json = json_decode((string)scalar($target, "SELECT option_value FROM wp_options WHERE option_name = 'target_json_graph'"), true);
+    $merged_source_serialized = unserialize((string)scalar($target, "SELECT option_value FROM wp_options WHERE option_name = 'source_serialized_graph'"));
+    $merged_target_serialized = unserialize((string)scalar($target, "SELECT option_value FROM wp_options WHERE option_name = 'target_serialized_graph'"));
+    assert_same($merged_source_json['post_id'] ?? null, $source_post_id, 'source JSON graph keeps the source branch post ID');
+    assert_same($merged_target_json['post_id'] ?? null, $target_post_id, 'target JSON graph keeps the target branch post ID');
+    assert_same($merged_source_serialized['post_id'] ?? null, $source_post_id, 'source serialized graph keeps the source branch post ID');
+    assert_same($merged_target_serialized['post_id'] ?? null, $target_post_id, 'target serialized graph keeps the target branch post ID');
+
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE decision = 'id-band-skipped' AND table_name = 'plugin_plain_ipk'"),
+        2,
+        'plain INTEGER PRIMARY KEY plugin tables are explicitly marked non-bandable for each branch'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_plain_ipk'"),
+        1,
+        'plain INTEGER PRIMARY KEY plugin collision is recorded as a review conflict'
+    );
+} finally {
+    remove_tree($tmp);
+}
+
+if ($fail) {
+    echo "FAILURES: $fail\n";
+    exit(1);
+}
+echo "COW ID-band focused tests passed ($pass assertions).\n";
