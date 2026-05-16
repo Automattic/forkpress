@@ -313,7 +313,7 @@ dependencies = [
 
 [[package]]
 name = "forkpress-cli"
-version = "0.1.26"
+version = "0.1.27"
 dependencies = [
  "anyhow",
  "clap",
@@ -334,7 +334,7 @@ dependencies = [
 
 [[package]]
 name = "forkpress-core"
-version = "0.1.26"
+version = "0.1.27"
 dependencies = [
  "anyhow",
  "clap",
@@ -342,14 +342,14 @@ dependencies = [
 
 [[package]]
 name = "forkpress-git"
-version = "0.1.26"
+version = "0.1.27"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "forkpress-runtime"
-version = "0.1.26"
+version = "0.1.27"
 dependencies = [
  "anyhow",
  "flate2",
@@ -360,7 +360,7 @@ dependencies = [
 
 [[package]]
 name = "forkpress-server"
-version = "0.1.26"
+version = "0.1.27"
 dependencies = [
  "anyhow",
  "forkpress-core",
@@ -369,7 +369,7 @@ dependencies = [
 
 [[package]]
 name = "forkpress-storage"
-version = "0.1.26"
+version = "0.1.27"
 dependencies = [
  "anyhow",
  "flate2",
