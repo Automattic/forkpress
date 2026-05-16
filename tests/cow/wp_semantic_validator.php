@@ -143,6 +143,25 @@ function create_wp_post_author_reference_db(string $path): void {
     $db->close();
 }
 
+function create_wp_postmeta_reference_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_title TEXT NOT NULL DEFAULT '',
+        post_content TEXT NOT NULL DEFAULT '',
+        post_status TEXT NOT NULL DEFAULT 'publish',
+        post_type TEXT NOT NULL DEFAULT 'post',
+        post_name TEXT NOT NULL DEFAULT ''
+    )");
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (52, 'Deleted postmeta owner', '<!-- wp:paragraph --><p>Postmeta owner</p><!-- /wp:paragraph -->', 'publish', 'page', 'deleted-postmeta-owner')");
+    $db->exec("INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES
+        (53, 52, '_forkpress_meta_note', 'Base postmeta note'),
+        (54, 52, '_forkpress_meta_json', '{\"favorite\":\"base\"}')");
+    $db->close();
+}
+
 function create_wp_usermeta_reference_db(string $path): void {
     $db = open_db($path);
     $db->exec("CREATE TABLE wp_users (
@@ -710,6 +729,92 @@ PHP);
     assert_true(str_contains($post_author_preview, '"missing_user_id":44'), 'WordPress post-author audit includes the missing user ID');
     assert_true(str_contains($post_author_preview, '"field":"post_author"'), 'WordPress post-author audit includes the stale field name');
     assert_true(str_contains($post_author_preview, '"post_type":"attachment"'), 'WordPress post-author audit includes attachment authors');
+
+    $postmeta_base_root = $tmp . '/postmeta-base';
+    $postmeta_source_root = $tmp . '/postmeta-source';
+    $postmeta_target_root = $tmp . '/postmeta-target';
+    $postmeta_base = $postmeta_base_root . '/wp-content/database/.ht.sqlite';
+    $postmeta_source = $postmeta_source_root . '/wp-content/database/.ht.sqlite';
+    $postmeta_target = $postmeta_target_root . '/wp-content/database/.ht.sqlite';
+    $postmeta_metadata = $tmp . '/.forkpress/cow/merge/wp-postmeta-validator-metadata.sqlite';
+    $postmeta_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-postmeta-validator.json';
+
+    mkdir($postmeta_base_root . '/wp-content/database', 0777, true);
+    create_wp_postmeta_reference_db($postmeta_base);
+    write_test_file($postmeta_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query("SELECT meta_id, post_id, meta_key FROM wp_postmeta WHERE post_id > 0");
+$findings = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    $post_id = (int)$row['post_id'];
+    $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $post_id");
+    if ($exists === 0) {
+        $findings[] = [
+            'plugin' => 'forkpress-wp-postmeta-refs',
+            'object' => 'postmeta:' . $row['meta_id'],
+            'reason' => 'postmeta references a missing post',
+            'type' => 'plugin-wp-postmeta-missing-post',
+            'tables' => ['wp_postmeta', 'wp_posts'],
+            'validator' => 'forkpress-wp-postmeta-refs@1',
+            'candidate' => [
+                'meta_id' => (int)$row['meta_id'],
+                'meta_key' => (string)$row['meta_key'],
+                'field' => 'post_id',
+                'missing_post_id' => $post_id,
+            ],
+        ];
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    copy_tree_for_test($postmeta_base_root, $postmeta_source_root);
+    copy_tree_for_test($postmeta_base_root, $postmeta_target_root);
+    cow_merge_capture_file_base($postmeta_base_root, $postmeta_file_base);
+    cow_merge_allocate_autoincrement_bands($postmeta_source, $postmeta_metadata, 'feature-wp-postmeta-source');
+    cow_merge_allocate_autoincrement_bands($postmeta_target, $postmeta_metadata, 'main');
+
+    $db = open_db($postmeta_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID = 52');
+    $db->close();
+
+    $db = open_db($postmeta_target);
+    $db->exec("UPDATE wp_postmeta SET meta_value = 'Target postmeta still pointing at deleted post' WHERE meta_id = 53");
+    $db->exec("UPDATE wp_postmeta SET meta_value = '{\"favorite\":\"target\"}' WHERE meta_id = 54");
+    $db->close();
+
+    $postmeta_result = cow_merge_branch_state(
+        $postmeta_base,
+        $postmeta_source,
+        $postmeta_target,
+        $postmeta_metadata,
+        'feature-wp-postmeta-source',
+        'main',
+        $postmeta_file_base,
+        $postmeta_source_root,
+        $postmeta_target_root
+    );
+
+    assert_same($postmeta_result['status'], 'completed_with_conflicts', 'WordPress postmeta validator holds missing post owners for review');
+    assert_same((int)($postmeta_result['plugin_validators'] ?? 0), 1, 'WordPress postmeta validator is discovered from mu-plugins during merge');
+    assert_same((int)($postmeta_result['plugin_validator_conflicts'] ?? 0), 2, 'WordPress postmeta validator records missing post owners for scalar and JSON metadata');
+    assert_same((int)scalar($postmeta_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 52'), 0, 'WordPress postmeta validator leaves the source post deletion staged for review');
+    assert_same(scalar($postmeta_target, 'SELECT meta_value FROM wp_postmeta WHERE meta_id = 53'), 'Target postmeta still pointing at deleted post', 'WordPress postmeta validator preserves the target scalar postmeta edit');
+    assert_same(scalar($postmeta_target, 'SELECT meta_value FROM wp_postmeta WHERE meta_id = 54'), '{"favorite":"target"}', 'WordPress postmeta validator preserves the target JSON postmeta edit');
+
+    $postmeta_audit = cow_merge_audit_report($postmeta_metadata, (int)$postmeta_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-postmeta-missing-post',
+    ]);
+    assert_same(count($postmeta_audit['conflicts']), 2, 'WordPress postmeta validator exposes missing posts as plugin-scoped audit conflicts');
+    $postmeta_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $postmeta_audit['conflicts']));
+    assert_true(str_contains($postmeta_preview, '"missing_post_id":52'), 'WordPress postmeta audit includes the missing post ID');
+    assert_true(str_contains($postmeta_preview, '"field":"post_id"'), 'WordPress postmeta audit includes the stale field name');
+    assert_true(str_contains($postmeta_preview, '"meta_key":"_forkpress_meta_json"'), 'WordPress postmeta audit includes JSON metadata');
 
     $usermeta_base_root = $tmp . '/usermeta-base';
     $usermeta_source_root = $tmp . '/usermeta-source';
