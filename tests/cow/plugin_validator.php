@@ -138,6 +138,14 @@ function create_plugin_serialized_validator_db(string $path): void {
     $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('plugin_asset_json_settings', :value, 'yes')");
     $stmt->bindValue(':value', $json_option_value, SQLITE3_TEXT);
     $stmt->execute();
+    $json_unsafe_option_value = json_encode([
+        'asset_id' => 20,
+        'file_path' => 'wp-content/uploads/plugin-assets/shared.dat',
+        'label' => 'base unsafe JSON option',
+    ], JSON_UNESCAPED_SLASHES);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('plugin_asset_unsafe_json_settings', :value, 'yes')");
+    $stmt->bindValue(':value', $json_unsafe_option_value, SQLITE3_TEXT);
+    $stmt->execute();
     $meta_value = serialize([
         'asset_id' => 20,
         'file_path' => 'wp-content/uploads/plugin-assets/shared.dat',
@@ -401,7 +409,8 @@ $check_asset = function (string $object, string $field, array $payload, array $t
         return;
     }
     $asset_exists = (int)$db->querySingle('SELECT COUNT(*) FROM plugin_asset WHERE asset_id = ' . $asset_id);
-    $file_exists = $file_path !== '' && !str_starts_with($file_path, '/') && !str_contains($file_path, '..') && is_file($target_root . '/' . $file_path);
+    $file_safe = $file_path !== '' && !str_starts_with($file_path, '/') && !str_contains($file_path, '..');
+    $file_exists = $file_safe && is_file($target_root . '/' . $file_path);
     if ($asset_exists === 1 && $file_exists) {
         return;
     }
@@ -418,6 +427,7 @@ $check_asset = function (string $object, string $field, array $payload, array $t
             'asset_id' => $asset_id,
             'file_path' => $file_path,
             'asset_exists' => $asset_exists,
+            'file_safe' => $file_safe,
             'file_exists' => $file_exists,
         ],
     ];
@@ -433,6 +443,12 @@ $json_option_value = $db->querySingle("SELECT option_value FROM wp_options WHERE
 $json_option_payload = is_string($json_option_value) ? json_decode($json_option_value, true) : null;
 if (is_array($json_option_payload)) {
     $check_asset('option:plugin_asset_json_settings', 'option.plugin_asset_json_settings.asset_id', $json_option_payload, ['wp_options', 'plugin_asset']);
+}
+
+$json_unsafe_option_value = $db->querySingle("SELECT option_value FROM wp_options WHERE option_name = 'plugin_asset_unsafe_json_settings'");
+$json_unsafe_option_payload = is_string($json_unsafe_option_value) ? json_decode($json_unsafe_option_value, true) : null;
+if (is_array($json_unsafe_option_payload)) {
+    $check_asset('option:plugin_asset_unsafe_json_settings', 'option.plugin_asset_unsafe_json_settings.file_path', $json_unsafe_option_payload, ['wp_options', 'plugin_asset']);
 }
 
 $res = $db->query("SELECT meta_id, meta_value FROM wp_postmeta WHERE meta_key = '_plugin_asset_ref'");
@@ -485,6 +501,14 @@ PHP);
     $stmt = $db->prepare("UPDATE wp_options SET option_value = :value WHERE option_name = 'plugin_asset_json_settings'");
     $stmt->bindValue(':value', $target_json_option, SQLITE3_TEXT);
     $stmt->execute();
+    $target_unsafe_json_option = json_encode([
+        'asset_id' => 20,
+        'file_path' => '../private/plugin-asset.dat',
+        'label' => 'target unsafe JSON option edit',
+    ], JSON_UNESCAPED_SLASHES);
+    $stmt = $db->prepare("UPDATE wp_options SET option_value = :value WHERE option_name = 'plugin_asset_unsafe_json_settings'");
+    $stmt->bindValue(':value', $target_unsafe_json_option, SQLITE3_TEXT);
+    $stmt->execute();
     $target_meta = serialize([
         'asset_id' => 20,
         'file_path' => 'wp-content/uploads/plugin-assets/shared.dat',
@@ -517,7 +541,7 @@ PHP);
 
     assert_same($serialized_result['status'], 'completed_with_conflicts', 'plugin validator holds serialized and JSON option/postmeta asset refs for review');
     assert_same((int)($serialized_result['plugin_validators'] ?? 0), 1, 'serialized plugin validator is discovered from mu-plugins during merge');
-    assert_same((int)($serialized_result['plugin_validator_conflicts'] ?? 0), 4, 'serialized plugin validator records serialized and JSON option/postmeta asset conflicts');
+    assert_same((int)($serialized_result['plugin_validator_conflicts'] ?? 0), 5, 'serialized plugin validator records serialized and JSON option/postmeta asset conflicts');
     assert_same((int)scalar($serialized_target, 'SELECT COUNT(*) FROM plugin_asset WHERE asset_id = 20'), 0, 'serialized plugin validator leaves the source asset row deletion staged for review');
     assert_true(!is_file($serialized_target_root . '/wp-content/uploads/plugin-assets/shared.dat'), 'serialized plugin validator leaves the source asset file deletion staged for review');
     $merged_option = unserialize((string)scalar($serialized_target, "SELECT option_value FROM wp_options WHERE option_name = 'plugin_asset_settings'"));
@@ -526,6 +550,9 @@ PHP);
     $merged_json_option = json_decode((string)scalar($serialized_target, "SELECT option_value FROM wp_options WHERE option_name = 'plugin_asset_json_settings'"), true);
     assert_same($merged_json_option['label'] ?? null, 'target JSON option edit', 'serialized plugin validator preserves target JSON option edits');
     assert_same($merged_json_option['asset_id'] ?? null, 20, 'serialized plugin validator keeps the stale JSON option asset reference visible');
+    $merged_unsafe_json_option = json_decode((string)scalar($serialized_target, "SELECT option_value FROM wp_options WHERE option_name = 'plugin_asset_unsafe_json_settings'"), true);
+    assert_same($merged_unsafe_json_option['label'] ?? null, 'target unsafe JSON option edit', 'serialized plugin validator preserves target unsafe JSON option edits');
+    assert_same($merged_unsafe_json_option['file_path'] ?? null, '../private/plugin-asset.dat', 'serialized plugin validator keeps the unsafe JSON option file path visible');
     $merged_meta = unserialize((string)scalar($serialized_target, "SELECT meta_value FROM wp_postmeta WHERE meta_key = '_plugin_asset_ref'"));
     assert_same($merged_meta['caption'] ?? null, 'target meta edit', 'serialized plugin validator preserves target postmeta edits');
     assert_same($merged_meta['asset_id'] ?? null, 20, 'serialized plugin validator keeps the stale postmeta asset reference visible');
@@ -538,14 +565,23 @@ PHP);
         'records' => 'conflicts',
         'conflict_type' => 'plugin-serialized-missing-asset',
     ]);
-    assert_same(count($serialized_audit['conflicts']), 4, 'serialized plugin validator exposes serialized and JSON option/postmeta refs as plugin audit conflicts');
+    assert_same(count($serialized_audit['conflicts']), 5, 'serialized plugin validator exposes serialized and JSON option/postmeta refs as plugin audit conflicts');
     $serialized_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $serialized_audit['conflicts']));
     assert_true(str_contains($serialized_preview, 'option.plugin_asset_settings.asset_id'), 'serialized plugin audit includes the option reference field');
     assert_true(str_contains($serialized_preview, 'option.plugin_asset_json_settings.asset_id'), 'serialized plugin audit includes the JSON option reference field');
+    assert_true(str_contains($serialized_preview, 'option.plugin_asset_unsafe_json_settings.file_path'), 'serialized plugin audit includes the unsafe JSON option file field');
     assert_true(str_contains($serialized_preview, 'postmeta._plugin_asset_ref.asset_id'), 'serialized plugin audit includes the postmeta reference field');
     assert_true(str_contains($serialized_preview, 'postmeta._plugin_asset_json_ref.asset_id'), 'serialized plugin audit includes the JSON postmeta reference field');
     assert_true(str_contains($serialized_preview, '"asset_id":20'), 'serialized plugin audit includes the missing asset ID');
     assert_true(str_contains($serialized_preview, '"file_exists":false'), 'serialized plugin audit records the missing asset file evidence');
+    $unsafe_asset_conflicts = array_values(array_filter($serialized_audit['conflicts'], function (array $conflict): bool {
+        $payload = cow_merge_decode_payload_json((string)($conflict['chosen_payload'] ?? ''), 'plugin serialized asset conflict');
+        return is_array($payload)
+            && (($payload['candidate']['field'] ?? null) === 'option.plugin_asset_unsafe_json_settings.file_path')
+            && (($payload['candidate']['file_path'] ?? null) === '../private/plugin-asset.dat')
+            && (($payload['candidate']['file_safe'] ?? null) === false);
+    }));
+    assert_same(count($unsafe_asset_conflicts), 1, 'serialized plugin audit records unsafe file path evidence');
 
     $contradictory_validator = $tmp . '/plugin-validator-contradictory-valid.php';
     write_test_file($contradictory_validator, <<<'PHP'
