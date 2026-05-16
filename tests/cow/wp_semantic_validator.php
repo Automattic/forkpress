@@ -143,6 +143,21 @@ function create_wp_post_author_reference_db(string $path): void {
     $db->close();
 }
 
+function create_wp_usermeta_reference_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_users (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_login TEXT NOT NULL,
+        user_email TEXT NOT NULL DEFAULT ''
+    )");
+    $db->exec('CREATE TABLE wp_usermeta (umeta_id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec("INSERT INTO wp_users (ID, user_login, user_email) VALUES (49, 'deleted_usermeta_owner', 'deleted-usermeta-owner@example.test')");
+    $db->exec("INSERT INTO wp_usermeta (umeta_id, user_id, meta_key, meta_value) VALUES
+        (50, 49, 'description', 'Base user description'),
+        (51, 49, 'forkpress_profile_json', '{\"favorite\":\"base\"}')");
+    $db->close();
+}
+
 function create_wp_menu_ref_db(string $path): void {
     $db = open_db($path);
     $db->exec("CREATE TABLE wp_posts (
@@ -695,6 +710,92 @@ PHP);
     assert_true(str_contains($post_author_preview, '"missing_user_id":44'), 'WordPress post-author audit includes the missing user ID');
     assert_true(str_contains($post_author_preview, '"field":"post_author"'), 'WordPress post-author audit includes the stale field name');
     assert_true(str_contains($post_author_preview, '"post_type":"attachment"'), 'WordPress post-author audit includes attachment authors');
+
+    $usermeta_base_root = $tmp . '/usermeta-base';
+    $usermeta_source_root = $tmp . '/usermeta-source';
+    $usermeta_target_root = $tmp . '/usermeta-target';
+    $usermeta_base = $usermeta_base_root . '/wp-content/database/.ht.sqlite';
+    $usermeta_source = $usermeta_source_root . '/wp-content/database/.ht.sqlite';
+    $usermeta_target = $usermeta_target_root . '/wp-content/database/.ht.sqlite';
+    $usermeta_metadata = $tmp . '/.forkpress/cow/merge/wp-usermeta-validator-metadata.sqlite';
+    $usermeta_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-usermeta-validator.json';
+
+    mkdir($usermeta_base_root . '/wp-content/database', 0777, true);
+    create_wp_usermeta_reference_db($usermeta_base);
+    write_test_file($usermeta_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query("SELECT umeta_id, user_id, meta_key FROM wp_usermeta WHERE user_id > 0");
+$findings = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    $user_id = (int)$row['user_id'];
+    $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_users WHERE ID = $user_id");
+    if ($exists === 0) {
+        $findings[] = [
+            'plugin' => 'forkpress-wp-usermeta-refs',
+            'object' => 'usermeta:' . $row['umeta_id'],
+            'reason' => 'usermeta references a missing user',
+            'type' => 'plugin-wp-usermeta-missing-user',
+            'tables' => ['wp_usermeta', 'wp_users'],
+            'validator' => 'forkpress-wp-usermeta-refs@1',
+            'candidate' => [
+                'umeta_id' => (int)$row['umeta_id'],
+                'meta_key' => (string)$row['meta_key'],
+                'field' => 'user_id',
+                'missing_user_id' => $user_id,
+            ],
+        ];
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    copy_tree_for_test($usermeta_base_root, $usermeta_source_root);
+    copy_tree_for_test($usermeta_base_root, $usermeta_target_root);
+    cow_merge_capture_file_base($usermeta_base_root, $usermeta_file_base);
+    cow_merge_allocate_autoincrement_bands($usermeta_source, $usermeta_metadata, 'feature-wp-usermeta-source');
+    cow_merge_allocate_autoincrement_bands($usermeta_target, $usermeta_metadata, 'main');
+
+    $db = open_db($usermeta_source);
+    $db->exec('DELETE FROM wp_users WHERE ID = 49');
+    $db->close();
+
+    $db = open_db($usermeta_target);
+    $db->exec("UPDATE wp_usermeta SET meta_value = 'Target user description still pointing at deleted user' WHERE umeta_id = 50");
+    $db->exec("UPDATE wp_usermeta SET meta_value = '{\"favorite\":\"target\"}' WHERE umeta_id = 51");
+    $db->close();
+
+    $usermeta_result = cow_merge_branch_state(
+        $usermeta_base,
+        $usermeta_source,
+        $usermeta_target,
+        $usermeta_metadata,
+        'feature-wp-usermeta-source',
+        'main',
+        $usermeta_file_base,
+        $usermeta_source_root,
+        $usermeta_target_root
+    );
+
+    assert_same($usermeta_result['status'], 'completed_with_conflicts', 'WordPress usermeta validator holds missing user owners for review');
+    assert_same((int)($usermeta_result['plugin_validators'] ?? 0), 1, 'WordPress usermeta validator is discovered from mu-plugins during merge');
+    assert_same((int)($usermeta_result['plugin_validator_conflicts'] ?? 0), 2, 'WordPress usermeta validator records missing user owners for scalar and JSON metadata');
+    assert_same((int)scalar($usermeta_target, 'SELECT COUNT(*) FROM wp_users WHERE ID = 49'), 0, 'WordPress usermeta validator leaves the source user deletion staged for review');
+    assert_same(scalar($usermeta_target, 'SELECT meta_value FROM wp_usermeta WHERE umeta_id = 50'), 'Target user description still pointing at deleted user', 'WordPress usermeta validator preserves the target scalar usermeta edit');
+    assert_same(scalar($usermeta_target, 'SELECT meta_value FROM wp_usermeta WHERE umeta_id = 51'), '{"favorite":"target"}', 'WordPress usermeta validator preserves the target JSON usermeta edit');
+
+    $usermeta_audit = cow_merge_audit_report($usermeta_metadata, (int)$usermeta_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-usermeta-missing-user',
+    ]);
+    assert_same(count($usermeta_audit['conflicts']), 2, 'WordPress usermeta validator exposes missing users as plugin-scoped audit conflicts');
+    $usermeta_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $usermeta_audit['conflicts']));
+    assert_true(str_contains($usermeta_preview, '"missing_user_id":49'), 'WordPress usermeta audit includes the missing user ID');
+    assert_true(str_contains($usermeta_preview, '"field":"user_id"'), 'WordPress usermeta audit includes the stale field name');
+    assert_true(str_contains($usermeta_preview, '"meta_key":"forkpress_profile_json"'), 'WordPress usermeta audit includes JSON metadata');
 
     $menu_parent_base_root = $tmp . '/menu-parent-base';
     $menu_parent_source_root = $tmp . '/menu-parent-source';
