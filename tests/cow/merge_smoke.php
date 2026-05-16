@@ -981,6 +981,134 @@ try {
         'page-plus-attachment smoke merge audits target upload files'
     );
 
+    $image_block_base_root = $tmp . '/image-block-base-root';
+    $image_block_source_root = $tmp . '/image-block-source-root';
+    $image_block_target_root = $tmp . '/image-block-target-root';
+    $image_block_base = $image_block_base_root . '/wp-content/database/.ht.sqlite';
+    $image_block_source = $image_block_source_root . '/wp-content/database/.ht.sqlite';
+    $image_block_target = $image_block_target_root . '/wp-content/database/.ht.sqlite';
+    $image_block_file_base = $tmp . '/.forkpress/cow/merge/file-bases/feature-smoke-page-image-block.json';
+    $image_block_metadata = $tmp . '/.forkpress/cow/merge/image-block-metadata.sqlite';
+
+    mkdir(dirname($image_block_base), 0777, true);
+    mkdir(dirname($image_block_source), 0777, true);
+    mkdir(dirname($image_block_target), 0777, true);
+    smoke_create_posts_db($image_block_base);
+    copy($image_block_base, $image_block_source);
+    copy($image_block_base, $image_block_target);
+    cow_merge_capture_file_base($image_block_base_root, $image_block_file_base);
+
+    $source_image_block_content = '<!-- wp:image {"id":18000091,"sizeSlug":"large","linkDestination":"none"} -->' .
+        '<figure class="wp-block-image size-large"><img src="http://example.test/wp-content/uploads/2026/05/source-block-image.jpg" alt="" class="wp-image-18000091"/></figure>' .
+        '<!-- /wp:image -->';
+    $target_image_block_content = '<!-- wp:image {"id":19000091,"sizeSlug":"large","linkDestination":"none"} -->' .
+        '<figure class="wp-block-image size-large"><img src="http://example.test/wp-content/uploads/2026/05/main-block-image.jpg" alt="" class="wp-image-19000091"/></figure>' .
+        '<!-- /wp:image -->';
+    $source_image_block_meta = serialize([
+        'file' => '2026/05/source-block-image.jpg',
+        'width' => 1024,
+        'height' => 768,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'source-block-image-150x150.jpg',
+                'width' => 150,
+                'height' => 150,
+                'mime-type' => 'image/jpeg',
+            ],
+        ],
+    ]);
+    $target_image_block_meta = serialize([
+        'file' => '2026/05/main-block-image.jpg',
+        'width' => 1200,
+        'height' => 900,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'main-block-image-150x150.jpg',
+                'width' => 150,
+                'height' => 150,
+                'mime-type' => 'image/jpeg',
+            ],
+        ],
+    ]);
+
+    $db = smoke_open_db($image_block_source);
+    smoke_insert_post($db, 18000090, 'Branch Page With Image Block', $source_image_block_content, 'page', 'branch-page-with-image-block');
+    smoke_insert_post($db, 18000091, 'source-block-image.jpg', '', 'attachment', 'source-block-image-jpg', 'inherit', 18000090, 'image/jpeg', 'http://example.test/wp-content/uploads/2026/05/source-block-image.jpg');
+    smoke_insert_postmeta($db, 18000092, 18000091, '_wp_attached_file', '2026/05/source-block-image.jpg');
+    smoke_insert_postmeta($db, 18000093, 18000091, '_wp_attachment_metadata', $source_image_block_meta);
+    $db->close();
+    smoke_write_file($image_block_source_root . '/wp-content/uploads/2026/05/source-block-image.jpg', 'source image block original bytes');
+    smoke_write_file($image_block_source_root . '/wp-content/uploads/2026/05/source-block-image-150x150.jpg', 'source image block thumbnail bytes');
+
+    $db = smoke_open_db($image_block_target);
+    smoke_insert_post($db, 19000090, 'Main Page With Image Block', $target_image_block_content, 'page', 'main-page-with-image-block');
+    smoke_insert_post($db, 19000091, 'main-block-image.jpg', '', 'attachment', 'main-block-image-jpg', 'inherit', 19000090, 'image/jpeg', 'http://example.test/wp-content/uploads/2026/05/main-block-image.jpg');
+    smoke_insert_postmeta($db, 19000092, 19000091, '_wp_attached_file', '2026/05/main-block-image.jpg');
+    smoke_insert_postmeta($db, 19000093, 19000091, '_wp_attachment_metadata', $target_image_block_meta);
+    $db->close();
+    smoke_write_file($image_block_target_root . '/wp-content/uploads/2026/05/main-block-image.jpg', 'main image block original bytes');
+    smoke_write_file($image_block_target_root . '/wp-content/uploads/2026/05/main-block-image-150x150.jpg', 'main image block thumbnail bytes');
+
+    $image_block_result = cow_merge_branch_state(
+        $image_block_base,
+        $image_block_source,
+        $image_block_target,
+        $image_block_metadata,
+        'feature-smoke-page-image-block',
+        'main',
+        $image_block_file_base,
+        $image_block_source_root,
+        $image_block_target_root
+    );
+    assert_same($image_block_result['status'], 'completed', 'branch and main page-plus-image-block inserts complete cleanly');
+    assert_same((int)($image_block_result['conflicts'] ?? -1), 0, 'branch and main page-plus-image-block inserts do not create merge conflicts');
+    assert_same(smoke_scalar($image_block_target, 'SELECT post_content FROM wp_posts WHERE ID = 18000090'), $source_image_block_content, 'merged target preserves branch core/image block attachment reference');
+    assert_same(smoke_scalar($image_block_target, 'SELECT post_type FROM wp_posts WHERE ID = 18000091'), 'attachment', 'merged target includes the branch image-block attachment row');
+    assert_same((int)smoke_scalar($image_block_target, 'SELECT post_parent FROM wp_posts WHERE ID = 18000091'), 18000090, 'merged target keeps the branch image-block attachment parent page');
+    assert_same(smoke_scalar($image_block_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 18000091 AND meta_key = '_wp_attached_file'"), '2026/05/source-block-image.jpg', 'merged target includes branch image-block attached-file metadata');
+    assert_same(smoke_scalar($image_block_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 18000091 AND meta_key = '_wp_attachment_metadata'"), $source_image_block_meta, 'merged target includes branch image-block generated-size metadata');
+    assert_same(file_get_contents($image_block_target_root . '/wp-content/uploads/2026/05/source-block-image.jpg'), 'source image block original bytes', 'merged target includes the branch image-block original upload file');
+    assert_same(file_get_contents($image_block_target_root . '/wp-content/uploads/2026/05/source-block-image-150x150.jpg'), 'source image block thumbnail bytes', 'merged target includes the branch image-block generated upload file');
+    assert_same(smoke_scalar($image_block_target, 'SELECT post_content FROM wp_posts WHERE ID = 19000090'), $target_image_block_content, 'merged target preserves target core/image block attachment reference');
+    assert_same(smoke_scalar($image_block_target, 'SELECT post_type FROM wp_posts WHERE ID = 19000091'), 'attachment', 'merged target preserves the main image-block attachment row');
+    assert_same(file_get_contents($image_block_target_root . '/wp-content/uploads/2026/05/main-block-image.jpg'), 'main image block original bytes', 'merged target preserves the main image-block original upload file');
+    assert_same(file_get_contents($image_block_target_root . '/wp-content/uploads/2026/05/main-block-image-150x150.jpg'), 'main image block thumbnail bytes', 'merged target preserves the main image-block generated upload file');
+    assert_same(
+        (int)smoke_scalar($image_block_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name IN ('wp_posts', 'wp_postmeta', '__files__')"),
+        0,
+        'page-plus-image-block smoke merge records no WordPress DB or file conflicts'
+    );
+    assert_same(
+        (int)smoke_scalar($image_block_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'source-applied'"),
+        2,
+        'page-plus-image-block smoke merge audits the source page and attachment inserts'
+    );
+    assert_same(
+        (int)smoke_scalar($image_block_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_postmeta' AND decision = 'source-applied'"),
+        2,
+        'page-plus-image-block smoke merge audits the source attachment metadata inserts'
+    );
+    assert_same(
+        (int)smoke_scalar(
+            $image_block_metadata,
+            "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'source-applied' AND row_identity IN ('" .
+            SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/2026/05/source-block-image.jpg')) . "', '" .
+            SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/2026/05/source-block-image-150x150.jpg')) . "')"
+        ),
+        2,
+        'page-plus-image-block smoke merge audits the source upload files'
+    );
+    assert_same(
+        (int)smoke_scalar($image_block_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_postmeta') AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
+        4,
+        'page-plus-image-block smoke merge audits target DB graph inserts'
+    );
+    assert_same(
+        (int)smoke_scalar($image_block_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'target-kept'"),
+        2,
+        'page-plus-image-block smoke merge audits target upload files'
+    );
+
     $options_base = $tmp . '/options-base.sqlite';
     $options_source = $tmp . '/options-source.sqlite';
     $options_target = $tmp . '/options-target.sqlite';
