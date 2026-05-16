@@ -79,6 +79,39 @@ assert_same(
     'theme_mods merge leaves source unrelated changes reviewable'
 );
 
+assert_same(
+    cow_merge_wordpress_target_local_row_reason(
+        'wp_options',
+        ['option_name' => 'cron', 'option_value' => 'base'],
+        ['option_name' => 'cron', 'option_value' => 'source'],
+        ['option_name' => 'cron', 'option_value' => 'target']
+    ),
+    'target kept branch-local WordPress runtime option cache; source cache state is not merged',
+    'runtime option cache conflicts keep target state'
+);
+
+assert_same(
+    cow_merge_wordpress_target_local_row_reason(
+        'wp_options',
+        null,
+        ['option_name' => '_transient_doing_cron', 'option_value' => 'source'],
+        null
+    ),
+    'target kept branch-local WordPress runtime option cache; source cache state is not merged',
+    'source-only runtime transients are not merged'
+);
+
+assert_same(
+    cow_merge_wordpress_target_local_row_reason(
+        'wp_options',
+        ['option_name' => 'blogname', 'option_value' => 'base'],
+        ['option_name' => 'blogname', 'option_value' => 'source'],
+        ['option_name' => 'blogname', 'option_value' => 'target']
+    ),
+    null,
+    'content options remain reviewable'
+);
+
 if ($fail > 0) {
     echo "COW merge smoke tests failed ($fail failures, $pass passes).\n";
     exit(1);
