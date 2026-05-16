@@ -181,6 +181,97 @@ try {
         (int)scalar($view_order_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE run_id = $view_order_run_id AND column_name IN ('plugin_z_source_parent_view', 'plugin_a_source_grandchild_view') AND decision = 'source-applied'") >= 2,
         'source-added dependent view creation order is auditable'
     );
+
+    $trigger_dependency_base = $tmp . '/trigger-dependency-base.sqlite';
+    $trigger_dependency_source = $tmp . '/trigger-dependency-source.sqlite';
+    $trigger_dependency_target = $tmp . '/trigger-dependency-target.sqlite';
+    $trigger_dependency_metadata = $tmp . '/.forkpress/cow/merge/schema-trigger-dependency-metadata.sqlite';
+
+    $db = open_db($trigger_dependency_base);
+    $db->exec('CREATE TABLE plugin_trigger_audit (item_label TEXT)');
+    $db->close();
+    copy($trigger_dependency_base, $trigger_dependency_source);
+    copy($trigger_dependency_base, $trigger_dependency_target);
+
+    $source_db = open_db($trigger_dependency_source);
+    $source_db->exec('CREATE TABLE plugin_trigger_items (label TEXT)');
+    $source_db->exec("INSERT INTO plugin_trigger_items (rowid, label) VALUES (5, 'source item')");
+    $source_db->exec('CREATE TRIGGER plugin_trigger_items_audit AFTER INSERT ON plugin_trigger_items BEGIN INSERT INTO plugin_trigger_audit (item_label) VALUES (NEW.label); END');
+    $source_db->close();
+
+    $target_db = open_db($trigger_dependency_target);
+    $target_db->exec('DROP TABLE plugin_trigger_audit');
+    $target_db->close();
+
+    $trigger_dependency_result = cow_merge_databases(
+        $trigger_dependency_base,
+        $trigger_dependency_source,
+        $trigger_dependency_target,
+        $trigger_dependency_metadata,
+        'feature-schema-trigger-dependency',
+        'main'
+    );
+    assert_same($trigger_dependency_result['status'], 'completed_with_conflicts', 'source-added trigger with missing dependency is held for review');
+    assert_same(
+        (int)scalar($trigger_dependency_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_trigger_items'"),
+        1,
+        'source-added trigger table still materializes before trigger review'
+    );
+    assert_same(
+        scalar($trigger_dependency_target, 'SELECT label FROM plugin_trigger_items WHERE rowid = 5'),
+        'source item',
+        'source-added trigger table rows materialize before trigger review'
+    );
+    assert_same(
+        (int)scalar($trigger_dependency_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_trigger_items_audit'"),
+        0,
+        'source-added trigger is not installed while its dependency is missing'
+    );
+
+    $trigger_dependency_table_conflict_id = (int)scalar($trigger_dependency_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_trigger_audit' AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
+    $trigger_dependency_trigger_conflict_id = (int)scalar($trigger_dependency_metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_trigger_items_audit' AND conflict_type = 'schema-source-added-trigger' ORDER BY id DESC LIMIT 1");
+    assert_true($trigger_dependency_table_conflict_id > 0, 'missing trigger dependency records a table restore conflict');
+    assert_true($trigger_dependency_trigger_conflict_id > 0, 'missing trigger dependency records a source-added trigger conflict');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $trigger_dependency_metadata,
+            $trigger_dependency_trigger_conflict_id,
+            'source',
+            true,
+            'Try trigger before audit table restore.',
+            'cow-test'
+        ),
+        'references missing target schema objects',
+        'source-added trigger resolution remains gated until its dependency is restored'
+    );
+
+    $trigger_dependency_table_resolution = cow_merge_resolve_conflict(
+        $trigger_dependency_metadata,
+        $trigger_dependency_table_conflict_id,
+        'source',
+        true,
+        'Restore trigger audit table before trigger.',
+        'cow-test'
+    );
+    assert_same($trigger_dependency_table_resolution['status'], 'applied', 'trigger dependency table restore applies before trigger resolution');
+    $trigger_dependency_trigger_resolution = cow_merge_resolve_conflict(
+        $trigger_dependency_metadata,
+        $trigger_dependency_trigger_conflict_id,
+        'source',
+        true,
+        'Apply trigger after dependency restore.',
+        'cow-test'
+    );
+    assert_same($trigger_dependency_trigger_resolution['status'], 'applied', 'source-added trigger applies after its dependency exists');
+
+    $target_db = open_db($trigger_dependency_target);
+    $target_db->exec("INSERT INTO plugin_trigger_items (label) VALUES ('post-review item')");
+    $target_db->close();
+    assert_same(
+        scalar($trigger_dependency_target, "SELECT item_label FROM plugin_trigger_audit WHERE item_label = 'post-review item'"),
+        'post-review item',
+        'reviewed source trigger is functional after dependency restore'
+    );
 } finally {
     remove_tree($tmp);
 }
