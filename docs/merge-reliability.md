@@ -300,7 +300,7 @@ should stay focused on these areas:
   resolved conflicts are not inferred from free-form review notes. Conflict
   state changes now append `merge_conflict_events`, giving UI and API clients a
   durable event stream for recorded, reviewed, revalidated, and resolved
-  conflicts.
+  conflicts; `merge-audit --records conflict-events` exposes that stream.
 - Improve deterministic schema dependency planning for safe view/trigger
   reorderings while keeping cyclic or semantic ambiguity review-only.
 - Keep aarch64 macOS release artifacts and APFS sparsebundle E2E runs green for

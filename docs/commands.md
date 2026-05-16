@@ -25,7 +25,7 @@ full CLI help.
 | `forkpress branch create <name> [--from main]` | Create a branch. |
 | `forkpress branch reset <name> --from <source>` | Replace a branch from another branch. |
 | `forkpress branch merge <source> --into <target>` | Merge one branch into another. |
-| `forkpress branch merge-audit` | Inspect merge runs, decisions, conflicts, and resolutions. |
+| `forkpress branch merge-audit` | Inspect merge runs, decisions, conflicts, conflict events, and resolutions. |
 | `forkpress branch merge-review <type> <id>` | Attach review status to an audit record. |
 | `forkpress branch merge-resolve conflict <id>` | Validate or apply a conflict choice. |
 | `forkpress branch delete <name>` | Delete a branch other than `main`. |

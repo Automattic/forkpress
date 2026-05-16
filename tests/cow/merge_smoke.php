@@ -2166,6 +2166,21 @@ try {
     assert_same($resolved_audit['conflicts'][0]['latest_event_type'], 'resolution-applied', 'resolved conflict advertises latest resolution event');
     assert_same($resolved_audit['conflicts'][0]['latest_event_lifecycle_state'], 'resolved', 'resolved conflict advertises latest event lifecycle state');
     assert_same($resolved_audit['conflicts'][0]['latest_event_actor'], 'cow-smoke', 'resolved conflict advertises latest event actor');
+    $event_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflict-events']);
+    assert_same(count($event_audit['conflict_events']), 5, 'conflict event audit returns the selected conflict lifecycle history');
+    assert_same(
+        array_column($event_audit['conflict_events'], 'event_type'),
+        ['resolution-applied', 'review-reviewed', 'review-needs-action', 'review-pending', 'recorded'],
+        'conflict event audit returns lifecycle events newest first'
+    );
+    assert_same(
+        count(array_unique(array_map('intval', array_column($event_audit['conflict_events'], 'conflict_id')))),
+        1,
+        'conflict event audit can be limited to one conflict history'
+    );
+    assert_same((int)$event_audit['conflict_events'][0]['conflict_id'], $options_contract_conflict_id, 'conflict event audit exposes the conflict id');
+    assert_same($event_audit['conflict_events'][0]['table_name'], 'wp_options', 'conflict event audit exposes the conflict table');
+    assert_same($event_audit['conflict_events'][0]['conflict_type'], 'row-target-deleted', 'conflict event audit exposes the conflict type');
 
     $plugin_contract = cow_merge_conflict_resolution_contract('__plugins__', 'plugin-demo-finding');
     assert_same($plugin_contract['class'], 'plugin', 'plugin conflicts advertise plugin class');

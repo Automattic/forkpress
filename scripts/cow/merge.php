@@ -20,8 +20,8 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "  php merge.php run-plugin-validator --metadata-db <path> --run ID --validator <path> [--format text|json]\n");
     fwrite(STDERR, "  php merge.php recover-crash --metadata-db <path> [--run ID] [--restore-target-db] [--restore-files] [--format text|json]\n");
     fwrite(STDERR, "  php merge.php audit --metadata-db <path> [--format text|json] [--limit N] [--run ID]\n");
-    fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|decisions|resolutions|rollback-failures] [--path <path>] [--path-prefix <prefix>]\n");
-    fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|decisions|resolutions|rollback-failures] [--conflict-type TYPE] [--decision DECISION]\n");
+    fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|conflict-events|decisions|resolutions|rollback-failures] [--path <path>] [--path-prefix <prefix>]\n");
+    fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|conflict-events|decisions|resolutions|rollback-failures] [--conflict-type TYPE] [--decision DECISION]\n");
     fwrite(STDERR, "    [--id-band-skips] [--target-kept] [--review] [--review-status unreviewed|pending|needs-action|reviewed] [--revalidate] [--reviewer NAME]\n");
     fwrite(STDERR, "    [--resolution-status validated|applied] [--group-by none|table|status|path|type|severity]\n");
     fwrite(STDERR, "    --group-by supports resolutions by table/status/path, conflicts by table/type/path/severity, and decisions by table/type/path.\n");
@@ -7491,8 +7491,8 @@ function cow_merge_audit_scope(?string $value): string {
 
 function cow_merge_audit_records(?string $value): string {
     $records = $value ?? 'all';
-    if (!in_array($records, ['all', 'conflicts', 'decisions', 'resolutions', 'rollback-failures'], true)) {
-        throw new InvalidArgumentException('--records must be all, conflicts, decisions, resolutions, or rollback-failures');
+    if (!in_array($records, ['all', 'conflicts', 'conflict-events', 'decisions', 'resolutions', 'rollback-failures'], true)) {
+        throw new InvalidArgumentException('--records must be all, conflicts, conflict-events, decisions, resolutions, or rollback-failures');
     }
     return $records;
 }
@@ -12206,6 +12206,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
         'filters' => $filters,
         'runs' => [],
         'conflicts' => [],
+        'conflict_events' => [],
         'conflict_groups' => [],
         'decisions' => [],
         'decision_groups' => [],
@@ -12319,6 +12320,23 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
                     $conflict_group_params + [':group_by' => $filters['group_by']]
                 );
             }
+        }
+
+        if ($filters['records'] === 'all' || $filters['records'] === 'conflict-events') {
+            [$event_filter, $event_params] = cow_merge_audit_where_sql($run_id, $filters, 'conflicts', 'c', $review_notes_exist);
+            $event_params[':limit'] = $limit;
+            $report['conflict_events'] = cow_merge_audit_table_rows(
+                $db,
+                'merge_conflict_events',
+                "SELECT ce.id, ce.conflict_id, ce.run_id, ce.event_type, ce.actor, ce.note, " .
+                "ce.related_record_type, ce.related_record_id, ce.lifecycle_state, ce.created_at, " .
+                "c.table_name, c.row_identity, c.column_name, c.conflict_type, r.source_branch, r.target_branch " .
+                "FROM merge_conflict_events ce " .
+                "JOIN merge_conflicts c ON c.id = ce.conflict_id " .
+                "JOIN merge_runs r ON r.id = ce.run_id " .
+                "$event_filter ORDER BY ce.id DESC LIMIT :limit",
+                $event_params
+            );
         }
 
         [$decision_filter, $decision_params] = cow_merge_audit_where_sql($run_id, $filters, 'decisions', '', $review_notes_exist);
@@ -12554,6 +12572,18 @@ function cow_merge_print_audit_text(array $report): void {
         echo "conflict-groups:\n";
         foreach ($report['conflict_groups'] as $group) {
             echo "  {$group['group_by']}={$group['group_key']} conflicts={$group['conflict_count']} target-wins={$group['target_wins_count']} resolved={$group['resolved_count']} files={$group['file_count']} plugin={$group['plugin_count']} db={$group['db_count']}\n";
+        }
+    }
+
+    if ($report['conflict_events']) {
+        echo "conflict-events:\n";
+        foreach ($report['conflict_events'] as $event) {
+            $object = cow_merge_audit_object_label($event);
+            echo "  #{$event['id']} conflict=#{$event['conflict_id']} run={$event['run_id']} {$event['event_type']} state={$event['lifecycle_state']} $object actor={$event['actor']} at={$event['created_at']}\n";
+            if (($event['related_record_type'] ?? null) !== null && (string)$event['related_record_type'] !== '') {
+                echo "     related={$event['related_record_type']}#{$event['related_record_id']}\n";
+            }
+            echo "     note=" . cow_merge_audit_truncate((string)$event['note'], 240) . "\n";
         }
     }
 
