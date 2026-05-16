@@ -1390,6 +1390,117 @@ try {
         'page-plus-file-block smoke merge audits target upload file'
     );
 
+    $media_text_base_root = $tmp . '/media-text-base-root';
+    $media_text_source_root = $tmp . '/media-text-source-root';
+    $media_text_target_root = $tmp . '/media-text-target-root';
+    $media_text_base = $media_text_base_root . '/wp-content/database/.ht.sqlite';
+    $media_text_source = $media_text_source_root . '/wp-content/database/.ht.sqlite';
+    $media_text_target = $media_text_target_root . '/wp-content/database/.ht.sqlite';
+    $media_text_file_base = $tmp . '/.forkpress/cow/merge/file-bases/feature-smoke-page-media-text.json';
+    $media_text_metadata = $tmp . '/.forkpress/cow/merge/media-text-metadata.sqlite';
+
+    mkdir(dirname($media_text_base), 0777, true);
+    mkdir(dirname($media_text_source), 0777, true);
+    mkdir(dirname($media_text_target), 0777, true);
+    smoke_create_posts_db($media_text_base);
+    copy($media_text_base, $media_text_source);
+    copy($media_text_base, $media_text_target);
+    cow_merge_capture_file_base($media_text_base_root, $media_text_file_base);
+
+    $source_media_text_content = '<!-- wp:media-text {"mediaId":18000131,"mediaLink":"http://example.test/wp-content/uploads/2026/05/source-media-text.jpg","mediaType":"image"} -->' .
+        '<div class="wp-block-media-text is-stacked-on-mobile"><figure class="wp-block-media-text__media"><img src="http://example.test/wp-content/uploads/2026/05/source-media-text.jpg" alt="" class="wp-image-18000131 size-full"/></figure>' .
+        '<div class="wp-block-media-text__content"><!-- wp:paragraph --><p>Branch media-text copy</p><!-- /wp:paragraph --></div></div>' .
+        '<!-- /wp:media-text -->';
+    $target_media_text_content = '<!-- wp:media-text {"mediaId":19000131,"mediaLink":"http://example.test/wp-content/uploads/2026/05/main-media-text.jpg","mediaType":"image"} -->' .
+        '<div class="wp-block-media-text is-stacked-on-mobile"><figure class="wp-block-media-text__media"><img src="http://example.test/wp-content/uploads/2026/05/main-media-text.jpg" alt="" class="wp-image-19000131 size-full"/></figure>' .
+        '<div class="wp-block-media-text__content"><!-- wp:paragraph --><p>Main media-text copy</p><!-- /wp:paragraph --></div></div>' .
+        '<!-- /wp:media-text -->';
+    $source_media_text_meta = serialize([
+        'file' => '2026/05/source-media-text.jpg',
+        'width' => 1280,
+        'height' => 720,
+        'sizes' => [],
+    ]);
+    $target_media_text_meta = serialize([
+        'file' => '2026/05/main-media-text.jpg',
+        'width' => 1280,
+        'height' => 720,
+        'sizes' => [],
+    ]);
+
+    $db = smoke_open_db($media_text_source);
+    smoke_insert_post($db, 18000130, 'Branch Page With Media Text', $source_media_text_content, 'page', 'branch-page-with-media-text');
+    smoke_insert_post($db, 18000131, 'source-media-text.jpg', '', 'attachment', 'source-media-text-jpg', 'inherit', 18000130, 'image/jpeg', 'http://example.test/wp-content/uploads/2026/05/source-media-text.jpg');
+    smoke_insert_postmeta($db, 18000132, 18000131, '_wp_attached_file', '2026/05/source-media-text.jpg');
+    smoke_insert_postmeta($db, 18000133, 18000131, '_wp_attachment_metadata', $source_media_text_meta);
+    $db->close();
+    smoke_write_file($media_text_source_root . '/wp-content/uploads/2026/05/source-media-text.jpg', 'source media text image bytes');
+
+    $db = smoke_open_db($media_text_target);
+    smoke_insert_post($db, 19000130, 'Main Page With Media Text', $target_media_text_content, 'page', 'main-page-with-media-text');
+    smoke_insert_post($db, 19000131, 'main-media-text.jpg', '', 'attachment', 'main-media-text-jpg', 'inherit', 19000130, 'image/jpeg', 'http://example.test/wp-content/uploads/2026/05/main-media-text.jpg');
+    smoke_insert_postmeta($db, 19000132, 19000131, '_wp_attached_file', '2026/05/main-media-text.jpg');
+    smoke_insert_postmeta($db, 19000133, 19000131, '_wp_attachment_metadata', $target_media_text_meta);
+    $db->close();
+    smoke_write_file($media_text_target_root . '/wp-content/uploads/2026/05/main-media-text.jpg', 'main media text image bytes');
+
+    $media_text_result = cow_merge_branch_state(
+        $media_text_base,
+        $media_text_source,
+        $media_text_target,
+        $media_text_metadata,
+        'feature-smoke-page-media-text',
+        'main',
+        $media_text_file_base,
+        $media_text_source_root,
+        $media_text_target_root
+    );
+    assert_same($media_text_result['status'], 'completed', 'branch and main page-plus-media-text inserts complete cleanly');
+    assert_same((int)($media_text_result['conflicts'] ?? -1), 0, 'branch and main page-plus-media-text inserts do not create merge conflicts');
+    assert_same(smoke_scalar($media_text_target, 'SELECT post_content FROM wp_posts WHERE ID = 18000130'), $source_media_text_content, 'merged target preserves branch core/media-text block attachment reference');
+    assert_same(smoke_scalar($media_text_target, 'SELECT post_type FROM wp_posts WHERE ID = 18000131'), 'attachment', 'merged target includes the branch media-text attachment row');
+    assert_same((int)smoke_scalar($media_text_target, 'SELECT post_parent FROM wp_posts WHERE ID = 18000131'), 18000130, 'merged target keeps the branch media-text attachment parent page');
+    assert_same(smoke_scalar($media_text_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 18000131 AND meta_key = '_wp_attached_file'"), '2026/05/source-media-text.jpg', 'merged target includes branch media-text attached-file metadata');
+    assert_same(smoke_scalar($media_text_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 18000131 AND meta_key = '_wp_attachment_metadata'"), $source_media_text_meta, 'merged target includes branch media-text attachment metadata');
+    assert_same(file_get_contents($media_text_target_root . '/wp-content/uploads/2026/05/source-media-text.jpg'), 'source media text image bytes', 'merged target includes the branch media-text upload file');
+    assert_same(smoke_scalar($media_text_target, 'SELECT post_content FROM wp_posts WHERE ID = 19000130'), $target_media_text_content, 'merged target preserves target core/media-text block attachment reference');
+    assert_same(smoke_scalar($media_text_target, 'SELECT post_type FROM wp_posts WHERE ID = 19000131'), 'attachment', 'merged target preserves the main media-text attachment row');
+    assert_same(file_get_contents($media_text_target_root . '/wp-content/uploads/2026/05/main-media-text.jpg'), 'main media text image bytes', 'merged target preserves the main media-text upload file');
+    assert_same(
+        (int)smoke_scalar($media_text_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name IN ('wp_posts', 'wp_postmeta', '__files__')"),
+        0,
+        'page-plus-media-text smoke merge records no WordPress DB or file conflicts'
+    );
+    assert_same(
+        (int)smoke_scalar($media_text_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'source-applied'"),
+        2,
+        'page-plus-media-text smoke merge audits the source page and attachment inserts'
+    );
+    assert_same(
+        (int)smoke_scalar($media_text_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_postmeta' AND decision = 'source-applied'"),
+        2,
+        'page-plus-media-text smoke merge audits the source attachment metadata inserts'
+    );
+    assert_same(
+        (int)smoke_scalar(
+            $media_text_metadata,
+            "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'source-applied' AND row_identity = '" .
+            SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/2026/05/source-media-text.jpg')) . "'"
+        ),
+        1,
+        'page-plus-media-text smoke merge audits the source upload file'
+    );
+    assert_same(
+        (int)smoke_scalar($media_text_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_postmeta') AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
+        4,
+        'page-plus-media-text smoke merge audits target DB graph inserts'
+    );
+    assert_same(
+        (int)smoke_scalar($media_text_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'target-kept'"),
+        1,
+        'page-plus-media-text smoke merge audits target upload file'
+    );
+
     $options_base = $tmp . '/options-base.sqlite';
     $options_source = $tmp . '/options-source.sqlite';
     $options_target = $tmp . '/options-target.sqlite';
