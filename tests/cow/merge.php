@@ -3127,6 +3127,51 @@ SQL);
         'source-added parent unique index materialization remains auditable'
     );
 
+    $theme_mods_base = $tmp . '/theme-mods-base.sqlite';
+    $theme_mods_source = $tmp . '/theme-mods-source.sqlite';
+    $theme_mods_target = $tmp . '/theme-mods-target.sqlite';
+    create_base_db($theme_mods_base);
+    copy($theme_mods_base, $theme_mods_source);
+    copy($theme_mods_base, $theme_mods_target);
+    $theme_base_value = serialize([
+        'color' => 'blue',
+        'nav_menu_locations' => [],
+    ]);
+    $theme_source_value = serialize([
+        'color' => 'blue',
+        'nav_menu_locations' => [
+            'forkpress_semantic_source' => 101,
+        ],
+    ]);
+    $theme_target_value = serialize([
+        'color' => 'blue',
+        'nav_menu_locations' => [
+            'forkpress_semantic_target' => 202,
+        ],
+    ]);
+    $db = open_db($theme_mods_base);
+    $db->exec("UPDATE wp_options SET option_value = '" . SQLite3::escapeString($theme_base_value) . "' WHERE option_name = 'theme_mods_test'");
+    $db->close();
+    $db = open_db($theme_mods_source);
+    $db->exec("UPDATE wp_options SET option_value = '" . SQLite3::escapeString($theme_source_value) . "' WHERE option_name = 'theme_mods_test'");
+    $db->close();
+    $db = open_db($theme_mods_target);
+    $db->exec("UPDATE wp_options SET option_value = '" . SQLite3::escapeString($theme_target_value) . "' WHERE option_name = 'theme_mods_test'");
+    $db->close();
+
+    $theme_mods_result = cow_merge_databases($theme_mods_base, $theme_mods_source, $theme_mods_target, $metadata, 'feature-theme-mods', 'main');
+    assert_same($theme_mods_result['status'], 'completed', 'disjoint theme_mods nav menu locations merge cleanly');
+    $theme_mods_run_id = (int)$theme_mods_result['run_id'];
+    $merged_theme_mods = unserialize((string)scalar($theme_mods_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_test'"), ['allowed_classes' => false]);
+    assert_same($merged_theme_mods['color'] ?? null, 'blue', 'theme_mods unrelated values are preserved');
+    assert_same($merged_theme_mods['nav_menu_locations']['forkpress_semantic_source'] ?? null, 101, 'source nav menu location is preserved');
+    assert_same($merged_theme_mods['nav_menu_locations']['forkpress_semantic_target'] ?? null, 202, 'target nav menu location is preserved');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE run_id = $theme_mods_run_id AND table_name = 'wp_options' AND column_name = 'option_value'"),
+        0,
+        'disjoint theme_mods nav menu location merge does not create a conflict'
+    );
+
     $conflict_base = $tmp . '/conflict-base.sqlite';
     $conflict_source = $tmp . '/conflict-source.sqlite';
     $conflict_target = $tmp . '/conflict-target.sqlite';

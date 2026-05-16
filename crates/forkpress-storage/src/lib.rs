@@ -528,6 +528,7 @@ pub fn create_cow_branch_from_tree(
             )
         })?;
         staging_published = true;
+        run_cow_bootstrap_script(layout, runtime, shared, &dest, "ForkPress", "admin")?;
         ensure_cow_public_branch_root(layout, branch, &dest, file_view)?;
         write_cow_branch_list(layout)?;
         Ok(())

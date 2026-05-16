@@ -5042,6 +5042,85 @@ function cow_merge_wordpress_option_reference_violation(
     return null;
 }
 
+function cow_merge_wordpress_theme_mods_nav_locations_merge(?string $base_value, ?string $source_value, ?string $target_value): ?string {
+    if ($base_value === null || $source_value === null || $target_value === null) {
+        return null;
+    }
+    $base = @unserialize($base_value, ['allowed_classes' => false]);
+    $source = @unserialize($source_value, ['allowed_classes' => false]);
+    $target = @unserialize($target_value, ['allowed_classes' => false]);
+    if (!is_array($base) || !is_array($source) || !is_array($target)) {
+        return null;
+    }
+
+    $base_locations = $base['nav_menu_locations'] ?? [];
+    $source_locations = $source['nav_menu_locations'] ?? [];
+    $target_locations = $target['nav_menu_locations'] ?? [];
+    if (!is_array($base_locations) || !is_array($source_locations) || !is_array($target_locations)) {
+        return null;
+    }
+    $base_without_locations = $base;
+    $source_without_locations = $source;
+    unset($base_without_locations['nav_menu_locations'], $source_without_locations['nav_menu_locations']);
+    if (!cow_merge_values_equal($source_without_locations, $base_without_locations)) {
+        return null;
+    }
+
+    $merged_locations = $target_locations;
+    $keys = array_values(array_unique(array_merge(
+        array_keys($base_locations),
+        array_keys($source_locations),
+        array_keys($target_locations)
+    )));
+    foreach ($keys as $key) {
+        $base_has = array_key_exists($key, $base_locations);
+        $source_has = array_key_exists($key, $source_locations);
+        $target_has = array_key_exists($key, $target_locations);
+        $base_location = $base_has ? $base_locations[$key] : null;
+        $source_location = $source_has ? $source_locations[$key] : null;
+        $target_location = $target_has ? $target_locations[$key] : null;
+        $source_changed = $base_has !== $source_has || !cow_merge_values_equal($source_location, $base_location);
+        $target_changed = $base_has !== $target_has || !cow_merge_values_equal($target_location, $base_location);
+        if (!$source_changed) {
+            continue;
+        }
+        if ($target_changed && ($source_has !== $target_has || !cow_merge_values_equal($source_location, $target_location))) {
+            return null;
+        }
+        if ($source_has) {
+            $merged_locations[$key] = $source_location;
+        } else {
+            unset($merged_locations[$key]);
+        }
+    }
+
+    $merged = $target;
+    $merged['nav_menu_locations'] = $merged_locations;
+    return serialize($merged);
+}
+
+function cow_merge_wordpress_cell_auto_merge(string $table, string $column, ?array $base_row, ?array $source_row, ?array $target_row): ?array {
+    if (!($table === 'wp_options' || str_ends_with($table, '_options')) || $column !== 'option_value') {
+        return null;
+    }
+    $option_name = (string)($source_row['option_name'] ?? $target_row['option_name'] ?? $base_row['option_name'] ?? '');
+    if (!str_starts_with($option_name, 'theme_mods_')) {
+        return null;
+    }
+    $merged = cow_merge_wordpress_theme_mods_nav_locations_merge(
+        isset($base_row['option_value']) ? (string)$base_row['option_value'] : null,
+        isset($source_row['option_value']) ? (string)$source_row['option_value'] : null,
+        isset($target_row['option_value']) ? (string)$target_row['option_value'] : null
+    );
+    if ($merged === null) {
+        return null;
+    }
+    return [
+        'value' => $merged,
+        'reason' => "merged disjoint WordPress nav_menu_locations in $option_name",
+    ];
+}
+
 function cow_merge_wordpress_insert_reference_violation(
     SQLite3 $source,
     SQLite3 $target,
@@ -13237,6 +13316,13 @@ function cow_merge_table_rows(
                     $pending_source_cell_decisions[] = [$col, 'source and target changed cell to the same value', $b, $s, $t, $t];
                     $row_applied++;
                 }
+                continue;
+            }
+            $auto_merge = cow_merge_wordpress_cell_auto_merge($table, $col, $base_row, $source_row, $target_row);
+            if ($auto_merge !== null) {
+                $merged[$col] = $auto_merge['value'];
+                $pending_source_cell_decisions[] = [$col, (string)$auto_merge['reason'], $b, $s, $t, $auto_merge['value']];
+                $row_applied++;
                 continue;
             }
             $active = cow_merge_record_conflict($meta, $run_id, $table, $key, $col, 'cell-conflict', $b, $s, $t, $t);

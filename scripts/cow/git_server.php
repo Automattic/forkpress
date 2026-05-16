@@ -1238,18 +1238,20 @@ function cow_git_cleanup_stale_update_artifacts(string $branches_dir, string $st
     }
 
     foreach ($parents as $parent) {
-        foreach (glob($parent . '/.forkpress-update-{backup,stage,failed}-*', GLOB_BRACE) ?: [] as $path) {
-            $name = basename($path);
-            if (!preg_match('/^\.forkpress-update-(?:backup|stage|failed)-(.+)-[0-9]+-[0-9a-f]+$/', $name, $matches)) {
-                continue;
-            }
-            $branch = $matches[1];
-            if (!cow_git_valid_branch_name($branch)) {
-                continue;
-            }
-            $storage = cow_git_branch_storage_root($storage_branches_dir, $branches_dir, $branch);
-            if (is_dir($storage) && is_file(rtrim($storage, "/\\") . '/wp-load.php')) {
-                cow_git_remove_tree($path);
+        foreach (['backup', 'stage', 'failed'] as $kind) {
+            foreach (glob($parent . '/.forkpress-update-' . $kind . '-*') ?: [] as $path) {
+                $name = basename($path);
+                if (!preg_match('/^\.forkpress-update-(?:backup|stage|failed)-(.+)-[0-9]+-[0-9a-f]+$/', $name, $matches)) {
+                    continue;
+                }
+                $branch = $matches[1];
+                if (!cow_git_valid_branch_name($branch)) {
+                    continue;
+                }
+                $storage = cow_git_branch_storage_root($storage_branches_dir, $branches_dir, $branch);
+                if (is_dir($storage) && is_file(rtrim($storage, "/\\") . '/wp-load.php')) {
+                    cow_git_remove_tree($path);
+                }
             }
         }
     }

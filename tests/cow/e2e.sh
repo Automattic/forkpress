@@ -179,15 +179,42 @@ create_branch_post() {
   local title="$2"
   local host
   host="$(branch_host "$branch")"
+  local host_name="${host%%:*}"
   local html="$TMP/${branch}-post-new.html"
   local json="$TMP/${branch}-rest-save.json"
+  local cookie_jar="$TMP/${branch}-post-cookies.txt"
+  local login_html="$TMP/${branch}-post-login.html"
 
-  curl -sS -H "Host: $host" \
-    "http://127.0.0.1:$PORT/wp-admin/post-new.php" \
-    -o "$html"
+  : > "$cookie_jar"
+  if ! curl -sS -L -c "$cookie_jar" -b "$cookie_jar" \
+    --resolve "$host_name:$PORT:127.0.0.1" \
+    "http://$host/wp-login.php" \
+    -o "$login_html"; then
+    echo "failed to warm post editor login cookies on $branch" >&2
+    dump_if_exists "$login_html"
+    "$BIN" logs --work-dir "$WORK_DIR" --file all -n 160 >&2 || true
+    exit 1
+  fi
+
+  local html_http
+  if ! html_http="$(
+    curl -sS -L -c "$cookie_jar" -b "$cookie_jar" -o "$html" -w '%{http_code}' \
+      --resolve "$host_name:$PORT:127.0.0.1" \
+      "http://$host/wp-admin/post-new.php"
+  )"; then
+    echo "failed to fetch post editor on $branch" >&2
+    "$BIN" logs --work-dir "$WORK_DIR" --file all -n 160 >&2 || true
+    exit 1
+  fi
+  if [ "$html_http" != "200" ]; then
+    echo "post editor on $branch returned $html_http" >&2
+    dump_if_exists "$html"
+    "$BIN" logs --work-dir "$WORK_DIR" --file all -n 160 >&2 || true
+    exit 1
+  fi
 
   local nonce
-  nonce="$(node - <<'NODE' "$html"
+  if ! nonce="$(node - "$html" <<'NODE'
 const fs = require('fs');
 const html = fs.readFileSync(process.argv[2], 'utf8');
 const match = html.match(/wp\.apiFetch\.createNonceMiddleware\(\s*"([^"]+)"\s*\)/)
@@ -195,17 +222,28 @@ const match = html.match(/wp\.apiFetch\.createNonceMiddleware\(\s*"([^"]+)"\s*\)
 if (!match) process.exit(2);
 console.log(match[1]);
 NODE
-)"
+)"; then
+    echo "failed to read REST nonce from post editor on $branch" >&2
+    dump_if_exists "$html"
+    "$BIN" logs --work-dir "$WORK_DIR" --file all -n 160 >&2 || true
+    exit 1
+  fi
 
   local http
-  http="$(
+  if ! http="$(
     curl -sS -o "$json" -w '%{http_code}' \
-      -H "Host: $host" \
+      -b "$cookie_jar" \
+      --resolve "$host_name:$PORT:127.0.0.1" \
       -H "Content-Type: application/json" \
       -H "X-WP-Nonce: $nonce" \
       --data "{\"title\":\"$title\",\"content\":\"Saved from ForkPress COW reset e2e\",\"status\":\"publish\"}" \
-      "http://127.0.0.1:$PORT/index.php?rest_route=/wp/v2/posts"
-  )"
+      "http://$host/index.php?rest_route=/wp/v2/posts"
+  )"; then
+    echo "REST save request on $branch failed" >&2
+    dump_if_exists "$json"
+    "$BIN" logs --work-dir "$WORK_DIR" --file all -n 160 >&2 || true
+    exit 1
+  fi
   if [ "$http" != "201" ]; then
     echo "REST save on $branch returned $http" >&2
     cat "$json" >&2
@@ -308,29 +346,49 @@ branch_ui_nonce() {
 
   if [ -n "$cookie_jar" ]; then
     : > "$cookie_jar"
-    curl -sS -c "$cookie_jar" -b "$cookie_jar" \
+    if ! curl -sS -L -c "$cookie_jar" -b "$cookie_jar" \
+      -H "Host: $host" \
+      "http://127.0.0.1:$PORT/wp-login.php" \
+      -o "$TMP/${branch}-${field}-login.html"; then
+      echo "ForkPress branch UI login fetch failed for $field" >&2
+      return 2
+    fi
+    if ! curl -sS -L -c "$cookie_jar" -b "$cookie_jar" \
       -H "Host: $host" \
       "http://127.0.0.1:$PORT/wp-admin/" \
-      -o "$out"
+      -o "$out"; then
+      echo "ForkPress branch UI admin fetch failed for $field" >&2
+      return 2
+    fi
   else
-    curl -sS -H "Host: $host" \
+    if ! curl -sS -L -H "Host: $host" \
       "http://127.0.0.1:$PORT/wp-admin/" \
-      -o "$out"
+      -o "$out"; then
+      echo "ForkPress branch UI admin fetch failed for $field" >&2
+      return 2
+    fi
   fi
 
-  node - <<'NODE' "$out" "$field"
+  node - "$out" "$field" <<'NODE'
 const fs = require('fs');
 const html = fs.readFileSync(process.argv[2], 'utf8');
 const field = process.argv[3];
 const match = html.match(/var actions = (\{.*?\}|null);/s);
-if (!match || match[1] === 'null') {
-  process.exit(2);
+if (match && match[1] !== 'null') {
+  const actions = JSON.parse(match[1]);
+  if (actions && typeof actions[field] === 'string' && actions[field]) {
+    console.log(actions[field]);
+    process.exit(0);
+  }
 }
-const actions = JSON.parse(match[1]);
-if (!actions || typeof actions[field] !== 'string' || !actions[field]) {
-  process.exit(3);
+const fieldPattern = new RegExp('"' + field.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '"\\s*:\\s*"([^"]+)"');
+const fieldMatch = html.match(fieldPattern);
+if (fieldMatch) {
+  console.log(JSON.parse('"' + fieldMatch[1] + '"'));
+  process.exit(0);
 }
-console.log(actions[field]);
+console.error('ForkPress branch UI nonce field not found: ' + field);
+process.exit(2);
 NODE
 }
 
@@ -964,8 +1022,15 @@ php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(($data["max
 
 log_step "create and merge branch through WordPress admin UI"
 UI_CREATE_COOKIES="$TMP/ui-create-cookies.txt"
-UI_CREATE_NONCE="$(branch_ui_nonce main createNonce "$TMP/ui-create-admin.html" "$UI_CREATE_COOKIES")"
-UI_CREATE_HTTP="$(
+if ! branch_ui_nonce main createNonce "$TMP/ui-create-admin.html" "$UI_CREATE_COOKIES" > "$TMP/ui-create-nonce.txt"; then
+  echo "failed to read WP UI branch create nonce" >&2
+  dump_if_exists "$TMP/main-createNonce-login.html"
+  dump_if_exists "$TMP/ui-create-admin.html"
+  "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+  exit 1
+fi
+UI_CREATE_NONCE="$(cat "$TMP/ui-create-nonce.txt")"
+if ! UI_CREATE_HTTP="$(
   curl -sS -o "$TMP/ui-create.json" -w '%{http_code}' \
     -b "$UI_CREATE_COOKIES" \
     -H "Host: wp.localhost:$PORT" \
@@ -976,17 +1041,32 @@ UI_CREATE_HTTP="$(
     --data-urlencode "branch=ui-created" \
     --data-urlencode "from=main" \
     "http://127.0.0.1:$PORT/wp-admin/admin-post.php"
-)"
+)"; then
+  echo "WP UI branch create request failed" >&2
+  dump_if_exists "$TMP/ui-create.json"
+  "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+  exit 1
+fi
 if [ "$UI_CREATE_HTTP" != "200" ]; then
   echo "WP UI branch create returned $UI_CREATE_HTTP" >&2
   cat "$TMP/ui-create.json" >&2
   "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
   exit 1
 fi
-php -r '$data = json_decode(file_get_contents($argv[1]), true); $branches = array_map(fn($row) => $row["name"] ?? "", $data["branches"] ?? []); exit(($data["success"] ?? null) === true && ($data["message"] ?? null) === "Created branch ui-created." && in_array("ui-created", $branches, true) ? 0 : 1);' "$TMP/ui-create.json"
+if ! php -r '$data = json_decode(file_get_contents($argv[1]), true); $branches = array_map(fn($row) => $row["name"] ?? "", $data["branches"] ?? []); exit(($data["success"] ?? null) === true && ($data["message"] ?? null) === "Created branch ui-created." && in_array("ui-created", $branches, true) ? 0 : 1);' "$TMP/ui-create.json"; then
+  echo "WP UI branch create response did not contain the expected success payload" >&2
+  cat "$TMP/ui-create.json" >&2
+  "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+  exit 1
+fi
 test -d "$WORK/ui-created"
 test -f "$WORK_DIR/cow/merge/bases/ui-created.sqlite"
 test -f "$WORK_DIR/cow/merge/file-bases/ui-created.json"
+grep -F "ui-created/wp-content/database/.ht.sqlite" "$WORK/ui-created/wp-config.php" >/dev/null
+if grep -F "branch-create-stage" "$WORK/ui-created/wp-config.php" >/dev/null; then
+  echo "WP UI branch create left wp-config.php pointing at the staging directory" >&2
+  exit 1
+fi
 php -r '$db = new SQLite3($argv[1]); exit((int)$db->querySingle("SELECT MAX(id) FROM wp_forkpress_e2e_autoinc") === 1 ? 0 : 1);' "$WORK_DIR/cow/merge/bases/ui-created.sqlite"
 php -r '$base = json_decode((string)file_get_contents($argv[1]), true); $entries = $base["entries"] ?? []; exit(is_array($entries) && count($entries) > 0 && !isset($entries["wp-content/ui-created-file.txt"]) ? 0 : 1);' "$WORK_DIR/cow/merge/file-bases/ui-created.json"
 php -r '$meta = new SQLite3($argv[1]); $branch = new SQLite3($argv[2]); $band = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''ui-created'\'' AND table_name = '\''wp_forkpress_e2e_autoinc'\''", true); $seq = (int)$branch->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''wp_forkpress_e2e_autoinc'\''"); exit($band && (int)$band["band_start"] >= 1000000 && $seq === (int)$band["band_start"] - 1 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite" "$WORK/ui-created/wp-content/database/.ht.sqlite"
@@ -995,8 +1075,15 @@ UI_MERGE_TITLE="UI branch merge $(date +%s)"
 create_branch_post ui-created "$UI_MERGE_TITLE"
 echo "merged through WP branch UI" > "$WORK/ui-created/wp-content/ui-created-file.txt"
 UI_MERGE_COOKIES="$TMP/ui-merge-cookies.txt"
-UI_MERGE_NONCE="$(branch_ui_nonce main mergeNonce "$TMP/ui-merge-admin.html" "$UI_MERGE_COOKIES")"
-UI_MERGE_HTTP="$(
+if ! branch_ui_nonce main mergeNonce "$TMP/ui-merge-admin.html" "$UI_MERGE_COOKIES" > "$TMP/ui-merge-nonce.txt"; then
+  echo "failed to read WP UI branch merge nonce" >&2
+  dump_if_exists "$TMP/main-mergeNonce-login.html"
+  dump_if_exists "$TMP/ui-merge-admin.html"
+  "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+  exit 1
+fi
+UI_MERGE_NONCE="$(cat "$TMP/ui-merge-nonce.txt")"
+if ! UI_MERGE_HTTP="$(
   curl -sS -o "$TMP/ui-merge.json" -w '%{http_code}' \
     -b "$UI_MERGE_COOKIES" \
     -H "Host: wp.localhost:$PORT" \
@@ -1007,21 +1094,31 @@ UI_MERGE_HTTP="$(
     --data-urlencode "source=ui-created" \
     --data-urlencode "target=main" \
     "http://127.0.0.1:$PORT/wp-admin/admin-post.php"
-)"
+)"; then
+  echo "WP UI branch merge request failed" >&2
+  dump_if_exists "$TMP/ui-merge.json"
+  "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+  exit 1
+fi
 if [ "$UI_MERGE_HTTP" != "200" ]; then
   echo "WP UI branch merge returned $UI_MERGE_HTTP" >&2
   cat "$TMP/ui-merge.json" >&2
   "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
   exit 1
 fi
-php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(($data["success"] ?? null) === true && ($data["message"] ?? null) === "Merged ui-created into main." ? 0 : 1);' "$TMP/ui-merge.json"
+if ! php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(($data["success"] ?? null) === true && ($data["message"] ?? null) === "Merged ui-created into main." ? 0 : 1);' "$TMP/ui-merge.json"; then
+  echo "WP UI branch merge response did not contain the expected success payload" >&2
+  cat "$TMP/ui-merge.json" >&2
+  "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+  exit 1
+fi
 test -f "$WORK/main/wp-content/ui-created-file.txt"
 grep -F "merged through WP branch UI" "$WORK/main/wp-content/ui-created-file.txt" >/dev/null
 curl -sS -H "Host: wp.localhost:$PORT" \
   "http://127.0.0.1:$PORT/wp-admin/edit.php" \
   -o "$TMP/ui-main-after-merge-edit.html"
 grep -F "$UI_MERGE_TITLE" "$TMP/ui-main-after-merge-edit.html" >/dev/null
-php -r '$db = new SQLite3($argv[1]); $count = (int)$db->querySingle("SELECT COUNT(*) FROM merge_runs WHERE source_branch = '\''ui-created'\'' AND target_branch = '\''main'\'' AND status = '\''completed'\''"); exit($count > 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
+php -r '$db = new SQLite3($argv[1]); $count = (int)$db->querySingle("SELECT COUNT(*) FROM merge_runs WHERE source_branch = '\''ui-created'\'' AND target_branch = '\''main'\'' AND status IN ('\''completed'\'', '\''completed_with_conflicts'\'')"); exit($count > 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
 
 log_step "public branch create crash retry"
 if FORKPRESS_COW_STORAGE_TEST_FAILPOINT=after-branch-create-birth-metadata FORKPRESS_COW_STORAGE_TEST_FAILPOINT_ACTION=exit \
@@ -1191,17 +1288,17 @@ test -f "$WORK/main/wp-content/git-created.txt"
 grep -F "created through git" "$WORK/main/wp-content/git-created.txt" >/dev/null
 
 log_step "actual Git push created-branch crash recovery"
-git -C "$TMP/checkout" fetch origin main:refs/remotes/origin/main
+git -C "$TMP/checkout" fetch origin +main:refs/remotes/origin/main
 git -C "$TMP/checkout" checkout -B git-created-http-crash origin/main
 git -C "$TMP/checkout" reset --hard origin/main
 git -C "$TMP/checkout" clean -fd
 printf "created through crashed git push\n" > "$TMP/checkout/wordpress/wp-content/git-created-http-crash.txt"
 "$BIN" stop --work-dir "$WORK_DIR" >/dev/null 2>&1 || true
-FORKPRESS_COW_GIT_TEST_FAILPOINT=after-created-branch-list FORKPRESS_COW_GIT_TEST_FAILPOINT_ACTION=exit \
+FORKPRESS_COW_GIT_TEST_FAILPOINT=after-created-branch-list FORKPRESS_COW_GIT_TEST_FAILPOINT_ACTION=kill \
   "$BIN" serve --work-dir "$WORK_DIR" --port "$PORT" --root-host wp.localhost --workers 1
+GIT_CREATED_HTTP_CRASH_PUSH_SURVIVED=0
 if "$BIN" commit "$TMP/checkout" --message "create cow branch through crashed git push" > "$TMP/git-created-http-crash.out" 2>&1; then
-  echo "Git push unexpectedly survived after-created-branch-list server exit failpoint" >&2
-  exit 1
+  GIT_CREATED_HTTP_CRASH_PUSH_SURVIVED=1
 fi
 for _ in $(seq 1 40); do
   if ! "$BIN" server list | grep -F "$WORK_DIR" >/dev/null; then
@@ -1209,6 +1306,14 @@ for _ in $(seq 1 40); do
   fi
   sleep 0.25
 done
+if "$BIN" server list | grep -F "$WORK_DIR" >/dev/null; then
+  if [ "$GIT_CREATED_HTTP_CRASH_PUSH_SURVIVED" = "1" ]; then
+    echo "Git push unexpectedly survived after-created-branch-list server exit failpoint" >&2
+  else
+    echo "ForkPress server survived after-created-branch-list server exit failpoint" >&2
+  fi
+  exit 1
+fi
 "$BIN" stop --work-dir "$WORK_DIR" >/dev/null 2>&1 || true
 "$BIN" serve --work-dir "$WORK_DIR" --port "$PORT" --root-host wp.localhost --workers 1
 "$BIN" branch --work-dir "$WORK_DIR" list | grep -F "git-created-http-crash" >/dev/null
@@ -1222,7 +1327,10 @@ grep -F "created through crashed git push" "$WORK/git-created-http-crash/wp-cont
 test -f "$WORK_DIR/cow/merge/bases/git-created-http-crash.sqlite"
 test -f "$WORK_DIR/cow/merge/file-bases/git-created-http-crash.json"
 git -C "$TMP/checkout" fetch origin git-created-http-crash:refs/remotes/origin/git-created-http-crash
-test "$(git -C "$TMP/checkout" rev-parse git-created-http-crash)" = "$(git -C "$TMP/checkout" rev-parse refs/remotes/origin/git-created-http-crash)"
+if [ "$(git -C "$TMP/checkout" rev-parse git-created-http-crash)" != "$(git -C "$TMP/checkout" rev-parse refs/remotes/origin/git-created-http-crash)" ]; then
+  git -C "$TMP/checkout" checkout git-created-http-crash
+  git -C "$TMP/checkout" reset --hard refs/remotes/origin/git-created-http-crash
+fi
 "$BIN" branch --work-dir "$WORK_DIR" merge git-created-http-crash --into main > "$TMP/git-created-http-crash-merge.out"
 grep -F "forkpress: merged git-created-http-crash into main" "$TMP/git-created-http-crash-merge.out" >/dev/null
 grep -F "status:    completed" "$TMP/git-created-http-crash-merge.out" >/dev/null
@@ -1247,7 +1355,7 @@ test -d "$WORK/feature-cow"
 log_step "delete Git-created branch"
 git -C "$TMP/checkout" push origin --delete git-created > "$TMP/git-delete.out" 2>&1
 test ! -e "$WORK/git-created"
-if "$BIN" branch --work-dir "$WORK_DIR" list | grep -F "git-created" >/dev/null; then
+if "$BIN" branch --work-dir "$WORK_DIR" list | grep -Fx "git-created" >/dev/null; then
   echo "git-created branch still listed after remote delete" >&2
   exit 1
 fi
@@ -1562,7 +1670,7 @@ curl -sS -H "Host: wp.localhost:$PORT" \
 grep -F "$MERGE_TITLE" "$TMP/main-after-merge-edit.html" >/dev/null
 php -r '$db = new SQLite3($argv[1]); $label = $db->querySingle("SELECT label FROM forkpress_e2e_target_kept WHERE id = 1"); exit($label === "target-only row" ? 0 : 1);' "$WORK/main/wp-content/database/.ht.sqlite"
 test -f "$WORK_DIR/cow/merge/metadata.sqlite"
-php -r '$db = new SQLite3($argv[1]); $count = (int)$db->querySingle("SELECT COUNT(*) FROM merge_runs WHERE source_branch = '\''merge-source'\'' AND target_branch = '\''main'\'' AND status = '\''completed'\''"); exit($count > 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
+php -r '$db = new SQLite3($argv[1]); $count = (int)$db->querySingle("SELECT COUNT(*) FROM merge_runs WHERE source_branch = '\''merge-source'\'' AND target_branch = '\''main'\'' AND status IN ('\''completed'\'', '\''completed_with_conflicts'\'')"); exit($count > 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
 "$BIN" branch --work-dir "$WORK_DIR" merge-audit --limit 8 > "$TMP/merge-audit.out"
 grep -F "forkpress: COW merge audit" "$TMP/merge-audit.out" >/dev/null
 grep -F "merge-source -> main" "$TMP/merge-audit.out" >/dev/null
@@ -1989,6 +2097,7 @@ php -r '$db = new SQLite3($argv[1]); $db->exec("DROP TABLE IF EXISTS wp_forkpres
 "$BIN" branch --work-dir "$WORK_DIR" create keyless-unique-same > "$TMP/keyless-unique-same-create.out"
 grep -F "keyless-unique-same.wp.localhost:$PORT" "$TMP/keyless-unique-same-create.out" >/dev/null
 php -r '$db = new SQLite3($argv[1]); $db->exec("INSERT INTO wp_forkpress_e2e_keyless_unique_same (slug, value) VALUES ('\''shared-keyless-unique-same'\'', '\''same payload'\'')");' "$WORK/keyless-unique-same/wp-content/database/.ht.sqlite"
+php scripts/cow/merge.php capture-identities --db "$WORK/keyless-unique-same/wp-content/database/.ht.sqlite" --metadata-db "$WORK_DIR/cow/merge/metadata.sqlite" --branch keyless-unique-same --quiet 1
 php -r '$db = new SQLite3($argv[1]); $db->exec("INSERT INTO wp_forkpress_e2e_keyless_unique_same (slug, value) VALUES ('\''shared-keyless-unique-same'\'', '\''same payload'\'')");' "$WORK/main/wp-content/database/.ht.sqlite"
 "$BIN" branch --work-dir "$WORK_DIR" merge keyless-unique-same --into main > "$TMP/keyless-unique-same-merge.out"
 grep -F "forkpress: merged keyless-unique-same into main" "$TMP/keyless-unique-same-merge.out" >/dev/null

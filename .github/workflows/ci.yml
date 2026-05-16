@@ -48,6 +48,18 @@ jobs:
       - name: Release preflight checks
         run: make test-release
 
+      - name: Cache runtime build
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: >-
+            ci-runtime-x86_64-unknown-linux-musl-${{ hashFiles(
+              'scripts/build-dist.sh',
+              'experiments/branchfs/php-ext/branchfs.c',
+              'experiments/branchfs/php-ext/branchfs.h',
+              'experiments/branchfs/build/spc-patch.php'
+            ) }}
+
       - name: Build production dist bundle
         run: scripts/build-dist.sh
         env:
@@ -110,6 +122,15 @@ jobs:
           brew update
           brew install composer gpatch automake re2c bison pkg-config
           brew install php || true
+
+      - name: Cache runtime build
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: >-
+            ci-runtime-${{ matrix.target }}-${{ hashFiles(
+              'scripts/build-dist.sh'
+            ) }}
 
       - name: Build production dist bundle
         run: scripts/build-dist.sh
