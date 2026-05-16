@@ -48,8 +48,8 @@ jobs:
       - name: Release preflight checks
         run: make test-release
 
-      - name: COW merge smoke tests
-        run: make test-cow-merge-smoke
+      - name: Fast COW tests
+        run: make test-cow-fast
 
       - name: Cache runtime build
         uses: actions/cache@v4
@@ -128,8 +128,8 @@ jobs:
           brew install composer gpatch automake re2c bison pkg-config
           brew install php || true
 
-      - name: COW merge smoke tests
-        run: make test-cow-merge-smoke
+      - name: Fast COW tests
+        run: make test-cow-fast
 
       - name: Cache runtime build
         uses: actions/cache@v4
