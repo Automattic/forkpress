@@ -582,6 +582,11 @@ function forkpress_branch_run_cli(array $args): array {
 }
 
 function forkpress_branch_wants_json(): bool {
+    $action = $_REQUEST['action'] ?? '';
+    if (is_string($action) && in_array($action, ['forkpress_branch_create', 'forkpress_branch_merge'], true)) {
+        return true;
+    }
+
     $async = $_SERVER['HTTP_X_FORKPRESS_ASYNC'] ?? '';
     if (is_string($async) && $async === '1') {
         return true;

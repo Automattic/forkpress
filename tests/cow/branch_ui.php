@@ -87,12 +87,15 @@ function wp_json_encode($payload) { return json_encode($payload, JSON_UNESCAPED_
 function wp_unslash($value) { return $value; }
 function sanitize_text_field($value) { return trim((string) $value); }
 
+$async = getenv('FORKPRESS_TEST_ASYNC') !== '0';
 $_SERVER = [
     'HTTP_HOST' => 'feature.wp.localhost:18080',
-    'HTTP_ACCEPT' => 'application/json',
-    'HTTP_X_FORKPRESS_ASYNC' => '1',
+    'HTTP_ACCEPT' => $async ? 'application/json' : 'text/html',
     'REQUEST_URI' => '/wp-admin/',
 ];
+if ($async) {
+    $_SERVER['HTTP_X_FORKPRESS_ASYNC'] = '1';
+}
 $_POST = json_decode(base64_decode($argv[2]), true);
 if (!is_array($_POST)) {
     fwrite(STDERR, "invalid test post payload\n");
@@ -114,7 +117,7 @@ fwrite(STDERR, "unknown action\n");
 exit(3);
 PHP);
 
-function run_branch_ui_action(array $post, array $branches, bool $cli_fail = false, bool $can_manage = true): array {
+function run_branch_ui_action(array $post, array $branches, bool $cli_fail = false, bool $can_manage = true, bool $async = true): array {
     global $tmp, $plugin, $runner, $fake_bin, $cli_log, $work_dir, $branch_list;
 
     @unlink($cli_log);
@@ -129,6 +132,7 @@ function run_branch_ui_action(array $post, array $branches, bool $cli_fail = fal
         'FORKPRESS_TEST_CLI_LOG' => $cli_log,
         'FORKPRESS_TEST_CLI_FAIL' => $cli_fail ? '1' : '0',
         'FORKPRESS_TEST_CAN_MANAGE' => $can_manage ? '1' : '0',
+        'FORKPRESS_TEST_ASYNC' => $async ? '1' : '0',
     ];
     $descriptor = [
         0 => ['pipe', 'r'],
@@ -177,6 +181,24 @@ assert_same(
     array_slice($create['argv'][0] ?? [], 1),
     ['branch', '--work-dir', $work_dir, 'create', 'new_feature', '--from', 'feature'],
     'branch create admin action uses safe branch birth CLI path'
+);
+
+$non_async_create = run_branch_ui_action(
+    ['action' => 'forkpress_branch_create', 'branch' => 'no_async_feature', 'from' => 'feature'],
+    ['main', 'feature'],
+    false,
+    true,
+    false
+);
+$non_async_create_payload = decode_branch_ui_payload($non_async_create);
+assert_same($non_async_create['status'], 0, 'non-async branch create admin action exits cleanly');
+assert_same($non_async_create_payload['success'] ?? null, true, 'non-async branch create admin action returns JSON success');
+assert_same($non_async_create_payload['message'] ?? null, 'Created branch no_async_feature.', 'non-async branch create admin action reports the created branch');
+assert_same(count($non_async_create['argv']), 1, 'non-async branch create admin action invokes ForkPress CLI once');
+assert_same(
+    array_slice($non_async_create['argv'][0] ?? [], 1),
+    ['branch', '--work-dir', $work_dir, 'create', 'no_async_feature', '--from', 'feature'],
+    'non-async branch create admin action still uses safe branch birth CLI path'
 );
 
 $merge = run_branch_ui_action(

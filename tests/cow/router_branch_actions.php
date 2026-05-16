@@ -205,7 +205,7 @@ $invalid = router_branch_action_request(
 assert_same($invalid['status'], 400, 'async router branch create rejects invalid names before CLI');
 assert_same($invalid['json']['success'] ?? null, false, 'async router branch create invalid name returns JSON failure');
 
-$fallback = router_branch_action_request(
+$non_async = router_branch_action_request(
     $child,
     $branches,
     $cow,
@@ -217,8 +217,11 @@ $fallback = router_branch_action_request(
     ['action' => 'forkpress_branch_create', 'branch' => 'html_fallback', 'from' => 'main'],
     false
 );
-assert_same($fallback['exit'], 0, 'non-async admin branch action exits cleanly');
-assert_same($fallback['body'], 'WORDPRESS ADMIN POST', 'non-async admin branch action still falls through to WordPress');
+assert_same($non_async['exit'], 0, 'non-async router branch create exits cleanly');
+assert_same($non_async['status'], 200, 'non-async router branch create returns 200');
+assert_same($non_async['json']['success'] ?? null, true, 'non-async router branch create still returns JSON success');
+assert_same($non_async['json']['message'] ?? null, 'Created branch html_fallback.', 'non-async router branch create reports created branch');
+assert_true(!str_contains($non_async['body'], 'WORDPRESS'), 'non-async router branch create does not reach WordPress admin-post');
 
 $argv_log = [];
 foreach (file($cli_log, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as $line) {
@@ -229,7 +232,8 @@ foreach (file($cli_log, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as 
 }
 assert_same($argv_log[0] ?? null, ['branch', '--work-dir', $work_dir, 'create', 'router_created', '--from', 'main'], 'router branch create invokes safe CLI command');
 assert_same($argv_log[1] ?? null, ['branch', '--work-dir', $work_dir, 'merge', 'router_created', '--into', 'main'], 'router branch merge invokes audited CLI command');
-assert_same(count($argv_log), 2, 'invalid and non-async branch action requests do not invoke router CLI path');
+assert_same($argv_log[2] ?? null, ['branch', '--work-dir', $work_dir, 'create', 'html_fallback', '--from', 'main'], 'non-async router branch create invokes safe CLI command');
+assert_same(count($argv_log), 3, 'invalid branch action request does not invoke router CLI path');
 
 rm_tree($tmp);
 
