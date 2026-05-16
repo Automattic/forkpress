@@ -45,6 +45,14 @@ function smoke_scalar(string $path, string $sql): mixed {
     return $value;
 }
 
+function smoke_write_file(string $path, string $contents): void {
+    $dir = dirname($path);
+    if (!is_dir($dir)) {
+        mkdir($dir, 0777, true);
+    }
+    file_put_contents($path, $contents);
+}
+
 function smoke_insert_option(SQLite3 $db, int $id, string $name, string $value, string $autoload = 'yes'): void {
     $stmt = $db->prepare('INSERT INTO wp_options (option_id, option_name, option_value, autoload) VALUES (:id, :name, :value, :autoload)');
     $stmt->bindValue(':id', $id, SQLITE3_INTEGER);
@@ -70,14 +78,28 @@ function smoke_insert_postmeta(SQLite3 $db, int $id, int $post_id, string $key, 
     $stmt->execute();
 }
 
-function smoke_insert_post(SQLite3 $db, int $id, string $title, string $content, string $type, string $name, string $status = 'publish'): void {
-    $stmt = $db->prepare('INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES (:id, :title, :content, :status, :type, :name)');
+function smoke_insert_post(
+    SQLite3 $db,
+    int $id,
+    string $title,
+    string $content,
+    string $type,
+    string $name,
+    string $status = 'publish',
+    int $parent = 0,
+    string $mime_type = '',
+    string $guid = ''
+): void {
+    $stmt = $db->prepare('INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, post_parent, post_mime_type, guid) VALUES (:id, :title, :content, :status, :type, :name, :parent, :mime_type, :guid)');
     $stmt->bindValue(':id', $id, SQLITE3_INTEGER);
     $stmt->bindValue(':title', $title, SQLITE3_TEXT);
     $stmt->bindValue(':content', $content, SQLITE3_TEXT);
     $stmt->bindValue(':status', $status, SQLITE3_TEXT);
     $stmt->bindValue(':type', $type, SQLITE3_TEXT);
     $stmt->bindValue(':name', $name, SQLITE3_TEXT);
+    $stmt->bindValue(':parent', $parent, SQLITE3_INTEGER);
+    $stmt->bindValue(':mime_type', $mime_type, SQLITE3_TEXT);
+    $stmt->bindValue(':guid', $guid, SQLITE3_TEXT);
     $stmt->execute();
 }
 
@@ -89,7 +111,10 @@ function smoke_create_posts_db(string $path): void {
         post_content TEXT NOT NULL DEFAULT '',
         post_status TEXT NOT NULL DEFAULT 'publish',
         post_type TEXT NOT NULL DEFAULT 'post',
-        post_name TEXT NOT NULL DEFAULT ''
+        post_name TEXT NOT NULL DEFAULT '',
+        post_parent INTEGER NOT NULL DEFAULT 0,
+        post_mime_type TEXT NOT NULL DEFAULT '',
+        guid TEXT NOT NULL DEFAULT ''
     )");
     $db->exec("CREATE TABLE wp_postmeta (
         meta_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -632,6 +657,132 @@ try {
         (int)smoke_scalar($block_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
         2,
         'page-plus-reusable-block smoke merge audits the target page and block inserts'
+    );
+
+    $attachment_base_root = $tmp . '/attachment-base-root';
+    $attachment_source_root = $tmp . '/attachment-source-root';
+    $attachment_target_root = $tmp . '/attachment-target-root';
+    $attachment_base = $attachment_base_root . '/wp-content/database/.ht.sqlite';
+    $attachment_source = $attachment_source_root . '/wp-content/database/.ht.sqlite';
+    $attachment_target = $attachment_target_root . '/wp-content/database/.ht.sqlite';
+    $attachment_file_base = $tmp . '/.forkpress/cow/merge/file-bases/feature-smoke-page-attachment.json';
+    $attachment_metadata = $tmp . '/.forkpress/cow/merge/attachment-metadata.sqlite';
+
+    mkdir(dirname($attachment_base), 0777, true);
+    mkdir(dirname($attachment_source), 0777, true);
+    mkdir(dirname($attachment_target), 0777, true);
+    smoke_create_posts_db($attachment_base);
+    copy($attachment_base, $attachment_source);
+    copy($attachment_base, $attachment_target);
+    cow_merge_capture_file_base($attachment_base_root, $attachment_file_base);
+
+    $source_attachment_meta = serialize([
+        'file' => '2026/05/source-featured.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'source-featured-150x150.jpg',
+                'width' => 150,
+                'height' => 150,
+                'mime-type' => 'image/jpeg',
+            ],
+        ],
+    ]);
+    $target_attachment_meta = serialize([
+        'file' => '2026/05/main-featured.jpg',
+        'width' => 800,
+        'height' => 600,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'main-featured-150x150.jpg',
+                'width' => 150,
+                'height' => 150,
+                'mime-type' => 'image/jpeg',
+            ],
+        ],
+    ]);
+
+    $db = smoke_open_db($attachment_source);
+    smoke_insert_post($db, 18000060, 'Branch Page With Featured Image', 'Branch featured image content', 'page', 'branch-page-with-featured-image');
+    smoke_insert_post($db, 18000061, 'source-featured.jpg', '', 'attachment', 'source-featured-jpg', 'inherit', 18000060, 'image/jpeg', 'http://example.test/wp-content/uploads/2026/05/source-featured.jpg');
+    smoke_insert_postmeta($db, 18000062, 18000060, '_thumbnail_id', '18000061');
+    smoke_insert_postmeta($db, 18000063, 18000061, '_wp_attached_file', '2026/05/source-featured.jpg');
+    smoke_insert_postmeta($db, 18000064, 18000061, '_wp_attachment_metadata', $source_attachment_meta);
+    $db->close();
+    smoke_write_file($attachment_source_root . '/wp-content/uploads/2026/05/source-featured.jpg', 'source original image bytes');
+    smoke_write_file($attachment_source_root . '/wp-content/uploads/2026/05/source-featured-150x150.jpg', 'source thumbnail image bytes');
+
+    $db = smoke_open_db($attachment_target);
+    smoke_insert_post($db, 19000060, 'Main Page With Featured Image', 'Main featured image content', 'page', 'main-page-with-featured-image');
+    smoke_insert_post($db, 19000061, 'main-featured.jpg', '', 'attachment', 'main-featured-jpg', 'inherit', 19000060, 'image/jpeg', 'http://example.test/wp-content/uploads/2026/05/main-featured.jpg');
+    smoke_insert_postmeta($db, 19000062, 19000060, '_thumbnail_id', '19000061');
+    smoke_insert_postmeta($db, 19000063, 19000061, '_wp_attached_file', '2026/05/main-featured.jpg');
+    smoke_insert_postmeta($db, 19000064, 19000061, '_wp_attachment_metadata', $target_attachment_meta);
+    $db->close();
+    smoke_write_file($attachment_target_root . '/wp-content/uploads/2026/05/main-featured.jpg', 'main original image bytes');
+    smoke_write_file($attachment_target_root . '/wp-content/uploads/2026/05/main-featured-150x150.jpg', 'main thumbnail image bytes');
+
+    $attachment_result = cow_merge_branch_state(
+        $attachment_base,
+        $attachment_source,
+        $attachment_target,
+        $attachment_metadata,
+        'feature-smoke-page-attachment',
+        'main',
+        $attachment_file_base,
+        $attachment_source_root,
+        $attachment_target_root
+    );
+    assert_same($attachment_result['status'], 'completed', 'branch and main page-plus-attachment inserts complete cleanly');
+    assert_same((int)($attachment_result['conflicts'] ?? -1), 0, 'branch and main page-plus-attachment inserts do not create merge conflicts');
+    assert_same(smoke_scalar($attachment_target, 'SELECT post_title FROM wp_posts WHERE ID = 18000060'), 'Branch Page With Featured Image', 'merged target includes the branch featured-image page');
+    assert_same(smoke_scalar($attachment_target, 'SELECT post_type FROM wp_posts WHERE ID = 18000061'), 'attachment', 'merged target includes the branch attachment row');
+    assert_same((int)smoke_scalar($attachment_target, 'SELECT post_parent FROM wp_posts WHERE ID = 18000061'), 18000060, 'merged target keeps the branch attachment parent page');
+    assert_same(smoke_scalar($attachment_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 18000060 AND meta_key = '_thumbnail_id'"), '18000061', 'merged target includes the branch featured-image reference');
+    assert_same(smoke_scalar($attachment_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 18000061 AND meta_key = '_wp_attached_file'"), '2026/05/source-featured.jpg', 'merged target includes the branch attached-file metadata');
+    assert_same(smoke_scalar($attachment_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 18000061 AND meta_key = '_wp_attachment_metadata'"), $source_attachment_meta, 'merged target includes the branch attachment generated-size metadata');
+    assert_same(file_get_contents($attachment_target_root . '/wp-content/uploads/2026/05/source-featured.jpg'), 'source original image bytes', 'merged target includes the branch original upload file');
+    assert_same(file_get_contents($attachment_target_root . '/wp-content/uploads/2026/05/source-featured-150x150.jpg'), 'source thumbnail image bytes', 'merged target includes the branch generated upload file');
+    assert_same(smoke_scalar($attachment_target, 'SELECT post_title FROM wp_posts WHERE ID = 19000060'), 'Main Page With Featured Image', 'merged target preserves the main featured-image page');
+    assert_same(smoke_scalar($attachment_target, 'SELECT post_type FROM wp_posts WHERE ID = 19000061'), 'attachment', 'merged target preserves the main attachment row');
+    assert_same(smoke_scalar($attachment_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 19000060 AND meta_key = '_thumbnail_id'"), '19000061', 'merged target preserves the main featured-image reference');
+    assert_same(file_get_contents($attachment_target_root . '/wp-content/uploads/2026/05/main-featured.jpg'), 'main original image bytes', 'merged target preserves the main original upload file');
+    assert_same(file_get_contents($attachment_target_root . '/wp-content/uploads/2026/05/main-featured-150x150.jpg'), 'main thumbnail image bytes', 'merged target preserves the main generated upload file');
+    assert_same(
+        (int)smoke_scalar($attachment_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name IN ('wp_posts', 'wp_postmeta', '__files__')"),
+        0,
+        'page-plus-attachment smoke merge records no WordPress DB or file conflicts'
+    );
+    assert_same(
+        (int)smoke_scalar($attachment_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'source-applied'"),
+        2,
+        'page-plus-attachment smoke merge audits the source page and attachment inserts'
+    );
+    assert_same(
+        (int)smoke_scalar($attachment_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_postmeta' AND decision = 'source-applied'"),
+        3,
+        'page-plus-attachment smoke merge audits the source attachment metadata inserts'
+    );
+    assert_same(
+        (int)smoke_scalar(
+            $attachment_metadata,
+            "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'source-applied' AND row_identity IN ('" .
+            SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/2026/05/source-featured.jpg')) . "', '" .
+            SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/2026/05/source-featured-150x150.jpg')) . "')"
+        ),
+        2,
+        'page-plus-attachment smoke merge audits the source upload files'
+    );
+    assert_same(
+        (int)smoke_scalar($attachment_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_postmeta', '__files__') AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
+        5,
+        'page-plus-attachment smoke merge audits target DB graph inserts'
+    );
+    assert_same(
+        (int)smoke_scalar($attachment_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'target-kept'"),
+        2,
+        'page-plus-attachment smoke merge audits target upload files'
     );
 
     $options_base = $tmp . '/options-base.sqlite';
