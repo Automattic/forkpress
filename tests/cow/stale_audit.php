@@ -78,6 +78,13 @@ function create_stale_audit_db(string $path): void {
     $db->close();
 }
 
+function create_keyless_stale_audit_db(string $path): void {
+    $db = open_db($path);
+    $db->exec('CREATE TABLE plugin_keyless (label TEXT, value TEXT)');
+    $db->exec("INSERT INTO plugin_keyless (rowid, label, value) VALUES (1, 'Base keyless', 'base')");
+    $db->close();
+}
+
 define('FORKPRESS_COW_MERGE_TESTS', true);
 require_once __DIR__ . '/../../scripts/cow/merge.php';
 
@@ -289,6 +296,80 @@ try {
         fn() => cow_merge_resolve_conflict($row_drift_metadata, $row_drift_conflict_id, 'source', true, 'Try source row after source-drift revalidation.', 'cow-test', true),
         'source payload changed after latest merge revalidation',
         'after-revalidate row resolution fails if the source row changed after review'
+    );
+
+    $keyless_revalidate_base = $tmp . '/keyless-revalidate-base.sqlite';
+    $keyless_revalidate_source = $tmp . '/keyless-revalidate-source.sqlite';
+    $keyless_revalidate_target = $tmp . '/keyless-revalidate-target.sqlite';
+    $keyless_revalidate_metadata = $tmp . '/.forkpress/cow/merge/keyless-revalidate-metadata.sqlite';
+
+    create_keyless_stale_audit_db($keyless_revalidate_base);
+    copy($keyless_revalidate_base, $keyless_revalidate_source);
+    copy($keyless_revalidate_base, $keyless_revalidate_target);
+
+    $db = open_db($keyless_revalidate_source);
+    $db->exec("UPDATE plugin_keyless SET value = 'source keyless revalidate' WHERE rowid = 1");
+    $db->close();
+    $db = open_db($keyless_revalidate_target);
+    $db->exec("UPDATE plugin_keyless SET value = 'target keyless revalidate' WHERE rowid = 1");
+    $db->close();
+
+    $keyless_revalidate_merge = cow_merge_databases(
+        $keyless_revalidate_base,
+        $keyless_revalidate_source,
+        $keyless_revalidate_target,
+        $keyless_revalidate_metadata,
+        'feature-keyless-revalidate',
+        'main'
+    );
+    $keyless_revalidate_run_id = (int)$keyless_revalidate_merge['run_id'];
+    assert_same($keyless_revalidate_merge['status'], 'completed_with_conflicts', 'keyless stale-revalidation fixture starts with a cell conflict');
+    $keyless_revalidate_conflict_id = (int)scalar($keyless_revalidate_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_keyless' AND column_name = 'value' AND conflict_type = 'cell-conflict' ORDER BY id DESC LIMIT 1");
+    assert_true($keyless_revalidate_conflict_id > 0, 'keyless stale-revalidation fixture records a reviewed cell conflict');
+    cow_merge_review_record(
+        $keyless_revalidate_metadata,
+        'conflict',
+        $keyless_revalidate_conflict_id,
+        'reviewed',
+        'Review original keyless row before replacement.',
+        'cow-test'
+    );
+
+    $db = open_db($keyless_revalidate_target);
+    $db->exec('DELETE FROM plugin_keyless WHERE rowid = 1');
+    $db->exec("INSERT INTO plugin_keyless (label, value) VALUES ('Replacement keyless', 'runtime replacement')");
+    $db->close();
+    assert_same(
+        (int)scalar($keyless_revalidate_target, 'SELECT rowid FROM plugin_keyless'),
+        1,
+        'keyless stale-revalidation fixture reuses the reviewed rowid'
+    );
+    cow_merge_track_row_identity_events(
+        $keyless_revalidate_target,
+        $keyless_revalidate_metadata,
+        'main',
+        [
+            ['id' => 1, 'table_name' => 'plugin_keyless', 'op' => 'delete', 'rowid' => 1, 'row' => ['label' => 'Base keyless', 'value' => 'target keyless revalidate']],
+            ['id' => 2, 'table_name' => 'plugin_keyless', 'op' => 'insert', 'rowid' => 1, 'row' => ['label' => 'Replacement keyless', 'value' => 'runtime replacement']],
+        ]
+    );
+
+    $keyless_revalidated = cow_merge_revalidate_reviewed_conflicts($keyless_revalidate_metadata, $keyless_revalidate_run_id, 'cow-revalidate');
+    assert_same($keyless_revalidated['checked'], 1, 'keyless rowid replacement revalidation checks the reviewed conflict');
+    assert_same($keyless_revalidated['stale'], 1, 'keyless rowid replacement revalidation detects stale target identity');
+    assert_same($keyless_revalidated['carried'], 1, 'keyless rowid replacement carries stale review intent');
+    assert_same(
+        scalar($keyless_revalidate_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $keyless_revalidate_conflict_id ORDER BY id DESC LIMIT 1"),
+        'incompatible',
+        'keyless rowid replacement is classified as incompatible'
+    );
+    $keyless_revalidated_audit = cow_merge_audit_report($keyless_revalidate_metadata, $keyless_revalidate_run_id, 10, ['records' => 'conflicts']);
+    $keyless_revalidated_conflicts = array_values(array_filter($keyless_revalidated_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $keyless_revalidate_conflict_id));
+    assert_same($keyless_revalidated_conflicts[0]['revalidation_class'] ?? null, 'incompatible', 'keyless audit exposes incompatible rowid replacement');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($keyless_revalidate_metadata, $keyless_revalidate_conflict_id, 'source', true, 'Do not apply source over replacement keyless row.', 'cow-test', true),
+        'target row no longer exists',
+        'after-revalidate does not apply reviewed source over an incompatible keyless replacement'
     );
 
     $post_identity_base = $tmp . '/post-identity-base.sqlite';
