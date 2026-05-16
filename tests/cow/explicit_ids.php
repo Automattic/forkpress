@@ -120,6 +120,45 @@ try {
     $tables = array_map(fn($record) => $record['table_name'] ?? '', $audit['conflicts'] ?? []);
     assert_true(in_array('wp_posts', $tables, true), 'audit report exposes the WordPress explicit-ID conflict');
     assert_true(in_array('plugin_autoinc', $tables, true), 'audit report exposes the plugin explicit-ID conflict');
+
+    $rewrite_base = $tmp . '/rewrite-base.sqlite';
+    $rewrite_source = $tmp . '/rewrite-source.sqlite';
+    $rewrite_target = $tmp . '/rewrite-target.sqlite';
+    $rewrite_metadata = $tmp . '/.forkpress/cow/merge/explicit-id-rewrite-metadata.sqlite';
+    create_explicit_id_db($rewrite_base);
+    copy($rewrite_base, $rewrite_source);
+    copy($rewrite_base, $rewrite_target);
+    cow_merge_allocate_autoincrement_bands($rewrite_source, $rewrite_metadata, 'feature-explicit-rewrite');
+
+    $rewrite_source_db = open_db($rewrite_source);
+    $rewrite_source_db->exec("UPDATE wp_posts SET ID = 2, post_title = 'Rewritten explicit post ID' WHERE ID = 1");
+    $rewrite_source_db->exec("UPDATE plugin_autoinc SET id = 2, label = 'rewritten explicit plugin ID' WHERE id = 1");
+    $rewrite_source_db->close();
+
+    $rewrite_result = cow_merge_databases($rewrite_base, $rewrite_source, $rewrite_target, $rewrite_metadata, 'feature-explicit-rewrite', 'main');
+    assert_same($rewrite_result['status'], 'completed_with_conflicts', 'out-of-band AUTOINCREMENT primary-key rewrites remain review-held');
+    assert_same((int)scalar($rewrite_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 1'), 1, 'out-of-band WordPress primary-key rewrite keeps the original target row by default');
+    assert_same((int)scalar($rewrite_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 2'), 0, 'out-of-band WordPress primary-key rewrite does not insert the rewritten explicit ID by default');
+    assert_same((int)scalar($rewrite_target, 'SELECT COUNT(*) FROM plugin_autoinc WHERE id = 1'), 1, 'out-of-band plugin primary-key rewrite keeps the original target row by default');
+    assert_same((int)scalar($rewrite_target, 'SELECT COUNT(*) FROM plugin_autoinc WHERE id = 2'), 0, 'out-of-band plugin primary-key rewrite does not insert the rewritten explicit ID by default');
+    assert_same(
+        (int)scalar($rewrite_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-explicit-rewrite' AND c.table_name = 'wp_posts' AND c.conflict_type = 'row-target-constraint'"),
+        2,
+        'out-of-band WordPress primary-key rewrite records reviewable insert and paired delete conflicts'
+    );
+    assert_same(
+        (int)scalar($rewrite_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-explicit-rewrite' AND c.table_name = 'plugin_autoinc' AND c.conflict_type = 'row-target-constraint'"),
+        2,
+        'out-of-band plugin primary-key rewrite records reviewable insert and paired delete conflicts'
+    );
+    assert_true(
+        str_contains((string)scalar($rewrite_metadata, "SELECT reason FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-explicit-rewrite' AND d.table_name = 'wp_posts' AND d.row_identity = '" . SQLite3::escapeString(cow_merge_identity_json(['ID' => 1])) . "' ORDER BY d.id DESC LIMIT 1"), 'held explicit AUTOINCREMENT insert'),
+        'out-of-band WordPress primary-key rewrite explains why the paired source delete is held'
+    );
+    assert_true(
+        str_contains((string)scalar($rewrite_metadata, "SELECT reason FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-explicit-rewrite' AND d.table_name = 'plugin_autoinc' AND d.row_identity = '" . SQLite3::escapeString(cow_merge_identity_json(['id' => 1])) . "' ORDER BY d.id DESC LIMIT 1"), 'held explicit AUTOINCREMENT insert'),
+        'out-of-band plugin primary-key rewrite explains why the paired source delete is held'
+    );
 } finally {
     remove_tree($tmp);
 }
