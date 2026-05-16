@@ -218,6 +218,7 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
         'png' => 'image/png',
         'gif' => 'image/gif',
         'webp' => 'image/webp',
+        'avif' => 'image/avif',
     ];
     $extension = strtolower((string)pathinfo(str_replace('\\', '/', $attached_file), PATHINFO_EXTENSION));
     $expected_mime_type = $expected_mime_by_extension[$extension] ?? null;
@@ -620,6 +621,7 @@ PHP);
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-filesize.jpg', "source generated filesize original bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-filesize-150x150.jpg', "source generated filesize thumb bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-mime-drift.jpg', "source MIME drift image bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-avif-mime-drift.avif', "source AVIF MIME drift image bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-mime.jpg', "source generated MIME original bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-mime-thumb.png', "source generated MIME thumb bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-dimensions.jpg', "source invalid generated dimensions original bytes\n");
@@ -710,6 +712,12 @@ PHP);
         'height' => 480,
         'sizes' => [],
     ], 'application/pdf');
+    $avif_mime_drift_id = insert_attachment($db, 'Source media AVIF MIME type drift', '2026/05/source-avif-mime-drift.avif', [
+        'file' => '2026/05/source-avif-mime-drift.avif',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [],
+    ], 'image/jpeg');
     $generated_mime_drift_id = insert_attachment($db, 'Source media generated MIME type drift', '2026/05/source-generated-mime.jpg', [
         'file' => '2026/05/source-generated-mime.jpg',
         'width' => 640,
@@ -873,7 +881,7 @@ PHP);
 
     assert_same($result['status'], 'completed_with_conflicts', 'media validator holds incomplete generated-size metadata for review');
     assert_same((int)($result['plugin_validators'] ?? 0), 1, 'media validator is discovered from mu-plugins during merge');
-    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 26, 'media validator records missing required metadata, invalid metadata, dimensions, filesize and MIME drift, generated-size, original-image, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
+    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 27, 'media validator records missing required metadata, invalid metadata, dimensions, filesize and MIME drift, generated-size, original-image, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
     assert_same(
         scalar($target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-generated-missing-file-key.jpg',
@@ -993,12 +1001,15 @@ PHP);
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-media-mime-drift',
     ]);
-    assert_same(count($mime_audit['conflicts']), 2, 'media validator exposes attachment and generated-size MIME drift as plugin-scoped audit conflicts');
+    assert_same(count($mime_audit['conflicts']), 3, 'media validator exposes attachment, AVIF attachment, and generated-size MIME drift as plugin-scoped audit conflicts');
     $mime_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $mime_audit['conflicts']));
     assert_true(str_contains($mime_preview, 'source-mime-drift.jpg'), 'media validator MIME drift audit includes the affected attachment');
     assert_true(str_contains($mime_preview, 'application/pdf'), 'media validator MIME drift audit includes the declared MIME type');
     assert_true(str_contains($mime_preview, 'image/jpeg'), 'media validator MIME drift audit includes the expected MIME type');
     assert_true(str_contains($mime_preview, (string)$mime_drift_id), 'media validator MIME drift audit includes the affected attachment ID');
+    assert_true(str_contains($mime_preview, 'source-avif-mime-drift.avif'), 'media validator MIME drift audit includes the affected AVIF attachment');
+    assert_true(str_contains($mime_preview, 'image/avif'), 'media validator MIME drift audit includes the expected AVIF MIME type');
+    assert_true(str_contains($mime_preview, (string)$avif_mime_drift_id), 'media validator MIME drift audit includes the affected AVIF attachment ID');
     assert_true(str_contains($mime_preview, 'image/png'), 'media validator MIME drift audit includes the expected generated MIME type');
     assert_true(str_contains($mime_preview, (string)$generated_mime_drift_id), 'media validator MIME drift audit includes the generated-size attachment ID');
     $generated_mime_recorded = false;
