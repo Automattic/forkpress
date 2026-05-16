@@ -2116,13 +2116,40 @@ try {
     );
     $options_contract_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts']);
     assert_same(count($options_contract_audit['conflicts']), 2, 'conflict audit returns both option edit/delete conflicts');
+    $options_contract_conflict_id = (int)$options_contract_audit['conflicts'][0]['id'];
     foreach ($options_contract_audit['conflicts'] as $contract_conflict) {
         assert_same($contract_conflict['conflict_class'], 'row', 'row delete conflict advertises row class');
         assert_same($contract_conflict['resolution_strategy'], 'row-choice', 'row delete conflict advertises row choice strategy');
         assert_same($contract_conflict['resolution_choices'], ['source', 'target'], 'row delete conflict advertises executable source and target choices');
         assert_same($contract_conflict['generic_resolver'], true, 'row delete conflict advertises generic resolver support');
         assert_same($contract_conflict['after_revalidate_supported'], true, 'row delete conflict advertises after-revalidate support');
+        assert_same($contract_conflict['lifecycle_state'], 'unreviewed', 'unreviewed row delete conflict advertises lifecycle state');
+        assert_same($contract_conflict['next_action'], 'review', 'unreviewed row delete conflict advertises review as next action');
+        assert_same((int)$contract_conflict['resolution_count'], 0, 'unreviewed row delete conflict advertises no resolutions');
     }
+
+    cow_merge_review_record($options_edit_delete_metadata, 'conflict', $options_contract_conflict_id, 'pending', 'Defer option conflict review.', 'cow-smoke');
+    $pending_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts']);
+    assert_same($pending_audit['conflicts'][0]['lifecycle_state'], 'deferred', 'pending review note advertises deferred lifecycle state');
+    assert_same($pending_audit['conflicts'][0]['next_action'], 'wait', 'pending review note advertises wait next action');
+
+    cow_merge_review_record($options_edit_delete_metadata, 'conflict', $options_contract_conflict_id, 'needs-action', 'Revalidate option conflict before resolving.', 'cow-smoke');
+    $needs_action_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts']);
+    assert_same($needs_action_audit['conflicts'][0]['lifecycle_state'], 'needs-action', 'needs-action review note advertises needs-action lifecycle state');
+    assert_same($needs_action_audit['conflicts'][0]['next_action'], 'revalidate', 'needs-action row conflict advertises revalidate next action');
+
+    cow_merge_review_record($options_edit_delete_metadata, 'conflict', $options_contract_conflict_id, 'reviewed', 'Reviewed option conflict.', 'cow-smoke');
+    $reviewed_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts']);
+    assert_same($reviewed_audit['conflicts'][0]['lifecycle_state'], 'reviewed', 'reviewed conflict advertises reviewed lifecycle state');
+    assert_same($reviewed_audit['conflicts'][0]['next_action'], 'resolve', 'reviewed generic conflict advertises resolve next action');
+
+    cow_merge_resolve_conflict($options_edit_delete_metadata, $options_contract_conflict_id, 'target', true, 'Keep target option deletion.', 'cow-smoke');
+    $resolved_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts']);
+    assert_same($resolved_audit['conflicts'][0]['lifecycle_state'], 'resolved', 'applied resolution advertises resolved lifecycle state');
+    assert_same($resolved_audit['conflicts'][0]['next_action'], 'none', 'applied resolution advertises no next action');
+    assert_same((int)$resolved_audit['conflicts'][0]['resolution_count'], 1, 'applied resolution increments conflict resolution count');
+    assert_same($resolved_audit['conflicts'][0]['latest_resolution_choice'], 'target', 'applied resolution advertises latest resolution choice');
+    assert_same((int)$resolved_audit['conflicts'][0]['latest_resolution_applied'], 1, 'applied resolution advertises latest resolution applied flag');
 
     $plugin_contract = cow_merge_conflict_resolution_contract('__plugins__', 'plugin-demo-finding');
     assert_same($plugin_contract['class'], 'plugin', 'plugin conflicts advertise plugin class');

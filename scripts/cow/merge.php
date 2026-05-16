@@ -11421,6 +11421,53 @@ function cow_merge_audit_add_conflict_contracts(array $rows): array {
     return $rows;
 }
 
+function cow_merge_conflict_lifecycle(array $row): array {
+    $resolution_count = (int)($row['resolution_count'] ?? 0);
+    $latest_resolution_applied = (int)($row['latest_resolution_applied'] ?? 0);
+    $review_status = (string)($row['review_status'] ?? '');
+    $generic_resolver = (bool)($row['generic_resolver'] ?? false);
+    $resolution_choices = $row['resolution_choices'] ?? [];
+    $strategy = (string)($row['resolution_strategy'] ?? 'manual-review');
+
+    if ($resolution_count > 0) {
+        if ($latest_resolution_applied === 1) {
+            return ['state' => 'resolved', 'next_action' => 'none'];
+        }
+        return ['state' => 'validated', 'next_action' => $generic_resolver ? 'apply-reviewed-choice' : 'manual-review'];
+    }
+
+    if ($review_status === 'pending') {
+        return ['state' => 'deferred', 'next_action' => 'wait'];
+    }
+    if ($review_status === 'needs-action') {
+        return [
+            'state' => 'needs-action',
+            'next_action' => !empty($row['after_revalidate_supported']) ? 'revalidate' : 'manual-review',
+        ];
+    }
+    if ($review_status === 'reviewed') {
+        return [
+            'state' => 'reviewed',
+            'next_action' => $generic_resolver && $resolution_choices !== [] ? 'resolve' : 'manual-review',
+        ];
+    }
+
+    return [
+        'state' => 'unreviewed',
+        'next_action' => $strategy === 'plugin-validator' ? 'run-plugin-validator' : 'review',
+    ];
+}
+
+function cow_merge_audit_add_conflict_lifecycle(array $rows): array {
+    foreach ($rows as &$row) {
+        $lifecycle = cow_merge_conflict_lifecycle($row);
+        $row['lifecycle_state'] = $lifecycle['state'];
+        $row['next_action'] = $lifecycle['next_action'];
+    }
+    unset($row);
+    return $rows;
+}
+
 function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflict): array {
     $status = [
         'stale_status' => 'unknown',
@@ -12049,12 +12096,20 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
             return $report;
         }
         $review_notes_exist = cow_merge_audit_has_table($db, 'merge_review_notes');
+        $resolutions_exist = cow_merge_audit_has_table($db, 'merge_resolutions');
         $conflict_review_select = $review_notes_exist
             ? ", (SELECT rn.status FROM merge_review_notes rn WHERE rn.record_type = 'conflict' AND rn.record_id = merge_conflicts.id ORDER BY rn.id DESC LIMIT 1) AS review_status, " .
               "(SELECT rn.note FROM merge_review_notes rn WHERE rn.record_type = 'conflict' AND rn.record_id = merge_conflicts.id ORDER BY rn.id DESC LIMIT 1) AS review_note, " .
               "(SELECT rn.reviewer FROM merge_review_notes rn WHERE rn.record_type = 'conflict' AND rn.record_id = merge_conflicts.id ORDER BY rn.id DESC LIMIT 1) AS review_reviewer, " .
               "(SELECT rn.created_at FROM merge_review_notes rn WHERE rn.record_type = 'conflict' AND rn.record_id = merge_conflicts.id ORDER BY rn.id DESC LIMIT 1) AS reviewed_at"
             : ', NULL AS review_status, NULL AS review_note, NULL AS review_reviewer, NULL AS reviewed_at';
+        $conflict_resolution_select = $resolutions_exist
+            ? ", (SELECT COUNT(*) FROM merge_resolutions mr WHERE mr.conflict_id = merge_conflicts.id) AS resolution_count, " .
+              "(SELECT mr.id FROM merge_resolutions mr WHERE mr.conflict_id = merge_conflicts.id ORDER BY mr.id DESC LIMIT 1) AS latest_resolution_id, " .
+              "(SELECT mr.choice FROM merge_resolutions mr WHERE mr.conflict_id = merge_conflicts.id ORDER BY mr.id DESC LIMIT 1) AS latest_resolution_choice, " .
+              "(SELECT mr.applied FROM merge_resolutions mr WHERE mr.conflict_id = merge_conflicts.id ORDER BY mr.id DESC LIMIT 1) AS latest_resolution_applied, " .
+              "(SELECT mr.status FROM merge_resolutions mr WHERE mr.conflict_id = merge_conflicts.id ORDER BY mr.id DESC LIMIT 1) AS latest_resolution_status"
+            : ', 0 AS resolution_count, NULL AS latest_resolution_id, NULL AS latest_resolution_choice, NULL AS latest_resolution_applied, NULL AS latest_resolution_status';
         $decision_review_select = $review_notes_exist
             ? ", (SELECT rn.status FROM merge_review_notes rn WHERE rn.record_type = 'decision' AND rn.record_id = merge_decisions.id ORDER BY rn.id DESC LIMIT 1) AS review_status, " .
               "(SELECT rn.note FROM merge_review_notes rn WHERE rn.record_type = 'decision' AND rn.record_id = merge_decisions.id ORDER BY rn.id DESC LIMIT 1) AS review_note, " .
@@ -12099,14 +12154,14 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
         [$conflict_filter, $conflict_params] = cow_merge_audit_where_sql($run_id, $filters, 'conflicts', '', $review_notes_exist);
         $conflict_params[':limit'] = $limit;
         if ($filters['records'] === 'all' || $filters['records'] === 'conflicts') {
-            $report['conflicts'] = cow_merge_audit_add_payload_previews(cow_merge_audit_add_conflict_contracts(cow_merge_audit_add_conflict_staleness($db, cow_merge_audit_table_rows(
+            $report['conflicts'] = cow_merge_audit_add_payload_previews(cow_merge_audit_add_conflict_lifecycle(cow_merge_audit_add_conflict_contracts(cow_merge_audit_add_conflict_staleness($db, cow_merge_audit_table_rows(
                 $db,
                 'merge_conflicts',
                 "SELECT merge_conflicts.id AS id, run_id, table_name, row_identity, column_name, conflict_type, resolver, resolved_at, created_at, " .
-                "base_payload, source_payload, target_payload, chosen_payload, r.source_db, r.target_db, r.source_branch, r.target_branch$conflict_review_select " .
+                "base_payload, source_payload, target_payload, chosen_payload, r.source_db, r.target_db, r.source_branch, r.target_branch$conflict_review_select$conflict_resolution_select " .
                 "FROM merge_conflicts JOIN merge_runs r ON r.id = merge_conflicts.run_id $conflict_filter ORDER BY merge_conflicts.id DESC LIMIT :limit",
                 $conflict_params
-            ))));
+            )))));
             if ($filters['records'] === 'conflicts' && $filters['group_by'] !== 'none') {
                 [$conflict_group_filter, $conflict_group_params] = cow_merge_audit_where_sql($run_id, $filters, 'conflicts', 'c', $review_notes_exist);
                 $conflict_group_params[':limit'] = $limit;
@@ -12336,6 +12391,10 @@ function cow_merge_print_audit_text(array $report): void {
             $generic = !empty($conflict['generic_resolver']) ? 'yes' : 'no';
             $after_revalidate = !empty($conflict['after_revalidate_supported']) ? 'yes' : 'no';
             echo "     class={$conflict['conflict_class']} strategy={$conflict['resolution_strategy']} choices=$choices generic-resolver=$generic after-revalidate=$after_revalidate\n";
+            echo "     lifecycle={$conflict['lifecycle_state']} next-action={$conflict['next_action']} resolutions={$conflict['resolution_count']}\n";
+            if (($conflict['latest_resolution_id'] ?? null) !== null && (string)$conflict['latest_resolution_id'] !== '') {
+                echo "     latest-resolution=#{$conflict['latest_resolution_id']} choice={$conflict['latest_resolution_choice']} status={$conflict['latest_resolution_status']} applied={$conflict['latest_resolution_applied']}\n";
+            }
             cow_merge_print_audit_review_text($conflict, $filters);
             if (isset($conflict['stale_status']) && $conflict['stale_status'] !== 'unknown') {
                 echo "     stale={$conflict['stale_status']} reason=" . cow_merge_audit_truncate((string)$conflict['stale_reason'], 240) . "\n";

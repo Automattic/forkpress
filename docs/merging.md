@@ -73,8 +73,11 @@ the target back rather than keeping a partial result.
 first-class records. Each conflict includes a `conflict_class`, a
 `resolution_strategy`, executable `resolution_choices`, whether the generic
 `merge-resolve conflict` path supports it, and whether `--after-revalidate` is
-available. UI clients should consume those fields instead of inferring behavior
-from raw `conflict_type` strings.
+available. It also includes the conflict `lifecycle_state`, `next_action`, and
+latest resolution metadata so clients can distinguish unreviewed, deferred,
+needs-action, reviewed, validated, and resolved conflicts without parsing review
+notes. UI clients should consume those fields instead of inferring behavior from
+raw `conflict_type` strings.
 
 ## What gets audited
 
