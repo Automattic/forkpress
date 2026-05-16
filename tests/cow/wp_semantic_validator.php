@@ -269,6 +269,27 @@ function create_wp_image_block_db(string $path): void {
     $db->close();
 }
 
+function create_wp_gallery_block_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_title TEXT NOT NULL DEFAULT '',
+        post_content TEXT NOT NULL DEFAULT '',
+        post_status TEXT NOT NULL DEFAULT 'publish',
+        post_type TEXT NOT NULL DEFAULT 'post',
+        post_name TEXT NOT NULL DEFAULT '',
+        guid TEXT NOT NULL DEFAULT ''
+    )");
+    $gallery_block_content = '<!-- wp:gallery {"ids":[73,74],"linkTo":"none"} --><figure class="wp-block-gallery has-nested-images columns-default is-cropped"><!-- wp:image {"id":73,"sizeSlug":"large"} --><figure class="wp-block-image size-large"><img src="wp-content/uploads/2026/05/gallery-deleted.jpg" class="wp-image-73"/></figure><!-- /wp:image --><!-- wp:image {"id":74,"sizeSlug":"large"} --><figure class="wp-block-image size-large"><img src="wp-content/uploads/2026/05/gallery-kept.jpg" class="wp-image-74"/></figure><!-- /wp:image --></figure><!-- /wp:gallery -->';
+    $stmt = $db->prepare("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, guid) VALUES
+        (72, 'Gallery block page', :content, 'publish', 'page', 'gallery-block-page', ''),
+        (73, 'Deleted gallery attachment', '', 'inherit', 'attachment', 'deleted-gallery-attachment', 'wp-content/uploads/2026/05/gallery-deleted.jpg'),
+        (74, 'Kept gallery attachment', '', 'inherit', 'attachment', 'kept-gallery-attachment', 'wp-content/uploads/2026/05/gallery-kept.jpg')");
+    $stmt->bindValue(':content', $gallery_block_content, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+}
+
 function create_wp_term_relationship_db(string $path): void {
     $db = open_db($path);
     $db->exec("CREATE TABLE wp_posts (
@@ -1310,6 +1331,115 @@ PHP);
     assert_true(
         str_contains($image_block_preview, '"block_name":"core/image"') || str_contains($image_block_preview, '"block_name":"core\/image"'),
         'WordPress image block audit includes the block name'
+    );
+
+    $gallery_block_base_root = $tmp . '/gallery-block-base';
+    $gallery_block_source_root = $tmp . '/gallery-block-source';
+    $gallery_block_target_root = $tmp . '/gallery-block-target';
+    $gallery_block_base = $gallery_block_base_root . '/wp-content/database/.ht.sqlite';
+    $gallery_block_source = $gallery_block_source_root . '/wp-content/database/.ht.sqlite';
+    $gallery_block_target = $gallery_block_target_root . '/wp-content/database/.ht.sqlite';
+    $gallery_block_metadata = $tmp . '/.forkpress/cow/merge/wp-gallery-block-validator-metadata.sqlite';
+    $gallery_block_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-gallery-block-validator.json';
+
+    mkdir($gallery_block_base_root . '/wp-content/database', 0777, true);
+    create_wp_gallery_block_db($gallery_block_base);
+    write_test_file($gallery_block_base_root . '/wp-content/uploads/2026/05/gallery-deleted.jpg', 'deleted gallery image bytes');
+    write_test_file($gallery_block_base_root . '/wp-content/uploads/2026/05/gallery-kept.jpg', 'kept gallery image bytes');
+    write_test_file($gallery_block_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type IN ('post', 'page')");
+$findings = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    if (!preg_match_all('/<!--\s*wp:gallery\s+(\{.*?\})\s*-->/', (string)$row['post_content'], $matches)) {
+        continue;
+    }
+    foreach ($matches[1] as $raw_attrs) {
+        $attrs = json_decode($raw_attrs, true);
+        if (!is_array($attrs) || !isset($attrs['ids']) || !is_array($attrs['ids'])) {
+            continue;
+        }
+        foreach ($attrs['ids'] as $index => $id) {
+            $attachment_id = (int)$id;
+            if ($attachment_id <= 0) {
+                continue;
+            }
+            $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $attachment_id AND post_type = 'attachment'");
+            if ($exists === 0) {
+                $findings[] = [
+                    'plugin' => 'forkpress-wp-gallery-block-refs',
+                    'object' => 'post:' . $row['ID'],
+                    'reason' => 'gallery block references a missing attachment',
+                    'type' => 'plugin-wp-gallery-block-missing-attachment',
+                    'tables' => ['wp_posts'],
+                    'validator' => 'forkpress-wp-gallery-block-refs@1',
+                    'candidate' => [
+                        'post_id' => (int)$row['ID'],
+                        'block_name' => 'core/gallery',
+                        'field' => 'attrs.ids.' . (string)$index,
+                        'missing_object_id' => $attachment_id,
+                        'object_type' => 'attachment',
+                    ],
+                ];
+            }
+        }
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    copy_tree_for_test($gallery_block_base_root, $gallery_block_source_root);
+    copy_tree_for_test($gallery_block_base_root, $gallery_block_target_root);
+    cow_merge_capture_file_base($gallery_block_base_root, $gallery_block_file_base);
+    cow_merge_allocate_autoincrement_bands($gallery_block_source, $gallery_block_metadata, 'feature-wp-gallery-block-source');
+    cow_merge_allocate_autoincrement_bands($gallery_block_target, $gallery_block_metadata, 'main');
+
+    $db = open_db($gallery_block_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID = 73');
+    $db->close();
+    unlink($gallery_block_source_root . '/wp-content/uploads/2026/05/gallery-deleted.jpg');
+
+    $db = open_db($gallery_block_target);
+    $db->exec("UPDATE wp_posts SET post_title = 'Target page still using deleted gallery attachment' WHERE ID = 72");
+    $db->close();
+
+    $gallery_block_result = cow_merge_branch_state(
+        $gallery_block_base,
+        $gallery_block_source,
+        $gallery_block_target,
+        $gallery_block_metadata,
+        'feature-wp-gallery-block-source',
+        'main',
+        $gallery_block_file_base,
+        $gallery_block_source_root,
+        $gallery_block_target_root
+    );
+
+    assert_same($gallery_block_result['status'], 'completed_with_conflicts', 'WordPress gallery block validator holds missing attachments for review');
+    assert_same((int)($gallery_block_result['plugin_validators'] ?? 0), 1, 'WordPress gallery block validator is discovered from mu-plugins during merge');
+    assert_same((int)($gallery_block_result['plugin_validator_conflicts'] ?? 0), 1, 'WordPress gallery block validator records the missing attachment');
+    assert_same((int)scalar($gallery_block_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 73'), 0, 'WordPress gallery block validator leaves the source attachment deletion staged for review');
+    assert_same((int)scalar($gallery_block_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 74'), 1, 'WordPress gallery block validator preserves unrelated gallery attachments');
+    assert_true(!file_exists($gallery_block_target_root . '/wp-content/uploads/2026/05/gallery-deleted.jpg'), 'WordPress gallery block validator leaves the source upload deletion staged for review');
+    assert_true(is_file($gallery_block_target_root . '/wp-content/uploads/2026/05/gallery-kept.jpg'), 'WordPress gallery block validator preserves unrelated gallery upload files');
+    assert_same(scalar($gallery_block_target, 'SELECT post_title FROM wp_posts WHERE ID = 72'), 'Target page still using deleted gallery attachment', 'WordPress gallery block validator preserves the target page edit');
+    assert_true(str_contains((string)scalar($gallery_block_target, 'SELECT post_content FROM wp_posts WHERE ID = 72'), '"ids":[73,74]'), 'WordPress gallery block validator keeps the stale gallery IDs visible for review');
+
+    $gallery_block_audit = cow_merge_audit_report($gallery_block_metadata, (int)$gallery_block_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-gallery-block-missing-attachment',
+    ]);
+    assert_same(count($gallery_block_audit['conflicts']), 1, 'WordPress gallery block validator exposes the missing attachment as a plugin-scoped audit conflict');
+    $gallery_block_preview = (string)($gallery_block_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_true(str_contains($gallery_block_preview, '"missing_object_id":73'), 'WordPress gallery block audit includes the missing attachment ID');
+    assert_true(str_contains($gallery_block_preview, '"field":"attrs.ids.0"'), 'WordPress gallery block audit includes the stale gallery ID field');
+    assert_true(
+        str_contains($gallery_block_preview, '"block_name":"core/gallery"') || str_contains($gallery_block_preview, '"block_name":"core\/gallery"'),
+        'WordPress gallery block audit includes the block name'
     );
 
     $term_base_root = $tmp . '/term-ref-base';
