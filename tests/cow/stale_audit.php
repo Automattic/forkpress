@@ -298,6 +298,72 @@ try {
         'after-revalidate row resolution fails if the source row changed after review'
     );
 
+    $row_missing_base = $tmp . '/row-missing-base.sqlite';
+    $row_missing_source = $tmp . '/row-missing-source.sqlite';
+    $row_missing_target = $tmp . '/row-missing-target.sqlite';
+    $row_missing_metadata = $tmp . '/.forkpress/cow/merge/row-missing-metadata.sqlite';
+
+    create_stale_audit_db($row_missing_base);
+    copy($row_missing_base, $row_missing_source);
+    copy($row_missing_base, $row_missing_target);
+
+    $source_db = open_db($row_missing_source);
+    $source_db->exec("INSERT INTO plugin_items (item_id, label, value) VALUES ('row-missing', 'Source row missing', 'source row missing')");
+    $source_db->close();
+    $target_db = open_db($row_missing_target);
+    $target_db->exec("INSERT INTO plugin_items (item_id, label, value) VALUES ('row-missing', 'Target row missing', 'target row missing')");
+    $target_db->close();
+
+    $row_missing_merge = cow_merge_databases($row_missing_base, $row_missing_source, $row_missing_target, $row_missing_metadata, 'feature-row-missing-review', 'main');
+    $row_missing_run_id = (int)$row_missing_merge['run_id'];
+    $row_missing_conflict_id = (int)scalar($row_missing_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND conflict_type = 'row-insert-collision'");
+    assert_true($row_missing_conflict_id > 0, 'row missing fixture records a reviewed row conflict');
+    cow_merge_review_record(
+        $row_missing_metadata,
+        'conflict',
+        $row_missing_conflict_id,
+        'reviewed',
+        'Revalidate before applying a row conflict whose target disappeared.',
+        'cow-test'
+    );
+
+    $target_db = open_db($row_missing_target);
+    $target_db->exec("DELETE FROM plugin_items WHERE item_id = 'row-missing'");
+    $target_db->close();
+
+    $row_missing_revalidated = cow_merge_revalidate_reviewed_conflicts($row_missing_metadata, $row_missing_run_id, 'cow-revalidate');
+    assert_same($row_missing_revalidated['checked'], 1, 'row missing revalidation checks the reviewed row conflict');
+    assert_same($row_missing_revalidated['stale'], 1, 'row missing revalidation detects the deleted target row');
+    assert_same($row_missing_revalidated['carried'], 1, 'row missing revalidation carries missing target row conflicts to needs-action');
+    assert_same(
+        scalar($row_missing_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $row_missing_conflict_id ORDER BY id DESC LIMIT 1"),
+        'missing',
+        'row revalidation classifies deleted target rows as missing'
+    );
+    $row_missing_audit = cow_merge_audit_report($row_missing_metadata, $row_missing_run_id, 10, ['records' => 'conflicts']);
+    $row_missing_conflicts = array_values(array_filter($row_missing_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $row_missing_conflict_id));
+    assert_same($row_missing_conflicts[0]['revalidation_class'] ?? null, 'missing', 'row audit exposes missing target row revalidation class');
+    $row_missing_resolution = cow_merge_resolve_conflict(
+        $row_missing_metadata,
+        $row_missing_conflict_id,
+        'source',
+        true,
+        'Apply source after missing-row conflict revalidation.',
+        'cow-test',
+        true
+    );
+    assert_same($row_missing_resolution['status'], 'applied', 'after-revalidate source resolution can restore a reviewed missing row conflict');
+    assert_same(
+        scalar($row_missing_target, "SELECT label FROM plugin_items WHERE item_id = 'row-missing'"),
+        'Source row missing',
+        'after-revalidate row resolution restores the audited source row'
+    );
+    assert_same(
+        scalar($row_missing_metadata, "SELECT previous_payload FROM merge_resolutions WHERE conflict_id = $row_missing_conflict_id ORDER BY id DESC LIMIT 1"),
+        cow_merge_payload_json(null),
+        'after-revalidate row resolution audits the missing revalidated target row'
+    );
+
     $keyless_revalidate_base = $tmp . '/keyless-revalidate-base.sqlite';
     $keyless_revalidate_source = $tmp . '/keyless-revalidate-source.sqlite';
     $keyless_revalidate_target = $tmp . '/keyless-revalidate-target.sqlite';
