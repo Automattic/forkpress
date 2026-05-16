@@ -150,6 +150,25 @@ try {
         1,
         'plain INTEGER PRIMARY KEY plugin collision is recorded as a review conflict'
     );
+
+    $reset = $tmp . '/reset.sqlite';
+    copy($base, $reset);
+    $reset_band = cow_merge_allocate_autoincrement_bands($reset, $metadata, 'feature-source');
+    assert_same($reset_band['allocated'], 2, 'reset branch DB below its old band gets fresh AUTOINCREMENT bands');
+    assert_same($reset_band['reused'], 0, 'reset branch DB below its old band does not reuse possibly published bands');
+    assert_true(
+        (int)scalar($reset, "SELECT seq FROM sqlite_sequence WHERE name = 'wp_posts'") > $target_post_id,
+        'fresh reset post band is above previously allocated branch post IDs'
+    );
+    assert_true(
+        (int)scalar($reset, "SELECT seq FROM sqlite_sequence WHERE name = 'wp_options'") >= (int)scalar($metadata, "SELECT band_start - 1 FROM merge_autoincrement_bands WHERE branch_name = 'feature-source' AND table_name = 'wp_options'"),
+        'fresh reset option band is recorded in the app DB sequence'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-source' AND policy = 'autoincrement-id-band-allocation' AND status = 'id_bands_allocated'"),
+        2,
+        'reset-safe AUTOINCREMENT allocation runs are auditable'
+    );
 } finally {
     remove_tree($tmp);
 }
