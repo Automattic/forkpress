@@ -490,6 +490,59 @@ try {
         'latest merge revalidation is incompatible',
         'after-revalidate blocks source resolution over an incompatible post semantic replacement'
     );
+
+    $postmeta_identity_base = $tmp . '/postmeta-identity-base.sqlite';
+    $postmeta_identity_source = $tmp . '/postmeta-identity-source.sqlite';
+    $postmeta_identity_target = $tmp . '/postmeta-identity-target.sqlite';
+    $postmeta_identity_metadata = $tmp . '/.forkpress/cow/merge/postmeta-identity-metadata.sqlite';
+    foreach ([$postmeta_identity_base, $postmeta_identity_source, $postmeta_identity_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+        $db->close();
+    }
+    $db = open_db($postmeta_identity_source);
+    $db->exec("INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES (20, 10, '_thumbnail_id', '101')");
+    $db->close();
+    $db = open_db($postmeta_identity_target);
+    $db->exec("INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES (20, 10, '_thumbnail_id', '202')");
+    $db->close();
+
+    $postmeta_identity_merge = cow_merge_databases($postmeta_identity_base, $postmeta_identity_source, $postmeta_identity_target, $postmeta_identity_metadata, 'feature-postmeta-identity-review', 'main');
+    $postmeta_identity_run_id = (int)$postmeta_identity_merge['run_id'];
+    assert_same($postmeta_identity_merge['status'], 'completed_with_conflicts', 'postmeta semantic identity fixture starts with a same-ID row conflict');
+    $postmeta_identity_conflict_id = (int)scalar($postmeta_identity_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'wp_postmeta' AND conflict_type = 'row-insert-collision'");
+    assert_true($postmeta_identity_conflict_id > 0, 'postmeta semantic identity fixture records the row conflict');
+    cow_merge_review_record(
+        $postmeta_identity_metadata,
+        'conflict',
+        $postmeta_identity_conflict_id,
+        'reviewed',
+        'Review source thumbnail metadata before applying over target metadata.',
+        'cow-test'
+    );
+
+    $db = open_db($postmeta_identity_target);
+    $db->exec("UPDATE wp_postmeta SET meta_key = '_wp_page_template', meta_value = 'templates/special.html' WHERE meta_id = 20");
+    $db->close();
+
+    $postmeta_identity_revalidated = cow_merge_revalidate_reviewed_conflicts($postmeta_identity_metadata, $postmeta_identity_run_id, 'cow-revalidate');
+    assert_same($postmeta_identity_revalidated['checked'], 1, 'postmeta semantic revalidation checks the reviewed row conflict');
+    assert_same($postmeta_identity_revalidated['stale'], 1, 'postmeta semantic revalidation detects target semantic replacement');
+    assert_same($postmeta_identity_revalidated['carried'], 1, 'postmeta semantic revalidation carries semantically replaced metadata to needs-action');
+    assert_same(
+        scalar($postmeta_identity_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $postmeta_identity_conflict_id ORDER BY id DESC LIMIT 1"),
+        'incompatible',
+        'postmeta semantic revalidation classifies changed post_id/meta_key identity as incompatible'
+    );
+    $postmeta_identity_audit = cow_merge_audit_report($postmeta_identity_metadata, $postmeta_identity_run_id, 10, ['records' => 'conflicts']);
+    $postmeta_identity_conflicts = array_values(array_filter($postmeta_identity_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $postmeta_identity_conflict_id));
+    assert_same($postmeta_identity_conflicts[0]['revalidation_class'] ?? null, 'incompatible', 'postmeta semantic audit exposes incompatible replacement');
+    assert_true(str_contains((string)($postmeta_identity_conflicts[0]['stale_reason'] ?? ''), 'semantic identity'), 'postmeta semantic stale reason explains semantic identity drift');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($postmeta_identity_metadata, $postmeta_identity_conflict_id, 'source', true, 'Do not apply source thumbnail metadata over replacement template metadata.', 'cow-test', true),
+        'latest merge revalidation is incompatible',
+        'after-revalidate blocks source resolution over an incompatible postmeta semantic replacement'
+    );
 } finally {
     remove_tree($tmp);
 }
