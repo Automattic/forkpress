@@ -2697,7 +2697,7 @@ fn compact_macos_apfs_sparsebundle_file_view_impl(layout: &Layout) -> Result<()>
     }
 
     let mut output = None;
-    for attempt in 0..5 {
+    for attempt in 0..20 {
         let attempt_output = hdiutil_output([
             OsString::from("compact"),
             layout.macos_cow_image.as_os_str().to_owned(),
@@ -2708,10 +2708,11 @@ fn compact_macos_apfs_sparsebundle_file_view_impl(layout: &Layout) -> Result<()>
         }
 
         let message = hdiutil_failure_message(&attempt_output);
-        if !macos_hdiutil_compact_retryable_message(&message) || attempt == 4 {
+        if !macos_hdiutil_compact_retryable_message(&message) || attempt == 19 {
             bail!("{message}");
         }
-        std::thread::sleep(std::time::Duration::from_millis(250 * (attempt + 1) as u64));
+        let delay = 250 * (attempt + 1) as u64;
+        std::thread::sleep(std::time::Duration::from_millis(delay.min(2_000)));
     }
     let output = output.expect("compact retry loop must return output or fail");
 
