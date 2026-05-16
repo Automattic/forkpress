@@ -167,7 +167,20 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
             ],
         ];
     }
-    if ($uploads_root !== '' && !is_file($uploads_root . '/' . $attached_file)) {
+    if ($unsafe_upload_path($attached_file)) {
+        $findings[] = [
+            'plugin' => 'forkpress-wp-media',
+            'object' => 'attachment:' . $row['ID'],
+            'reason' => 'attachment original file metadata points outside uploads',
+            'type' => 'plugin-wp-media-unsafe-path',
+            'tables' => ['wp_posts', 'wp_postmeta'],
+            'validator' => 'forkpress-wp-media@1',
+            'candidate' => [
+                'attached_file' => $attached_file,
+                'file' => $attached_file,
+            ],
+        ];
+    } elseif ($uploads_root !== '' && !is_file($uploads_root . '/' . $attached_file)) {
         $findings[] = [
             'plugin' => 'forkpress-wp-media',
             'object' => 'attachment:' . $row['ID'],
@@ -339,6 +352,12 @@ PHP);
             ],
         ],
     ]);
+    $unsafe_attached_id = insert_attachment($db, 'Source media unsafe attached path', '../source-unsafe-attached.jpg', [
+        'file' => '../source-unsafe-attached.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [],
+    ]);
     $db->close();
 
     $result = cow_merge_branch_state(
@@ -355,7 +374,7 @@ PHP);
 
     assert_same($result['status'], 'completed_with_conflicts', 'media validator holds incomplete generated-size metadata for review');
     assert_same((int)($result['plugin_validators'] ?? 0), 1, 'media validator is discovered from mu-plugins during merge');
-    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 6, 'media validator records generated-size, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
+    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 7, 'media validator records generated-size, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
     assert_same(
         scalar($target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-generated-missing-file-key.jpg',
@@ -408,15 +427,21 @@ PHP);
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-media-unsafe-path',
     ]);
-    assert_same(count($unsafe_audit['conflicts']), 1, 'media validator exposes unsafe generated upload paths as plugin-scoped audit conflicts');
-    $unsafe_preview = (string)($unsafe_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_same(count($unsafe_audit['conflicts']), 2, 'media validator exposes unsafe primary and generated upload paths as plugin-scoped audit conflicts');
+    $unsafe_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $unsafe_audit['conflicts']));
     assert_true(str_contains($unsafe_preview, 'source-unsafe-generated.jpg'), 'media validator unsafe-path audit includes the affected attachment');
     assert_true(str_contains($unsafe_preview, '../source-unsafe-generated-150x150.jpg'), 'media validator unsafe-path audit includes the rejected generated path');
+    assert_true(str_contains($unsafe_preview, '../source-unsafe-attached.jpg'), 'media validator unsafe-path audit includes the rejected attached file path');
     assert_true(is_file($target_root . '/wp-content/uploads/2026/05/source-unsafe-generated.jpg'), 'media validator keeps the unsafe-path attachment original file for review');
     assert_same(
         scalar($target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $unsafe_generated_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-unsafe-generated.jpg',
         'media validator leaves unsafe-path attachment metadata available for review'
+    );
+    assert_same(
+        scalar($target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $unsafe_attached_id AND meta_key = '_wp_attached_file'"),
+        '../source-unsafe-attached.jpg',
+        'media validator leaves unsafe attached-path metadata available for review'
     );
 
     $duplicate_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
