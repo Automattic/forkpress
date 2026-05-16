@@ -210,6 +210,13 @@ Review resolution should initially support only target acceptance and
 re-audit-after-change. Source application should require a plugin merge driver,
 not just a validator.
 
+When a validator rerun changes evidence for a reviewed plugin conflict,
+stale-audit revalidation records `replacement-evidence`, links to the newer
+validator conflict row, and appends a `revalidation-required` conflict event
+with `lifecycle_state = needs-action`. Plugin UI and API surfaces should use
+that event stream to show the reviewed -> needs-action transition instead of
+inferring state from review-note text.
+
 ## Test Shape
 
 Each plugin validator claim needs both:
