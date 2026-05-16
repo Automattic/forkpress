@@ -54,6 +54,13 @@ cover `wp_posts` `post_type`, `wp_options` `option_name`, `wp_postmeta`
 `post_id`/`meta_key`, term slugs, term taxonomy `term_id`/`taxonomy`, termmeta
 `term_id`/`meta_key`, user logins, usermeta `user_id`/`meta_key`, comment
 `comment_post_ID`/`comment_type`, and commentmeta `comment_id`/`meta_key`.
+Custom and plugin tables also get a conservative logical-identity check when a
+row has a non-primary-key `UNIQUE` index with non-NULL values. If source or
+target changes that unique key after review, revalidation classifies the review
+as `incompatible`. This does not infer plugin-specific repair semantics; it
+only prevents guarded `--after-revalidate` resolution from applying a reviewed
+row over a different logical object that happens to reuse the same numeric
+primary key.
 Plugin validator conflicts are classified as `unchanged` when the rerun reports
 the same evidence and `replacement-evidence` when the validator reports changed
 evidence for the same plugin object. The replacement can come from changed
@@ -108,12 +115,14 @@ To support this cleanly, audit metadata should retain:
   stores `unchanged`, `compatible-target-drift`, `compatible-source-drift`,
   `missing`, `incompatible`, `replacement-evidence`, or `unclassified`;
   plugin validators can supply changed `source`, `target`, and candidate
-  evidence through replacement findings.
+  evidence through replacement findings. The same `incompatible` class is used
+  when a custom/plugin table's non-primary-key `UNIQUE` logical key changes
+  after review.
   Schema index/view/trigger/table-restore/table-rebuild conflicts can record
   current source/target SQL but stay `unclassified`. Future work should add
-  richer schema-specific evidence for dependency rebuild plans, plus broader
-  incompatible logical-identity cases beyond the currently supported WordPress
-  row fingerprints and no-primary-key rowid reuse.
+  richer schema-specific evidence for dependency rebuild plans, plus explicit
+  plugin-supplied logical identities where schema `UNIQUE` keys are not enough
+  to prove object identity.
 - Logical identity fingerprint separate from the raw payload.
 - Re-audit timestamp and merge run id.
 
@@ -159,14 +168,16 @@ fingerprint, and plugin validator reruns that deduplicate unchanged evidence or
 carry reviewed plugin conflicts back to `needs-action` with
 `replacement-evidence`, replacement validator payloads, and replacement
 conflict links when the validator reports changed evidence for the same plugin
-object, including explicit changed plugin source evidence. Schema
+object, including explicit changed plugin source evidence. Custom/plugin
+non-primary-key `UNIQUE` logical-key replacements are also classified as
+`incompatible` for both source and target drift. Schema
 index/view/trigger/table-restore/table-rebuild conflicts record changed
 source/target SQL and carry reviewed conflicts back to `needs-action` as
 `unclassified`.
 
 Future classifier tests should cover richer dependency rebuild-plan evidence and
-plugin/custom primary-key row conflicts where the row keeps the same key but a
-higher-level logical fingerprint proves it now represents a different object.
+explicit plugin-supplied logical fingerprints for primary-key row conflicts
+where schema `UNIQUE` keys are not enough to prove object identity.
 
 The existing stale-resolution tests in `tests/cow/merge.php` should remain.
 They prove stale resolutions are blocked. New tests should prove reviewers get

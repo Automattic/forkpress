@@ -799,6 +799,112 @@ try {
             $case['label'] . ' after-revalidate blocks source resolution over incompatible replacement'
         );
     }
+
+    $custom_unique_target_base = $tmp . '/custom-unique-target-base.sqlite';
+    $custom_unique_target_source = $tmp . '/custom-unique-target-source.sqlite';
+    $custom_unique_target_target = $tmp . '/custom-unique-target-target.sqlite';
+    $custom_unique_target_metadata = $tmp . '/.forkpress/cow/merge/custom-unique-target-metadata.sqlite';
+    foreach ([$custom_unique_target_base, $custom_unique_target_source, $custom_unique_target_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_unique_objects (object_id INTEGER PRIMARY KEY, object_key TEXT NOT NULL UNIQUE, label TEXT NOT NULL)');
+        $db->close();
+    }
+    $db = open_db($custom_unique_target_source);
+    $db->exec("INSERT INTO plugin_unique_objects (object_id, object_key, label) VALUES (200, 'source-object', 'Source object')");
+    $db->close();
+    $db = open_db($custom_unique_target_target);
+    $db->exec("INSERT INTO plugin_unique_objects (object_id, object_key, label) VALUES (200, 'target-object', 'Target object')");
+    $db->close();
+
+    $custom_unique_target_merge = cow_merge_databases($custom_unique_target_base, $custom_unique_target_source, $custom_unique_target_target, $custom_unique_target_metadata, 'feature-custom-unique-target-review', 'main');
+    $custom_unique_target_run_id = (int)$custom_unique_target_merge['run_id'];
+    assert_same($custom_unique_target_merge['status'], 'completed_with_conflicts', 'custom unique-key target identity fixture starts with a same-ID row conflict');
+    $custom_unique_target_conflict_id = (int)scalar($custom_unique_target_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_unique_objects' AND conflict_type = 'row-insert-collision'");
+    assert_true($custom_unique_target_conflict_id > 0, 'custom unique-key target identity fixture records the row conflict');
+    cow_merge_review_record(
+        $custom_unique_target_metadata,
+        'conflict',
+        $custom_unique_target_conflict_id,
+        'reviewed',
+        'Review source plugin object before applying over target plugin object.',
+        'cow-test'
+    );
+
+    $db = open_db($custom_unique_target_target);
+    $db->exec("UPDATE plugin_unique_objects SET object_key = 'replacement-target-object', label = 'Replacement target object' WHERE object_id = 200");
+    $db->close();
+
+    $custom_unique_target_revalidated = cow_merge_revalidate_reviewed_conflicts($custom_unique_target_metadata, $custom_unique_target_run_id, 'cow-revalidate');
+    assert_same($custom_unique_target_revalidated['checked'], 1, 'custom unique-key target revalidation checks the reviewed row conflict');
+    assert_same($custom_unique_target_revalidated['stale'], 1, 'custom unique-key target revalidation detects target logical replacement');
+    assert_same($custom_unique_target_revalidated['carried'], 1, 'custom unique-key target revalidation carries logical replacement to needs-action');
+    assert_same(
+        scalar($custom_unique_target_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $custom_unique_target_conflict_id ORDER BY id DESC LIMIT 1"),
+        'incompatible',
+        'custom unique-key target revalidation classifies changed logical identity as incompatible'
+    );
+    $custom_unique_target_audit = cow_merge_audit_report($custom_unique_target_metadata, $custom_unique_target_run_id, 10, ['records' => 'conflicts']);
+    $custom_unique_target_conflicts = array_values(array_filter($custom_unique_target_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $custom_unique_target_conflict_id));
+    assert_same($custom_unique_target_conflicts[0]['revalidation_class'] ?? null, 'incompatible', 'custom unique-key target audit exposes incompatible replacement');
+    assert_true(str_contains((string)($custom_unique_target_conflicts[0]['stale_reason'] ?? ''), 'semantic identity'), 'custom unique-key target stale reason explains logical identity drift');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($custom_unique_target_metadata, $custom_unique_target_conflict_id, 'source', true, 'Do not apply source over replacement plugin object.', 'cow-test', true),
+        'latest merge revalidation is incompatible',
+        'custom unique-key target after-revalidate blocks source resolution over incompatible replacement'
+    );
+
+    $custom_unique_source_base = $tmp . '/custom-unique-source-base.sqlite';
+    $custom_unique_source_source = $tmp . '/custom-unique-source-source.sqlite';
+    $custom_unique_source_target = $tmp . '/custom-unique-source-target.sqlite';
+    $custom_unique_source_metadata = $tmp . '/.forkpress/cow/merge/custom-unique-source-metadata.sqlite';
+    foreach ([$custom_unique_source_base, $custom_unique_source_source, $custom_unique_source_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_unique_objects (object_id INTEGER PRIMARY KEY, object_key TEXT NOT NULL UNIQUE, label TEXT NOT NULL)');
+        $db->close();
+    }
+    $db = open_db($custom_unique_source_source);
+    $db->exec("INSERT INTO plugin_unique_objects (object_id, object_key, label) VALUES (201, 'source-object-before-review', 'Source object before review')");
+    $db->close();
+    $db = open_db($custom_unique_source_target);
+    $db->exec("INSERT INTO plugin_unique_objects (object_id, object_key, label) VALUES (201, 'target-object-before-review', 'Target object before review')");
+    $db->close();
+
+    $custom_unique_source_merge = cow_merge_databases($custom_unique_source_base, $custom_unique_source_source, $custom_unique_source_target, $custom_unique_source_metadata, 'feature-custom-unique-source-review', 'main');
+    $custom_unique_source_run_id = (int)$custom_unique_source_merge['run_id'];
+    assert_same($custom_unique_source_merge['status'], 'completed_with_conflicts', 'custom unique-key source identity fixture starts with a same-ID row conflict');
+    $custom_unique_source_conflict_id = (int)scalar($custom_unique_source_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_unique_objects' AND conflict_type = 'row-insert-collision'");
+    assert_true($custom_unique_source_conflict_id > 0, 'custom unique-key source identity fixture records the row conflict');
+    cow_merge_review_record(
+        $custom_unique_source_metadata,
+        'conflict',
+        $custom_unique_source_conflict_id,
+        'reviewed',
+        'Apply source plugin object if it is still the reviewed object.',
+        'cow-test'
+    );
+
+    $db = open_db($custom_unique_source_source);
+    $db->exec("UPDATE plugin_unique_objects SET object_key = 'replacement-source-object', label = 'Replacement source object' WHERE object_id = 201");
+    $db->close();
+
+    $custom_unique_source_revalidated = cow_merge_revalidate_reviewed_conflicts($custom_unique_source_metadata, $custom_unique_source_run_id, 'cow-revalidate');
+    assert_same($custom_unique_source_revalidated['checked'], 1, 'custom unique-key source revalidation checks the reviewed row conflict');
+    assert_same($custom_unique_source_revalidated['stale'], 1, 'custom unique-key source revalidation detects source logical replacement');
+    assert_same($custom_unique_source_revalidated['carried'], 1, 'custom unique-key source revalidation carries logical replacement to needs-action');
+    assert_same(
+        scalar($custom_unique_source_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $custom_unique_source_conflict_id ORDER BY id DESC LIMIT 1"),
+        'incompatible',
+        'custom unique-key source revalidation classifies changed logical identity as incompatible'
+    );
+    $custom_unique_source_audit = cow_merge_audit_report($custom_unique_source_metadata, $custom_unique_source_run_id, 10, ['records' => 'conflicts']);
+    $custom_unique_source_conflicts = array_values(array_filter($custom_unique_source_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $custom_unique_source_conflict_id));
+    assert_same($custom_unique_source_conflicts[0]['revalidation_class'] ?? null, 'incompatible', 'custom unique-key source audit exposes incompatible replacement');
+    assert_true(str_contains((string)($custom_unique_source_conflicts[0]['stale_reason'] ?? ''), 'semantic identity'), 'custom unique-key source stale reason explains logical identity drift');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($custom_unique_source_metadata, $custom_unique_source_conflict_id, 'source', true, 'Do not apply replacement source plugin object.', 'cow-test', true),
+        'latest merge revalidation is incompatible',
+        'custom unique-key source after-revalidate blocks source resolution over incompatible replacement'
+    );
 } finally {
     remove_tree($tmp);
 }

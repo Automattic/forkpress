@@ -1497,7 +1497,7 @@ function cow_merge_row_values_equal(?array $a, ?array $b, array $columns): bool 
     return true;
 }
 
-function cow_merge_row_semantic_identity(string $table, ?array $row): ?array {
+function cow_merge_row_profile_semantic_identity(string $table, ?array $row): ?array {
     if ($row === null) {
         return null;
     }
@@ -1525,6 +1525,77 @@ function cow_merge_row_semantic_identity(string $table, ?array $row): ?array {
         $identity[$column] = $row[$column];
     }
     return $identity;
+}
+
+function cow_merge_row_unique_semantic_identities(SQLite3 $db, string $table, ?array $row): array {
+    if ($row === null) {
+        return [];
+    }
+    $pk_cols = cow_merge_pk_cols($db, $table);
+    $identities = [];
+    foreach (cow_merge_unique_indexes($db, $table) as $index) {
+        $terms = $index['terms'] ?? [];
+        if (!is_array($terms) || !$terms) {
+            continue;
+        }
+        $term_columns = [];
+        $values = [];
+        $complete = true;
+        foreach ($terms as $term) {
+            $type = (string)($term['type'] ?? '');
+            if ($type === 'column') {
+                $column = (string)($term['name'] ?? '');
+                if ($column === '' || !array_key_exists($column, $row) || $row[$column] === null) {
+                    $complete = false;
+                    break;
+                }
+                $term_columns[] = $column;
+                $values[] = $row[$column];
+                continue;
+            }
+            if ($type === 'expression') {
+                $evaluated = cow_merge_row_expression_value($db, $row, (string)($term['sql'] ?? ''));
+                if (!($evaluated['ok'] ?? false) || $evaluated['value'] === null) {
+                    $complete = false;
+                    break;
+                }
+                $term_columns[] = null;
+                $values[] = $evaluated['value'];
+                continue;
+            }
+            $complete = false;
+            break;
+        }
+        if (!$complete) {
+            continue;
+        }
+        $partial_where = $index['where'] ?? null;
+        if (is_string($partial_where) && !cow_merge_row_matches_partial_index_where($db, $row, $partial_where)) {
+            continue;
+        }
+        if ($pk_cols && $term_columns === $pk_cols) {
+            continue;
+        }
+        $identities[] = [
+            'kind' => 'unique-index',
+            'table' => $table,
+            'index' => (string)($index['name'] ?? ''),
+            'values' => $values,
+        ];
+    }
+    return $identities;
+}
+
+function cow_merge_row_semantic_identities(SQLite3 $db, string $table, ?array $row): array {
+    $identities = [];
+    $profile_identity = cow_merge_row_profile_semantic_identity($table, $row);
+    if ($profile_identity !== null) {
+        $identities[] = ['kind' => 'profile', 'identity' => $profile_identity];
+    }
+    foreach (cow_merge_row_unique_semantic_identities($db, $table, $row) as $identity) {
+        $identities[] = $identity;
+    }
+    return $identities;
 }
 
 function cow_merge_wordpress_target_local_option_name(string $option_name): bool {
@@ -11406,6 +11477,8 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
             $current_source_payload = (string)($conflict['source_payload'] ?? '');
             $source_db = (string)($conflict['source_db'] ?? '');
             $source_current_row = null;
+            $audited_source_semantic_identities = [];
+            $current_source_semantic_identities = [];
             if ($source_db !== '' && is_file($source_db)) {
                 $source = cow_merge_open_db($source_db, SQLITE3_OPEN_READONLY);
                 try {
@@ -11428,9 +11501,17 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
                         $source_fresh = cow_merge_row_values_equal($source_current_row, $source_value, cow_merge_all_columns(array_keys($source_value), array_keys($source_current_row)));
                         $current_source_payload = cow_merge_payload_json($source_current_row);
                     }
+                    if (is_array($source_value)) {
+                        $audited_source_semantic_identities = cow_merge_row_semantic_identities($source, $table, $source_value);
+                    }
+                    if (is_array($source_current_row)) {
+                        $current_source_semantic_identities = cow_merge_row_semantic_identities($source, $table, $source_current_row);
+                    }
                 } catch (Throwable) {
                     $source_fresh = true;
                     $current_source_payload = (string)($conflict['source_payload'] ?? '');
+                    $audited_source_semantic_identities = [];
+                    $current_source_semantic_identities = [];
                 } finally {
                     $source->close();
                 }
@@ -11487,11 +11568,10 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
             $semantic_revalidation_class = null;
             $semantic_stale_reason = null;
             if (!$fresh && is_array($current) && is_array($target_value)) {
-                $audited_semantic_identity = cow_merge_row_semantic_identity($table, $target_value);
-                $current_semantic_identity = cow_merge_row_semantic_identity($table, $current);
+                $audited_semantic_identity = cow_merge_row_semantic_identities($target, $table, $target_value);
+                $current_semantic_identity = cow_merge_row_semantic_identities($target, $table, $current);
                 if (
-                    $audited_semantic_identity !== null
-                    && $current_semantic_identity !== null
+                    ($audited_semantic_identity !== [] || $current_semantic_identity !== [])
                     && !cow_merge_values_equal($audited_semantic_identity, $current_semantic_identity)
                 ) {
                     $semantic_revalidation_class = 'incompatible';
@@ -11502,12 +11582,9 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
             $source_semantic_revalidation_class = null;
             $source_semantic_stale_reason = null;
             if (!$source_fresh && is_array($source_current_row) && is_array($source_value)) {
-                $audited_source_semantic_identity = cow_merge_row_semantic_identity($table, $source_value);
-                $current_source_semantic_identity = cow_merge_row_semantic_identity($table, $source_current_row);
                 if (
-                    $audited_source_semantic_identity !== null
-                    && $current_source_semantic_identity !== null
-                    && !cow_merge_values_equal($audited_source_semantic_identity, $current_source_semantic_identity)
+                    ($audited_source_semantic_identities !== [] || $current_source_semantic_identities !== [])
+                    && !cow_merge_values_equal($audited_source_semantic_identities, $current_source_semantic_identities)
                 ) {
                     $source_semantic_revalidation_class = 'incompatible';
                     $source_semantic_stale_reason = 'source row semantic identity no longer matches audited source payload; rerun merge-audit before resolving';
