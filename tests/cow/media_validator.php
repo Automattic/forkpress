@@ -136,6 +136,12 @@ $res = $db->query("SELECT p.ID, f.meta_value AS attached_file, m.meta_value AS m
     ORDER BY p.ID");
 $findings = [];
 $claimed_uploads = [];
+$unsafe_upload_path = static function (string $relative_file): bool {
+    return $relative_file === '' ||
+        str_starts_with($relative_file, '/') ||
+        str_contains($relative_file, "\0") ||
+        in_array('..', explode('/', str_replace('\\', '/', $relative_file)), true);
+};
 while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
     $metadata = @unserialize((string)$row['metadata']);
     if (!is_array($metadata)) {
@@ -177,7 +183,24 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
     $directory = trim(dirname($metadata_file !== '' ? $metadata_file : $attached_file), '.');
     foreach (($metadata['sizes'] ?? []) as $size_name => $size) {
         if (is_array($size) && isset($size['file'])) {
-            $relative_files[] = trim($directory . '/' . str_replace('\\', '/', (string)$size['file']), '/');
+            $generated_file = trim($directory . '/' . str_replace('\\', '/', (string)$size['file']), '/');
+            if ($unsafe_upload_path($generated_file)) {
+                $findings[] = [
+                    'plugin' => 'forkpress-wp-media',
+                    'object' => 'attachment:' . $row['ID'],
+                    'reason' => 'attachment generated size metadata points outside uploads',
+                    'type' => 'plugin-wp-media-unsafe-path',
+                    'tables' => ['wp_posts', 'wp_postmeta'],
+                    'validator' => 'forkpress-wp-media@1',
+                    'candidate' => [
+                        'attached_file' => $attached_file,
+                        'size' => (string)$size_name,
+                        'generated_file' => $generated_file,
+                    ],
+                ];
+                continue;
+            }
+            $relative_files[] = $generated_file;
             continue;
         }
         $findings[] = [
@@ -243,6 +266,7 @@ PHP);
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-duplicate-a.jpg', "source duplicate original a\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-duplicate-b.jpg', "source duplicate original b\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-duplicate-shared-150x150.jpg', "source duplicate shared generated size\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-unsafe-generated.jpg', "source unsafe generated original bytes\n");
     $db = open_db($source);
     $attachment_id = insert_attachment($db, 'Source media generated missing file key', '2026/05/source-generated-missing-file-key.jpg', [
         'file' => '2026/05/source-generated-missing-file-key.jpg',
@@ -303,6 +327,18 @@ PHP);
             ],
         ],
     ]);
+    $unsafe_generated_id = insert_attachment($db, 'Source media unsafe generated path', '2026/05/source-unsafe-generated.jpg', [
+        'file' => '2026/05/source-unsafe-generated.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => '../source-unsafe-generated-150x150.jpg',
+                'width' => 150,
+                'height' => 150,
+            ],
+        ],
+    ]);
     $db->close();
 
     $result = cow_merge_branch_state(
@@ -319,7 +355,7 @@ PHP);
 
     assert_same($result['status'], 'completed_with_conflicts', 'media validator holds incomplete generated-size metadata for review');
     assert_same((int)($result['plugin_validators'] ?? 0), 1, 'media validator is discovered from mu-plugins during merge');
-    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 5, 'media validator records generated-size, missing-file, metadata-file drift, and duplicate upload conflicts');
+    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 6, 'media validator records generated-size, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
     assert_same(
         scalar($target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-generated-missing-file-key.jpg',
@@ -366,6 +402,22 @@ PHP);
     $mismatch_preview = (string)($mismatch_audit['conflicts'][0]['chosen_preview'] ?? '');
     assert_true(str_contains($mismatch_preview, 'source-metadata-file-mismatch-attached.jpg'), 'media validator mismatch audit includes the attached file');
     assert_true(str_contains($mismatch_preview, 'source-metadata-file-mismatch-metadata.jpg'), 'media validator mismatch audit includes the metadata file');
+
+    $unsafe_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-media-unsafe-path',
+    ]);
+    assert_same(count($unsafe_audit['conflicts']), 1, 'media validator exposes unsafe generated upload paths as plugin-scoped audit conflicts');
+    $unsafe_preview = (string)($unsafe_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_true(str_contains($unsafe_preview, 'source-unsafe-generated.jpg'), 'media validator unsafe-path audit includes the affected attachment');
+    assert_true(str_contains($unsafe_preview, '../source-unsafe-generated-150x150.jpg'), 'media validator unsafe-path audit includes the rejected generated path');
+    assert_true(is_file($target_root . '/wp-content/uploads/2026/05/source-unsafe-generated.jpg'), 'media validator keeps the unsafe-path attachment original file for review');
+    assert_same(
+        scalar($target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $unsafe_generated_id AND meta_key = '_wp_attached_file'"),
+        '2026/05/source-unsafe-generated.jpg',
+        'media validator leaves unsafe-path attachment metadata available for review'
+    );
 
     $duplicate_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'plugin',
