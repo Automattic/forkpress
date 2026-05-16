@@ -82,14 +82,15 @@ function scalar(string $db_path, string $sql): mixed {
 
 function create_media_db(string $path): void {
     $db = open_db($path);
-    $db->exec("CREATE TABLE wp_posts (ID INTEGER PRIMARY KEY AUTOINCREMENT, post_title TEXT, post_content TEXT, post_status TEXT, post_type TEXT NOT NULL DEFAULT 'post', guid TEXT NOT NULL DEFAULT '')");
+    $db->exec("CREATE TABLE wp_posts (ID INTEGER PRIMARY KEY AUTOINCREMENT, post_title TEXT, post_content TEXT, post_status TEXT, post_type TEXT NOT NULL DEFAULT 'post', post_mime_type TEXT NOT NULL DEFAULT '', guid TEXT NOT NULL DEFAULT '')");
     $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
     $db->close();
 }
 
-function insert_attachment(SQLite3 $db, string $title, string $attached_file, array $metadata): int {
-    $stmt = $db->prepare("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, guid) VALUES (:title, '', 'inherit', 'attachment', :guid)");
+function insert_attachment(SQLite3 $db, string $title, string $attached_file, array $metadata, string $mime_type = 'image/jpeg'): int {
+    $stmt = $db->prepare("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_mime_type, guid) VALUES (:title, '', 'inherit', 'attachment', :mime_type, :guid)");
     $stmt->bindValue(':title', $title, SQLITE3_TEXT);
+    $stmt->bindValue(':mime_type', $mime_type, SQLITE3_TEXT);
     $stmt->bindValue(':guid', 'wp-content/uploads/' . $attached_file, SQLITE3_TEXT);
     $stmt->execute();
     $attachment_id = (int)$db->lastInsertRowID();
@@ -104,7 +105,7 @@ function insert_attachment(SQLite3 $db, string $title, string $attached_file, ar
 }
 
 function insert_attachment_raw_metadata(SQLite3 $db, string $title, string $attached_file, string $metadata): int {
-    $stmt = $db->prepare("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, guid) VALUES (:title, '', 'inherit', 'attachment', :guid)");
+    $stmt = $db->prepare("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_mime_type, guid) VALUES (:title, '', 'inherit', 'attachment', 'image/jpeg', :guid)");
     $stmt->bindValue(':title', $title, SQLITE3_TEXT);
     $stmt->bindValue(':guid', 'wp-content/uploads/' . $attached_file, SQLITE3_TEXT);
     $stmt->execute();
@@ -120,7 +121,7 @@ function insert_attachment_raw_metadata(SQLite3 $db, string $title, string $atta
 }
 
 function insert_attachment_with_single_meta(SQLite3 $db, string $title, string $meta_key, string $meta_value): int {
-    $stmt = $db->prepare("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, guid) VALUES (:title, '', 'inherit', 'attachment', '')");
+    $stmt = $db->prepare("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_mime_type, guid) VALUES (:title, '', 'inherit', 'attachment', 'image/jpeg', '')");
     $stmt->bindValue(':title', $title, SQLITE3_TEXT);
     $stmt->execute();
     $attachment_id = (int)$db->lastInsertRowID();
@@ -159,7 +160,7 @@ try {
 $db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
 $target_root = rtrim((string)getenv('FORKPRESS_MERGE_TARGET_ROOT'), '/');
 $uploads_root = $target_root === '' ? '' : $target_root . '/wp-content/uploads';
-$res = $db->query("SELECT p.ID, f.meta_value AS attached_file, m.meta_value AS metadata
+$res = $db->query("SELECT p.ID, p.post_mime_type, f.meta_value AS attached_file, m.meta_value AS metadata
     FROM wp_posts p
     LEFT JOIN wp_postmeta f ON f.post_id = p.ID AND f.meta_key = '_wp_attached_file'
     LEFT JOIN wp_postmeta m ON m.post_id = p.ID AND m.meta_key = '_wp_attachment_metadata'
@@ -211,6 +212,32 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
     }
     $attached_file = (string)$row['attached_file'];
     $metadata_file = (string)($metadata['file'] ?? '');
+    $expected_mime_by_extension = [
+        'jpg' => 'image/jpeg',
+        'jpeg' => 'image/jpeg',
+        'png' => 'image/png',
+        'gif' => 'image/gif',
+        'webp' => 'image/webp',
+    ];
+    $extension = strtolower((string)pathinfo(str_replace('\\', '/', $attached_file), PATHINFO_EXTENSION));
+    $expected_mime_type = $expected_mime_by_extension[$extension] ?? null;
+    $post_mime_type = strtolower((string)($row['post_mime_type'] ?? ''));
+    if ($expected_mime_type !== null && $post_mime_type !== $expected_mime_type) {
+        $findings[] = [
+            'plugin' => 'forkpress-wp-media',
+            'object' => 'attachment:' . $row['ID'],
+            'reason' => 'attachment post MIME type does not match the uploaded file extension',
+            'type' => 'plugin-wp-media-mime-drift',
+            'tables' => ['wp_posts', 'wp_postmeta'],
+            'validator' => 'forkpress-wp-media@1',
+            'candidate' => [
+                'attachment_id' => (int)$row['ID'],
+                'attached_file' => $attached_file,
+                'post_mime_type' => (string)($row['post_mime_type'] ?? ''),
+                'expected_mime_type' => $expected_mime_type,
+            ],
+        ];
+    }
     $relative_files = [$attached_file];
     if ($metadata_file !== '' && $metadata_file !== $attached_file) {
         $relative_files[] = $metadata_file;
@@ -569,6 +596,7 @@ PHP);
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-filesize-drift.jpg', "source filesize drift bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-filesize.jpg', "source generated filesize original bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-filesize-150x150.jpg', "source generated filesize thumb bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-mime-drift.jpg', "source MIME drift image bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-dimensions.jpg', "source invalid generated dimensions original bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-dimensions-150x150.jpg', "source invalid generated dimensions thumb bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-subdir.jpg', "source generated subdir original bytes\n");
@@ -651,6 +679,12 @@ PHP);
             ],
         ],
     ]);
+    $mime_drift_id = insert_attachment($db, 'Source media MIME type drift', '2026/05/source-mime-drift.jpg', [
+        'file' => '2026/05/source-mime-drift.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [],
+    ], 'application/pdf');
     $generated_dimensions_id = insert_attachment($db, 'Source media invalid generated dimensions', '2026/05/source-generated-dimensions.jpg', [
         'file' => '2026/05/source-generated-dimensions.jpg',
         'width' => 640,
@@ -801,7 +835,7 @@ PHP);
 
     assert_same($result['status'], 'completed_with_conflicts', 'media validator holds incomplete generated-size metadata for review');
     assert_same((int)($result['plugin_validators'] ?? 0), 1, 'media validator is discovered from mu-plugins during merge');
-    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 24, 'media validator records missing required metadata, invalid metadata, dimensions, filesize drift, generated-size, original-image, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
+    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 25, 'media validator records missing required metadata, invalid metadata, dimensions, filesize and MIME drift, generated-size, original-image, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
     assert_same(
         scalar($target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-generated-missing-file-key.jpg',
@@ -915,6 +949,18 @@ PHP);
     $meta_db->close();
     assert_true($generated_filesize_recorded, 'media validator filesize audit payload identifies the affected generated file');
     assert_true(str_contains($filesize_preview, (string)$generated_filesize_drift_id), 'media validator filesize audit includes the generated filesize attachment ID');
+
+    $mime_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-media-mime-drift',
+    ]);
+    assert_same(count($mime_audit['conflicts']), 1, 'media validator exposes attachment MIME drift as a plugin-scoped audit conflict');
+    $mime_preview = (string)($mime_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_true(str_contains($mime_preview, 'source-mime-drift.jpg'), 'media validator MIME drift audit includes the affected attachment');
+    assert_true(str_contains($mime_preview, 'application/pdf'), 'media validator MIME drift audit includes the declared MIME type');
+    assert_true(str_contains($mime_preview, 'image/jpeg'), 'media validator MIME drift audit includes the expected MIME type');
+    assert_true(str_contains($mime_preview, (string)$mime_drift_id), 'media validator MIME drift audit includes the affected attachment ID');
 
     $generated_dimension_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'plugin',
