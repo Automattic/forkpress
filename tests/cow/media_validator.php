@@ -241,7 +241,27 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
     $directory = trim(dirname($metadata_file !== '' ? $metadata_file : $attached_file), '.');
     foreach (($metadata['sizes'] ?? []) as $size_name => $size) {
         if (is_array($size) && isset($size['file'])) {
-            $generated_file = trim($directory . '/' . str_replace('\\', '/', (string)$size['file']), '/');
+            $size_file = str_replace('\\', '/', (string)$size['file']);
+            if ($size_file === '' || (str_contains($size_file, '/') && !$unsafe_upload_path($size_file))) {
+                $findings[] = [
+                    'plugin' => 'forkpress-wp-media',
+                    'object' => 'attachment:' . $row['ID'],
+                    'reason' => 'attachment generated size file is not a non-empty basename',
+                    'type' => 'plugin-wp-media-generated-file-drift',
+                    'tables' => ['wp_posts', 'wp_postmeta'],
+                    'validator' => 'forkpress-wp-media@1',
+                    'candidate' => [
+                        'attachment_id' => (int)$row['ID'],
+                        'attached_file' => $attached_file,
+                        'size' => (string)$size_name,
+                        'generated_file' => (string)$size['file'],
+                    ],
+                ];
+                if ($size_file === '') {
+                    continue;
+                }
+            }
+            $generated_file = trim($directory . '/' . $size_file, '/');
             if ($unsafe_upload_path($generated_file)) {
                 $findings[] = [
                     'plugin' => 'forkpress-wp-media',
@@ -365,6 +385,8 @@ PHP);
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-original-dimensions.jpg', "source invalid original dimensions bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-dimensions.jpg', "source invalid generated dimensions original bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-dimensions-150x150.jpg', "source invalid generated dimensions thumb bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-subdir.jpg', "source generated subdir original bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/nested/source-generated-subdir-150x150.jpg', "source generated subdir thumb bytes\n");
     $db = open_db($source);
     $attachment_id = insert_attachment($db, 'Source media generated missing file key', '2026/05/source-generated-missing-file-key.jpg', [
         'file' => '2026/05/source-generated-missing-file-key.jpg',
@@ -415,6 +437,18 @@ PHP);
             'thumbnail' => [
                 'file' => 'source-generated-dimensions-150x150.jpg',
                 'width' => 0,
+                'height' => 150,
+            ],
+        ],
+    ]);
+    $generated_subdir_id = insert_attachment($db, 'Source media generated size subdir filename', '2026/05/source-generated-subdir.jpg', [
+        'file' => '2026/05/source-generated-subdir.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'nested/source-generated-subdir-150x150.jpg',
+                'width' => 150,
                 'height' => 150,
             ],
         ],
@@ -507,7 +541,7 @@ PHP);
 
     assert_same($result['status'], 'completed_with_conflicts', 'media validator holds incomplete generated-size metadata for review');
     assert_same((int)($result['plugin_validators'] ?? 0), 1, 'media validator is discovered from mu-plugins during merge');
-    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 12, 'media validator records invalid metadata, dimensions, generated-size, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
+    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 13, 'media validator records invalid metadata, dimensions, generated-size, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
     assert_same(
         scalar($target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-generated-missing-file-key.jpg',
@@ -544,10 +578,12 @@ PHP);
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-media-generated-file-drift',
     ]);
-    assert_same(count($audit['conflicts']), 1, 'media validator exposes incomplete generated-size metadata as a plugin-scoped audit conflict');
-    $preview = (string)($audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_same(count($audit['conflicts']), 2, 'media validator exposes incomplete and non-basename generated-size metadata as plugin-scoped audit conflicts');
+    $preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $audit['conflicts']));
     assert_true(str_contains($preview, 'source-generated-missing-file-key.jpg'), 'media validator audit includes the affected attachment');
     assert_true(str_contains($preview, '"generated_file":null'), 'media validator audit records the missing generated file field');
+    assert_true(str_contains($preview, 'nested/source-generated-subdir-150x150.jpg'), 'media validator audit includes the non-basename generated filename');
+    assert_true(str_contains($preview, (string)$generated_subdir_id), 'media validator audit includes the non-basename generated attachment ID');
 
     $original_dimension_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'plugin',
