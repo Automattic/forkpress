@@ -149,6 +149,8 @@ try {
     write_test_file($source_root . '/wp-content/uploads/replace-file-with-dir/source-child.txt', 'source replacement child');
     remove_tree($source_root . '/wp-content/uploads/delete-dir-conflict');
     create_test_symlink('/etc/passwd', $source_root . '/wp-content/uploads/absolute-link.txt');
+    create_test_symlink('self-link.txt', $source_root . '/wp-content/uploads/self-link.txt');
+    create_test_symlink('../database/.ht.sqlite', $source_root . '/wp-content/uploads/managed-db-link.txt');
     write_test_file($target_root . '/wp-content/uploads/binary-conflict.bin', "target\0binary conflict\xfe");
     write_test_file($target_root . '/wp-content/uploads/delete-dir-conflict/target-child.txt', 'target delete-dir child');
 
@@ -166,7 +168,7 @@ try {
 
     assert_same($result['status'], 'completed_with_conflicts', 'filesystem merge completes with review conflicts for unsafe source paths and type replacements');
     assert_same($result['file_applied'], 7, 'filesystem merge applies safe text, binary, directory, and symlink changes');
-    assert_same($result['file_conflicts'], 5, 'filesystem merge records binary, unsafe symlink, type replacement, and directory-delete conflicts');
+    assert_same($result['file_conflicts'], 7, 'filesystem merge records binary, unsafe symlink, type replacement, and directory-delete conflicts');
     assert_same(file_get_contents($target_root . '/wp-content/uploads/shared.txt'), 'source shared', 'safe source text file change is applied');
     assert_same(file_get_contents($target_root . '/wp-content/uploads/binary.bin'), "source\0binary\xff", 'safe source binary file change is applied exactly');
     assert_same(file_get_contents($target_root . '/wp-content/uploads/binary-conflict.bin'), "target\0binary conflict\xfe", 'target binary file wins conflicting binary edits before review');
@@ -176,6 +178,8 @@ try {
     assert_true(is_link($target_root . '/wp-content/uploads/links/source-link.txt'), 'safe relative symlink addition is applied');
     assert_same(readlink($target_root . '/wp-content/uploads/links/source-link.txt'), '../new-source.txt', 'safe symlink with in-root parent traversal is preserved');
     assert_true(!file_exists($target_root . '/wp-content/uploads/absolute-link.txt') && !is_link($target_root . '/wp-content/uploads/absolute-link.txt'), 'unsafe absolute symlink is not installed on target');
+    assert_true(!file_exists($target_root . '/wp-content/uploads/self-link.txt') && !is_link($target_root . '/wp-content/uploads/self-link.txt'), 'self-referential symlink is not installed on target');
+    assert_true(!file_exists($target_root . '/wp-content/uploads/managed-db-link.txt') && !is_link($target_root . '/wp-content/uploads/managed-db-link.txt'), 'managed-path symlink is not installed on target');
     assert_true(is_dir($target_root . '/wp-content/uploads/replace-dir-with-file'), 'directory-to-file replacement keeps the target directory before review');
     assert_same(file_get_contents($target_root . '/wp-content/uploads/replace-dir-with-file/base-child.txt'), 'base child', 'directory-to-file replacement keeps target descendants before review');
     assert_same(file_get_contents($target_root . '/wp-content/uploads/replace-file-with-dir'), 'base file', 'file-to-directory replacement keeps the target file before review');
@@ -183,7 +187,7 @@ try {
 
     assert_same(
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-unsafe-symlink'"),
-        1,
+        3,
         'unsafe filesystem symlink conflict is auditable'
     );
     assert_same(
@@ -238,9 +242,15 @@ try {
         'records' => 'conflicts',
         'conflict_type' => 'file-unsafe-symlink',
     ]);
-    assert_same(count($audit['conflicts']), 1, 'file audit can focus on unsafe symlink conflicts');
-    assert_same($audit['conflicts'][0]['row_identity'], cow_merge_file_identity_json('wp-content/uploads/absolute-link.txt'), 'unsafe symlink audit points at the blocked path');
-    assert_true(str_contains((string)$audit['conflicts'][0]['source_preview'], '/etc/passwd'), 'unsafe symlink audit exposes the rejected source target');
+    assert_same(count($audit['conflicts']), 3, 'file audit can focus on unsafe symlink conflicts');
+    $unsafe_symlink_identities = array_map(fn($conflict) => $conflict['row_identity'], $audit['conflicts']);
+    assert_true(in_array(cow_merge_file_identity_json('wp-content/uploads/absolute-link.txt'), $unsafe_symlink_identities, true), 'unsafe symlink audit points at the blocked absolute path');
+    assert_true(in_array(cow_merge_file_identity_json('wp-content/uploads/self-link.txt'), $unsafe_symlink_identities, true), 'unsafe symlink audit points at the blocked self-reference');
+    assert_true(in_array(cow_merge_file_identity_json('wp-content/uploads/managed-db-link.txt'), $unsafe_symlink_identities, true), 'unsafe symlink audit points at the blocked managed path');
+    $unsafe_symlink_preview = implode("\n", array_map(fn($conflict) => (string)$conflict['source_preview'], $audit['conflicts']));
+    assert_true(str_contains($unsafe_symlink_preview, '/etc/passwd'), 'unsafe symlink audit exposes the rejected absolute target');
+    assert_true(str_contains($unsafe_symlink_preview, 'self-link.txt'), 'unsafe symlink audit exposes the rejected self-reference target');
+    assert_true(str_contains($unsafe_symlink_preview, '../database/.ht.sqlite'), 'unsafe symlink audit exposes the rejected managed-path target');
 
     $delete_dir_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'files',
