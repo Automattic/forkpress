@@ -458,6 +458,82 @@ try {
         1,
         'successful source index resolution is auditable'
     );
+
+    $index_revalidate_base = $tmp . '/index-revalidate-base.sqlite';
+    $index_revalidate_source = $tmp . '/index-revalidate-source.sqlite';
+    $index_revalidate_target = $tmp . '/index-revalidate-target.sqlite';
+    $index_revalidate_metadata = $tmp . '/.forkpress/cow/merge/schema-index-revalidate-metadata.sqlite';
+
+    $db = open_db($index_revalidate_base);
+    $db->exec('CREATE TABLE plugin_index_revalidate (id INTEGER PRIMARY KEY, label TEXT)');
+    $db->exec("INSERT INTO plugin_index_revalidate (id, label) VALUES (1, 'Alpha')");
+    $db->close();
+    copy($index_revalidate_base, $index_revalidate_source);
+    copy($index_revalidate_base, $index_revalidate_target);
+
+    $db = open_db($index_revalidate_source);
+    $db->exec('CREATE UNIQUE INDEX plugin_index_revalidate_label_idx ON plugin_index_revalidate(lower(label))');
+    $db->close();
+
+    $db = open_db($index_revalidate_target);
+    $db->exec("INSERT INTO plugin_index_revalidate (id, label) VALUES (2, 'alpha')");
+    $db->close();
+
+    $index_revalidate_result = cow_merge_databases(
+        $index_revalidate_base,
+        $index_revalidate_source,
+        $index_revalidate_target,
+        $index_revalidate_metadata,
+        'feature-schema-index-revalidate',
+        'main'
+    );
+    assert_same($index_revalidate_result['status'], 'completed_with_conflicts', 'reviewed source-added schema index fixture starts reviewable');
+    $index_revalidate_run_id = (int)$index_revalidate_result['run_id'];
+    $index_revalidate_conflict_id = (int)scalar($index_revalidate_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_index_revalidate' AND column_name = 'plugin_index_revalidate_label_idx' AND conflict_type = 'schema-source-added-index' ORDER BY id DESC LIMIT 1");
+    assert_true($index_revalidate_conflict_id > 0, 'reviewed source-added schema index fixture records an index conflict');
+    cow_merge_review_record(
+        $index_revalidate_metadata,
+        'conflict',
+        $index_revalidate_conflict_id,
+        'reviewed',
+        'Review source-added expression index after target rows are cleaned up.',
+        'cow-test'
+    );
+
+    $db = open_db($index_revalidate_source);
+    $db->exec('DROP INDEX plugin_index_revalidate_label_idx');
+    $db->exec('CREATE UNIQUE INDEX plugin_index_revalidate_label_idx ON plugin_index_revalidate(upper(label))');
+    $db->close();
+
+    $index_revalidated = cow_merge_revalidate_reviewed_conflicts($index_revalidate_metadata, $index_revalidate_run_id, 'cow-revalidate');
+    assert_same($index_revalidated['checked'], 1, 'schema index revalidation checks the reviewed index conflict');
+    assert_same($index_revalidated['reviewed'], 1, 'schema index revalidation sees the reviewed index conflict');
+    assert_same($index_revalidated['stale'], 1, 'schema index revalidation detects changed source index SQL');
+    assert_same($index_revalidated['carried'], 1, 'schema index revalidation carries changed source index evidence to needs-action');
+    assert_same(
+        scalar($index_revalidate_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $index_revalidate_conflict_id ORDER BY id DESC LIMIT 1"),
+        'unclassified',
+        'schema index source drift remains unclassified until a schema planner proves compatibility'
+    );
+    assert_true(
+        str_contains((string)scalar($index_revalidate_metadata, "SELECT stale_reason FROM merge_revalidations WHERE conflict_id = $index_revalidate_conflict_id ORDER BY id DESC LIMIT 1"), 'source changed'),
+        'schema index source drift explains that source schema changed after review'
+    );
+    $index_revalidate_source_payload = cow_merge_decode_payload_json(
+        (string)scalar($index_revalidate_metadata, "SELECT source_payload FROM merge_revalidations WHERE conflict_id = $index_revalidate_conflict_id ORDER BY id DESC LIMIT 1"),
+        'schema index revalidation source'
+    );
+    assert_true(
+        str_contains((string)($index_revalidate_source_payload['sql'] ?? ''), 'upper(label)'),
+        'schema index revalidation records the updated source index SQL'
+    );
+    $index_revalidate_audit = cow_merge_audit_report($index_revalidate_metadata, $index_revalidate_run_id, 10, [
+        'records' => 'conflicts',
+        'review_status' => 'needs-action',
+    ]);
+    $index_revalidate_conflicts = array_values(array_filter($index_revalidate_audit['conflicts'], fn($conflict) => (int)($conflict['id'] ?? 0) === $index_revalidate_conflict_id));
+    assert_same(count($index_revalidate_conflicts), 1, 'schema index source drift returns the reviewed conflict to the needs-action audit queue');
+    assert_same($index_revalidate_conflicts[0]['revalidation_class'] ?? null, 'unclassified', 'schema index audit exposes the conservative unclassified revalidation');
 } finally {
     remove_tree($tmp);
 }
