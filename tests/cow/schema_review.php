@@ -240,6 +240,7 @@ try {
 
     $source_db = open_db($schema_target_drift_source);
     $source_db->exec('CREATE VIEW plugin_schema_target_drift_view AS SELECT label FROM plugin_schema_target_drift_view');
+    $source_db->exec('CREATE TRIGGER plugin_schema_target_drift_trigger AFTER INSERT ON plugin_schema_target_drift_items BEGIN UPDATE plugin_schema_target_drift_items SET label = NEW.label WHERE rowid = NEW.rowid; END');
     $source_db->close();
 
     $schema_target_drift_result = cow_merge_databases(
@@ -251,9 +252,11 @@ try {
         'main'
     );
     $schema_target_drift_run_id = (int)$schema_target_drift_result['run_id'];
-    assert_same($schema_target_drift_result['status'], 'completed_with_conflicts', 'schema target-drift fixture starts with a reviewed source-added view conflict');
+    assert_same($schema_target_drift_result['status'], 'completed_with_conflicts', 'schema target-drift fixture starts with reviewed source-added view and trigger conflicts');
     $schema_target_drift_conflict_id = (int)scalar($schema_target_drift_metadata, "SELECT id FROM merge_conflicts WHERE conflict_type = 'schema-source-added-view' AND column_name = 'plugin_schema_target_drift_view' ORDER BY id DESC LIMIT 1");
     assert_true($schema_target_drift_conflict_id > 0, 'schema target-drift fixture records the source-added view conflict');
+    $schema_trigger_target_drift_conflict_id = (int)scalar($schema_target_drift_metadata, "SELECT id FROM merge_conflicts WHERE conflict_type = 'schema-source-added-trigger' AND column_name = 'plugin_schema_target_drift_trigger' ORDER BY id DESC LIMIT 1");
+    assert_true($schema_trigger_target_drift_conflict_id > 0, 'schema target-drift fixture records the source-added trigger conflict');
     cow_merge_review_record(
         $schema_target_drift_metadata,
         'conflict',
@@ -262,19 +265,32 @@ try {
         'Review source-added view before target creates the same object.',
         'cow-test'
     );
+    cow_merge_review_record(
+        $schema_target_drift_metadata,
+        'conflict',
+        $schema_trigger_target_drift_conflict_id,
+        'reviewed',
+        'Review source-added trigger before target creates the same object.',
+        'cow-test'
+    );
 
     $target_db = open_db($schema_target_drift_target);
     $target_db->exec('CREATE VIEW plugin_schema_target_drift_view AS SELECT label FROM plugin_schema_target_drift_items');
+    $target_db->exec('CREATE TRIGGER plugin_schema_target_drift_trigger AFTER INSERT ON plugin_schema_target_drift_items BEGIN SELECT NEW.label; END');
     $target_db->close();
 
     $schema_target_drift_revalidated = cow_merge_revalidate_reviewed_conflicts($schema_target_drift_metadata, $schema_target_drift_run_id, 'cow-revalidate');
-    assert_same($schema_target_drift_revalidated['checked'], 1, 'schema target SQL drift revalidation checks the reviewed conflict');
-    assert_same($schema_target_drift_revalidated['reviewed'], 1, 'schema target SQL drift revalidation sees the reviewed conflict');
-    assert_same($schema_target_drift_revalidated['stale'], 1, 'schema target SQL drift is treated as stale');
-    assert_same($schema_target_drift_revalidated['carried'], 1, 'schema target SQL drift returns the conflict to needs-action');
+    assert_same($schema_target_drift_revalidated['checked'], 2, 'schema target SQL drift revalidation checks reviewed view and trigger conflicts');
+    assert_same($schema_target_drift_revalidated['reviewed'], 2, 'schema target SQL drift revalidation sees reviewed view and trigger conflicts');
+    assert_same($schema_target_drift_revalidated['stale'], 2, 'schema target SQL drift is treated as stale for views and triggers');
+    assert_same($schema_target_drift_revalidated['carried'], 2, 'schema target SQL drift returns view and trigger conflicts to needs-action');
     assert_true(
         str_contains((string)scalar($schema_target_drift_metadata, "SELECT stale_reason FROM merge_revalidations WHERE conflict_id = $schema_target_drift_conflict_id ORDER BY id DESC LIMIT 1"), 'view target changed'),
         'schema target SQL drift explains that the target schema changed after review'
+    );
+    assert_true(
+        str_contains((string)scalar($schema_target_drift_metadata, "SELECT stale_reason FROM merge_revalidations WHERE conflict_id = $schema_trigger_target_drift_conflict_id ORDER BY id DESC LIMIT 1"), 'trigger target changed'),
+        'schema trigger target SQL drift explains that the target schema changed after review'
     );
     $schema_target_drift_payload = cow_merge_decode_payload_json(
         (string)scalar($schema_target_drift_metadata, "SELECT target_payload FROM merge_revalidations WHERE conflict_id = $schema_target_drift_conflict_id ORDER BY id DESC LIMIT 1"),
@@ -284,12 +300,86 @@ try {
         str_contains((string)$schema_target_drift_payload, 'SELECT label FROM plugin_schema_target_drift_items'),
         'schema target SQL drift records the current target SQL evidence'
     );
+    $schema_trigger_target_drift_payload = cow_merge_decode_payload_json(
+        (string)scalar($schema_target_drift_metadata, "SELECT target_payload FROM merge_revalidations WHERE conflict_id = $schema_trigger_target_drift_conflict_id ORDER BY id DESC LIMIT 1"),
+        'schema trigger target-drift target payload'
+    );
+    assert_true(
+        str_contains((string)$schema_trigger_target_drift_payload, 'SELECT NEW.label'),
+        'schema trigger target SQL drift records the current target SQL evidence'
+    );
     $schema_target_drift_audit = cow_merge_audit_report($schema_target_drift_metadata, $schema_target_drift_run_id, 10, [
         'records' => 'conflicts',
         'review_status' => 'needs-action',
     ]);
-    assert_same(count($schema_target_drift_audit['conflicts']), 1, 'schema target SQL drift is visible in the needs-action audit queue');
-    assert_same($schema_target_drift_audit['conflicts'][0]['revalidation_class'] ?? null, 'unclassified', 'schema target SQL drift remains unclassified until a planner proves compatibility');
+    assert_same(count($schema_target_drift_audit['conflicts']), 2, 'schema target SQL drift is visible in the needs-action audit queue');
+    foreach ($schema_target_drift_audit['conflicts'] as $conflict) {
+        assert_same($conflict['revalidation_class'] ?? null, 'unclassified', 'schema target SQL drift remains unclassified until a planner proves compatibility');
+    }
+
+    $schema_index_target_drift_base = $tmp . '/schema-index-target-drift-base.sqlite';
+    $schema_index_target_drift_source = $tmp . '/schema-index-target-drift-source.sqlite';
+    $schema_index_target_drift_target = $tmp . '/schema-index-target-drift-target.sqlite';
+    $schema_index_target_drift_metadata = $tmp . '/.forkpress/cow/merge/schema-index-target-drift-metadata.sqlite';
+
+    $db = open_db($schema_index_target_drift_base);
+    $db->exec('CREATE TABLE plugin_schema_index_target_drift_items (label TEXT NOT NULL)');
+    $db->exec("INSERT INTO plugin_schema_index_target_drift_items (label) VALUES ('base label')");
+    $db->close();
+    copy($schema_index_target_drift_base, $schema_index_target_drift_source);
+    copy($schema_index_target_drift_base, $schema_index_target_drift_target);
+
+    $source_db = open_db($schema_index_target_drift_source);
+    $source_db->exec('CREATE UNIQUE INDEX plugin_schema_index_target_drift_idx ON plugin_schema_index_target_drift_items(lower(label))');
+    $source_db->close();
+
+    $target_db = open_db($schema_index_target_drift_target);
+    $target_db->exec("INSERT INTO plugin_schema_index_target_drift_items (label) VALUES ('BASE LABEL')");
+    $target_db->close();
+
+    $schema_index_target_drift_result = cow_merge_databases(
+        $schema_index_target_drift_base,
+        $schema_index_target_drift_source,
+        $schema_index_target_drift_target,
+        $schema_index_target_drift_metadata,
+        'feature-schema-index-target-drift',
+        'main'
+    );
+    $schema_index_target_drift_run_id = (int)$schema_index_target_drift_result['run_id'];
+    assert_same($schema_index_target_drift_result['status'], 'completed_with_conflicts', 'schema index target-drift fixture starts with a blocked source-added index conflict');
+    $schema_index_target_drift_conflict_id = (int)scalar($schema_index_target_drift_metadata, "SELECT id FROM merge_conflicts WHERE conflict_type = 'schema-source-added-index' AND column_name = 'plugin_schema_index_target_drift_idx' ORDER BY id DESC LIMIT 1");
+    assert_true($schema_index_target_drift_conflict_id > 0, 'schema index target-drift fixture records the source-added index conflict');
+    cow_merge_review_record(
+        $schema_index_target_drift_metadata,
+        'conflict',
+        $schema_index_target_drift_conflict_id,
+        'reviewed',
+        'Review source-added index before target creates the same object.',
+        'cow-test'
+    );
+
+    $target_db = open_db($schema_index_target_drift_target);
+    $target_db->exec("DELETE FROM plugin_schema_index_target_drift_items WHERE label = 'BASE LABEL'");
+    $target_db->exec('CREATE INDEX plugin_schema_index_target_drift_idx ON plugin_schema_index_target_drift_items(label)');
+    $target_db->close();
+
+    $schema_index_target_drift_revalidated = cow_merge_revalidate_reviewed_conflicts($schema_index_target_drift_metadata, $schema_index_target_drift_run_id, 'cow-revalidate');
+    assert_same($schema_index_target_drift_revalidated['checked'], 1, 'schema index target SQL drift revalidation checks the reviewed conflict');
+    assert_same($schema_index_target_drift_revalidated['reviewed'], 1, 'schema index target SQL drift revalidation sees the reviewed conflict');
+    assert_same($schema_index_target_drift_revalidated['stale'], 1, 'schema index target SQL drift is treated as stale');
+    assert_same($schema_index_target_drift_revalidated['carried'], 1, 'schema index target SQL drift returns the conflict to needs-action');
+    assert_true(
+        str_contains((string)scalar($schema_index_target_drift_metadata, "SELECT stale_reason FROM merge_revalidations WHERE conflict_id = $schema_index_target_drift_conflict_id ORDER BY id DESC LIMIT 1"), 'index target changed'),
+        'schema index target SQL drift explains that the target index changed after review'
+    );
+    $schema_index_target_drift_payload = cow_merge_decode_payload_json(
+        (string)scalar($schema_index_target_drift_metadata, "SELECT target_payload FROM merge_revalidations WHERE conflict_id = $schema_index_target_drift_conflict_id ORDER BY id DESC LIMIT 1"),
+        'schema index target-drift target payload'
+    );
+    assert_true(
+        str_contains((string)$schema_index_target_drift_payload, 'CREATE INDEX plugin_schema_index_target_drift_idx'),
+        'schema index target SQL drift records the current target SQL evidence'
+    );
 
     $view_order_base = $tmp . '/view-order-base.sqlite';
     $view_order_source = $tmp . '/view-order-source.sqlite';
