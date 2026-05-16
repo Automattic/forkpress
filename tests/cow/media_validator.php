@@ -466,6 +466,29 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
                 ];
                 continue;
             }
+            if (array_key_exists('mime-type', $size)) {
+                $generated_extension = strtolower((string)pathinfo($generated_file, PATHINFO_EXTENSION));
+                $expected_generated_mime_type = $expected_mime_by_extension[$generated_extension] ?? null;
+                $generated_mime_type = strtolower((string)$size['mime-type']);
+                if ($expected_generated_mime_type !== null && $generated_mime_type !== $expected_generated_mime_type) {
+                    $findings[] = [
+                        'plugin' => 'forkpress-wp-media',
+                        'object' => 'attachment:' . $row['ID'],
+                        'reason' => 'attachment generated size MIME type does not match the generated file extension',
+                        'type' => 'plugin-wp-media-mime-drift',
+                        'tables' => ['wp_posts', 'wp_postmeta'],
+                        'validator' => 'forkpress-wp-media@1',
+                        'candidate' => [
+                            'attachment_id' => (int)$row['ID'],
+                            'attached_file' => $attached_file,
+                            'size' => (string)$size_name,
+                            'generated_file' => $generated_file,
+                            'generated_mime_type' => (string)$size['mime-type'],
+                            'expected_mime_type' => $expected_generated_mime_type,
+                        ],
+                    ];
+                }
+            }
             $relative_files[] = $generated_file;
             if ($uploads_root !== '' && !is_file($uploads_root . '/' . $generated_file)) {
                 $findings[] = [
@@ -597,6 +620,8 @@ PHP);
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-filesize.jpg', "source generated filesize original bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-filesize-150x150.jpg', "source generated filesize thumb bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-mime-drift.jpg', "source MIME drift image bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-mime.jpg', "source generated MIME original bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-mime-thumb.png', "source generated MIME thumb bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-dimensions.jpg', "source invalid generated dimensions original bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-dimensions-150x150.jpg', "source invalid generated dimensions thumb bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-subdir.jpg', "source generated subdir original bytes\n");
@@ -685,6 +710,19 @@ PHP);
         'height' => 480,
         'sizes' => [],
     ], 'application/pdf');
+    $generated_mime_drift_id = insert_attachment($db, 'Source media generated MIME type drift', '2026/05/source-generated-mime.jpg', [
+        'file' => '2026/05/source-generated-mime.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'source-generated-mime-thumb.png',
+                'width' => 150,
+                'height' => 150,
+                'mime-type' => 'image/jpeg',
+            ],
+        ],
+    ]);
     $generated_dimensions_id = insert_attachment($db, 'Source media invalid generated dimensions', '2026/05/source-generated-dimensions.jpg', [
         'file' => '2026/05/source-generated-dimensions.jpg',
         'width' => 640,
@@ -835,7 +873,7 @@ PHP);
 
     assert_same($result['status'], 'completed_with_conflicts', 'media validator holds incomplete generated-size metadata for review');
     assert_same((int)($result['plugin_validators'] ?? 0), 1, 'media validator is discovered from mu-plugins during merge');
-    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 25, 'media validator records missing required metadata, invalid metadata, dimensions, filesize and MIME drift, generated-size, original-image, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
+    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 26, 'media validator records missing required metadata, invalid metadata, dimensions, filesize and MIME drift, generated-size, original-image, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
     assert_same(
         scalar($target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-generated-missing-file-key.jpg',
@@ -955,12 +993,26 @@ PHP);
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-media-mime-drift',
     ]);
-    assert_same(count($mime_audit['conflicts']), 1, 'media validator exposes attachment MIME drift as a plugin-scoped audit conflict');
-    $mime_preview = (string)($mime_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_same(count($mime_audit['conflicts']), 2, 'media validator exposes attachment and generated-size MIME drift as plugin-scoped audit conflicts');
+    $mime_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $mime_audit['conflicts']));
     assert_true(str_contains($mime_preview, 'source-mime-drift.jpg'), 'media validator MIME drift audit includes the affected attachment');
     assert_true(str_contains($mime_preview, 'application/pdf'), 'media validator MIME drift audit includes the declared MIME type');
     assert_true(str_contains($mime_preview, 'image/jpeg'), 'media validator MIME drift audit includes the expected MIME type');
     assert_true(str_contains($mime_preview, (string)$mime_drift_id), 'media validator MIME drift audit includes the affected attachment ID');
+    assert_true(str_contains($mime_preview, 'image/png'), 'media validator MIME drift audit includes the expected generated MIME type');
+    assert_true(str_contains($mime_preview, (string)$generated_mime_drift_id), 'media validator MIME drift audit includes the generated-size attachment ID');
+    $generated_mime_recorded = false;
+    $meta_db = open_db($metadata);
+    $payloads = $meta_db->query("SELECT chosen_payload FROM merge_conflicts WHERE conflict_type = 'plugin-wp-media-mime-drift'");
+    while ($payload = $payloads->fetchArray(SQLITE3_ASSOC)) {
+        $decoded = cow_merge_decode_payload_json((string)$payload['chosen_payload'], 'media validator MIME payload');
+        if (($decoded['candidate']['generated_file'] ?? null) === '2026/05/source-generated-mime-thumb.png') {
+            $generated_mime_recorded = true;
+        }
+    }
+    $payloads->finalize();
+    $meta_db->close();
+    assert_true($generated_mime_recorded, 'media validator MIME drift audit payload identifies the affected generated size');
 
     $generated_dimension_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'plugin',
