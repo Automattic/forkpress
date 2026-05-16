@@ -57,6 +57,7 @@ function create_id_band_db(string $path): void {
     $db->exec('CREATE TABLE wp_posts (ID INTEGER PRIMARY KEY AUTOINCREMENT, post_title TEXT NOT NULL, post_content TEXT NOT NULL, post_status TEXT NOT NULL)');
     $db->exec('CREATE TABLE wp_options (option_id INTEGER PRIMARY KEY AUTOINCREMENT, option_name TEXT UNIQUE, option_value TEXT NOT NULL, autoload TEXT NOT NULL)');
     $db->exec('CREATE TABLE plugin_plain_ipk (id INTEGER PRIMARY KEY, payload TEXT NOT NULL)');
+    $db->exec('CREATE TABLE plugin_plain_ipk_implicit (id INTEGER PRIMARY KEY, payload TEXT NOT NULL)');
     $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status) VALUES (1, 'Base page', 'Base content', 'draft')");
     $db->exec("INSERT INTO wp_options (option_id, option_name, option_value, autoload) VALUES (1, 'base_graph', '{}', 'yes')");
     $db->close();
@@ -98,6 +99,8 @@ try {
     $source_stmt->execute();
     $source_db->exec("INSERT INTO plugin_plain_ipk (id, payload) VALUES (7, 'source explicit plain integer key')");
     $source_db->exec("INSERT INTO plugin_plain_ipk (id, payload) VALUES (8, 'source non-colliding plain integer key')");
+    $source_db->exec("INSERT INTO plugin_plain_ipk_implicit (payload) VALUES ('source implicit plain integer key')");
+    $source_implicit_id = (int)$source_db->lastInsertRowID();
     $source_db->close();
 
     $target_db = open_db($target);
@@ -113,11 +116,15 @@ try {
     $target_stmt->execute();
     $target_db->exec("INSERT INTO plugin_plain_ipk (id, payload) VALUES (7, 'target explicit plain integer key')");
     $target_db->exec("INSERT INTO plugin_plain_ipk (id, payload) VALUES (9, 'target non-colliding plain integer key')");
+    $target_db->exec("INSERT INTO plugin_plain_ipk_implicit (payload) VALUES ('target implicit plain integer key')");
+    $target_implicit_id = (int)$target_db->lastInsertRowID();
     $target_db->close();
 
     assert_true($source_post_id !== $target_post_id, 'source and target branch inserts receive different post IDs');
     assert_true($source_post_id >= 1000000, 'source post ID lands inside an allocated branch band');
     assert_true($target_post_id >= 2000000, 'target post ID lands inside a later allocated branch band');
+    assert_same($source_implicit_id, 1, 'source plain INTEGER PRIMARY KEY implicit insert starts at the unbanded rowid floor');
+    assert_same($target_implicit_id, 1, 'target plain INTEGER PRIMARY KEY implicit insert independently reuses the unbanded rowid floor');
 
     $source_reuse_band = cow_merge_allocate_autoincrement_bands($source, $metadata, 'feature-source');
     assert_same($source_reuse_band['allocated'], 0, 'source branch still inside its reserved band does not allocate fresh AUTOINCREMENT bands');
@@ -164,14 +171,36 @@ try {
         'plain INTEGER PRIMARY KEY plugin tables are explicitly marked non-bandable for each branch'
     );
     assert_same(
+        (int)scalar(
+            $metadata,
+            "SELECT COUNT(DISTINCT r.source_branch)
+             FROM merge_decisions d
+             JOIN merge_runs r ON r.id = d.run_id
+             WHERE d.decision = 'id-band-skipped'
+               AND d.table_name = 'plugin_plain_ipk_implicit'"
+        ),
+        2,
+        'plain INTEGER PRIMARY KEY plugin tables with implicit inserts are explicitly marked non-bandable for each branch'
+    );
+    assert_same(
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_plain_ipk'"),
         1,
         'plain INTEGER PRIMARY KEY plugin collision is recorded as a review conflict'
     );
     assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_plain_ipk_implicit'"),
+        1,
+        'implicit plain INTEGER PRIMARY KEY plugin collision is recorded as a review conflict'
+    );
+    assert_same(
         scalar($target, 'SELECT payload FROM plugin_plain_ipk WHERE id = 7'),
         'target explicit plain integer key',
         'plain INTEGER PRIMARY KEY plugin collision keeps the target row before review'
+    );
+    assert_same(
+        scalar($target, 'SELECT payload FROM plugin_plain_ipk_implicit WHERE id = 1'),
+        'target implicit plain integer key',
+        'implicit plain INTEGER PRIMARY KEY plugin collision keeps the target row before review'
     );
     assert_same(
         scalar($target, 'SELECT payload FROM plugin_plain_ipk WHERE id = 8'),
