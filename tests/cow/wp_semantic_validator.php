@@ -181,6 +181,42 @@ function create_wp_term_relationship_db(string $path): void {
     $db->close();
 }
 
+function create_wp_comment_reference_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_title TEXT NOT NULL DEFAULT '',
+        post_content TEXT NOT NULL DEFAULT '',
+        post_status TEXT NOT NULL DEFAULT 'publish',
+        post_type TEXT NOT NULL DEFAULT 'post',
+        post_name TEXT NOT NULL DEFAULT ''
+    )");
+    $db->exec("CREATE TABLE wp_users (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_login TEXT NOT NULL,
+        user_email TEXT NOT NULL DEFAULT ''
+    )");
+    $db->exec("CREATE TABLE wp_comments (
+        comment_ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        comment_post_ID INTEGER NOT NULL DEFAULT 0,
+        comment_content TEXT NOT NULL DEFAULT '',
+        comment_parent INTEGER NOT NULL DEFAULT 0,
+        user_id INTEGER NOT NULL DEFAULT 0
+    )");
+    $db->exec('CREATE TABLE wp_commentmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, comment_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (120, 'Deleted comment host page', '<!-- wp:paragraph --><p>Comment host</p><!-- /wp:paragraph -->', 'publish', 'page', 'deleted-comment-host-page'),
+        (127, 'Surviving comment host page', '<!-- wp:paragraph --><p>Surviving host</p><!-- /wp:paragraph -->', 'publish', 'page', 'surviving-comment-host-page')");
+    $db->exec("INSERT INTO wp_users (ID, user_login, user_email) VALUES (121, 'deleted_comment_author', 'deleted-comment-author@example.test')");
+    $db->exec("INSERT INTO wp_comments (comment_ID, comment_post_ID, comment_content, comment_parent, user_id) VALUES
+        (122, 120, 'Base comment pointing at deleted post and user', 0, 121),
+        (123, 127, 'Base comment with metadata', 0, 0),
+        (125, 127, 'Base parent comment', 0, 0),
+        (126, 127, 'Base child comment', 125, 0)");
+    $db->exec("INSERT INTO wp_commentmeta (meta_id, comment_id, meta_key, meta_value) VALUES (124, 123, '_forkpress_comment_note', 'base comment metadata')");
+    $db->close();
+}
+
 function create_wp_option_reference_db(string $path): void {
     $db = open_db($path);
     $db->exec("CREATE TABLE wp_posts (
@@ -745,6 +781,160 @@ PHP);
     assert_same(count($term_audit['conflicts']), 1, 'WordPress term relationship validator exposes the missing taxonomy term as a plugin-scoped audit conflict');
     $term_preview = (string)($term_audit['conflicts'][0]['chosen_preview'] ?? '');
     assert_true(str_contains($term_preview, '"term_taxonomy_id":82'), 'WordPress term relationship audit includes the missing term taxonomy ID');
+
+    $comment_base_root = $tmp . '/comment-ref-base';
+    $comment_source_root = $tmp . '/comment-ref-source';
+    $comment_target_root = $tmp . '/comment-ref-target';
+    $comment_base = $comment_base_root . '/wp-content/database/.ht.sqlite';
+    $comment_source = $comment_source_root . '/wp-content/database/.ht.sqlite';
+    $comment_target = $comment_target_root . '/wp-content/database/.ht.sqlite';
+    $comment_metadata = $tmp . '/.forkpress/cow/merge/wp-comment-ref-validator-metadata.sqlite';
+    $comment_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-comment-ref-validator.json';
+
+    mkdir($comment_base_root . '/wp-content/database', 0777, true);
+    create_wp_comment_reference_db($comment_base);
+    write_test_file($comment_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$findings = [];
+$comments = $db->query('SELECT comment_ID, comment_post_ID, comment_parent, user_id FROM wp_comments ORDER BY comment_ID');
+while ($row = $comments->fetchArray(SQLITE3_ASSOC)) {
+    $comment_id = (int)$row['comment_ID'];
+    $post_id = (int)$row['comment_post_ID'];
+    $post_exists = $post_id <= 0 ? 1 : (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $post_id");
+    if ($post_exists === 0) {
+        $findings[] = [
+            'plugin' => 'forkpress-wp-comment-refs',
+            'object' => 'comment:' . $comment_id,
+            'reason' => 'comment references a missing post',
+            'type' => 'plugin-wp-comment-missing-post',
+            'tables' => ['wp_comments', 'wp_posts'],
+            'validator' => 'forkpress-wp-comment-refs@1',
+            'candidate' => [
+                'comment_id' => $comment_id,
+                'field' => 'comment_post_ID',
+                'missing_object_id' => $post_id,
+                'object_type' => 'post',
+            ],
+        ];
+    }
+    $user_id = (int)$row['user_id'];
+    $user_exists = $user_id <= 0 ? 1 : (int)$db->querySingle("SELECT COUNT(*) FROM wp_users WHERE ID = $user_id");
+    if ($user_exists === 0) {
+        $findings[] = [
+            'plugin' => 'forkpress-wp-comment-refs',
+            'object' => 'comment:' . $comment_id,
+            'reason' => 'comment references a missing user',
+            'type' => 'plugin-wp-comment-missing-user',
+            'tables' => ['wp_comments', 'wp_users'],
+            'validator' => 'forkpress-wp-comment-refs@1',
+            'candidate' => [
+                'comment_id' => $comment_id,
+                'field' => 'user_id',
+                'missing_object_id' => $user_id,
+                'object_type' => 'user',
+            ],
+        ];
+    }
+    $parent_id = (int)$row['comment_parent'];
+    $parent_exists = $parent_id <= 0 ? 1 : (int)$db->querySingle("SELECT COUNT(*) FROM wp_comments WHERE comment_ID = $parent_id");
+    if ($parent_exists === 0) {
+        $findings[] = [
+            'plugin' => 'forkpress-wp-comment-refs',
+            'object' => 'comment:' . $comment_id,
+            'reason' => 'comment references a missing parent comment',
+            'type' => 'plugin-wp-comment-missing-parent',
+            'tables' => ['wp_comments'],
+            'validator' => 'forkpress-wp-comment-refs@1',
+            'candidate' => [
+                'comment_id' => $comment_id,
+                'field' => 'comment_parent',
+                'missing_object_id' => $parent_id,
+                'object_type' => 'comment',
+            ],
+        ];
+    }
+}
+$meta = $db->query('SELECT meta_id, comment_id FROM wp_commentmeta ORDER BY meta_id');
+while ($row = $meta->fetchArray(SQLITE3_ASSOC)) {
+    $comment_id = (int)$row['comment_id'];
+    $exists = $comment_id <= 0 ? 1 : (int)$db->querySingle("SELECT COUNT(*) FROM wp_comments WHERE comment_ID = $comment_id");
+    if ($exists !== 0) {
+        continue;
+    }
+    $findings[] = [
+        'plugin' => 'forkpress-wp-comment-refs',
+        'object' => 'commentmeta:' . $row['meta_id'],
+        'reason' => 'comment metadata references a missing comment',
+        'type' => 'plugin-wp-commentmeta-missing-comment',
+        'tables' => ['wp_commentmeta', 'wp_comments'],
+        'validator' => 'forkpress-wp-comment-refs@1',
+        'candidate' => [
+            'meta_id' => (int)$row['meta_id'],
+            'field' => 'comment_id',
+            'missing_object_id' => $comment_id,
+            'object_type' => 'comment',
+        ],
+    ];
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    copy_tree_for_test($comment_base_root, $comment_source_root);
+    copy_tree_for_test($comment_base_root, $comment_target_root);
+    cow_merge_capture_file_base($comment_base_root, $comment_file_base);
+    cow_merge_allocate_autoincrement_bands($comment_source, $comment_metadata, 'feature-wp-comment-ref-source');
+    cow_merge_allocate_autoincrement_bands($comment_target, $comment_metadata, 'main');
+
+    $db = open_db($comment_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID = 120');
+    $db->exec('DELETE FROM wp_users WHERE ID = 121');
+    $db->exec('DELETE FROM wp_comments WHERE comment_ID IN (123, 125)');
+    $db->close();
+
+    $db = open_db($comment_target);
+    $db->exec("UPDATE wp_comments SET comment_content = 'Target comment still pointing at deleted post and user' WHERE comment_ID = 122");
+    $db->exec("UPDATE wp_comments SET comment_content = 'Target child comment still pointing at deleted parent' WHERE comment_ID = 126");
+    $db->exec("UPDATE wp_commentmeta SET meta_value = 'target metadata still pointing at deleted comment' WHERE meta_id = 124");
+    $db->close();
+
+    $comment_result = cow_merge_branch_state(
+        $comment_base,
+        $comment_source,
+        $comment_target,
+        $comment_metadata,
+        'feature-wp-comment-ref-source',
+        'main',
+        $comment_file_base,
+        $comment_source_root,
+        $comment_target_root
+    );
+
+    assert_same($comment_result['status'], 'completed_with_conflicts', 'WordPress comment-reference validator holds missing post/user/comment refs for review');
+    assert_same((int)($comment_result['plugin_validators'] ?? 0), 1, 'WordPress comment-reference validator is discovered from mu-plugins during merge');
+    assert_same((int)($comment_result['plugin_validator_conflicts'] ?? 0), 4, 'WordPress comment-reference validator records missing post, user, parent comment, and commentmeta refs');
+    assert_same((int)scalar($comment_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 120'), 0, 'WordPress comment-reference validator leaves the source post deletion staged for review');
+    assert_same((int)scalar($comment_target, 'SELECT COUNT(*) FROM wp_users WHERE ID = 121'), 0, 'WordPress comment-reference validator leaves the source user deletion staged for review');
+    assert_same((int)scalar($comment_target, 'SELECT COUNT(*) FROM wp_comments WHERE comment_ID = 123'), 0, 'WordPress comment-reference validator leaves the source comment deletion staged for review');
+    assert_same((int)scalar($comment_target, 'SELECT COUNT(*) FROM wp_comments WHERE comment_ID = 125'), 0, 'WordPress comment-reference validator leaves the source parent comment deletion staged for review');
+    assert_same(scalar($comment_target, 'SELECT comment_content FROM wp_comments WHERE comment_ID = 122'), 'Target comment still pointing at deleted post and user', 'WordPress comment-reference validator preserves target comment edits');
+    assert_same(scalar($comment_target, 'SELECT comment_content FROM wp_comments WHERE comment_ID = 126'), 'Target child comment still pointing at deleted parent', 'WordPress comment-reference validator preserves target child comment edits');
+    assert_same(scalar($comment_target, 'SELECT meta_value FROM wp_commentmeta WHERE meta_id = 124'), 'target metadata still pointing at deleted comment', 'WordPress comment-reference validator preserves target commentmeta edits');
+
+    $comment_audit = cow_merge_audit_report($comment_metadata, (int)$comment_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+    ]);
+    assert_same(count($comment_audit['conflicts']), 4, 'WordPress comment-reference validator exposes missing refs as plugin-scoped audit conflicts');
+    $comment_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $comment_audit['conflicts']));
+    foreach (['"object_type":"post"', '"object_type":"user"', '"object_type":"comment"', '"missing_object_id":120', '"missing_object_id":121', '"missing_object_id":123', '"missing_object_id":125'] as $needle) {
+        assert_true(str_contains($comment_preview, $needle), 'WordPress comment-reference audit includes ' . $needle);
+    }
+    foreach (['comment_post_ID', 'user_id', 'comment_parent', 'comment_id'] as $needle) {
+        assert_true(str_contains($comment_preview, $needle), 'WordPress comment-reference audit includes ' . $needle);
+    }
 
     $option_base_root = $tmp . '/option-ref-base';
     $option_source_root = $tmp . '/option-ref-source';
