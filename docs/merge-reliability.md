@@ -92,6 +92,12 @@ publication crash/failpoint changes, run:
 make test-cow-git-server
 ```
 
+For WordPress upload/media validator changes, run:
+
+```bash
+make test-cow-media-validator
+```
+
 For the broader PHP merge gate without building ForkPress or starting the full
 WordPress E2E harness, run:
 
