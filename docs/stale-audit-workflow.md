@@ -89,6 +89,10 @@ specific stale-audit blind spot where table SQL stayed unchanged but a source
 index, trigger, or dependent view changed after review. These conflicts should
 still be rerun manually while kept review-only until the schema planner can
 prove a guarded resolution remains compatible.
+The reviewed -> needs-action transition is still recorded as a
+`revalidation-required` conflict event linked to the schema revalidation row, so
+schema review UIs can show the lifecycle without treating free-form review
+notes as state.
 
 ## Future Re-Audit Model
 
