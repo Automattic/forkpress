@@ -55,8 +55,16 @@ function smoke_create_posts_db(string $path): void {
         post_type TEXT NOT NULL DEFAULT 'post',
         post_name TEXT NOT NULL DEFAULT ''
     )");
+    $db->exec("CREATE TABLE wp_postmeta (
+        meta_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_id INTEGER NOT NULL,
+        meta_key TEXT NOT NULL,
+        meta_value TEXT NOT NULL
+    )");
     $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
         (1, 'Base Page', 'Base content', 'publish', 'page', 'base-page')");
+    $db->exec("INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES
+        (2, 1, '_forkpress_smoke_note', 'Base note')");
     $db->close();
 }
 
@@ -302,6 +310,62 @@ try {
         (int)smoke_scalar($delete_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
         1,
         'page delete smoke merge audits the independent target page insert'
+    );
+
+    $postmeta_base = $tmp . '/postmeta-base.sqlite';
+    $postmeta_source = $tmp . '/postmeta-source.sqlite';
+    $postmeta_target = $tmp . '/postmeta-target.sqlite';
+    $postmeta_metadata = $tmp . '/.forkpress/cow/merge/postmeta-metadata.sqlite';
+
+    smoke_create_posts_db($postmeta_base);
+    copy($postmeta_base, $postmeta_source);
+    copy($postmeta_base, $postmeta_target);
+
+    $db = smoke_open_db($postmeta_source);
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (18000010, 'Branch Page With Metadata', 'Branch page metadata content', 'publish', 'page', 'branch-page-with-metadata')");
+    $db->exec("INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES
+        (18000011, 18000010, '_forkpress_smoke_graph', '{\"branch\":\"source\",\"post_id\":18000010}')");
+    $db->close();
+
+    $db = smoke_open_db($postmeta_target);
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (19000010, 'Main Page With Metadata', 'Main page metadata content', 'publish', 'page', 'main-page-with-metadata')");
+    $db->exec("INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES
+        (19000011, 19000010, '_forkpress_smoke_graph', '{\"branch\":\"target\",\"post_id\":19000010}')");
+    $db->close();
+
+    $postmeta_result = cow_merge_databases($postmeta_base, $postmeta_source, $postmeta_target, $postmeta_metadata, 'feature-smoke-page-postmeta', 'main');
+    assert_same($postmeta_result['status'], 'completed', 'branch and main page-plus-postmeta inserts complete cleanly');
+    assert_same((int)($postmeta_result['conflicts'] ?? -1), 0, 'branch and main page-plus-postmeta inserts do not create merge conflicts');
+    assert_same(smoke_scalar($postmeta_target, 'SELECT post_title FROM wp_posts WHERE ID = 18000010'), 'Branch Page With Metadata', 'merged target includes the branch page row');
+    assert_same(smoke_scalar($postmeta_target, 'SELECT post_title FROM wp_posts WHERE ID = 19000010'), 'Main Page With Metadata', 'merged target preserves the main page row');
+    assert_same(smoke_scalar($postmeta_target, 'SELECT meta_value FROM wp_postmeta WHERE meta_id = 18000011'), '{"branch":"source","post_id":18000010}', 'merged target includes branch postmeta with its source post ID reference');
+    assert_same(smoke_scalar($postmeta_target, 'SELECT meta_value FROM wp_postmeta WHERE meta_id = 19000011'), '{"branch":"target","post_id":19000010}', 'merged target preserves target postmeta with its target post ID reference');
+    assert_same(
+        (int)smoke_scalar($postmeta_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name IN ('wp_posts', 'wp_postmeta')"),
+        0,
+        'page-plus-postmeta smoke merge records no WordPress row conflicts'
+    );
+    assert_same(
+        (int)smoke_scalar($postmeta_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'source-applied'"),
+        1,
+        'page-plus-postmeta smoke merge audits the source page insert'
+    );
+    assert_same(
+        (int)smoke_scalar($postmeta_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_postmeta' AND decision = 'source-applied'"),
+        1,
+        'page-plus-postmeta smoke merge audits the source metadata insert'
+    );
+    assert_same(
+        (int)smoke_scalar($postmeta_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
+        1,
+        'page-plus-postmeta smoke merge audits the target page insert'
+    );
+    assert_same(
+        (int)smoke_scalar($postmeta_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_postmeta' AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
+        1,
+        'page-plus-postmeta smoke merge audits the target metadata insert'
     );
 } finally {
     smoke_remove_tree($tmp);
