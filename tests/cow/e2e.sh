@@ -37,6 +37,12 @@ on_error() {
   dump_if_exists "$TMP/git-created-http-crash-after-restart.html"
   dump_if_exists "$TMP/git-created-http-crash-merge.out"
   dump_if_exists "$TMP/autoinc-main-init.json"
+  dump_if_exists "$TMP/remote-cache-add.out"
+  dump_if_exists "$TMP/remote-cache-show.out"
+  dump_if_exists "$TMP/remote-cache-list.out"
+  dump_if_exists "$TMP/remote-cache-branch.out"
+  dump_if_exists "$TMP/autoinc-remote-cache-insert.json"
+  dump_if_exists "$TMP/remote-cache-merge.out"
   dump_if_exists "$TMP/ui-create-admin.html"
   dump_if_exists "$TMP/ui-create.json"
   dump_if_exists "$TMP/ui-merge-admin.html"
@@ -244,6 +250,10 @@ autoinc_runtime_request() {
     "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
     exit 1
   fi
+}
+
+autoinc_db_max_id() {
+  php -r '$db = new SQLite3($argv[1]); echo (int)$db->querySingle("SELECT COALESCE(MAX(id), 0) FROM wp_forkpress_e2e_autoinc");' "$1"
 }
 
 keyless_runtime_request() {
@@ -1107,6 +1117,30 @@ PHP
 autoinc_runtime_request main init "$TMP/autoinc-main-init.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(($data["max_id"] ?? null) === 1 ? 0 : 1);' "$TMP/autoinc-main-init.json"
 
+log_step "branch remote cache and merge back"
+"$BIN" remote --work-dir "$WORK_DIR" add cache-main \
+  --cache-root "$WORK/main" \
+  --remote-url "https://example.test/" \
+  > "$TMP/remote-cache-add.out"
+grep -F "forkpress: remote site 'cache-main' registered" "$TMP/remote-cache-add.out" >/dev/null
+"$BIN" remote --work-dir "$WORK_DIR" show cache-main > "$TMP/remote-cache-show.out"
+grep -F "wp-load:    yes" "$TMP/remote-cache-show.out" >/dev/null
+"$BIN" remote --work-dir "$WORK_DIR" list > "$TMP/remote-cache-list.out"
+grep -F "cache-main" "$TMP/remote-cache-list.out" >/dev/null
+"$BIN" remote --work-dir "$WORK_DIR" branch cache-main remote-cache-branch > "$TMP/remote-cache-branch.out"
+grep -F "forkpress: remote cache 'cache-main' branched to 'remote-cache-branch'" "$TMP/remote-cache-branch.out" >/dev/null
+test -f "$WORK/remote-cache-branch/wp-load.php"
+test -f "$WORK/remote-cache-branch/wp-content/database/.ht.sqlite"
+autoinc_runtime_request remote-cache-branch insert "$TMP/autoinc-remote-cache-insert.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $meta = new SQLite3($argv[2]); $branch = new SQLite3($argv[3]); $max = (int)($data["max_id"] ?? 0); $band = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''remote-cache-branch'\'' AND table_name = '\''wp_forkpress_e2e_autoinc'\''", true); $seq = (int)$branch->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''wp_forkpress_e2e_autoinc'\''"); exit($band && $max >= (int)$band["band_start"] && $max <= (int)$band["band_end"] && $seq === $max ? 0 : 1);' "$TMP/autoinc-remote-cache-insert.json" "$WORK_DIR/cow/merge/metadata.sqlite" "$WORK/remote-cache-branch/wp-content/database/.ht.sqlite"
+echo "merged from remote cache branch" > "$WORK/remote-cache-branch/wp-content/remote-cache-branch.txt"
+"$BIN" branch --work-dir "$WORK_DIR" merge remote-cache-branch --into main > "$TMP/remote-cache-merge.out"
+grep -F "forkpress: merged remote-cache-branch into main" "$TMP/remote-cache-merge.out" >/dev/null
+grep -F "status:    completed" "$TMP/remote-cache-merge.out" >/dev/null
+grep -F "merged from remote cache branch" "$WORK/main/wp-content/remote-cache-branch.txt" >/dev/null
+php -r '$db = new SQLite3($argv[1]); $rows = (int)$db->querySingle("SELECT COUNT(*) FROM wp_forkpress_e2e_autoinc WHERE label = '\''Branch runtime plugin row'\''"); exit($rows === 1 ? 0 : 1);' "$WORK/main/wp-content/database/.ht.sqlite"
+MAIN_AUTOINC_MAX_BEFORE_UI="$(autoinc_db_max_id "$WORK/main/wp-content/database/.ht.sqlite")"
+
 log_step "create and merge branch through WordPress admin UI"
 UI_CREATE_COOKIES="$TMP/ui-create-cookies.txt"
 if ! branch_ui_nonce main createNonce "$TMP/ui-create-admin.html" "$UI_CREATE_COOKIES" > "$TMP/ui-create-nonce.txt"; then
@@ -1154,7 +1188,7 @@ if grep -F "branch-create-stage" "$WORK/ui-created/wp-config.php" >/dev/null; th
   echo "WP UI branch create left wp-config.php pointing at the staging directory" >&2
   exit 1
 fi
-php -r '$db = new SQLite3($argv[1]); exit((int)$db->querySingle("SELECT MAX(id) FROM wp_forkpress_e2e_autoinc") === 1 ? 0 : 1);' "$WORK_DIR/cow/merge/bases/ui-created.sqlite"
+php -r '$db = new SQLite3($argv[1]); exit((int)$db->querySingle("SELECT COALESCE(MAX(id), 0) FROM wp_forkpress_e2e_autoinc") === (int)$argv[2] ? 0 : 1);' "$WORK_DIR/cow/merge/bases/ui-created.sqlite" "$MAIN_AUTOINC_MAX_BEFORE_UI"
 php -r '$base = json_decode((string)file_get_contents($argv[1]), true); $entries = $base["entries"] ?? []; exit(is_array($entries) && count($entries) > 0 && !isset($entries["wp-content/ui-created-file.txt"]) ? 0 : 1);' "$WORK_DIR/cow/merge/file-bases/ui-created.json"
 php -r '$meta = new SQLite3($argv[1]); $branch = new SQLite3($argv[2]); $band = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''ui-created'\'' AND table_name = '\''wp_forkpress_e2e_autoinc'\''", true); $seq = (int)$branch->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''wp_forkpress_e2e_autoinc'\''"); exit($band && (int)$band["band_start"] >= 1000000 && $seq === (int)$band["band_start"] - 1 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite" "$WORK/ui-created/wp-content/database/.ht.sqlite"
 assert_branch_config_uses_final_db ui-created
@@ -1224,6 +1258,7 @@ test -f "$WORK_DIR/cow/merge/file-bases/public-create-crash.json"
 php -r '$meta = new SQLite3($argv[1]); $count = (int)$meta->querySingle("SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = '\''public-create-crash'\''"); exit($count > 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
 
 log_step "create CLI branch"
+MAIN_AUTOINC_MAX_BEFORE_FEATURE_COW="$(autoinc_db_max_id "$WORK/main/wp-content/database/.ht.sqlite")"
 "$BIN" branch --work-dir "$WORK_DIR" create feature-cow > "$TMP/branch-create.out"
 grep -F "feature-cow.wp.localhost:$PORT" "$TMP/branch-create.out" >/dev/null
 test -d "$WORK/feature-cow"
@@ -1231,7 +1266,7 @@ echo "feature only" > "$WORK/feature-cow/wp-content/forkpress-branch.txt"
 test ! -e "$WORK/main/wp-content/forkpress-branch.txt"
 test -f "$WORK_DIR/cow/merge/bases/feature-cow.sqlite"
 test -f "$WORK_DIR/cow/merge/file-bases/feature-cow.json"
-php -r '$db = new SQLite3($argv[1]); exit((int)$db->querySingle("SELECT MAX(id) FROM wp_forkpress_e2e_autoinc") === 1 ? 0 : 1);' "$WORK_DIR/cow/merge/bases/feature-cow.sqlite"
+php -r '$db = new SQLite3($argv[1]); exit((int)$db->querySingle("SELECT COALESCE(MAX(id), 0) FROM wp_forkpress_e2e_autoinc") === (int)$argv[2] ? 0 : 1);' "$WORK_DIR/cow/merge/bases/feature-cow.sqlite" "$MAIN_AUTOINC_MAX_BEFORE_FEATURE_COW"
 php -r '$base = json_decode((string)file_get_contents($argv[1]), true); $entries = $base["entries"] ?? []; exit(is_array($entries) && count($entries) > 0 && !isset($entries["wp-content/forkpress-branch.txt"]) ? 0 : 1);' "$WORK_DIR/cow/merge/file-bases/feature-cow.json"
 php -r '$meta = new SQLite3($argv[1]); $branch = new SQLite3($argv[2]); $band = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''feature-cow'\'' AND table_name = '\''wp_forkpress_e2e_autoinc'\''", true); $seq = (int)$branch->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''wp_forkpress_e2e_autoinc'\''"); exit($band && (int)$band["band_start"] >= 1000000 && $seq === (int)$band["band_start"] - 1 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite" "$WORK/feature-cow/wp-content/database/.ht.sqlite"
 assert_branch_config_uses_final_db feature-cow
