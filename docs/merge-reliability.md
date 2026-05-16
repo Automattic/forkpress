@@ -301,7 +301,8 @@ should stay focused on these areas:
   state changes now append `merge_conflict_events`, giving UI and API clients a
   durable event stream for recorded, reviewed, revalidated, and resolved
   conflicts; validation-only `merge-resolve` calls are persisted as validated
-  resolutions with `resolution-validated` events, and
+  resolutions with `resolution-validated` events, `--apply-reviewed` applies the
+  latest unapplied validated choice, and
   `merge-audit --records conflict-events` exposes that stream.
 - Improve deterministic schema dependency planning for safe view/trigger
   reorderings while keeping cyclic or semantic ambiguity review-only.

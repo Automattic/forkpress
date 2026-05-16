@@ -27,7 +27,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "    --group-by supports resolutions by table/status/path, conflicts by table/type/path/severity, and decisions by table/type/path.\n");
     fwrite(STDERR, "  php merge.php revalidate-reviews --metadata-db <path> [--run ID] [--reviewer NAME] [--format text|json]\n");
     fwrite(STDERR, "  php merge.php review-record --metadata-db <path> --record conflict|decision|resolution --id ID --status pending|needs-action|reviewed --note TEXT [--reviewer NAME]\n");
-    fwrite(STDERR, "  php merge.php resolve-conflict --metadata-db <path> --id ID --choice source|target [--apply] [--after-revalidate] [--note TEXT] [--reviewer NAME]\n");
+    fwrite(STDERR, "  php merge.php resolve-conflict --metadata-db <path> --id ID (--choice source|target [--apply]|--apply-reviewed) [--after-revalidate] [--note TEXT] [--reviewer NAME]\n");
 }
 
 const COW_MERGE_AUTOINCREMENT_BAND_SIZE = 1000000;
@@ -3722,6 +3722,72 @@ CREATE TABLE IF NOT EXISTS merge_conflict_events (
 )
 SQL, 'failed to create metadata table merge_conflict_events');
     cow_merge_exec_checked($meta, 'CREATE INDEX IF NOT EXISTS merge_conflict_events_conflict_idx ON merge_conflict_events(conflict_id, id)', 'failed to create metadata index merge_conflict_events_conflict_idx');
+    $conflict_events_schema = cow_merge_query_checked(
+        $meta,
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'merge_conflict_events'",
+        'failed to inspect conflict-event metadata schema'
+    );
+    $conflict_events_row = $conflict_events_schema->fetchArray(SQLITE3_ASSOC);
+    if ($conflict_events_row === false) {
+        cow_merge_result_finalize_checked(
+            $conflict_events_schema,
+            'failed to finalize conflict-event metadata schema inspection'
+        );
+        throw new RuntimeException('failed to inspect conflict-event metadata schema: missing merge_conflict_events table');
+    }
+    $conflict_events_sql = (string)$conflict_events_row['sql'];
+    cow_merge_result_finalize_checked(
+        $conflict_events_schema,
+        'failed to finalize conflict-event metadata schema inspection'
+    );
+    unset($conflict_events_schema);
+    if (!str_contains($conflict_events_sql, 'resolution-validated')) {
+        $migration_savepoint = 'migrate_merge_conflict_events_event_type';
+        cow_merge_exec_checked(
+            $meta,
+            'SAVEPOINT ' . $migration_savepoint,
+            'failed to create conflict-event metadata migration savepoint'
+        );
+        try {
+            cow_merge_exec_checked($meta, 'ALTER TABLE merge_conflict_events RENAME TO merge_conflict_events_old', 'failed to rename legacy conflict-event metadata table');
+            cow_merge_exec_checked($meta, <<<'SQL'
+CREATE TABLE merge_conflict_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conflict_id INTEGER NOT NULL,
+    run_id INTEGER NOT NULL,
+    event_type TEXT NOT NULL CHECK(event_type IN ('recorded', 'review-pending', 'review-needs-action', 'review-reviewed', 'resolution-validated', 'resolution-applied', 'revalidation-required')),
+    actor TEXT NOT NULL,
+    note TEXT NOT NULL,
+    related_record_type TEXT,
+    related_record_id INTEGER,
+    lifecycle_state TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(conflict_id) REFERENCES merge_conflicts(id),
+    FOREIGN KEY(run_id) REFERENCES merge_runs(id)
+)
+SQL, 'failed to create migrated conflict-event metadata table');
+            cow_merge_exec_checked(
+                $meta,
+                'INSERT INTO merge_conflict_events (id, conflict_id, run_id, event_type, actor, note, related_record_type, related_record_id, lifecycle_state, created_at) ' .
+                'SELECT id, conflict_id, run_id, event_type, actor, note, related_record_type, related_record_id, lifecycle_state, created_at FROM merge_conflict_events_old',
+                'failed to copy legacy conflict-event metadata'
+            );
+            cow_merge_exec_checked($meta, 'DROP TABLE merge_conflict_events_old', 'failed to drop legacy conflict-event metadata table');
+            cow_merge_exec_checked($meta, 'CREATE INDEX IF NOT EXISTS merge_conflict_events_conflict_idx ON merge_conflict_events(conflict_id, id)', 'failed to create migrated metadata index merge_conflict_events_conflict_idx');
+            cow_merge_release_savepoint_checked($meta, $migration_savepoint, 'conflict-event metadata migration');
+        } catch (Throwable $e) {
+            $cleanup_error = cow_merge_rollback_release_savepoint_checked(
+                $meta,
+                $migration_savepoint,
+                'conflict-event metadata migration',
+                $e
+            );
+            if ($cleanup_error !== null) {
+                throw $cleanup_error;
+            }
+            throw $e;
+        }
+    }
     cow_merge_exec_checked($meta, <<<'SQL'
 CREATE TABLE IF NOT EXISTS merge_revalidations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -5958,6 +6024,12 @@ function cow_merge_latest_applied_resolution_choice(SQLite3 $meta, int $conflict
     return (string)$row['choice'];
 }
 
+function cow_merge_require_unresolved_conflict(SQLite3 $meta, int $conflict_id): void {
+    if (cow_merge_latest_applied_resolution_choice($meta, $conflict_id) !== null) {
+        throw new InvalidArgumentException("conflict #$conflict_id is already resolved");
+    }
+}
+
 function cow_merge_record_conflict_event(
     SQLite3 $meta,
     int $conflict_id,
@@ -7923,6 +7995,38 @@ function cow_merge_resolution_choice(?string $value): string {
     return (string)$value;
 }
 
+function cow_merge_latest_validated_resolution_choice(SQLite3 $meta, int $conflict_id): string {
+    $stmt = cow_merge_prepare_checked(
+        $meta,
+        'SELECT choice, applied, status FROM merge_resolutions WHERE conflict_id = :conflict_id ORDER BY id DESC LIMIT 1',
+        'failed to prepare latest validated resolution lookup'
+    );
+    cow_merge_bind($stmt, ':conflict_id', $conflict_id);
+    $res = cow_merge_execute_checked($stmt, $meta, 'failed to read latest validated resolution');
+    $row = $res->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($res, 'failed to finalize latest validated resolution lookup');
+    if (!$row) {
+        throw new InvalidArgumentException("conflict #$conflict_id does not have a validated resolution to apply");
+    }
+    if ((int)$row['applied'] !== 0 || (string)$row['status'] !== 'validated') {
+        throw new InvalidArgumentException("conflict #$conflict_id latest resolution is not an unapplied validated choice");
+    }
+    return cow_merge_resolution_choice((string)$row['choice']);
+}
+
+function cow_merge_latest_validated_resolution_choice_from_db(string $metadata_db, int $conflict_id): string {
+    if (!is_file($metadata_db)) {
+        throw new InvalidArgumentException("merge metadata database does not exist: $metadata_db");
+    }
+    $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READWRITE);
+    try {
+        cow_merge_ensure_metadata($meta);
+        return cow_merge_latest_validated_resolution_choice($meta, $conflict_id);
+    } finally {
+        $meta->close();
+    }
+}
+
 function cow_merge_bool_flag(mixed $value): bool {
     return (string)$value === '1' || $value === true;
 }
@@ -8156,7 +8260,7 @@ function cow_merge_record_resolution(
     cow_merge_bind($stmt, ':conflict_id', $conflict_id);
     cow_merge_bind($stmt, ':choice', $choice);
     cow_merge_bind($stmt, ':applied', $apply ? 1 : 0);
-    cow_merge_bind($stmt, ':status', $apply && $choice === 'source' ? 'applied' : 'validated');
+    cow_merge_bind($stmt, ':status', $apply ? 'applied' : 'validated');
     cow_merge_bind($stmt, ':note', $note);
     cow_merge_bind($stmt, ':reviewer', $reviewer);
     cow_merge_bind($stmt, ':target_db', $target_db);
@@ -10240,7 +10344,7 @@ function cow_merge_resolve_schema_conflict(
             'resolution_id' => $resolution_id,
             'choice' => $choice,
             'applied' => $apply,
-            'status' => $apply && $choice === 'source' ? 'applied' : 'validated',
+            'status' => $apply ? 'applied' : 'validated',
             'target_db' => $target_db,
             'table_name' => $table,
             'column_name' => $object,
@@ -10283,6 +10387,7 @@ function cow_merge_resolve_conflict(
         if (!$conflict) {
             throw new InvalidArgumentException("conflict #$conflict_id does not exist in merge metadata");
         }
+        cow_merge_require_unresolved_conflict($meta, $conflict_id);
         $table = (string)$conflict['table_name'];
         $column = (string)($conflict['column_name'] ?? '');
         $conflict_type = (string)$conflict['conflict_type'];
@@ -10445,7 +10550,7 @@ function cow_merge_resolve_conflict(
                 'resolution_id' => $resolution_id,
                 'choice' => $choice,
                 'applied' => $apply,
-                'status' => $apply && $choice === 'source' ? 'applied' : 'validated',
+                'status' => $apply ? 'applied' : 'validated',
                 'target_db' => $target_db,
                 'table_name' => $table,
                 'column_name' => 'path',
@@ -10846,7 +10951,7 @@ function cow_merge_resolve_conflict(
             'resolution_id' => $resolution_id,
             'choice' => $choice,
             'applied' => $apply,
-            'status' => $apply && $choice === 'source' ? 'applied' : 'validated',
+            'status' => $apply ? 'applied' : 'validated',
             'target_db' => $target_db,
             'table_name' => $table,
             'column_name' => $conflict_type === 'cell-conflict' ? $column : null,
@@ -15136,7 +15241,7 @@ function cow_merge_parse_cli(array $argv, array $required, int $start_index = 1)
             throw new InvalidArgumentException("unexpected argument: $arg");
         }
         $key = substr($arg, 2);
-        if (in_array($key, ['id-band-skips', 'target-kept', 'review', 'revalidate', 'apply', 'after-revalidate', 'restore-target-db', 'restore-files'], true) && (!isset($argv[$i + 1]) || str_starts_with($argv[$i + 1], '--'))) {
+        if (in_array($key, ['id-band-skips', 'target-kept', 'review', 'revalidate', 'apply', 'apply-reviewed', 'after-revalidate', 'restore-target-db', 'restore-files'], true) && (!isset($argv[$i + 1]) || str_starts_with($argv[$i + 1], '--'))) {
             $args[$key] = '1';
             continue;
         }
@@ -15443,12 +15548,23 @@ if (realpath($argv[0] ?? '') === __FILE__) {
             exit(0);
         }
         if ($command === 'resolve-conflict') {
-            $args = cow_merge_parse_cli($argv, ['metadata-db', 'id', 'choice'], 2);
-            $apply = cow_merge_bool_flag($args['apply'] ?? '0');
+            $args = cow_merge_parse_cli($argv, ['metadata-db', 'id'], 2);
+            $apply_reviewed = cow_merge_bool_flag($args['apply-reviewed'] ?? '0');
+            if ($apply_reviewed && array_key_exists('choice', $args)) {
+                throw new InvalidArgumentException('--apply-reviewed cannot be combined with --choice');
+            }
+            if ($apply_reviewed && cow_merge_bool_flag($args['apply'] ?? '0')) {
+                throw new InvalidArgumentException('--apply-reviewed already applies the latest validated choice; do not combine it with --apply');
+            }
+            $conflict_id = cow_merge_review_record_id($args['id'] ?? null);
+            $choice = $apply_reviewed
+                ? cow_merge_latest_validated_resolution_choice_from_db($args['metadata-db'], $conflict_id)
+                : cow_merge_resolution_choice($args['choice'] ?? null);
+            $apply = $apply_reviewed || cow_merge_bool_flag($args['apply'] ?? '0');
             $result = cow_merge_resolve_conflict(
                 $args['metadata-db'],
-                cow_merge_review_record_id($args['id'] ?? null),
-                cow_merge_resolution_choice($args['choice'] ?? null),
+                $conflict_id,
+                $choice,
                 $apply,
                 cow_merge_review_text($args['note'] ?? 'deterministic conflict resolution', 'note'),
                 cow_merge_review_text($args['reviewer'] ?? 'user', 'reviewer'),

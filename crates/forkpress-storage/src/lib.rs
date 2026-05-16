@@ -1513,8 +1513,9 @@ pub fn resolve_cow_merge_conflict(
     runtime: &PortableRuntime,
     shared: &SharedPaths,
     conflict_id: &str,
-    choice: &str,
+    choice: Option<&str>,
     apply: bool,
+    apply_reviewed: bool,
     after_revalidate: bool,
     note: Option<&str>,
     reviewer: Option<&str>,
@@ -1526,11 +1527,16 @@ pub fn resolve_cow_merge_conflict(
         metadata_db.as_os_str().to_os_string(),
         "--id".into(),
         conflict_id.into(),
-        "--choice".into(),
-        choice.into(),
     ];
+    if let Some(choice) = choice {
+        args.push("--choice".into());
+        args.push(choice.into());
+    }
     if apply {
         args.push("--apply".into());
+    }
+    if apply_reviewed {
+        args.push("--apply-reviewed".into());
     }
     if after_revalidate {
         args.push("--after-revalidate".into());

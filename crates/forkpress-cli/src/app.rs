@@ -3356,6 +3356,7 @@ fn cow_branch_command(
             };
             let mut choice: Option<String> = None;
             let mut apply = false;
+            let mut apply_reviewed = false;
             let mut after_revalidate = false;
             let mut note: Option<String> = None;
             let mut reviewer: Option<String> = None;
@@ -3371,6 +3372,10 @@ fn cow_branch_command(
                     }
                     "--apply" => {
                         apply = true;
+                        index += 1;
+                    }
+                    "--apply-reviewed" => {
+                        apply_reviewed = true;
                         index += 1;
                     }
                     "--after-revalidate" => {
@@ -3396,16 +3401,25 @@ fn cow_branch_command(
                     }
                 }
             }
-            let Some(choice) = choice else {
-                bail!("branch merge-resolve requires --choice source|target");
-            };
+            if apply_reviewed && choice.is_some() {
+                bail!("--apply-reviewed cannot be combined with --choice");
+            }
+            if apply_reviewed && apply {
+                bail!(
+                    "--apply-reviewed already applies the latest validated choice; do not combine it with --apply"
+                );
+            }
+            if !apply_reviewed && choice.is_none() {
+                bail!("branch merge-resolve requires --choice source|target or --apply-reviewed");
+            }
             resolve_cow_merge_conflict(
                 &layout,
                 &runtime,
                 &args.shared,
                 record_id,
-                &choice,
+                choice.as_deref(),
                 apply,
+                apply_reviewed,
                 after_revalidate,
                 note.as_deref(),
                 reviewer.as_deref(),
@@ -3484,7 +3498,7 @@ fn branch_help_text(command: Option<&str>) -> &'static str {
             "Usage: forkpress branch merge-review <conflict|decision|resolution> <id> --status <pending|needs-action|reviewed> --note <text> [--reviewer <name>]\n\nAttach review metadata to an audit record.\n"
         }
         Some("merge-resolve") => {
-            "Usage: forkpress branch merge-resolve conflict <id> --choice <source|target> [--apply] [--after-revalidate] [--note <text>] [--reviewer <name>]\n\nValidate or apply a reviewed merge conflict choice. Use --after-revalidate only after merge-audit --revalidate has carried a stale DB row/cell or file conflict back to needs-action.\n"
+            "Usage: forkpress branch merge-resolve conflict <id> (--choice <source|target> [--apply]|--apply-reviewed) [--after-revalidate] [--note <text>] [--reviewer <name>]\n\nValidate or apply a reviewed merge conflict choice. Use --apply-reviewed to apply the latest validated choice. Use --after-revalidate only after merge-audit --revalidate has carried a stale DB row/cell or file conflict back to needs-action.\n"
         }
         Some("delete") | Some("rm") => {
             "Usage: forkpress branch delete <branch>\n\nDelete a materialized branch. Use with care.\n"
@@ -5599,6 +5613,41 @@ mod git_helper_tests {
                 "--after-revalidate".to_string(),
                 "--note".to_string(),
                 "Use source title".to_string(),
+                "--reviewer".to_string(),
+                "alice".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_branch_merge_resolve_apply_reviewed_args() {
+        let cli = Cli::try_parse_from([
+            "forkpress",
+            "branch",
+            "--work-dir",
+            ".forkpress",
+            "merge-resolve",
+            "conflict",
+            "12",
+            "--apply-reviewed",
+            "--note",
+            "Apply validated choice",
+            "--reviewer",
+            "alice",
+        ])
+        .unwrap();
+        let Commands::Branch(args) = cli.command else {
+            panic!("expected branch command");
+        };
+        assert_eq!(
+            args.args,
+            vec![
+                "merge-resolve".to_string(),
+                "conflict".to_string(),
+                "12".to_string(),
+                "--apply-reviewed".to_string(),
+                "--note".to_string(),
+                "Apply validated choice".to_string(),
                 "--reviewer".to_string(),
                 "alice".to_string(),
             ]

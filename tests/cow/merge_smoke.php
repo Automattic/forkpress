@@ -45,6 +45,16 @@ function smoke_scalar(string $path, string $sql): mixed {
     return $value;
 }
 
+function smoke_run_merge_cli(array $args): array {
+    $script = dirname(__DIR__, 2) . '/scripts/cow/merge.php';
+    $command = array_map('escapeshellarg', array_merge([PHP_BINARY, $script], $args));
+    exec(implode(' ', $command) . ' 2>&1', $output, $status);
+    return [
+        'status' => $status,
+        'output' => implode("\n", $output) . ($output === [] ? '' : "\n"),
+    ];
+}
+
 function smoke_write_file(string $path, string $contents): void {
     $dir = dirname($path);
     if (!is_dir($dir)) {
@@ -2167,17 +2177,44 @@ try {
     assert_same($validated_audit['conflicts'][0]['latest_event_type'], 'resolution-validated', 'validation-only resolution advertises latest validation event');
     assert_same($validated_audit['conflicts'][0]['latest_event_lifecycle_state'], 'validated', 'validation-only resolution advertises latest event lifecycle state');
 
-    cow_merge_resolve_conflict($options_edit_delete_metadata, $options_contract_conflict_id, 'target', true, 'Keep target option deletion.', 'cow-smoke');
+    $apply_reviewed_cli = smoke_run_merge_cli([
+        'resolve-conflict',
+        '--metadata-db', $options_edit_delete_metadata,
+        '--id', (string)$options_contract_conflict_id,
+        '--apply-reviewed',
+        '--note', 'Keep target option deletion.',
+        '--reviewer', 'cow-smoke',
+    ]);
+    assert_same($apply_reviewed_cli['status'], 0, 'apply-reviewed CLI applies the latest validated choice: ' . $apply_reviewed_cli['output']);
+    assert_same(str_contains($apply_reviewed_cli['output'], 'choice:    target'), true, 'apply-reviewed CLI reports the validated target choice');
     $resolved_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts']);
     assert_same($resolved_audit['conflicts'][0]['lifecycle_state'], 'resolved', 'applied resolution advertises resolved lifecycle state');
     assert_same($resolved_audit['conflicts'][0]['next_action'], 'none', 'applied resolution advertises no next action');
     assert_same((int)$resolved_audit['conflicts'][0]['resolution_count'], 2, 'applied resolution increments conflict resolution count');
     assert_same($resolved_audit['conflicts'][0]['latest_resolution_choice'], 'target', 'applied resolution advertises latest resolution choice');
     assert_same((int)$resolved_audit['conflicts'][0]['latest_resolution_applied'], 1, 'applied resolution advertises latest resolution applied flag');
+    assert_same($resolved_audit['conflicts'][0]['latest_resolution_status'], 'applied', 'applied target resolution advertises applied status');
     assert_same((int)$resolved_audit['conflicts'][0]['event_count'], 6, 'applied resolution appends a conflict lifecycle event');
     assert_same($resolved_audit['conflicts'][0]['latest_event_type'], 'resolution-applied', 'resolved conflict advertises latest resolution event');
     assert_same($resolved_audit['conflicts'][0]['latest_event_lifecycle_state'], 'resolved', 'resolved conflict advertises latest event lifecycle state');
     assert_same($resolved_audit['conflicts'][0]['latest_event_actor'], 'cow-smoke', 'resolved conflict advertises latest event actor');
+    $resolved_regression_message = null;
+    try {
+        cow_merge_resolve_conflict(
+            $options_edit_delete_metadata,
+            $options_contract_conflict_id,
+            'target',
+            false,
+            'Do not reopen a resolved conflict.',
+            'cow-smoke'
+        );
+    } catch (Throwable $e) {
+        $resolved_regression_message = $e->getMessage();
+    }
+    assert_same(str_contains((string)$resolved_regression_message, 'already resolved'), true, 'resolved conflicts reject later validation-only resolutions');
+    $after_resolved_regression_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts']);
+    assert_same($after_resolved_regression_audit['conflicts'][0]['lifecycle_state'], 'resolved', 'rejected resolved-conflict validation keeps resolved lifecycle state');
+    assert_same((int)$after_resolved_regression_audit['conflicts'][0]['resolution_count'], 2, 'rejected resolved-conflict validation does not append resolution records');
     $event_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 6, ['records' => 'conflict-events']);
     assert_same(count($event_audit['conflict_events']), 6, 'conflict event audit returns the selected conflict lifecycle history');
     assert_same(
