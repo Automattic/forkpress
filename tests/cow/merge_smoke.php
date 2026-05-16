@@ -577,6 +577,51 @@ try {
         'page-plus-comment smoke merge audits all target graph inserts'
     );
 
+    $comment_edit_delete_base = $tmp . '/comment-edit-delete-base.sqlite';
+    $comment_edit_delete_source = $tmp . '/comment-edit-delete-source.sqlite';
+    $comment_edit_delete_target = $tmp . '/comment-edit-delete-target.sqlite';
+    $comment_edit_delete_metadata = $tmp . '/.forkpress/cow/merge/comment-edit-delete-metadata.sqlite';
+
+    smoke_create_posts_db($comment_edit_delete_base);
+    $db = smoke_open_db($comment_edit_delete_base);
+    smoke_insert_user($db, 17000081, 'shared-commenter', 'shared-commenter@example.test', 'Shared Commenter');
+    smoke_insert_comment($db, 17000082, 1, 17000081, 'Shared Commenter', 'Base shared comment body');
+    smoke_insert_commentmeta($db, 17000083, 17000082, 'forkpress_smoke_comment_ref', '{"branch":"base","comment_id":17000082,"user_id":17000081,"post_id":1}');
+    $db->close();
+    copy($comment_edit_delete_base, $comment_edit_delete_source);
+    copy($comment_edit_delete_base, $comment_edit_delete_target);
+
+    $db = smoke_open_db($comment_edit_delete_source);
+    $db->exec("UPDATE wp_comments SET comment_content = 'Source edited shared comment body' WHERE comment_ID = 17000082");
+    $db->exec("UPDATE wp_commentmeta SET meta_value = '{\"branch\":\"source\",\"comment_id\":17000082,\"user_id\":17000081,\"post_id\":1,\"edited\":true}' WHERE meta_id = 17000083");
+    $db->close();
+
+    $db = smoke_open_db($comment_edit_delete_target);
+    $db->exec('DELETE FROM wp_commentmeta WHERE comment_id = 17000082');
+    $db->exec('DELETE FROM wp_comments WHERE comment_ID = 17000082');
+    $db->close();
+
+    $comment_edit_delete_result = cow_merge_databases($comment_edit_delete_base, $comment_edit_delete_source, $comment_edit_delete_target, $comment_edit_delete_metadata, 'feature-smoke-comment-edit-delete', 'main');
+    assert_same($comment_edit_delete_result['status'], 'completed_with_conflicts', 'comment edit/delete graph stays reviewable');
+    assert_same((int)smoke_scalar($comment_edit_delete_target, 'SELECT COUNT(*) FROM wp_comments WHERE comment_ID = 17000082'), 0, 'comment edit/delete preserves target comment deletion before review');
+    assert_same((int)smoke_scalar($comment_edit_delete_target, 'SELECT COUNT(*) FROM wp_commentmeta WHERE comment_id = 17000082'), 0, 'comment edit/delete preserves target comment metadata deletion before review');
+    assert_same((int)smoke_scalar($comment_edit_delete_target, 'SELECT COUNT(*) FROM wp_users WHERE ID = 17000081'), 1, 'comment edit/delete preserves the unchanged comment author');
+    assert_same(
+        (int)smoke_scalar($comment_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_comments' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'comment edit/delete records the edited comment delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($comment_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_commentmeta' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'comment edit/delete records the edited comment metadata delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($comment_edit_delete_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_comments', 'wp_commentmeta') AND decision = 'target-wins'"),
+        2,
+        'comment edit/delete defaults the changed source comment graph to target-wins before review'
+    );
+
     $cpt_base = $tmp . '/cpt-base.sqlite';
     $cpt_source = $tmp . '/cpt-source.sqlite';
     $cpt_target = $tmp . '/cpt-target.sqlite';
@@ -653,6 +698,72 @@ try {
         (int)smoke_scalar($cpt_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_postmeta', 'wp_options', 'wp_terms', 'wp_term_taxonomy', 'wp_term_relationships') AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
         7,
         'page-plus-custom-post-type smoke merge audits all target graph inserts'
+    );
+
+    $cpt_edit_delete_base = $tmp . '/cpt-edit-delete-base.sqlite';
+    $cpt_edit_delete_source = $tmp . '/cpt-edit-delete-source.sqlite';
+    $cpt_edit_delete_target = $tmp . '/cpt-edit-delete-target.sqlite';
+    $cpt_edit_delete_metadata = $tmp . '/.forkpress/cow/merge/cpt-edit-delete-metadata.sqlite';
+
+    smoke_create_posts_db($cpt_edit_delete_base);
+    $db = smoke_open_db($cpt_edit_delete_base);
+    smoke_insert_post($db, 17000090, 'Shared CPT Owner Page', 'Base owner page body', 'page', 'shared-cpt-owner-page');
+    smoke_insert_post($db, 17000091, 'Shared Plugin Note', 'Base plugin CPT body', 'forkpress_note', 'shared-plugin-note', 'publish', 17000090);
+    smoke_insert_postmeta($db, 17000092, 17000091, '_forkpress_note_payload', '{"branch":"base","note_id":17000091,"page_id":17000090}');
+    smoke_insert_option($db, 17000093, 'forkpress_shared_note_index', '{"branch":"base","note_id":17000091,"page_id":17000090}');
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (17000094, 'Shared Note Topic', 'shared-note-topic')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES (17000095, 17000094, 'forkpress_topic', 'Shared note topic', 0, 1)");
+    $db->exec("INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (17000091, 17000095, 0)");
+    $db->close();
+    copy($cpt_edit_delete_base, $cpt_edit_delete_source);
+    copy($cpt_edit_delete_base, $cpt_edit_delete_target);
+
+    $db = smoke_open_db($cpt_edit_delete_source);
+    $db->exec("UPDATE wp_posts SET post_title = 'Source Edited Plugin Note', post_content = 'Source edited plugin CPT body' WHERE ID = 17000091");
+    $db->exec("UPDATE wp_postmeta SET meta_value = '{\"branch\":\"source\",\"note_id\":17000091,\"page_id\":17000090,\"edited\":true}' WHERE meta_id = 17000092");
+    smoke_update_option($db, 'forkpress_shared_note_index', '{"branch":"source","note_id":17000091,"page_id":17000090,"edited":true}');
+    $db->exec('UPDATE wp_term_relationships SET term_order = 1 WHERE object_id = 17000091 AND term_taxonomy_id = 17000095');
+    $db->close();
+
+    $db = smoke_open_db($cpt_edit_delete_target);
+    $db->exec('DELETE FROM wp_term_relationships WHERE object_id = 17000091 AND term_taxonomy_id = 17000095');
+    $db->exec("DELETE FROM wp_options WHERE option_name = 'forkpress_shared_note_index'");
+    $db->exec('DELETE FROM wp_postmeta WHERE post_id = 17000091');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 17000091');
+    $db->close();
+
+    $cpt_edit_delete_result = cow_merge_databases($cpt_edit_delete_base, $cpt_edit_delete_source, $cpt_edit_delete_target, $cpt_edit_delete_metadata, 'feature-smoke-cpt-edit-delete', 'main');
+    assert_same($cpt_edit_delete_result['status'], 'completed_with_conflicts', 'custom post type edit/delete graph stays reviewable');
+    assert_same((int)smoke_scalar($cpt_edit_delete_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 17000091'), 0, 'custom post type edit/delete preserves target CPT deletion before review');
+    assert_same((int)smoke_scalar($cpt_edit_delete_target, 'SELECT COUNT(*) FROM wp_postmeta WHERE post_id = 17000091'), 0, 'custom post type edit/delete preserves target CPT metadata deletion before review');
+    assert_same((int)smoke_scalar($cpt_edit_delete_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'forkpress_shared_note_index'"), 0, 'custom post type edit/delete preserves target CPT option cleanup before review');
+    assert_same((int)smoke_scalar($cpt_edit_delete_target, 'SELECT COUNT(*) FROM wp_term_relationships WHERE object_id = 17000091 AND term_taxonomy_id = 17000095'), 0, 'custom post type edit/delete preserves target CPT taxonomy relationship deletion before review');
+    assert_same(smoke_scalar($cpt_edit_delete_target, 'SELECT post_title FROM wp_posts WHERE ID = 17000090'), 'Shared CPT Owner Page', 'custom post type edit/delete preserves unchanged owner page');
+    assert_same(smoke_scalar($cpt_edit_delete_target, 'SELECT name FROM wp_terms WHERE term_id = 17000094'), 'Shared Note Topic', 'custom post type edit/delete preserves unchanged taxonomy term');
+    assert_same(
+        (int)smoke_scalar($cpt_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_posts' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'custom post type edit/delete records the edited CPT delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($cpt_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_postmeta' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'custom post type edit/delete records the edited CPT metadata delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($cpt_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_options' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'custom post type edit/delete records the edited CPT option delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($cpt_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_term_relationships' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'custom post type edit/delete records the edited taxonomy relationship delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($cpt_edit_delete_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_postmeta', 'wp_options', 'wp_term_relationships') AND decision = 'target-wins'"),
+        4,
+        'custom post type edit/delete defaults the changed source CPT graph to target-wins before review'
     );
 
     $taxonomy_base = $tmp . '/taxonomy-base.sqlite';
