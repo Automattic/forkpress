@@ -290,6 +290,59 @@ try {
         'source payload changed after latest merge revalidation',
         'after-revalidate row resolution fails if the source row changed after review'
     );
+
+    $post_identity_base = $tmp . '/post-identity-base.sqlite';
+    $post_identity_source = $tmp . '/post-identity-source.sqlite';
+    $post_identity_target = $tmp . '/post-identity-target.sqlite';
+    $post_identity_metadata = $tmp . '/.forkpress/cow/merge/post-identity-metadata.sqlite';
+    foreach ([$post_identity_base, $post_identity_source, $post_identity_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE wp_posts (ID INTEGER PRIMARY KEY, post_type TEXT, post_title TEXT, post_content TEXT)');
+        $db->close();
+    }
+    $db = open_db($post_identity_source);
+    $db->exec("INSERT INTO wp_posts (ID, post_type, post_title, post_content) VALUES (10, 'page', 'Source page', 'source page content')");
+    $db->close();
+    $db = open_db($post_identity_target);
+    $db->exec("INSERT INTO wp_posts (ID, post_type, post_title, post_content) VALUES (10, 'page', 'Target page', 'target page content')");
+    $db->close();
+
+    $post_identity_merge = cow_merge_databases($post_identity_base, $post_identity_source, $post_identity_target, $post_identity_metadata, 'feature-post-identity-review', 'main');
+    $post_identity_run_id = (int)$post_identity_merge['run_id'];
+    assert_same($post_identity_merge['status'], 'completed_with_conflicts', 'post semantic identity fixture starts with a same-ID row conflict');
+    $post_identity_conflict_id = (int)scalar($post_identity_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'wp_posts' AND conflict_type = 'row-insert-collision'");
+    assert_true($post_identity_conflict_id > 0, 'post semantic identity fixture records the row conflict');
+    cow_merge_review_record(
+        $post_identity_metadata,
+        'conflict',
+        $post_identity_conflict_id,
+        'reviewed',
+        'Review source page before applying over target page.',
+        'cow-test'
+    );
+
+    $db = open_db($post_identity_target);
+    $db->exec("UPDATE wp_posts SET post_type = 'attachment', post_title = 'Target attachment', post_content = 'target attachment content' WHERE ID = 10");
+    $db->close();
+
+    $post_identity_revalidated = cow_merge_revalidate_reviewed_conflicts($post_identity_metadata, $post_identity_run_id, 'cow-revalidate');
+    assert_same($post_identity_revalidated['checked'], 1, 'post semantic revalidation checks the reviewed row conflict');
+    assert_same($post_identity_revalidated['stale'], 1, 'post semantic revalidation detects target semantic replacement');
+    assert_same($post_identity_revalidated['carried'], 1, 'post semantic revalidation carries semantically replaced rows to needs-action');
+    assert_same(
+        scalar($post_identity_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $post_identity_conflict_id ORDER BY id DESC LIMIT 1"),
+        'incompatible',
+        'post semantic revalidation classifies changed post_type as incompatible'
+    );
+    $post_identity_audit = cow_merge_audit_report($post_identity_metadata, $post_identity_run_id, 10, ['records' => 'conflicts']);
+    $post_identity_conflicts = array_values(array_filter($post_identity_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $post_identity_conflict_id));
+    assert_same($post_identity_conflicts[0]['revalidation_class'] ?? null, 'incompatible', 'post semantic audit exposes incompatible replacement');
+    assert_true(str_contains((string)($post_identity_conflicts[0]['stale_reason'] ?? ''), 'semantic identity'), 'post semantic stale reason explains semantic identity drift');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($post_identity_metadata, $post_identity_conflict_id, 'source', true, 'Do not apply source page over replacement attachment.', 'cow-test', true),
+        'latest merge revalidation is incompatible',
+        'after-revalidate blocks source resolution over an incompatible post semantic replacement'
+    );
 } finally {
     remove_tree($tmp);
 }
