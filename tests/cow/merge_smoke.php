@@ -592,6 +592,49 @@ try {
         'page-plus-comment smoke merge audits all target graph inserts'
     );
 
+    $user_edit_delete_base = $tmp . '/user-edit-delete-base.sqlite';
+    $user_edit_delete_source = $tmp . '/user-edit-delete-source.sqlite';
+    $user_edit_delete_target = $tmp . '/user-edit-delete-target.sqlite';
+    $user_edit_delete_metadata = $tmp . '/.forkpress/cow/merge/user-edit-delete-metadata.sqlite';
+
+    smoke_create_posts_db($user_edit_delete_base);
+    $db = smoke_open_db($user_edit_delete_base);
+    smoke_insert_user($db, 17000076, 'shared-user', 'shared-user@example.test', 'Shared User');
+    smoke_insert_usermeta($db, 17000077, 17000076, 'forkpress_smoke_user_graph', '{"branch":"base","user_id":17000076}');
+    $db->close();
+    copy($user_edit_delete_base, $user_edit_delete_source);
+    copy($user_edit_delete_base, $user_edit_delete_target);
+
+    $db = smoke_open_db($user_edit_delete_source);
+    $db->exec("UPDATE wp_users SET user_email = 'source-edited-user@example.test', display_name = 'Source Edited User' WHERE ID = 17000076");
+    $db->exec("UPDATE wp_usermeta SET meta_value = '{\"branch\":\"source\",\"user_id\":17000076,\"edited\":true}' WHERE umeta_id = 17000077");
+    $db->close();
+
+    $db = smoke_open_db($user_edit_delete_target);
+    $db->exec('DELETE FROM wp_usermeta WHERE user_id = 17000076');
+    $db->exec('DELETE FROM wp_users WHERE ID = 17000076');
+    $db->close();
+
+    $user_edit_delete_result = cow_merge_databases($user_edit_delete_base, $user_edit_delete_source, $user_edit_delete_target, $user_edit_delete_metadata, 'feature-smoke-user-edit-delete', 'main');
+    assert_same($user_edit_delete_result['status'], 'completed_with_conflicts', 'user edit/delete graph stays reviewable');
+    assert_same((int)smoke_scalar($user_edit_delete_target, 'SELECT COUNT(*) FROM wp_users WHERE ID = 17000076'), 0, 'user edit/delete preserves target user deletion before review');
+    assert_same((int)smoke_scalar($user_edit_delete_target, 'SELECT COUNT(*) FROM wp_usermeta WHERE user_id = 17000076'), 0, 'user edit/delete preserves target user metadata deletion before review');
+    assert_same(
+        (int)smoke_scalar($user_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_users' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'user edit/delete records the edited user delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($user_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_usermeta' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'user edit/delete records the edited user metadata delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($user_edit_delete_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_users', 'wp_usermeta') AND decision = 'target-wins'"),
+        2,
+        'user edit/delete defaults the changed source user graph to target-wins before review'
+    );
+
     $comment_edit_delete_base = $tmp . '/comment-edit-delete-base.sqlite';
     $comment_edit_delete_source = $tmp . '/comment-edit-delete-source.sqlite';
     $comment_edit_delete_target = $tmp . '/comment-edit-delete-target.sqlite';
