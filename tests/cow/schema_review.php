@@ -105,6 +105,7 @@ try {
     $source_db->close();
 
     $result = cow_merge_databases($base, $source, $target, $metadata, 'feature-schema-review', 'main');
+    $schema_review_run_id = (int)$result['run_id'];
     assert_same($result['status'], 'completed_with_conflicts', 'cyclic source-added schema objects are held as reviewable conflicts');
     assert_same(
         (int)scalar($target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_cycle_self_view'"),
@@ -156,6 +157,74 @@ try {
         0,
         'failed cyclic schema resolution attempts do not record resolutions'
     );
+    cow_merge_review_record(
+        $metadata,
+        'conflict',
+        $view_conflict_id,
+        'reviewed',
+        'Review cyclic source-added view after schema dependencies are updated.',
+        'cow-test'
+    );
+    cow_merge_review_record(
+        $metadata,
+        'conflict',
+        $trigger_conflict_id,
+        'reviewed',
+        'Review cyclic source-added trigger after schema dependencies are updated.',
+        'cow-test'
+    );
+    $source_db = open_db($source);
+    $source_db->exec('DROP VIEW plugin_cycle_self_view');
+    $source_db->exec('CREATE VIEW plugin_cycle_self_view AS SELECT label FROM plugin_trigger_cycle_self');
+    $source_db->exec('DROP TRIGGER plugin_trigger_cycle_self_insert');
+    $source_db->exec('CREATE TRIGGER plugin_trigger_cycle_self_insert AFTER INSERT ON plugin_trigger_cycle_self BEGIN SELECT NEW.label; END');
+    $source_db->close();
+    $schema_object_revalidated = cow_merge_revalidate_reviewed_conflicts($metadata, $schema_review_run_id, 'cow-revalidate');
+    assert_same($schema_object_revalidated['checked'], 2, 'schema object revalidation checks reviewed view and trigger conflicts');
+    assert_same($schema_object_revalidated['reviewed'], 2, 'schema object revalidation sees reviewed view and trigger conflicts');
+    assert_same($schema_object_revalidated['stale'], 2, 'schema object revalidation detects changed source view and trigger SQL');
+    assert_same($schema_object_revalidated['carried'], 2, 'schema object revalidation carries changed source object evidence to needs-action');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id IN ($view_conflict_id, $trigger_conflict_id) AND revalidation_class = 'unclassified'"),
+        2,
+        'schema object source drift remains unclassified until a schema planner proves compatibility'
+    );
+    assert_true(
+        str_contains((string)scalar($metadata, "SELECT stale_reason FROM merge_revalidations WHERE conflict_id = $view_conflict_id ORDER BY id DESC LIMIT 1"), 'view source changed'),
+        'schema view source drift explains that source schema changed after review'
+    );
+    assert_true(
+        str_contains((string)scalar($metadata, "SELECT stale_reason FROM merge_revalidations WHERE conflict_id = $trigger_conflict_id ORDER BY id DESC LIMIT 1"), 'trigger source changed'),
+        'schema trigger source drift explains that source schema changed after review'
+    );
+    $view_revalidate_source_payload = cow_merge_decode_payload_json(
+        (string)scalar($metadata, "SELECT source_payload FROM merge_revalidations WHERE conflict_id = $view_conflict_id ORDER BY id DESC LIMIT 1"),
+        'schema view revalidation source'
+    );
+    $trigger_revalidate_source_payload = cow_merge_decode_payload_json(
+        (string)scalar($metadata, "SELECT source_payload FROM merge_revalidations WHERE conflict_id = $trigger_conflict_id ORDER BY id DESC LIMIT 1"),
+        'schema trigger revalidation source'
+    );
+    assert_true(
+        str_contains((string)($view_revalidate_source_payload['sql'] ?? ''), 'SELECT label FROM plugin_trigger_cycle_self'),
+        'schema view revalidation records the updated source SQL'
+    );
+    assert_true(
+        str_contains((string)($trigger_revalidate_source_payload['sql'] ?? ''), 'SELECT NEW.label'),
+        'schema trigger revalidation records the updated source SQL'
+    );
+    $schema_object_audit = cow_merge_audit_report($metadata, $schema_review_run_id, 10, [
+        'records' => 'conflicts',
+        'review_status' => 'needs-action',
+    ]);
+    $schema_object_needs_action = array_values(array_filter(
+        $schema_object_audit['conflicts'],
+        fn($conflict) => in_array((int)($conflict['id'] ?? 0), [$view_conflict_id, $trigger_conflict_id], true)
+    ));
+    assert_same(count($schema_object_needs_action), 2, 'schema object source drift returns reviewed conflicts to the needs-action audit queue');
+    foreach ($schema_object_needs_action as $conflict) {
+        assert_same($conflict['revalidation_class'] ?? null, 'unclassified', 'schema object audit exposes conservative unclassified revalidation');
+    }
 
     $view_order_base = $tmp . '/view-order-base.sqlite';
     $view_order_source = $tmp . '/view-order-source.sqlite';
