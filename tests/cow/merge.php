@@ -17970,6 +17970,12 @@ PHP);
         SQLite3::escapeString(serialize(['auto-validator/auto-validator.php'])) .
         "', 'yes')"
     );
+    $db->exec('CREATE TABLE wp_sitemeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, site_id INTEGER NOT NULL DEFAULT 1, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec(
+        "INSERT INTO wp_sitemeta (site_id, meta_key, meta_value) VALUES (1, 'active_sitewide_plugins', '" .
+        SQLite3::escapeString(serialize(['network-auto-validator/network-auto-validator.php' => time()])) .
+        "')"
+    );
     $db->close();
     write_test_file($auto_validator_target_root . '/wp-content/plugins/auto-validator/forkpress-merge-validator.php', <<<'PHP'
 <?php
@@ -17982,6 +17988,24 @@ echo json_encode([
             'reason' => 'automatically discovered validator inspected the merge candidate',
             'type' => 'plugin-auto-validator-conflict',
             'validator' => 'forkpress-auto-validator@1',
+            'candidate' => [
+                'target_content' => trim((string)(new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB')))->querySingle('SELECT post_content FROM wp_posts WHERE ID = 1')),
+            ],
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    write_test_file($auto_validator_target_root . '/wp-content/plugins/network-auto-validator/forkpress-merge-validator.php', <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-network-auto-validator',
+            'object' => 'candidate:' . basename((string)getenv('FORKPRESS_MERGE_TARGET_ROOT')),
+            'reason' => 'network-active validator inspected the merge candidate',
+            'type' => 'plugin-network-auto-validator-conflict',
+            'validator' => 'forkpress-network-auto-validator@1',
             'candidate' => [
                 'target_content' => trim((string)(new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB')))->querySingle('SELECT post_content FROM wp_posts WHERE ID = 1')),
             ],
@@ -18007,12 +18031,17 @@ PHP);
         '--target-root', $auto_validator_target_root,
     ]);
     assert_same($auto_validator_merge['status'], 0, 'automatic plugin validator discovery runs during normal file-backed merge');
-    assert_true(str_contains($auto_validator_merge['output'], 'plugins:   validators=1 conflicts=1'), 'automatic plugin validator discovery reports discovered validator conflicts');
+    assert_true(str_contains($auto_validator_merge['output'], 'plugins:   validators=2 conflicts=2'), 'automatic plugin validator discovery reports regular and network-active validator conflicts');
     assert_same(scalar($auto_validator_target_db, 'SELECT post_content FROM wp_posts WHERE ID = 1'), 'source automatic validator content', 'automatic validator conflict keeps the staged DB candidate');
     assert_same(
         (int)scalar($auto_validator_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-auto-validator-conflict'"),
         1,
         'automatically discovered validator records plugin-scoped conflicts during merge'
+    );
+    assert_same(
+        (int)scalar($auto_validator_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-network-auto-validator-conflict'"),
+        1,
+        'automatically discovered network-active validator records plugin-scoped conflicts during merge'
     );
 
     $plugin_explicit_import_base_root = $tmp . '/plugin-explicit-import-base';
