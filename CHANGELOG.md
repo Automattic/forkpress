@@ -12,7 +12,7 @@
   metadata, relationships, and theme-mod location cleanup.
 - Added fast COW semantic merge coverage for attachment edit/delete conflicts,
   including attachment rows, metadata rows, original files, and generated files.
-- Updated merge reliability docs to point at the current `v0.1.26` release and
+- Updated merge reliability docs to point at the current `v0.1.27` release and
   the no-header branch UI regression gate.
 - Added COW branch mergeback for production materialized branches, including generic SQLite 3-way merge, conservative schema additions, filesystem mergeback, rollback handling, and audit metadata under `.forkpress/cow/merge`.
 - Cleaned up created-branch AUTOINCREMENT ID-band metadata when a multi-branch Git push rolls back after a later created branch fails allocation.
