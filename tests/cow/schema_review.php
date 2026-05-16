@@ -728,6 +728,65 @@ try {
     assert_same(count($table_restore_revalidate_conflicts), 1, 'schema table restore source drift returns the reviewed conflict to the needs-action audit queue');
     assert_same($table_restore_revalidate_conflicts[0]['revalidation_class'] ?? null, 'unclassified', 'schema table restore audit exposes conservative unclassified revalidation');
 
+    $table_restore_target_drift_base = $tmp . '/table-restore-target-drift-base.sqlite';
+    $table_restore_target_drift_source = $tmp . '/table-restore-target-drift-source.sqlite';
+    $table_restore_target_drift_target = $tmp . '/table-restore-target-drift-target.sqlite';
+    $table_restore_target_drift_metadata = $tmp . '/.forkpress/cow/merge/schema-table-restore-target-drift-metadata.sqlite';
+
+    $db = open_db($table_restore_target_drift_base);
+    $db->exec('CREATE TABLE plugin_restore_target_drift (id INTEGER PRIMARY KEY, label TEXT)');
+    $db->exec("INSERT INTO plugin_restore_target_drift (id, label) VALUES (1, 'Alpha')");
+    $db->close();
+    copy($table_restore_target_drift_base, $table_restore_target_drift_source);
+    copy($table_restore_target_drift_base, $table_restore_target_drift_target);
+
+    $target_db = open_db($table_restore_target_drift_target);
+    $target_db->exec('DROP TABLE plugin_restore_target_drift');
+    $target_db->close();
+
+    $table_restore_target_drift_result = cow_merge_databases(
+        $table_restore_target_drift_base,
+        $table_restore_target_drift_source,
+        $table_restore_target_drift_target,
+        $table_restore_target_drift_metadata,
+        'feature-schema-table-restore-target-drift',
+        'main'
+    );
+    assert_same($table_restore_target_drift_result['status'], 'completed_with_conflicts', 'reviewed table restore target-drift fixture starts reviewable');
+    $table_restore_target_drift_run_id = (int)$table_restore_target_drift_result['run_id'];
+    $table_restore_target_drift_conflict_id = (int)scalar($table_restore_target_drift_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_restore_target_drift' AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
+    assert_true($table_restore_target_drift_conflict_id > 0, 'reviewed table restore target-drift fixture records a table conflict');
+    cow_merge_review_record(
+        $table_restore_target_drift_metadata,
+        'conflict',
+        $table_restore_target_drift_conflict_id,
+        'reviewed',
+        'Review dropped table restore before target recreates the table.',
+        'cow-test'
+    );
+
+    $target_db = open_db($table_restore_target_drift_target);
+    $target_db->exec('CREATE TABLE plugin_restore_target_drift (id INTEGER PRIMARY KEY, label BLOB)');
+    $target_db->close();
+
+    $table_restore_target_drift_revalidated = cow_merge_revalidate_reviewed_conflicts($table_restore_target_drift_metadata, $table_restore_target_drift_run_id, 'cow-revalidate');
+    assert_same($table_restore_target_drift_revalidated['checked'], 1, 'schema table restore target drift revalidation checks the reviewed conflict');
+    assert_same($table_restore_target_drift_revalidated['reviewed'], 1, 'schema table restore target drift revalidation sees the reviewed conflict');
+    assert_same($table_restore_target_drift_revalidated['stale'], 1, 'schema table restore target drift is treated as stale');
+    assert_same($table_restore_target_drift_revalidated['carried'], 1, 'schema table restore target drift returns the conflict to needs-action');
+    assert_true(
+        str_contains((string)scalar($table_restore_target_drift_metadata, "SELECT stale_reason FROM merge_revalidations WHERE conflict_id = $table_restore_target_drift_conflict_id ORDER BY id DESC LIMIT 1"), 'target changed'),
+        'schema table restore target drift explains that target schema changed after review'
+    );
+    $table_restore_target_drift_payload = cow_merge_decode_payload_json(
+        (string)scalar($table_restore_target_drift_metadata, "SELECT target_payload FROM merge_revalidations WHERE conflict_id = $table_restore_target_drift_conflict_id ORDER BY id DESC LIMIT 1"),
+        'schema table restore target drift payload'
+    );
+    assert_true(
+        str_contains((string)$table_restore_target_drift_payload, 'label BLOB'),
+        'schema table restore target drift records the current target table SQL'
+    );
+
     $table_rebuild_revalidate_base = $tmp . '/table-rebuild-revalidate-base.sqlite';
     $table_rebuild_revalidate_source = $tmp . '/table-rebuild-revalidate-source.sqlite';
     $table_rebuild_revalidate_target = $tmp . '/table-rebuild-revalidate-target.sqlite';
@@ -811,6 +870,78 @@ try {
     $table_rebuild_revalidate_conflicts = array_values(array_filter($table_rebuild_revalidate_audit['conflicts'], fn($conflict) => (int)($conflict['id'] ?? 0) === $table_rebuild_revalidate_conflict_id));
     assert_same(count($table_rebuild_revalidate_conflicts), 1, 'schema table rebuild source drift returns the reviewed conflict to the needs-action audit queue');
     assert_same($table_rebuild_revalidate_conflicts[0]['revalidation_class'] ?? null, 'unclassified', 'schema table rebuild audit exposes conservative unclassified revalidation');
+
+    $table_rebuild_target_drift_base = $tmp . '/table-rebuild-target-drift-base.sqlite';
+    $table_rebuild_target_drift_source = $tmp . '/table-rebuild-target-drift-source.sqlite';
+    $table_rebuild_target_drift_target = $tmp . '/table-rebuild-target-drift-target.sqlite';
+    $table_rebuild_target_drift_metadata = $tmp . '/.forkpress/cow/merge/schema-table-rebuild-target-drift-metadata.sqlite';
+
+    $db = open_db($table_rebuild_target_drift_base);
+    $db->exec('CREATE TABLE plugin_rebuild_target_drift (id INTEGER PRIMARY KEY, value TEXT)');
+    $db->exec("INSERT INTO plugin_rebuild_target_drift (id, value) VALUES (1, 'Alpha')");
+    $db->close();
+    copy($table_rebuild_target_drift_base, $table_rebuild_target_drift_source);
+    copy($table_rebuild_target_drift_base, $table_rebuild_target_drift_target);
+
+    $source_db = open_db($table_rebuild_target_drift_source);
+    $source_db->exec('CREATE TABLE plugin_rebuild_target_drift_new (id INTEGER PRIMARY KEY, value INTEGER)');
+    $source_db->exec('INSERT INTO plugin_rebuild_target_drift_new (id, value) SELECT id, value FROM plugin_rebuild_target_drift');
+    $source_db->exec('DROP TABLE plugin_rebuild_target_drift');
+    $source_db->exec('ALTER TABLE plugin_rebuild_target_drift_new RENAME TO plugin_rebuild_target_drift');
+    $source_db->close();
+
+    $target_db = open_db($table_rebuild_target_drift_target);
+    $target_db->exec('CREATE TABLE plugin_rebuild_target_drift_new (id INTEGER PRIMARY KEY, value REAL)');
+    $target_db->exec('INSERT INTO plugin_rebuild_target_drift_new (id, value) SELECT id, value FROM plugin_rebuild_target_drift');
+    $target_db->exec('DROP TABLE plugin_rebuild_target_drift');
+    $target_db->exec('ALTER TABLE plugin_rebuild_target_drift_new RENAME TO plugin_rebuild_target_drift');
+    $target_db->close();
+
+    $table_rebuild_target_drift_result = cow_merge_databases(
+        $table_rebuild_target_drift_base,
+        $table_rebuild_target_drift_source,
+        $table_rebuild_target_drift_target,
+        $table_rebuild_target_drift_metadata,
+        'feature-schema-table-rebuild-target-drift',
+        'main'
+    );
+    assert_same($table_rebuild_target_drift_result['status'], 'completed_with_conflicts', 'reviewed table rebuild target-drift fixture starts reviewable');
+    $table_rebuild_target_drift_run_id = (int)$table_rebuild_target_drift_result['run_id'];
+    $table_rebuild_target_drift_conflict_id = (int)scalar($table_rebuild_target_drift_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_rebuild_target_drift' AND conflict_type = 'schema-conflict' ORDER BY id DESC LIMIT 1");
+    assert_true($table_rebuild_target_drift_conflict_id > 0, 'reviewed table rebuild target-drift fixture records a table conflict');
+    cow_merge_review_record(
+        $table_rebuild_target_drift_metadata,
+        'conflict',
+        $table_rebuild_target_drift_conflict_id,
+        'reviewed',
+        'Review table rebuild before target schema changes again.',
+        'cow-test'
+    );
+
+    $target_db = open_db($table_rebuild_target_drift_target);
+    $target_db->exec('CREATE TABLE plugin_rebuild_target_drift_new (id INTEGER PRIMARY KEY, value BLOB)');
+    $target_db->exec('INSERT INTO plugin_rebuild_target_drift_new (id, value) SELECT id, value FROM plugin_rebuild_target_drift');
+    $target_db->exec('DROP TABLE plugin_rebuild_target_drift');
+    $target_db->exec('ALTER TABLE plugin_rebuild_target_drift_new RENAME TO plugin_rebuild_target_drift');
+    $target_db->close();
+
+    $table_rebuild_target_drift_revalidated = cow_merge_revalidate_reviewed_conflicts($table_rebuild_target_drift_metadata, $table_rebuild_target_drift_run_id, 'cow-revalidate');
+    assert_same($table_rebuild_target_drift_revalidated['checked'], 1, 'schema table rebuild target drift revalidation checks the reviewed conflict');
+    assert_same($table_rebuild_target_drift_revalidated['reviewed'], 1, 'schema table rebuild target drift revalidation sees the reviewed conflict');
+    assert_same($table_rebuild_target_drift_revalidated['stale'], 1, 'schema table rebuild target drift is treated as stale');
+    assert_same($table_rebuild_target_drift_revalidated['carried'], 1, 'schema table rebuild target drift returns the conflict to needs-action');
+    assert_true(
+        str_contains((string)scalar($table_rebuild_target_drift_metadata, "SELECT stale_reason FROM merge_revalidations WHERE conflict_id = $table_rebuild_target_drift_conflict_id ORDER BY id DESC LIMIT 1"), 'target changed'),
+        'schema table rebuild target drift explains that target schema changed after review'
+    );
+    $table_rebuild_target_drift_payload = cow_merge_decode_payload_json(
+        (string)scalar($table_rebuild_target_drift_metadata, "SELECT target_payload FROM merge_revalidations WHERE conflict_id = $table_rebuild_target_drift_conflict_id ORDER BY id DESC LIMIT 1"),
+        'schema table rebuild target drift payload'
+    );
+    assert_true(
+        str_contains((string)$table_rebuild_target_drift_payload, 'value BLOB'),
+        'schema table rebuild target drift records the current target table SQL'
+    );
 
     $index_validate_base = $tmp . '/index-validate-base.sqlite';
     $index_validate_source = $tmp . '/index-validate-source.sqlite';
