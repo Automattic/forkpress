@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added fast COW semantic merge coverage for navigation menu edit/delete
+  conflicts, including menu terms, taxonomy rows, menu item posts, menu item
+  metadata, relationships, and theme-mod location cleanup.
 - Added fast COW semantic merge coverage for attachment edit/delete conflicts,
   including attachment rows, metadata rows, original files, and generated files.
 - Updated merge reliability docs to point at the current `v0.1.26` release and

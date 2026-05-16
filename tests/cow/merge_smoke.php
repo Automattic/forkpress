@@ -804,6 +804,96 @@ try {
         'page-plus-menu smoke merge audits all target graph inserts'
     );
 
+    $menu_edit_delete_base = $tmp . '/menu-edit-delete-base.sqlite';
+    $menu_edit_delete_source = $tmp . '/menu-edit-delete-source.sqlite';
+    $menu_edit_delete_target = $tmp . '/menu-edit-delete-target.sqlite';
+    $menu_edit_delete_metadata = $tmp . '/.forkpress/cow/merge/menu-edit-delete-metadata.sqlite';
+
+    smoke_create_posts_db($menu_edit_delete_base);
+    $db = smoke_open_db($menu_edit_delete_base);
+    smoke_insert_post($db, 17000100, 'Shared Menu Page', 'Shared menu page content', 'page', 'shared-menu-page');
+    smoke_insert_post($db, 17000103, 'Shared Menu Item', '', 'nav_menu_item', 'shared-menu-item');
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES
+        (17000101, 'Shared Menu', 'shared-menu')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES
+        (17000102, 17000101, 'nav_menu', 'Shared menu taxonomy', 0, 1)");
+    $db->exec("INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES
+        (17000103, 17000102, 0)");
+    smoke_insert_postmeta($db, 17000104, 17000103, '_menu_item_type', 'post_type');
+    smoke_insert_postmeta($db, 17000105, 17000103, '_menu_item_object', 'page');
+    smoke_insert_postmeta($db, 17000106, 17000103, '_menu_item_object_id', '17000100');
+    smoke_insert_postmeta($db, 17000107, 17000103, '_menu_item_menu_item_parent', '0');
+    smoke_insert_postmeta($db, 17000108, 17000103, '_menu_item_classes', serialize([]));
+    smoke_update_option($db, 'theme_mods_forkpress_smoke', serialize([
+        'color' => 'blue',
+        'nav_menu_locations' => [
+            'shared_primary' => 17000101,
+        ],
+    ]));
+    $db->close();
+    copy($menu_edit_delete_base, $menu_edit_delete_source);
+    copy($menu_edit_delete_base, $menu_edit_delete_target);
+
+    $db = smoke_open_db($menu_edit_delete_source);
+    $db->exec("UPDATE wp_posts SET post_title = 'Source Edited Shared Menu Item', post_name = 'source-edited-shared-menu-item' WHERE ID = 17000103");
+    $db->exec("UPDATE wp_terms SET name = 'Source Edited Shared Menu', slug = 'source-edited-shared-menu' WHERE term_id = 17000101");
+    $db->exec("UPDATE wp_term_taxonomy SET description = 'Source edited menu taxonomy' WHERE term_taxonomy_id = 17000102");
+    $stmt = $db->prepare('UPDATE wp_postmeta SET meta_value = :value WHERE meta_id = 17000108');
+    $stmt->bindValue(':value', serialize(['source-edited-menu']), SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+
+    $db = smoke_open_db($menu_edit_delete_target);
+    $db->exec('DELETE FROM wp_postmeta WHERE post_id = 17000103');
+    $db->exec('DELETE FROM wp_term_relationships WHERE object_id = 17000103 OR term_taxonomy_id = 17000102');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 17000103');
+    $db->exec('DELETE FROM wp_term_taxonomy WHERE term_taxonomy_id = 17000102');
+    $db->exec('DELETE FROM wp_terms WHERE term_id = 17000101');
+    smoke_update_option($db, 'theme_mods_forkpress_smoke', serialize([
+        'color' => 'red',
+        'nav_menu_locations' => [],
+    ]));
+    $db->close();
+
+    $menu_edit_delete_result = cow_merge_databases($menu_edit_delete_base, $menu_edit_delete_source, $menu_edit_delete_target, $menu_edit_delete_metadata, 'feature-smoke-menu-edit-delete', 'main');
+    assert_same($menu_edit_delete_result['status'], 'completed_with_conflicts', 'menu edit/delete graph stays reviewable');
+    assert_same((int)smoke_scalar($menu_edit_delete_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 17000103'), 0, 'menu edit/delete preserves target nav item deletion before review');
+    assert_same((int)smoke_scalar($menu_edit_delete_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 17000101'), 0, 'menu edit/delete preserves target menu term deletion before review');
+    assert_same((int)smoke_scalar($menu_edit_delete_target, 'SELECT COUNT(*) FROM wp_term_taxonomy WHERE term_taxonomy_id = 17000102'), 0, 'menu edit/delete preserves target menu taxonomy deletion before review');
+    assert_same((int)smoke_scalar($menu_edit_delete_target, 'SELECT COUNT(*) FROM wp_term_relationships WHERE object_id = 17000103 AND term_taxonomy_id = 17000102'), 0, 'menu edit/delete preserves target menu relationship deletion before review');
+    assert_same((int)smoke_scalar($menu_edit_delete_target, 'SELECT COUNT(*) FROM wp_postmeta WHERE post_id = 17000103'), 0, 'menu edit/delete preserves target nav item metadata deletion before review');
+    $menu_edit_delete_theme_mods = unserialize(
+        (string)smoke_scalar($menu_edit_delete_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_forkpress_smoke'"),
+        ['allowed_classes' => false]
+    );
+    assert_same($menu_edit_delete_theme_mods['color'] ?? null, 'red', 'menu edit/delete preserves target-local theme mod changes before review');
+    assert_same(array_key_exists('shared_primary', $menu_edit_delete_theme_mods['nav_menu_locations'] ?? []), false, 'menu edit/delete preserves target menu location cleanup before review');
+    assert_same(
+        (int)smoke_scalar($menu_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_posts' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'menu edit/delete records the edited nav item delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($menu_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_terms' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'menu edit/delete records the edited menu term delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($menu_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_term_taxonomy' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'menu edit/delete records the edited menu taxonomy delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($menu_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_postmeta' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'menu edit/delete records the edited nav item metadata delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($menu_edit_delete_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_terms', 'wp_term_taxonomy', 'wp_postmeta') AND decision = 'target-wins'"),
+        4,
+        'menu edit/delete defaults the changed source graph to target-wins before review'
+    );
+
     $block_base = $tmp . '/block-base.sqlite';
     $block_source = $tmp . '/block-source.sqlite';
     $block_target = $tmp . '/block-target.sqlite';
