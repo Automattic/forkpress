@@ -125,6 +125,17 @@ try {
         'branch birth setup records active row identities'
     );
 
+    cow_merge_allocate_autoincrement_bands($db_path, $metadata, 'feature-birth-unrelated');
+    cow_merge_capture_row_identities($db_path, $metadata, 'feature-birth-unrelated');
+    assert_true(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'feature-birth-unrelated'") > 0,
+        'branch birth cleanup fixture records unrelated branch ID bands'
+    );
+    assert_true(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = 'feature-birth-unrelated'") > 0,
+        'branch birth cleanup fixture records unrelated active row identities'
+    );
+
     $cleanup = cow_merge_cleanup_branch_birth_metadata($metadata, 'feature-birth');
     assert_true($cleanup['cleaned'] > 0, 'branch birth metadata cleanup reports removed rows');
     assert_same(
@@ -146,6 +157,18 @@ try {
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-birth'"),
         0,
         'branch birth metadata cleanup removes branch birth runs'
+    );
+    assert_true(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'feature-birth-unrelated'") > 0,
+        'branch birth metadata cleanup leaves unrelated branch ID bands intact'
+    );
+    assert_true(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = 'feature-birth-unrelated'") > 0,
+        'branch birth metadata cleanup leaves unrelated active row identities intact'
+    );
+    assert_true(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-birth-unrelated'") > 0,
+        'branch birth metadata cleanup leaves unrelated branch birth runs intact'
     );
 
     $missing_band_db = $tmp . '/missing-band.sqlite';
