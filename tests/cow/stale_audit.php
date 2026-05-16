@@ -905,6 +905,124 @@ try {
         'latest merge revalidation is incompatible',
         'custom unique-key source after-revalidate blocks source resolution over incompatible replacement'
     );
+
+    $custom_unique_cell_target_base = $tmp . '/custom-unique-cell-target-base.sqlite';
+    $custom_unique_cell_target_source = $tmp . '/custom-unique-cell-target-source.sqlite';
+    $custom_unique_cell_target_target = $tmp . '/custom-unique-cell-target-target.sqlite';
+    $custom_unique_cell_target_metadata = $tmp . '/.forkpress/cow/merge/custom-unique-cell-target-metadata.sqlite';
+    foreach ([$custom_unique_cell_target_base, $custom_unique_cell_target_source, $custom_unique_cell_target_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_unique_cells (object_id INTEGER PRIMARY KEY, object_key TEXT NOT NULL UNIQUE, value TEXT NOT NULL)');
+        $db->exec("INSERT INTO plugin_unique_cells (object_id, object_key, value) VALUES (300, 'target-cell-object-before-review', 'base value')");
+        $db->close();
+    }
+    $db = open_db($custom_unique_cell_target_source);
+    $db->exec("UPDATE plugin_unique_cells SET value = 'source reviewed value' WHERE object_id = 300");
+    $db->close();
+    $db = open_db($custom_unique_cell_target_target);
+    $db->exec("UPDATE plugin_unique_cells SET value = 'target reviewed value' WHERE object_id = 300");
+    $db->close();
+
+    $custom_unique_cell_target_merge = cow_merge_databases($custom_unique_cell_target_base, $custom_unique_cell_target_source, $custom_unique_cell_target_target, $custom_unique_cell_target_metadata, 'feature-custom-unique-cell-target-review', 'main');
+    $custom_unique_cell_target_run_id = (int)$custom_unique_cell_target_merge['run_id'];
+    assert_same($custom_unique_cell_target_merge['status'], 'completed_with_conflicts', 'custom unique-key target cell fixture starts with a same-cell conflict');
+    $custom_unique_cell_target_conflict_id = (int)scalar($custom_unique_cell_target_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_unique_cells' AND column_name = 'value' AND conflict_type = 'cell-conflict'");
+    assert_true($custom_unique_cell_target_conflict_id > 0, 'custom unique-key target cell fixture records the cell conflict');
+    assert_true(
+        (string)scalar($custom_unique_cell_target_metadata, "SELECT target_row_payload FROM merge_conflicts WHERE id = $custom_unique_cell_target_conflict_id") !== '',
+        'custom unique-key target cell fixture records audited target row context'
+    );
+    cow_merge_review_record(
+        $custom_unique_cell_target_metadata,
+        'conflict',
+        $custom_unique_cell_target_conflict_id,
+        'reviewed',
+        'Apply source cell only if the target row is still the reviewed plugin object.',
+        'cow-test'
+    );
+
+    $db = open_db($custom_unique_cell_target_target);
+    $db->exec("UPDATE plugin_unique_cells SET object_key = 'replacement-target-cell-object' WHERE object_id = 300");
+    $db->close();
+
+    $custom_unique_cell_target_revalidated = cow_merge_revalidate_reviewed_conflicts($custom_unique_cell_target_metadata, $custom_unique_cell_target_run_id, 'cow-revalidate');
+    assert_same($custom_unique_cell_target_revalidated['checked'], 1, 'custom unique-key target cell revalidation checks the reviewed cell conflict');
+    assert_same($custom_unique_cell_target_revalidated['stale'], 1, 'custom unique-key target cell revalidation detects logical replacement even when the cell value is unchanged');
+    assert_same($custom_unique_cell_target_revalidated['carried'], 1, 'custom unique-key target cell revalidation carries logical replacement to needs-action');
+    assert_same(
+        scalar($custom_unique_cell_target_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $custom_unique_cell_target_conflict_id ORDER BY id DESC LIMIT 1"),
+        'incompatible',
+        'custom unique-key target cell revalidation classifies logical replacement as incompatible'
+    );
+    $custom_unique_cell_target_payload = cow_merge_decode_payload_json(
+        (string)scalar($custom_unique_cell_target_metadata, "SELECT target_payload FROM merge_revalidations WHERE conflict_id = $custom_unique_cell_target_conflict_id ORDER BY id DESC LIMIT 1"),
+        'custom unique-key target cell revalidation payload'
+    );
+    assert_same($custom_unique_cell_target_payload['object_key'] ?? null, 'replacement-target-cell-object', 'custom unique-key target cell revalidation records the current target row context');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($custom_unique_cell_target_metadata, $custom_unique_cell_target_conflict_id, 'source', true, 'Do not apply source cell over replacement plugin object.', 'cow-test', true),
+        'latest merge revalidation is incompatible',
+        'custom unique-key target cell after-revalidate blocks source resolution over incompatible replacement'
+    );
+
+    $custom_unique_cell_source_base = $tmp . '/custom-unique-cell-source-base.sqlite';
+    $custom_unique_cell_source_source = $tmp . '/custom-unique-cell-source-source.sqlite';
+    $custom_unique_cell_source_target = $tmp . '/custom-unique-cell-source-target.sqlite';
+    $custom_unique_cell_source_metadata = $tmp . '/.forkpress/cow/merge/custom-unique-cell-source-metadata.sqlite';
+    foreach ([$custom_unique_cell_source_base, $custom_unique_cell_source_source, $custom_unique_cell_source_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_unique_cells (object_id INTEGER PRIMARY KEY, object_key TEXT NOT NULL UNIQUE, value TEXT NOT NULL)');
+        $db->exec("INSERT INTO plugin_unique_cells (object_id, object_key, value) VALUES (301, 'source-cell-object-before-review', 'base value')");
+        $db->close();
+    }
+    $db = open_db($custom_unique_cell_source_source);
+    $db->exec("UPDATE plugin_unique_cells SET value = 'source reviewed value' WHERE object_id = 301");
+    $db->close();
+    $db = open_db($custom_unique_cell_source_target);
+    $db->exec("UPDATE plugin_unique_cells SET value = 'target reviewed value' WHERE object_id = 301");
+    $db->close();
+
+    $custom_unique_cell_source_merge = cow_merge_databases($custom_unique_cell_source_base, $custom_unique_cell_source_source, $custom_unique_cell_source_target, $custom_unique_cell_source_metadata, 'feature-custom-unique-cell-source-review', 'main');
+    $custom_unique_cell_source_run_id = (int)$custom_unique_cell_source_merge['run_id'];
+    assert_same($custom_unique_cell_source_merge['status'], 'completed_with_conflicts', 'custom unique-key source cell fixture starts with a same-cell conflict');
+    $custom_unique_cell_source_conflict_id = (int)scalar($custom_unique_cell_source_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_unique_cells' AND column_name = 'value' AND conflict_type = 'cell-conflict'");
+    assert_true($custom_unique_cell_source_conflict_id > 0, 'custom unique-key source cell fixture records the cell conflict');
+    assert_true(
+        (string)scalar($custom_unique_cell_source_metadata, "SELECT source_row_payload FROM merge_conflicts WHERE id = $custom_unique_cell_source_conflict_id") !== '',
+        'custom unique-key source cell fixture records audited source row context'
+    );
+    cow_merge_review_record(
+        $custom_unique_cell_source_metadata,
+        'conflict',
+        $custom_unique_cell_source_conflict_id,
+        'reviewed',
+        'Apply source cell only if the source row is still the reviewed plugin object.',
+        'cow-test'
+    );
+
+    $db = open_db($custom_unique_cell_source_source);
+    $db->exec("UPDATE plugin_unique_cells SET object_key = 'replacement-source-cell-object' WHERE object_id = 301");
+    $db->close();
+
+    $custom_unique_cell_source_revalidated = cow_merge_revalidate_reviewed_conflicts($custom_unique_cell_source_metadata, $custom_unique_cell_source_run_id, 'cow-revalidate');
+    assert_same($custom_unique_cell_source_revalidated['checked'], 1, 'custom unique-key source cell revalidation checks the reviewed cell conflict');
+    assert_same($custom_unique_cell_source_revalidated['stale'], 1, 'custom unique-key source cell revalidation detects logical replacement even when the source cell value is unchanged');
+    assert_same($custom_unique_cell_source_revalidated['carried'], 1, 'custom unique-key source cell revalidation carries logical replacement to needs-action');
+    assert_same(
+        scalar($custom_unique_cell_source_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $custom_unique_cell_source_conflict_id ORDER BY id DESC LIMIT 1"),
+        'incompatible',
+        'custom unique-key source cell revalidation classifies logical replacement as incompatible'
+    );
+    $custom_unique_cell_source_payload = cow_merge_decode_payload_json(
+        (string)scalar($custom_unique_cell_source_metadata, "SELECT source_payload FROM merge_revalidations WHERE conflict_id = $custom_unique_cell_source_conflict_id ORDER BY id DESC LIMIT 1"),
+        'custom unique-key source cell revalidation payload'
+    );
+    assert_same($custom_unique_cell_source_payload['object_key'] ?? null, 'replacement-source-cell-object', 'custom unique-key source cell revalidation records the current source row context');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($custom_unique_cell_source_metadata, $custom_unique_cell_source_conflict_id, 'source', true, 'Do not apply replacement source cell.', 'cow-test', true),
+        'latest merge revalidation is incompatible',
+        'custom unique-key source cell after-revalidate blocks source resolution over incompatible replacement'
+    );
 } finally {
     remove_tree($tmp);
 }
