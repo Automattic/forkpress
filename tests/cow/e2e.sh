@@ -1355,7 +1355,7 @@ test -d "$WORK/feature-cow"
 log_step "delete Git-created branch"
 git -C "$TMP/checkout" push origin --delete git-created > "$TMP/git-delete.out" 2>&1
 test ! -e "$WORK/git-created"
-if "$BIN" branch --work-dir "$WORK_DIR" list | grep -F "git-created" >/dev/null; then
+if "$BIN" branch --work-dir "$WORK_DIR" list | grep -Fx "git-created" >/dev/null; then
   echo "git-created branch still listed after remote delete" >&2
   exit 1
 fi
