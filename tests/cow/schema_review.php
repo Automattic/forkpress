@@ -453,6 +453,82 @@ try {
         'reviewed source trigger is functional after dependency restore'
     );
 
+    $table_restore_revalidate_base = $tmp . '/table-restore-revalidate-base.sqlite';
+    $table_restore_revalidate_source = $tmp . '/table-restore-revalidate-source.sqlite';
+    $table_restore_revalidate_target = $tmp . '/table-restore-revalidate-target.sqlite';
+    $table_restore_revalidate_metadata = $tmp . '/.forkpress/cow/merge/schema-table-restore-revalidate-metadata.sqlite';
+
+    $db = open_db($table_restore_revalidate_base);
+    $db->exec('CREATE TABLE plugin_restore_revalidate (id INTEGER PRIMARY KEY, label TEXT)');
+    $db->exec("INSERT INTO plugin_restore_revalidate (id, label) VALUES (1, 'Alpha')");
+    $db->close();
+    copy($table_restore_revalidate_base, $table_restore_revalidate_source);
+    copy($table_restore_revalidate_base, $table_restore_revalidate_target);
+
+    $source_db = open_db($table_restore_revalidate_source);
+    $source_db->exec('CREATE INDEX plugin_restore_revalidate_label_idx ON plugin_restore_revalidate(lower(label))');
+    $source_db->close();
+
+    $target_db = open_db($table_restore_revalidate_target);
+    $target_db->exec('DROP TABLE plugin_restore_revalidate');
+    $target_db->close();
+
+    $table_restore_revalidate_result = cow_merge_databases(
+        $table_restore_revalidate_base,
+        $table_restore_revalidate_source,
+        $table_restore_revalidate_target,
+        $table_restore_revalidate_metadata,
+        'feature-schema-table-restore-revalidate',
+        'main'
+    );
+    assert_same($table_restore_revalidate_result['status'], 'completed_with_conflicts', 'reviewed table restore fixture starts reviewable');
+    $table_restore_revalidate_run_id = (int)$table_restore_revalidate_result['run_id'];
+    $table_restore_revalidate_conflict_id = (int)scalar($table_restore_revalidate_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_restore_revalidate' AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
+    assert_true($table_restore_revalidate_conflict_id > 0, 'reviewed table restore fixture records a table conflict');
+    cow_merge_review_record(
+        $table_restore_revalidate_metadata,
+        'conflict',
+        $table_restore_revalidate_conflict_id,
+        'reviewed',
+        'Review dropped table restore after source schema is stable.',
+        'cow-test'
+    );
+
+    $source_db = open_db($table_restore_revalidate_source);
+    $source_db->exec('DROP INDEX plugin_restore_revalidate_label_idx');
+    $source_db->exec('CREATE INDEX plugin_restore_revalidate_label_idx ON plugin_restore_revalidate(upper(label))');
+    $source_db->close();
+
+    $table_restore_revalidated = cow_merge_revalidate_reviewed_conflicts($table_restore_revalidate_metadata, $table_restore_revalidate_run_id, 'cow-revalidate');
+    assert_same($table_restore_revalidated['checked'], 2, 'schema table restore revalidation checks the run conflict set');
+    assert_same($table_restore_revalidated['reviewed'], 1, 'schema table restore revalidation sees the reviewed conflict');
+    assert_same($table_restore_revalidated['stale'], 1, 'schema table restore revalidation detects changed source restore payload');
+    assert_same($table_restore_revalidated['carried'], 1, 'schema table restore revalidation carries changed source evidence to needs-action');
+    assert_same(
+        scalar($table_restore_revalidate_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $table_restore_revalidate_conflict_id ORDER BY id DESC LIMIT 1"),
+        'unclassified',
+        'schema table restore source drift remains unclassified until a schema planner proves compatibility'
+    );
+    assert_true(
+        str_contains((string)scalar($table_restore_revalidate_metadata, "SELECT stale_reason FROM merge_revalidations WHERE conflict_id = $table_restore_revalidate_conflict_id ORDER BY id DESC LIMIT 1"), 'source changed'),
+        'schema table restore source drift explains that source schema changed after review'
+    );
+    $table_restore_revalidate_source_payload = cow_merge_decode_payload_json(
+        (string)scalar($table_restore_revalidate_metadata, "SELECT source_payload FROM merge_revalidations WHERE conflict_id = $table_restore_revalidate_conflict_id ORDER BY id DESC LIMIT 1"),
+        'schema table restore revalidation source'
+    );
+    assert_true(
+        str_contains((string)($table_restore_revalidate_source_payload['indexes'][0]['sql'] ?? ''), 'upper(label)'),
+        'schema table restore revalidation records the updated source index SQL'
+    );
+    $table_restore_revalidate_audit = cow_merge_audit_report($table_restore_revalidate_metadata, $table_restore_revalidate_run_id, 10, [
+        'records' => 'conflicts',
+        'review_status' => 'needs-action',
+    ]);
+    $table_restore_revalidate_conflicts = array_values(array_filter($table_restore_revalidate_audit['conflicts'], fn($conflict) => (int)($conflict['id'] ?? 0) === $table_restore_revalidate_conflict_id));
+    assert_same(count($table_restore_revalidate_conflicts), 1, 'schema table restore source drift returns the reviewed conflict to the needs-action audit queue');
+    assert_same($table_restore_revalidate_conflicts[0]['revalidation_class'] ?? null, 'unclassified', 'schema table restore audit exposes conservative unclassified revalidation');
+
     $index_validate_base = $tmp . '/index-validate-base.sqlite';
     $index_validate_source = $tmp . '/index-validate-source.sqlite';
     $index_validate_target = $tmp . '/index-validate-target.sqlite';

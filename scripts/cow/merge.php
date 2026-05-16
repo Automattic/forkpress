@@ -11197,6 +11197,57 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
                     'current_target_payload' => $current_target_payload,
                 ];
             }
+            if ($conflict_type === 'schema-target-dropped-table') {
+                $source_db = (string)($conflict['source_db'] ?? '');
+                $target_db = (string)($conflict['target_db'] ?? '');
+                $table = (string)($conflict['table_name'] ?? '');
+                if ($source_db === '' || $target_db === '' || $table === '') {
+                    return ['stale_status' => 'error', 'stale_reason' => 'schema table restore conflict is missing source/target database or table metadata', 'revalidation_class' => 'unclassified', 'current_source_payload' => null, 'current_target_payload' => null];
+                }
+                if (!is_file($source_db) || !is_file($target_db)) {
+                    return ['stale_status' => 'error', 'stale_reason' => 'schema table restore conflict source or target database no longer exists', 'revalidation_class' => 'unclassified', 'current_source_payload' => null, 'current_target_payload' => null];
+                }
+                $source_payload = cow_merge_decode_payload_json((string)($conflict['source_payload'] ?? ''), 'source schema table restore');
+                $expected_source_restore = cow_merge_normalize_source_table_restore_payload($source_payload);
+                $source = cow_merge_open_db($source_db, SQLITE3_OPEN_READONLY);
+                $target = cow_merge_open_db($target_db, SQLITE3_OPEN_READONLY);
+                try {
+                    $current_source_sql = cow_merge_table_sql($source, $table);
+                    $current_source_restore = $current_source_sql === null
+                        ? null
+                        : cow_merge_source_table_restore_payload($source, $table, $current_source_sql);
+                    $current_target_sql = cow_merge_table_sql($target, $table);
+                } finally {
+                    $source->close();
+                    $target->close();
+                }
+                $source_fresh = $current_source_restore !== null
+                    && cow_merge_values_equal($current_source_restore, $expected_source_restore);
+                $target_fresh = $current_target_sql === null;
+                $current_source_payload = cow_merge_payload_json($current_source_restore);
+                $current_target_payload = cow_merge_payload_json($current_target_sql);
+                if ($source_fresh && $target_fresh) {
+                    return [
+                        'stale_status' => 'fresh',
+                        'stale_reason' => 'schema table restore source and target still match audited payloads',
+                        'revalidation_class' => 'unclassified',
+                        'current_source_payload' => $current_source_payload,
+                        'current_target_payload' => $current_target_payload,
+                    ];
+                }
+                $reason = !$source_fresh && !$target_fresh
+                    ? 'schema table restore source and target changed after review'
+                    : (!$source_fresh
+                        ? 'schema table restore source changed after review'
+                        : 'schema table restore target changed after review');
+                return [
+                    'stale_status' => 'stale',
+                    'stale_reason' => $reason,
+                    'revalidation_class' => 'unclassified',
+                    'current_source_payload' => $current_source_payload,
+                    'current_target_payload' => $current_target_payload,
+                ];
+            }
             return $status;
         }
 
