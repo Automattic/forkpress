@@ -78,6 +78,15 @@ function smoke_insert_postmeta(SQLite3 $db, int $id, int $post_id, string $key, 
     $stmt->execute();
 }
 
+function smoke_insert_termmeta(SQLite3 $db, int $id, int $term_id, string $key, string $value): void {
+    $stmt = $db->prepare('INSERT INTO wp_termmeta (meta_id, term_id, meta_key, meta_value) VALUES (:id, :term_id, :key, :value)');
+    $stmt->bindValue(':id', $id, SQLITE3_INTEGER);
+    $stmt->bindValue(':term_id', $term_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':key', $key, SQLITE3_TEXT);
+    $stmt->bindValue(':value', $value, SQLITE3_TEXT);
+    $stmt->execute();
+}
+
 function smoke_insert_user(SQLite3 $db, int $id, string $login, string $email, string $display_name): void {
     $stmt = $db->prepare('INSERT INTO wp_users (ID, user_login, user_email, display_name) VALUES (:id, :login, :email, :display_name)');
     $stmt->bindValue(':id', $id, SQLITE3_INTEGER);
@@ -171,6 +180,12 @@ function smoke_create_posts_db(string $path): void {
         description TEXT NOT NULL DEFAULT '',
         parent INTEGER NOT NULL DEFAULT 0,
         count INTEGER NOT NULL DEFAULT 0
+    )");
+    $db->exec("CREATE TABLE wp_termmeta (
+        meta_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        term_id INTEGER NOT NULL,
+        meta_key TEXT NOT NULL,
+        meta_value TEXT NOT NULL
     )");
     $db->exec("CREATE TABLE wp_term_relationships (
         object_id INTEGER NOT NULL,
@@ -822,6 +837,76 @@ try {
         (int)smoke_scalar($taxonomy_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_terms', 'wp_term_taxonomy', 'wp_term_relationships') AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
         4,
         'page-plus-taxonomy smoke merge audits all target graph inserts'
+    );
+
+    $taxonomy_edit_delete_base = $tmp . '/taxonomy-edit-delete-base.sqlite';
+    $taxonomy_edit_delete_source = $tmp . '/taxonomy-edit-delete-source.sqlite';
+    $taxonomy_edit_delete_target = $tmp . '/taxonomy-edit-delete-target.sqlite';
+    $taxonomy_edit_delete_metadata = $tmp . '/.forkpress/cow/merge/taxonomy-edit-delete-metadata.sqlite';
+
+    smoke_create_posts_db($taxonomy_edit_delete_base);
+    $db = smoke_open_db($taxonomy_edit_delete_base);
+    smoke_insert_post($db, 17000140, 'Shared Taxonomy Page', 'Shared taxonomy page content', 'page', 'shared-taxonomy-page');
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES
+        (17000141, 'Shared Parent Topic', 'shared-parent-topic'),
+        (17000142, 'Shared Child Topic', 'shared-child-topic')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES
+        (17000143, 17000141, 'category', 'Shared parent topic', 0, 1),
+        (17000144, 17000142, 'category', 'Shared child topic', 17000143, 1)");
+    smoke_insert_termmeta($db, 17000145, 17000142, 'forkpress_topic_payload', '{"branch":"base","term_id":17000142}');
+    $db->exec("INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES
+        (17000140, 17000144, 0)");
+    $db->close();
+    copy($taxonomy_edit_delete_base, $taxonomy_edit_delete_source);
+    copy($taxonomy_edit_delete_base, $taxonomy_edit_delete_target);
+
+    $db = smoke_open_db($taxonomy_edit_delete_source);
+    $db->exec("UPDATE wp_terms SET name = 'Source Edited Child Topic', slug = 'source-edited-child-topic' WHERE term_id = 17000142");
+    $db->exec("UPDATE wp_term_taxonomy SET description = 'Source edited child topic', count = 2 WHERE term_taxonomy_id = 17000144");
+    $db->exec("UPDATE wp_termmeta SET meta_value = '{\"branch\":\"source\",\"term_id\":17000142,\"edited\":true}' WHERE meta_id = 17000145");
+    $db->exec('UPDATE wp_term_relationships SET term_order = 1 WHERE object_id = 17000140 AND term_taxonomy_id = 17000144');
+    $db->close();
+
+    $db = smoke_open_db($taxonomy_edit_delete_target);
+    $db->exec('DELETE FROM wp_term_relationships WHERE object_id = 17000140 AND term_taxonomy_id = 17000144');
+    $db->exec('DELETE FROM wp_termmeta WHERE term_id = 17000142');
+    $db->exec('DELETE FROM wp_term_taxonomy WHERE term_taxonomy_id = 17000144');
+    $db->exec('DELETE FROM wp_terms WHERE term_id = 17000142');
+    $db->close();
+
+    $taxonomy_edit_delete_result = cow_merge_databases($taxonomy_edit_delete_base, $taxonomy_edit_delete_source, $taxonomy_edit_delete_target, $taxonomy_edit_delete_metadata, 'feature-smoke-taxonomy-edit-delete', 'main');
+    assert_same($taxonomy_edit_delete_result['status'], 'completed_with_conflicts', 'taxonomy term edit/delete graph stays reviewable');
+    assert_same((int)smoke_scalar($taxonomy_edit_delete_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 17000142'), 0, 'taxonomy edit/delete preserves target term deletion before review');
+    assert_same((int)smoke_scalar($taxonomy_edit_delete_target, 'SELECT COUNT(*) FROM wp_term_taxonomy WHERE term_taxonomy_id = 17000144'), 0, 'taxonomy edit/delete preserves target term taxonomy deletion before review');
+    assert_same((int)smoke_scalar($taxonomy_edit_delete_target, 'SELECT COUNT(*) FROM wp_termmeta WHERE term_id = 17000142'), 0, 'taxonomy edit/delete preserves target term metadata deletion before review');
+    assert_same((int)smoke_scalar($taxonomy_edit_delete_target, 'SELECT COUNT(*) FROM wp_term_relationships WHERE object_id = 17000140 AND term_taxonomy_id = 17000144'), 0, 'taxonomy edit/delete preserves target page-term relationship deletion before review');
+    assert_same(smoke_scalar($taxonomy_edit_delete_target, 'SELECT name FROM wp_terms WHERE term_id = 17000141'), 'Shared Parent Topic', 'taxonomy edit/delete preserves unchanged parent term');
+    assert_same(smoke_scalar($taxonomy_edit_delete_target, 'SELECT description FROM wp_term_taxonomy WHERE term_taxonomy_id = 17000143'), 'Shared parent topic', 'taxonomy edit/delete preserves unchanged parent term taxonomy');
+    assert_same(smoke_scalar($taxonomy_edit_delete_target, 'SELECT post_title FROM wp_posts WHERE ID = 17000140'), 'Shared Taxonomy Page', 'taxonomy edit/delete preserves unchanged related page');
+    assert_same(
+        (int)smoke_scalar($taxonomy_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_terms' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'taxonomy edit/delete records the edited term delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($taxonomy_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_term_taxonomy' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'taxonomy edit/delete records the edited term taxonomy delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($taxonomy_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_termmeta' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'taxonomy edit/delete records the edited term metadata delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($taxonomy_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_term_relationships' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'taxonomy edit/delete records the edited page-term relationship delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($taxonomy_edit_delete_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_terms', 'wp_term_taxonomy', 'wp_termmeta', 'wp_term_relationships') AND decision = 'target-wins'"),
+        4,
+        'taxonomy edit/delete defaults the changed source graph to target-wins before review'
     );
 
     $menu_base = $tmp . '/menu-base.sqlite';
