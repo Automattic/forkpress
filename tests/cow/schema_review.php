@@ -74,6 +74,13 @@ function create_schema_view_order_db(string $path): void {
     $db->close();
 }
 
+function create_schema_trigger_order_db(string $path): void {
+    $db = open_db($path);
+    $db->exec('CREATE TABLE plugin_trigger_order_items (item_id TEXT DEFAULT "default-id", label TEXT DEFAULT "default-label")');
+    $db->exec('CREATE TABLE plugin_trigger_order_audit (item_id TEXT, label TEXT)');
+    $db->close();
+}
+
 define('FORKPRESS_COW_MERGE_TESTS', true);
 require_once __DIR__ . '/../../scripts/cow/merge.php';
 
@@ -180,6 +187,55 @@ try {
     assert_true(
         (int)scalar($view_order_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE run_id = $view_order_run_id AND column_name IN ('plugin_z_source_parent_view', 'plugin_a_source_grandchild_view') AND decision = 'source-applied'") >= 2,
         'source-added dependent view creation order is auditable'
+    );
+
+    $trigger_order_base = $tmp . '/trigger-order-base.sqlite';
+    $trigger_order_source = $tmp . '/trigger-order-source.sqlite';
+    $trigger_order_target = $tmp . '/trigger-order-target.sqlite';
+    $trigger_order_metadata = $tmp . '/.forkpress/cow/merge/schema-trigger-order-metadata.sqlite';
+
+    create_schema_trigger_order_db($trigger_order_base);
+    copy($trigger_order_base, $trigger_order_source);
+    copy($trigger_order_base, $trigger_order_target);
+
+    $source_db = open_db($trigger_order_source);
+    $source_db->exec('CREATE VIEW plugin_trigger_order_view AS SELECT item_id, label FROM plugin_trigger_order_items');
+    $source_db->exec('CREATE TRIGGER z_plugin_trigger_order_view_insert INSTEAD OF INSERT ON plugin_trigger_order_view BEGIN INSERT INTO plugin_trigger_order_audit (item_id, label) VALUES (NEW.item_id, NEW.label); END');
+    $source_db->exec('CREATE TRIGGER a_plugin_trigger_order_items_after AFTER INSERT ON plugin_trigger_order_items BEGIN INSERT INTO plugin_trigger_order_view (item_id, label) VALUES (NEW.item_id, NEW.label); END');
+    $source_db->close();
+
+    $trigger_order_result = cow_merge_databases(
+        $trigger_order_base,
+        $trigger_order_source,
+        $trigger_order_target,
+        $trigger_order_metadata,
+        'feature-schema-trigger-order',
+        'main'
+    );
+    $trigger_order_run_id = (int)$trigger_order_result['run_id'];
+    assert_same($trigger_order_result['status'], 'completed', 'source-added trigger dependencies merge automatically in dependency order');
+    assert_same(
+        (int)scalar($trigger_order_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name IN ('a_plugin_trigger_order_items_after', 'z_plugin_trigger_order_view_insert')"),
+        2,
+        'dependent source-added triggers both install'
+    );
+    assert_same(
+        (int)scalar($trigger_order_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE run_id = $trigger_order_run_id AND conflict_type = 'schema-source-added-trigger'"),
+        0,
+        'ordered source-added triggers create no review-only schema conflicts'
+    );
+    assert_same(
+        (int)scalar($trigger_order_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE run_id = $trigger_order_run_id AND column_name IN ('a_plugin_trigger_order_items_after', 'z_plugin_trigger_order_view_insert') AND decision = 'source-applied'"),
+        2,
+        'source-added dependent trigger creation order is auditable'
+    );
+    $target_db = open_db($trigger_order_target);
+    $target_db->exec("INSERT INTO plugin_trigger_order_items (item_id, label) VALUES ('trigger-order', 'Trigger Order')");
+    $target_db->close();
+    assert_same(
+        scalar($trigger_order_target, "SELECT label FROM plugin_trigger_order_audit WHERE item_id = 'trigger-order'"),
+        'Trigger Order',
+        'dependent source-added trigger chain fires after ordered materialization'
     );
 
     $trigger_dependency_base = $tmp . '/trigger-dependency-base.sqlite';
