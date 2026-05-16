@@ -67,6 +67,13 @@ function create_schema_review_db(string $path): void {
     $db->close();
 }
 
+function create_schema_view_order_db(string $path): void {
+    $db = open_db($path);
+    $db->exec('CREATE TABLE plugin_view_order_items (item_id TEXT PRIMARY KEY, label TEXT NOT NULL)');
+    $db->exec("INSERT INTO plugin_view_order_items (item_id, label) VALUES ('alpha', 'Alpha')");
+    $db->close();
+}
+
 define('FORKPRESS_COW_MERGE_TESTS', true);
 require_once __DIR__ . '/../../scripts/cow/merge.php';
 
@@ -141,6 +148,38 @@ try {
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id IN ($view_conflict_id, $trigger_conflict_id)"),
         0,
         'failed cyclic schema resolution attempts do not record resolutions'
+    );
+
+    $view_order_base = $tmp . '/view-order-base.sqlite';
+    $view_order_source = $tmp . '/view-order-source.sqlite';
+    $view_order_target = $tmp . '/view-order-target.sqlite';
+    $view_order_metadata = $tmp . '/.forkpress/cow/merge/schema-view-order-metadata.sqlite';
+
+    create_schema_view_order_db($view_order_base);
+    copy($view_order_base, $view_order_source);
+    copy($view_order_base, $view_order_target);
+
+    $source_db = open_db($view_order_source);
+    $source_db->exec('CREATE VIEW plugin_a_source_grandchild_view AS SELECT label FROM plugin_z_source_parent_view');
+    $source_db->exec('CREATE VIEW plugin_z_source_parent_view AS SELECT label FROM plugin_view_order_items');
+    $source_db->close();
+
+    $view_order_result = cow_merge_databases($view_order_base, $view_order_source, $view_order_target, $view_order_metadata, 'feature-schema-view-order', 'main');
+    $view_order_run_id = (int)$view_order_result['run_id'];
+    assert_same($view_order_result['status'], 'completed', 'acyclic source-added dependent views merge automatically');
+    assert_same(
+        scalar($view_order_target, "SELECT label FROM plugin_a_source_grandchild_view WHERE label = 'Alpha'"),
+        'Alpha',
+        'source-added dependent view chain remains queryable after merge'
+    );
+    assert_same(
+        (int)scalar($view_order_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE run_id = $view_order_run_id AND conflict_type = 'schema-source-added-view'"),
+        0,
+        'acyclic source-added dependent view ordering creates no review-only schema conflicts'
+    );
+    assert_true(
+        (int)scalar($view_order_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE run_id = $view_order_run_id AND column_name IN ('plugin_z_source_parent_view', 'plugin_a_source_grandchild_view') AND decision = 'source-applied'") >= 2,
+        'source-added dependent view creation order is auditable'
     );
 } finally {
     remove_tree($tmp);
