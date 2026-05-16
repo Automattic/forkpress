@@ -64,13 +64,13 @@ at the exact validator record that superseded their prior review. These classes
 and links are audit metadata only. They do not make stale reviews apply
 automatically.
 
-Schema index conflicts now record current source/target index SQL when
-revalidation finds drift and carry reviewed conflicts back to `needs-action`.
-They remain `unclassified`: treating changed index DDL as compatible source
-drift requires a schema-specific planner that can prove the same dependency
-graph and target preconditions still hold. View, trigger, table-restore, and
-rebuild conflicts still need schema-specific revalidation payloads and should
-be rerun manually while kept review-only.
+Schema index, view, and trigger conflicts now record current source/target SQL
+when revalidation finds drift and carry reviewed conflicts back to
+`needs-action`. They remain `unclassified`: treating changed DDL as compatible
+source drift requires a schema-specific planner that can prove the same
+dependency graph and target preconditions still hold. Table-restore and rebuild
+conflicts still need schema-specific revalidation payloads and should be rerun
+manually while kept review-only.
 
 ## Future Re-Audit Model
 
@@ -108,11 +108,11 @@ To support this cleanly, audit metadata should retain:
   stores `unchanged`, `compatible-target-drift`, `compatible-source-drift`,
   `missing`, `incompatible`, `replacement-evidence`, or `unclassified`;
   plugin validators can supply changed `source`, `target`, and candidate
-  evidence through replacement findings. Schema index conflicts can record
-  current source/target index SQL but stay `unclassified`. Future work should
-  add schema-specific evidence for views, triggers, table restores, and rebuild
-  plans, plus broader incompatible logical-identity cases beyond the currently
-  supported WordPress row fingerprints and no-primary-key rowid reuse.
+  evidence through replacement findings. Schema index/view/trigger conflicts can
+  record current source/target SQL but stay `unclassified`. Future work should
+  add schema-specific evidence for table restores and rebuild plans, plus
+  broader incompatible logical-identity cases beyond the currently supported
+  WordPress row fingerprints and no-primary-key rowid reuse.
 - Logical identity fingerprint separate from the raw payload.
 - Re-audit timestamp and merge run id.
 
@@ -158,13 +158,14 @@ fingerprint, and plugin validator reruns that deduplicate unchanged evidence or
 carry reviewed plugin conflicts back to `needs-action` with
 `replacement-evidence`, replacement validator payloads, and replacement
 conflict links when the validator reports changed evidence for the same plugin
-object, including explicit changed plugin source evidence.
+object, including explicit changed plugin source evidence. Schema
+index/view/trigger conflicts record changed source/target SQL and carry reviewed
+conflicts back to `needs-action` as `unclassified`.
 
-Future classifier tests should cover schema-specific source-drift evidence and
-plugin/custom primary-key row conflicts where the row keeps the same key but a
-higher-level logical fingerprint proves it now represents a different object.
-For schema, the next cases should cover view/trigger dependency evidence, table
-restore payloads, and rebuild plans.
+Future classifier tests should cover table restore/rebuild source-drift
+evidence and plugin/custom primary-key row conflicts where the row keeps the
+same key but a higher-level logical fingerprint proves it now represents a
+different object.
 
 The existing stale-resolution tests in `tests/cow/merge.php` should remain.
 They prove stale resolutions are blocked. New tests should prove reviewers get
