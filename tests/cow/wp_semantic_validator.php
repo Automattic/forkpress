@@ -102,6 +102,24 @@ function create_wp_semantic_db(string $path): void {
     $db->close();
 }
 
+function create_wp_post_parent_reference_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_title TEXT NOT NULL DEFAULT '',
+        post_content TEXT NOT NULL DEFAULT '',
+        post_status TEXT NOT NULL DEFAULT 'publish',
+        post_type TEXT NOT NULL DEFAULT 'post',
+        post_name TEXT NOT NULL DEFAULT '',
+        post_parent INTEGER NOT NULL DEFAULT 0
+    )");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, post_parent) VALUES
+        (37, 'Deleted parent page', '<!-- wp:paragraph --><p>Parent page</p><!-- /wp:paragraph -->', 'publish', 'page', 'deleted-parent-page', 0),
+        (38, 'Child page', '<!-- wp:paragraph --><p>Child page</p><!-- /wp:paragraph -->', 'publish', 'page', 'child-page', 37),
+        (39, 'Child attachment', '', 'inherit', 'attachment', 'child-attachment', 37)");
+    $db->close();
+}
+
 function create_wp_menu_ref_db(string $path): void {
     $db = open_db($path);
     $db->exec("CREATE TABLE wp_posts (
@@ -447,6 +465,92 @@ PHP);
     assert_true(str_contains($preview, '"missing_ref":35'), 'WordPress block-reference audit includes the missing navigation ID');
     assert_true(str_contains($preview, '"post_id":33'), 'WordPress block-reference audit includes the synced pattern consumer page ID');
     assert_true(str_contains($preview, '"block_name":"core/navigation"'), 'WordPress block-reference audit includes the navigation block name');
+
+    $post_parent_base_root = $tmp . '/post-parent-base';
+    $post_parent_source_root = $tmp . '/post-parent-source';
+    $post_parent_target_root = $tmp . '/post-parent-target';
+    $post_parent_base = $post_parent_base_root . '/wp-content/database/.ht.sqlite';
+    $post_parent_source = $post_parent_source_root . '/wp-content/database/.ht.sqlite';
+    $post_parent_target = $post_parent_target_root . '/wp-content/database/.ht.sqlite';
+    $post_parent_metadata = $tmp . '/.forkpress/cow/merge/wp-post-parent-validator-metadata.sqlite';
+    $post_parent_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-post-parent-validator.json';
+
+    mkdir($post_parent_base_root . '/wp-content/database', 0777, true);
+    create_wp_post_parent_reference_db($post_parent_base);
+    write_test_file($post_parent_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query("SELECT child.ID, child.post_type, child.post_parent FROM wp_posts child WHERE child.post_parent > 0");
+$findings = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    $parent_id = (int)$row['post_parent'];
+    $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $parent_id");
+    if ($exists === 0) {
+        $findings[] = [
+            'plugin' => 'forkpress-wp-post-parent-refs',
+            'object' => 'post:' . $row['ID'],
+            'reason' => 'post parent references a missing post',
+            'type' => 'plugin-wp-post-parent-missing-reference',
+            'tables' => ['wp_posts'],
+            'validator' => 'forkpress-wp-post-parent-refs@1',
+            'candidate' => [
+                'post_id' => (int)$row['ID'],
+                'post_type' => (string)$row['post_type'],
+                'field' => 'post_parent',
+                'missing_parent_id' => $parent_id,
+            ],
+        ];
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    copy_tree_for_test($post_parent_base_root, $post_parent_source_root);
+    copy_tree_for_test($post_parent_base_root, $post_parent_target_root);
+    cow_merge_capture_file_base($post_parent_base_root, $post_parent_file_base);
+    cow_merge_allocate_autoincrement_bands($post_parent_source, $post_parent_metadata, 'feature-wp-post-parent-source');
+    cow_merge_allocate_autoincrement_bands($post_parent_target, $post_parent_metadata, 'main');
+
+    $db = open_db($post_parent_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID = 37');
+    $db->close();
+
+    $db = open_db($post_parent_target);
+    $db->exec("UPDATE wp_posts SET post_title = 'Target child page still pointing at deleted parent' WHERE ID = 38");
+    $db->exec("UPDATE wp_posts SET post_title = 'Target child attachment still pointing at deleted parent' WHERE ID = 39");
+    $db->close();
+
+    $post_parent_result = cow_merge_branch_state(
+        $post_parent_base,
+        $post_parent_source,
+        $post_parent_target,
+        $post_parent_metadata,
+        'feature-wp-post-parent-source',
+        'main',
+        $post_parent_file_base,
+        $post_parent_source_root,
+        $post_parent_target_root
+    );
+
+    assert_same($post_parent_result['status'], 'completed_with_conflicts', 'WordPress post-parent validator holds missing parent posts for review');
+    assert_same((int)($post_parent_result['plugin_validators'] ?? 0), 1, 'WordPress post-parent validator is discovered from mu-plugins during merge');
+    assert_same((int)($post_parent_result['plugin_validator_conflicts'] ?? 0), 2, 'WordPress post-parent validator records missing parent references for child posts and attachments');
+    assert_same((int)scalar($post_parent_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 37'), 0, 'WordPress post-parent validator leaves the source parent deletion staged for review');
+    assert_same(scalar($post_parent_target, 'SELECT post_title FROM wp_posts WHERE ID = 38'), 'Target child page still pointing at deleted parent', 'WordPress post-parent validator preserves the target child page edit');
+    assert_same(scalar($post_parent_target, 'SELECT post_title FROM wp_posts WHERE ID = 39'), 'Target child attachment still pointing at deleted parent', 'WordPress post-parent validator preserves the target child attachment edit');
+
+    $post_parent_audit = cow_merge_audit_report($post_parent_metadata, (int)$post_parent_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-post-parent-missing-reference',
+    ]);
+    assert_same(count($post_parent_audit['conflicts']), 2, 'WordPress post-parent validator exposes missing parents as plugin-scoped audit conflicts');
+    $post_parent_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $post_parent_audit['conflicts']));
+    assert_true(str_contains($post_parent_preview, '"missing_parent_id":37'), 'WordPress post-parent audit includes the missing parent ID');
+    assert_true(str_contains($post_parent_preview, '"field":"post_parent"'), 'WordPress post-parent audit includes the stale field name');
+    assert_true(str_contains($post_parent_preview, '"post_type":"attachment"'), 'WordPress post-parent audit includes attachment children');
 
     $menu_base_root = $tmp . '/menu-base';
     $menu_source_root = $tmp . '/menu-source';
