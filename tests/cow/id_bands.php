@@ -119,6 +119,15 @@ try {
     assert_true($source_post_id >= 1000000, 'source post ID lands inside an allocated branch band');
     assert_true($target_post_id >= 2000000, 'target post ID lands inside a later allocated branch band');
 
+    $source_reuse_band = cow_merge_allocate_autoincrement_bands($source, $metadata, 'feature-source');
+    assert_same($source_reuse_band['allocated'], 0, 'source branch still inside its reserved band does not allocate fresh AUTOINCREMENT bands');
+    assert_same($source_reuse_band['reused'], 2, 'source branch still inside its reserved band reuses existing AUTOINCREMENT bands');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE decision = 'id-band-reused' AND table_name IN ('wp_posts', 'wp_options')"),
+        2,
+        'reused AUTOINCREMENT bands are auditable'
+    );
+
     $result = cow_merge_databases($base, $source, $target, $metadata, 'feature-source', 'feature-target');
     assert_same($result['status'], 'completed_with_conflicts', 'plain INTEGER PRIMARY KEY collision remains reviewable while banded WordPress rows merge');
 
@@ -143,7 +152,14 @@ try {
     assert_same($merged_target_serialized['post_id'] ?? null, $target_post_id, 'target serialized graph keeps the target branch post ID');
 
     assert_same(
-        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE decision = 'id-band-skipped' AND table_name = 'plugin_plain_ipk'"),
+        (int)scalar(
+            $metadata,
+            "SELECT COUNT(DISTINCT r.source_branch)
+             FROM merge_decisions d
+             JOIN merge_runs r ON r.id = d.run_id
+             WHERE d.decision = 'id-band-skipped'
+               AND d.table_name = 'plugin_plain_ipk'"
+        ),
         2,
         'plain INTEGER PRIMARY KEY plugin tables are explicitly marked non-bandable for each branch'
     );
@@ -183,8 +199,8 @@ try {
     );
     assert_same(
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-source' AND policy = 'autoincrement-id-band-allocation' AND status = 'id_bands_allocated'"),
-        2,
-        'reset-safe AUTOINCREMENT allocation runs are auditable'
+        3,
+        'initial, reused, and reset-safe AUTOINCREMENT allocation runs are auditable'
     );
 } finally {
     remove_tree($tmp);
