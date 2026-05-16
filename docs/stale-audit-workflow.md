@@ -56,11 +56,21 @@ cover `wp_posts` `post_type`, `wp_options` `option_name`, `wp_postmeta`
 `comment_post_ID`/`comment_type`, and commentmeta `comment_id`/`meta_key`.
 Plugin validator conflicts are classified as `unchanged` when the rerun reports
 the same evidence and `replacement-evidence` when the validator reports changed
-evidence for the same plugin object. Replacement evidence also links the stale
+evidence for the same plugin object. The replacement can come from changed
+candidate evidence, changed target evidence, or explicit changed `source`
+payloads emitted by the validator. Replacement evidence also links the stale
 review to the newer validator conflict row, so audit output can point reviewers
 at the exact validator record that superseded their prior review. These classes
 and links are audit metadata only. They do not make stale reviews apply
 automatically.
+
+Schema conflicts are intentionally not classified beyond the generic stale
+target guard yet. A schema conflict payload may contain DDL text, validation
+errors, dependency-order evidence, or a rebuild plan. Treating a changed
+trigger/view/index payload as compatible source drift requires a
+schema-specific planner that can prove the same dependency graph and target
+preconditions still hold. Until then, schema reviews should be rerun manually
+and kept review-only.
 
 ## Future Re-Audit Model
 
@@ -96,10 +106,12 @@ To support this cleanly, audit metadata should retain:
 - Previous review status and note.
 - Re-audit classifier. The current `merge_revalidations.revalidation_class`
   stores `unchanged`, `compatible-target-drift`, `compatible-source-drift`,
-  `missing`, `incompatible`, `replacement-evidence`, or `unclassified`; future
-  work should broaden source-drift coverage into plugin/schema-specific
-  evidence and add broader incompatible logical-identity cases beyond the
-  currently supported WordPress row fingerprints and no-primary-key rowid reuse.
+  `missing`, `incompatible`, `replacement-evidence`, or `unclassified`;
+  plugin validators can supply changed `source`, `target`, and candidate
+  evidence through replacement findings. Future work should add
+  schema-specific evidence and broader incompatible logical-identity cases
+  beyond the currently supported WordPress row fingerprints and no-primary-key
+  rowid reuse.
 - Logical identity fingerprint separate from the raw payload.
 - Re-audit timestamp and merge run id.
 
@@ -122,12 +134,12 @@ instead of applying the stale original conflict.
 The first implementation supports database cell, database row, and filesystem
 conflicts. Plugin validator conflicts now have a conservative validator-evidence
 classifier: if a validator rerun records changed evidence for the same plugin
-object, the reviewed plugin conflict returns to `needs-action` with the
-replacement validator payload and replacement conflict id visible in audit.
-Generic merge resolution still cannot apply plugin conflicts; the plugin
-validator or a plugin-specific repair flow remains the authority. Schema
-conflicts still use the conservative stale-target guard until they have
-schema-specific revalidation payloads.
+object, including changed source evidence, the reviewed plugin conflict returns
+to `needs-action` with the replacement validator payload and replacement
+conflict id visible in audit. Generic merge resolution still cannot apply
+plugin conflicts; the plugin validator or a plugin-specific repair flow remains
+the authority. Schema conflicts still use the conservative stale-target guard
+until they have schema-specific revalidation payloads.
 
 ## Test Shape
 
@@ -144,11 +156,11 @@ fingerprint, and plugin validator reruns that deduplicate unchanged evidence or
 carry reviewed plugin conflicts back to `needs-action` with
 `replacement-evidence`, replacement validator payloads, and replacement
 conflict links when the validator reports changed evidence for the same plugin
-object.
+object, including explicit changed plugin source evidence.
 
-Future classifier tests should cover plugin/custom primary-key row conflicts
-where the row keeps the same key but a higher-level logical fingerprint proves
-it now represents a different object.
+Future classifier tests should cover schema-specific source-drift evidence and
+plugin/custom primary-key row conflicts where the row keeps the same key but a
+higher-level logical fingerprint proves it now represents a different object.
 
 The existing stale-resolution tests in `tests/cow/merge.php` should remain.
 They prove stale resolutions are blocked. New tests should prove reviewers get
