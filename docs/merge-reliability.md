@@ -82,6 +82,13 @@ conflicts, run:
 make test-cow-filesystem
 ```
 
+For explicit import IDs that fall outside a branch's reserved AUTOINCREMENT ID
+band, run:
+
+```bash
+make test-cow-explicit-ids
+```
+
 For all cheap COW helper/UI/router checks, run:
 
 ```bash
