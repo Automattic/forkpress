@@ -17945,6 +17945,26 @@ PHP);
         'wp-content/plugins/network-plugin/forkpress-merge-validator.php',
     ], 'plugin validator discovery includes mu-plugin validators, active plugin validators, and network-active plugin validators only');
 
+    $prefixed_network_discovery_root = $tmp . '/prefixed-network-plugin-validator-discovery-root';
+    $prefixed_network_discovery_db = $tmp . '/prefixed-network-plugin-validator-discovery.sqlite';
+    create_base_db($prefixed_network_discovery_db);
+    $db = open_db($prefixed_network_discovery_db);
+    $db->exec('CREATE TABLE custom_sitemeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, site_id INTEGER NOT NULL DEFAULT 1, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec(
+        "INSERT INTO custom_sitemeta (site_id, meta_key, meta_value) VALUES (1, 'active_sitewide_plugins', '" .
+        SQLite3::escapeString(serialize(['prefixed-network-plugin/prefixed-network-plugin.php' => time()])) .
+        "')"
+    );
+    $db->close();
+    write_test_file($prefixed_network_discovery_root . '/wp-content/plugins/prefixed-network-plugin/forkpress-merge-validator.php', "<?php echo 'prefixed-network';\n");
+    $prefixed_network_validators = array_map(
+        fn(string $path): string => str_replace($prefixed_network_discovery_root . '/', '', $path),
+        cow_merge_discover_plugin_validators($prefixed_network_discovery_db, $prefixed_network_discovery_root)
+    );
+    assert_same($prefixed_network_validators, [
+        'wp-content/plugins/prefixed-network-plugin/forkpress-merge-validator.php',
+    ], 'plugin validator discovery reads network-active plugins from prefixed sitemeta tables');
+
     $auto_validator_base_root = $tmp . '/auto-validator-base';
     $auto_validator_source_root = $tmp . '/auto-validator-source';
     $auto_validator_target_root = $tmp . '/auto-validator-target';
