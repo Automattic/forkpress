@@ -274,6 +274,21 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
             ],
         ];
     }
+    if (array_key_exists('image_meta', $metadata) && !is_array($metadata['image_meta'])) {
+        $findings[] = [
+            'plugin' => 'forkpress-wp-media',
+            'object' => 'attachment:' . $row['ID'],
+            'reason' => 'attachment image metadata is not an array',
+            'type' => 'plugin-wp-media-image-meta-drift',
+            'tables' => ['wp_posts', 'wp_postmeta'],
+            'validator' => 'forkpress-wp-media@1',
+            'candidate' => [
+                'attachment_id' => (int)$row['ID'],
+                'attached_file' => $attached_file,
+                'image_meta_type' => gettype($metadata['image_meta']),
+            ],
+        ];
+    }
     if ($unsafe_upload_path($attached_file)) {
         $findings[] = [
             'plugin' => 'forkpress-wp-media',
@@ -769,6 +784,7 @@ PHP);
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-unsafe-generated.jpg', "source unsafe generated original bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-invalid-metadata.jpg', "source invalid metadata original bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-original-dimensions.jpg', "source invalid original dimensions bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-image-meta-drift.jpg', "source invalid image_meta bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-filesize-drift.jpg', "source filesize drift bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-filesize.jpg', "source generated filesize original bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-filesize-150x150.jpg', "source generated filesize thumb bytes\n");
@@ -837,6 +853,13 @@ PHP);
         'file' => '2026/05/source-original-dimensions.jpg',
         'width' => 0,
         'height' => 480,
+        'sizes' => [],
+    ]);
+    $image_meta_drift_id = insert_attachment($db, 'Source media invalid image meta', '2026/05/source-image-meta-drift.jpg', [
+        'file' => '2026/05/source-image-meta-drift.jpg',
+        'width' => 640,
+        'height' => 480,
+        'image_meta' => 'corrupt-image-meta',
         'sizes' => [],
     ]);
     $filesize_drift_id = insert_attachment($db, 'Source media filesize drift', '2026/05/source-filesize-drift.jpg', [
@@ -1048,7 +1071,7 @@ PHP);
 
     assert_same($result['status'], 'completed_with_conflicts', 'media validator holds incomplete generated-size metadata for review');
     assert_same((int)($result['plugin_validators'] ?? 0), 1, 'media validator is discovered from mu-plugins during merge');
-    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 28, 'media validator records missing required metadata, invalid metadata, dimensions, filesize and MIME drift, generated-size, original-image, backup-size, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
+    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 29, 'media validator records missing required metadata, invalid metadata, dimensions, image metadata, filesize and MIME drift, generated-size, original-image, backup-size, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
     assert_same(
         scalar($target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-generated-missing-file-key.jpg',
@@ -1138,6 +1161,17 @@ PHP);
     assert_true(str_contains($original_dimension_preview, 'source-original-dimensions.jpg'), 'media validator original-dimensions audit includes the affected attachment');
     assert_true(str_contains($original_dimension_preview, '"width":0'), 'media validator original-dimensions audit includes the invalid width');
     assert_true(str_contains($original_dimension_preview, (string)$original_dimensions_id), 'media validator original-dimensions audit includes the affected attachment ID');
+
+    $image_meta_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-media-image-meta-drift',
+    ]);
+    assert_same(count($image_meta_audit['conflicts']), 1, 'media validator exposes invalid image_meta as a plugin-scoped audit conflict');
+    $image_meta_preview = (string)($image_meta_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_true(str_contains($image_meta_preview, 'source-image-meta-drift.jpg'), 'media validator image-meta audit includes the affected attachment');
+    assert_true(str_contains($image_meta_preview, '"image_meta_type":"string"'), 'media validator image-meta audit includes the malformed image_meta type');
+    assert_true(str_contains($image_meta_preview, (string)$image_meta_drift_id), 'media validator image-meta audit includes the affected attachment ID');
 
     $filesize_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'plugin',
