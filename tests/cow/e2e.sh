@@ -55,9 +55,9 @@ on_error() {
   dump_if_exists "$TMP/branch-post-edit.html"
   dump_if_exists "$TMP/branch-post-frontend.html"
   dump_if_exists "$TMP/band-merge-source-post-new.html"
-  dump_if_exists "$TMP/band-merge-source-rest-save.json"
+  dump_if_exists "$TMP/band-merge-source-post-save.json"
   dump_if_exists "$TMP/band-merge-target-post-new.html"
-  dump_if_exists "$TMP/band-merge-target-rest-save.json"
+  dump_if_exists "$TMP/band-merge-target-post-save.json"
   dump_if_exists "$TMP/merge-band-posts.out"
   dump_if_exists "$TMP/band-merge-target-edit.html"
   dump_if_exists "$TMP/band-merge-target-source-post.html"
@@ -1585,8 +1585,8 @@ BAND_SOURCE_TITLE="Band source $(date +%s)"
 BAND_TARGET_TITLE="Band target $(date +%s)"
 create_branch_post band-merge-source "$BAND_SOURCE_TITLE"
 create_branch_post band-merge-target "$BAND_TARGET_TITLE"
-BAND_SOURCE_POST_ID="$(php -r '$data = json_decode(file_get_contents($argv[1]), true); echo (int)($data["id"] ?? 0);' "$TMP/band-merge-source-rest-save.json")"
-BAND_TARGET_POST_ID="$(php -r '$data = json_decode(file_get_contents($argv[1]), true); echo (int)($data["id"] ?? 0);' "$TMP/band-merge-target-rest-save.json")"
+BAND_SOURCE_POST_ID="$(php -r '$data = json_decode(file_get_contents($argv[1]), true); echo (int)($data["id"] ?? 0);' "$TMP/band-merge-source-post-save.json")"
+BAND_TARGET_POST_ID="$(php -r '$data = json_decode(file_get_contents($argv[1]), true); echo (int)($data["id"] ?? 0);' "$TMP/band-merge-target-post-save.json")"
 if [ "$BAND_SOURCE_POST_ID" = "0" ] || [ "$BAND_TARGET_POST_ID" = "0" ] || [ "$BAND_SOURCE_POST_ID" = "$BAND_TARGET_POST_ID" ]; then
   echo "banded source/target post IDs were not distinct: source=$BAND_SOURCE_POST_ID target=$BAND_TARGET_POST_ID" >&2
   exit 1
