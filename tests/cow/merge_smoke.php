@@ -577,6 +577,84 @@ try {
         'page-plus-comment smoke merge audits all target graph inserts'
     );
 
+    $cpt_base = $tmp . '/cpt-base.sqlite';
+    $cpt_source = $tmp . '/cpt-source.sqlite';
+    $cpt_target = $tmp . '/cpt-target.sqlite';
+    $cpt_metadata = $tmp . '/.forkpress/cow/merge/cpt-metadata.sqlite';
+
+    smoke_create_posts_db($cpt_base);
+    copy($cpt_base, $cpt_source);
+    copy($cpt_base, $cpt_target);
+
+    $source_cpt_option = json_encode([
+        'branch' => 'source',
+        'page_id' => 18000080,
+        'note_id' => 18000081,
+        'term_taxonomy_id' => 18000085,
+    ], JSON_UNESCAPED_SLASHES);
+    $target_cpt_option = json_encode([
+        'branch' => 'target',
+        'page_id' => 19000080,
+        'note_id' => 19000081,
+        'term_taxonomy_id' => 19000085,
+    ], JSON_UNESCAPED_SLASHES);
+
+    $db = smoke_open_db($cpt_source);
+    smoke_insert_post($db, 18000080, 'Branch Page With Note', 'Branch page linked to a plugin note', 'page', 'branch-page-with-note');
+    smoke_insert_post($db, 18000081, 'Branch Plugin Note', 'Branch plugin CPT body', 'forkpress_note', 'branch-plugin-note', 'publish', 18000080);
+    smoke_insert_postmeta($db, 18000082, 18000081, '_forkpress_note_payload', '{"branch":"source","note_id":18000081,"page_id":18000080}');
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES
+        (18000084, 'Branch Note Topic', 'branch-note-topic')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES
+        (18000085, 18000084, 'forkpress_topic', 'Branch CPT topic', 0, 1)");
+    $db->exec("INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES
+        (18000081, 18000085, 0)");
+    smoke_insert_option($db, 18000083, 'forkpress_source_note_index', $source_cpt_option);
+    $db->close();
+
+    $db = smoke_open_db($cpt_target);
+    smoke_insert_post($db, 19000080, 'Main Page With Note', 'Main page linked to a plugin note', 'page', 'main-page-with-note');
+    smoke_insert_post($db, 19000081, 'Main Plugin Note', 'Main plugin CPT body', 'forkpress_note', 'main-plugin-note', 'publish', 19000080);
+    smoke_insert_postmeta($db, 19000082, 19000081, '_forkpress_note_payload', '{"branch":"target","note_id":19000081,"page_id":19000080}');
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES
+        (19000084, 'Main Note Topic', 'main-note-topic')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES
+        (19000085, 19000084, 'forkpress_topic', 'Main CPT topic', 0, 1)");
+    $db->exec("INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES
+        (19000081, 19000085, 0)");
+    smoke_insert_option($db, 19000083, 'forkpress_target_note_index', $target_cpt_option);
+    $db->close();
+
+    $cpt_result = cow_merge_databases($cpt_base, $cpt_source, $cpt_target, $cpt_metadata, 'feature-smoke-page-cpt', 'main');
+    assert_same($cpt_result['status'], 'completed', 'branch and main page-plus-custom-post-type inserts complete cleanly');
+    assert_same((int)($cpt_result['conflicts'] ?? -1), 0, 'branch and main page-plus-custom-post-type inserts do not create merge conflicts');
+    assert_same(smoke_scalar($cpt_target, 'SELECT post_title FROM wp_posts WHERE ID = 18000080'), 'Branch Page With Note', 'merged target includes the branch CPT owner page');
+    assert_same(smoke_scalar($cpt_target, 'SELECT post_type FROM wp_posts WHERE ID = 18000081'), 'forkpress_note', 'merged target includes the branch custom post type row');
+    assert_same((int)smoke_scalar($cpt_target, 'SELECT post_parent FROM wp_posts WHERE ID = 18000081'), 18000080, 'merged target keeps the branch CPT parent page reference');
+    assert_same(smoke_scalar($cpt_target, 'SELECT meta_value FROM wp_postmeta WHERE meta_id = 18000082'), '{"branch":"source","note_id":18000081,"page_id":18000080}', 'merged target includes branch CPT metadata with source graph references');
+    assert_same(smoke_scalar($cpt_target, "SELECT option_value FROM wp_options WHERE option_name = 'forkpress_source_note_index'"), $source_cpt_option, 'merged target includes branch CPT option with source graph references');
+    assert_same(smoke_scalar($cpt_target, 'SELECT taxonomy FROM wp_term_taxonomy WHERE term_taxonomy_id = 18000085'), 'forkpress_topic', 'merged target includes the branch CPT taxonomy row');
+    assert_same((int)smoke_scalar($cpt_target, 'SELECT COUNT(*) FROM wp_term_relationships WHERE object_id = 18000081 AND term_taxonomy_id = 18000085'), 1, 'merged target includes the branch CPT topic relationship');
+    assert_same(smoke_scalar($cpt_target, 'SELECT post_title FROM wp_posts WHERE ID = 19000080'), 'Main Page With Note', 'merged target preserves the main CPT owner page');
+    assert_same(smoke_scalar($cpt_target, 'SELECT post_type FROM wp_posts WHERE ID = 19000081'), 'forkpress_note', 'merged target preserves the main custom post type row');
+    assert_same(smoke_scalar($cpt_target, 'SELECT meta_value FROM wp_postmeta WHERE meta_id = 19000082'), '{"branch":"target","note_id":19000081,"page_id":19000080}', 'merged target preserves target CPT metadata with target graph references');
+    assert_same(smoke_scalar($cpt_target, "SELECT option_value FROM wp_options WHERE option_name = 'forkpress_target_note_index'"), $target_cpt_option, 'merged target preserves target CPT option with target graph references');
+    assert_same(
+        (int)smoke_scalar($cpt_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name IN ('wp_posts', 'wp_postmeta', 'wp_options', 'wp_terms', 'wp_term_taxonomy', 'wp_term_relationships')"),
+        0,
+        'page-plus-custom-post-type smoke merge records no WordPress graph conflicts'
+    );
+    assert_same(
+        (int)smoke_scalar($cpt_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_postmeta', 'wp_options', 'wp_terms', 'wp_term_taxonomy', 'wp_term_relationships') AND decision = 'source-applied'"),
+        7,
+        'page-plus-custom-post-type smoke merge audits all source graph inserts'
+    );
+    assert_same(
+        (int)smoke_scalar($cpt_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_postmeta', 'wp_options', 'wp_terms', 'wp_term_taxonomy', 'wp_term_relationships') AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
+        7,
+        'page-plus-custom-post-type smoke merge audits all target graph inserts'
+    );
+
     $taxonomy_base = $tmp . '/taxonomy-base.sqlite';
     $taxonomy_source = $tmp . '/taxonomy-source.sqlite';
     $taxonomy_target = $tmp . '/taxonomy-target.sqlite';
