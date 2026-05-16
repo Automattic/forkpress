@@ -135,6 +135,15 @@ plugin collision checks, run:
 make test-cow-id-bands
 ```
 
+For a semantic-only fast gate that skips Git publication, branch UI, router,
+schema, and generic filesystem checks while still covering page smoke merges,
+ID bands, explicit IDs, media/upload validators, plugin validators, stale
+audits, and WordPress semantic reference validators, run:
+
+```bash
+make test-cow-semantic-fast
+```
+
 For schema dependency planning and review-only cases such as dependent
 source-added views/triggers, source-added triggers that depend on source-added
 tables, cyclic source-added views/triggers, source-added expression unique
