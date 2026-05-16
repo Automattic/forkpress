@@ -297,6 +297,47 @@ function create_wp_media_block_db(string $path): void {
     $db->close();
 }
 
+function create_wp_avatar_navigation_link_block_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_title TEXT NOT NULL DEFAULT '',
+        post_content TEXT NOT NULL DEFAULT '',
+        post_status TEXT NOT NULL DEFAULT 'publish',
+        post_type TEXT NOT NULL DEFAULT 'post',
+        post_name TEXT NOT NULL DEFAULT ''
+    )");
+    $db->exec("CREATE TABLE wp_users (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_login TEXT NOT NULL,
+        user_pass TEXT NOT NULL DEFAULT '',
+        user_nicename TEXT NOT NULL DEFAULT '',
+        user_email TEXT NOT NULL DEFAULT '',
+        user_url TEXT NOT NULL DEFAULT '',
+        user_registered TEXT NOT NULL DEFAULT '2026-05-16 00:00:00',
+        user_activation_key TEXT NOT NULL DEFAULT '',
+        user_status INTEGER NOT NULL DEFAULT 0,
+        display_name TEXT NOT NULL DEFAULT ''
+    )");
+    $db->exec('CREATE TABLE wp_terms (term_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, slug TEXT NOT NULL, term_group INTEGER NOT NULL DEFAULT 0)');
+    $db->exec('CREATE TABLE wp_term_taxonomy (term_taxonomy_id INTEGER PRIMARY KEY AUTOINCREMENT, term_id INTEGER NOT NULL, taxonomy TEXT NOT NULL, description TEXT NOT NULL DEFAULT "", parent INTEGER NOT NULL DEFAULT 0, count INTEGER NOT NULL DEFAULT 0)');
+    $block_content = '<!-- wp:avatar {"userId":188,"size":96} /-->'
+        . '<!-- wp:navigation-link {"id":189,"kind":"post-type","type":"page","label":"Deleted page","url":"/deleted-page"} /-->'
+        . '<!-- wp:navigation-link {"id":190,"kind":"taxonomy","type":"category","label":"Deleted category","url":"/category/deleted"} /-->';
+    $stmt = $db->prepare("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (187, 'Avatar and navigation link page', :content, 'publish', 'page', 'avatar-navigation-link-page'),
+        (189, 'Deleted navigation page', '<!-- wp:paragraph --><p>Deleted nav page</p><!-- /wp:paragraph -->', 'publish', 'page', 'deleted-navigation-page')");
+    $stmt->bindValue(':content', $block_content, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->exec("INSERT INTO wp_users (ID, user_login, user_nicename, user_email, display_name) VALUES
+        (188, 'deleted_avatar_user', 'deleted-avatar-user', 'avatar-user@example.com', 'Deleted Avatar User')");
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES
+        (190, 'Deleted navigation category', 'deleted-navigation-category')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, count) VALUES
+        (191, 190, 'category', 'Deleted navigation category taxonomy', 1)");
+    $db->close();
+}
+
 function create_wp_gallery_block_db(string $path): void {
     $db = open_db($path);
     $db->exec("CREATE TABLE wp_posts (
@@ -1538,6 +1579,170 @@ PHP);
     }
     assert_true(str_contains($media_block_preview, '"field":"attrs.id"'), 'WordPress media block audit includes generic media block ID fields');
     assert_true(str_contains($media_block_preview, '"field":"attrs.mediaId"'), 'WordPress media block audit includes media-text ID fields');
+
+    $avatar_nav_base_root = $tmp . '/avatar-nav-block-base';
+    $avatar_nav_source_root = $tmp . '/avatar-nav-block-source';
+    $avatar_nav_target_root = $tmp . '/avatar-nav-block-target';
+    $avatar_nav_base = $avatar_nav_base_root . '/wp-content/database/.ht.sqlite';
+    $avatar_nav_source = $avatar_nav_source_root . '/wp-content/database/.ht.sqlite';
+    $avatar_nav_target = $avatar_nav_target_root . '/wp-content/database/.ht.sqlite';
+    $avatar_nav_metadata = $tmp . '/.forkpress/cow/merge/wp-avatar-nav-block-validator-metadata.sqlite';
+    $avatar_nav_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-avatar-nav-block-validator.json';
+
+    mkdir($avatar_nav_base_root . '/wp-content/database', 0777, true);
+    create_wp_avatar_navigation_link_block_db($avatar_nav_base);
+    write_test_file($avatar_nav_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type IN ('post', 'page', 'wp_navigation')");
+$findings = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    if (!preg_match_all('/<!--\s*wp:([A-Za-z0-9_\/-]+)\s+(\{.*?\})\s*\/?-->/', (string)$row['post_content'], $matches, PREG_SET_ORDER)) {
+        continue;
+    }
+    foreach ($matches as $match) {
+        $block_name = (string)$match[1];
+        $attrs = json_decode((string)$match[2], true);
+        if (!is_array($attrs)) {
+            continue;
+        }
+        if ($block_name === 'avatar' && isset($attrs['userId'])) {
+            $user_id = (int)$attrs['userId'];
+            $exists = $user_id <= 0 ? 1 : (int)$db->querySingle("SELECT COUNT(*) FROM wp_users WHERE ID = $user_id");
+            if ($exists === 0) {
+                $findings[] = [
+                    'plugin' => 'forkpress-wp-avatar-navigation-link-refs',
+                    'object' => 'post:' . $row['ID'],
+                    'reason' => 'avatar block references a missing user',
+                    'type' => 'plugin-wp-avatar-navigation-link-missing-object',
+                    'tables' => ['wp_posts', 'wp_users'],
+                    'validator' => 'forkpress-wp-avatar-navigation-link-refs@1',
+                    'candidate' => [
+                        'post_id' => (int)$row['ID'],
+                        'block_name' => 'core/avatar',
+                        'field' => 'attrs.userId',
+                        'missing_object_id' => $user_id,
+                        'object_type' => 'user',
+                    ],
+                ];
+            }
+        }
+        if ($block_name !== 'navigation-link' || !isset($attrs['id'])) {
+            continue;
+        }
+        $object_id = (int)$attrs['id'];
+        if (($attrs['kind'] ?? null) === 'post-type') {
+            $exists = $object_id <= 0 ? 1 : (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $object_id");
+            if ($exists === 0) {
+                $findings[] = [
+                    'plugin' => 'forkpress-wp-avatar-navigation-link-refs',
+                    'object' => 'post:' . $row['ID'],
+                    'reason' => 'navigation link block references a missing post object',
+                    'type' => 'plugin-wp-avatar-navigation-link-missing-object',
+                    'tables' => ['wp_posts'],
+                    'validator' => 'forkpress-wp-avatar-navigation-link-refs@1',
+                    'candidate' => [
+                        'post_id' => (int)$row['ID'],
+                        'block_name' => 'core/navigation-link',
+                        'field' => 'attrs.id',
+                        'missing_object_id' => $object_id,
+                        'object_type' => (string)($attrs['type'] ?? 'post'),
+                        'kind' => 'post-type',
+                    ],
+                ];
+            }
+        }
+        if (($attrs['kind'] ?? null) === 'taxonomy') {
+            $taxonomy = (string)($attrs['type'] ?? '');
+            $escaped_taxonomy = SQLite3::escapeString($taxonomy);
+            $exists = $object_id <= 0 ? 1 : (int)$db->querySingle("SELECT COUNT(*) FROM wp_terms t JOIN wp_term_taxonomy tt ON tt.term_id = t.term_id AND tt.taxonomy = '$escaped_taxonomy' WHERE t.term_id = $object_id");
+            if ($exists === 0) {
+                $findings[] = [
+                    'plugin' => 'forkpress-wp-avatar-navigation-link-refs',
+                    'object' => 'post:' . $row['ID'],
+                    'reason' => 'navigation link block references a missing taxonomy term',
+                    'type' => 'plugin-wp-avatar-navigation-link-missing-object',
+                    'tables' => ['wp_posts', 'wp_terms', 'wp_term_taxonomy'],
+                    'validator' => 'forkpress-wp-avatar-navigation-link-refs@1',
+                    'candidate' => [
+                        'post_id' => (int)$row['ID'],
+                        'block_name' => 'core/navigation-link',
+                        'field' => 'attrs.id',
+                        'missing_object_id' => $object_id,
+                        'object_type' => $taxonomy,
+                        'kind' => 'taxonomy',
+                    ],
+                ];
+            }
+        }
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    copy_tree_for_test($avatar_nav_base_root, $avatar_nav_source_root);
+    copy_tree_for_test($avatar_nav_base_root, $avatar_nav_target_root);
+    cow_merge_capture_file_base($avatar_nav_base_root, $avatar_nav_file_base);
+    cow_merge_allocate_autoincrement_bands($avatar_nav_source, $avatar_nav_metadata, 'feature-wp-avatar-nav-block-source');
+    cow_merge_allocate_autoincrement_bands($avatar_nav_target, $avatar_nav_metadata, 'main');
+
+    $db = open_db($avatar_nav_source);
+    $db->exec('DELETE FROM wp_users WHERE ID = 188');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 189');
+    $db->exec('DELETE FROM wp_term_taxonomy WHERE term_id = 190');
+    $db->exec('DELETE FROM wp_terms WHERE term_id = 190');
+    $db->close();
+
+    $db = open_db($avatar_nav_target);
+    $db->exec("UPDATE wp_posts SET post_title = 'Target page still using deleted avatar and navigation links' WHERE ID = 187");
+    $db->close();
+
+    $avatar_nav_result = cow_merge_branch_state(
+        $avatar_nav_base,
+        $avatar_nav_source,
+        $avatar_nav_target,
+        $avatar_nav_metadata,
+        'feature-wp-avatar-nav-block-source',
+        'main',
+        $avatar_nav_file_base,
+        $avatar_nav_source_root,
+        $avatar_nav_target_root
+    );
+
+    assert_same($avatar_nav_result['status'], 'completed_with_conflicts', 'WordPress avatar/navigation-link block validator holds missing objects for review');
+    assert_same((int)($avatar_nav_result['plugin_validators'] ?? 0), 1, 'WordPress avatar/navigation-link block validator is discovered from mu-plugins during merge');
+    assert_same((int)($avatar_nav_result['plugin_validator_conflicts'] ?? 0), 3, 'WordPress avatar/navigation-link block validator records missing user, page, and taxonomy refs');
+    assert_same((int)scalar($avatar_nav_target, 'SELECT COUNT(*) FROM wp_users WHERE ID = 188'), 0, 'WordPress avatar/navigation-link block validator leaves source user deletion staged for review');
+    assert_same((int)scalar($avatar_nav_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 189'), 0, 'WordPress avatar/navigation-link block validator leaves source page deletion staged for review');
+    assert_same((int)scalar($avatar_nav_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 190'), 0, 'WordPress avatar/navigation-link block validator leaves source term deletion staged for review');
+    assert_same(scalar($avatar_nav_target, 'SELECT post_title FROM wp_posts WHERE ID = 187'), 'Target page still using deleted avatar and navigation links', 'WordPress avatar/navigation-link block validator preserves the target page edit');
+    $avatar_nav_content = (string)scalar($avatar_nav_target, 'SELECT post_content FROM wp_posts WHERE ID = 187');
+    assert_true(str_contains($avatar_nav_content, '"userId":188'), 'WordPress avatar/navigation-link block validator keeps the stale avatar user visible for review');
+    assert_true(str_contains($avatar_nav_content, '"id":189'), 'WordPress avatar/navigation-link block validator keeps the stale navigation page visible for review');
+    assert_true(str_contains($avatar_nav_content, '"id":190'), 'WordPress avatar/navigation-link block validator keeps the stale navigation taxonomy visible for review');
+
+    $avatar_nav_audit = cow_merge_audit_report($avatar_nav_metadata, (int)$avatar_nav_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-avatar-navigation-link-missing-object',
+    ]);
+    assert_same(count($avatar_nav_audit['conflicts']), 3, 'WordPress avatar/navigation-link block validator exposes stale refs as plugin-scoped audit conflicts');
+    $avatar_nav_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $avatar_nav_audit['conflicts']));
+    foreach ([188, 189, 190] as $missing_id) {
+        assert_true(str_contains($avatar_nav_preview, '"missing_object_id":' . (string)$missing_id), 'WordPress avatar/navigation-link block audit includes missing object ID ' . (string)$missing_id);
+    }
+    foreach (['core/avatar', 'core/navigation-link'] as $block_name) {
+        $encoded_block_name = str_replace('/', '\\/', $block_name);
+        assert_true(
+            str_contains($avatar_nav_preview, '"block_name":"' . $block_name . '"') || str_contains($avatar_nav_preview, '"block_name":"' . $encoded_block_name . '"'),
+            'WordPress avatar/navigation-link block audit includes block name ' . $block_name
+        );
+    }
+    foreach (['"field":"attrs.userId"', '"field":"attrs.id"', '"kind":"post-type"', '"kind":"taxonomy"'] as $needle) {
+        assert_true(str_contains($avatar_nav_preview, $needle), 'WordPress avatar/navigation-link block audit includes ' . $needle);
+    }
 
     $gallery_block_base_root = $tmp . '/gallery-block-base';
     $gallery_block_source_root = $tmp . '/gallery-block-source';
