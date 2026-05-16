@@ -1527,10 +1527,70 @@ function cow_merge_row_semantic_identity(string $table, ?array $row): ?array {
     return $identity;
 }
 
+function cow_merge_wordpress_target_local_option_name(string $option_name): bool {
+    if (in_array($option_name, ['cron', 'rewrite_rules'], true)) {
+        return true;
+    }
+
+    foreach (['_transient_', '_site_transient_', '_transient_timeout_', '_site_transient_timeout_'] as $prefix) {
+        if (str_starts_with($option_name, $prefix)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function cow_merge_wordpress_taxonomy_children_option_row(array $row): bool {
+    $option_name = (string)($row['option_name'] ?? '');
+    if (!str_ends_with($option_name, '_children')) {
+        return false;
+    }
+
+    $decoded = @unserialize((string)($row['option_value'] ?? ''), ['allowed_classes' => false]);
+    if (!is_array($decoded)) {
+        return false;
+    }
+
+    foreach ($decoded as $parent_id => $child_ids) {
+        if (!is_int($parent_id) && !ctype_digit((string)$parent_id)) {
+            return false;
+        }
+        if (!is_array($child_ids)) {
+            return false;
+        }
+        foreach ($child_ids as $child_id) {
+            if (!is_int($child_id) && !ctype_digit((string)$child_id)) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
 function cow_merge_wordpress_target_local_row_reason(string $table, ?array $base_row, ?array $source_row, ?array $target_row): ?string {
+    if ($table === 'wp_options') {
+        $saw_row = false;
+        foreach ([$base_row, $source_row, $target_row] as $row) {
+            if ($row === null) {
+                continue;
+            }
+            $saw_row = true;
+            if (
+                !cow_merge_wordpress_target_local_option_name((string)($row['option_name'] ?? ''))
+                && !cow_merge_wordpress_taxonomy_children_option_row($row)
+            ) {
+                return null;
+            }
+        }
+        return $saw_row ? 'target kept branch-local WordPress runtime option cache; source cache state is not merged' : null;
+    }
+
     if ($table !== 'wp_usermeta') {
         return null;
     }
+
     $saw_row = false;
     foreach ([$base_row, $source_row, $target_row] as $row) {
         if ($row === null) {

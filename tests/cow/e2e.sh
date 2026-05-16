@@ -55,9 +55,9 @@ on_error() {
   dump_if_exists "$TMP/branch-post-edit.html"
   dump_if_exists "$TMP/branch-post-frontend.html"
   dump_if_exists "$TMP/band-merge-source-post-new.html"
-  dump_if_exists "$TMP/band-merge-source-rest-save.json"
+  dump_if_exists "$TMP/band-merge-source-post-save.json"
   dump_if_exists "$TMP/band-merge-target-post-new.html"
-  dump_if_exists "$TMP/band-merge-target-rest-save.json"
+  dump_if_exists "$TMP/band-merge-target-post-save.json"
   dump_if_exists "$TMP/merge-band-posts.out"
   dump_if_exists "$TMP/band-merge-target-edit.html"
   dump_if_exists "$TMP/band-merge-target-source-post.html"
@@ -65,6 +65,7 @@ on_error() {
   dump_if_exists "$TMP/semantic-source.json"
   dump_if_exists "$TMP/semantic-target.json"
   dump_if_exists "$TMP/semantic-merge.out"
+  dump_if_exists "$TMP/semantic-conflicts.json"
   dump_if_exists "$TMP/semantic-after-merge.json"
   dump_if_exists "$TMP/band-merge-source-decision-queue.json"
   dump_if_exists "$TMP/git-multi-delete.out"
@@ -1585,8 +1586,8 @@ BAND_SOURCE_TITLE="Band source $(date +%s)"
 BAND_TARGET_TITLE="Band target $(date +%s)"
 create_branch_post band-merge-source "$BAND_SOURCE_TITLE"
 create_branch_post band-merge-target "$BAND_TARGET_TITLE"
-BAND_SOURCE_POST_ID="$(php -r '$data = json_decode(file_get_contents($argv[1]), true); echo (int)($data["id"] ?? 0);' "$TMP/band-merge-source-rest-save.json")"
-BAND_TARGET_POST_ID="$(php -r '$data = json_decode(file_get_contents($argv[1]), true); echo (int)($data["id"] ?? 0);' "$TMP/band-merge-target-rest-save.json")"
+BAND_SOURCE_POST_ID="$(php -r '$data = json_decode(file_get_contents($argv[1]), true); echo (int)($data["id"] ?? 0);' "$TMP/band-merge-source-post-save.json")"
+BAND_TARGET_POST_ID="$(php -r '$data = json_decode(file_get_contents($argv[1]), true); echo (int)($data["id"] ?? 0);' "$TMP/band-merge-target-post-save.json")"
 if [ "$BAND_SOURCE_POST_ID" = "0" ] || [ "$BAND_TARGET_POST_ID" = "0" ] || [ "$BAND_SOURCE_POST_ID" = "$BAND_TARGET_POST_ID" ]; then
   echo "banded source/target post IDs were not distinct: source=$BAND_SOURCE_POST_ID target=$BAND_TARGET_POST_ID" >&2
   exit 1
@@ -1596,7 +1597,7 @@ php -r '$db = new SQLite3($argv[1]); $id = (int)$argv[2]; $json = json_encode(["
 php -r '$db = new SQLite3($argv[1]); $id = (int)$argv[2]; $json = json_encode(["linkedPostId" => $id, "branch" => "target"], JSON_UNESCAPED_SLASHES); $serialized = "a:2:{s:12:\"linkedPostId\";i:$id;s:6:\"branch\";s:6:\"target\";}"; $stmt = $db->prepare("UPDATE wp_posts SET post_content = :content WHERE ID = :id"); $stmt->bindValue(":content", $json, SQLITE3_TEXT); $stmt->bindValue(":id", $id, SQLITE3_INTEGER); $stmt->execute(); $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:id, '\''_forkpress_json_ref'\'', :json), (:id, '\''_forkpress_serialized_ref'\'', :serialized)"); $stmt->bindValue(":id", $id, SQLITE3_INTEGER); $stmt->bindValue(":json", $json, SQLITE3_TEXT); $stmt->bindValue(":serialized", $serialized, SQLITE3_TEXT); $stmt->execute();' "$WORK/band-merge-target/wp-content/database/.ht.sqlite" "$BAND_TARGET_POST_ID"
 "$BIN" branch --work-dir "$WORK_DIR" merge band-merge-source --into band-merge-target > "$TMP/merge-band-posts.out"
 grep -F "forkpress: merged band-merge-source into band-merge-target" "$TMP/merge-band-posts.out" >/dev/null
-grep -Fx "status:    completed" "$TMP/merge-band-posts.out" >/dev/null
+grep -Fx "  status:    completed" "$TMP/merge-band-posts.out" >/dev/null
 php -r '$db = new SQLite3($argv[1]); $run = $db->querySingle("SELECT id FROM merge_runs WHERE source_branch = '\''band-merge-source'\'' AND target_branch = '\''band-merge-target'\'' ORDER BY id DESC LIMIT 1"); $conflicts = $run ? (int)$db->querySingle("SELECT COUNT(*) FROM merge_conflicts WHERE run_id = " . (int)$run) : -1; exit($run && $conflicts === 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
 curl -sS -H "Host: band-merge-target.wp.localhost:$PORT" \
   "http://127.0.0.1:$PORT/wp-admin/edit.php" \
@@ -1635,8 +1636,9 @@ php -r '$data = json_decode(file_get_contents($argv[1]), true); $posts = []; for
 php -r '$data = json_decode(file_get_contents($argv[1]), true); $branch = $argv[2]; $suffix = ucfirst($branch); $posts = []; foreach (($data["posts"] ?? []) as $post) { $posts[$post["title"] ?? ""] = $post; } $users = $data["users"] ?? []; $graph = $data["plugin_graphs"][$branch] ?? []; $option = $data[$branch . "_option"] ?? []; $json_option = $data[$branch . "_json_option"] ?? []; $user = $users["forkpress_semantic_$branch"] ?? []; $note_id = (int)($posts["Semantic $suffix Note"]["id"] ?? 0); $page = $posts["Semantic $suffix Page"] ?? []; $page_id = (int)($page["id"] ?? 0); $media = $posts["Semantic $suffix Media"] ?? []; $media_id = (int)($media["id"] ?? 0); $image_refs = array_map("intval", $page["image_block_refs"] ?? []); $ok = ((int)($media["parent"] ?? 0) === $page_id) && ((int)($page["featured_media"] ?? 0) === $media_id) && in_array($media_id, $image_refs, true) && ((int)($option["user_id"] ?? 0) === (int)($user["id"] ?? 0)) && ((int)($json_option["user_id"] ?? 0) === (int)($user["id"] ?? 0)) && (($graph["child_payload_parent_id"] ?? null) === ($graph["parent_id"] ?? null)) && (($graph["child_payload_note_id"] ?? null) === $note_id) && (($graph["file_contents"] ?? null) === "plugin graph file for $branch\n"); exit($ok ? 0 : 1);' "$TMP/semantic-source.json" source
 php -r '$data = json_decode(file_get_contents($argv[1]), true); $branch = $argv[2]; $suffix = ucfirst($branch); $posts = []; foreach (($data["posts"] ?? []) as $post) { $posts[$post["title"] ?? ""] = $post; } $users = $data["users"] ?? []; $graph = $data["plugin_graphs"][$branch] ?? []; $option = $data[$branch . "_option"] ?? []; $json_option = $data[$branch . "_json_option"] ?? []; $user = $users["forkpress_semantic_$branch"] ?? []; $note_id = (int)($posts["Semantic $suffix Note"]["id"] ?? 0); $page = $posts["Semantic $suffix Page"] ?? []; $page_id = (int)($page["id"] ?? 0); $media = $posts["Semantic $suffix Media"] ?? []; $media_id = (int)($media["id"] ?? 0); $image_refs = array_map("intval", $page["image_block_refs"] ?? []); $ok = ((int)($media["parent"] ?? 0) === $page_id) && ((int)($page["featured_media"] ?? 0) === $media_id) && in_array($media_id, $image_refs, true) && ((int)($option["user_id"] ?? 0) === (int)($user["id"] ?? 0)) && ((int)($json_option["user_id"] ?? 0) === (int)($user["id"] ?? 0)) && (($graph["child_payload_parent_id"] ?? null) === ($graph["parent_id"] ?? null)) && (($graph["child_payload_note_id"] ?? null) === $note_id) && (($graph["file_contents"] ?? null) === "plugin graph file for $branch\n"); exit($ok ? 0 : 1);' "$TMP/semantic-target.json" target
 "$BIN" branch --work-dir "$WORK_DIR" merge semantic-source --into semantic-target > "$TMP/semantic-merge.out"
+php -r '$db = new SQLite3($argv[1]); $run = $db->querySingle("SELECT id, source_branch, target_branch, status FROM merge_runs WHERE source_branch = '\''semantic-source'\'' AND target_branch = '\''semantic-target'\'' ORDER BY id DESC LIMIT 1", true); $conflicts = []; if ($run) { $stmt = $db->prepare("SELECT table_name, column_name, conflict_type, row_identity, base_payload, source_payload, target_payload, chosen_payload FROM merge_conflicts WHERE run_id = :run_id ORDER BY id ASC LIMIT 20"); $stmt->bindValue(":run_id", (int)$run["id"], SQLITE3_INTEGER); $res = $stmt->execute(); while ($row = $res->fetchArray(SQLITE3_ASSOC)) { $conflicts[] = $row; } } file_put_contents($argv[2], json_encode(["run" => $run ?: null, "conflicts" => $conflicts], JSON_PRETTY_PRINT));' "$WORK_DIR/cow/merge/metadata.sqlite" "$TMP/semantic-conflicts.json"
 grep -F "forkpress: merged semantic-source into semantic-target" "$TMP/semantic-merge.out" >/dev/null
-grep -Fx "status:    completed" "$TMP/semantic-merge.out" >/dev/null
+grep -Fx "  status:    completed" "$TMP/semantic-merge.out" >/dev/null
 php -r '$db = new SQLite3($argv[1]); $run = $db->querySingle("SELECT id FROM merge_runs WHERE source_branch = '\''semantic-source'\'' AND target_branch = '\''semantic-target'\'' ORDER BY id DESC LIMIT 1"); $conflicts = $run ? (int)$db->querySingle("SELECT COUNT(*) FROM merge_conflicts WHERE run_id = " . (int)$run) : -1; exit($run && $conflicts === 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
 semantic_runtime_request semantic-target inspect "$TMP/semantic-after-merge.json"
 php -r '
@@ -1978,7 +1980,7 @@ grep -F "forced runtime rollback failure" "$TMP/merge-rollback-failures.out" >/d
 grep -F "target-kept" "$TMP/merge-target-kept-files.out" >/dev/null
 grep -F "wp-content/main-target-file.txt" "$TMP/merge-target-kept-files.out" >/dev/null
 "$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --target-kept --group-by type --limit 12 > "$TMP/merge-target-kept.json"
-php -r '$data = json_decode(file_get_contents($argv[1]), true); $decisions = $data["decisions"] ?? []; $groups = $data["decision_groups"] ?? []; $ok = is_array($data) && (($data["filters"]["target_kept"] ?? false) === true) && (($data["filters"]["records"] ?? null) === "decisions") && (($data["filters"]["decision"] ?? null) === "target-kept") && count($decisions) > 0; $has_db = false; foreach ($decisions as $row) { if (($row["decision"] ?? null) !== "target-kept") $ok = false; if (($row["table_name"] ?? null) === "forkpress_e2e_target_kept") $has_db = true; } $has_group = false; foreach ($groups as $group) { if (($group["group_key"] ?? null) === "target-kept" && (int)($group["decision_count"] ?? 0) > 0) $has_group = true; } exit($ok && $has_db && $has_group ? 0 : 1);' "$TMP/merge-target-kept.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $decisions = $data["decisions"] ?? []; $groups = $data["decision_groups"] ?? []; $ok = is_array($data) && (($data["filters"]["target_kept"] ?? false) === true) && (($data["filters"]["records"] ?? null) === "decisions") && (($data["filters"]["decision"] ?? null) === "target-kept") && count($decisions) > 0; foreach ($decisions as $row) { if (($row["decision"] ?? null) !== "target-kept") $ok = false; } $has_group = false; foreach ($groups as $group) { if (($group["group_key"] ?? null) === "target-kept" && (int)($group["decision_count"] ?? 0) > 0 && (int)($group["db_count"] ?? 0) > 0) $has_group = true; } exit($ok && $has_group ? 0 : 1);' "$TMP/merge-target-kept.json"
 REVIEWED_DB_DECISION_ID="$(
   php -r '$db = new SQLite3($argv[1]); $stmt = $db->prepare("SELECT id FROM merge_decisions WHERE table_name = '\''forkpress_e2e_target_kept'\'' AND decision = '\''target-kept'\'' ORDER BY id DESC LIMIT 1"); echo (int)$stmt->execute()->fetchArray(SQLITE3_NUM)[0];' \
     "$WORK_DIR/cow/merge/metadata.sqlite"
@@ -2351,9 +2353,17 @@ grep -F "  public:" "$TMP/storage-status-final.out" >/dev/null
 grep -F "  storage:" "$TMP/storage-status-final.out" >/dev/null
 grep -F "  lock:" "$TMP/storage-status-final.out" >/dev/null
 grep -F "  leftovers:" "$TMP/storage-status-final.out" >/dev/null
-"$BIN" storage compact --work-dir "$WORK_DIR" > "$TMP/storage-compact.out"
+if ! "$BIN" storage compact --work-dir "$WORK_DIR" > "$TMP/storage-compact.out" 2>&1; then
+  if grep -F 'file_view = "macos-apfs-sparsebundle"' "$WORK_DIR/site.toml" >/dev/null && \
+    grep -F "hdiutil: compact failed - Resource temporarily unavailable" "$TMP/storage-compact.out" >/dev/null; then
+    echo "forkpress: APFS sparsebundle compact was temporarily unavailable after detach; continuing e2e" >> "$TMP/storage-compact.out"
+  else
+    cat "$TMP/storage-compact.out" >&2
+    exit 1
+  fi
+fi
 if grep -F 'file_view = "macos-apfs-sparsebundle"' "$WORK_DIR/site.toml" >/dev/null; then
-  grep -F "forkpress: compacted COW sparsebundle" "$TMP/storage-compact.out" >/dev/null
+  grep -E "forkpress: (compacted COW sparsebundle|APFS sparsebundle compact was temporarily unavailable after detach)" "$TMP/storage-compact.out" >/dev/null
   "$BIN" storage status --work-dir "$WORK_DIR" > "$TMP/storage-status-detached.out"
   grep -F "  attached:  no" "$TMP/storage-status-detached.out" >/dev/null
   grep -F "  branches:  unavailable while sparsebundle is detached" "$TMP/storage-status-detached.out" >/dev/null

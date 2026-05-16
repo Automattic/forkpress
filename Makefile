@@ -75,7 +75,7 @@ else ifeq ($(UNAME_S)-$(UNAME_M),Linux-aarch64)
 FORKPRESS_TARGET ?= aarch64-unknown-linux-musl
 endif
 
-.PHONY: all clean test test-compat test-branchfs test-cow test-release init-db test-all forkpress forkpress-dev dist dist-dev
+.PHONY: all clean test test-compat test-branchfs test-cow test-cow-merge test-cow-merge-smoke test-release init-db test-all forkpress forkpress-dev dist dist-dev
 
 all: $(BRANCHFS_EXT_SO)
 
@@ -104,9 +104,15 @@ test-branchfs: $(BRANCHFS_EXT_SO)
 	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" $(BRANCHFS_TEST_DIR)/push_auth.php
 	php -d "extension=$(CURDIR)/$(BRANCHFS_EXT_SO)" $(BRANCHFS_TEST_DIR)/branchctl_local_auth.php
 
+test-cow-merge-smoke:
+	php $(COW_TEST_DIR)/merge_smoke.php
+
+test-cow-merge: test-cow-merge-smoke
+	php $(COW_TEST_DIR)/merge.php
+
 test-cow:
 	php $(COW_TEST_DIR)/git_server.php
-	php $(COW_TEST_DIR)/merge.php
+	$(MAKE) test-cow-merge
 	php $(COW_TEST_DIR)/branch_ui.php
 	php $(COW_TEST_DIR)/router_paths.php
 	php $(COW_TEST_DIR)/router_lock.php
