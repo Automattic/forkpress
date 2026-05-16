@@ -54,6 +54,22 @@ function smoke_insert_option(SQLite3 $db, int $id, string $name, string $value, 
     $stmt->execute();
 }
 
+function smoke_update_option(SQLite3 $db, string $name, string $value): void {
+    $stmt = $db->prepare('UPDATE wp_options SET option_value = :value WHERE option_name = :name');
+    $stmt->bindValue(':name', $name, SQLITE3_TEXT);
+    $stmt->bindValue(':value', $value, SQLITE3_TEXT);
+    $stmt->execute();
+}
+
+function smoke_insert_postmeta(SQLite3 $db, int $id, int $post_id, string $key, string $value): void {
+    $stmt = $db->prepare('INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES (:id, :post_id, :key, :value)');
+    $stmt->bindValue(':id', $id, SQLITE3_INTEGER);
+    $stmt->bindValue(':post_id', $post_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':key', $key, SQLITE3_TEXT);
+    $stmt->bindValue(':value', $value, SQLITE3_TEXT);
+    $stmt->execute();
+}
+
 function smoke_create_posts_db(string $path): void {
     $db = smoke_open_db($path);
     $db->exec("CREATE TABLE wp_posts (
@@ -100,6 +116,10 @@ function smoke_create_posts_db(string $path): void {
     $db->exec("INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES
         (2, 1, '_forkpress_smoke_note', 'Base note')");
     smoke_insert_option($db, 3, 'forkpress_smoke_base', '{"base":true}');
+    smoke_insert_option($db, 4, 'theme_mods_forkpress_smoke', serialize([
+        'color' => 'blue',
+        'nav_menu_locations' => [],
+    ]));
     $db->close();
 }
 
@@ -459,6 +479,97 @@ try {
         (int)smoke_scalar($taxonomy_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_terms', 'wp_term_taxonomy', 'wp_term_relationships') AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
         4,
         'page-plus-taxonomy smoke merge audits all target graph inserts'
+    );
+
+    $menu_base = $tmp . '/menu-base.sqlite';
+    $menu_source = $tmp . '/menu-source.sqlite';
+    $menu_target = $tmp . '/menu-target.sqlite';
+    $menu_metadata = $tmp . '/.forkpress/cow/merge/menu-metadata.sqlite';
+
+    smoke_create_posts_db($menu_base);
+    copy($menu_base, $menu_source);
+    copy($menu_base, $menu_target);
+
+    $db = smoke_open_db($menu_source);
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (18000040, 'Branch Menu Page', 'Branch menu page content', 'publish', 'page', 'branch-menu-page'),
+        (18000043, 'Branch Menu Item', '', 'publish', 'nav_menu_item', 'branch-menu-item')");
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES
+        (18000041, 'Branch Menu', 'branch-menu')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES
+        (18000042, 18000041, 'nav_menu', 'Branch menu taxonomy', 0, 1)");
+    $db->exec("INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES
+        (18000043, 18000042, 0)");
+    smoke_insert_postmeta($db, 18000044, 18000043, '_menu_item_type', 'post_type');
+    smoke_insert_postmeta($db, 18000045, 18000043, '_menu_item_object', 'page');
+    smoke_insert_postmeta($db, 18000046, 18000043, '_menu_item_object_id', '18000040');
+    smoke_insert_postmeta($db, 18000047, 18000043, '_menu_item_menu_item_parent', '0');
+    smoke_update_option($db, 'theme_mods_forkpress_smoke', serialize([
+        'color' => 'blue',
+        'nav_menu_locations' => [
+            'branch_primary' => 18000041,
+        ],
+    ]));
+    $db->close();
+
+    $db = smoke_open_db($menu_target);
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (19000040, 'Main Menu Page', 'Main menu page content', 'publish', 'page', 'main-menu-page'),
+        (19000043, 'Main Menu Item', '', 'publish', 'nav_menu_item', 'main-menu-item')");
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES
+        (19000041, 'Main Menu', 'main-menu')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES
+        (19000042, 19000041, 'nav_menu', 'Main menu taxonomy', 0, 1)");
+    $db->exec("INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES
+        (19000043, 19000042, 0)");
+    smoke_insert_postmeta($db, 19000044, 19000043, '_menu_item_type', 'post_type');
+    smoke_insert_postmeta($db, 19000045, 19000043, '_menu_item_object', 'page');
+    smoke_insert_postmeta($db, 19000046, 19000043, '_menu_item_object_id', '19000040');
+    smoke_insert_postmeta($db, 19000047, 19000043, '_menu_item_menu_item_parent', '0');
+    smoke_update_option($db, 'theme_mods_forkpress_smoke', serialize([
+        'color' => 'red',
+        'nav_menu_locations' => [
+            'main_primary' => 19000041,
+        ],
+    ]));
+    $db->close();
+
+    $menu_result = cow_merge_databases($menu_base, $menu_source, $menu_target, $menu_metadata, 'feature-smoke-page-menu', 'main');
+    assert_same($menu_result['status'], 'completed', 'branch and main page-plus-menu inserts complete cleanly');
+    assert_same((int)($menu_result['conflicts'] ?? -1), 0, 'branch and main page-plus-menu inserts do not create merge conflicts');
+    assert_same(smoke_scalar($menu_target, 'SELECT post_title FROM wp_posts WHERE ID = 18000040'), 'Branch Menu Page', 'merged target includes the branch menu page');
+    assert_same(smoke_scalar($menu_target, 'SELECT post_title FROM wp_posts WHERE ID = 18000043'), 'Branch Menu Item', 'merged target includes the branch nav menu item post');
+    assert_same(smoke_scalar($menu_target, 'SELECT name FROM wp_terms WHERE term_id = 18000041'), 'Branch Menu', 'merged target includes the branch nav menu term');
+    assert_same(smoke_scalar($menu_target, 'SELECT taxonomy FROM wp_term_taxonomy WHERE term_taxonomy_id = 18000042'), 'nav_menu', 'merged target includes the branch nav menu taxonomy');
+    assert_same((int)smoke_scalar($menu_target, 'SELECT COUNT(*) FROM wp_term_relationships WHERE object_id = 18000043 AND term_taxonomy_id = 18000042'), 1, 'merged target includes the branch menu item relationship');
+    assert_same(smoke_scalar($menu_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 18000043 AND meta_key = '_menu_item_object_id'"), '18000040', 'merged target includes branch menu item page reference');
+    assert_same(smoke_scalar($menu_target, 'SELECT post_title FROM wp_posts WHERE ID = 19000040'), 'Main Menu Page', 'merged target preserves the main menu page');
+    assert_same(smoke_scalar($menu_target, 'SELECT post_title FROM wp_posts WHERE ID = 19000043'), 'Main Menu Item', 'merged target preserves the main nav menu item post');
+    assert_same(smoke_scalar($menu_target, 'SELECT name FROM wp_terms WHERE term_id = 19000041'), 'Main Menu', 'merged target preserves the main nav menu term');
+    assert_same(smoke_scalar($menu_target, 'SELECT taxonomy FROM wp_term_taxonomy WHERE term_taxonomy_id = 19000042'), 'nav_menu', 'merged target preserves the main nav menu taxonomy');
+    assert_same((int)smoke_scalar($menu_target, 'SELECT COUNT(*) FROM wp_term_relationships WHERE object_id = 19000043 AND term_taxonomy_id = 19000042'), 1, 'merged target preserves the main menu item relationship');
+    assert_same(smoke_scalar($menu_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 19000043 AND meta_key = '_menu_item_object_id'"), '19000040', 'merged target preserves target menu item page reference');
+    $merged_menu_theme_mods = unserialize(
+        (string)smoke_scalar($menu_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_forkpress_smoke'"),
+        ['allowed_classes' => false]
+    );
+    assert_same($merged_menu_theme_mods['color'] ?? null, 'red', 'page-plus-menu merge preserves target-local theme mod changes');
+    assert_same($merged_menu_theme_mods['nav_menu_locations']['branch_primary'] ?? null, 18000041, 'page-plus-menu merge includes the branch menu location');
+    assert_same($merged_menu_theme_mods['nav_menu_locations']['main_primary'] ?? null, 19000041, 'page-plus-menu merge preserves the main menu location');
+    assert_same(
+        (int)smoke_scalar($menu_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name IN ('wp_posts', 'wp_postmeta', 'wp_terms', 'wp_term_taxonomy', 'wp_term_relationships', 'wp_options')"),
+        0,
+        'page-plus-menu smoke merge records no WordPress graph conflicts'
+    );
+    assert_same(
+        (int)smoke_scalar($menu_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_postmeta', 'wp_terms', 'wp_term_taxonomy', 'wp_term_relationships', 'wp_options') AND decision = 'source-applied'"),
+        10,
+        'page-plus-menu smoke merge audits all source graph inserts and the merged theme_mods option'
+    );
+    assert_same(
+        (int)smoke_scalar($menu_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_postmeta', 'wp_terms', 'wp_term_taxonomy', 'wp_term_relationships') AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
+        9,
+        'page-plus-menu smoke merge audits all target graph inserts'
     );
 
     $options_base = $tmp . '/options-base.sqlite';
