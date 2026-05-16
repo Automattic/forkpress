@@ -75,7 +75,7 @@ else ifeq ($(UNAME_S)-$(UNAME_M),Linux-aarch64)
 FORKPRESS_TARGET ?= aarch64-unknown-linux-musl
 endif
 
-.PHONY: all clean test test-compat test-branchfs test-cow test-cow-branch-birth test-cow-explicit-ids test-cow-fast test-cow-filesystem test-cow-git-server test-cow-id-bands test-cow-media-validator test-cow-merge test-cow-merge-smoke test-cow-plugin-validator test-cow-schema-review test-cow-stale-audit test-cow-wp-semantic-validator test-release init-db test-all forkpress forkpress-dev dist dist-dev
+.PHONY: all clean test test-compat test-branchfs test-cow test-cow-branch-birth test-cow-branch-ui test-cow-explicit-ids test-cow-fast test-cow-filesystem test-cow-git-server test-cow-id-bands test-cow-media-validator test-cow-merge test-cow-merge-smoke test-cow-plugin-validator test-cow-schema-review test-cow-stale-audit test-cow-wp-semantic-validator test-release init-db test-all forkpress forkpress-dev dist dist-dev
 
 all: $(BRANCHFS_EXT_SO)
 
@@ -119,6 +119,11 @@ test-cow-filesystem:
 test-cow-branch-birth:
 	php $(COW_TEST_DIR)/branch_birth.php
 
+test-cow-branch-ui:
+	php $(COW_TEST_DIR)/branch_ui.php
+	php $(COW_TEST_DIR)/router_branch_actions.php
+	php $(COW_TEST_DIR)/router_lock.php
+
 test-cow-explicit-ids:
 	php $(COW_TEST_DIR)/explicit_ids.php
 
@@ -151,6 +156,7 @@ test-cow-fast: test-cow-git-server test-cow-merge-smoke
 	php $(COW_TEST_DIR)/stale_audit.php
 	php $(COW_TEST_DIR)/wp_semantic_validator.php
 	php $(COW_TEST_DIR)/branch_ui.php
+	php $(COW_TEST_DIR)/router_branch_actions.php
 	php $(COW_TEST_DIR)/router_paths.php
 	php $(COW_TEST_DIR)/router_lock.php
 

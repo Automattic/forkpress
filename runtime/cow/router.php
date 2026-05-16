@@ -150,6 +150,187 @@ function forkpress_cow_is_admin_branch_action(string $path): bool {
     return is_string($action) && in_array($action, ['forkpress_branch_create', 'forkpress_branch_merge'], true);
 }
 
+function forkpress_cow_branch_action_wants_json(): bool {
+    $async = $_SERVER['HTTP_X_FORKPRESS_ASYNC'] ?? '';
+    if (is_string($async) && $async === '1') {
+        return true;
+    }
+
+    $accept = $_SERVER['HTTP_ACCEPT'] ?? '';
+    return is_string($accept) && str_contains($accept, 'application/json');
+}
+
+function forkpress_cow_branch_name_is_valid(string $branch): bool {
+    if (!preg_match('/^[a-zA-Z0-9_\-]{1,63}$/', $branch)) {
+        return false;
+    }
+
+    return !in_array(strtolower($branch), ['www', 'admin', 'api', 'mail', 'localhost', 'wp'], true);
+}
+
+function forkpress_cow_branch_post_value(string $key): string {
+    $value = $_POST[$key] ?? $_REQUEST[$key] ?? '';
+    if (is_array($value)) {
+        return '';
+    }
+    return trim((string)$value);
+}
+
+function forkpress_cow_branch_url(string $branch, string $uri = '/wp-admin/'): string {
+    $root_host = getenv('FORKPRESS_ROOT_HOST') ?: 'wp.localhost';
+    $current_host = $_SERVER['HTTP_HOST'] ?? '';
+    $port = preg_match('/:(\d+)$/', $current_host, $m) ? ':' . $m[1] : '';
+    $host = $branch === 'main' ? $root_host : $branch . '.' . $root_host;
+    return 'http://' . $host . $port . $uri;
+}
+
+function forkpress_cow_branch_names(string $current_branch): array {
+    $branch_list = getenv('FORKPRESS_BRANCH_LIST') ?: '';
+    $branches = [];
+    if (is_string($branch_list) && $branch_list !== '' && is_readable($branch_list)) {
+        foreach (file($branch_list, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as $line) {
+            $name = trim((string)$line);
+            if ($name !== '' && preg_match('/^[a-zA-Z0-9_\-]{1,63}$/', $name)) {
+                $branches[] = $name;
+            }
+        }
+    }
+    if (!$branches) {
+        $branches[] = $current_branch;
+    }
+
+    $branches = array_values(array_unique($branches));
+    usort($branches, static function (string $a, string $b) use ($current_branch): int {
+        if ($a === $current_branch) return -1;
+        if ($b === $current_branch) return 1;
+        if ($a === 'main') return -1;
+        if ($b === 'main') return 1;
+        return strnatcasecmp($a, $b);
+    });
+    return $branches;
+}
+
+function forkpress_cow_branch_switcher_data(string $current_branch): array {
+    return array_map(static function (string $branch) use ($current_branch): array {
+        return [
+            'name' => $branch,
+            'url' => forkpress_cow_branch_url($branch),
+            'current' => $branch === $current_branch,
+        ];
+    }, forkpress_cow_branch_names($current_branch));
+}
+
+function forkpress_cow_branch_finish_json(int $status, string $url, bool $success, string $message, array $data = []): void {
+    http_response_code($status);
+    header('Content-Type: application/json; charset=UTF-8');
+    echo json_encode(array_merge([
+        'success' => $success,
+        'message' => $message,
+        'url' => $url,
+    ], $data), JSON_UNESCAPED_SLASHES);
+}
+
+function forkpress_cow_branch_run_cli(array $args): array {
+    if (!function_exists('proc_open')) {
+        return [1, 'ForkPress branch actions require proc_open().'];
+    }
+
+    $bin = getenv('FORKPRESS_BIN');
+    $work_dir = getenv('FORKPRESS_WORK_DIR');
+    if (!is_string($bin) || $bin === '' || !is_executable($bin) || !is_string($work_dir) || $work_dir === '') {
+        return [1, 'ForkPress branch actions are not available for this server.'];
+    }
+
+    $command = array_merge([$bin, 'branch', '--work-dir', $work_dir], $args);
+    $shell_command = implode(' ', array_map('escapeshellarg', $command));
+    $descriptors = [
+        0 => ['pipe', 'r'],
+        1 => ['pipe', 'w'],
+        2 => ['pipe', 'w'],
+    ];
+    $process = proc_open($shell_command, $descriptors, $pipes);
+    if (!is_resource($process)) {
+        return [1, 'Failed to start the ForkPress branch command.'];
+    }
+
+    fclose($pipes[0]);
+    $stdout = stream_get_contents($pipes[1]);
+    $stderr = stream_get_contents($pipes[2]);
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+    $code = proc_close($process);
+    return [(int)$code, trim((string)$stdout . "\n" . (string)$stderr)];
+}
+
+function forkpress_cow_handle_async_admin_branch_action(string $path, string $current_branch): bool {
+    if (!forkpress_cow_is_admin_branch_action($path) || !forkpress_cow_branch_action_wants_json()) {
+        return false;
+    }
+
+    $action = $_REQUEST['action'] ?? '';
+    $current_url = forkpress_cow_branch_url($current_branch, '/wp-admin/');
+    $branches = forkpress_cow_branch_names($current_branch);
+    if ($action === 'forkpress_branch_create') {
+        $branch = forkpress_cow_branch_post_value('branch');
+        $from = forkpress_cow_branch_post_value('from') ?: 'main';
+        if (!forkpress_cow_branch_name_is_valid($branch)) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'Branch names can use letters, numbers, hyphens, and underscores.');
+            return true;
+        }
+        if (!in_array($from, $branches, true)) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'Choose an existing source branch.');
+            return true;
+        }
+
+        [$code, $output] = forkpress_cow_branch_run_cli(['create', $branch, '--from', $from]);
+        if ($code !== 0) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, $output ?: 'ForkPress could not create the branch.');
+            return true;
+        }
+        forkpress_cow_branch_finish_json(
+            200,
+            forkpress_cow_branch_url($branch, '/wp-admin/'),
+            true,
+            'Created branch ' . $branch . '.',
+            ['branches' => forkpress_cow_branch_switcher_data($current_branch)]
+        );
+        return true;
+    }
+
+    if ($action === 'forkpress_branch_merge') {
+        $source = forkpress_cow_branch_post_value('source');
+        $target = forkpress_cow_branch_post_value('target') ?: 'main';
+        if (!in_array($source, $branches, true) || !in_array($target, $branches, true)) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'Choose existing source and target branches.');
+            return true;
+        }
+        if ($source === $target) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'Choose two different branches to merge.');
+            return true;
+        }
+
+        [$code, $output] = forkpress_cow_branch_run_cli(['merge', $source, '--into', $target]);
+        if ($code !== 0) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, $output ?: 'ForkPress could not merge the branch.');
+            return true;
+        }
+        forkpress_cow_branch_finish_json(
+            200,
+            forkpress_cow_branch_url($target, '/wp-admin/'),
+            true,
+            'Merged ' . $source . ' into ' . $target . '.',
+            ['branches' => forkpress_cow_branch_switcher_data($current_branch)]
+        );
+        return true;
+    }
+
+    return false;
+}
+
+if (forkpress_cow_handle_async_admin_branch_action($path, $branch)) {
+    return true;
+}
+
 if (!forkpress_cow_is_admin_branch_action($path) && !forkpress_cow_acquire_request_lock()) {
     return true;
 }
