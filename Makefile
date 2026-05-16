@@ -75,7 +75,7 @@ else ifeq ($(UNAME_S)-$(UNAME_M),Linux-aarch64)
 FORKPRESS_TARGET ?= aarch64-unknown-linux-musl
 endif
 
-.PHONY: all clean test test-compat test-branchfs test-cow test-cow-branch-birth test-cow-explicit-ids test-cow-fast test-cow-filesystem test-cow-git-server test-cow-id-bands test-cow-media-validator test-cow-merge test-cow-merge-smoke test-cow-plugin-validator test-cow-schema-review test-cow-stale-audit test-release init-db test-all forkpress forkpress-dev dist dist-dev
+.PHONY: all clean test test-compat test-branchfs test-cow test-cow-branch-birth test-cow-explicit-ids test-cow-fast test-cow-filesystem test-cow-git-server test-cow-id-bands test-cow-media-validator test-cow-merge test-cow-merge-smoke test-cow-plugin-validator test-cow-schema-review test-cow-stale-audit test-cow-wp-semantic-validator test-release init-db test-all forkpress forkpress-dev dist dist-dev
 
 all: $(BRANCHFS_EXT_SO)
 
@@ -134,6 +134,9 @@ test-cow-plugin-validator:
 test-cow-stale-audit:
 	php $(COW_TEST_DIR)/stale_audit.php
 
+test-cow-wp-semantic-validator:
+	php $(COW_TEST_DIR)/wp_semantic_validator.php
+
 test-cow-schema-review:
 	php $(COW_TEST_DIR)/schema_review.php
 
@@ -146,6 +149,7 @@ test-cow-fast: test-cow-git-server test-cow-merge-smoke
 	php $(COW_TEST_DIR)/plugin_validator.php
 	php $(COW_TEST_DIR)/schema_review.php
 	php $(COW_TEST_DIR)/stale_audit.php
+	php $(COW_TEST_DIR)/wp_semantic_validator.php
 	php $(COW_TEST_DIR)/branch_ui.php
 	php $(COW_TEST_DIR)/router_paths.php
 	php $(COW_TEST_DIR)/router_lock.php
