@@ -97,6 +97,7 @@ try {
     $source_stmt->bindValue(':serialized', serialize($source_graph), SQLITE3_TEXT);
     $source_stmt->execute();
     $source_db->exec("INSERT INTO plugin_plain_ipk (id, payload) VALUES (7, 'source explicit plain integer key')");
+    $source_db->exec("INSERT INTO plugin_plain_ipk (id, payload) VALUES (8, 'source non-colliding plain integer key')");
     $source_db->close();
 
     $target_db = open_db($target);
@@ -111,6 +112,7 @@ try {
     $target_stmt->bindValue(':serialized', serialize($target_graph), SQLITE3_TEXT);
     $target_stmt->execute();
     $target_db->exec("INSERT INTO plugin_plain_ipk (id, payload) VALUES (7, 'target explicit plain integer key')");
+    $target_db->exec("INSERT INTO plugin_plain_ipk (id, payload) VALUES (9, 'target non-colliding plain integer key')");
     $target_db->close();
 
     assert_true($source_post_id !== $target_post_id, 'source and target branch inserts receive different post IDs');
@@ -149,6 +151,21 @@ try {
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_plain_ipk'"),
         1,
         'plain INTEGER PRIMARY KEY plugin collision is recorded as a review conflict'
+    );
+    assert_same(
+        scalar($target, 'SELECT payload FROM plugin_plain_ipk WHERE id = 7'),
+        'target explicit plain integer key',
+        'plain INTEGER PRIMARY KEY plugin collision keeps the target row before review'
+    );
+    assert_same(
+        scalar($target, 'SELECT payload FROM plugin_plain_ipk WHERE id = 8'),
+        'source non-colliding plain integer key',
+        'non-colliding plain INTEGER PRIMARY KEY plugin rows still merge'
+    );
+    assert_same(
+        scalar($target, 'SELECT payload FROM plugin_plain_ipk WHERE id = 9'),
+        'target non-colliding plain integer key',
+        'target non-colliding plain INTEGER PRIMARY KEY plugin rows remain'
     );
 
     $reset = $tmp . '/reset.sqlite';
