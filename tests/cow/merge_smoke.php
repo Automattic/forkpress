@@ -537,6 +537,45 @@ try {
         'page-plus-postmeta smoke merge audits the target metadata insert'
     );
 
+    $postmeta_edit_delete_base = $tmp . '/postmeta-edit-delete-base.sqlite';
+    $postmeta_edit_delete_source = $tmp . '/postmeta-edit-delete-source.sqlite';
+    $postmeta_edit_delete_target = $tmp . '/postmeta-edit-delete-target.sqlite';
+    $postmeta_edit_delete_metadata = $tmp . '/.forkpress/cow/merge/postmeta-edit-delete-metadata.sqlite';
+
+    smoke_create_posts_db($postmeta_edit_delete_base);
+    copy($postmeta_edit_delete_base, $postmeta_edit_delete_source);
+    copy($postmeta_edit_delete_base, $postmeta_edit_delete_target);
+
+    $db = smoke_open_db($postmeta_edit_delete_source);
+    $db->exec("UPDATE wp_posts SET post_title = 'Source Edited Base Page', post_content = 'Source edited base content' WHERE ID = 1");
+    $db->exec("UPDATE wp_postmeta SET meta_value = '{\"branch\":\"source\",\"post_id\":1,\"edited\":true}' WHERE meta_id = 2");
+    $db->close();
+
+    $db = smoke_open_db($postmeta_edit_delete_target);
+    $db->exec('DELETE FROM wp_postmeta WHERE post_id = 1');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 1');
+    $db->close();
+
+    $postmeta_edit_delete_result = cow_merge_databases($postmeta_edit_delete_base, $postmeta_edit_delete_source, $postmeta_edit_delete_target, $postmeta_edit_delete_metadata, 'feature-smoke-page-postmeta-edit-delete', 'main');
+    assert_same($postmeta_edit_delete_result['status'], 'completed_with_conflicts', 'page/postmeta edit/delete graph stays reviewable');
+    assert_same((int)smoke_scalar($postmeta_edit_delete_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 1'), 0, 'page/postmeta edit/delete preserves target page deletion before review');
+    assert_same((int)smoke_scalar($postmeta_edit_delete_target, 'SELECT COUNT(*) FROM wp_postmeta WHERE post_id = 1'), 0, 'page/postmeta edit/delete preserves target metadata deletion before review');
+    assert_same(
+        (int)smoke_scalar($postmeta_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_posts' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'page/postmeta edit/delete records the edited page delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($postmeta_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_postmeta' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'page/postmeta edit/delete records the edited metadata delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($postmeta_edit_delete_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_postmeta') AND decision = 'target-wins'"),
+        2,
+        'page/postmeta edit/delete defaults the changed source graph to target-wins before review'
+    );
+
     $comment_base = $tmp . '/comment-base.sqlite';
     $comment_source = $tmp . '/comment-source.sqlite';
     $comment_target = $tmp . '/comment-target.sqlite';
