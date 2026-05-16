@@ -981,6 +981,116 @@ try {
         'page-plus-attachment smoke merge audits target upload files'
     );
 
+    $attachment_edit_delete_base_root = $tmp . '/attachment-edit-delete-base-root';
+    $attachment_edit_delete_source_root = $tmp . '/attachment-edit-delete-source-root';
+    $attachment_edit_delete_target_root = $tmp . '/attachment-edit-delete-target-root';
+    $attachment_edit_delete_base = $attachment_edit_delete_base_root . '/wp-content/database/.ht.sqlite';
+    $attachment_edit_delete_source = $attachment_edit_delete_source_root . '/wp-content/database/.ht.sqlite';
+    $attachment_edit_delete_target = $attachment_edit_delete_target_root . '/wp-content/database/.ht.sqlite';
+    $attachment_edit_delete_file_base = $tmp . '/.forkpress/cow/merge/file-bases/feature-smoke-attachment-edit-delete.json';
+    $attachment_edit_delete_metadata = $tmp . '/.forkpress/cow/merge/attachment-edit-delete-metadata.sqlite';
+
+    mkdir(dirname($attachment_edit_delete_base), 0777, true);
+    mkdir(dirname($attachment_edit_delete_source), 0777, true);
+    mkdir(dirname($attachment_edit_delete_target), 0777, true);
+    smoke_create_posts_db($attachment_edit_delete_base);
+    $base_attachment_meta = serialize([
+        'file' => '2026/05/shared-edit-delete.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'shared-edit-delete-150x150.jpg',
+                'width' => 150,
+                'height' => 150,
+                'mime-type' => 'image/jpeg',
+            ],
+        ],
+    ]);
+    $db = smoke_open_db($attachment_edit_delete_base);
+    smoke_insert_post($db, 17000070, 'Shared Page With Existing Image', 'Base attachment page content', 'page', 'shared-page-with-existing-image');
+    smoke_insert_post($db, 17000071, 'shared-edit-delete.jpg', '', 'attachment', 'shared-edit-delete-jpg', 'inherit', 17000070, 'image/jpeg', 'http://example.test/wp-content/uploads/2026/05/shared-edit-delete.jpg');
+    smoke_insert_postmeta($db, 17000072, 17000070, '_thumbnail_id', '17000071');
+    smoke_insert_postmeta($db, 17000073, 17000071, '_wp_attached_file', '2026/05/shared-edit-delete.jpg');
+    smoke_insert_postmeta($db, 17000074, 17000071, '_wp_attachment_metadata', $base_attachment_meta);
+    $db->close();
+    smoke_write_file($attachment_edit_delete_base_root . '/wp-content/uploads/2026/05/shared-edit-delete.jpg', 'base shared image bytes');
+    smoke_write_file($attachment_edit_delete_base_root . '/wp-content/uploads/2026/05/shared-edit-delete-150x150.jpg', 'base shared thumbnail bytes');
+    copy($attachment_edit_delete_base, $attachment_edit_delete_source);
+    copy($attachment_edit_delete_base, $attachment_edit_delete_target);
+    smoke_write_file($attachment_edit_delete_source_root . '/wp-content/uploads/2026/05/shared-edit-delete.jpg', 'base shared image bytes');
+    smoke_write_file($attachment_edit_delete_source_root . '/wp-content/uploads/2026/05/shared-edit-delete-150x150.jpg', 'base shared thumbnail bytes');
+    smoke_write_file($attachment_edit_delete_target_root . '/wp-content/uploads/2026/05/shared-edit-delete.jpg', 'base shared image bytes');
+    smoke_write_file($attachment_edit_delete_target_root . '/wp-content/uploads/2026/05/shared-edit-delete-150x150.jpg', 'base shared thumbnail bytes');
+    cow_merge_capture_file_base($attachment_edit_delete_base_root, $attachment_edit_delete_file_base);
+
+    $source_edited_attachment_meta = serialize([
+        'file' => '2026/05/shared-edit-delete.jpg',
+        'width' => 1024,
+        'height' => 768,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'shared-edit-delete-150x150.jpg',
+                'width' => 150,
+                'height' => 150,
+                'mime-type' => 'image/jpeg',
+            ],
+        ],
+    ]);
+    $db = smoke_open_db($attachment_edit_delete_source);
+    $db->exec("UPDATE wp_posts SET post_title = 'Source Edited Shared Image', post_mime_type = 'image/jpeg' WHERE ID = 17000071");
+    $stmt = $db->prepare("UPDATE wp_postmeta SET meta_value = :metadata WHERE post_id = 17000071 AND meta_key = '_wp_attachment_metadata'");
+    $stmt->bindValue(':metadata', $source_edited_attachment_meta, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+    smoke_write_file($attachment_edit_delete_source_root . '/wp-content/uploads/2026/05/shared-edit-delete.jpg', 'source edited shared image bytes');
+    smoke_write_file($attachment_edit_delete_source_root . '/wp-content/uploads/2026/05/shared-edit-delete-150x150.jpg', 'source edited shared thumbnail bytes');
+
+    $db = smoke_open_db($attachment_edit_delete_target);
+    $db->exec("DELETE FROM wp_postmeta WHERE post_id = 17000071 OR (post_id = 17000070 AND meta_key = '_thumbnail_id')");
+    $db->exec('DELETE FROM wp_posts WHERE ID = 17000071');
+    $db->close();
+    unlink($attachment_edit_delete_target_root . '/wp-content/uploads/2026/05/shared-edit-delete.jpg');
+    unlink($attachment_edit_delete_target_root . '/wp-content/uploads/2026/05/shared-edit-delete-150x150.jpg');
+
+    $attachment_edit_delete_result = cow_merge_branch_state(
+        $attachment_edit_delete_base,
+        $attachment_edit_delete_source,
+        $attachment_edit_delete_target,
+        $attachment_edit_delete_metadata,
+        'feature-smoke-attachment-edit-delete',
+        'main',
+        $attachment_edit_delete_file_base,
+        $attachment_edit_delete_source_root,
+        $attachment_edit_delete_target_root
+    );
+    assert_same($attachment_edit_delete_result['status'], 'completed_with_conflicts', 'attachment edit/delete graph stays reviewable');
+    assert_same((int)smoke_scalar($attachment_edit_delete_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 17000071'), 0, 'attachment edit/delete preserves the target attachment deletion before review');
+    assert_same((int)smoke_scalar($attachment_edit_delete_target, 'SELECT COUNT(*) FROM wp_postmeta WHERE post_id = 17000071'), 0, 'attachment edit/delete preserves target metadata deletion before review');
+    assert_same((int)smoke_scalar($attachment_edit_delete_target, "SELECT COUNT(*) FROM wp_postmeta WHERE post_id = 17000070 AND meta_key = '_thumbnail_id'"), 0, 'attachment edit/delete preserves target featured-image cleanup before review');
+    assert_same(file_exists($attachment_edit_delete_target_root . '/wp-content/uploads/2026/05/shared-edit-delete.jpg'), false, 'attachment edit/delete preserves target original-file deletion before review');
+    assert_same(file_exists($attachment_edit_delete_target_root . '/wp-content/uploads/2026/05/shared-edit-delete-150x150.jpg'), false, 'attachment edit/delete preserves target generated-file deletion before review');
+    assert_same(
+        (int)smoke_scalar($attachment_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_posts' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'attachment edit/delete records the attachment post edit/delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($attachment_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_postmeta' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'attachment edit/delete records the edited attachment metadata delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($attachment_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-target-deleted'"),
+        2,
+        'attachment edit/delete records original and generated file edit/delete conflicts'
+    );
+    assert_same(
+        (int)smoke_scalar($attachment_edit_delete_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_postmeta', '__files__') AND decision = 'target-wins'"),
+        4,
+        'attachment edit/delete defaults the changed source graph to target-wins before review'
+    );
+
     $image_block_base_root = $tmp . '/image-block-base-root';
     $image_block_source_root = $tmp . '/image-block-source-root';
     $image_block_target_root = $tmp . '/image-block-target-root';
