@@ -702,6 +702,103 @@ try {
         'latest merge revalidation is incompatible',
         'after-revalidate blocks source resolution over an incompatible user semantic replacement'
     );
+
+    $extra_semantic_identity_cases = [
+        'term-taxonomy' => [
+            'table' => 'wp_term_taxonomy',
+            'create' => 'CREATE TABLE wp_term_taxonomy (term_taxonomy_id INTEGER PRIMARY KEY, term_id INTEGER, taxonomy TEXT, description TEXT)',
+            'source_insert' => "INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description) VALUES (60, 40, 'category', 'source taxonomy')",
+            'target_insert' => "INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description) VALUES (60, 40, 'post_tag', 'target taxonomy')",
+            'target_update' => "UPDATE wp_term_taxonomy SET term_id = 41, taxonomy = 'nav_menu', description = 'replacement taxonomy' WHERE term_taxonomy_id = 60",
+            'label' => 'term taxonomy semantic identity',
+        ],
+        'termmeta' => [
+            'table' => 'wp_termmeta',
+            'create' => 'CREATE TABLE wp_termmeta (meta_id INTEGER PRIMARY KEY, term_id INTEGER, meta_key TEXT, meta_value TEXT)',
+            'source_insert' => "INSERT INTO wp_termmeta (meta_id, term_id, meta_key, meta_value) VALUES (70, 40, 'source_key', 'source value')",
+            'target_insert' => "INSERT INTO wp_termmeta (meta_id, term_id, meta_key, meta_value) VALUES (70, 40, 'target_key', 'target value')",
+            'target_update' => "UPDATE wp_termmeta SET term_id = 41, meta_key = 'replacement_key', meta_value = 'replacement value' WHERE meta_id = 70",
+            'label' => 'termmeta semantic identity',
+        ],
+        'usermeta' => [
+            'table' => 'wp_usermeta',
+            'create' => 'CREATE TABLE wp_usermeta (umeta_id INTEGER PRIMARY KEY, user_id INTEGER, meta_key TEXT, meta_value TEXT)',
+            'source_insert' => "INSERT INTO wp_usermeta (umeta_id, user_id, meta_key, meta_value) VALUES (80, 50, 'source_key', 'source value')",
+            'target_insert' => "INSERT INTO wp_usermeta (umeta_id, user_id, meta_key, meta_value) VALUES (80, 50, 'target_key', 'target value')",
+            'target_update' => "UPDATE wp_usermeta SET user_id = 51, meta_key = 'replacement_key', meta_value = 'replacement value' WHERE umeta_id = 80",
+            'label' => 'usermeta semantic identity',
+        ],
+        'comment' => [
+            'table' => 'wp_comments',
+            'create' => 'CREATE TABLE wp_comments (comment_ID INTEGER PRIMARY KEY, comment_post_ID INTEGER, comment_type TEXT, comment_content TEXT)',
+            'source_insert' => "INSERT INTO wp_comments (comment_ID, comment_post_ID, comment_type, comment_content) VALUES (90, 10, 'comment', 'source comment')",
+            'target_insert' => "INSERT INTO wp_comments (comment_ID, comment_post_ID, comment_type, comment_content) VALUES (90, 10, 'review', 'target comment')",
+            'target_update' => "UPDATE wp_comments SET comment_post_ID = 11, comment_type = 'pingback', comment_content = 'replacement comment' WHERE comment_ID = 90",
+            'label' => 'comment semantic identity',
+        ],
+        'commentmeta' => [
+            'table' => 'wp_commentmeta',
+            'create' => 'CREATE TABLE wp_commentmeta (meta_id INTEGER PRIMARY KEY, comment_id INTEGER, meta_key TEXT, meta_value TEXT)',
+            'source_insert' => "INSERT INTO wp_commentmeta (meta_id, comment_id, meta_key, meta_value) VALUES (100, 90, 'source_key', 'source value')",
+            'target_insert' => "INSERT INTO wp_commentmeta (meta_id, comment_id, meta_key, meta_value) VALUES (100, 90, 'target_key', 'target value')",
+            'target_update' => "UPDATE wp_commentmeta SET comment_id = 91, meta_key = 'replacement_key', meta_value = 'replacement value' WHERE meta_id = 100",
+            'label' => 'commentmeta semantic identity',
+        ],
+    ];
+    foreach ($extra_semantic_identity_cases as $case_name => $case) {
+        $case_base = $tmp . "/extra-$case_name-identity-base.sqlite";
+        $case_source = $tmp . "/extra-$case_name-identity-source.sqlite";
+        $case_target = $tmp . "/extra-$case_name-identity-target.sqlite";
+        $case_metadata = $tmp . "/.forkpress/cow/merge/extra-$case_name-identity-metadata.sqlite";
+        foreach ([$case_base, $case_source, $case_target] as $path) {
+            $db = open_db($path);
+            $db->exec($case['create']);
+            $db->close();
+        }
+        $db = open_db($case_source);
+        $db->exec($case['source_insert']);
+        $db->close();
+        $db = open_db($case_target);
+        $db->exec($case['target_insert']);
+        $db->close();
+
+        $case_merge = cow_merge_databases($case_base, $case_source, $case_target, $case_metadata, "feature-$case_name-identity-review", 'main');
+        $case_run_id = (int)$case_merge['run_id'];
+        assert_same($case_merge['status'], 'completed_with_conflicts', $case['label'] . ' fixture starts with a same-ID row conflict');
+        $case_conflict_id = (int)scalar($case_metadata, "SELECT id FROM merge_conflicts WHERE table_name = '{$case['table']}' AND conflict_type = 'row-insert-collision'");
+        assert_true($case_conflict_id > 0, $case['label'] . ' fixture records the row conflict');
+        cow_merge_review_record(
+            $case_metadata,
+            'conflict',
+            $case_conflict_id,
+            'reviewed',
+            'Review source row before applying over target semantic identity.',
+            'cow-test'
+        );
+
+        $db = open_db($case_target);
+        $db->exec($case['target_update']);
+        $db->close();
+
+        $case_revalidated = cow_merge_revalidate_reviewed_conflicts($case_metadata, $case_run_id, 'cow-revalidate');
+        assert_same($case_revalidated['checked'], 1, $case['label'] . ' revalidation checks the reviewed row conflict');
+        assert_same($case_revalidated['stale'], 1, $case['label'] . ' revalidation detects target semantic replacement');
+        assert_same($case_revalidated['carried'], 1, $case['label'] . ' revalidation carries semantic replacement to needs-action');
+        assert_same(
+            scalar($case_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $case_conflict_id ORDER BY id DESC LIMIT 1"),
+            'incompatible',
+            $case['label'] . ' revalidation classifies changed semantic identity as incompatible'
+        );
+        $case_audit = cow_merge_audit_report($case_metadata, $case_run_id, 10, ['records' => 'conflicts']);
+        $case_conflicts = array_values(array_filter($case_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $case_conflict_id));
+        assert_same($case_conflicts[0]['revalidation_class'] ?? null, 'incompatible', $case['label'] . ' audit exposes incompatible replacement');
+        assert_true(str_contains((string)($case_conflicts[0]['stale_reason'] ?? ''), 'semantic identity'), $case['label'] . ' stale reason explains semantic identity drift');
+        assert_throws(
+            fn() => cow_merge_resolve_conflict($case_metadata, $case_conflict_id, 'source', true, 'Do not apply source row over replacement semantic identity.', 'cow-test', true),
+            'latest merge revalidation is incompatible',
+            $case['label'] . ' after-revalidate blocks source resolution over incompatible replacement'
+        );
+    }
 } finally {
     remove_tree($tmp);
 }
