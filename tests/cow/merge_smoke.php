@@ -235,6 +235,74 @@ try {
         1,
         'page smoke merge audits the target page insert'
     );
+
+    $edit_base = $tmp . '/edit-base.sqlite';
+    $edit_source = $tmp . '/edit-source.sqlite';
+    $edit_target = $tmp . '/edit-target.sqlite';
+    $edit_metadata = $tmp . '/.forkpress/cow/merge/edit-metadata.sqlite';
+
+    smoke_create_posts_db($edit_base);
+    copy($edit_base, $edit_source);
+    copy($edit_base, $edit_target);
+
+    $db = smoke_open_db($edit_source);
+    $db->exec("UPDATE wp_posts SET post_title = 'Branch Edited Page', post_content = 'Edited on feature branch' WHERE ID = 1");
+    $db->close();
+
+    $db = smoke_open_db($edit_target);
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (19000001, 'Main Page During Edit', 'Created on main while branch edits', 'publish', 'page', 'main-page-during-edit')");
+    $db->close();
+
+    $edit_result = cow_merge_databases($edit_base, $edit_source, $edit_target, $edit_metadata, 'feature-smoke-page-edit', 'main');
+    assert_same($edit_result['status'], 'completed', 'branch page edit and independent main page insert complete cleanly');
+    assert_same((int)($edit_result['conflicts'] ?? -1), 0, 'branch page edit and independent main page insert do not create merge conflicts');
+    assert_same(smoke_scalar($edit_target, 'SELECT post_content FROM wp_posts WHERE ID = 1'), 'Edited on feature branch', 'merged target includes the branch page edit');
+    assert_same(smoke_scalar($edit_target, "SELECT post_content FROM wp_posts WHERE post_title = 'Main Page During Edit'"), 'Created on main while branch edits', 'merged target preserves the main page inserted during branch edit');
+    assert_same(
+        (int)smoke_scalar($edit_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'source-applied'"),
+        1,
+        'page edit smoke merge audits the source page update'
+    );
+    assert_same(
+        (int)smoke_scalar($edit_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
+        1,
+        'page edit smoke merge audits the independent target page insert'
+    );
+
+    $delete_base = $tmp . '/delete-base.sqlite';
+    $delete_source = $tmp . '/delete-source.sqlite';
+    $delete_target = $tmp . '/delete-target.sqlite';
+    $delete_metadata = $tmp . '/.forkpress/cow/merge/delete-metadata.sqlite';
+
+    smoke_create_posts_db($delete_base);
+    copy($delete_base, $delete_source);
+    copy($delete_base, $delete_target);
+
+    $db = smoke_open_db($delete_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID = 1');
+    $db->close();
+
+    $db = smoke_open_db($delete_target);
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (19000002, 'Main Page During Delete', 'Created on main while branch deletes', 'publish', 'page', 'main-page-during-delete')");
+    $db->close();
+
+    $delete_result = cow_merge_databases($delete_base, $delete_source, $delete_target, $delete_metadata, 'feature-smoke-page-delete', 'main');
+    assert_same($delete_result['status'], 'completed', 'branch page delete and independent main page insert complete cleanly');
+    assert_same((int)($delete_result['conflicts'] ?? -1), 0, 'branch page delete and independent main page insert do not create merge conflicts');
+    assert_same((int)smoke_scalar($delete_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 1'), 0, 'merged target applies the branch page delete');
+    assert_same(smoke_scalar($delete_target, "SELECT post_content FROM wp_posts WHERE post_title = 'Main Page During Delete'"), 'Created on main while branch deletes', 'merged target preserves the main page inserted during branch delete');
+    assert_same(
+        (int)smoke_scalar($delete_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'source-applied'"),
+        1,
+        'page delete smoke merge audits the source page delete'
+    );
+    assert_same(
+        (int)smoke_scalar($delete_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
+        1,
+        'page delete smoke merge audits the independent target page insert'
+    );
 } finally {
     smoke_remove_tree($tmp);
 }
