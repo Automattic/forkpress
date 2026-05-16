@@ -194,6 +194,23 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
             ],
         ];
     }
+    $metadata_width = $metadata['width'] ?? null;
+    $metadata_height = $metadata['height'] ?? null;
+    if (!is_numeric($metadata_width) || !is_numeric($metadata_height) || (int)$metadata_width <= 0 || (int)$metadata_height <= 0) {
+        $findings[] = [
+            'plugin' => 'forkpress-wp-media',
+            'object' => 'attachment:' . $row['ID'],
+            'reason' => 'attachment original dimensions are invalid',
+            'type' => 'plugin-wp-media-original-dimensions-drift',
+            'tables' => ['wp_posts', 'wp_postmeta'],
+            'validator' => 'forkpress-wp-media@1',
+            'candidate' => [
+                'attached_file' => $attached_file,
+                'width' => $metadata_width,
+                'height' => $metadata_height,
+            ],
+        ];
+    }
     if ($unsafe_upload_path($attached_file)) {
         $findings[] = [
             'plugin' => 'forkpress-wp-media',
@@ -255,6 +272,24 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
                         'attached_file' => $attached_file,
                         'size' => (string)$size_name,
                         'generated_file' => $generated_file,
+                    ],
+                ];
+            }
+            $size_width = $size['width'] ?? null;
+            $size_height = $size['height'] ?? null;
+            if (!is_numeric($size_width) || !is_numeric($size_height) || (int)$size_width <= 0 || (int)$size_height <= 0) {
+                $findings[] = [
+                    'plugin' => 'forkpress-wp-media',
+                    'object' => 'attachment:' . $row['ID'],
+                    'reason' => 'attachment generated size dimensions are invalid',
+                    'type' => 'plugin-wp-media-generated-dimensions-drift',
+                    'tables' => ['wp_posts', 'wp_postmeta'],
+                    'validator' => 'forkpress-wp-media@1',
+                    'candidate' => [
+                        'attached_file' => $attached_file,
+                        'size' => (string)$size_name,
+                        'width' => $size_width,
+                        'height' => $size_height,
                     ],
                 ];
             }
@@ -327,6 +362,9 @@ PHP);
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-duplicate-original.jpg', "source duplicate shared original\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-unsafe-generated.jpg', "source unsafe generated original bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-invalid-metadata.jpg', "source invalid metadata original bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-original-dimensions.jpg', "source invalid original dimensions bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-dimensions.jpg', "source invalid generated dimensions original bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-dimensions-150x150.jpg', "source invalid generated dimensions thumb bytes\n");
     $db = open_db($source);
     $attachment_id = insert_attachment($db, 'Source media generated missing file key', '2026/05/source-generated-missing-file-key.jpg', [
         'file' => '2026/05/source-generated-missing-file-key.jpg',
@@ -362,6 +400,24 @@ PHP);
         'width' => 640,
         'height' => 480,
         'sizes' => [],
+    ]);
+    $original_dimensions_id = insert_attachment($db, 'Source media invalid original dimensions', '2026/05/source-original-dimensions.jpg', [
+        'file' => '2026/05/source-original-dimensions.jpg',
+        'width' => 0,
+        'height' => 480,
+        'sizes' => [],
+    ]);
+    $generated_dimensions_id = insert_attachment($db, 'Source media invalid generated dimensions', '2026/05/source-generated-dimensions.jpg', [
+        'file' => '2026/05/source-generated-dimensions.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'source-generated-dimensions-150x150.jpg',
+                'width' => 0,
+                'height' => 150,
+            ],
+        ],
     ]);
     $self_duplicate_id = insert_attachment($db, 'Source media self duplicate generated file', '2026/05/source-self-duplicate.jpg', [
         'file' => '2026/05/source-self-duplicate.jpg',
@@ -451,7 +507,7 @@ PHP);
 
     assert_same($result['status'], 'completed_with_conflicts', 'media validator holds incomplete generated-size metadata for review');
     assert_same((int)($result['plugin_validators'] ?? 0), 1, 'media validator is discovered from mu-plugins during merge');
-    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 10, 'media validator records invalid metadata, generated-size, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
+    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 12, 'media validator records invalid metadata, dimensions, generated-size, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
     assert_same(
         scalar($target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-generated-missing-file-key.jpg',
@@ -492,6 +548,28 @@ PHP);
     $preview = (string)($audit['conflicts'][0]['chosen_preview'] ?? '');
     assert_true(str_contains($preview, 'source-generated-missing-file-key.jpg'), 'media validator audit includes the affected attachment');
     assert_true(str_contains($preview, '"generated_file":null'), 'media validator audit records the missing generated file field');
+
+    $original_dimension_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-media-original-dimensions-drift',
+    ]);
+    assert_same(count($original_dimension_audit['conflicts']), 1, 'media validator exposes invalid original dimensions as a plugin-scoped audit conflict');
+    $original_dimension_preview = (string)($original_dimension_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_true(str_contains($original_dimension_preview, 'source-original-dimensions.jpg'), 'media validator original-dimensions audit includes the affected attachment');
+    assert_true(str_contains($original_dimension_preview, '"width":0'), 'media validator original-dimensions audit includes the invalid width');
+    assert_true(str_contains($original_dimension_preview, (string)$original_dimensions_id), 'media validator original-dimensions audit includes the affected attachment ID');
+
+    $generated_dimension_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-media-generated-dimensions-drift',
+    ]);
+    assert_same(count($generated_dimension_audit['conflicts']), 1, 'media validator exposes invalid generated-size dimensions as a plugin-scoped audit conflict');
+    $generated_dimension_preview = (string)($generated_dimension_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_true(str_contains($generated_dimension_preview, 'source-generated-dimensions.jpg'), 'media validator generated-dimensions audit includes the affected attachment');
+    assert_true(str_contains($generated_dimension_preview, '"width":0'), 'media validator generated-dimensions audit includes the invalid generated width');
+    assert_true(str_contains($generated_dimension_preview, (string)$generated_dimensions_id), 'media validator generated-dimensions audit includes the affected attachment ID');
 
     $missing_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'plugin',
