@@ -80,6 +80,20 @@ function scalar(string $db_path, string $sql): mixed {
     return $value;
 }
 
+function run_merge_cli(array $args): array {
+    $cmd = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(__DIR__ . '/../../scripts/cow/merge.php');
+    foreach ($args as $arg) {
+        $cmd .= ' ' . escapeshellarg((string)$arg);
+    }
+    $output = [];
+    $status = 0;
+    exec($cmd . ' 2>&1', $output, $status);
+    return [
+        'status' => $status,
+        'output' => implode("\n", $output),
+    ];
+}
+
 function create_plugin_validator_db(string $path): void {
     $db = open_db($path);
     $db->exec('CREATE TABLE plugin_graph_parent (parent_id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT NOT NULL)');
@@ -306,6 +320,36 @@ PHP);
     $revalidated_again = cow_merge_revalidate_reviewed_conflicts($metadata, (int)$result['run_id'], 'cow-revalidate');
     assert_same($revalidated_again['carried'], 0, 'plugin revalidation does not duplicate carried replacement-evidence notes');
     assert_same($revalidated_again['already_needs_action'], 1, 'plugin revalidation reports already-carried replacement evidence');
+
+    $contradictory_validator = $tmp . '/plugin-validator-contradictory-valid.php';
+    write_test_file($contradictory_validator, <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'valid',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-plugin-graph',
+            'object' => 'child:contradictory-valid',
+            'reason' => 'valid status must not carry findings',
+            'type' => 'plugin-graph-contradictory-valid',
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $contradictory = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $metadata,
+        '--run', (string)$result['run_id'],
+        '--validator', $contradictory_validator,
+        '--format', 'json',
+    ]);
+    assert_true($contradictory['status'] !== 0, 'plugin validator runner rejects valid status with findings');
+    assert_true(str_contains($contradictory['output'], 'status valid with findings'), 'plugin validator runner explains contradictory valid findings');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE conflict_type = 'plugin-graph-contradictory-valid'"),
+        0,
+        'plugin validator runner does not record contradictory valid findings'
+    );
 } finally {
     remove_tree($tmp);
 }
