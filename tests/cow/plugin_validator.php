@@ -385,6 +385,89 @@ PHP);
     assert_same($revalidated_again['carried'], 0, 'plugin revalidation does not duplicate carried replacement-evidence notes');
     assert_same($revalidated_again['already_needs_action'], 1, 'plugin revalidation reports already-carried replacement evidence');
 
+    $source_payload_result = cow_merge_record_plugin_validator_conflicts($metadata, (int)$result['run_id'], [
+        [
+            'plugin' => 'forkpress-plugin-source-drift',
+            'object' => 'child:' . $child_id,
+            'reason' => 'plugin validator source evidence needs review',
+            'type' => 'plugin-graph-source-evidence',
+            'tables' => ['plugin_graph_child'],
+            'validator' => 'forkpress-plugin-graph@1',
+            'source' => [
+                'child_id' => $child_id,
+                'source_revision' => 'source-before-rerun',
+            ],
+            'target' => [
+                'child_id' => $child_id,
+                'target_revision' => 'target-at-review',
+            ],
+            'candidate' => [
+                'child_id' => $child_id,
+                'graph' => 'candidate-at-review',
+            ],
+        ],
+    ]);
+    assert_same($source_payload_result['conflicts'], 1, 'plugin validator can record explicit source evidence for later revalidation');
+    $source_payload_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-graph-source-evidence' ORDER BY id DESC LIMIT 1");
+    assert_true($source_payload_conflict_id > 0, 'plugin source-evidence conflict is recorded');
+    cow_merge_review_record(
+        $metadata,
+        'conflict',
+        $source_payload_conflict_id,
+        'reviewed',
+        'plugin source evidence looked safe before rerun',
+        'cow-test'
+    );
+
+    $updated_source_payload = cow_merge_record_plugin_validator_conflicts($metadata, (int)$result['run_id'], [
+        [
+            'plugin' => 'forkpress-plugin-source-drift',
+            'object' => 'child:' . $child_id,
+            'reason' => 'plugin validator source evidence changed after rerun',
+            'type' => 'plugin-graph-source-evidence',
+            'tables' => ['plugin_graph_child'],
+            'validator' => 'forkpress-plugin-graph@1',
+            'source' => [
+                'child_id' => $child_id,
+                'source_revision' => 'source-after-rerun',
+            ],
+            'target' => [
+                'child_id' => $child_id,
+                'target_revision' => 'target-at-review',
+            ],
+            'candidate' => [
+                'child_id' => $child_id,
+                'graph' => 'candidate-at-review',
+            ],
+        ],
+    ]);
+    assert_same($updated_source_payload['conflicts'], 1, 'plugin validator rerun records replacement evidence when source evidence changes');
+    $source_payload_replacement_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-graph-source-evidence' AND id > $source_payload_conflict_id ORDER BY id DESC LIMIT 1");
+    assert_true($source_payload_replacement_id > $source_payload_conflict_id, 'plugin source-evidence rerun stores a newer conflict');
+
+    $source_payload_revalidated = cow_merge_revalidate_reviewed_conflicts($metadata, (int)$result['run_id'], 'cow-revalidate');
+    assert_true($source_payload_revalidated['stale'] >= 1, 'plugin revalidation treats changed source evidence as stale');
+    assert_true($source_payload_revalidated['carried'] >= 1, 'plugin revalidation carries changed source evidence to needs-action');
+    assert_same(
+        scalar($metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $source_payload_conflict_id ORDER BY id DESC LIMIT 1"),
+        'replacement-evidence',
+        'plugin source-evidence revalidation uses the replacement-evidence classifier'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT replacement_conflict_id FROM merge_revalidations WHERE conflict_id = $source_payload_conflict_id ORDER BY id DESC LIMIT 1"),
+        $source_payload_replacement_id,
+        'plugin source-evidence revalidation links to the newer validator finding'
+    );
+    $source_payload_revalidated_payload = cow_merge_decode_payload_json(
+        (string)scalar($metadata, "SELECT source_payload FROM merge_revalidations WHERE conflict_id = $source_payload_conflict_id ORDER BY id DESC LIMIT 1"),
+        'plugin source-evidence revalidation source'
+    );
+    assert_same(
+        $source_payload_revalidated_payload['source_revision'] ?? null,
+        'source-after-rerun',
+        'plugin source-evidence revalidation records the updated source payload'
+    );
+
     $serialized_base_root = $tmp . '/serialized-base';
     $serialized_source_root = $tmp . '/serialized-source';
     $serialized_target_root = $tmp . '/serialized-target';
