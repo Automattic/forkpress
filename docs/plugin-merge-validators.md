@@ -16,10 +16,10 @@ return reviewable conflicts.
 A validator should be deterministic and side-effect free. It receives:
 
 - The source branch name and target branch name.
-- Read-only handles or paths for base, source, target-before, and candidate
-  target databases.
-- Read-only paths for base, source, target-before, and candidate target file
-  trees.
+- Read-only paths for the base, source, pre-merge target, and candidate target
+  databases.
+- Read-only paths for the base, source, pre-merge target, and candidate target
+  file trees when file merge context is available.
 - The current merge run id and metadata database path for writing findings
   through ForkPress-provided helpers, not through plugin SQL.
 
@@ -90,9 +90,11 @@ The runner passes merge context through environment variables:
 `FORKPRESS_MERGE_METADATA_DB`, `FORKPRESS_MERGE_RUN`,
 `FORKPRESS_MERGE_SOURCE_BRANCH`, `FORKPRESS_MERGE_TARGET_BRANCH`,
 `FORKPRESS_MERGE_BASE_DB`, `FORKPRESS_MERGE_SOURCE_DB`,
-`FORKPRESS_MERGE_TARGET_DB`, `FORKPRESS_MERGE_BASE_ROOT`,
-`FORKPRESS_MERGE_SOURCE_ROOT`, and `FORKPRESS_MERGE_TARGET_ROOT`. A validator
-may emit either a raw findings array or an object with `status` and `findings`.
+`FORKPRESS_MERGE_TARGET_DB`, `FORKPRESS_MERGE_TARGET_BEFORE_DB`,
+`FORKPRESS_MERGE_BASE_ROOT`, `FORKPRESS_MERGE_SOURCE_ROOT`,
+`FORKPRESS_MERGE_TARGET_ROOT`, and `FORKPRESS_MERGE_TARGET_BEFORE_ROOT` when
+that context exists for the run. A validator may emit either a raw findings
+array or an object with `status` and `findings`.
 
 The lower-level PHP helper commands remain available for focused fixtures and
 runtime integration:

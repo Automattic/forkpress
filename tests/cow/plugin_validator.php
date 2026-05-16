@@ -750,6 +750,82 @@ PHP);
     }));
     assert_same(count($unsafe_asset_conflicts), 1, 'serialized plugin audit records unsafe file path evidence');
 
+    $env_validator = $tmp . '/plugin-validator-env.php';
+    write_test_file($env_validator, <<<'PHP'
+<?php
+$required_files = [
+    'FORKPRESS_MERGE_METADATA_DB',
+    'FORKPRESS_MERGE_BASE_DB',
+    'FORKPRESS_MERGE_SOURCE_DB',
+    'FORKPRESS_MERGE_TARGET_DB',
+    'FORKPRESS_MERGE_TARGET_BEFORE_DB',
+];
+$required_dirs = [
+    'FORKPRESS_MERGE_BASE_ROOT',
+    'FORKPRESS_MERGE_SOURCE_ROOT',
+    'FORKPRESS_MERGE_TARGET_ROOT',
+    'FORKPRESS_MERGE_TARGET_BEFORE_ROOT',
+];
+$required_values = [
+    'FORKPRESS_MERGE_RUN',
+    'FORKPRESS_MERGE_SOURCE_BRANCH',
+    'FORKPRESS_MERGE_TARGET_BRANCH',
+];
+$missing = [];
+foreach ($required_files as $name) {
+    $value = (string)getenv($name);
+    if ($value === '' || !is_file($value)) {
+        $missing[] = $name;
+    }
+}
+foreach ($required_dirs as $name) {
+    $value = (string)getenv($name);
+    if ($value === '' || !is_dir($value)) {
+        $missing[] = $name;
+    }
+}
+foreach ($required_values as $name) {
+    $value = (string)getenv($name);
+    if ($value === '') {
+        $missing[] = $name;
+    }
+}
+$candidate = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$before = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_BEFORE_DB'));
+$candidate_children = (int)$candidate->querySingle('SELECT COUNT(*) FROM plugin_graph_child');
+$before_children = (int)$before->querySingle('SELECT COUNT(*) FROM plugin_graph_child');
+$candidate->close();
+$before->close();
+if ($candidate_children < 1 || $before_children !== 0) {
+    $missing[] = 'target-before snapshot state';
+}
+$before_root = rtrim((string)getenv('FORKPRESS_MERGE_TARGET_BEFORE_ROOT'), '/');
+if (!is_file($before_root . '/wp-content/mu-plugins/forkpress-merge-validator.php')) {
+    $missing[] = 'target-before root contents';
+}
+echo json_encode([
+    'status' => $missing === [] ? 'valid' : 'failed',
+    'reason' => $missing === [] ? '' : 'missing merge validator context: ' . implode(', ', $missing),
+    'findings' => [],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $env_result = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $metadata,
+        '--run', (string)$result['run_id'],
+        '--validator', $env_validator,
+        '--format', 'json',
+    ]);
+    assert_same($env_result['status'], 0, 'plugin validator runner provides documented merge context environment');
+    $env_decoded = json_decode($env_result['output'], true);
+    assert_same($env_decoded['validator_status'] ?? null, 'valid', 'plugin validator context probe reports valid');
+    assert_same((int)($env_decoded['conflicts'] ?? -1), 0, 'plugin validator context probe records no conflicts');
+    $context_db = (string)scalar($metadata, "SELECT target_before_db FROM merge_runs WHERE id = " . (int)$result['run_id']);
+    assert_true(
+        str_starts_with($context_db, cow_merge_validator_context_dir($metadata, (int)$result['run_id']) . '/'),
+        'plugin validator target-before context is persisted beside merge metadata'
+    );
+
     $contradictory_validator = $tmp . '/plugin-validator-contradictory-valid.php';
     write_test_file($contradictory_validator, <<<'PHP'
 <?php

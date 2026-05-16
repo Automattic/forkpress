@@ -2857,6 +2857,156 @@ PHP);
     foreach (['theme_mods_forkpress_active', 'widget_nav_menu', 'widget_media_image', 'sidebars_widgets', 'widget_text', 'site_icon', 'page_on_front', 'page_for_posts', 'sticky_posts'] as $needle) {
         assert_true(str_contains($option_preview, $needle), 'WordPress option reference audit includes ' . $needle);
     }
+
+    $plugin_cpt_base_root = $tmp . '/wp-plugin-cpt-validator-files-base';
+    $plugin_cpt_source_root = $tmp . '/wp-plugin-cpt-validator-files-source';
+    $plugin_cpt_target_root = $tmp . '/wp-plugin-cpt-validator-files-target';
+    $plugin_cpt_base = $plugin_cpt_base_root . '/wp-content/database/.ht.sqlite';
+    $plugin_cpt_source = $plugin_cpt_source_root . '/wp-content/database/.ht.sqlite';
+    $plugin_cpt_target = $plugin_cpt_target_root . '/wp-content/database/.ht.sqlite';
+    $plugin_cpt_metadata = $tmp . '/.forkpress/cow/merge/wp-plugin-cpt-validator-metadata.sqlite';
+    $plugin_cpt_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-plugin-cpt-validator.json';
+    mkdir($plugin_cpt_base_root . '/wp-content/database', 0777, true);
+    $db = open_db($plugin_cpt_base);
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_title TEXT NOT NULL DEFAULT '',
+        post_content TEXT NOT NULL DEFAULT '',
+        post_status TEXT NOT NULL DEFAULT 'publish',
+        post_type TEXT NOT NULL DEFAULT 'post',
+        post_name TEXT NOT NULL DEFAULT '',
+        post_parent INTEGER NOT NULL DEFAULT 0
+    )");
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec('CREATE TABLE wp_options (option_id INTEGER PRIMARY KEY AUTOINCREMENT, option_name TEXT UNIQUE, option_value TEXT NOT NULL, autoload TEXT NOT NULL DEFAULT "yes")');
+    $db->exec('CREATE TABLE plugin_forkpress_notes (note_key TEXT PRIMARY KEY, note_id INTEGER NOT NULL, owner_page_id INTEGER NOT NULL, label TEXT NOT NULL, config_json TEXT NOT NULL, config_serialized TEXT NOT NULL)');
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (100, 'Plugin CPT owner page', '<!-- wp:paragraph --><p>Owner page</p><!-- /wp:paragraph -->', 'publish', 'page', 'plugin-cpt-owner-page'),
+        (101, 'Plugin Note CPT', 'Base plugin CPT body', 'publish', 'forkpress_note', 'plugin-note-cpt')");
+    $db->exec("INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES
+        (102, 101, '_forkpress_note_graph', '{\"note_id\":101,\"owner_page_id\":100,\"branch\":\"base\"}'),
+        (103, 101, '_forkpress_note_serialized_graph', 'a:3:{s:7:\"note_id\";i:101;s:13:\"owner_page_id\";i:100;s:6:\"branch\";s:4:\"base\";}')");
+    $base_plugin_cpt_config_json = json_encode(['note_id' => 101, 'owner_page_id' => 100, 'branch' => 'base'], JSON_UNESCAPED_SLASHES);
+    $base_plugin_cpt_config_serialized = serialize(['note_id' => 101, 'owner_page_id' => 100, 'branch' => 'base']);
+    $stmt = $db->prepare('INSERT INTO plugin_forkpress_notes (note_key, note_id, owner_page_id, label, config_json, config_serialized) VALUES (:key, 101, 100, :label, :json, :serialized)');
+    $stmt->bindValue(':key', 'shared-note', SQLITE3_TEXT);
+    $stmt->bindValue(':label', 'Base plugin note', SQLITE3_TEXT);
+    $stmt->bindValue(':json', $base_plugin_cpt_config_json, SQLITE3_TEXT);
+    $stmt->bindValue(':serialized', $base_plugin_cpt_config_serialized, SQLITE3_TEXT);
+    $stmt->execute();
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('forkpress_note_index', :value, 'yes')");
+    $stmt->bindValue(':value', serialize(['featured_note' => 101, 'owner_page_id' => 100, 'label' => 'Base plugin note']), SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+    write_test_file($plugin_cpt_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$findings = [];
+$check_note = static function (int $note_id, string $object, string $field, array $candidate) use ($db, &$findings): void {
+    $exists = $note_id > 0 ? (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $note_id AND post_type = 'forkpress_note'") : 1;
+    if ($exists !== 0) {
+        return;
+    }
+    $findings[] = [
+        'plugin' => 'forkpress-plugin-cpt',
+        'object' => $object,
+        'reason' => 'plugin custom post type graph references a missing forkpress_note post',
+        'type' => 'plugin-wp-cpt-missing-post',
+        'tables' => ['wp_posts', 'wp_postmeta', 'wp_options', 'plugin_forkpress_notes'],
+        'validator' => 'forkpress-plugin-cpt@1',
+        'candidate' => $candidate + [
+            'graph_object' => $object,
+            'field' => $field,
+            'missing_object_id' => $note_id,
+            'object_type' => 'forkpress_note',
+        ],
+    ];
+};
+$rows = $db->query('SELECT note_key, note_id, owner_page_id, label, config_json, config_serialized FROM plugin_forkpress_notes ORDER BY note_key');
+while ($row = $rows->fetchArray(SQLITE3_ASSOC)) {
+    $note_id = (int)$row['note_id'];
+    $decoded_json = json_decode((string)$row['config_json'], true);
+    $decoded_serialized = @unserialize((string)$row['config_serialized']);
+    $check_note($note_id, 'plugin_forkpress_notes:' . $row['note_key'], 'note_id', [
+        'note_key' => (string)$row['note_key'],
+        'label' => (string)$row['label'],
+        'owner_page_id' => (int)$row['owner_page_id'],
+        'json_note_id' => is_array($decoded_json) ? ($decoded_json['note_id'] ?? null) : null,
+        'serialized_note_id' => is_array($decoded_serialized) ? ($decoded_serialized['note_id'] ?? null) : null,
+    ]);
+}
+$option_value = $db->querySingle("SELECT option_value FROM wp_options WHERE option_name = 'forkpress_note_index'");
+if (is_string($option_value)) {
+    $decoded = @unserialize($option_value);
+    if (is_array($decoded) && isset($decoded['featured_note'])) {
+        $check_note((int)$decoded['featured_note'], 'option:forkpress_note_index', 'featured_note', [
+            'option_name' => 'forkpress_note_index',
+            'owner_page_id' => $decoded['owner_page_id'] ?? null,
+            'label' => $decoded['label'] ?? null,
+        ]);
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    copy_tree_for_test($plugin_cpt_base_root, $plugin_cpt_source_root);
+    copy_tree_for_test($plugin_cpt_base_root, $plugin_cpt_target_root);
+    cow_merge_capture_file_base($plugin_cpt_base_root, $plugin_cpt_file_base);
+    cow_merge_allocate_autoincrement_bands($plugin_cpt_source, $plugin_cpt_metadata, 'feature-wp-plugin-cpt-source');
+    cow_merge_allocate_autoincrement_bands($plugin_cpt_target, $plugin_cpt_metadata, 'main');
+
+    $db = open_db($plugin_cpt_source);
+    $db->exec('DELETE FROM wp_postmeta WHERE post_id = 101');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 101');
+    $db->exec("DELETE FROM plugin_forkpress_notes WHERE note_key = 'shared-note'");
+    $db->exec("DELETE FROM wp_options WHERE option_name = 'forkpress_note_index'");
+    $db->close();
+
+    $db = open_db($plugin_cpt_target);
+    $db->exec("UPDATE wp_posts SET post_title = 'Target owner page still showing note widget' WHERE ID = 100");
+    $target_plugin_cpt_config_json = json_encode(['note_id' => 101, 'owner_page_id' => 100, 'branch' => 'target'], JSON_UNESCAPED_SLASHES);
+    $target_plugin_cpt_config_serialized = serialize(['note_id' => 101, 'owner_page_id' => 100, 'branch' => 'target']);
+    $stmt = $db->prepare("UPDATE plugin_forkpress_notes SET label = 'Target edited plugin note card', config_json = :json, config_serialized = :serialized WHERE note_key = 'shared-note'");
+    $stmt->bindValue(':json', $target_plugin_cpt_config_json, SQLITE3_TEXT);
+    $stmt->bindValue(':serialized', $target_plugin_cpt_config_serialized, SQLITE3_TEXT);
+    $stmt->execute();
+    $stmt = $db->prepare("UPDATE wp_options SET option_value = :value WHERE option_name = 'forkpress_note_index'");
+    $stmt->bindValue(':value', serialize(['featured_note' => 101, 'owner_page_id' => 100, 'label' => 'Target edited plugin note card']), SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+
+    $plugin_cpt_result = cow_merge_branch_state(
+        $plugin_cpt_base,
+        $plugin_cpt_source,
+        $plugin_cpt_target,
+        $plugin_cpt_metadata,
+        'feature-wp-plugin-cpt-source',
+        'main',
+        $plugin_cpt_file_base,
+        $plugin_cpt_source_root,
+        $plugin_cpt_target_root
+    );
+
+    assert_same($plugin_cpt_result['status'], 'completed_with_conflicts', 'plugin CPT validator holds stale plugin graph references for review');
+    assert_same((int)($plugin_cpt_result['plugin_validators'] ?? 0), 1, 'plugin CPT validator is discovered from mu-plugins during merge');
+    assert_same((int)($plugin_cpt_result['plugin_validator_conflicts'] ?? 0), 2, 'plugin CPT validator records plugin table and option references to the missing CPT row');
+    assert_same((int)scalar($plugin_cpt_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 101'), 0, 'plugin CPT source deletion removes the custom post type row before validation');
+    assert_same(scalar($plugin_cpt_target, 'SELECT post_title FROM wp_posts WHERE ID = 100'), 'Target owner page still showing note widget', 'plugin CPT validator preserves the target owner page edit');
+    assert_same(scalar($plugin_cpt_target, "SELECT label FROM plugin_forkpress_notes WHERE note_key = 'shared-note'"), 'Target edited plugin note card', 'plugin CPT validator keeps the stale plugin table row visible for review');
+    $plugin_cpt_option = unserialize((string)scalar($plugin_cpt_target, "SELECT option_value FROM wp_options WHERE option_name = 'forkpress_note_index'"));
+    assert_same($plugin_cpt_option['featured_note'] ?? null, 101, 'plugin CPT validator keeps the stale option reference visible for review');
+    $plugin_cpt_audit = cow_merge_audit_report($plugin_cpt_metadata, (int)$plugin_cpt_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-cpt-missing-post',
+    ]);
+    assert_same(count($plugin_cpt_audit['conflicts']), 2, 'plugin CPT validator exposes stale graph references as plugin-scoped audit conflicts');
+    $plugin_cpt_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $plugin_cpt_audit['conflicts']));
+    assert_true(str_contains($plugin_cpt_preview, '"missing_object_id":101'), 'plugin CPT audit includes the missing custom post type ID');
+    assert_true(str_contains($plugin_cpt_preview, 'plugin_forkpress_notes:shared-note'), 'plugin CPT audit includes the plugin table graph object');
+    assert_true(str_contains($plugin_cpt_preview, 'option:forkpress_note_index'), 'plugin CPT audit includes the option graph object');
 } finally {
     remove_tree($tmp);
 }
