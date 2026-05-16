@@ -117,6 +117,8 @@ candidate target:
   `wp-content/plugins/my-plugin/forkpress-merge-validator.php`;
 - single-file active plugins may ship
   `wp-content/plugins/my-plugin.forkpress-merge-validator.php`;
+- network-active plugins listed in `active_sitewide_plugins` may ship the same
+  validator files as active plugins;
 - mu-plugins may ship `wp-content/mu-plugins/forkpress-merge-validator.php`,
   `wp-content/mu-plugins/*.forkpress-merge-validator.php`, or
   `wp-content/mu-plugins/*/forkpress-merge-validator.php`.

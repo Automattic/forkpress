@@ -17915,9 +17915,19 @@ PHP);
         SQLite3::escapeString(serialize(['active-plugin/active-plugin.php', 'single-plugin.php', '../unsafe/unsafe.php'])) .
         "', 'yes')"
     );
+    $db->exec('CREATE TABLE wp_sitemeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, site_id INTEGER NOT NULL DEFAULT 1, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec(
+        "INSERT INTO wp_sitemeta (site_id, meta_key, meta_value) VALUES (1, 'active_sitewide_plugins', '" .
+        SQLite3::escapeString(serialize([
+            'network-plugin/network-plugin.php' => time(),
+            '../unsafe-network/unsafe.php' => time(),
+        ])) .
+        "')"
+    );
     $db->close();
     write_test_file($plugin_discovery_root . '/wp-content/plugins/active-plugin/forkpress-merge-validator.php', "<?php echo 'active';\n");
     write_test_file($plugin_discovery_root . '/wp-content/plugins/single-plugin.forkpress-merge-validator.php', "<?php echo 'single';\n");
+    write_test_file($plugin_discovery_root . '/wp-content/plugins/network-plugin/forkpress-merge-validator.php', "<?php echo 'network';\n");
     write_test_file($plugin_discovery_root . '/wp-content/plugins/inactive-plugin/forkpress-merge-validator.php', "<?php echo 'inactive';\n");
     write_test_file($plugin_discovery_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', "<?php echo 'mu';\n");
     write_test_file($plugin_discovery_root . '/wp-content/mu-plugins/mu-extra.forkpress-merge-validator.php', "<?php echo 'mu-extra';\n");
@@ -17932,7 +17942,8 @@ PHP);
         'wp-content/mu-plugins/mu-dir/forkpress-merge-validator.php',
         'wp-content/plugins/active-plugin/forkpress-merge-validator.php',
         'wp-content/plugins/single-plugin.forkpress-merge-validator.php',
-    ], 'plugin validator discovery includes mu-plugin validators and active plugin validators only');
+        'wp-content/plugins/network-plugin/forkpress-merge-validator.php',
+    ], 'plugin validator discovery includes mu-plugin validators, active plugin validators, and network-active plugin validators only');
 
     $auto_validator_base_root = $tmp . '/auto-validator-base';
     $auto_validator_source_root = $tmp . '/auto-validator-source';
