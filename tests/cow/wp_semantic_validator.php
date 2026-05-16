@@ -290,6 +290,46 @@ function create_wp_gallery_block_db(string $path): void {
     $db->close();
 }
 
+function create_wp_query_block_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_title TEXT NOT NULL DEFAULT '',
+        post_content TEXT NOT NULL DEFAULT '',
+        post_status TEXT NOT NULL DEFAULT 'publish',
+        post_type TEXT NOT NULL DEFAULT 'post',
+        post_name TEXT NOT NULL DEFAULT ''
+    )");
+    $db->exec("CREATE TABLE wp_users (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_login TEXT NOT NULL,
+        user_pass TEXT NOT NULL DEFAULT '',
+        user_nicename TEXT NOT NULL DEFAULT '',
+        user_email TEXT NOT NULL DEFAULT '',
+        user_url TEXT NOT NULL DEFAULT '',
+        user_registered TEXT NOT NULL DEFAULT '2026-05-16 00:00:00',
+        user_activation_key TEXT NOT NULL DEFAULT '',
+        user_status INTEGER NOT NULL DEFAULT 0,
+        display_name TEXT NOT NULL DEFAULT ''
+    )");
+    $db->exec('CREATE TABLE wp_terms (term_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, slug TEXT NOT NULL, term_group INTEGER NOT NULL DEFAULT 0)');
+    $db->exec('CREATE TABLE wp_term_taxonomy (term_taxonomy_id INTEGER PRIMARY KEY AUTOINCREMENT, term_id INTEGER NOT NULL, taxonomy TEXT NOT NULL, description TEXT NOT NULL DEFAULT "", parent INTEGER NOT NULL DEFAULT 0, count INTEGER NOT NULL DEFAULT 0)');
+    $query_block_content = '<!-- wp:query {"query":{"perPage":10,"pages":0,"offset":0,"postType":"post","order":"desc","orderBy":"date","author":75,"categoryIds":[76],"tagIds":[78]}} --><!-- wp:post-template --><!-- wp:post-title /--><!-- /wp:post-template --><!-- /wp:query -->';
+    $stmt = $db->prepare("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (79, 'Query block page', :content, 'publish', 'page', 'query-block-page')");
+    $stmt->bindValue(':content', $query_block_content, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->exec("INSERT INTO wp_users (ID, user_login, user_nicename, user_email, display_name) VALUES
+        (75, 'deleted_query_author', 'deleted-query-author', 'query-author@example.com', 'Deleted Query Author')");
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES
+        (76, 'Deleted query category', 'deleted-query-category'),
+        (78, 'Deleted query tag', 'deleted-query-tag')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, count) VALUES
+        (77, 76, 'category', 'Deleted query category taxonomy', 1),
+        (80, 78, 'post_tag', 'Deleted query tag taxonomy', 1)");
+    $db->close();
+}
+
 function create_wp_term_relationship_db(string $path): void {
     $db = open_db($path);
     $db->exec("CREATE TABLE wp_posts (
@@ -1440,6 +1480,145 @@ PHP);
     assert_true(
         str_contains($gallery_block_preview, '"block_name":"core/gallery"') || str_contains($gallery_block_preview, '"block_name":"core\/gallery"'),
         'WordPress gallery block audit includes the block name'
+    );
+
+    $query_block_base_root = $tmp . '/query-block-base';
+    $query_block_source_root = $tmp . '/query-block-source';
+    $query_block_target_root = $tmp . '/query-block-target';
+    $query_block_base = $query_block_base_root . '/wp-content/database/.ht.sqlite';
+    $query_block_source = $query_block_source_root . '/wp-content/database/.ht.sqlite';
+    $query_block_target = $query_block_target_root . '/wp-content/database/.ht.sqlite';
+    $query_block_metadata = $tmp . '/.forkpress/cow/merge/wp-query-block-validator-metadata.sqlite';
+    $query_block_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-query-block-validator.json';
+
+    mkdir($query_block_base_root . '/wp-content/database', 0777, true);
+    create_wp_query_block_db($query_block_base);
+    write_test_file($query_block_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type IN ('post', 'page', 'wp_template_part', 'wp_template')");
+$findings = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    if (!preg_match_all('/<!--\s*wp:query\s+(\{.*?\})\s*-->/', (string)$row['post_content'], $matches)) {
+        continue;
+    }
+    foreach ($matches[1] as $raw_attrs) {
+        $attrs = json_decode($raw_attrs, true);
+        $query = is_array($attrs) && isset($attrs['query']) && is_array($attrs['query']) ? $attrs['query'] : [];
+        if (isset($query['author'])) {
+            $author_id = (int)$query['author'];
+            $exists = $author_id <= 0 ? 1 : (int)$db->querySingle("SELECT COUNT(*) FROM wp_users WHERE ID = $author_id");
+            if ($exists === 0) {
+                $findings[] = [
+                    'plugin' => 'forkpress-wp-query-block-refs',
+                    'object' => 'post:' . $row['ID'],
+                    'reason' => 'query block references a missing author user',
+                    'type' => 'plugin-wp-query-block-missing-object',
+                    'tables' => ['wp_posts', 'wp_users'],
+                    'validator' => 'forkpress-wp-query-block-refs@1',
+                    'candidate' => [
+                        'post_id' => (int)$row['ID'],
+                        'block_name' => 'core/query',
+                        'field' => 'query.author',
+                        'missing_object_id' => $author_id,
+                        'object_type' => 'user',
+                    ],
+                ];
+            }
+        }
+        foreach (['categoryIds' => 'category', 'tagIds' => 'post_tag'] as $field => $taxonomy) {
+            if (!isset($query[$field]) || !is_array($query[$field])) {
+                continue;
+            }
+            foreach ($query[$field] as $index => $term_id) {
+                $term_id = (int)$term_id;
+                if ($term_id <= 0) {
+                    continue;
+                }
+                $escaped_taxonomy = SQLite3::escapeString($taxonomy);
+                $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_terms t JOIN wp_term_taxonomy tt ON tt.term_id = t.term_id AND tt.taxonomy = '$escaped_taxonomy' WHERE t.term_id = $term_id");
+                if ($exists === 0) {
+                    $findings[] = [
+                        'plugin' => 'forkpress-wp-query-block-refs',
+                        'object' => 'post:' . $row['ID'],
+                        'reason' => 'query block references a missing taxonomy term',
+                        'type' => 'plugin-wp-query-block-missing-object',
+                        'tables' => ['wp_posts', 'wp_terms', 'wp_term_taxonomy'],
+                        'validator' => 'forkpress-wp-query-block-refs@1',
+                        'candidate' => [
+                            'post_id' => (int)$row['ID'],
+                            'block_name' => 'core/query',
+                            'field' => 'query.' . $field . '.' . (string)$index,
+                            'missing_object_id' => $term_id,
+                            'object_type' => 'term',
+                            'taxonomy' => $taxonomy,
+                        ],
+                    ];
+                }
+            }
+        }
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    copy_tree_for_test($query_block_base_root, $query_block_source_root);
+    copy_tree_for_test($query_block_base_root, $query_block_target_root);
+    cow_merge_capture_file_base($query_block_base_root, $query_block_file_base);
+    cow_merge_allocate_autoincrement_bands($query_block_source, $query_block_metadata, 'feature-wp-query-block-source');
+    cow_merge_allocate_autoincrement_bands($query_block_target, $query_block_metadata, 'main');
+
+    $db = open_db($query_block_source);
+    $db->exec('DELETE FROM wp_users WHERE ID = 75');
+    $db->exec('DELETE FROM wp_term_taxonomy WHERE term_id IN (76, 78)');
+    $db->exec('DELETE FROM wp_terms WHERE term_id IN (76, 78)');
+    $db->close();
+
+    $db = open_db($query_block_target);
+    $db->exec("UPDATE wp_posts SET post_title = 'Target page still using deleted query refs' WHERE ID = 79");
+    $db->close();
+
+    $query_block_result = cow_merge_branch_state(
+        $query_block_base,
+        $query_block_source,
+        $query_block_target,
+        $query_block_metadata,
+        'feature-wp-query-block-source',
+        'main',
+        $query_block_file_base,
+        $query_block_source_root,
+        $query_block_target_root
+    );
+
+    assert_same($query_block_result['status'], 'completed_with_conflicts', 'WordPress query block validator holds missing query refs for review');
+    assert_same((int)($query_block_result['plugin_validators'] ?? 0), 1, 'WordPress query block validator is discovered from mu-plugins during merge');
+    assert_same((int)($query_block_result['plugin_validator_conflicts'] ?? 0), 3, 'WordPress query block validator records missing author, category, and tag refs');
+    assert_same((int)scalar($query_block_target, 'SELECT COUNT(*) FROM wp_users WHERE ID = 75'), 0, 'WordPress query block validator leaves the source author deletion staged for review');
+    assert_same((int)scalar($query_block_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id IN (76, 78)'), 0, 'WordPress query block validator leaves the source term deletions staged for review');
+    assert_same(scalar($query_block_target, 'SELECT post_title FROM wp_posts WHERE ID = 79'), 'Target page still using deleted query refs', 'WordPress query block validator preserves the target page edit');
+    $query_block_content = (string)scalar($query_block_target, 'SELECT post_content FROM wp_posts WHERE ID = 79');
+    assert_true(str_contains($query_block_content, '"author":75'), 'WordPress query block validator keeps the stale query author visible for review');
+    assert_true(str_contains($query_block_content, '"categoryIds":[76]'), 'WordPress query block validator keeps the stale query category visible for review');
+    assert_true(str_contains($query_block_content, '"tagIds":[78]'), 'WordPress query block validator keeps the stale query tag visible for review');
+
+    $query_block_audit = cow_merge_audit_report($query_block_metadata, (int)$query_block_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-query-block-missing-object',
+    ]);
+    assert_same(count($query_block_audit['conflicts']), 3, 'WordPress query block validator exposes missing query refs as plugin-scoped audit conflicts');
+    $query_block_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $query_block_audit['conflicts']));
+    assert_true(str_contains($query_block_preview, '"missing_object_id":75'), 'WordPress query block audit includes the missing author ID');
+    assert_true(str_contains($query_block_preview, '"missing_object_id":76'), 'WordPress query block audit includes the missing category ID');
+    assert_true(str_contains($query_block_preview, '"missing_object_id":78'), 'WordPress query block audit includes the missing tag ID');
+    assert_true(str_contains($query_block_preview, '"field":"query.author"'), 'WordPress query block audit includes the stale author field');
+    assert_true(str_contains($query_block_preview, '"field":"query.categoryIds.0"'), 'WordPress query block audit includes the stale category field');
+    assert_true(str_contains($query_block_preview, '"field":"query.tagIds.0"'), 'WordPress query block audit includes the stale tag field');
+    assert_true(
+        str_contains($query_block_preview, '"block_name":"core/query"') || str_contains($query_block_preview, '"block_name":"core\/query"'),
+        'WordPress query block audit includes the block name'
     );
 
     $term_base_root = $tmp . '/term-ref-base';
