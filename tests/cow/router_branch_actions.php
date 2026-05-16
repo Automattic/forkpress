@@ -97,6 +97,7 @@ mkdir($cow, 0777, true);
 mkdir($work_dir, 0777, true);
 file_put_contents($branch_list, "main\nfeature\n");
 file_put_contents($main . '/index.php', "<?php echo \"WORDPRESS INDEX\";\n");
+file_put_contents($main . '/wp-admin/admin.php', "<?php echo \"WORDPRESS ADMIN PAGE\";\n");
 file_put_contents($main . '/wp-admin/admin-post.php', "<?php echo \"WORDPRESS ADMIN POST\";\n");
 file_put_contents($fake_bin, <<<'PHP'
 #!/usr/bin/env php
@@ -223,6 +224,24 @@ assert_same($non_async['json']['success'] ?? null, true, 'non-async router branc
 assert_same($non_async['json']['message'] ?? null, 'Created branch html_fallback.', 'non-async router branch create reports created branch');
 assert_true(!str_contains($non_async['body'], 'WORDPRESS'), 'non-async router branch create does not reach WordPress admin-post');
 
+$admin_page_create = router_branch_action_request(
+    $child,
+    $branches,
+    $cow,
+    $router,
+    $branch_list,
+    $fake_bin,
+    $work_dir,
+    '/wp-admin/admin.php?page=forkpress-branches',
+    ['action' => 'forkpress_branch_create', 'branch' => 'admin_page_created', 'from' => 'main'],
+    false
+);
+assert_same($admin_page_create['exit'], 0, 'admin-page router branch create exits cleanly');
+assert_same($admin_page_create['status'], 200, 'admin-page router branch create returns 200');
+assert_same($admin_page_create['json']['success'] ?? null, true, 'admin-page router branch create returns JSON success');
+assert_same($admin_page_create['json']['message'] ?? null, 'Created branch admin_page_created.', 'admin-page router branch create reports created branch');
+assert_true(!str_contains($admin_page_create['body'], 'WORDPRESS'), 'admin-page router branch create does not reach WordPress admin page');
+
 $argv_log = [];
 foreach (file($cli_log, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as $line) {
     $decoded = json_decode($line, true);
@@ -233,7 +252,8 @@ foreach (file($cli_log, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as 
 assert_same($argv_log[0] ?? null, ['branch', '--work-dir', $work_dir, 'create', 'router_created', '--from', 'main'], 'router branch create invokes safe CLI command');
 assert_same($argv_log[1] ?? null, ['branch', '--work-dir', $work_dir, 'merge', 'router_created', '--into', 'main'], 'router branch merge invokes audited CLI command');
 assert_same($argv_log[2] ?? null, ['branch', '--work-dir', $work_dir, 'create', 'html_fallback', '--from', 'main'], 'non-async router branch create invokes safe CLI command');
-assert_same(count($argv_log), 3, 'invalid branch action request does not invoke router CLI path');
+assert_same($argv_log[3] ?? null, ['branch', '--work-dir', $work_dir, 'create', 'admin_page_created', '--from', 'main'], 'admin-page router branch create invokes safe CLI command');
+assert_same(count($argv_log), 4, 'invalid branch action request does not invoke router CLI path');
 
 rm_tree($tmp);
 

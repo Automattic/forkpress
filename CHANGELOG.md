@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Routed ForkPress branch UI POST actions before WordPress even when the form
+  submits from an admin page instead of `admin-post.php`, preventing HTML
+  fallback responses during branch creation.
+- Added fast COW semantic merge coverage for reusable block edit/delete
+  conflicts, including the deleted `wp_block` row and target page cleanup.
 - Added fast COW semantic merge coverage for navigation menu edit/delete
   conflicts, including menu terms, taxonomy rows, menu item posts, menu item
   metadata, relationships, and theme-mod location cleanup.
