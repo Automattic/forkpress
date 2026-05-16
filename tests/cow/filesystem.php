@@ -56,6 +56,12 @@ function copy_tree_for_test(string $source, string $dest): void {
         if (!is_dir(dirname($target))) {
             mkdir(dirname($target), 0777, true);
         }
+        if ($entry->isLink()) {
+            if (!symlink((string)readlink($entry->getPathname()), $target)) {
+                throw new RuntimeException('failed to copy test symlink: ' . $entry->getPathname());
+            }
+            continue;
+        }
         copy($entry->getPathname(), $target);
     }
 }
@@ -121,6 +127,7 @@ try {
     create_filesystem_db($base);
     write_test_file($base_root . '/wp-content/uploads/shared.txt', 'base shared');
     write_test_file($base_root . '/wp-content/uploads/binary.bin', "base\0binary");
+    create_test_symlink('shared.txt', $base_root . '/wp-content/uploads/shared-link.txt');
     write_test_file($base_root . '/wp-content/uploads/replace-dir-with-file/base-child.txt', 'base child');
     write_test_file($base_root . '/wp-content/uploads/replace-file-with-dir', 'base file');
     copy_tree_for_test($base_root, $source_root);
@@ -130,6 +137,9 @@ try {
 
     write_test_file($source_root . '/wp-content/uploads/shared.txt', 'source shared');
     write_test_file($source_root . '/wp-content/uploads/binary.bin', "source\0binary\xff");
+    write_test_file($source_root . '/wp-content/uploads/new-source.txt', 'source symlink target');
+    create_test_symlink('new-source.txt', $source_root . '/wp-content/uploads/shared-link.txt');
+    create_test_symlink('../new-source.txt', $source_root . '/wp-content/uploads/links/source-link.txt');
     remove_tree($source_root . '/wp-content/uploads/replace-dir-with-file');
     write_test_file($source_root . '/wp-content/uploads/replace-dir-with-file', 'source replacement file');
     unlink($source_root . '/wp-content/uploads/replace-file-with-dir');
@@ -149,10 +159,15 @@ try {
     );
 
     assert_same($result['status'], 'completed_with_conflicts', 'filesystem merge completes with review conflicts for unsafe source paths and type replacements');
-    assert_same($result['file_applied'], 2, 'filesystem merge applies safe source-only text and binary file changes');
+    assert_same($result['file_applied'], 6, 'filesystem merge applies safe text, binary, directory, and symlink changes');
     assert_same($result['file_conflicts'], 3, 'filesystem merge records unsafe symlink and type replacement conflicts');
     assert_same(file_get_contents($target_root . '/wp-content/uploads/shared.txt'), 'source shared', 'safe source text file change is applied');
     assert_same(file_get_contents($target_root . '/wp-content/uploads/binary.bin'), "source\0binary\xff", 'safe source binary file change is applied exactly');
+    assert_same(file_get_contents($target_root . '/wp-content/uploads/new-source.txt'), 'source symlink target', 'safe source symlink target file is applied');
+    assert_true(is_link($target_root . '/wp-content/uploads/shared-link.txt'), 'safe source symlink target change is applied');
+    assert_same(readlink($target_root . '/wp-content/uploads/shared-link.txt'), 'new-source.txt', 'merged symlink keeps the changed relative target');
+    assert_true(is_link($target_root . '/wp-content/uploads/links/source-link.txt'), 'safe relative symlink addition is applied');
+    assert_same(readlink($target_root . '/wp-content/uploads/links/source-link.txt'), '../new-source.txt', 'safe symlink with in-root parent traversal is preserved');
     assert_true(!file_exists($target_root . '/wp-content/uploads/absolute-link.txt') && !is_link($target_root . '/wp-content/uploads/absolute-link.txt'), 'unsafe absolute symlink is not installed on target');
     assert_true(is_dir($target_root . '/wp-content/uploads/replace-dir-with-file'), 'directory-to-file replacement keeps the target directory before review');
     assert_same(file_get_contents($target_root . '/wp-content/uploads/replace-dir-with-file/base-child.txt'), 'base child', 'directory-to-file replacement keeps target descendants before review');
@@ -167,6 +182,18 @@ try {
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-type-replacement-conflict'"),
         2,
         'filesystem directory/file replacement conflicts are auditable'
+    );
+    $source_changed_link_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/shared-link.txt'));
+    $source_added_link_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/links/source-link.txt'));
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'source-applied' AND row_identity = '$source_changed_link_identity' AND reason = 'source changed filesystem symlink target and target did not change it'"),
+        1,
+        'safe source symlink target change is auditable'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'source-applied' AND row_identity = '$source_added_link_identity' AND reason = 'source added filesystem symlink and target did not have it'"),
+        1,
+        'safe source symlink addition is auditable'
     );
     $dir_to_file_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/replace-dir-with-file'));
     $file_to_dir_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/replace-file-with-dir'));
