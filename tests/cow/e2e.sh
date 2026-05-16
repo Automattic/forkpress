@@ -2097,6 +2097,7 @@ php -r '$db = new SQLite3($argv[1]); $db->exec("DROP TABLE IF EXISTS wp_forkpres
 "$BIN" branch --work-dir "$WORK_DIR" create keyless-unique-same > "$TMP/keyless-unique-same-create.out"
 grep -F "keyless-unique-same.wp.localhost:$PORT" "$TMP/keyless-unique-same-create.out" >/dev/null
 php -r '$db = new SQLite3($argv[1]); $db->exec("INSERT INTO wp_forkpress_e2e_keyless_unique_same (slug, value) VALUES ('\''shared-keyless-unique-same'\'', '\''same payload'\'')");' "$WORK/keyless-unique-same/wp-content/database/.ht.sqlite"
+php scripts/cow/merge.php capture-identities --db "$WORK/keyless-unique-same/wp-content/database/.ht.sqlite" --metadata-db "$WORK_DIR/cow/merge/metadata.sqlite" --branch keyless-unique-same --quiet 1
 php -r '$db = new SQLite3($argv[1]); $db->exec("INSERT INTO wp_forkpress_e2e_keyless_unique_same (slug, value) VALUES ('\''shared-keyless-unique-same'\'', '\''same payload'\'')");' "$WORK/main/wp-content/database/.ht.sqlite"
 "$BIN" branch --work-dir "$WORK_DIR" merge keyless-unique-same --into main > "$TMP/keyless-unique-same-merge.out"
 grep -F "forkpress: merged keyless-unique-same into main" "$TMP/keyless-unique-same-merge.out" >/dev/null
