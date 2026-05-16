@@ -543,6 +543,59 @@ try {
         'latest merge revalidation is incompatible',
         'after-revalidate blocks source resolution over an incompatible postmeta semantic replacement'
     );
+
+    $option_identity_base = $tmp . '/option-identity-base.sqlite';
+    $option_identity_source = $tmp . '/option-identity-source.sqlite';
+    $option_identity_target = $tmp . '/option-identity-target.sqlite';
+    $option_identity_metadata = $tmp . '/.forkpress/cow/merge/option-identity-metadata.sqlite';
+    foreach ([$option_identity_base, $option_identity_source, $option_identity_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE wp_options (option_id INTEGER PRIMARY KEY, option_name TEXT NOT NULL, option_value TEXT NOT NULL)');
+        $db->close();
+    }
+    $db = open_db($option_identity_source);
+    $db->exec("INSERT INTO wp_options (option_id, option_name, option_value) VALUES (30, 'source_feature_flag', 'source enabled')");
+    $db->close();
+    $db = open_db($option_identity_target);
+    $db->exec("INSERT INTO wp_options (option_id, option_name, option_value) VALUES (30, 'target_feature_flag', 'target enabled')");
+    $db->close();
+
+    $option_identity_merge = cow_merge_databases($option_identity_base, $option_identity_source, $option_identity_target, $option_identity_metadata, 'feature-option-identity-review', 'main');
+    $option_identity_run_id = (int)$option_identity_merge['run_id'];
+    assert_same($option_identity_merge['status'], 'completed_with_conflicts', 'option semantic identity fixture starts with a same-ID row conflict');
+    $option_identity_conflict_id = (int)scalar($option_identity_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'wp_options' AND conflict_type = 'row-insert-collision'");
+    assert_true($option_identity_conflict_id > 0, 'option semantic identity fixture records the row conflict');
+    cow_merge_review_record(
+        $option_identity_metadata,
+        'conflict',
+        $option_identity_conflict_id,
+        'reviewed',
+        'Review source option before applying over target option.',
+        'cow-test'
+    );
+
+    $db = open_db($option_identity_target);
+    $db->exec("UPDATE wp_options SET option_name = 'replacement_feature_flag', option_value = 'replacement enabled' WHERE option_id = 30");
+    $db->close();
+
+    $option_identity_revalidated = cow_merge_revalidate_reviewed_conflicts($option_identity_metadata, $option_identity_run_id, 'cow-revalidate');
+    assert_same($option_identity_revalidated['checked'], 1, 'option semantic revalidation checks the reviewed row conflict');
+    assert_same($option_identity_revalidated['stale'], 1, 'option semantic revalidation detects target semantic replacement');
+    assert_same($option_identity_revalidated['carried'], 1, 'option semantic revalidation carries semantically replaced options to needs-action');
+    assert_same(
+        scalar($option_identity_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $option_identity_conflict_id ORDER BY id DESC LIMIT 1"),
+        'incompatible',
+        'option semantic revalidation classifies changed option_name identity as incompatible'
+    );
+    $option_identity_audit = cow_merge_audit_report($option_identity_metadata, $option_identity_run_id, 10, ['records' => 'conflicts']);
+    $option_identity_conflicts = array_values(array_filter($option_identity_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $option_identity_conflict_id));
+    assert_same($option_identity_conflicts[0]['revalidation_class'] ?? null, 'incompatible', 'option semantic audit exposes incompatible replacement');
+    assert_true(str_contains((string)($option_identity_conflicts[0]['stale_reason'] ?? ''), 'semantic identity'), 'option semantic stale reason explains semantic identity drift');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($option_identity_metadata, $option_identity_conflict_id, 'source', true, 'Do not apply source option over replacement option.', 'cow-test', true),
+        'latest merge revalidation is incompatible',
+        'after-revalidate blocks source resolution over an incompatible option semantic replacement'
+    );
 } finally {
     remove_tree($tmp);
 }
