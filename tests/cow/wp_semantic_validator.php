@@ -111,14 +111,23 @@ function create_wp_menu_ref_db(string $path): void {
         post_name TEXT NOT NULL DEFAULT ''
     )");
     $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec('CREATE TABLE wp_terms (term_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, slug TEXT NOT NULL)');
+    $db->exec('CREATE TABLE wp_term_taxonomy (term_taxonomy_id INTEGER PRIMARY KEY AUTOINCREMENT, term_id INTEGER NOT NULL, taxonomy TEXT NOT NULL, description TEXT NOT NULL DEFAULT "", parent INTEGER NOT NULL DEFAULT 0, count INTEGER NOT NULL DEFAULT 0)');
     $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
         (40, 'Shared menu page', '<!-- wp:paragraph --><p>Menu page</p><!-- /wp:paragraph -->', 'publish', 'page', 'shared-menu-page'),
-        (41, 'Menu item for shared page', '', 'publish', 'nav_menu_item', 'menu-item-shared-page')");
+        (41, 'Menu item for shared page', '', 'publish', 'nav_menu_item', 'menu-item-shared-page'),
+        (42, 'Menu item for shared category', '', 'publish', 'nav_menu_item', 'menu-item-shared-category')");
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (43, 'Shared menu category', 'shared-menu-category')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES (43, 43, 'category', '', 0, 0)");
     $db->exec("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES
         (41, '_menu_item_type', 'post_type'),
         (41, '_menu_item_object', 'page'),
         (41, '_menu_item_object_id', '40'),
-        (41, '_menu_item_menu_item_parent', '0')");
+        (41, '_menu_item_menu_item_parent', '0'),
+        (42, '_menu_item_type', 'taxonomy'),
+        (42, '_menu_item_object', 'category'),
+        (42, '_menu_item_object_id', '43'),
+        (42, '_menu_item_menu_item_parent', '0')");
     $db->close();
 }
 
@@ -426,28 +435,38 @@ PHP);
     write_test_file($menu_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
 <?php
 $db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
-$res = $db->query("SELECT item.ID AS menu_item_id, object.meta_value AS object_type, object_id.meta_value AS object_id
+$res = $db->query("SELECT item.ID AS menu_item_id, item_type.meta_value AS menu_item_type, object.meta_value AS object_type, object_id.meta_value AS object_id
     FROM wp_posts item
     JOIN wp_postmeta item_type ON item_type.post_id = item.ID AND item_type.meta_key = '_menu_item_type'
     JOIN wp_postmeta object ON object.post_id = item.ID AND object.meta_key = '_menu_item_object'
     JOIN wp_postmeta object_id ON object_id.post_id = item.ID AND object_id.meta_key = '_menu_item_object_id'
-    WHERE item.post_type = 'nav_menu_item' AND item_type.meta_value = 'post_type'");
+    WHERE item.post_type = 'nav_menu_item' AND item_type.meta_value IN ('post_type', 'taxonomy')");
 $findings = [];
 while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    $menu_item_type = (string)$row['menu_item_type'];
     $object_type = (string)$row['object_type'];
     $object_id = (int)$row['object_id'];
     $escaped_type = SQLite3::escapeString($object_type);
-    $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $object_id AND post_type = '$escaped_type'");
+    if ($menu_item_type === 'taxonomy') {
+        $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_terms t JOIN wp_term_taxonomy tt ON tt.term_id = t.term_id AND tt.taxonomy = '$escaped_type' WHERE t.term_id = $object_id");
+        $reason = 'nav menu item references a missing taxonomy term';
+        $tables = ['wp_posts', 'wp_postmeta', 'wp_terms', 'wp_term_taxonomy'];
+    } else {
+        $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $object_id AND post_type = '$escaped_type'");
+        $reason = 'nav menu item references a missing post object';
+        $tables = ['wp_posts', 'wp_postmeta'];
+    }
     if ($exists === 0) {
         $findings[] = [
             'plugin' => 'forkpress-wp-menu-refs',
             'object' => 'nav_menu_item:' . $row['menu_item_id'],
-            'reason' => 'nav menu item references a missing post object',
+            'reason' => $reason,
             'type' => 'plugin-wp-menu-missing-object',
-            'tables' => ['wp_posts', 'wp_postmeta'],
+            'tables' => $tables,
             'validator' => 'forkpress-wp-menu-refs@1',
             'candidate' => [
                 'menu_item_id' => (int)$row['menu_item_id'],
+                'menu_item_type' => $menu_item_type,
                 'object_type' => $object_type,
                 'missing_object_id' => $object_id,
             ],
@@ -467,10 +486,13 @@ PHP);
 
     $db = open_db($menu_source);
     $db->exec('DELETE FROM wp_posts WHERE ID = 40');
+    $db->exec('DELETE FROM wp_term_taxonomy WHERE term_id = 43');
+    $db->exec('DELETE FROM wp_terms WHERE term_id = 43');
     $db->close();
 
     $db = open_db($menu_target);
     $db->exec("UPDATE wp_posts SET post_title = 'Target menu item still pointing at deleted page' WHERE ID = 41");
+    $db->exec("UPDATE wp_posts SET post_title = 'Target menu item still pointing at deleted category' WHERE ID = 42");
     $db->close();
 
     $menu_result = cow_merge_branch_state(
@@ -487,19 +509,25 @@ PHP);
 
     assert_same($menu_result['status'], 'completed_with_conflicts', 'WordPress menu-reference validator holds missing menu objects for review');
     assert_same((int)($menu_result['plugin_validators'] ?? 0), 1, 'WordPress menu-reference validator is discovered from mu-plugins during merge');
-    assert_same((int)($menu_result['plugin_validator_conflicts'] ?? 0), 1, 'WordPress menu-reference validator records the missing page object');
+    assert_same((int)($menu_result['plugin_validator_conflicts'] ?? 0), 2, 'WordPress menu-reference validator records missing page and taxonomy objects');
     assert_same((int)scalar($menu_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 40'), 0, 'WordPress menu-reference validator leaves the source page deletion staged for review');
+    assert_same((int)scalar($menu_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 43'), 0, 'WordPress menu-reference validator leaves the source term deletion staged for review');
+    assert_same((int)scalar($menu_target, 'SELECT COUNT(*) FROM wp_term_taxonomy WHERE term_id = 43'), 0, 'WordPress menu-reference validator leaves the source taxonomy deletion staged for review');
     assert_same(scalar($menu_target, 'SELECT post_title FROM wp_posts WHERE ID = 41'), 'Target menu item still pointing at deleted page', 'WordPress menu-reference validator preserves the target menu item edit');
+    assert_same(scalar($menu_target, 'SELECT post_title FROM wp_posts WHERE ID = 42'), 'Target menu item still pointing at deleted category', 'WordPress menu-reference validator preserves the taxonomy menu item edit');
 
     $menu_audit = cow_merge_audit_report($menu_metadata, (int)$menu_result['run_id'], 10, [
         'scope' => 'plugin',
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-menu-missing-object',
     ]);
-    assert_same(count($menu_audit['conflicts']), 1, 'WordPress menu-reference validator exposes the missing menu object as a plugin-scoped audit conflict');
-    $menu_preview = (string)($menu_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_same(count($menu_audit['conflicts']), 2, 'WordPress menu-reference validator exposes missing menu objects as plugin-scoped audit conflicts');
+    $menu_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $menu_audit['conflicts']));
     assert_true(str_contains($menu_preview, '"missing_object_id":40'), 'WordPress menu-reference audit includes the missing page ID');
-    assert_true(str_contains($menu_preview, '"object_type":"page"'), 'WordPress menu-reference audit includes the menu object type');
+    assert_true(str_contains($menu_preview, '"object_type":"page"'), 'WordPress menu-reference audit includes the page object type');
+    assert_true(str_contains($menu_preview, '"missing_object_id":43'), 'WordPress menu-reference audit includes the missing term ID');
+    assert_true(str_contains($menu_preview, '"menu_item_type":"taxonomy"'), 'WordPress menu-reference audit includes the taxonomy menu item type');
+    assert_true(str_contains($menu_preview, '"object_type":"category"'), 'WordPress menu-reference audit includes the taxonomy object type');
 
     $featured_base_root = $tmp . '/featured-media-base';
     $featured_source_root = $tmp . '/featured-media-source';
