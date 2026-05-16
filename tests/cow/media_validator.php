@@ -361,6 +361,27 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
                         'generated_file' => $generated_file,
                     ],
                 ];
+            } elseif ($uploads_root !== '') {
+                $declared_generated_filesize = $size['filesize'] ?? null;
+                $actual_generated_filesize = filesize($uploads_root . '/' . $generated_file);
+                if ($declared_generated_filesize !== null && (!is_numeric($declared_generated_filesize) || (int)$declared_generated_filesize !== (int)$actual_generated_filesize)) {
+                    $findings[] = [
+                        'plugin' => 'forkpress-wp-media',
+                        'object' => 'attachment:' . $row['ID'],
+                        'reason' => 'attachment generated size filesize metadata does not match the upload file',
+                        'type' => 'plugin-wp-media-filesize-drift',
+                        'tables' => ['wp_posts', 'wp_postmeta'],
+                        'validator' => 'forkpress-wp-media@1',
+                        'candidate' => [
+                            'attachment_id' => (int)$row['ID'],
+                            'attached_file' => $attached_file,
+                            'size' => (string)$size_name,
+                            'generated_file' => $generated_file,
+                            'declared_filesize' => $declared_generated_filesize,
+                            'actual_filesize' => (int)$actual_generated_filesize,
+                        ],
+                    ];
+                }
             }
             $size_width = $size['width'] ?? null;
             $size_height = $size['height'] ?? null;
@@ -453,6 +474,8 @@ PHP);
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-invalid-metadata.jpg', "source invalid metadata original bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-original-dimensions.jpg', "source invalid original dimensions bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-filesize-drift.jpg', "source filesize drift bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-filesize.jpg', "source generated filesize original bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-filesize-150x150.jpg', "source generated filesize thumb bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-dimensions.jpg', "source invalid generated dimensions original bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-dimensions-150x150.jpg', "source invalid generated dimensions thumb bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-subdir.jpg', "source generated subdir original bytes\n");
@@ -517,6 +540,19 @@ PHP);
         'height' => 480,
         'filesize' => 1,
         'sizes' => [],
+    ]);
+    $generated_filesize_drift_id = insert_attachment($db, 'Source media generated filesize drift', '2026/05/source-generated-filesize.jpg', [
+        'file' => '2026/05/source-generated-filesize.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'source-generated-filesize-150x150.jpg',
+                'width' => 150,
+                'height' => 150,
+                'filesize' => 1,
+            ],
+        ],
     ]);
     $generated_dimensions_id = insert_attachment($db, 'Source media invalid generated dimensions', '2026/05/source-generated-dimensions.jpg', [
         'file' => '2026/05/source-generated-dimensions.jpg',
@@ -630,7 +666,7 @@ PHP);
 
     assert_same($result['status'], 'completed_with_conflicts', 'media validator holds incomplete generated-size metadata for review');
     assert_same((int)($result['plugin_validators'] ?? 0), 1, 'media validator is discovered from mu-plugins during merge');
-    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 18, 'media validator records invalid metadata, dimensions, filesize drift, generated-size, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
+    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 19, 'media validator records invalid metadata, dimensions, filesize drift, generated-size, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
     assert_same(
         scalar($target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-generated-missing-file-key.jpg',
@@ -699,11 +735,24 @@ PHP);
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-media-filesize-drift',
     ]);
-    assert_same(count($filesize_audit['conflicts']), 1, 'media validator exposes original filesize drift as a plugin-scoped audit conflict');
-    $filesize_preview = (string)($filesize_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_same(count($filesize_audit['conflicts']), 2, 'media validator exposes original and generated filesize drift as plugin-scoped audit conflicts');
+    $filesize_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $filesize_audit['conflicts']));
     assert_true(str_contains($filesize_preview, 'source-filesize-drift.jpg'), 'media validator filesize audit includes the affected attachment');
     assert_true(str_contains($filesize_preview, '"declared_filesize":1'), 'media validator filesize audit includes the declared filesize');
     assert_true(str_contains($filesize_preview, (string)$filesize_drift_id), 'media validator filesize audit includes the affected attachment ID');
+    $generated_filesize_recorded = false;
+    $meta_db = open_db($metadata);
+    $payloads = $meta_db->query("SELECT chosen_payload FROM merge_conflicts WHERE conflict_type = 'plugin-wp-media-filesize-drift'");
+    while ($payload = $payloads->fetchArray(SQLITE3_ASSOC)) {
+        $decoded = cow_merge_decode_payload_json((string)$payload['chosen_payload'], 'media validator filesize payload');
+        if (($decoded['candidate']['generated_file'] ?? null) === '2026/05/source-generated-filesize-150x150.jpg') {
+            $generated_filesize_recorded = true;
+        }
+    }
+    $payloads->finalize();
+    $meta_db->close();
+    assert_true($generated_filesize_recorded, 'media validator filesize audit payload identifies the affected generated file');
+    assert_true(str_contains($filesize_preview, (string)$generated_filesize_drift_id), 'media validator filesize audit includes the generated filesize attachment ID');
 
     $generated_dimension_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'plugin',
