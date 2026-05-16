@@ -122,6 +122,8 @@ try {
     $target = $target_root . '/wp-content/database/.ht.sqlite';
     $metadata = $tmp . '/.forkpress/cow/merge/filesystem-metadata.sqlite';
     $file_base = $tmp . '/.forkpress/cow/merge/file-bases/filesystem.json';
+    $unsupported_special_entry_path = 'wp-content/uploads/source-fifo';
+    $has_unsupported_special_entry = false;
 
     mkdir($base_root . '/wp-content/database', 0777, true);
     create_filesystem_db($base);
@@ -155,6 +157,9 @@ try {
     create_test_symlink('self-link.txt', $source_root . '/wp-content/uploads/self-link.txt');
     create_test_symlink('../database/.ht.sqlite', $source_root . '/wp-content/uploads/managed-db-link.txt');
     create_test_symlink('../../../../outside-root.txt', $source_root . '/wp-content/uploads/links/root-escape-link.txt');
+    if (function_exists('posix_mkfifo')) {
+        $has_unsupported_special_entry = @posix_mkfifo($source_root . '/' . $unsupported_special_entry_path, 0600);
+    }
     write_test_file($target_root . '/wp-content/uploads/binary-conflict.bin', "target\0binary conflict\xfe");
     write_test_file($target_root . '/wp-content/uploads/delete-dir-conflict/target-child.txt', 'target delete-dir child');
 
@@ -172,7 +177,11 @@ try {
 
     assert_same($result['status'], 'completed_with_conflicts', 'filesystem merge completes with review conflicts for unsafe source paths and type replacements');
     assert_same($result['file_applied'], 7, 'filesystem merge applies safe text, binary, directory, and symlink changes');
-    assert_same($result['file_conflicts'], 9, 'filesystem merge records binary, unsafe symlink, type replacement, and directory-delete conflicts');
+    assert_same(
+        $result['file_conflicts'],
+        $has_unsupported_special_entry ? 10 : 9,
+        'filesystem merge records binary, unsafe symlink, type replacement, directory-delete, and unsupported-entry conflicts'
+    );
     assert_same(file_get_contents($target_root . '/wp-content/uploads/shared.txt'), 'source shared', 'safe source text file change is applied');
     assert_same(file_get_contents($target_root . '/wp-content/uploads/binary.bin'), "source\0binary\xff", 'safe source binary file change is applied exactly');
     assert_same(file_get_contents($target_root . '/wp-content/uploads/binary-conflict.bin'), "target\0binary conflict\xfe", 'target binary file wins conflicting binary edits before review');
@@ -185,6 +194,12 @@ try {
     assert_true(!file_exists($target_root . '/wp-content/uploads/self-link.txt') && !is_link($target_root . '/wp-content/uploads/self-link.txt'), 'self-referential symlink is not installed on target');
     assert_true(!file_exists($target_root . '/wp-content/uploads/managed-db-link.txt') && !is_link($target_root . '/wp-content/uploads/managed-db-link.txt'), 'managed-path symlink is not installed on target');
     assert_true(!file_exists($target_root . '/wp-content/uploads/links/root-escape-link.txt') && !is_link($target_root . '/wp-content/uploads/links/root-escape-link.txt'), 'root-escaping relative symlink is not installed on target');
+    if ($has_unsupported_special_entry) {
+        assert_true(
+            !file_exists($target_root . '/' . $unsupported_special_entry_path) && !is_link($target_root . '/' . $unsupported_special_entry_path),
+            'unsupported source filesystem entry is not installed on target'
+        );
+    }
     assert_true(is_dir($target_root . '/wp-content/uploads/replace-dir-with-file'), 'directory-to-file replacement keeps the target directory before review');
     assert_same(file_get_contents($target_root . '/wp-content/uploads/replace-dir-with-file/base-child.txt'), 'base child', 'directory-to-file replacement keeps target descendants before review');
     assert_same(file_get_contents($target_root . '/wp-content/uploads/replace-file-with-dir'), 'base file', 'file-to-directory replacement keeps the target file before review');
@@ -206,6 +221,16 @@ try {
         1,
         'filesystem directory deletion with target descendants is auditable'
     );
+    if ($has_unsupported_special_entry) {
+        $unsupported_special_entry_identity = SQLite3::escapeString(cow_merge_file_identity_json($unsupported_special_entry_path));
+        $unsupported_source_payload = SQLite3::escapeString(cow_merge_payload_json(cow_merge_file_path_payload($unsupported_special_entry_path, ['type' => 'special'])));
+        $unsupported_empty_payload = SQLite3::escapeString(cow_merge_payload_json(cow_merge_file_path_payload($unsupported_special_entry_path, null)));
+        assert_same(
+            (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-unsupported-source-change' AND row_identity = '$unsupported_special_entry_identity' AND source_payload = '$unsupported_source_payload' AND target_payload = '$unsupported_empty_payload' AND chosen_payload = '$unsupported_empty_payload'"),
+            1,
+            'unsupported source filesystem entry conflict records source and empty target payloads'
+        );
+    }
     $binary_conflict_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/binary-conflict.bin'));
     $base_entries = cow_merge_file_manifest_for_root($base_root)['entries'];
     $source_entries = cow_merge_file_manifest_for_root($source_root)['entries'];
@@ -282,6 +307,25 @@ try {
         !file_exists($target_root . '/wp-content/uploads/absolute-link.txt') && !is_link($target_root . '/wp-content/uploads/absolute-link.txt'),
         'failed unsafe symlink source resolution still leaves the target clean'
     );
+
+    if ($has_unsupported_special_entry) {
+        $unsupported_special_entry_identity = SQLite3::escapeString(cow_merge_file_identity_json($unsupported_special_entry_path));
+        $unsupported_special_entry_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-unsupported-source-change' AND row_identity = '$unsupported_special_entry_identity' ORDER BY id DESC LIMIT 1");
+        $unsupported_resolution_error = null;
+        try {
+            cow_merge_resolve_conflict($metadata, $unsupported_special_entry_conflict_id, 'source', true, 'Try applying unsupported source filesystem entry.', 'cow-test');
+        } catch (Throwable $e) {
+            $unsupported_resolution_error = $e->getMessage();
+        }
+        assert_true(
+            is_string($unsupported_resolution_error) && str_contains($unsupported_resolution_error, 'cannot apply source filesystem conflict wp-content/uploads/source-fifo (file-unsupported-source-change): source changed a filesystem path whose type cannot be applied automatically'),
+            'reviewed source resolution cannot force-apply an unsupported filesystem entry'
+        );
+        assert_true(
+            !file_exists($target_root . '/' . $unsupported_special_entry_path) && !is_link($target_root . '/' . $unsupported_special_entry_path),
+            'failed unsupported-entry source resolution still leaves the target clean'
+        );
+    }
 
     $delete_dir_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'files',
