@@ -103,6 +103,22 @@ function insert_attachment(SQLite3 $db, string $title, string $attached_file, ar
     return $attachment_id;
 }
 
+function insert_attachment_raw_metadata(SQLite3 $db, string $title, string $attached_file, string $metadata): int {
+    $stmt = $db->prepare("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, guid) VALUES (:title, '', 'inherit', 'attachment', :guid)");
+    $stmt->bindValue(':title', $title, SQLITE3_TEXT);
+    $stmt->bindValue(':guid', 'wp-content/uploads/' . $attached_file, SQLITE3_TEXT);
+    $stmt->execute();
+    $attachment_id = (int)$db->lastInsertRowID();
+
+    $meta_stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', :file), (:post_id, '_wp_attachment_metadata', :metadata)");
+    $meta_stmt->bindValue(':post_id', $attachment_id, SQLITE3_INTEGER);
+    $meta_stmt->bindValue(':file', $attached_file, SQLITE3_TEXT);
+    $meta_stmt->bindValue(':metadata', $metadata, SQLITE3_TEXT);
+    $meta_stmt->execute();
+
+    return $attachment_id;
+}
+
 define('FORKPRESS_COW_MERGE_TESTS', true);
 require_once __DIR__ . '/../../scripts/cow/merge.php';
 
@@ -145,6 +161,17 @@ $unsafe_upload_path = static function (string $relative_file): bool {
 while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
     $metadata = @unserialize((string)$row['metadata']);
     if (!is_array($metadata)) {
+        $findings[] = [
+            'plugin' => 'forkpress-wp-media',
+            'object' => 'attachment:' . $row['ID'],
+            'reason' => 'attachment metadata is not readable serialized media metadata',
+            'type' => 'plugin-wp-media-invalid-metadata',
+            'tables' => ['wp_posts', 'wp_postmeta'],
+            'validator' => 'forkpress-wp-media@1',
+            'candidate' => [
+                'attached_file' => (string)$row['attached_file'],
+            ],
+        ];
         continue;
     }
     $attached_file = (string)$row['attached_file'];
@@ -281,6 +308,7 @@ PHP);
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-duplicate-shared-150x150.jpg', "source duplicate shared generated size\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-duplicate-original.jpg', "source duplicate shared original\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-unsafe-generated.jpg', "source unsafe generated original bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-invalid-metadata.jpg', "source invalid metadata original bytes\n");
     $db = open_db($source);
     $attachment_id = insert_attachment($db, 'Source media generated missing file key', '2026/05/source-generated-missing-file-key.jpg', [
         'file' => '2026/05/source-generated-missing-file-key.jpg',
@@ -371,6 +399,12 @@ PHP);
         'height' => 480,
         'sizes' => [],
     ]);
+    $invalid_metadata_id = insert_attachment_raw_metadata(
+        $db,
+        'Source media invalid serialized metadata',
+        '2026/05/source-invalid-metadata.jpg',
+        'not serialized attachment metadata'
+    );
     $db->close();
 
     $result = cow_merge_branch_state(
@@ -387,7 +421,7 @@ PHP);
 
     assert_same($result['status'], 'completed_with_conflicts', 'media validator holds incomplete generated-size metadata for review');
     assert_same((int)($result['plugin_validators'] ?? 0), 1, 'media validator is discovered from mu-plugins during merge');
-    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 8, 'media validator records generated-size, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
+    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 9, 'media validator records invalid metadata, generated-size, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
     assert_same(
         scalar($target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-generated-missing-file-key.jpg',
@@ -406,6 +440,16 @@ PHP);
         'media validator leaves mismatched attached-file metadata available for review'
     );
     assert_true(is_file($target_root . '/wp-content/uploads/2026/05/source-metadata-file-mismatch-attached.jpg'), 'media validator keeps mismatched attached file for review');
+
+    $invalid_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-media-invalid-metadata',
+    ]);
+    assert_same(count($invalid_audit['conflicts']), 1, 'media validator exposes invalid serialized attachment metadata as a plugin-scoped audit conflict');
+    $invalid_preview = (string)($invalid_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_true(str_contains($invalid_preview, 'source-invalid-metadata.jpg'), 'media validator invalid-metadata audit includes the affected attachment');
+    assert_true(str_contains($invalid_preview, (string)$invalid_metadata_id), 'media validator invalid-metadata audit includes the affected attachment ID');
 
     $audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'plugin',
