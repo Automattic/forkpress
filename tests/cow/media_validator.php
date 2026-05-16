@@ -279,6 +279,7 @@ PHP);
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-duplicate-a.jpg', "source duplicate original a\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-duplicate-b.jpg', "source duplicate original b\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-duplicate-shared-150x150.jpg', "source duplicate shared generated size\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-duplicate-original.jpg', "source duplicate shared original\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-unsafe-generated.jpg', "source unsafe generated original bytes\n");
     $db = open_db($source);
     $attachment_id = insert_attachment($db, 'Source media generated missing file key', '2026/05/source-generated-missing-file-key.jpg', [
@@ -340,6 +341,18 @@ PHP);
             ],
         ],
     ]);
+    $duplicate_original_a_id = insert_attachment($db, 'Source media duplicate original file A', '2026/05/source-duplicate-original.jpg', [
+        'file' => '2026/05/source-duplicate-original.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [],
+    ]);
+    $duplicate_original_b_id = insert_attachment($db, 'Source media duplicate original file B', '2026/05/source-duplicate-original.jpg', [
+        'file' => '2026/05/source-duplicate-original.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [],
+    ]);
     $unsafe_generated_id = insert_attachment($db, 'Source media unsafe generated path', '2026/05/source-unsafe-generated.jpg', [
         'file' => '2026/05/source-unsafe-generated.jpg',
         'width' => 640,
@@ -374,7 +387,7 @@ PHP);
 
     assert_same($result['status'], 'completed_with_conflicts', 'media validator holds incomplete generated-size metadata for review');
     assert_same((int)($result['plugin_validators'] ?? 0), 1, 'media validator is discovered from mu-plugins during merge');
-    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 7, 'media validator records generated-size, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
+    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 8, 'media validator records generated-size, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
     assert_same(
         scalar($target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-generated-missing-file-key.jpg',
@@ -449,13 +462,16 @@ PHP);
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-media-duplicate-file',
     ]);
-    assert_same(count($duplicate_audit['conflicts']), 2, 'media validator exposes duplicate upload ownership as plugin-scoped audit conflicts');
+    assert_same(count($duplicate_audit['conflicts']), 3, 'media validator exposes duplicate original and generated upload ownership as plugin-scoped audit conflicts');
     $duplicate_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $duplicate_audit['conflicts']));
     assert_true(str_contains($duplicate_preview, 'source-self-duplicate.jpg'), 'media validator duplicate audit includes the same-attachment duplicate filename');
     assert_true(str_contains($duplicate_preview, (string)$self_duplicate_id), 'media validator duplicate audit includes the same-attachment duplicate ID');
     assert_true(str_contains($duplicate_preview, 'source-duplicate-shared-150x150.jpg'), 'media validator duplicate audit includes the shared generated filename');
     assert_true(str_contains($duplicate_preview, (string)$duplicate_a_id), 'media validator duplicate audit includes the first shared generated attachment ID');
     assert_true(str_contains($duplicate_preview, (string)$duplicate_b_id), 'media validator duplicate audit includes the second shared generated attachment ID');
+    assert_true(str_contains($duplicate_preview, 'source-duplicate-original.jpg'), 'media validator duplicate audit includes the shared original filename');
+    assert_true(str_contains($duplicate_preview, (string)$duplicate_original_a_id), 'media validator duplicate audit includes the first shared original attachment ID');
+    assert_true(str_contains($duplicate_preview, (string)$duplicate_original_b_id), 'media validator duplicate audit includes the second shared original attachment ID');
 } finally {
     remove_tree($tmp);
 }
