@@ -78,6 +78,43 @@ function smoke_insert_postmeta(SQLite3 $db, int $id, int $post_id, string $key, 
     $stmt->execute();
 }
 
+function smoke_insert_user(SQLite3 $db, int $id, string $login, string $email, string $display_name): void {
+    $stmt = $db->prepare('INSERT INTO wp_users (ID, user_login, user_email, display_name) VALUES (:id, :login, :email, :display_name)');
+    $stmt->bindValue(':id', $id, SQLITE3_INTEGER);
+    $stmt->bindValue(':login', $login, SQLITE3_TEXT);
+    $stmt->bindValue(':email', $email, SQLITE3_TEXT);
+    $stmt->bindValue(':display_name', $display_name, SQLITE3_TEXT);
+    $stmt->execute();
+}
+
+function smoke_insert_usermeta(SQLite3 $db, int $id, int $user_id, string $key, string $value): void {
+    $stmt = $db->prepare('INSERT INTO wp_usermeta (umeta_id, user_id, meta_key, meta_value) VALUES (:id, :user_id, :key, :value)');
+    $stmt->bindValue(':id', $id, SQLITE3_INTEGER);
+    $stmt->bindValue(':user_id', $user_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':key', $key, SQLITE3_TEXT);
+    $stmt->bindValue(':value', $value, SQLITE3_TEXT);
+    $stmt->execute();
+}
+
+function smoke_insert_comment(SQLite3 $db, int $id, int $post_id, int $user_id, string $author, string $content): void {
+    $stmt = $db->prepare('INSERT INTO wp_comments (comment_ID, comment_post_ID, user_id, comment_author, comment_content) VALUES (:id, :post_id, :user_id, :author, :content)');
+    $stmt->bindValue(':id', $id, SQLITE3_INTEGER);
+    $stmt->bindValue(':post_id', $post_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':user_id', $user_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':author', $author, SQLITE3_TEXT);
+    $stmt->bindValue(':content', $content, SQLITE3_TEXT);
+    $stmt->execute();
+}
+
+function smoke_insert_commentmeta(SQLite3 $db, int $id, int $comment_id, string $key, string $value): void {
+    $stmt = $db->prepare('INSERT INTO wp_commentmeta (meta_id, comment_id, meta_key, meta_value) VALUES (:id, :comment_id, :key, :value)');
+    $stmt->bindValue(':id', $id, SQLITE3_INTEGER);
+    $stmt->bindValue(':comment_id', $comment_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':key', $key, SQLITE3_TEXT);
+    $stmt->bindValue(':value', $value, SQLITE3_TEXT);
+    $stmt->execute();
+}
+
 function smoke_insert_post(
     SQLite3 $db,
     int $id,
@@ -146,6 +183,32 @@ function smoke_create_posts_db(string $path): void {
         option_name TEXT NOT NULL UNIQUE,
         option_value TEXT NOT NULL,
         autoload TEXT NOT NULL DEFAULT 'yes'
+    )");
+    $db->exec("CREATE TABLE wp_users (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_login TEXT NOT NULL DEFAULT '',
+        user_email TEXT NOT NULL DEFAULT '',
+        display_name TEXT NOT NULL DEFAULT ''
+    )");
+    $db->exec("CREATE TABLE wp_usermeta (
+        umeta_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        meta_key TEXT NOT NULL,
+        meta_value TEXT NOT NULL
+    )");
+    $db->exec("CREATE TABLE wp_comments (
+        comment_ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        comment_post_ID INTEGER NOT NULL,
+        user_id INTEGER NOT NULL DEFAULT 0,
+        comment_author TEXT NOT NULL DEFAULT '',
+        comment_content TEXT NOT NULL DEFAULT '',
+        comment_parent INTEGER NOT NULL DEFAULT 0
+    )");
+    $db->exec("CREATE TABLE wp_commentmeta (
+        meta_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        comment_id INTEGER NOT NULL,
+        meta_key TEXT NOT NULL,
+        meta_value TEXT NOT NULL
     )");
     $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
         (1, 'Base Page', 'Base content', 'publish', 'page', 'base-page')");
@@ -457,6 +520,61 @@ try {
         (int)smoke_scalar($postmeta_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_postmeta' AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
         1,
         'page-plus-postmeta smoke merge audits the target metadata insert'
+    );
+
+    $comment_base = $tmp . '/comment-base.sqlite';
+    $comment_source = $tmp . '/comment-source.sqlite';
+    $comment_target = $tmp . '/comment-target.sqlite';
+    $comment_metadata = $tmp . '/.forkpress/cow/merge/comment-metadata.sqlite';
+
+    smoke_create_posts_db($comment_base);
+    copy($comment_base, $comment_source);
+    copy($comment_base, $comment_target);
+
+    $db = smoke_open_db($comment_source);
+    smoke_insert_post($db, 18000070, 'Branch Page With Comment', 'Branch comment content', 'page', 'branch-page-with-comment');
+    smoke_insert_user($db, 18000071, 'branch-commenter', 'branch-commenter@example.test', 'Branch Commenter');
+    smoke_insert_usermeta($db, 18000072, 18000071, 'forkpress_smoke_profile', '{"branch":"source","user_id":18000071}');
+    smoke_insert_comment($db, 18000073, 18000070, 18000071, 'Branch Commenter', 'Branch comment body');
+    smoke_insert_commentmeta($db, 18000074, 18000073, 'forkpress_smoke_comment_ref', '{"branch":"source","comment_id":18000073,"user_id":18000071,"post_id":18000070}');
+    $db->close();
+
+    $db = smoke_open_db($comment_target);
+    smoke_insert_post($db, 19000070, 'Main Page With Comment', 'Main comment content', 'page', 'main-page-with-comment');
+    smoke_insert_user($db, 19000071, 'main-commenter', 'main-commenter@example.test', 'Main Commenter');
+    smoke_insert_usermeta($db, 19000072, 19000071, 'forkpress_smoke_profile', '{"branch":"target","user_id":19000071}');
+    smoke_insert_comment($db, 19000073, 19000070, 19000071, 'Main Commenter', 'Main comment body');
+    smoke_insert_commentmeta($db, 19000074, 19000073, 'forkpress_smoke_comment_ref', '{"branch":"target","comment_id":19000073,"user_id":19000071,"post_id":19000070}');
+    $db->close();
+
+    $comment_result = cow_merge_databases($comment_base, $comment_source, $comment_target, $comment_metadata, 'feature-smoke-page-comment', 'main');
+    assert_same($comment_result['status'], 'completed', 'branch and main page-plus-comment inserts complete cleanly');
+    assert_same((int)($comment_result['conflicts'] ?? -1), 0, 'branch and main page-plus-comment inserts do not create merge conflicts');
+    assert_same(smoke_scalar($comment_target, 'SELECT post_title FROM wp_posts WHERE ID = 18000070'), 'Branch Page With Comment', 'merged target includes the branch comment page');
+    assert_same(smoke_scalar($comment_target, 'SELECT user_login FROM wp_users WHERE ID = 18000071'), 'branch-commenter', 'merged target includes the branch comment author');
+    assert_same(smoke_scalar($comment_target, 'SELECT meta_value FROM wp_usermeta WHERE umeta_id = 18000072'), '{"branch":"source","user_id":18000071}', 'merged target includes branch user metadata with its source user ID reference');
+    assert_same(smoke_scalar($comment_target, 'SELECT comment_content FROM wp_comments WHERE comment_ID = 18000073'), 'Branch comment body', 'merged target includes the branch comment');
+    assert_same((int)smoke_scalar($comment_target, 'SELECT comment_post_ID FROM wp_comments WHERE comment_ID = 18000073'), 18000070, 'merged target keeps the branch comment page reference');
+    assert_same((int)smoke_scalar($comment_target, 'SELECT user_id FROM wp_comments WHERE comment_ID = 18000073'), 18000071, 'merged target keeps the branch comment author reference');
+    assert_same(smoke_scalar($comment_target, 'SELECT meta_value FROM wp_commentmeta WHERE meta_id = 18000074'), '{"branch":"source","comment_id":18000073,"user_id":18000071,"post_id":18000070}', 'merged target includes branch comment metadata with source graph references');
+    assert_same(smoke_scalar($comment_target, 'SELECT post_title FROM wp_posts WHERE ID = 19000070'), 'Main Page With Comment', 'merged target preserves the main comment page');
+    assert_same(smoke_scalar($comment_target, 'SELECT user_login FROM wp_users WHERE ID = 19000071'), 'main-commenter', 'merged target preserves the main comment author');
+    assert_same(smoke_scalar($comment_target, 'SELECT comment_content FROM wp_comments WHERE comment_ID = 19000073'), 'Main comment body', 'merged target preserves the main comment');
+    assert_same(smoke_scalar($comment_target, 'SELECT meta_value FROM wp_commentmeta WHERE meta_id = 19000074'), '{"branch":"target","comment_id":19000073,"user_id":19000071,"post_id":19000070}', 'merged target preserves target comment metadata with target graph references');
+    assert_same(
+        (int)smoke_scalar($comment_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name IN ('wp_posts', 'wp_users', 'wp_usermeta', 'wp_comments', 'wp_commentmeta')"),
+        0,
+        'page-plus-comment smoke merge records no WordPress graph conflicts'
+    );
+    assert_same(
+        (int)smoke_scalar($comment_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_users', 'wp_usermeta', 'wp_comments', 'wp_commentmeta') AND decision = 'source-applied'"),
+        5,
+        'page-plus-comment smoke merge audits all source graph inserts'
+    );
+    assert_same(
+        (int)smoke_scalar($comment_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_users', 'wp_usermeta', 'wp_comments', 'wp_commentmeta') AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
+        5,
+        'page-plus-comment smoke merge audits all target graph inserts'
     );
 
     $taxonomy_base = $tmp . '/taxonomy-base.sqlite';
