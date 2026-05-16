@@ -41,6 +41,10 @@ The command does not mutate the target branch. It only writes review metadata in
 the merge metadata database. Fresh reviewed conflicts stay reviewed. Stale or
 errored reviewed conflicts are reopened as `needs-action` with a note that
 preserves the prior reviewer, status, and note text.
+The same transition is also recorded in `merge_conflict_events` as a
+`revalidation-required` event linked to the `merge_revalidations` row, so
+`merge-audit --records conflict-events` can reconstruct the reviewed ->
+needs-action lifecycle without inferring it from summary fields.
 
 Each recorded revalidation now includes a conservative `revalidation_class`.
 Database row/cell and filesystem conflicts are classified as `unchanged`,
