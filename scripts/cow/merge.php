@@ -647,6 +647,37 @@ function cow_merge_normalize_source_table_restore_payload(mixed $payload): array
     return $normalized;
 }
 
+function cow_merge_source_table_rebuild_payload(SQLite3 $db, string $table, ?string $table_sql): mixed {
+    if ($table_sql === null) {
+        return null;
+    }
+    $dependent_views = cow_merge_table_dependent_views($db, $table);
+    return [
+        'table_sql' => $table_sql,
+        'rebuild_dependencies' => cow_merge_table_rebuild_dependencies($db, $table),
+        'dependent_views' => $dependent_views,
+        'dependent_view_triggers' => cow_merge_view_trigger_dependencies($db, $dependent_views),
+    ];
+}
+
+function cow_merge_schema_table_payload_sql(mixed $payload): ?string {
+    if ($payload === null || is_string($payload)) {
+        return $payload;
+    }
+    if (is_array($payload) && array_key_exists('table_sql', $payload)) {
+        $sql = $payload['table_sql'];
+        return is_string($sql) ? $sql : null;
+    }
+    return null;
+}
+
+function cow_merge_schema_table_payload_fresh(mixed $current_payload, ?string $current_sql, mixed $expected_payload): bool {
+    if (is_array($expected_payload) && array_key_exists('table_sql', $expected_payload)) {
+        return cow_merge_values_equal($current_payload, $expected_payload);
+    }
+    return cow_merge_values_equal($current_sql, cow_merge_schema_table_payload_sql($expected_payload));
+}
+
 function cow_merge_has_schema_conflict_for_object(SQLite3 $meta, int $run_id, string $table, string $object, array $types): bool {
     $stmt = cow_merge_prepare_checked(
         $meta,
@@ -9926,16 +9957,17 @@ function cow_merge_resolve_schema_conflict(
                 if ($conflict_type !== 'schema-conflict' || $object !== '') {
                     throw new InvalidArgumentException('source schema resolution currently supports source-added columns/indexes/views/triggers, index/view/trigger rewrites or drops, source/target table drops with validation, and compatible table rebuilds only');
                 }
-                if (!is_string($source_payload)) {
+                $source_table_sql = cow_merge_schema_table_payload_sql($source_payload);
+                if (!is_string($source_table_sql)) {
                     throw new RuntimeException("schema conflict #$conflict_id does not contain a source table SQL payload");
                 }
                 $current_source_sql = cow_merge_table_sql($source, $table);
-                if (!cow_merge_values_equal($current_source_sql, $source_payload)) {
+                if (!cow_merge_values_equal($current_source_sql, $source_table_sql)) {
                     throw new RuntimeException('source table schema no longer matches the audited conflict source value; rerun merge before resolving');
                 }
                 $current_target_sql = cow_merge_table_sql($target, $table);
                 $previous = $current_target_sql;
-                if (!cow_merge_values_equal($current_target_sql, $target_payload)) {
+                if (!cow_merge_values_equal($current_target_sql, cow_merge_schema_table_payload_sql($target_payload))) {
                     throw new RuntimeException('target table schema no longer matches the audited conflict target value; rerun merge-audit before resolving');
                 }
                 $source_columns = cow_merge_table_info($source, $table);
@@ -9943,19 +9975,22 @@ function cow_merge_resolve_schema_conflict(
                 if (!cow_merge_table_rebuild_supported($source_columns, $target_columns)) {
                     throw new InvalidArgumentException('source schema resolution can only rebuild tables with the same column order and unchanged primary key columns');
                 }
-                $resolved = $source_payload;
+                $resolved = $source_table_sql;
                 $target_branch = (string)$conflict['target_branch'];
-                $validate_source = function () use ($target, $table, $source_payload, $source_columns, $target_columns): void {
-                    cow_merge_validate_source_table_rebuild($target, $table, $source_payload, $source_columns, $target_columns);
+                $validate_source = function () use ($target, $table, $source_table_sql, $source_columns, $target_columns): void {
+                    cow_merge_validate_source_table_rebuild($target, $table, $source_table_sql, $source_columns, $target_columns);
                 };
-                $apply_source = function () use ($target, $meta, $conflict, $target_branch, $table, $source_payload, $source_columns, $target_columns): void {
-                    cow_merge_apply_source_table_rebuild($target, $table, $source_payload, $source_columns, $target_columns);
+                $apply_source = function () use ($target, $meta, $conflict, $target_branch, $table, $source_table_sql, $source_columns, $target_columns): void {
+                    cow_merge_apply_source_table_rebuild($target, $table, $source_table_sql, $source_columns, $target_columns);
                     cow_merge_refresh_table_row_identities($target, $meta, (int)$conflict['run_id'], $target_branch, $table);
                 };
             } else {
                 $current_target_sql = $object === '' ? cow_merge_table_sql($target, $table) : cow_merge_index_sql($target, $object);
                 $previous = $current_target_sql;
-                if (!cow_merge_values_equal($current_target_sql, $target_payload)) {
+                $target_fresh = $object === ''
+                    ? cow_merge_values_equal($current_target_sql, cow_merge_schema_table_payload_sql($target_payload))
+                    : cow_merge_values_equal($current_target_sql, $target_payload);
+                if (!$target_fresh) {
                     throw new RuntimeException('target schema no longer matches the audited conflict target value; rerun merge-audit before resolving');
                 }
             }
@@ -11522,14 +11557,16 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
                 try {
                     $current_source_sql = cow_merge_table_sql($source, $table);
                     $current_target_sql = cow_merge_table_sql($target, $table);
+                    $current_source_table_payload = cow_merge_source_table_rebuild_payload($source, $table, $current_source_sql);
+                    $current_target_table_payload = cow_merge_source_table_rebuild_payload($target, $table, $current_target_sql);
                 } finally {
                     $source->close();
                     $target->close();
                 }
-                $source_fresh = cow_merge_values_equal($current_source_sql, $source_payload);
-                $target_fresh = cow_merge_values_equal($current_target_sql, $target_payload);
-                $current_source_payload = cow_merge_payload_json($current_source_sql);
-                $current_target_payload = cow_merge_payload_json($current_target_sql);
+                $source_fresh = cow_merge_schema_table_payload_fresh($current_source_table_payload, $current_source_sql, $source_payload);
+                $target_fresh = cow_merge_schema_table_payload_fresh($current_target_table_payload, $current_target_sql, $target_payload);
+                $current_source_payload = cow_merge_payload_json($current_source_table_payload);
+                $current_target_payload = cow_merge_payload_json($current_target_table_payload);
                 if ($source_fresh && $target_fresh) {
                     return [
                         'stale_status' => 'fresh',
@@ -12659,6 +12696,8 @@ function cow_merge_apply_safe_table_schema_changes(
     string $target_sql
 ): array {
     if ($base_sql === null) {
+        $source_payload = cow_merge_source_table_rebuild_payload($source, $table, $source_sql);
+        $target_payload = cow_merge_source_table_rebuild_payload($target, $table, $target_sql);
         $active = cow_merge_record_schema_conflict(
             $meta,
             $run_id,
@@ -12666,9 +12705,9 @@ function cow_merge_apply_safe_table_schema_changes(
             null,
             'schema-conflict',
             null,
-            $source_sql,
-            $target_sql,
-            $target_sql,
+            $source_payload,
+            $target_payload,
+            $target_payload,
             'source and target independently added incompatible table schemas'
         );
         return cow_merge_schema_conflict_result($active);
@@ -12681,6 +12720,8 @@ function cow_merge_apply_safe_table_schema_changes(
         !cow_merge_base_column_prefix_unchanged($base_columns, $source_columns) ||
         !cow_merge_base_column_prefix_unchanged($base_columns, $target_columns)
     ) {
+        $source_payload = cow_merge_source_table_rebuild_payload($source, $table, $source_sql);
+        $target_payload = cow_merge_source_table_rebuild_payload($target, $table, $target_sql);
         $active = cow_merge_record_schema_conflict(
             $meta,
             $run_id,
@@ -12688,9 +12729,9 @@ function cow_merge_apply_safe_table_schema_changes(
             null,
             'schema-conflict',
             $base_sql,
-            $source_sql,
-            $target_sql,
-            $target_sql,
+            $source_payload,
+            $target_payload,
+            $target_payload,
             'source or target changed existing table columns; only appended columns can be merged automatically'
         );
         return cow_merge_schema_conflict_result($active);

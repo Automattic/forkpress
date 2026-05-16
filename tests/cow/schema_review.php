@@ -811,6 +811,8 @@ try {
     $source_db->exec('INSERT INTO plugin_rebuild_revalidate_new (id, value) SELECT id, value FROM plugin_rebuild_revalidate');
     $source_db->exec('DROP TABLE plugin_rebuild_revalidate');
     $source_db->exec('ALTER TABLE plugin_rebuild_revalidate_new RENAME TO plugin_rebuild_revalidate');
+    $source_db->exec('CREATE INDEX plugin_rebuild_revalidate_value_idx ON plugin_rebuild_revalidate(value)');
+    $source_db->exec('CREATE TRIGGER plugin_rebuild_revalidate_noop AFTER INSERT ON plugin_rebuild_revalidate BEGIN SELECT NEW.value; END');
     $source_db->close();
 
     $target_db = open_db($table_rebuild_revalidate_target);
@@ -842,16 +844,16 @@ try {
     );
 
     $source_db = open_db($table_rebuild_revalidate_source);
-    $source_db->exec('CREATE TABLE plugin_rebuild_revalidate_new (id INTEGER PRIMARY KEY, value NUMERIC)');
-    $source_db->exec('INSERT INTO plugin_rebuild_revalidate_new (id, value) SELECT id, value FROM plugin_rebuild_revalidate');
-    $source_db->exec('DROP TABLE plugin_rebuild_revalidate');
-    $source_db->exec('ALTER TABLE plugin_rebuild_revalidate_new RENAME TO plugin_rebuild_revalidate');
+    $source_db->exec('DROP INDEX plugin_rebuild_revalidate_value_idx');
+    $source_db->exec('CREATE INDEX plugin_rebuild_revalidate_value_idx ON plugin_rebuild_revalidate(value + 0)');
+    $source_db->exec('DROP TRIGGER plugin_rebuild_revalidate_noop');
+    $source_db->exec('CREATE TRIGGER plugin_rebuild_revalidate_noop AFTER INSERT ON plugin_rebuild_revalidate BEGIN SELECT NEW.id; END');
     $source_db->close();
 
     $table_rebuild_revalidated = cow_merge_revalidate_reviewed_conflicts($table_rebuild_revalidate_metadata, $table_rebuild_revalidate_run_id, 'cow-revalidate');
     assert_same($table_rebuild_revalidated['checked'], 1, 'schema table rebuild revalidation checks the reviewed conflict');
     assert_same($table_rebuild_revalidated['reviewed'], 1, 'schema table rebuild revalidation sees the reviewed conflict');
-    assert_same($table_rebuild_revalidated['stale'], 1, 'schema table rebuild revalidation detects changed source table SQL');
+    assert_same($table_rebuild_revalidated['stale'], 1, 'schema table rebuild revalidation detects changed source dependency SQL');
     assert_same($table_rebuild_revalidated['carried'], 1, 'schema table rebuild revalidation carries changed source evidence to needs-action');
     assert_same(
         scalar($table_rebuild_revalidate_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $table_rebuild_revalidate_conflict_id ORDER BY id DESC LIMIT 1"),
@@ -859,16 +861,21 @@ try {
         'schema table rebuild source drift remains unclassified until a schema planner proves compatibility'
     );
     assert_true(
-        str_contains((string)scalar($table_rebuild_revalidate_metadata, "SELECT stale_reason FROM merge_revalidations WHERE conflict_id = $table_rebuild_revalidate_conflict_id ORDER BY id DESC LIMIT 1"), 'source changed'),
-        'schema table rebuild source drift explains that source schema changed after review'
+        str_contains((string)scalar($table_rebuild_revalidate_metadata, "SELECT stale_reason FROM merge_revalidations WHERE conflict_id = $table_rebuild_revalidate_conflict_id ORDER BY id DESC LIMIT 1"), 'source and target changed'),
+        'schema table rebuild source drift explains that source rebuild evidence changed after review'
     );
     $table_rebuild_revalidate_source_sql = cow_merge_decode_payload_json(
         (string)scalar($table_rebuild_revalidate_metadata, "SELECT source_payload FROM merge_revalidations WHERE conflict_id = $table_rebuild_revalidate_conflict_id ORDER BY id DESC LIMIT 1"),
         'schema table rebuild revalidation source'
     );
     assert_true(
-        str_contains((string)$table_rebuild_revalidate_source_sql, 'value NUMERIC'),
-        'schema table rebuild revalidation records the updated source table SQL'
+        str_contains((string)($table_rebuild_revalidate_source_sql['table_sql'] ?? ''), 'value INTEGER'),
+        'schema table rebuild revalidation records the unchanged source table SQL'
+    );
+    assert_true(
+        str_contains((string)json_encode($table_rebuild_revalidate_source_sql), 'value + 0') &&
+            str_contains((string)json_encode($table_rebuild_revalidate_source_sql), 'SELECT NEW.id'),
+        'schema table rebuild revalidation records changed source dependency SQL'
     );
     $table_rebuild_revalidate_audit = cow_merge_audit_report($table_rebuild_revalidate_metadata, $table_rebuild_revalidate_run_id, 10, [
         'records' => 'conflicts',
@@ -946,7 +953,7 @@ try {
         'schema table rebuild target drift payload'
     );
     assert_true(
-        str_contains((string)$table_rebuild_target_drift_payload, 'value BLOB'),
+        str_contains((string)($table_rebuild_target_drift_payload['table_sql'] ?? ''), 'value BLOB'),
         'schema table rebuild target drift records the current target table SQL'
     );
 
