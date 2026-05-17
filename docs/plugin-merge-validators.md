@@ -83,11 +83,14 @@ summarize plugin conflict queues with `merge-audit --scope plugin --group-by plu
 attach review notes. Plugin audit records expose validator metadata as
 structured fields (`plugin`, `plugin_object`, `plugin_tables`,
 `plugin_files`, `plugin_validator`, `plugin_severity`,
-`plugin_logical_identity`, and review guidance fields) so UI/API consumers do
-not need to scrape payload previews.
+`plugin_logical_identity`, `semantic_scope`, and review guidance fields) so
+UI/API consumers do not need to scrape payload previews. ForkPress tags
+built-in WordPress semantic validators whose plugin id starts with
+`forkpress-wp-` as `semantic_scope = wordpress`; other plugin validator
+findings default to `semantic_scope = plugin`.
 The same first-class fields are filterable with `merge-audit --plugin <name>`,
 `--plugin-object <object>`, `--plugin-severity <severity>`, and
-`--plugin-logical-identity <json>`.
+`--plugin-logical-identity <json>`, plus `--semantic-scope wordpress|plugin`.
 Text audit output prints the same plugin identity, owned table/file, logical
 identity, and review-guidance evidence for CLI reviewers.
 Plugin conflict-event records inherit the same fields, so UI queues can render

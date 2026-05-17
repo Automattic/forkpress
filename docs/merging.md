@@ -62,8 +62,8 @@ Useful filters include `--run`, `--scope all|db|files|plugin`,
 `--resolution-choice source|target`, `--blocked-resolution-choice source|target`,
 `--resolution-strategy manual-review|plugin-validator|schema-choice|file-choice|row-choice|cell-choice`,
 `--generic-resolver yes|no`, `--after-revalidate supported|unsupported`,
-`--plugin-logical-identity <json>`, `--group-by`, `--target-kept`, `--path`,
-and `--path-prefix`.
+`--plugin-logical-identity <json>`, `--semantic-scope wordpress|plugin`,
+`--group-by`, `--target-kept`, `--path`, and `--path-prefix`.
 
 `--revalidation-class` filters by what the latest revalidation found when it
 ran. `--latest-revalidation-status` checks whether that latest recorded

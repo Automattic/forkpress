@@ -23,7 +23,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "  php merge.php recover-crash --metadata-db <path> [--run ID] [--restore-target-db] [--restore-files] [--format text|json]\n");
     fwrite(STDERR, "  php merge.php audit --metadata-db <path> [--format text|json] [--limit N] [--run ID]\n");
     fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|conflict-events|decisions|resolutions|rollback-failures|crash-recovery] [--path <path>] [--path-prefix <prefix>]\n");
-    fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|conflict-events|decisions|resolutions|rollback-failures|crash-recovery] [--conflict-type TYPE] [--conflict-id ID] [--conflict-key KEY] [--event-type TYPE] [--plugin NAME] [--plugin-object OBJECT] [--plugin-severity SEVERITY] [--plugin-logical-identity JSON] [--decision DECISION]\n");
+    fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|conflict-events|decisions|resolutions|rollback-failures|crash-recovery] [--conflict-type TYPE] [--conflict-id ID] [--conflict-key KEY] [--event-type TYPE] [--plugin NAME] [--plugin-object OBJECT] [--plugin-severity SEVERITY] [--plugin-logical-identity JSON] [--semantic-scope wordpress|plugin] [--decision DECISION]\n");
     fwrite(STDERR, "    [--id-band-skips] [--target-kept] [--review] [--review-status unreviewed|pending|needs-action|reviewed] [--lifecycle-state unreviewed|deferred|needs-action|reviewed|validated|resolved]\n");
     fwrite(STDERR, "    [--next-action review|run-plugin-validator|wait|revalidate|resolve|apply-reviewed-choice|manual-review|none]\n");
     fwrite(STDERR, "    [--resolution-choice source|target|plugin-driver] [--blocked-resolution-choice source|target] [--resolution-strategy STRATEGY] [--generic-resolver yes|no] [--after-revalidate supported|unsupported]\n");
@@ -7404,6 +7404,23 @@ function cow_merge_plugin_validator_logical_identity(array $finding): mixed {
     return $value;
 }
 
+function cow_merge_plugin_validator_semantic_scope(array $finding, string $plugin): string {
+    if (array_key_exists('semantic_scope', $finding)) {
+        if (!is_string($finding['semantic_scope'])) {
+            throw new InvalidArgumentException('plugin validator semantic_scope must be a string');
+        }
+        $scope = trim((string)$finding['semantic_scope']);
+        if ($scope === '') {
+            throw new InvalidArgumentException('plugin validator semantic_scope must not be empty');
+        }
+        if (!in_array($scope, ['wordpress', 'plugin'], true)) {
+            throw new InvalidArgumentException('plugin validator semantic_scope must be wordpress or plugin');
+        }
+        return $scope;
+    }
+    return str_starts_with($plugin, 'forkpress-wp-') ? 'wordpress' : 'plugin';
+}
+
 function cow_merge_record_plugin_validator_conflicts(
     string $metadata_db,
     int $run_id,
@@ -7452,6 +7469,7 @@ function cow_merge_record_plugin_validator_conflicts(
                 'tables' => cow_merge_plugin_validator_string_list($finding, ['tables']),
                 'files' => cow_merge_plugin_validator_string_list($finding, ['files', 'paths']),
                 'validator' => cow_merge_plugin_validator_identity($finding),
+                'semantic_scope' => cow_merge_plugin_validator_semantic_scope($finding, $plugin),
                 'candidate' => $finding['candidate'] ?? null,
             ];
             $severity = cow_merge_plugin_validator_severity($finding);
@@ -9155,6 +9173,16 @@ function cow_merge_audit_plugin_logical_identity_filter(?string $value): ?string
         throw new InvalidArgumentException('--plugin-logical-identity requires a JSON value matching the plugin logical identity audit key');
     }
     return cow_merge_audit_canonical_json_key($decoded);
+}
+
+function cow_merge_audit_semantic_scope_filter(?string $value): ?string {
+    if ($value === null || $value === '') {
+        return null;
+    }
+    if (!in_array($value, ['wordpress', 'plugin'], true)) {
+        throw new InvalidArgumentException('--semantic-scope must be wordpress or plugin');
+    }
+    return $value;
 }
 
 function cow_merge_audit_file_path_filter(?string $value, string $name): ?string {
@@ -13095,7 +13123,8 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
     $plugin_filter = (($filters['plugin'] ?? null) !== null && (string)$filters['plugin'] !== '') ||
         (($filters['plugin_object'] ?? null) !== null && (string)$filters['plugin_object'] !== '') ||
         (($filters['plugin_severity'] ?? null) !== null && (string)$filters['plugin_severity'] !== '') ||
-        (($filters['plugin_logical_identity'] ?? null) !== null && (string)$filters['plugin_logical_identity'] !== '');
+        (($filters['plugin_logical_identity'] ?? null) !== null && (string)$filters['plugin_logical_identity'] !== '') ||
+        (($filters['semantic_scope'] ?? null) !== null && (string)$filters['semantic_scope'] !== '');
     $group_by = (string)($filters['group_by'] ?? 'none');
     if ($id_band_skips && $target_kept) {
         throw new InvalidArgumentException('--id-band-skips cannot be combined with --target-kept');
@@ -13337,21 +13366,21 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
         if (($filters['scope'] ?? null) === null || ($filters['scope'] ?? null) === '' || ($filters['scope'] ?? null) === 'all') {
             $filters['scope'] = 'plugin';
         } elseif (($filters['scope'] ?? null) !== 'plugin') {
-            throw new InvalidArgumentException('--plugin, --plugin-object, --plugin-severity, and --plugin-logical-identity require plugin audit scope');
+            throw new InvalidArgumentException('--plugin, --plugin-object, --plugin-severity, --plugin-logical-identity, and --semantic-scope require plugin audit scope');
         }
         if (cow_merge_audit_filter_is_default_all($filters, 'records')) {
             $filters['records'] = $resolution_status ? 'resolutions' : 'conflicts';
         } elseif (!in_array(($filters['records'] ?? null), ['conflicts', 'conflict-events', 'resolutions'], true)) {
-            throw new InvalidArgumentException('--plugin, --plugin-object, --plugin-severity, and --plugin-logical-identity can only be combined with --records conflicts, conflict-events, or resolutions');
+            throw new InvalidArgumentException('--plugin, --plugin-object, --plugin-severity, --plugin-logical-identity, and --semantic-scope can only be combined with --records conflicts, conflict-events, or resolutions');
         }
         if (($filters['decision'] ?? null) !== null) {
-            throw new InvalidArgumentException('--plugin, --plugin-object, --plugin-severity, and --plugin-logical-identity cannot be combined with --decision');
+            throw new InvalidArgumentException('--plugin, --plugin-object, --plugin-severity, --plugin-logical-identity, and --semantic-scope cannot be combined with --decision');
         }
         if ($id_band_skips) {
-            throw new InvalidArgumentException('--plugin, --plugin-object, --plugin-severity, and --plugin-logical-identity cannot be combined with --id-band-skips');
+            throw new InvalidArgumentException('--plugin, --plugin-object, --plugin-severity, --plugin-logical-identity, and --semantic-scope cannot be combined with --id-band-skips');
         }
         if ($target_kept) {
-            throw new InvalidArgumentException('--plugin, --plugin-object, --plugin-severity, and --plugin-logical-identity cannot be combined with --target-kept');
+            throw new InvalidArgumentException('--plugin, --plugin-object, --plugin-severity, --plugin-logical-identity, and --semantic-scope cannot be combined with --target-kept');
         }
     }
     if ($target_kept && cow_merge_audit_filter_is_default_all($filters, 'records')) {
@@ -13461,7 +13490,7 @@ function cow_merge_audit_filters(array $filters = []): array {
         if ($scope !== 'all') {
             throw new InvalidArgumentException("--records $records cannot be combined with --scope");
         }
-        foreach (['conflict_type', 'conflict_id', 'conflict_key', 'event_type', 'plugin', 'plugin_object', 'plugin_severity', 'plugin_logical_identity', 'decision', 'review_status', 'resolution_status', 'lifecycle_state', 'next_action', 'revalidation_class', 'latest_revalidation_status', 'stale_status', 'resolution_choice', 'blocked_resolution_choice', 'resolution_strategy', 'generic_resolver', 'after_revalidate'] as $key) {
+        foreach (['conflict_type', 'conflict_id', 'conflict_key', 'event_type', 'plugin', 'plugin_object', 'plugin_severity', 'plugin_logical_identity', 'semantic_scope', 'decision', 'review_status', 'resolution_status', 'lifecycle_state', 'next_action', 'revalidation_class', 'latest_revalidation_status', 'stale_status', 'resolution_choice', 'blocked_resolution_choice', 'resolution_strategy', 'generic_resolver', 'after_revalidate'] as $key) {
             if (($filters[$key] ?? null) !== null && (string)$filters[$key] !== '') {
                 throw new InvalidArgumentException("--records $records cannot be combined with --" . str_replace('_', '-', $key));
             }
@@ -13491,6 +13520,7 @@ function cow_merge_audit_filters(array $filters = []): array {
         'plugin_object' => cow_merge_audit_filter_text($filters['plugin_object'] ?? null, 'plugin-object'),
         'plugin_severity' => cow_merge_audit_filter_text($filters['plugin_severity'] ?? null, 'plugin-severity'),
         'plugin_logical_identity' => cow_merge_audit_plugin_logical_identity_filter($filters['plugin_logical_identity'] ?? null),
+        'semantic_scope' => cow_merge_audit_semantic_scope_filter($filters['semantic_scope'] ?? null),
         'decision' => cow_merge_audit_filter_text($filters['decision'] ?? null, 'decision'),
         'path' => $path,
         'path_prefix' => $path_prefix,
@@ -13559,6 +13589,11 @@ function cow_merge_audit_plugin_payload_field(?string $payload_json, string $fie
     }
     $value = $payload[$field] ?? null;
     return is_string($value) && $value !== '' ? $value : null;
+}
+
+function cow_merge_audit_plugin_semantic_scope_group(?string $payload_json): ?string {
+    $scope = cow_merge_audit_plugin_payload_field($payload_json, 'semantic_scope');
+    return in_array($scope, ['wordpress', 'plugin'], true) ? $scope : null;
 }
 
 function cow_merge_audit_plugin_logical_identity_group(?string $payload_json): ?string {
@@ -13885,6 +13920,13 @@ function cow_merge_audit_register_functions(SQLite3 $db): void {
         1
     )) {
         throw new RuntimeException('failed to register audit plugin logical identity group function');
+    }
+    if (!$db->createFunction(
+        'forkpress_plugin_semantic_scope_group',
+        fn($payload_json) => cow_merge_audit_plugin_semantic_scope_group(is_string($payload_json) ? $payload_json : null),
+        1
+    )) {
+        throw new RuntimeException('failed to register audit plugin semantic scope group function');
     }
     if (!$db->createFunction(
         'forkpress_conflict_has_resolution_choice',
@@ -14262,6 +14304,12 @@ function cow_merge_audit_where_sql(
         $params[':plugin_logical_identity_filter'] = $filters['plugin_logical_identity'];
     }
 
+    if ($record_type === 'conflicts' && ($filters['semantic_scope'] ?? null) !== null) {
+        $clauses[] = $prefix . "table_name = '__plugins__'";
+        $clauses[] = 'forkpress_plugin_semantic_scope_group(' . $prefix . 'chosen_payload) = :semantic_scope_filter';
+        $params[':semantic_scope_filter'] = $filters['semantic_scope'];
+    }
+
     if ($record_type === 'conflicts' && ($filters['lifecycle_state'] ?? null) !== null && ($filters['records'] ?? null) !== 'conflict-events') {
         $conflict_id_sql = $alias === '' ? 'merge_conflicts.id' : $prefix . 'id';
         $clauses[] = cow_merge_audit_conflict_lifecycle_state_sql($conflict_id_sql, $review_notes_exist, $resolutions_exist, $conflict_events_exist) . ' = :lifecycle_state';
@@ -14429,6 +14477,12 @@ function cow_merge_audit_resolution_where_sql(
         $clauses[] = "c.table_name = '__plugins__'";
         $clauses[] = 'forkpress_plugin_logical_identity_group(c.chosen_payload) = :plugin_logical_identity_filter';
         $params[':plugin_logical_identity_filter'] = $filters['plugin_logical_identity'];
+    }
+
+    if (($filters['semantic_scope'] ?? null) !== null) {
+        $clauses[] = "c.table_name = '__plugins__'";
+        $clauses[] = 'forkpress_plugin_semantic_scope_group(c.chosen_payload) = :semantic_scope_filter';
+        $params[':semantic_scope_filter'] = $filters['semantic_scope'];
     }
 
     if (($filters['review_status'] ?? null) !== null) {
@@ -14620,6 +14674,10 @@ function cow_merge_audit_count_sql(
     if ($record_type === 'conflicts' && ($filters['plugin_logical_identity'] ?? null) !== null) {
         $conditions[] = $alias . ".table_name = '__plugins__'";
         $conditions[] = "forkpress_plugin_logical_identity_group($alias.chosen_payload) = '" . SQLite3::escapeString($filters['plugin_logical_identity']) . "'";
+    }
+    if ($record_type === 'conflicts' && ($filters['semantic_scope'] ?? null) !== null) {
+        $conditions[] = $alias . ".table_name = '__plugins__'";
+        $conditions[] = "forkpress_plugin_semantic_scope_group($alias.chosen_payload) = '" . SQLite3::escapeString($filters['semantic_scope']) . "'";
     }
     if ($record_type === 'conflicts' && ($filters['lifecycle_state'] ?? null) !== null && ($filters['records'] ?? null) !== 'conflict-events') {
         $conditions[] = cow_merge_audit_conflict_lifecycle_state_sql($alias . '.id', $review_notes_exist, $resolutions_exist, $conflict_events_exist) .
@@ -14909,6 +14967,7 @@ function cow_merge_audit_add_plugin_fields(array $rows): array {
             'validator' => 'plugin_validator',
             'severity' => 'plugin_severity',
             'logical_identity' => 'plugin_logical_identity',
+            'semantic_scope' => 'semantic_scope',
             'resolution_policy' => 'plugin_resolution_policy',
             'suggested_action' => 'plugin_suggested_action',
             'manual_review_reason' => 'plugin_manual_review_reason',
@@ -16625,7 +16684,7 @@ function cow_merge_audit_object_label(array $row): string {
 
 function cow_merge_audit_filter_label(array $filters): string {
     $parts = [];
-    foreach (['scope', 'records', 'conflict_type', 'conflict_id', 'conflict_key', 'event_type', 'plugin', 'plugin_object', 'plugin_severity', 'plugin_logical_identity', 'decision', 'path', 'path_prefix', 'review_status', 'resolution_status', 'lifecycle_state', 'next_action', 'revalidation_class', 'latest_revalidation_status', 'stale_status', 'resolution_choice', 'blocked_resolution_choice', 'resolution_strategy', 'generic_resolver', 'after_revalidate', 'group_by'] as $key) {
+    foreach (['scope', 'records', 'conflict_type', 'conflict_id', 'conflict_key', 'event_type', 'plugin', 'plugin_object', 'plugin_severity', 'plugin_logical_identity', 'semantic_scope', 'decision', 'path', 'path_prefix', 'review_status', 'resolution_status', 'lifecycle_state', 'next_action', 'revalidation_class', 'latest_revalidation_status', 'stale_status', 'resolution_choice', 'blocked_resolution_choice', 'resolution_strategy', 'generic_resolver', 'after_revalidate', 'group_by'] as $key) {
         $value = $filters[$key] ?? null;
         if ($value === null || $value === '') {
             continue;
@@ -16684,6 +16743,7 @@ function cow_merge_print_plugin_audit_text(array $conflict): void {
         'plugin_object' => 'object',
         'plugin_validator' => 'validator',
         'plugin_severity' => 'severity',
+        'semantic_scope' => 'semantic-scope',
     ] as $row_key => $label) {
         if (isset($conflict[$row_key]) && (string)$conflict[$row_key] !== '') {
             $parts[] = $label . '=' . cow_merge_audit_truncate((string)$conflict[$row_key], 120);
@@ -19853,6 +19913,7 @@ if (realpath($argv[0] ?? '') === __FILE__) {
                     'plugin_object' => $args['plugin-object'] ?? null,
                     'plugin_severity' => $args['plugin-severity'] ?? null,
                     'plugin_logical_identity' => $args['plugin-logical-identity'] ?? null,
+                    'semantic_scope' => $args['semantic-scope'] ?? null,
                     'decision' => $args['decision'] ?? null,
                     'path' => $args['path'] ?? null,
                     'path_prefix' => $args['path-prefix'] ?? null,
