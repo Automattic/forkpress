@@ -1258,6 +1258,7 @@ pub struct CowMergeAuditQuery<'a> {
     pub conflict_type: Option<&'a str>,
     pub conflict_id: Option<&'a str>,
     pub conflict_key: Option<&'a str>,
+    pub event_type: Option<&'a str>,
     pub plugin: Option<&'a str>,
     pub plugin_object: Option<&'a str>,
     pub plugin_severity: Option<&'a str>,
@@ -1314,6 +1315,10 @@ pub fn inspect_cow_merge_audit(
     if let Some(conflict_key) = query.conflict_key {
         args.push("--conflict-key".into());
         args.push(conflict_key.into());
+    }
+    if let Some(event_type) = query.event_type {
+        args.push("--event-type".into());
+        args.push(event_type.into());
     }
     if let Some(plugin) = query.plugin {
         args.push("--plugin".into());

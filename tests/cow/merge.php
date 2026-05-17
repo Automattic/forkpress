@@ -3898,9 +3898,20 @@ SQL);
     $title_key_event_audit = cow_merge_audit_report($metadata, null, 10, ['records' => 'conflict-events', 'conflict_key' => $title_conflict_key]);
     assert_same(count($title_key_event_audit['conflict_events']), 3, 'merge audit can filter conflict lifecycle events by stable conflict key');
     assert_same(count(array_unique(array_column($title_key_event_audit['conflict_events'], 'conflict_key'))), 1, 'conflict-key event audit returns one logical conflict group');
+    $recorded_event_audit = cow_merge_audit_report($metadata, null, 10, ['event_type' => 'recorded']);
+    assert_same($recorded_event_audit['filters']['records'], 'conflict-events', 'event-type audit defaults to conflict-events records');
+    assert_true(count($recorded_event_audit['conflict_events']) >= 3, 'event-type audit returns recorded conflict events');
+    foreach ($recorded_event_audit['conflict_events'] as $event) {
+        assert_same($event['event_type'], 'recorded', 'event-type audit returns only matching conflict events');
+    }
     $title_id_event_audit = cow_merge_audit_report($metadata, null, 10, ['records' => 'conflict-events', 'conflict_id' => (string)$title_conflict_id]);
     assert_same(count($title_id_event_audit['conflict_events']), 1, 'merge audit can filter conflict lifecycle events by conflict id');
     assert_same((int)$title_id_event_audit['conflict_events'][0]['conflict_id'], $title_conflict_id, 'conflict-id event audit returns events for the requested conflict');
+    assert_throws(
+        fn() => cow_merge_audit_report($metadata, null, 10, ['records' => 'conflicts', 'event_type' => 'recorded']),
+        '--event-type can only be combined',
+        'event-type audit rejects non-event records'
+    );
     assert_throws(
         fn() => cow_merge_audit_report($metadata, null, 10, ['records' => 'decisions', 'conflict_id' => (string)$title_conflict_id]),
         '--conflict-id can only be combined',
@@ -5427,6 +5438,27 @@ SQL);
     ));
     assert_same($reviewed_rows[0]['review_status'], 'reviewed', 'merge audit JSON exposes latest conflict review status');
     assert_same($reviewed_rows[0]['review_note'], 'Target value is intentional after manual review.', 'merge audit JSON exposes latest conflict review note');
+    $reviewed_event_audit = cow_merge_audit_report($metadata, null, 10, [
+        'records' => 'conflict-events',
+        'event_type' => 'review-reviewed',
+        'conflict_id' => (string)$reviewed_conflict_id,
+    ]);
+    assert_same(count($reviewed_event_audit['conflict_events']), 1, 'event-type audit can focus reviewed conflict events');
+    assert_same($reviewed_event_audit['conflict_events'][0]['event_type'], 'review-reviewed', 'reviewed event audit returns the requested event type');
+    assert_same((int)$reviewed_event_audit['conflict_events'][0]['conflict_id'], $reviewed_conflict_id, 'reviewed event audit remains scoped to the requested conflict');
+    $reviewed_event_cli = run_merge_cli([
+        'audit',
+        '--metadata-db', $metadata,
+        '--records', 'conflict-events',
+        '--event-type=review-reviewed',
+        '--conflict-id', (string)$reviewed_conflict_id,
+        '--format', 'json',
+    ]);
+    assert_same($reviewed_event_cli['status'], 0, 'event-type audit CLI accepts equals-form filters');
+    $reviewed_event_cli_json = json_decode($reviewed_event_cli['output'], true);
+    assert_true(is_array($reviewed_event_cli_json), 'event-type audit CLI emits JSON');
+    assert_same($reviewed_event_cli_json['filters']['event_type'] ?? null, 'review-reviewed', 'event-type audit CLI preserves the filter');
+    assert_same(count($reviewed_event_cli_json['conflict_events'] ?? []), 1, 'event-type audit CLI returns the matching conflict event');
 
     $review_queue_base = $tmp . '/review-queue-base.sqlite';
     $review_queue_source = $tmp . '/review-queue-source.sqlite';
