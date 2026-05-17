@@ -177,10 +177,41 @@ try {
     assert_same(count($audit['conflicts']), 1, 'revalidated conflict enters the needs-action queue');
     assert_true(str_contains((string)$audit['conflicts'][0]['review_note'], 'Keep target plugin value for launch.'), 'revalidated note preserves prior reviewer intent');
     assert_same($audit['conflicts'][0]['revalidation_class'] ?? null, 'compatible-target-drift', 'audit exposes the revalidation classifier');
+    assert_same($audit['conflicts'][0]['latest_revalidation_class'] ?? null, 'compatible-target-drift', 'audit exposes the latest recorded revalidation classifier');
     assert_same((int)$audit['conflicts'][0]['event_count'], 3, 'revalidated conflict appends a lifecycle event');
     assert_same($audit['conflicts'][0]['latest_event_type'], 'revalidation-required', 'revalidated conflict advertises latest lifecycle event');
     assert_same($audit['conflicts'][0]['latest_event_lifecycle_state'], 'needs-action', 'revalidated conflict advertises latest event state');
     assert_same($audit['conflicts'][0]['latest_event_actor'], 'cow-revalidate', 'revalidated conflict advertises latest event actor');
+
+    $class_filtered_audit = cow_merge_audit_report($metadata, $run_id, 10, [
+        'records' => 'conflicts',
+        'revalidation_class' => 'compatible-target-drift',
+    ]);
+    assert_same(count($class_filtered_audit['conflicts']), 1, 'audit filters conflicts by latest revalidation class');
+    assert_same($class_filtered_audit['conflicts'][0]['id'], $conflict_id, 'revalidation-class filter returns the revalidated conflict');
+    $empty_class_filtered_audit = cow_merge_audit_report($metadata, $run_id, 10, [
+        'records' => 'conflicts',
+        'revalidation_class' => 'incompatible',
+    ]);
+    assert_same(count($empty_class_filtered_audit['conflicts']), 0, 'audit excludes conflicts with another latest revalidation class');
+    $class_groups = cow_merge_audit_report($metadata, $run_id, 10, [
+        'records' => 'conflicts',
+        'group_by' => 'revalidation-class',
+    ]);
+    $class_group_counts = array_column($class_groups['conflict_groups'], 'conflict_count', 'group_key');
+    assert_same((int)($class_group_counts['compatible-target-drift'] ?? 0), 1, 'audit groups conflicts by latest revalidation class');
+    $class_cli = run_merge_cli([
+        'audit',
+        '--metadata-db', $metadata,
+        '--run', (string)$run_id,
+        '--records', 'conflicts',
+        '--revalidation-class', 'compatible-target-drift',
+        '--format', 'json',
+    ]);
+    assert_same($class_cli['status'], 0, 'audit CLI accepts a revalidation-class filter');
+    $class_cli_json = json_decode($class_cli['output'], true);
+    assert_same(count($class_cli_json['conflicts'] ?? []), 1, 'audit CLI filters JSON conflicts by latest revalidation class');
+    assert_same($class_cli_json['filters']['revalidation_class'] ?? null, 'compatible-target-drift', 'audit CLI reports the revalidation-class filter');
     $revalidation_id = (int)scalar($metadata, "SELECT id FROM merge_revalidations WHERE conflict_id = $conflict_id ORDER BY id DESC LIMIT 1");
     $event_audit = cow_merge_audit_report($metadata, $run_id, 3, [
         'records' => 'conflict-events',
