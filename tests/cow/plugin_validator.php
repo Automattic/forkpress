@@ -861,6 +861,19 @@ PHP);
             'plugin audit can filter resolution records by ' . array_key_first($resolution_filter)
         );
     }
+    $plugin_resolution_status_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'plugin' => 'forkpress-plugin-logical-id',
+        'resolution_status' => 'validated',
+    ]);
+    assert_same(
+        $plugin_resolution_status_audit['filters']['records'],
+        'resolutions',
+        'plugin audit with resolution status defaults to resolution records'
+    );
+    assert_true(
+        count($plugin_resolution_status_audit['resolutions']) >= 1,
+        'plugin audit with resolution status returns plugin resolution records'
+    );
     foreach ([
         'plugin' => 'forkpress-plugin-logical-id',
         'plugin-object' => 'child-slot:' . $child_id,
