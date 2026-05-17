@@ -16784,6 +16784,16 @@ function cow_merge_parse_cli(array $argv, array $required, int $start_index = 1)
             throw new InvalidArgumentException("unexpected argument: $arg");
         }
         $key = substr($arg, 2);
+        $equals = strpos($key, '=');
+        if ($equals !== false) {
+            $value = substr($key, $equals + 1);
+            $key = substr($key, 0, $equals);
+            if ($key === '') {
+                throw new InvalidArgumentException("unexpected argument: $arg");
+            }
+            $args[$key] = $value;
+            continue;
+        }
         if (in_array($key, ['id-band-skips', 'target-kept', 'review', 'revalidate', 'apply', 'apply-reviewed', 'after-revalidate', 'restore-target-db', 'restore-files', 'quiet'], true) && (!isset($argv[$i + 1]) || str_starts_with($argv[$i + 1], '--'))) {
             $args[$key] = '1';
             continue;

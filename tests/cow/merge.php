@@ -10874,6 +10874,19 @@ SQL);
     cow_merge_print_audit_text($source_added_fk_child_blocked_source_audit);
     $source_added_fk_child_blocked_source_text = ob_get_clean();
     assert_true(str_contains($source_added_fk_child_blocked_source_text, 'blocked-resolution-choice=source'), 'blocked resolution choice filter is visible in text audit output');
+    $source_added_fk_child_blocked_source_cli = run_merge_cli([
+        'audit',
+        '--metadata-db', $source_added_fk_child_metadata,
+        '--run', (string)$source_added_fk_child_result['run_id'],
+        '--format', 'json',
+        '--blocked-resolution-choice', 'source',
+    ]);
+    assert_same($source_added_fk_child_blocked_source_cli['status'], 0, 'blocked resolution choice audit CLI exits successfully');
+    $source_added_fk_child_blocked_source_cli_json = json_decode($source_added_fk_child_blocked_source_cli['output'], true);
+    assert_true(is_array($source_added_fk_child_blocked_source_cli_json), 'blocked resolution choice audit CLI emits JSON');
+    assert_same($source_added_fk_child_blocked_source_cli_json['filters']['blocked_resolution_choice'] ?? null, 'source', 'blocked resolution choice audit CLI preserves the source filter');
+    $source_added_fk_child_blocked_source_cli_ids = array_map(static fn(array $row): int => (int)$row['id'], $source_added_fk_child_blocked_source_cli_json['conflicts'] ?? []);
+    assert_true(in_array($source_added_fk_child_conflict_id, $source_added_fk_child_blocked_source_cli_ids, true), 'blocked resolution choice audit CLI returns the blocked child row conflict');
     assert_throws(
         fn() => cow_merge_resolve_conflict(
             $source_added_fk_child_metadata,
@@ -10911,6 +10924,19 @@ SQL);
     ]);
     $source_added_fk_child_unblocked_source_ids = array_map(static fn(array $row): int => (int)$row['id'], $source_added_fk_child_unblocked_source_audit['conflicts']);
     assert_true(in_array($source_added_fk_child_conflict_id, $source_added_fk_child_unblocked_source_ids, true), 'resolution-choice source filter returns the child row after its blocker is resolved');
+    $source_added_fk_child_unblocked_source_cli = run_merge_cli([
+        'audit',
+        '--metadata-db', $source_added_fk_child_metadata,
+        '--run', (string)$source_added_fk_child_result['run_id'],
+        '--format', 'json',
+        '--resolution-choice=source',
+    ]);
+    assert_same($source_added_fk_child_unblocked_source_cli['status'], 0, 'resolution choice audit CLI accepts equals-form source filter');
+    $source_added_fk_child_unblocked_source_cli_json = json_decode($source_added_fk_child_unblocked_source_cli['output'], true);
+    assert_true(is_array($source_added_fk_child_unblocked_source_cli_json), 'resolution choice audit CLI emits JSON');
+    assert_same($source_added_fk_child_unblocked_source_cli_json['filters']['resolution_choice'] ?? null, 'source', 'resolution choice audit CLI preserves the source filter');
+    $source_added_fk_child_unblocked_source_cli_ids = array_map(static fn(array $row): int => (int)$row['id'], $source_added_fk_child_unblocked_source_cli_json['conflicts'] ?? []);
+    assert_true(in_array($source_added_fk_child_conflict_id, $source_added_fk_child_unblocked_source_cli_ids, true), 'resolution choice audit CLI returns the unblocked child row conflict');
     $source_added_fk_child_unblocked_blocked_source_audit = cow_merge_audit_report($source_added_fk_child_metadata, (int)$source_added_fk_child_result['run_id'], 10, [
         'records' => 'conflicts',
         'blocked_resolution_choice' => 'source',
