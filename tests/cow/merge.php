@@ -18600,6 +18600,22 @@ PHP);
     assert_same(count($plugin_audit['autoincrement_bands']), 0, 'plugin audit scope omits DB AUTOINCREMENT band summaries');
     assert_same(count($plugin_audit['row_identity_summary']), 0, 'plugin audit scope omits DB row identity summaries');
     $plugin_conflict_id = (int)$plugin_audit['conflicts'][0]['id'];
+    $plugin_validator_action_audit = cow_merge_audit_report($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'next_action' => 'run-plugin-validator',
+    ]);
+    assert_same($plugin_validator_action_audit['filters']['next_action'], 'run-plugin-validator', 'plugin next-action audit preserves the validator queue filter');
+    $plugin_validator_action_ids = array_map(fn($row) => (int)$row['id'], $plugin_validator_action_audit['conflicts']);
+    assert_true(in_array($plugin_conflict_id, $plugin_validator_action_ids, true), 'plugin next-action audit returns unreviewed validator conflicts');
+    $plugin_next_action_group_audit = cow_merge_audit_report($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'group_by' => 'next-action',
+    ]);
+    assert_same($plugin_next_action_group_audit['filters']['group_by'], 'next-action', 'plugin next-action grouping is preserved in audit filters');
+    $plugin_next_action_group_keys = array_column($plugin_next_action_group_audit['conflict_groups'], 'group_key');
+    assert_true(in_array('run-plugin-validator', $plugin_next_action_group_keys, true), 'plugin next-action grouping includes validator rerun queues');
 
     $plugin_db_scope_audit = cow_merge_audit_report($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 10, [
         'scope' => 'db',
@@ -18637,6 +18653,13 @@ PHP);
     assert_same(count($plugin_review_audit['conflicts']), 1, 'plugin conflict review queue returns reviewed plugin conflicts');
     assert_same($plugin_review_audit['conflicts'][0]['review_status'], 'needs-action', 'plugin audit exposes latest plugin conflict review status');
     assert_same($plugin_review_audit['conflicts'][0]['stale_status'] ?? null, 'unknown', 'plugin validator conflicts are not marked fresh or stale without rerunning validators');
+    $plugin_manual_action_audit = cow_merge_audit_report($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'next_action' => 'manual-review',
+    ]);
+    $plugin_manual_action_ids = array_map(fn($row) => (int)$row['id'], $plugin_manual_action_audit['conflicts']);
+    assert_true(in_array($plugin_conflict_id, $plugin_manual_action_ids, true), 'plugin next-action audit returns reviewed manual conflicts');
     $plugin_revalidate = cow_merge_revalidate_reviewed_conflicts($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 'cow-revalidate');
     assert_same($plugin_revalidate['checked'], 1, 'plugin conflict revalidation inspects plugin conflicts in the selected run');
     assert_same($plugin_revalidate['reviewed'], 1, 'plugin conflict revalidation sees reviewed plugin conflicts');
