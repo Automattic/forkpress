@@ -2434,6 +2434,56 @@ SQL);
         1,
         'foreign-key update violation is recorded as a row target constraint conflict'
     );
+    $fk_update_conflict_id = (int)scalar($fk_update_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_fk_update_children' AND conflict_type = 'row-target-constraint' ORDER BY id DESC LIMIT 1");
+    $fk_update_audit = cow_merge_audit_report($fk_update_metadata, (int)$fk_update_result['run_id'], 10, ['records' => 'conflicts']);
+    $fk_update_audit_rows = [];
+    foreach ($fk_update_audit['conflicts'] as $row) {
+        $fk_update_audit_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $fk_update_audit_rows[$fk_update_conflict_id]['resolution_choices'],
+        ['target'],
+        'foreign-key update audit does not advertise source while the target parent is missing'
+    );
+    assert_true(
+        str_contains((string)($fk_update_audit_rows[$fk_update_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'referencing plugin_fk_update_parents(id)'),
+        'foreign-key update audit explains the missing target parent'
+    );
+    ob_start();
+    cow_merge_print_audit_text($fk_update_audit);
+    $fk_update_audit_text = (string)ob_get_clean();
+    assert_true(
+        str_contains($fk_update_audit_text, 'blocked-choice=source reason=source row resolution is blocked by current target foreign-key state'),
+        'text audit prints blocked source choice for foreign-key updates'
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($fk_update_metadata, $fk_update_conflict_id, 'source', true, 'Try reparent before target parent exists.', 'cow-test'),
+        'resolution choice source is blocked',
+        'source resolution for a foreign-key update is blocked before mutation while the target parent is missing'
+    );
+    $db = open_db($fk_update_target);
+    $db->exec("INSERT INTO plugin_fk_update_parents (id, label) VALUES (999, 'target parent for reviewed source update')");
+    $db->close();
+    $fk_update_unblocked_audit = cow_merge_audit_report($fk_update_metadata, (int)$fk_update_result['run_id'], 10, ['records' => 'conflicts']);
+    $fk_update_unblocked_rows = [];
+    foreach ($fk_update_unblocked_audit['conflicts'] as $row) {
+        $fk_update_unblocked_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $fk_update_unblocked_rows[$fk_update_conflict_id]['resolution_choices'],
+        ['source', 'target'],
+        'foreign-key update audit advertises source after the target parent is restored'
+    );
+    $fk_update_source_resolution = cow_merge_resolve_conflict(
+        $fk_update_metadata,
+        $fk_update_conflict_id,
+        'source',
+        true,
+        'Apply source reparent after target parent review.',
+        'cow-test'
+    );
+    assert_same($fk_update_source_resolution['status'], 'applied', 'source foreign-key update resolution applies after the target parent exists');
+    assert_same((int)scalar($fk_update_target, 'SELECT parent_id FROM plugin_fk_update_children WHERE id = 20'), 999, 'source foreign-key update resolution reparents the child row');
 
     $fk_delete_base = $tmp . '/fk-delete-base.sqlite';
     $fk_delete_source = $tmp . '/fk-delete-source.sqlite';
