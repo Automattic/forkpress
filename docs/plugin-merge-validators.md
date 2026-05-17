@@ -304,6 +304,31 @@ plugin-owned database or filesystem edits before it records an applied result.
 The explicit runner provides context and audit recording, but still expects
 the plugin driver to own the correctness of any repair it performs.
 
+The WordPress branch switcher can run approved plugin drivers for plugin
+conflict rows. It does not accept arbitrary browser-posted driver paths.
+Operators must configure an allowlist with `FORKPRESS_PLUGIN_MERGE_DRIVERS`:
+
+```json
+{
+  "my-plugin": "/absolute/path/to/wp-content/plugins/my-plugin/forkpress-merge-driver.php"
+}
+```
+
+The UI sends only an opaque driver key, the conflict id, and the optional merge
+run id. The server maps that key back to the approved PHP script or executable
+and invokes:
+
+```bash
+forkpress branch run-plugin-driver conflict <id> \
+  --driver <approved-driver> \
+  --reviewer wordpress-ui \
+  --format json
+```
+
+After a successful driver run, the UI refreshes the needs-action conflict queue
+for the merge run. This keeps plugin repairs behind the same stale-evidence
+guard and rollback policy as CLI driver execution.
+
 When a validator rerun changes evidence for a reviewed plugin conflict,
 stale-audit revalidation records `replacement-evidence`, links to the newer
 validator conflict row, and appends a `revalidation-required` conflict event

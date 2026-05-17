@@ -537,6 +537,60 @@ function forkpress_branch_post_int(string $key): ?int {
     return $int > 0 ? $int : null;
 }
 
+function forkpress_branch_plugin_driver_map(): array {
+    $raw = getenv('FORKPRESS_PLUGIN_MERGE_DRIVERS');
+    if (!is_string($raw) || trim($raw) === '') {
+        return [];
+    }
+
+    $decoded = json_decode($raw, true);
+    if (!is_array($decoded)) {
+        return [];
+    }
+
+    $drivers = [];
+    $add_driver = static function (string $plugin, string $driver) use (&$drivers): void {
+        $plugin = trim($plugin);
+        $driver = trim($driver);
+        if ($plugin === '' || $driver === '') {
+            return;
+        }
+        $real = realpath($driver);
+        if (!is_string($real) || !is_file($real)) {
+            return;
+        }
+        if (strtolower(pathinfo($real, PATHINFO_EXTENSION)) !== 'php' && !is_executable($real)) {
+            return;
+        }
+        $key = hash('sha256', $plugin . "\0" . $real);
+        $drivers[$key] = [
+            'key' => $key,
+            'plugin' => $plugin,
+            'driver' => $real,
+            'label' => basename($real),
+        ];
+    };
+
+    if (array_is_list($decoded)) {
+        foreach ($decoded as $entry) {
+            if (!is_array($entry)) {
+                continue;
+            }
+            $add_driver((string)($entry['plugin'] ?? ''), (string)($entry['driver'] ?? $entry['path'] ?? ''));
+        }
+    } else {
+        foreach ($decoded as $plugin => $driver) {
+            if (is_array($driver)) {
+                $add_driver((string)$plugin, (string)($driver['driver'] ?? $driver['path'] ?? ''));
+            } else {
+                $add_driver((string)$plugin, (string)$driver);
+            }
+        }
+    }
+
+    return $drivers;
+}
+
 function forkpress_branch_conflict_audit_filters(): array {
     $allowed = [
         'scope' => ['all', 'db', 'files', 'plugin'],
@@ -703,7 +757,7 @@ function forkpress_branch_run_cli(array $args): array {
 
 function forkpress_branch_wants_json(): bool {
     $action = $_REQUEST['action'] ?? '';
-    if (is_string($action) && in_array($action, ['forkpress_branch_create', 'forkpress_branch_merge', 'forkpress_branch_conflicts', 'forkpress_branch_revalidate_conflicts'], true)) {
+    if (is_string($action) && in_array($action, ['forkpress_branch_create', 'forkpress_branch_merge', 'forkpress_branch_conflicts', 'forkpress_branch_revalidate_conflicts', 'forkpress_branch_run_plugin_driver'], true)) {
         return true;
     }
 
@@ -1035,6 +1089,71 @@ function forkpress_handle_branch_revalidate_conflicts(): void {
 }
 add_action('admin_post_forkpress_branch_revalidate_conflicts', 'forkpress_handle_branch_revalidate_conflicts');
 
+function forkpress_handle_branch_run_plugin_driver(): void {
+    if (!forkpress_branch_can_manage()) {
+        forkpress_branch_finish_action(forkpress_branch_url(forkpress_current_branch() ?: 'main', '/wp-admin/'), 'error', 'You cannot run ForkPress plugin merge drivers from this site.');
+    }
+    if (function_exists('check_admin_referer')) {
+        check_admin_referer('forkpress_branch_run_plugin_driver');
+    }
+
+    $current = forkpress_current_branch() ?: 'main';
+    $conflict = forkpress_branch_post_int('conflict');
+    if ($conflict === null) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Choose a plugin conflict to repair.');
+    }
+
+    $drivers = forkpress_branch_plugin_driver_map();
+    if (!$drivers) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'No approved plugin merge drivers are configured.');
+    }
+
+    $driver_key = forkpress_branch_post_value('driverKey');
+    if ($driver_key === '' || !isset($drivers[$driver_key])) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Choose an approved plugin merge driver.');
+    }
+
+    $driver = $drivers[$driver_key];
+    [$code, $output] = forkpress_branch_run_cli([
+        'run-plugin-driver',
+        'conflict',
+        (string) $conflict,
+        '--driver',
+        (string) $driver['driver'],
+        '--reviewer',
+        'wordpress-ui',
+        '--format',
+        'json',
+    ]);
+    if ($code !== 0) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', $output ?: 'ForkPress could not run the plugin merge driver.');
+    }
+
+    $result = json_decode($output, true);
+    if (!is_array($result)) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'ForkPress returned invalid plugin driver JSON.');
+    }
+
+    $driver_status = trim((string)($result['driver_status'] ?? $result['status'] ?? 'completed'));
+    if ($driver_status === '') {
+        $driver_status = 'completed';
+    }
+    $run = forkpress_branch_post_int('run');
+    forkpress_branch_finish_action(
+        forkpress_branch_url($current, '/wp-admin/'),
+        'notice',
+        'Ran plugin driver for conflict #' . $conflict . ': ' . $driver_status . '.',
+        [
+            'run' => $run,
+            'conflict' => $conflict,
+            'driverStatus' => $driver_status,
+            'driverPlugin' => (string) $driver['plugin'],
+            'result' => $result,
+        ]
+    );
+}
+add_action('admin_post_forkpress_branch_run_plugin_driver', 'forkpress_handle_branch_run_plugin_driver');
+
 add_action('admin_bar_menu', function ($wp_admin_bar) {
     $branch = forkpress_current_branch();
     if (!$branch) {
@@ -1300,6 +1419,15 @@ function forkpress_branch_switcher_assets(): void {
             color: #c3c4c7;
             font-size: 11px;
         }
+        #wpadminbar .forkpress-conflict-actions {
+            display: flex;
+            gap: 6px;
+            margin-top: 4px;
+        }
+        #wpadminbar .forkpress-conflict-actions .forkpress-switcher-button {
+            height: 26px;
+            width: auto;
+        }
         @keyframes forkpress-switcher-spin {
             to {
                 transform: rotate(360deg);
@@ -1333,6 +1461,15 @@ function forkpress_render_branch_switcher(): void {
             'mergeNonce'  => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_merge') : '',
             'auditNonce'  => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_conflicts') : '',
             'revalidateNonce' => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_revalidate_conflicts') : '',
+            'driverNonce' => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_run_plugin_driver') : '',
+            'pluginDrivers' => array_map(
+                static fn(array $driver): array => [
+                    'key' => (string) $driver['key'],
+                    'plugin' => (string) $driver['plugin'],
+                    'label' => (string) $driver['label'],
+                ],
+                array_values(forkpress_branch_plugin_driver_map())
+            ),
         ];
     }
     $actions_json = function_exists('wp_json_encode') ? wp_json_encode($actions) : json_encode($actions);
@@ -1427,6 +1564,19 @@ function forkpress_render_branch_switcher(): void {
             ].filter(Boolean).join(' / ');
         }
 
+        function driverForConflict(record) {
+            if (!actions || !Array.isArray(actions.pluginDrivers) || !record || !record.plugin) {
+                return null;
+            }
+            for (var i = 0; i < actions.pluginDrivers.length; i++) {
+                var driver = actions.pluginDrivers[i];
+                if (driver && driver.plugin === record.plugin && driver.key) {
+                    return driver;
+                }
+            }
+            return null;
+        }
+
         function renderConflictAudit(payload, fallbackMessage) {
             var records = Array.isArray(payload.records) ? payload.records : [];
             var filters = payload.filters || {};
@@ -1455,6 +1605,22 @@ function forkpress_render_branch_switcher(): void {
                 ].filter(Boolean).join(' / '));
                 appendConflictText(row, 'forkpress-conflict-meta', conflictPluginMeta(record));
                 appendConflictText(row, 'forkpress-conflict-meta', conflictPluginGuidance(record));
+                var driver = driverForConflict(record);
+                if (driver && record.id && record.lifecycle_state !== 'resolved') {
+                    var actionsRow = document.createElement('div');
+                    actionsRow.className = 'forkpress-conflict-actions';
+                    var driverButton = document.createElement('button');
+                    driverButton.className = 'forkpress-switcher-button';
+                    driverButton.type = 'button';
+                    driverButton.textContent = 'Run plugin driver';
+                    driverButton.addEventListener('click', function (record, driver) {
+                        return function () {
+                            fetchPluginDriver(record, driver, payload.run);
+                        };
+                    }(record, driver));
+                    actionsRow.appendChild(driverButton);
+                    row.appendChild(actionsRow);
+                }
                 conflictList.appendChild(row);
             });
 
@@ -1691,6 +1857,50 @@ function forkpress_render_branch_switcher(): void {
                 fetchConflictAudit(run, payload.message || '', { lifecycleState: 'needs-action' });
             }).catch(function (error) {
                 showStatus('error', error && error.message ? error.message : 'ForkPress conflict revalidation failed.');
+            });
+        }
+
+        function fetchPluginDriver(record, driver, run) {
+            if (!actions || !actions.driverNonce || !window.fetch || !window.FormData || !record || !record.id || !driver || !driver.key) {
+                return;
+            }
+            var body = new FormData();
+            body.append('action', 'forkpress_branch_run_plugin_driver');
+            body.append('_wpnonce', actions.driverNonce);
+            body.append('conflict', String(record.id));
+            body.append('driverKey', String(driver.key));
+            if (run) {
+                body.append('run', String(run));
+            }
+            showStatus('warning', 'Running plugin driver...');
+            fetch(actions.url, {
+                method: 'POST',
+                body: body,
+                credentials: 'same-origin',
+                headers: {
+                    'Accept': 'application/json',
+                    'X-ForkPress-Async': '1'
+                }
+            }).then(function (response) {
+                return response.text().then(function (text) {
+                    var payload = null;
+                    try {
+                        payload = text ? JSON.parse(text) : null;
+                    } catch (error) {
+                        payload = null;
+                    }
+                    if (!response.ok || !payload || payload.success === false) {
+                        throw new Error(payload && payload.message ? payload.message : (text || 'ForkPress plugin driver failed.'));
+                    }
+                    return payload;
+                });
+            }).then(function (payload) {
+                showStatus('success', payload.message || 'Ran plugin driver.');
+                if (run) {
+                    fetchConflictAudit(run, payload.message || '', { lifecycleState: 'needs-action' });
+                }
+            }).catch(function (error) {
+                showStatus('error', error && error.message ? error.message : 'ForkPress plugin driver failed.');
             });
         }
 
