@@ -117,7 +117,9 @@ The Git server suite covers these publication classes:
   and restores the branch list.
 - Process exit immediately after Git-created branch-list publication leaves the
   created branch visible with DB/file merge bases, ID-band metadata, and row
-  identity metadata already finalized.
+  identity metadata already finalized; a retry reconciles the Git ref to the
+  finalized branch DB snapshot, keeps the branch list and branch-birth metadata
+  stable, and subsequent retries keep the recovered ref stable.
 - Process exit after Git-created branch metadata capture but before branch-list
   publication can leave `branches.txt` stale; the next Git apply refreshes the
   branch list from the durable branch tree while preserving the finalized DB/file

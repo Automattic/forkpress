@@ -919,6 +919,24 @@ $crash_identity_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_
 $metadata->close();
 assert_same($crash_band_count, 1, 'Git-created branch-list crash leaves ID-band metadata finalized before publication');
 assert_same($crash_identity_count, 1, 'Git-created branch-list crash leaves row identity metadata finalized before publication');
+$crashed_created_tip = $repo->get_branch_tip('refs/heads/git-created-list-crash');
+cow_git_apply_push_to_branches($repo, $git, $branches, $branches, $branch_list, 'file-copy', '', ['main' => $main_tip]);
+$recovered_created_tip = $repo->get_branch_tip('refs/heads/git-created-list-crash');
+assert_true(is_dir($branches . '/git-created-list-crash'), 'retry after Git-created branch-list crash keeps the created branch published');
+assert_same(file_get_contents($branches . '/git-created-list-crash/wp-content/git-created-list-crash.txt'), "created\n", 'retry after Git-created branch-list crash keeps pushed WordPress files published');
+assert_true($recovered_created_tip !== $crashed_created_tip, 'retry after Git-created branch-list crash resyncs the Git ref after finalized branch-birth metadata changes the DB snapshot');
+$reconciled_branch_list = (string)file_get_contents($branch_list);
+assert_true(str_contains($reconciled_branch_list, "main\n"), 'retry after Git-created branch-list crash keeps main in the branch list');
+assert_true(str_contains($reconciled_branch_list, "git-created-list-crash\n"), 'retry after Git-created branch-list crash keeps the created branch in the branch list');
+$metadata = new SQLite3($tmp . '/merge/metadata.sqlite');
+$reconciled_band_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'git-created-list-crash' AND table_name = 'wp_posts'");
+$reconciled_identity_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = 'git-created-list-crash' AND table_name = 'plugin_keyless'");
+$metadata->close();
+assert_same($reconciled_band_count, 1, 'retry after Git-created branch-list crash keeps one active ID-band row');
+assert_same($reconciled_identity_count, 1, 'retry after Git-created branch-list crash keeps one active row identity');
+assert_same(glob($branches . '/.forkpress-update-*') ?: [], [], 'retry after Git-created branch-list crash leaves no stale update artifacts');
+cow_git_apply_push_to_branches($repo, $git, $branches, $branches, $branch_list, 'file-copy', '', ['main' => $main_tip]);
+assert_same($repo->get_branch_tip('refs/heads/git-created-list-crash'), $recovered_created_tip, 'second retry after Git-created branch-list crash keeps the recovered Git ref stable');
 cow_git_remove_tree($tmp);
 
 $tmp = sys_get_temp_dir() . '/forkpress-cow-git-created-before-metadata-crash-' . getmypid() . '-' . bin2hex(random_bytes(4));
