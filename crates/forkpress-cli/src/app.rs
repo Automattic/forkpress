@@ -3448,7 +3448,7 @@ fn branch_help_text(command: Option<&str>) -> &'static str {
             "Usage: forkpress branch run-plugin-validator --run <id> --validator <path> [--format text|json]\n\nRun one plugin validator and record emitted findings as plugin-scoped merge conflicts.\n"
         }
         Some("merge-audit") | Some("audit") => {
-            "Usage: forkpress branch merge-audit [options]\n\nInspect merge runs, decisions, conflicts, conflict events, resolutions, and rollback failures. Use --revalidate to carry stale reviewed conflicts back into needs-action before resolving; revalidation only accepts --run, --conflict-id, --conflict-key, --reviewer, --format, and --quiet.\nCommon options: --format text|json, --run <id>, --scope all|db|files|plugin, --records all|conflicts|conflict-events|decisions|resolutions|rollback-failures, --conflict-id <id>, --conflict-key <key>, --event-type <type>, --plugin <name>, --plugin-object <object>, --plugin-severity <severity>, --review, --review-status <status>, --lifecycle-state <state>, --next-action <action>, --revalidation-class <class>, --latest-revalidation-status <status>, --stale-status <status>, --resolution-choice source|target, --blocked-resolution-choice source|target, --resolution-strategy <strategy>, --generic-resolver yes|no, --after-revalidate supported|unsupported, --group-by none|table|status|path|type|severity|lifecycle|event-type|next-action|conflict-key|resolution-strategy|generic-resolver|after-revalidate|revalidation-class|latest-revalidation-status|stale-status|plugin|plugin-object|plugin-severity, --revalidate.\n"
+            "Usage: forkpress branch merge-audit [options]\n\nInspect merge runs, decisions, conflicts, conflict events, resolutions, and rollback failures. Use --revalidate to carry stale reviewed conflicts back into needs-action before resolving; revalidation only accepts --run, --conflict-id, --conflict-key, --reviewer, --format, and --quiet.\nCommon options: --format text|json, --run <id>, --scope all|db|files|plugin, --records all|conflicts|conflict-events|decisions|resolutions|rollback-failures, --conflict-id <id>, --conflict-key <key>, --event-type recorded|review-pending|review-needs-action|review-reviewed|resolution-validated|resolution-applied|resolution-blocked|revalidation-required, --plugin <name>, --plugin-object <object>, --plugin-severity <severity>, --review, --review-status <status>, --lifecycle-state <state>, --next-action <action>, --revalidation-class <class>, --latest-revalidation-status <status>, --stale-status <status>, --resolution-choice source|target, --blocked-resolution-choice source|target, --resolution-strategy <strategy>, --generic-resolver yes|no, --after-revalidate supported|unsupported, --group-by none|table|status|path|type|severity|lifecycle|event-type|next-action|conflict-key|resolution-strategy|generic-resolver|after-revalidate|revalidation-class|latest-revalidation-status|stale-status|plugin|plugin-object|plugin-severity, --revalidate.\n"
         }
         Some("merge-review") => {
             "Usage: forkpress branch merge-review <conflict|decision|resolution> <id> --status <pending|needs-action|reviewed> --note <text> [--reviewer <name>]\n       forkpress branch merge-review conflict-key <key> [--run <id>] --status <pending|needs-action|reviewed> --note <text> [--reviewer <name>]\n\nAttach review metadata to an audit record. Reviewing by conflict key is allowed only when the key identifies one unresolved conflict, or when --run disambiguates it.\n"
@@ -3668,7 +3668,7 @@ fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAu
             "--event-type" => {
                 let Some(value) = args.get(index + 1) else {
                     bail!(
-                        "--event-type requires recorded, review-pending, review-needs-action, review-reviewed, resolution-validated, resolution-applied, or revalidation-required"
+                        "--event-type requires recorded, review-pending, review-needs-action, review-reviewed, resolution-validated, resolution-applied, resolution-blocked, or revalidation-required"
                     );
                 };
                 event_type = Some(value.clone());
@@ -3678,7 +3678,7 @@ fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAu
                 let value = value.trim_start_matches("--event-type=");
                 if value.is_empty() {
                     bail!(
-                        "--event-type requires recorded, review-pending, review-needs-action, review-reviewed, resolution-validated, resolution-applied, or revalidation-required"
+                        "--event-type requires recorded, review-pending, review-needs-action, review-reviewed, resolution-validated, resolution-applied, resolution-blocked, or revalidation-required"
                     );
                 }
                 event_type = Some(value.to_string());
@@ -5601,7 +5601,8 @@ mod git_helper_tests {
         assert!(branch_help_text(Some("merge-audit")).contains("--scope all|db|files|plugin"));
         assert!(branch_help_text(Some("merge-audit")).contains("--conflict-id <id>"));
         assert!(branch_help_text(Some("merge-audit")).contains("--conflict-key <key>"));
-        assert!(branch_help_text(Some("merge-audit")).contains("--event-type <type>"));
+        assert!(branch_help_text(Some("merge-audit")).contains("--event-type recorded|"));
+        assert!(branch_help_text(Some("merge-audit")).contains("resolution-blocked"));
         assert!(branch_help_text(Some("merge-audit")).contains("--lifecycle-state <state>"));
         assert!(branch_help_text(Some("merge-audit")).contains("--next-action <action>"));
         assert!(branch_help_text(Some("merge-audit")).contains("--revalidation-class <class>"));
@@ -6058,7 +6059,7 @@ mod git_helper_tests {
             "--conflict-type=row-target-deleted".to_string(),
             "--conflict-id=12".to_string(),
             "--conflict-key=sha256:abc123".to_string(),
-            "--event-type=review-reviewed".to_string(),
+            "--event-type=resolution-blocked".to_string(),
             "--plugin=forkpress-plugin-graph".to_string(),
             "--plugin-object=child:1000000".to_string(),
             "--plugin-severity=error".to_string(),
@@ -6087,7 +6088,7 @@ mod git_helper_tests {
         assert_eq!(parsed.conflict_type.as_deref(), Some("row-target-deleted"));
         assert_eq!(parsed.conflict_id.as_deref(), Some("12"));
         assert_eq!(parsed.conflict_key.as_deref(), Some("sha256:abc123"));
-        assert_eq!(parsed.event_type.as_deref(), Some("review-reviewed"));
+        assert_eq!(parsed.event_type.as_deref(), Some("resolution-blocked"));
         assert_eq!(parsed.plugin.as_deref(), Some("forkpress-plugin-graph"));
         assert_eq!(parsed.plugin_object.as_deref(), Some("child:1000000"));
         assert_eq!(parsed.plugin_severity.as_deref(), Some("error"));
