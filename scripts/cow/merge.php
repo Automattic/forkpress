@@ -11470,6 +11470,34 @@ function cow_merge_apply_source_trigger_schema_resolution(SQLite3 $target, strin
     }
 }
 
+function cow_merge_apply_source_trigger_schema_merge(SQLite3 $target, string $trigger, string $source_sql): void {
+    $target_savepoint_started = false;
+    try {
+        cow_merge_exec_checked(
+            $target,
+            'SAVEPOINT forkpress_trigger_schema_merge',
+            'failed to start source trigger schema merge savepoint'
+        );
+        $target_savepoint_started = true;
+        cow_merge_apply_source_trigger_schema_resolution($target, $trigger, $source_sql);
+        cow_merge_release_savepoint_checked($target, 'forkpress_trigger_schema_merge', 'source trigger schema merge');
+        $target_savepoint_started = false;
+    } catch (Throwable $e) {
+        if ($target_savepoint_started) {
+            $cleanup_failure = cow_merge_rollback_release_savepoint_checked(
+                $target,
+                'forkpress_trigger_schema_merge',
+                'source trigger schema merge',
+                $e
+            );
+            if ($cleanup_failure !== null) {
+                throw $cleanup_failure;
+            }
+        }
+        throw $e;
+    }
+}
+
 function cow_merge_apply_source_schema_object_resolution(
     SQLite3 $target,
     string $type,
@@ -17433,6 +17461,46 @@ function cow_merge_apply_schema_object_changes(
             continue;
         }
         if ($target_sql === $base_sql) {
+            if ($type === 'trigger') {
+                $apply_error = null;
+                try {
+                    cow_merge_apply_source_trigger_schema_merge($target, $name, $source_sql);
+                } catch (Throwable $e) {
+                    $apply_error = $e->getMessage();
+                }
+                if ($apply_error !== null) {
+                    if (cow_merge_record_schema_conflict(
+                        $meta,
+                        $run_id,
+                        $table,
+                        $name,
+                        "schema-source-changed-$type",
+                        $base_sql,
+                        ['sql' => $source_sql, 'validation_error' => $apply_error],
+                        $target_sql,
+                        $target_sql,
+                        "source changed an existing $type that target validation rejected"
+                    )) {
+                        $conflicts++;
+                    }
+                    continue;
+                }
+                cow_merge_record_decision(
+                    $meta,
+                    $run_id,
+                    $table,
+                    null,
+                    $name,
+                    'source-applied',
+                    "source changed an existing $type while target kept the base definition",
+                    $base_sql,
+                    $source_sql,
+                    $target_sql,
+                    $source_sql
+                );
+                $applied++;
+                continue;
+            }
             if (cow_merge_record_schema_conflict(
                 $meta,
                 $run_id,

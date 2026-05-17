@@ -887,6 +887,57 @@ SQL);
         'dependent source-added trigger chain fires after ordered materialization'
     );
 
+    $trigger_rewrite_base = $tmp . '/trigger-rewrite-base.sqlite';
+    $trigger_rewrite_source = $tmp . '/trigger-rewrite-source.sqlite';
+    $trigger_rewrite_target = $tmp . '/trigger-rewrite-target.sqlite';
+    $trigger_rewrite_metadata = $tmp . '/.forkpress/cow/merge/schema-trigger-rewrite-metadata.sqlite';
+
+    $db = open_db($trigger_rewrite_base);
+    $db->exec('CREATE TABLE plugin_trigger_rewrite_items (item_id TEXT PRIMARY KEY, label TEXT NOT NULL)');
+    $db->exec('CREATE TABLE plugin_trigger_rewrite_audit (item_id TEXT, label TEXT)');
+    $db->exec('CREATE TRIGGER plugin_trigger_rewrite_items_after AFTER INSERT ON plugin_trigger_rewrite_items BEGIN INSERT INTO plugin_trigger_rewrite_audit (item_id, label) VALUES (NEW.item_id, NEW.label); END');
+    $db->close();
+    copy($trigger_rewrite_base, $trigger_rewrite_source);
+    copy($trigger_rewrite_base, $trigger_rewrite_target);
+
+    $source_db = open_db($trigger_rewrite_source);
+    $source_db->exec('DROP TRIGGER plugin_trigger_rewrite_items_after');
+    $source_db->exec("CREATE TRIGGER plugin_trigger_rewrite_items_after AFTER INSERT ON plugin_trigger_rewrite_items BEGIN INSERT INTO plugin_trigger_rewrite_audit (item_id, label) VALUES (NEW.item_id, NEW.label || ':source'); END");
+    $source_db->close();
+
+    $trigger_rewrite_result = cow_merge_databases(
+        $trigger_rewrite_base,
+        $trigger_rewrite_source,
+        $trigger_rewrite_target,
+        $trigger_rewrite_metadata,
+        'feature-schema-trigger-rewrite',
+        'main'
+    );
+    $trigger_rewrite_run_id = (int)$trigger_rewrite_result['run_id'];
+    assert_same($trigger_rewrite_result['status'], 'completed', 'source-changed trigger merges automatically when target kept the base trigger');
+    assert_same(
+        (int)scalar($trigger_rewrite_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE run_id = $trigger_rewrite_run_id AND conflict_type = 'schema-source-changed-trigger'"),
+        0,
+        'safe source-changed trigger rewrite creates no review-only schema conflict'
+    );
+    assert_same(
+        (int)scalar($trigger_rewrite_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE run_id = $trigger_rewrite_run_id AND column_name = 'plugin_trigger_rewrite_items_after' AND decision = 'source-applied'"),
+        1,
+        'automatic source-changed trigger rewrite is auditable'
+    );
+    assert_true(
+        str_contains((string)scalar($trigger_rewrite_target, "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_trigger_rewrite_items_after'"), ':source'),
+        'automatic source-changed trigger rewrite installs the source trigger body'
+    );
+    $target_db = open_db($trigger_rewrite_target);
+    $target_db->exec("INSERT INTO plugin_trigger_rewrite_items (item_id, label) VALUES ('trigger-rewrite', 'Trigger Rewrite')");
+    $target_db->close();
+    assert_same(
+        scalar($trigger_rewrite_target, "SELECT label FROM plugin_trigger_rewrite_audit WHERE item_id = 'trigger-rewrite'"),
+        'Trigger Rewrite:source',
+        'automatically rewritten source trigger fires after merge'
+    );
+
     $trigger_source_table_base = $tmp . '/trigger-source-table-base.sqlite';
     $trigger_source_table_source = $tmp . '/trigger-source-table-source.sqlite';
     $trigger_source_table_target = $tmp . '/trigger-source-table-target.sqlite';
