@@ -1054,11 +1054,53 @@ function forkpress_branch_conflict_audit_summary(array $report, int $run, array 
         break;
     }
 
+    $conflict_summary = is_array($report['conflict_summary'] ?? null) ? $report['conflict_summary'] : null;
+    if ($conflict_summary === null) {
+        $conflict_summary = [
+            'total' => count($records),
+            'resolved' => 0,
+            'unresolved' => 0,
+            'by_lifecycle' => [],
+            'by_next_action' => [],
+            'by_scope' => [],
+        ];
+        foreach ($records as $record) {
+            if (!is_array($record)) {
+                continue;
+            }
+            $lifecycle = trim((string)($record['lifecycle_state'] ?? $record['latest_event_lifecycle_state'] ?? 'unreviewed'));
+            if ($lifecycle === '') {
+                $lifecycle = 'unreviewed';
+            }
+            $next_action = trim((string)($record['next_action'] ?? 'review'));
+            if ($next_action === '') {
+                $next_action = 'review';
+            }
+            $scope = 'db';
+            $table = (string)($record['table_name'] ?? '');
+            if ($table === '__files__' || isset($record['path'])) {
+                $scope = 'files';
+            } elseif (isset($record['plugin']) || isset($record['plugin_object'])) {
+                $scope = 'plugin';
+            }
+
+            $conflict_summary['by_lifecycle'][$lifecycle] = (int)($conflict_summary['by_lifecycle'][$lifecycle] ?? 0) + 1;
+            $conflict_summary['by_next_action'][$next_action] = (int)($conflict_summary['by_next_action'][$next_action] ?? 0) + 1;
+            $conflict_summary['by_scope'][$scope] = (int)($conflict_summary['by_scope'][$scope] ?? 0) + 1;
+            if ($lifecycle === 'resolved') {
+                $conflict_summary['resolved']++;
+            } else {
+                $conflict_summary['unresolved']++;
+            }
+        }
+    }
+
     return [
         'run' => $run,
         'records' => $records,
         'recordCount' => count($records),
         'totalConflicts' => $total,
+        'conflictSummary' => $conflict_summary,
         'filters' => $filters,
         'audit' => $report,
         'auditCommand' => forkpress_branch_merge_audit_command($run, $filters) . ' --format json',
@@ -1584,6 +1626,17 @@ function forkpress_branch_switcher_assets(): void {
             font-weight: 700;
             line-height: 1.25;
         }
+        #wpadminbar .forkpress-conflict-summary {
+            background: #1d2327;
+            border: 1px solid #3c434a;
+            border-radius: 4px;
+            color: #f0f0f1;
+            display: grid;
+            gap: 3px;
+            font-size: 11px;
+            line-height: 1.35;
+            padding: 7px;
+        }
         #wpadminbar .forkpress-conflict-row {
             border-top: 1px solid #3c434a;
             color: #f0f0f1;
@@ -1749,6 +1802,46 @@ function forkpress_render_branch_switcher(): void {
             ].filter(Boolean).join(' / ');
         }
 
+        function formatConflictSummaryBucket(label, bucket) {
+            if (!bucket || typeof bucket !== 'object') {
+                return '';
+            }
+            var parts = Object.keys(bucket).filter(function (key) {
+                return Number(bucket[key]) > 0;
+            }).sort().map(function (key) {
+                return key + '=' + String(bucket[key]);
+            });
+            return parts.length ? label + ': ' + parts.join(' / ') : '';
+        }
+
+        function renderConflictSummary(payload, records) {
+            var summary = payload.conflictSummary || (payload.audit && payload.audit.conflict_summary) || null;
+            if (!summary || typeof summary !== 'object') {
+                return null;
+            }
+            var total = Number(summary.total);
+            if (!Number.isFinite(total) || total < 0) {
+                total = records.length;
+            }
+            var unresolved = Number(summary.unresolved);
+            if (!Number.isFinite(unresolved) || unresolved < 0) {
+                unresolved = records.filter(function (record) {
+                    return !record || record.lifecycle_state !== 'resolved';
+                }).length;
+            }
+            var resolved = Number(summary.resolved);
+            if (!Number.isFinite(resolved) || resolved < 0) {
+                resolved = Math.max(0, total - unresolved);
+            }
+            var node = document.createElement('div');
+            node.className = 'forkpress-conflict-summary';
+            appendConflictText(node, 'forkpress-conflict-meta', 'summary: total=' + String(total) + ' / unresolved=' + String(unresolved) + ' / resolved=' + String(resolved));
+            appendConflictText(node, 'forkpress-conflict-meta', formatConflictSummaryBucket('scope', summary.by_scope));
+            appendConflictText(node, 'forkpress-conflict-meta', formatConflictSummaryBucket('lifecycle', summary.by_lifecycle));
+            appendConflictText(node, 'forkpress-conflict-meta', formatConflictSummaryBucket('next', summary.by_next_action));
+            return node;
+        }
+
         function driverForConflict(record) {
             if (!actions || !Array.isArray(actions.pluginDrivers) || !record || !record.plugin) {
                 return null;
@@ -1792,6 +1885,10 @@ function forkpress_render_branch_switcher(): void {
             }
             heading.textContent = 'Run ' + String(payload.run || '') + ': ' + String(payload.recordCount || records.length) + ' of ' + String(payload.totalConflicts || records.length) + ' conflicts';
             conflictList.appendChild(heading);
+            var summary = renderConflictSummary(payload, records);
+            if (summary) {
+                conflictList.appendChild(summary);
+            }
             appendConflictText(conflictList, 'forkpress-conflict-meta', [
                 filters.scope && filters.scope !== 'all' ? 'scope: ' + filters.scope : '',
                 filters.lifecycleState ? 'state: ' + filters.lifecycleState : '',

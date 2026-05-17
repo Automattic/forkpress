@@ -372,6 +372,24 @@ $audit_output = json_encode([
             'next_action' => 'review',
         ],
     ],
+    'conflict_summary' => [
+        'total' => 3,
+        'resolved' => 1,
+        'unresolved' => 2,
+        'by_lifecycle' => [
+            'needs-action' => 2,
+            'resolved' => 1,
+        ],
+        'by_next_action' => [
+            'review' => 2,
+            'none' => 1,
+        ],
+        'by_scope' => [
+            'db' => 1,
+            'files' => 1,
+            'plugin' => 1,
+        ],
+    ],
 ], JSON_UNESCAPED_SLASHES);
 $empty_crash_recovery_output = json_encode([
     'crash_recovery' => [],
@@ -391,6 +409,11 @@ assert_same($conflict_audit_payload['run'] ?? null, 42, 'branch conflict audit r
 assert_same($conflict_audit_payload['recordCount'] ?? null, 2, 'branch conflict audit returns loaded conflict record count');
 assert_same($conflict_audit_payload['totalConflicts'] ?? null, 3, 'branch conflict audit returns total run conflict count');
 assert_same($conflict_audit_payload['records'][0]['conflict_key'] ?? null, 'wp_posts:page:about', 'branch conflict audit returns first-class conflict records');
+assert_same($conflict_audit_payload['conflictSummary']['total'] ?? null, 3, 'branch conflict audit exposes summary total');
+assert_same($conflict_audit_payload['conflictSummary']['unresolved'] ?? null, 2, 'branch conflict audit exposes unresolved conflict count');
+assert_same($conflict_audit_payload['conflictSummary']['resolved'] ?? null, 1, 'branch conflict audit exposes resolved conflict count');
+assert_same($conflict_audit_payload['conflictSummary']['by_scope']['plugin'] ?? null, 1, 'branch conflict audit exposes scope summary buckets');
+assert_same($conflict_audit_payload['conflictSummary']['by_next_action']['review'] ?? null, 2, 'branch conflict audit exposes next-action summary buckets');
 assert_same(
     $conflict_audit_payload['auditCommand'] ?? null,
     'forkpress branch merge-audit --records conflicts --run 42 --format json',
@@ -772,7 +795,12 @@ $switcher_render = run_branch_ui_action(
 $switcher_render_payload = decode_branch_ui_payload($switcher_render);
 $switcher_html = (string)($switcher_render_payload['html'] ?? '');
 assert_true(str_contains($switcher_html, 'forkpress-conflict-list'), 'branch switcher renders conflict audit list container');
+assert_true(str_contains($switcher_html, 'forkpress-conflict-summary'), 'branch switcher renders conflict summary container');
 assert_true(str_contains($switcher_html, 'function renderConflictAudit'), 'branch switcher renders conflict audit client handler');
+assert_true(str_contains($switcher_html, 'function renderConflictSummary'), 'branch switcher renders conflict summary client handler');
+assert_true(str_contains($switcher_html, 'function formatConflictSummaryBucket'), 'branch switcher renders conflict summary bucket formatter');
+assert_true(str_contains($switcher_html, 'payload.conflictSummary'), 'branch switcher reads normalized conflict summary payload');
+assert_true(str_contains($switcher_html, 'payload.audit && payload.audit.conflict_summary'), 'branch switcher can read merge-audit conflict summary payload');
 assert_true(str_contains($switcher_html, 'pending crash recovery'), 'branch switcher renders pending crash recovery state');
 assert_true(str_contains($switcher_html, 'payload.recoveryCommand'), 'branch switcher renders crash recovery command from audit payload');
 assert_true(str_contains($switcher_html, 'forkpress_branch_conflicts'), 'branch switcher renders conflict audit action');
