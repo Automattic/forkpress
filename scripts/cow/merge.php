@@ -8266,17 +8266,39 @@ function cow_merge_discover_plugin_validators(string $target_db, ?string $target
     if ($target_root === null || $target_root === '' || !is_dir($target_root)) {
         return [];
     }
+    return cow_merge_plugin_validator_discovery_report($target_db, $target_root)['validators'];
+}
+
+function cow_merge_plugin_validator_discovery_report(string $target_db, ?string $target_root): array {
+    $report = [
+        'validators' => [],
+        'active_plugins' => [],
+        'active_sitewide_plugins' => [],
+        'unchecked_plugins' => [],
+    ];
+    if ($target_root === null || $target_root === '' || !is_dir($target_root)) {
+        return $report;
+    }
+
     $validators = cow_merge_discover_mu_plugin_validators($target_root);
-    foreach (array_merge(
-        cow_merge_active_wordpress_plugins($target_db),
-        cow_merge_active_sitewide_wordpress_plugins($target_db)
-    ) as $active_plugin) {
+    $active_plugins = cow_merge_active_wordpress_plugins($target_db);
+    $active_sitewide_plugins = cow_merge_active_sitewide_wordpress_plugins($target_db);
+    $report['active_plugins'] = $active_plugins;
+    $report['active_sitewide_plugins'] = $active_sitewide_plugins;
+
+    $unchecked = [];
+    foreach (array_merge($active_plugins, $active_sitewide_plugins) as $active_plugin) {
         $validator = cow_merge_active_plugin_validator_path($target_root, $active_plugin);
         if ($validator !== null) {
             $validators[] = $validator;
+        } else {
+            $unchecked[$active_plugin] = true;
         }
     }
-    return cow_merge_unique_plugin_validator_paths($validators);
+    $report['validators'] = cow_merge_unique_plugin_validator_paths($validators);
+    $report['unchecked_plugins'] = array_values(array_keys($unchecked));
+    sort($report['unchecked_plugins'], SORT_STRING);
+    return $report;
 }
 
 function cow_merge_record_matching_file_decision(
@@ -18816,6 +18838,8 @@ function cow_merge_branch_state(
         $result['plugin_validators'] = 0;
         $result['plugin_validator_conflicts'] = 0;
         $result['plugin_validators_discovered'] = 0;
+        $result['plugin_validators_unchecked'] = 0;
+        $result['plugin_validators_unchecked_plugins'] = [];
         if ($target_snapshot !== null) {
             cow_merge_materialize_validator_context(
                 $metadata_db,
@@ -18852,8 +18876,11 @@ function cow_merge_branch_state(
             $result['conflicts'] += $file_result['conflicts'];
             $result['status'] = $result['conflicts'] > 0 ? 'completed_with_conflicts' : 'completed';
             cow_merge_set_run_status($metadata_db, (int)$result['run_id'], $result['status']);
-            $discovered_plugin_validators = cow_merge_discover_plugin_validators($target_db, $target_root);
+            $plugin_validator_discovery = cow_merge_plugin_validator_discovery_report($target_db, $target_root);
+            $discovered_plugin_validators = $plugin_validator_discovery['validators'];
             $result['plugin_validators_discovered'] = count($discovered_plugin_validators);
+            $result['plugin_validators_unchecked_plugins'] = $plugin_validator_discovery['unchecked_plugins'];
+            $result['plugin_validators_unchecked'] = count($plugin_validator_discovery['unchecked_plugins']);
             $plugin_validators = cow_merge_unique_plugin_validator_paths(array_merge(
                 $plugin_validators,
                 $discovered_plugin_validators
@@ -19589,8 +19616,8 @@ if (realpath($argv[0] ?? '') === __FILE__) {
         if (isset($result['file_applied']) && ($result['file_applied'] > 0 || $result['file_conflicts'] > 0)) {
             echo "  files:     applied={$result['file_applied']} conflicts={$result['file_conflicts']}\n";
         }
-        if (isset($result['plugin_validators']) && $result['plugin_validators'] > 0) {
-            echo "  plugins:   validators={$result['plugin_validators']} conflicts={$result['plugin_validator_conflicts']}\n";
+        if (isset($result['plugin_validators']) && ($result['plugin_validators'] > 0 || ($result['plugin_validators_unchecked'] ?? 0) > 0)) {
+            echo "  plugins:   validators={$result['plugin_validators']} conflicts={$result['plugin_validator_conflicts']} unchecked={$result['plugin_validators_unchecked']}\n";
         }
         echo "  metadata:  {$result['metadata_db']}\n";
         exit(0);

@@ -169,6 +169,11 @@ forkpress branch merge feature --into main \
   --plugin-validator ./vendor/bin/my-plugin-merge-validator
 ```
 
+Merge output also reports active plugins that did not ship a discoverable
+validator as `unchecked`. This is coverage metadata, not a hard conflict: it
+keeps current plugin installs mergeable while making it explicit that ForkPress
+only ran generic SQLite/files logic for those plugin graphs.
+
 When this inline validator returns `conflicts`, the merge completes as
 `completed_with_conflicts` and records plugin-scoped conflict rows before the
 result is reported. When it returns `failed` or exits unsuccessfully, the merge

@@ -19321,7 +19321,12 @@ PHP);
     $db = open_db($plugin_discovery_db);
     $db->exec(
         "INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('active_plugins', '" .
-        SQLite3::escapeString(serialize(['active-plugin/active-plugin.php', 'single-plugin.php', '../unsafe/unsafe.php'])) .
+        SQLite3::escapeString(serialize([
+            'active-plugin/active-plugin.php',
+            'single-plugin.php',
+            'unchecked-plugin/unchecked-plugin.php',
+            '../unsafe/unsafe.php',
+        ])) .
         "', 'yes')"
     );
     $db->exec('CREATE TABLE wp_sitemeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, site_id INTEGER NOT NULL DEFAULT 1, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
@@ -19329,6 +19334,7 @@ PHP);
         "INSERT INTO wp_sitemeta (site_id, meta_key, meta_value) VALUES (1, 'active_sitewide_plugins', '" .
         SQLite3::escapeString(serialize([
             'network-plugin/network-plugin.php' => time(),
+            'network-unchecked/network-unchecked.php' => time(),
             '../unsafe-network/unsafe.php' => time(),
         ])) .
         "')"
@@ -19353,6 +19359,16 @@ PHP);
         'wp-content/plugins/single-plugin.forkpress-merge-validator.php',
         'wp-content/plugins/network-plugin/forkpress-merge-validator.php',
     ], 'plugin validator discovery includes mu-plugin validators, active plugin validators, and network-active plugin validators only');
+    $plugin_discovery_report = cow_merge_plugin_validator_discovery_report($plugin_discovery_db, $plugin_discovery_root);
+    $reported_plugin_validators = array_map(
+        fn(string $path): string => str_replace($plugin_discovery_root . '/', '', $path),
+        $plugin_discovery_report['validators']
+    );
+    assert_same($reported_plugin_validators, $discovered_plugin_validators, 'plugin validator discovery report preserves discovered validators');
+    assert_same($plugin_discovery_report['unchecked_plugins'], [
+        'network-unchecked/network-unchecked.php',
+        'unchecked-plugin/unchecked-plugin.php',
+    ], 'plugin validator discovery report exposes active plugins without validators');
 
     $prefixed_network_discovery_root = $tmp . '/prefixed-network-plugin-validator-discovery-root';
     $prefixed_network_discovery_db = $tmp . '/prefixed-network-plugin-validator-discovery.sqlite';
@@ -19396,7 +19412,7 @@ PHP);
     $db = open_db($auto_validator_target_db);
     $db->exec(
         "INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('active_plugins', '" .
-        SQLite3::escapeString(serialize(['auto-validator/auto-validator.php'])) .
+        SQLite3::escapeString(serialize(['auto-validator/auto-validator.php', 'unchecked-auto/unchecked-auto.php'])) .
         "', 'yes')"
     );
     $db->exec('CREATE TABLE wp_sitemeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, site_id INTEGER NOT NULL DEFAULT 1, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
@@ -19461,6 +19477,7 @@ PHP);
     ]);
     assert_same($auto_validator_merge['status'], 0, 'automatic plugin validator discovery runs during normal file-backed merge');
     assert_true(str_contains($auto_validator_merge['output'], 'plugins:   validators=2 conflicts=2'), 'automatic plugin validator discovery reports regular and network-active validator conflicts');
+    assert_true(str_contains($auto_validator_merge['output'], 'unchecked=1'), 'automatic plugin validator discovery reports active plugins without validators');
     assert_same(scalar($auto_validator_target_db, 'SELECT post_content FROM wp_posts WHERE ID = 1'), 'source automatic validator content', 'automatic validator conflict keeps the staged DB candidate');
     assert_same(
         (int)scalar($auto_validator_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-auto-validator-conflict'"),
