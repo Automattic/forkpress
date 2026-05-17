@@ -62,7 +62,15 @@ $branch_list = $tmp . '/branches.txt';
 $metadata_path = $tmp . '/merge/metadata.sqlite';
 mkdir($git, 0777, true);
 mkdir(dirname($metadata_path), 0777, true);
+mkdir($tmp . '/merge/bases', 0777, true);
+mkdir($tmp . '/merge/file-bases', 0777, true);
 file_put_contents($branch_list, "main\n");
+file_put_contents($tmp . '/merge/bases/git-created.sqlite', 'created db base');
+file_put_contents($tmp . '/merge/bases/git-created.sqlite-wal', 'created db wal');
+file_put_contents($tmp . '/merge/bases/git-created.sqlite-shm', 'created db shm');
+file_put_contents($tmp . '/merge/file-bases/git-created.json', '{}');
+file_put_contents($tmp . '/merge/bases/kept.sqlite', 'kept db base');
+file_put_contents($tmp . '/merge/file-bases/kept.json', '{}');
 $metadata = new SQLite3($metadata_path);
 $metadata->exec('CREATE TABLE merge_autoincrement_bands (branch_name TEXT NOT NULL)');
 $metadata->exec('CREATE TABLE merge_row_identities (branch_name TEXT NOT NULL)');
@@ -77,6 +85,7 @@ $metadata->exec("INSERT INTO merge_runs (id, source_branch, target_branch, base_
 $metadata->exec("INSERT INTO merge_runs (id, source_branch, target_branch, base_ref, policy) VALUES (3, 'git-created', 'main', 'identity-capture', 'sidecar-row-identity-capture')");
 $metadata->exec('INSERT INTO merge_decisions (id, run_id) VALUES (10, 1), (11, 2), (12, 3)');
 $metadata->close();
+cow_git_cleanup_created_branch_merge_base_artifacts($git, $branch_list, [['branch' => 'git-created']]);
 cow_git_cleanup_created_branch_id_band_metadata($git, $branch_list, [['branch' => 'git-created']]);
 $metadata = new SQLite3($metadata_path, SQLITE3_OPEN_READONLY);
 assert_same((int)$metadata->querySingle("SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'git-created'"), 0, 'created-branch cleanup removes created ID-band rows');
@@ -87,6 +96,12 @@ assert_same((int)$metadata->querySingle('SELECT COUNT(*) FROM merge_decisions WH
 assert_same((int)$metadata->querySingle('SELECT COUNT(*) FROM merge_decisions WHERE run_id = 3'), 1, 'created-branch cleanup preserves non-birth decisions');
 assert_same((int)$metadata->querySingle("SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'kept'"), 1, 'created-branch cleanup preserves other branch ID-band rows');
 $metadata->close();
+assert_true(!file_exists($tmp . '/merge/bases/git-created.sqlite'), 'created-branch cleanup removes DB merge-base artifacts');
+assert_true(!file_exists($tmp . '/merge/bases/git-created.sqlite-wal'), 'created-branch cleanup removes DB merge-base WAL artifacts');
+assert_true(!file_exists($tmp . '/merge/bases/git-created.sqlite-shm'), 'created-branch cleanup removes DB merge-base SHM artifacts');
+assert_true(!file_exists($tmp . '/merge/file-bases/git-created.json'), 'created-branch cleanup removes filesystem merge-base artifacts');
+assert_true(file_exists($tmp . '/merge/bases/kept.sqlite'), 'created-branch cleanup preserves other branch DB merge-base artifacts');
+assert_true(file_exists($tmp . '/merge/file-bases/kept.json'), 'created-branch cleanup preserves other branch filesystem merge-base artifacts');
 cow_git_remove_tree($tmp);
 
 echo "=== COW Git server receive-pack parsing ===\n";
