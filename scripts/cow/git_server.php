@@ -800,7 +800,9 @@ function cow_git_apply_all_refs_to_branches(
             $wp_files,
             $file_view,
             $debug_log,
-            $transaction !== null
+            $transaction !== null,
+            $git_repo_dir,
+            $branch_list_path
         );
         if ($transaction !== null && $updated !== null) {
             $transaction['updates'][] = $updated;
@@ -1162,13 +1164,16 @@ function cow_git_apply_existing_branch_update(
     array $wp_files,
     string $file_view,
     string $debug_log,
-    bool $keep_backup = false
+    bool $keep_backup = false,
+    ?string $git_repo_dir = null,
+    ?string $branch_list_path = null
 ): ?array {
     $public_root = rtrim($branches_dir, "/\\") . '/' . $branch;
     $storage_root = cow_git_branch_storage_root($storage_branches_dir, $branches_dir, $branch);
     if (!is_dir($public_root) || !is_dir($storage_root)) {
         throw new \RuntimeException("target branch '$branch' does not exist");
     }
+    cow_git_validate_existing_branch_birth_metadata_for_update($git_repo_dir, $branch_list_path, $storage_root, $branch);
 
     $parent = dirname($storage_root);
     $stage = cow_git_unique_branch_temp_path($parent, 'update-stage', $branch);
@@ -1222,6 +1227,48 @@ function cow_git_apply_existing_branch_update(
 
     cow_git_remove_tree($backup);
     return null;
+}
+
+function cow_git_validate_existing_branch_birth_metadata_for_update(
+    ?string $git_repo_dir,
+    ?string $branch_list_path,
+    string $storage_root,
+    string $branch
+): void {
+    if ($branch === 'main' || $git_repo_dir === null) {
+        return;
+    }
+
+    require_once __DIR__ . '/merge.php';
+
+    $branch_list_path = $branch_list_path ?: dirname($git_repo_dir) . '/branches.txt';
+    $merge_dir = dirname($branch_list_path) . '/merge';
+    $db = rtrim($storage_root, "/\\") . '/wp-content/database/.ht.sqlite';
+    if (!is_file($db)) {
+        return;
+    }
+    $base_db = rtrim($merge_dir, "/\\") . '/bases/' . $branch . '.sqlite';
+    if (!is_file($base_db)) {
+        throw new \RuntimeException(
+            "existing Git branch '$branch' is missing its DB merge base before update: $base_db"
+        );
+    }
+    $file_base = rtrim($merge_dir, "/\\") . '/file-bases/' . $branch . '.json';
+    if (!is_file($file_base)) {
+        throw new \RuntimeException(
+            "existing Git branch '$branch' is missing its filesystem merge base before update: $file_base"
+        );
+    }
+    $metadata_db = rtrim($merge_dir, "/\\") . '/metadata.sqlite';
+    try {
+        cow_merge_validate_branch_birth_metadata($db, $metadata_db, $branch);
+    } catch (\Throwable $e) {
+        throw new \RuntimeException(
+            "existing Git branch '$branch' is missing required merge metadata before update: " . $e->getMessage(),
+            0,
+            $e
+        );
+    }
 }
 
 function cow_git_new_apply_transaction(string $branches_dir, string $storage_branches_dir, ?string $branch_list_path): array {

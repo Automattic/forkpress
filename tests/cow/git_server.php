@@ -668,6 +668,88 @@ assert_same(file_get_contents($branches . '/main/wp-content/pushed.txt'), "new m
 assert_same($repo->get_branch_tip('refs/heads/feature'), $feature_tip, 'targeted push resync does not publish unrelated branch edits');
 cow_git_remove_tree($tmp);
 
+$tmp = sys_get_temp_dir() . '/forkpress-cow-git-existing-branch-birth-guard-' . getmypid() . '-' . bin2hex(random_bytes(4));
+$branches = $tmp . '/branches';
+$git = $tmp . '/git';
+$branch_list = $tmp . '/branches.txt';
+mkdir($branches . '/main/wp-content/database', 0777, true);
+mkdir($branches . '/feature/wp-content/database', 0777, true);
+mkdir($tmp . '/merge/bases', 0777, true);
+mkdir($tmp . '/merge/file-bases', 0777, true);
+file_put_contents($branches . '/main/wp-load.php', "<?php\n");
+file_put_contents($branches . '/feature/wp-load.php', "<?php\n");
+file_put_contents($branches . '/feature/wp-content/pushed.txt', "old feature\n");
+foreach (['main', 'feature'] as $branch_name) {
+    $db = new SQLite3($branches . "/$branch_name/wp-content/database/.ht.sqlite");
+    $db->exec('CREATE TABLE wp_posts (ID INTEGER PRIMARY KEY AUTOINCREMENT, post_title TEXT)');
+    $db->exec("INSERT INTO wp_posts (post_title) VALUES ('Base post')");
+    $db->close();
+}
+copy($branches . '/feature/wp-content/database/.ht.sqlite', $tmp . '/merge/bases/feature.sqlite');
+file_put_contents($tmp . '/merge/file-bases/feature.json', json_encode(['version' => 1, 'entries' => []]));
+require_once __DIR__ . '/../../scripts/cow/merge.php';
+cow_merge_capture_row_identities($branches . '/feature/wp-content/database/.ht.sqlite', $tmp . '/merge/metadata.sqlite', 'feature');
+
+$fs = WordPress\Filesystem\LocalFilesystem::create($git);
+$repo = new WordPress\Git\GitRepository($fs, ['default_branch' => 'main']);
+$repo->set_config_value(['user', 'name'], 'ForkPress COW');
+$repo->set_config_value(['user', 'email'], 'forkpress-cow@local');
+cow_git_sync_repository($repo, $branches);
+cow_git_write_branch_list($branches, $branch_list);
+$main_tip = $repo->get_branch_tip('refs/heads/main');
+$feature_tip = $repo->get_branch_tip('refs/heads/feature');
+$repo->checkout('refs/heads/feature');
+$pushed_tip = $repo->commit([
+    'commit' => [
+        'message' => 'push feature without branch birth metadata',
+        'author' => 'ForkPress Test <forkpress-test@local>',
+        'committer' => 'ForkPress Test <forkpress-test@local>',
+        'parents' => [$feature_tip],
+    ],
+    'updates' => ['wordpress/wp-content/pushed.txt' => "new feature\n"],
+]);
+$repo->set_branch_tip('refs/heads/feature', $pushed_tip);
+$failed = false;
+$failure_message = '';
+unlink($tmp . '/merge/bases/feature.sqlite');
+try {
+    cow_git_apply_push_to_branches($repo, $git, $branches, $branches, $branch_list, 'file-copy', '', ['main' => $main_tip, 'feature' => $feature_tip]);
+} catch (Throwable $e) {
+    $failed = true;
+    $failure_message = $e->getMessage();
+}
+assert_true($failed, 'existing branch Git update rejects missing DB merge base before writes');
+assert_true(str_contains($failure_message, 'DB merge base'), 'existing branch Git update explains the missing DB merge base');
+assert_same(file_get_contents($branches . '/feature/wp-content/pushed.txt'), "old feature\n", 'existing branch Git update leaves branch storage unchanged when the DB merge base is missing');
+
+copy($branches . '/feature/wp-content/database/.ht.sqlite', $tmp . '/merge/bases/feature.sqlite');
+unlink($tmp . '/merge/file-bases/feature.json');
+$failed = false;
+$failure_message = '';
+try {
+    cow_git_apply_push_to_branches($repo, $git, $branches, $branches, $branch_list, 'file-copy', '', ['main' => $main_tip, 'feature' => $feature_tip]);
+} catch (Throwable $e) {
+    $failed = true;
+    $failure_message = $e->getMessage();
+}
+assert_true($failed, 'existing branch Git update rejects missing filesystem merge base before writes');
+assert_true(str_contains($failure_message, 'filesystem merge base'), 'existing branch Git update explains the missing filesystem merge base');
+assert_same(file_get_contents($branches . '/feature/wp-content/pushed.txt'), "old feature\n", 'existing branch Git update leaves branch storage unchanged when the filesystem merge base is missing');
+
+file_put_contents($tmp . '/merge/file-bases/feature.json', json_encode(['version' => 1, 'entries' => []]));
+$failed = false;
+$failure_message = '';
+try {
+    cow_git_apply_push_to_branches($repo, $git, $branches, $branches, $branch_list, 'file-copy', '', ['main' => $main_tip, 'feature' => $feature_tip]);
+} catch (Throwable $e) {
+    $failed = true;
+    $failure_message = $e->getMessage();
+}
+assert_true($failed, 'existing branch Git update rejects missing branch birth metadata before writes');
+assert_true(str_contains($failure_message, 'AUTOINCREMENT ID band'), 'existing branch Git update explains the missing ID-band metadata');
+assert_same(file_get_contents($branches . '/feature/wp-content/pushed.txt'), "old feature\n", 'existing branch Git update leaves branch storage unchanged when metadata is incomplete');
+cow_git_remove_tree($tmp);
+
 $tmp = sys_get_temp_dir() . '/forkpress-cow-git-created-id-bands-' . getmypid() . '-' . bin2hex(random_bytes(4));
 $branches = $tmp . '/branches';
 $git = $tmp . '/git';
