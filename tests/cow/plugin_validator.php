@@ -225,8 +225,15 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
             ],
         ];
     }
-    $file_path = str_replace('\\', '/', (string)$row['file_path']);
-    if ($file_path === '' || str_starts_with($file_path, '/') || str_contains($file_path, '..') || !is_file($target_root . '/' . $file_path)) {
+    $file_path_raw = (string)$row['file_path'];
+    $file_path = str_replace('\\', '/', $file_path_raw);
+    $file_safe = $file_path !== '' &&
+        !str_starts_with($file_path, '/') &&
+        preg_match('/^[A-Za-z][A-Za-z0-9+.-]*:\/\//', $file_path) !== 1 &&
+        preg_match('/^[A-Za-z]:\//', $file_path) !== 1 &&
+        !str_contains($file_path_raw, '\\') &&
+        !in_array('..', explode('/', $file_path), true);
+    if (!$file_safe || !is_file($target_root . '/' . $file_path)) {
         $findings[] = [
             'plugin' => 'forkpress-plugin-graph',
             'object' => 'child:' . $child_id,
@@ -242,6 +249,7 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
             'candidate' => [
                 'child_id' => $child_id,
                 'file_path' => $file_path,
+                'file_safe' => $file_safe,
             ],
         ];
     }
@@ -263,6 +271,12 @@ PHP);
     $parent_id = (int)$source_db->lastInsertRowID();
     $source_db->exec("INSERT INTO plugin_graph_child (parent_id, graph_json, file_path) VALUES ($parent_id, '{\"child_id\":9999,\"parent_id\":$parent_id}', 'wp-content/uploads/plugin-validator-missing.dat')");
     $child_id = (int)$source_db->lastInsertRowID();
+    $source_db->exec("INSERT INTO plugin_graph_child (parent_id, graph_json, file_path) VALUES ($parent_id, '{}', 'https://example.test/plugin-validator-url.dat')");
+    $url_child_id = (int)$source_db->lastInsertRowID();
+    $source_db->exec("UPDATE plugin_graph_child SET graph_json = '{\"child_id\":$url_child_id,\"parent_id\":$parent_id}' WHERE child_id = $url_child_id");
+    $source_db->exec("INSERT INTO plugin_graph_child (parent_id, graph_json, file_path) VALUES ($parent_id, '{}', 'C:/plugin-assets/plugin-validator-drive.dat')");
+    $drive_child_id = (int)$source_db->lastInsertRowID();
+    $source_db->exec("UPDATE plugin_graph_child SET graph_json = '{\"child_id\":$drive_child_id,\"parent_id\":$parent_id}' WHERE child_id = $drive_child_id");
     $source_db->close();
 
     $result = cow_merge_branch_state(
@@ -279,7 +293,7 @@ PHP);
 
     assert_same($result['status'], 'completed_with_conflicts', 'plugin validator holds incoherent plugin graph candidates for review');
     assert_same((int)($result['plugin_validators'] ?? 0), 1, 'plugin validator is discovered from mu-plugins during merge');
-    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 2, 'plugin validator records JSON and file graph conflicts');
+    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 4, 'plugin validator records JSON, missing-file, and unsafe-file graph conflicts');
     assert_same(
         scalar($target, "SELECT parent_id FROM plugin_graph_child WHERE child_id = $child_id"),
         $parent_id,
@@ -291,21 +305,42 @@ PHP);
         'scope' => 'plugin',
         'records' => 'conflicts',
     ]);
-    assert_same(count($audit['conflicts']), 2, 'plugin validator conflicts are visible in plugin audit scope');
+    assert_same(count($audit['conflicts']), 4, 'plugin validator conflicts are visible in plugin audit scope');
     $preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $audit['conflicts']));
     assert_true(str_contains($preview, 'plugin-validator-missing.dat'), 'plugin audit exposes missing plugin file context');
+    assert_true(str_contains($preview, 'https://example.test/plugin-validator-url.dat'), 'plugin audit exposes unsafe URL plugin file context');
+    assert_true(str_contains($preview, 'C:/plugin-assets/plugin-validator-drive.dat'), 'plugin audit exposes unsafe drive-letter plugin file context');
     assert_true(str_contains($preview, '"child_id":9999'), 'plugin audit exposes mismatched JSON graph context');
     $file_audit_conflicts = array_values(array_filter($audit['conflicts'], fn($conflict) => ($conflict['conflict_type'] ?? '') === 'plugin-graph-file-drift'));
-    assert_same(count($file_audit_conflicts), 1, 'plugin audit exposes the file validator conflict as a focused record');
-    assert_same($file_audit_conflicts[0]['plugin'] ?? null, 'forkpress-plugin-graph', 'plugin audit exposes the validator plugin as a first-class field');
-    assert_same($file_audit_conflicts[0]['plugin_object'] ?? null, 'child:' . $child_id, 'plugin audit exposes the validator object as a first-class field');
-    assert_same($file_audit_conflicts[0]['plugin_validator'] ?? null, 'forkpress-plugin-graph@1', 'plugin audit exposes the validator version as a first-class field');
-    assert_same($file_audit_conflicts[0]['plugin_severity'] ?? null, 'error', 'plugin audit exposes validator severity as a first-class field');
-    assert_same($file_audit_conflicts[0]['plugin_tables'] ?? null, ['plugin_graph_child'], 'plugin audit exposes plugin-owned tables as structured fields');
-    assert_same($file_audit_conflicts[0]['plugin_files'] ?? null, ['wp-content/uploads/plugin-validator-missing.dat'], 'plugin audit normalizes validator paths into structured plugin files');
-    assert_same($file_audit_conflicts[0]['plugin_resolution_policy'] ?? null, 'review-only', 'plugin audit exposes validator review policy as a first-class field');
+    assert_same(count($file_audit_conflicts), 3, 'plugin audit exposes the file validator conflicts as focused records');
+    $missing_file_audit_conflicts = array_values(array_filter(
+        $file_audit_conflicts,
+        fn(array $conflict): bool => ($conflict['plugin_files'] ?? null) === ['wp-content/uploads/plugin-validator-missing.dat']
+    ));
+    assert_same(count($missing_file_audit_conflicts), 1, 'plugin audit exposes the missing file conflict as a focused record');
+    $missing_file_audit_conflict = $missing_file_audit_conflicts[0];
+    assert_same($missing_file_audit_conflict['plugin'] ?? null, 'forkpress-plugin-graph', 'plugin audit exposes the validator plugin as a first-class field');
+    assert_same($missing_file_audit_conflict['plugin_object'] ?? null, 'child:' . $child_id, 'plugin audit exposes the validator object as a first-class field');
+    assert_same($missing_file_audit_conflict['plugin_validator'] ?? null, 'forkpress-plugin-graph@1', 'plugin audit exposes the validator version as a first-class field');
+    assert_same($missing_file_audit_conflict['plugin_severity'] ?? null, 'error', 'plugin audit exposes validator severity as a first-class field');
+    assert_same($missing_file_audit_conflict['plugin_tables'] ?? null, ['plugin_graph_child'], 'plugin audit exposes plugin-owned tables as structured fields');
+    assert_same($missing_file_audit_conflict['plugin_files'] ?? null, ['wp-content/uploads/plugin-validator-missing.dat'], 'plugin audit normalizes validator paths into structured plugin files');
+    $unsafe_file_paths = [];
+    foreach ($file_audit_conflicts as $conflict) {
+        $payload = cow_merge_decode_payload_json((string)($conflict['chosen_payload'] ?? ''), 'plugin graph file conflict');
+        if (($payload['candidate']['file_safe'] ?? null) === false) {
+            $unsafe_file_paths[] = (string)($payload['candidate']['file_path'] ?? '');
+        }
+    }
+    sort($unsafe_file_paths);
+    assert_same(
+        $unsafe_file_paths,
+        ['C:/plugin-assets/plugin-validator-drive.dat', 'https://example.test/plugin-validator-url.dat'],
+        'plugin audit records URL and drive-letter plugin file references as unsafe'
+    );
+    assert_same($missing_file_audit_conflict['plugin_resolution_policy'] ?? null, 'review-only', 'plugin audit exposes validator review policy as a first-class field');
     assert_true(
-        str_contains((string)($file_audit_conflicts[0]['plugin_manual_review_reason'] ?? ''), 'cannot synthesize plugin-owned files'),
+        str_contains((string)($missing_file_audit_conflict['plugin_manual_review_reason'] ?? ''), 'cannot synthesize plugin-owned files'),
         'plugin audit exposes validator manual-review guidance as a first-class field'
     );
     ob_start();
@@ -323,7 +358,7 @@ PHP);
     ]);
     assert_same($plugin_filter_audit['filters']['scope'], 'plugin', 'plugin audit filter defaults to plugin scope');
     assert_same($plugin_filter_audit['filters']['records'], 'conflicts', 'plugin audit filter defaults to conflict records');
-    assert_same(count($plugin_filter_audit['conflicts']), 2, 'plugin audit can filter conflicts by validator plugin');
+    assert_same(count($plugin_filter_audit['conflicts']), 4, 'plugin audit can filter conflicts by validator plugin');
     $plugin_object_filter_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'plugin_object' => 'child:' . $child_id,
     ]);
@@ -331,7 +366,7 @@ PHP);
     $plugin_severity_filter_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'plugin_severity' => 'error',
     ]);
-    assert_same(count($plugin_severity_filter_audit['conflicts']), 1, 'plugin audit can filter conflicts by validator severity');
+    assert_same(count($plugin_severity_filter_audit['conflicts']), 3, 'plugin audit can filter conflicts by validator severity');
     assert_same($plugin_severity_filter_audit['conflicts'][0]['conflict_type'] ?? null, 'plugin-graph-file-drift', 'plugin severity filter returns the matching validator conflict');
     $plugin_group_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'plugin',
@@ -342,7 +377,7 @@ PHP);
     foreach ($plugin_group_audit['conflict_groups'] as $group) {
         $plugin_group_counts[(string)$group['group_key']] = (int)$group['conflict_count'];
     }
-    assert_same($plugin_group_counts['forkpress-plugin-graph'] ?? 0, 2, 'plugin audit can group conflicts by validator plugin');
+    assert_same($plugin_group_counts['forkpress-plugin-graph'] ?? 0, 4, 'plugin audit can group conflicts by validator plugin');
     $plugin_object_group_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'plugin',
         'records' => 'conflicts',
@@ -362,7 +397,7 @@ PHP);
     foreach ($plugin_severity_group_audit['conflict_groups'] as $group) {
         $plugin_severity_group_counts[(string)$group['group_key']] = (int)$group['conflict_count'];
     }
-    assert_same($plugin_severity_group_counts['error'] ?? 0, 1, 'plugin audit can group conflicts by validator severity');
+    assert_same($plugin_severity_group_counts['error'] ?? 0, 3, 'plugin audit can group conflicts by validator severity');
     assert_same($plugin_severity_group_counts['(unknown)'] ?? 0, 1, 'plugin audit groups findings without validator severity as unknown');
     $plugin_group_default_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, ['scope' => 'plugin', 'group_by' => 'plugin']);
     assert_same($plugin_group_default_audit['filters']['records'], 'conflicts', 'plugin grouping defaults audit records to conflicts');
@@ -377,7 +412,7 @@ PHP);
     ob_start();
     cow_merge_print_audit_text($plugin_severity_group_audit);
     $plugin_group_text = ob_get_clean();
-    assert_true(str_contains($plugin_group_text, 'plugin-severity=error conflicts=1'), 'plugin text audit exposes conflict grouping by validator severity');
+    assert_true(str_contains($plugin_group_text, 'plugin-severity=error conflicts=3'), 'plugin text audit exposes conflict grouping by validator severity');
 
     $json_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-graph-json-drift' ORDER BY id ASC LIMIT 1");
     assert_true($json_conflict_id > 0, 'plugin validator fixture records a JSON graph conflict for revalidation');
