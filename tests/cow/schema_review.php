@@ -334,9 +334,9 @@ SQL);
     assert_same($schema_object_revalidated['stale'], 2, 'schema object revalidation detects changed source view and trigger SQL');
     assert_same($schema_object_revalidated['carried'], 2, 'schema object revalidation carries changed source object evidence to needs-action');
     assert_same(
-        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id IN ($view_conflict_id, $trigger_conflict_id) AND revalidation_class = 'unclassified'"),
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id IN ($view_conflict_id, $trigger_conflict_id) AND revalidation_class = 'compatible-source-drift'"),
         2,
-        'schema object source drift remains unclassified until a schema planner proves compatibility'
+        'schema object source drift is classified compatible when revalidation proves formerly blocked source SQL is now valid'
     );
     assert_true(
         str_contains((string)scalar($metadata, "SELECT stale_reason FROM merge_revalidations WHERE conflict_id = $view_conflict_id ORDER BY id DESC LIMIT 1"), 'view source changed'),
@@ -372,8 +372,22 @@ SQL);
     ));
     assert_same(count($schema_object_needs_action), 2, 'schema object source drift returns reviewed conflicts to the needs-action audit queue');
     foreach ($schema_object_needs_action as $conflict) {
-        assert_same($conflict['revalidation_class'] ?? null, 'unclassified', 'schema object audit exposes conservative unclassified revalidation');
+        assert_same($conflict['revalidation_class'] ?? null, 'compatible-source-drift', 'schema object audit exposes compatible source-drift revalidation');
     }
+    $view_after_revalidate_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $view_conflict_id,
+        'source',
+        true,
+        'Apply revalidated non-cyclic source-added view.',
+        'cow-test',
+        true
+    );
+    assert_same($view_after_revalidate_resolution['status'], 'applied', 'after-revalidate source resolution applies updated source-added view evidence');
+    assert_true(
+        str_contains((string)scalar($target, "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'plugin_cycle_self_view'"), 'SELECT label FROM plugin_trigger_cycle_self'),
+        'after-revalidate source resolution installs the updated non-cyclic source view SQL'
+    );
     $schema_object_revalidation_ids = [
         $view_conflict_id => (int)scalar($metadata, "SELECT id FROM merge_revalidations WHERE conflict_id = $view_conflict_id ORDER BY id DESC LIMIT 1"),
         $trigger_conflict_id => (int)scalar($metadata, "SELECT id FROM merge_revalidations WHERE conflict_id = $trigger_conflict_id ORDER BY id DESC LIMIT 1"),

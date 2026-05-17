@@ -11992,24 +11992,28 @@ function cow_merge_resolve_schema_conflict(
             }
             $type = str_contains($conflict_type, 'trigger') ? 'trigger' : 'view';
             $source_sql = cow_merge_schema_index_sql_payload($source_payload);
-            if ($source_sql === null && !str_contains($conflict_type, 'source-dropped')) {
+            if (!$after_revalidate && $source_sql === null && !str_contains($conflict_type, 'source-dropped')) {
                 throw new RuntimeException("schema conflict #$conflict_id does not contain a source $type SQL payload");
             }
             $current_source_sql = cow_merge_schema_object_sql($source, $type, $object);
-            if (!cow_merge_values_equal($current_source_sql, $source_sql)) {
+            if (!$after_revalidate && !cow_merge_values_equal($current_source_sql, $source_sql)) {
                 throw new RuntimeException("source $type no longer matches the audited conflict source value; rerun merge before resolving");
             }
             $current_target_sql = cow_merge_schema_object_sql($target, $type, $object);
             $previous = $current_target_sql;
+            $source_error = is_array($source_payload) ? (string)($source_payload['error'] ?? '') : '';
             if ($after_revalidate) {
                 $current_source_payload = cow_merge_payload_json(['sql' => $current_source_sql]);
                 $current_target_payload = cow_merge_payload_json($current_target_sql);
                 cow_merge_require_after_revalidate($meta, $conflict_id, $current_source_payload, $current_target_payload);
                 $latest_revalidation = cow_merge_latest_revalidation($meta, $conflict_id);
                 $expected_revalidation_class = "compatible-schema-$type-target-drift";
-                if ((string)($latest_revalidation['revalidation_class'] ?? '') !== $expected_revalidation_class) {
+                $latest_revalidation_class = (string)($latest_revalidation['revalidation_class'] ?? '');
+                if (!in_array($latest_revalidation_class, [$expected_revalidation_class, 'compatible-source-drift'], true)) {
                     throw new RuntimeException("latest schema revalidation did not prove this source-added $type drift is compatible");
                 }
+                $source_sql = $current_source_sql;
+                $source_error = '';
             } else {
                 if ($target_payload === null) {
                     if ($current_target_sql !== null) {
@@ -12021,7 +12025,6 @@ function cow_merge_resolve_schema_conflict(
             }
             if ($choice === 'source') {
                 $resolved = $source_sql;
-                $source_error = is_array($source_payload) ? (string)($source_payload['error'] ?? '') : '';
                 $mutate_source = function () use ($target, $type, $object, $source_sql, $source_error): void {
                     cow_merge_apply_source_schema_object_resolution($target, $type, $object, $source_sql, $source_error);
                 };
@@ -12347,7 +12350,29 @@ function cow_merge_resolve_conflict(
         $column = (string)($conflict['column_name'] ?? '');
         $conflict_type = (string)$conflict['conflict_type'];
         $blocked_choice = cow_merge_conflict_blocked_resolution_choice($conflict, $choice);
-        if ($blocked_choice !== null) {
+        $source_block_cleared_by_revalidation = false;
+        if (
+            $blocked_choice !== null &&
+            $after_revalidate &&
+            $choice === 'source' &&
+            in_array($conflict_type, [
+                'schema-source-added-view',
+                'schema-source-changed-view',
+                'schema-source-added-trigger',
+                'schema-source-changed-trigger',
+            ], true)
+        ) {
+            $latest_revalidation = cow_merge_latest_revalidation($meta, $conflict_id);
+            if ($latest_revalidation !== null && (string)($latest_revalidation['revalidation_class'] ?? '') === 'compatible-source-drift') {
+                $staleness = cow_merge_audit_conflict_target_staleness($meta, $conflict);
+                $source_block_cleared_by_revalidation = cow_merge_latest_revalidation_status(
+                    $latest_revalidation,
+                    $staleness,
+                    $conflict
+                ) === 'current';
+            }
+        }
+        if ($blocked_choice !== null && !$source_block_cleared_by_revalidation) {
             throw new InvalidArgumentException("resolution choice $choice is blocked for conflict #$conflict_id: $blocked_choice");
         }
         if ($table === '__files__') {
@@ -15546,6 +15571,33 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
                         $revalidation_class = 'unclassified';
                     } finally {
                         $target->close();
+                    }
+                }
+                if (
+                    in_array($conflict_type, [
+                        'schema-source-added-view',
+                        'schema-source-changed-view',
+                        'schema-source-added-trigger',
+                        'schema-source-changed-trigger',
+                    ], true) &&
+                    !$source_fresh &&
+                    $target_fresh &&
+                    $current_source_sql !== null
+                ) {
+                    $source_error = is_array($source_payload) ? (string)($source_payload['error'] ?? '') : '';
+                    $was_blocked_cyclic_source =
+                        ($type === 'view' && str_contains($source_error, 'unsupported cyclic') && str_contains($source_error, 'view dependencies')) ||
+                        ($type === 'trigger' && str_contains($source_error, 'unsupported cyclic trigger dependencies'));
+                    if ($was_blocked_cyclic_source) {
+                        $target = cow_merge_open_db($target_db, SQLITE3_OPEN_READWRITE);
+                        try {
+                            cow_merge_validate_source_schema_object_resolution($target, $type, $object, $current_source_sql);
+                            $revalidation_class = 'compatible-source-drift';
+                        } catch (Throwable) {
+                            $revalidation_class = 'unclassified';
+                        } finally {
+                            $target->close();
+                        }
                     }
                 }
                 $reason = !$source_fresh && !$target_fresh
