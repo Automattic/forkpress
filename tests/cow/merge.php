@@ -1962,6 +1962,22 @@ try {
         'conflict_id' => (string)$unique_fk_conflict_id,
     ]);
     assert_same(count($unique_fk_blocked_action_audit['conflicts']), 1, 'blocked resolution conflicts are discoverable through the manual-review action queue');
+    $unique_fk_blocked_queue_cli = run_merge_cli([
+        'audit',
+        '--metadata-db', $unique_fk_metadata,
+        '--run', (string)$unique_fk_result['run_id'],
+        '--records=conflicts',
+        '--lifecycle-state=needs-action',
+        '--next-action=manual-review',
+        '--conflict-id', (string)$unique_fk_conflict_id,
+        '--format=json',
+    ]);
+    assert_same($unique_fk_blocked_queue_cli['status'], 0, 'blocked resolution queue audit CLI exits successfully');
+    $unique_fk_blocked_queue_cli_json = json_decode($unique_fk_blocked_queue_cli['output'], true);
+    assert_true(is_array($unique_fk_blocked_queue_cli_json), 'blocked resolution queue audit CLI emits JSON');
+    assert_same($unique_fk_blocked_queue_cli_json['filters']['lifecycle_state'] ?? null, 'needs-action', 'blocked resolution queue audit CLI preserves lifecycle filter');
+    assert_same($unique_fk_blocked_queue_cli_json['filters']['next_action'] ?? null, 'manual-review', 'blocked resolution queue audit CLI preserves next-action filter');
+    assert_same(count($unique_fk_blocked_queue_cli_json['conflicts'] ?? []), 1, 'blocked resolution queue audit CLI returns the blocked conflict');
     $unique_fk_blocked_lifecycle_groups = cow_merge_audit_report($unique_fk_metadata, (int)$unique_fk_result['run_id'], 10, [
         'records' => 'conflicts',
         'group_by' => 'lifecycle',
