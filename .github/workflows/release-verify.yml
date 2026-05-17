@@ -31,21 +31,29 @@ permissions:
 jobs:
   preflight:
     name: "Release: verify metadata"
-    if: >-
-      startsWith(github.event.pull_request.head.ref, 'release/v') &&
-      github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.metadata.outputs.version }}
-      tag: ${{ steps.metadata.outputs.tag }}
-      branch: ${{ steps.metadata.outputs.branch }}
-      is_prerelease: ${{ steps.metadata.outputs.is_prerelease }}
+      version: ${{ steps.metadata_release.outputs.version || steps.metadata_defaults.outputs.version }}
+      tag: ${{ steps.metadata_release.outputs.tag || steps.metadata_defaults.outputs.tag }}
+      branch: ${{ steps.metadata_release.outputs.branch || steps.metadata_defaults.outputs.branch }}
+      is_prerelease: ${{ steps.metadata_release.outputs.is_prerelease || steps.metadata_defaults.outputs.is_prerelease }}
       checkout_ref: ${{ steps.ref.outputs.checkout_ref }}
     steps:
       - name: Select checkout ref
         id: ref
         run: |
           echo "checkout_ref=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Default metadata for release-infra PRs
+        id: metadata_defaults
+        run: |
+          echo "version=0.0.0" >> "$GITHUB_OUTPUT"
+          echo "tag=" >> "$GITHUB_OUTPUT"
+          echo "branch=${RELEASE_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+        env:
+          RELEASE_BRANCH: ${{ github.event.pull_request.head.ref }}
 
       - uses: actions/checkout@v4
         with:
@@ -57,13 +65,15 @@ jobs:
           node-version: 24
 
       - name: Validate release metadata
-        id: metadata
+        id: metadata_release
+        if: startsWith(github.event.pull_request.head.ref, 'release/v')
         run: node scripts/release-validate.mjs --release-branch "${{ github.event.pull_request.head.ref }}" --github-output
 
       - name: Validate tag state
+        if: startsWith(github.event.pull_request.head.ref, 'release/v')
         run: |
           git fetch --force --tags origin
-          tag="${{ steps.metadata.outputs.tag }}"
+          tag="${{ steps.metadata_release.outputs.tag }}"
           sha="$(git rev-parse HEAD)"
           existing="$(git rev-parse -q --verify "refs/tags/${tag}^{}" 2>/dev/null || true)"
           if [ -n "$existing" ] && [ "$existing" != "$sha" ]; then
