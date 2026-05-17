@@ -369,9 +369,202 @@ try {
         'review_status' => 'needs-action',
     ]);
     assert_same(count($schema_target_drift_audit['conflicts']), 2, 'schema target SQL drift is visible in the needs-action audit queue');
-    foreach ($schema_target_drift_audit['conflicts'] as $conflict) {
-        assert_same($conflict['revalidation_class'] ?? null, 'unclassified', 'schema target SQL drift remains unclassified until a planner proves compatibility');
-    }
+    assert_same(
+        scalar($schema_target_drift_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $schema_target_drift_conflict_id ORDER BY id DESC LIMIT 1"),
+        'unclassified',
+        'cyclic schema view target SQL drift remains unclassified until a planner proves compatibility'
+    );
+    assert_same(
+        scalar($schema_target_drift_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $schema_trigger_target_drift_conflict_id ORDER BY id DESC LIMIT 1"),
+        'unclassified',
+        'cyclic schema trigger target SQL drift remains unclassified until a planner proves compatibility'
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $schema_target_drift_metadata,
+            $schema_target_drift_conflict_id,
+            'source',
+            true,
+            'Try source view after unclassified revalidation.',
+            'cow-test',
+            true
+        ),
+        'resolution choice source is blocked',
+        'unclassified schema view target drift cannot resolve after revalidation'
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict(
+            $schema_target_drift_metadata,
+            $schema_trigger_target_drift_conflict_id,
+            'source',
+            true,
+            'Try source trigger after unclassified revalidation.',
+            'cow-test',
+            true
+        ),
+        'resolution choice source is blocked',
+        'unclassified schema trigger target drift cannot resolve after revalidation'
+    );
+
+    $schema_view_compatible_base = $tmp . '/schema-view-compatible-base.sqlite';
+    $schema_view_compatible_source = $tmp . '/schema-view-compatible-source.sqlite';
+    $schema_view_compatible_target = $tmp . '/schema-view-compatible-target.sqlite';
+    $schema_view_compatible_metadata = $tmp . '/.forkpress/cow/merge/schema-view-compatible-metadata.sqlite';
+
+    $db = open_db($schema_view_compatible_base);
+    $db->exec('CREATE TABLE plugin_schema_view_compatible_items (label TEXT NOT NULL)');
+    $db->exec("INSERT INTO plugin_schema_view_compatible_items (label) VALUES ('compatible view anchor')");
+    $db->close();
+    copy($schema_view_compatible_base, $schema_view_compatible_source);
+    copy($schema_view_compatible_base, $schema_view_compatible_target);
+
+    $source_db = open_db($schema_view_compatible_source);
+    $source_db->exec('CREATE VIEW plugin_schema_view_compatible_view AS SELECT label FROM plugin_schema_view_compatible_items');
+    $source_view_sql = (string)$source_db->querySingle("SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'plugin_schema_view_compatible_view'");
+    $source_db->close();
+
+    @mkdir(dirname($schema_view_compatible_metadata), 0777, true);
+    $schema_view_compatible_meta = open_db($schema_view_compatible_metadata);
+    cow_merge_ensure_metadata($schema_view_compatible_meta);
+    $schema_view_compatible_run_id = cow_merge_start_run(
+        $schema_view_compatible_meta,
+        'feature-schema-view-compatible',
+        'main',
+        $schema_view_compatible_base,
+        $schema_view_compatible_source,
+        $schema_view_compatible_target
+    );
+    cow_merge_record_schema_conflict(
+        $schema_view_compatible_meta,
+        $schema_view_compatible_run_id,
+        'plugin_schema_view_compatible_items',
+        'plugin_schema_view_compatible_view',
+        'schema-source-added-view',
+        null,
+        ['sql' => $source_view_sql],
+        null,
+        null,
+        'manual source-added view conflict for compatible target-drift revalidation'
+    );
+    cow_merge_finish_run($schema_view_compatible_meta, $schema_view_compatible_run_id, 'completed_with_conflicts');
+    $schema_view_compatible_meta->close();
+    $schema_view_compatible_conflict_id = (int)scalar($schema_view_compatible_metadata, "SELECT id FROM merge_conflicts WHERE conflict_type = 'schema-source-added-view' ORDER BY id DESC LIMIT 1");
+    assert_true($schema_view_compatible_conflict_id > 0, 'compatible schema view target-drift fixture records a source-added view conflict');
+    cow_merge_review_record(
+        $schema_view_compatible_metadata,
+        'conflict',
+        $schema_view_compatible_conflict_id,
+        'reviewed',
+        'Review source-added view before compatible target drift.',
+        'cow-test'
+    );
+    $target_db = open_db($schema_view_compatible_target);
+    $target_db->exec("CREATE VIEW plugin_schema_view_compatible_view AS SELECT label || ' target' AS label FROM plugin_schema_view_compatible_items");
+    $target_db->close();
+
+    $schema_view_compatible_revalidated = cow_merge_revalidate_reviewed_conflicts($schema_view_compatible_metadata, $schema_view_compatible_run_id, 'cow-revalidate');
+    assert_same($schema_view_compatible_revalidated['checked'], 1, 'compatible schema view target drift revalidation checks the reviewed conflict');
+    assert_same($schema_view_compatible_revalidated['stale'], 1, 'compatible schema view target drift is treated as stale');
+    assert_same($schema_view_compatible_revalidated['carried'], 1, 'compatible schema view target drift returns the conflict to needs-action');
+    assert_same(
+        scalar($schema_view_compatible_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $schema_view_compatible_conflict_id ORDER BY id DESC LIMIT 1"),
+        'compatible-schema-view-target-drift',
+        'schema view target drift is classified compatible when source replacement validates'
+    );
+    $schema_view_compatible_resolution = cow_merge_resolve_conflict(
+        $schema_view_compatible_metadata,
+        $schema_view_compatible_conflict_id,
+        'source',
+        true,
+        'Apply source view after compatible target drift revalidation.',
+        'cow-test',
+        true
+    );
+    assert_same($schema_view_compatible_resolution['status'], 'applied', 'compatible schema view target drift resolves after revalidation');
+    assert_true(
+        str_contains((string)scalar($schema_view_compatible_target, "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'plugin_schema_view_compatible_view'"), 'SELECT label FROM plugin_schema_view_compatible_items'),
+        'compatible schema view target drift applies the audited source view'
+    );
+
+    $schema_trigger_compatible_base = $tmp . '/schema-trigger-compatible-base.sqlite';
+    $schema_trigger_compatible_source = $tmp . '/schema-trigger-compatible-source.sqlite';
+    $schema_trigger_compatible_target = $tmp . '/schema-trigger-compatible-target.sqlite';
+    $schema_trigger_compatible_metadata = $tmp . '/.forkpress/cow/merge/schema-trigger-compatible-metadata.sqlite';
+
+    $db = open_db($schema_trigger_compatible_base);
+    $db->exec('CREATE TABLE plugin_schema_trigger_compatible_items (label TEXT NOT NULL)');
+    $db->exec("INSERT INTO plugin_schema_trigger_compatible_items (label) VALUES ('compatible trigger anchor')");
+    $db->close();
+    copy($schema_trigger_compatible_base, $schema_trigger_compatible_source);
+    copy($schema_trigger_compatible_base, $schema_trigger_compatible_target);
+
+    $source_db = open_db($schema_trigger_compatible_source);
+    $source_db->exec('CREATE TRIGGER plugin_schema_trigger_compatible_trigger AFTER INSERT ON plugin_schema_trigger_compatible_items BEGIN SELECT NEW.label; END');
+    $source_trigger_sql = (string)$source_db->querySingle("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_schema_trigger_compatible_trigger'");
+    $source_db->close();
+
+    @mkdir(dirname($schema_trigger_compatible_metadata), 0777, true);
+    $schema_trigger_compatible_meta = open_db($schema_trigger_compatible_metadata);
+    cow_merge_ensure_metadata($schema_trigger_compatible_meta);
+    $schema_trigger_compatible_run_id = cow_merge_start_run(
+        $schema_trigger_compatible_meta,
+        'feature-schema-trigger-compatible',
+        'main',
+        $schema_trigger_compatible_base,
+        $schema_trigger_compatible_source,
+        $schema_trigger_compatible_target
+    );
+    cow_merge_record_schema_conflict(
+        $schema_trigger_compatible_meta,
+        $schema_trigger_compatible_run_id,
+        'plugin_schema_trigger_compatible_items',
+        'plugin_schema_trigger_compatible_trigger',
+        'schema-source-added-trigger',
+        null,
+        ['sql' => $source_trigger_sql],
+        null,
+        null,
+        'manual source-added trigger conflict for compatible target-drift revalidation'
+    );
+    cow_merge_finish_run($schema_trigger_compatible_meta, $schema_trigger_compatible_run_id, 'completed_with_conflicts');
+    $schema_trigger_compatible_meta->close();
+    $schema_trigger_compatible_conflict_id = (int)scalar($schema_trigger_compatible_metadata, "SELECT id FROM merge_conflicts WHERE conflict_type = 'schema-source-added-trigger' ORDER BY id DESC LIMIT 1");
+    assert_true($schema_trigger_compatible_conflict_id > 0, 'compatible schema trigger target-drift fixture records a source-added trigger conflict');
+    cow_merge_review_record(
+        $schema_trigger_compatible_metadata,
+        'conflict',
+        $schema_trigger_compatible_conflict_id,
+        'reviewed',
+        'Review source-added trigger before compatible target drift.',
+        'cow-test'
+    );
+    $target_db = open_db($schema_trigger_compatible_target);
+    $target_db->exec("CREATE TRIGGER plugin_schema_trigger_compatible_trigger AFTER INSERT ON plugin_schema_trigger_compatible_items BEGIN SELECT 'target'; END");
+    $target_db->close();
+
+    $schema_trigger_compatible_revalidated = cow_merge_revalidate_reviewed_conflicts($schema_trigger_compatible_metadata, $schema_trigger_compatible_run_id, 'cow-revalidate');
+    assert_same($schema_trigger_compatible_revalidated['checked'], 1, 'compatible schema trigger target drift revalidation checks the reviewed conflict');
+    assert_same($schema_trigger_compatible_revalidated['stale'], 1, 'compatible schema trigger target drift is treated as stale');
+    assert_same($schema_trigger_compatible_revalidated['carried'], 1, 'compatible schema trigger target drift returns the conflict to needs-action');
+    assert_same(
+        scalar($schema_trigger_compatible_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $schema_trigger_compatible_conflict_id ORDER BY id DESC LIMIT 1"),
+        'compatible-schema-trigger-target-drift',
+        'schema trigger target drift is classified compatible when source replacement validates'
+    );
+    $schema_trigger_compatible_resolution = cow_merge_resolve_conflict(
+        $schema_trigger_compatible_metadata,
+        $schema_trigger_compatible_conflict_id,
+        'source',
+        true,
+        'Apply source trigger after compatible target drift revalidation.',
+        'cow-test',
+        true
+    );
+    assert_same($schema_trigger_compatible_resolution['status'], 'applied', 'compatible schema trigger target drift resolves after revalidation');
+    assert_true(
+        str_contains((string)scalar($schema_trigger_compatible_target, "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_schema_trigger_compatible_trigger'"), 'SELECT NEW.label'),
+        'compatible schema trigger target drift applies the audited source trigger'
+    );
 
     $schema_index_target_drift_base = $tmp . '/schema-index-target-drift-base.sqlite';
     $schema_index_target_drift_source = $tmp . '/schema-index-target-drift-source.sqlite';

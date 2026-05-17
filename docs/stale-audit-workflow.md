@@ -88,13 +88,14 @@ are audit metadata only. They do not make stale reviews apply automatically.
 
 Schema index, view, trigger, dropped-table restore, and table rebuild conflicts
 now record current source/target SQL when revalidation finds drift and carry
-reviewed conflicts back to `needs-action`. Source-added index conflicts can be
-classified as `compatible-schema-index-target-drift` when the source index still
-matches review, the original target had no index, target drifted to a same-name
-index, and a dry-run source index replacement validates over the current target
-rows. Other schema drift remains `unclassified`: treating changed DDL as
-compatible source drift requires a schema-specific planner that can prove the
-same dependency graph and target preconditions still hold.
+reviewed conflicts back to `needs-action`. Source-added index, view, and
+trigger conflicts can be classified as `compatible-schema-*-target-drift` when
+the source object still matches review, the original target had no same-name
+object, target drifted to a same-name object, and a dry-run source replacement
+validates over the current target. Other schema drift remains `unclassified`:
+treating changed DDL as compatible source drift requires a schema-specific
+planner that can prove the same dependency graph and target preconditions still
+hold.
 Table rebuild conflicts also record rebuild-plan evidence for direct
 indexes/triggers, dependent views, and dependent view triggers. That closes the
 specific stale-audit blind spot where table SQL stayed unchanged but a source

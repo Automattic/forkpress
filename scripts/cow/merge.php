@@ -10083,6 +10083,90 @@ function cow_merge_apply_source_index_schema_resolution(SQLite3 $target, string 
     }
 }
 
+function cow_merge_apply_source_trigger_schema_resolution(SQLite3 $target, string $trigger, ?string $source_sql): void {
+    if (cow_merge_schema_object_sql($target, 'trigger', $trigger) !== null) {
+        cow_merge_exec_checked(
+            $target,
+            'DROP TRIGGER ' . cow_merge_quote_ident($trigger),
+            'failed to drop target trigger during schema resolution'
+        );
+    }
+    if ($source_sql !== null) {
+        cow_merge_validate_trigger_references($target, $trigger, $source_sql);
+        cow_merge_validate_trigger_program_acyclic($target, $trigger, $source_sql);
+        cow_merge_exec_checked(
+            $target,
+            $source_sql,
+            'failed to apply source trigger schema resolution'
+        );
+        cow_merge_validate_trigger_program($target, $trigger, $source_sql);
+    }
+}
+
+function cow_merge_apply_source_schema_object_resolution(
+    SQLite3 $target,
+    string $type,
+    string $object,
+    ?string $source_sql,
+    string $source_error = ''
+): void {
+    if ($type === 'view') {
+        if (str_contains($source_error, 'unsupported cyclic') && str_contains($source_error, 'view dependencies')) {
+            throw new InvalidArgumentException($source_error);
+        }
+        cow_merge_apply_source_view_schema_resolution($target, $object, $source_sql);
+        return;
+    }
+    if ($type !== 'trigger') {
+        throw new InvalidArgumentException("unsupported schema object type for source resolution: $type");
+    }
+    if (str_contains($source_error, 'unsupported cyclic trigger dependencies')) {
+        throw new InvalidArgumentException($source_error);
+    }
+    cow_merge_apply_source_trigger_schema_resolution($target, $object, $source_sql);
+}
+
+function cow_merge_validate_source_schema_object_resolution(
+    SQLite3 $target,
+    string $type,
+    string $object,
+    ?string $source_sql,
+    string $source_error = ''
+): void {
+    $target_savepoint_started = false;
+    try {
+        cow_merge_exec_checked(
+            $target,
+            'SAVEPOINT forkpress_schema_object_resolution_validation',
+            'failed to start schema object resolution validation target savepoint'
+        );
+        $target_savepoint_started = true;
+        cow_merge_apply_source_schema_object_resolution($target, $type, $object, $source_sql, $source_error);
+        $cleanup_failure = cow_merge_rollback_release_savepoint_checked(
+            $target,
+            'forkpress_schema_object_resolution_validation',
+            'schema object resolution validation'
+        );
+        if ($cleanup_failure !== null) {
+            throw $cleanup_failure;
+        }
+        $target_savepoint_started = false;
+    } catch (Throwable $e) {
+        if ($target_savepoint_started) {
+            $cleanup_failure = cow_merge_rollback_release_savepoint_checked(
+                $target,
+                'forkpress_schema_object_resolution_validation',
+                'schema object resolution validation',
+                $e
+            );
+            if ($cleanup_failure !== null) {
+                throw $cleanup_failure;
+            }
+        }
+        throw $e;
+    }
+}
+
 function cow_merge_resolve_schema_conflict(
     SQLite3 $meta,
     array $conflict,
@@ -10105,8 +10189,13 @@ function cow_merge_resolve_schema_conflict(
     if (!is_file($target_db)) {
         throw new RuntimeException("target database for conflict #$conflict_id does not exist: $target_db");
     }
-    if ($after_revalidate && ($choice !== 'source' || $conflict_type !== 'schema-source-added-index')) {
-        throw new InvalidArgumentException('--after-revalidate currently supports source resolution for compatible source-added index drift only');
+    $after_revalidate_schema_types = [
+        'schema-source-added-index',
+        'schema-source-added-view',
+        'schema-source-added-trigger',
+    ];
+    if ($after_revalidate && ($choice !== 'source' || !in_array($conflict_type, $after_revalidate_schema_types, true))) {
+        throw new InvalidArgumentException('--after-revalidate currently supports source resolution for compatible source-added index/view/trigger drift only');
     }
 
     $source_payload = cow_merge_decode_payload_json((string)$conflict['source_payload'], 'source');
@@ -10235,9 +10324,6 @@ function cow_merge_resolve_schema_conflict(
             'schema-source-dropped-trigger',
             'schema-trigger-conflict',
         ], true)) {
-            if ($after_revalidate) {
-                throw new InvalidArgumentException('--after-revalidate currently supports source resolution for compatible source-added index drift only');
-            }
             if ($object === '') {
                 throw new InvalidArgumentException('schema view/trigger resolution requires a schema object name');
             }
@@ -10252,89 +10338,38 @@ function cow_merge_resolve_schema_conflict(
             }
             $current_target_sql = cow_merge_schema_object_sql($target, $type, $object);
             $previous = $current_target_sql;
-            if ($target_payload === null) {
-                if ($current_target_sql !== null) {
-                    throw new RuntimeException("target $type no longer matches the audited missing-$type target value; rerun merge-audit before resolving");
+            if ($after_revalidate) {
+                $current_source_payload = cow_merge_payload_json(['sql' => $current_source_sql]);
+                $current_target_payload = cow_merge_payload_json($current_target_sql);
+                cow_merge_require_after_revalidate($meta, $conflict_id, $current_source_payload, $current_target_payload);
+                $latest_revalidation = cow_merge_latest_revalidation($meta, $conflict_id);
+                $expected_revalidation_class = "compatible-schema-$type-target-drift";
+                if ((string)($latest_revalidation['revalidation_class'] ?? '') !== $expected_revalidation_class) {
+                    throw new RuntimeException("latest schema revalidation did not prove this source-added $type drift is compatible");
                 }
-            } elseif (!cow_merge_values_equal($current_target_sql, $target_payload)) {
-                throw new RuntimeException("target $type no longer matches the audited conflict target value; rerun merge-audit before resolving");
+            } else {
+                if ($target_payload === null) {
+                    if ($current_target_sql !== null) {
+                        throw new RuntimeException("target $type no longer matches the audited missing-$type target value; rerun merge-audit before resolving");
+                    }
+                } elseif (!cow_merge_values_equal($current_target_sql, $target_payload)) {
+                    throw new RuntimeException("target $type no longer matches the audited conflict target value; rerun merge-audit before resolving");
+                }
             }
             if ($choice === 'source') {
                 $resolved = $source_sql;
                 $source_error = is_array($source_payload) ? (string)($source_payload['error'] ?? '') : '';
                 $mutate_source = function () use ($target, $type, $object, $source_sql, $source_error): void {
-                    if ($type === 'view') {
-                        if (str_contains($source_error, 'unsupported cyclic') && str_contains($source_error, 'view dependencies')) {
-                            throw new InvalidArgumentException($source_error);
-                        }
-                        cow_merge_apply_source_view_schema_resolution($target, $object, $source_sql);
-                    } else {
-                        if (str_contains($source_error, 'unsupported cyclic trigger dependencies')) {
-                            throw new InvalidArgumentException($source_error);
-                        }
-                        if (cow_merge_schema_object_sql($target, $type, $object) !== null) {
-                            $drop_sql = 'DROP ' . strtoupper($type) . ' ' . cow_merge_quote_ident($object);
-                            cow_merge_exec_checked(
-                                $target,
-                                $drop_sql,
-                                "failed to drop target $type during schema resolution"
-                            );
-                        }
-                        if ($source_sql !== null) {
-                            cow_merge_validate_trigger_references($target, $object, $source_sql);
-                            cow_merge_validate_trigger_program_acyclic($target, $object, $source_sql);
-                        }
-                        if ($source_sql !== null) {
-                            cow_merge_exec_checked(
-                                $target,
-                                $source_sql,
-                                "failed to apply source $type schema resolution"
-                            );
-                        }
-                        if ($source_sql !== null) {
-                            cow_merge_validate_trigger_program($target, $object, $source_sql);
-                        }
-                    }
+                    cow_merge_apply_source_schema_object_resolution($target, $type, $object, $source_sql, $source_error);
                 };
-                $validate_source = function () use ($target, $mutate_source): void {
-                    $target_savepoint_started = false;
-                    try {
-                        cow_merge_exec_checked(
-                            $target,
-                            'SAVEPOINT forkpress_schema_object_resolution_validation',
-                            'failed to start schema object resolution validation target savepoint'
-                        );
-                        $target_savepoint_started = true;
-                        $mutate_source();
-                        $cleanup_failure = cow_merge_rollback_release_savepoint_checked(
-                            $target,
-                            'forkpress_schema_object_resolution_validation',
-                            'schema object resolution validation'
-                        );
-                        if ($cleanup_failure !== null) {
-                            throw $cleanup_failure;
-                        }
-                        $target_savepoint_started = false;
-                    } catch (Throwable $e) {
-                        if ($target_savepoint_started) {
-                            $cleanup_failure = cow_merge_rollback_release_savepoint_checked(
-                                $target,
-                                'forkpress_schema_object_resolution_validation',
-                                'schema object resolution validation',
-                                $e
-                            );
-                            if ($cleanup_failure !== null) {
-                                throw $cleanup_failure;
-                            }
-                        }
-                        throw $e;
-                    }
+                $validate_source = function () use ($target, $type, $object, $source_sql, $source_error): void {
+                    cow_merge_validate_source_schema_object_resolution($target, $type, $object, $source_sql, $source_error);
                 };
                 $apply_source = $mutate_source;
             }
         } elseif ($conflict_type === 'schema-target-dropped-table' && $object === '') {
             if ($after_revalidate) {
-                throw new InvalidArgumentException('--after-revalidate currently supports source resolution for compatible source-added index drift only');
+                throw new InvalidArgumentException('--after-revalidate currently supports source resolution for compatible source-added index/view/trigger drift only');
             }
             $restore_payload = cow_merge_normalize_source_table_restore_payload($source_payload);
             if ($target_payload !== null) {
@@ -10397,7 +10432,7 @@ function cow_merge_resolve_schema_conflict(
             }
         } elseif ($conflict_type === 'schema-source-dropped-table' && $object === '') {
             if ($after_revalidate) {
-                throw new InvalidArgumentException('--after-revalidate currently supports source resolution for compatible source-added index drift only');
+                throw new InvalidArgumentException('--after-revalidate currently supports source resolution for compatible source-added index/view/trigger drift only');
             }
             if ($source_payload !== null) {
                 throw new RuntimeException("schema conflict #$conflict_id has an unexpected source table payload");
@@ -12325,6 +12360,25 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
                         'current_target_payload' => $current_target_payload,
                     ];
                 }
+                $revalidation_class = 'unclassified';
+                if (
+                    in_array($conflict_type, ['schema-source-added-view', 'schema-source-added-trigger'], true) &&
+                    $source_fresh &&
+                    !$target_fresh &&
+                    $expected_target_sql === null &&
+                    $current_source_sql !== null
+                ) {
+                    $source_error = is_array($source_payload) ? (string)($source_payload['error'] ?? '') : '';
+                    $target = cow_merge_open_db($target_db, SQLITE3_OPEN_READWRITE);
+                    try {
+                        cow_merge_validate_source_schema_object_resolution($target, $type, $object, $current_source_sql, $source_error);
+                        $revalidation_class = "compatible-schema-$type-target-drift";
+                    } catch (Throwable) {
+                        $revalidation_class = 'unclassified';
+                    } finally {
+                        $target->close();
+                    }
+                }
                 $reason = !$source_fresh && !$target_fresh
                     ? "schema $type source and target changed after review"
                     : (!$source_fresh
@@ -12333,7 +12387,7 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
                 return [
                     'stale_status' => 'stale',
                     'stale_reason' => $reason,
-                    'revalidation_class' => 'unclassified',
+                    'revalidation_class' => $revalidation_class,
                     'current_source_payload' => $current_source_payload,
                     'current_target_payload' => $current_target_payload,
                 ];
