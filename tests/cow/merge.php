@@ -15672,6 +15672,56 @@ SQL);
     $post_id_b = (int)scalar($band_feature_b, "SELECT MAX(ID) FROM wp_posts");
     assert_true($post_id_b > $post_id_a, 'independent branches do not allocate colliding post IDs');
 
+    $plain_ipk_collision_base = $tmp . '/plain-ipk-collision-base.sqlite';
+    $plain_ipk_collision_source = $tmp . '/plain-ipk-collision-source.sqlite';
+    $plain_ipk_collision_target = $tmp . '/plain-ipk-collision-target.sqlite';
+    $plain_ipk_collision_metadata = $tmp . '/.forkpress/cow/merge/plain-ipk-collision-metadata.sqlite';
+    create_base_db($plain_ipk_collision_base);
+    $db = open_db($plain_ipk_collision_base);
+    $db->exec('CREATE TABLE plugin_plain_ipk_refs (id INTEGER PRIMARY KEY, label TEXT, payload TEXT)');
+    $db->exec("INSERT INTO plugin_plain_ipk_refs (id, label, payload) VALUES (1, 'base plain ipk row', '{\"id\":1,\"branch\":\"base\"}')");
+    $db->close();
+    copy($plain_ipk_collision_base, $plain_ipk_collision_source);
+    copy($plain_ipk_collision_base, $plain_ipk_collision_target);
+    cow_merge_allocate_autoincrement_bands($plain_ipk_collision_source, $plain_ipk_collision_metadata, 'feature-plain-ipk-source');
+    cow_merge_allocate_autoincrement_bands($plain_ipk_collision_target, $plain_ipk_collision_metadata, 'main');
+    $db = open_db($plain_ipk_collision_source);
+    $db->exec("INSERT INTO plugin_plain_ipk_refs (id, label, payload) VALUES (2, 'source plain ipk row', '{\"id\":2,\"branch\":\"source\"}')");
+    $db->close();
+    $db = open_db($plain_ipk_collision_target);
+    $db->exec("INSERT INTO plugin_plain_ipk_refs (id, label, payload) VALUES (2, 'target plain ipk row', '{\"id\":2,\"branch\":\"target\"}')");
+    $db->close();
+    $plain_ipk_collision_result = cow_merge_databases(
+        $plain_ipk_collision_base,
+        $plain_ipk_collision_source,
+        $plain_ipk_collision_target,
+        $plain_ipk_collision_metadata,
+        'feature-plain-ipk-source',
+        'main'
+    );
+    assert_same($plain_ipk_collision_result['status'], 'completed_with_conflicts', 'plain INTEGER PRIMARY KEY plugin branch ID collisions remain reviewable');
+    assert_same(scalar($plain_ipk_collision_target, 'SELECT label FROM plugin_plain_ipk_refs WHERE id = 2'), 'target plain ipk row', 'target plain INTEGER PRIMARY KEY row wins before review');
+    assert_same(scalar($plain_ipk_collision_target, 'SELECT payload FROM plugin_plain_ipk_refs WHERE id = 2'), '{"id":2,"branch":"target"}', 'target plain INTEGER PRIMARY KEY JSON reference is preserved before review');
+    $plain_ipk_collision_conflict_id = (int)scalar($plain_ipk_collision_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_plain_ipk_refs' AND conflict_type = 'row-insert-collision' ORDER BY id DESC LIMIT 1");
+    assert_true($plain_ipk_collision_conflict_id > 0, 'plain INTEGER PRIMARY KEY plugin collision records a first-class row conflict');
+    assert_same(
+        (int)scalar($plain_ipk_collision_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_plain_ipk_refs' AND decision = 'id-band-skipped'"),
+        2,
+        'plain INTEGER PRIMARY KEY plugin collision keeps ID-band skip decisions auditable for both branches'
+    );
+    $plain_ipk_collision_audit = cow_merge_audit_report($plain_ipk_collision_metadata, (int)$plain_ipk_collision_result['run_id'], 10, ['records' => 'conflicts']);
+    $plain_ipk_collision_row = null;
+    foreach ($plain_ipk_collision_audit['conflicts'] as $row) {
+        if ((int)$row['id'] === $plain_ipk_collision_conflict_id) {
+            $plain_ipk_collision_row = $row;
+            break;
+        }
+    }
+    assert_true(is_array($plain_ipk_collision_row), 'plain INTEGER PRIMARY KEY plugin collision is visible in merge audit');
+    assert_same($plain_ipk_collision_row['resolution_choices'], ['source', 'target'], 'plain INTEGER PRIMARY KEY plugin collision advertises explicit source or target review choices');
+    assert_true(str_contains((string)$plain_ipk_collision_row['source_preview'], 'source plain ipk row'), 'plain INTEGER PRIMARY KEY collision audit includes the source payload');
+    assert_true(str_contains((string)$plain_ipk_collision_row['target_preview'], 'target plain ipk row'), 'plain INTEGER PRIMARY KEY collision audit includes the target payload');
+
     $band_explicit_base = $tmp . '/band-explicit-base.sqlite';
     $band_explicit_source = $tmp . '/band-explicit-source.sqlite';
     $band_explicit_target = $tmp . '/band-explicit-target.sqlite';
