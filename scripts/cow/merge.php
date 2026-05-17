@@ -35,6 +35,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "  php merge.php revalidate-reviews --metadata-db <path> [--run ID] [--conflict-id ID|--conflict-key KEY] [--reviewer NAME] [--format text|json]\n");
     fwrite(STDERR, "  php merge.php review-record --metadata-db <path> --record conflict|decision|resolution (--id ID|--conflict-key KEY [--run ID]) --status pending|needs-action|reviewed --note TEXT [--reviewer NAME]\n");
     fwrite(STDERR, "  php merge.php resolve-conflict --metadata-db <path> --id ID (--choice source|target [--apply]|--apply-reviewed) [--after-revalidate] [--note TEXT] [--reviewer NAME]\n");
+    fwrite(STDERR, "  php merge.php apply-reviewed-resolutions --metadata-db <path> [--run ID] [--limit N] [--note TEXT] [--reviewer NAME] [--format text|json]\n");
 }
 
 const COW_MERGE_AUTOINCREMENT_BAND_SIZE = 1000000;
@@ -9333,6 +9334,58 @@ function cow_merge_resolve_conflict_key(
         $reviewer,
         $after_revalidate
     );
+}
+
+function cow_merge_apply_reviewed_resolutions(
+    string $metadata_db,
+    ?int $run_id,
+    int $limit,
+    string $note,
+    string $reviewer
+): array {
+    if (!is_file($metadata_db)) {
+        throw new InvalidArgumentException("merge metadata database does not exist: $metadata_db");
+    }
+    $audit = cow_merge_audit_report($metadata_db, $run_id, $limit, [
+        'records' => 'conflicts',
+        'next_action' => 'apply-reviewed-choice',
+    ]);
+    $applied = [];
+    $errors = [];
+    foreach ($audit['conflicts'] as $conflict) {
+        $conflict_id = (int)($conflict['id'] ?? 0);
+        if ($conflict_id < 1 || ($conflict['next_action'] ?? null) !== 'apply-reviewed-choice') {
+            continue;
+        }
+        try {
+            $choice = cow_merge_latest_validated_resolution_choice_from_db($metadata_db, $conflict_id);
+            $applied[] = cow_merge_resolve_conflict(
+                $metadata_db,
+                $conflict_id,
+                $choice,
+                true,
+                $note,
+                $reviewer
+            );
+        } catch (Throwable $e) {
+            $errors[] = [
+                'conflict_id' => $conflict_id,
+                'error' => $e->getMessage(),
+            ];
+            break;
+        }
+    }
+
+    return [
+        'metadata_db' => $metadata_db,
+        'run_id' => $run_id,
+        'limit' => $limit,
+        'eligible' => count($audit['conflicts']),
+        'applied' => count($applied),
+        'status' => $errors === [] ? 'completed' : 'completed_with_errors',
+        'resolutions' => $applied,
+        'errors' => $errors,
+    ];
 }
 
 function cow_merge_bool_flag(mixed $value): bool {
@@ -19211,6 +19264,36 @@ if (realpath($argv[0] ?? '') === __FILE__) {
                 echo "  metadata:  {$result['metadata_db']}\n";
             }
             exit(0);
+        }
+        if ($command === 'apply-reviewed-resolutions') {
+            $args = cow_merge_parse_cli($argv, ['metadata-db'], 2);
+            $format = cow_merge_audit_format($args['format'] ?? null);
+            $result = cow_merge_apply_reviewed_resolutions(
+                $args['metadata-db'],
+                cow_merge_audit_run_id($args['run'] ?? null),
+                cow_merge_audit_limit($args['limit'] ?? null),
+                cow_merge_review_text($args['note'] ?? 'apply reviewed merge conflict resolutions', 'note'),
+                cow_merge_review_text($args['reviewer'] ?? 'user', 'reviewer')
+            );
+            if ($format === 'json') {
+                $encoded = json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+                if (!is_string($encoded)) {
+                    throw new RuntimeException('failed to encode apply-reviewed result');
+                }
+                echo $encoded . "\n";
+            } elseif (($args['quiet'] ?? '0') !== '1') {
+                echo "forkpress: applied reviewed COW merge resolutions\n";
+                echo "  status:    {$result['status']}\n";
+                echo "  eligible:  {$result['eligible']}\n";
+                echo "  applied:   {$result['applied']}\n";
+                echo "  metadata:  {$result['metadata_db']}\n";
+                if ($result['errors'] !== []) {
+                    foreach ($result['errors'] as $error) {
+                        echo "  error:     conflict #{$error['conflict_id']}: {$error['error']}\n";
+                    }
+                }
+            }
+            exit($result['errors'] === [] ? 0 : 1);
         }
 
         $start_index = $command === 'merge' ? 2 : 1;

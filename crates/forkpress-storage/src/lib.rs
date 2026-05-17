@@ -1880,6 +1880,51 @@ pub fn resolve_cow_merge_conflict_key(
     )
 }
 
+pub fn apply_reviewed_cow_merge_resolutions(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    run_id: Option<&str>,
+    limit: Option<&str>,
+    note: Option<&str>,
+    reviewer: Option<&str>,
+    format: Option<&str>,
+) -> Result<()> {
+    let metadata_db = cow_merge_metadata_db_path(layout);
+    let mut args: Vec<OsString> = vec![
+        "apply-reviewed-resolutions".into(),
+        "--metadata-db".into(),
+        metadata_db.as_os_str().to_os_string(),
+    ];
+    if let Some(run_id) = run_id {
+        args.push("--run".into());
+        args.push(run_id.into());
+    }
+    if let Some(limit) = limit {
+        args.push("--limit".into());
+        args.push(limit.into());
+    }
+    if let Some(note) = note {
+        args.push("--note".into());
+        args.push(note.into());
+    }
+    if let Some(reviewer) = reviewer {
+        args.push("--reviewer".into());
+        args.push(reviewer.into());
+    }
+    if let Some(format) = format {
+        args.push("--format".into());
+        args.push(format.into());
+    }
+    run_php_script(
+        layout,
+        runtime,
+        shared,
+        "scripts/cow/merge.php",
+        args.iter().map(|arg| arg.as_os_str()),
+    )
+}
+
 pub fn rollback_failed_reset_publish(
     branch: &str,
     target: &Path,
