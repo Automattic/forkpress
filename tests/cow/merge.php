@@ -3278,9 +3278,12 @@ SQL);
     assert_same(scalar($conflict_target, "SELECT post_title FROM wp_posts WHERE ID = 1"), 'Target title', 'target title wins conflicting post title');
     assert_same(scalar($conflict_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_test'"), 'a:1:{s:5:"color";s:3:"red";}', 'serialized option is treated as one conflicting cell');
 
-    cow_merge_databases($conflict_base, $conflict_source, $conflict_target, $metadata, 'feature-conflict', 'main');
-    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_posts' AND column_name = 'post_title'"), 1, 'rerunning the same conflict does not duplicate conflict records');
-    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_options' AND column_name = 'option_value'"), 1, 'serialized-cell conflict is auditable without repeated noise');
+    $repeat_conflict_result = cow_merge_databases($conflict_base, $conflict_source, $conflict_target, $metadata, 'feature-conflict', 'main');
+    $repeat_conflict_run_id = (int)$repeat_conflict_result['run_id'];
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE run_id = $repeat_conflict_run_id"), 2, 'rerunning the same unresolved conflict records first-class rows for the new run');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflict_events WHERE run_id = $repeat_conflict_run_id AND event_type = 'recorded'"), 2, 'rerunning the same unresolved conflict records lifecycle events for the new run');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_posts' AND column_name = 'post_title'"), 2, 'same-cell conflicts remain auditable per merge run');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_options' AND column_name = 'option_value'"), 2, 'serialized-cell conflicts remain auditable per merge run');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE decision = 'target-wins' AND table_name IN ('wp_posts', 'wp_options')"), 4, 'target-wins decisions are recorded for each conflicting run');
 
     $conflict_peer_target = $tmp . '/conflict-peer-target.sqlite';
@@ -4101,8 +4104,8 @@ SQL);
     assert_same(scalar($conflict_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_test'"), 'a:1:{s:5:"color";s:3:"red";}', 'rerunning after target cell resolution keeps the audited target value');
     assert_same(
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'wp_options' AND c.column_name = 'option_value' AND r.source_branch = 'feature-conflict'"),
-        1,
-        'rerunning after target cell resolution does not duplicate the unchanged conflict record'
+        2,
+        'rerunning after target cell resolution does not add another unchanged conflict record'
     );
     assert_same(
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE d.table_name = 'wp_options' AND d.column_name = 'option_value' AND d.decision = 'target-accepted' AND r.source_branch = 'feature-conflict'"),
