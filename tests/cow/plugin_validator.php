@@ -534,6 +534,8 @@ PHP);
     assert_same($plugin_event_audit['conflict_events'][0]['related_record_type'], 'revalidation', 'plugin revalidation event links to the revalidation record');
     assert_same((int)$plugin_event_audit['conflict_events'][0]['related_record_id'], $plugin_revalidation_id, 'plugin revalidation event exposes the revalidation id');
     assert_same($plugin_event_audit['conflict_events'][0]['lifecycle_state'], 'needs-action', 'plugin revalidation event records the needs-action lifecycle state');
+    assert_same($plugin_event_audit['conflict_events'][0]['plugin'] ?? null, 'forkpress-plugin-graph', 'plugin conflict events expose validator plugin metadata');
+    assert_same($plugin_event_audit['conflict_events'][0]['plugin_object'] ?? null, 'child:' . $child_id, 'plugin conflict events expose validator object metadata');
     $plugin_filtered_event_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 4, [
         'records' => 'conflict-events',
         'plugin_object' => 'child:' . $child_id,
@@ -780,6 +782,11 @@ PHP);
         fn($event) => ($event['event_type'] ?? null) === 'revalidation-required' && (int)($event['conflict_id'] ?? 0) === $logical_identity_conflict_id
     ));
     assert_same(count($logical_identity_revalidation_events), 1, 'plugin logical-identity filter applies to conflict event queues');
+    assert_same(
+        $logical_identity_revalidation_events[0]['plugin_logical_identity']['slug'] ?? null,
+        'child-before-rerun',
+        'plugin logical-identity conflict events expose structured logical identity metadata'
+    );
     $logical_identity_event_group_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'records' => 'conflict-events',
         'group_by' => 'plugin-logical-identity',

@@ -15003,18 +15003,18 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
                 $event_params[':event_type'] = $filters['event_type'];
             }
             $event_params[':limit'] = $limit;
-            $report['conflict_events'] = cow_merge_audit_table_rows(
+            $report['conflict_events'] = cow_merge_audit_add_plugin_fields(cow_merge_audit_table_rows(
                 $db,
                 'merge_conflict_events',
                 "SELECT ce.id, ce.conflict_id, ce.run_id, ce.event_type, ce.actor, ce.note, " .
                 "ce.related_record_type, ce.related_record_id, ce.lifecycle_state, ce.created_at, " .
-                "$event_conflict_key_select, c.table_name, c.row_identity, c.column_name, c.conflict_type, r.source_branch, r.target_branch " .
+                "$event_conflict_key_select, c.table_name, c.row_identity, c.column_name, c.conflict_type, c.chosen_payload, r.source_branch, r.target_branch " .
                 "FROM merge_conflict_events ce " .
                 "JOIN merge_conflicts c ON c.id = ce.conflict_id " .
                 "JOIN merge_runs r ON r.id = ce.run_id " .
                 "$event_filter ORDER BY ce.id DESC LIMIT :limit",
                 $event_params
-            );
+            ));
             if ($filters['records'] === 'conflict-events' && $filters['group_by'] !== 'none') {
                 $group_expr = cow_merge_audit_conflict_event_group_sql($filters['group_by'], $conflict_key_exists);
                 $report['conflict_event_groups'] = cow_merge_audit_table_rows(
@@ -15350,6 +15350,7 @@ function cow_merge_print_audit_text(array $report): void {
             if (($event['related_record_type'] ?? null) !== null && (string)$event['related_record_type'] !== '') {
                 echo "     related={$event['related_record_type']}#{$event['related_record_id']}\n";
             }
+            cow_merge_print_plugin_audit_text($event);
             echo "     note=" . cow_merge_audit_truncate((string)$event['note'], 240) . "\n";
         }
     }

@@ -90,6 +90,9 @@ The same first-class fields are filterable with `merge-audit --plugin <name>`,
 `--plugin-logical-identity <json>`.
 Text audit output prints the same plugin identity, owned table/file, logical
 identity, and review-guidance evidence for CLI reviewers.
+Plugin conflict-event records inherit the same fields, so UI queues can render
+review, revalidation, and blocked-resolution events without a second conflict
+lookup.
 Validator findings may use either `files` or `paths`; both are normalized into
 the audit `plugin_files` field. External validator runners can hand findings
 back through:
