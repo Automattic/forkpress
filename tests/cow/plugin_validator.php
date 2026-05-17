@@ -870,6 +870,13 @@ PHP);
             ($plugin_resolution_group_counts[$expected_group_key] ?? 0) >= 1,
             "plugin audit can group resolution records by $group_by"
         );
+        ob_start();
+        cow_merge_print_audit_text($plugin_resolution_group_audit);
+        $plugin_resolution_group_text = ob_get_clean();
+        assert_true(
+            str_contains($plugin_resolution_group_text, "$group_by=$expected_group_key resolutions="),
+            "plugin text audit exposes resolution grouping by $group_by"
+        );
     }
 
     $serialized_base_root = $tmp . '/serialized-base';
