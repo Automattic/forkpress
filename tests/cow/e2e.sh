@@ -117,8 +117,10 @@ on_error() {
   dump_if_exists "$TMP/merge-pending-reset.out"
   dump_if_exists "$TMP/public-crash-merge.out"
   dump_if_exists "$TMP/public-crash-recover.json"
+  dump_if_exists "$TMP/public-crash-merge-audit-crash-recovery.json"
   dump_if_exists "$TMP/public-crash-blocked.out"
   dump_if_exists "$TMP/public-crash-restore.json"
+  dump_if_exists "$TMP/public-crash-merge-audit-crash-recovery-cleared.json"
   dump_if_exists "$TMP/public-crash-retry.out"
   dump_if_exists "$TMP/public-crash-main-edit.html"
   dump_if_exists "$TMP/public-metadata-crash-merge.out"
@@ -2049,6 +2051,8 @@ if FORKPRESS_COW_MERGE_TEST_FAILPOINT=before-target-db-commit FORKPRESS_COW_MERG
 fi
 "$BIN" branch --work-dir "$WORK_DIR" recover-crash --format json > "$TMP/public-crash-recover.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && (int)($data["pending"] ?? 0) >= 1 ? 0 : 1);' "$TMP/public-crash-recover.json"
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --records crash-recovery --format json > "$TMP/public-crash-merge-audit-crash-recovery.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $records = is_array($data["crash_recovery"] ?? null) ? $data["crash_recovery"] : []; $ok = (($data["filters"]["records"] ?? null) === "crash-recovery"); foreach ($records as $record) { if (($record["checkpoint"] ?? null) === "target-db-commit" && ($record["source_branch"] ?? null) === "public-crash-merge" && ($record["target_branch"] ?? null) === "main" && is_array($record["target_db_snapshot"] ?? null)) { exit($ok ? 0 : 1); } } exit(1);' "$TMP/public-crash-merge-audit-crash-recovery.json"
 if "$BIN" branch --work-dir "$WORK_DIR" merge public-crash-merge --into main > "$TMP/public-crash-blocked.out" 2>&1; then
   echo "public branch merge unexpectedly ignored pending crash recovery artifact" >&2
   exit 1
@@ -2056,6 +2060,8 @@ fi
 grep -F "pending COW merge crash recovery artifact" "$TMP/public-crash-blocked.out" >/dev/null
 "$BIN" branch --work-dir "$WORK_DIR" recover-crash --restore-target-db --format json > "$TMP/public-crash-restore.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && (int)($data["pending"] ?? 0) === 0 && (int)($data["restored"] ?? 0) >= 1 ? 0 : 1);' "$TMP/public-crash-restore.json"
+"$BIN" branch --work-dir "$WORK_DIR" merge-audit --records crash-recovery --format json > "$TMP/public-crash-merge-audit-crash-recovery-cleared.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $records = is_array($data["crash_recovery"] ?? null) ? $data["crash_recovery"] : []; exit(count($records) === 0 ? 0 : 1);' "$TMP/public-crash-merge-audit-crash-recovery-cleared.json"
 "$BIN" branch --work-dir "$WORK_DIR" merge public-crash-merge --into main > "$TMP/public-crash-retry.out"
 grep -F "forkpress: merged public-crash-merge into main" "$TMP/public-crash-retry.out" >/dev/null
 grep -F "status:    completed" "$TMP/public-crash-retry.out" >/dev/null

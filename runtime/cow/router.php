@@ -355,6 +355,53 @@ function forkpress_cow_branch_merge_audit_command(?int $run, array $filters = []
     return $command;
 }
 
+function forkpress_cow_branch_crash_recovery_audit_command(?int $run): string {
+    $command = 'forkpress branch merge-audit --records crash-recovery';
+    if ($run !== null && $run > 0) {
+        $command .= ' --run ' . $run;
+    }
+    return $command;
+}
+
+function forkpress_cow_branch_crash_recovery_command(?int $run, array $artifacts = []): string {
+    $command = 'forkpress branch recover-crash';
+    if ($run !== null && $run > 0) {
+        $command .= ' --run ' . $run;
+    }
+    $restore_db = false;
+    $restore_files = false;
+    foreach ($artifacts as $artifact) {
+        if (!is_array($artifact)) {
+            continue;
+        }
+        if (is_array($artifact['target_db_snapshot'] ?? null)) {
+            $restore_db = true;
+        }
+        if (is_array($artifact['filesystem_transaction'] ?? null) || is_array($artifact['filesystem_snapshot'] ?? null)) {
+            $restore_files = true;
+        }
+    }
+    if ($restore_db) {
+        $command .= ' --restore-target-db';
+    }
+    if ($restore_files) {
+        $command .= ' --restore-files';
+    }
+    return $command;
+}
+
+function forkpress_cow_branch_crash_recovery_summary(array $report, int $run): array {
+    $records = is_array($report['crash_recovery'] ?? null) ? array_values($report['crash_recovery']) : [];
+    return [
+        'run' => $run,
+        'crashRecovery' => $records,
+        'crashRecoveryCount' => count($records),
+        'audit' => $report,
+        'auditCommand' => forkpress_cow_branch_crash_recovery_audit_command($run) . ' --format json',
+        'recoveryCommand' => forkpress_cow_branch_crash_recovery_command($run, $records),
+    ];
+}
+
 function forkpress_cow_branch_conflict_audit_summary(array $report, int $run, array $filters = []): array {
     $records = is_array($report['conflicts'] ?? null) ? array_values($report['conflicts']) : [];
     $total = count($records);
@@ -472,6 +519,23 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
         $filters = forkpress_cow_branch_conflict_audit_filters();
         if (($filters['error'] ?? null) !== null) {
             forkpress_cow_branch_finish_json(400, $current_url, false, (string)$filters['error']);
+            return true;
+        }
+
+        [$crash_code, $crash_output] = forkpress_cow_branch_run_cli(['merge-audit', '--records', 'crash-recovery', '--run', (string)$run, '--format', 'json']);
+        if ($crash_code !== 0) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, $crash_output ?: 'ForkPress could not inspect pending crash recovery.');
+            return true;
+        }
+        $crash_report = json_decode($crash_output, true);
+        if (!is_array($crash_report)) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'ForkPress returned invalid crash recovery JSON.');
+            return true;
+        }
+        $crash_summary = forkpress_cow_branch_crash_recovery_summary($crash_report, $run);
+        if (($crash_summary['crashRecoveryCount'] ?? 0) > 0) {
+            $message = 'Merge run ' . $run . ' has pending crash recovery. Restore it before reviewing conflicts.';
+            forkpress_cow_branch_finish_json(200, $current_url, true, $message, array_merge(['type' => 'warning'], $crash_summary));
             return true;
         }
 

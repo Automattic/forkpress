@@ -679,6 +679,28 @@ PHP);
         ),
         'plugin driver process-death recovery snapshot predates the driver-created file'
     );
+    $crash_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 5, ['records' => 'crash-recovery']);
+    assert_same($crash_audit['filters']['records'], 'crash-recovery', 'merge audit can focus on pending crash recovery artifacts');
+    assert_same(count($crash_audit['crash_recovery']), 1, 'merge audit exposes pending plugin-driver crash recovery artifacts');
+    assert_same(
+        $crash_audit['crash_recovery'][0]['checkpoint'] ?? null,
+        'plugin-driver-resolution',
+        'merge audit exposes the plugin-driver crash recovery checkpoint'
+    );
+    ob_start();
+    cow_merge_print_audit_text($crash_audit);
+    $crash_audit_text = ob_get_clean();
+    assert_true(
+        str_contains($crash_audit_text, 'filters:   records=crash-recovery') &&
+        str_contains($crash_audit_text, 'checkpoint=plugin-driver-resolution') &&
+        str_contains($crash_audit_text, '--restore-target-db --restore-files'),
+        'merge audit text prints pending crash recovery artifacts and restore flags'
+    );
+    assert_throws(
+        fn() => cow_merge_audit_report($metadata, null, 5, ['records' => 'crash-recovery', 'scope' => 'files']),
+        '--records crash-recovery cannot be combined with --scope',
+        'crash recovery audit rejects unrelated filters'
+    );
     $blocked_driver_retry = run_merge_cli([
         'run-plugin-driver',
         '--metadata-db', $metadata,

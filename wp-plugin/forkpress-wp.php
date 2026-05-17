@@ -995,6 +995,53 @@ function forkpress_branch_merge_audit_command(?int $run, array $filters = []): s
     return $command;
 }
 
+function forkpress_branch_crash_recovery_audit_command(?int $run): string {
+    $command = 'forkpress branch merge-audit --records crash-recovery';
+    if ($run !== null && $run > 0) {
+        $command .= ' --run ' . $run;
+    }
+    return $command;
+}
+
+function forkpress_branch_crash_recovery_command(?int $run, array $artifacts = []): string {
+    $command = 'forkpress branch recover-crash';
+    if ($run !== null && $run > 0) {
+        $command .= ' --run ' . $run;
+    }
+    $restore_db = false;
+    $restore_files = false;
+    foreach ($artifacts as $artifact) {
+        if (!is_array($artifact)) {
+            continue;
+        }
+        if (is_array($artifact['target_db_snapshot'] ?? null)) {
+            $restore_db = true;
+        }
+        if (is_array($artifact['filesystem_transaction'] ?? null) || is_array($artifact['filesystem_snapshot'] ?? null)) {
+            $restore_files = true;
+        }
+    }
+    if ($restore_db) {
+        $command .= ' --restore-target-db';
+    }
+    if ($restore_files) {
+        $command .= ' --restore-files';
+    }
+    return $command;
+}
+
+function forkpress_branch_crash_recovery_summary(array $report, int $run): array {
+    $records = is_array($report['crash_recovery'] ?? null) ? array_values($report['crash_recovery']) : [];
+    return [
+        'run' => $run,
+        'crashRecovery' => $records,
+        'crashRecoveryCount' => count($records),
+        'audit' => $report,
+        'auditCommand' => forkpress_branch_crash_recovery_audit_command($run) . ' --format json',
+        'recoveryCommand' => forkpress_branch_crash_recovery_command($run, $records),
+    ];
+}
+
 function forkpress_branch_conflict_audit_summary(array $report, int $run, array $filters = []): array {
     $records = is_array($report['conflicts'] ?? null) ? array_values($report['conflicts']) : [];
     $total = count($records);
@@ -1140,6 +1187,25 @@ function forkpress_handle_branch_conflicts(): void {
     $filters = forkpress_branch_conflict_audit_filters();
     if (($filters['error'] ?? null) !== null) {
         forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', (string) $filters['error']);
+    }
+
+    [$crash_code, $crash_output] = forkpress_branch_run_cli(['merge-audit', '--records', 'crash-recovery', '--run', (string) $run, '--format', 'json']);
+    if ($crash_code !== 0) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', $crash_output ?: 'ForkPress could not inspect pending crash recovery.');
+    }
+    $crash_report = json_decode($crash_output, true);
+    if (!is_array($crash_report)) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'ForkPress returned invalid crash recovery JSON.');
+    }
+    $crash_summary = forkpress_branch_crash_recovery_summary($crash_report, $run);
+    if (($crash_summary['crashRecoveryCount'] ?? 0) > 0) {
+        $message = 'Merge run ' . $run . ' has pending crash recovery. Restore it before reviewing conflicts.';
+        forkpress_branch_finish_action(
+            forkpress_branch_url($current, '/wp-admin/'),
+            'warning',
+            $message,
+            $crash_summary
+        );
     }
 
     $audit_args = array_merge(['merge-audit', '--records', 'conflicts', '--run', (string) $run, '--format', 'json'], $filters['args']);
@@ -1698,6 +1764,7 @@ function forkpress_render_branch_switcher(): void {
 
         function renderConflictAudit(payload, fallbackMessage) {
             var records = Array.isArray(payload.records) ? payload.records : [];
+            var recovery = Array.isArray(payload.crashRecovery) ? payload.crashRecovery : [];
             var filters = payload.filters || {};
             showStatus('warning', payload.message || fallbackMessage || 'Merge completed with conflicts.');
             clearConflictAudit();
@@ -1705,6 +1772,24 @@ function forkpress_render_branch_switcher(): void {
 
             var heading = document.createElement('div');
             heading.className = 'forkpress-conflict-heading';
+            if (recovery.length) {
+                heading.textContent = 'Run ' + String(payload.run || '') + ': pending crash recovery';
+                conflictList.appendChild(heading);
+                recovery.slice(0, 5).forEach(function (artifact) {
+                    var row = document.createElement('div');
+                    row.className = 'forkpress-conflict-row';
+                    appendConflictText(row, 'forkpress-conflict-title', 'checkpoint: ' + String(artifact.checkpoint || 'unknown'));
+                    appendConflictText(row, 'forkpress-conflict-meta', [
+                        artifact.target_db ? 'target DB: ' + String(artifact.target_db) : '',
+                        artifact.target_root ? 'target root: ' + String(artifact.target_root) : ''
+                    ].filter(Boolean).join(' / '));
+                    appendConflictText(row, 'forkpress-conflict-command', artifact.artifact_path || '');
+                    conflictList.appendChild(row);
+                });
+                appendConflictText(conflictList, 'forkpress-conflict-command', payload.recoveryCommand || '');
+                appendConflictText(conflictList, 'forkpress-conflict-command', payload.auditCommand || '');
+                return;
+            }
             heading.textContent = 'Run ' + String(payload.run || '') + ': ' + String(payload.recordCount || records.length) + ' of ' + String(payload.totalConflicts || records.length) + ' conflicts';
             conflictList.appendChild(heading);
             appendConflictText(conflictList, 'forkpress-conflict-meta', [
