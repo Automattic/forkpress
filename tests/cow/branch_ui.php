@@ -186,6 +186,12 @@ if ($action === 'forkpress_branch_restore_crash') {
 if ($action === 'forkpress_branch_revalidate_conflicts') {
     forkpress_handle_branch_revalidate_conflicts();
 }
+if ($action === 'forkpress_branch_review_conflict') {
+    forkpress_handle_branch_review_conflict();
+}
+if ($action === 'forkpress_branch_resolve_conflict') {
+    forkpress_handle_branch_resolve_conflict();
+}
 if ($action === 'forkpress_branch_run_plugin_driver') {
     forkpress_handle_branch_run_plugin_driver();
 }
@@ -364,6 +370,8 @@ $audit_output = json_encode([
             'conflict_type' => 'cell',
             'lifecycle_state' => 'needs-action',
             'next_action' => 'review',
+            'resolution_choices' => ['source', 'target'],
+            'blocked_resolution_choices' => [],
         ],
         [
             'id' => 8,
@@ -438,6 +446,97 @@ assert_same(
     ['branch', '--work-dir', $work_dir, 'merge-audit', '--records', 'conflicts', '--run', '42', '--format', 'json'],
     'branch conflict audit admin action uses structured merge-audit JSON path'
 );
+
+$conflict_review = run_branch_ui_action(
+    ['action' => 'forkpress_branch_review_conflict', 'conflict' => '7', 'run' => '42', 'status' => 'reviewed'],
+    ['main', 'feature']
+);
+$conflict_review_payload = decode_branch_ui_payload($conflict_review);
+assert_same($conflict_review['status'], 0, 'branch conflict review admin action exits cleanly');
+assert_same($conflict_review_payload['success'] ?? null, true, 'branch conflict review admin action returns JSON success');
+assert_same($conflict_review_payload['run'] ?? null, 42, 'branch conflict review returns merge run id');
+assert_same($conflict_review_payload['conflict'] ?? null, 7, 'branch conflict review returns conflict id');
+assert_same($conflict_review_payload['reviewStatus'] ?? null, 'reviewed', 'branch conflict review returns recorded status');
+assert_same(
+    array_slice($conflict_review['argv'][0] ?? [], 1),
+    ['branch', '--work-dir', $work_dir, 'merge-review', 'conflict', '7', '--status', 'reviewed', '--note', 'Marked reviewed from the WordPress branch switcher.', '--reviewer', 'wordpress-ui'],
+    'branch conflict review admin action records a first-class merge review note'
+);
+
+$invalid_conflict_review = run_branch_ui_action(
+    ['action' => 'forkpress_branch_review_conflict', 'conflict' => '7', 'status' => 'done'],
+    ['main', 'feature']
+);
+$invalid_conflict_review_payload = decode_branch_ui_payload($invalid_conflict_review);
+assert_same($invalid_conflict_review_payload['success'] ?? null, false, 'branch conflict review rejects invalid statuses');
+assert_same(count($invalid_conflict_review['argv']), 0, 'branch conflict review rejects invalid statuses before invoking CLI');
+
+$conflict_resolution = run_branch_ui_action(
+    ['action' => 'forkpress_branch_resolve_conflict', 'conflict' => '7', 'run' => '42', 'choice' => 'source'],
+    ['main', 'feature']
+);
+$conflict_resolution_payload = decode_branch_ui_payload($conflict_resolution);
+assert_same($conflict_resolution['status'], 0, 'branch conflict resolution admin action exits cleanly');
+assert_same($conflict_resolution_payload['success'] ?? null, true, 'branch conflict resolution admin action returns JSON success');
+assert_same($conflict_resolution_payload['run'] ?? null, 42, 'branch conflict resolution returns merge run id');
+assert_same($conflict_resolution_payload['conflict'] ?? null, 7, 'branch conflict resolution returns conflict id');
+assert_same($conflict_resolution_payload['resolutionChoice'] ?? null, 'source', 'branch conflict resolution returns applied choice');
+assert_same(
+    array_slice($conflict_resolution['argv'][0] ?? [], 1),
+    ['branch', '--work-dir', $work_dir, 'merge-resolve', 'conflict', '7', '--choice', 'source', '--apply', '--note', 'Applied source choice from the WordPress branch switcher.', '--reviewer', 'wordpress-ui'],
+    'branch conflict resolution admin action applies a first-class merge resolution'
+);
+
+$invalid_conflict_resolution = run_branch_ui_action(
+    ['action' => 'forkpress_branch_resolve_conflict', 'conflict' => '7', 'choice' => 'both'],
+    ['main', 'feature']
+);
+$invalid_conflict_resolution_payload = decode_branch_ui_payload($invalid_conflict_resolution);
+assert_same($invalid_conflict_resolution_payload['success'] ?? null, false, 'branch conflict resolution rejects invalid choices');
+assert_same(count($invalid_conflict_resolution['argv']), 0, 'branch conflict resolution rejects invalid choices before invoking CLI');
+
+$apply_reviewed_resolution = run_branch_ui_action(
+    ['action' => 'forkpress_branch_resolve_conflict', 'conflict' => '7', 'run' => '42', 'applyReviewed' => '1'],
+    ['main', 'feature']
+);
+$apply_reviewed_resolution_payload = decode_branch_ui_payload($apply_reviewed_resolution);
+assert_same($apply_reviewed_resolution['status'], 0, 'branch conflict apply-reviewed action exits cleanly');
+assert_same($apply_reviewed_resolution_payload['success'] ?? null, true, 'branch conflict apply-reviewed action returns JSON success');
+assert_same($apply_reviewed_resolution_payload['resolutionChoice'] ?? null, 'reviewed', 'branch conflict apply-reviewed returns reviewed choice marker');
+assert_same(
+    array_slice($apply_reviewed_resolution['argv'][0] ?? [], 1),
+    ['branch', '--work-dir', $work_dir, 'merge-resolve', 'conflict', '7', '--apply-reviewed', '--note', 'Applied reviewed choice from the WordPress branch switcher.', '--reviewer', 'wordpress-ui'],
+    'branch conflict apply-reviewed action applies the latest validated choice'
+);
+
+$mixed_conflict_resolution = run_branch_ui_action(
+    ['action' => 'forkpress_branch_resolve_conflict', 'conflict' => '7', 'choice' => 'source', 'applyReviewed' => '1'],
+    ['main', 'feature']
+);
+$mixed_conflict_resolution_payload = decode_branch_ui_payload($mixed_conflict_resolution);
+assert_same($mixed_conflict_resolution_payload['success'] ?? null, false, 'branch conflict resolution rejects mixed choice and apply-reviewed');
+assert_same(count($mixed_conflict_resolution['argv']), 0, 'branch conflict resolution rejects mixed apply modes before invoking CLI');
+
+$after_revalidate_resolution = run_branch_ui_action(
+    ['action' => 'forkpress_branch_resolve_conflict', 'conflict' => '7', 'run' => '42', 'choice' => 'source', 'afterRevalidate' => '1'],
+    ['main', 'feature']
+);
+$after_revalidate_resolution_payload = decode_branch_ui_payload($after_revalidate_resolution);
+assert_same($after_revalidate_resolution_payload['success'] ?? null, true, 'branch conflict after-revalidate resolution returns JSON success');
+assert_same($after_revalidate_resolution_payload['afterRevalidate'] ?? null, true, 'branch conflict after-revalidate resolution reports guarded mode');
+assert_same(
+    array_slice($after_revalidate_resolution['argv'][0] ?? [], 1),
+    ['branch', '--work-dir', $work_dir, 'merge-resolve', 'conflict', '7', '--choice', 'source', '--apply', '--after-revalidate', '--note', 'Applied source choice from the WordPress branch switcher.', '--reviewer', 'wordpress-ui'],
+    'branch conflict after-revalidate resolution preserves the guarded CLI flag'
+);
+
+$mixed_after_revalidate_resolution = run_branch_ui_action(
+    ['action' => 'forkpress_branch_resolve_conflict', 'conflict' => '7', 'applyReviewed' => '1', 'afterRevalidate' => '1'],
+    ['main', 'feature']
+);
+$mixed_after_revalidate_resolution_payload = decode_branch_ui_payload($mixed_after_revalidate_resolution);
+assert_same($mixed_after_revalidate_resolution_payload['success'] ?? null, false, 'branch conflict resolution rejects apply-reviewed after-revalidate');
+assert_same(count($mixed_after_revalidate_resolution['argv']), 0, 'branch conflict resolution rejects apply-reviewed after-revalidate before invoking CLI');
 
 $pending_crash_output = json_encode([
     'crash_recovery' => [
@@ -872,6 +971,22 @@ assert_true(str_contains($switcher_html, "fetchConflictAudit(run, payload.messag
 assert_true(str_contains($switcher_html, 'forkpress_branch_revalidate_conflicts'), 'branch switcher renders conflict revalidation action');
 assert_true(str_contains($switcher_html, 'nonce-forkpress_branch_revalidate_conflicts'), 'branch switcher renders conflict revalidation nonce');
 assert_true(str_contains($switcher_html, 'function fetchConflictRevalidation'), 'branch switcher renders conflict revalidation client handler');
+assert_true(str_contains($switcher_html, 'forkpress_branch_review_conflict'), 'branch switcher renders conflict review action');
+assert_true(str_contains($switcher_html, 'nonce-forkpress_branch_review_conflict'), 'branch switcher renders conflict review nonce');
+assert_true(str_contains($switcher_html, 'function fetchConflictReview'), 'branch switcher renders conflict review client handler');
+assert_true(str_contains($switcher_html, 'Mark reviewed'), 'branch switcher renders conflict reviewed action');
+assert_true(str_contains($switcher_html, 'Needs action'), 'branch switcher renders conflict needs-action action');
+assert_true(str_contains($switcher_html, 'forkpress_branch_resolve_conflict'), 'branch switcher renders conflict resolution action');
+assert_true(str_contains($switcher_html, 'nonce-forkpress_branch_resolve_conflict'), 'branch switcher renders conflict resolution nonce');
+assert_true(str_contains($switcher_html, 'function fetchConflictResolution'), 'branch switcher renders conflict resolution client handler');
+assert_true(str_contains($switcher_html, 'function conflictResolutionChoiceAvailable'), 'branch switcher checks conflict resolution availability');
+assert_true(str_contains($switcher_html, 'function conflictApplyReviewedAvailable'), 'branch switcher checks apply-reviewed availability');
+assert_true(str_contains($switcher_html, 'function conflictResolutionAfterRevalidate'), 'branch switcher detects after-revalidate resolution guards');
+assert_true(str_contains($switcher_html, 'Use source'), 'branch switcher renders source resolution action');
+assert_true(str_contains($switcher_html, 'Keep target'), 'branch switcher renders target resolution action');
+assert_true(str_contains($switcher_html, 'Apply reviewed'), 'branch switcher renders apply-reviewed action');
+assert_true(str_contains($switcher_html, "body.append('applyReviewed', '1')"), 'branch switcher sends apply-reviewed resolution payloads');
+assert_true(str_contains($switcher_html, "body.append('afterRevalidate', '1')"), 'branch switcher sends after-revalidate resolution payloads');
 assert_true(str_contains($switcher_html, 'function conflictPluginMeta'), 'branch switcher renders structured plugin conflict metadata');
 assert_true(str_contains($switcher_html, 'record.plugin_object'), 'branch switcher renders plugin conflict object metadata');
 assert_true(str_contains($switcher_html, 'record.plugin_severity'), 'branch switcher renders plugin conflict severity metadata');
