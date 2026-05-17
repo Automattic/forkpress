@@ -155,6 +155,11 @@ try {
     assert_same($revalidated['checked'], 1, 'revalidation checks the reviewed conflict');
     assert_same($revalidated['stale'], 1, 'revalidation detects target drift');
     assert_same($revalidated['carried'], 1, 'revalidation carries stale reviewer intent to needs-action');
+    assert_same(count($revalidated['carried_conflicts'] ?? []), 1, 'revalidation returns the carried conflict summary');
+    assert_same(count($revalidated['needs_action_conflicts'] ?? []), 1, 'revalidation returns the needs-action conflict queue');
+    assert_same($revalidated['needs_action_conflicts'][0]['conflict_id'] ?? null, $conflict_id, 'revalidation summary names the reopened conflict id');
+    assert_same($revalidated['needs_action_conflicts'][0]['revalidation_class'] ?? null, 'compatible-target-drift', 'revalidation summary names the classifier');
+    assert_true((string)($revalidated['needs_action_conflicts'][0]['stale_reason'] ?? '') !== '', 'revalidation summary explains the drift reason');
     assert_same(
         scalar($metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $conflict_id ORDER BY id DESC LIMIT 1"),
         'compatible-target-drift',
@@ -192,6 +197,26 @@ try {
     $again_json = json_decode($again['output'], true);
     assert_same($again_json['carried'] ?? null, 0, 'revalidation CLI does not duplicate carried notes');
     assert_same($again_json['already_needs_action'] ?? null, 1, 'revalidation CLI reports already-carried stale reviews');
+    assert_same(count($again_json['already_needs_action_conflicts'] ?? []), 1, 'revalidation CLI returns already-open needs-action conflicts');
+    assert_same($again_json['already_needs_action_conflicts'][0]['conflict_id'] ?? null, $conflict_id, 'revalidation CLI summary keeps the conflict id visible');
+    assert_same(count($again_json['needs_action_conflicts'] ?? []), 1, 'revalidation CLI returns the complete needs-action conflict queue');
+    $again_text = run_merge_cli([
+        'revalidate-reviews',
+        '--metadata-db', $metadata,
+        '--run', (string)$run_id,
+    ]);
+    assert_same($again_text['status'], 0, 'text revalidation CLI accepts already-carried stale reviews');
+    assert_true(str_contains($again_text['output'], 'needs-action-conflicts:'), 'text revalidation output lists actionable conflicts');
+    assert_true(str_contains($again_text['output'], "#$conflict_id"), 'text revalidation output names the actionable conflict id');
+    $again_quiet = run_merge_cli([
+        'audit',
+        '--metadata-db', $metadata,
+        '--revalidate',
+        '--run', (string)$run_id,
+        '--quiet',
+    ]);
+    assert_same($again_quiet['status'], 0, 'audit revalidate supports quiet mode');
+    assert_same(trim($again_quiet['output']), '', 'audit revalidate quiet mode suppresses summary output');
 
     $resolution = cow_merge_resolve_conflict(
         $metadata,

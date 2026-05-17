@@ -33,6 +33,7 @@ from silently overwriting newer target work.
 forkpress branch revalidate-reviews
 forkpress branch revalidate-reviews --run 12 --reviewer alice
 forkpress branch revalidate-reviews --format json
+forkpress branch revalidate-reviews --run 12 --quiet
 forkpress branch merge-audit --revalidate --run 12 --reviewer alice
 forkpress branch merge-audit --review --review-status needs-action
 ```
@@ -41,6 +42,13 @@ The command does not mutate the target branch. It only writes review metadata in
 the merge metadata database. Fresh reviewed conflicts stay reviewed. Stale or
 errored reviewed conflicts are reopened as `needs-action` with a note that
 preserves the prior reviewer, status, and note text.
+The text and JSON summaries include `needs_action_conflicts`, plus separate
+`carried_conflicts` and `already_needs_action_conflicts` lists. Each entry
+names the conflict id, run id, object, classifier, drift reason, revalidation
+record, and replacement conflict id when one exists. That makes the next review
+queue explicit without requiring a second query just to discover which conflict
+ids were reopened. Use `--quiet` for automation that only wants the metadata
+mutation and exit status.
 The same transition is also recorded in `merge_conflict_events` as a
 `revalidation-required` event linked to the `merge_revalidations` row, so
 `merge-audit --records conflict-events` can reconstruct the reviewed ->

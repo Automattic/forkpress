@@ -7928,6 +7928,32 @@ function cow_merge_revalidation_note(array $review, array $staleness): string {
     return strlen($note) > 4096 ? substr($note, 0, 4093) . '...' : $note;
 }
 
+function cow_merge_revalidation_conflict_summary(
+    array $conflict,
+    array $staleness,
+    ?int $review_note_id,
+    ?int $revalidation_id,
+    ?array $revalidation = null
+): array {
+    $replacement_conflict_id = $staleness['replacement_conflict_id'] ?? ($revalidation['replacement_conflict_id'] ?? null);
+    return [
+        'conflict_id' => (int)$conflict['id'],
+        'run_id' => (int)$conflict['run_id'],
+        'conflict_key' => $conflict['conflict_key'] ?? null,
+        'previous_conflict_id' => isset($conflict['previous_conflict_id']) ? (int)$conflict['previous_conflict_id'] : null,
+        'table_name' => (string)$conflict['table_name'],
+        'row_identity' => $conflict['row_identity'],
+        'column_name' => $conflict['column_name'],
+        'conflict_type' => (string)$conflict['conflict_type'],
+        'stale_status' => (string)($staleness['stale_status'] ?? 'unknown'),
+        'revalidation_class' => (string)($staleness['revalidation_class'] ?? ($revalidation['revalidation_class'] ?? 'unclassified')),
+        'stale_reason' => (string)($staleness['stale_reason'] ?? ($revalidation['stale_reason'] ?? 'target payload changed')),
+        'review_note_id' => $review_note_id,
+        'revalidation_id' => $revalidation_id,
+        'replacement_conflict_id' => $replacement_conflict_id === null ? null : (int)$replacement_conflict_id,
+    ];
+}
+
 function cow_merge_revalidate_reviewed_conflicts(
     string $metadata_db,
     ?int $run_id = null,
@@ -7948,7 +7974,7 @@ function cow_merge_revalidate_reviewed_conflicts(
         }
         $conflicts = cow_merge_fetch_rows(
             $meta,
-            "SELECT c.id AS id, c.run_id, c.table_name, c.row_identity, c.column_name, c.conflict_type, c.resolver, c.resolved_at, c.created_at, " .
+            "SELECT c.id AS id, c.run_id, c.conflict_key, c.previous_conflict_id, c.table_name, c.row_identity, c.column_name, c.conflict_type, c.resolver, c.resolved_at, c.created_at, " .
             "c.base_payload, c.source_payload, c.target_payload, c.chosen_payload, c.source_row_payload, c.target_row_payload, r.source_db, r.target_db, r.source_branch, r.target_branch " .
             "FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id $where ORDER BY c.id ASC",
             $params
@@ -7963,6 +7989,8 @@ function cow_merge_revalidate_reviewed_conflicts(
         $errors = 0;
         $carried = 0;
         $already_needs_action = 0;
+        $carried_conflicts = [];
+        $already_needs_action_conflicts = [];
         foreach ($conflicts as $conflict) {
             $checked++;
             $conflict_id = (int)$conflict['id'];
@@ -8000,6 +8028,13 @@ function cow_merge_revalidate_reviewed_conflicts(
                     && hash_equals((string)$latest_revalidation['target_hash'], hash('sha256', $current_target_payload))
                 ) {
                     $already_needs_action++;
+                    $already_needs_action_conflicts[] = cow_merge_revalidation_conflict_summary(
+                        $conflict,
+                        $staleness,
+                        isset($review['id']) ? (int)$review['id'] : null,
+                        isset($latest_revalidation['id']) ? (int)$latest_revalidation['id'] : null,
+                        $latest_revalidation
+                    );
                     continue;
                 }
             }
@@ -8039,9 +8074,16 @@ function cow_merge_revalidate_reviewed_conflicts(
                 'needs-action'
             );
             $carried++;
+            $carried_conflicts[] = cow_merge_revalidation_conflict_summary(
+                $conflict,
+                $staleness,
+                $review_note_id,
+                $revalidation_id
+            );
         }
         cow_merge_exec_checked($meta, 'COMMIT', 'failed to commit review revalidation transaction');
         $transaction_started = false;
+        $needs_action_conflicts = array_merge($carried_conflicts, $already_needs_action_conflicts);
         return [
             'metadata_db' => $metadata_db,
             'run_id' => $run_id,
@@ -8052,6 +8094,9 @@ function cow_merge_revalidate_reviewed_conflicts(
             'errors' => $errors,
             'carried' => $carried,
             'already_needs_action' => $already_needs_action,
+            'needs_action_conflicts' => $needs_action_conflicts,
+            'carried_conflicts' => $carried_conflicts,
+            'already_needs_action_conflicts' => $already_needs_action_conflicts,
         ];
     } catch (Throwable $e) {
         if ($transaction_started) {
@@ -15600,7 +15645,7 @@ function cow_merge_parse_cli(array $argv, array $required, int $start_index = 1)
             throw new InvalidArgumentException("unexpected argument: $arg");
         }
         $key = substr($arg, 2);
-        if (in_array($key, ['id-band-skips', 'target-kept', 'review', 'revalidate', 'apply', 'apply-reviewed', 'after-revalidate', 'restore-target-db', 'restore-files'], true) && (!isset($argv[$i + 1]) || str_starts_with($argv[$i + 1], '--'))) {
+        if (in_array($key, ['id-band-skips', 'target-kept', 'review', 'revalidate', 'apply', 'apply-reviewed', 'after-revalidate', 'restore-target-db', 'restore-files', 'quiet'], true) && (!isset($argv[$i + 1]) || str_starts_with($argv[$i + 1], '--'))) {
             $args[$key] = '1';
             continue;
         }
@@ -15639,6 +15684,35 @@ function cow_merge_audit_revalidate_reject_ignored_filters(array $args): void {
             'run merge-audit without --revalidate to filter audit output. Ignored filters: ' .
             implode(', ', $ignored)
         );
+    }
+}
+
+function cow_merge_print_revalidation_text(array $result): void {
+    echo "forkpress: revalidated reviewed COW merge conflicts\n";
+    echo "  checked:              {$result['checked']}\n";
+    echo "  reviewed:             {$result['reviewed']}\n";
+    echo "  fresh:                {$result['fresh']}\n";
+    echo "  stale:                {$result['stale']}\n";
+    echo "  errors:               {$result['errors']}\n";
+    echo "  carried:              {$result['carried']}\n";
+    echo "  already-needs-action: {$result['already_needs_action']}\n";
+    echo "  metadata:             {$result['metadata_db']}\n";
+    $needs_action = $result['needs_action_conflicts'] ?? [];
+    if (is_array($needs_action) && $needs_action !== []) {
+        echo "needs-action-conflicts:\n";
+        foreach ($needs_action as $conflict) {
+            $column = ($conflict['column_name'] ?? null) !== null && (string)$conflict['column_name'] !== ''
+                ? '.' . $conflict['column_name']
+                : '';
+            $identity = ($conflict['row_identity'] ?? null) !== null && (string)$conflict['row_identity'] !== ''
+                ? ' row=' . cow_merge_audit_truncate((string)$conflict['row_identity'], 120)
+                : '';
+            $replacement = ($conflict['replacement_conflict_id'] ?? null) !== null
+                ? ' replacement=#' . $conflict['replacement_conflict_id']
+                : '';
+            echo "  #{$conflict['conflict_id']} run={$conflict['run_id']} {$conflict['conflict_type']} {$conflict['table_name']}{$column}{$identity} class={$conflict['revalidation_class']}{$replacement}\n";
+            echo "     reason=" . cow_merge_audit_truncate((string)($conflict['stale_reason'] ?? ''), 240) . "\n";
+        }
     }
 }
 
@@ -15843,15 +15917,7 @@ if (realpath($argv[0] ?? '') === __FILE__) {
                     }
                     echo $encoded . "\n";
                 } elseif (($args['quiet'] ?? '0') !== '1') {
-                    echo "forkpress: revalidated reviewed COW merge conflicts\n";
-                    echo "  checked:              {$result['checked']}\n";
-                    echo "  reviewed:             {$result['reviewed']}\n";
-                    echo "  fresh:                {$result['fresh']}\n";
-                    echo "  stale:                {$result['stale']}\n";
-                    echo "  errors:               {$result['errors']}\n";
-                    echo "  carried:              {$result['carried']}\n";
-                    echo "  already-needs-action: {$result['already_needs_action']}\n";
-                    echo "  metadata:             {$result['metadata_db']}\n";
+                    cow_merge_print_revalidation_text($result);
                 }
                 exit(0);
             }
@@ -15902,15 +15968,7 @@ if (realpath($argv[0] ?? '') === __FILE__) {
                 }
                 echo $encoded . "\n";
             } elseif (($args['quiet'] ?? '0') !== '1') {
-                echo "forkpress: revalidated reviewed COW merge conflicts\n";
-                echo "  checked:              {$result['checked']}\n";
-                echo "  reviewed:             {$result['reviewed']}\n";
-                echo "  fresh:                {$result['fresh']}\n";
-                echo "  stale:                {$result['stale']}\n";
-                echo "  errors:               {$result['errors']}\n";
-                echo "  carried:              {$result['carried']}\n";
-                echo "  already-needs-action: {$result['already_needs_action']}\n";
-                echo "  metadata:             {$result['metadata_db']}\n";
+                cow_merge_print_revalidation_text($result);
             }
             exit(0);
         }

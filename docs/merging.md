@@ -43,6 +43,14 @@ Export machine-readable audit data:
 forkpress branch merge-audit --format json --review --records conflicts
 ```
 
+Revalidate stale reviewed conflicts and print the conflict ids that are now in
+the `needs-action` queue:
+
+```bash
+forkpress branch revalidate-reviews --run 12
+forkpress branch merge-audit --revalidate --run 12 --format json
+```
+
 Useful filters include `--run`, `--scope all|db|files|plugin`,
 `--records all|conflicts|conflict-events|decisions|resolutions|rollback-failures`,
 `--conflict-key`, `--review-status unreviewed|pending|needs-action|reviewed`,
