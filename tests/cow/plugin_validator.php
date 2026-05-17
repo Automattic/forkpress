@@ -839,6 +839,15 @@ PHP);
         'warning',
         'plugin resolution rows expose validator severity metadata from the conflict'
     );
+    ob_start();
+    cow_merge_print_audit_text($logical_identity_resolution_audit);
+    $logical_identity_resolution_text = ob_get_clean();
+    assert_true(
+        str_contains($logical_identity_resolution_text, 'plugin plugin=forkpress-plugin-logical-id object=child-slot:' . $child_id) &&
+            str_contains($logical_identity_resolution_text, 'severity=warning') &&
+            str_contains($logical_identity_resolution_text, 'plugin-logical-identity={"kind":"plugin-child","slug":"child-before-rerun"}'),
+        'plugin text audit exposes resolution row plugin metadata'
+    );
     foreach ([
         ['plugin' => 'forkpress-plugin-logical-id'],
         ['plugin_object' => 'child-slot:' . $child_id],
