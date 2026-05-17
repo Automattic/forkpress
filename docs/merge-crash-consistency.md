@@ -58,6 +58,10 @@ The PHP merge suite covers these rollback classes:
   restore the pending recovery state first. The product-level entry point is
   `forkpress branch recover-crash`; the lower-level PHP helper remains available
   as `recover-crash` for focused test fixtures.
+- Pending crash-recovery artifacts are also visible through
+  `merge-audit --records crash-recovery`, so review and branch UI surfaces can
+  detect a blocked recovery state without attempting another merge or driver
+  command first.
 - Process exit after crash recovery restores a target DB or filesystem
   transaction but before recovery artifact cleanup leaves the artifact and
   rollback material retryable; a second recovery removes the artifact and

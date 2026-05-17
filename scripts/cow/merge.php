@@ -22,8 +22,8 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "  php merge.php run-plugin-driver --metadata-db <path> (--id ID|--conflict-key KEY [--run ID]) --driver <path> [--note TEXT] [--reviewer NAME] [--format text|json]\n");
     fwrite(STDERR, "  php merge.php recover-crash --metadata-db <path> [--run ID] [--restore-target-db] [--restore-files] [--format text|json]\n");
     fwrite(STDERR, "  php merge.php audit --metadata-db <path> [--format text|json] [--limit N] [--run ID]\n");
-    fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|conflict-events|decisions|resolutions|rollback-failures] [--path <path>] [--path-prefix <prefix>]\n");
-    fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|conflict-events|decisions|resolutions|rollback-failures] [--conflict-type TYPE] [--conflict-id ID] [--conflict-key KEY] [--event-type TYPE] [--plugin NAME] [--plugin-object OBJECT] [--plugin-severity SEVERITY] [--plugin-logical-identity JSON] [--decision DECISION]\n");
+    fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|conflict-events|decisions|resolutions|rollback-failures|crash-recovery] [--path <path>] [--path-prefix <prefix>]\n");
+    fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|conflict-events|decisions|resolutions|rollback-failures|crash-recovery] [--conflict-type TYPE] [--conflict-id ID] [--conflict-key KEY] [--event-type TYPE] [--plugin NAME] [--plugin-object OBJECT] [--plugin-severity SEVERITY] [--plugin-logical-identity JSON] [--decision DECISION]\n");
     fwrite(STDERR, "    [--id-band-skips] [--target-kept] [--review] [--review-status unreviewed|pending|needs-action|reviewed] [--lifecycle-state unreviewed|deferred|needs-action|reviewed|validated|resolved]\n");
     fwrite(STDERR, "    [--next-action review|run-plugin-validator|wait|revalidate|resolve|apply-reviewed-choice|manual-review|none]\n");
     fwrite(STDERR, "    [--resolution-choice source|target|plugin-driver] [--blocked-resolution-choice source|target] [--resolution-strategy STRATEGY] [--generic-resolver yes|no] [--after-revalidate supported|unsupported]\n");
@@ -8540,8 +8540,8 @@ function cow_merge_audit_scope(?string $value): string {
 
 function cow_merge_audit_records(?string $value): string {
     $records = $value ?? 'all';
-    if (!in_array($records, ['all', 'conflicts', 'conflict-events', 'decisions', 'resolutions', 'rollback-failures'], true)) {
-        throw new InvalidArgumentException('--records must be all, conflicts, conflict-events, decisions, resolutions, or rollback-failures');
+    if (!in_array($records, ['all', 'conflicts', 'conflict-events', 'decisions', 'resolutions', 'rollback-failures', 'crash-recovery'], true)) {
+        throw new InvalidArgumentException('--records must be all, conflicts, conflict-events, decisions, resolutions, rollback-failures, or crash-recovery');
     }
     return $records;
 }
@@ -12763,27 +12763,27 @@ function cow_merge_audit_filters(array $filters = []): array {
     if ($scope !== 'all' && $scope !== 'files' && ($path !== null || $path_prefix !== null)) {
         throw new InvalidArgumentException('--path and --path-prefix require file audit scope');
     }
-    if ($records === 'rollback-failures') {
+    if (in_array($records, ['rollback-failures', 'crash-recovery'], true)) {
         if ($scope !== 'all') {
-            throw new InvalidArgumentException('--records rollback-failures cannot be combined with --scope');
+            throw new InvalidArgumentException("--records $records cannot be combined with --scope");
         }
         foreach (['conflict_type', 'conflict_id', 'conflict_key', 'event_type', 'plugin', 'plugin_object', 'plugin_severity', 'plugin_logical_identity', 'decision', 'review_status', 'resolution_status', 'lifecycle_state', 'next_action', 'revalidation_class', 'latest_revalidation_status', 'stale_status', 'resolution_choice', 'blocked_resolution_choice', 'resolution_strategy', 'generic_resolver', 'after_revalidate'] as $key) {
             if (($filters[$key] ?? null) !== null && (string)$filters[$key] !== '') {
-                throw new InvalidArgumentException('--records rollback-failures cannot be combined with --' . str_replace('_', '-', $key));
+                throw new InvalidArgumentException("--records $records cannot be combined with --" . str_replace('_', '-', $key));
             }
         }
         if ($path !== null || $path_prefix !== null) {
-            throw new InvalidArgumentException('--records rollback-failures cannot be combined with file path filters');
+            throw new InvalidArgumentException("--records $records cannot be combined with file path filters");
         }
         if (
             (string)($filters['id_band_skips'] ?? '') === '1' ||
             (string)($filters['target_kept'] ?? '') === '1' ||
             (string)($filters['review'] ?? '') === '1'
         ) {
-            throw new InvalidArgumentException('--records rollback-failures cannot be combined with audit shortcuts');
+            throw new InvalidArgumentException("--records $records cannot be combined with audit shortcuts");
         }
         if (cow_merge_audit_group_by($filters['group_by'] ?? null) !== 'none') {
-            throw new InvalidArgumentException('--records rollback-failures cannot be combined with --group-by');
+            throw new InvalidArgumentException("--records $records cannot be combined with --group-by");
         }
     }
     return [
@@ -15506,7 +15506,15 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
         'autoincrement_bands' => [],
         'row_identity_summary' => [],
         'rollback_failures' => [],
+        'crash_recovery' => [],
     ];
+    if ($filters['records'] === 'all' || $filters['records'] === 'crash-recovery') {
+        $report['crash_recovery'] = array_slice(
+            cow_merge_crash_recovery_artifacts($metadata_db, $run_id),
+            0,
+            $limit
+        );
+    }
     if (!is_file($metadata_db)) {
         return $report;
     }
@@ -15904,7 +15912,7 @@ function cow_merge_print_audit_text(array $report): void {
         echo "  status:    no metadata database\n";
         return;
     }
-    if (!$report['runs'] && !$report['rollback_failures']) {
+    if (!$report['runs'] && !$report['rollback_failures'] && !$report['crash_recovery']) {
         echo "  status:    no audit runs\n";
         return;
     }
@@ -16053,6 +16061,31 @@ function cow_merge_print_audit_text(array $report): void {
             echo "     rollback=" . cow_merge_audit_truncate((string)$failure['rollback_failure'], 240) . "\n";
             if (($failure['artifact_path'] ?? null) !== null && (string)$failure['artifact_path'] !== '') {
                 echo "     artifact={$failure['artifact_path']}\n";
+            }
+        }
+    }
+
+    if ($report['crash_recovery']) {
+        echo "crash-recovery:\n";
+        foreach ($report['crash_recovery'] as $artifact) {
+            $run = ((int)($artifact['run_id'] ?? 0)) > 0 ? 'run=' . (int)$artifact['run_id'] : 'run=unknown';
+            echo "  $run checkpoint={$artifact['checkpoint']} {$artifact['source_branch']} -> {$artifact['target_branch']}\n";
+            echo "     artifact={$artifact['artifact_path']}\n";
+            if (($artifact['target_db'] ?? '') !== '') {
+                echo "     target-db={$artifact['target_db']}\n";
+            }
+            if (($artifact['target_root'] ?? '') !== '') {
+                echo "     target-root={$artifact['target_root']}\n";
+            }
+            $restore = [];
+            if (is_array($artifact['target_db_snapshot'] ?? null)) {
+                $restore[] = '--restore-target-db';
+            }
+            if (is_array($artifact['filesystem_transaction'] ?? null) || is_array($artifact['filesystem_snapshot'] ?? null)) {
+                $restore[] = '--restore-files';
+            }
+            if ($restore !== []) {
+                echo '     recovery=' . implode(' ', $restore) . "\n";
             }
         }
     }
