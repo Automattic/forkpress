@@ -1390,6 +1390,7 @@ pub fn revalidate_cow_merge_reviews(
     run_id: Option<&str>,
     reviewer: Option<&str>,
     format: &str,
+    quiet: bool,
 ) -> Result<()> {
     let metadata_db = cow_merge_metadata_db_path(layout);
     let mut args: Vec<OsString> = vec![
@@ -1406,6 +1407,9 @@ pub fn revalidate_cow_merge_reviews(
     if let Some(reviewer) = reviewer {
         args.push("--reviewer".into());
         args.push(reviewer.into());
+    }
+    if quiet {
+        args.push("--quiet".into());
     }
     run_php_script(
         layout,

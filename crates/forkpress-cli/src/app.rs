@@ -3085,6 +3085,7 @@ fn cow_branch_command(
                 revalidation.run_id.as_deref(),
                 revalidation.reviewer.as_deref(),
                 &revalidation.format,
+                revalidation.quiet,
             )?;
             Ok(0)
         }
@@ -3123,6 +3124,7 @@ fn cow_branch_command(
                     audit.run_id.as_deref(),
                     audit.reviewer.as_deref(),
                     &audit.format,
+                    audit.quiet,
                 )?;
                 return Ok(0);
             }
@@ -3348,7 +3350,7 @@ fn branch_help_text(command: Option<&str>) -> &'static str {
             "Usage: forkpress branch recover-crash [--run <id>] [--restore-target-db] [--restore-files] [--format text|json]\n\nInspect or restore pending COW merge crash-recovery artifacts. Run without restore flags to list pending artifacts first.\nExamples:\n  forkpress branch recover-crash\n  forkpress branch recover-crash --restore-target-db --restore-files\n"
         }
         Some("revalidate-reviews") | Some("merge-revalidate") => {
-            "Usage: forkpress branch revalidate-reviews [--run <id>] [--reviewer <name>] [--format text|json]\n\nRecheck reviewed merge conflicts against current target state. Stale reviewed conflicts are carried back into the needs-action queue without applying a resolution.\nExample: forkpress branch revalidate-reviews --reviewer alice\n"
+            "Usage: forkpress branch revalidate-reviews [--run <id>] [--reviewer <name>] [--format text|json] [--quiet]\n\nRecheck reviewed merge conflicts against current target state. Stale reviewed conflicts are carried back into the needs-action queue without applying a resolution.\nExample: forkpress branch revalidate-reviews --reviewer alice\n"
         }
         Some("record-plugin-validator-conflicts") => {
             "Usage: forkpress branch record-plugin-validator-conflicts --run <id> (--findings-file <path>|--findings-json <json>) [--format text|json]\n\nRecord plugin-scoped validator findings against an existing merge run. Prefer --findings-file for real validators.\n"
@@ -3357,7 +3359,7 @@ fn branch_help_text(command: Option<&str>) -> &'static str {
             "Usage: forkpress branch run-plugin-validator --run <id> --validator <path> [--format text|json]\n\nRun one plugin validator and record emitted findings as plugin-scoped merge conflicts.\n"
         }
         Some("merge-audit") | Some("audit") => {
-            "Usage: forkpress branch merge-audit [options]\n\nInspect merge runs, decisions, conflicts, conflict events, resolutions, and rollback failures. Use --revalidate to carry stale reviewed conflicts back into needs-action before resolving; revalidation only accepts --run, --reviewer, and --format.\nCommon options: --format text|json, --run <id>, --scope all|db|files|plugin, --records all|conflicts|conflict-events|decisions|resolutions|rollback-failures, --conflict-key <key>, --review, --review-status <status>, --lifecycle-state <state>, --group-by none|table|status|path|type|severity|lifecycle, --revalidate.\n"
+            "Usage: forkpress branch merge-audit [options]\n\nInspect merge runs, decisions, conflicts, conflict events, resolutions, and rollback failures. Use --revalidate to carry stale reviewed conflicts back into needs-action before resolving; revalidation only accepts --run, --reviewer, --format, and --quiet.\nCommon options: --format text|json, --run <id>, --scope all|db|files|plugin, --records all|conflicts|conflict-events|decisions|resolutions|rollback-failures, --conflict-key <key>, --review, --review-status <status>, --lifecycle-state <state>, --group-by none|table|status|path|type|severity|lifecycle, --revalidate.\n"
         }
         Some("merge-review") => {
             "Usage: forkpress branch merge-review <conflict|decision|resolution> <id> --status <pending|needs-action|reviewed> --note <text> [--reviewer <name>]\n\nAttach review metadata to an audit record.\n"
@@ -3395,6 +3397,7 @@ struct CowBranchMergeAuditArgs {
     resolution_status: Option<String>,
     lifecycle_state: Option<String>,
     group_by: String,
+    quiet: bool,
 }
 
 fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAuditArgs> {
@@ -3417,6 +3420,7 @@ fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAu
     let mut resolution_status: Option<String> = None;
     let mut lifecycle_state: Option<String> = None;
     let mut group_by = "none".to_string();
+    let mut quiet = false;
     let mut index = 1;
     while index < args.len() {
         match args[index].as_str() {
@@ -3590,6 +3594,10 @@ fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAu
                 revalidate = true;
                 index += 1;
             }
+            "--quiet" => {
+                quiet = true;
+                index += 1;
+            }
             "--review-status" => {
                 let Some(value) = args.get(index + 1) else {
                     bail!(
@@ -3701,8 +3709,11 @@ fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAu
             || group_by != "none")
     {
         bail!(
-            "`forkpress branch merge-audit --revalidate` only accepts --run, --reviewer, and --format; run merge-audit without --revalidate to filter audit output"
+            "`forkpress branch merge-audit --revalidate` only accepts --run, --reviewer, --format, and --quiet; run merge-audit without --revalidate to filter audit output"
         );
+    }
+    if quiet && !revalidate {
+        bail!("--quiet is only supported with `forkpress branch merge-audit --revalidate`");
     }
     Ok(CowBranchMergeAuditArgs {
         format,
@@ -3724,6 +3735,7 @@ fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAu
         resolution_status,
         lifecycle_state,
         group_by,
+        quiet,
     })
 }
 
@@ -3803,6 +3815,7 @@ struct CowBranchRevalidateReviewsArgs {
     run_id: Option<String>,
     reviewer: Option<String>,
     format: String,
+    quiet: bool,
 }
 
 fn parse_cow_branch_revalidate_reviews_args(
@@ -3811,6 +3824,7 @@ fn parse_cow_branch_revalidate_reviews_args(
     let mut run_id: Option<String> = None;
     let mut reviewer: Option<String> = None;
     let mut format = "text".to_string();
+    let mut quiet = false;
     let mut index = 1;
     while index < args.len() {
         match args[index].as_str() {
@@ -3859,6 +3873,10 @@ fn parse_cow_branch_revalidate_reviews_args(
                 format = value.to_string();
                 index += 1;
             }
+            "--quiet" => {
+                quiet = true;
+                index += 1;
+            }
             other => bail!(
                 "unsupported argument for `forkpress branch revalidate-reviews`: {other}\n\n{}",
                 branch_help_text(Some("revalidate-reviews"))
@@ -3872,6 +3890,7 @@ fn parse_cow_branch_revalidate_reviews_args(
         run_id,
         reviewer,
         format,
+        quiet,
     })
 }
 
@@ -5157,9 +5176,11 @@ mod git_helper_tests {
     fn branch_help_lists_review_revalidation_command() {
         assert!(branch_help_text(None).contains("revalidate-reviews"));
         assert!(branch_help_text(Some("revalidate-reviews")).contains("--reviewer"));
+        assert!(branch_help_text(Some("revalidate-reviews")).contains("--quiet"));
         assert!(branch_help_text(Some("revalidate-reviews")).contains("needs-action"));
         assert!(branch_help_text(Some("merge-audit")).contains("--revalidate"));
         assert!(branch_help_text(Some("merge-audit")).contains("revalidation only accepts"));
+        assert!(branch_help_text(Some("merge-audit")).contains("--quiet"));
         assert!(branch_help_text(Some("merge-audit")).contains("--scope all|db|files|plugin"));
         assert!(branch_help_text(Some("merge-audit")).contains("--conflict-key <key>"));
         assert!(branch_help_text(Some("merge-audit")).contains("--lifecycle-state <state>"));
@@ -5221,6 +5242,7 @@ mod git_helper_tests {
         assert_eq!(parsed.run_id, None);
         assert_eq!(parsed.reviewer, None);
         assert_eq!(parsed.format, "text");
+        assert!(!parsed.quiet);
     }
 
     #[test]
@@ -5230,11 +5252,13 @@ mod git_helper_tests {
             "--run=9".to_string(),
             "--reviewer=alice".to_string(),
             "--format=json".to_string(),
+            "--quiet".to_string(),
         ];
         let parsed = parse_cow_branch_revalidate_reviews_args(&args).unwrap();
         assert_eq!(parsed.run_id.as_deref(), Some("9"));
         assert_eq!(parsed.reviewer.as_deref(), Some("alice"));
         assert_eq!(parsed.format, "json");
+        assert!(parsed.quiet);
     }
 
     #[test]
@@ -5524,6 +5548,7 @@ mod git_helper_tests {
             "alice",
             "--format",
             "json",
+            "--quiet",
         ])
         .unwrap();
         let Commands::Branch(args) = cli.command else {
@@ -5540,6 +5565,7 @@ mod git_helper_tests {
                 "alice".to_string(),
                 "--format".to_string(),
                 "json".to_string(),
+                "--quiet".to_string(),
             ]
         );
     }
@@ -5624,7 +5650,31 @@ mod git_helper_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("merge-audit --revalidate"));
-        assert!(err.contains("only accepts --run, --reviewer, and --format"));
+        assert!(err.contains("only accepts --run, --reviewer, --format, and --quiet"));
+    }
+
+    #[test]
+    fn branch_merge_audit_revalidate_accepts_quiet() {
+        let args = vec![
+            "merge-audit".to_string(),
+            "--revalidate".to_string(),
+            "--run=7".to_string(),
+            "--format=json".to_string(),
+            "--quiet".to_string(),
+        ];
+        let parsed = parse_cow_branch_merge_audit_args(&args).unwrap();
+        assert!(parsed.revalidate);
+        assert!(parsed.quiet);
+    }
+
+    #[test]
+    fn branch_merge_audit_quiet_requires_revalidate() {
+        let args = vec!["merge-audit".to_string(), "--quiet".to_string()];
+        let err = parse_cow_branch_merge_audit_args(&args)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--quiet"));
+        assert!(err.contains("merge-audit --revalidate"));
     }
 
     #[test]
