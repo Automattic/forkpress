@@ -521,6 +521,62 @@ function forkpress_branch_post_value(string $key): string {
     return function_exists('sanitize_text_field') ? sanitize_text_field($value) : (preg_replace('/[^a-zA-Z0-9_\-]/', '', $value) ?? '');
 }
 
+function forkpress_branch_post_int(string $key): ?int {
+    $value = $_POST[$key] ?? '';
+    if (function_exists('wp_unslash')) {
+        $value = wp_unslash($value);
+    }
+    if (is_array($value)) {
+        return null;
+    }
+    $value = trim((string) $value);
+    if ($value === '' || preg_match('/^\d+$/', $value) !== 1) {
+        return null;
+    }
+    $int = (int) $value;
+    return $int > 0 ? $int : null;
+}
+
+function forkpress_branch_conflict_audit_filters(): array {
+    $allowed = [
+        'scope' => ['all', 'db', 'files', 'plugin'],
+        'lifecycleState' => ['unreviewed', 'deferred', 'needs-action', 'reviewed', 'validated', 'resolved'],
+        'nextAction' => ['review', 'run-plugin-validator', 'wait', 'revalidate', 'resolve', 'apply-reviewed-choice', 'manual-review', 'none'],
+    ];
+    $flags = [
+        'scope' => '--scope',
+        'lifecycleState' => '--lifecycle-state',
+        'nextAction' => '--next-action',
+    ];
+    $labels = [
+        'scope' => 'scope',
+        'lifecycleState' => 'lifecycle state',
+        'nextAction' => 'next action',
+    ];
+    $filters = [];
+    foreach ($allowed as $key => $values) {
+        $value = forkpress_branch_post_value($key);
+        if ($value === '') {
+            continue;
+        }
+        if (!in_array($value, $values, true)) {
+            return [
+                'error' => 'Choose a valid merge conflict ' . $labels[$key] . '.',
+                'args' => [],
+                'filters' => [],
+            ];
+        }
+        $filters[$key] = $value;
+    }
+
+    $args = [];
+    foreach ($filters as $key => $value) {
+        $args[] = $flags[$key];
+        $args[] = $value;
+    }
+    return ['error' => null, 'args' => $args, 'filters' => $filters];
+}
+
 function forkpress_branch_can_manage(): bool {
     if (!function_exists('current_user_can') || !current_user_can('manage_options')) {
         return false;
@@ -647,7 +703,7 @@ function forkpress_branch_run_cli(array $args): array {
 
 function forkpress_branch_wants_json(): bool {
     $action = $_REQUEST['action'] ?? '';
-    if (is_string($action) && in_array($action, ['forkpress_branch_create', 'forkpress_branch_merge'], true)) {
+    if (is_string($action) && in_array($action, ['forkpress_branch_create', 'forkpress_branch_merge', 'forkpress_branch_conflicts', 'forkpress_branch_revalidate_conflicts'], true)) {
         return true;
     }
 
@@ -748,12 +804,45 @@ function forkpress_branch_merge_summary(string $output): array {
     return $summary;
 }
 
-function forkpress_branch_merge_audit_command(?int $run): string {
+function forkpress_branch_merge_audit_command(?int $run, array $filters = []): string {
     $command = 'forkpress branch merge-audit --records conflicts';
     if ($run !== null && $run > 0) {
         $command .= ' --run ' . $run;
     }
+    $filter_flags = [
+        'scope' => '--scope',
+        'lifecycleState' => '--lifecycle-state',
+        'nextAction' => '--next-action',
+    ];
+    foreach ($filter_flags as $key => $flag) {
+        if (isset($filters[$key]) && is_string($filters[$key]) && $filters[$key] !== '') {
+            $command .= ' ' . $flag . ' ' . $filters[$key];
+        }
+    }
     return $command;
+}
+
+function forkpress_branch_conflict_audit_summary(array $report, int $run, array $filters = []): array {
+    $records = is_array($report['conflicts'] ?? null) ? array_values($report['conflicts']) : [];
+    $total = count($records);
+    $runs = is_array($report['runs'] ?? null) ? $report['runs'] : [];
+    foreach ($runs as $run_record) {
+        if (!is_array($run_record) || (int)($run_record['id'] ?? 0) !== $run) {
+            continue;
+        }
+        $total = max($total, (int)($run_record['conflict_count'] ?? 0));
+        break;
+    }
+
+    return [
+        'run' => $run,
+        'records' => $records,
+        'recordCount' => count($records),
+        'totalConflicts' => $total,
+        'filters' => $filters,
+        'audit' => $report,
+        'auditCommand' => forkpress_branch_merge_audit_command($run, $filters) . ' --format json',
+    ];
 }
 
 function forkpress_branch_birth_admin_notice(): void {
@@ -860,6 +949,91 @@ function forkpress_handle_branch_merge(): void {
     );
 }
 add_action('admin_post_forkpress_branch_merge', 'forkpress_handle_branch_merge');
+
+function forkpress_handle_branch_conflicts(): void {
+    if (!forkpress_branch_can_manage()) {
+        forkpress_branch_finish_action(forkpress_branch_url(forkpress_current_branch() ?: 'main', '/wp-admin/'), 'error', 'You cannot inspect ForkPress merge conflicts from this site.');
+    }
+    if (function_exists('check_admin_referer')) {
+        check_admin_referer('forkpress_branch_conflicts');
+    }
+
+    $current = forkpress_current_branch() ?: 'main';
+    $run = forkpress_branch_post_int('run');
+    if ($run === null) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Choose a merge run to inspect.');
+    }
+
+    $filters = forkpress_branch_conflict_audit_filters();
+    if (($filters['error'] ?? null) !== null) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', (string) $filters['error']);
+    }
+
+    $audit_args = array_merge(['merge-audit', '--records', 'conflicts', '--run', (string) $run, '--format', 'json'], $filters['args']);
+    [$code, $output] = forkpress_branch_run_cli($audit_args);
+    if ($code !== 0) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', $output ?: 'ForkPress could not inspect merge conflicts.');
+    }
+
+    $report = json_decode($output, true);
+    if (!is_array($report)) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'ForkPress returned invalid merge audit JSON.');
+    }
+
+    $summary = forkpress_branch_conflict_audit_summary($report, $run, $filters['filters']);
+    $message = 'Loaded ' . $summary['recordCount'] . ' of ' . $summary['totalConflicts'] . ' conflict record' . ($summary['totalConflicts'] === 1 ? '' : 's') . ' for merge run ' . $run . '.';
+    forkpress_branch_finish_action(
+        forkpress_branch_url($current, '/wp-admin/'),
+        'notice',
+        $message,
+        $summary
+    );
+}
+add_action('admin_post_forkpress_branch_conflicts', 'forkpress_handle_branch_conflicts');
+
+function forkpress_handle_branch_revalidate_conflicts(): void {
+    if (!forkpress_branch_can_manage()) {
+        forkpress_branch_finish_action(forkpress_branch_url(forkpress_current_branch() ?: 'main', '/wp-admin/'), 'error', 'You cannot revalidate ForkPress merge conflicts from this site.');
+    }
+    if (function_exists('check_admin_referer')) {
+        check_admin_referer('forkpress_branch_revalidate_conflicts');
+    }
+
+    $current = forkpress_current_branch() ?: 'main';
+    $run = forkpress_branch_post_int('run');
+    if ($run === null) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Choose a merge run to revalidate.');
+    }
+
+    [$code, $output] = forkpress_branch_run_cli(['merge-audit', '--revalidate', '--run', (string) $run, '--reviewer', 'wordpress-ui', '--format', 'json']);
+    if ($code !== 0) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', $output ?: 'ForkPress could not revalidate merge conflicts.');
+    }
+
+    $result = json_decode($output, true);
+    if (!is_array($result)) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'ForkPress returned invalid revalidation JSON.');
+    }
+
+    $checked = max(0, (int)($result['checked'] ?? 0));
+    $stale = max(0, (int)($result['stale'] ?? 0));
+    $carried = max(0, (int)($result['carried'] ?? 0));
+    $message = 'Revalidated merge run ' . $run . ': checked ' . $checked . ', stale ' . $stale . ', carried ' . $carried . '.';
+    forkpress_branch_finish_action(
+        forkpress_branch_url($current, '/wp-admin/'),
+        'warning',
+        $message,
+        [
+            'run' => $run,
+            'checked' => $checked,
+            'stale' => $stale,
+            'carried' => $carried,
+            'revalidation' => $result,
+            'auditCommand' => 'forkpress branch merge-audit --revalidate --run ' . $run . ' --reviewer wordpress-ui --format json',
+        ]
+    );
+}
+add_action('admin_post_forkpress_branch_revalidate_conflicts', 'forkpress_handle_branch_revalidate_conflicts');
 
 add_action('admin_bar_menu', function ($wp_admin_bar) {
     $branch = forkpress_current_branch();
@@ -1079,9 +1253,52 @@ function forkpress_branch_switcher_assets(): void {
             background: #0a4b78;
             color: #fff;
         }
+        #wpadminbar .forkpress-switcher-status.is-warning {
+            background: #7a4d00;
+            color: #fff;
+        }
         #wpadminbar .forkpress-switcher-status.is-error {
             background: #8a2424;
             color: #fff;
+        }
+        #wpadminbar .forkpress-conflict-list {
+            background: #2c3338;
+            border: 1px solid #3c434a;
+            border-radius: 6px;
+            display: none;
+            gap: 7px;
+            max-height: 220px;
+            overflow: auto;
+            padding: 8px;
+        }
+        #wpadminbar .forkpress-conflict-list.is-visible {
+            display: grid;
+        }
+        #wpadminbar .forkpress-conflict-heading {
+            color: #f0f0f1;
+            font-size: 12px;
+            font-weight: 700;
+            line-height: 1.25;
+        }
+        #wpadminbar .forkpress-conflict-row {
+            border-top: 1px solid #3c434a;
+            color: #f0f0f1;
+            display: grid;
+            gap: 2px;
+            font-size: 12px;
+            line-height: 1.3;
+            min-width: 0;
+            padding-top: 7px;
+        }
+        #wpadminbar .forkpress-conflict-title,
+        #wpadminbar .forkpress-conflict-meta,
+        #wpadminbar .forkpress-conflict-command {
+            overflow-wrap: anywhere;
+        }
+        #wpadminbar .forkpress-conflict-meta,
+        #wpadminbar .forkpress-conflict-command {
+            color: #c3c4c7;
+            font-size: 11px;
         }
         @keyframes forkpress-switcher-spin {
             to {
@@ -1114,6 +1331,8 @@ function forkpress_render_branch_switcher(): void {
             'current'     => $current,
             'createNonce' => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_create') : '',
             'mergeNonce'  => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_merge') : '',
+            'auditNonce'  => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_conflicts') : '',
+            'revalidateNonce' => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_revalidate_conflicts') : '',
         ];
     }
     $actions_json = function_exists('wp_json_encode') ? wp_json_encode($actions) : json_encode($actions);
@@ -1132,12 +1351,13 @@ function forkpress_render_branch_switcher(): void {
         var actions = <?php echo $actions_json; ?>;
         var panel = document.createElement('div');
         panel.className = 'forkpress-switcher-panel';
-        panel.innerHTML = '<input class="forkpress-switcher-filter" type="search" autocomplete="off" placeholder="Filter branches" aria-label="Filter branches"><div class="forkpress-switcher-list" role="menu"></div><div class="forkpress-switcher-status" role="status" aria-live="polite"></div>';
+        panel.innerHTML = '<input class="forkpress-switcher-filter" type="search" autocomplete="off" placeholder="Filter branches" aria-label="Filter branches"><div class="forkpress-switcher-list" role="menu"></div><div class="forkpress-switcher-status" role="status" aria-live="polite"></div><div class="forkpress-conflict-list" aria-live="polite"></div>';
         item.appendChild(panel);
 
         var input = panel.querySelector('.forkpress-switcher-filter');
         var list = panel.querySelector('.forkpress-switcher-list');
         var status = panel.querySelector('.forkpress-switcher-status');
+        var conflictList = panel.querySelector('.forkpress-conflict-list');
         var actionSelects = [];
 
         function setBranches(nextBranches) {
@@ -1154,6 +1374,80 @@ function forkpress_render_branch_switcher(): void {
         function showStatus(kind, message) {
             status.className = 'forkpress-switcher-status is-visible is-' + kind;
             status.textContent = message;
+        }
+
+        function clearConflictAudit() {
+            conflictList.className = 'forkpress-conflict-list';
+            conflictList.innerHTML = '';
+        }
+
+        function appendConflictText(parent, className, text) {
+            if (!text) {
+                return;
+            }
+            var node = document.createElement('div');
+            node.className = className;
+            node.textContent = text;
+            parent.appendChild(node);
+        }
+
+        function conflictTitle(record) {
+            if (record && record.conflict_key) {
+                return String(record.conflict_key);
+            }
+            if (record && record.path) {
+                return String(record.path);
+            }
+            if (record && record.table_name) {
+                return String(record.table_name) + (record.column_name ? '.' + String(record.column_name) : '');
+            }
+            return 'Conflict #' + String(record && record.id ? record.id : '');
+        }
+
+        function renderConflictAudit(payload, fallbackMessage) {
+            var records = Array.isArray(payload.records) ? payload.records : [];
+            var filters = payload.filters || {};
+            showStatus('warning', payload.message || fallbackMessage || 'Merge completed with conflicts.');
+            clearConflictAudit();
+            conflictList.className = 'forkpress-conflict-list is-visible';
+
+            var heading = document.createElement('div');
+            heading.className = 'forkpress-conflict-heading';
+            heading.textContent = 'Run ' + String(payload.run || '') + ': ' + String(payload.recordCount || records.length) + ' of ' + String(payload.totalConflicts || records.length) + ' conflicts';
+            conflictList.appendChild(heading);
+            appendConflictText(conflictList, 'forkpress-conflict-meta', [
+                filters.scope && filters.scope !== 'all' ? 'scope: ' + filters.scope : '',
+                filters.lifecycleState ? 'state: ' + filters.lifecycleState : '',
+                filters.nextAction ? 'next: ' + filters.nextAction : ''
+            ].filter(Boolean).join(' / '));
+
+            records.slice(0, 5).forEach(function (record) {
+                var row = document.createElement('div');
+                row.className = 'forkpress-conflict-row';
+                appendConflictText(row, 'forkpress-conflict-title', conflictTitle(record));
+                appendConflictText(row, 'forkpress-conflict-meta', [
+                    record.conflict_type || record.type || '',
+                    record.lifecycle_state || record.latest_event_lifecycle_state || '',
+                    record.next_action || ''
+                ].filter(Boolean).join(' / '));
+                appendConflictText(row, 'forkpress-conflict-meta', record.plugin ? 'plugin: ' + String(record.plugin) : '');
+                conflictList.appendChild(row);
+            });
+
+            if (records.length > 5) {
+                appendConflictText(conflictList, 'forkpress-conflict-meta', String(records.length - 5) + ' more conflicts in merge audit.');
+            }
+            appendConflictText(conflictList, 'forkpress-conflict-command', payload.auditCommand || '');
+            if (payload.run && actions && actions.revalidateNonce) {
+                var button = document.createElement('button');
+                button.className = 'forkpress-switcher-button';
+                button.type = 'button';
+                button.textContent = 'Revalidate conflicts';
+                button.addEventListener('click', function () {
+                    fetchConflictRevalidation(payload.run);
+                });
+                conflictList.appendChild(button);
+            }
         }
 
         function render() {
@@ -1244,6 +1538,7 @@ function forkpress_render_branch_switcher(): void {
                 var body = new FormData(form);
                 setFormLoading(form, true);
                 showStatus('success', 'Working...');
+                clearConflictAudit();
 
                 fetch(form.action, {
                     method: 'POST',
@@ -1273,12 +1568,105 @@ function forkpress_render_branch_switcher(): void {
                     if (payload.branches) {
                         setBranches(payload.branches);
                     }
-                    showStatus('success', payload.message || 'ForkPress branch action completed.');
+                    if (payload.type === 'warning' && payload.run) {
+                        showStatus('warning', payload.message || 'ForkPress branch action completed.');
+                        fetchConflictAudit(payload.run, payload.message || '');
+                    } else {
+                        showStatus('success', payload.message || 'ForkPress branch action completed.');
+                    }
                 }).catch(function (error) {
                     showStatus('error', error && error.message ? error.message : 'ForkPress branch action failed.');
                 }).then(function () {
                     setFormLoading(form, false);
                 });
+            });
+        }
+
+        function fetchConflictAudit(run, fallbackMessage, filters) {
+            if (!actions || !actions.auditNonce || !window.fetch || !window.FormData) {
+                return;
+            }
+            var body = new FormData();
+            body.append('action', 'forkpress_branch_conflicts');
+            body.append('_wpnonce', actions.auditNonce);
+            body.append('run', String(run));
+            filters = filters || {};
+            if (filters.scope) {
+                body.append('scope', filters.scope);
+            }
+            if (filters.lifecycleState) {
+                body.append('lifecycleState', filters.lifecycleState);
+            }
+            if (filters.nextAction) {
+                body.append('nextAction', filters.nextAction);
+            }
+            fetch(actions.url, {
+                method: 'POST',
+                body: body,
+                credentials: 'same-origin',
+                headers: {
+                    'Accept': 'application/json',
+                    'X-ForkPress-Async': '1'
+                }
+            }).then(function (response) {
+                return response.text().then(function (text) {
+                    var payload = null;
+                    try {
+                        payload = text ? JSON.parse(text) : null;
+                    } catch (error) {
+                        payload = null;
+                    }
+                    if (!response.ok || !payload || payload.success === false) {
+                        throw new Error(payload && payload.message ? payload.message : (text || 'ForkPress conflict audit failed.'));
+                    }
+                    return payload;
+                });
+            }).then(function (payload) {
+                renderConflictAudit(payload, fallbackMessage);
+            }).catch(function (error) {
+                var message = fallbackMessage || 'Merge completed with conflicts.';
+                if (error && error.message) {
+                    message += ' Conflict details could not be loaded: ' + error.message;
+                }
+                showStatus('warning', message);
+            });
+        }
+
+        function fetchConflictRevalidation(run) {
+            if (!actions || !actions.revalidateNonce || !window.fetch || !window.FormData) {
+                return;
+            }
+            var body = new FormData();
+            body.append('action', 'forkpress_branch_revalidate_conflicts');
+            body.append('_wpnonce', actions.revalidateNonce);
+            body.append('run', String(run));
+            showStatus('warning', 'Revalidating conflicts...');
+            fetch(actions.url, {
+                method: 'POST',
+                body: body,
+                credentials: 'same-origin',
+                headers: {
+                    'Accept': 'application/json',
+                    'X-ForkPress-Async': '1'
+                }
+            }).then(function (response) {
+                return response.text().then(function (text) {
+                    var payload = null;
+                    try {
+                        payload = text ? JSON.parse(text) : null;
+                    } catch (error) {
+                        payload = null;
+                    }
+                    if (!response.ok || !payload || payload.success === false) {
+                        throw new Error(payload && payload.message ? payload.message : (text || 'ForkPress conflict revalidation failed.'));
+                    }
+                    return payload;
+                });
+            }).then(function (payload) {
+                showStatus('warning', payload.message || 'Revalidated conflicts.');
+                fetchConflictAudit(run, payload.message || '', { lifecycleState: 'needs-action' });
+            }).catch(function (error) {
+                showStatus('error', error && error.message ? error.message : 'ForkPress conflict revalidation failed.');
             });
         }
 
