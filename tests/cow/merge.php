@@ -2718,6 +2718,142 @@ SQL);
     assert_same($fk_insert_collision_source_resolution['status'], 'applied', 'source foreign-key row insert collision resolution applies after the target parent exists');
     assert_same((int)scalar($fk_insert_collision_target, 'SELECT parent_id FROM plugin_fk_insert_collision_children WHERE id = 20'), 999, 'source foreign-key row insert collision resolution reparents the child row');
 
+    $fk_target_deleted_base = $tmp . '/fk-target-deleted-base.sqlite';
+    $fk_target_deleted_source = $tmp . '/fk-target-deleted-source.sqlite';
+    $fk_target_deleted_target = $tmp . '/fk-target-deleted-target.sqlite';
+    $fk_target_deleted_metadata = $tmp . '/.forkpress/cow/merge/fk-target-deleted-metadata.sqlite';
+    create_base_db($fk_target_deleted_base);
+    copy($fk_target_deleted_base, $fk_target_deleted_source);
+    copy($fk_target_deleted_base, $fk_target_deleted_target);
+    foreach ([$fk_target_deleted_base, $fk_target_deleted_source, $fk_target_deleted_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_fk_target_deleted_parents (id INTEGER PRIMARY KEY, label TEXT)');
+        $db->exec('CREATE TABLE plugin_fk_target_deleted_children (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES plugin_fk_target_deleted_parents(id), label TEXT)');
+        $db->exec("INSERT INTO plugin_fk_target_deleted_parents (id, label) VALUES (1, 'base parent')");
+        $db->exec("INSERT INTO plugin_fk_target_deleted_children (id, parent_id, label) VALUES (20, 1, 'base child')");
+        $db->close();
+    }
+    $db = open_db($fk_target_deleted_source);
+    $db->exec("UPDATE plugin_fk_target_deleted_children SET parent_id = 999, label = 'source restore child' WHERE id = 20");
+    $db->close();
+    $db = open_db($fk_target_deleted_target);
+    $db->exec('DELETE FROM plugin_fk_target_deleted_children WHERE id = 20');
+    $db->close();
+    $fk_target_deleted_result = cow_merge_databases($fk_target_deleted_base, $fk_target_deleted_source, $fk_target_deleted_target, $fk_target_deleted_metadata, 'feature-fk-target-deleted', 'main');
+    assert_same($fk_target_deleted_result['status'], 'completed_with_conflicts', 'foreign-key target-deleted row restore is held for review');
+    assert_same((int)scalar($fk_target_deleted_target, 'SELECT COUNT(*) FROM plugin_fk_target_deleted_children WHERE id = 20'), 0, 'target deletion wins before FK row restore review');
+    $fk_target_deleted_conflict_id = (int)scalar($fk_target_deleted_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_fk_target_deleted_children' AND conflict_type = 'row-target-deleted' ORDER BY id DESC LIMIT 1");
+    $fk_target_deleted_audit = cow_merge_audit_report($fk_target_deleted_metadata, (int)$fk_target_deleted_result['run_id'], 10, ['records' => 'conflicts']);
+    $fk_target_deleted_audit_rows = [];
+    foreach ($fk_target_deleted_audit['conflicts'] as $row) {
+        $fk_target_deleted_audit_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $fk_target_deleted_audit_rows[$fk_target_deleted_conflict_id]['resolution_choices'],
+        ['target'],
+        'foreign-key target-deleted row audit does not advertise source while the target parent is missing'
+    );
+    assert_true(
+        str_contains((string)($fk_target_deleted_audit_rows[$fk_target_deleted_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'referencing plugin_fk_target_deleted_parents(id)'),
+        'foreign-key target-deleted row audit explains the missing target parent'
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($fk_target_deleted_metadata, $fk_target_deleted_conflict_id, 'source', true, 'Try restore before target parent exists.', 'cow-test'),
+        'resolution choice source is blocked',
+        'source restore for a foreign-key target-deleted row is blocked before mutation while the target parent is missing'
+    );
+    $db = open_db($fk_target_deleted_target);
+    $db->exec("INSERT INTO plugin_fk_target_deleted_parents (id, label) VALUES (999, 'target parent for row restore')");
+    $db->close();
+    $fk_target_deleted_unblocked_audit = cow_merge_audit_report($fk_target_deleted_metadata, (int)$fk_target_deleted_result['run_id'], 10, ['records' => 'conflicts']);
+    $fk_target_deleted_unblocked_rows = [];
+    foreach ($fk_target_deleted_unblocked_audit['conflicts'] as $row) {
+        $fk_target_deleted_unblocked_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $fk_target_deleted_unblocked_rows[$fk_target_deleted_conflict_id]['resolution_choices'],
+        ['source', 'target'],
+        'foreign-key target-deleted row audit advertises source after the target parent is restored'
+    );
+    $fk_target_deleted_source_resolution = cow_merge_resolve_conflict(
+        $fk_target_deleted_metadata,
+        $fk_target_deleted_conflict_id,
+        'source',
+        true,
+        'Apply source restore after target parent review.',
+        'cow-test'
+    );
+    assert_same($fk_target_deleted_source_resolution['status'], 'applied', 'source foreign-key target-deleted row restore applies after the target parent exists');
+    assert_same((int)scalar($fk_target_deleted_target, 'SELECT parent_id FROM plugin_fk_target_deleted_children WHERE id = 20'), 999, 'source foreign-key target-deleted row restore reparents the child row');
+
+    $fk_source_deleted_base = $tmp . '/fk-source-deleted-base.sqlite';
+    $fk_source_deleted_source = $tmp . '/fk-source-deleted-source.sqlite';
+    $fk_source_deleted_target = $tmp . '/fk-source-deleted-target.sqlite';
+    $fk_source_deleted_metadata = $tmp . '/.forkpress/cow/merge/fk-source-deleted-metadata.sqlite';
+    create_base_db($fk_source_deleted_base);
+    copy($fk_source_deleted_base, $fk_source_deleted_source);
+    copy($fk_source_deleted_base, $fk_source_deleted_target);
+    foreach ([$fk_source_deleted_base, $fk_source_deleted_source, $fk_source_deleted_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_fk_source_deleted_parents (id INTEGER PRIMARY KEY, label TEXT)');
+        $db->exec('CREATE TABLE plugin_fk_source_deleted_children (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES plugin_fk_source_deleted_parents(id), label TEXT)');
+        $db->exec("INSERT INTO plugin_fk_source_deleted_parents (id, label) VALUES (1, 'base parent')");
+        $db->close();
+    }
+    $db = open_db($fk_source_deleted_source);
+    $db->exec('DELETE FROM plugin_fk_source_deleted_parents WHERE id = 1');
+    $db->close();
+    $db = open_db($fk_source_deleted_target);
+    $db->exec("UPDATE plugin_fk_source_deleted_parents SET label = 'target parent edit' WHERE id = 1");
+    $db->exec("INSERT INTO plugin_fk_source_deleted_children (id, parent_id, label) VALUES (20, 1, 'target child blocks delete')");
+    $db->close();
+    $fk_source_deleted_result = cow_merge_databases($fk_source_deleted_base, $fk_source_deleted_source, $fk_source_deleted_target, $fk_source_deleted_metadata, 'feature-fk-source-deleted', 'main');
+    assert_same($fk_source_deleted_result['status'], 'completed_with_conflicts', 'foreign-key source-deleted parent row is held for review while target has children');
+    assert_same((int)scalar($fk_source_deleted_target, 'SELECT COUNT(*) FROM plugin_fk_source_deleted_parents WHERE id = 1'), 1, 'target parent wins before source delete review');
+    $fk_source_deleted_conflict_id = (int)scalar($fk_source_deleted_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_fk_source_deleted_parents' AND conflict_type = 'row-source-deleted' ORDER BY id DESC LIMIT 1");
+    $fk_source_deleted_audit = cow_merge_audit_report($fk_source_deleted_metadata, (int)$fk_source_deleted_result['run_id'], 10, ['records' => 'conflicts']);
+    $fk_source_deleted_audit_rows = [];
+    foreach ($fk_source_deleted_audit['conflicts'] as $row) {
+        $fk_source_deleted_audit_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $fk_source_deleted_audit_rows[$fk_source_deleted_conflict_id]['resolution_choices'],
+        ['target'],
+        'foreign-key source-deleted row audit does not advertise source while target children still reference it'
+    );
+    assert_true(
+        str_contains((string)($fk_source_deleted_audit_rows[$fk_source_deleted_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'referenced by plugin_fk_source_deleted_children(parent_id)'),
+        'foreign-key source-deleted row audit explains the target child blocker'
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($fk_source_deleted_metadata, $fk_source_deleted_conflict_id, 'source', true, 'Try source delete while child remains.', 'cow-test'),
+        'resolution choice source is blocked',
+        'source delete for a foreign-key source-deleted row is blocked before mutation while target children remain'
+    );
+    $db = open_db($fk_source_deleted_target);
+    $db->exec('DELETE FROM plugin_fk_source_deleted_children WHERE parent_id = 1');
+    $db->close();
+    $fk_source_deleted_unblocked_audit = cow_merge_audit_report($fk_source_deleted_metadata, (int)$fk_source_deleted_result['run_id'], 10, ['records' => 'conflicts']);
+    $fk_source_deleted_unblocked_rows = [];
+    foreach ($fk_source_deleted_unblocked_audit['conflicts'] as $row) {
+        $fk_source_deleted_unblocked_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $fk_source_deleted_unblocked_rows[$fk_source_deleted_conflict_id]['resolution_choices'],
+        ['source', 'target'],
+        'foreign-key source-deleted row audit advertises source after target children are removed'
+    );
+    $fk_source_deleted_source_resolution = cow_merge_resolve_conflict(
+        $fk_source_deleted_metadata,
+        $fk_source_deleted_conflict_id,
+        'source',
+        true,
+        'Apply source parent delete after child review.',
+        'cow-test'
+    );
+    assert_same($fk_source_deleted_source_resolution['status'], 'applied', 'source foreign-key source-deleted row delete applies after target children are gone');
+    assert_same((int)scalar($fk_source_deleted_target, 'SELECT COUNT(*) FROM plugin_fk_source_deleted_parents WHERE id = 1'), 0, 'source foreign-key source-deleted row delete removes the parent after child review');
+
     $fk_delete_base = $tmp . '/fk-delete-base.sqlite';
     $fk_delete_source = $tmp . '/fk-delete-source.sqlite';
     $fk_delete_target = $tmp . '/fk-delete-target.sqlite';
