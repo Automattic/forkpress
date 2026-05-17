@@ -2279,13 +2279,30 @@ try {
     }
     assert_same(
         $constraint_insert_audit_rows[$constraint_insert_conflict_id]['resolution_choices'],
-        ['source', 'target'],
-        'target-side check constraint audit keeps source as validation-time choice'
+        ['target'],
+        'target-side check constraint audit does not advertise source as executable'
     );
-    assert_same(
-        $constraint_insert_audit_rows[$constraint_insert_conflict_id]['blocked_resolution_choices'],
-        [],
-        'target-side check constraint audit does not precompute blocked source choices'
+    assert_true(
+        str_contains((string)($constraint_insert_audit_rows[$constraint_insert_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'CHECK constraint failed'),
+        'target-side check constraint audit explains the blocked source choice'
+    );
+    $constraint_insert_source_choice_audit = cow_merge_audit_report($constraint_insert_metadata, (int)$constraint_insert_result['run_id'], 10, [
+        'records' => 'conflicts',
+        'resolution_choice' => 'source',
+    ]);
+    $constraint_insert_source_choice_ids = array_map(static fn(array $row): int => (int)$row['id'], $constraint_insert_source_choice_audit['conflicts']);
+    assert_true(
+        !in_array($constraint_insert_conflict_id, $constraint_insert_source_choice_ids, true),
+        'resolution-choice source filter omits target-side check constraint conflicts'
+    );
+    $constraint_insert_blocked_source_audit = cow_merge_audit_report($constraint_insert_metadata, (int)$constraint_insert_result['run_id'], 10, [
+        'records' => 'conflicts',
+        'blocked_resolution_choice' => 'source',
+    ]);
+    $constraint_insert_blocked_source_ids = array_map(static fn(array $row): int => (int)$row['id'], $constraint_insert_blocked_source_audit['conflicts']);
+    assert_true(
+        in_array($constraint_insert_conflict_id, $constraint_insert_blocked_source_ids, true),
+        'blocked-resolution-choice source filter returns target-side check constraint conflicts'
     );
     $constraint_insert_target_resolution = cow_merge_resolve_conflict(
         $constraint_insert_metadata,
@@ -2338,6 +2355,21 @@ try {
         1,
         'target-side constraint update collision records an auditable target-wins decision'
     );
+    $constraint_update_conflict_id = (int)scalar($constraint_update_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_constraint_updates' AND conflict_type = 'row-target-constraint' ORDER BY id DESC LIMIT 1");
+    $constraint_update_audit = cow_merge_audit_report($constraint_update_metadata, (int)$constraint_update_result['run_id'], 10, ['records' => 'conflicts']);
+    $constraint_update_audit_rows = [];
+    foreach ($constraint_update_audit['conflicts'] as $row) {
+        $constraint_update_audit_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $constraint_update_audit_rows[$constraint_update_conflict_id]['resolution_choices'],
+        ['target'],
+        'target-side check update audit does not advertise source as executable'
+    );
+    assert_true(
+        str_contains((string)($constraint_update_audit_rows[$constraint_update_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'CHECK constraint failed'),
+        'target-side check update audit explains the blocked source choice'
+    );
 
     $trigger_insert_base = $tmp . '/trigger-insert-base.sqlite';
     $trigger_insert_source = $tmp . '/trigger-insert-source.sqlite';
@@ -2384,13 +2416,12 @@ SQL);
     }
     assert_same(
         $trigger_insert_audit_rows[$trigger_insert_conflict_id]['resolution_choices'],
-        ['source', 'target'],
-        'target trigger rewrite audit keeps source as validation-time choice'
+        ['target'],
+        'target trigger rewrite audit does not advertise source as executable'
     );
-    assert_same(
-        $trigger_insert_audit_rows[$trigger_insert_conflict_id]['blocked_resolution_choices'],
-        [],
-        'target trigger rewrite audit does not precompute blocked source choices'
+    assert_true(
+        str_contains((string)($trigger_insert_audit_rows[$trigger_insert_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'target triggers changed the applied source row'),
+        'target trigger rewrite audit explains the blocked source choice'
     );
     assert_throws(
         fn() => cow_merge_resolve_conflict($trigger_insert_metadata, $trigger_insert_conflict_id, 'source', true, 'Try trigger-mutated source insert.', 'cow-test'),
@@ -2440,6 +2471,20 @@ SQL);
         'trigger-mutated source update records an auditable target-wins decision'
     );
     $trigger_update_conflict_id = (int)scalar($trigger_update_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_trigger_update_rows' AND conflict_type = 'row-target-constraint' ORDER BY id DESC LIMIT 1");
+    $trigger_update_audit = cow_merge_audit_report($trigger_update_metadata, (int)$trigger_update_result['run_id'], 10, ['records' => 'conflicts']);
+    $trigger_update_audit_rows = [];
+    foreach ($trigger_update_audit['conflicts'] as $row) {
+        $trigger_update_audit_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $trigger_update_audit_rows[$trigger_update_conflict_id]['resolution_choices'],
+        ['target'],
+        'target trigger update audit does not advertise source as executable'
+    );
+    assert_true(
+        str_contains((string)($trigger_update_audit_rows[$trigger_update_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'target triggers changed the applied source row'),
+        'target trigger update audit explains the blocked source choice'
+    );
     assert_throws(
         fn() => cow_merge_resolve_conflict($trigger_update_metadata, $trigger_update_conflict_id, 'source', true, 'Try trigger-mutated source update.', 'cow-test'),
         'target triggers changed the applied source row',

@@ -55,11 +55,9 @@ Recent additions released through `v0.1.33`:
 - Source row inserts and updates are verified after SQLite accepts the write.
   If target-side triggers rewrote or removed the row, the write is rolled back
   and the merge remains reviewable.
-- Foreign-key row target-constraint conflicts expose source choices as blocked
-  while current target parent or child rows make the audited source row invalid.
-  Other target-side row constraints, including `CHECK` constraints and trigger
-  rewrites, still fail during resolver validation instead of being precomputed
-  as blocked audit choices.
+- Row target-constraint conflicts expose source choices as blocked while
+  current target foreign-key state, target-side `CHECK` constraints, or target
+  trigger rewrites make the audited source row invalid.
 - Reviewed source conflict resolutions use the same row postcondition guard.
 - File changes are merged separately from DB rows and unsafe paths remain
   conflicts.
@@ -323,10 +321,10 @@ should stay focused on these areas:
   schema source resolution, unresolved target dependencies for source-dropped
   tables/views, foreign-key row, unique-collision row, and
   primary-key-addressable cell source choices blocked by current target state,
-  unsafe filesystem source payloads, and target-descendant directory deletions
-  are exposed as
-  `blocked_resolution_choices`, while target-side row `CHECK` constraints and
-  trigger rewrites still remain validation-time failures,
+  target-side row `CHECK` constraints, target trigger rewrites, unsafe
+  filesystem source payloads, and target-descendant directory deletions are
+  exposed as
+  `blocked_resolution_choices`,
   conflict rows expose a stable
   `conflict_key` for logical UI grouping plus `previous_conflict_id` lineage for
   recurring conflicts and plugin validator replacement evidence on the same

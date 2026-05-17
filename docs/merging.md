@@ -136,10 +136,10 @@ source row deletion, source cell value, or source unique-collision replacement
 that must first remove a target row with dependent children; after the missing
 parent or blocking child dependency is resolved, audit output can advertise
 `source` again.
-Target-side `CHECK` constraints and trigger rewrites are still validated by the
-resolver rather than precomputed as blocked audit choices, because their
-correctness depends on executing the target program and comparing the resulting
-row. It also includes the
+Target-side `CHECK` constraints and trigger rewrites are also exposed as
+blocked source choices with the recorded target-constraint reason, so clients do
+not need to discover those blockers by attempting a resolver mutation. Audit
+output also includes the
 conflict
 `lifecycle_state`, `next_action`, and latest resolution metadata so clients can
 distinguish unreviewed, deferred, needs-action, reviewed, validated, and

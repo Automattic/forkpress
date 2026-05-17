@@ -11159,7 +11159,8 @@ function cow_merge_resolve_conflict(
         $stmt = cow_merge_prepare_checked(
             $meta,
             'SELECT c.id, c.run_id, c.table_name, c.row_identity, c.column_name, c.conflict_type, ' .
-            'c.base_payload, c.source_payload, c.target_payload, r.source_db, r.target_db, r.source_branch, r.target_branch ' .
+            'c.base_payload, c.source_payload, c.target_payload, r.source_db, r.target_db, r.source_branch, r.target_branch, ' .
+            cow_merge_audit_conflict_target_constraint_reason_sql('c') . ' AS target_constraint_reason ' .
             'FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.id = :id',
             'failed to prepare conflict lookup'
         );
@@ -12237,6 +12238,7 @@ function cow_merge_audit_conflict_resolution_choice_matches(
     mixed $chosen_payload,
     mixed $source_db,
     mixed $target_db,
+    mixed $target_constraint_reason,
     mixed $choice,
     bool $blocked
 ): int {
@@ -12253,6 +12255,7 @@ function cow_merge_audit_conflict_resolution_choice_matches(
         'chosen_payload' => is_string($chosen_payload) ? $chosen_payload : '',
         'source_db' => is_string($source_db) ? $source_db : '',
         'target_db' => is_string($target_db) ? $target_db : '',
+        'target_constraint_reason' => is_string($target_constraint_reason) ? $target_constraint_reason : '',
     ];
 
     try {
@@ -12282,6 +12285,7 @@ function cow_merge_audit_conflict_next_action(
     mixed $chosen_payload,
     mixed $source_db,
     mixed $target_db,
+    mixed $target_constraint_reason,
     mixed $review_status,
     mixed $resolution_count,
     mixed $latest_resolution_applied,
@@ -12297,6 +12301,7 @@ function cow_merge_audit_conflict_next_action(
         'chosen_payload' => is_string($chosen_payload) ? $chosen_payload : '',
         'source_db' => is_string($source_db) ? $source_db : '',
         'target_db' => is_string($target_db) ? $target_db : '',
+        'target_constraint_reason' => is_string($target_constraint_reason) ? $target_constraint_reason : '',
         'review_status' => is_string($review_status) ? $review_status : '',
         'resolution_count' => is_numeric($resolution_count) ? (int)$resolution_count : 0,
         'latest_resolution_applied' => is_numeric($latest_resolution_applied) ? (int)$latest_resolution_applied : 0,
@@ -12332,6 +12337,7 @@ function cow_merge_audit_conflict_contract_field(
     mixed $chosen_payload,
     mixed $source_db,
     mixed $target_db,
+    mixed $target_constraint_reason,
     mixed $field
 ): ?string {
     $row = [
@@ -12344,6 +12350,7 @@ function cow_merge_audit_conflict_contract_field(
         'chosen_payload' => is_string($chosen_payload) ? $chosen_payload : '',
         'source_db' => is_string($source_db) ? $source_db : '',
         'target_db' => is_string($target_db) ? $target_db : '',
+        'target_constraint_reason' => is_string($target_constraint_reason) ? $target_constraint_reason : '',
     ];
 
     try {
@@ -12522,7 +12529,7 @@ function cow_merge_audit_register_functions(SQLite3 $db): void {
     }
     if (!$db->createFunction(
         'forkpress_conflict_has_resolution_choice',
-        fn($table_name, $conflict_type, $row_identity, $column_name, $source_payload, $target_payload, $chosen_payload, $source_db, $target_db, $choice) => cow_merge_audit_conflict_resolution_choice_matches(
+        fn($table_name, $conflict_type, $row_identity, $column_name, $source_payload, $target_payload, $chosen_payload, $source_db, $target_db, $target_constraint_reason, $choice) => cow_merge_audit_conflict_resolution_choice_matches(
             $table_name,
             $conflict_type,
             $row_identity,
@@ -12532,16 +12539,17 @@ function cow_merge_audit_register_functions(SQLite3 $db): void {
             $chosen_payload,
             $source_db,
             $target_db,
+            $target_constraint_reason,
             $choice,
             false
         ),
-        10
+        11
     )) {
         throw new RuntimeException('failed to register audit resolution choice filter');
     }
     if (!$db->createFunction(
         'forkpress_conflict_blocks_resolution_choice',
-        fn($table_name, $conflict_type, $row_identity, $column_name, $source_payload, $target_payload, $chosen_payload, $source_db, $target_db, $choice) => cow_merge_audit_conflict_resolution_choice_matches(
+        fn($table_name, $conflict_type, $row_identity, $column_name, $source_payload, $target_payload, $chosen_payload, $source_db, $target_db, $target_constraint_reason, $choice) => cow_merge_audit_conflict_resolution_choice_matches(
             $table_name,
             $conflict_type,
             $row_identity,
@@ -12551,16 +12559,17 @@ function cow_merge_audit_register_functions(SQLite3 $db): void {
             $chosen_payload,
             $source_db,
             $target_db,
+            $target_constraint_reason,
             $choice,
             true
         ),
-        10
+        11
     )) {
         throw new RuntimeException('failed to register audit blocked resolution choice filter');
     }
     if (!$db->createFunction(
         'forkpress_conflict_next_action',
-        fn($table_name, $conflict_type, $row_identity, $column_name, $source_payload, $target_payload, $chosen_payload, $source_db, $target_db, $review_status, $resolution_count, $latest_resolution_applied, $latest_event_type) => cow_merge_audit_conflict_next_action(
+        fn($table_name, $conflict_type, $row_identity, $column_name, $source_payload, $target_payload, $chosen_payload, $source_db, $target_db, $target_constraint_reason, $review_status, $resolution_count, $latest_resolution_applied, $latest_event_type) => cow_merge_audit_conflict_next_action(
             $table_name,
             $conflict_type,
             $row_identity,
@@ -12570,18 +12579,19 @@ function cow_merge_audit_register_functions(SQLite3 $db): void {
             $chosen_payload,
             $source_db,
             $target_db,
+            $target_constraint_reason,
             $review_status,
             $resolution_count,
             $latest_resolution_applied,
             $latest_event_type
         ),
-        13
+        14
     )) {
         throw new RuntimeException('failed to register audit next-action filter');
     }
     if (!$db->createFunction(
         'forkpress_conflict_contract_field',
-        fn($table_name, $conflict_type, $row_identity, $column_name, $source_payload, $target_payload, $chosen_payload, $source_db, $target_db, $field) => cow_merge_audit_conflict_contract_field(
+        fn($table_name, $conflict_type, $row_identity, $column_name, $source_payload, $target_payload, $chosen_payload, $source_db, $target_db, $target_constraint_reason, $field) => cow_merge_audit_conflict_contract_field(
             $table_name,
             $conflict_type,
             $row_identity,
@@ -12591,9 +12601,10 @@ function cow_merge_audit_register_functions(SQLite3 $db): void {
             $chosen_payload,
             $source_db,
             $target_db,
+            $target_constraint_reason,
             $field
         ),
-        10
+        11
     )) {
         throw new RuntimeException('failed to register audit conflict contract grouping');
     }
@@ -12690,8 +12701,21 @@ function cow_merge_audit_conflict_choice_sql(string $alias, string $choice_param
         $record . '.chosen_payload, ' .
         '(SELECT source_db FROM merge_runs WHERE id = ' . $record . '.run_id), ' .
         '(SELECT target_db FROM merge_runs WHERE id = ' . $record . '.run_id), ' .
+        cow_merge_audit_conflict_target_constraint_reason_sql($record) . ', ' .
         $choice_param .
     ') = 1';
+}
+
+function cow_merge_audit_conflict_target_constraint_reason_sql(string $record): string {
+    return "(SELECT d.reason FROM merge_decisions d " .
+        "WHERE d.run_id = $record.run_id " .
+        "AND d.table_name = $record.table_name " .
+        "AND COALESCE(d.row_identity, '') = COALESCE($record.row_identity, '') " .
+        "AND COALESCE(d.column_name, '') = COALESCE($record.column_name, '') " .
+        "AND d.decision IN ('target-wins', 'target-accepted') " .
+        "AND (d.reason LIKE 'source % row violates target constraints:%' " .
+        "OR d.reason LIKE 'source % row was rewritten by target triggers:%') " .
+        "ORDER BY d.id DESC LIMIT 1)";
 }
 
 function cow_merge_audit_conflict_next_action_sql(
@@ -12723,6 +12747,7 @@ function cow_merge_audit_conflict_next_action_sql(
         $record . '.chosen_payload, ' .
         '(SELECT source_db FROM merge_runs WHERE id = ' . $record . '.run_id), ' .
         '(SELECT target_db FROM merge_runs WHERE id = ' . $record . '.run_id), ' .
+        cow_merge_audit_conflict_target_constraint_reason_sql($record) . ', ' .
         $review_status . ', ' .
         $resolution_count . ', ' .
         $latest_resolution_applied . ', ' .
@@ -12743,6 +12768,7 @@ function cow_merge_audit_conflict_contract_field_sql(string $alias, string $fiel
         $record . '.chosen_payload, ' .
         '(SELECT source_db FROM merge_runs WHERE id = ' . $record . '.run_id), ' .
         '(SELECT target_db FROM merge_runs WHERE id = ' . $record . '.run_id), ' .
+        cow_merge_audit_conflict_target_constraint_reason_sql($record) . ', ' .
         "'$field_sql'" .
     ')';
 }
@@ -13807,7 +13833,23 @@ function cow_merge_row_source_resolution_blocked_reason(array $row): ?string {
 
         if (is_array($source_value)) {
             $error = cow_merge_foreign_key_error($target, $table, $source_value);
-            return $error === null ? null : "source row resolution is blocked by current target foreign-key state: $error";
+            if ($error !== null) {
+                return "source row resolution is blocked by current target foreign-key state: $error";
+            }
+            $constraint_reason = trim((string)($row['target_constraint_reason'] ?? ''));
+            if ($conflict_type === 'row-target-constraint' && $constraint_reason !== '') {
+                if (str_contains($constraint_reason, 'FOREIGN KEY constraint failed')) {
+                    return null;
+                }
+                if (str_contains($constraint_reason, 'target triggers changed the applied source row')) {
+                    return 'source row resolution is blocked because target triggers changed the applied source row; review or remove the trigger before applying source';
+                }
+                if (str_contains($constraint_reason, ':')) {
+                    $constraint_reason = trim(substr($constraint_reason, (int)strpos($constraint_reason, ':') + 1));
+                }
+                return 'source row resolution is blocked by target constraints: ' . $constraint_reason;
+            }
+            return null;
         }
 
         if ($source_value !== null || !is_array($target_value) || !in_array($conflict_type, ['row-target-constraint', 'row-source-deleted'], true)) {
@@ -14824,7 +14866,8 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
                 $db,
                 'merge_conflicts',
                 "SELECT merge_conflicts.id AS id, run_id, $conflict_key_select, table_name, row_identity, column_name, conflict_type, resolver, resolved_at, created_at, " .
-                "base_payload, source_payload, target_payload, chosen_payload, r.source_db, r.target_db, r.source_branch, r.target_branch$conflict_review_select$conflict_resolution_select$conflict_event_select " .
+                "base_payload, source_payload, target_payload, chosen_payload, r.source_db, r.target_db, r.source_branch, r.target_branch, " .
+                cow_merge_audit_conflict_target_constraint_reason_sql('merge_conflicts') . " AS target_constraint_reason$conflict_review_select$conflict_resolution_select$conflict_event_select " .
                 "FROM merge_conflicts JOIN merge_runs r ON r.id = merge_conflicts.run_id $conflict_filter ORDER BY merge_conflicts.id DESC LIMIT :limit",
                 $conflict_params
             ))))));
