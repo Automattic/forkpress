@@ -105,7 +105,10 @@ are resolved, audit output can advertise `source` again. Row target-constraint
 conflicts use the same model when the current target foreign-key state would
 reject the audited source row or source row deletion; after the missing parent
 or blocking child dependency is resolved, audit output can advertise `source`
-again. It also includes the
+again. Target-side `CHECK` constraints and trigger rewrites are still validated
+by the resolver rather than precomputed as blocked audit choices, because their
+correctness depends on executing the target program and comparing the resulting
+row. It also includes the
 conflict
 `lifecycle_state`, `next_action`, and latest resolution metadata so clients can
 distinguish unreviewed, deferred, needs-action, reviewed, validated, and
