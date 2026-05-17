@@ -761,6 +761,15 @@ PHP);
         'child-after-rerun',
         'plugin logical-identity revalidation records the updated validator identity'
     );
+    $logical_identity_event_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'records' => 'conflict-events',
+        'plugin_logical_identity' => '{"slug":"child-before-rerun","kind":"plugin-child"}',
+    ]);
+    $logical_identity_revalidation_events = array_values(array_filter(
+        $logical_identity_event_audit['conflict_events'],
+        fn($event) => ($event['event_type'] ?? null) === 'revalidation-required' && (int)($event['conflict_id'] ?? 0) === $logical_identity_conflict_id
+    ));
+    assert_same(count($logical_identity_revalidation_events), 1, 'plugin logical-identity filter applies to conflict event queues');
 
     $serialized_base_root = $tmp . '/serialized-base';
     $serialized_source_root = $tmp . '/serialized-source';
