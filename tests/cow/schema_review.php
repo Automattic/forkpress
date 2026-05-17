@@ -374,6 +374,20 @@ SQL);
     foreach ($schema_object_needs_action as $conflict) {
         assert_same($conflict['revalidation_class'] ?? null, 'compatible-source-drift', 'schema object audit exposes compatible source-drift revalidation');
     }
+    $schema_object_after_revalidate_audit = cow_merge_audit_report($metadata, $schema_review_run_id, 10, [
+        'records' => 'conflicts',
+        'after_revalidate' => 'supported',
+        'latest_revalidation_status' => 'current',
+    ]);
+    $schema_object_after_revalidate_ids = array_map(
+        fn($conflict) => (int)($conflict['id'] ?? 0),
+        $schema_object_after_revalidate_audit['conflicts']
+    );
+    assert_true(
+        in_array($view_conflict_id, $schema_object_after_revalidate_ids, true) &&
+            in_array($trigger_conflict_id, $schema_object_after_revalidate_ids, true),
+        'compatible schema source drift is advertised as after-revalidate supported'
+    );
     $view_after_revalidate_resolution = cow_merge_resolve_conflict(
         $metadata,
         $view_conflict_id,

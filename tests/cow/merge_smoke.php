@@ -4074,7 +4074,7 @@ try {
     assert_same($schema_contract['class'], 'schema', 'schema conflicts advertise schema class');
     assert_same($schema_contract['choices'], ['source', 'target'], 'schema conflicts advertise source and target choices');
     assert_same($schema_contract['blocked_choices'], [], 'schema conflicts advertise no blocked choices by default');
-    assert_same($schema_contract['after_revalidate'], false, 'schema conflicts do not advertise after-revalidate support yet');
+    assert_same($schema_contract['after_revalidate'], true, 'schema conflicts advertise after-revalidate support');
 } finally {
     smoke_remove_tree($tmp);
 }

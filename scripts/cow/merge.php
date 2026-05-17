@@ -15513,6 +15513,17 @@ function cow_merge_conflict_resolution_contract(string $table, string $conflict_
         $contract['generic_resolver'] = true;
         $contract['choices'] = ['source', 'target'];
         $contract['strategy'] = 'schema-choice';
+        if (in_array($conflict_type, [
+            'schema-source-added-index',
+            'schema-source-changed-index',
+            'schema-source-added-view',
+            'schema-source-changed-view',
+            'schema-source-added-trigger',
+            'schema-source-changed-trigger',
+            'schema-conflict',
+        ], true)) {
+            $contract['after_revalidate'] = true;
+        }
         $source_blocked_reason = cow_merge_schema_source_resolution_blocked_reason($row + [
             'table_name' => $table,
             'conflict_type' => $conflict_type,
