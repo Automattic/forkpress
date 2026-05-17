@@ -430,6 +430,12 @@ try {
     $attachment_graph_source_db->exec("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('theme_mods_explicit_attachment', '$theme_mods', 'yes')");
     $media_widget = SQLite3::escapeString(serialize([2 => ['attachment_id' => 2, 'url' => 'wp-content/uploads/explicit-attachment.jpg']]));
     $attachment_graph_source_db->exec("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_media_image', '$media_widget', 'yes')");
+    $audio_widget = SQLite3::escapeString(serialize([2 => ['attachment_id' => 2, 'url' => 'wp-content/uploads/explicit-attachment.mp3']]));
+    $attachment_graph_source_db->exec("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_media_audio', '$audio_widget', 'yes')");
+    $video_widget = SQLite3::escapeString(serialize([2 => ['attachment_id' => 2, 'url' => 'wp-content/uploads/explicit-attachment.mp4']]));
+    $attachment_graph_source_db->exec("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_media_video', '$video_widget', 'yes')");
+    $gallery_widget = SQLite3::escapeString(serialize([2 => ['ids' => [2], 'link_type' => 'post']]));
+    $attachment_graph_source_db->exec("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_media_gallery', '$gallery_widget', 'yes')");
     $attachment_graph_source_db->close();
 
     $attachment_graph_result = cow_merge_databases($attachment_graph_base, $attachment_graph_source, $attachment_graph_target, $attachment_graph_metadata, 'feature-explicit-attachment-graph', 'main');
@@ -477,7 +483,22 @@ try {
     assert_same(
         (int)scalar($attachment_graph_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'widget_media_image'"),
         0,
-        'media widget refs behind a held explicit attachment ID are not applied automatically'
+        'image media widget refs behind a held explicit attachment ID are not applied automatically'
+    );
+    assert_same(
+        (int)scalar($attachment_graph_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'widget_media_audio'"),
+        0,
+        'audio media widget refs behind a held explicit attachment ID are not applied automatically'
+    );
+    assert_same(
+        (int)scalar($attachment_graph_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'widget_media_video'"),
+        0,
+        'video media widget refs behind a held explicit attachment ID are not applied automatically'
+    );
+    assert_same(
+        (int)scalar($attachment_graph_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'widget_media_gallery'"),
+        0,
+        'gallery media widget refs behind a held explicit attachment ID are not applied automatically'
     );
     assert_same(
         (int)scalar($attachment_graph_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-explicit-attachment-graph' AND c.table_name = 'wp_posts' AND c.conflict_type = 'row-target-constraint'"),
@@ -495,11 +516,11 @@ try {
     );
     assert_same(
         (int)scalar($attachment_graph_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-explicit-attachment-graph' AND c.table_name = 'wp_options' AND c.conflict_type = 'row-target-constraint'"),
-        3,
+        6,
         'option refs behind a held explicit attachment record review conflicts'
     );
     assert_true(
-        (int)scalar($attachment_graph_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-explicit-attachment-graph' AND d.table_name = 'wp_options' AND d.decision = 'target-wins' AND d.reason LIKE '%outside the source branch ID band%' AND d.reason LIKE '%wp_posts%'") >= 3,
+        (int)scalar($attachment_graph_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-explicit-attachment-graph' AND d.table_name = 'wp_options' AND d.decision = 'target-wins' AND d.reason LIKE '%outside the source branch ID band%' AND d.reason LIKE '%wp_posts%'") >= 6,
         'option conflicts explain that they are held behind the explicit attachment ID'
     );
 
