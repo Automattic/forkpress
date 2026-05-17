@@ -436,6 +436,25 @@ try {
         str_contains((string)$schema_index_target_drift_payload, 'CREATE INDEX plugin_schema_index_target_drift_idx'),
         'schema index target SQL drift records the current target SQL evidence'
     );
+    assert_same(
+        scalar($schema_index_target_drift_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $schema_index_target_drift_conflict_id ORDER BY id DESC LIMIT 1"),
+        'compatible-schema-index-target-drift',
+        'schema index target SQL drift is classified compatible when the source index validates over current target state'
+    );
+    $schema_index_target_drift_resolution = cow_merge_resolve_conflict(
+        $schema_index_target_drift_metadata,
+        $schema_index_target_drift_conflict_id,
+        'source',
+        true,
+        'Apply source index after compatible target drift revalidation.',
+        'cow-test',
+        true
+    );
+    assert_same($schema_index_target_drift_resolution['status'], 'applied', 'compatible schema index target drift resolves after revalidation');
+    assert_true(
+        str_contains((string)scalar($schema_index_target_drift_target, "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'plugin_schema_index_target_drift_idx'"), 'UNIQUE INDEX plugin_schema_index_target_drift_idx ON plugin_schema_index_target_drift_items(lower(label))'),
+        'compatible schema index target drift applies the audited source index'
+    );
 
     $view_order_base = $tmp . '/view-order-base.sqlite';
     $view_order_source = $tmp . '/view-order-source.sqlite';

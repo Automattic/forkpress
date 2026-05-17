@@ -9026,7 +9026,7 @@ SQL);
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $schema_column_conflict_id"), 0, 'schema conflict revalidation records no guarded payload without schema-specific evidence');
     assert_throws(
         fn() => cow_merge_resolve_conflict($metadata, $schema_column_conflict_id, 'source', false, 'Try guarded schema resolution.', 'cow-test', true),
-        '--after-revalidate currently supports database row/cell conflicts and filesystem conflicts only',
+        '--after-revalidate currently supports source resolution for compatible source-added index drift only',
         'schema conflicts have an explicit guarded revalidation boundary'
     );
     $schema_column_dry = cow_merge_resolve_conflict(
