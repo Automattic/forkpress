@@ -93,10 +93,16 @@ validator records replacement evidence for the same logical conflict, a
 `merge-resolve conflict` path supports it, and whether `--after-revalidate` is
 available. When a normally supported choice is blocked for this specific
 conflict payload, `blocked_resolution_choices` maps that choice to the audit
-reason. It also includes the conflict `lifecycle_state`, `next_action`, and
-latest resolution metadata so clients can distinguish unreviewed, deferred,
-needs-action, reviewed, validated, and resolved conflicts without parsing review
-notes. Conflict lifecycle changes are also recorded in an append-only
+reason. For filesystem conflicts this is how unsafe source payloads are exposed:
+unsafe symlinks, unsupported source entries, unsafe directory replacement
+subtrees, and source directory deletions that would remove target-side
+descendants may still be reviewable conflicts, but `source` is omitted from
+the executable choices and listed in `blocked_resolution_choices` with the
+reason the resolver will reject it. It also includes the conflict
+`lifecycle_state`, `next_action`, and latest resolution metadata so clients can
+distinguish unreviewed, deferred, needs-action, reviewed, validated, and
+resolved conflicts without parsing review notes. Conflict lifecycle changes are
+also recorded in an append-only
 `merge_conflict_events` stream, and audit JSON exposes the latest event summary.
 UI clients should consume those fields instead of inferring behavior from raw
 `conflict_type` strings or free-form notes.
