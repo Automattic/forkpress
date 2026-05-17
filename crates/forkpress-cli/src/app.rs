@@ -53,9 +53,9 @@ use forkpress_storage::{
     lock_cow_operations, merge_cow_branch, prepare_cow_file_view, print_cow_storage_status,
     print_linux_xfs_loop_storage_status, print_macos_cow_storage_status, probe_reflink_dir,
     probe_remote_site, record_cow_plugin_validator_conflicts, recover_cow_merge_crash,
-    reset_cow_branch, resolve_cow_merge_conflict, revalidate_cow_merge_reviews,
-    review_cow_merge_audit_record, run_cow_plugin_validator, show_cow_branch,
-    write_cow_branch_list, write_cow_strategy_notes,
+    reset_cow_branch, resolve_cow_merge_conflict, resolve_cow_merge_conflict_key,
+    revalidate_cow_merge_reviews, review_cow_merge_audit_record, run_cow_plugin_validator,
+    show_cow_branch, write_cow_branch_list, write_cow_strategy_notes,
 };
 #[cfg(feature = "dev-experiments")]
 use forkpress_storage::{copy_tree_cow, plain_branch_names};
@@ -3213,12 +3213,15 @@ fn cow_branch_command(
         }
         "merge-resolve" => {
             let Some(record_type) = args.args.get(1) else {
-                bail!("branch merge-resolve requires conflict");
+                bail!("branch merge-resolve requires conflict or conflict-key");
             };
-            if record_type != "conflict" {
-                bail!("branch merge-resolve currently supports conflict records only");
+            if record_type != "conflict" && record_type != "conflict-key" {
+                bail!("branch merge-resolve supports conflict <id> or conflict-key <key>");
             }
-            let Some(record_id) = args.args.get(2) else {
+            let Some(record_id_or_key) = args.args.get(2) else {
+                if record_type == "conflict-key" {
+                    bail!("branch merge-resolve requires a conflict key");
+                }
                 bail!("branch merge-resolve requires a conflict id");
             };
             let mut choice: Option<String> = None;
@@ -3227,6 +3230,7 @@ fn cow_branch_command(
             let mut after_revalidate = false;
             let mut note: Option<String> = None;
             let mut reviewer: Option<String> = None;
+            let mut run: Option<String> = None;
             let mut index = 3;
             while index < args.args.len() {
                 match args.args[index].as_str() {
@@ -3263,10 +3267,22 @@ fn cow_branch_command(
                         reviewer = Some(value.clone());
                         index += 2;
                     }
+                    "--run" => {
+                        let Some(value) = args.args.get(index + 1) else {
+                            bail!("--run requires a merge run id");
+                        };
+                        run = Some(value.clone());
+                        index += 2;
+                    }
                     other => {
                         bail!("unsupported argument for `forkpress branch merge-resolve`: {other}")
                     }
                 }
+            }
+            if record_type == "conflict" && run.is_some() {
+                bail!(
+                    "--run can only be used with `forkpress branch merge-resolve conflict-key <key>`"
+                );
             }
             if apply_reviewed && choice.is_some() {
                 bail!("--apply-reviewed cannot be combined with --choice");
@@ -3279,18 +3295,34 @@ fn cow_branch_command(
             if !apply_reviewed && choice.is_none() {
                 bail!("branch merge-resolve requires --choice source|target or --apply-reviewed");
             }
-            resolve_cow_merge_conflict(
-                &layout,
-                &runtime,
-                &args.shared,
-                record_id,
-                choice.as_deref(),
-                apply,
-                apply_reviewed,
-                after_revalidate,
-                note.as_deref(),
-                reviewer.as_deref(),
-            )?;
+            if record_type == "conflict-key" {
+                resolve_cow_merge_conflict_key(
+                    &layout,
+                    &runtime,
+                    &args.shared,
+                    record_id_or_key,
+                    run.as_deref(),
+                    choice.as_deref(),
+                    apply,
+                    apply_reviewed,
+                    after_revalidate,
+                    note.as_deref(),
+                    reviewer.as_deref(),
+                )?;
+            } else {
+                resolve_cow_merge_conflict(
+                    &layout,
+                    &runtime,
+                    &args.shared,
+                    record_id_or_key,
+                    choice.as_deref(),
+                    apply,
+                    apply_reviewed,
+                    after_revalidate,
+                    note.as_deref(),
+                    reviewer.as_deref(),
+                )?;
+            }
             Ok(0)
         }
         "delete" | "rm" => {
@@ -3365,13 +3397,13 @@ fn branch_help_text(command: Option<&str>) -> &'static str {
             "Usage: forkpress branch merge-review <conflict|decision|resolution> <id> --status <pending|needs-action|reviewed> --note <text> [--reviewer <name>]\n\nAttach review metadata to an audit record.\n"
         }
         Some("merge-resolve") => {
-            "Usage: forkpress branch merge-resolve conflict <id> (--choice <source|target> [--apply]|--apply-reviewed) [--after-revalidate] [--note <text>] [--reviewer <name>]\n\nValidate or apply a reviewed merge conflict choice. Use --apply-reviewed to apply the latest validated choice. Use --after-revalidate only after merge-audit --revalidate has carried a stale DB row/cell, file conflict, or compatible source-added schema index/view/trigger conflict back to needs-action.\n"
+            "Usage: forkpress branch merge-resolve conflict <id> (--choice <source|target> [--apply]|--apply-reviewed) [--after-revalidate] [--note <text>] [--reviewer <name>]\n       forkpress branch merge-resolve conflict-key <key> [--run <id>] (--choice <source|target> [--apply]|--apply-reviewed) [--after-revalidate] [--note <text>] [--reviewer <name>]\n\nValidate or apply a reviewed merge conflict choice. Resolving by conflict key is allowed only when the key identifies one unresolved conflict, or when --run disambiguates it. Use --apply-reviewed to apply the latest validated choice. Use --after-revalidate only after merge-audit --revalidate has carried a stale DB row/cell, file conflict, or compatible source-added schema index/view/trigger conflict back to needs-action.\n"
         }
         Some("delete") | Some("rm") => {
             "Usage: forkpress branch delete <branch>\n\nDelete a materialized branch. Use with care.\n"
         }
         _ => {
-            "Usage: forkpress branch <command> [options]\n\nCommands:\n  list                         List branches\n  show [branch]                Show branch storage details\n  create <branch> [--from b]   Create a branch; defaults to --from main\n  reset <branch> --from b      Replace a branch from another branch\n  merge <source> --into target Merge one branch into another; accepts --plugin-validator\n  recover-crash [options]      Inspect or restore pending merge crash artifacts\n  revalidate-reviews [options] Recheck reviewed conflicts for stale target drift\n  run-plugin-validator [opts]  Run one plugin validator for a merge run\n  record-plugin-validator-conflicts [opts]\n                               Record plugin-scoped validator findings\n  merge-audit [options]        Inspect merge audit records\n  merge-review <type> <id>     Mark an audit record as reviewed\n  merge-resolve conflict <id>  Validate or apply a conflict choice\n  delete <branch>              Delete a branch\n\nExamples:\n  forkpress branch list\n  forkpress branch create feature --from main\n  forkpress branch merge feature --into main\n  forkpress branch merge feature --into main --plugin-validator ./validator.php\n  forkpress branch recover-crash --restore-target-db --restore-files\n  forkpress branch revalidate-reviews --reviewer alice\n  forkpress branch run-plugin-validator --run 12 --validator ./validator.php\n  forkpress branch merge-audit --review --records conflicts\n\nRun `forkpress branch <command> --help` for command-specific help.\n"
+            "Usage: forkpress branch <command> [options]\n\nCommands:\n  list                         List branches\n  show [branch]                Show branch storage details\n  create <branch> [--from b]   Create a branch; defaults to --from main\n  reset <branch> --from b      Replace a branch from another branch\n  merge <source> --into target Merge one branch into another; accepts --plugin-validator\n  recover-crash [options]      Inspect or restore pending merge crash artifacts\n  revalidate-reviews [options] Recheck reviewed conflicts for stale target drift\n  run-plugin-validator [opts]  Run one plugin validator for a merge run\n  record-plugin-validator-conflicts [opts]\n                               Record plugin-scoped validator findings\n  merge-audit [options]        Inspect merge audit records\n  merge-review <type> <id>     Mark an audit record as reviewed\n  merge-resolve conflict <id>  Validate or apply a conflict choice\n  merge-resolve conflict-key <key>\n                               Resolve by logical conflict key when unambiguous\n  delete <branch>              Delete a branch\n\nExamples:\n  forkpress branch list\n  forkpress branch create feature --from main\n  forkpress branch merge feature --into main\n  forkpress branch merge feature --into main --plugin-validator ./validator.php\n  forkpress branch recover-crash --restore-target-db --restore-files\n  forkpress branch revalidate-reviews --reviewer alice\n  forkpress branch run-plugin-validator --run 12 --validator ./validator.php\n  forkpress branch merge-audit --review --records conflicts\n\nRun `forkpress branch <command> --help` for command-specific help.\n"
         }
     }
 }
@@ -6081,6 +6113,47 @@ mod git_helper_tests {
                 "--apply-reviewed".to_string(),
                 "--note".to_string(),
                 "Apply validated choice".to_string(),
+                "--reviewer".to_string(),
+                "alice".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_branch_merge_resolve_conflict_key_args() {
+        let cli = Cli::try_parse_from([
+            "forkpress",
+            "branch",
+            "--work-dir",
+            ".forkpress",
+            "merge-resolve",
+            "conflict-key",
+            "sha256:abc123",
+            "--run",
+            "9",
+            "--choice",
+            "target",
+            "--note",
+            "Keep target value",
+            "--reviewer",
+            "alice",
+        ])
+        .unwrap();
+        let Commands::Branch(args) = cli.command else {
+            panic!("expected branch command");
+        };
+        assert_eq!(
+            args.args,
+            vec![
+                "merge-resolve".to_string(),
+                "conflict-key".to_string(),
+                "sha256:abc123".to_string(),
+                "--run".to_string(),
+                "9".to_string(),
+                "--choice".to_string(),
+                "target".to_string(),
+                "--note".to_string(),
+                "Keep target value".to_string(),
                 "--reviewer".to_string(),
                 "alice".to_string(),
             ]

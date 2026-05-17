@@ -3983,6 +3983,45 @@ SQL);
     );
     unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize']);
     assert_same((int)scalar($metadata, 'SELECT COUNT(*) FROM merge_resolutions'), 0, 'failed current-cell finalization records no resolution audit rows');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict_key(
+            $metadata,
+            $title_conflict_key,
+            null,
+            'source',
+            false,
+            'Preview source title resolution by ambiguous key.',
+            'cow-test'
+        ),
+        'matches multiple unresolved conflicts',
+        'conflict-key resolution rejects ambiguous logical conflict groups without a run'
+    );
+    $repeat_title_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE run_id = $repeat_conflict_run_id AND table_name = 'wp_posts' AND column_name = 'post_title'");
+    $key_dry_resolution = cow_merge_resolve_conflict_key(
+        $metadata,
+        $title_conflict_key,
+        $repeat_conflict_run_id,
+        'source',
+        false,
+        'Preview source title resolution by conflict key.',
+        'cow-test'
+    );
+    assert_same($key_dry_resolution['conflict_id'], $repeat_title_conflict_id, 'conflict-key resolution selects the conflict in the requested run');
+    assert_same($key_dry_resolution['status'], 'validated', 'conflict-key source resolution validates target preconditions');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $repeat_title_conflict_id AND choice = 'source' AND applied = 0 AND status = 'validated'"), 1, 'conflict-key dry-run resolution records a validated resolution audit row');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict_key(
+            $metadata,
+            'sha256:missing-conflict-key',
+            null,
+            'source',
+            false,
+            'Preview missing conflict key.',
+            'cow-test'
+        ),
+        'does not exist',
+        'conflict-key resolution explains missing logical conflict groups'
+    );
     $dry_resolution = cow_merge_resolve_conflict(
         $metadata,
         $title_conflict_id,

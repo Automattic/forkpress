@@ -8268,6 +8268,89 @@ function cow_merge_latest_validated_resolution_choice_from_db(string $metadata_d
     }
 }
 
+function cow_merge_conflict_key_arg(?string $value): string {
+    if ($value === null || trim($value) === '') {
+        throw new InvalidArgumentException('--conflict-key must not be empty');
+    }
+    if (str_contains($value, "\0")) {
+        throw new InvalidArgumentException('--conflict-key must not contain NUL bytes');
+    }
+    return trim($value);
+}
+
+function cow_merge_conflict_id_from_key(SQLite3 $meta, string $conflict_key, ?int $run_id = null): int {
+    $where = 'WHERE c.conflict_key = :conflict_key';
+    $params = [':conflict_key' => $conflict_key];
+    if ($run_id !== null) {
+        $where .= ' AND c.run_id = :run_id';
+        $params[':run_id'] = $run_id;
+    }
+    $stmt = cow_merge_prepare_checked(
+        $meta,
+        "SELECT c.id, c.run_id FROM merge_conflicts c $where ORDER BY c.id DESC",
+        'failed to prepare conflict-key lookup'
+    );
+    foreach ($params as $key => $value) {
+        cow_merge_bind($stmt, $key, $value);
+    }
+    $res = cow_merge_execute_checked($stmt, $meta, 'failed to read conflict-key lookup');
+    $matches = [];
+    while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+        $matches[] = ['id' => (int)$row['id'], 'run_id' => (int)$row['run_id']];
+    }
+    cow_merge_result_finalize_checked($res, 'failed to finalize conflict-key lookup');
+    if ($matches === []) {
+        $scope = $run_id === null ? '' : " in run #$run_id";
+        throw new InvalidArgumentException("conflict key $conflict_key does not exist$scope in merge metadata");
+    }
+
+    $unresolved = [];
+    foreach ($matches as $match) {
+        if (cow_merge_latest_applied_resolution_choice($meta, $match['id']) === null) {
+            $unresolved[] = $match;
+        }
+    }
+    if ($unresolved === []) {
+        $scope = $run_id === null ? '' : " in run #$run_id";
+        throw new InvalidArgumentException("all conflicts for conflict key $conflict_key$scope are already resolved");
+    }
+    if (count($unresolved) > 1) {
+        throw new InvalidArgumentException("conflict key $conflict_key matches multiple unresolved conflicts; pass --run or resolve by conflict id");
+    }
+    return (int)$unresolved[0]['id'];
+}
+
+function cow_merge_resolve_conflict_key(
+    string $metadata_db,
+    string $conflict_key,
+    ?int $run_id,
+    string $choice,
+    bool $apply,
+    string $note,
+    string $reviewer,
+    bool $after_revalidate = false
+): array {
+    if (!is_file($metadata_db)) {
+        throw new InvalidArgumentException("merge metadata database does not exist: $metadata_db");
+    }
+    $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READWRITE);
+    try {
+        cow_merge_ensure_metadata($meta);
+        $conflict_id = cow_merge_conflict_id_from_key($meta, cow_merge_conflict_key_arg($conflict_key), $run_id);
+    } finally {
+        $meta->close();
+    }
+    return cow_merge_resolve_conflict(
+        $metadata_db,
+        $conflict_id,
+        $choice,
+        $apply,
+        $note,
+        $reviewer,
+        $after_revalidate
+    );
+}
+
 function cow_merge_bool_flag(mixed $value): bool {
     return (string)$value === '1' || $value === true;
 }
@@ -16553,7 +16636,7 @@ if (realpath($argv[0] ?? '') === __FILE__) {
             exit(0);
         }
         if ($command === 'resolve-conflict') {
-            $args = cow_merge_parse_cli($argv, ['metadata-db', 'id'], 2);
+            $args = cow_merge_parse_cli($argv, ['metadata-db'], 2);
             $apply_reviewed = cow_merge_bool_flag($args['apply-reviewed'] ?? '0');
             if ($apply_reviewed && array_key_exists('choice', $args)) {
                 throw new InvalidArgumentException('--apply-reviewed cannot be combined with --choice');
@@ -16561,7 +16644,28 @@ if (realpath($argv[0] ?? '') === __FILE__) {
             if ($apply_reviewed && cow_merge_bool_flag($args['apply'] ?? '0')) {
                 throw new InvalidArgumentException('--apply-reviewed already applies the latest validated choice; do not combine it with --apply');
             }
-            $conflict_id = cow_merge_review_record_id($args['id'] ?? null);
+            $has_id = array_key_exists('id', $args) && (string)$args['id'] !== '';
+            $has_conflict_key = array_key_exists('conflict-key', $args) && (string)$args['conflict-key'] !== '';
+            if ($has_id === $has_conflict_key) {
+                throw new InvalidArgumentException('resolve-conflict requires exactly one of --id or --conflict-key');
+            }
+            $run_id = array_key_exists('run', $args)
+                ? cow_merge_audit_run_id($args['run'] ?? null)
+                : null;
+            if ($has_id && $run_id !== null) {
+                throw new InvalidArgumentException('--run can only be combined with --conflict-key');
+            }
+            if ($has_conflict_key) {
+                $meta = cow_merge_open_db($args['metadata-db'], SQLITE3_OPEN_READWRITE);
+                try {
+                    cow_merge_ensure_metadata($meta);
+                    $conflict_id = cow_merge_conflict_id_from_key($meta, cow_merge_conflict_key_arg($args['conflict-key'] ?? null), $run_id);
+                } finally {
+                    $meta->close();
+                }
+            } else {
+                $conflict_id = cow_merge_review_record_id($args['id'] ?? null);
+            }
             $choice = $apply_reviewed
                 ? cow_merge_latest_validated_resolution_choice_from_db($args['metadata-db'], $conflict_id)
                 : cow_merge_resolution_choice($args['choice'] ?? null);

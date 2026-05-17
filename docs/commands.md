@@ -28,6 +28,7 @@ full CLI help.
 | `forkpress branch merge-audit` | Inspect merge runs, decisions, conflicts, conflict events, and resolutions. |
 | `forkpress branch merge-review <type> <id>` | Attach review status to an audit record. |
 | `forkpress branch merge-resolve conflict <id>` | Validate or apply a conflict choice. |
+| `forkpress branch merge-resolve conflict-key <key> [--run <id>]` | Validate or apply a conflict choice by logical conflict key when unambiguous. |
 | `forkpress branch delete <name>` | Delete a branch other than `main`. |
 
 ## Git and agents

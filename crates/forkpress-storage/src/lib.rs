@@ -1572,6 +1572,61 @@ pub fn resolve_cow_merge_conflict(
     )
 }
 
+pub fn resolve_cow_merge_conflict_key(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    conflict_key: &str,
+    run_id: Option<&str>,
+    choice: Option<&str>,
+    apply: bool,
+    apply_reviewed: bool,
+    after_revalidate: bool,
+    note: Option<&str>,
+    reviewer: Option<&str>,
+) -> Result<()> {
+    let metadata_db = cow_merge_metadata_db_path(layout);
+    let mut args: Vec<OsString> = vec![
+        "resolve-conflict".into(),
+        "--metadata-db".into(),
+        metadata_db.as_os_str().to_os_string(),
+        "--conflict-key".into(),
+        conflict_key.into(),
+    ];
+    if let Some(run_id) = run_id {
+        args.push("--run".into());
+        args.push(run_id.into());
+    }
+    if let Some(choice) = choice {
+        args.push("--choice".into());
+        args.push(choice.into());
+    }
+    if apply {
+        args.push("--apply".into());
+    }
+    if apply_reviewed {
+        args.push("--apply-reviewed".into());
+    }
+    if after_revalidate {
+        args.push("--after-revalidate".into());
+    }
+    if let Some(note) = note {
+        args.push("--note".into());
+        args.push(note.into());
+    }
+    if let Some(reviewer) = reviewer {
+        args.push("--reviewer".into());
+        args.push(reviewer.into());
+    }
+    run_php_script(
+        layout,
+        runtime,
+        shared,
+        "scripts/cow/merge.php",
+        args.iter().map(|arg| arg.as_os_str()),
+    )
+}
+
 pub fn rollback_failed_reset_publish(
     branch: &str,
     target: &Path,

@@ -73,6 +73,7 @@ Validate or apply a conflict choice:
 forkpress branch merge-resolve conflict <id> --choice source
 forkpress branch merge-resolve conflict <id> --choice source --apply
 forkpress branch merge-resolve conflict <id> --apply-reviewed
+forkpress branch merge-resolve conflict-key <key> --run <id> --choice source --apply
 ```
 
 Source and target choices are validated before they mutate target state. If a
@@ -82,6 +83,9 @@ Validation-only resolutions are persisted as `validated` resolution records and
 append `resolution-validated` conflict events. Applying a reviewed choice appends
 `resolution-applied`; `--apply-reviewed` applies the latest unapplied validated
 choice without asking the user to restate `source` or `target`.
+Conflict keys can be used in place of numeric conflict ids only when the key
+identifies one unresolved conflict, or when `--run <id>` disambiguates it.
+Otherwise, use `merge-audit --conflict-key <key>` to pick the exact row.
 
 `merge-audit --format json --records conflicts` treats conflicts as
 first-class records. Each conflict includes a stable `conflict_key` for the
