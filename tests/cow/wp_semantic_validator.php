@@ -97,7 +97,9 @@ function create_wp_semantic_db(string $path): void {
         (32, 'Shared synced pattern', '<!-- wp:paragraph --><p>Shared synced pattern</p><!-- /wp:paragraph -->', 'publish', 'wp_block', 'shared-synced-pattern'),
         (33, 'Page with synced pattern', '<!-- wp:block {\"ref\":32} /--><!-- wp:paragraph --><p>Base synced pattern content</p><!-- /wp:paragraph -->', 'publish', 'page', 'page-with-synced-pattern'),
         (35, 'Shared navigation', '<!-- wp:navigation-link {\"label\":\"Home\",\"url\":\"/\"} /-->', 'publish', 'wp_navigation', 'shared-navigation'),
-        (36, 'Page with navigation block', '<!-- wp:navigation {\"ref\":35} /--><!-- wp:paragraph --><p>Base navigation page content</p><!-- /wp:paragraph -->', 'publish', 'page', 'page-with-navigation-block')");
+        (36, 'Page with navigation block', '<!-- wp:navigation {\"ref\":35} /--><!-- wp:paragraph --><p>Base navigation page content</p><!-- /wp:paragraph -->', 'publish', 'page', 'page-with-navigation-block'),
+        (37, 'Theme header template part', '<!-- wp:paragraph --><p>Header template part</p><!-- /wp:paragraph -->', 'publish', 'wp_template_part', 'forkpress-test//header'),
+        (38, 'Template using header part', '<!-- wp:template-part {\"slug\":\"header\",\"theme\":\"forkpress-test\",\"tagName\":\"header\"} /--><!-- wp:paragraph --><p>Base template content</p><!-- /wp:paragraph -->', 'publish', 'wp_template', 'forkpress-test//front-page')");
     $db->exec("INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES (34, 32, 'wp_pattern_sync_status', 'synced')");
     $db->close();
 }
@@ -737,6 +739,43 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
             ];
         }
     }
+    preg_match_all('/<!--\s+wp:template-part\s+(\{.*?\})\s*\/?-->/', $content, $template_part_matches);
+    foreach ($template_part_matches[1] as $raw_attrs) {
+        $attrs = json_decode($raw_attrs, true);
+        if (!is_array($attrs) || !isset($attrs['slug']) || !is_string($attrs['slug']) || $attrs['slug'] === '') {
+            continue;
+        }
+        $slug = $attrs['slug'];
+        $theme = isset($attrs['theme']) && is_string($attrs['theme']) ? $attrs['theme'] : '';
+        $post_names = [$slug];
+        if ($theme !== '') {
+            array_unshift($post_names, $theme . '//' . $slug);
+        }
+        $exists = 0;
+        foreach (array_unique($post_names) as $post_name) {
+            $escaped_post_name = SQLite3::escapeString($post_name);
+            $exists += (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE post_type = 'wp_template_part' AND post_name = '$escaped_post_name'");
+        }
+        if ($exists === 0) {
+            $findings[] = [
+                'plugin' => 'forkpress-wp-block-refs',
+                'object' => 'post:' . $row['ID'],
+                'reason' => 'post content references a missing template part',
+                'type' => 'plugin-wp-block-missing-reference',
+                'tables' => ['wp_posts'],
+                'validator' => 'forkpress-wp-block-refs@1',
+                'candidate' => [
+                    'post_id' => (int)$row['ID'],
+                    'missing_template_part' => [
+                        'theme' => $theme,
+                        'slug' => $slug,
+                    ],
+                    'block_name' => 'core/template-part',
+                    'expected_post_type' => 'wp_template_part',
+                ],
+            ];
+        }
+    }
 }
 echo json_encode([
     'status' => $findings ? 'conflicts' : 'valid',
@@ -754,6 +793,7 @@ PHP);
     $db->exec('DELETE FROM wp_posts WHERE ID = 30');
     $db->exec('DELETE FROM wp_posts WHERE ID = 32');
     $db->exec('DELETE FROM wp_posts WHERE ID = 35');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 37');
     $db->exec('DELETE FROM wp_postmeta WHERE post_id = 32');
     $db->close();
 
@@ -761,6 +801,7 @@ PHP);
     $db->exec("UPDATE wp_posts SET post_title = 'Target page still using reusable block' WHERE ID = 31");
     $db->exec("UPDATE wp_posts SET post_title = 'Target page still using synced pattern' WHERE ID = 33");
     $db->exec("UPDATE wp_posts SET post_title = 'Target page still using navigation block' WHERE ID = 36");
+    $db->exec("UPDATE wp_posts SET post_title = 'Target template still using header part' WHERE ID = 38");
     $db->close();
 
     $result = cow_merge_branch_state(
@@ -775,29 +816,41 @@ PHP);
         $target_root
     );
 
-    assert_same($result['status'], 'completed_with_conflicts', 'WordPress block-reference validator holds missing reusable blocks, synced patterns, and navigation blocks for review');
+    assert_same($result['status'], 'completed_with_conflicts', 'WordPress block-reference validator holds missing reusable blocks, synced patterns, navigation blocks, and template parts for review');
     assert_same((int)($result['plugin_validators'] ?? 0), 1, 'WordPress block-reference validator is discovered from mu-plugins during merge');
-    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 3, 'WordPress block-reference validator records missing reusable block, synced pattern, and navigation references');
+    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 4, 'WordPress block-reference validator records missing reusable block, synced pattern, navigation, and template-part references');
     assert_same((int)scalar($target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 30'), 0, 'WordPress block-reference validator leaves the source block deletion staged for review');
     assert_same((int)scalar($target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 32'), 0, 'WordPress block-reference validator leaves the source synced pattern deletion staged for review');
     assert_same((int)scalar($target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 35'), 0, 'WordPress block-reference validator leaves the source navigation deletion staged for review');
+    assert_same((int)scalar($target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 37'), 0, 'WordPress block-reference validator leaves the source template-part deletion staged for review');
     assert_same((int)scalar($target, 'SELECT COUNT(*) FROM wp_postmeta WHERE post_id = 32'), 0, 'WordPress block-reference validator leaves the synced pattern metadata deletion staged for review');
     assert_same(scalar($target, 'SELECT post_title FROM wp_posts WHERE ID = 31'), 'Target page still using reusable block', 'WordPress block-reference validator preserves the target page edit');
     assert_same(scalar($target, 'SELECT post_title FROM wp_posts WHERE ID = 33'), 'Target page still using synced pattern', 'WordPress block-reference validator preserves the target synced pattern page edit');
     assert_same(scalar($target, 'SELECT post_title FROM wp_posts WHERE ID = 36'), 'Target page still using navigation block', 'WordPress block-reference validator preserves the target navigation page edit');
+    assert_same(scalar($target, 'SELECT post_title FROM wp_posts WHERE ID = 38'), 'Target template still using header part', 'WordPress block-reference validator preserves the target template edit');
 
     $audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'plugin',
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-block-missing-reference',
     ]);
-    assert_same(count($audit['conflicts']), 3, 'WordPress block-reference validator exposes missing refs as plugin-scoped audit conflicts');
+    assert_same(count($audit['conflicts']), 4, 'WordPress block-reference validator exposes missing refs as plugin-scoped audit conflicts');
     $preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $audit['conflicts']));
     assert_true(str_contains($preview, '"missing_ref":30'), 'WordPress block-reference audit includes the missing reusable block ID');
     assert_true(str_contains($preview, '"missing_ref":32'), 'WordPress block-reference audit includes the missing synced pattern ID');
     assert_true(str_contains($preview, '"missing_ref":35'), 'WordPress block-reference audit includes the missing navigation ID');
     assert_true(str_contains($preview, '"post_id":33'), 'WordPress block-reference audit includes the synced pattern consumer page ID');
     assert_true(str_contains($preview, '"block_name":"core/navigation"'), 'WordPress block-reference audit includes the navigation block name');
+    assert_true(str_contains($preview, '"block_name":"core/template-part"'), 'WordPress block-reference audit includes the template-part block name');
+    $template_part_payloads = array_values(array_filter(
+        array_map(
+            fn($conflict) => cow_merge_audit_decode_payload(json_decode((string)($conflict['chosen_payload'] ?? ''), true)),
+            $audit['conflicts']
+        ),
+        fn($payload) => is_array($payload) && (($payload['candidate']['block_name'] ?? null) === 'core/template-part')
+    ));
+    assert_same($template_part_payloads[0]['candidate']['missing_template_part']['theme'] ?? null, 'forkpress-test', 'WordPress block-reference audit includes the missing template part theme');
+    assert_same($template_part_payloads[0]['candidate']['missing_template_part']['slug'] ?? null, 'header', 'WordPress block-reference audit includes the missing template part slug');
 
     $post_parent_base_root = $tmp . '/post-parent-base';
     $post_parent_source_root = $tmp . '/post-parent-source';
