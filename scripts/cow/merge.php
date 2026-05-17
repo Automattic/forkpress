@@ -18,6 +18,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "  php merge.php validate-branch-birth-metadata --db <path> --metadata-db <path> --branch <branch>\n");
     fwrite(STDERR, "  php merge.php record-plugin-validator-conflicts --metadata-db <path> --run ID (--findings-json <json>|--findings-file <path>) [--format text|json]\n");
     fwrite(STDERR, "  php merge.php run-plugin-validator --metadata-db <path> --run ID --validator <path> [--format text|json]\n");
+    fwrite(STDERR, "  php merge.php record-plugin-driver-resolution --metadata-db <path> (--id ID|--conflict-key KEY [--run ID]) --driver NAME (--result-json <json>|--result-file <path>) [--previous-json <json>|--previous-file <path>] [--applied] [--note TEXT] [--reviewer NAME] [--format text|json]\n");
     fwrite(STDERR, "  php merge.php recover-crash --metadata-db <path> [--run ID] [--restore-target-db] [--restore-files] [--format text|json]\n");
     fwrite(STDERR, "  php merge.php audit --metadata-db <path> [--format text|json] [--limit N] [--run ID]\n");
     fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|conflict-events|decisions|resolutions|rollback-failures] [--path <path>] [--path-prefix <prefix>]\n");
@@ -4073,7 +4074,7 @@ SQL, 'failed to create migrated review-note metadata table');
 CREATE TABLE IF NOT EXISTS merge_resolutions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     conflict_id INTEGER NOT NULL,
-    choice TEXT NOT NULL CHECK(choice IN ('source', 'target')),
+    choice TEXT NOT NULL CHECK(choice IN ('source', 'target', 'plugin-driver')),
     applied INTEGER NOT NULL CHECK(applied IN (0, 1)),
     status TEXT NOT NULL CHECK(status IN ('validated', 'applied')),
     note TEXT NOT NULL,
@@ -4088,6 +4089,59 @@ CREATE TABLE IF NOT EXISTS merge_resolutions (
     FOREIGN KEY(conflict_id) REFERENCES merge_conflicts(id)
 )
 SQL, 'failed to create metadata table merge_resolutions');
+    $resolution_schema = $meta->querySingle("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'merge_resolutions'");
+    if (is_string($resolution_schema) && !str_contains($resolution_schema, "'plugin-driver'")) {
+        $migration_savepoint = cow_merge_begin_savepoint_checked(
+            $meta,
+            'merge_resolutions_choice_migration',
+            'resolution choice metadata migration'
+        );
+        try {
+            cow_merge_exec_checked($meta, 'ALTER TABLE merge_resolutions RENAME TO merge_resolutions_old', 'failed to rename legacy resolution metadata table');
+            cow_merge_exec_checked($meta, <<<'SQL'
+CREATE TABLE merge_resolutions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conflict_id INTEGER NOT NULL,
+    choice TEXT NOT NULL CHECK(choice IN ('source', 'target', 'plugin-driver')),
+    applied INTEGER NOT NULL CHECK(applied IN (0, 1)),
+    status TEXT NOT NULL CHECK(status IN ('validated', 'applied')),
+    note TEXT NOT NULL,
+    reviewer TEXT NOT NULL,
+    target_db TEXT NOT NULL,
+    table_name TEXT NOT NULL,
+    row_identity TEXT NOT NULL,
+    column_name TEXT NOT NULL,
+    previous_payload TEXT NOT NULL,
+    resolved_payload TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(conflict_id) REFERENCES merge_conflicts(id)
+)
+SQL, 'failed to create migrated resolution metadata table');
+            cow_merge_exec_checked(
+                $meta,
+                'INSERT INTO merge_resolutions (id, conflict_id, choice, applied, status, note, reviewer, target_db, table_name, row_identity, column_name, previous_payload, resolved_payload, created_at) ' .
+                'SELECT id, conflict_id, choice, applied, status, note, reviewer, target_db, table_name, row_identity, column_name, previous_payload, resolved_payload, created_at FROM merge_resolutions_old',
+                'failed to copy legacy resolution metadata'
+            );
+            cow_merge_exec_checked($meta, 'DROP TABLE merge_resolutions_old', 'failed to drop legacy resolution metadata table');
+            cow_merge_release_savepoint_checked(
+                $meta,
+                $migration_savepoint,
+                'resolution choice metadata migration'
+            );
+        } catch (Throwable $e) {
+            $cleanup_error = cow_merge_rollback_release_savepoint_checked(
+                $meta,
+                $migration_savepoint,
+                'resolution choice metadata migration',
+                $e
+            );
+            if ($cleanup_error !== null) {
+                throw $cleanup_error;
+            }
+            throw $e;
+        }
+    }
     cow_merge_exec_checked($meta, 'CREATE INDEX IF NOT EXISTS merge_resolutions_conflict_idx ON merge_resolutions(conflict_id, id)', 'failed to create metadata index merge_resolutions_conflict_idx');
         cow_merge_release_savepoint_checked($meta, $schema_savepoint, 'metadata schema');
     } catch (Throwable $e) {
@@ -7386,6 +7440,110 @@ function cow_merge_run_plugin_validator(string $metadata_db, int $run_id, string
     return $result;
 }
 
+function cow_merge_plugin_driver_identity(?string $value): string {
+    if ($value === null) {
+        throw new InvalidArgumentException('--driver is required');
+    }
+    if (str_contains($value, "\0")) {
+        throw new InvalidArgumentException('--driver must not contain NUL bytes');
+    }
+    $value = trim($value);
+    if ($value === '') {
+        throw new InvalidArgumentException('--driver must not be empty');
+    }
+    if (strlen($value) > 256) {
+        throw new InvalidArgumentException('--driver must be 256 bytes or shorter');
+    }
+    return $value;
+}
+
+function cow_merge_record_plugin_driver_resolution(
+    string $metadata_db,
+    int $conflict_id,
+    string $driver,
+    mixed $result_payload,
+    mixed $previous_payload,
+    bool $applied,
+    string $note,
+    string $reviewer
+): array {
+    if (!is_file($metadata_db)) {
+        throw new InvalidArgumentException("merge metadata database does not exist: $metadata_db");
+    }
+    $driver = cow_merge_plugin_driver_identity($driver);
+    $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READWRITE);
+    $transaction_started = false;
+    try {
+        cow_merge_ensure_metadata($meta);
+        $stmt = cow_merge_prepare_checked(
+            $meta,
+            'SELECT c.id, c.run_id, c.table_name, c.row_identity, c.column_name, c.conflict_type, ' .
+            'c.chosen_payload, r.target_db ' .
+            'FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.id = :id',
+            'failed to prepare plugin driver conflict lookup'
+        );
+        cow_merge_bind($stmt, ':id', $conflict_id);
+        $res = cow_merge_execute_checked($stmt, $meta, 'failed to read plugin driver conflict');
+        $conflict = $res->fetchArray(SQLITE3_ASSOC);
+        cow_merge_result_finalize_checked($res, 'failed to finalize plugin driver conflict lookup');
+        if (!$conflict) {
+            throw new InvalidArgumentException("conflict #$conflict_id does not exist in merge metadata");
+        }
+        if ((string)$conflict['table_name'] !== '__plugins__') {
+            throw new InvalidArgumentException('record-plugin-driver-resolution only supports plugin validator conflicts');
+        }
+        cow_merge_require_unresolved_conflict($meta, $conflict_id);
+        if ($previous_payload === null) {
+            $previous_payload = cow_merge_decode_payload_json((string)$conflict['chosen_payload'], 'plugin conflict');
+        }
+        $resolved_payload = [
+            'driver' => $driver,
+            'result' => $result_payload,
+        ];
+
+        cow_merge_exec_checked($meta, 'BEGIN IMMEDIATE', 'failed to start plugin driver resolution metadata transaction');
+        $transaction_started = true;
+        $resolution_id = cow_merge_record_resolution(
+            $meta,
+            $conflict_id,
+            'plugin-driver',
+            $applied,
+            $note,
+            $reviewer,
+            (string)$conflict['target_db'],
+            '__plugins__',
+            (string)$conflict['row_identity'],
+            '',
+            [
+                'driver' => $driver,
+                'previous' => $previous_payload,
+            ],
+            $resolved_payload
+        );
+        cow_merge_exec_checked($meta, 'COMMIT', 'failed to commit plugin driver resolution metadata transaction');
+        $transaction_started = false;
+        return [
+            'metadata_db' => $metadata_db,
+            'conflict_id' => $conflict_id,
+            'resolution_id' => $resolution_id,
+            'choice' => 'plugin-driver',
+            'driver' => $driver,
+            'applied' => $applied,
+            'status' => $applied ? 'applied' : 'validated',
+            'target_db' => (string)$conflict['target_db'],
+            'table_name' => '__plugins__',
+            'conflict_type' => (string)$conflict['conflict_type'],
+        ];
+    } catch (Throwable $e) {
+        if ($transaction_started) {
+            @$meta->exec('ROLLBACK');
+        }
+        throw $e;
+    } finally {
+        $meta->close();
+    }
+}
+
 function cow_merge_unique_plugin_validator_paths(array $validators): array {
     $seen = [];
     $out = [];
@@ -8814,6 +8972,39 @@ function cow_merge_json_array_arg(array $args, string $json_key, string $file_ke
     $decoded = json_decode($json, true);
     if (!is_array($decoded) || !array_is_list($decoded)) {
         throw new InvalidArgumentException("$json_label must be a JSON array");
+    }
+    return $decoded;
+}
+
+function cow_merge_json_value_arg(array $args, string $json_key, string $file_key, bool $required = true): mixed {
+    $has_json = isset($args[$json_key]) && (string)$args[$json_key] !== '';
+    $has_file = isset($args[$file_key]) && (string)$args[$file_key] !== '';
+    $json_label = '--' . str_replace('_', '-', $json_key);
+    $file_label = '--' . str_replace('_', '-', $file_key);
+    if ($has_json && $has_file) {
+        throw new InvalidArgumentException("$json_label and $file_label cannot be used together");
+    }
+    if (!$has_json && !$has_file) {
+        if ($required) {
+            throw new InvalidArgumentException("$json_label or $file_label is required");
+        }
+        return null;
+    }
+    if ($has_file) {
+        $path = (string)$args[$file_key];
+        if (!is_file($path)) {
+            throw new InvalidArgumentException("$file_label must point to a readable file");
+        }
+        $json = file_get_contents($path);
+        if ($json === false) {
+            throw new RuntimeException("failed to read $file_label");
+        }
+    } else {
+        $json = (string)$args[$json_key];
+    }
+    $decoded = json_decode($json, true);
+    if (json_last_error() !== JSON_ERROR_NONE) {
+        throw new InvalidArgumentException("$json_label must be valid JSON: " . json_last_error_msg());
     }
     return $decoded;
 }
@@ -18125,6 +18316,59 @@ if (realpath($argv[0] ?? '') === __FILE__) {
                 echo "  status:    {$result['status']}\n";
                 echo "  validator: {$result['validator_status']}\n";
                 echo "  conflicts: {$result['conflicts']}\n";
+                echo "  metadata:  {$result['metadata_db']}\n";
+            }
+            exit(0);
+        }
+        if ($command === 'record-plugin-driver-resolution') {
+            $args = cow_merge_parse_cli($argv, ['metadata-db', 'driver'], 2);
+            $has_id = array_key_exists('id', $args) && (string)$args['id'] !== '';
+            $has_conflict_key = array_key_exists('conflict-key', $args) && (string)$args['conflict-key'] !== '';
+            if ($has_id === $has_conflict_key) {
+                throw new InvalidArgumentException('record-plugin-driver-resolution requires exactly one of --id or --conflict-key');
+            }
+            $run_id = array_key_exists('run', $args)
+                ? cow_merge_audit_run_id($args['run'] ?? null)
+                : null;
+            if ($has_id && $run_id !== null) {
+                throw new InvalidArgumentException('--run can only be combined with --conflict-key');
+            }
+            if ($has_conflict_key) {
+                $meta = cow_merge_open_db($args['metadata-db'], SQLITE3_OPEN_READWRITE);
+                try {
+                    cow_merge_ensure_metadata($meta);
+                    $conflict_id = cow_merge_conflict_id_from_key($meta, cow_merge_conflict_key_arg($args['conflict-key'] ?? null), $run_id);
+                } finally {
+                    $meta->close();
+                }
+            } else {
+                $conflict_id = cow_merge_review_record_id($args['id'] ?? null);
+            }
+            $result_payload = cow_merge_json_value_arg($args, 'result-json', 'result-file');
+            $previous_payload = cow_merge_json_value_arg($args, 'previous-json', 'previous-file', false);
+            $result = cow_merge_record_plugin_driver_resolution(
+                $args['metadata-db'],
+                $conflict_id,
+                $args['driver'],
+                $result_payload,
+                $previous_payload,
+                cow_merge_bool_flag($args['applied'] ?? '0'),
+                cow_merge_review_text($args['note'] ?? 'plugin driver repair recorded', 'note'),
+                cow_merge_review_text($args['reviewer'] ?? 'plugin-driver', 'reviewer')
+            );
+            $format = cow_merge_audit_format($args['format'] ?? null);
+            if ($format === 'json') {
+                $encoded = json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+                if (!is_string($encoded)) {
+                    throw new RuntimeException('failed to encode plugin driver resolution result');
+                }
+                echo $encoded . "\n";
+            } elseif (($args['quiet'] ?? '0') !== '1') {
+                echo "forkpress: recorded plugin driver resolution\n";
+                echo "  conflict:  #{$result['conflict_id']}\n";
+                echo "  resolution:#{$result['resolution_id']}\n";
+                echo "  driver:    {$result['driver']}\n";
+                echo "  applied:   " . ($result['applied'] ? 'yes' : 'no') . "\n";
                 echo "  metadata:  {$result['metadata_db']}\n";
             }
             exit(0);

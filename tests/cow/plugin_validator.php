@@ -21,6 +21,23 @@ function assert_same($actual, $expected, $msg) {
     );
 }
 
+function assert_throws(callable $fn, string $contains, string $msg): void {
+    global $pass, $fail;
+    try {
+        $fn();
+        echo "  FAIL: $msg (no exception)\n";
+        $fail++;
+    } catch (Throwable $e) {
+        if (str_contains($e->getMessage(), $contains)) {
+            echo "  PASS: $msg ({$e->getMessage()})\n";
+            $pass++;
+        } else {
+            echo "  FAIL: $msg (unexpected exception: {$e->getMessage()})\n";
+            $fail++;
+        }
+    }
+}
+
 function remove_tree(string $path): void {
     if (!file_exists($path) && !is_link($path)) {
         return;
@@ -343,6 +360,49 @@ PHP);
         str_contains((string)($missing_file_audit_conflict['plugin_manual_review_reason'] ?? ''), 'cannot synthesize plugin-owned files'),
         'plugin audit exposes validator manual-review guidance as a first-class field'
     );
+    $missing_file_conflict_id = (int)$missing_file_audit_conflict['id'];
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $missing_file_conflict_id, 'source', true, 'generic source repair should stay blocked', 'cow-test'),
+        'plugin validator conflicts cannot be resolved by generic merge-resolve',
+        'plugin validator conflicts remain blocked from generic source/target resolution'
+    );
+    $driver_resolution = cow_merge_record_plugin_driver_resolution(
+        $metadata,
+        $missing_file_conflict_id,
+        'forkpress-plugin-graph-driver@1',
+        [
+            'status' => 'repaired',
+            'restored_file' => 'wp-content/uploads/plugin-validator-missing.dat',
+        ],
+        null,
+        true,
+        'plugin driver restored the missing file reference and validated the object graph',
+        'cow-test-driver'
+    );
+    assert_same($driver_resolution['status'], 'applied', 'plugin driver resolution records an applied plugin repair');
+    assert_same($driver_resolution['choice'], 'plugin-driver', 'plugin driver resolution uses an explicit plugin-driver choice');
+    $driver_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_id' => (string)$missing_file_conflict_id,
+    ]);
+    assert_same($driver_audit['conflicts'][0]['lifecycle_state'] ?? null, 'resolved', 'plugin driver resolution closes the plugin conflict lifecycle');
+    assert_same((int)($driver_audit['conflicts'][0]['latest_resolution_applied'] ?? 0), 1, 'plugin audit exposes the applied plugin driver resolution');
+    assert_same($driver_audit['conflicts'][0]['latest_resolution_choice'] ?? null, 'plugin-driver', 'plugin audit preserves the plugin-driver resolution choice');
+    $driver_resolution_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'resolutions',
+        'plugin_object' => 'child:' . $child_id,
+    ]);
+    $driver_resolution_rows = array_values(array_filter(
+        $driver_resolution_audit['resolutions'],
+        fn(array $resolution): bool => (int)($resolution['id'] ?? 0) === (int)$driver_resolution['resolution_id']
+    ));
+    assert_same(count($driver_resolution_rows), 1, 'plugin driver resolution is visible in plugin-scoped resolution audit');
+    assert_same($driver_resolution_rows[0]['choice'] ?? null, 'plugin-driver', 'plugin resolution audit exposes the plugin-driver choice');
+    $driver_result_payload = cow_merge_decode_payload_json((string)($driver_resolution_rows[0]['chosen_payload'] ?? ''), 'plugin driver audit result');
+    assert_same($driver_result_payload['driver'] ?? null, 'forkpress-plugin-graph-driver@1', 'plugin resolution audit records the driver identity');
+    assert_same($driver_result_payload['result']['status'] ?? null, 'repaired', 'plugin resolution audit records driver result evidence');
     ob_start();
     cow_merge_print_audit_text($audit);
     $plugin_audit_text = ob_get_clean();

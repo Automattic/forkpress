@@ -248,6 +248,28 @@ Review resolution should initially support only target acceptance and
 re-audit-after-change. Source application should require a plugin merge driver,
 not just a validator.
 
+Plugin driver repairs now have a first-class audit boundary. ForkPress still
+does not run generic source/target resolution for plugin validator conflicts;
+instead, a plugin-specific driver must repair or validate the plugin-owned
+object graph and then record that evidence:
+
+```bash
+forkpress branch record-plugin-driver-resolution conflict 34 \
+  --driver ./vendor/bin/my-plugin-merge-driver \
+  --result-file /tmp/forkpress-plugin-driver-result.json \
+  --applied
+```
+
+The command records a `plugin-driver` resolution linked to the original
+plugin-scoped conflict, including the driver identity, result payload, reviewer
+note, and conflict lifecycle event. `--previous-file` or `--previous-json` may
+be supplied when the driver wants to preserve a pre-repair snapshot; otherwise
+ForkPress records the original validator finding as the previous payload. The
+command is intentionally metadata-only: the driver is responsible for any
+plugin-owned database or filesystem edits before it records an applied result.
+This keeps the safety boundary explicit until ForkPress grows a controlled
+driver execution API.
+
 When a validator rerun changes evidence for a reviewed plugin conflict,
 stale-audit revalidation records `replacement-evidence`, links to the newer
 validator conflict row, and appends a `revalidation-required` conflict event
