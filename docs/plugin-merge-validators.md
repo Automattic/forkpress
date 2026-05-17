@@ -78,6 +78,8 @@ attach review notes. Plugin audit records expose validator metadata as
 structured fields (`plugin`, `plugin_object`, `plugin_tables`,
 `plugin_files`, `plugin_validator`, `plugin_logical_identity`, and review
 guidance fields) so UI/API consumers do not need to scrape payload previews.
+Text audit output prints the same plugin identity, owned table/file, logical
+identity, and review-guidance evidence for CLI reviewers.
 Validator findings may use either `files` or `paths`; both are normalized into
 the audit `plugin_files` field. External validator runners can hand findings
 back through:

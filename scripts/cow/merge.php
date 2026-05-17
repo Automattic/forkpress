@@ -13574,6 +13574,52 @@ function cow_merge_print_audit_review_text(array $row, array $filters, string $n
     echo "     $note_label=" . cow_merge_audit_truncate((string)$row['review_note'], 240) . "\n";
 }
 
+function cow_merge_print_plugin_audit_text(array $conflict): void {
+    if (($conflict['table_name'] ?? null) !== '__plugins__') {
+        return;
+    }
+    $parts = [];
+    foreach ([
+        'plugin' => 'plugin',
+        'plugin_object' => 'object',
+        'plugin_validator' => 'validator',
+    ] as $row_key => $label) {
+        if (isset($conflict[$row_key]) && (string)$conflict[$row_key] !== '') {
+            $parts[] = $label . '=' . cow_merge_audit_truncate((string)$conflict[$row_key], 120);
+        }
+    }
+    foreach ([
+        'plugin_tables' => 'tables',
+        'plugin_files' => 'files',
+    ] as $row_key => $label) {
+        if (isset($conflict[$row_key]) && is_array($conflict[$row_key]) && $conflict[$row_key] !== []) {
+            $parts[] = $label . '=' . cow_merge_audit_truncate(implode(',', array_map('strval', $conflict[$row_key])), 160);
+        }
+    }
+    if ($parts !== []) {
+        echo '     plugin ' . implode(' ', $parts) . "\n";
+    }
+    if (isset($conflict['plugin_logical_identity'])) {
+        $identity = json_encode($conflict['plugin_logical_identity'], JSON_UNESCAPED_SLASHES);
+        if (is_string($identity)) {
+            echo '     plugin-logical-identity=' . cow_merge_audit_truncate($identity, 240) . "\n";
+        }
+    }
+    $guidance = [];
+    foreach ([
+        'plugin_resolution_policy' => 'policy',
+        'plugin_suggested_action' => 'action',
+        'plugin_manual_review_reason' => 'manual-review',
+    ] as $row_key => $label) {
+        if (isset($conflict[$row_key]) && (string)$conflict[$row_key] !== '') {
+            $guidance[] = $label . '=' . cow_merge_audit_truncate((string)$conflict[$row_key], 160);
+        }
+    }
+    if ($guidance !== []) {
+        echo '     plugin-guidance ' . implode(' ', $guidance) . "\n";
+    }
+}
+
 function cow_merge_print_audit_text(array $report): void {
     echo "forkpress: COW merge audit\n";
     echo "  metadata:  {$report['metadata_db']}\n";
@@ -13634,6 +13680,7 @@ function cow_merge_print_audit_text(array $report): void {
             if (($conflict['latest_resolution_id'] ?? null) !== null && (string)$conflict['latest_resolution_id'] !== '') {
                 echo "     latest-resolution=#{$conflict['latest_resolution_id']} choice={$conflict['latest_resolution_choice']} status={$conflict['latest_resolution_status']} applied={$conflict['latest_resolution_applied']}\n";
             }
+            cow_merge_print_plugin_audit_text($conflict);
             cow_merge_print_audit_review_text($conflict, $filters);
             if (isset($conflict['stale_status']) && $conflict['stale_status'] !== 'unknown') {
                 echo "     stale={$conflict['stale_status']} reason=" . cow_merge_audit_truncate((string)$conflict['stale_reason'], 240) . "\n";

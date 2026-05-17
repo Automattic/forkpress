@@ -306,6 +306,15 @@ PHP);
         str_contains((string)($file_audit_conflicts[0]['plugin_manual_review_reason'] ?? ''), 'cannot synthesize plugin-owned files'),
         'plugin audit exposes validator manual-review guidance as a first-class field'
     );
+    ob_start();
+    cow_merge_print_audit_text($audit);
+    $plugin_audit_text = ob_get_clean();
+    assert_true(str_contains($plugin_audit_text, 'plugin plugin=forkpress-plugin-graph object=child:' . $child_id), 'plugin text audit exposes validator plugin and object fields');
+    assert_true(str_contains($plugin_audit_text, 'validator=forkpress-plugin-graph@1'), 'plugin text audit exposes validator version');
+    assert_true(str_contains($plugin_audit_text, 'tables=plugin_graph_child'), 'plugin text audit exposes plugin-owned tables');
+    assert_true(str_contains($plugin_audit_text, 'files=wp-content/uploads/plugin-validator-missing.dat'), 'plugin text audit exposes plugin-owned files');
+    assert_true(str_contains($plugin_audit_text, 'plugin-guidance policy=review-only'), 'plugin text audit exposes validator review policy');
+    assert_true(str_contains($plugin_audit_text, 'manual-review=ForkPress cannot synthesize plugin-owned files'), 'plugin text audit exposes validator manual-review reason');
 
     $json_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-graph-json-drift' ORDER BY id ASC LIMIT 1");
     assert_true($json_conflict_id > 0, 'plugin validator fixture records a JSON graph conflict for revalidation');
@@ -556,6 +565,10 @@ PHP);
         'child-before-rerun',
         'plugin audit exposes logical identity as a structured field'
     );
+    ob_start();
+    cow_merge_print_audit_text($logical_identity_audit);
+    $logical_identity_text = ob_get_clean();
+    assert_true(str_contains($logical_identity_text, 'plugin-logical-identity={"kind":"plugin-child","slug":"child-before-rerun"}'), 'plugin text audit exposes logical identity evidence');
     cow_merge_review_record(
         $metadata,
         'conflict',
