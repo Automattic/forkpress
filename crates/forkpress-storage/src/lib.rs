@@ -1269,6 +1269,8 @@ pub struct CowMergeAuditQuery<'a> {
     pub review_status: Option<&'a str>,
     pub resolution_status: Option<&'a str>,
     pub lifecycle_state: Option<&'a str>,
+    pub resolution_choice: Option<&'a str>,
+    pub blocked_resolution_choice: Option<&'a str>,
     pub group_by: &'a str,
 }
 
@@ -1348,6 +1350,14 @@ pub fn inspect_cow_merge_audit(
     if let Some(lifecycle_state) = query.lifecycle_state {
         args.push("--lifecycle-state".into());
         args.push(lifecycle_state.into());
+    }
+    if let Some(resolution_choice) = query.resolution_choice {
+        args.push("--resolution-choice".into());
+        args.push(resolution_choice.into());
+    }
+    if let Some(blocked_resolution_choice) = query.blocked_resolution_choice {
+        args.push("--blocked-resolution-choice".into());
+        args.push(blocked_resolution_choice.into());
     }
     if query.group_by != "none" {
         args.push("--group-by".into());

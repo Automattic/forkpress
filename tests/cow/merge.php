@@ -10855,6 +10855,25 @@ SQL);
         str_contains((string)($source_added_fk_child_audit_rows[$source_added_fk_child_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'parent table plugin_source_added_fk_parent could not be inspected'),
         'source-added child row audit explains the missing FK parent blocker'
     );
+    $source_added_fk_child_source_choice_audit = cow_merge_audit_report($source_added_fk_child_metadata, (int)$source_added_fk_child_result['run_id'], 10, [
+        'records' => 'conflicts',
+        'resolution_choice' => 'source',
+    ]);
+    $source_added_fk_child_source_choice_ids = array_map(static fn(array $row): int => (int)$row['id'], $source_added_fk_child_source_choice_audit['conflicts']);
+    assert_true(!in_array($source_added_fk_child_conflict_id, $source_added_fk_child_source_choice_ids, true), 'resolution-choice source filter omits conflicts where source is currently blocked');
+    assert_true(in_array($source_added_fk_parent_conflict_id, $source_added_fk_child_source_choice_ids, true), 'resolution-choice source filter keeps conflicts whose source choice is executable');
+    $source_added_fk_child_blocked_source_audit = cow_merge_audit_report($source_added_fk_child_metadata, (int)$source_added_fk_child_result['run_id'], 10, [
+        'blocked_resolution_choice' => 'source',
+    ]);
+    assert_same($source_added_fk_child_blocked_source_audit['filters']['records'], 'conflicts', 'blocked resolution choice filter defaults audit records to conflicts');
+    assert_same($source_added_fk_child_blocked_source_audit['filters']['blocked_resolution_choice'], 'source', 'merge audit JSON report includes blocked resolution choice filter');
+    $source_added_fk_child_blocked_source_ids = array_map(static fn(array $row): int => (int)$row['id'], $source_added_fk_child_blocked_source_audit['conflicts']);
+    assert_true(in_array($source_added_fk_child_conflict_id, $source_added_fk_child_blocked_source_ids, true), 'blocked-resolution-choice source filter returns conflicts whose source choice is unavailable');
+    assert_true(!in_array($source_added_fk_parent_conflict_id, $source_added_fk_child_blocked_source_ids, true), 'blocked-resolution-choice source filter omits executable source conflicts');
+    ob_start();
+    cow_merge_print_audit_text($source_added_fk_child_blocked_source_audit);
+    $source_added_fk_child_blocked_source_text = ob_get_clean();
+    assert_true(str_contains($source_added_fk_child_blocked_source_text, 'blocked-resolution-choice=source'), 'blocked resolution choice filter is visible in text audit output');
     assert_throws(
         fn() => cow_merge_resolve_conflict(
             $source_added_fk_child_metadata,
@@ -10886,6 +10905,18 @@ SQL);
         ['source', 'target'],
         'source-added child row audit advertises source after the FK parent is restored'
     );
+    $source_added_fk_child_unblocked_source_audit = cow_merge_audit_report($source_added_fk_child_metadata, (int)$source_added_fk_child_result['run_id'], 10, [
+        'records' => 'conflicts',
+        'resolution_choice' => 'source',
+    ]);
+    $source_added_fk_child_unblocked_source_ids = array_map(static fn(array $row): int => (int)$row['id'], $source_added_fk_child_unblocked_source_audit['conflicts']);
+    assert_true(in_array($source_added_fk_child_conflict_id, $source_added_fk_child_unblocked_source_ids, true), 'resolution-choice source filter returns the child row after its blocker is resolved');
+    $source_added_fk_child_unblocked_blocked_source_audit = cow_merge_audit_report($source_added_fk_child_metadata, (int)$source_added_fk_child_result['run_id'], 10, [
+        'records' => 'conflicts',
+        'blocked_resolution_choice' => 'source',
+    ]);
+    $source_added_fk_child_unblocked_blocked_source_ids = array_map(static fn(array $row): int => (int)$row['id'], $source_added_fk_child_unblocked_blocked_source_audit['conflicts']);
+    assert_true(!in_array($source_added_fk_child_conflict_id, $source_added_fk_child_unblocked_blocked_source_ids, true), 'blocked-resolution-choice source filter drops the child row after its blocker is resolved');
     $source_added_fk_child_resolution = cow_merge_resolve_conflict(
         $source_added_fk_child_metadata,
         $source_added_fk_child_conflict_id,
