@@ -11577,7 +11577,7 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
     }
     if ($group_by !== '' && $group_by !== 'none') {
         if (cow_merge_audit_filter_is_default_all($filters, 'records')) {
-            $filters['records'] = 'resolutions';
+            $filters['records'] = in_array($group_by, ['lifecycle', 'conflict-key'], true) ? 'conflicts' : 'resolutions';
         } elseif (!in_array(($filters['records'] ?? null), ['conflicts', 'decisions', 'resolutions'], true)) {
             throw new InvalidArgumentException('--group-by can only be combined with --records conflicts, decisions, or resolutions');
         }
