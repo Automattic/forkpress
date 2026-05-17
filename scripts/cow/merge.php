@@ -12026,7 +12026,105 @@ function cow_merge_conflict_class(string $table, string $conflict_type): string 
     return 'unknown';
 }
 
+function cow_merge_schema_dependency_name_list(array $dependencies): string {
+    return implode(', ', array_map(
+        static fn(array $dependency): string => (string)($dependency['type'] ?? 'schema') . ' ' . (string)($dependency['name'] ?? ''),
+        $dependencies
+    ));
+}
+
+function cow_merge_schema_source_drop_blocked_reason(array $row): ?string {
+    $conflict_type = (string)($row['conflict_type'] ?? '');
+    $target_db = $row['target_db'] ?? null;
+    if (!is_string($target_db) || $target_db === '') {
+        return 'source schema resolution is blocked because the target database cannot be verified';
+    }
+    if (!is_file($target_db)) {
+        return 'source schema resolution is blocked because the target database no longer exists';
+    }
+
+    if ($conflict_type === 'schema-source-dropped-view') {
+        $view = (string)($row['column_name'] ?? '');
+        if ($view === '') {
+            return null;
+        }
+        $target = cow_merge_open_db($target_db, SQLITE3_OPEN_READONLY);
+        try {
+            $dependent_views = cow_merge_table_dependent_views($target, $view, $view);
+            if ($dependent_views) {
+                $names = implode(', ', array_map(static fn(array $dependency): string => (string)$dependency['name'], $dependent_views));
+                return "source view drop is blocked because dependent target views would be invalid: $names";
+            }
+            $view_dependencies = cow_merge_table_rebuild_dependencies($target, $view);
+            $dependent_view_triggers = cow_merge_view_trigger_dependencies($target, $dependent_views);
+            $dependent_trigger_names = array_map(
+                static fn(array $dependency): string => (string)$dependency['name'],
+                array_filter($dependent_view_triggers, static fn(array $dependency): bool => (string)($dependency['type'] ?? '') === 'trigger')
+            );
+            $dependent_trigger_bodies = cow_merge_table_dependent_triggers($target, $view, $dependent_trigger_names);
+            if ($dependent_trigger_bodies) {
+                $names = implode(', ', array_map(static fn(array $trigger): string => (string)$trigger['name'], $dependent_trigger_bodies));
+                return "source view drop is blocked because dependent target trigger programs would be invalid: $names";
+            }
+            $dependencies = array_merge($view_dependencies, $dependent_view_triggers);
+            if ($dependencies) {
+                $names = cow_merge_schema_dependency_name_list($dependencies);
+                return "source view drop is blocked because dependent target schema objects require review first: $names";
+            }
+        } finally {
+            $target->close();
+        }
+        return null;
+    }
+
+    if ($conflict_type !== 'schema-source-dropped-table') {
+        return null;
+    }
+    $table = (string)($row['table_name'] ?? '');
+    if ($table === '') {
+        return null;
+    }
+    $target = cow_merge_open_db($target_db, SQLITE3_OPEN_READONLY);
+    try {
+        $dependent_views = cow_merge_table_dependent_views($target, $table);
+        if ($dependent_views) {
+            $names = implode(', ', array_map(static fn(array $view): string => (string)$view['name'], $dependent_views));
+            return "source table drop is blocked because dependent target views would be invalid: $names";
+        }
+        $dependent_schema = cow_merge_table_rebuild_dependencies($target, $table);
+        if ($dependent_schema) {
+            $names = cow_merge_schema_dependency_name_list($dependent_schema);
+            return "source table drop is blocked because dependent target schema objects require review first: $names";
+        }
+        $child_tables = cow_merge_foreign_key_child_tables($target, $table);
+        if ($child_tables) {
+            return 'source table drop is blocked because dependent target foreign-key child tables would be invalid: ' . implode(', ', $child_tables);
+        }
+        $attached_triggers = array_values(array_filter(
+            cow_merge_table_rebuild_dependencies($target, $table),
+            static fn(array $dependency): bool => (string)($dependency['type'] ?? '') === 'trigger'
+        ));
+        $dependent_triggers = cow_merge_table_dependent_triggers(
+            $target,
+            $table,
+            array_map(static fn(array $dependency): string => (string)$dependency['name'], $attached_triggers)
+        );
+        if ($dependent_triggers) {
+            $names = implode(', ', array_map(static fn(array $trigger): string => (string)$trigger['name'], $dependent_triggers));
+            return "source table drop is blocked because dependent target trigger programs would be invalid: $names";
+        }
+    } finally {
+        $target->close();
+    }
+    return null;
+}
+
 function cow_merge_schema_source_resolution_blocked_reason(array $row): ?string {
+    $drop_reason = cow_merge_schema_source_drop_blocked_reason($row);
+    if ($drop_reason !== null) {
+        return $drop_reason;
+    }
+
     $conflict_type = (string)($row['conflict_type'] ?? '');
     if (!str_starts_with($conflict_type, 'schema-')) {
         return null;

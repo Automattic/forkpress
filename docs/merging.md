@@ -98,7 +98,11 @@ unsafe symlinks, unsupported source entries, unsafe directory replacement
 subtrees, and source directory deletions that would remove target-side
 descendants may still be reviewable conflicts, but `source` is omitted from
 the executable choices and listed in `blocked_resolution_choices` with the
-reason the resolver will reject it. It also includes the conflict
+reason the resolver will reject it. Schema conflicts use the same model for
+source drops that would invalidate target-side dependent views, triggers,
+schema objects, or foreign-key child tables; once those dependency conflicts
+are resolved, audit output can advertise `source` again. It also includes the
+conflict
 `lifecycle_state`, `next_action`, and latest resolution metadata so clients can
 distinguish unreviewed, deferred, needs-action, reviewed, validated, and
 resolved conflicts without parsing review notes. Conflict lifecycle changes are

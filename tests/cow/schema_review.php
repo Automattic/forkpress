@@ -193,6 +193,119 @@ try {
         0,
         'failed cyclic schema resolution attempts do not record resolutions'
     );
+
+    $drop_table_base = $tmp . '/drop-table-contract-base.sqlite';
+    $drop_table_source = $tmp . '/drop-table-contract-source.sqlite';
+    $drop_table_target = $tmp . '/drop-table-contract-target.sqlite';
+    $db = open_db($drop_table_base);
+    $db->exec('CREATE TABLE plugin_contract_drop_table (item_id TEXT PRIMARY KEY, label TEXT)');
+    $db->exec('CREATE VIEW plugin_contract_drop_table_live AS SELECT item_id, label FROM plugin_contract_drop_table');
+    $db->close();
+    copy($drop_table_base, $drop_table_source);
+    copy($drop_table_base, $drop_table_target);
+    $db = open_db($drop_table_source);
+    $db->exec('DROP VIEW plugin_contract_drop_table_live');
+    $db->exec('DROP TABLE plugin_contract_drop_table');
+    $db->close();
+    $drop_table_result = cow_merge_databases($drop_table_base, $drop_table_source, $drop_table_target, $metadata, 'feature-schema-drop-table-contract', 'main');
+    $drop_table_run_id = (int)$drop_table_result['run_id'];
+    assert_same($drop_table_result['status'], 'completed_with_conflicts', 'source table drop with a dependent target view stays reviewable');
+    $drop_table_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_contract_drop_table' AND conflict_type = 'schema-source-dropped-table' ORDER BY id DESC LIMIT 1");
+    $drop_table_view_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_contract_drop_table_live' AND conflict_type = 'schema-source-dropped-view' ORDER BY id DESC LIMIT 1");
+    $drop_table_audit = cow_merge_audit_report($metadata, $drop_table_run_id, 10, ['records' => 'conflicts']);
+    $drop_table_rows = [];
+    foreach ($drop_table_audit['conflicts'] as $row) {
+        $drop_table_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $drop_table_rows[$drop_table_conflict_id]['resolution_choices'],
+        ['target'],
+        'source table drop audit does not advertise source while a target view depends on it'
+    );
+    assert_true(
+        str_contains((string)($drop_table_rows[$drop_table_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'dependent target views'),
+        'source table drop audit explains dependent target view blocker'
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $drop_table_conflict_id, 'source', true, 'Try source table drop before dependent view.', 'cow-test'),
+        'resolution choice source is blocked',
+        'source table drop resolution is blocked by the conflict contract before dependency mutation'
+    );
+    cow_merge_resolve_conflict($metadata, $drop_table_view_conflict_id, 'source', true, 'Apply source view drop first.', 'cow-test');
+    $drop_table_unblocked_audit = cow_merge_audit_report($metadata, $drop_table_run_id, 10, ['records' => 'conflicts']);
+    $drop_table_unblocked_rows = [];
+    foreach ($drop_table_unblocked_audit['conflicts'] as $row) {
+        $drop_table_unblocked_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $drop_table_unblocked_rows[$drop_table_conflict_id]['resolution_choices'],
+        ['source', 'target'],
+        'source table drop audit advertises source after dependent target view is resolved'
+    );
+    $drop_table_resolution = cow_merge_resolve_conflict($metadata, $drop_table_conflict_id, 'source', true, 'Apply source table drop after dependent view.', 'cow-test');
+    assert_same($drop_table_resolution['status'], 'applied', 'source table drop applies after dependent target view is resolved');
+
+    $drop_view_base = $tmp . '/drop-view-contract-base.sqlite';
+    $drop_view_source = $tmp . '/drop-view-contract-source.sqlite';
+    $drop_view_target = $tmp . '/drop-view-contract-target.sqlite';
+    $db = open_db($drop_view_base);
+    $db->exec('CREATE TABLE plugin_contract_drop_view_items (item_id TEXT PRIMARY KEY, label TEXT)');
+    $db->exec('CREATE VIEW plugin_contract_drop_view_live AS SELECT item_id, label FROM plugin_contract_drop_view_items');
+    $db->exec('CREATE TABLE plugin_contract_drop_view_observer (item_id TEXT PRIMARY KEY)');
+    $db->exec('CREATE TABLE plugin_contract_drop_view_audit (item_id TEXT, label TEXT)');
+    $db->exec(<<<'SQL'
+CREATE TRIGGER plugin_contract_drop_view_observer_insert
+AFTER INSERT ON plugin_contract_drop_view_observer
+BEGIN
+    INSERT INTO plugin_contract_drop_view_audit (item_id, label)
+    SELECT item_id, label FROM plugin_contract_drop_view_live WHERE item_id = NEW.item_id;
+END
+SQL);
+    $db->close();
+    copy($drop_view_base, $drop_view_source);
+    copy($drop_view_base, $drop_view_target);
+    $db = open_db($drop_view_source);
+    $db->exec('DROP TRIGGER plugin_contract_drop_view_observer_insert');
+    $db->exec('DROP VIEW plugin_contract_drop_view_live');
+    $db->close();
+    $drop_view_result = cow_merge_databases($drop_view_base, $drop_view_source, $drop_view_target, $metadata, 'feature-schema-drop-view-contract', 'main');
+    $drop_view_run_id = (int)$drop_view_result['run_id'];
+    assert_same($drop_view_result['status'], 'completed_with_conflicts', 'source view drop with a dependent target trigger stays reviewable');
+    $drop_view_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_contract_drop_view_live' AND conflict_type = 'schema-source-dropped-view' ORDER BY id DESC LIMIT 1");
+    $drop_view_trigger_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_contract_drop_view_observer_insert' AND conflict_type = 'schema-source-dropped-trigger' ORDER BY id DESC LIMIT 1");
+    $drop_view_audit = cow_merge_audit_report($metadata, $drop_view_run_id, 10, ['records' => 'conflicts']);
+    $drop_view_rows = [];
+    foreach ($drop_view_audit['conflicts'] as $row) {
+        $drop_view_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $drop_view_rows[$drop_view_conflict_id]['resolution_choices'],
+        ['target'],
+        'source view drop audit does not advertise source while a target trigger depends on it'
+    );
+    assert_true(
+        str_contains((string)($drop_view_rows[$drop_view_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'dependent target trigger programs'),
+        'source view drop audit explains dependent target trigger blocker'
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $drop_view_conflict_id, 'source', false, 'Preview source view drop before dependent trigger.', 'cow-test'),
+        'resolution choice source is blocked',
+        'source view drop preview is blocked by the conflict contract before dependency mutation'
+    );
+    cow_merge_resolve_conflict($metadata, $drop_view_trigger_conflict_id, 'source', true, 'Apply source trigger drop first.', 'cow-test');
+    $drop_view_unblocked_audit = cow_merge_audit_report($metadata, $drop_view_run_id, 10, ['records' => 'conflicts']);
+    $drop_view_unblocked_rows = [];
+    foreach ($drop_view_unblocked_audit['conflicts'] as $row) {
+        $drop_view_unblocked_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $drop_view_unblocked_rows[$drop_view_conflict_id]['resolution_choices'],
+        ['source', 'target'],
+        'source view drop audit advertises source after dependent target trigger is resolved'
+    );
+    $drop_view_resolution = cow_merge_resolve_conflict($metadata, $drop_view_conflict_id, 'source', true, 'Apply source view drop after dependent trigger.', 'cow-test');
+    assert_same($drop_view_resolution['status'], 'applied', 'source view drop applies after dependent target trigger is resolved');
+
     cow_merge_review_record(
         $metadata,
         'conflict',
