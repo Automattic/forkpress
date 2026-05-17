@@ -144,7 +144,7 @@ function forkpress_cow_acquire_request_lock(): bool {
 
 function forkpress_cow_is_admin_branch_action(string $path): bool {
     $action = $_REQUEST['action'] ?? '';
-    if (!is_string($action) || !in_array($action, ['forkpress_branch_create', 'forkpress_branch_merge', 'forkpress_branch_conflicts', 'forkpress_branch_restore_crash', 'forkpress_branch_revalidate_conflicts', 'forkpress_branch_apply_reviewed_conflicts', 'forkpress_branch_run_plugin_driver'], true)) {
+    if (!is_string($action) || !in_array($action, ['forkpress_branch_create', 'forkpress_branch_merge', 'forkpress_branch_conflicts', 'forkpress_branch_restore_crash', 'forkpress_branch_revalidate_conflicts', 'forkpress_branch_review_conflict', 'forkpress_branch_resolve_conflict', 'forkpress_branch_apply_reviewed_conflicts', 'forkpress_branch_run_plugin_driver'], true)) {
         return false;
     }
     if ($path === '/wp-admin/admin-post.php') {
@@ -539,6 +539,29 @@ function forkpress_cow_branch_conflict_audit_summary(array $report, int $run, ar
     ];
 }
 
+function forkpress_cow_branch_revalidate_merge_run(int $run): array {
+    [$code, $output] = forkpress_cow_branch_run_cli(['merge-audit', '--revalidate', '--run', (string)$run, '--reviewer', 'wordpress-ui', '--format', 'json']);
+    if ($code !== 0) {
+        return [$code, $output, null];
+    }
+
+    $result = json_decode($output, true);
+    if (!is_array($result)) {
+        return [1, 'ForkPress returned invalid revalidation JSON.', null];
+    }
+
+    return [0, $output, $result];
+}
+
+function forkpress_cow_branch_revalidation_needs_action_for_conflict(array $result, int $conflict): bool {
+    foreach (($result['needs_action_conflicts'] ?? []) as $record) {
+        if (is_array($record) && (int)($record['conflict_id'] ?? 0) === $conflict) {
+            return true;
+        }
+    }
+    return false;
+}
+
 function forkpress_cow_handle_admin_branch_action(string $path, string $current_branch, string $branches_dir): bool {
     if (!forkpress_cow_is_admin_branch_action($path)) {
         return false;
@@ -718,14 +741,9 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
             return true;
         }
 
-        [$code, $output] = forkpress_cow_branch_run_cli(['merge-audit', '--revalidate', '--run', (string)$run, '--reviewer', 'wordpress-ui', '--format', 'json']);
+        [$code, $output, $result] = forkpress_cow_branch_revalidate_merge_run($run);
         if ($code !== 0) {
             forkpress_cow_branch_finish_json(400, $current_url, false, $output ?: 'ForkPress could not revalidate merge conflicts.');
-            return true;
-        }
-        $result = json_decode($output, true);
-        if (!is_array($result)) {
-            forkpress_cow_branch_finish_json(400, $current_url, false, 'ForkPress returned invalid revalidation JSON.');
             return true;
         }
 
@@ -746,6 +764,155 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
                 'carried' => $carried,
                 'revalidation' => $result,
                 'auditCommand' => 'forkpress branch merge-audit --revalidate --run ' . $run . ' --reviewer wordpress-ui --format json',
+            ]
+        );
+        return true;
+    }
+
+    if ($action === 'forkpress_branch_review_conflict') {
+        $conflict = forkpress_cow_branch_post_int('conflict');
+        if ($conflict === null) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'Choose a merge conflict to review.');
+            return true;
+        }
+
+        $status = forkpress_cow_branch_post_value('status');
+        if (!in_array($status, ['pending', 'needs-action', 'reviewed'], true)) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'Choose pending, needs-action, or reviewed for the conflict review status.');
+            return true;
+        }
+
+        $notes = [
+            'pending' => 'Marked pending from the WordPress branch switcher.',
+            'needs-action' => 'Marked needs-action from the WordPress branch switcher.',
+            'reviewed' => 'Marked reviewed from the WordPress branch switcher.',
+        ];
+        [$code, $output] = forkpress_cow_branch_run_cli([
+            'merge-review',
+            'conflict',
+            (string)$conflict,
+            '--status',
+            $status,
+            '--note',
+            $notes[$status],
+            '--reviewer',
+            'wordpress-ui',
+        ]);
+        if ($code !== 0) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, $output ?: 'ForkPress could not record the conflict review.');
+            return true;
+        }
+
+        $run = forkpress_cow_branch_post_int('run');
+        forkpress_cow_branch_finish_json(
+            200,
+            $current_url,
+            true,
+            'Marked conflict #' . $conflict . ' ' . $status . '.',
+            [
+                'run' => $run,
+                'conflict' => $conflict,
+                'reviewStatus' => $status,
+            ]
+        );
+        return true;
+    }
+
+    if ($action === 'forkpress_branch_resolve_conflict') {
+        $conflict = forkpress_cow_branch_post_int('conflict');
+        if ($conflict === null) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'Choose a merge conflict to resolve.');
+            return true;
+        }
+
+        $apply_reviewed = forkpress_cow_branch_post_value('applyReviewed') === '1';
+        $after_revalidate = forkpress_cow_branch_post_value('afterRevalidate') === '1';
+        $choice = forkpress_cow_branch_post_value('choice');
+        if ($apply_reviewed && $choice !== '') {
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'Apply reviewed cannot be combined with a new source or target choice.');
+            return true;
+        }
+        if ($apply_reviewed && $after_revalidate) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'After revalidate requires a source or target choice.');
+            return true;
+        }
+        if (!$apply_reviewed && !in_array($choice, ['source', 'target'], true)) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'Choose source or target for the conflict resolution.');
+            return true;
+        }
+
+        $run = forkpress_cow_branch_post_int('run');
+        if ($apply_reviewed && $run !== null) {
+            [$code, $output, $revalidation] = forkpress_cow_branch_revalidate_merge_run($run);
+            if ($code !== 0) {
+                forkpress_cow_branch_finish_json(400, $current_url, false, $output ?: 'ForkPress could not revalidate merge conflicts before applying the reviewed choice.');
+                return true;
+            }
+            if ($revalidation !== null && forkpress_cow_branch_revalidation_needs_action_for_conflict($revalidation, $conflict)) {
+                $checked = max(0, (int)($revalidation['checked'] ?? 0));
+                $stale = max(0, (int)($revalidation['stale'] ?? 0));
+                $carried = max(0, (int)($revalidation['carried'] ?? 0));
+                forkpress_cow_branch_finish_json(
+                    400,
+                    $current_url,
+                    false,
+                    'Conflict #' . $conflict . ' changed since review. Revalidate and review it before applying the reviewed choice.',
+                    [
+                        'run' => $run,
+                        'conflict' => $conflict,
+                        'checked' => $checked,
+                        'stale' => $stale,
+                        'carried' => $carried,
+                        'revalidation' => $revalidation,
+                        'auditCommand' => 'forkpress branch merge-audit --revalidate --run ' . $run . ' --reviewer wordpress-ui --format json',
+                    ]
+                );
+                return true;
+            }
+        }
+
+        $notes = [
+            'source' => 'Applied source choice from the WordPress branch switcher.',
+            'target' => 'Applied target choice from the WordPress branch switcher.',
+            'reviewed' => 'Applied reviewed choice from the WordPress branch switcher.',
+        ];
+        $resolve_args = [
+            'merge-resolve',
+            'conflict',
+            (string)$conflict,
+        ];
+        if ($apply_reviewed) {
+            $resolve_args[] = '--apply-reviewed';
+            $note = $notes['reviewed'];
+        } else {
+            $resolve_args[] = '--choice';
+            $resolve_args[] = $choice;
+            $resolve_args[] = '--apply';
+            if ($after_revalidate) {
+                $resolve_args[] = '--after-revalidate';
+            }
+            $note = $notes[$choice];
+        }
+        $resolve_args[] = '--note';
+        $resolve_args[] = $note;
+        $resolve_args[] = '--reviewer';
+        $resolve_args[] = 'wordpress-ui';
+        [$code, $output] = forkpress_cow_branch_run_cli($resolve_args);
+        if ($code !== 0) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, $output ?: 'ForkPress could not apply the conflict resolution.');
+            return true;
+        }
+
+        forkpress_cow_branch_finish_json(
+            200,
+            $current_url,
+            true,
+            $apply_reviewed ? 'Applied reviewed choice for conflict #' . $conflict . '.' : 'Applied ' . $choice . ' for conflict #' . $conflict . '.',
+            [
+                'run' => $run,
+                'conflict' => $conflict,
+                'resolutionChoice' => $apply_reviewed ? 'reviewed' : $choice,
+                'afterRevalidate' => $after_revalidate,
             ]
         );
         return true;
