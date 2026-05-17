@@ -21,7 +21,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "  php merge.php recover-crash --metadata-db <path> [--run ID] [--restore-target-db] [--restore-files] [--format text|json]\n");
     fwrite(STDERR, "  php merge.php audit --metadata-db <path> [--format text|json] [--limit N] [--run ID]\n");
     fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|conflict-events|decisions|resolutions|rollback-failures] [--path <path>] [--path-prefix <prefix>]\n");
-    fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|conflict-events|decisions|resolutions|rollback-failures] [--conflict-type TYPE] [--conflict-key KEY] [--plugin NAME] [--plugin-object OBJECT] [--plugin-severity SEVERITY] [--decision DECISION]\n");
+    fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|conflict-events|decisions|resolutions|rollback-failures] [--conflict-type TYPE] [--conflict-id ID] [--conflict-key KEY] [--plugin NAME] [--plugin-object OBJECT] [--plugin-severity SEVERITY] [--decision DECISION]\n");
     fwrite(STDERR, "    [--id-band-skips] [--target-kept] [--review] [--review-status unreviewed|pending|needs-action|reviewed] [--lifecycle-state unreviewed|deferred|needs-action|reviewed|validated|resolved]\n");
     fwrite(STDERR, "    [--next-action review|run-plugin-validator|wait|revalidate|resolve|apply-reviewed-choice|manual-review|none]\n");
     fwrite(STDERR, "    [--resolution-choice source|target] [--blocked-resolution-choice source|target] [--revalidate] [--reviewer NAME]\n");
@@ -7908,6 +7908,16 @@ function cow_merge_audit_run_id(?string $value): ?int {
     return (int)$value;
 }
 
+function cow_merge_audit_conflict_id(?string $value): ?int {
+    if ($value === null || $value === '') {
+        return null;
+    }
+    if (!ctype_digit($value) || (int)$value < 1) {
+        throw new InvalidArgumentException('--conflict-id must be a positive integer');
+    }
+    return (int)$value;
+}
+
 function cow_merge_audit_format(?string $value): string {
     $format = $value ?? 'text';
     if ($format !== 'text' && $format !== 'json') {
@@ -11588,6 +11598,7 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
     $target_kept = (string)($filters['target_kept'] ?? '') === '1';
     $review = (string)($filters['review'] ?? '') === '1';
     $resolution_status = ($filters['resolution_status'] ?? null) !== null && (string)$filters['resolution_status'] !== '';
+    $conflict_id = ($filters['conflict_id'] ?? null) !== null && (string)$filters['conflict_id'] !== '';
     $conflict_key = ($filters['conflict_key'] ?? null) !== null && (string)$filters['conflict_key'] !== '';
     $lifecycle_state = ($filters['lifecycle_state'] ?? null) !== null && (string)$filters['lifecycle_state'] !== '';
     $next_action = ($filters['next_action'] ?? null) !== null && (string)$filters['next_action'] !== '';
@@ -11636,6 +11647,22 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
         }
         if (($filters['conflict_type'] ?? null) !== null) {
             throw new InvalidArgumentException('--review cannot be combined with --conflict-type');
+        }
+    }
+    if ($conflict_id) {
+        if (cow_merge_audit_filter_is_default_all($filters, 'records')) {
+            $filters['records'] = $resolution_status ? 'resolutions' : 'conflicts';
+        } elseif (!in_array(($filters['records'] ?? null), ['conflicts', 'conflict-events', 'resolutions'], true)) {
+            throw new InvalidArgumentException('--conflict-id can only be combined with --records conflicts, conflict-events, or resolutions');
+        }
+        if (($filters['decision'] ?? null) !== null) {
+            throw new InvalidArgumentException('--conflict-id cannot be combined with --decision');
+        }
+        if ((string)($filters['id_band_skips'] ?? '') === '1') {
+            throw new InvalidArgumentException('--conflict-id cannot be combined with --id-band-skips');
+        }
+        if ((string)($filters['target_kept'] ?? '') === '1') {
+            throw new InvalidArgumentException('--conflict-id cannot be combined with --target-kept');
         }
     }
     if ($conflict_key) {
@@ -11835,7 +11862,7 @@ function cow_merge_audit_filters(array $filters = []): array {
         if ($scope !== 'all') {
             throw new InvalidArgumentException('--records rollback-failures cannot be combined with --scope');
         }
-        foreach (['conflict_type', 'conflict_key', 'plugin', 'plugin_object', 'plugin_severity', 'decision', 'review_status', 'resolution_status', 'lifecycle_state', 'next_action', 'resolution_choice', 'blocked_resolution_choice'] as $key) {
+        foreach (['conflict_type', 'conflict_id', 'conflict_key', 'plugin', 'plugin_object', 'plugin_severity', 'decision', 'review_status', 'resolution_status', 'lifecycle_state', 'next_action', 'resolution_choice', 'blocked_resolution_choice'] as $key) {
             if (($filters[$key] ?? null) !== null && (string)$filters[$key] !== '') {
                 throw new InvalidArgumentException('--records rollback-failures cannot be combined with --' . str_replace('_', '-', $key));
             }
@@ -11858,6 +11885,7 @@ function cow_merge_audit_filters(array $filters = []): array {
         'scope' => $scope,
         'records' => $records,
         'conflict_type' => cow_merge_audit_filter_text($filters['conflict_type'] ?? null, 'conflict-type'),
+        'conflict_id' => cow_merge_audit_conflict_id($filters['conflict_id'] ?? null),
         'conflict_key' => cow_merge_audit_filter_text($filters['conflict_key'] ?? null, 'conflict-key'),
         'plugin' => cow_merge_audit_filter_text($filters['plugin'] ?? null, 'plugin'),
         'plugin_object' => cow_merge_audit_filter_text($filters['plugin_object'] ?? null, 'plugin-object'),
@@ -12232,6 +12260,12 @@ function cow_merge_audit_where_sql(
         $params[':conflict_type'] = $filters['conflict_type'];
     }
 
+    if ($record_type === 'conflicts' && ($filters['conflict_id'] ?? null) !== null) {
+        $conflict_id_column = $alias === '' ? 'merge_conflicts.id' : $prefix . 'id';
+        $clauses[] = $conflict_id_column . ' = :conflict_id';
+        $params[':conflict_id'] = $filters['conflict_id'];
+    }
+
     if ($record_type === 'conflicts' && ($filters['conflict_key'] ?? null) !== null) {
         $clauses[] = $prefix . 'conflict_key = :conflict_key';
         $params[':conflict_key'] = $filters['conflict_key'];
@@ -12326,6 +12360,11 @@ function cow_merge_audit_resolution_where_sql(
     if ($run_id !== null) {
         $clauses[] = 'c.run_id = :run_id';
         $params[':run_id'] = $run_id;
+    }
+
+    if (($filters['conflict_id'] ?? null) !== null) {
+        $clauses[] = 'mr.conflict_id = :conflict_id';
+        $params[':conflict_id'] = $filters['conflict_id'];
     }
 
     if ($filters['scope'] === 'files') {
@@ -12479,6 +12518,9 @@ function cow_merge_audit_count_sql(
     }
     if ($record_type === 'conflicts' && $filters['conflict_type'] !== null) {
         $conditions[] = $alias . ".conflict_type = '" . SQLite3::escapeString($filters['conflict_type']) . "'";
+    }
+    if ($record_type === 'conflicts' && ($filters['conflict_id'] ?? null) !== null) {
+        $conditions[] = $alias . '.id = ' . (int)$filters['conflict_id'];
     }
     if ($record_type === 'conflicts' && ($filters['conflict_key'] ?? null) !== null) {
         $conditions[] = $alias . ".conflict_key = '" . SQLite3::escapeString($filters['conflict_key']) . "'";
@@ -14254,7 +14296,7 @@ function cow_merge_audit_object_label(array $row): string {
 
 function cow_merge_audit_filter_label(array $filters): string {
     $parts = [];
-    foreach (['scope', 'records', 'conflict_type', 'conflict_key', 'plugin', 'plugin_object', 'plugin_severity', 'decision', 'path', 'path_prefix', 'review_status', 'resolution_status', 'lifecycle_state', 'next_action', 'resolution_choice', 'blocked_resolution_choice', 'group_by'] as $key) {
+    foreach (['scope', 'records', 'conflict_type', 'conflict_id', 'conflict_key', 'plugin', 'plugin_object', 'plugin_severity', 'decision', 'path', 'path_prefix', 'review_status', 'resolution_status', 'lifecycle_state', 'next_action', 'resolution_choice', 'blocked_resolution_choice', 'group_by'] as $key) {
         $value = $filters[$key] ?? null;
         if ($value === null || $value === '') {
             continue;
@@ -17229,6 +17271,7 @@ if (realpath($argv[0] ?? '') === __FILE__) {
                     'scope' => $args['scope'] ?? null,
                     'records' => $args['records'] ?? null,
                     'conflict_type' => $args['conflict-type'] ?? null,
+                    'conflict_id' => $args['conflict-id'] ?? null,
                     'conflict_key' => $args['conflict-key'] ?? null,
                     'plugin' => $args['plugin'] ?? null,
                     'plugin_object' => $args['plugin-object'] ?? null,
