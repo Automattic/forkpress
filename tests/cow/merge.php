@@ -3983,6 +3983,7 @@ SQL);
     );
     unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize']);
     assert_same((int)scalar($metadata, 'SELECT COUNT(*) FROM merge_resolutions'), 0, 'failed current-cell finalization records no resolution audit rows');
+    $repeat_title_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE run_id = $repeat_conflict_run_id AND table_name = 'wp_posts' AND column_name = 'post_title'");
     assert_throws(
         fn() => cow_merge_resolve_conflict_key(
             $metadata,
@@ -3996,7 +3997,19 @@ SQL);
         'matches multiple unresolved conflicts',
         'conflict-key resolution rejects ambiguous logical conflict groups without a run'
     );
-    $repeat_title_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE run_id = $repeat_conflict_run_id AND table_name = 'wp_posts' AND column_name = 'post_title'");
+    assert_throws(
+        fn() => cow_merge_resolve_conflict_key(
+            $metadata,
+            $title_conflict_key,
+            null,
+            'source',
+            false,
+            'Preview source title resolution by ambiguous key.',
+            'cow-test'
+        ),
+        '#' . $repeat_title_conflict_id . ' in run #' . $repeat_conflict_run_id,
+        'conflict-key ambiguity errors list candidate conflict ids and runs'
+    );
     $key_dry_resolution = cow_merge_resolve_conflict_key(
         $metadata,
         $title_conflict_key,

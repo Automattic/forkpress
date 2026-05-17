@@ -8278,6 +8278,14 @@ function cow_merge_conflict_key_arg(?string $value): string {
     return trim($value);
 }
 
+function cow_merge_conflict_key_match_summary(array $matches): string {
+    $parts = [];
+    foreach ($matches as $match) {
+        $parts[] = '#' . (int)$match['id'] . ' in run #' . (int)$match['run_id'];
+    }
+    return implode(', ', $parts);
+}
+
 function cow_merge_conflict_id_from_key(SQLite3 $meta, string $conflict_key, ?int $run_id = null): int {
     $where = 'WHERE c.conflict_key = :conflict_key';
     $params = [':conflict_key' => $conflict_key];
@@ -8312,10 +8320,12 @@ function cow_merge_conflict_id_from_key(SQLite3 $meta, string $conflict_key, ?in
     }
     if ($unresolved === []) {
         $scope = $run_id === null ? '' : " in run #$run_id";
-        throw new InvalidArgumentException("all conflicts for conflict key $conflict_key$scope are already resolved");
+        $summary = cow_merge_conflict_key_match_summary($matches);
+        throw new InvalidArgumentException("all conflicts for conflict key $conflict_key$scope are already resolved ($summary)");
     }
     if (count($unresolved) > 1) {
-        throw new InvalidArgumentException("conflict key $conflict_key matches multiple unresolved conflicts; pass --run or resolve by conflict id");
+        $summary = cow_merge_conflict_key_match_summary($unresolved);
+        throw new InvalidArgumentException("conflict key $conflict_key matches multiple unresolved conflicts ($summary); pass --run or resolve by conflict id");
     }
     return (int)$unresolved[0]['id'];
 }
