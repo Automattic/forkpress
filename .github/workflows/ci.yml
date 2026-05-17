@@ -7,6 +7,7 @@ on:
       - "experiments/**"
       - "runtime/**"
       - "scripts/**"
+      - "!scripts/dev/**"
       - "installer/**"
       - "tests/**"
       - "wp-plugin/**"
@@ -17,8 +18,35 @@ on:
   push:
     branches: ["trunk"]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  cow-changed-preflight:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install PHP
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends php-cli php-sqlite3
+
+      - name: Fetch base branch
+        if: github.event_name == 'pull_request'
+        run: git fetch --force origin "${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+
+      - name: Changed-file COW preflight
+        run: scripts/dev/cow-changed-test-plan.sh
+        env:
+          FORKPRESS_CHANGED_TEST_PLAN_SCOPE: cow
+          FORKPRESS_TEST_BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || 'HEAD^' }}
+
   linux-cow-e2e:
+    needs: cow-changed-preflight
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -93,6 +121,7 @@ jobs:
 
   mac-cow-e2e:
     name: mac-cow-e2e ${{ matrix.target }}
+    needs: cow-changed-preflight
     strategy:
       fail-fast: false
       matrix:
@@ -158,6 +187,7 @@ jobs:
           FORKPRESS_FORCE_MACOS_APFS_SPARSEBUNDLE: "1"
 
   windows-cow-check:
+    needs: cow-changed-preflight
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
