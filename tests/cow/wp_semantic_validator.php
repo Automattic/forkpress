@@ -263,11 +263,17 @@ function create_wp_image_block_db(string $path): void {
         guid TEXT NOT NULL DEFAULT ''
     )");
     $image_block_content = '<!-- wp:image {"id":71,"sizeSlug":"large"} --><figure class="wp-block-image size-large"><img src="wp-content/uploads/2026/05/block-image.jpg" class="wp-image-71"/></figure><!-- /wp:image -->';
+    $classic_image_content = '<p><img src="wp-content/uploads/2026/05/block-image.jpg" class="alignnone wp-image-71" /></p>';
+    $classic_gallery_content = '[gallery ids="71"]';
     $stmt = $db->prepare("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, guid) VALUES
         (70, 'Image block page', :content, 'publish', 'page', 'image-block-page', ''),
         (75, 'Image block product CPT', :content, 'publish', 'forkpress_product', 'image-block-product', ''),
+        (76, 'Classic image page', :classic_image, 'publish', 'page', 'classic-image-page', ''),
+        (77, 'Classic gallery page', :classic_gallery, 'publish', 'page', 'classic-gallery-page', ''),
         (71, 'Image block attachment', '', 'inherit', 'attachment', 'block-image', 'wp-content/uploads/2026/05/block-image.jpg')");
     $stmt->bindValue(':content', $image_block_content, SQLITE3_TEXT);
+    $stmt->bindValue(':classic_image', $classic_image_content, SQLITE3_TEXT);
+    $stmt->bindValue(':classic_gallery', $classic_gallery_content, SQLITE3_TEXT);
     $stmt->execute();
     $db->close();
 }
@@ -1502,33 +1508,58 @@ PHP);
 $db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
 $res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type NOT IN ('attachment', 'revision') AND post_content <> ''");
 $findings = [];
-while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
-    if (!preg_match_all('/<!--\s*wp:image\s+(\{.*?\})\s*-->/', (string)$row['post_content'], $matches)) {
-        continue;
+$reported = [];
+$record_missing_attachment = function (array $row, int $attachment_id, string $field, string $block_name, string $reason) use ($db, &$findings, &$reported): void {
+    if ($attachment_id <= 0) {
+        return;
     }
-    foreach ($matches[1] as $raw_attrs) {
-        $attrs = json_decode($raw_attrs, true);
-        if (!is_array($attrs) || empty($attrs['id'])) {
-            continue;
+    $key = (string)$row['ID'] . ':' . (string)$attachment_id;
+    if (isset($reported[$key])) {
+        return;
+    }
+    $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $attachment_id AND post_type = 'attachment'");
+    if ($exists !== 0) {
+        return;
+    }
+    $reported[$key] = true;
+    $findings[] = [
+        'plugin' => 'forkpress-wp-image-block-refs',
+        'object' => 'post:' . $row['ID'],
+        'reason' => $reason,
+        'type' => 'plugin-wp-image-block-missing-attachment',
+        'tables' => ['wp_posts'],
+        'validator' => 'forkpress-wp-image-block-refs@1',
+        'candidate' => [
+            'post_id' => (int)$row['ID'],
+            'block_name' => $block_name,
+            'field' => $field,
+            'missing_object_id' => $attachment_id,
+            'object_type' => 'attachment',
+        ],
+    ];
+};
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    $content = (string)$row['post_content'];
+    if (preg_match_all('/<!--\s*wp:image\s+(\{.*?\})\s*-->/', $content, $matches)) {
+        foreach ($matches[1] as $raw_attrs) {
+            $attrs = json_decode($raw_attrs, true);
+            if (!is_array($attrs) || empty($attrs['id'])) {
+                continue;
+            }
+            $record_missing_attachment($row, (int)$attrs['id'], 'attrs.id', 'core/image', 'image block references a missing attachment');
         }
-        $attachment_id = (int)$attrs['id'];
-        $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $attachment_id AND post_type = 'attachment'");
-        if ($exists === 0) {
-            $findings[] = [
-                'plugin' => 'forkpress-wp-image-block-refs',
-                'object' => 'post:' . $row['ID'],
-                'reason' => 'image block references a missing attachment',
-                'type' => 'plugin-wp-image-block-missing-attachment',
-                'tables' => ['wp_posts'],
-                'validator' => 'forkpress-wp-image-block-refs@1',
-                'candidate' => [
-                    'post_id' => (int)$row['ID'],
-                    'block_name' => 'core/image',
-                    'field' => 'attrs.id',
-                    'missing_object_id' => $attachment_id,
-                    'object_type' => 'attachment',
-                ],
-            ];
+    }
+    if (preg_match_all('/\b(?:wp-image|wp-att|attachment)[_-](\d+)\b/i', $content, $class_matches)) {
+        foreach ($class_matches[1] as $id) {
+            $record_missing_attachment($row, (int)$id, 'class.wp-image', 'classic/image', 'classic image content references a missing attachment');
+        }
+    }
+    if (preg_match_all('/\[gallery\b[^\]]*\bids\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s\]]+))/i', $content, $gallery_matches, PREG_SET_ORDER)) {
+        foreach ($gallery_matches as $match) {
+            $ids = $match[1] ?? $match[2] ?? $match[3] ?? '';
+            foreach (preg_split('/\s*,\s*/', (string)$ids, -1, PREG_SPLIT_NO_EMPTY) as $index => $id) {
+                $record_missing_attachment($row, (int)$id, 'shortcode.gallery.ids.' . (string)$index, 'classic/gallery', 'classic gallery shortcode references a missing attachment');
+            }
         }
     }
 }
@@ -1551,6 +1582,8 @@ PHP);
     $db = open_db($image_block_target);
     $db->exec("UPDATE wp_posts SET post_title = 'Target page still using deleted image block attachment' WHERE ID = 70");
     $db->exec("UPDATE wp_posts SET post_title = 'Target CPT still using deleted image block attachment' WHERE ID = 75");
+    $db->exec("UPDATE wp_posts SET post_title = 'Target page still using deleted classic image attachment' WHERE ID = 76");
+    $db->exec("UPDATE wp_posts SET post_title = 'Target page still using deleted classic gallery attachment' WHERE ID = 77");
     $db->close();
 
     $image_block_result = cow_merge_branch_state(
@@ -1567,23 +1600,31 @@ PHP);
 
     assert_same($image_block_result['status'], 'completed_with_conflicts', 'WordPress image block validator holds missing attachments for review');
     assert_same((int)($image_block_result['plugin_validators'] ?? 0), 1, 'WordPress image block validator is discovered from mu-plugins during merge');
-    assert_same((int)($image_block_result['plugin_validator_conflicts'] ?? 0), 2, 'WordPress image block validator records missing attachment refs in page and custom post type content');
+    assert_same((int)($image_block_result['plugin_validator_conflicts'] ?? 0), 4, 'WordPress image block validator records missing attachment refs in block, classic image, and gallery content');
     assert_same((int)scalar($image_block_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 71'), 0, 'WordPress image block validator leaves the source attachment deletion staged for review');
     assert_true(!file_exists($image_block_target_root . '/wp-content/uploads/2026/05/block-image.jpg'), 'WordPress image block validator leaves the source upload deletion staged for review');
     assert_same(scalar($image_block_target, 'SELECT post_title FROM wp_posts WHERE ID = 70'), 'Target page still using deleted image block attachment', 'WordPress image block validator preserves the target page edit');
     assert_same(scalar($image_block_target, 'SELECT post_title FROM wp_posts WHERE ID = 75'), 'Target CPT still using deleted image block attachment', 'WordPress image block validator preserves the target custom post type edit');
+    assert_same(scalar($image_block_target, 'SELECT post_title FROM wp_posts WHERE ID = 76'), 'Target page still using deleted classic image attachment', 'WordPress image block validator preserves the target classic image edit');
+    assert_same(scalar($image_block_target, 'SELECT post_title FROM wp_posts WHERE ID = 77'), 'Target page still using deleted classic gallery attachment', 'WordPress image block validator preserves the target classic gallery edit');
     assert_true(str_contains((string)scalar($image_block_target, 'SELECT post_content FROM wp_posts WHERE ID = 70'), '"id":71'), 'WordPress image block validator keeps the stale block attachment reference visible for review');
     assert_true(str_contains((string)scalar($image_block_target, 'SELECT post_content FROM wp_posts WHERE ID = 75'), '"id":71'), 'WordPress image block validator keeps the stale custom post type block attachment reference visible for review');
+    assert_true(str_contains((string)scalar($image_block_target, 'SELECT post_content FROM wp_posts WHERE ID = 76'), 'wp-image-71'), 'WordPress image block validator keeps the stale classic image reference visible for review');
+    assert_true(str_contains((string)scalar($image_block_target, 'SELECT post_content FROM wp_posts WHERE ID = 77'), 'ids="71"'), 'WordPress image block validator keeps the stale classic gallery reference visible for review');
 
     $image_block_audit = cow_merge_audit_report($image_block_metadata, (int)$image_block_result['run_id'], 10, [
         'scope' => 'plugin',
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-image-block-missing-attachment',
     ]);
-    assert_same(count($image_block_audit['conflicts']), 2, 'WordPress image block validator exposes missing page and custom post type attachments as plugin-scoped audit conflicts');
+    assert_same(count($image_block_audit['conflicts']), 4, 'WordPress image block validator exposes missing block and classic content attachments as plugin-scoped audit conflicts');
     $image_block_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $image_block_audit['conflicts']));
     assert_true(str_contains($image_block_preview, '"missing_object_id":71'), 'WordPress image block audit includes the missing attachment ID');
     assert_true(str_contains($image_block_preview, '"post_id":75'), 'WordPress image block audit includes the custom post type owner ID');
+    assert_true(str_contains($image_block_preview, '"post_id":76'), 'WordPress image block audit includes the classic image owner ID');
+    assert_true(str_contains($image_block_preview, '"post_id":77'), 'WordPress image block audit includes the classic gallery owner ID');
+    assert_true(str_contains($image_block_preview, '"field":"class.wp-image"'), 'WordPress image block audit includes the classic wp-image field');
+    assert_true(str_contains($image_block_preview, '"field":"shortcode.gallery.ids.0"'), 'WordPress image block audit includes the classic gallery shortcode field');
     assert_true(
         str_contains($image_block_preview, '"block_name":"core/image"') || str_contains($image_block_preview, '"block_name":"core\/image"'),
         'WordPress image block audit includes the block name'

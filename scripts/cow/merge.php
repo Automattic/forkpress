@@ -5414,6 +5414,47 @@ function cow_merge_wordpress_post_content_blocks(string $content): array {
     return $blocks;
 }
 
+function cow_merge_wordpress_post_content_legacy_attachment_refs(string $content): array {
+    if ($content === '') {
+        return [];
+    }
+
+    $refs = [];
+    $seen = [];
+    $add_ref = static function (mixed $id, string $label) use (&$refs, &$seen): void {
+        if (!is_int($id) && !(is_string($id) && preg_match('/^\d+$/', $id))) {
+            return;
+        }
+        $id = (int)$id;
+        if ($id <= 0) {
+            return;
+        }
+        $key = $label . ':' . $id;
+        if (isset($seen[$key])) {
+            return;
+        }
+        $seen[$key] = true;
+        $refs[] = ['id' => $id, 'label' => $label];
+    };
+
+    if (preg_match_all('/\b(?:wp-image|wp-att|attachment)[_-](\d+)\b/i', $content, $matches)) {
+        foreach ($matches[1] as $index => $id) {
+            $add_ref($id, 'classic.attachment-ref.' . (string)$index);
+        }
+    }
+
+    if (preg_match_all('/\[(gallery|playlist)\b[^\]]*\bids\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s\]]+))/i', $content, $matches, PREG_SET_ORDER)) {
+        foreach ($matches as $shortcode_index => $match) {
+            $ids = $match[2] ?? $match[3] ?? $match[4] ?? '';
+            foreach (preg_split('/\s*,\s*/', (string)$ids, -1, PREG_SPLIT_NO_EMPTY) as $id_index => $id) {
+                $add_ref($id, 'shortcode.' . strtolower((string)$match[1]) . '.ids.' . (string)$shortcode_index . '.' . (string)$id_index);
+            }
+        }
+    }
+
+    return $refs;
+}
+
 function cow_merge_wordpress_post_content_reference_violation(
     SQLite3 $source,
     SQLite3 $target,
@@ -5472,6 +5513,13 @@ function cow_merge_wordpress_post_content_reference_violation(
     };
 
     $blocks = cow_merge_wordpress_post_content_blocks($content);
+    foreach (cow_merge_wordpress_post_content_legacy_attachment_refs($content) as $ref) {
+        $violation = $check_post($ref['id'], (string)$ref['label']);
+        if ($violation !== null) {
+            return $violation;
+        }
+    }
+
     if (!$blocks) {
         return null;
     }
