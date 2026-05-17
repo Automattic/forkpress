@@ -796,6 +796,32 @@ PHP);
         $logical_identity_event_group_counts[(string)$group['group_key']] = (int)$group['event_count'];
     }
     assert_true(($logical_identity_event_group_counts['{"kind":"plugin-child","slug":"child-before-rerun"}'] ?? 0) >= 1, 'plugin audit can group conflict events by logical identity');
+    $resolution_meta = open_db($metadata);
+    cow_merge_record_resolution(
+        $resolution_meta,
+        $logical_identity_conflict_id,
+        'target',
+        false,
+        'reviewed plugin logical identity without applying',
+        'cow-test',
+        $target,
+        '__plugins__',
+        (string)scalar($metadata, "SELECT row_identity FROM merge_conflicts WHERE id = $logical_identity_conflict_id"),
+        '',
+        ['state' => 'target-before-review'],
+        ['state' => 'target-after-review']
+    );
+    $resolution_meta->close();
+    $logical_identity_resolution_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'records' => 'resolutions',
+        'plugin_logical_identity' => '{"slug":"child-before-rerun","kind":"plugin-child"}',
+    ]);
+    assert_true(count($logical_identity_resolution_audit['resolutions']) >= 1, 'plugin logical-identity filter applies to resolution queues');
+    assert_same(
+        $logical_identity_resolution_audit['resolutions'][0]['plugin_logical_identity']['slug'] ?? null,
+        'child-before-rerun',
+        'plugin resolution rows expose structured logical identity metadata from the conflict'
+    );
 
     $serialized_base_root = $tmp . '/serialized-base';
     $serialized_source_root = $tmp . '/serialized-source';

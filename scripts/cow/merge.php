@@ -13573,7 +13573,7 @@ function cow_merge_audit_add_plugin_fields(array $rows): array {
         if (($row['table_name'] ?? null) !== '__plugins__') {
             continue;
         }
-        $payload_json = $row['chosen_payload'] ?? null;
+        $payload_json = $row['plugin_payload'] ?? ($row['chosen_payload'] ?? null);
         if (!is_string($payload_json) || $payload_json === '') {
             continue;
         }
@@ -15071,14 +15071,14 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
         if ($filters['records'] === 'all' || $filters['records'] === 'resolutions') {
             [$resolution_filter, $resolution_params] = cow_merge_audit_resolution_where_sql($run_id, $filters, $review_notes_exist);
             $resolution_params[':limit'] = $limit;
-            $report['resolutions'] = cow_merge_audit_add_payload_previews(cow_merge_audit_table_rows(
+            $report['resolutions'] = cow_merge_audit_add_plugin_fields(cow_merge_audit_add_payload_previews(cow_merge_audit_table_rows(
                 $db,
                 'merge_resolutions',
                 "SELECT mr.id, mr.conflict_id, c.run_id, $event_conflict_key_select, mr.choice, mr.applied, mr.status, mr.reviewer, mr.note, mr.target_db, " .
-                "mr.table_name, mr.row_identity, mr.column_name, mr.previous_payload AS target_payload, mr.resolved_payload AS chosen_payload, mr.created_at$resolution_review_select " .
+                "mr.table_name, mr.row_identity, mr.column_name, mr.previous_payload AS target_payload, mr.resolved_payload AS chosen_payload, c.chosen_payload AS plugin_payload, mr.created_at$resolution_review_select " .
                 "FROM merge_resolutions mr JOIN merge_conflicts c ON c.id = mr.conflict_id $resolution_filter ORDER BY mr.id DESC LIMIT :limit",
                 $resolution_params
-            ));
+            )));
             if ($filters['group_by'] !== 'none') {
                 $group_expr = cow_merge_audit_resolution_group_sql($filters['group_by']);
                 $report['resolution_groups'] = cow_merge_audit_table_rows(
@@ -15387,6 +15387,7 @@ function cow_merge_print_audit_text(array $report): void {
             $applied = ((int)$resolution['applied']) === 1 ? 'yes' : 'no';
             echo "  #{$resolution['id']} conflict={$resolution['conflict_id']} run={$resolution['run_id']} {$resolution['choice']} $object status={$resolution['status']} applied=$applied reviewer={$resolution['reviewer']}\n";
             cow_merge_print_audit_review_text($resolution, $filters, 'review-note');
+            cow_merge_print_plugin_audit_text($resolution);
             echo "     note=" . cow_merge_audit_truncate((string)$resolution['note'], 240) . "\n";
             echo "     previous={$resolution['target_preview']}\n";
             echo "     resolved={$resolution['chosen_preview']}\n";
