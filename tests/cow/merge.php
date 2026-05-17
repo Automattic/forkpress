@@ -15494,8 +15494,35 @@ SQL);
     $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_media_image', :value, 'yes')");
     $stmt->bindValue(':value', $band_explicit_ref_media_widget, SQLITE3_TEXT);
     $stmt->execute();
+    $band_explicit_ref_audio_widget = serialize([
+        4 => [
+            'attachment_id' => 6,
+            'caption' => 'Imported audio widget behind held explicit attachment',
+        ],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_media_audio', :value, 'yes')");
+    $stmt->bindValue(':value', $band_explicit_ref_audio_widget, SQLITE3_TEXT);
+    $stmt->execute();
+    $band_explicit_ref_video_widget = serialize([
+        5 => [
+            'attachment_id' => 6,
+            'caption' => 'Imported video widget behind held explicit attachment',
+        ],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_media_video', :value, 'yes')");
+    $stmt->bindValue(':value', $band_explicit_ref_video_widget, SQLITE3_TEXT);
+    $stmt->execute();
+    $band_explicit_ref_gallery_widget = serialize([
+        6 => [
+            'ids' => [6],
+            'caption' => 'Imported gallery widget behind held explicit attachment',
+        ],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_media_gallery', :value, 'yes')");
+    $stmt->bindValue(':value', $band_explicit_ref_gallery_widget, SQLITE3_TEXT);
+    $stmt->execute();
     $band_explicit_ref_widget_block = serialize([
-        3 => [
+        7 => [
             'content' => '<!-- wp:image {"id":6,"sizeSlug":"large"} --><figure class="wp-block-image size-large"><img class="wp-image-6"/></figure><!-- /wp:image -->',
         ],
         '_multiwidget' => 1,
@@ -15568,6 +15595,9 @@ SQL);
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'sticky_posts'"), 0, 'serialized options pointing at a held explicit source post are not applied automatically');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'theme_mods_imported_post_refs'"), 0, 'theme mods pointing at a held explicit source attachment are not applied automatically');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'widget_media_image'"), 0, 'media widgets pointing at a held explicit source attachment are not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'widget_media_audio'"), 0, 'audio widgets pointing at a held explicit source attachment are not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'widget_media_video'"), 0, 'video widgets pointing at a held explicit source attachment are not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'widget_media_gallery'"), 0, 'gallery widgets pointing at a held explicit source attachment are not applied automatically');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'widget_block'"), 0, 'block widgets pointing at a held explicit source attachment are not applied automatically');
     assert_same(scalar($band_explicit_ref_target, "SELECT option_value FROM wp_options WHERE option_name = 'page_for_posts'"), '1', 'updated scalar options pointing at a held explicit source post are not applied automatically');
     assert_same(scalar($band_explicit_ref_target, "SELECT option_value FROM wp_options WHERE option_name = 'site_icon'"), '1', 'updated site icons pointing at a held explicit source attachment are not applied automatically');
@@ -15591,7 +15621,7 @@ SQL);
     );
     assert_same(
         (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND c.table_name = 'wp_options' AND c.conflict_type = 'row-target-constraint'"),
-        8,
+        11,
         'options pointing at a held explicit source post record reviewable row conflicts'
     );
     assert_same(
@@ -15623,7 +15653,7 @@ SQL);
         'updated postmeta held behind an explicit source post explains that the source changed the row'
     );
     assert_true(
-        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_options' AND d.decision = 'target-wins' AND d.reason LIKE '%parent post must merge before child row%'") === 8,
+        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_options' AND d.decision = 'target-wins' AND d.reason LIKE '%parent post must merge before child row%'") === 11,
         'options held behind an explicit source post explain the missing parent'
     );
     assert_true(
