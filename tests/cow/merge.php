@@ -1948,6 +1948,19 @@ try {
     assert_same(count($unique_fk_blocked_event_audit['conflict_events']), 1, 'blocked source resolution attempts are recorded as conflict events');
     assert_same((int)$unique_fk_blocked_event_audit['conflict_events'][0]['conflict_id'], $unique_fk_conflict_id, 'blocked resolution event belongs to the attempted conflict');
     assert_true(str_contains((string)$unique_fk_blocked_event_audit['conflict_events'][0]['note'], 'Resolution blocked:'), 'blocked resolution event preserves the failure reason');
+    $unique_fk_blocked_event_cli = run_merge_cli([
+        'audit',
+        '--metadata-db', $unique_fk_metadata,
+        '--run', (string)$unique_fk_result['run_id'],
+        '--records=conflict-events',
+        '--event-type=resolution-blocked',
+        '--format=json',
+    ]);
+    assert_same($unique_fk_blocked_event_cli['status'], 0, 'resolution-blocked event audit CLI exits successfully');
+    $unique_fk_blocked_event_cli_json = json_decode($unique_fk_blocked_event_cli['output'], true);
+    assert_true(is_array($unique_fk_blocked_event_cli_json), 'resolution-blocked event audit CLI emits JSON');
+    assert_same($unique_fk_blocked_event_cli_json['filters']['event_type'] ?? null, 'resolution-blocked', 'resolution-blocked event audit CLI preserves the event filter');
+    assert_same(count($unique_fk_blocked_event_cli_json['conflict_events'] ?? []), 1, 'resolution-blocked event audit CLI returns the blocked resolution event');
     $db = open_db($unique_fk_target);
     $db->exec('DELETE FROM plugin_unique_fk_children WHERE row_id = 200');
     $db->close();
