@@ -868,6 +868,22 @@ PHP);
         'conflict_type' => 'plugin-wp-block-missing-reference',
     ]);
     assert_same(count($audit['conflicts']), 4, 'WordPress block-reference validator exposes missing refs as plugin-scoped audit conflicts');
+    assert_same($audit['conflicts'][0]['semantic_scope'] ?? null, 'wordpress', 'WordPress block-reference audit exposes semantic scope');
+    $semantic_scope_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'semantic_scope' => 'wordpress',
+        'records' => 'conflicts',
+    ]);
+    assert_same($semantic_scope_audit['filters']['scope'], 'plugin', 'WordPress semantic-scope filter defaults to plugin audit scope');
+    assert_same(count($semantic_scope_audit['conflicts']), 4, 'WordPress semantic-scope filter returns built-in WordPress semantic findings');
+    $plugin_scope_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'semantic_scope' => 'plugin',
+        'records' => 'conflicts',
+    ]);
+    assert_same(count($plugin_scope_audit['conflicts']), 0, 'WordPress semantic-scope filter excludes ordinary plugin semantic findings');
+    ob_start();
+    cow_merge_print_audit_text($semantic_scope_audit);
+    $semantic_scope_text = ob_get_clean();
+    assert_true(str_contains($semantic_scope_text, 'semantic-scope=wordpress'), 'WordPress semantic-scope is visible in text audit output');
     $preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $audit['conflicts']));
     assert_true(str_contains($preview, '"missing_ref":30'), 'WordPress block-reference audit includes the missing reusable block ID');
     assert_true(str_contains($preview, '"missing_ref":32'), 'WordPress block-reference audit includes the missing synced pattern ID');
