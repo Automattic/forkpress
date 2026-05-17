@@ -7429,8 +7429,7 @@ function cow_merge_plugin_validator_command(string $validator): array {
     return [$validator];
 }
 
-function cow_merge_run_plugin_validator(string $metadata_db, int $run_id, string $validator): array {
-    $command = cow_merge_plugin_validator_command($validator);
+function cow_merge_plugin_validator_env(string $metadata_db, int $run_id): array {
     $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READWRITE | SQLITE3_OPEN_CREATE);
     try {
         cow_merge_ensure_metadata($meta);
@@ -7442,7 +7441,7 @@ function cow_merge_run_plugin_validator(string $metadata_db, int $run_id, string
         throw new InvalidArgumentException("merge run #$run_id does not exist in merge metadata");
     }
 
-    $env = array_merge($_ENV, [
+    return array_merge($_ENV, [
         'FORKPRESS_MERGE_METADATA_DB' => $metadata_db,
         'FORKPRESS_MERGE_RUN' => (string)$run_id,
         'FORKPRESS_MERGE_SOURCE_BRANCH' => $context['source_branch'],
@@ -7456,6 +7455,11 @@ function cow_merge_run_plugin_validator(string $metadata_db, int $run_id, string
         'FORKPRESS_MERGE_TARGET_ROOT' => $context['target_db'] === '' ? '' : cow_merge_branch_root_from_db_path($context['target_db']),
         'FORKPRESS_MERGE_TARGET_BEFORE_ROOT' => $context['target_before_root'],
     ]);
+}
+
+function cow_merge_collect_plugin_validator_findings(string $metadata_db, int $run_id, string $validator): array {
+    $command = cow_merge_plugin_validator_command($validator);
+    $env = cow_merge_plugin_validator_env($metadata_db, $run_id);
     $shell_command = implode(' ', array_map('escapeshellarg', $command));
     $pipes = [];
     $process = proc_open(
@@ -7483,10 +7487,48 @@ function cow_merge_run_plugin_validator(string $metadata_db, int $run_id, string
         throw new RuntimeException("plugin validator $validator exited with status $exit_status" . ($stderr === '' ? '' : ": $stderr"));
     }
     $decoded = cow_merge_decode_plugin_validator_stdout(is_string($stdout) ? $stdout : '', $validator);
+    return [
+        'validator' => $validator,
+        'validator_status' => $decoded['validator_status'],
+        'findings' => $decoded['findings'],
+    ];
+}
+
+function cow_merge_run_plugin_validator(string $metadata_db, int $run_id, string $validator): array {
+    $decoded = cow_merge_collect_plugin_validator_findings($metadata_db, $run_id, $validator);
     $result = cow_merge_record_plugin_validator_conflicts($metadata_db, $run_id, $decoded['findings']);
-    $result['validator'] = $validator;
+    $result['validator'] = $decoded['validator'];
     $result['validator_status'] = $decoded['validator_status'];
     return $result;
+}
+
+function cow_merge_plugin_validator_fingerprints(array $validators): array {
+    $fingerprints = [];
+    foreach ($validators as $validator) {
+        $validator = (string)$validator;
+        cow_merge_plugin_validator_command($validator);
+        $hash = hash_file('sha256', $validator);
+        if (!is_string($hash)) {
+            throw new RuntimeException("failed to fingerprint plugin validator: $validator");
+        }
+        $fingerprints[$validator] = $hash;
+    }
+    return $fingerprints;
+}
+
+function cow_merge_assert_plugin_validators_unchanged(array $fingerprints): void {
+    foreach ($fingerprints as $validator => $expected_hash) {
+        if (!is_file((string)$validator)) {
+            throw new RuntimeException("plugin driver changed discovered validator $validator: validator file is missing");
+        }
+        $hash = hash_file('sha256', (string)$validator);
+        if (!is_string($hash)) {
+            throw new RuntimeException("failed to fingerprint plugin validator: $validator");
+        }
+        if (!hash_equals((string)$expected_hash, $hash)) {
+            throw new RuntimeException("plugin driver changed discovered validator $validator; refusing to trust postflight validation");
+        }
+    }
 }
 
 function cow_merge_plugin_driver_identity(?string $value): string {
@@ -7673,6 +7715,78 @@ function cow_merge_write_plugin_driver_context_file(string $metadata_db, array $
     return $path;
 }
 
+function cow_merge_assert_plugin_driver_cleared_finding(
+    string $metadata_db,
+    int $run_id,
+    int $conflict_id,
+    string $conflict_type,
+    string $target_db,
+    string $target_root,
+    array $payload,
+    ?array $validators = null
+): void {
+    $validators = $validators ?? cow_merge_discover_plugin_validators($target_db, $target_root);
+    if ($validators === []) {
+        return;
+    }
+
+    $expected_plugin = (string)($payload['plugin'] ?? '');
+    $expected_object = (string)($payload['object'] ?? '');
+    $expected_type = $conflict_type !== '' ? $conflict_type : 'plugin-validator-conflict';
+    $expected_logical_identity = null;
+    if (array_key_exists('logical_identity', $payload)) {
+        $expected_logical_identity = cow_merge_audit_canonical_json_key($payload['logical_identity']);
+    }
+    foreach ($validators as $validator) {
+        $result = cow_merge_collect_plugin_validator_findings(
+            $metadata_db,
+            $run_id,
+            $validator
+        );
+        foreach ($result['findings'] as $finding) {
+            if (!is_array($finding)) {
+                continue;
+            }
+            $plugin = trim((string)($finding['plugin'] ?? ''));
+            $object = trim((string)($finding['object'] ?? ''));
+            $type = trim((string)($finding['type'] ?? 'plugin-validator-conflict'));
+            $logical_identity = null;
+            if ($expected_logical_identity !== null && array_key_exists('logical_identity', $finding)) {
+                $logical_identity = cow_merge_audit_canonical_json_key(
+                    cow_merge_plugin_validator_logical_identity($finding)
+                );
+            }
+            $same_object = $object === $expected_object;
+            $same_logical_identity = $expected_logical_identity !== null
+                && $logical_identity !== null
+                && hash_equals($expected_logical_identity, $logical_identity);
+            if ($plugin === $expected_plugin && $type === $expected_type && ($same_object || $same_logical_identity)) {
+                throw new RuntimeException(
+                    'plugin driver applied result did not clear validator conflict #'
+                    . $conflict_id
+                    . ": validator $validator still reports $type for $plugin $object"
+                    . ($same_logical_identity && !$same_object ? ' with the same logical identity' : '')
+                );
+            }
+        }
+    }
+}
+
+function cow_merge_assert_plugin_driver_cleared_conflict(string $metadata_db, array $context, ?array $validators = null): void {
+    $merge_context = is_array($context['merge'] ?? null) ? $context['merge'] : [];
+    $payload = is_array($context['payloads']['chosen'] ?? null) ? $context['payloads']['chosen'] : [];
+    cow_merge_assert_plugin_driver_cleared_finding(
+        $metadata_db,
+        (int)$context['run_id'],
+        (int)$context['conflict_id'],
+        (string)($context['conflict_type'] ?? 'plugin-validator-conflict'),
+        (string)($merge_context['target_db'] ?? ''),
+        (string)($merge_context['target_root'] ?? ''),
+        $payload,
+        $validators
+    );
+}
+
 function cow_merge_run_plugin_driver(
     string $metadata_db,
     int $conflict_id,
@@ -7694,6 +7808,8 @@ function cow_merge_run_plugin_driver(
     $plugin_context = is_array($context['plugin'] ?? null) ? $context['plugin'] : [];
     $target_db = (string)$merge_context['target_db'];
     $target_root = (string)$merge_context['target_root'];
+    $postflight_validators = cow_merge_discover_plugin_validators($target_db, $target_root);
+    $postflight_validator_fingerprints = cow_merge_plugin_validator_fingerprints($postflight_validators);
     $target_snapshot = $target_db !== '' && is_file($target_db)
         ? cow_merge_snapshot_sqlite_db($target_db)
         : null;
@@ -7771,6 +7887,10 @@ function cow_merge_run_plugin_driver(
             )
         ) {
             throw new RuntimeException("plugin driver $driver emitted validated status but mutated target DB or files; emit applied status for mutating repairs");
+        }
+        if ((bool)$decoded['applied']) {
+            cow_merge_assert_plugin_validators_unchanged($postflight_validator_fingerprints);
+            cow_merge_assert_plugin_driver_cleared_conflict($metadata_db, $context, $postflight_validators);
         }
         cow_merge_failpoint('before-plugin-driver-resolution');
         $resolution = cow_merge_record_plugin_driver_resolution(
@@ -7885,6 +8005,18 @@ function cow_merge_record_plugin_driver_resolution(
         cow_merge_require_current_plugin_validator_conflict($meta, $conflict, 'record-plugin-driver-resolution');
         if ($previous_payload === null) {
             $previous_payload = cow_merge_decode_payload_json((string)$conflict['chosen_payload'], 'plugin conflict');
+        }
+        if ($applied) {
+            $target_db = (string)$conflict['target_db'];
+            cow_merge_assert_plugin_driver_cleared_finding(
+                $metadata_db,
+                (int)$conflict['run_id'],
+                $conflict_id,
+                (string)$conflict['conflict_type'],
+                $target_db,
+                $target_db === '' ? '' : cow_merge_branch_root_from_db_path($target_db),
+                cow_merge_decode_payload_json((string)$conflict['chosen_payload'], 'plugin conflict')
+            );
         }
         $resolved_payload = [
             'driver' => $driver,
@@ -18772,7 +18904,7 @@ function cow_merge_parse_cli(array $argv, array $required, int $start_index = 1)
             $args[$key] = $value;
             continue;
         }
-        if (in_array($key, ['id-band-skips', 'target-kept', 'review', 'revalidate', 'apply', 'apply-reviewed', 'after-revalidate', 'restore-target-db', 'restore-files', 'quiet', 'fail-on-unresolved'], true) && (!isset($argv[$i + 1]) || str_starts_with($argv[$i + 1], '--'))) {
+        if (in_array($key, ['id-band-skips', 'target-kept', 'review', 'revalidate', 'apply', 'apply-reviewed', 'after-revalidate', 'applied', 'restore-target-db', 'restore-files', 'quiet', 'fail-on-unresolved'], true) && (!isset($argv[$i + 1]) || str_starts_with($argv[$i + 1], '--'))) {
             $args[$key] = '1';
             continue;
         }
