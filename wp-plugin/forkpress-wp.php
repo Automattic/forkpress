@@ -876,7 +876,7 @@ function forkpress_branch_run_cli(array $args): array {
 
 function forkpress_branch_wants_json(): bool {
     $action = $_REQUEST['action'] ?? '';
-    if (is_string($action) && in_array($action, ['forkpress_branch_create', 'forkpress_branch_merge', 'forkpress_branch_conflicts', 'forkpress_branch_revalidate_conflicts', 'forkpress_branch_run_plugin_driver'], true)) {
+    if (is_string($action) && in_array($action, ['forkpress_branch_create', 'forkpress_branch_merge', 'forkpress_branch_conflicts', 'forkpress_branch_restore_crash', 'forkpress_branch_revalidate_conflicts', 'forkpress_branch_run_plugin_driver'], true)) {
         return true;
     }
 
@@ -1229,6 +1229,50 @@ function forkpress_handle_branch_conflicts(): void {
     );
 }
 add_action('admin_post_forkpress_branch_conflicts', 'forkpress_handle_branch_conflicts');
+
+function forkpress_handle_branch_restore_crash(): void {
+    if (!forkpress_branch_can_manage()) {
+        forkpress_branch_finish_action(forkpress_branch_url(forkpress_current_branch() ?: 'main', '/wp-admin/'), 'error', 'You cannot restore ForkPress merge crash recovery from this site.');
+    }
+    if (function_exists('check_admin_referer')) {
+        check_admin_referer('forkpress_branch_restore_crash');
+    }
+
+    $current = forkpress_current_branch() ?: 'main';
+    $run = forkpress_branch_post_int('run');
+    if ($run === null) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Choose a merge run to restore.');
+    }
+
+    [$code, $output] = forkpress_branch_run_cli(['recover-crash', '--run', (string) $run, '--restore-target-db', '--restore-files', '--format', 'json']);
+    if ($code !== 0) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', $output ?: 'ForkPress could not restore pending crash recovery.');
+    }
+
+    $result = json_decode($output, true);
+    if (!is_array($result)) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'ForkPress returned invalid crash recovery restore JSON.');
+    }
+
+    $restored = max(0, (int)($result['restored'] ?? 0));
+    $pending = max(0, (int)($result['pending'] ?? 0));
+    $message = $restored > 0
+        ? 'Restored pending crash recovery for merge run ' . $run . '.'
+        : 'No pending crash recovery artifacts were restored for merge run ' . $run . '.';
+    forkpress_branch_finish_action(
+        forkpress_branch_url($current, '/wp-admin/'),
+        $pending > 0 ? 'warning' : 'notice',
+        $message,
+        [
+            'run' => $run,
+            'restored' => $restored,
+            'pending' => $pending,
+            'recovery' => $result,
+            'recoveryCommand' => 'forkpress branch recover-crash --run ' . $run . ' --restore-target-db --restore-files',
+        ]
+    );
+}
+add_action('admin_post_forkpress_branch_restore_crash', 'forkpress_handle_branch_restore_crash');
 
 function forkpress_handle_branch_revalidate_conflicts(): void {
     if (!forkpress_branch_can_manage()) {
@@ -1645,6 +1689,7 @@ function forkpress_render_branch_switcher(): void {
             'createNonce' => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_create') : '',
             'mergeNonce'  => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_merge') : '',
             'auditNonce'  => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_conflicts') : '',
+            'restoreCrashNonce' => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_restore_crash') : '',
             'revalidateNonce' => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_revalidate_conflicts') : '',
             'driverNonce' => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_run_plugin_driver') : '',
             'pluginDrivers' => array_map(
@@ -1788,6 +1833,16 @@ function forkpress_render_branch_switcher(): void {
                 });
                 appendConflictText(conflictList, 'forkpress-conflict-command', payload.recoveryCommand || '');
                 appendConflictText(conflictList, 'forkpress-conflict-command', payload.auditCommand || '');
+                if (payload.run && actions && actions.restoreCrashNonce) {
+                    var restoreButton = document.createElement('button');
+                    restoreButton.className = 'forkpress-switcher-button';
+                    restoreButton.type = 'button';
+                    restoreButton.textContent = 'Restore crash recovery';
+                    restoreButton.addEventListener('click', function () {
+                        fetchCrashRecoveryRestore(payload.run);
+                    });
+                    conflictList.appendChild(restoreButton);
+                }
                 return;
             }
             heading.textContent = 'Run ' + String(payload.run || '') + ': ' + String(payload.recordCount || records.length) + ' of ' + String(payload.totalConflicts || records.length) + ' conflicts';
@@ -2061,6 +2116,44 @@ function forkpress_render_branch_switcher(): void {
                 fetchConflictAudit(run, payload.message || '', { lifecycleState: 'needs-action' });
             }).catch(function (error) {
                 showStatus('error', error && error.message ? error.message : 'ForkPress conflict revalidation failed.');
+            });
+        }
+
+        function fetchCrashRecoveryRestore(run) {
+            if (!actions || !actions.restoreCrashNonce || !window.fetch || !window.FormData) {
+                return;
+            }
+            var body = new FormData();
+            body.append('action', 'forkpress_branch_restore_crash');
+            body.append('_wpnonce', actions.restoreCrashNonce);
+            body.append('run', String(run));
+            showStatus('warning', 'Restoring crash recovery...');
+            fetch(actions.url, {
+                method: 'POST',
+                body: body,
+                credentials: 'same-origin',
+                headers: {
+                    'Accept': 'application/json',
+                    'X-ForkPress-Async': '1'
+                }
+            }).then(function (response) {
+                return response.text().then(function (text) {
+                    var payload = null;
+                    try {
+                        payload = text ? JSON.parse(text) : null;
+                    } catch (error) {
+                        payload = null;
+                    }
+                    if (!response.ok || !payload || payload.success === false) {
+                        throw new Error(payload && payload.message ? payload.message : (text || 'ForkPress crash recovery restore failed.'));
+                    }
+                    return payload;
+                });
+            }).then(function (payload) {
+                showStatus(payload.type === 'warning' ? 'warning' : 'success', payload.message || 'Restored crash recovery.');
+                fetchConflictAudit(run, payload.message || '');
+            }).catch(function (error) {
+                showStatus('error', error && error.message ? error.message : 'ForkPress crash recovery restore failed.');
             });
         }
 

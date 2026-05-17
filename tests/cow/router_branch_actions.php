@@ -105,6 +105,7 @@ register_shutdown_function(static function() use ($tmp): void {
 });
 
 mkdir($main . '/wp-admin', 0777, true);
+mkdir($main . '/wp-content/plugins/sample-plugin', 0777, true);
 mkdir($feature, 0777, true);
 mkdir($cow, 0777, true);
 mkdir($work_dir, 0777, true);
@@ -112,6 +113,9 @@ file_put_contents($branch_list, "main\nfeature\n");
 file_put_contents($main . '/index.php', "<?php echo \"WORDPRESS INDEX\";\n");
 file_put_contents($main . '/wp-admin/admin.php', "<?php echo \"WORDPRESS ADMIN PAGE\";\n");
 file_put_contents($main . '/wp-admin/admin-post.php', "<?php echo \"WORDPRESS ADMIN POST\";\n");
+$driver_path = $main . '/wp-content/plugins/sample-plugin/forkpress-merge-driver.php';
+file_put_contents($driver_path, "<?php echo \"sample driver\";\n");
+$driver_key = hash('sha256', 'sample-plugin' . "\0" . realpath($driver_path));
 file_put_contents($fake_bin, <<<'PHP'
 #!/usr/bin/env php
 <?php
@@ -332,6 +336,64 @@ assert_same(
 );
 assert_true(!str_contains($pending_crash_audit['body'], 'WORDPRESS'), 'pending crash recovery router branch conflict audit does not reach WordPress admin-post');
 
+$restore_crash_output = json_encode(['restored' => 1, 'pending' => 0], JSON_UNESCAPED_SLASHES);
+$restore_crash = router_branch_action_request(
+    $child,
+    $branches,
+    $cow,
+    $router,
+    $branch_list,
+    $fake_bin,
+    $work_dir,
+    '/wp-admin/admin-post.php',
+    ['action' => 'forkpress_branch_restore_crash', 'run' => '42'],
+    true,
+    ['FORKPRESS_TEST_CLI_OUTPUT' => $restore_crash_output]
+);
+assert_same($restore_crash['exit'], 0, 'router branch crash restore exits cleanly');
+assert_same($restore_crash['status'], 200, 'router branch crash restore returns 200');
+assert_same($restore_crash['json']['success'] ?? null, true, 'router branch crash restore returns JSON success');
+assert_same($restore_crash['json']['restored'] ?? null, 1, 'router branch crash restore exposes restored count');
+assert_same($restore_crash['json']['pending'] ?? null, 0, 'router branch crash restore exposes pending count');
+assert_same(
+    $restore_crash['json']['recoveryCommand'] ?? null,
+    'forkpress branch recover-crash --run 42 --restore-target-db --restore-files',
+    'router branch crash restore exposes exact restore command'
+);
+assert_true(!str_contains($restore_crash['body'], 'WORDPRESS'), 'router branch crash restore does not reach WordPress admin-post');
+
+$invalid_restore_crash = router_branch_action_request(
+    $child,
+    $branches,
+    $cow,
+    $router,
+    $branch_list,
+    $fake_bin,
+    $work_dir,
+    '/wp-admin/admin-post.php',
+    ['action' => 'forkpress_branch_restore_crash', 'run' => 'abc']
+);
+assert_same($invalid_restore_crash['status'], 400, 'router branch crash restore rejects invalid run ids before CLI');
+assert_same($invalid_restore_crash['json']['message'] ?? null, 'Choose a merge run to restore.', 'router branch crash restore explains invalid run ids');
+assert_true(!str_contains($invalid_restore_crash['body'], 'WORDPRESS'), 'invalid router branch crash restore does not reach WordPress admin-post');
+
+$invalid_restore_json = router_branch_action_request(
+    $child,
+    $branches,
+    $cow,
+    $router,
+    $branch_list,
+    $fake_bin,
+    $work_dir,
+    '/wp-admin/admin-post.php',
+    ['action' => 'forkpress_branch_restore_crash', 'run' => '42'],
+    true,
+    ['FORKPRESS_TEST_CLI_OUTPUT' => 'not-json']
+);
+assert_same($invalid_restore_json['status'], 400, 'router branch crash restore rejects invalid CLI JSON');
+assert_same($invalid_restore_json['json']['message'] ?? null, 'ForkPress returned invalid crash recovery restore JSON.', 'router branch crash restore explains invalid CLI JSON');
+assert_true(!str_contains($invalid_restore_json['body'], 'WORDPRESS'), 'invalid JSON router branch crash restore does not reach WordPress admin-post');
+
 $invalid_audit = router_branch_action_request(
     $child,
     $branches,
@@ -442,6 +504,73 @@ assert_same($invalid_revalidation['status'], 400, 'async router branch conflict 
 assert_same($invalid_revalidation['json']['message'] ?? null, 'Choose a merge run to revalidate.', 'async router branch conflict revalidation explains invalid run ids');
 assert_true(!str_contains($invalid_revalidation['body'], 'WORDPRESS'), 'invalid async router branch conflict revalidation does not reach WordPress admin-post');
 
+$plugin_driver_output = json_encode([
+    'status' => 'completed',
+    'driver_status' => 'applied',
+], JSON_UNESCAPED_SLASHES);
+$plugin_driver = router_branch_action_request(
+    $child,
+    $branches,
+    $cow,
+    $router,
+    $branch_list,
+    $fake_bin,
+    $work_dir,
+    '/wp-admin/admin-post.php',
+    [
+        'action' => 'forkpress_branch_run_plugin_driver',
+        'conflict' => '77',
+        'driverKey' => $driver_key,
+        'run' => '42',
+    ],
+    true,
+    ['FORKPRESS_TEST_CLI_OUTPUT' => $plugin_driver_output]
+);
+assert_same($plugin_driver['status'], 200, 'async router plugin driver action returns 200');
+assert_same($plugin_driver['json']['success'] ?? null, true, 'async router plugin driver action returns JSON success');
+assert_same($plugin_driver['json']['driverStatus'] ?? null, 'applied', 'async router plugin driver action exposes driver status');
+assert_same($plugin_driver['json']['driverPlugin'] ?? null, 'sample-plugin', 'async router plugin driver action exposes approved plugin');
+assert_same($plugin_driver['json']['conflict'] ?? null, 77, 'async router plugin driver action exposes conflict id');
+assert_true(!str_contains($plugin_driver['body'], 'WORDPRESS'), 'async router plugin driver action does not reach WordPress admin-post');
+
+$invalid_plugin_driver_conflict = router_branch_action_request(
+    $child,
+    $branches,
+    $cow,
+    $router,
+    $branch_list,
+    $fake_bin,
+    $work_dir,
+    '/wp-admin/admin-post.php',
+    [
+        'action' => 'forkpress_branch_run_plugin_driver',
+        'conflict' => 'abc',
+        'driverKey' => $driver_key,
+    ]
+);
+assert_same($invalid_plugin_driver_conflict['status'], 400, 'async router plugin driver action rejects invalid conflict ids before CLI');
+assert_same($invalid_plugin_driver_conflict['json']['message'] ?? null, 'Choose a plugin conflict to repair.', 'async router plugin driver action explains invalid conflict ids');
+assert_true(!str_contains($invalid_plugin_driver_conflict['body'], 'WORDPRESS'), 'invalid async router plugin driver action does not reach WordPress admin-post');
+
+$invalid_plugin_driver_key = router_branch_action_request(
+    $child,
+    $branches,
+    $cow,
+    $router,
+    $branch_list,
+    $fake_bin,
+    $work_dir,
+    '/wp-admin/admin-post.php',
+    [
+        'action' => 'forkpress_branch_run_plugin_driver',
+        'conflict' => '77',
+        'driverKey' => 'not-approved',
+    ]
+);
+assert_same($invalid_plugin_driver_key['status'], 400, 'async router plugin driver action rejects unknown driver keys before CLI');
+assert_same($invalid_plugin_driver_key['json']['message'] ?? null, 'Choose an approved plugin merge driver.', 'async router plugin driver action explains unknown driver keys');
+assert_true(!str_contains($invalid_plugin_driver_key['body'], 'WORDPRESS'), 'unknown-driver async router plugin driver action does not reach WordPress admin-post');
+
 $invalid = router_branch_action_request(
     $child,
     $branches,
@@ -505,12 +634,15 @@ assert_same($argv_log[2] ?? null, ['branch', '--work-dir', $work_dir, 'merge', '
 assert_same($argv_log[3] ?? null, ['branch', '--work-dir', $work_dir, 'merge-audit', '--records', 'crash-recovery', '--run', '42', '--format', 'json'], 'router branch conflict audit checks crash recovery first');
 assert_same($argv_log[4] ?? null, ['branch', '--work-dir', $work_dir, 'merge-audit', '--records', 'conflicts', '--run', '42', '--format', 'json'], 'router branch conflict audit invokes structured audit CLI command');
 assert_same($argv_log[5] ?? null, ['branch', '--work-dir', $work_dir, 'merge-audit', '--records', 'crash-recovery', '--run', '42', '--format', 'json'], 'pending crash recovery router branch conflict audit checks crash recovery');
-assert_same($argv_log[6] ?? null, ['branch', '--work-dir', $work_dir, 'merge-audit', '--records', 'crash-recovery', '--run', '42', '--format', 'json'], 'filtered router branch conflict audit checks crash recovery first');
-assert_same($argv_log[7] ?? null, ['branch', '--work-dir', $work_dir, 'merge-audit', '--records', 'conflicts', '--run', '42', '--format', 'json', '--scope', 'plugin', '--lifecycle-state', 'needs-action', '--next-action', 'revalidate'], 'router branch conflict audit invokes filtered structured audit CLI command');
-assert_same($argv_log[8] ?? null, ['branch', '--work-dir', $work_dir, 'merge-audit', '--revalidate', '--run', '42', '--reviewer', 'wordpress-ui', '--format', 'json'], 'router branch conflict revalidation invokes structured revalidate CLI command');
-assert_same($argv_log[9] ?? null, ['branch', '--work-dir', $work_dir, 'create', 'html_fallback', '--from', 'main'], 'non-async router branch create invokes safe CLI command');
-assert_same($argv_log[10] ?? null, ['branch', '--work-dir', $work_dir, 'create', 'admin_page_created', '--from', 'main'], 'admin-page router branch create invokes safe CLI command');
-assert_same(count($argv_log), 11, 'invalid branch action requests do not invoke router CLI path');
+assert_same($argv_log[6] ?? null, ['branch', '--work-dir', $work_dir, 'recover-crash', '--run', '42', '--restore-target-db', '--restore-files', '--format', 'json'], 'router branch crash restore invokes structured recover-crash CLI command');
+assert_same($argv_log[7] ?? null, ['branch', '--work-dir', $work_dir, 'recover-crash', '--run', '42', '--restore-target-db', '--restore-files', '--format', 'json'], 'router branch crash restore invalid JSON path invokes structured recover-crash CLI command');
+assert_same($argv_log[8] ?? null, ['branch', '--work-dir', $work_dir, 'merge-audit', '--records', 'crash-recovery', '--run', '42', '--format', 'json'], 'filtered router branch conflict audit checks crash recovery first');
+assert_same($argv_log[9] ?? null, ['branch', '--work-dir', $work_dir, 'merge-audit', '--records', 'conflicts', '--run', '42', '--format', 'json', '--scope', 'plugin', '--lifecycle-state', 'needs-action', '--next-action', 'revalidate'], 'router branch conflict audit invokes filtered structured audit CLI command');
+assert_same($argv_log[10] ?? null, ['branch', '--work-dir', $work_dir, 'merge-audit', '--revalidate', '--run', '42', '--reviewer', 'wordpress-ui', '--format', 'json'], 'router branch conflict revalidation invokes structured revalidate CLI command');
+assert_same($argv_log[11] ?? null, ['branch', '--work-dir', $work_dir, 'run-plugin-driver', 'conflict', '77', '--driver', realpath($driver_path), '--reviewer', 'wordpress-ui', '--format', 'json'], 'router plugin driver action invokes approved driver CLI command');
+assert_same($argv_log[12] ?? null, ['branch', '--work-dir', $work_dir, 'create', 'html_fallback', '--from', 'main'], 'non-async router branch create invokes safe CLI command');
+assert_same($argv_log[13] ?? null, ['branch', '--work-dir', $work_dir, 'create', 'admin_page_created', '--from', 'main'], 'admin-page router branch create invokes safe CLI command');
+assert_same(count($argv_log), 14, 'invalid branch action requests do not invoke router CLI path');
 
 rm_tree($tmp);
 
