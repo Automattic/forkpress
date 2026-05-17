@@ -1434,7 +1434,7 @@ assert_true(str_contains($restored_branch_list, "no-db-source\n"), 'multi-branch
 assert_true(!str_contains($restored_branch_list, "a-created-ok\n") && !str_contains($restored_branch_list, "z-created-no-db\n"), 'multi-branch ID-band allocation failure removes created branches from the branch list');
 $metadata = new SQLite3($tmp . '/merge/metadata.sqlite');
 $stale_band_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name IN ('a-created-ok', 'z-created-no-db')");
-$stale_decision_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_decisions WHERE run_id IN (SELECT id FROM merge_runs WHERE source_branch IN ('a-created-ok', 'z-created-no-db') AND policy = 'autoincrement-id-band-allocation')");
+$stale_decision_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_decisions WHERE run_id IN (SELECT id FROM merge_runs WHERE source_branch IN ('a-created-ok', 'z-created-no-db') AND target_branch IN ('a-created-ok', 'z-created-no-db') AND base_ref IN ('autoincrement-id-band', 'identity-capture') AND policy IN ('autoincrement-id-band-allocation', 'sidecar-row-identity-capture'))");
 $stale_identity_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_row_identities WHERE branch_name IN ('a-created-ok', 'z-created-no-db')");
 $stale_identity_history_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name IN ('a-created-ok', 'z-created-no-db')");
 $stale_run_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_runs WHERE source_branch IN ('a-created-ok', 'z-created-no-db') AND policy IN ('autoincrement-id-band-allocation', 'sidecar-row-identity-capture')");
