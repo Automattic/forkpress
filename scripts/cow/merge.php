@@ -12056,6 +12056,101 @@ function cow_merge_schema_source_resolution_blocked_reason(array $row): ?string 
     return null;
 }
 
+function cow_merge_file_conflict_path(array $row, mixed $source_payload = null): ?string {
+    if (is_array($source_payload) && isset($source_payload['path']) && is_string($source_payload['path'])) {
+        return $source_payload['path'];
+    }
+    $row_identity = $row['row_identity'] ?? null;
+    if (!is_string($row_identity) || $row_identity === '') {
+        return null;
+    }
+    try {
+        $identity = cow_merge_decode_payload_json($row_identity, 'file conflict identity');
+    } catch (Throwable) {
+        return null;
+    }
+    if (is_array($identity) && isset($identity['path']) && is_string($identity['path'])) {
+        return $identity['path'];
+    }
+    return null;
+}
+
+function cow_merge_file_source_resolution_blocked_reason(array $row): ?string {
+    if (($row['table_name'] ?? '') !== '__files__') {
+        return null;
+    }
+    $conflict_type = (string)($row['conflict_type'] ?? '');
+    if (!in_array($conflict_type, [
+        'file-unsafe-symlink',
+        'file-type-replacement-conflict',
+        'file-unsupported-source-change',
+    ], true)) {
+        return null;
+    }
+
+    $source_payload_json = $row['source_payload'] ?? null;
+    if (!is_string($source_payload_json) || $source_payload_json === '') {
+        return null;
+    }
+    try {
+        $source_payload = cow_merge_decode_payload_json($source_payload_json, 'file conflict source');
+    } catch (Throwable) {
+        return null;
+    }
+    if (!is_array($source_payload)) {
+        return null;
+    }
+    $path = cow_merge_file_conflict_path($row, $source_payload);
+    if ($path === null || $path === '') {
+        return null;
+    }
+
+    if ($conflict_type === 'file-unsafe-symlink') {
+        $reason = cow_merge_symlink_safety_reason($path, $source_payload);
+        return $reason === null
+            ? 'source symlink cannot be safely applied automatically'
+            : 'source symlink cannot be safely applied automatically: ' . $reason;
+    }
+
+    if ($conflict_type === 'file-unsupported-source-change') {
+        return 'source filesystem entry type cannot be applied automatically';
+    }
+
+    if ($conflict_type !== 'file-type-replacement-conflict' || ($source_payload['type'] ?? null) !== 'dir') {
+        return null;
+    }
+
+    $source_db = $row['source_db'] ?? null;
+    if (!is_string($source_db) || $source_db === '') {
+        return null;
+    }
+    try {
+        $source_root = cow_merge_branch_root_from_db_path($source_db);
+        if (!is_dir($source_root)) {
+            return 'source directory subtree cannot be verified because the source root is unavailable';
+        }
+        $source_entries = cow_merge_file_manifest_for_root($source_root)['entries'];
+    } catch (Throwable $e) {
+        return 'source directory subtree cannot be verified: ' . $e->getMessage();
+    }
+
+    foreach ($source_entries as $child_path => $child_entry) {
+        if (!cow_merge_file_has_prefix($child_path, $path)) {
+            continue;
+        }
+        $child_type = (string)($child_entry['type'] ?? '');
+        if ($child_type === 'symlink') {
+            $reason = cow_merge_symlink_safety_reason($child_path, $child_entry);
+            if ($reason !== null) {
+                return "source directory subtree contains an unsafe symlink at $child_path: $reason";
+            }
+        } elseif (!in_array($child_type, ['dir', 'file'], true)) {
+            return "source directory subtree contains an unsupported filesystem entry at $child_path";
+        }
+    }
+    return null;
+}
+
 function cow_merge_conflict_resolution_contract(string $table, string $conflict_type, array $row = []): array {
     $class = cow_merge_conflict_class($table, $conflict_type);
     $contract = [
@@ -12103,6 +12198,14 @@ function cow_merge_conflict_resolution_contract(string $table, string $conflict_
             $contract['choices'] = ['source', 'target'];
             $contract['after_revalidate'] = true;
             $contract['strategy'] = 'file-choice';
+            $source_blocked_reason = cow_merge_file_source_resolution_blocked_reason($row + [
+                'table_name' => $table,
+                'conflict_type' => $conflict_type,
+            ]);
+            if ($source_blocked_reason !== null) {
+                $contract['choices'] = ['target'];
+                $contract['blocked_choices'] = ['source' => $source_blocked_reason];
+            }
         }
         return $contract;
     }

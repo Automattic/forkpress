@@ -6797,8 +6797,8 @@ SQL);
     $file_type_replacement_unsafe_dir_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-type-replacement-conflict' AND row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/replace-file-with-unsafe-dir')) . "' ORDER BY id DESC LIMIT 1");
     assert_throws(
         fn() => cow_merge_resolve_conflict($metadata, $file_type_replacement_unsafe_dir_conflict_id, 'source', true, 'Try reviewed source directory replacement with unsafe symlink descendant.', 'cow-test'),
-        'cannot apply source filesystem directory subtree',
-        'source file-to-directory resolution rejects unsafe source symlink descendants'
+        'resolution choice source is blocked',
+        'source file-to-directory resolution blocks unsafe source symlink descendants before apply'
     );
     assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/replace-file-with-unsafe-dir'), 'base unsafe replacement file', 'failed source file-to-directory resolution restores the target file when a subtree symlink is unsafe');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $file_type_replacement_unsafe_dir_conflict_id"), 0, 'failed unsafe directory replacement records no resolution metadata');
@@ -6886,8 +6886,8 @@ SQL);
     $unsafe_symlink_id = (int)scalar($metadata, "SELECT c.id FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = '__files__' AND c.conflict_type = 'file-unsafe-symlink' AND r.source_branch = 'feature-file-resolve' ORDER BY c.id DESC LIMIT 1");
     assert_throws(
         fn() => cow_merge_resolve_conflict($metadata, $unsafe_symlink_id, 'source', true, 'Try unsafe source symlink.', 'cow-test'),
-        'cannot apply source filesystem conflict',
-        'unsafe source symlink conflicts cannot be applied by the deterministic resolver'
+        'resolution choice source is blocked',
+        'unsafe source symlink conflicts are blocked before deterministic resolution'
     );
 
     $file_target_keep_base_root = $tmp . '/files-target-keep-base';
