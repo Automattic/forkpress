@@ -63,7 +63,8 @@ Useful filters include `--run`, `--scope all|db|files|plugin`,
 `--resolution-strategy manual-review|plugin-validator|schema-choice|file-choice|row-choice|cell-choice`,
 `--generic-resolver yes|no`, `--after-revalidate supported|unsupported`,
 `--plugin-logical-identity <json>`, `--semantic-scope wordpress|plugin`,
-`--group-by`, `--target-kept`, `--path`, and `--path-prefix`.
+`--plugin-file <path>`, `--group-by`, `--target-kept`, `--path`, and
+`--path-prefix`.
 
 `--revalidation-class` filters by what the latest revalidation found when it
 ran. `--latest-revalidation-status` checks whether that latest recorded
@@ -79,9 +80,10 @@ conflict. Use those filters, or the matching `--group-by` values, to build
 queues such as generic resolver-ready conflicts, plugin-validator conflicts,
 and conflicts that can only be applied after a current revalidation guard.
 Plugin validator queues can also group by `plugin`, `plugin-object`,
-`plugin-severity`, or `plugin-logical-identity`; the last one uses the
-validator-provided semantic identity JSON as the queue key. Use
-`--plugin-logical-identity <json>` to drill into that queue.
+`plugin-severity`, `plugin-logical-identity`, or `plugin-file`; the logical
+identity queue uses the validator-provided semantic identity JSON as the queue
+key. Use `--plugin-logical-identity <json>` or `--plugin-file <path>` to drill
+into those queues.
 
 ## Review and resolve conflicts
 
