@@ -225,8 +225,9 @@ the authority. Schema index, view, trigger, dropped-table restore, and table
 rebuild conflicts can return to the review queue with current SQL evidence, and
 table rebuild conflicts include dependency-plan evidence. Guarded schema
 resolution is intentionally limited to source-added index/view/trigger target
-drift where the planner recorded a compatible schema class after a dry-run
-source replacement validated against the current target.
+drift and compatible table-rebuild target drift where the planner recorded a
+compatible schema class after a dry-run source replacement validated against
+the current target.
 
 ## Test Shape
 
