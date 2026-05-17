@@ -5340,7 +5340,7 @@ function cow_merge_wordpress_post_content_reference_violation(
         return null;
     }
 
-    $check_post = function (mixed $id, string $label) use ($source, $target, $meta, $source_branch, $source_action): ?string {
+    $check_post = function (mixed $id, string $label) use ($source, $target, $meta, $source_branch, $source_action, $context): ?string {
         return cow_merge_wordpress_parent_reference_violation(
             $source,
             $target,
@@ -5354,7 +5354,7 @@ function cow_merge_wordpress_post_content_reference_violation(
             $source_action
         );
     };
-    $check_user = function (mixed $id, string $label) use ($source, $target, $meta, $source_branch, $source_action): ?string {
+    $check_user = function (mixed $id, string $label) use ($source, $target, $meta, $source_branch, $source_action, $context): ?string {
         return cow_merge_wordpress_parent_reference_violation(
             $source,
             $target,
@@ -5368,7 +5368,7 @@ function cow_merge_wordpress_post_content_reference_violation(
             $source_action
         );
     };
-    $check_term = function (mixed $id, string $label) use ($source, $target, $meta, $source_branch, $source_action): ?string {
+    $check_term = function (mixed $id, string $label) use ($source, $target, $meta, $source_branch, $source_action, $context): ?string {
         return cow_merge_wordpress_parent_reference_violation(
             $source,
             $target,
@@ -5660,9 +5660,15 @@ function cow_merge_wordpress_option_reference_violation(
         }
     }
 
-    if ($option_name === 'widget_block') {
+    $block_content_widget_fields = [
+        'widget_block' => 'content',
+        'widget_custom_html' => 'content',
+        'widget_text' => 'text',
+    ];
+    $block_content_field = $block_content_widget_fields[$option_name] ?? null;
+    if ($block_content_field !== null) {
         foreach ($decoded as $widget_id => $widget) {
-            if (!is_array($widget) || !isset($widget['content']) || !is_string($widget['content'])) {
+            if (!is_array($widget) || !isset($widget[$block_content_field]) || !is_string($widget[$block_content_field])) {
                 continue;
             }
             $violation = cow_merge_wordpress_post_content_reference_violation(
@@ -5670,9 +5676,9 @@ function cow_merge_wordpress_option_reference_violation(
                 $target,
                 $meta,
                 $source_branch,
-                ['post_content' => $widget['content']],
+                ['post_content' => $widget[$block_content_field]],
                 $source_action,
-                "wp_options row '$option_name' widget." . (string)$widget_id . '.content'
+                "wp_options row '$option_name' widget." . (string)$widget_id . '.' . $block_content_field
             );
             if ($violation !== null) {
                 return $violation;
