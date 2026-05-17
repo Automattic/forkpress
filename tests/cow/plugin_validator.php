@@ -318,6 +318,22 @@ PHP);
     assert_true(str_contains($plugin_audit_text, 'files=wp-content/uploads/plugin-validator-missing.dat'), 'plugin text audit exposes plugin-owned files');
     assert_true(str_contains($plugin_audit_text, 'plugin-guidance policy=review-only'), 'plugin text audit exposes validator review policy');
     assert_true(str_contains($plugin_audit_text, 'manual-review=ForkPress cannot synthesize plugin-owned files'), 'plugin text audit exposes validator manual-review reason');
+    $plugin_group_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'group_by' => 'plugin',
+    ]);
+    $plugin_group_counts = [];
+    foreach ($plugin_group_audit['conflict_groups'] as $group) {
+        $plugin_group_counts[(string)$group['group_key']] = (int)$group['conflict_count'];
+    }
+    assert_same($plugin_group_counts['forkpress-plugin-graph'] ?? 0, 2, 'plugin audit can group conflicts by validator plugin');
+    $plugin_group_default_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, ['scope' => 'plugin', 'group_by' => 'plugin']);
+    assert_same($plugin_group_default_audit['filters']['records'], 'conflicts', 'plugin grouping defaults audit records to conflicts');
+    ob_start();
+    cow_merge_print_audit_text($plugin_group_audit);
+    $plugin_group_text = ob_get_clean();
+    assert_true(str_contains($plugin_group_text, 'plugin=forkpress-plugin-graph conflicts=2'), 'plugin text audit exposes conflict grouping by validator plugin');
 
     $json_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-graph-json-drift' ORDER BY id ASC LIMIT 1");
     assert_true($json_conflict_id > 0, 'plugin validator fixture records a JSON graph conflict for revalidation');

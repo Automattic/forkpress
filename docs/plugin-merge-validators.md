@@ -73,7 +73,7 @@ repair is deterministic and records the chosen repair in audit metadata.
 The current implementation has the metadata/audit foundation for validator
 conflicts: ForkPress can record plugin-scoped findings against a merge run,
 mark that run as `completed_with_conflicts`, filter `merge-audit` output with
-`scope = plugin`, group plugin findings separately from DB/file findings, and
+`scope = plugin`, group plugin findings separately from DB/file findings, summarize plugin conflict queues with `merge-audit --scope plugin --group-by plugin`, and
 attach review notes. Plugin audit records expose validator metadata as
 structured fields (`plugin`, `plugin_object`, `plugin_tables`,
 `plugin_files`, `plugin_validator`, `plugin_severity`,
