@@ -8867,6 +8867,28 @@ function cow_merge_latest_review_note(SQLite3 $meta, string $record_type, int $r
     return $row ? $row : null;
 }
 
+function cow_merge_previous_review_note(SQLite3 $meta, string $record_type, int $record_id, int $before_id): ?array {
+    $stmt = cow_merge_prepare_checked(
+        $meta,
+        'SELECT id, status, note, reviewer, created_at FROM merge_review_notes ' .
+        'WHERE record_type = :record_type AND record_id = :record_id AND id < :before_id ORDER BY id DESC LIMIT 1',
+        'failed to prepare previous review note lookup'
+    );
+    cow_merge_bind($stmt, ':record_type', $record_type);
+    cow_merge_bind($stmt, ':record_id', $record_id);
+    cow_merge_bind($stmt, ':before_id', $before_id);
+    $res = cow_merge_execute_checked($stmt, $meta, 'failed to look up previous review note');
+    $row = $res->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($res, 'failed to finalize previous review note lookup');
+    return $row ? $row : null;
+}
+
+function cow_merge_is_revalidation_required_review(?array $review): bool {
+    return $review !== null
+        && (string)($review['status'] ?? '') === 'needs-action'
+        && str_starts_with((string)($review['note'] ?? ''), 'Revalidation required after');
+}
+
 function cow_merge_revalidation_note(array $review, array $staleness): string {
     $previous_status = (string)($review['status'] ?? 'unknown');
     $previous_reviewer = (string)($review['reviewer'] ?? 'unknown');
@@ -8957,8 +8979,10 @@ function cow_merge_revalidate_reviewed_conflicts(
         $errors = 0;
         $carried = 0;
         $already_needs_action = 0;
+        $restored = 0;
         $carried_conflicts = [];
         $already_needs_action_conflicts = [];
+        $restored_conflicts = [];
         foreach ($conflicts as $conflict) {
             $checked++;
             $conflict_id = (int)$conflict['id'];
@@ -8971,6 +8995,44 @@ function cow_merge_revalidate_reviewed_conflicts(
             $status = (string)($staleness['stale_status'] ?? 'unknown');
             if ($status === 'fresh') {
                 $fresh++;
+                if (cow_merge_is_revalidation_required_review($review)) {
+                    $previous_review = cow_merge_previous_review_note(
+                        $meta,
+                        'conflict',
+                        $conflict_id,
+                        (int)($review['id'] ?? 0)
+                    );
+                    $previous_status = (string)($previous_review['status'] ?? '');
+                    if (in_array($previous_status, ['pending', 'reviewed'], true)) {
+                        $restore_note = 'Revalidation is fresh again; restored previous ' . $previous_status . ' review.';
+                        $review_note_id = cow_merge_insert_review_note(
+                            $meta,
+                            'conflict',
+                            $conflict_id,
+                            $previous_status,
+                            $restore_note,
+                            $reviewer
+                        );
+                        cow_merge_record_conflict_event(
+                            $meta,
+                            $conflict_id,
+                            (int)$conflict['run_id'],
+                            cow_merge_review_conflict_event_type($previous_status),
+                            $reviewer,
+                            $restore_note,
+                            'review_note',
+                            $review_note_id,
+                            cow_merge_review_conflict_lifecycle_state($previous_status)
+                        );
+                        $restored++;
+                        $restored_conflicts[] = cow_merge_revalidation_conflict_summary(
+                            $conflict,
+                            $staleness,
+                            $review_note_id,
+                            null
+                        );
+                    }
+                }
                 continue;
             }
             if ($status === 'unknown') {
@@ -9064,9 +9126,11 @@ function cow_merge_revalidate_reviewed_conflicts(
             'errors' => $errors,
             'carried' => $carried,
             'already_needs_action' => $already_needs_action,
+            'restored' => $restored,
             'needs_action_conflicts' => $needs_action_conflicts,
             'carried_conflicts' => $carried_conflicts,
             'already_needs_action_conflicts' => $already_needs_action_conflicts,
+            'restored_conflicts' => $restored_conflicts,
         ];
     } catch (Throwable $e) {
         if ($transaction_started) {
@@ -13397,6 +13461,7 @@ function cow_merge_audit_conflict_lifecycle_state_sql(
     return "CASE " .
         "WHEN COALESCE($latest_resolution_applied, 0) = 1 THEN 'resolved' " .
         "WHEN $latest_event_type = 'resolution-blocked' THEN 'needs-action' " .
+        "WHEN $latest_event_type = 'revalidation-required' THEN 'needs-action' " .
         "WHEN $latest_resolution_id IS NOT NULL THEN 'validated' " .
         "WHEN $latest_review_status = 'pending' THEN 'deferred' " .
         "WHEN $latest_review_status = 'needs-action' THEN 'needs-action' " .
@@ -14818,6 +14883,12 @@ function cow_merge_conflict_lifecycle(array $row): array {
         }
         if ($latest_event_type === 'resolution-blocked') {
             return ['state' => 'needs-action', 'next_action' => 'manual-review'];
+        }
+        if ($latest_event_type === 'revalidation-required') {
+            return [
+                'state' => 'needs-action',
+                'next_action' => !empty($row['after_revalidate_supported']) ? 'revalidate' : 'manual-review',
+            ];
         }
         return ['state' => 'validated', 'next_action' => $generic_resolver ? 'apply-reviewed-choice' : 'manual-review'];
     }
