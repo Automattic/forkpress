@@ -739,9 +739,22 @@ add_action('init', function () {
         if (is_wp_error($block_id)) {
             wp_send_json_error(['error' => $block_id->get_error_message()], 500);
         }
+        $synced_pattern_id = wp_insert_post([
+            'post_type' => 'wp_block',
+            'post_status' => 'publish',
+            'post_title' => "Semantic $suffix Synced Pattern",
+            'post_content' => "<!-- wp:paragraph --><p>Synced pattern for $branch</p><!-- /wp:paragraph -->",
+            'post_author' => $user_id,
+        ], true);
+        if (is_wp_error($synced_pattern_id)) {
+            wp_send_json_error(['error' => $synced_pattern_id->get_error_message()], 500);
+        }
+        update_post_meta((int)$synced_pattern_id, 'wp_pattern_sync_status', 'synced');
         $page_update = wp_update_post([
             'ID' => (int)$page_id,
-            'post_content' => "<!-- wp:paragraph --><p>Semantic $branch page body</p><!-- /wp:paragraph -->\n<!-- wp:block {\"ref\":$block_id} /-->",
+            'post_content' => "<!-- wp:paragraph --><p>Semantic $branch page body</p><!-- /wp:paragraph -->\n"
+                . "<!-- wp:block {\"ref\":$block_id} /-->\n"
+                . "<!-- wp:block {\"ref\":$synced_pattern_id} /-->",
         ], true);
         if (is_wp_error($page_update)) {
             wp_send_json_error(['error' => $page_update->get_error_message()], 500);
@@ -820,6 +833,7 @@ add_action('init', function () {
             'ID' => (int)$page_id,
             'post_content' => "<!-- wp:paragraph --><p>Semantic $branch page body</p><!-- /wp:paragraph -->\n"
                 . "<!-- wp:block {\"ref\":$block_id} /-->\n"
+                . "<!-- wp:block {\"ref\":$synced_pattern_id} /-->\n"
                 . "<!-- wp:image {\"id\":$attachment_id,\"sizeSlug\":\"full\",\"linkDestination\":\"none\"} --><figure class=\"wp-block-image size-full\"><img class=\"wp-image-$attachment_id\" /></figure><!-- /wp:image -->",
         ], true);
         if (is_wp_error($page_update)) {
@@ -863,6 +877,7 @@ add_action('init', function () {
             'page_id' => (int)$page_id,
             'note_id' => (int)$note_id,
             'block_id' => (int)$block_id,
+            'synced_pattern_id' => (int)$synced_pattern_id,
             'menu_id' => (int)$menu_id,
             'attachment_id' => (int)$attachment_id,
             'comment_id' => $comment_id,
@@ -984,6 +999,9 @@ add_action('init', function () {
             'image_block_refs' => $image_block_refs,
             'author' => (int)$post->post_author,
             'parent' => (int)$post->post_parent,
+            'pattern_sync_status' => $post->post_type === 'wp_block'
+                ? (string)get_post_meta($post->ID, 'wp_pattern_sync_status', true)
+                : '',
             'featured_media' => (int)get_post_thumbnail_id($post->ID),
             'branch' => get_post_meta($post->ID, '_forkpress_semantic_branch', true)
                 ?: get_post_meta($post->ID, '_forkpress_semantic_note', true)
@@ -1967,6 +1985,8 @@ $required = [
     "Semantic Target Note" => "forkpress_note",
     "Semantic Source Block" => "wp_block",
     "Semantic Target Block" => "wp_block",
+    "Semantic Source Synced Pattern" => "wp_block",
+    "Semantic Target Synced Pattern" => "wp_block",
     "Semantic Source Media" => "attachment",
     "Semantic Target Media" => "attachment",
 ];
@@ -1981,6 +2001,7 @@ $optionRefsValid = static function (array $option, string $branch, string $suffi
         && ((int)($option["page_id"] ?? 0) === (int)($posts["Semantic $suffix Page"]["id"] ?? 0))
         && ((int)($option["note_id"] ?? 0) === (int)($posts["Semantic $suffix Note"]["id"] ?? 0))
         && ((int)($option["block_id"] ?? 0) === (int)($posts["Semantic $suffix Block"]["id"] ?? 0))
+        && ((int)($option["synced_pattern_id"] ?? 0) === (int)($posts["Semantic $suffix Synced Pattern"]["id"] ?? 0))
         && ((int)($option["attachment_id"] ?? 0) === (int)($posts["Semantic $suffix Media"]["id"] ?? 0))
         && ((int)($option["comment_id"] ?? 0) > 0)
         && ((int)($option["reply_id"] ?? 0) > 0);
@@ -2044,6 +2065,14 @@ $reusableBlockValid = static function (array $posts, string $suffix): bool {
     $blockId = (int)($posts["Semantic $suffix Block"]["id"] ?? 0);
     $refs = array_map("intval", $posts["Semantic $suffix Page"]["block_refs"] ?? []);
     return $blockId > 0 && in_array($blockId, $refs, true);
+};
+$syncedPatternValid = static function (array $posts, string $suffix): bool {
+    $pattern = $posts["Semantic $suffix Synced Pattern"] ?? [];
+    $patternId = (int)($pattern["id"] ?? 0);
+    $refs = array_map("intval", $posts["Semantic $suffix Page"]["block_refs"] ?? []);
+    return $patternId > 0
+        && (($pattern["pattern_sync_status"] ?? null) === "synced")
+        && in_array($patternId, $refs, true);
 };
 $termGraphValid = static function (array $termGraphs, array $posts, string $suffix): bool {
     $topic = $termGraphs["Semantic $suffix Topic"] ?? [];
@@ -2112,6 +2141,8 @@ $ok = $ok
     && $editedPageValid($posts, $users, "target", "Target")
     && $reusableBlockValid($posts, "Source")
     && $reusableBlockValid($posts, "Target")
+    && $syncedPatternValid($posts, "Source")
+    && $syncedPatternValid($posts, "Target")
     && $termGraphValid($data["term_graphs"] ?? [], $posts, "Source")
     && $termGraphValid($data["term_graphs"] ?? [], $posts, "Target")
     && $optionRefsValid($data["source_option"] ?? [], "source", "Source")
