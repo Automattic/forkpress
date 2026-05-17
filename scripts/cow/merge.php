@@ -23,7 +23,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "  php merge.php recover-crash --metadata-db <path> [--run ID] [--restore-target-db] [--restore-files] [--format text|json]\n");
     fwrite(STDERR, "  php merge.php audit --metadata-db <path> [--format text|json] [--limit N] [--run ID]\n");
     fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|conflict-events|decisions|resolutions|rollback-failures|crash-recovery] [--path <path>] [--path-prefix <prefix>]\n");
-    fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|conflict-events|decisions|resolutions|rollback-failures|crash-recovery] [--conflict-type TYPE] [--conflict-id ID] [--conflict-key KEY] [--event-type TYPE] [--plugin NAME] [--plugin-object OBJECT] [--plugin-severity SEVERITY] [--plugin-logical-identity JSON] [--semantic-scope wordpress|plugin] [--decision DECISION]\n");
+    fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|conflict-events|decisions|resolutions|rollback-failures|crash-recovery] [--conflict-type TYPE] [--conflict-id ID] [--conflict-key KEY] [--event-type TYPE] [--plugin NAME] [--plugin-object OBJECT] [--plugin-severity SEVERITY] [--plugin-logical-identity JSON] [--semantic-scope wordpress|plugin] [--plugin-file PATH] [--decision DECISION]\n");
     fwrite(STDERR, "    [--id-band-skips] [--target-kept] [--review] [--review-status unreviewed|pending|needs-action|reviewed] [--lifecycle-state unreviewed|deferred|needs-action|reviewed|validated|resolved]\n");
     fwrite(STDERR, "    [--next-action review|run-plugin-validator|wait|revalidate|resolve|apply-reviewed-choice|manual-review|none]\n");
     fwrite(STDERR, "    [--resolution-choice source|target|plugin-driver] [--blocked-resolution-choice source|target] [--resolution-strategy STRATEGY] [--generic-resolver yes|no] [--after-revalidate supported|unsupported]\n");
@@ -9152,8 +9152,8 @@ function cow_merge_audit_after_revalidate_filter(?string $value): ?string {
 
 function cow_merge_audit_group_by(?string $value): string {
     $group_by = $value ?? 'none';
-    if (!in_array($group_by, ['none', 'table', 'status', 'path', 'type', 'severity', 'lifecycle', 'event-type', 'next-action', 'conflict-key', 'resolution-strategy', 'generic-resolver', 'after-revalidate', 'revalidation-class', 'latest-revalidation-status', 'stale-status', 'plugin', 'plugin-object', 'plugin-severity', 'plugin-logical-identity'], true)) {
-        throw new InvalidArgumentException('--group-by must be none, table, status, path, type, severity, lifecycle, event-type, next-action, conflict-key, resolution-strategy, generic-resolver, after-revalidate, revalidation-class, latest-revalidation-status, stale-status, plugin, plugin-object, plugin-severity, or plugin-logical-identity');
+    if (!in_array($group_by, ['none', 'table', 'status', 'path', 'type', 'severity', 'lifecycle', 'event-type', 'next-action', 'conflict-key', 'resolution-strategy', 'generic-resolver', 'after-revalidate', 'revalidation-class', 'latest-revalidation-status', 'stale-status', 'plugin', 'plugin-object', 'plugin-severity', 'plugin-logical-identity', 'plugin-file'], true)) {
+        throw new InvalidArgumentException('--group-by must be none, table, status, path, type, severity, lifecycle, event-type, next-action, conflict-key, resolution-strategy, generic-resolver, after-revalidate, revalidation-class, latest-revalidation-status, stale-status, plugin, plugin-object, plugin-severity, plugin-logical-identity, or plugin-file');
     }
     return $group_by;
 }
@@ -9198,6 +9198,10 @@ function cow_merge_audit_semantic_scope_filter(?string $value): ?string {
         throw new InvalidArgumentException('--semantic-scope must be wordpress or plugin');
     }
     return $value;
+}
+
+function cow_merge_audit_plugin_file_filter(?string $value): ?string {
+    return cow_merge_audit_filter_text($value, 'plugin-file');
 }
 
 function cow_merge_audit_file_path_filter(?string $value, string $name): ?string {
@@ -13139,7 +13143,8 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
         (($filters['plugin_object'] ?? null) !== null && (string)$filters['plugin_object'] !== '') ||
         (($filters['plugin_severity'] ?? null) !== null && (string)$filters['plugin_severity'] !== '') ||
         (($filters['plugin_logical_identity'] ?? null) !== null && (string)$filters['plugin_logical_identity'] !== '') ||
-        (($filters['semantic_scope'] ?? null) !== null && (string)$filters['semantic_scope'] !== '');
+        (($filters['semantic_scope'] ?? null) !== null && (string)$filters['semantic_scope'] !== '') ||
+        (($filters['plugin_file'] ?? null) !== null && (string)$filters['plugin_file'] !== '');
     $group_by = (string)($filters['group_by'] ?? 'none');
     if ($id_band_skips && $target_kept) {
         throw new InvalidArgumentException('--id-band-skips cannot be combined with --target-kept');
@@ -13381,21 +13386,21 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
         if (($filters['scope'] ?? null) === null || ($filters['scope'] ?? null) === '' || ($filters['scope'] ?? null) === 'all') {
             $filters['scope'] = 'plugin';
         } elseif (($filters['scope'] ?? null) !== 'plugin') {
-            throw new InvalidArgumentException('--plugin, --plugin-object, --plugin-severity, --plugin-logical-identity, and --semantic-scope require plugin audit scope');
+            throw new InvalidArgumentException('--plugin, --plugin-object, --plugin-severity, --plugin-logical-identity, --semantic-scope, and --plugin-file require plugin audit scope');
         }
         if (cow_merge_audit_filter_is_default_all($filters, 'records')) {
             $filters['records'] = $resolution_status ? 'resolutions' : 'conflicts';
         } elseif (!in_array(($filters['records'] ?? null), ['conflicts', 'conflict-events', 'resolutions'], true)) {
-            throw new InvalidArgumentException('--plugin, --plugin-object, --plugin-severity, --plugin-logical-identity, and --semantic-scope can only be combined with --records conflicts, conflict-events, or resolutions');
+            throw new InvalidArgumentException('--plugin, --plugin-object, --plugin-severity, --plugin-logical-identity, --semantic-scope, and --plugin-file can only be combined with --records conflicts, conflict-events, or resolutions');
         }
         if (($filters['decision'] ?? null) !== null) {
-            throw new InvalidArgumentException('--plugin, --plugin-object, --plugin-severity, --plugin-logical-identity, and --semantic-scope cannot be combined with --decision');
+            throw new InvalidArgumentException('--plugin, --plugin-object, --plugin-severity, --plugin-logical-identity, --semantic-scope, and --plugin-file cannot be combined with --decision');
         }
         if ($id_band_skips) {
-            throw new InvalidArgumentException('--plugin, --plugin-object, --plugin-severity, --plugin-logical-identity, and --semantic-scope cannot be combined with --id-band-skips');
+            throw new InvalidArgumentException('--plugin, --plugin-object, --plugin-severity, --plugin-logical-identity, --semantic-scope, and --plugin-file cannot be combined with --id-band-skips');
         }
         if ($target_kept) {
-            throw new InvalidArgumentException('--plugin, --plugin-object, --plugin-severity, --plugin-logical-identity, and --semantic-scope cannot be combined with --target-kept');
+            throw new InvalidArgumentException('--plugin, --plugin-object, --plugin-severity, --plugin-logical-identity, --semantic-scope, and --plugin-file cannot be combined with --target-kept');
         }
     }
     if ($target_kept && cow_merge_audit_filter_is_default_all($filters, 'records')) {
@@ -13405,22 +13410,22 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
         if (cow_merge_audit_filter_is_default_all($filters, 'records')) {
             $filters['records'] = $group_by === 'event-type'
                 ? 'conflict-events'
-                : (in_array($group_by, ['lifecycle', 'next-action', 'conflict-key', 'resolution-strategy', 'generic-resolver', 'after-revalidate', 'revalidation-class', 'latest-revalidation-status', 'stale-status', 'plugin', 'plugin-object', 'plugin-severity', 'plugin-logical-identity'], true) ? 'conflicts' : 'resolutions');
+                : (in_array($group_by, ['lifecycle', 'next-action', 'conflict-key', 'resolution-strategy', 'generic-resolver', 'after-revalidate', 'revalidation-class', 'latest-revalidation-status', 'stale-status', 'plugin', 'plugin-object', 'plugin-severity', 'plugin-logical-identity', 'plugin-file'], true) ? 'conflicts' : 'resolutions');
         } elseif (!in_array(($filters['records'] ?? null), ['conflicts', 'conflict-events', 'decisions', 'resolutions'], true)) {
             throw new InvalidArgumentException('--group-by can only be combined with --records conflicts, conflict-events, decisions, or resolutions');
         }
         $records = (string)($filters['records'] ?? 'resolutions');
-        if ($records === 'resolutions' && !in_array($group_by, ['table', 'status', 'path', 'plugin', 'plugin-object', 'plugin-severity', 'plugin-logical-identity'], true)) {
-            throw new InvalidArgumentException('--records resolutions supports --group-by table, status, path, plugin, plugin-object, plugin-severity, or plugin-logical-identity');
+        if ($records === 'resolutions' && !in_array($group_by, ['table', 'status', 'path', 'plugin', 'plugin-object', 'plugin-severity', 'plugin-logical-identity', 'plugin-file'], true)) {
+            throw new InvalidArgumentException('--records resolutions supports --group-by table, status, path, plugin, plugin-object, plugin-severity, plugin-logical-identity, or plugin-file');
         }
-        if ($records === 'conflicts' && !in_array($group_by, ['table', 'type', 'path', 'severity', 'lifecycle', 'next-action', 'conflict-key', 'resolution-strategy', 'generic-resolver', 'after-revalidate', 'revalidation-class', 'latest-revalidation-status', 'stale-status', 'plugin', 'plugin-object', 'plugin-severity', 'plugin-logical-identity'], true)) {
-            throw new InvalidArgumentException('--records conflicts supports --group-by table, type, path, severity, lifecycle, next-action, conflict-key, resolution-strategy, generic-resolver, after-revalidate, revalidation-class, latest-revalidation-status, stale-status, plugin, plugin-object, plugin-severity, or plugin-logical-identity');
+        if ($records === 'conflicts' && !in_array($group_by, ['table', 'type', 'path', 'severity', 'lifecycle', 'next-action', 'conflict-key', 'resolution-strategy', 'generic-resolver', 'after-revalidate', 'revalidation-class', 'latest-revalidation-status', 'stale-status', 'plugin', 'plugin-object', 'plugin-severity', 'plugin-logical-identity', 'plugin-file'], true)) {
+            throw new InvalidArgumentException('--records conflicts supports --group-by table, type, path, severity, lifecycle, next-action, conflict-key, resolution-strategy, generic-resolver, after-revalidate, revalidation-class, latest-revalidation-status, stale-status, plugin, plugin-object, plugin-severity, plugin-logical-identity, or plugin-file');
         }
         if ($records === 'decisions' && !in_array($group_by, ['table', 'type', 'path'], true)) {
             throw new InvalidArgumentException('--records decisions supports --group-by table, type, or path');
         }
-        if ($records === 'conflict-events' && !in_array($group_by, ['table', 'type', 'lifecycle', 'event-type', 'conflict-key', 'plugin', 'plugin-object', 'plugin-severity', 'plugin-logical-identity'], true)) {
-            throw new InvalidArgumentException('--records conflict-events supports --group-by table, type, lifecycle, event-type, conflict-key, plugin, plugin-object, plugin-severity, or plugin-logical-identity');
+        if ($records === 'conflict-events' && !in_array($group_by, ['table', 'type', 'lifecycle', 'event-type', 'conflict-key', 'plugin', 'plugin-object', 'plugin-severity', 'plugin-logical-identity', 'plugin-file'], true)) {
+            throw new InvalidArgumentException('--records conflict-events supports --group-by table, type, lifecycle, event-type, conflict-key, plugin, plugin-object, plugin-severity, plugin-logical-identity, or plugin-file');
         }
         if (($filters['decision'] ?? null) !== null && $records !== 'decisions') {
             throw new InvalidArgumentException('--group-by cannot be combined with --decision unless --records decisions is used');
@@ -13505,7 +13510,7 @@ function cow_merge_audit_filters(array $filters = []): array {
         if ($scope !== 'all') {
             throw new InvalidArgumentException("--records $records cannot be combined with --scope");
         }
-        foreach (['conflict_type', 'conflict_id', 'conflict_key', 'event_type', 'plugin', 'plugin_object', 'plugin_severity', 'plugin_logical_identity', 'semantic_scope', 'decision', 'review_status', 'resolution_status', 'lifecycle_state', 'next_action', 'revalidation_class', 'latest_revalidation_status', 'stale_status', 'resolution_choice', 'blocked_resolution_choice', 'resolution_strategy', 'generic_resolver', 'after_revalidate'] as $key) {
+        foreach (['conflict_type', 'conflict_id', 'conflict_key', 'event_type', 'plugin', 'plugin_object', 'plugin_severity', 'plugin_logical_identity', 'semantic_scope', 'plugin_file', 'decision', 'review_status', 'resolution_status', 'lifecycle_state', 'next_action', 'revalidation_class', 'latest_revalidation_status', 'stale_status', 'resolution_choice', 'blocked_resolution_choice', 'resolution_strategy', 'generic_resolver', 'after_revalidate'] as $key) {
             if (($filters[$key] ?? null) !== null && (string)$filters[$key] !== '') {
                 throw new InvalidArgumentException("--records $records cannot be combined with --" . str_replace('_', '-', $key));
             }
@@ -13536,6 +13541,7 @@ function cow_merge_audit_filters(array $filters = []): array {
         'plugin_severity' => cow_merge_audit_filter_text($filters['plugin_severity'] ?? null, 'plugin-severity'),
         'plugin_logical_identity' => cow_merge_audit_plugin_logical_identity_filter($filters['plugin_logical_identity'] ?? null),
         'semantic_scope' => cow_merge_audit_semantic_scope_filter($filters['semantic_scope'] ?? null),
+        'plugin_file' => cow_merge_audit_plugin_file_filter($filters['plugin_file'] ?? null),
         'decision' => cow_merge_audit_filter_text($filters['decision'] ?? null, 'decision'),
         'path' => $path,
         'path_prefix' => $path_prefix,
@@ -13628,6 +13634,49 @@ function cow_merge_audit_plugin_logical_identity_group(?string $payload_json): ?
     } catch (Throwable) {
         return null;
     }
+}
+
+function cow_merge_audit_plugin_file_matches(?string $payload_json, ?string $file): int {
+    if ($payload_json === null || $payload_json === '' || $file === null || $file === '') {
+        return 0;
+    }
+    $decoded = json_decode($payload_json, true);
+    if (!is_array($decoded)) {
+        return 0;
+    }
+    $payload = cow_merge_audit_decode_payload($decoded);
+    if (!is_array($payload) || !is_array($payload['files'] ?? null)) {
+        return 0;
+    }
+    foreach ($payload['files'] as $candidate) {
+        if (is_string($candidate) && hash_equals($file, $candidate)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+function cow_merge_audit_plugin_file_group(?string $payload_json): ?string {
+    if ($payload_json === null || $payload_json === '') {
+        return null;
+    }
+    $decoded = json_decode($payload_json, true);
+    if (!is_array($decoded)) {
+        return null;
+    }
+    $payload = cow_merge_audit_decode_payload($decoded);
+    if (!is_array($payload) || !is_array($payload['files'] ?? null)) {
+        return null;
+    }
+    $files = array_values(array_filter(
+        $payload['files'],
+        fn($candidate): bool => is_string($candidate) && $candidate !== ''
+    ));
+    if (!$files) {
+        return null;
+    }
+    sort($files, SORT_STRING);
+    return implode(', ', $files);
 }
 
 function cow_merge_audit_conflict_resolution_choice_matches(
@@ -13942,6 +13991,23 @@ function cow_merge_audit_register_functions(SQLite3 $db): void {
         1
     )) {
         throw new RuntimeException('failed to register audit plugin semantic scope group function');
+    }
+    if (!$db->createFunction(
+        'forkpress_plugin_file_matches',
+        fn($payload_json, $file) => cow_merge_audit_plugin_file_matches(
+            is_string($payload_json) ? $payload_json : null,
+            is_string($file) ? $file : null
+        ),
+        2
+    )) {
+        throw new RuntimeException('failed to register audit plugin file filter function');
+    }
+    if (!$db->createFunction(
+        'forkpress_plugin_file_group',
+        fn($payload_json) => cow_merge_audit_plugin_file_group(is_string($payload_json) ? $payload_json : null),
+        1
+    )) {
+        throw new RuntimeException('failed to register audit plugin file group function');
     }
     if (!$db->createFunction(
         'forkpress_conflict_has_resolution_choice',
@@ -14325,6 +14391,12 @@ function cow_merge_audit_where_sql(
         $params[':semantic_scope_filter'] = $filters['semantic_scope'];
     }
 
+    if ($record_type === 'conflicts' && ($filters['plugin_file'] ?? null) !== null) {
+        $clauses[] = $prefix . "table_name = '__plugins__'";
+        $clauses[] = 'forkpress_plugin_file_matches(' . $prefix . 'chosen_payload, :plugin_file_filter) = 1';
+        $params[':plugin_file_filter'] = $filters['plugin_file'];
+    }
+
     if ($record_type === 'conflicts' && ($filters['lifecycle_state'] ?? null) !== null && ($filters['records'] ?? null) !== 'conflict-events') {
         $conflict_id_sql = $alias === '' ? 'merge_conflicts.id' : $prefix . 'id';
         $clauses[] = cow_merge_audit_conflict_lifecycle_state_sql($conflict_id_sql, $review_notes_exist, $resolutions_exist, $conflict_events_exist) . ' = :lifecycle_state';
@@ -14500,6 +14572,12 @@ function cow_merge_audit_resolution_where_sql(
         $params[':semantic_scope_filter'] = $filters['semantic_scope'];
     }
 
+    if (($filters['plugin_file'] ?? null) !== null) {
+        $clauses[] = "c.table_name = '__plugins__'";
+        $clauses[] = 'forkpress_plugin_file_matches(c.chosen_payload, :plugin_file_filter) = 1';
+        $params[':plugin_file_filter'] = $filters['plugin_file'];
+    }
+
     if (($filters['review_status'] ?? null) !== null) {
         if (($filters['review_status'] ?? null) === 'unreviewed') {
             if ($review_notes_exist) {
@@ -14538,6 +14616,9 @@ function cow_merge_audit_resolution_group_sql(string $group_by): string {
     }
     if ($group_by === 'plugin-logical-identity') {
         return "CASE WHEN mr.table_name = '__plugins__' THEN COALESCE(forkpress_plugin_logical_identity_group(c.chosen_payload), '(unknown)') ELSE mr.table_name END";
+    }
+    if ($group_by === 'plugin-file') {
+        return "CASE WHEN mr.table_name = '__plugins__' THEN COALESCE(forkpress_plugin_file_group(c.chosen_payload), '(unknown)') ELSE mr.table_name END";
     }
     throw new InvalidArgumentException('unsupported resolution group');
 }
@@ -14601,6 +14682,9 @@ function cow_merge_audit_conflict_group_sql(
     if ($group_by === 'plugin-logical-identity') {
         return "CASE WHEN c.table_name = '__plugins__' THEN COALESCE(forkpress_plugin_logical_identity_group(c.chosen_payload), '(unknown)') ELSE c.table_name END";
     }
+    if ($group_by === 'plugin-file') {
+        return "CASE WHEN c.table_name = '__plugins__' THEN COALESCE(forkpress_plugin_file_group(c.chosen_payload), '(unknown)') ELSE c.table_name END";
+    }
     throw new InvalidArgumentException('unsupported conflict group');
 }
 
@@ -14631,6 +14715,9 @@ function cow_merge_audit_conflict_event_group_sql(string $group_by, bool $confli
     }
     if ($group_by === 'plugin-logical-identity') {
         return "CASE WHEN c.table_name = '__plugins__' THEN COALESCE(forkpress_plugin_logical_identity_group(c.chosen_payload), '(unknown)') ELSE c.table_name END";
+    }
+    if ($group_by === 'plugin-file') {
+        return "CASE WHEN c.table_name = '__plugins__' THEN COALESCE(forkpress_plugin_file_group(c.chosen_payload), '(unknown)') ELSE c.table_name END";
     }
     throw new InvalidArgumentException('unsupported conflict event group');
 }
@@ -14693,6 +14780,10 @@ function cow_merge_audit_count_sql(
     if ($record_type === 'conflicts' && ($filters['semantic_scope'] ?? null) !== null) {
         $conditions[] = $alias . ".table_name = '__plugins__'";
         $conditions[] = "forkpress_plugin_semantic_scope_group($alias.chosen_payload) = '" . SQLite3::escapeString($filters['semantic_scope']) . "'";
+    }
+    if ($record_type === 'conflicts' && ($filters['plugin_file'] ?? null) !== null) {
+        $conditions[] = $alias . ".table_name = '__plugins__'";
+        $conditions[] = "forkpress_plugin_file_matches($alias.chosen_payload, '" . SQLite3::escapeString($filters['plugin_file']) . "') = 1";
     }
     if ($record_type === 'conflicts' && ($filters['lifecycle_state'] ?? null) !== null && ($filters['records'] ?? null) !== 'conflict-events') {
         $conditions[] = cow_merge_audit_conflict_lifecycle_state_sql($alias . '.id', $review_notes_exist, $resolutions_exist, $conflict_events_exist) .
@@ -16699,7 +16790,7 @@ function cow_merge_audit_object_label(array $row): string {
 
 function cow_merge_audit_filter_label(array $filters): string {
     $parts = [];
-    foreach (['scope', 'records', 'conflict_type', 'conflict_id', 'conflict_key', 'event_type', 'plugin', 'plugin_object', 'plugin_severity', 'plugin_logical_identity', 'semantic_scope', 'decision', 'path', 'path_prefix', 'review_status', 'resolution_status', 'lifecycle_state', 'next_action', 'revalidation_class', 'latest_revalidation_status', 'stale_status', 'resolution_choice', 'blocked_resolution_choice', 'resolution_strategy', 'generic_resolver', 'after_revalidate', 'group_by'] as $key) {
+    foreach (['scope', 'records', 'conflict_type', 'conflict_id', 'conflict_key', 'event_type', 'plugin', 'plugin_object', 'plugin_severity', 'plugin_logical_identity', 'semantic_scope', 'plugin_file', 'decision', 'path', 'path_prefix', 'review_status', 'resolution_status', 'lifecycle_state', 'next_action', 'revalidation_class', 'latest_revalidation_status', 'stale_status', 'resolution_choice', 'blocked_resolution_choice', 'resolution_strategy', 'generic_resolver', 'after_revalidate', 'group_by'] as $key) {
         $value = $filters[$key] ?? null;
         if ($value === null || $value === '') {
             continue;
@@ -19929,6 +20020,7 @@ if (realpath($argv[0] ?? '') === __FILE__) {
                     'plugin_severity' => $args['plugin-severity'] ?? null,
                     'plugin_logical_identity' => $args['plugin-logical-identity'] ?? null,
                     'semantic_scope' => $args['semantic-scope'] ?? null,
+                    'plugin_file' => $args['plugin-file'] ?? null,
                     'decision' => $args['decision'] ?? null,
                     'path' => $args['path'] ?? null,
                     'path_prefix' => $args['path-prefix'] ?? null,

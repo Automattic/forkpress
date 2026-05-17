@@ -365,6 +365,29 @@ PHP);
     assert_same($missing_file_audit_conflict['plugin_severity'] ?? null, 'error', 'plugin audit exposes validator severity as a first-class field');
     assert_same($missing_file_audit_conflict['plugin_tables'] ?? null, ['plugin_graph_child'], 'plugin audit exposes plugin-owned tables as structured fields');
     assert_same($missing_file_audit_conflict['plugin_files'] ?? null, ['wp-content/uploads/plugin-validator-missing.dat'], 'plugin audit normalizes validator paths into structured plugin files');
+    $missing_file_filter_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin_file' => 'wp-content/uploads/plugin-validator-missing.dat',
+    ]);
+    assert_same(count($missing_file_filter_audit['conflicts']), 1, 'plugin audit can filter conflicts by validator-reported file path');
+    assert_same(
+        $missing_file_filter_audit['conflicts'][0]['plugin_files'] ?? null,
+        ['wp-content/uploads/plugin-validator-missing.dat'],
+        'plugin file filter keeps the matching plugin file context'
+    );
+    $missing_file_cli_filter = run_merge_cli([
+        'audit',
+        '--metadata-db', $metadata,
+        '--run', (string)$result['run_id'],
+        '--scope', 'plugin',
+        '--records', 'conflicts',
+        '--plugin-file', 'wp-content/uploads/plugin-validator-missing.dat',
+        '--format', 'json',
+    ]);
+    assert_same($missing_file_cli_filter['status'], 0, 'plugin audit CLI accepts --plugin-file');
+    $missing_file_cli_decoded = json_decode($missing_file_cli_filter['output'], true);
+    assert_same(count($missing_file_cli_decoded['conflicts'] ?? []), 1, 'plugin audit CLI filters conflicts by validator-reported file path');
     $unsafe_file_paths = [];
     foreach ($file_audit_conflicts as $conflict) {
         $payload = cow_merge_decode_payload_json((string)($conflict['chosen_payload'] ?? ''), 'plugin graph file conflict');
@@ -432,6 +455,18 @@ PHP);
         fn(array $conflict): bool => ($conflict['plugin_files'] ?? null) === ['https://example.test/plugin-validator-url.dat']
     ));
     assert_same(count($url_file_audit_conflicts), 1, 'plugin audit exposes the unsafe URL file conflict as a focused record');
+    $url_file_filter_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin_file' => 'https://example.test/plugin-validator-url.dat',
+    ]);
+    assert_same(count($url_file_filter_audit['conflicts']), 1, 'plugin audit can filter unsafe URL file conflicts by plugin file path');
+    $url_file_event_filter_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflict-events',
+        'plugin_file' => 'https://example.test/plugin-validator-url.dat',
+    ]);
+    assert_true(count($url_file_event_filter_audit['conflict_events']) >= 1, 'plugin file filter applies to plugin conflict event queues');
     $url_file_conflict_id = (int)$url_file_audit_conflicts[0]['id'];
     $plugin_driver_path = $tmp . '/forkpress-plugin-graph-driver.php';
     write_test_file($plugin_driver_path, <<<'PHP'
@@ -492,6 +527,27 @@ PHP);
         fn(array $resolution): bool => (int)($resolution['conflict_id'] ?? 0) === $url_file_conflict_id
     ));
     assert_same(count($runner_resolution_rows), 1, 'plugin driver runner resolution is filterable by plugin-driver choice');
+    $runner_plugin_file_resolution_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'resolutions',
+        'plugin_file' => 'https://example.test/plugin-validator-url.dat',
+    ]);
+    assert_same(count($runner_plugin_file_resolution_audit['resolutions']), 1, 'plugin file filter applies to plugin-driver resolution queues');
+    assert_same(
+        $runner_plugin_file_resolution_audit['resolutions'][0]['plugin_files'] ?? null,
+        ['https://example.test/plugin-validator-url.dat'],
+        'plugin file resolution filter keeps the matching plugin file context'
+    );
+    $runner_plugin_file_resolution_group_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'resolutions',
+        'group_by' => 'plugin-file',
+    ]);
+    $plugin_file_resolution_group_counts = [];
+    foreach ($runner_plugin_file_resolution_group_audit['resolution_groups'] as $group) {
+        $plugin_file_resolution_group_counts[(string)$group['group_key']] = (int)$group['resolution_count'];
+    }
+    assert_same($plugin_file_resolution_group_counts['https://example.test/plugin-validator-url.dat'] ?? 0, 1, 'plugin file grouping applies to plugin-driver resolution queues');
     $runner_result_payload = cow_merge_decode_payload_json((string)($runner_resolution_rows[0]['chosen_payload'] ?? ''), 'plugin driver runner audit result');
     assert_same($runner_result_payload['result']['context_ok'] ?? null, true, 'plugin driver runner passes conflict and merge context to the driver');
     $drive_file_audit_conflicts = array_values(array_filter(
@@ -1125,12 +1181,24 @@ PHP);
     }
     assert_same($plugin_severity_group_counts['error'] ?? 0, 3, 'plugin audit can group conflicts by validator severity');
     assert_same($plugin_severity_group_counts['(unknown)'] ?? 0, 1, 'plugin audit groups findings without validator severity as unknown');
+    $plugin_file_group_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'group_by' => 'plugin-file',
+    ]);
+    $plugin_file_group_counts = [];
+    foreach ($plugin_file_group_audit['conflict_groups'] as $group) {
+        $plugin_file_group_counts[(string)$group['group_key']] = (int)$group['conflict_count'];
+    }
+    assert_same($plugin_file_group_counts['wp-content/uploads/plugin-validator-missing.dat'] ?? 0, 1, 'plugin audit can group conflicts by validator-reported file');
     $plugin_group_default_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, ['scope' => 'plugin', 'group_by' => 'plugin']);
     assert_same($plugin_group_default_audit['filters']['records'], 'conflicts', 'plugin grouping defaults audit records to conflicts');
     $plugin_object_group_default_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, ['scope' => 'plugin', 'group_by' => 'plugin-object']);
     assert_same($plugin_object_group_default_audit['filters']['records'], 'conflicts', 'plugin object grouping defaults audit records to conflicts');
     $plugin_severity_group_default_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, ['scope' => 'plugin', 'group_by' => 'plugin-severity']);
     assert_same($plugin_severity_group_default_audit['filters']['records'], 'conflicts', 'plugin severity grouping defaults audit records to conflicts');
+    $plugin_file_group_default_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, ['scope' => 'plugin', 'group_by' => 'plugin-file']);
+    assert_same($plugin_file_group_default_audit['filters']['records'], 'conflicts', 'plugin file grouping defaults audit records to conflicts');
     ob_start();
     cow_merge_print_audit_text($plugin_object_group_audit);
     $plugin_object_group_text = ob_get_clean();
@@ -1139,6 +1207,10 @@ PHP);
     cow_merge_print_audit_text($plugin_severity_group_audit);
     $plugin_group_text = ob_get_clean();
     assert_true(str_contains($plugin_group_text, 'plugin-severity=error conflicts=3'), 'plugin text audit exposes conflict grouping by validator severity');
+    ob_start();
+    cow_merge_print_audit_text($plugin_file_group_audit);
+    $plugin_file_group_text = ob_get_clean();
+    assert_true(str_contains($plugin_file_group_text, 'plugin-file=wp-content/uploads/plugin-validator-missing.dat conflicts=1'), 'plugin text audit exposes conflict grouping by validator file');
 
     $logical_alias_result = cow_merge_record_plugin_validator_conflicts($metadata, (int)$result['run_id'], [
         [
@@ -1363,6 +1435,16 @@ PHP);
         'plugin' => 'forkpress-plugin-graph',
         'group_by' => 'plugin-object',
     ]);
+    $plugin_file_event_group_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'records' => 'conflict-events',
+        'plugin_file' => 'wp-content/uploads/plugin-validator-missing.dat',
+        'group_by' => 'plugin-file',
+    ]);
+    $plugin_file_event_group_counts = [];
+    foreach ($plugin_file_event_group_audit['conflict_event_groups'] as $group) {
+        $plugin_file_event_group_counts[(string)$group['group_key']] = (int)$group['event_count'];
+    }
+    assert_true(($plugin_file_event_group_counts['wp-content/uploads/plugin-validator-missing.dat'] ?? 0) >= 1, 'plugin file grouping applies to plugin conflict-event queues');
     $plugin_event_group_counts = [];
     foreach ($plugin_event_group_audit['conflict_event_groups'] as $group) {
         $plugin_event_group_counts[(string)$group['group_key']] = (int)$group['event_count'];

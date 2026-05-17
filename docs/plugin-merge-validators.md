@@ -79,7 +79,7 @@ mark that run as `completed_with_conflicts`, filter `merge-audit` output with
 `scope = plugin`, group plugin findings separately from DB/file findings,
 summarize plugin conflict queues with `merge-audit --scope plugin --group-by plugin`,
 `--group-by plugin-object`, `--group-by plugin-severity`, or
-`--group-by plugin-logical-identity`, and
+`--group-by plugin-logical-identity`, or `--group-by plugin-file`, and
 attach review notes. Plugin audit records expose validator metadata as
 structured fields (`plugin`, `plugin_object`, `plugin_tables`,
 `plugin_files`, `plugin_validator`, `plugin_severity`,
@@ -89,8 +89,9 @@ built-in WordPress semantic validators whose plugin id starts with
 `forkpress-wp-` as `semantic_scope = wordpress`; other plugin validator
 findings default to `semantic_scope = plugin`.
 The same first-class fields are filterable with `merge-audit --plugin <name>`,
-`--plugin-object <object>`, `--plugin-severity <severity>`, and
-`--plugin-logical-identity <json>`, plus `--semantic-scope wordpress|plugin`.
+`--plugin-object <object>`, `--plugin-severity <severity>`,
+`--plugin-logical-identity <json>`, `--semantic-scope wordpress|plugin`, and
+`--plugin-file <path>`.
 Text audit output prints the same plugin identity, owned table/file, logical
 identity, and review-guidance evidence for CLI reviewers.
 Plugin conflict-event records inherit the same fields, so UI queues can render
@@ -100,8 +101,8 @@ Plugin resolution records also expose those fields from the linked conflict,
 even though the resolution payload previews still show the validated/applied
 value, and `--records resolutions --group-by plugin`,
 `--group-by plugin-object`, `--group-by plugin-severity`, or
-`--group-by plugin-logical-identity` can summarize resolution queues by that
-linked plugin evidence.
+`--group-by plugin-logical-identity`, or `--group-by plugin-file` can
+summarize resolution queues by that linked plugin evidence.
 Validator findings may use either `files` or `paths`; both are normalized into
 the audit `plugin_files` field. External validator runners can hand findings
 back through:
