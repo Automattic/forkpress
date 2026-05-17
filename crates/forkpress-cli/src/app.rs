@@ -6195,6 +6195,15 @@ mod git_helper_tests {
     }
 
     #[test]
+    fn parses_cow_branch_merge_audit_id_band_skip_shortcut() {
+        let args = vec!["merge-audit".to_string(), "--id-band-skips".to_string()];
+        let parsed = parse_cow_branch_merge_audit_args(&args).unwrap();
+        assert!(parsed.id_band_skips);
+        assert_eq!(parsed.records, "all");
+        assert_eq!(parsed.decision.as_deref(), None);
+    }
+
+    #[test]
     fn branch_merge_audit_revalidate_rejects_ignored_filters() {
         let args = vec![
             "merge-audit".to_string(),
