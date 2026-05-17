@@ -328,6 +328,16 @@ PHP);
         $plugin_group_counts[(string)$group['group_key']] = (int)$group['conflict_count'];
     }
     assert_same($plugin_group_counts['forkpress-plugin-graph'] ?? 0, 2, 'plugin audit can group conflicts by validator plugin');
+    $plugin_object_group_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'group_by' => 'plugin-object',
+    ]);
+    $plugin_object_group_counts = [];
+    foreach ($plugin_object_group_audit['conflict_groups'] as $group) {
+        $plugin_object_group_counts[(string)$group['group_key']] = (int)$group['conflict_count'];
+    }
+    assert_same($plugin_object_group_counts['child:' . $child_id] ?? 0, 2, 'plugin audit can group conflicts by validator object');
     $plugin_severity_group_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'plugin',
         'records' => 'conflicts',
@@ -341,8 +351,14 @@ PHP);
     assert_same($plugin_severity_group_counts['(unknown)'] ?? 0, 1, 'plugin audit groups findings without validator severity as unknown');
     $plugin_group_default_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, ['scope' => 'plugin', 'group_by' => 'plugin']);
     assert_same($plugin_group_default_audit['filters']['records'], 'conflicts', 'plugin grouping defaults audit records to conflicts');
+    $plugin_object_group_default_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, ['scope' => 'plugin', 'group_by' => 'plugin-object']);
+    assert_same($plugin_object_group_default_audit['filters']['records'], 'conflicts', 'plugin object grouping defaults audit records to conflicts');
     $plugin_severity_group_default_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, ['scope' => 'plugin', 'group_by' => 'plugin-severity']);
     assert_same($plugin_severity_group_default_audit['filters']['records'], 'conflicts', 'plugin severity grouping defaults audit records to conflicts');
+    ob_start();
+    cow_merge_print_audit_text($plugin_object_group_audit);
+    $plugin_object_group_text = ob_get_clean();
+    assert_true(str_contains($plugin_object_group_text, 'plugin-object=child:' . $child_id . ' conflicts=2'), 'plugin text audit exposes conflict grouping by validator object');
     ob_start();
     cow_merge_print_audit_text($plugin_severity_group_audit);
     $plugin_group_text = ob_get_clean();
