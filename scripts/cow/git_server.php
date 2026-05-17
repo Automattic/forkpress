@@ -669,7 +669,7 @@ function cow_git_cleanup_created_branch_id_band_metadata(string $git_repo_dir, ?
                 'DELETE FROM merge_autoincrement_bands WHERE branch_name = :branch',
                 'DELETE FROM merge_row_identities WHERE branch_name = :branch',
                 'DELETE FROM merge_row_identity_history WHERE branch_name = :branch',
-                "DELETE FROM merge_decisions WHERE run_id IN (SELECT id FROM merge_runs WHERE source_branch = :branch AND target_branch = :branch AND base_ref = 'autoincrement-id-band' AND policy = 'autoincrement-id-band-allocation')",
+                "DELETE FROM merge_decisions WHERE run_id IN (SELECT id FROM merge_runs WHERE source_branch = :branch AND target_branch = :branch AND base_ref IN ('autoincrement-id-band', 'identity-capture') AND policy IN ('autoincrement-id-band-allocation', 'sidecar-row-identity-capture'))",
                 "DELETE FROM merge_runs WHERE source_branch = :branch AND target_branch = :branch AND base_ref IN ('autoincrement-id-band', 'identity-capture') AND policy IN ('autoincrement-id-band-allocation', 'sidecar-row-identity-capture')",
             ] as $sql) {
                 $stmt = $db->prepare($sql);

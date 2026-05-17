@@ -54,6 +54,41 @@ function run_php_code_env(string $code, array $env): array {
 
 require_once __DIR__ . '/../../scripts/cow/git_server.php';
 
+echo "=== COW Git created-branch cleanup ===\n";
+
+$tmp = sys_get_temp_dir() . '/forkpress-cow-git-created-branch-cleanup-' . getmypid() . '-' . bin2hex(random_bytes(4));
+$git = $tmp . '/git';
+$branch_list = $tmp . '/branches.txt';
+$metadata_path = $tmp . '/merge/metadata.sqlite';
+mkdir($git, 0777, true);
+mkdir(dirname($metadata_path), 0777, true);
+file_put_contents($branch_list, "main\n");
+$metadata = new SQLite3($metadata_path);
+$metadata->exec('CREATE TABLE merge_autoincrement_bands (branch_name TEXT NOT NULL)');
+$metadata->exec('CREATE TABLE merge_row_identities (branch_name TEXT NOT NULL)');
+$metadata->exec('CREATE TABLE merge_row_identity_history (branch_name TEXT NOT NULL)');
+$metadata->exec('CREATE TABLE merge_runs (id INTEGER PRIMARY KEY, source_branch TEXT NOT NULL, target_branch TEXT NOT NULL, base_ref TEXT NOT NULL, policy TEXT NOT NULL)');
+$metadata->exec('CREATE TABLE merge_decisions (id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL)');
+$metadata->exec("INSERT INTO merge_autoincrement_bands (branch_name) VALUES ('git-created'), ('kept')");
+$metadata->exec("INSERT INTO merge_row_identities (branch_name) VALUES ('git-created'), ('kept')");
+$metadata->exec("INSERT INTO merge_row_identity_history (branch_name) VALUES ('git-created'), ('kept')");
+$metadata->exec("INSERT INTO merge_runs (id, source_branch, target_branch, base_ref, policy) VALUES (1, 'git-created', 'git-created', 'autoincrement-id-band', 'autoincrement-id-band-allocation')");
+$metadata->exec("INSERT INTO merge_runs (id, source_branch, target_branch, base_ref, policy) VALUES (2, 'git-created', 'git-created', 'identity-capture', 'sidecar-row-identity-capture')");
+$metadata->exec("INSERT INTO merge_runs (id, source_branch, target_branch, base_ref, policy) VALUES (3, 'git-created', 'main', 'identity-capture', 'sidecar-row-identity-capture')");
+$metadata->exec('INSERT INTO merge_decisions (id, run_id) VALUES (10, 1), (11, 2), (12, 3)');
+$metadata->close();
+cow_git_cleanup_created_branch_id_band_metadata($git, $branch_list, [['branch' => 'git-created']]);
+$metadata = new SQLite3($metadata_path, SQLITE3_OPEN_READONLY);
+assert_same((int)$metadata->querySingle("SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'git-created'"), 0, 'created-branch cleanup removes created ID-band rows');
+assert_same((int)$metadata->querySingle("SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = 'git-created'"), 0, 'created-branch cleanup removes active row identity rows');
+assert_same((int)$metadata->querySingle("SELECT COUNT(*) FROM merge_row_identity_history WHERE branch_name = 'git-created'"), 0, 'created-branch cleanup removes row identity history');
+assert_same((int)$metadata->querySingle("SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'git-created' AND target_branch = 'git-created'"), 0, 'created-branch cleanup removes branch-birth runs');
+assert_same((int)$metadata->querySingle('SELECT COUNT(*) FROM merge_decisions WHERE run_id IN (1, 2)'), 0, 'created-branch cleanup removes all branch-birth decisions');
+assert_same((int)$metadata->querySingle('SELECT COUNT(*) FROM merge_decisions WHERE run_id = 3'), 1, 'created-branch cleanup preserves non-birth decisions');
+assert_same((int)$metadata->querySingle("SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'kept'"), 1, 'created-branch cleanup preserves other branch ID-band rows');
+$metadata->close();
+cow_git_remove_tree($tmp);
+
 echo "=== COW Git server receive-pack parsing ===\n";
 
 $signed_commit_bytes = implode("\n", [
