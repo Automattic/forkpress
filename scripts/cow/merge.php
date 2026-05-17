@@ -5432,6 +5432,23 @@ function cow_merge_wordpress_post_content_reference_violation(
             }
         }
 
+        if ($block_name === 'latest-posts') {
+            if (array_key_exists('selectedAuthor', $attrs)) {
+                $violation = $check_user($attrs['selectedAuthor'], 'wp:latest-posts.selectedAuthor');
+                if ($violation !== null) {
+                    return $violation;
+                }
+            }
+            if (isset($attrs['categories']) && is_array($attrs['categories'])) {
+                foreach ($attrs['categories'] as $index => $term_id) {
+                    $violation = $check_term($term_id, 'wp:latest-posts.categories.' . (string)$index);
+                    if ($violation !== null) {
+                        return $violation;
+                    }
+                }
+            }
+        }
+
         if (in_array($block_name, ['navigation-link', 'navigation-submenu'], true) && array_key_exists('id', $attrs)) {
             $label = 'wp:' . $block_name . '.id';
             if (($attrs['kind'] ?? null) === 'post-type') {
