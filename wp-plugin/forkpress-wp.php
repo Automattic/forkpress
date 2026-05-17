@@ -1632,10 +1632,40 @@ function forkpress_branch_switcher_assets(): void {
             border-radius: 4px;
             color: #f0f0f1;
             display: grid;
-            gap: 3px;
+            gap: 6px;
             font-size: 11px;
             line-height: 1.35;
             padding: 7px;
+        }
+        #wpadminbar .forkpress-conflict-summary-row {
+            color: #c3c4c7;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
+        }
+        #wpadminbar .forkpress-conflict-summary-label {
+            color: #f0f0f1;
+            font-weight: 700;
+            line-height: 24px;
+            min-width: 54px;
+        }
+        #wpadminbar .forkpress-conflict-summary-button {
+            background: #2c3338;
+            border: 1px solid #50575e;
+            border-radius: 3px;
+            color: #f0f0f1;
+            cursor: pointer;
+            font-size: 11px;
+            line-height: 1;
+            margin: 0;
+            padding: 5px 7px;
+        }
+        #wpadminbar .forkpress-conflict-summary-button:hover,
+        #wpadminbar .forkpress-conflict-summary-button:focus {
+            background: #2271b1;
+            border-color: #2271b1;
+            color: #fff;
+            outline: none;
         }
         #wpadminbar .forkpress-conflict-row {
             border-top: 1px solid #3c434a;
@@ -1802,19 +1832,70 @@ function forkpress_render_branch_switcher(): void {
             ].filter(Boolean).join(' / ');
         }
 
-        function formatConflictSummaryBucket(label, bucket) {
-            if (!bucket || typeof bucket !== 'object') {
-                return '';
-            }
-            var parts = Object.keys(bucket).filter(function (key) {
-                return Number(bucket[key]) > 0;
-            }).sort().map(function (key) {
-                return key + '=' + String(bucket[key]);
+        function mergeConflictFilters(base, next) {
+            var filters = {};
+            [base || {}, next || {}].forEach(function (source) {
+                Object.keys(source).forEach(function (key) {
+                    if (source[key]) {
+                        filters[key] = source[key];
+                    }
+                });
             });
-            return parts.length ? label + ': ' + parts.join(' / ') : '';
+            return filters;
         }
 
-        function renderConflictSummary(payload, records) {
+        function conflictSummaryFilter(filterKey, value) {
+            if (filterKey === 'lifecycle') {
+                return { lifecycleState: value };
+            }
+            if (filterKey === 'next') {
+                return { nextAction: value };
+            }
+            if (filterKey === 'scope') {
+                return { scope: value };
+            }
+            return {};
+        }
+
+        function appendConflictSummaryQueue(row, payload, activeFilters, bucket, filterKey) {
+            if (!bucket || typeof bucket !== 'object') {
+                return;
+            }
+            Object.keys(bucket).filter(function (key) {
+                return Number(bucket[key]) > 0;
+            }).sort().forEach(function (key) {
+                var button = document.createElement('button');
+                button.className = 'forkpress-conflict-summary-button';
+                button.type = 'button';
+                button.textContent = key + ' (' + String(bucket[key]) + ')';
+                button.addEventListener('click', function () {
+                    fetchConflictAudit(payload.run, '', mergeConflictFilters(activeFilters, conflictSummaryFilter(filterKey, key)));
+                });
+                row.appendChild(button);
+            });
+        }
+
+        function appendConflictSummaryRow(node, payload, activeFilters, label, bucket, filterKey) {
+            if (!bucket || typeof bucket !== 'object') {
+                return;
+            }
+            var keys = Object.keys(bucket).filter(function (key) {
+                return Number(bucket[key]) > 0;
+            });
+            if (!keys.length) {
+                return;
+            }
+            var row = document.createElement('div');
+            row.className = 'forkpress-conflict-summary-row';
+            var labelNode = document.createElement('span');
+            labelNode.className = 'forkpress-conflict-summary-label';
+            labelNode.textContent = label;
+            row.appendChild(labelNode);
+            appendConflictSummaryQueue(row, payload, activeFilters, bucket, filterKey);
+            node.appendChild(row);
+        }
+
+        function renderConflictSummary(payload, records, activeFilters) {
             var summary = payload.conflictSummary || (payload.audit && payload.audit.conflict_summary) || null;
             if (!summary || typeof summary !== 'object') {
                 return null;
@@ -1836,9 +1917,9 @@ function forkpress_render_branch_switcher(): void {
             var node = document.createElement('div');
             node.className = 'forkpress-conflict-summary';
             appendConflictText(node, 'forkpress-conflict-meta', 'summary: total=' + String(total) + ' / unresolved=' + String(unresolved) + ' / resolved=' + String(resolved));
-            appendConflictText(node, 'forkpress-conflict-meta', formatConflictSummaryBucket('scope', summary.by_scope));
-            appendConflictText(node, 'forkpress-conflict-meta', formatConflictSummaryBucket('lifecycle', summary.by_lifecycle));
-            appendConflictText(node, 'forkpress-conflict-meta', formatConflictSummaryBucket('next', summary.by_next_action));
+            appendConflictSummaryRow(node, payload, activeFilters, 'Scope', summary.by_scope, 'scope');
+            appendConflictSummaryRow(node, payload, activeFilters, 'State', summary.by_lifecycle, 'lifecycle');
+            appendConflictSummaryRow(node, payload, activeFilters, 'Next', summary.by_next_action, 'next');
             return node;
         }
 
@@ -1885,7 +1966,7 @@ function forkpress_render_branch_switcher(): void {
             }
             heading.textContent = 'Run ' + String(payload.run || '') + ': ' + String(payload.recordCount || records.length) + ' of ' + String(payload.totalConflicts || records.length) + ' conflicts';
             conflictList.appendChild(heading);
-            var summary = renderConflictSummary(payload, records);
+            var summary = renderConflictSummary(payload, records, filters);
             if (summary) {
                 conflictList.appendChild(summary);
             }
