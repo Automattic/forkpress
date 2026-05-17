@@ -1947,7 +1947,29 @@ try {
     ]);
     assert_same(count($unique_fk_blocked_event_audit['conflict_events']), 1, 'blocked source resolution attempts are recorded as conflict events');
     assert_same((int)$unique_fk_blocked_event_audit['conflict_events'][0]['conflict_id'], $unique_fk_conflict_id, 'blocked resolution event belongs to the attempted conflict');
+    assert_same($unique_fk_blocked_event_audit['conflict_events'][0]['lifecycle_state'], 'needs-action', 'blocked resolution events move conflicts into the needs-action lifecycle');
     assert_true(str_contains((string)$unique_fk_blocked_event_audit['conflict_events'][0]['note'], 'Resolution blocked:'), 'blocked resolution event preserves the failure reason');
+    $unique_fk_blocked_queue_audit = cow_merge_audit_report($unique_fk_metadata, (int)$unique_fk_result['run_id'], 10, [
+        'records' => 'conflicts',
+        'lifecycle_state' => 'needs-action',
+        'conflict_id' => (string)$unique_fk_conflict_id,
+    ]);
+    assert_same(count($unique_fk_blocked_queue_audit['conflicts']), 1, 'blocked resolution conflicts are discoverable through the needs-action queue');
+    assert_same($unique_fk_blocked_queue_audit['conflicts'][0]['next_action'], 'manual-review', 'blocked resolution conflicts require manual review before another resolver attempt');
+    $unique_fk_blocked_action_audit = cow_merge_audit_report($unique_fk_metadata, (int)$unique_fk_result['run_id'], 10, [
+        'records' => 'conflicts',
+        'next_action' => 'manual-review',
+        'conflict_id' => (string)$unique_fk_conflict_id,
+    ]);
+    assert_same(count($unique_fk_blocked_action_audit['conflicts']), 1, 'blocked resolution conflicts are discoverable through the manual-review action queue');
+    $unique_fk_blocked_lifecycle_groups = cow_merge_audit_report($unique_fk_metadata, (int)$unique_fk_result['run_id'], 10, [
+        'records' => 'conflicts',
+        'group_by' => 'lifecycle',
+    ]);
+    assert_true(
+        in_array('needs-action', array_column($unique_fk_blocked_lifecycle_groups['conflict_groups'], 'group_key'), true),
+        'blocked resolution conflicts are counted in lifecycle groups'
+    );
     $unique_fk_blocked_event_cli = run_merge_cli([
         'audit',
         '--metadata-db', $unique_fk_metadata,

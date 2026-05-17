@@ -333,6 +333,9 @@ should stay focused on these areas:
   source/target branch pair, conflict rows are
   scoped to the merge run so repeated unresolved conflicts and identical payload
   conflicts on different branch pairs receive their own rows/events, and
+  blocked resolver attempts append `resolution-blocked` events that move the
+  still-open conflict back to `needs-action`/manual-review queues instead of
+  leaving UI clients to offer a stale validated apply, and
   `merge-audit --conflict-key <key>` can focus conflict, conflict-event, or
   resolution audit output on one logical conflict group, `merge-review
   conflict-key <key> [--run <id>]` can attach review status by logical key,

@@ -171,12 +171,14 @@ conflicts`, `conflict-events`, or `resolutions` to focus audit output on one
 logical conflict group across repeated runs. Use `--lifecycle-state <state>`
 with conflict records to build queues such as `unreviewed`, `needs-action`,
 `validated`, or `resolved`, and with conflict-event records to inspect matching
-history entries. Use `--event-type resolution-blocked` to audit failed resolver
-attempts whose conflicts remain open. Use `--next-action <action>` to build
-action-specific queues from the same `next_action` field the JSON output
-exposes. Use `--records conflicts --group-by lifecycle` or `--group-by
-next-action` to summarize current conflict queues by lifecycle state or
-required action.
+history entries. Failed resolver attempts append `resolution-blocked` events
+and move the unresolved conflict back to `needs-action` with a manual-review
+next action, so UI queues do not keep offering a stale validated apply. Use
+`--event-type resolution-blocked` to audit those blocked attempts. Use
+`--next-action <action>` to build action-specific queues from the same
+`next_action` field the JSON output exposes. Use lifecycle grouping
+(`--records conflicts --group-by lifecycle`) or `--group-by next-action` to
+summarize current conflict queues by lifecycle state or required action.
 Use `--group-by resolution-strategy`, `--group-by generic-resolver`, or
 `--group-by after-revalidate` to summarize the resolver contract for active
 conflicts.
