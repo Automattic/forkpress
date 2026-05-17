@@ -10491,6 +10491,21 @@ SQL);
     );
     assert_same((int)scalar($schema_view_drop_dep_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_drop_base'"), 1, 'blocked source view drop preserves target view');
     assert_same((int)scalar($schema_view_drop_dep_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_drop_child'"), 1, 'blocked source view drop preserves dependent target view');
+    $schema_view_drop_blocked_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'records' => 'conflicts',
+        'lifecycle_state' => 'needs-action',
+        'next_action' => 'manual-review',
+        'conflict_id' => (string)$schema_view_drop_dep_conflict_id,
+    ]);
+    assert_same(count($schema_view_drop_blocked_audit['conflicts']), 1, 'blocked schema source choices are discoverable through the manual-review queue');
+    assert_same($schema_view_drop_blocked_audit['conflicts'][0]['latest_event_type'], 'resolution-blocked', 'blocked schema source choices expose the latest blocked event');
+    $schema_view_drop_blocked_events = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'records' => 'conflict-events',
+        'event_type' => 'resolution-blocked',
+        'conflict_id' => (string)$schema_view_drop_dep_conflict_id,
+    ]);
+    assert_same(count($schema_view_drop_blocked_events['conflict_events']), 1, 'blocked schema source choices record a resolution-blocked event');
+    assert_same($schema_view_drop_blocked_events['conflict_events'][0]['lifecycle_state'], 'needs-action', 'blocked schema source choice events move conflicts into needs-action');
 
     $schema_trigger_drop_base = $tmp . '/schema-trigger-drop-base.sqlite';
     $schema_trigger_drop_source = $tmp . '/schema-trigger-drop-source.sqlite';
