@@ -141,16 +141,52 @@ try {
             str_contains((string)($trigger_payload['error'] ?? ''), 'plugin_trigger_cycle_self_insert -> plugin_trigger_cycle_self_insert'),
         'cyclic trigger conflict payload records the unsupported dependency cycle'
     );
+    $schema_contract_audit = cow_merge_audit_report($metadata, $schema_review_run_id, 10, ['records' => 'conflicts']);
+    $schema_contract_rows = [];
+    foreach ($schema_contract_audit['conflicts'] as $row) {
+        $schema_contract_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $schema_contract_rows[$view_conflict_id]['resolution_choices'],
+        ['target'],
+        'cyclic source-added view audit does not advertise blocked source resolution'
+    );
+    assert_same(
+        $schema_contract_rows[$view_conflict_id]['blocked_resolution_choices']['source'] ?? null,
+        (string)$view_payload['error'],
+        'cyclic source-added view audit explains why source resolution is blocked'
+    );
+    assert_same(
+        $schema_contract_rows[$trigger_conflict_id]['resolution_choices'],
+        ['target'],
+        'cyclic source-added trigger audit does not advertise blocked source resolution'
+    );
+    assert_same(
+        $schema_contract_rows[$trigger_conflict_id]['blocked_resolution_choices']['source'] ?? null,
+        (string)$trigger_payload['error'],
+        'cyclic source-added trigger audit explains why source resolution is blocked'
+    );
+    ob_start();
+    cow_merge_print_audit_text($schema_contract_audit);
+    $schema_contract_text = (string)ob_get_clean();
+    assert_true(
+        str_contains($schema_contract_text, 'blocked-choice=source reason=source view plugin_cycle_self_view has unsupported cyclic source view dependencies'),
+        'text audit prints blocked source choice for cyclic views'
+    );
+    assert_true(
+        str_contains($schema_contract_text, 'blocked-choice=source reason=source trigger plugin_trigger_cycle_self_insert has unsupported cyclic trigger dependencies'),
+        'text audit prints blocked source choice for cyclic triggers'
+    );
 
     assert_throws(
         fn() => cow_merge_resolve_conflict($metadata, $view_conflict_id, 'source', true, 'Try cyclic source-added view.', 'cow-test'),
-        'unsupported cyclic source view dependencies',
-        'cyclic source-added view resolution remains validation-gated'
+        "resolution choice source is blocked for conflict #$view_conflict_id: source view plugin_cycle_self_view has unsupported cyclic source view dependencies",
+        'cyclic source-added view resolution is blocked by the conflict contract'
     );
     assert_throws(
         fn() => cow_merge_resolve_conflict($metadata, $trigger_conflict_id, 'source', true, 'Try cyclic source-added trigger.', 'cow-test'),
-        'unsupported cyclic trigger dependencies',
-        'cyclic source-added trigger resolution remains validation-gated'
+        "resolution choice source is blocked for conflict #$trigger_conflict_id: source trigger plugin_trigger_cycle_self_insert has unsupported cyclic trigger dependencies",
+        'cyclic source-added trigger resolution is blocked by the conflict contract'
     );
     assert_same(
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id IN ($view_conflict_id, $trigger_conflict_id)"),

@@ -720,6 +720,8 @@ file_put_contents($branches . '/main/wp-content/base.txt', "base\n");
 $db = new SQLite3($branches . '/main/wp-content/database/.ht.sqlite');
 $db->exec('CREATE TABLE wp_posts (ID INTEGER PRIMARY KEY AUTOINCREMENT, post_title TEXT)');
 $db->exec("INSERT INTO wp_posts (post_title) VALUES ('Base post')");
+$db->exec('CREATE TABLE plugin_keyless (label TEXT, value TEXT)');
+$db->exec("INSERT INTO plugin_keyless (label, value) VALUES ('Base keyless', 'base')");
 $db->close();
 
 $fs = WordPress\Filesystem\LocalFilesystem::create($git);
@@ -762,9 +764,13 @@ assert_same(trim((string)file_get_contents($branch_list)), 'main', 'Git-created 
 $metadata = new SQLite3($tmp . '/merge/metadata.sqlite');
 $stale_band_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'git-created-list-fail'");
 $stale_identity_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = 'git-created-list-fail'");
+$stale_birth_run_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'git-created-list-fail' AND target_branch = 'git-created-list-fail'");
+$stale_birth_decision_count = (int)$metadata->querySingle('SELECT COUNT(*) FROM merge_decisions');
 $metadata->close();
 assert_same($stale_band_count, 0, 'Git-created branch-list publication failure removes ID-band metadata');
 assert_same($stale_identity_count, 0, 'Git-created branch-list publication failure removes row identity metadata');
+assert_same($stale_birth_decision_count, 0, 'Git-created branch-list publication failure removes branch birth decision metadata');
+assert_same($stale_birth_run_count, 0, 'Git-created branch-list publication failure removes branch birth run metadata');
 $failed = false;
 $failure_message = '';
 putenv('FORKPRESS_COW_GIT_TEST_FAILPOINT=after-created-branch-metadata');
@@ -787,9 +793,13 @@ assert_same(trim((string)file_get_contents($branch_list)), 'main', 'Git-created 
 $metadata = new SQLite3($tmp . '/merge/metadata.sqlite');
 $stale_band_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'git-created-list-fail'");
 $stale_identity_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = 'git-created-list-fail'");
+$stale_birth_run_count = (int)$metadata->querySingle("SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'git-created-list-fail' AND target_branch = 'git-created-list-fail'");
+$stale_birth_decision_count = (int)$metadata->querySingle('SELECT COUNT(*) FROM merge_decisions');
 $metadata->close();
 assert_same($stale_band_count, 0, 'Git-created branch metadata publication failure removes ID-band metadata');
 assert_same($stale_identity_count, 0, 'Git-created branch metadata publication failure removes row identity metadata');
+assert_same($stale_birth_decision_count, 0, 'Git-created branch metadata publication failure removes branch birth decision metadata');
+assert_same($stale_birth_run_count, 0, 'Git-created branch metadata publication failure removes branch birth run metadata');
 cow_git_remove_tree($tmp);
 
 $tmp = sys_get_temp_dir() . '/forkpress-cow-git-created-branch-list-crash-' . getmypid() . '-' . bin2hex(random_bytes(4));

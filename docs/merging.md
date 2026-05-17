@@ -81,7 +81,9 @@ logical table/row/column/type conflict, a same-source/target-branch
 `conflict_class`, a
 `resolution_strategy`, executable `resolution_choices`, whether the generic
 `merge-resolve conflict` path supports it, and whether `--after-revalidate` is
-available. It also includes the conflict `lifecycle_state`, `next_action`, and
+available. When a normally supported choice is blocked for this specific
+conflict payload, `blocked_resolution_choices` maps that choice to the audit
+reason. It also includes the conflict `lifecycle_state`, `next_action`, and
 latest resolution metadata so clients can distinguish unreviewed, deferred,
 needs-action, reviewed, validated, and resolved conflicts without parsing review
 notes. Conflict lifecycle changes are also recorded in an append-only
@@ -100,7 +102,9 @@ still auto-accept the same payload as a `target-accepted` decision instead of
 reopening the conflict.
 
 Use `--records conflict-events` to inspect the full append-only lifecycle
-history for conflict records.
+history for conflict records. Use `--conflict-key <key>` with `--records
+conflicts`, `conflict-events`, or `resolutions` to focus audit output on one
+logical conflict group across repeated runs.
 
 ## What gets audited
 

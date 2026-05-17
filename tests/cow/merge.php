@@ -3432,6 +3432,22 @@ SQL);
     assert_same($title_audit_conflicts[0]['conflict_key'] ?? null, $title_conflict_key, 'merge audit exposes conflict keys for UI grouping');
     assert_same($title_audit_conflicts[0]['previous_conflict_id'] ?? null, null, 'first-run merge audit exposes empty conflict lineage');
     assert_same($title_audit_conflicts[0]['stale_status'] ?? null, 'fresh', 'merge audit marks unchanged target conflicts as fresh');
+    $title_key_audit = cow_merge_audit_report($metadata, null, 10, ['records' => 'conflicts', 'conflict_key' => $title_conflict_key]);
+    assert_same(count($title_key_audit['conflicts']), 3, 'merge audit can filter conflicts by stable conflict key across runs');
+    assert_same(count(array_unique(array_column($title_key_audit['conflicts'], 'conflict_key'))), 1, 'conflict-key audit returns one logical conflict group');
+    assert_same(
+        array_values(array_unique(array_column($title_key_audit['conflicts'], 'column_name'))),
+        ['post_title'],
+        'conflict-key audit excludes unrelated conflict columns'
+    );
+    $title_key_event_audit = cow_merge_audit_report($metadata, null, 10, ['records' => 'conflict-events', 'conflict_key' => $title_conflict_key]);
+    assert_same(count($title_key_event_audit['conflict_events']), 3, 'merge audit can filter conflict lifecycle events by stable conflict key');
+    assert_same(count(array_unique(array_column($title_key_event_audit['conflict_events'], 'conflict_key'))), 1, 'conflict-key event audit returns one logical conflict group');
+    assert_throws(
+        fn() => cow_merge_audit_report($metadata, null, 10, ['records' => 'decisions', 'conflict_key' => $title_conflict_key]),
+        '--conflict-key can only be combined',
+        'conflict-key audit rejects decision-only records'
+    );
     $title_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'wp_posts' AND column_name = 'post_title'");
     $GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize'] = [
         static function (SQLite3Result $result, string $message): void {
@@ -4259,6 +4275,22 @@ SQL);
     assert_same(count($applied_resolution_default_records_audit['decisions']), 0, 'resolution status filter with CLI-style defaults omits decision records');
     assert_same(count($applied_resolution_default_records_audit['resolutions']), 2, 'resolution status filter with CLI-style defaults returns applied resolutions');
     assert_true(count(array_filter($applied_resolution_default_records_audit['resolution_groups'], fn($row) => $row['group_key'] === 'applied')) === 1, 'resolution status grouping works through CLI-style default records');
+    $title_key_resolution_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['records' => 'resolutions', 'conflict_key' => $title_conflict_key]);
+    assert_same(count($title_key_resolution_audit['resolutions']), 2, 'conflict-key audit can filter resolution records by logical conflict');
+    assert_same(count(array_unique(array_column($title_key_resolution_audit['resolutions'], 'conflict_key'))), 1, 'conflict-key resolution audit returns one logical conflict group');
+    assert_same(
+        array_values(array_unique(array_column($title_key_resolution_audit['resolutions'], 'column_name'))),
+        ['post_title'],
+        'conflict-key resolution audit excludes unrelated resolved columns'
+    );
+    $title_key_applied_resolution_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, [
+        'records' => 'all',
+        'resolution_status' => 'applied',
+        'conflict_key' => $title_conflict_key,
+    ]);
+    assert_same($title_key_applied_resolution_audit['filters']['records'], 'resolutions', 'conflict-key plus resolution-status defaults to resolution records');
+    assert_same(count($title_key_applied_resolution_audit['resolutions']), 1, 'conflict-key plus resolution-status returns the matching applied resolution');
+    assert_same($title_key_applied_resolution_audit['resolutions'][0]['conflict_key'] ?? null, $title_conflict_key, 'resolution audit exposes the filtered conflict key');
     $validated_resolution_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['records' => 'resolutions', 'resolution_status' => 'validated']);
     assert_same(count($validated_resolution_audit['resolutions']), 1, 'validated resolution status filter returns validated resolution records');
     assert_same($validated_resolution_audit['resolutions'][0]['status'], 'validated', 'validated resolution status filter matches resolution rows');
