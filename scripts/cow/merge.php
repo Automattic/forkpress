@@ -5604,6 +5604,19 @@ function cow_merge_wordpress_option_reference_violation(
         return null;
     }
 
+    if ($option_name === 'nav_menu_options') {
+        $auto_add = $decoded['auto_add'] ?? null;
+        if (is_array($auto_add)) {
+            foreach ($auto_add as $index => $term_id) {
+                $violation = $check_term($term_id, 'auto_add.' . (string)$index);
+                if ($violation !== null) {
+                    return $violation;
+                }
+            }
+        }
+        return null;
+    }
+
     if ($option_name === 'widget_media_image') {
         foreach ($decoded as $widget_id => $widget) {
             if (!is_array($widget) || !array_key_exists('attachment_id', $widget)) {
