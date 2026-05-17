@@ -216,7 +216,7 @@ try {
     assert_same($audit['conflicts'][0]['revalidation_class'] ?? null, 'compatible-target-drift', 'audit exposes the revalidation classifier');
     assert_same($audit['conflicts'][0]['latest_revalidation_class'] ?? null, 'compatible-target-drift', 'audit exposes the latest recorded revalidation classifier');
     assert_same($audit['conflicts'][0]['latest_revalidation_status'] ?? null, 'current', 'audit marks the latest revalidation current while source and target payloads still match');
-    assert_same((int)$audit['conflicts'][0]['event_count'], 3, 'revalidated conflict appends a lifecycle event');
+    assert_same((int)$audit['conflicts'][0]['event_count'], 4, 'revalidated conflict appends a lifecycle event');
     assert_same($audit['conflicts'][0]['latest_event_type'], 'revalidation-required', 'revalidated conflict advertises latest lifecycle event');
     assert_same($audit['conflicts'][0]['latest_event_lifecycle_state'], 'needs-action', 'revalidated conflict advertises latest event state');
     assert_same($audit['conflicts'][0]['latest_event_actor'], 'cow-revalidate', 'revalidated conflict advertises latest event actor');
@@ -251,10 +251,10 @@ try {
     assert_same(count($class_cli_json['conflicts'] ?? []), 1, 'audit CLI filters JSON conflicts by latest revalidation class');
     assert_same($class_cli_json['filters']['revalidation_class'] ?? null, 'compatible-target-drift', 'audit CLI reports the revalidation-class filter');
     $revalidation_id = (int)scalar($metadata, "SELECT id FROM merge_revalidations WHERE conflict_id = $conflict_id ORDER BY id DESC LIMIT 1");
-    $event_audit = cow_merge_audit_report($metadata, $run_id, 3, [
+    $event_audit = cow_merge_audit_report($metadata, $run_id, 4, [
         'records' => 'conflict-events',
     ]);
-    assert_same(array_column($event_audit['conflict_events'], 'event_type'), ['revalidation-required', 'review-reviewed', 'recorded'], 'stale revalidation is visible in the conflict event stream');
+    assert_same(array_column($event_audit['conflict_events'], 'event_type'), ['revalidation-required', 'resolution-blocked', 'review-reviewed', 'recorded'], 'stale revalidation is visible in the conflict event stream');
     assert_same($event_audit['conflict_events'][0]['related_record_type'], 'revalidation', 'revalidation event links to the revalidation record');
     assert_same((int)$event_audit['conflict_events'][0]['related_record_id'], $revalidation_id, 'revalidation event exposes the revalidation id');
     assert_same($event_audit['conflict_events'][0]['lifecycle_state'], 'needs-action', 'revalidation event records the needs-action lifecycle state');
@@ -316,7 +316,7 @@ try {
         'after-revalidate resolution audits the latest revalidated target payload'
     );
     $resolved_audit = cow_merge_audit_report($metadata, $run_id, 10, ['records' => 'conflicts']);
-    assert_same((int)$resolved_audit['conflicts'][0]['event_count'], 4, 'after-revalidate resolution appends a lifecycle event');
+    assert_same((int)$resolved_audit['conflicts'][0]['event_count'], 5, 'after-revalidate resolution appends a lifecycle event');
     assert_same($resolved_audit['conflicts'][0]['latest_event_type'], 'resolution-applied', 'after-revalidate resolution advertises latest lifecycle event');
     assert_same($resolved_audit['conflicts'][0]['latest_event_lifecycle_state'], 'resolved', 'after-revalidate resolution advertises latest event state');
 
