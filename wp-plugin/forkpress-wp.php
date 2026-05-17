@@ -537,7 +537,144 @@ function forkpress_branch_post_int(string $key): ?int {
     return $int > 0 ? $int : null;
 }
 
-function forkpress_branch_plugin_driver_map(): array {
+function forkpress_branch_plugin_driver_entry(string $plugin, string $driver): ?array {
+    $plugin = trim($plugin);
+    $driver = trim($driver);
+    if ($plugin === '' || $driver === '') {
+        return null;
+    }
+    $real = realpath($driver);
+    if (!is_string($real) || !is_file($real)) {
+        return null;
+    }
+    if (strtolower(pathinfo($real, PATHINFO_EXTENSION)) !== 'php' && !is_executable($real)) {
+        return null;
+    }
+    $key = hash('sha256', $plugin . "\0" . $real);
+    return [
+        'key' => $key,
+        'plugin' => $plugin,
+        'driver' => $real,
+        'label' => basename($real),
+    ];
+}
+
+function forkpress_branch_plugin_driver_add(array &$drivers, string $plugin, string $driver): void {
+    $entry = forkpress_branch_plugin_driver_entry($plugin, $driver);
+    if ($entry === null) {
+        return;
+    }
+    $drivers[$entry['key']] = $entry;
+}
+
+function forkpress_branch_normalize_relative_path(string $path): ?string {
+    if ($path === '' || str_contains($path, "\0")) {
+        return null;
+    }
+    $path = str_replace('\\', '/', $path);
+    $parts = [];
+    foreach (explode('/', $path) as $part) {
+        if ($part === '' || $part === '.') {
+            continue;
+        }
+        if ($part === '..') {
+            return null;
+        }
+        $parts[] = $part;
+    }
+    return $parts ? implode('/', $parts) : null;
+}
+
+function forkpress_branch_active_plugin_paths(): array {
+    $plugins = [];
+    if (function_exists('get_option')) {
+        $active = get_option('active_plugins', []);
+        if (is_array($active)) {
+            foreach ($active as $plugin) {
+                if (!is_string($plugin)) {
+                    continue;
+                }
+                $plugin = forkpress_branch_normalize_relative_path($plugin);
+                if ($plugin !== null) {
+                    $plugins[] = $plugin;
+                }
+            }
+        }
+    }
+
+    if (function_exists('get_site_option')) {
+        $sitewide = get_site_option('active_sitewide_plugins', []);
+        if (is_array($sitewide)) {
+            foreach ($sitewide as $plugin => $enabled) {
+                $candidate = is_string($plugin) && $plugin !== '' ? $plugin : (is_string($enabled) ? $enabled : '');
+                $candidate = forkpress_branch_normalize_relative_path($candidate);
+                if ($candidate !== null) {
+                    $plugins[] = $candidate;
+                }
+            }
+        }
+    }
+
+    return array_values(array_unique($plugins));
+}
+
+function forkpress_branch_plugin_dir(): string {
+    if (defined('WP_PLUGIN_DIR') && is_string(WP_PLUGIN_DIR) && WP_PLUGIN_DIR !== '') {
+        return WP_PLUGIN_DIR;
+    }
+    return rtrim((string) ABSPATH, "/\\") . '/wp-content/plugins';
+}
+
+function forkpress_branch_mu_plugin_dir(): string {
+    if (defined('WPMU_PLUGIN_DIR') && is_string(WPMU_PLUGIN_DIR) && WPMU_PLUGIN_DIR !== '') {
+        return WPMU_PLUGIN_DIR;
+    }
+    return rtrim((string) ABSPATH, "/\\") . '/wp-content/mu-plugins';
+}
+
+function forkpress_branch_discovered_plugin_driver_map(): array {
+    $drivers = [];
+    $plugins_dir = rtrim(forkpress_branch_plugin_dir(), "/\\");
+    foreach (forkpress_branch_active_plugin_paths() as $active_plugin) {
+        $plugin_dir = dirname($active_plugin);
+        if ($plugin_dir === '.' || $plugin_dir === '') {
+            $slug = pathinfo($active_plugin, PATHINFO_FILENAME);
+            $driver = $plugins_dir . '/' . $slug . '.forkpress-merge-driver.php';
+        } else {
+            $slug = basename($plugin_dir);
+            $driver = $plugins_dir . '/' . $plugin_dir . '/forkpress-merge-driver.php';
+        }
+        forkpress_branch_plugin_driver_add($drivers, $slug, $driver);
+        forkpress_branch_plugin_driver_add($drivers, $active_plugin, $driver);
+    }
+
+    $mu_dir = rtrim(forkpress_branch_mu_plugin_dir(), "/\\");
+    if (is_dir($mu_dir)) {
+        $direct = $mu_dir . '/forkpress-merge-driver.php';
+        forkpress_branch_plugin_driver_add($drivers, 'mu-plugins', $direct);
+        foreach ([$mu_dir . '/*.forkpress-merge-driver.php', $mu_dir . '/*/forkpress-merge-driver.php'] as $pattern) {
+            $matches = glob($pattern);
+            if (!is_array($matches)) {
+                continue;
+            }
+            sort($matches, SORT_STRING);
+            foreach ($matches as $match) {
+                if (!is_file($match)) {
+                    continue;
+                }
+                $plugin = basename(dirname($match));
+                if ($plugin === 'mu-plugins') {
+                    $plugin = basename($match, '.forkpress-merge-driver.php');
+                }
+                forkpress_branch_plugin_driver_add($drivers, $plugin, $match);
+            }
+        }
+    }
+
+    return $drivers;
+}
+
+function forkpress_branch_configured_plugin_driver_map(): array {
     $raw = getenv('FORKPRESS_PLUGIN_MERGE_DRIVERS');
     if (!is_string($raw) || trim($raw) === '') {
         return [];
@@ -549,46 +686,28 @@ function forkpress_branch_plugin_driver_map(): array {
     }
 
     $drivers = [];
-    $add_driver = static function (string $plugin, string $driver) use (&$drivers): void {
-        $plugin = trim($plugin);
-        $driver = trim($driver);
-        if ($plugin === '' || $driver === '') {
-            return;
-        }
-        $real = realpath($driver);
-        if (!is_string($real) || !is_file($real)) {
-            return;
-        }
-        if (strtolower(pathinfo($real, PATHINFO_EXTENSION)) !== 'php' && !is_executable($real)) {
-            return;
-        }
-        $key = hash('sha256', $plugin . "\0" . $real);
-        $drivers[$key] = [
-            'key' => $key,
-            'plugin' => $plugin,
-            'driver' => $real,
-            'label' => basename($real),
-        ];
-    };
-
     if (array_is_list($decoded)) {
         foreach ($decoded as $entry) {
             if (!is_array($entry)) {
                 continue;
             }
-            $add_driver((string)($entry['plugin'] ?? ''), (string)($entry['driver'] ?? $entry['path'] ?? ''));
+            forkpress_branch_plugin_driver_add($drivers, (string)($entry['plugin'] ?? ''), (string)($entry['driver'] ?? $entry['path'] ?? ''));
         }
     } else {
         foreach ($decoded as $plugin => $driver) {
             if (is_array($driver)) {
-                $add_driver((string)$plugin, (string)($driver['driver'] ?? $driver['path'] ?? ''));
+                forkpress_branch_plugin_driver_add($drivers, (string)$plugin, (string)($driver['driver'] ?? $driver['path'] ?? ''));
             } else {
-                $add_driver((string)$plugin, (string)$driver);
+                forkpress_branch_plugin_driver_add($drivers, (string)$plugin, (string)$driver);
             }
         }
     }
 
     return $drivers;
+}
+
+function forkpress_branch_plugin_driver_map(): array {
+    return forkpress_branch_configured_plugin_driver_map() + forkpress_branch_discovered_plugin_driver_map();
 }
 
 function forkpress_branch_conflict_audit_filters(): array {
