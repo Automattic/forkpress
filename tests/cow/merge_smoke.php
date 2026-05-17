@@ -1681,6 +1681,119 @@ try {
         'reusable block edit/delete defaults the edited source block to target-wins before review'
     );
 
+    $synced_pattern_base = $tmp . '/synced-pattern-base.sqlite';
+    $synced_pattern_source = $tmp . '/synced-pattern-source.sqlite';
+    $synced_pattern_target = $tmp . '/synced-pattern-target.sqlite';
+    $synced_pattern_metadata = $tmp . '/.forkpress/cow/merge/synced-pattern-metadata.sqlite';
+
+    smoke_create_posts_db($synced_pattern_base);
+    copy($synced_pattern_base, $synced_pattern_source);
+    copy($synced_pattern_base, $synced_pattern_target);
+
+    $source_pattern_content = '<!-- wp:paragraph --><p>Branch synced pattern body</p><!-- /wp:paragraph -->';
+    $source_pattern_page_content = '<!-- wp:paragraph --><p>Branch page before synced pattern</p><!-- /wp:paragraph -->' . "\n" .
+        '<!-- wp:block {"ref":18000061} /-->';
+    $target_pattern_content = '<!-- wp:paragraph --><p>Main synced pattern body</p><!-- /wp:paragraph -->';
+    $target_pattern_page_content = '<!-- wp:paragraph --><p>Main page before synced pattern</p><!-- /wp:paragraph -->' . "\n" .
+        '<!-- wp:block {"ref":19000061} /-->';
+
+    $db = smoke_open_db($synced_pattern_source);
+    smoke_insert_post($db, 18000060, 'Branch Page With Synced Pattern', $source_pattern_page_content, 'page', 'branch-page-with-synced-pattern');
+    smoke_insert_post($db, 18000061, 'Branch Synced Pattern', $source_pattern_content, 'wp_block', 'branch-synced-pattern');
+    smoke_insert_postmeta($db, 18000062, 18000061, 'wp_pattern_sync_status', 'synced');
+    $db->close();
+
+    $db = smoke_open_db($synced_pattern_target);
+    smoke_insert_post($db, 19000060, 'Main Page With Synced Pattern', $target_pattern_page_content, 'page', 'main-page-with-synced-pattern');
+    smoke_insert_post($db, 19000061, 'Main Synced Pattern', $target_pattern_content, 'wp_block', 'main-synced-pattern');
+    smoke_insert_postmeta($db, 19000062, 19000061, 'wp_pattern_sync_status', 'synced');
+    $db->close();
+
+    $synced_pattern_result = cow_merge_databases($synced_pattern_base, $synced_pattern_source, $synced_pattern_target, $synced_pattern_metadata, 'feature-smoke-page-synced-pattern', 'main');
+    assert_same($synced_pattern_result['status'], 'completed', 'branch and main page-plus-synced-pattern inserts complete cleanly');
+    assert_same((int)($synced_pattern_result['conflicts'] ?? -1), 0, 'branch and main page-plus-synced-pattern inserts do not create merge conflicts');
+    assert_same(smoke_scalar($synced_pattern_target, 'SELECT post_type FROM wp_posts WHERE ID = 18000061'), 'wp_block', 'merged target includes the branch synced pattern row');
+    assert_same(smoke_scalar($synced_pattern_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 18000061 AND meta_key = 'wp_pattern_sync_status'"), 'synced', 'merged target includes branch synced pattern metadata');
+    assert_same(smoke_scalar($synced_pattern_target, 'SELECT post_content FROM wp_posts WHERE ID = 18000060'), $source_pattern_page_content, 'merged target preserves the branch page synced-pattern reference');
+    assert_same(smoke_scalar($synced_pattern_target, 'SELECT post_type FROM wp_posts WHERE ID = 19000061'), 'wp_block', 'merged target preserves the main synced pattern row');
+    assert_same(smoke_scalar($synced_pattern_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 19000061 AND meta_key = 'wp_pattern_sync_status'"), 'synced', 'merged target preserves main synced pattern metadata');
+    assert_same(smoke_scalar($synced_pattern_target, 'SELECT post_content FROM wp_posts WHERE ID = 19000060'), $target_pattern_page_content, 'merged target preserves the main page synced-pattern reference');
+    assert_same(
+        (int)smoke_scalar($synced_pattern_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name IN ('wp_posts', 'wp_postmeta')"),
+        0,
+        'page-plus-synced-pattern smoke merge records no WordPress row conflicts'
+    );
+    assert_same(
+        (int)smoke_scalar($synced_pattern_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'source-applied'"),
+        2,
+        'page-plus-synced-pattern smoke merge audits the source page and pattern inserts'
+    );
+    assert_same(
+        (int)smoke_scalar($synced_pattern_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_postmeta' AND decision = 'source-applied'"),
+        1,
+        'page-plus-synced-pattern smoke merge audits the source sync metadata insert'
+    );
+    assert_same(
+        (int)smoke_scalar($synced_pattern_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
+        2,
+        'page-plus-synced-pattern smoke merge audits the target page and pattern inserts'
+    );
+    assert_same(
+        (int)smoke_scalar($synced_pattern_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_postmeta' AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
+        1,
+        'page-plus-synced-pattern smoke merge audits the target sync metadata insert'
+    );
+
+    $synced_pattern_edit_delete_base = $tmp . '/synced-pattern-edit-delete-base.sqlite';
+    $synced_pattern_edit_delete_source = $tmp . '/synced-pattern-edit-delete-source.sqlite';
+    $synced_pattern_edit_delete_target = $tmp . '/synced-pattern-edit-delete-target.sqlite';
+    $synced_pattern_edit_delete_metadata = $tmp . '/.forkpress/cow/merge/synced-pattern-edit-delete-metadata.sqlite';
+
+    smoke_create_posts_db($synced_pattern_edit_delete_base);
+    $shared_pattern_content = '<!-- wp:paragraph --><p>Shared synced pattern body</p><!-- /wp:paragraph -->';
+    $shared_pattern_page_content = '<!-- wp:paragraph --><p>Page before shared synced pattern</p><!-- /wp:paragraph -->' . "\n" .
+        '<!-- wp:block {"ref":17000126} /-->';
+    $target_without_pattern_content = '<!-- wp:paragraph --><p>Target removed the shared synced pattern</p><!-- /wp:paragraph -->';
+    $source_edited_pattern_content = '<!-- wp:paragraph --><p>Source edited synced pattern body</p><!-- /wp:paragraph -->';
+
+    $db = smoke_open_db($synced_pattern_edit_delete_base);
+    smoke_insert_post($db, 17000125, 'Shared Page With Synced Pattern', $shared_pattern_page_content, 'page', 'shared-page-with-synced-pattern');
+    smoke_insert_post($db, 17000126, 'Shared Synced Pattern', $shared_pattern_content, 'wp_block', 'shared-synced-pattern');
+    smoke_insert_postmeta($db, 17000127, 17000126, 'wp_pattern_sync_status', 'synced');
+    $db->close();
+    copy($synced_pattern_edit_delete_base, $synced_pattern_edit_delete_source);
+    copy($synced_pattern_edit_delete_base, $synced_pattern_edit_delete_target);
+
+    $db = smoke_open_db($synced_pattern_edit_delete_source);
+    $stmt = $db->prepare("UPDATE wp_posts SET post_title = 'Source Edited Shared Synced Pattern', post_content = :content WHERE ID = 17000126");
+    $stmt->bindValue(':content', $source_edited_pattern_content, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+
+    $db = smoke_open_db($synced_pattern_edit_delete_target);
+    $stmt = $db->prepare('UPDATE wp_posts SET post_content = :content WHERE ID = 17000125');
+    $stmt->bindValue(':content', $target_without_pattern_content, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->exec('DELETE FROM wp_postmeta WHERE post_id = 17000126');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 17000126');
+    $db->close();
+
+    $synced_pattern_edit_delete_result = cow_merge_databases($synced_pattern_edit_delete_base, $synced_pattern_edit_delete_source, $synced_pattern_edit_delete_target, $synced_pattern_edit_delete_metadata, 'feature-smoke-synced-pattern-edit-delete', 'main');
+    assert_same($synced_pattern_edit_delete_result['status'], 'completed_with_conflicts', 'synced pattern edit/delete graph stays reviewable');
+    assert_same((int)smoke_scalar($synced_pattern_edit_delete_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 17000126'), 0, 'synced pattern edit/delete preserves target pattern deletion before review');
+    assert_same((int)smoke_scalar($synced_pattern_edit_delete_target, 'SELECT COUNT(*) FROM wp_postmeta WHERE post_id = 17000126'), 0, 'synced pattern edit/delete preserves target sync metadata deletion before review');
+    assert_same(smoke_scalar($synced_pattern_edit_delete_target, 'SELECT post_content FROM wp_posts WHERE ID = 17000125'), $target_without_pattern_content, 'synced pattern edit/delete preserves target page cleanup before review');
+    assert_same(
+        (int)smoke_scalar($synced_pattern_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_posts' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'synced pattern edit/delete records the edited pattern delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($synced_pattern_edit_delete_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-wins'"),
+        1,
+        'synced pattern edit/delete defaults the edited source pattern to target-wins before review'
+    );
+
     $navigation_block_base = $tmp . '/navigation-block-base.sqlite';
     $navigation_block_source = $tmp . '/navigation-block-source.sqlite';
     $navigation_block_target = $tmp . '/navigation-block-target.sqlite';
@@ -1777,6 +1890,215 @@ try {
         (int)smoke_scalar($navigation_edit_delete_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-wins'"),
         1,
         'navigation block edit/delete defaults the edited source block to target-wins before review'
+    );
+
+    $template_part_base = $tmp . '/template-part-base.sqlite';
+    $template_part_source = $tmp . '/template-part-source.sqlite';
+    $template_part_target = $tmp . '/template-part-target.sqlite';
+    $template_part_metadata = $tmp . '/.forkpress/cow/merge/template-part-metadata.sqlite';
+
+    smoke_create_posts_db($template_part_base);
+    copy($template_part_base, $template_part_source);
+    copy($template_part_base, $template_part_target);
+
+    $source_template_part_content = '<!-- wp:paragraph --><p>Branch template part body</p><!-- /wp:paragraph -->';
+    $source_template_page_content = '<!-- wp:template-part {"slug":"branch-header","theme":"forkpress-smoke","tagName":"header"} /-->' . "\n" .
+        '<!-- wp:paragraph --><p>Branch page after template part</p><!-- /wp:paragraph -->';
+    $target_template_part_content = '<!-- wp:paragraph --><p>Main template part body</p><!-- /wp:paragraph -->';
+    $target_template_page_content = '<!-- wp:template-part {"slug":"main-header","theme":"forkpress-smoke","tagName":"header"} /-->' . "\n" .
+        '<!-- wp:paragraph --><p>Main page after template part</p><!-- /wp:paragraph -->';
+
+    $db = smoke_open_db($template_part_source);
+    smoke_insert_post($db, 18000072, 'Branch Page With Template Part', $source_template_page_content, 'page', 'branch-page-with-template-part');
+    smoke_insert_post($db, 18000073, 'Branch Template Part', $source_template_part_content, 'wp_template_part', 'forkpress-smoke//branch-header');
+    $db->close();
+
+    $db = smoke_open_db($template_part_target);
+    smoke_insert_post($db, 19000072, 'Main Page With Template Part', $target_template_page_content, 'page', 'main-page-with-template-part');
+    smoke_insert_post($db, 19000073, 'Main Template Part', $target_template_part_content, 'wp_template_part', 'forkpress-smoke//main-header');
+    $db->close();
+
+    $template_part_result = cow_merge_databases($template_part_base, $template_part_source, $template_part_target, $template_part_metadata, 'feature-smoke-page-template-part', 'main');
+    assert_same($template_part_result['status'], 'completed', 'branch and main page-plus-template-part inserts complete cleanly');
+    assert_same((int)($template_part_result['conflicts'] ?? -1), 0, 'branch and main page-plus-template-part inserts do not create merge conflicts');
+    assert_same(smoke_scalar($template_part_target, 'SELECT post_type FROM wp_posts WHERE ID = 18000073'), 'wp_template_part', 'merged target includes the branch template part row');
+    assert_same(smoke_scalar($template_part_target, 'SELECT post_title FROM wp_posts WHERE ID = 18000072'), 'Branch Page With Template Part', 'merged target includes the branch page using a template part');
+    assert_same(smoke_scalar($template_part_target, 'SELECT post_content FROM wp_posts WHERE ID = 18000072'), $source_template_page_content, 'merged target preserves the branch page template-part reference');
+    assert_same(smoke_scalar($template_part_target, 'SELECT post_type FROM wp_posts WHERE ID = 19000073'), 'wp_template_part', 'merged target preserves the main template part row');
+    assert_same(smoke_scalar($template_part_target, 'SELECT post_title FROM wp_posts WHERE ID = 19000072'), 'Main Page With Template Part', 'merged target preserves the main page using a template part');
+    assert_same(smoke_scalar($template_part_target, 'SELECT post_content FROM wp_posts WHERE ID = 19000072'), $target_template_page_content, 'merged target preserves the main page template-part reference');
+    assert_same(
+        (int)smoke_scalar($template_part_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_posts'"),
+        0,
+        'page-plus-template-part smoke merge records no WordPress row conflicts'
+    );
+    assert_same(
+        (int)smoke_scalar($template_part_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'source-applied'"),
+        2,
+        'page-plus-template-part smoke merge audits the source page and template part inserts'
+    );
+    assert_same(
+        (int)smoke_scalar($template_part_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
+        2,
+        'page-plus-template-part smoke merge audits the target page and template part inserts'
+    );
+
+    $template_part_edit_delete_base = $tmp . '/template-part-edit-delete-base.sqlite';
+    $template_part_edit_delete_source = $tmp . '/template-part-edit-delete-source.sqlite';
+    $template_part_edit_delete_target = $tmp . '/template-part-edit-delete-target.sqlite';
+    $template_part_edit_delete_metadata = $tmp . '/.forkpress/cow/merge/template-part-edit-delete-metadata.sqlite';
+
+    smoke_create_posts_db($template_part_edit_delete_base);
+    $shared_template_part_content = '<!-- wp:paragraph --><p>Shared template part body</p><!-- /wp:paragraph -->';
+    $shared_template_page_content = '<!-- wp:template-part {"slug":"shared-header","theme":"forkpress-smoke","tagName":"header"} /-->' . "\n" .
+        '<!-- wp:paragraph --><p>Page after shared template part</p><!-- /wp:paragraph -->';
+    $target_without_template_part_content = '<!-- wp:paragraph --><p>Target removed the shared template part</p><!-- /wp:paragraph -->';
+    $source_edited_template_part_content = '<!-- wp:paragraph --><p>Source edited template part body</p><!-- /wp:paragraph -->';
+
+    $db = smoke_open_db($template_part_edit_delete_base);
+    smoke_insert_post($db, 17000142, 'Shared Page With Template Part', $shared_template_page_content, 'page', 'shared-page-with-template-part');
+    smoke_insert_post($db, 17000143, 'Shared Template Part', $shared_template_part_content, 'wp_template_part', 'forkpress-smoke//shared-header');
+    $db->close();
+    copy($template_part_edit_delete_base, $template_part_edit_delete_source);
+    copy($template_part_edit_delete_base, $template_part_edit_delete_target);
+
+    $db = smoke_open_db($template_part_edit_delete_source);
+    $stmt = $db->prepare("UPDATE wp_posts SET post_title = 'Source Edited Shared Template Part', post_content = :content WHERE ID = 17000143");
+    $stmt->bindValue(':content', $source_edited_template_part_content, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+
+    $db = smoke_open_db($template_part_edit_delete_target);
+    $stmt = $db->prepare('UPDATE wp_posts SET post_content = :content WHERE ID = 17000142');
+    $stmt->bindValue(':content', $target_without_template_part_content, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->exec('DELETE FROM wp_posts WHERE ID = 17000143');
+    $db->close();
+
+    $template_part_edit_delete_result = cow_merge_databases($template_part_edit_delete_base, $template_part_edit_delete_source, $template_part_edit_delete_target, $template_part_edit_delete_metadata, 'feature-smoke-template-part-edit-delete', 'main');
+    assert_same($template_part_edit_delete_result['status'], 'completed_with_conflicts', 'template part edit/delete graph stays reviewable');
+    assert_same((int)smoke_scalar($template_part_edit_delete_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 17000143'), 0, 'template part edit/delete preserves target part deletion before review');
+    assert_same(smoke_scalar($template_part_edit_delete_target, 'SELECT post_content FROM wp_posts WHERE ID = 17000142'), $target_without_template_part_content, 'template part edit/delete preserves target page cleanup before review');
+    assert_same(
+        (int)smoke_scalar($template_part_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_posts' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'template part edit/delete records the edited part delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($template_part_edit_delete_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-wins'"),
+        1,
+        'template part edit/delete defaults the edited source part to target-wins before review'
+    );
+
+    $template_base = $tmp . '/template-base.sqlite';
+    $template_source = $tmp . '/template-source.sqlite';
+    $template_target = $tmp . '/template-target.sqlite';
+    $template_metadata = $tmp . '/.forkpress/cow/merge/template-metadata.sqlite';
+
+    smoke_create_posts_db($template_base);
+    copy($template_base, $template_source);
+    copy($template_base, $template_target);
+
+    $source_template_content = '<!-- wp:template-part {"slug":"branch-header","theme":"forkpress-smoke","tagName":"header"} /-->' . "\n" .
+        '<!-- wp:post-content /-->';
+    $target_template_content = '<!-- wp:template-part {"slug":"main-header","theme":"forkpress-smoke","tagName":"header"} /-->' . "\n" .
+        '<!-- wp:post-content /-->';
+
+    $db = smoke_open_db($template_source);
+    smoke_insert_post($db, 18000074, 'Branch Page With Custom Template', '<!-- wp:paragraph --><p>Branch page using a custom template</p><!-- /wp:paragraph -->', 'page', 'branch-page-with-custom-template');
+    smoke_insert_post($db, 18000075, 'Branch Custom Template', $source_template_content, 'wp_template', 'forkpress-smoke//branch-layout');
+    smoke_insert_postmeta($db, 18000076, 18000074, '_wp_page_template', 'forkpress-smoke//branch-layout');
+    $db->close();
+
+    $db = smoke_open_db($template_target);
+    smoke_insert_post($db, 19000074, 'Main Page With Custom Template', '<!-- wp:paragraph --><p>Main page using a custom template</p><!-- /wp:paragraph -->', 'page', 'main-page-with-custom-template');
+    smoke_insert_post($db, 19000075, 'Main Custom Template', $target_template_content, 'wp_template', 'forkpress-smoke//main-layout');
+    smoke_insert_postmeta($db, 19000076, 19000074, '_wp_page_template', 'forkpress-smoke//main-layout');
+    $db->close();
+
+    $template_result = cow_merge_databases($template_base, $template_source, $template_target, $template_metadata, 'feature-smoke-page-template', 'main');
+    assert_same($template_result['status'], 'completed', 'branch and main page-plus-template inserts complete cleanly');
+    assert_same((int)($template_result['conflicts'] ?? -1), 0, 'branch and main page-plus-template inserts do not create merge conflicts');
+    assert_same(smoke_scalar($template_target, 'SELECT post_type FROM wp_posts WHERE ID = 18000075'), 'wp_template', 'merged target includes the branch template row');
+    assert_same(smoke_scalar($template_target, 'SELECT post_title FROM wp_posts WHERE ID = 18000074'), 'Branch Page With Custom Template', 'merged target includes the branch page using a custom template');
+    assert_same(smoke_scalar($template_target, 'SELECT meta_value FROM wp_postmeta WHERE meta_id = 18000076'), 'forkpress-smoke//branch-layout', 'merged target preserves the branch page template assignment');
+    assert_same(smoke_scalar($template_target, 'SELECT post_type FROM wp_posts WHERE ID = 19000075'), 'wp_template', 'merged target preserves the main template row');
+    assert_same(smoke_scalar($template_target, 'SELECT post_title FROM wp_posts WHERE ID = 19000074'), 'Main Page With Custom Template', 'merged target preserves the main page using a custom template');
+    assert_same(smoke_scalar($template_target, 'SELECT meta_value FROM wp_postmeta WHERE meta_id = 19000076'), 'forkpress-smoke//main-layout', 'merged target preserves the main page template assignment');
+    assert_same(
+        (int)smoke_scalar($template_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name IN ('wp_posts', 'wp_postmeta')"),
+        0,
+        'page-plus-template smoke merge records no WordPress row conflicts'
+    );
+    assert_same(
+        (int)smoke_scalar($template_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'source-applied'"),
+        2,
+        'page-plus-template smoke merge audits the source page and template inserts'
+    );
+    assert_same(
+        (int)smoke_scalar($template_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_postmeta' AND decision = 'source-applied'"),
+        1,
+        'page-plus-template smoke merge audits the source template assignment'
+    );
+    assert_same(
+        (int)smoke_scalar($template_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
+        2,
+        'page-plus-template smoke merge audits the target page and template inserts'
+    );
+    assert_same(
+        (int)smoke_scalar($template_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_postmeta' AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
+        1,
+        'page-plus-template smoke merge audits the target template assignment'
+    );
+
+    $template_edit_delete_base = $tmp . '/template-edit-delete-base.sqlite';
+    $template_edit_delete_source = $tmp . '/template-edit-delete-source.sqlite';
+    $template_edit_delete_target = $tmp . '/template-edit-delete-target.sqlite';
+    $template_edit_delete_metadata = $tmp . '/.forkpress/cow/merge/template-edit-delete-metadata.sqlite';
+
+    smoke_create_posts_db($template_edit_delete_base);
+    $shared_template_content = '<!-- wp:template-part {"slug":"shared-header","theme":"forkpress-smoke","tagName":"header"} /-->' . "\n" .
+        '<!-- wp:post-content /-->';
+    $source_edited_template_content = '<!-- wp:template-part {"slug":"source-header","theme":"forkpress-smoke","tagName":"header"} /-->' . "\n" .
+        '<!-- wp:post-content /-->';
+    $target_without_template_content = '<!-- wp:paragraph --><p>Target removed the shared custom template</p><!-- /wp:paragraph -->';
+
+    $db = smoke_open_db($template_edit_delete_base);
+    smoke_insert_post($db, 17000144, 'Shared Page With Custom Template', '<!-- wp:paragraph --><p>Shared page using a custom template</p><!-- /wp:paragraph -->', 'page', 'shared-page-with-custom-template');
+    smoke_insert_post($db, 17000145, 'Shared Custom Template', $shared_template_content, 'wp_template', 'forkpress-smoke//shared-layout');
+    smoke_insert_postmeta($db, 17000146, 17000144, '_wp_page_template', 'forkpress-smoke//shared-layout');
+    $db->close();
+    copy($template_edit_delete_base, $template_edit_delete_source);
+    copy($template_edit_delete_base, $template_edit_delete_target);
+
+    $db = smoke_open_db($template_edit_delete_source);
+    $stmt = $db->prepare("UPDATE wp_posts SET post_title = 'Source Edited Shared Custom Template', post_content = :content WHERE ID = 17000145");
+    $stmt->bindValue(':content', $source_edited_template_content, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+
+    $db = smoke_open_db($template_edit_delete_target);
+    $stmt = $db->prepare('UPDATE wp_posts SET post_content = :content WHERE ID = 17000144');
+    $stmt->bindValue(':content', $target_without_template_content, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->exec('DELETE FROM wp_postmeta WHERE post_id = 17000144 AND meta_key = \'_wp_page_template\'');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 17000145');
+    $db->close();
+
+    $template_edit_delete_result = cow_merge_databases($template_edit_delete_base, $template_edit_delete_source, $template_edit_delete_target, $template_edit_delete_metadata, 'feature-smoke-template-edit-delete', 'main');
+    assert_same($template_edit_delete_result['status'], 'completed_with_conflicts', 'template edit/delete graph stays reviewable');
+    assert_same((int)smoke_scalar($template_edit_delete_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 17000145'), 0, 'template edit/delete preserves target template deletion before review');
+    assert_same((int)smoke_scalar($template_edit_delete_target, "SELECT COUNT(*) FROM wp_postmeta WHERE post_id = 17000144 AND meta_key = '_wp_page_template'"), 0, 'template edit/delete preserves target page template assignment cleanup before review');
+    assert_same(smoke_scalar($template_edit_delete_target, 'SELECT post_content FROM wp_posts WHERE ID = 17000144'), $target_without_template_content, 'template edit/delete preserves target page cleanup before review');
+    assert_same(
+        (int)smoke_scalar($template_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_posts' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'template edit/delete records the edited template delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($template_edit_delete_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-wins'"),
+        1,
+        'template edit/delete defaults the edited source template to target-wins before review'
     );
 
     $attachment_base_root = $tmp . '/attachment-base-root';
