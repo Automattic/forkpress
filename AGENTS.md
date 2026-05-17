@@ -62,12 +62,12 @@ The issue #2 workflow is Git/worktree based:
 
 ## Local Git Sandbox Permissions
 
-Codex sandbox sessions may start with a restrictive `umask` that creates local
+Codex sandbox sessions may start with a restrictive `umask` and create local
 `.git` object directories without execute permission. Symptoms look like Git
-repository corruption, for example `insufficient permission for adding an
-object to repository database .git/objects` during `fetch`, `commit`, or
-`push`. This is a local sandbox permissions problem, not a ForkPress product
-bug.
+repository corruption or branch workflow breakage, for example `insufficient
+permission for adding an object to repository database .git/objects` during
+`fetch`, `commit`, or `push`. Treat this as a local Codex sandbox permissions
+problem, not a ForkPress product bug.
 
 Before commands that write Git objects or create test temp trees, use:
 
@@ -83,8 +83,12 @@ find .git -type d -exec chmod 755 {} +
 find .git -type f -exec chmod u+rw {} +
 ```
 
-Do not reset the repository or revert unrelated work to fix this. After the
-permissions are repaired, rerun the original Git command with `umask 0022`.
+Do not reset the repository, rewrite history, or revert unrelated work to fix
+this. Do not patch ForkPress Git/merge code until this local cause is ruled
+out. After the permissions are repaired, rerun the original Git command with
+`umask 0022`. If the same failure appears in a default Codex sandbox, move the
+work to a danger-full-access lane or repair the sandbox checkout permissions;
+do not treat it as a ForkPress Git, merge, release, or CI regression.
 
 ## Tests
 
