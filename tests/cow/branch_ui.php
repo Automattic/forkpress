@@ -192,6 +192,9 @@ if ($action === 'forkpress_branch_review_conflict') {
 if ($action === 'forkpress_branch_resolve_conflict') {
     forkpress_handle_branch_resolve_conflict();
 }
+if ($action === 'forkpress_branch_apply_reviewed_conflicts') {
+    forkpress_handle_branch_apply_reviewed_conflicts();
+}
 if ($action === 'forkpress_branch_run_plugin_driver') {
     forkpress_handle_branch_run_plugin_driver();
 }
@@ -711,6 +714,40 @@ assert_same(
     'branch conflict revalidation uses structured revalidate command'
 );
 
+$apply_reviewed_output = json_encode([
+    'run_id' => 42,
+    'eligible' => 2,
+    'applied' => 2,
+    'status' => 'completed',
+], JSON_UNESCAPED_SLASHES);
+$apply_reviewed = run_branch_ui_action(
+    ['action' => 'forkpress_branch_apply_reviewed_conflicts', 'run' => '42'],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    ['FORKPRESS_TEST_CLI_OUTPUT' => $apply_reviewed_output]
+);
+$apply_reviewed_payload = decode_branch_ui_payload($apply_reviewed);
+assert_same($apply_reviewed_payload['success'] ?? null, true, 'branch reviewed-resolution apply action returns JSON success');
+assert_same($apply_reviewed_payload['applied'] ?? null, 2, 'branch reviewed-resolution apply action exposes applied count');
+assert_same($apply_reviewed_payload['eligible'] ?? null, 2, 'branch reviewed-resolution apply action exposes eligible count');
+assert_same(
+    $apply_reviewed_payload['message'] ?? null,
+    'Applied 2 reviewed merge resolutions for run 42.',
+    'branch reviewed-resolution apply action reports applied resolutions'
+);
+assert_same(
+    $apply_reviewed_payload['applyReviewedCommand'] ?? null,
+    'forkpress branch merge-apply-reviewed --run 42 --reviewer wordpress-ui --format json',
+    'branch reviewed-resolution apply action exposes exact command'
+);
+assert_same(
+    array_slice($apply_reviewed['argv'][0] ?? [], 1),
+    ['branch', '--work-dir', $work_dir, 'merge-apply-reviewed', '--run', '42', '--reviewer', 'wordpress-ui', '--format', 'json'],
+    'branch reviewed-resolution apply action uses structured apply command'
+);
+
 $driver_key = hash('sha256', 'forkpress-plugin-graph' . "\0" . realpath($plugin_driver));
 $driver_output = json_encode([
     'conflict_id' => 7,
@@ -856,6 +893,15 @@ assert_same($invalid_revalidation_payload['success'] ?? null, false, 'branch con
 assert_same($invalid_revalidation_payload['message'] ?? null, 'Choose a merge run to revalidate.', 'branch conflict revalidation explains invalid run ids');
 assert_same(count($invalid_revalidation['argv']), 0, 'branch conflict revalidation does not invoke CLI for invalid run ids');
 
+$invalid_apply_reviewed = run_branch_ui_action(
+    ['action' => 'forkpress_branch_apply_reviewed_conflicts', 'run' => 'abc'],
+    ['main', 'feature']
+);
+$invalid_apply_reviewed_payload = decode_branch_ui_payload($invalid_apply_reviewed);
+assert_same($invalid_apply_reviewed_payload['success'] ?? null, false, 'branch reviewed-resolution apply rejects invalid run ids');
+assert_same($invalid_apply_reviewed_payload['message'] ?? null, 'Choose a merge run to apply reviewed resolutions.', 'branch reviewed-resolution apply explains invalid run ids');
+assert_same(count($invalid_apply_reviewed['argv']), 0, 'branch reviewed-resolution apply does not invoke CLI for invalid run ids');
+
 $invalid_revalidation_json = run_branch_ui_action(
     ['action' => 'forkpress_branch_revalidate_conflicts', 'run' => '42'],
     ['main', 'feature'],
@@ -987,6 +1033,10 @@ assert_true(str_contains($switcher_html, 'Keep target'), 'branch switcher render
 assert_true(str_contains($switcher_html, 'Apply reviewed'), 'branch switcher renders apply-reviewed action');
 assert_true(str_contains($switcher_html, "body.append('applyReviewed', '1')"), 'branch switcher sends apply-reviewed resolution payloads');
 assert_true(str_contains($switcher_html, "body.append('afterRevalidate', '1')"), 'branch switcher sends after-revalidate resolution payloads');
+assert_true(str_contains($switcher_html, 'forkpress_branch_apply_reviewed_conflicts'), 'branch switcher renders reviewed-resolution apply action');
+assert_true(str_contains($switcher_html, 'nonce-forkpress_branch_apply_reviewed_conflicts'), 'branch switcher renders reviewed-resolution apply nonce');
+assert_true(str_contains($switcher_html, 'function fetchApplyReviewedConflicts'), 'branch switcher renders reviewed-resolution apply client handler');
+assert_true(str_contains($switcher_html, 'Apply reviewed resolutions'), 'branch switcher renders reviewed-resolution apply button text');
 assert_true(str_contains($switcher_html, 'function conflictPluginMeta'), 'branch switcher renders structured plugin conflict metadata');
 assert_true(str_contains($switcher_html, 'record.plugin_object'), 'branch switcher renders plugin conflict object metadata');
 assert_true(str_contains($switcher_html, 'record.plugin_severity'), 'branch switcher renders plugin conflict severity metadata');
