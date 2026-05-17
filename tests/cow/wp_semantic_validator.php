@@ -21,6 +21,16 @@ function assert_same($actual, $expected, $msg) {
     );
 }
 
+function run_merge_cli(array $args): array {
+    $script = dirname(__DIR__, 2) . '/scripts/cow/merge.php';
+    $command = array_map('escapeshellarg', array_merge([PHP_BINARY, $script], $args));
+    exec(implode(' ', $command) . ' 2>&1', $output, $status);
+    return [
+        'status' => $status,
+        'output' => implode("\n", $output) . ($output === [] ? '' : "\n"),
+    ];
+}
+
 function remove_tree(string $path): void {
     if (!file_exists($path) && !is_link($path)) {
         return;
@@ -119,6 +129,22 @@ function create_wp_post_parent_reference_db(string $path): void {
         (37, 'Deleted parent page', '<!-- wp:paragraph --><p>Parent page</p><!-- /wp:paragraph -->', 'publish', 'page', 'deleted-parent-page', 0),
         (38, 'Child page', '<!-- wp:paragraph --><p>Child page</p><!-- /wp:paragraph -->', 'publish', 'page', 'child-page', 37),
         (39, 'Child attachment', '', 'inherit', 'attachment', 'child-attachment', 37)");
+    $db->close();
+}
+
+function create_wp_duplicate_page_route_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_title TEXT NOT NULL DEFAULT '',
+        post_content TEXT NOT NULL DEFAULT '',
+        post_status TEXT NOT NULL DEFAULT 'publish',
+        post_type TEXT NOT NULL DEFAULT 'post',
+        post_name TEXT NOT NULL DEFAULT '',
+        post_parent INTEGER NOT NULL DEFAULT 0
+    )");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, post_parent) VALUES
+        (80, 'Shared parent page', '<!-- wp:paragraph --><p>Parent page</p><!-- /wp:paragraph -->', 'publish', 'page', 'shared-parent-page', 0)");
     $db->close();
 }
 
@@ -944,6 +970,154 @@ PHP);
     assert_true(str_contains($post_parent_preview, '"missing_parent_id":37'), 'WordPress post-parent audit includes the missing parent ID');
     assert_true(str_contains($post_parent_preview, '"field":"post_parent"'), 'WordPress post-parent audit includes the stale field name');
     assert_true(str_contains($post_parent_preview, '"post_type":"attachment"'), 'WordPress post-parent audit includes attachment children');
+
+    $duplicate_page_base_root = $tmp . '/duplicate-page-route-base';
+    $duplicate_page_source_root = $tmp . '/duplicate-page-route-source';
+    $duplicate_page_target_root = $tmp . '/duplicate-page-route-target';
+    $duplicate_page_base = $duplicate_page_base_root . '/wp-content/database/.ht.sqlite';
+    $duplicate_page_source = $duplicate_page_source_root . '/wp-content/database/.ht.sqlite';
+    $duplicate_page_target = $duplicate_page_target_root . '/wp-content/database/.ht.sqlite';
+    $duplicate_page_metadata = $tmp . '/.forkpress/cow/merge/wp-duplicate-page-route-metadata.sqlite';
+    $duplicate_page_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-duplicate-page-route.json';
+
+    mkdir($duplicate_page_base_root . '/wp-content/database', 0777, true);
+    create_wp_duplicate_page_route_db($duplicate_page_base);
+    copy_tree_for_test($duplicate_page_base_root, $duplicate_page_source_root);
+    copy_tree_for_test($duplicate_page_base_root, $duplicate_page_target_root);
+    cow_merge_capture_file_base($duplicate_page_base_root, $duplicate_page_file_base);
+    cow_merge_allocate_autoincrement_bands($duplicate_page_source, $duplicate_page_metadata, 'feature-wp-duplicate-page-route-source');
+    cow_merge_allocate_autoincrement_bands($duplicate_page_target, $duplicate_page_metadata, 'main');
+
+    $db = open_db($duplicate_page_source);
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name, post_parent) VALUES
+        ('Source route page', '<!-- wp:paragraph --><p>Source route page</p><!-- /wp:paragraph -->', 'publish', 'page', 'shared-route', 80)");
+    $db->close();
+
+    $db = open_db($duplicate_page_target);
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name, post_parent) VALUES
+        ('Target route page', '<!-- wp:paragraph --><p>Target route page</p><!-- /wp:paragraph -->', 'publish', 'page', 'shared-route', 80)");
+    $db->close();
+
+    $duplicate_page_result = cow_merge_branch_state(
+        $duplicate_page_base,
+        $duplicate_page_source,
+        $duplicate_page_target,
+        $duplicate_page_metadata,
+        'feature-wp-duplicate-page-route-source',
+        'main',
+        $duplicate_page_file_base,
+        $duplicate_page_source_root,
+        $duplicate_page_target_root
+    );
+
+    assert_same($duplicate_page_result['status'], 'completed_with_conflicts', 'built-in WordPress page-route validator holds duplicate published child-page slugs for review');
+    assert_same((int)($duplicate_page_result['wordpress_semantic_validator_conflicts'] ?? 0), 1, 'built-in WordPress page-route validator records the duplicate route identity');
+    assert_same((int)($duplicate_page_result['plugin_validator_conflicts'] ?? 0), 1, 'built-in WordPress page-route validator exposes duplicate routes through plugin-scoped audit conflicts');
+    assert_same((int)scalar($duplicate_page_target, "SELECT COUNT(*) FROM wp_posts WHERE post_type = 'page' AND post_parent = 80 AND post_name = 'shared-route'"), 2, 'built-in WordPress page-route validator keeps both duplicate pages visible for review');
+
+    $duplicate_page_audit = cow_merge_audit_report($duplicate_page_metadata, (int)$duplicate_page_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-duplicate-page-route',
+    ]);
+    assert_same(count($duplicate_page_audit['conflicts']), 1, 'built-in WordPress page-route validator exposes duplicate routes as plugin-scoped audit conflicts');
+    $duplicate_page_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $duplicate_page_audit['conflicts']));
+    assert_true(str_contains($duplicate_page_preview, '"post_parent":80'), 'WordPress duplicate page-route audit includes the parent page ID');
+    assert_true(str_contains($duplicate_page_preview, '"post_name":"shared-route"'), 'WordPress duplicate page-route audit includes the duplicated slug');
+    $duplicate_page_payload = cow_merge_audit_decode_payload(json_decode((string)($duplicate_page_audit['conflicts'][0]['chosen_payload'] ?? ''), true));
+    $duplicate_page_titles = array_column($duplicate_page_payload['candidate']['posts'] ?? [], 'post_title');
+    sort($duplicate_page_titles, SORT_STRING);
+    assert_same($duplicate_page_titles, ['Source route page', 'Target route page'], 'WordPress duplicate page-route audit payload includes both duplicate page titles');
+
+    $duplicate_page_cli_base_root = $tmp . '/duplicate-page-route-cli-base';
+    $duplicate_page_cli_source_root = $tmp . '/duplicate-page-route-cli-source';
+    $duplicate_page_cli_target_root = $tmp . '/duplicate-page-route-cli-target';
+    $duplicate_page_cli_base = $duplicate_page_cli_base_root . '/wp-content/database/.ht.sqlite';
+    $duplicate_page_cli_source = $duplicate_page_cli_source_root . '/wp-content/database/.ht.sqlite';
+    $duplicate_page_cli_target = $duplicate_page_cli_target_root . '/wp-content/database/.ht.sqlite';
+    $duplicate_page_cli_metadata = $tmp . '/.forkpress/cow/merge/wp-duplicate-page-route-cli-metadata.sqlite';
+    $duplicate_page_cli_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-duplicate-page-route-cli.json';
+
+    mkdir($duplicate_page_cli_base_root . '/wp-content/database', 0777, true);
+    create_wp_duplicate_page_route_db($duplicate_page_cli_base);
+    copy_tree_for_test($duplicate_page_cli_base_root, $duplicate_page_cli_source_root);
+    copy_tree_for_test($duplicate_page_cli_base_root, $duplicate_page_cli_target_root);
+    cow_merge_capture_file_base($duplicate_page_cli_base_root, $duplicate_page_cli_file_base);
+    cow_merge_allocate_autoincrement_bands($duplicate_page_cli_source, $duplicate_page_cli_metadata, 'feature-wp-duplicate-page-route-cli-source');
+    cow_merge_allocate_autoincrement_bands($duplicate_page_cli_target, $duplicate_page_cli_metadata, 'main');
+
+    $db = open_db($duplicate_page_cli_source);
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name, post_parent) VALUES
+        ('Source CLI route page', '<!-- wp:paragraph --><p>Source CLI route page</p><!-- /wp:paragraph -->', 'publish', 'page', 'shared-cli-route', 80)");
+    $db->close();
+
+    $db = open_db($duplicate_page_cli_target);
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name, post_parent) VALUES
+        ('Target CLI route page', '<!-- wp:paragraph --><p>Target CLI route page</p><!-- /wp:paragraph -->', 'publish', 'page', 'shared-cli-route', 80)");
+    $db->close();
+
+    $duplicate_page_cli_result = run_merge_cli([
+        'merge',
+        '--base-db', $duplicate_page_cli_base,
+        '--source-db', $duplicate_page_cli_source,
+        '--target-db', $duplicate_page_cli_target,
+        '--metadata-db', $duplicate_page_cli_metadata,
+        '--source', 'feature-wp-duplicate-page-route-cli-source',
+        '--target', 'main',
+        '--base-files', $duplicate_page_cli_file_base,
+        '--source-root', $duplicate_page_cli_source_root,
+        '--target-root', $duplicate_page_cli_target_root,
+    ]);
+
+    assert_same($duplicate_page_cli_result['status'], 0, 'built-in WordPress page-route validator CLI merge exits successfully with review conflicts');
+    assert_true(str_contains($duplicate_page_cli_result['output'], 'status:    completed_with_conflicts'), 'built-in WordPress page-route validator CLI reports conflicted merge status');
+    assert_true(str_contains($duplicate_page_cli_result['output'], 'wordpress: semantic_conflicts=1'), 'built-in WordPress page-route validator CLI reports WordPress semantic conflicts');
+    assert_true(str_contains($duplicate_page_cli_result['output'], 'plugins:   validators=0 conflicts=1'), 'built-in WordPress page-route validator CLI reports the audit conflict channel even without plugin validators');
+
+    $existing_duplicate_page_base_root = $tmp . '/existing-duplicate-page-route-base';
+    $existing_duplicate_page_source_root = $tmp . '/existing-duplicate-page-route-source';
+    $existing_duplicate_page_target_root = $tmp . '/existing-duplicate-page-route-target';
+    $existing_duplicate_page_base = $existing_duplicate_page_base_root . '/wp-content/database/.ht.sqlite';
+    $existing_duplicate_page_source = $existing_duplicate_page_source_root . '/wp-content/database/.ht.sqlite';
+    $existing_duplicate_page_target = $existing_duplicate_page_target_root . '/wp-content/database/.ht.sqlite';
+    $existing_duplicate_page_metadata = $tmp . '/.forkpress/cow/merge/wp-existing-duplicate-page-route-metadata.sqlite';
+    $existing_duplicate_page_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-existing-duplicate-page-route.json';
+
+    mkdir($existing_duplicate_page_base_root . '/wp-content/database', 0777, true);
+    create_wp_duplicate_page_route_db($existing_duplicate_page_base);
+    copy_tree_for_test($existing_duplicate_page_base_root, $existing_duplicate_page_source_root);
+    copy_tree_for_test($existing_duplicate_page_base_root, $existing_duplicate_page_target_root);
+    cow_merge_capture_file_base($existing_duplicate_page_base_root, $existing_duplicate_page_file_base);
+    cow_merge_allocate_autoincrement_bands($existing_duplicate_page_source, $existing_duplicate_page_metadata, 'feature-existing-wp-duplicate-page-route-source');
+    cow_merge_allocate_autoincrement_bands($existing_duplicate_page_target, $existing_duplicate_page_metadata, 'main');
+
+    $db = open_db($existing_duplicate_page_source);
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name, post_parent) VALUES
+        ('Source unrelated page', '<!-- wp:paragraph --><p>Source unrelated page</p><!-- /wp:paragraph -->', 'publish', 'page', 'source-unrelated-page', 80)");
+    $db->close();
+
+    $db = open_db($existing_duplicate_page_target);
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name, post_parent) VALUES
+        ('Existing duplicate route page A', '<!-- wp:paragraph --><p>Existing duplicate A</p><!-- /wp:paragraph -->', 'publish', 'page', 'preexisting-shared-route', 80),
+        ('Existing duplicate route page B', '<!-- wp:paragraph --><p>Existing duplicate B</p><!-- /wp:paragraph -->', 'publish', 'page', 'preexisting-shared-route', 80)");
+    $db->close();
+
+    $existing_duplicate_page_result = cow_merge_branch_state(
+        $existing_duplicate_page_base,
+        $existing_duplicate_page_source,
+        $existing_duplicate_page_target,
+        $existing_duplicate_page_metadata,
+        'feature-existing-wp-duplicate-page-route-source',
+        'main',
+        $existing_duplicate_page_file_base,
+        $existing_duplicate_page_source_root,
+        $existing_duplicate_page_target_root
+    );
+
+    assert_same($existing_duplicate_page_result['status'], 'completed', 'built-in WordPress page-route validator ignores duplicate route state that predates the merge');
+    assert_same((int)($existing_duplicate_page_result['wordpress_semantic_validator_conflicts'] ?? 0), 0, 'built-in WordPress page-route validator only records newly introduced or worsened duplicate routes');
+    assert_same((int)scalar($existing_duplicate_page_target, "SELECT COUNT(*) FROM wp_posts WHERE post_type = 'page' AND post_parent = 80 AND post_name = 'preexisting-shared-route'"), 2, 'built-in WordPress page-route validator preserves preexisting duplicate pages during unrelated merges');
+    assert_same((int)scalar($existing_duplicate_page_target, "SELECT COUNT(*) FROM wp_posts WHERE post_type = 'page' AND post_parent = 80 AND post_name = 'source-unrelated-page'"), 1, 'built-in WordPress page-route validator still lets unrelated source pages merge');
 
     $post_author_base_root = $tmp . '/post-author-base';
     $post_author_source_root = $tmp . '/post-author-source';

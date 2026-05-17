@@ -8450,6 +8450,128 @@ function cow_merge_plugin_validator_discovery_report(string $target_db, ?string 
     return $report;
 }
 
+function cow_merge_wordpress_page_route_counts(SQLite3 $db): array {
+    $columns = array_fill_keys(cow_merge_table_columns($db, 'wp_posts'), true);
+    foreach (['post_status', 'post_type', 'post_name', 'post_parent'] as $column) {
+        if (!isset($columns[$column])) {
+            return [];
+        }
+    }
+
+    $routes = [];
+    $res = cow_merge_query_checked(
+        $db,
+        "SELECT post_parent, post_name, COUNT(*) AS route_count
+         FROM wp_posts
+         WHERE post_type = 'page'
+           AND post_status IN ('publish', 'private', 'future')
+           AND post_name <> ''
+         GROUP BY post_parent, post_name
+         ORDER BY post_parent, post_name",
+        'failed to inspect WordPress page routes'
+    );
+    while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+        $parent = (int)$row['post_parent'];
+        $post_name = (string)$row['post_name'];
+        $routes[$parent . "\0" . $post_name] = [
+            'post_parent' => $parent,
+            'post_name' => $post_name,
+            'route_count' => (int)$row['route_count'],
+        ];
+    }
+    cow_merge_result_finalize_checked($res, 'failed to finalize WordPress page route inspection');
+    return $routes;
+}
+
+function cow_merge_collect_wordpress_duplicate_page_route_findings(string $target_db, ?string $target_before_db = null): array {
+    $db = cow_merge_open_db($target_db, SQLITE3_OPEN_READONLY);
+    try {
+        $columns = array_fill_keys(cow_merge_table_columns($db, 'wp_posts'), true);
+        foreach (['ID', 'post_title', 'post_status', 'post_type', 'post_name', 'post_parent'] as $column) {
+            if (!isset($columns[$column])) {
+                return [];
+            }
+        }
+
+        $before_routes = [];
+        if (is_string($target_before_db) && $target_before_db !== '' && is_file($target_before_db)) {
+            $before_db = cow_merge_open_db($target_before_db, SQLITE3_OPEN_READONLY);
+            try {
+                $before_routes = cow_merge_wordpress_page_route_counts($before_db);
+            } finally {
+                $before_db->close();
+            }
+        }
+
+        $findings = [];
+        $routes = cow_merge_wordpress_page_route_counts($db);
+        $stmt = cow_merge_prepare_checked(
+            $db,
+            "SELECT ID, post_title, post_status
+             FROM wp_posts
+             WHERE post_type = 'page'
+               AND post_status IN ('publish', 'private', 'future')
+               AND post_parent = :post_parent
+               AND post_name = :post_name
+             ORDER BY ID",
+            'failed to prepare WordPress duplicate page route details'
+        );
+        foreach ($routes as $route_key => $route) {
+            if ($route['route_count'] < 2) {
+                continue;
+            }
+            if ((int)($before_routes[$route_key]['route_count'] ?? 0) >= $route['route_count']) {
+                continue;
+            }
+            cow_merge_bind($stmt, ':post_parent', $route['post_parent']);
+            cow_merge_bind($stmt, ':post_name', $route['post_name']);
+            $detail_res = cow_merge_execute_checked($stmt, $db, 'failed to read WordPress duplicate page route details');
+            $posts = [];
+            while ($post = $detail_res->fetchArray(SQLITE3_ASSOC)) {
+                $posts[] = [
+                    'ID' => (int)$post['ID'],
+                    'post_title' => (string)$post['post_title'],
+                    'post_status' => (string)$post['post_status'],
+                ];
+            }
+            cow_merge_result_finalize_checked($detail_res, 'failed to finalize WordPress duplicate page route details');
+            $stmt->reset();
+            $findings[] = [
+                'plugin' => 'forkpress-wordpress-core',
+                'object' => 'page-route:' . $route['post_parent'] . ':' . $route['post_name'],
+                'reason' => 'multiple route-visible WordPress pages share the same parent and slug',
+                'type' => 'plugin-wp-duplicate-page-route',
+                'tables' => ['wp_posts'],
+                'validator' => 'forkpress-wordpress-core-page-routes@1',
+                'severity' => 'error',
+                'logical_identity' => [
+                    'kind' => 'wordpress-page-route',
+                    'post_type' => 'page',
+                    'post_parent' => $route['post_parent'],
+                    'post_name' => $route['post_name'],
+                ],
+                'manual_review_reason' => 'WordPress cannot route multiple published pages with the same slug under the same parent deterministically.',
+                'suggested_action' => 'Rename, unpublish, or delete one duplicate page before accepting the merged state.',
+                'candidate' => [
+                    'post_type' => 'page',
+                    'post_parent' => $route['post_parent'],
+                    'post_name' => $route['post_name'],
+                    'duplicate_count' => $route['route_count'],
+                    'target_before_count' => (int)($before_routes[$route_key]['route_count'] ?? 0),
+                    'posts' => $posts,
+                ],
+            ];
+        }
+        return $findings;
+    } finally {
+        $db->close();
+    }
+}
+
+function cow_merge_collect_wordpress_semantic_findings(string $target_db, ?string $target_before_db = null): array {
+    return cow_merge_collect_wordpress_duplicate_page_route_findings($target_db, $target_before_db);
+}
+
 function cow_merge_record_matching_file_decision(
     SQLite3 $meta,
     int $run_id,
@@ -19124,6 +19246,7 @@ function cow_merge_branch_state(
     $target_snapshot = null;
     $metadata_snapshot = null;
     $filesystem_snapshot = null;
+    $validator_context = [];
     if ($has_file_args || count($plugin_validators) > 0) {
         $target_snapshot = cow_merge_snapshot_sqlite_db($target_db);
         $metadata_snapshot = cow_merge_snapshot_sqlite_db($metadata_db);
@@ -19147,6 +19270,7 @@ function cow_merge_branch_state(
         $result['plugin_validators_discovered'] = 0;
         $result['plugin_validators_unchecked'] = 0;
         $result['plugin_validators_unchecked_plugins'] = [];
+        $result['wordpress_semantic_validator_conflicts'] = 0;
         if ($has_file_args) {
             cow_merge_update_run_file_roots(
                 $metadata_db,
@@ -19156,7 +19280,7 @@ function cow_merge_branch_state(
             );
         }
         if ($target_snapshot !== null) {
-            cow_merge_materialize_validator_context(
+            $validator_context = cow_merge_materialize_validator_context(
                 $metadata_db,
                 (int)$result['run_id'],
                 $target_snapshot,
@@ -19191,6 +19315,24 @@ function cow_merge_branch_state(
             $result['conflicts'] += $file_result['conflicts'];
             $result['status'] = $result['conflicts'] > 0 ? 'completed_with_conflicts' : 'completed';
             cow_merge_set_run_status($metadata_db, (int)$result['run_id'], $result['status']);
+            $wordpress_semantic_findings = cow_merge_collect_wordpress_semantic_findings(
+                $target_db,
+                isset($validator_context['target_before_db']) ? (string)$validator_context['target_before_db'] : null
+            );
+            if ($wordpress_semantic_findings !== []) {
+                $wordpress_semantic_result = cow_merge_record_plugin_validator_conflicts(
+                    $metadata_db,
+                    (int)$result['run_id'],
+                    $wordpress_semantic_findings
+                );
+                $wordpress_semantic_conflicts = (int)($wordpress_semantic_result['conflicts'] ?? 0);
+                $result['wordpress_semantic_validator_conflicts'] += $wordpress_semantic_conflicts;
+                $result['plugin_validator_conflicts'] += $wordpress_semantic_conflicts;
+                if ($wordpress_semantic_conflicts > 0) {
+                    $result['conflicts'] += $wordpress_semantic_conflicts;
+                    $result['status'] = 'completed_with_conflicts';
+                }
+            }
             $plugin_validator_discovery = cow_merge_plugin_validator_discovery_report($target_db, $target_root);
             $discovered_plugin_validators = $plugin_validator_discovery['validators'];
             $result['plugin_validators_discovered'] = count($discovered_plugin_validators);
@@ -19931,7 +20073,10 @@ if (realpath($argv[0] ?? '') === __FILE__) {
         if (isset($result['file_applied']) && ($result['file_applied'] > 0 || $result['file_conflicts'] > 0)) {
             echo "  files:     applied={$result['file_applied']} conflicts={$result['file_conflicts']}\n";
         }
-        if (isset($result['plugin_validators']) && ($result['plugin_validators'] > 0 || ($result['plugin_validators_unchecked'] ?? 0) > 0)) {
+        if (($result['wordpress_semantic_validator_conflicts'] ?? 0) > 0) {
+            echo "  wordpress: semantic_conflicts={$result['wordpress_semantic_validator_conflicts']}\n";
+        }
+        if (isset($result['plugin_validators']) && ($result['plugin_validators'] > 0 || ($result['plugin_validator_conflicts'] ?? 0) > 0 || ($result['plugin_validators_unchecked'] ?? 0) > 0)) {
             echo "  plugins:   validators={$result['plugin_validators']} conflicts={$result['plugin_validator_conflicts']} unchecked={$result['plugin_validators_unchecked']}\n";
         }
         echo "  metadata:  {$result['metadata_db']}\n";
