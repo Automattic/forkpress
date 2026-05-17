@@ -6157,6 +6157,18 @@ mod git_helper_tests {
     }
 
     #[test]
+    fn parses_cow_branch_merge_audit_resolution_plugin_grouping() {
+        let args = vec![
+            "merge-audit".to_string(),
+            "--records=resolutions".to_string(),
+            "--group-by=plugin-logical-identity".to_string(),
+        ];
+        let parsed = parse_cow_branch_merge_audit_args(&args).unwrap();
+        assert_eq!(parsed.records, "resolutions");
+        assert_eq!(parsed.group_by, "plugin-logical-identity");
+    }
+
+    #[test]
     fn branch_merge_audit_revalidate_rejects_ignored_filters() {
         let args = vec![
             "merge-audit".to_string(),
@@ -6621,6 +6633,33 @@ mod git_helper_tests {
                 "merge-audit".to_string(),
                 "--scope".to_string(),
                 "plugin".to_string(),
+                "--group-by=plugin-logical-identity".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_branch_merge_audit_plugin_resolution_grouping() {
+        let cli = Cli::try_parse_from([
+            "forkpress",
+            "branch",
+            "--work-dir",
+            ".forkpress",
+            "merge-audit",
+            "--records",
+            "resolutions",
+            "--group-by=plugin-logical-identity",
+        ])
+        .unwrap();
+        let Commands::Branch(args) = cli.command else {
+            panic!("expected branch command");
+        };
+        assert_eq!(
+            args.args,
+            vec![
+                "merge-audit".to_string(),
+                "--records".to_string(),
+                "resolutions".to_string(),
                 "--group-by=plugin-logical-identity".to_string(),
             ]
         );
