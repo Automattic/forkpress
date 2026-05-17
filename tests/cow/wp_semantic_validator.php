@@ -21,6 +21,16 @@ function assert_same($actual, $expected, $msg) {
     );
 }
 
+function run_merge_cli(array $args): array {
+    $script = dirname(__DIR__, 2) . '/scripts/cow/merge.php';
+    $command = array_map('escapeshellarg', array_merge([PHP_BINARY, $script], $args));
+    exec(implode(' ', $command) . ' 2>&1', $output, $status);
+    return [
+        'status' => $status,
+        'output' => implode("\n", $output) . ($output === [] ? '' : "\n"),
+    ];
+}
+
 function remove_tree(string $path): void {
     if (!file_exists($path) && !is_link($path)) {
         return;
@@ -1018,6 +1028,51 @@ PHP);
     $duplicate_page_titles = array_column($duplicate_page_payload['candidate']['posts'] ?? [], 'post_title');
     sort($duplicate_page_titles, SORT_STRING);
     assert_same($duplicate_page_titles, ['Source route page', 'Target route page'], 'WordPress duplicate page-route audit payload includes both duplicate page titles');
+
+    $duplicate_page_cli_base_root = $tmp . '/duplicate-page-route-cli-base';
+    $duplicate_page_cli_source_root = $tmp . '/duplicate-page-route-cli-source';
+    $duplicate_page_cli_target_root = $tmp . '/duplicate-page-route-cli-target';
+    $duplicate_page_cli_base = $duplicate_page_cli_base_root . '/wp-content/database/.ht.sqlite';
+    $duplicate_page_cli_source = $duplicate_page_cli_source_root . '/wp-content/database/.ht.sqlite';
+    $duplicate_page_cli_target = $duplicate_page_cli_target_root . '/wp-content/database/.ht.sqlite';
+    $duplicate_page_cli_metadata = $tmp . '/.forkpress/cow/merge/wp-duplicate-page-route-cli-metadata.sqlite';
+    $duplicate_page_cli_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-duplicate-page-route-cli.json';
+
+    mkdir($duplicate_page_cli_base_root . '/wp-content/database', 0777, true);
+    create_wp_duplicate_page_route_db($duplicate_page_cli_base);
+    copy_tree_for_test($duplicate_page_cli_base_root, $duplicate_page_cli_source_root);
+    copy_tree_for_test($duplicate_page_cli_base_root, $duplicate_page_cli_target_root);
+    cow_merge_capture_file_base($duplicate_page_cli_base_root, $duplicate_page_cli_file_base);
+    cow_merge_allocate_autoincrement_bands($duplicate_page_cli_source, $duplicate_page_cli_metadata, 'feature-wp-duplicate-page-route-cli-source');
+    cow_merge_allocate_autoincrement_bands($duplicate_page_cli_target, $duplicate_page_cli_metadata, 'main');
+
+    $db = open_db($duplicate_page_cli_source);
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name, post_parent) VALUES
+        ('Source CLI route page', '<!-- wp:paragraph --><p>Source CLI route page</p><!-- /wp:paragraph -->', 'publish', 'page', 'shared-cli-route', 80)");
+    $db->close();
+
+    $db = open_db($duplicate_page_cli_target);
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name, post_parent) VALUES
+        ('Target CLI route page', '<!-- wp:paragraph --><p>Target CLI route page</p><!-- /wp:paragraph -->', 'publish', 'page', 'shared-cli-route', 80)");
+    $db->close();
+
+    $duplicate_page_cli_result = run_merge_cli([
+        'merge',
+        '--base-db', $duplicate_page_cli_base,
+        '--source-db', $duplicate_page_cli_source,
+        '--target-db', $duplicate_page_cli_target,
+        '--metadata-db', $duplicate_page_cli_metadata,
+        '--source', 'feature-wp-duplicate-page-route-cli-source',
+        '--target', 'main',
+        '--base-files', $duplicate_page_cli_file_base,
+        '--source-root', $duplicate_page_cli_source_root,
+        '--target-root', $duplicate_page_cli_target_root,
+    ]);
+
+    assert_same($duplicate_page_cli_result['status'], 0, 'built-in WordPress page-route validator CLI merge exits successfully with review conflicts');
+    assert_true(str_contains($duplicate_page_cli_result['output'], 'status:    completed_with_conflicts'), 'built-in WordPress page-route validator CLI reports conflicted merge status');
+    assert_true(str_contains($duplicate_page_cli_result['output'], 'wordpress: semantic_conflicts=1'), 'built-in WordPress page-route validator CLI reports WordPress semantic conflicts');
+    assert_true(str_contains($duplicate_page_cli_result['output'], 'plugins:   validators=0 conflicts=1'), 'built-in WordPress page-route validator CLI reports the audit conflict channel even without plugin validators');
 
     $existing_duplicate_page_base_root = $tmp . '/existing-duplicate-page-route-base';
     $existing_duplicate_page_source_root = $tmp . '/existing-duplicate-page-route-source';

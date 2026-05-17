@@ -20073,7 +20073,10 @@ if (realpath($argv[0] ?? '') === __FILE__) {
         if (isset($result['file_applied']) && ($result['file_applied'] > 0 || $result['file_conflicts'] > 0)) {
             echo "  files:     applied={$result['file_applied']} conflicts={$result['file_conflicts']}\n";
         }
-        if (isset($result['plugin_validators']) && ($result['plugin_validators'] > 0 || ($result['plugin_validators_unchecked'] ?? 0) > 0)) {
+        if (($result['wordpress_semantic_validator_conflicts'] ?? 0) > 0) {
+            echo "  wordpress: semantic_conflicts={$result['wordpress_semantic_validator_conflicts']}\n";
+        }
+        if (isset($result['plugin_validators']) && ($result['plugin_validators'] > 0 || ($result['plugin_validator_conflicts'] ?? 0) > 0 || ($result['plugin_validators_unchecked'] ?? 0) > 0)) {
             echo "  plugins:   validators={$result['plugin_validators']} conflicts={$result['plugin_validator_conflicts']} unchecked={$result['plugin_validators_unchecked']}\n";
         }
         echo "  metadata:  {$result['metadata_db']}\n";
