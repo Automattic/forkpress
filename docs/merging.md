@@ -101,7 +101,11 @@ the executable choices and listed in `blocked_resolution_choices` with the
 reason the resolver will reject it. Schema conflicts use the same model for
 source drops that would invalidate target-side dependent views, triggers,
 schema objects, or foreign-key child tables; once those dependency conflicts
-are resolved, audit output can advertise `source` again. It also includes the
+are resolved, audit output can advertise `source` again. Row target-constraint
+conflicts use the same model when the current target foreign-key state would
+reject the audited source row or source row deletion; after the missing parent
+or blocking child dependency is resolved, audit output can advertise `source`
+again. It also includes the
 conflict
 `lifecycle_state`, `next_action`, and latest resolution metadata so clients can
 distinguish unreviewed, deferred, needs-action, reviewed, validated, and

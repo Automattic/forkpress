@@ -10320,6 +10320,20 @@ SQL);
     $source_added_fk_child_conflict_id = (int)scalar($source_added_fk_child_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_source_added_fk_child' AND conflict_type = 'row-target-constraint' ORDER BY id DESC LIMIT 1");
     assert_true($source_added_fk_parent_conflict_id > 0, 'missing parent table remains a reviewable schema conflict');
     assert_true($source_added_fk_child_conflict_id > 0, 'blocked source-added child row records a target constraint conflict');
+    $source_added_fk_child_audit = cow_merge_audit_report($source_added_fk_child_metadata, (int)$source_added_fk_child_result['run_id'], 10, ['records' => 'conflicts']);
+    $source_added_fk_child_audit_rows = [];
+    foreach ($source_added_fk_child_audit['conflicts'] as $row) {
+        $source_added_fk_child_audit_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $source_added_fk_child_audit_rows[$source_added_fk_child_conflict_id]['resolution_choices'],
+        ['target'],
+        'source-added child row audit does not advertise source while the FK parent is missing'
+    );
+    assert_true(
+        str_contains((string)($source_added_fk_child_audit_rows[$source_added_fk_child_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'parent table plugin_source_added_fk_parent could not be inspected'),
+        'source-added child row audit explains the missing FK parent blocker'
+    );
     assert_throws(
         fn() => cow_merge_resolve_conflict(
             $source_added_fk_child_metadata,
@@ -10341,6 +10355,16 @@ SQL);
         'test'
     );
     assert_same($source_added_fk_parent_resolution['status'], 'applied', 'source parent table restore applies before source-added child row resolution');
+    $source_added_fk_child_unblocked_audit = cow_merge_audit_report($source_added_fk_child_metadata, (int)$source_added_fk_child_result['run_id'], 10, ['records' => 'conflicts']);
+    $source_added_fk_child_unblocked_rows = [];
+    foreach ($source_added_fk_child_unblocked_audit['conflicts'] as $row) {
+        $source_added_fk_child_unblocked_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $source_added_fk_child_unblocked_rows[$source_added_fk_child_conflict_id]['resolution_choices'],
+        ['source', 'target'],
+        'source-added child row audit advertises source after the FK parent is restored'
+    );
     $source_added_fk_child_resolution = cow_merge_resolve_conflict(
         $source_added_fk_child_metadata,
         $source_added_fk_child_conflict_id,

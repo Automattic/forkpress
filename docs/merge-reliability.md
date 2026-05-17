@@ -315,8 +315,9 @@ should stay focused on these areas:
   resolutions with `resolution-validated` events, `--apply-reviewed` applies the
   latest unapplied validated choice, payload-specific blockers such as cyclic
   schema source resolution, unresolved target dependencies for source-dropped
-  tables/views, unsafe filesystem source payloads, and target-descendant
-  directory deletions are exposed as `blocked_resolution_choices`,
+  tables/views, foreign-key row source choices blocked by current target state,
+  unsafe filesystem source payloads, and target-descendant directory deletions
+  are exposed as `blocked_resolution_choices`,
   conflict rows expose a stable
   `conflict_key` for logical UI grouping plus `previous_conflict_id` lineage for
   recurring conflicts and plugin validator replacement evidence on the same
