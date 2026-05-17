@@ -6916,6 +6916,24 @@ function cow_merge_plugin_identity_json(string $plugin, string $object): string 
     ]);
 }
 
+function cow_merge_plugin_validator_string_list(array $finding, array $keys): array {
+    $values = [];
+    foreach ($keys as $key) {
+        if (!is_array($finding[$key] ?? null)) {
+            continue;
+        }
+        foreach ($finding[$key] as $value) {
+            if (is_scalar($value)) {
+                $value = trim((string)$value);
+                if ($value !== '') {
+                    $values[] = $value;
+                }
+            }
+        }
+    }
+    return array_values(array_unique($values));
+}
+
 function cow_merge_record_plugin_validator_conflicts(
     string $metadata_db,
     int $run_id,
@@ -6961,8 +6979,8 @@ function cow_merge_record_plugin_validator_conflicts(
                 'plugin' => $plugin,
                 'object' => $object,
                 'reason' => $reason,
-                'tables' => array_values(array_map('strval', is_array($finding['tables'] ?? null) ? $finding['tables'] : [])),
-                'files' => array_values(array_map('strval', is_array($finding['files'] ?? null) ? $finding['files'] : [])),
+                'tables' => cow_merge_plugin_validator_string_list($finding, ['tables']),
+                'files' => cow_merge_plugin_validator_string_list($finding, ['files', 'paths']),
                 'validator' => (string)($finding['validator'] ?? ''),
                 'candidate' => $finding['candidate'] ?? null,
             ];
@@ -12000,6 +12018,44 @@ function cow_merge_audit_add_payload_previews(array $rows): array {
     return $rows;
 }
 
+function cow_merge_audit_add_plugin_fields(array $rows): array {
+    foreach ($rows as &$row) {
+        if (($row['table_name'] ?? null) !== '__plugins__') {
+            continue;
+        }
+        $payload_json = $row['chosen_payload'] ?? null;
+        if (!is_string($payload_json) || $payload_json === '') {
+            continue;
+        }
+        try {
+            $payload = cow_merge_decode_payload_json($payload_json, 'plugin audit payload');
+        } catch (Throwable) {
+            continue;
+        }
+        if (!is_array($payload)) {
+            continue;
+        }
+        foreach ([
+            'plugin' => 'plugin',
+            'object' => 'plugin_object',
+            'reason' => 'plugin_reason',
+            'validator' => 'plugin_validator',
+            'logical_identity' => 'plugin_logical_identity',
+            'resolution_policy' => 'plugin_resolution_policy',
+            'suggested_action' => 'plugin_suggested_action',
+            'manual_review_reason' => 'plugin_manual_review_reason',
+        ] as $payload_key => $row_key) {
+            if (array_key_exists($payload_key, $payload)) {
+                $row[$row_key] = $payload[$payload_key];
+            }
+        }
+        $row['plugin_tables'] = is_array($payload['tables'] ?? null) ? array_values($payload['tables']) : [];
+        $row['plugin_files'] = is_array($payload['files'] ?? null) ? array_values($payload['files']) : [];
+    }
+    unset($row);
+    return $rows;
+}
+
 function cow_merge_conflict_class(string $table, string $conflict_type): string {
     if ($table === '__plugins__') {
         return 'plugin';
@@ -13295,14 +13351,14 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
         [$conflict_filter, $conflict_params] = cow_merge_audit_where_sql($run_id, $filters, 'conflicts', '', $review_notes_exist, $resolutions_exist);
         $conflict_params[':limit'] = $limit;
         if ($filters['records'] === 'all' || $filters['records'] === 'conflicts') {
-            $report['conflicts'] = cow_merge_audit_add_payload_previews(cow_merge_audit_add_conflict_lifecycle(cow_merge_audit_add_conflict_contracts(cow_merge_audit_add_conflict_staleness($db, cow_merge_audit_table_rows(
+            $report['conflicts'] = cow_merge_audit_add_plugin_fields(cow_merge_audit_add_payload_previews(cow_merge_audit_add_conflict_lifecycle(cow_merge_audit_add_conflict_contracts(cow_merge_audit_add_conflict_staleness($db, cow_merge_audit_table_rows(
                 $db,
                 'merge_conflicts',
                 "SELECT merge_conflicts.id AS id, run_id, $conflict_key_select, table_name, row_identity, column_name, conflict_type, resolver, resolved_at, created_at, " .
                 "base_payload, source_payload, target_payload, chosen_payload, r.source_db, r.target_db, r.source_branch, r.target_branch$conflict_review_select$conflict_resolution_select$conflict_event_select " .
                 "FROM merge_conflicts JOIN merge_runs r ON r.id = merge_conflicts.run_id $conflict_filter ORDER BY merge_conflicts.id DESC LIMIT :limit",
                 $conflict_params
-            )))));
+            ))))));
             if ($filters['records'] === 'conflicts' && $filters['group_by'] !== 'none') {
                 [$conflict_group_filter, $conflict_group_params] = cow_merge_audit_where_sql($run_id, $filters, 'conflicts', 'c', $review_notes_exist, $resolutions_exist);
                 $conflict_group_params[':limit'] = $limit;

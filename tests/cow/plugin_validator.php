@@ -235,6 +235,9 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
             'tables' => ['plugin_graph_child'],
             'paths' => [$file_path],
             'validator' => 'forkpress-plugin-graph@1',
+            'resolution_policy' => 'review-only',
+            'suggested_action' => 'Restore or repair the plugin-owned file reference after review',
+            'manual_review_reason' => 'ForkPress cannot synthesize plugin-owned files from a validator finding',
             'candidate' => [
                 'child_id' => $child_id,
                 'file_path' => $file_path,
@@ -291,6 +294,18 @@ PHP);
     $preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $audit['conflicts']));
     assert_true(str_contains($preview, 'plugin-validator-missing.dat'), 'plugin audit exposes missing plugin file context');
     assert_true(str_contains($preview, '"child_id":9999'), 'plugin audit exposes mismatched JSON graph context');
+    $file_audit_conflicts = array_values(array_filter($audit['conflicts'], fn($conflict) => ($conflict['conflict_type'] ?? '') === 'plugin-graph-file-drift'));
+    assert_same(count($file_audit_conflicts), 1, 'plugin audit exposes the file validator conflict as a focused record');
+    assert_same($file_audit_conflicts[0]['plugin'] ?? null, 'forkpress-plugin-graph', 'plugin audit exposes the validator plugin as a first-class field');
+    assert_same($file_audit_conflicts[0]['plugin_object'] ?? null, 'child:' . $child_id, 'plugin audit exposes the validator object as a first-class field');
+    assert_same($file_audit_conflicts[0]['plugin_validator'] ?? null, 'forkpress-plugin-graph@1', 'plugin audit exposes the validator version as a first-class field');
+    assert_same($file_audit_conflicts[0]['plugin_tables'] ?? null, ['plugin_graph_child'], 'plugin audit exposes plugin-owned tables as structured fields');
+    assert_same($file_audit_conflicts[0]['plugin_files'] ?? null, ['wp-content/uploads/plugin-validator-missing.dat'], 'plugin audit normalizes validator paths into structured plugin files');
+    assert_same($file_audit_conflicts[0]['plugin_resolution_policy'] ?? null, 'review-only', 'plugin audit exposes validator review policy as a first-class field');
+    assert_true(
+        str_contains((string)($file_audit_conflicts[0]['plugin_manual_review_reason'] ?? ''), 'cannot synthesize plugin-owned files'),
+        'plugin audit exposes validator manual-review guidance as a first-class field'
+    );
 
     $json_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-graph-json-drift' ORDER BY id ASC LIMIT 1");
     assert_true($json_conflict_id > 0, 'plugin validator fixture records a JSON graph conflict for revalidation');
@@ -529,6 +544,17 @@ PHP);
         $logical_identity_payload['logical_identity']['slug'] ?? null,
         'child-before-rerun',
         'plugin logical identity is stored as first-class validator evidence'
+    );
+    $logical_identity_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-graph-logical-identity',
+    ]);
+    assert_same(count($logical_identity_audit['conflicts']), 1, 'plugin logical identity is visible as a plugin-scoped audit conflict');
+    assert_same(
+        $logical_identity_audit['conflicts'][0]['plugin_logical_identity']['slug'] ?? null,
+        'child-before-rerun',
+        'plugin audit exposes logical identity as a structured field'
     );
     cow_merge_review_record(
         $metadata,

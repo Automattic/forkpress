@@ -74,7 +74,13 @@ The current implementation has the metadata/audit foundation for validator
 conflicts: ForkPress can record plugin-scoped findings against a merge run,
 mark that run as `completed_with_conflicts`, filter `merge-audit` output with
 `scope = plugin`, group plugin findings separately from DB/file findings, and
-attach review notes. External validator runners can hand findings back through:
+attach review notes. Plugin audit records expose validator metadata as
+structured fields (`plugin`, `plugin_object`, `plugin_tables`,
+`plugin_files`, `plugin_validator`, `plugin_logical_identity`, and review
+guidance fields) so UI/API consumers do not need to scrape payload previews.
+Validator findings may use either `files` or `paths`; both are normalized into
+the audit `plugin_files` field. External validator runners can hand findings
+back through:
 
 ```bash
 forkpress branch record-plugin-validator-conflicts \
