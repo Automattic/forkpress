@@ -70,6 +70,10 @@ if (getenv('FORKPRESS_TEST_CLI_FAIL') === '1') {
     fwrite(STDERR, "synthetic branch command failure\n");
     exit(19);
 }
+$output = getenv('FORKPRESS_TEST_CLI_OUTPUT');
+if (is_string($output) && $output !== '') {
+    fwrite(STDOUT, str_replace('\n', "\n", $output));
+}
 exit(0);
 PHP);
 chmod($fake_bin, 0755);
@@ -109,6 +113,7 @@ if (!is_array($_POST)) {
     exit(2);
 }
 $_REQUEST = $_POST;
+$_GET = $_POST;
 
 require $argv[1];
 
@@ -122,6 +127,13 @@ if ($action === 'forkpress_branch_merge') {
 if ($action === 'forkpress_branch_birth_notice') {
     ob_start();
     forkpress_branch_birth_admin_notice();
+    $html = ob_get_clean();
+    echo json_encode(['html' => $html], JSON_UNESCAPED_SLASHES);
+    exit;
+}
+if ($action === 'forkpress_branch_notice') {
+    ob_start();
+    forkpress_branch_admin_notice();
     $html = ob_get_clean();
     echo json_encode(['html' => $html], JSON_UNESCAPED_SLASHES);
     exit;
@@ -223,6 +235,7 @@ $merge = run_branch_ui_action(
 $merge_payload = decode_branch_ui_payload($merge);
 assert_same($merge['status'], 0, 'branch merge admin action exits cleanly');
 assert_same($merge_payload['success'] ?? null, true, 'branch merge admin action returns JSON success');
+assert_same($merge_payload['type'] ?? null, 'notice', 'branch merge admin action returns notice type for clean merge');
 assert_same($merge_payload['message'] ?? null, 'Merged feature into main.', 'branch merge admin action reports the merge');
 assert_same($merge_payload['url'] ?? null, 'http://wp.localhost:18080/wp-admin/', 'branch merge admin action redirects to target branch admin');
 assert_same(count($merge['argv']), 1, 'branch merge admin action invokes ForkPress CLI once');
@@ -230,6 +243,33 @@ assert_same(
     array_slice($merge['argv'][0] ?? [], 1),
     ['branch', '--work-dir', $work_dir, 'merge', 'feature', '--into', 'main'],
     'branch merge admin action uses audited branch merge CLI path'
+);
+
+$conflicted_merge_output = "forkpress: merged feature into main\\n  run:       42\\n  status:    completed_with_conflicts\\n  applied:   yes\\n  conflicts: 3\\n";
+$conflicted_merge = run_branch_ui_action(
+    ['action' => 'forkpress_branch_merge', 'source' => 'feature', 'target' => 'main'],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    ['FORKPRESS_TEST_CLI_OUTPUT' => $conflicted_merge_output]
+);
+$conflicted_payload = decode_branch_ui_payload($conflicted_merge);
+assert_same($conflicted_merge['status'], 0, 'conflicted branch merge admin action exits cleanly');
+assert_same($conflicted_payload['success'] ?? null, true, 'conflicted branch merge admin action is still a successful request');
+assert_same($conflicted_payload['type'] ?? null, 'warning', 'conflicted branch merge admin action returns warning type');
+assert_same($conflicted_payload['mergeStatus'] ?? null, 'completed_with_conflicts', 'conflicted branch merge exposes merge status');
+assert_same($conflicted_payload['conflicts'] ?? null, 3, 'conflicted branch merge exposes conflict count');
+assert_same($conflicted_payload['run'] ?? null, 42, 'conflicted branch merge exposes merge run id');
+assert_same(
+    $conflicted_payload['auditCommand'] ?? null,
+    'forkpress branch merge-audit --records conflicts --run 42',
+    'conflicted branch merge exposes the exact audit command'
+);
+assert_same(
+    $conflicted_payload['message'] ?? null,
+    'Merged feature into main with 3 conflicts. Review them with `forkpress branch merge-audit --records conflicts --run 42`.',
+    'conflicted branch merge tells users to review conflicts'
 );
 
 $invalid_create = run_branch_ui_action(
@@ -266,6 +306,20 @@ $failed_cli_payload = decode_branch_ui_payload($failed_cli);
 assert_same($failed_cli_payload['success'] ?? null, false, 'merge admin action returns JSON failure when CLI fails');
 assert_same($failed_cli_payload['message'] ?? null, 'synthetic branch command failure', 'merge admin action surfaces CLI failure output');
 assert_same(count($failed_cli['argv']), 1, 'merge admin action records attempted CLI command on failure');
+
+$warning_notice = run_branch_ui_action(
+    ['action' => 'forkpress_branch_notice', 'forkpress_branch_warning' => 'Merge completed with conflicts.'],
+    ['main', 'feature']
+);
+$warning_notice_payload = decode_branch_ui_payload($warning_notice);
+assert_true(
+    str_contains((string)($warning_notice_payload['html'] ?? ''), 'notice notice-warning'),
+    'branch admin notice renders warning class'
+);
+assert_true(
+    str_contains((string)($warning_notice_payload['html'] ?? ''), 'Merge completed with conflicts.'),
+    'branch admin notice renders warning text'
+);
 
 $forbidden = run_branch_ui_action(
     ['action' => 'forkpress_branch_create', 'branch' => 'new_feature', 'from' => 'main'],
