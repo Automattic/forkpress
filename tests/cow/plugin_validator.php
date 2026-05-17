@@ -318,6 +318,21 @@ PHP);
     assert_true(str_contains($plugin_audit_text, 'files=wp-content/uploads/plugin-validator-missing.dat'), 'plugin text audit exposes plugin-owned files');
     assert_true(str_contains($plugin_audit_text, 'plugin-guidance policy=review-only'), 'plugin text audit exposes validator review policy');
     assert_true(str_contains($plugin_audit_text, 'manual-review=ForkPress cannot synthesize plugin-owned files'), 'plugin text audit exposes validator manual-review reason');
+    $plugin_filter_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'plugin' => 'forkpress-plugin-graph',
+    ]);
+    assert_same($plugin_filter_audit['filters']['scope'], 'plugin', 'plugin audit filter defaults to plugin scope');
+    assert_same($plugin_filter_audit['filters']['records'], 'conflicts', 'plugin audit filter defaults to conflict records');
+    assert_same(count($plugin_filter_audit['conflicts']), 2, 'plugin audit can filter conflicts by validator plugin');
+    $plugin_object_filter_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'plugin_object' => 'child:' . $child_id,
+    ]);
+    assert_same(count($plugin_object_filter_audit['conflicts']), 2, 'plugin audit can filter conflicts by validator object');
+    $plugin_severity_filter_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'plugin_severity' => 'error',
+    ]);
+    assert_same(count($plugin_severity_filter_audit['conflicts']), 1, 'plugin audit can filter conflicts by validator severity');
+    assert_same($plugin_severity_filter_audit['conflicts'][0]['conflict_type'] ?? null, 'plugin-graph-file-drift', 'plugin severity filter returns the matching validator conflict');
     $plugin_group_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'plugin',
         'records' => 'conflicts',

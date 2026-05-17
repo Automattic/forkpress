@@ -83,6 +83,8 @@ structured fields (`plugin`, `plugin_object`, `plugin_tables`,
 `plugin_files`, `plugin_validator`, `plugin_severity`,
 `plugin_logical_identity`, and review guidance fields) so UI/API consumers do
 not need to scrape payload previews.
+The same first-class fields are filterable with `merge-audit --plugin <name>`,
+`--plugin-object <object>`, and `--plugin-severity <severity>`.
 Text audit output prints the same plugin identity, owned table/file, logical
 identity, and review-guidance evidence for CLI reviewers.
 Validator findings may use either `files` or `paths`; both are normalized into

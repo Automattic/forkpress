@@ -3140,6 +3140,9 @@ fn cow_branch_command(
                     records: &audit.records,
                     conflict_type: audit.conflict_type.as_deref(),
                     conflict_key: audit.conflict_key.as_deref(),
+                    plugin: audit.plugin.as_deref(),
+                    plugin_object: audit.plugin_object.as_deref(),
+                    plugin_severity: audit.plugin_severity.as_deref(),
                     decision: audit.decision.as_deref(),
                     path: audit.path.as_deref(),
                     path_prefix: audit.path_prefix.as_deref(),
@@ -3430,7 +3433,7 @@ fn branch_help_text(command: Option<&str>) -> &'static str {
             "Usage: forkpress branch run-plugin-validator --run <id> --validator <path> [--format text|json]\n\nRun one plugin validator and record emitted findings as plugin-scoped merge conflicts.\n"
         }
         Some("merge-audit") | Some("audit") => {
-            "Usage: forkpress branch merge-audit [options]\n\nInspect merge runs, decisions, conflicts, conflict events, resolutions, and rollback failures. Use --revalidate to carry stale reviewed conflicts back into needs-action before resolving; revalidation only accepts --run, --reviewer, --format, and --quiet.\nCommon options: --format text|json, --run <id>, --scope all|db|files|plugin, --records all|conflicts|conflict-events|decisions|resolutions|rollback-failures, --conflict-key <key>, --review, --review-status <status>, --lifecycle-state <state>, --group-by none|table|status|path|type|severity|lifecycle|conflict-key|plugin|plugin-object|plugin-severity, --revalidate.\n"
+            "Usage: forkpress branch merge-audit [options]\n\nInspect merge runs, decisions, conflicts, conflict events, resolutions, and rollback failures. Use --revalidate to carry stale reviewed conflicts back into needs-action before resolving; revalidation only accepts --run, --reviewer, --format, and --quiet.\nCommon options: --format text|json, --run <id>, --scope all|db|files|plugin, --records all|conflicts|conflict-events|decisions|resolutions|rollback-failures, --conflict-key <key>, --plugin <name>, --plugin-object <object>, --plugin-severity <severity>, --review, --review-status <status>, --lifecycle-state <state>, --group-by none|table|status|path|type|severity|lifecycle|conflict-key|plugin|plugin-object|plugin-severity, --revalidate.\n"
         }
         Some("merge-review") => {
             "Usage: forkpress branch merge-review <conflict|decision|resolution> <id> --status <pending|needs-action|reviewed> --note <text> [--reviewer <name>]\n       forkpress branch merge-review conflict-key <key> [--run <id>] --status <pending|needs-action|reviewed> --note <text> [--reviewer <name>]\n\nAttach review metadata to an audit record. Reviewing by conflict key is allowed only when the key identifies one unresolved conflict, or when --run disambiguates it.\n"
@@ -3456,6 +3459,9 @@ struct CowBranchMergeAuditArgs {
     records: String,
     conflict_type: Option<String>,
     conflict_key: Option<String>,
+    plugin: Option<String>,
+    plugin_object: Option<String>,
+    plugin_severity: Option<String>,
     decision: Option<String>,
     path: Option<String>,
     path_prefix: Option<String>,
@@ -3479,6 +3485,9 @@ fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAu
     let mut records = "all".to_string();
     let mut conflict_type: Option<String> = None;
     let mut conflict_key: Option<String> = None;
+    let mut plugin: Option<String> = None;
+    let mut plugin_object: Option<String> = None;
+    let mut plugin_severity: Option<String> = None;
     let mut decision: Option<String> = None;
     let mut path: Option<String> = None;
     let mut path_prefix: Option<String> = None;
@@ -3602,6 +3611,51 @@ fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAu
                     bail!("--conflict-key requires a value");
                 }
                 conflict_key = Some(value.to_string());
+                index += 1;
+            }
+            "--plugin" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--plugin requires a name");
+                };
+                plugin = Some(value.clone());
+                index += 2;
+            }
+            value if value.starts_with("--plugin=") => {
+                let value = value.trim_start_matches("--plugin=");
+                if value.is_empty() {
+                    bail!("--plugin requires a name");
+                }
+                plugin = Some(value.to_string());
+                index += 1;
+            }
+            "--plugin-object" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--plugin-object requires an object");
+                };
+                plugin_object = Some(value.clone());
+                index += 2;
+            }
+            value if value.starts_with("--plugin-object=") => {
+                let value = value.trim_start_matches("--plugin-object=");
+                if value.is_empty() {
+                    bail!("--plugin-object requires an object");
+                }
+                plugin_object = Some(value.to_string());
+                index += 1;
+            }
+            "--plugin-severity" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--plugin-severity requires info, warning, error, or critical");
+                };
+                plugin_severity = Some(value.clone());
+                index += 2;
+            }
+            value if value.starts_with("--plugin-severity=") => {
+                let value = value.trim_start_matches("--plugin-severity=");
+                if value.is_empty() {
+                    bail!("--plugin-severity requires info, warning, error, or critical");
+                }
+                plugin_severity = Some(value.to_string());
                 index += 1;
             }
             "--decision" => {
@@ -3768,6 +3822,9 @@ fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAu
             || records != "all"
             || conflict_type.is_some()
             || conflict_key.is_some()
+            || plugin.is_some()
+            || plugin_object.is_some()
+            || plugin_severity.is_some()
             || decision.is_some()
             || path.is_some()
             || path_prefix.is_some()
@@ -3794,6 +3851,9 @@ fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAu
         records,
         conflict_type,
         conflict_key,
+        plugin,
+        plugin_object,
+        plugin_severity,
         decision,
         path,
         path_prefix,
@@ -5676,6 +5736,9 @@ mod git_helper_tests {
             "--records=conflicts".to_string(),
             "--conflict-type=row-target-deleted".to_string(),
             "--conflict-key=sha256:abc123".to_string(),
+            "--plugin=forkpress-plugin-graph".to_string(),
+            "--plugin-object=child:1000000".to_string(),
+            "--plugin-severity=error".to_string(),
             "--path=wp-content/uploads/a.jpg".to_string(),
             "--path-prefix=wp-content/uploads".to_string(),
             "--review-status=needs-action".to_string(),
@@ -5691,6 +5754,9 @@ mod git_helper_tests {
         assert_eq!(parsed.records, "conflicts");
         assert_eq!(parsed.conflict_type.as_deref(), Some("row-target-deleted"));
         assert_eq!(parsed.conflict_key.as_deref(), Some("sha256:abc123"));
+        assert_eq!(parsed.plugin.as_deref(), Some("forkpress-plugin-graph"));
+        assert_eq!(parsed.plugin_object.as_deref(), Some("child:1000000"));
+        assert_eq!(parsed.plugin_severity.as_deref(), Some("error"));
         assert_eq!(parsed.path.as_deref(), Some("wp-content/uploads/a.jpg"));
         assert_eq!(parsed.path_prefix.as_deref(), Some("wp-content/uploads"));
         assert_eq!(parsed.review_status.as_deref(), Some("needs-action"));
@@ -5770,6 +5836,16 @@ mod git_helper_tests {
             .to_string();
         assert!(err.contains("--conflict-key"));
         assert!(err.contains("requires"));
+    }
+
+    #[test]
+    fn branch_merge_audit_plugin_filters_require_values() {
+        let args = vec!["merge-audit".to_string(), "--plugin-object=".to_string()];
+        let err = parse_cow_branch_merge_audit_args(&args)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--plugin-object"));
+        assert!(err.contains("requires an object"));
     }
 
     #[test]

@@ -21,7 +21,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "  php merge.php recover-crash --metadata-db <path> [--run ID] [--restore-target-db] [--restore-files] [--format text|json]\n");
     fwrite(STDERR, "  php merge.php audit --metadata-db <path> [--format text|json] [--limit N] [--run ID]\n");
     fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|conflict-events|decisions|resolutions|rollback-failures] [--path <path>] [--path-prefix <prefix>]\n");
-    fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|conflict-events|decisions|resolutions|rollback-failures] [--conflict-type TYPE] [--conflict-key KEY] [--decision DECISION]\n");
+    fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|conflict-events|decisions|resolutions|rollback-failures] [--conflict-type TYPE] [--conflict-key KEY] [--plugin NAME] [--plugin-object OBJECT] [--plugin-severity SEVERITY] [--decision DECISION]\n");
     fwrite(STDERR, "    [--id-band-skips] [--target-kept] [--review] [--review-status unreviewed|pending|needs-action|reviewed] [--lifecycle-state unreviewed|deferred|needs-action|reviewed|validated|resolved] [--revalidate] [--reviewer NAME]\n");
     fwrite(STDERR, "    [--resolution-status validated|applied] [--group-by none|table|status|path|type|severity|lifecycle|conflict-key|plugin|plugin-object|plugin-severity]\n");
     fwrite(STDERR, "    --group-by supports resolutions by table/status/path, conflicts by table/type/path/severity/lifecycle/conflict-key/plugin/plugin-object/plugin-severity, and decisions by table/type/path.\n");
@@ -11560,6 +11560,9 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
     $resolution_status = ($filters['resolution_status'] ?? null) !== null && (string)$filters['resolution_status'] !== '';
     $conflict_key = ($filters['conflict_key'] ?? null) !== null && (string)$filters['conflict_key'] !== '';
     $lifecycle_state = ($filters['lifecycle_state'] ?? null) !== null && (string)$filters['lifecycle_state'] !== '';
+    $plugin_filter = (($filters['plugin'] ?? null) !== null && (string)$filters['plugin'] !== '') ||
+        (($filters['plugin_object'] ?? null) !== null && (string)$filters['plugin_object'] !== '') ||
+        (($filters['plugin_severity'] ?? null) !== null && (string)$filters['plugin_severity'] !== '');
     $group_by = (string)($filters['group_by'] ?? 'none');
     if ($id_band_skips && $target_kept) {
         throw new InvalidArgumentException('--id-band-skips cannot be combined with --target-kept');
@@ -11636,6 +11639,27 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
         }
         if ($resolution_status) {
             throw new InvalidArgumentException('--lifecycle-state cannot be combined with --resolution-status');
+        }
+    }
+    if ($plugin_filter) {
+        if (($filters['scope'] ?? null) === null || ($filters['scope'] ?? null) === '' || ($filters['scope'] ?? null) === 'all') {
+            $filters['scope'] = 'plugin';
+        } elseif (($filters['scope'] ?? null) !== 'plugin') {
+            throw new InvalidArgumentException('--plugin, --plugin-object, and --plugin-severity require plugin audit scope');
+        }
+        if (cow_merge_audit_filter_is_default_all($filters, 'records')) {
+            $filters['records'] = $resolution_status ? 'resolutions' : 'conflicts';
+        } elseif (!in_array(($filters['records'] ?? null), ['conflicts', 'conflict-events', 'resolutions'], true)) {
+            throw new InvalidArgumentException('--plugin, --plugin-object, and --plugin-severity can only be combined with --records conflicts, conflict-events, or resolutions');
+        }
+        if (($filters['decision'] ?? null) !== null) {
+            throw new InvalidArgumentException('--plugin, --plugin-object, and --plugin-severity cannot be combined with --decision');
+        }
+        if ($id_band_skips) {
+            throw new InvalidArgumentException('--plugin, --plugin-object, and --plugin-severity cannot be combined with --id-band-skips');
+        }
+        if ($target_kept) {
+            throw new InvalidArgumentException('--plugin, --plugin-object, and --plugin-severity cannot be combined with --target-kept');
         }
     }
     if ($target_kept && cow_merge_audit_filter_is_default_all($filters, 'records')) {
@@ -11740,7 +11764,7 @@ function cow_merge_audit_filters(array $filters = []): array {
         if ($scope !== 'all') {
             throw new InvalidArgumentException('--records rollback-failures cannot be combined with --scope');
         }
-        foreach (['conflict_type', 'decision', 'review_status', 'resolution_status', 'lifecycle_state'] as $key) {
+        foreach (['conflict_type', 'conflict_key', 'plugin', 'plugin_object', 'plugin_severity', 'decision', 'review_status', 'resolution_status', 'lifecycle_state'] as $key) {
             if (($filters[$key] ?? null) !== null && (string)$filters[$key] !== '') {
                 throw new InvalidArgumentException('--records rollback-failures cannot be combined with --' . str_replace('_', '-', $key));
             }
@@ -11764,6 +11788,9 @@ function cow_merge_audit_filters(array $filters = []): array {
         'records' => $records,
         'conflict_type' => cow_merge_audit_filter_text($filters['conflict_type'] ?? null, 'conflict-type'),
         'conflict_key' => cow_merge_audit_filter_text($filters['conflict_key'] ?? null, 'conflict-key'),
+        'plugin' => cow_merge_audit_filter_text($filters['plugin'] ?? null, 'plugin'),
+        'plugin_object' => cow_merge_audit_filter_text($filters['plugin_object'] ?? null, 'plugin-object'),
+        'plugin_severity' => cow_merge_audit_filter_text($filters['plugin_severity'] ?? null, 'plugin-severity'),
         'decision' => cow_merge_audit_filter_text($filters['decision'] ?? null, 'decision'),
         'path' => $path,
         'path_prefix' => $path_prefix,
@@ -11935,6 +11962,24 @@ function cow_merge_audit_where_sql(
         $params[':conflict_key'] = $filters['conflict_key'];
     }
 
+    if ($record_type === 'conflicts' && ($filters['plugin'] ?? null) !== null) {
+        $clauses[] = $prefix . "table_name = '__plugins__'";
+        $clauses[] = 'forkpress_plugin_group(' . $prefix . 'chosen_payload) = :plugin_filter';
+        $params[':plugin_filter'] = $filters['plugin'];
+    }
+
+    if ($record_type === 'conflicts' && ($filters['plugin_object'] ?? null) !== null) {
+        $clauses[] = $prefix . "table_name = '__plugins__'";
+        $clauses[] = 'forkpress_plugin_object_group(' . $prefix . 'chosen_payload) = :plugin_object_filter';
+        $params[':plugin_object_filter'] = $filters['plugin_object'];
+    }
+
+    if ($record_type === 'conflicts' && ($filters['plugin_severity'] ?? null) !== null) {
+        $clauses[] = $prefix . "table_name = '__plugins__'";
+        $clauses[] = 'forkpress_plugin_severity_group(' . $prefix . 'chosen_payload) = :plugin_severity_filter';
+        $params[':plugin_severity_filter'] = $filters['plugin_severity'];
+    }
+
     if ($record_type === 'conflicts' && ($filters['lifecycle_state'] ?? null) !== null && ($filters['records'] ?? null) !== 'conflict-events') {
         $conflict_id_sql = $alias === '' ? 'merge_conflicts.id' : $prefix . 'id';
         $clauses[] = cow_merge_audit_conflict_lifecycle_state_sql($conflict_id_sql, $review_notes_exist, $resolutions_exist) . ' = :lifecycle_state';
@@ -12019,6 +12064,24 @@ function cow_merge_audit_resolution_where_sql(
     if (($filters['conflict_key'] ?? null) !== null) {
         $clauses[] = 'c.conflict_key = :conflict_key';
         $params[':conflict_key'] = $filters['conflict_key'];
+    }
+
+    if (($filters['plugin'] ?? null) !== null) {
+        $clauses[] = "c.table_name = '__plugins__'";
+        $clauses[] = 'forkpress_plugin_group(c.chosen_payload) = :plugin_filter';
+        $params[':plugin_filter'] = $filters['plugin'];
+    }
+
+    if (($filters['plugin_object'] ?? null) !== null) {
+        $clauses[] = "c.table_name = '__plugins__'";
+        $clauses[] = 'forkpress_plugin_object_group(c.chosen_payload) = :plugin_object_filter';
+        $params[':plugin_object_filter'] = $filters['plugin_object'];
+    }
+
+    if (($filters['plugin_severity'] ?? null) !== null) {
+        $clauses[] = "c.table_name = '__plugins__'";
+        $clauses[] = 'forkpress_plugin_severity_group(c.chosen_payload) = :plugin_severity_filter';
+        $params[':plugin_severity_filter'] = $filters['plugin_severity'];
     }
 
     if (($filters['review_status'] ?? null) !== null) {
@@ -12126,6 +12189,18 @@ function cow_merge_audit_count_sql(
     }
     if ($record_type === 'conflicts' && ($filters['conflict_key'] ?? null) !== null) {
         $conditions[] = $alias . ".conflict_key = '" . SQLite3::escapeString($filters['conflict_key']) . "'";
+    }
+    if ($record_type === 'conflicts' && ($filters['plugin'] ?? null) !== null) {
+        $conditions[] = $alias . ".table_name = '__plugins__'";
+        $conditions[] = "forkpress_plugin_group($alias.chosen_payload) = '" . SQLite3::escapeString($filters['plugin']) . "'";
+    }
+    if ($record_type === 'conflicts' && ($filters['plugin_object'] ?? null) !== null) {
+        $conditions[] = $alias . ".table_name = '__plugins__'";
+        $conditions[] = "forkpress_plugin_object_group($alias.chosen_payload) = '" . SQLite3::escapeString($filters['plugin_object']) . "'";
+    }
+    if ($record_type === 'conflicts' && ($filters['plugin_severity'] ?? null) !== null) {
+        $conditions[] = $alias . ".table_name = '__plugins__'";
+        $conditions[] = "forkpress_plugin_severity_group($alias.chosen_payload) = '" . SQLite3::escapeString($filters['plugin_severity']) . "'";
     }
     if ($record_type === 'conflicts' && ($filters['lifecycle_state'] ?? null) !== null && ($filters['records'] ?? null) !== 'conflict-events') {
         $conditions[] = cow_merge_audit_conflict_lifecycle_state_sql($alias . '.id', $review_notes_exist, $resolutions_exist) .
@@ -13868,7 +13943,7 @@ function cow_merge_audit_object_label(array $row): string {
 
 function cow_merge_audit_filter_label(array $filters): string {
     $parts = [];
-    foreach (['scope', 'records', 'conflict_type', 'conflict_key', 'decision', 'path', 'path_prefix', 'review_status', 'resolution_status', 'lifecycle_state', 'group_by'] as $key) {
+    foreach (['scope', 'records', 'conflict_type', 'conflict_key', 'plugin', 'plugin_object', 'plugin_severity', 'decision', 'path', 'path_prefix', 'review_status', 'resolution_status', 'lifecycle_state', 'group_by'] as $key) {
         $value = $filters[$key] ?? null;
         if ($value === null || $value === '') {
             continue;
@@ -16834,6 +16909,9 @@ if (realpath($argv[0] ?? '') === __FILE__) {
                     'records' => $args['records'] ?? null,
                     'conflict_type' => $args['conflict-type'] ?? null,
                     'conflict_key' => $args['conflict-key'] ?? null,
+                    'plugin' => $args['plugin'] ?? null,
+                    'plugin_object' => $args['plugin-object'] ?? null,
+                    'plugin_severity' => $args['plugin-severity'] ?? null,
                     'decision' => $args['decision'] ?? null,
                     'path' => $args['path'] ?? null,
                     'path_prefix' => $args['path-prefix'] ?? null,
