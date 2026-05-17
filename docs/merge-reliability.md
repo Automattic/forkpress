@@ -173,6 +173,15 @@ publication crash/failpoint changes, run:
 make test-cow-git-server
 ```
 
+For the default local iteration gate, let the changed-file planner choose the
+smallest focused COW/PHP checks for the current diff:
+
+```bash
+make test-cow-changed
+```
+
+See `docs/merge-test-speed.md` for the planner rules and CI preflight behavior.
+
 For branch-birth metadata validation, frozen pre-write filesystem base
 snapshots, and cleanup isolation without the Git publication harness, run:
 
