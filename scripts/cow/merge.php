@@ -9379,7 +9379,8 @@ function cow_merge_revalidation_conflict_summary(
     array $staleness,
     ?int $review_note_id,
     ?int $revalidation_id,
-    ?array $revalidation = null
+    ?array $revalidation = null,
+    ?string $review_note = null
 ): array {
     $replacement_conflict_id = $staleness['replacement_conflict_id'] ?? ($revalidation['replacement_conflict_id'] ?? null);
     return [
@@ -9395,6 +9396,7 @@ function cow_merge_revalidation_conflict_summary(
         'revalidation_class' => (string)($staleness['revalidation_class'] ?? ($revalidation['revalidation_class'] ?? 'unclassified')),
         'stale_reason' => (string)($staleness['stale_reason'] ?? ($revalidation['stale_reason'] ?? 'target payload changed')),
         'review_note_id' => $review_note_id,
+        'review_note' => $review_note,
         'revalidation_id' => $revalidation_id,
         'replacement_conflict_id' => $replacement_conflict_id === null ? null : (int)$replacement_conflict_id,
     ];
@@ -9501,7 +9503,9 @@ function cow_merge_revalidate_reviewed_conflicts(
                             $conflict,
                             $staleness,
                             $review_note_id,
-                            null
+                            null,
+                            null,
+                            $restore_note
                         );
                     }
                 }
@@ -9535,17 +9539,19 @@ function cow_merge_revalidate_reviewed_conflicts(
                         $staleness,
                         isset($review['id']) ? (int)$review['id'] : null,
                         isset($latest_revalidation['id']) ? (int)$latest_revalidation['id'] : null,
-                        $latest_revalidation
+                        $latest_revalidation,
+                        isset($review['note']) ? (string)$review['note'] : null
                     );
                     continue;
                 }
             }
+            $carried_note = cow_merge_revalidation_note($review, $staleness);
             $review_note_id = cow_merge_insert_review_note(
                 $meta,
                 'conflict',
                 $conflict_id,
                 'needs-action',
-                cow_merge_revalidation_note($review, $staleness),
+                $carried_note,
                 $reviewer
             );
             $current_source_payload = $staleness['current_source_payload'] ?? (string)$conflict['source_payload'];
@@ -9570,7 +9576,7 @@ function cow_merge_revalidate_reviewed_conflicts(
                 (int)$conflict['run_id'],
                 'revalidation-required',
                 $reviewer,
-                cow_merge_revalidation_note($review, $staleness),
+                $carried_note,
                 $revalidation_id === null ? 'review_note' : 'revalidation',
                 $revalidation_id ?? $review_note_id,
                 'needs-action'
@@ -9580,7 +9586,9 @@ function cow_merge_revalidate_reviewed_conflicts(
                 $conflict,
                 $staleness,
                 $review_note_id,
-                $revalidation_id
+                $revalidation_id,
+                null,
+                $carried_note
             );
         }
         cow_merge_exec_checked($meta, 'COMMIT', 'failed to commit review revalidation transaction');
@@ -19750,6 +19758,9 @@ function cow_merge_print_revalidation_text(array $result): void {
                 : '';
             echo "  #{$conflict['conflict_id']} run={$conflict['run_id']} {$conflict['conflict_type']} {$conflict['table_name']}{$column}{$identity} class={$conflict['revalidation_class']}{$replacement}\n";
             echo "     reason=" . cow_merge_audit_truncate((string)($conflict['stale_reason'] ?? ''), 240) . "\n";
+            if (isset($conflict['review_note']) && (string)$conflict['review_note'] !== '') {
+                echo "     review-note=" . cow_merge_audit_truncate((string)$conflict['review_note'], 240) . "\n";
+            }
         }
     }
 }
