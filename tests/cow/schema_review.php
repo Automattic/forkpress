@@ -207,6 +207,10 @@ try {
     $db->exec('DROP VIEW plugin_contract_drop_table_live');
     $db->exec('DROP TABLE plugin_contract_drop_table');
     $db->close();
+    $db = open_db($drop_table_target);
+    $db->exec('DROP VIEW plugin_contract_drop_table_live');
+    $db->exec('CREATE VIEW plugin_contract_drop_table_live AS SELECT item_id, label, label AS target_label FROM plugin_contract_drop_table');
+    $db->close();
     $drop_table_result = cow_merge_databases($drop_table_base, $drop_table_source, $drop_table_target, $metadata, 'feature-schema-drop-table-contract', 'main');
     $drop_table_run_id = (int)$drop_table_result['run_id'];
     assert_same($drop_table_result['status'], 'completed_with_conflicts', 'source table drop with a dependent target view stays reviewable');

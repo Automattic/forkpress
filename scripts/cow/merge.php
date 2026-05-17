@@ -17836,20 +17836,43 @@ function cow_merge_apply_index_schema_changes(
             continue;
         }
         if ($target_sql === $base_sql) {
-            if (cow_merge_record_schema_conflict(
+            $apply_error = null;
+            try {
+                cow_merge_apply_source_index_schema_resolution($target, $index, $source_sql, true);
+            } catch (Throwable $e) {
+                $apply_error = $e->getMessage();
+            }
+            if ($apply_error !== null) {
+                if (cow_merge_record_schema_conflict(
+                    $meta,
+                    $run_id,
+                    $table,
+                    $index,
+                    'schema-source-changed-index',
+                    $base_sql,
+                    ['sql' => $source_sql, 'validation_error' => $apply_error],
+                    $target_sql,
+                    $target_sql,
+                    'source changed an existing index that target validation rejected'
+                )) {
+                    $conflicts++;
+                }
+                continue;
+            }
+            cow_merge_record_decision(
                 $meta,
                 $run_id,
                 $table,
+                null,
                 $index,
-                'schema-source-changed-index',
+                'source-applied',
+                'source changed an index while target did not change it',
                 $base_sql,
                 $source_sql,
                 $target_sql,
-                $target_sql,
-                'source changed an existing index; automatic index rewrites are not applied'
-            )) {
-                $conflicts++;
-            }
+                $source_sql
+            );
+            $applied++;
             continue;
         }
         if (cow_merge_record_schema_conflict(
@@ -17924,6 +17947,31 @@ function cow_merge_apply_schema_object_changes(
         }
         if ($source_sql === null) {
             if ($base_sql !== null) {
+                if ($type === 'view' && $target_sql === $base_sql) {
+                    $apply_error = null;
+                    try {
+                        cow_merge_apply_source_view_schema_resolution($target, $name, null);
+                    } catch (Throwable $e) {
+                        $apply_error = $e->getMessage();
+                    }
+                    if ($apply_error === null) {
+                        cow_merge_record_decision(
+                            $meta,
+                            $run_id,
+                            $table,
+                            null,
+                            $name,
+                            'source-applied',
+                            'source dropped a view while target kept the base definition',
+                            $base_sql,
+                            null,
+                            $target_sql,
+                            null
+                        );
+                        $applied++;
+                        continue;
+                    }
+                }
                 if (cow_merge_record_schema_conflict(
                     $meta,
                     $run_id,

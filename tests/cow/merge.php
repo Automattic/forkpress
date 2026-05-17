@@ -10058,25 +10058,25 @@ SQL);
     $db->close();
 
     $result = cow_merge_databases($schema_index_rewrite_base, $schema_index_rewrite_source, $schema_index_rewrite_target, $metadata, 'feature-index-rewrite', 'main');
-    assert_same($result['status'], 'completed_with_conflicts', 'source-changed index remains a schema conflict');
-    $schema_index_rewrite_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND column_name = 'plugin_items_label_idx' AND conflict_type = 'schema-source-changed-index' ORDER BY id DESC LIMIT 1");
-    $schema_index_rewrite_resolution = cow_merge_resolve_conflict(
-        $metadata,
-        $schema_index_rewrite_conflict_id,
-        'source',
-        true,
-        'Apply source index rewrite.',
-        'test'
+    assert_same($result['status'], 'completed', 'compatible source-changed index rewrites apply automatically');
+    assert_true(str_contains((string)scalar($schema_index_rewrite_target, "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'plugin_items_label_idx'"), '(value)'), 'source index rewrite replaces target index definition during merge');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_items' AND c.column_name = 'plugin_items_label_idx' AND c.conflict_type = 'schema-source-changed-index' AND r.source_branch = 'feature-index-rewrite'"),
+        0,
+        'compatible source-changed index rewrite records no schema conflict'
     );
-    assert_same($schema_index_rewrite_resolution['status'], 'applied', 'source index rewrite resolution records applied status');
-    assert_true(str_contains((string)scalar($schema_index_rewrite_target, "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'plugin_items_label_idx'"), '(value)'), 'source index rewrite replaces target index definition');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE d.table_name = 'plugin_items' AND d.column_name = 'plugin_items_label_idx' AND d.decision = 'source-applied' AND d.reason = 'source changed an index while target did not change it' AND r.source_branch = 'feature-index-rewrite'"),
+        1,
+        'compatible source-changed index rewrite records a source-applied schema decision'
+    );
     $schema_index_rewrite_rerun = cow_merge_databases($schema_index_rewrite_base, $schema_index_rewrite_source, $schema_index_rewrite_target, $metadata, 'feature-index-rewrite', 'main');
     assert_same($schema_index_rewrite_rerun['status'], 'completed', 'rerunning after source index rewrite resolution completes without a new conflict');
     assert_true(str_contains((string)scalar($schema_index_rewrite_target, "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'plugin_items_label_idx'"), '(value)'), 'rerunning after source index rewrite keeps the audited source index');
     assert_same(
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_items' AND c.column_name = 'plugin_items_label_idx' AND c.conflict_type = 'schema-source-changed-index' AND r.source_branch = 'feature-index-rewrite'"),
-        1,
-        'rerunning after source index rewrite resolution does not rediscover the resolved schema conflict'
+        0,
+        'rerunning after automatic source index rewrite does not discover a schema conflict'
     );
 
     $schema_index_drop_base = $tmp . '/schema-index-drop-base.sqlite';
@@ -10243,84 +10243,26 @@ SQL);
     $db->close();
 
     $result = cow_merge_databases($schema_view_rewrite_base, $schema_view_rewrite_source, $schema_view_rewrite_target, $metadata, 'feature-view-rewrite', 'main');
-    assert_same($result['status'], 'completed_with_conflicts', 'source-changed view remains a schema conflict');
-    $schema_view_rewrite_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_items_review_view' AND conflict_type = 'schema-source-changed-view' ORDER BY id DESC LIMIT 1");
-    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
-        static function (SQLite3 $db, string $sql, string $message): void {
-            if ($sql === 'SAVEPOINT forkpress_view_resolution' && $message === 'failed to start source view schema resolution savepoint') {
-                throw new RuntimeException('forced source view resolution savepoint failure');
-            }
-        },
-    ];
-    $schema_view_rewrite_savepoint_failure = null;
-    try {
-        cow_merge_resolve_conflict(
-            $metadata,
-            $schema_view_rewrite_conflict_id,
-            'source',
-            false,
-            'Preview source view rewrite with failing savepoint.',
-            'test'
-        );
-    } catch (Throwable $e) {
-        $schema_view_rewrite_savepoint_failure = $e->getMessage();
-    } finally {
-        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
-    }
-    assert_true($schema_view_rewrite_savepoint_failure !== null && str_contains($schema_view_rewrite_savepoint_failure, 'forced source view resolution savepoint failure'), 'source view schema resolution savepoint failure is surfaced to the caller');
-    assert_true(str_contains((string)scalar($schema_view_rewrite_target, "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_review_view'"), 'label FROM'), 'failed source view resolution savepoint leaves target view unchanged');
-    assert_same(
-        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_view_rewrite_conflict_id"),
-        0,
-        'failed source view resolution savepoint records no resolution metadata'
-    );
-    $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
-        static function (SQLite3 $db, string $sql, string $message): void {
-            if (str_starts_with($sql, 'CREATE VIEW plugin_items_review_view') && $message === 'failed to apply source view schema resolution') {
-                throw new RuntimeException('forced source view resolution DDL failure');
-            }
-        },
-    ];
-    $schema_view_rewrite_ddl_failure = null;
-    try {
-        cow_merge_resolve_conflict(
-            $metadata,
-            $schema_view_rewrite_conflict_id,
-            'source',
-            false,
-            'Preview source view rewrite with failing DDL.',
-            'test'
-        );
-    } catch (Throwable $e) {
-        $schema_view_rewrite_ddl_failure = $e->getMessage();
-    } finally {
-        unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_exec']);
-    }
-    assert_true($schema_view_rewrite_ddl_failure !== null && str_contains($schema_view_rewrite_ddl_failure, 'forced source view resolution DDL failure'), 'source view schema resolution DDL failure is surfaced to the caller');
-    assert_true(str_contains((string)scalar($schema_view_rewrite_target, "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_review_view'"), 'label FROM'), 'failed source view resolution DDL rolls back target view');
-    assert_same(
-        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_view_rewrite_conflict_id"),
-        0,
-        'failed source view resolution DDL records no resolution metadata'
-    );
-    $schema_view_rewrite_resolution = cow_merge_resolve_conflict(
-        $metadata,
-        $schema_view_rewrite_conflict_id,
-        'source',
-        true,
-        'Apply source view rewrite.',
-        'test'
-    );
-    assert_same($schema_view_rewrite_resolution['status'], 'applied', 'source view rewrite resolution records applied status');
-    assert_true(str_contains((string)scalar($schema_view_rewrite_target, "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_review_view'"), 'value'), 'source view rewrite replaces target view definition');
+    assert_same($result['status'], 'completed', 'compatible source-changed view rewrites apply automatically');
+    assert_true(str_contains((string)scalar($schema_view_rewrite_target, "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_review_view'"), 'value'), 'source view rewrite replaces target view definition during merge');
     assert_same(scalar($schema_view_rewrite_target, "SELECT value FROM plugin_items_review_view WHERE item_id = 'alpha'"), 'base', 'rewritten source view remains queryable');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.column_name = 'plugin_items_review_view' AND c.conflict_type = 'schema-source-changed-view' AND r.source_branch = 'feature-view-rewrite'"),
+        0,
+        'compatible source-changed view rewrite records no schema conflict'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE d.column_name = 'plugin_items_review_view' AND d.decision = 'source-applied' AND d.reason = 'source changed an existing view while target kept the base definition' AND r.source_branch = 'feature-view-rewrite'"),
+        1,
+        'compatible source-changed view rewrite records a source-applied schema decision'
+    );
     $schema_view_rewrite_rerun = cow_merge_databases($schema_view_rewrite_base, $schema_view_rewrite_source, $schema_view_rewrite_target, $metadata, 'feature-view-rewrite', 'main');
     assert_same($schema_view_rewrite_rerun['status'], 'completed', 'rerunning after source view rewrite resolution completes without a new conflict');
     assert_same(scalar($schema_view_rewrite_target, "SELECT value FROM plugin_items_review_view WHERE item_id = 'alpha'"), 'base', 'rerunning after source view rewrite keeps the audited source view queryable');
     assert_same(
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.column_name = 'plugin_items_review_view' AND c.conflict_type = 'schema-source-changed-view' AND r.source_branch = 'feature-view-rewrite'"),
-        1,
-        'rerunning after source view rewrite resolution does not rediscover the resolved schema conflict'
+        0,
+        'rerunning after automatic source view rewrite does not discover a schema conflict'
     );
 
     $schema_view_dep_base = $tmp . '/schema-view-dep-base.sqlite';
@@ -10348,17 +10290,7 @@ SQL);
     $db->close();
 
     $result = cow_merge_databases($schema_view_dep_base, $schema_view_dep_source, $schema_view_dep_target, $metadata, 'feature-view-dependency', 'main');
-    assert_same($result['status'], 'completed_with_conflicts', 'source-changed view with target dependent view remains a schema conflict');
-    $schema_view_dep_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_items_dep_base' AND conflict_type = 'schema-source-changed-view' ORDER BY id DESC LIMIT 1");
-    $schema_view_dep_resolution = cow_merge_resolve_conflict(
-        $metadata,
-        $schema_view_dep_conflict_id,
-        'source',
-        true,
-        'Apply source view rewrite and preserve dependent target view.',
-        'test'
-    );
-    assert_same($schema_view_dep_resolution['status'], 'applied', 'source view rewrite with dependent target view records applied status');
+    assert_same($result['status'], 'completed', 'compatible source-changed view with target dependent view applies automatically');
     assert_same((int)scalar($schema_view_dep_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_dep_child'"), 1, 'source view rewrite recreates dependent target view');
     assert_same((int)scalar($schema_view_dep_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_dep_grandchild'"), 1, 'source view rewrite recreates transitive dependent target view');
     assert_same((int)scalar($schema_view_dep_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_items_dep_base_insert'"), 1, 'source view rewrite recreates dependent target trigger');
@@ -10371,14 +10303,50 @@ SQL);
     $db->close();
     assert_same(scalar($schema_view_dep_target, "SELECT label FROM plugin_items_dep_insert_audit WHERE item_id = 'from-view'"), 'From View', 'dependent target trigger still fires after source view rewrite');
     assert_same(scalar($schema_view_dep_target, "SELECT label FROM plugin_items_dep_child_audit WHERE label = 'From Child View'"), 'From Child View', 'trigger on transitive dependent target view still fires after source view rewrite');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE d.column_name = 'plugin_items_dep_base' AND d.decision = 'source-applied' AND d.reason = 'source changed an existing view while target kept the base definition' AND r.source_branch = 'feature-view-dependency'"),
+        1,
+        'compatible dependent source view rewrite records a source-applied schema decision'
+    );
     $schema_view_dep_rerun = cow_merge_databases($schema_view_dep_base, $schema_view_dep_source, $schema_view_dep_target, $metadata, 'feature-view-dependency', 'main');
     assert_same($schema_view_dep_rerun['status'], 'completed', 'rerunning after dependent source view rewrite completes without a new conflict');
     assert_same(scalar($schema_view_dep_target, "SELECT label FROM plugin_items_dep_child WHERE label = 'Alpha'"), 'Alpha', 'rerunning after dependent source view rewrite keeps dependent target view queryable');
     assert_same(
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.column_name = 'plugin_items_dep_base' AND c.conflict_type = 'schema-source-changed-view' AND r.source_branch = 'feature-view-dependency'"),
-        1,
-        'rerunning after dependent source view rewrite does not rediscover the resolved schema conflict'
+        0,
+        'rerunning after automatic dependent source view rewrite does not discover a schema conflict'
     );
+
+    $schema_view_drop_base = $tmp . '/schema-view-drop-base.sqlite';
+    $schema_view_drop_source = $tmp . '/schema-view-drop-source.sqlite';
+    $schema_view_drop_target = $tmp . '/schema-view-drop-target.sqlite';
+    create_base_db($schema_view_drop_base);
+    $db = open_db($schema_view_drop_base);
+    $db->exec('CREATE VIEW plugin_items_drop_review AS SELECT item_id, label FROM plugin_items');
+    $db->close();
+    copy($schema_view_drop_base, $schema_view_drop_source);
+    copy($schema_view_drop_base, $schema_view_drop_target);
+
+    $db = open_db($schema_view_drop_source);
+    $db->exec('DROP VIEW plugin_items_drop_review');
+    $db->close();
+
+    $result = cow_merge_databases($schema_view_drop_base, $schema_view_drop_source, $schema_view_drop_target, $metadata, 'feature-view-drop', 'main');
+    assert_same($result['status'], 'completed', 'compatible source-dropped view applies automatically');
+    assert_same((int)scalar($schema_view_drop_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_drop_review'"), 0, 'automatic source view drop removes the target base view');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.column_name = 'plugin_items_drop_review' AND c.conflict_type = 'schema-source-dropped-view' AND r.source_branch = 'feature-view-drop'"),
+        0,
+        'compatible source-dropped view records no schema conflict'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE d.column_name = 'plugin_items_drop_review' AND d.decision = 'source-applied' AND d.reason = 'source dropped a view while target kept the base definition' AND r.source_branch = 'feature-view-drop'"),
+        1,
+        'compatible source-dropped view records a source-applied schema decision'
+    );
+    $schema_view_drop_rerun = cow_merge_databases($schema_view_drop_base, $schema_view_drop_source, $schema_view_drop_target, $metadata, 'feature-view-drop', 'main');
+    assert_same($schema_view_drop_rerun['status'], 'completed', 'rerunning after automatic source view drop completes without a new conflict');
+    assert_same((int)scalar($schema_view_drop_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_drop_review'"), 0, 'rerunning after source view drop keeps the target view removed');
 
     $schema_view_cycle_rewrite_base = $tmp . '/schema-view-cycle-rewrite-base.sqlite';
     $schema_view_cycle_rewrite_source = $tmp . '/schema-view-cycle-rewrite-source.sqlite';
@@ -15734,6 +15702,56 @@ SQL);
     $db->close();
     $post_id_b = (int)scalar($band_feature_b, "SELECT MAX(ID) FROM wp_posts");
     assert_true($post_id_b > $post_id_a, 'independent branches do not allocate colliding post IDs');
+
+    $plain_ipk_collision_base = $tmp . '/plain-ipk-collision-base.sqlite';
+    $plain_ipk_collision_source = $tmp . '/plain-ipk-collision-source.sqlite';
+    $plain_ipk_collision_target = $tmp . '/plain-ipk-collision-target.sqlite';
+    $plain_ipk_collision_metadata = $tmp . '/.forkpress/cow/merge/plain-ipk-collision-metadata.sqlite';
+    create_base_db($plain_ipk_collision_base);
+    $db = open_db($plain_ipk_collision_base);
+    $db->exec('CREATE TABLE plugin_plain_ipk_refs (id INTEGER PRIMARY KEY, label TEXT, payload TEXT)');
+    $db->exec("INSERT INTO plugin_plain_ipk_refs (id, label, payload) VALUES (1, 'base plain ipk row', '{\"id\":1,\"branch\":\"base\"}')");
+    $db->close();
+    copy($plain_ipk_collision_base, $plain_ipk_collision_source);
+    copy($plain_ipk_collision_base, $plain_ipk_collision_target);
+    cow_merge_allocate_autoincrement_bands($plain_ipk_collision_source, $plain_ipk_collision_metadata, 'feature-plain-ipk-source');
+    cow_merge_allocate_autoincrement_bands($plain_ipk_collision_target, $plain_ipk_collision_metadata, 'main');
+    $db = open_db($plain_ipk_collision_source);
+    $db->exec("INSERT INTO plugin_plain_ipk_refs (id, label, payload) VALUES (2, 'source plain ipk row', '{\"id\":2,\"branch\":\"source\"}')");
+    $db->close();
+    $db = open_db($plain_ipk_collision_target);
+    $db->exec("INSERT INTO plugin_plain_ipk_refs (id, label, payload) VALUES (2, 'target plain ipk row', '{\"id\":2,\"branch\":\"target\"}')");
+    $db->close();
+    $plain_ipk_collision_result = cow_merge_databases(
+        $plain_ipk_collision_base,
+        $plain_ipk_collision_source,
+        $plain_ipk_collision_target,
+        $plain_ipk_collision_metadata,
+        'feature-plain-ipk-source',
+        'main'
+    );
+    assert_same($plain_ipk_collision_result['status'], 'completed_with_conflicts', 'plain INTEGER PRIMARY KEY plugin branch ID collisions remain reviewable');
+    assert_same(scalar($plain_ipk_collision_target, 'SELECT label FROM plugin_plain_ipk_refs WHERE id = 2'), 'target plain ipk row', 'target plain INTEGER PRIMARY KEY row wins before review');
+    assert_same(scalar($plain_ipk_collision_target, 'SELECT payload FROM plugin_plain_ipk_refs WHERE id = 2'), '{"id":2,"branch":"target"}', 'target plain INTEGER PRIMARY KEY JSON reference is preserved before review');
+    $plain_ipk_collision_conflict_id = (int)scalar($plain_ipk_collision_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_plain_ipk_refs' AND conflict_type = 'row-insert-collision' ORDER BY id DESC LIMIT 1");
+    assert_true($plain_ipk_collision_conflict_id > 0, 'plain INTEGER PRIMARY KEY plugin collision records a first-class row conflict');
+    assert_same(
+        (int)scalar($plain_ipk_collision_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'plugin_plain_ipk_refs' AND decision = 'id-band-skipped'"),
+        2,
+        'plain INTEGER PRIMARY KEY plugin collision keeps ID-band skip decisions auditable for both branches'
+    );
+    $plain_ipk_collision_audit = cow_merge_audit_report($plain_ipk_collision_metadata, (int)$plain_ipk_collision_result['run_id'], 10, ['records' => 'conflicts']);
+    $plain_ipk_collision_row = null;
+    foreach ($plain_ipk_collision_audit['conflicts'] as $row) {
+        if ((int)$row['id'] === $plain_ipk_collision_conflict_id) {
+            $plain_ipk_collision_row = $row;
+            break;
+        }
+    }
+    assert_true(is_array($plain_ipk_collision_row), 'plain INTEGER PRIMARY KEY plugin collision is visible in merge audit');
+    assert_same($plain_ipk_collision_row['resolution_choices'], ['source', 'target'], 'plain INTEGER PRIMARY KEY plugin collision advertises explicit source or target review choices');
+    assert_true(str_contains((string)$plain_ipk_collision_row['source_preview'], 'source plain ipk row'), 'plain INTEGER PRIMARY KEY collision audit includes the source payload');
+    assert_true(str_contains((string)$plain_ipk_collision_row['target_preview'], 'target plain ipk row'), 'plain INTEGER PRIMARY KEY collision audit includes the target payload');
 
     $band_explicit_base = $tmp . '/band-explicit-base.sqlite';
     $band_explicit_source = $tmp . '/band-explicit-source.sqlite';
