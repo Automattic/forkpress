@@ -328,12 +328,25 @@ PHP);
         $plugin_group_counts[(string)$group['group_key']] = (int)$group['conflict_count'];
     }
     assert_same($plugin_group_counts['forkpress-plugin-graph'] ?? 0, 2, 'plugin audit can group conflicts by validator plugin');
+    $plugin_severity_group_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'group_by' => 'plugin-severity',
+    ]);
+    $plugin_severity_group_counts = [];
+    foreach ($plugin_severity_group_audit['conflict_groups'] as $group) {
+        $plugin_severity_group_counts[(string)$group['group_key']] = (int)$group['conflict_count'];
+    }
+    assert_same($plugin_severity_group_counts['error'] ?? 0, 1, 'plugin audit can group conflicts by validator severity');
+    assert_same($plugin_severity_group_counts['(unknown)'] ?? 0, 1, 'plugin audit groups findings without validator severity as unknown');
     $plugin_group_default_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, ['scope' => 'plugin', 'group_by' => 'plugin']);
     assert_same($plugin_group_default_audit['filters']['records'], 'conflicts', 'plugin grouping defaults audit records to conflicts');
+    $plugin_severity_group_default_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, ['scope' => 'plugin', 'group_by' => 'plugin-severity']);
+    assert_same($plugin_severity_group_default_audit['filters']['records'], 'conflicts', 'plugin severity grouping defaults audit records to conflicts');
     ob_start();
-    cow_merge_print_audit_text($plugin_group_audit);
+    cow_merge_print_audit_text($plugin_severity_group_audit);
     $plugin_group_text = ob_get_clean();
-    assert_true(str_contains($plugin_group_text, 'plugin=forkpress-plugin-graph conflicts=2'), 'plugin text audit exposes conflict grouping by validator plugin');
+    assert_true(str_contains($plugin_group_text, 'plugin-severity=error conflicts=1'), 'plugin text audit exposes conflict grouping by validator severity');
 
     $json_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-graph-json-drift' ORDER BY id ASC LIMIT 1");
     assert_true($json_conflict_id > 0, 'plugin validator fixture records a JSON graph conflict for revalidation');
