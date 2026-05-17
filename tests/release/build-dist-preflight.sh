@@ -77,6 +77,17 @@ grep -q 'SPC_RUN_UNDER_ARM64=1' scripts/build-dist.sh
 grep -q 'arch -arm64 ./bin/spc "$@"' scripts/build-dist.sh
 grep -q 'FORKPRESS_STATIC_PHP_CLI_DOWNLOAD_RETRIES:-3' scripts/build-dist.sh
 grep -q 'run_spc_phase_with_retries "$SPC_DOWNLOAD_RETRIES" "download PHP and extension sources"' scripts/build-dist.sh
+awk '
+  /run_spc_phase\(\) \{/ { in_fn = 1 }
+  in_fn && /if run_spc "\$@"; then/ { saw_if = 1 }
+  in_fn && saw_if && /else/ { saw_else = 1 }
+  in_fn && saw_else && /status=\$\?/ { saw_status = 1 }
+  in_fn && /^  \}/ { in_fn = 0 }
+  END { exit(saw_if && saw_else && saw_status ? 0 : 1) }
+' scripts/build-dist.sh || {
+  echo "build-dist must preserve failed static-php-cli exit statuses for retry handling" >&2
+  exit 1
+}
 if grep -q 'SPC_RUN\[@\]' scripts/build-dist.sh; then
   echo "build-dist must not expand an empty bash array under macOS bash with set -u" >&2
   exit 1
