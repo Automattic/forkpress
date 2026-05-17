@@ -5645,6 +5645,21 @@ function cow_merge_wordpress_option_reference_violation(
         }
     }
 
+    if ($option_name === 'widget_pages') {
+        foreach ($decoded as $widget_id => $widget) {
+            if (!is_array($widget) || !isset($widget['exclude'])) {
+                continue;
+            }
+            $excluded_ids = is_array($widget['exclude']) ? $widget['exclude'] : explode(',', (string)$widget['exclude']);
+            foreach ($excluded_ids as $index => $post_id) {
+                $violation = $check_post($post_id, 'widget.' . (string)$widget_id . '.exclude.' . (string)$index);
+                if ($violation !== null) {
+                    return $violation;
+                }
+            }
+        }
+    }
+
     if ($option_name === 'widget_block') {
         foreach ($decoded as $widget_id => $widget) {
             if (!is_array($widget) || !isset($widget['content']) || !is_string($widget['content'])) {
