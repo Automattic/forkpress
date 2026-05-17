@@ -7022,16 +7022,24 @@ function cow_merge_plugin_identity_json(string $plugin, string $object): string 
 function cow_merge_plugin_validator_string_list(array $finding, array $keys): array {
     $values = [];
     foreach ($keys as $key) {
-        if (!is_array($finding[$key] ?? null)) {
+        if (!array_key_exists($key, $finding)) {
             continue;
         }
+        if (!is_array($finding[$key])) {
+            throw new InvalidArgumentException("plugin validator $key must be a list of strings");
+        }
         foreach ($finding[$key] as $value) {
-            if (is_scalar($value)) {
-                $value = trim((string)$value);
-                if ($value !== '') {
-                    $values[] = $value;
-                }
+            if (!is_scalar($value)) {
+                throw new InvalidArgumentException("plugin validator $key entries must be strings");
             }
+            $value = trim((string)$value);
+            if ($value === '') {
+                throw new InvalidArgumentException("plugin validator $key entries must not be empty");
+            }
+            if (str_contains($value, "\0")) {
+                throw new InvalidArgumentException("plugin validator $key entries must not contain NUL bytes");
+            }
+            $values[] = $value;
         }
     }
     return array_values(array_unique($values));

@@ -1140,6 +1140,68 @@ PHP);
         'plugin validator runner does not record findings with malformed review guidance'
     );
 
+    $bad_paths_validator = $tmp . '/plugin-validator-bad-paths.php';
+    write_test_file($bad_paths_validator, <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-plugin-graph',
+            'object' => 'child:bad-paths',
+            'reason' => 'malformed finding uses scalar paths',
+            'type' => 'plugin-graph-bad-paths',
+            'paths' => 'wp-content/uploads/plugin.dat',
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $bad_paths = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $metadata,
+        '--run', (string)$result['run_id'],
+        '--validator', $bad_paths_validator,
+        '--format', 'json',
+    ]);
+    assert_true($bad_paths['status'] !== 0, 'plugin validator runner rejects malformed paths fields');
+    assert_true(str_contains($bad_paths['output'], 'paths must be a list of strings'), 'plugin validator runner explains malformed paths fields');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE row_identity LIKE '%child:bad-paths%'"),
+        0,
+        'plugin validator runner does not record findings with malformed paths'
+    );
+
+    $bad_tables_validator = $tmp . '/plugin-validator-bad-tables.php';
+    write_test_file($bad_tables_validator, <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-plugin-graph',
+            'object' => 'child:bad-tables',
+            'reason' => 'malformed finding uses non-string table entries',
+            'type' => 'plugin-graph-bad-tables',
+            'tables' => [['plugin_graph_child']],
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $bad_tables = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $metadata,
+        '--run', (string)$result['run_id'],
+        '--validator', $bad_tables_validator,
+        '--format', 'json',
+    ]);
+    assert_true($bad_tables['status'] !== 0, 'plugin validator runner rejects malformed table entries');
+    assert_true(str_contains($bad_tables['output'], 'tables entries must be strings'), 'plugin validator runner explains malformed table entries');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE row_identity LIKE '%child:bad-tables%'"),
+        0,
+        'plugin validator runner does not record findings with malformed tables'
+    );
+
     $empty_guidance_validator = $tmp . '/plugin-validator-empty-guidance.php';
     write_test_file($empty_guidance_validator, <<<'PHP'
 <?php
