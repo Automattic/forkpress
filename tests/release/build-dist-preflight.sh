@@ -70,6 +70,10 @@ fi
 
 grep -q 'missing static PHP build tools: pkg-config' "$out_file"
 grep -q 'Refusing to let static-php-cli auto-install prerequisites' "$out_file"
+if grep -q 'doctor --auto-fix' scripts/build-dist.sh; then
+  echo "build-dist must not let static-php-cli auto-install prerequisites during release builds" >&2
+  exit 1
+fi
 
 grep -q 'TRIPLE" = "aarch64-apple-darwin"' scripts/build-dist.sh
 grep -q 'arch -arm64 /usr/bin/true' scripts/build-dist.sh
