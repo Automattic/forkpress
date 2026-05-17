@@ -98,6 +98,13 @@ function create_explicit_attachment_graph_db(string $path): void {
     $db->exec('CREATE TABLE wp_options (option_id INTEGER PRIMARY KEY AUTOINCREMENT, option_name TEXT NOT NULL, option_value TEXT NOT NULL, autoload TEXT NOT NULL DEFAULT "yes")');
     $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type) VALUES
         (1, 'Base attachment consumer', '<!-- wp:paragraph --><p>base image consumer</p><!-- /wp:paragraph -->', 'publish', 'page')");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type) VALUES
+        (3, 'Base audio consumer', '<!-- wp:paragraph --><p>base audio consumer</p><!-- /wp:paragraph -->', 'publish', 'page'),
+        (4, 'Base cover consumer', '<!-- wp:paragraph --><p>base cover consumer</p><!-- /wp:paragraph -->', 'publish', 'page'),
+        (5, 'Base file consumer', '<!-- wp:paragraph --><p>base file consumer</p><!-- /wp:paragraph -->', 'publish', 'page'),
+        (6, 'Base gallery consumer', '<!-- wp:paragraph --><p>base gallery consumer</p><!-- /wp:paragraph -->', 'publish', 'page'),
+        (7, 'Base media-text consumer', '<!-- wp:paragraph --><p>base media text consumer</p><!-- /wp:paragraph -->', 'publish', 'page'),
+        (8, 'Base video consumer', '<!-- wp:paragraph --><p>base video consumer</p><!-- /wp:paragraph -->', 'publish', 'page')");
     $db->exec("INSERT INTO wp_options (option_id, option_name, option_value, autoload) VALUES (1, 'site_icon', '1', 'yes')");
     $db->close();
 }
@@ -411,6 +418,12 @@ try {
     $attachment_graph_source_db = open_db($attachment_graph_source);
     $attachment_graph_source_db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type) VALUES (2, 'Imported explicit attachment', '', 'inherit', 'attachment')");
     $attachment_graph_source_db->exec("UPDATE wp_posts SET post_content = '<!-- wp:image {\"id\":2,\"sizeSlug\":\"large\"} --><figure class=\"wp-block-image size-large\"><img class=\"wp-image-2\"/></figure><!-- /wp:image -->' WHERE ID = 1");
+    $attachment_graph_source_db->exec("UPDATE wp_posts SET post_content = '<!-- wp:audio {\"id\":2} /-->' WHERE ID = 3");
+    $attachment_graph_source_db->exec("UPDATE wp_posts SET post_content = '<!-- wp:cover {\"id\":2} --><div class=\"wp-block-cover\"></div><!-- /wp:cover -->' WHERE ID = 4");
+    $attachment_graph_source_db->exec("UPDATE wp_posts SET post_content = '<!-- wp:file {\"id\":2} --><div class=\"wp-block-file\"></div><!-- /wp:file -->' WHERE ID = 5");
+    $attachment_graph_source_db->exec("UPDATE wp_posts SET post_content = '<!-- wp:gallery {\"ids\":[2]} --><figure class=\"wp-block-gallery\"></figure><!-- /wp:gallery -->' WHERE ID = 6");
+    $attachment_graph_source_db->exec("UPDATE wp_posts SET post_content = '<!-- wp:media-text {\"mediaId\":2,\"mediaType\":\"image\"} --><div class=\"wp-block-media-text\"></div><!-- /wp:media-text -->' WHERE ID = 7");
+    $attachment_graph_source_db->exec("UPDATE wp_posts SET post_content = '<!-- wp:video {\"id\":2} /-->' WHERE ID = 8");
     $attachment_graph_source_db->exec("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (1, '_thumbnail_id', '2')");
     $attachment_graph_source_db->exec("UPDATE wp_options SET option_value = '2' WHERE option_name = 'site_icon'");
     $theme_mods = SQLite3::escapeString(serialize(['custom_logo' => 2]));
@@ -431,6 +444,21 @@ try {
         '<!-- wp:paragraph --><p>base image consumer</p><!-- /wp:paragraph -->',
         'image block refs behind a held explicit attachment ID are not applied automatically'
     );
+    $attachment_block_consumers = [
+        3 => 'audio',
+        4 => 'cover',
+        5 => 'file',
+        6 => 'gallery',
+        7 => 'media text',
+        8 => 'video',
+    ];
+    foreach ($attachment_block_consumers as $post_id => $block_label) {
+        assert_same(
+            scalar($attachment_graph_target, "SELECT post_content FROM wp_posts WHERE ID = $post_id"),
+            '<!-- wp:paragraph --><p>base ' . $block_label . ' consumer</p><!-- /wp:paragraph -->',
+            "$block_label block refs behind a held explicit attachment ID are not applied automatically"
+        );
+    }
     assert_same(
         (int)scalar($attachment_graph_target, "SELECT COUNT(*) FROM wp_postmeta WHERE meta_key = '_thumbnail_id' AND meta_value = '2'"),
         0,
@@ -453,8 +481,8 @@ try {
     );
     assert_same(
         (int)scalar($attachment_graph_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-explicit-attachment-graph' AND c.table_name = 'wp_posts' AND c.conflict_type = 'row-target-constraint'"),
-        2,
-        'explicit attachment import and image block consumer record review conflicts'
+        8,
+        'explicit attachment import and attachment block consumers record review conflicts'
     );
     assert_same(
         (int)scalar($attachment_graph_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-explicit-attachment-graph' AND c.table_name = 'wp_postmeta' AND c.conflict_type = 'row-target-constraint'"),
