@@ -177,6 +177,11 @@ function forkpress_cow_branch_url(string $branch, string $uri = '/wp-admin/'): s
     return 'http://' . $host . $port . $uri;
 }
 
+function forkpress_cow_request_can_write(): bool {
+    $method = strtoupper((string)($_SERVER['REQUEST_METHOD'] ?? 'GET'));
+    return !in_array($method, ['GET', 'HEAD', 'OPTIONS'], true);
+}
+
 function forkpress_cow_branch_names(string $current_branch): array {
     $branch_list = getenv('FORKPRESS_BRANCH_LIST') ?: '';
     $branches = [];
@@ -332,6 +337,62 @@ $branch_root = rtrim($branches_dir, '/') . '/' . $branch;
 if (!is_dir($branch_root)) {
     http_response_code(404);
     echo "Branch not found: " . htmlspecialchars($branch, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . "\n";
+    return true;
+}
+
+function forkpress_cow_reject_unready_branch_write(string $branch_root, string $branches_dir, string $branch): bool {
+    if ($branch === 'main' || !forkpress_cow_request_can_write()) {
+        return false;
+    }
+
+    $cow_dir = getenv('FORKPRESS_COW_DIR') ?: dirname(rtrim($branches_dir, "/\\"));
+    $merge_dir = rtrim($cow_dir, "/\\") . '/merge';
+    $db_path = rtrim($branch_root, "/\\") . '/wp-content/database/.ht.sqlite';
+    $db_base = $merge_dir . '/bases/' . $branch . '.sqlite';
+    $file_base = $merge_dir . '/file-bases/' . $branch . '.json';
+    $metadata_db = $merge_dir . '/metadata.sqlite';
+
+    $missing = [];
+    if (!is_file($db_path)) {
+        $missing[] = 'branch database';
+    }
+    if (!is_file($db_base)) {
+        $missing[] = 'database merge base';
+    }
+    if (!is_file($file_base)) {
+        $missing[] = 'filesystem merge base';
+    }
+    if (!is_file($metadata_db)) {
+        $missing[] = 'merge metadata';
+    }
+
+    $error = null;
+    if (!$missing) {
+        require_once dirname(__DIR__, 2) . '/scripts/cow/merge.php';
+        try {
+            cow_merge_validate_branch_birth_metadata($db_path, $metadata_db, $branch);
+        } catch (Throwable $e) {
+            $error = $e->getMessage();
+        }
+    }
+
+    if (!$missing && $error === null) {
+        return false;
+    }
+
+    http_response_code(409);
+    header('Content-Type: text/plain; charset=UTF-8');
+    echo "ForkPress branch '$branch' is missing required merge metadata. Reset or recreate it before editing.\n";
+    echo "Recovery: run `forkpress branch reset $branch --from main`, or delete and recreate the branch.\n";
+    if ($missing) {
+        echo 'Missing: ' . implode(', ', $missing) . "\n";
+    } elseif ($error !== null) {
+        echo $error . "\n";
+    }
+    return true;
+}
+
+if (forkpress_cow_reject_unready_branch_write($branch_root, $branches_dir, $branch)) {
     return true;
 }
 
