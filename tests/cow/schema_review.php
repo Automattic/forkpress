@@ -772,6 +772,103 @@ SQL);
         'compatible schema trigger target drift applies the audited source trigger'
     );
 
+    $schema_trigger_changed_compatible_base = $tmp . '/schema-trigger-changed-compatible-base.sqlite';
+    $schema_trigger_changed_compatible_source = $tmp . '/schema-trigger-changed-compatible-source.sqlite';
+    $schema_trigger_changed_compatible_target = $tmp . '/schema-trigger-changed-compatible-target.sqlite';
+    $schema_trigger_changed_compatible_metadata = $tmp . '/.forkpress/cow/merge/schema-trigger-changed-compatible-metadata.sqlite';
+
+    $db = open_db($schema_trigger_changed_compatible_base);
+    $db->exec('CREATE TABLE plugin_schema_trigger_changed_compatible_items (label TEXT NOT NULL)');
+    $db->exec('CREATE TABLE plugin_schema_trigger_changed_compatible_audit (label TEXT NOT NULL)');
+    $db->exec("INSERT INTO plugin_schema_trigger_changed_compatible_items (label) VALUES ('compatible changed trigger anchor')");
+    $db->exec("CREATE TRIGGER plugin_schema_trigger_changed_compatible_trigger AFTER INSERT ON plugin_schema_trigger_changed_compatible_items BEGIN INSERT INTO plugin_schema_trigger_changed_compatible_audit (label) VALUES ('base:' || NEW.label); END");
+    $db->close();
+    copy($schema_trigger_changed_compatible_base, $schema_trigger_changed_compatible_source);
+    copy($schema_trigger_changed_compatible_base, $schema_trigger_changed_compatible_target);
+
+    $base_db = open_db($schema_trigger_changed_compatible_base);
+    $base_changed_trigger_sql = (string)$base_db->querySingle("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_schema_trigger_changed_compatible_trigger'");
+    $base_db->close();
+
+    $source_db = open_db($schema_trigger_changed_compatible_source);
+    $source_db->exec('DROP TRIGGER plugin_schema_trigger_changed_compatible_trigger');
+    $source_db->exec("CREATE TRIGGER plugin_schema_trigger_changed_compatible_trigger AFTER INSERT ON plugin_schema_trigger_changed_compatible_items BEGIN INSERT INTO plugin_schema_trigger_changed_compatible_audit (label) VALUES ('source:' || NEW.label); END");
+    $source_changed_trigger_sql = (string)$source_db->querySingle("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_schema_trigger_changed_compatible_trigger'");
+    $source_db->close();
+
+    @mkdir(dirname($schema_trigger_changed_compatible_metadata), 0777, true);
+    $schema_trigger_changed_compatible_meta = open_db($schema_trigger_changed_compatible_metadata);
+    cow_merge_ensure_metadata($schema_trigger_changed_compatible_meta);
+    $schema_trigger_changed_compatible_run_id = cow_merge_start_run(
+        $schema_trigger_changed_compatible_meta,
+        'feature-schema-trigger-changed-compatible',
+        'main',
+        $schema_trigger_changed_compatible_base,
+        $schema_trigger_changed_compatible_source,
+        $schema_trigger_changed_compatible_target
+    );
+    cow_merge_record_schema_conflict(
+        $schema_trigger_changed_compatible_meta,
+        $schema_trigger_changed_compatible_run_id,
+        'plugin_schema_trigger_changed_compatible_items',
+        'plugin_schema_trigger_changed_compatible_trigger',
+        'schema-source-changed-trigger',
+        $base_changed_trigger_sql,
+        ['sql' => $source_changed_trigger_sql],
+        $base_changed_trigger_sql,
+        $base_changed_trigger_sql,
+        'manual source-changed trigger conflict for compatible target-drift revalidation'
+    );
+    cow_merge_finish_run($schema_trigger_changed_compatible_meta, $schema_trigger_changed_compatible_run_id, 'completed_with_conflicts');
+    $schema_trigger_changed_compatible_meta->close();
+
+    $schema_trigger_changed_compatible_conflict_id = (int)scalar($schema_trigger_changed_compatible_metadata, "SELECT id FROM merge_conflicts WHERE conflict_type = 'schema-source-changed-trigger' ORDER BY id DESC LIMIT 1");
+    assert_true($schema_trigger_changed_compatible_conflict_id > 0, 'compatible schema changed-trigger target-drift fixture records a legacy source-changed trigger conflict');
+    cow_merge_review_record(
+        $schema_trigger_changed_compatible_metadata,
+        'conflict',
+        $schema_trigger_changed_compatible_conflict_id,
+        'reviewed',
+        'Review source-changed trigger before compatible target drift.',
+        'cow-test'
+    );
+    $target_db = open_db($schema_trigger_changed_compatible_target);
+    $target_db->exec('DROP TRIGGER plugin_schema_trigger_changed_compatible_trigger');
+    $target_db->exec("CREATE TRIGGER plugin_schema_trigger_changed_compatible_trigger AFTER INSERT ON plugin_schema_trigger_changed_compatible_items BEGIN INSERT INTO plugin_schema_trigger_changed_compatible_audit (label) VALUES ('target:' || NEW.label); END");
+    $target_db->close();
+
+    $schema_trigger_changed_compatible_revalidated = cow_merge_revalidate_reviewed_conflicts(
+        $schema_trigger_changed_compatible_metadata,
+        $schema_trigger_changed_compatible_run_id,
+        'cow-revalidate'
+    );
+    assert_same($schema_trigger_changed_compatible_revalidated['checked'], 1, 'compatible schema changed-trigger target drift revalidation checks the reviewed conflict');
+    assert_same($schema_trigger_changed_compatible_revalidated['stale'], 1, 'compatible schema changed-trigger target drift is treated as stale');
+    assert_same($schema_trigger_changed_compatible_revalidated['carried'], 1, 'compatible schema changed-trigger target drift returns the conflict to needs-action');
+    assert_same(
+        scalar($schema_trigger_changed_compatible_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $schema_trigger_changed_compatible_conflict_id ORDER BY id DESC LIMIT 1"),
+        'compatible-schema-trigger-target-drift',
+        'schema changed-trigger target drift is classified compatible when source replacement validates'
+    );
+    $schema_trigger_changed_compatible_resolution = cow_merge_resolve_conflict(
+        $schema_trigger_changed_compatible_metadata,
+        $schema_trigger_changed_compatible_conflict_id,
+        'source',
+        true,
+        'Apply source-changed trigger after compatible target drift revalidation.',
+        'cow-test',
+        true
+    );
+    assert_same($schema_trigger_changed_compatible_resolution['status'], 'applied', 'compatible schema changed-trigger target drift resolves after revalidation');
+    $target_db = open_db($schema_trigger_changed_compatible_target);
+    $target_db->exec("INSERT INTO plugin_schema_trigger_changed_compatible_items (label) VALUES ('proof')");
+    $target_db->close();
+    assert_same(
+        scalar($schema_trigger_changed_compatible_target, "SELECT label FROM plugin_schema_trigger_changed_compatible_audit ORDER BY rowid DESC LIMIT 1"),
+        'source:proof',
+        'compatible schema changed-trigger target drift applies the audited source trigger'
+    );
+
     $schema_index_target_drift_base = $tmp . '/schema-index-target-drift-base.sqlite';
     $schema_index_target_drift_source = $tmp . '/schema-index-target-drift-source.sqlite';
     $schema_index_target_drift_target = $tmp . '/schema-index-target-drift-target.sqlite';
@@ -853,6 +950,98 @@ SQL);
     assert_true(
         str_contains((string)scalar($schema_index_target_drift_target, "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'plugin_schema_index_target_drift_idx'"), 'UNIQUE INDEX plugin_schema_index_target_drift_idx ON plugin_schema_index_target_drift_items(lower(label))'),
         'compatible schema index target drift applies the audited source index'
+    );
+
+    $schema_index_changed_compatible_base = $tmp . '/schema-index-changed-compatible-base.sqlite';
+    $schema_index_changed_compatible_source = $tmp . '/schema-index-changed-compatible-source.sqlite';
+    $schema_index_changed_compatible_target = $tmp . '/schema-index-changed-compatible-target.sqlite';
+    $schema_index_changed_compatible_metadata = $tmp . '/.forkpress/cow/merge/schema-index-changed-compatible-metadata.sqlite';
+
+    $db = open_db($schema_index_changed_compatible_base);
+    $db->exec('CREATE TABLE plugin_schema_index_changed_compatible_items (label TEXT NOT NULL, slug TEXT NOT NULL)');
+    $db->exec("INSERT INTO plugin_schema_index_changed_compatible_items (label, slug) VALUES ('Compatible Changed Index Anchor', 'compatible-changed-index-anchor')");
+    $db->exec('CREATE INDEX plugin_schema_index_changed_compatible_idx ON plugin_schema_index_changed_compatible_items(label)');
+    $db->close();
+    copy($schema_index_changed_compatible_base, $schema_index_changed_compatible_source);
+    copy($schema_index_changed_compatible_base, $schema_index_changed_compatible_target);
+
+    $base_db = open_db($schema_index_changed_compatible_base);
+    $base_changed_index_sql = (string)$base_db->querySingle("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'plugin_schema_index_changed_compatible_idx'");
+    $base_db->close();
+
+    $source_db = open_db($schema_index_changed_compatible_source);
+    $source_db->exec('DROP INDEX plugin_schema_index_changed_compatible_idx');
+    $source_db->exec('CREATE UNIQUE INDEX plugin_schema_index_changed_compatible_idx ON plugin_schema_index_changed_compatible_items(lower(slug))');
+    $source_changed_index_sql = (string)$source_db->querySingle("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'plugin_schema_index_changed_compatible_idx'");
+    $source_db->close();
+
+    @mkdir(dirname($schema_index_changed_compatible_metadata), 0777, true);
+    $schema_index_changed_compatible_meta = open_db($schema_index_changed_compatible_metadata);
+    cow_merge_ensure_metadata($schema_index_changed_compatible_meta);
+    $schema_index_changed_compatible_run_id = cow_merge_start_run(
+        $schema_index_changed_compatible_meta,
+        'feature-schema-index-changed-compatible',
+        'main',
+        $schema_index_changed_compatible_base,
+        $schema_index_changed_compatible_source,
+        $schema_index_changed_compatible_target
+    );
+    cow_merge_record_schema_conflict(
+        $schema_index_changed_compatible_meta,
+        $schema_index_changed_compatible_run_id,
+        'plugin_schema_index_changed_compatible_items',
+        'plugin_schema_index_changed_compatible_idx',
+        'schema-source-changed-index',
+        $base_changed_index_sql,
+        ['sql' => $source_changed_index_sql],
+        $base_changed_index_sql,
+        $base_changed_index_sql,
+        'manual source-changed index conflict for compatible target-drift revalidation'
+    );
+    cow_merge_finish_run($schema_index_changed_compatible_meta, $schema_index_changed_compatible_run_id, 'completed_with_conflicts');
+    $schema_index_changed_compatible_meta->close();
+
+    $schema_index_changed_compatible_conflict_id = (int)scalar($schema_index_changed_compatible_metadata, "SELECT id FROM merge_conflicts WHERE conflict_type = 'schema-source-changed-index' ORDER BY id DESC LIMIT 1");
+    assert_true($schema_index_changed_compatible_conflict_id > 0, 'compatible schema changed-index target-drift fixture records a legacy source-changed index conflict');
+    cow_merge_review_record(
+        $schema_index_changed_compatible_metadata,
+        'conflict',
+        $schema_index_changed_compatible_conflict_id,
+        'reviewed',
+        'Review source-changed index before compatible target drift.',
+        'cow-test'
+    );
+    $target_db = open_db($schema_index_changed_compatible_target);
+    $target_db->exec('DROP INDEX plugin_schema_index_changed_compatible_idx');
+    $target_db->exec('CREATE INDEX plugin_schema_index_changed_compatible_idx ON plugin_schema_index_changed_compatible_items(slug)');
+    $target_db->close();
+
+    $schema_index_changed_compatible_revalidated = cow_merge_revalidate_reviewed_conflicts(
+        $schema_index_changed_compatible_metadata,
+        $schema_index_changed_compatible_run_id,
+        'cow-revalidate'
+    );
+    assert_same($schema_index_changed_compatible_revalidated['checked'], 1, 'compatible schema changed-index target drift revalidation checks the reviewed conflict');
+    assert_same($schema_index_changed_compatible_revalidated['stale'], 1, 'compatible schema changed-index target drift is treated as stale');
+    assert_same($schema_index_changed_compatible_revalidated['carried'], 1, 'compatible schema changed-index target drift returns the conflict to needs-action');
+    assert_same(
+        scalar($schema_index_changed_compatible_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $schema_index_changed_compatible_conflict_id ORDER BY id DESC LIMIT 1"),
+        'compatible-schema-index-target-drift',
+        'schema changed-index target drift is classified compatible when source replacement validates'
+    );
+    $schema_index_changed_compatible_resolution = cow_merge_resolve_conflict(
+        $schema_index_changed_compatible_metadata,
+        $schema_index_changed_compatible_conflict_id,
+        'source',
+        true,
+        'Apply source-changed index after compatible target drift revalidation.',
+        'cow-test',
+        true
+    );
+    assert_same($schema_index_changed_compatible_resolution['status'], 'applied', 'compatible schema changed-index target drift resolves after revalidation');
+    assert_true(
+        str_contains((string)scalar($schema_index_changed_compatible_target, "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'plugin_schema_index_changed_compatible_idx'"), 'UNIQUE INDEX plugin_schema_index_changed_compatible_idx ON plugin_schema_index_changed_compatible_items(lower(slug))'),
+        'compatible schema changed-index target drift applies the audited source index'
     );
 
     $view_order_base = $tmp . '/view-order-base.sqlite';
