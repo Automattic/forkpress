@@ -244,7 +244,7 @@ if [ "$NEED_PHP_BUILD" = "1" ]; then
     return "$status"
   }
 
-  run_spc_phase "doctor" doctor --auto-fix
+  run_spc_phase "doctor" doctor
   run_spc_phase_with_retries "$SPC_DOWNLOAD_RETRIES" "download PHP and extension sources" download --for-extensions="$EXTENSIONS" --with-php=8.3
 
   if [ "$PROFILE" = "dev" ]; then
