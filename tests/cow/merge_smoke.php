@@ -3433,6 +3433,78 @@ try {
     assert_same($event_audit['conflict_events'][0]['table_name'], 'wp_options', 'conflict event audit exposes the conflict table');
     assert_same($event_audit['conflict_events'][0]['conflict_type'], 'row-target-deleted', 'conflict event audit exposes the conflict type');
 
+    $fk_blocked_base = $tmp . '/fk-blocked-source-base.sqlite';
+    $fk_blocked_source = $tmp . '/fk-blocked-source-source.sqlite';
+    $fk_blocked_target = $tmp . '/fk-blocked-source-target.sqlite';
+    $fk_blocked_metadata = $tmp . '/.forkpress/cow/merge/fk-blocked-source-metadata.sqlite';
+
+    smoke_create_posts_db($fk_blocked_base);
+    $db = smoke_open_db($fk_blocked_base);
+    $db->exec('CREATE TABLE plugin_smoke_fk_parents (id INTEGER PRIMARY KEY, label TEXT)');
+    $db->exec('CREATE TABLE plugin_smoke_fk_children (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES plugin_smoke_fk_parents(id), label TEXT)');
+    $db->exec("INSERT INTO plugin_smoke_fk_parents (id, label) VALUES (1, 'base parent')");
+    $db->close();
+    copy($fk_blocked_base, $fk_blocked_source);
+    copy($fk_blocked_base, $fk_blocked_target);
+
+    $db = smoke_open_db($fk_blocked_source);
+    $db->exec('DELETE FROM plugin_smoke_fk_parents WHERE id = 1');
+    $db->close();
+
+    $db = smoke_open_db($fk_blocked_target);
+    $db->exec("UPDATE plugin_smoke_fk_parents SET label = 'target parent edit' WHERE id = 1");
+    $db->exec("INSERT INTO plugin_smoke_fk_children (id, parent_id, label) VALUES (20, 1, 'target child blocks source delete')");
+    $db->close();
+
+    $fk_blocked_result = cow_merge_databases($fk_blocked_base, $fk_blocked_source, $fk_blocked_target, $fk_blocked_metadata, 'feature-smoke-fk-blocked-source', 'main');
+    assert_same($fk_blocked_result['status'], 'completed_with_conflicts', 'foreign-key smoke source delete is held for review while target has children');
+    assert_same((int)smoke_scalar($fk_blocked_target, 'SELECT COUNT(*) FROM plugin_smoke_fk_parents WHERE id = 1'), 1, 'foreign-key smoke keeps target parent before source delete review');
+    $fk_blocked_conflict_id = (int)smoke_scalar($fk_blocked_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_smoke_fk_parents' AND conflict_type = 'row-source-deleted' ORDER BY id DESC LIMIT 1");
+    $fk_blocked_audit = cow_merge_audit_report($fk_blocked_metadata, (int)$fk_blocked_result['run_id'], 10, ['records' => 'conflicts']);
+    $fk_blocked_audit_rows = [];
+    foreach ($fk_blocked_audit['conflicts'] as $row) {
+        $fk_blocked_audit_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $fk_blocked_audit_rows[$fk_blocked_conflict_id]['resolution_choices'],
+        ['target'],
+        'foreign-key smoke audit hides source while target children still reference the row'
+    );
+    assert_same(
+        str_contains((string)($fk_blocked_audit_rows[$fk_blocked_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'referenced by plugin_smoke_fk_children(parent_id)'),
+        true,
+        'foreign-key smoke audit explains the target child blocker'
+    );
+    $fk_blocked_source_error = null;
+    try {
+        cow_merge_resolve_conflict($fk_blocked_metadata, $fk_blocked_conflict_id, 'source', true, 'Try blocked source delete.', 'cow-smoke');
+    } catch (Throwable $e) {
+        $fk_blocked_source_error = $e->getMessage();
+    }
+    assert_same(
+        str_contains((string)$fk_blocked_source_error, 'resolution choice source is blocked'),
+        true,
+        'foreign-key smoke resolver rejects blocked source before mutation'
+    );
+    assert_same((int)smoke_scalar($fk_blocked_target, 'SELECT COUNT(*) FROM plugin_smoke_fk_parents WHERE id = 1'), 1, 'foreign-key smoke blocked source leaves target parent untouched');
+
+    $db = smoke_open_db($fk_blocked_target);
+    $db->exec('DELETE FROM plugin_smoke_fk_children WHERE parent_id = 1');
+    $db->close();
+    $fk_unblocked_audit = cow_merge_audit_report($fk_blocked_metadata, (int)$fk_blocked_result['run_id'], 10, ['records' => 'conflicts']);
+    $fk_unblocked_audit_rows = [];
+    foreach ($fk_unblocked_audit['conflicts'] as $row) {
+        $fk_unblocked_audit_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $fk_unblocked_audit_rows[$fk_blocked_conflict_id]['resolution_choices'],
+        ['source', 'target'],
+        'foreign-key smoke audit advertises source after target children are removed'
+    );
+    $fk_source_resolution = cow_merge_resolve_conflict($fk_blocked_metadata, $fk_blocked_conflict_id, 'source', true, 'Apply source delete after child review.', 'cow-smoke');
+    assert_same($fk_source_resolution['status'], 'applied', 'foreign-key smoke applies source after blockers are cleared');
+    assert_same((int)smoke_scalar($fk_blocked_target, 'SELECT COUNT(*) FROM plugin_smoke_fk_parents WHERE id = 1'), 0, 'foreign-key smoke source delete removes the parent after review');
+
     $plugin_contract = cow_merge_conflict_resolution_contract('__plugins__', 'plugin-demo-finding');
     assert_same($plugin_contract['class'], 'plugin', 'plugin conflicts advertise plugin class');
     assert_same($plugin_contract['strategy'], 'plugin-validator', 'plugin conflicts require validator strategy');

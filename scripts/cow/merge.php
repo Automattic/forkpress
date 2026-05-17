@@ -12035,6 +12035,9 @@ function cow_merge_schema_dependency_name_list(array $dependencies): string {
 
 function cow_merge_schema_source_drop_blocked_reason(array $row): ?string {
     $conflict_type = (string)($row['conflict_type'] ?? '');
+    if (!in_array($conflict_type, ['schema-source-dropped-table', 'schema-source-dropped-view'], true)) {
+        return null;
+    }
     $target_db = $row['target_db'] ?? null;
     if (!is_string($target_db) || $target_db === '') {
         return 'source schema resolution is blocked because the target database cannot be verified';
