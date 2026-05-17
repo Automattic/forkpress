@@ -675,10 +675,28 @@ PHP);
         'child-before-rerun',
         'plugin audit exposes logical identity as a structured field'
     );
+    $logical_identity_group_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 20, [
+        'scope' => 'plugin',
+        'group_by' => 'plugin-logical-identity',
+    ]);
+    assert_same($logical_identity_group_audit['filters']['records'], 'conflicts', 'plugin logical-identity grouping defaults audit records to conflicts');
+    $logical_identity_group_counts = [];
+    foreach ($logical_identity_group_audit['conflict_groups'] as $group) {
+        $logical_identity_group_counts[(string)$group['group_key']] = (int)$group['conflict_count'];
+    }
+    assert_same(
+        $logical_identity_group_counts['{"kind":"plugin-child","slug":"child-before-rerun"}'] ?? 0,
+        1,
+        'plugin audit can group conflicts by structured logical identity'
+    );
     ob_start();
     cow_merge_print_audit_text($logical_identity_audit);
     $logical_identity_text = ob_get_clean();
     assert_true(str_contains($logical_identity_text, 'plugin-logical-identity={"kind":"plugin-child","slug":"child-before-rerun"}'), 'plugin text audit exposes logical identity evidence');
+    ob_start();
+    cow_merge_print_audit_text($logical_identity_group_audit);
+    $logical_identity_group_text = ob_get_clean();
+    assert_true(str_contains($logical_identity_group_text, 'plugin-logical-identity={"kind":"plugin-child","slug":"child-before-rerun"} conflicts=1'), 'plugin text audit exposes conflict grouping by logical identity');
     cow_merge_review_record(
         $metadata,
         'conflict',

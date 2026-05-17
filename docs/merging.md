@@ -77,6 +77,9 @@ conflict and conflict-event records by the resolver contract advertised on each
 conflict. Use those filters, or the matching `--group-by` values, to build
 queues such as generic resolver-ready conflicts, plugin-validator conflicts,
 and conflicts that can only be applied after a current revalidation guard.
+Plugin validator queues can also group by `plugin`, `plugin-object`,
+`plugin-severity`, or `plugin-logical-identity`; the last one uses the
+validator-provided semantic identity JSON as the queue key.
 
 ## Review and resolve conflicts
 

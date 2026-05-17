@@ -26,9 +26,9 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "    [--next-action review|run-plugin-validator|wait|revalidate|resolve|apply-reviewed-choice|manual-review|none]\n");
     fwrite(STDERR, "    [--resolution-choice source|target] [--blocked-resolution-choice source|target] [--resolution-strategy STRATEGY] [--generic-resolver yes|no] [--after-revalidate supported|unsupported]\n");
     fwrite(STDERR, "    [--revalidation-class CLASS] [--latest-revalidation-status STATUS] [--stale-status fresh|stale|error|unknown] [--revalidate] [--reviewer NAME]\n");
-    fwrite(STDERR, "    [--resolution-status validated|applied] [--group-by none|table|status|path|type|severity|lifecycle|event-type|next-action|conflict-key|resolution-strategy|generic-resolver|after-revalidate|revalidation-class|latest-revalidation-status|stale-status|plugin|plugin-object|plugin-severity]\n");
+    fwrite(STDERR, "    [--resolution-status validated|applied] [--group-by none|table|status|path|type|severity|lifecycle|event-type|next-action|conflict-key|resolution-strategy|generic-resolver|after-revalidate|revalidation-class|latest-revalidation-status|stale-status|plugin|plugin-object|plugin-severity|plugin-logical-identity]\n");
     fwrite(STDERR, "    --event-type accepts recorded, review-pending, review-needs-action, review-reviewed, resolution-validated, resolution-applied, resolution-blocked, or revalidation-required.\n");
-    fwrite(STDERR, "    --group-by supports resolutions by table/status/path, conflicts by table/type/path/severity/lifecycle/next-action/conflict-key/resolution-strategy/generic-resolver/after-revalidate/revalidation-class/latest-revalidation-status/stale-status/plugin/plugin-object/plugin-severity, conflict-events by table/type/lifecycle/event-type/conflict-key, and decisions by table/type/path.\n");
+    fwrite(STDERR, "    --group-by supports resolutions by table/status/path, conflicts by table/type/path/severity/lifecycle/next-action/conflict-key/resolution-strategy/generic-resolver/after-revalidate/revalidation-class/latest-revalidation-status/stale-status/plugin/plugin-object/plugin-severity/plugin-logical-identity, conflict-events by table/type/lifecycle/event-type/conflict-key, and decisions by table/type/path.\n");
     fwrite(STDERR, "    --revalidate accepts only --run, --conflict-id, --conflict-key, --reviewer, --format, and --quiet; omit --revalidate to filter audit output.\n");
     fwrite(STDERR, "  php merge.php revalidate-reviews --metadata-db <path> [--run ID] [--conflict-id ID|--conflict-key KEY] [--reviewer NAME] [--format text|json]\n");
     fwrite(STDERR, "  php merge.php review-record --metadata-db <path> --record conflict|decision|resolution (--id ID|--conflict-key KEY [--run ID]) --status pending|needs-action|reviewed --note TEXT [--reviewer NAME]\n");
@@ -8142,8 +8142,8 @@ function cow_merge_audit_after_revalidate_filter(?string $value): ?string {
 
 function cow_merge_audit_group_by(?string $value): string {
     $group_by = $value ?? 'none';
-    if (!in_array($group_by, ['none', 'table', 'status', 'path', 'type', 'severity', 'lifecycle', 'event-type', 'next-action', 'conflict-key', 'resolution-strategy', 'generic-resolver', 'after-revalidate', 'revalidation-class', 'latest-revalidation-status', 'stale-status', 'plugin', 'plugin-object', 'plugin-severity'], true)) {
-        throw new InvalidArgumentException('--group-by must be none, table, status, path, type, severity, lifecycle, event-type, next-action, conflict-key, resolution-strategy, generic-resolver, after-revalidate, revalidation-class, latest-revalidation-status, stale-status, plugin, plugin-object, or plugin-severity');
+    if (!in_array($group_by, ['none', 'table', 'status', 'path', 'type', 'severity', 'lifecycle', 'event-type', 'next-action', 'conflict-key', 'resolution-strategy', 'generic-resolver', 'after-revalidate', 'revalidation-class', 'latest-revalidation-status', 'stale-status', 'plugin', 'plugin-object', 'plugin-severity', 'plugin-logical-identity'], true)) {
+        throw new InvalidArgumentException('--group-by must be none, table, status, path, type, severity, lifecycle, event-type, next-action, conflict-key, resolution-strategy, generic-resolver, after-revalidate, revalidation-class, latest-revalidation-status, stale-status, plugin, plugin-object, plugin-severity, or plugin-logical-identity');
     }
     return $group_by;
 }
@@ -12029,7 +12029,7 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
         if (cow_merge_audit_filter_is_default_all($filters, 'records')) {
             $filters['records'] = $group_by === 'event-type'
                 ? 'conflict-events'
-                : (in_array($group_by, ['lifecycle', 'next-action', 'conflict-key', 'resolution-strategy', 'generic-resolver', 'after-revalidate', 'revalidation-class', 'latest-revalidation-status', 'stale-status', 'plugin', 'plugin-object', 'plugin-severity'], true) ? 'conflicts' : 'resolutions');
+                : (in_array($group_by, ['lifecycle', 'next-action', 'conflict-key', 'resolution-strategy', 'generic-resolver', 'after-revalidate', 'revalidation-class', 'latest-revalidation-status', 'stale-status', 'plugin', 'plugin-object', 'plugin-severity', 'plugin-logical-identity'], true) ? 'conflicts' : 'resolutions');
         } elseif (!in_array(($filters['records'] ?? null), ['conflicts', 'conflict-events', 'decisions', 'resolutions'], true)) {
             throw new InvalidArgumentException('--group-by can only be combined with --records conflicts, conflict-events, decisions, or resolutions');
         }
@@ -12037,8 +12037,8 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
         if ($records === 'resolutions' && !in_array($group_by, ['table', 'status', 'path'], true)) {
             throw new InvalidArgumentException('--records resolutions supports --group-by table, status, or path');
         }
-        if ($records === 'conflicts' && !in_array($group_by, ['table', 'type', 'path', 'severity', 'lifecycle', 'next-action', 'conflict-key', 'resolution-strategy', 'generic-resolver', 'after-revalidate', 'revalidation-class', 'latest-revalidation-status', 'stale-status', 'plugin', 'plugin-object', 'plugin-severity'], true)) {
-            throw new InvalidArgumentException('--records conflicts supports --group-by table, type, path, severity, lifecycle, next-action, conflict-key, resolution-strategy, generic-resolver, after-revalidate, revalidation-class, latest-revalidation-status, stale-status, plugin, plugin-object, or plugin-severity');
+        if ($records === 'conflicts' && !in_array($group_by, ['table', 'type', 'path', 'severity', 'lifecycle', 'next-action', 'conflict-key', 'resolution-strategy', 'generic-resolver', 'after-revalidate', 'revalidation-class', 'latest-revalidation-status', 'stale-status', 'plugin', 'plugin-object', 'plugin-severity', 'plugin-logical-identity'], true)) {
+            throw new InvalidArgumentException('--records conflicts supports --group-by table, type, path, severity, lifecycle, next-action, conflict-key, resolution-strategy, generic-resolver, after-revalidate, revalidation-class, latest-revalidation-status, stale-status, plugin, plugin-object, plugin-severity, or plugin-logical-identity');
         }
         if ($records === 'decisions' && !in_array($group_by, ['table', 'type', 'path'], true)) {
             throw new InvalidArgumentException('--records decisions supports --group-by table, type, or path');
@@ -12226,6 +12226,22 @@ function cow_merge_audit_plugin_payload_field(?string $payload_json, string $fie
     }
     $value = $payload[$field] ?? null;
     return is_string($value) && $value !== '' ? $value : null;
+}
+
+function cow_merge_audit_plugin_logical_identity_group(?string $payload_json): ?string {
+    if ($payload_json === null || $payload_json === '') {
+        return null;
+    }
+    $decoded = json_decode($payload_json, true);
+    if (!is_array($decoded)) {
+        return null;
+    }
+    $payload = cow_merge_audit_decode_payload($decoded);
+    if (!is_array($payload) || !array_key_exists('logical_identity', $payload)) {
+        return null;
+    }
+    $encoded = json_encode($payload['logical_identity'], JSON_UNESCAPED_SLASHES);
+    return is_string($encoded) && $encoded !== '' ? $encoded : null;
 }
 
 function cow_merge_audit_conflict_resolution_choice_matches(
@@ -12526,6 +12542,13 @@ function cow_merge_audit_register_functions(SQLite3 $db): void {
         1
     )) {
         throw new RuntimeException('failed to register audit plugin severity group function');
+    }
+    if (!$db->createFunction(
+        'forkpress_plugin_logical_identity_group',
+        fn($payload_json) => cow_merge_audit_plugin_logical_identity_group(is_string($payload_json) ? $payload_json : null),
+        1
+    )) {
+        throw new RuntimeException('failed to register audit plugin logical identity group function');
     }
     if (!$db->createFunction(
         'forkpress_conflict_has_resolution_choice',
@@ -13139,6 +13162,9 @@ function cow_merge_audit_conflict_group_sql(
     }
     if ($group_by === 'plugin-severity') {
         return "CASE WHEN c.table_name = '__plugins__' THEN COALESCE(forkpress_plugin_severity_group(c.chosen_payload), '(unknown)') ELSE c.table_name END";
+    }
+    if ($group_by === 'plugin-logical-identity') {
+        return "CASE WHEN c.table_name = '__plugins__' THEN COALESCE(forkpress_plugin_logical_identity_group(c.chosen_payload), '(unknown)') ELSE c.table_name END";
     }
     throw new InvalidArgumentException('unsupported conflict group');
 }
