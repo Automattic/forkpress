@@ -664,6 +664,7 @@ function forkpress_branch_finish_action(string $url, string $type, string $messa
     if (forkpress_branch_wants_json()) {
         $payload = array_merge([
             'success' => $type !== 'error',
+            'type' => $type,
             'message' => $message,
             'url' => $url,
         ], $data);
@@ -677,7 +678,13 @@ function forkpress_branch_finish_action(string $url, string $type, string $messa
 }
 
 function forkpress_branch_redirect_with_notice(string $url, string $type, string $message): void {
-    $param = $type === 'error' ? 'forkpress_branch_error' : 'forkpress_branch_notice';
+    if ($type === 'error') {
+        $param = 'forkpress_branch_error';
+    } elseif ($type === 'warning') {
+        $param = 'forkpress_branch_warning';
+    } else {
+        $param = 'forkpress_branch_notice';
+    }
     if (function_exists('add_query_arg')) {
         $url = add_query_arg($param, $message, $url);
     } else {
@@ -694,21 +701,60 @@ function forkpress_branch_redirect_with_notice(string $url, string $type, string
 
 function forkpress_branch_admin_notice(): void {
     $notice = $_GET['forkpress_branch_notice'] ?? '';
+    $warning = $_GET['forkpress_branch_warning'] ?? '';
     $error = $_GET['forkpress_branch_error'] ?? '';
     if (function_exists('wp_unslash')) {
         $notice = wp_unslash($notice);
+        $warning = wp_unslash($warning);
         $error = wp_unslash($error);
     }
 
-    $message = is_string($error) && $error !== '' ? $error : $notice;
+    $message = is_string($error) && $error !== '' ? $error : (is_string($warning) && $warning !== '' ? $warning : $notice);
     if (!is_string($message) || $message === '') {
         return;
     }
 
-    $class = is_string($error) && $error !== '' ? 'notice notice-error' : 'notice notice-success';
+    if (is_string($error) && $error !== '') {
+        $class = 'notice notice-error';
+    } elseif (is_string($warning) && $warning !== '') {
+        $class = 'notice notice-warning';
+    } else {
+        $class = 'notice notice-success';
+    }
     echo '<div class="' . esc_attr($class) . '"><p>' . esc_html($message) . '</p></div>';
 }
 add_action('admin_notices', 'forkpress_branch_admin_notice');
+
+function forkpress_branch_merge_summary(string $output): array {
+    $summary = [
+        'run' => null,
+        'status' => null,
+        'conflicts' => null,
+    ];
+
+    foreach (preg_split('/\R/', $output) ?: [] as $line) {
+        if (preg_match('/^\s*(run|status|conflicts):\s*(.+?)\s*$/', (string) $line, $matches) !== 1) {
+            continue;
+        }
+        if ($matches[1] === 'conflicts') {
+            $summary['conflicts'] = max(0, (int) $matches[2]);
+        } elseif ($matches[1] === 'run') {
+            $summary['run'] = max(0, (int) $matches[2]);
+        } else {
+            $summary['status'] = (string) $matches[2];
+        }
+    }
+
+    return $summary;
+}
+
+function forkpress_branch_merge_audit_command(?int $run): string {
+    $command = 'forkpress branch merge-audit --records conflicts';
+    if ($run !== null && $run > 0) {
+        $command .= ' --run ' . $run;
+    }
+    return $command;
+}
 
 function forkpress_branch_birth_admin_notice(): void {
     $status = forkpress_branch_birth_status();
@@ -785,6 +831,27 @@ function forkpress_handle_branch_merge(): void {
     if ($code !== 0) {
         forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', $output ?: 'ForkPress could not merge the branch.');
     }
+
+    $summary = forkpress_branch_merge_summary($output);
+    $run = is_int($summary['run']) && $summary['run'] > 0 ? $summary['run'] : null;
+    $conflicts = is_int($summary['conflicts']) ? $summary['conflicts'] : 0;
+    if (($summary['status'] ?? null) === 'completed_with_conflicts' || $conflicts > 0) {
+        $audit_command = forkpress_branch_merge_audit_command($run);
+        $message = 'Merged ' . $source . ' into ' . $target . ' with ' . $conflicts . ' conflict' . ($conflicts === 1 ? '' : 's') . '. Review them with `' . $audit_command . '`.';
+        forkpress_branch_finish_action(
+            forkpress_branch_url($target, '/wp-admin/'),
+            'warning',
+            $message,
+            [
+                'branches' => forkpress_branch_switcher_data($current),
+                'mergeStatus' => $summary['status'],
+                'conflicts' => $conflicts,
+                'run' => $run,
+                'auditCommand' => $audit_command,
+            ]
+        );
+    }
+
     forkpress_branch_finish_action(
         forkpress_branch_url($target, '/wp-admin/'),
         'notice',
