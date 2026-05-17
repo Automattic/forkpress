@@ -142,6 +142,7 @@ try {
     create_test_symlink('shared.txt', $base_root . '/wp-content/uploads/shared-link.txt');
     write_test_file($base_root . '/wp-content/uploads/replace-dir-with-file/base-child.txt', 'base child');
     write_test_file($base_root . '/wp-content/uploads/replace-file-with-dir', 'base file');
+    write_test_file($base_root . '/wp-content/uploads/replace-file-with-drifted-dir', 'base drift file');
     write_test_file($base_root . '/wp-content/uploads/replace-file-with-unsafe-dir', 'base unsafe file');
     write_test_file($base_root . '/wp-content/uploads/delete-dir-conflict/base-child.txt', 'base delete-dir child');
     copy_tree_for_test($base_root, $source_root);
@@ -159,6 +160,8 @@ try {
     write_test_file($source_root . '/wp-content/uploads/replace-dir-with-file', 'source replacement file');
     unlink($source_root . '/wp-content/uploads/replace-file-with-dir');
     write_test_file($source_root . '/wp-content/uploads/replace-file-with-dir/source-child.txt', 'source replacement child');
+    unlink($source_root . '/wp-content/uploads/replace-file-with-drifted-dir');
+    write_test_file($source_root . '/wp-content/uploads/replace-file-with-drifted-dir/source-child.txt', 'audited replacement child');
     unlink($source_root . '/wp-content/uploads/replace-file-with-unsafe-dir');
     create_test_symlink('../../../../outside-root.txt', $source_root . '/wp-content/uploads/replace-file-with-unsafe-dir/escape-link.txt');
     remove_tree($source_root . '/wp-content/uploads/delete-dir-conflict');
@@ -188,7 +191,7 @@ try {
     assert_same($result['file_applied'], 7, 'filesystem merge applies safe text, binary, directory, and symlink changes');
     assert_same(
         $result['file_conflicts'],
-        $has_unsupported_special_entry ? 10 : 9,
+        $has_unsupported_special_entry ? 11 : 10,
         'filesystem merge records binary, unsafe symlink, type replacement, directory-delete, and unsupported-entry conflicts'
     );
     assert_same(file_get_contents($target_root . '/wp-content/uploads/shared.txt'), 'source shared', 'safe source text file change is applied');
@@ -212,6 +215,7 @@ try {
     assert_true(is_dir($target_root . '/wp-content/uploads/replace-dir-with-file'), 'directory-to-file replacement keeps the target directory before review');
     assert_same(file_get_contents($target_root . '/wp-content/uploads/replace-dir-with-file/base-child.txt'), 'base child', 'directory-to-file replacement keeps target descendants before review');
     assert_same(file_get_contents($target_root . '/wp-content/uploads/replace-file-with-dir'), 'base file', 'file-to-directory replacement keeps the target file before review');
+    assert_same(file_get_contents($target_root . '/wp-content/uploads/replace-file-with-drifted-dir'), 'base drift file', 'drift-prone file-to-directory replacement keeps the target file before review');
     assert_same(file_get_contents($target_root . '/wp-content/uploads/replace-file-with-unsafe-dir'), 'base unsafe file', 'unsafe file-to-directory replacement keeps the target file before review');
     assert_same(file_get_contents($target_root . '/wp-content/uploads/delete-dir-conflict/target-child.txt'), 'target delete-dir child', 'directory deletion keeps target-side descendants before review');
 
@@ -222,7 +226,7 @@ try {
     );
     assert_same(
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-type-replacement-conflict'"),
-        3,
+        4,
         'filesystem directory/file replacement conflicts are auditable'
     );
     assert_same(
@@ -266,6 +270,7 @@ try {
     );
     $dir_to_file_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/replace-dir-with-file'));
     $file_to_dir_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/replace-file-with-dir'));
+    $drifted_file_to_dir_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/replace-file-with-drifted-dir'));
     $unsafe_file_to_dir_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/replace-file-with-unsafe-dir'));
     assert_same(
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'target-wins' AND row_identity = '$dir_to_file_identity' AND reason LIKE 'source changed filesystem path type from dir to file%'"),
@@ -276,6 +281,11 @@ try {
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'target-wins' AND row_identity = '$file_to_dir_identity' AND reason LIKE 'source changed filesystem path type from file to dir%'"),
         1,
         'file-to-directory replacement records a type-specific target-wins decision'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'target-wins' AND row_identity = '$drifted_file_to_dir_identity' AND reason LIKE 'source changed filesystem path type from file to dir%'"),
+        1,
+        'drift-prone file-to-directory replacement records a type-specific target-wins decision'
     );
     assert_same(
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'target-wins' AND row_identity = '$unsafe_file_to_dir_identity' AND reason LIKE 'source changed filesystem path type from file to dir%'"),
@@ -390,17 +400,35 @@ try {
     ]);
     $dir_to_file_audit = find_audit_conflict_by_identity($type_replacement_audit['conflicts'], cow_merge_file_identity_json('wp-content/uploads/replace-dir-with-file'));
     $file_to_dir_audit = find_audit_conflict_by_identity($type_replacement_audit['conflicts'], cow_merge_file_identity_json('wp-content/uploads/replace-file-with-dir'));
+    $drifted_file_to_dir_audit = find_audit_conflict_by_identity($type_replacement_audit['conflicts'], cow_merge_file_identity_json('wp-content/uploads/replace-file-with-drifted-dir'));
     $unsafe_file_to_dir_audit = find_audit_conflict_by_identity($type_replacement_audit['conflicts'], cow_merge_file_identity_json('wp-content/uploads/replace-file-with-unsafe-dir'));
     assert_true(is_array($dir_to_file_audit), 'type replacement audit includes safe directory-to-file replacement');
     assert_true(is_array($file_to_dir_audit), 'type replacement audit includes safe file-to-directory replacement');
+    assert_true(is_array($drifted_file_to_dir_audit), 'type replacement audit includes drift-prone file-to-directory replacement');
     assert_true(is_array($unsafe_file_to_dir_audit), 'type replacement audit includes unsafe file-to-directory replacement');
     assert_same($dir_to_file_audit['resolution_choices'] ?? null, ['source', 'target'], 'safe directory-to-file audit offers source and target choices');
     assert_same($file_to_dir_audit['resolution_choices'] ?? null, ['source', 'target'], 'safe file-to-directory audit offers source and target choices');
+    assert_same($drifted_file_to_dir_audit['resolution_choices'] ?? null, ['source', 'target'], 'drift-prone file-to-directory audit initially offers source and target choices');
     assert_same($unsafe_file_to_dir_audit['resolution_choices'] ?? null, ['target'], 'unsafe source subtree audit only offers target resolution');
     assert_true(
         str_contains((string)(($unsafe_file_to_dir_audit['blocked_resolution_choices'] ?? [])['source'] ?? ''), 'source directory subtree contains an unsafe symlink'),
         'unsafe source subtree audit records why source resolution is blocked'
     );
+
+    write_test_file($source_root . '/wp-content/uploads/replace-file-with-drifted-dir/source-child.txt', 'drifted replacement child');
+    $drifted_file_to_dir_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-type-replacement-conflict' AND row_identity = '$drifted_file_to_dir_identity' ORDER BY id DESC LIMIT 1");
+    $drifted_subtree_resolution_error = null;
+    try {
+        cow_merge_resolve_conflict($metadata, $drifted_file_to_dir_conflict_id, 'source', true, 'Try applying drifted source directory subtree.', 'cow-test');
+    } catch (Throwable $e) {
+        $drifted_subtree_resolution_error = $e->getMessage();
+    }
+    assert_true(
+        is_string($drifted_subtree_resolution_error) && str_contains($drifted_subtree_resolution_error, 'source filesystem directory subtree no longer matches the audited merge payload'),
+        'reviewed source file-to-directory resolution is blocked before replacing the target with a drifted source subtree'
+    );
+    assert_true(is_file($target_root . '/wp-content/uploads/replace-file-with-drifted-dir'), 'failed drifted subtree resolution keeps the target file in place');
+    assert_same(file_get_contents($target_root . '/wp-content/uploads/replace-file-with-drifted-dir'), 'base drift file', 'failed drifted subtree resolution preserves target file contents');
 
     $dir_to_file_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-type-replacement-conflict' AND row_identity = '$dir_to_file_identity' ORDER BY id DESC LIMIT 1");
     $dir_to_file_resolution = cow_merge_resolve_conflict($metadata, $dir_to_file_conflict_id, 'source', true, 'Apply reviewed source directory-to-file replacement.', 'cow-test');
