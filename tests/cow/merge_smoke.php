@@ -3289,6 +3289,7 @@ try {
     $options_contract_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts']);
     assert_same(count($options_contract_audit['conflicts']), 2, 'conflict audit returns both option edit/delete conflicts');
     $options_contract_conflict_id = (int)$options_contract_audit['conflicts'][0]['id'];
+    $options_contract_conflict_key = (string)$options_contract_audit['conflicts'][0]['conflict_key'];
     $unreviewed_filter_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['lifecycle_state' => 'unreviewed']);
     assert_same($unreviewed_filter_audit['filters']['records'], 'conflicts', 'lifecycle-state filter defaults to conflict records');
     assert_same(count($unreviewed_filter_audit['conflicts']), 2, 'lifecycle-state filter returns unreviewed conflicts');
@@ -3364,12 +3365,13 @@ try {
     $apply_reviewed_cli = smoke_run_merge_cli([
         'resolve-conflict',
         '--metadata-db', $options_edit_delete_metadata,
-        '--id', (string)$options_contract_conflict_id,
+        '--conflict-key', $options_contract_conflict_key,
+        '--run', (string)$options_edit_delete_result['run_id'],
         '--apply-reviewed',
         '--note', 'Keep target option deletion.',
         '--reviewer', 'cow-smoke',
     ]);
-    assert_same($apply_reviewed_cli['status'], 0, 'apply-reviewed CLI applies the latest validated choice: ' . $apply_reviewed_cli['output']);
+    assert_same($apply_reviewed_cli['status'], 0, 'apply-reviewed CLI applies the latest validated choice by conflict key: ' . $apply_reviewed_cli['output']);
     assert_same(str_contains($apply_reviewed_cli['output'], 'choice:    target'), true, 'apply-reviewed CLI reports the validated target choice');
     $resolved_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts']);
     assert_same($resolved_audit['conflicts'][0]['lifecycle_state'], 'resolved', 'applied resolution advertises resolved lifecycle state');
