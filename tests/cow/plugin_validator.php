@@ -98,16 +98,35 @@ function scalar(string $db_path, string $sql): mixed {
 }
 
 function run_merge_cli(array $args): array {
-    $cmd = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(__DIR__ . '/../../scripts/cow/merge.php');
-    foreach ($args as $arg) {
-        $cmd .= ' ' . escapeshellarg((string)$arg);
+    return run_merge_cli_env($args, []);
+}
+
+function run_merge_cli_env(array $args, array $env): array {
+    $base_env = getenv();
+    if (!is_array($base_env)) {
+        $base_env = [];
     }
-    $output = [];
-    $status = 0;
-    exec($cmd . ' 2>&1', $output, $status);
+    $pipes = [];
+    $process = proc_open(
+        array_merge([PHP_BINARY, __DIR__ . '/../../scripts/cow/merge.php'], $args),
+        [
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w'],
+        ],
+        $pipes,
+        null,
+        array_merge($base_env, $env)
+    );
+    if (!is_resource($process)) {
+        throw new RuntimeException('failed to start merge CLI subprocess');
+    }
+    $stdout = stream_get_contents($pipes[1]);
+    $stderr = stream_get_contents($pipes[2]);
+    fclose($pipes[1]);
+    fclose($pipes[2]);
     return [
-        'status' => $status,
-        'output' => implode("\n", $output),
+        'status' => proc_close($process),
+        'output' => (is_string($stdout) ? $stdout : '') . (is_string($stderr) ? $stderr : ''),
     ];
 }
 
@@ -588,6 +607,111 @@ PHP);
         !is_file($target_root . '/wp-content/uploads/plugin-driver-pre-resolution-mutation.dat'),
         'plugin driver pre-resolution failpoint rolls back target filesystem mutations'
     );
+    $pre_resolution_kill_driver_path = $tmp . '/forkpress-plugin-graph-driver-pre-resolution-kill.php';
+    write_test_file($pre_resolution_kill_driver_path, <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$db->exec("UPDATE plugin_graph_child SET graph_json = '{\"driver\":\"pre resolution mutation\"}' WHERE child_id = " . (int)str_replace('child:', '', (string)getenv('FORKPRESS_MERGE_PLUGIN_OBJECT')));
+$target_root = rtrim((string)getenv('FORKPRESS_MERGE_TARGET_ROOT'), '/');
+@mkdir($target_root . '/wp-content/uploads', 0777, true);
+file_put_contents($target_root . '/wp-content/uploads/plugin-driver-pre-resolution-kill-mutation.dat', 'pre resolution kill mutation');
+echo json_encode([
+    'status' => 'applied',
+    'result' => ['pre_resolution_kill' => true],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $drive_child_graph_before_pre_resolution_kill = (string)scalar($target, "SELECT graph_json FROM plugin_graph_child WHERE child_id = $drive_child_id");
+    $pre_resolution_kill = run_merge_cli_env(
+        [
+            'run-plugin-driver',
+            '--metadata-db', $metadata,
+            '--id', (string)$drive_file_conflict_id,
+            '--driver', $pre_resolution_kill_driver_path,
+            '--format', 'json',
+        ],
+        [
+            'FORKPRESS_COW_MERGE_TEST_FAILPOINT' => 'before-plugin-driver-resolution',
+            'FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION' => 'kill',
+        ]
+    );
+    assert_true($pre_resolution_kill['status'] !== 0, 'plugin driver pre-resolution process death exits unsuccessfully');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE choice = 'plugin-driver'"),
+        $plugin_driver_resolution_count,
+        'plugin driver pre-resolution process death records no plugin-driver resolution'
+    );
+    assert_same(
+        (string)scalar($target, "SELECT graph_json FROM plugin_graph_child WHERE child_id = $drive_child_id"),
+        '{"driver":"pre resolution mutation"}',
+        'plugin driver pre-resolution process death can leave target database mutations before recovery'
+    );
+    clearstatcache(true, $target_root . '/wp-content/uploads/plugin-driver-pre-resolution-kill-mutation.dat');
+    assert_true(
+        is_file($target_root . '/wp-content/uploads/plugin-driver-pre-resolution-kill-mutation.dat'),
+        'plugin driver pre-resolution process death can leave target filesystem mutations before recovery'
+    );
+    $crash_report = run_merge_cli([
+        'recover-crash',
+        '--metadata-db', $metadata,
+        '--format', 'json',
+    ]);
+    assert_same($crash_report['status'], 0, 'plugin driver pre-resolution process death leaves inspectable crash recovery state');
+    $crash_report_json = json_decode($crash_report['output'], true);
+    assert_same($crash_report_json['pending'] ?? null, 1, 'plugin driver process-death recovery reports one pending artifact');
+    assert_same(
+        $crash_report_json['artifacts'][0]['checkpoint'] ?? null,
+        'plugin-driver-resolution',
+        'plugin driver process-death recovery records the driver-resolution checkpoint'
+    );
+    assert_same(
+        $crash_report_json['artifacts'][0]['target_root'] ?? null,
+        $target_root,
+        'plugin driver process-death recovery records the target filesystem root'
+    );
+    assert_true(
+        is_array($crash_report_json['artifacts'][0]['filesystem_snapshot'] ?? null),
+        'plugin driver process-death recovery records a target filesystem snapshot'
+    );
+    assert_true(
+        !array_key_exists(
+            'wp-content/uploads/plugin-driver-pre-resolution-kill-mutation.dat',
+            $crash_report_json['artifacts'][0]['filesystem_snapshot']['entries'] ?? []
+        ),
+        'plugin driver process-death recovery snapshot predates the driver-created file'
+    );
+    $blocked_driver_retry = run_merge_cli([
+        'run-plugin-driver',
+        '--metadata-db', $metadata,
+        '--id', (string)$drive_file_conflict_id,
+        '--driver', $pre_resolution_kill_driver_path,
+        '--format', 'json',
+    ]);
+    assert_true($blocked_driver_retry['status'] !== 0, 'plugin driver runner blocks retries while crash recovery is pending');
+    assert_true(
+        str_contains($blocked_driver_retry['output'], 'pending COW merge crash recovery artifact'),
+        'plugin driver pending crash recovery error points to recovery before retry'
+    );
+    $restore_crash = run_merge_cli([
+        'recover-crash',
+        '--metadata-db', $metadata,
+        '--restore-target-db',
+        '--restore-files',
+        '--format', 'json',
+    ]);
+    assert_same($restore_crash['status'], 0, 'plugin driver process-death recovery restores target DB and files');
+    $restore_crash_json = json_decode($restore_crash['output'], true);
+    assert_same($restore_crash_json['restored'] ?? null, 1, 'plugin driver process-death recovery restores one artifact');
+    assert_same($restore_crash_json['pending'] ?? null, 0, 'plugin driver process-death recovery clears the pending artifact');
+    assert_same(
+        (string)scalar($target, "SELECT graph_json FROM plugin_graph_child WHERE child_id = $drive_child_id"),
+        $drive_child_graph_before_pre_resolution_kill,
+        'plugin driver process-death recovery restores target database mutations'
+    );
+    clearstatcache(true, $target_root . '/wp-content/uploads/plugin-driver-pre-resolution-kill-mutation.dat');
+    assert_true(
+        !is_file($target_root . '/wp-content/uploads/plugin-driver-pre-resolution-kill-mutation.dat'),
+        'plugin driver process-death recovery restores target filesystem mutations'
+    );
     $rollback_failure_before = (int)scalar($metadata, 'SELECT COUNT(*) FROM merge_rollback_failures');
     $GLOBALS['cow_merge_test_hooks']['before_file_root_snapshot_restore'] = [
         static function (array $snapshot, string $restore_root) use ($target_root): void {
@@ -645,6 +769,16 @@ PHP);
     $plugin_driver_rollback_artifact = json_decode((string)$plugin_driver_rollback_artifact_lines[0], true);
     assert_true(is_file($plugin_driver_rollback_artifact['artifacts']['target_db_snapshot']['backup'] ?? ''), 'plugin driver rollback failure artifact preserves target DB backup');
     assert_true(is_dir($plugin_driver_rollback_artifact['artifacts']['filesystem_snapshot']['stage_root'] ?? ''), 'plugin driver rollback failure artifact preserves filesystem snapshot backup root');
+    $rollback_recovery = run_merge_cli([
+        'recover-crash',
+        '--metadata-db', $metadata,
+        '--restore-target-db',
+        '--restore-files',
+        '--format', 'json',
+    ]);
+    assert_same($rollback_recovery['status'], 0, 'plugin driver rollback-failure crash artifact can be restored before later work');
+    $rollback_recovery_json = json_decode($rollback_recovery['output'], true);
+    assert_same($rollback_recovery_json['pending'] ?? null, 0, 'plugin driver rollback-failure crash artifact is cleared after restore');
     @unlink($target_root . '/wp-content/uploads/plugin-driver-failed-mutation.dat');
     $malformed_plugin_driver_path = $tmp . '/forkpress-plugin-graph-driver-malformed.php';
     write_test_file($malformed_plugin_driver_path, <<<'PHP'

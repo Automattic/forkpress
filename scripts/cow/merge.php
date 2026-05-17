@@ -6986,6 +6986,17 @@ function cow_merge_file_root_snapshot_restore(array $snapshot, string $target_ro
         throw new RuntimeException('invalid filesystem root snapshot');
     }
 
+    cow_merge_file_root_snapshot_remove_added_paths($target_root, $original_entries);
+
+    $tx = $snapshot['transaction'] ?? null;
+    if (!is_array($tx)) {
+        throw new RuntimeException('invalid filesystem root snapshot transaction');
+    }
+    cow_merge_file_transaction_restore($tx, $target_root);
+    cow_merge_file_root_snapshot_remove_added_paths($target_root, $original_entries);
+}
+
+function cow_merge_file_root_snapshot_remove_added_paths(string $target_root, array $original_entries): void {
     $current_entries = cow_merge_file_manifest_for_root($target_root)['entries'];
     $added_paths = array_values(array_diff(array_keys($current_entries), array_keys($original_entries)));
     usort($added_paths, static function (string $a, string $b): int {
@@ -6994,12 +7005,6 @@ function cow_merge_file_root_snapshot_restore(array $snapshot, string $target_ro
     foreach ($added_paths as $path) {
         cow_merge_remove_tree(cow_merge_file_target_path($target_root, $path));
     }
-
-    $tx = $snapshot['transaction'] ?? null;
-    if (!is_array($tx)) {
-        throw new RuntimeException('invalid filesystem root snapshot transaction');
-    }
-    cow_merge_file_transaction_restore($tx, $target_root);
 }
 
 function cow_merge_file_root_snapshot_cleanup(?array $snapshot): void {
@@ -7674,6 +7679,7 @@ function cow_merge_run_plugin_driver(
     ?string $note = null,
     string $reviewer = 'plugin-driver'
 ): array {
+    cow_merge_assert_no_pending_crash_recovery($metadata_db);
     $command = cow_merge_plugin_driver_command($driver);
     $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READWRITE | SQLITE3_OPEN_CREATE);
     try {
@@ -7694,6 +7700,20 @@ function cow_merge_run_plugin_driver(
         ? cow_merge_file_root_snapshot_begin($target_root)
         : null;
     $preserve_snapshots = false;
+    $crash_recovery_artifact = null;
+    if (is_array($target_snapshot) || is_array($filesystem_snapshot)) {
+        $crash_recovery_artifact = cow_merge_write_crash_recovery_artifact(
+            $metadata_db,
+            (int)$context['run_id'],
+            'plugin-driver-resolution',
+            $merge_context,
+            $target_snapshot,
+            null,
+            $target_root !== '' ? $target_root : null,
+            null,
+            $filesystem_snapshot
+        );
+    }
     $env = array_merge($_ENV, [
         'FORKPRESS_MERGE_METADATA_DB' => $metadata_db,
         'FORKPRESS_MERGE_RUN' => (string)$context['run_id'],
@@ -7764,6 +7784,8 @@ function cow_merge_run_plugin_driver(
         );
         $resolution['driver_status'] = $decoded['driver_status'];
         $resolution['context_file'] = $context_file;
+        cow_merge_remove_crash_recovery_artifact($crash_recovery_artifact);
+        $crash_recovery_artifact = null;
         return $resolution;
     } catch (Throwable $e) {
         $rollback_errors = [];
@@ -7808,6 +7830,8 @@ function cow_merge_run_plugin_driver(
                 $e
             );
         }
+        cow_merge_remove_crash_recovery_artifact($crash_recovery_artifact);
+        $crash_recovery_artifact = null;
         throw $e;
     } finally {
         if (!$preserve_snapshots) {
