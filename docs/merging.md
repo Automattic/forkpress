@@ -56,8 +56,17 @@ Useful filters include `--run`, `--scope all|db|files|plugin`,
 `--conflict-key`, `--review-status unreviewed|pending|needs-action|reviewed`,
 `--lifecycle-state unreviewed|deferred|needs-action|reviewed|validated|resolved`,
 `--next-action review|run-plugin-validator|wait|revalidate|resolve|apply-reviewed-choice|manual-review|none`,
+`--revalidation-class unchanged|compatible-target-drift|compatible-source-drift|compatible-schema-index-target-drift|compatible-schema-view-target-drift|compatible-schema-trigger-target-drift|missing|incompatible|replacement-evidence|unclassified`,
+`--latest-revalidation-status none|current|source-drifted|target-drifted|source-and-target-drifted|unknown`,
 `--resolution-choice source|target`, `--blocked-resolution-choice source|target`,
 `--group-by`, `--target-kept`, `--path`, and `--path-prefix`.
+
+`--revalidation-class` filters by what the latest revalidation found when it
+ran. `--latest-revalidation-status` checks whether that latest recorded
+source/target guard still matches live state now. Use
+`--group-by latest-revalidation-status` to see which reviewed conflicts can
+still be resolved with `--after-revalidate` and which need another revalidation
+first.
 
 ## Review and resolve conflicts
 

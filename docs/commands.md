@@ -26,6 +26,7 @@ full CLI help.
 | `forkpress branch reset <name> --from <source>` | Replace a branch from another branch. |
 | `forkpress branch merge <source> --into <target>` | Merge one branch into another. |
 | `forkpress branch merge-audit` | Inspect merge runs, decisions, conflicts, conflict events, and resolutions. |
+| `forkpress branch revalidate-reviews [--run <id>]` | Recheck reviewed conflicts and carry stale reviews back to `needs-action`. |
 | `forkpress branch merge-review <type> <id>` | Attach review status to an audit record. |
 | `forkpress branch merge-review conflict-key <key> [--run <id>]` | Attach review status by logical conflict key when unambiguous. |
 | `forkpress branch merge-resolve conflict <id>` | Validate or apply a conflict choice. |
