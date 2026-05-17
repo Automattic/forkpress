@@ -3152,6 +3152,7 @@ fn cow_branch_command(
                     review_status: audit.review_status.as_deref(),
                     resolution_status: audit.resolution_status.as_deref(),
                     lifecycle_state: audit.lifecycle_state.as_deref(),
+                    next_action: audit.next_action.as_deref(),
                     resolution_choice: audit.resolution_choice.as_deref(),
                     blocked_resolution_choice: audit.blocked_resolution_choice.as_deref(),
                     group_by: &audit.group_by,
@@ -3435,7 +3436,7 @@ fn branch_help_text(command: Option<&str>) -> &'static str {
             "Usage: forkpress branch run-plugin-validator --run <id> --validator <path> [--format text|json]\n\nRun one plugin validator and record emitted findings as plugin-scoped merge conflicts.\n"
         }
         Some("merge-audit") | Some("audit") => {
-            "Usage: forkpress branch merge-audit [options]\n\nInspect merge runs, decisions, conflicts, conflict events, resolutions, and rollback failures. Use --revalidate to carry stale reviewed conflicts back into needs-action before resolving; revalidation only accepts --run, --reviewer, --format, and --quiet.\nCommon options: --format text|json, --run <id>, --scope all|db|files|plugin, --records all|conflicts|conflict-events|decisions|resolutions|rollback-failures, --conflict-key <key>, --plugin <name>, --plugin-object <object>, --plugin-severity <severity>, --review, --review-status <status>, --lifecycle-state <state>, --resolution-choice source|target, --blocked-resolution-choice source|target, --group-by none|table|status|path|type|severity|lifecycle|conflict-key|plugin|plugin-object|plugin-severity, --revalidate.\n"
+            "Usage: forkpress branch merge-audit [options]\n\nInspect merge runs, decisions, conflicts, conflict events, resolutions, and rollback failures. Use --revalidate to carry stale reviewed conflicts back into needs-action before resolving; revalidation only accepts --run, --reviewer, --format, and --quiet.\nCommon options: --format text|json, --run <id>, --scope all|db|files|plugin, --records all|conflicts|conflict-events|decisions|resolutions|rollback-failures, --conflict-key <key>, --plugin <name>, --plugin-object <object>, --plugin-severity <severity>, --review, --review-status <status>, --lifecycle-state <state>, --next-action <action>, --resolution-choice source|target, --blocked-resolution-choice source|target, --group-by none|table|status|path|type|severity|lifecycle|next-action|conflict-key|plugin|plugin-object|plugin-severity, --revalidate.\n"
         }
         Some("merge-review") => {
             "Usage: forkpress branch merge-review <conflict|decision|resolution> <id> --status <pending|needs-action|reviewed> --note <text> [--reviewer <name>]\n       forkpress branch merge-review conflict-key <key> [--run <id>] --status <pending|needs-action|reviewed> --note <text> [--reviewer <name>]\n\nAttach review metadata to an audit record. Reviewing by conflict key is allowed only when the key identifies one unresolved conflict, or when --run disambiguates it.\n"
@@ -3475,6 +3476,7 @@ struct CowBranchMergeAuditArgs {
     reviewer: Option<String>,
     resolution_status: Option<String>,
     lifecycle_state: Option<String>,
+    next_action: Option<String>,
     resolution_choice: Option<String>,
     blocked_resolution_choice: Option<String>,
     group_by: String,
@@ -3503,6 +3505,7 @@ fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAu
     let mut reviewer: Option<String> = None;
     let mut resolution_status: Option<String> = None;
     let mut lifecycle_state: Option<String> = None;
+    let mut next_action: Option<String> = None;
     let mut resolution_choice: Option<String> = None;
     let mut blocked_resolution_choice: Option<String> = None;
     let mut group_by = "none".to_string();
@@ -3797,6 +3800,25 @@ fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAu
                 lifecycle_state = Some(value.to_string());
                 index += 1;
             }
+            "--next-action" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!(
+                        "--next-action requires review, run-plugin-validator, wait, revalidate, resolve, apply-reviewed-choice, manual-review, or none"
+                    );
+                };
+                next_action = Some(value.clone());
+                index += 2;
+            }
+            value if value.starts_with("--next-action=") => {
+                let value = value.trim_start_matches("--next-action=");
+                if value.is_empty() {
+                    bail!(
+                        "--next-action requires review, run-plugin-validator, wait, revalidate, resolve, apply-reviewed-choice, manual-review, or none"
+                    );
+                }
+                next_action = Some(value.to_string());
+                index += 1;
+            }
             "--resolution-choice" => {
                 let Some(value) = args.get(index + 1) else {
                     bail!("--resolution-choice requires source or target");
@@ -3830,7 +3852,7 @@ fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAu
             "--group-by" => {
                 let Some(value) = args.get(index + 1) else {
                     bail!(
-                        "--group-by requires none, table, status, path, type, severity, lifecycle, conflict-key, plugin, plugin-object, or plugin-severity"
+                        "--group-by requires none, table, status, path, type, severity, lifecycle, next-action, conflict-key, plugin, plugin-object, or plugin-severity"
                     );
                 };
                 group_by = value.clone();
@@ -3840,7 +3862,7 @@ fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAu
                 let value = value.trim_start_matches("--group-by=");
                 if value.is_empty() {
                     bail!(
-                        "--group-by requires none, table, status, path, type, severity, lifecycle, conflict-key, plugin, plugin-object, or plugin-severity"
+                        "--group-by requires none, table, status, path, type, severity, lifecycle, next-action, conflict-key, plugin, plugin-object, or plugin-severity"
                     );
                 }
                 group_by = value.to_string();
@@ -3870,6 +3892,7 @@ fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAu
             || review_status.is_some()
             || resolution_status.is_some()
             || lifecycle_state.is_some()
+            || next_action.is_some()
             || resolution_choice.is_some()
             || blocked_resolution_choice.is_some()
             || group_by != "none")
@@ -3903,6 +3926,7 @@ fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAu
         reviewer,
         resolution_status,
         lifecycle_state,
+        next_action,
         resolution_choice,
         blocked_resolution_choice,
         group_by,
@@ -5355,6 +5379,7 @@ mod git_helper_tests {
         assert!(branch_help_text(Some("merge-audit")).contains("--scope all|db|files|plugin"));
         assert!(branch_help_text(Some("merge-audit")).contains("--conflict-key <key>"));
         assert!(branch_help_text(Some("merge-audit")).contains("--lifecycle-state <state>"));
+        assert!(branch_help_text(Some("merge-audit")).contains("--next-action <action>"));
         assert!(
             branch_help_text(Some("merge-audit")).contains("--resolution-choice source|target")
         );
@@ -5363,6 +5388,7 @@ mod git_helper_tests {
                 .contains("--blocked-resolution-choice source|target")
         );
         assert!(branch_help_text(Some("merge-audit")).contains("lifecycle"));
+        assert!(branch_help_text(Some("merge-audit")).contains("next-action"));
         assert!(
             branch_help_text(Some("merge-resolve"))
                 .contains("source-added schema index/view/trigger")
@@ -5791,9 +5817,10 @@ mod git_helper_tests {
             "--review-status=needs-action".to_string(),
             "--reviewer=alice".to_string(),
             "--lifecycle-state=needs-action".to_string(),
+            "--next-action=revalidate".to_string(),
             "--resolution-choice=target".to_string(),
             "--blocked-resolution-choice=source".to_string(),
-            "--group-by=lifecycle".to_string(),
+            "--group-by=next-action".to_string(),
         ];
         let parsed = parse_cow_branch_merge_audit_args(&args).unwrap();
         assert_eq!(parsed.format, "json");
@@ -5811,9 +5838,10 @@ mod git_helper_tests {
         assert_eq!(parsed.review_status.as_deref(), Some("needs-action"));
         assert_eq!(parsed.reviewer.as_deref(), Some("alice"));
         assert_eq!(parsed.lifecycle_state.as_deref(), Some("needs-action"));
+        assert_eq!(parsed.next_action.as_deref(), Some("revalidate"));
         assert_eq!(parsed.resolution_choice.as_deref(), Some("target"));
         assert_eq!(parsed.blocked_resolution_choice.as_deref(), Some("source"));
-        assert_eq!(parsed.group_by, "lifecycle");
+        assert_eq!(parsed.group_by, "next-action");
     }
 
     #[test]
@@ -5916,6 +5944,16 @@ mod git_helper_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("--lifecycle-state"));
+        assert!(err.contains("requires"));
+    }
+
+    #[test]
+    fn branch_merge_audit_next_action_requires_value() {
+        let args = vec!["merge-audit".to_string(), "--next-action=".to_string()];
+        let err = parse_cow_branch_merge_audit_args(&args)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--next-action"));
         assert!(err.contains("requires"));
     }
 
@@ -6200,6 +6238,37 @@ mod git_helper_tests {
                 "needs-action".to_string(),
                 "--group-by".to_string(),
                 "lifecycle".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_branch_merge_audit_next_action_queue_grouping() {
+        let cli = Cli::try_parse_from([
+            "forkpress",
+            "branch",
+            "--work-dir",
+            ".forkpress",
+            "merge-audit",
+            "--records",
+            "conflicts",
+            "--next-action",
+            "resolve",
+            "--group-by=next-action",
+        ])
+        .unwrap();
+        let Commands::Branch(args) = cli.command else {
+            panic!("expected branch command");
+        };
+        assert_eq!(
+            args.args,
+            vec![
+                "merge-audit".to_string(),
+                "--records".to_string(),
+                "conflicts".to_string(),
+                "--next-action".to_string(),
+                "resolve".to_string(),
+                "--group-by=next-action".to_string(),
             ]
         );
     }

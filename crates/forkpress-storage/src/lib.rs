@@ -1269,6 +1269,7 @@ pub struct CowMergeAuditQuery<'a> {
     pub review_status: Option<&'a str>,
     pub resolution_status: Option<&'a str>,
     pub lifecycle_state: Option<&'a str>,
+    pub next_action: Option<&'a str>,
     pub resolution_choice: Option<&'a str>,
     pub blocked_resolution_choice: Option<&'a str>,
     pub group_by: &'a str,
@@ -1350,6 +1351,10 @@ pub fn inspect_cow_merge_audit(
     if let Some(lifecycle_state) = query.lifecycle_state {
         args.push("--lifecycle-state".into());
         args.push(lifecycle_state.into());
+    }
+    if let Some(next_action) = query.next_action {
+        args.push("--next-action".into());
+        args.push(next_action.into());
     }
     if let Some(resolution_choice) = query.resolution_choice {
         args.push("--resolution-choice".into());

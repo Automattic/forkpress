@@ -55,6 +55,8 @@ Useful filters include `--run`, `--scope all|db|files|plugin`,
 `--records all|conflicts|conflict-events|decisions|resolutions|rollback-failures`,
 `--conflict-key`, `--review-status unreviewed|pending|needs-action|reviewed`,
 `--lifecycle-state unreviewed|deferred|needs-action|reviewed|validated|resolved`,
+`--next-action review|run-plugin-validator|wait|revalidate|resolve|apply-reviewed-choice|manual-review|none`,
+`--resolution-choice source|target`, `--blocked-resolution-choice source|target`,
 `--group-by`, `--target-kept`, `--path`, and `--path-prefix`.
 
 ## Review and resolve conflicts
@@ -150,8 +152,10 @@ conflicts`, `conflict-events`, or `resolutions` to focus audit output on one
 logical conflict group across repeated runs. Use `--lifecycle-state <state>`
 with conflict records to build queues such as `unreviewed`, `needs-action`,
 `validated`, or `resolved`, and with conflict-event records to inspect matching
-history entries. Use `--records conflicts --group-by lifecycle` to summarize
-current conflict queues by lifecycle state.
+history entries. Use `--next-action <action>` to build action-specific queues
+from the same `next_action` field the JSON output exposes. Use `--records
+conflicts --group-by lifecycle` or `--group-by next-action` to summarize current
+conflict queues by lifecycle state or required action.
 
 ## What gets audited
 

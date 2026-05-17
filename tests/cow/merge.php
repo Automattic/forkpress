@@ -5559,6 +5559,74 @@ SQL);
     ));
     assert_same($needs_action_transition_rows[0]['review_status'], 'needs-action', 'needs-action review queue exposes the latest review status');
     assert_same($needs_action_transition_rows[0]['review_note'], 'Escalated for owner follow-up.', 'needs-action review queue exposes the latest review note');
+    $resolve_action_base = $tmp . '/resolve-action-base.sqlite';
+    $resolve_action_source = $tmp . '/resolve-action-source.sqlite';
+    $resolve_action_target = $tmp . '/resolve-action-target.sqlite';
+    create_base_db($resolve_action_base);
+    copy($resolve_action_base, $resolve_action_source);
+    copy($resolve_action_base, $resolve_action_target);
+    $db = open_db($resolve_action_source);
+    $db->exec("UPDATE plugin_items SET value = 'source resolve action conflict' WHERE item_id = 'alpha'");
+    $db->close();
+    $db = open_db($resolve_action_target);
+    $db->exec("UPDATE plugin_items SET value = 'target resolve action conflict' WHERE item_id = 'alpha'");
+    $db->close();
+    cow_merge_databases($resolve_action_base, $resolve_action_source, $resolve_action_target, $metadata, 'feature-resolve-action', 'main');
+    $resolve_action_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND conflict_type = 'cell-conflict' ORDER BY id DESC LIMIT 1");
+    cow_merge_review_record(
+        $metadata,
+        'conflict',
+        $resolve_action_conflict_id,
+        'reviewed',
+        'Ready for source or target resolution.',
+        'cow-test'
+    );
+    $resolve_next_action_audit = cow_merge_audit_report($metadata, null, 10, [
+        'records' => 'conflicts',
+        'next_action' => 'resolve',
+    ]);
+    assert_same($resolve_next_action_audit['filters']['next_action'], 'resolve', 'next-action filter is preserved in audit filters');
+    $resolve_next_action_ids = array_map(fn($row) => (int)$row['id'], $resolve_next_action_audit['conflicts']);
+    assert_true(in_array($resolve_action_conflict_id, $resolve_next_action_ids, true), 'next-action resolve filter returns reviewed generic conflicts');
+    assert_true(!in_array($status_transition_conflict_id, $resolve_next_action_ids, true), 'next-action resolve filter excludes deferred conflicts');
+    assert_true(!in_array($needs_action_transition_conflict_id, $resolve_next_action_ids, true), 'next-action resolve filter excludes needs-action conflicts');
+    $wait_next_action_audit = cow_merge_audit_report($metadata, null, 10, [
+        'records' => 'conflicts',
+        'next_action' => 'wait',
+    ]);
+    $wait_next_action_ids = array_map(fn($row) => (int)$row['id'], $wait_next_action_audit['conflicts']);
+    assert_true(in_array($status_transition_conflict_id, $wait_next_action_ids, true), 'next-action wait filter returns deferred conflicts');
+    $revalidate_next_action_audit = cow_merge_audit_report($metadata, null, 10, [
+        'records' => 'conflicts',
+        'next_action' => 'revalidate',
+    ]);
+    $revalidate_next_action_ids = array_map(fn($row) => (int)$row['id'], $revalidate_next_action_audit['conflicts']);
+    assert_true(in_array($needs_action_transition_conflict_id, $revalidate_next_action_ids, true), 'next-action revalidate filter returns stale-review candidates');
+    $next_action_group_audit = cow_merge_audit_report($metadata, null, 10, [
+        'records' => 'conflicts',
+        'group_by' => 'next-action',
+    ]);
+    assert_same($next_action_group_audit['filters']['group_by'], 'next-action', 'next-action grouping is preserved in audit filters');
+    $next_action_group_keys = array_column($next_action_group_audit['conflict_groups'], 'group_key');
+    assert_true(in_array('resolve', $next_action_group_keys, true), 'next-action grouping includes resolve queue counts');
+    assert_true(in_array('wait', $next_action_group_keys, true), 'next-action grouping includes wait queue counts');
+    ob_start();
+    cow_merge_print_audit_text($resolve_next_action_audit);
+    $resolve_next_action_text = ob_get_clean();
+    assert_true(str_contains($resolve_next_action_text, 'next-action=resolve'), 'next-action filter is visible in text audit output');
+    $resolve_next_action_cli = run_merge_cli([
+        'audit',
+        '--metadata-db', $metadata,
+        '--records', 'conflicts',
+        '--format', 'json',
+        '--next-action=resolve',
+    ]);
+    assert_same($resolve_next_action_cli['status'], 0, 'next-action audit CLI accepts equals-form filters');
+    $resolve_next_action_cli_json = json_decode($resolve_next_action_cli['output'], true);
+    assert_true(is_array($resolve_next_action_cli_json), 'next-action audit CLI emits JSON');
+    assert_same($resolve_next_action_cli_json['filters']['next_action'] ?? null, 'resolve', 'next-action audit CLI preserves the filter');
+    $resolve_next_action_cli_ids = array_map(fn($row) => (int)$row['id'], $resolve_next_action_cli_json['conflicts'] ?? []);
+    assert_true(in_array($resolve_action_conflict_id, $resolve_next_action_cli_ids, true), 'next-action audit CLI returns reviewed generic conflicts');
     $reviewed_status_audit = cow_merge_audit_report($metadata, null, 10, ['review_status' => 'reviewed']);
     assert_same($reviewed_status_audit['filters']['review_status'], 'reviewed', 'merge audit JSON report includes review status filter');
     assert_true(count($reviewed_status_audit['conflicts']) >= 1, 'review status filter returns reviewed conflicts');

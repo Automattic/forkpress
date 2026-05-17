@@ -343,9 +343,11 @@ should stay focused on these areas:
   reimplementing lifecycle inference, `merge-audit --resolution-choice
   source|target` and `--blocked-resolution-choice source|target` can focus
   queues using the same live contract that `merge-resolve` enforces, and
-  `merge-audit --records conflicts --group-by lifecycle` and
-  `--group-by conflict-key` can summarize queue counts by lifecycle or logical
-  conflict without client-side aggregation.
+  `merge-audit --next-action <action>` can focus queues by the action a UI
+  should offer next. `merge-audit --records conflicts --group-by lifecycle`,
+  `--group-by next-action`, and `--group-by conflict-key` can summarize queue
+  counts by lifecycle, required action, or logical conflict without client-side
+  aggregation.
 - Improve deterministic schema dependency planning for safe view/trigger
   reorderings while keeping cyclic or semantic ambiguity review-only.
 - Keep aarch64 macOS release artifacts and APFS sparsebundle E2E runs green for
