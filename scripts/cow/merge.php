@@ -7097,6 +7097,55 @@ function cow_merge_validate_current_file_entry(string $root, string $path, ?arra
     return $current;
 }
 
+function cow_merge_validate_source_dir_subtree_for_resolution(SQLite3 $meta, int $run_id, string $source_root, string $path): void {
+    $expected = [];
+    $stmt = cow_merge_prepare_checked(
+        $meta,
+        "SELECT row_identity, source_payload FROM merge_decisions WHERE run_id = :run_id AND table_name = '__files__'",
+        'failed to prepare filesystem subtree decision lookup'
+    );
+    cow_merge_bind($stmt, ':run_id', $run_id);
+    $res = cow_merge_execute_checked($stmt, $meta, 'failed to read filesystem subtree decisions');
+    try {
+        while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+            $child_path = cow_merge_file_path_from_identity($row['row_identity'] ?? null);
+            if ($child_path === null || !cow_merge_file_has_prefix($child_path, $path)) {
+                continue;
+            }
+            $source_payload_json = $row['source_payload'] ?? null;
+            if (!is_string($source_payload_json) || $source_payload_json === '') {
+                throw new RuntimeException('source filesystem directory subtree no longer matches the audited merge payload; rerun merge-audit before resolving');
+            }
+            $source_payload = cow_merge_decode_payload_json($source_payload_json, 'filesystem subtree source');
+            if (!is_array($source_payload)) {
+                throw new RuntimeException('source filesystem directory subtree no longer matches the audited merge payload; rerun merge-audit before resolving');
+            }
+            $expected[$child_path] = cow_merge_file_entry_without_path($source_payload);
+        }
+    } finally {
+        cow_merge_result_finalize_checked($res, 'failed to finalize filesystem subtree decision lookup');
+    }
+
+    $source_entries = cow_merge_file_manifest_for_root($source_root)['entries'];
+    $current = [];
+    foreach ($source_entries as $child_path => $child_entry) {
+        if (cow_merge_file_has_prefix($child_path, $path)) {
+            $current[$child_path] = $child_entry;
+        }
+    }
+
+    foreach ($expected as $child_path => $expected_entry) {
+        if (!cow_merge_file_entries_equal($current[$child_path] ?? null, $expected_entry)) {
+            throw new RuntimeException('source filesystem directory subtree no longer matches the audited merge payload; rerun merge-audit before resolving');
+        }
+    }
+    foreach (array_keys($current) as $child_path) {
+        if (!array_key_exists($child_path, $expected)) {
+            throw new RuntimeException('source filesystem directory subtree no longer matches the audited merge payload; rerun merge-audit before resolving');
+        }
+    }
+}
+
 function cow_merge_apply_file_resolution(
     string $source_root,
     string $target_root,
@@ -12301,6 +12350,9 @@ function cow_merge_resolve_conflict(
             }
             if ($choice === 'source' && $source_value !== null) {
                 cow_merge_validate_current_file_entry($source_root, $path, $source_value, 'source');
+                if ($conflict_type === 'file-type-replacement-conflict' && ($source_value['type'] ?? null) === 'dir') {
+                    cow_merge_validate_source_dir_subtree_for_resolution($meta, (int)$conflict['run_id'], $source_root, $path);
+                }
             }
             $resolved_value = $choice === 'source' ? $source_value : $target_value;
 
