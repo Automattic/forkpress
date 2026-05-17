@@ -159,7 +159,7 @@ if (is_resource($lock)) {
     }
 }
 
-foreach (['forkpress_branch_create', 'forkpress_branch_merge'] as $action) {
+foreach (['forkpress_branch_create', 'forkpress_branch_merge', 'forkpress_branch_conflicts', 'forkpress_branch_revalidate_conflicts'] as $action) {
     @unlink($entered);
     @unlink($started);
     $lock = fopen($lock_path, 'c');

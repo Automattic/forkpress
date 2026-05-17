@@ -144,7 +144,7 @@ function forkpress_cow_acquire_request_lock(): bool {
 
 function forkpress_cow_is_admin_branch_action(string $path): bool {
     $action = $_REQUEST['action'] ?? '';
-    if (!is_string($action) || !in_array($action, ['forkpress_branch_create', 'forkpress_branch_merge'], true)) {
+    if (!is_string($action) || !in_array($action, ['forkpress_branch_create', 'forkpress_branch_merge', 'forkpress_branch_conflicts', 'forkpress_branch_revalidate_conflicts'], true)) {
         return false;
     }
     if ($path === '/wp-admin/admin-post.php') {
@@ -167,6 +167,59 @@ function forkpress_cow_branch_post_value(string $key): string {
         return '';
     }
     return trim((string)$value);
+}
+
+function forkpress_cow_branch_post_int(string $key): ?int {
+    $value = $_POST[$key] ?? $_REQUEST[$key] ?? '';
+    if (is_array($value)) {
+        return null;
+    }
+    $value = trim((string)$value);
+    if ($value === '' || preg_match('/^\d+$/', $value) !== 1) {
+        return null;
+    }
+    $int = (int)$value;
+    return $int > 0 ? $int : null;
+}
+
+function forkpress_cow_branch_conflict_audit_filters(): array {
+    $allowed = [
+        'scope' => ['all', 'db', 'files', 'plugin'],
+        'lifecycleState' => ['unreviewed', 'deferred', 'needs-action', 'reviewed', 'validated', 'resolved'],
+        'nextAction' => ['review', 'run-plugin-validator', 'wait', 'revalidate', 'resolve', 'apply-reviewed-choice', 'manual-review', 'none'],
+    ];
+    $flags = [
+        'scope' => '--scope',
+        'lifecycleState' => '--lifecycle-state',
+        'nextAction' => '--next-action',
+    ];
+    $labels = [
+        'scope' => 'scope',
+        'lifecycleState' => 'lifecycle state',
+        'nextAction' => 'next action',
+    ];
+    $filters = [];
+    foreach ($allowed as $key => $values) {
+        $value = forkpress_cow_branch_post_value($key);
+        if ($value === '') {
+            continue;
+        }
+        if (!in_array($value, $values, true)) {
+            return [
+                'error' => 'Choose a valid merge conflict ' . $labels[$key] . '.',
+                'args' => [],
+                'filters' => [],
+            ];
+        }
+        $filters[$key] = $value;
+    }
+
+    $args = [];
+    foreach ($filters as $key => $value) {
+        $args[] = $flags[$key];
+        $args[] = $value;
+    }
+    return ['error' => null, 'args' => $args, 'filters' => $filters];
 }
 
 function forkpress_cow_branch_url(string $branch, string $uri = '/wp-admin/'): string {
@@ -223,6 +276,7 @@ function forkpress_cow_branch_finish_json(int $status, string $url, bool $succes
     header('Content-Type: application/json; charset=UTF-8');
     echo json_encode(array_merge([
         'success' => $success,
+        'type' => $success ? 'notice' : 'error',
         'message' => $message,
         'url' => $url,
     ], $data), JSON_UNESCAPED_SLASHES);
@@ -258,6 +312,70 @@ function forkpress_cow_branch_run_cli(array $args): array {
     fclose($pipes[2]);
     $code = proc_close($process);
     return [(int)$code, trim((string)$stdout . "\n" . (string)$stderr)];
+}
+
+function forkpress_cow_branch_merge_summary(string $output): array {
+    $summary = [
+        'run' => null,
+        'status' => null,
+        'conflicts' => null,
+    ];
+
+    foreach (preg_split('/\R/', $output) ?: [] as $line) {
+        if (preg_match('/^\s*(run|status|conflicts):\s*(.+?)\s*$/', (string)$line, $matches) !== 1) {
+            continue;
+        }
+        if ($matches[1] === 'conflicts') {
+            $summary['conflicts'] = max(0, (int)$matches[2]);
+        } elseif ($matches[1] === 'run') {
+            $summary['run'] = max(0, (int)$matches[2]);
+        } else {
+            $summary['status'] = (string)$matches[2];
+        }
+    }
+
+    return $summary;
+}
+
+function forkpress_cow_branch_merge_audit_command(?int $run, array $filters = []): string {
+    $command = 'forkpress branch merge-audit --records conflicts';
+    if ($run !== null && $run > 0) {
+        $command .= ' --run ' . $run;
+    }
+    $filter_flags = [
+        'scope' => '--scope',
+        'lifecycleState' => '--lifecycle-state',
+        'nextAction' => '--next-action',
+    ];
+    foreach ($filter_flags as $key => $flag) {
+        if (isset($filters[$key]) && is_string($filters[$key]) && $filters[$key] !== '') {
+            $command .= ' ' . $flag . ' ' . $filters[$key];
+        }
+    }
+    return $command;
+}
+
+function forkpress_cow_branch_conflict_audit_summary(array $report, int $run, array $filters = []): array {
+    $records = is_array($report['conflicts'] ?? null) ? array_values($report['conflicts']) : [];
+    $total = count($records);
+    $runs = is_array($report['runs'] ?? null) ? $report['runs'] : [];
+    foreach ($runs as $run_record) {
+        if (!is_array($run_record) || (int)($run_record['id'] ?? 0) !== $run) {
+            continue;
+        }
+        $total = max($total, (int)($run_record['conflict_count'] ?? 0));
+        break;
+    }
+
+    return [
+        'run' => $run,
+        'records' => $records,
+        'recordCount' => count($records),
+        'totalConflicts' => $total,
+        'filters' => $filters,
+        'audit' => $report,
+        'auditCommand' => forkpress_cow_branch_merge_audit_command($run, $filters) . ' --format json',
+    ];
 }
 
 function forkpress_cow_handle_admin_branch_action(string $path, string $current_branch): bool {
@@ -312,12 +430,105 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
             forkpress_cow_branch_finish_json(400, $current_url, false, $output ?: 'ForkPress could not merge the branch.');
             return true;
         }
+        $summary = forkpress_cow_branch_merge_summary($output);
+        $run = is_int($summary['run']) && $summary['run'] > 0 ? $summary['run'] : null;
+        $conflicts = is_int($summary['conflicts']) ? $summary['conflicts'] : 0;
+        if (($summary['status'] ?? null) === 'completed_with_conflicts' || $conflicts > 0) {
+            $audit_command = forkpress_cow_branch_merge_audit_command($run);
+            $message = 'Merged ' . $source . ' into ' . $target . ' with ' . $conflicts . ' conflict' . ($conflicts === 1 ? '' : 's') . '. Review them with `' . $audit_command . '`.';
+            forkpress_cow_branch_finish_json(
+                200,
+                forkpress_cow_branch_url($target, '/wp-admin/'),
+                true,
+                $message,
+                [
+                    'type' => 'warning',
+                    'branches' => forkpress_cow_branch_switcher_data($current_branch),
+                    'mergeStatus' => $summary['status'],
+                    'conflicts' => $conflicts,
+                    'run' => $run,
+                    'auditCommand' => $audit_command,
+                ]
+            );
+            return true;
+        }
         forkpress_cow_branch_finish_json(
             200,
             forkpress_cow_branch_url($target, '/wp-admin/'),
             true,
             'Merged ' . $source . ' into ' . $target . '.',
             ['branches' => forkpress_cow_branch_switcher_data($current_branch)]
+        );
+        return true;
+    }
+
+    if ($action === 'forkpress_branch_conflicts') {
+        $run = forkpress_cow_branch_post_int('run');
+        if ($run === null) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'Choose a merge run to inspect.');
+            return true;
+        }
+
+        $filters = forkpress_cow_branch_conflict_audit_filters();
+        if (($filters['error'] ?? null) !== null) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, (string)$filters['error']);
+            return true;
+        }
+
+        $audit_args = array_merge(['merge-audit', '--records', 'conflicts', '--run', (string)$run, '--format', 'json'], $filters['args']);
+        [$code, $output] = forkpress_cow_branch_run_cli($audit_args);
+        if ($code !== 0) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, $output ?: 'ForkPress could not inspect merge conflicts.');
+            return true;
+        }
+        $report = json_decode($output, true);
+        if (!is_array($report)) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'ForkPress returned invalid merge audit JSON.');
+            return true;
+        }
+
+        $summary = forkpress_cow_branch_conflict_audit_summary($report, $run, $filters['filters']);
+        $message = 'Loaded ' . $summary['recordCount'] . ' of ' . $summary['totalConflicts'] . ' conflict record' . ($summary['totalConflicts'] === 1 ? '' : 's') . ' for merge run ' . $run . '.';
+        forkpress_cow_branch_finish_json(200, $current_url, true, $message, $summary);
+        return true;
+    }
+
+    if ($action === 'forkpress_branch_revalidate_conflicts') {
+        $run = forkpress_cow_branch_post_int('run');
+        if ($run === null) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'Choose a merge run to revalidate.');
+            return true;
+        }
+
+        [$code, $output] = forkpress_cow_branch_run_cli(['merge-audit', '--revalidate', '--run', (string)$run, '--reviewer', 'wordpress-ui', '--format', 'json']);
+        if ($code !== 0) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, $output ?: 'ForkPress could not revalidate merge conflicts.');
+            return true;
+        }
+        $result = json_decode($output, true);
+        if (!is_array($result)) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'ForkPress returned invalid revalidation JSON.');
+            return true;
+        }
+
+        $checked = max(0, (int)($result['checked'] ?? 0));
+        $stale = max(0, (int)($result['stale'] ?? 0));
+        $carried = max(0, (int)($result['carried'] ?? 0));
+        $message = 'Revalidated merge run ' . $run . ': checked ' . $checked . ', stale ' . $stale . ', carried ' . $carried . '.';
+        forkpress_cow_branch_finish_json(
+            200,
+            $current_url,
+            true,
+            $message,
+            [
+                'type' => 'warning',
+                'run' => $run,
+                'checked' => $checked,
+                'stale' => $stale,
+                'carried' => $carried,
+                'revalidation' => $result,
+                'auditCommand' => 'forkpress branch merge-audit --revalidate --run ' . $run . ' --reviewer wordpress-ui --format json',
+            ]
         );
         return true;
     }

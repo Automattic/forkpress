@@ -86,6 +86,8 @@ function add_action($tag, $callback, $priority = 10, $accepted_args = 1) { retur
 function add_filter($tag, $callback, $priority = 10, $accepted_args = 1) { return true; }
 function current_user_can($capability) { return getenv('FORKPRESS_TEST_CAN_MANAGE') !== '0'; }
 function check_admin_referer($action) { return true; }
+function is_admin_bar_showing() { return true; }
+function wp_create_nonce($action) { return 'nonce-' . $action; }
 function is_ssl() { return false; }
 function wp_json_encode($payload) { return json_encode($payload, JSON_UNESCAPED_SLASHES); }
 function wp_unslash($value) { return $value; }
@@ -124,6 +126,12 @@ if ($action === 'forkpress_branch_create') {
 if ($action === 'forkpress_branch_merge') {
     forkpress_handle_branch_merge();
 }
+if ($action === 'forkpress_branch_conflicts') {
+    forkpress_handle_branch_conflicts();
+}
+if ($action === 'forkpress_branch_revalidate_conflicts') {
+    forkpress_handle_branch_revalidate_conflicts();
+}
 if ($action === 'forkpress_branch_birth_notice') {
     ob_start();
     forkpress_branch_birth_admin_notice();
@@ -134,6 +142,14 @@ if ($action === 'forkpress_branch_birth_notice') {
 if ($action === 'forkpress_branch_notice') {
     ob_start();
     forkpress_branch_admin_notice();
+    $html = ob_get_clean();
+    echo json_encode(['html' => $html], JSON_UNESCAPED_SLASHES);
+    exit;
+}
+if ($action === 'forkpress_branch_switcher_render') {
+    ob_start();
+    forkpress_branch_switcher_assets();
+    forkpress_render_branch_switcher();
     $html = ob_get_clean();
     echo json_encode(['html' => $html], JSON_UNESCAPED_SLASHES);
     exit;
@@ -272,6 +288,184 @@ assert_same(
     'conflicted branch merge tells users to review conflicts'
 );
 
+$audit_output = json_encode([
+    'runs' => [
+        [
+            'id' => 42,
+            'source_branch' => 'feature',
+            'target_branch' => 'main',
+            'status' => 'completed_with_conflicts',
+            'conflict_count' => 3,
+        ],
+    ],
+    'conflicts' => [
+        [
+            'id' => 7,
+            'run_id' => 42,
+            'conflict_key' => 'wp_posts:page:about',
+            'table_name' => 'wp_posts',
+            'conflict_type' => 'cell',
+            'lifecycle_state' => 'needs-action',
+            'next_action' => 'review',
+        ],
+        [
+            'id' => 8,
+            'run_id' => 42,
+            'conflict_key' => 'files:uploads/example.jpg',
+            'table_name' => '__files__',
+            'conflict_type' => 'file',
+            'lifecycle_state' => 'needs-action',
+            'next_action' => 'review',
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+$conflict_audit = run_branch_ui_action(
+    ['action' => 'forkpress_branch_conflicts', 'run' => '42'],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    ['FORKPRESS_TEST_CLI_OUTPUT' => $audit_output]
+);
+$conflict_audit_payload = decode_branch_ui_payload($conflict_audit);
+assert_same($conflict_audit['status'], 0, 'branch conflict audit admin action exits cleanly');
+assert_same($conflict_audit_payload['success'] ?? null, true, 'branch conflict audit admin action returns JSON success');
+assert_same($conflict_audit_payload['run'] ?? null, 42, 'branch conflict audit returns merge run id');
+assert_same($conflict_audit_payload['recordCount'] ?? null, 2, 'branch conflict audit returns loaded conflict record count');
+assert_same($conflict_audit_payload['totalConflicts'] ?? null, 3, 'branch conflict audit returns total run conflict count');
+assert_same($conflict_audit_payload['records'][0]['conflict_key'] ?? null, 'wp_posts:page:about', 'branch conflict audit returns first-class conflict records');
+assert_same(
+    $conflict_audit_payload['auditCommand'] ?? null,
+    'forkpress branch merge-audit --records conflicts --run 42 --format json',
+    'branch conflict audit exposes the exact JSON audit command'
+);
+assert_same(
+    $conflict_audit_payload['message'] ?? null,
+    'Loaded 2 of 3 conflict records for merge run 42.',
+    'branch conflict audit reports loaded records'
+);
+assert_same(count($conflict_audit['argv']), 1, 'branch conflict audit admin action invokes ForkPress CLI once');
+assert_same(
+    array_slice($conflict_audit['argv'][0] ?? [], 1),
+    ['branch', '--work-dir', $work_dir, 'merge-audit', '--records', 'conflicts', '--run', '42', '--format', 'json'],
+    'branch conflict audit admin action uses structured merge-audit JSON path'
+);
+
+$invalid_audit = run_branch_ui_action(
+    ['action' => 'forkpress_branch_conflicts', 'run' => 'abc'],
+    ['main', 'feature']
+);
+$invalid_audit_payload = decode_branch_ui_payload($invalid_audit);
+assert_same($invalid_audit_payload['success'] ?? null, false, 'branch conflict audit rejects invalid run ids');
+assert_same($invalid_audit_payload['message'] ?? null, 'Choose a merge run to inspect.', 'branch conflict audit explains invalid run ids');
+assert_same(count($invalid_audit['argv']), 0, 'branch conflict audit does not invoke CLI for invalid run ids');
+
+$filtered_audit = run_branch_ui_action(
+    [
+        'action' => 'forkpress_branch_conflicts',
+        'run' => '42',
+        'scope' => 'plugin',
+        'lifecycleState' => 'needs-action',
+        'nextAction' => 'revalidate',
+    ],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    ['FORKPRESS_TEST_CLI_OUTPUT' => $audit_output]
+);
+$filtered_audit_payload = decode_branch_ui_payload($filtered_audit);
+assert_same($filtered_audit_payload['success'] ?? null, true, 'branch conflict audit accepts supported filters');
+assert_same($filtered_audit_payload['filters']['scope'] ?? null, 'plugin', 'branch conflict audit returns scope filter');
+assert_same($filtered_audit_payload['filters']['lifecycleState'] ?? null, 'needs-action', 'branch conflict audit returns lifecycle filter');
+assert_same($filtered_audit_payload['filters']['nextAction'] ?? null, 'revalidate', 'branch conflict audit returns next-action filter');
+assert_same(
+    $filtered_audit_payload['auditCommand'] ?? null,
+    'forkpress branch merge-audit --records conflicts --run 42 --scope plugin --lifecycle-state needs-action --next-action revalidate --format json',
+    'branch conflict audit exposes filtered audit command'
+);
+assert_same(
+    array_slice($filtered_audit['argv'][0] ?? [], 1),
+    ['branch', '--work-dir', $work_dir, 'merge-audit', '--records', 'conflicts', '--run', '42', '--format', 'json', '--scope', 'plugin', '--lifecycle-state', 'needs-action', '--next-action', 'revalidate'],
+    'branch conflict audit passes supported filters to merge-audit'
+);
+
+$invalid_filter_audit = run_branch_ui_action(
+    ['action' => 'forkpress_branch_conflicts', 'run' => '42', 'scope' => 'everything'],
+    ['main', 'feature']
+);
+$invalid_filter_payload = decode_branch_ui_payload($invalid_filter_audit);
+assert_same($invalid_filter_payload['success'] ?? null, false, 'branch conflict audit rejects invalid filters');
+assert_same($invalid_filter_payload['message'] ?? null, 'Choose a valid merge conflict scope.', 'branch conflict audit explains invalid filters');
+assert_same(count($invalid_filter_audit['argv']), 0, 'branch conflict audit does not invoke CLI for invalid filters');
+
+$revalidation_output = json_encode([
+    'run_id' => 42,
+    'checked' => 4,
+    'stale' => 2,
+    'carried' => 1,
+    'needs_action_conflicts' => [
+        ['conflict_id' => 7, 'revalidation_class' => 'compatible-target-drift'],
+    ],
+], JSON_UNESCAPED_SLASHES);
+$revalidation = run_branch_ui_action(
+    ['action' => 'forkpress_branch_revalidate_conflicts', 'run' => '42'],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    ['FORKPRESS_TEST_CLI_OUTPUT' => $revalidation_output]
+);
+$revalidation_payload = decode_branch_ui_payload($revalidation);
+assert_same($revalidation_payload['success'] ?? null, true, 'branch conflict revalidation returns JSON success');
+assert_same($revalidation_payload['type'] ?? null, 'warning', 'branch conflict revalidation returns warning type');
+assert_same($revalidation_payload['checked'] ?? null, 4, 'branch conflict revalidation exposes checked count');
+assert_same($revalidation_payload['stale'] ?? null, 2, 'branch conflict revalidation exposes stale count');
+assert_same($revalidation_payload['carried'] ?? null, 1, 'branch conflict revalidation exposes carried count');
+assert_same(
+    $revalidation_payload['auditCommand'] ?? null,
+    'forkpress branch merge-audit --revalidate --run 42 --reviewer wordpress-ui --format json',
+    'branch conflict revalidation exposes exact command'
+);
+assert_same(
+    array_slice($revalidation['argv'][0] ?? [], 1),
+    ['branch', '--work-dir', $work_dir, 'merge-audit', '--revalidate', '--run', '42', '--reviewer', 'wordpress-ui', '--format', 'json'],
+    'branch conflict revalidation uses structured revalidate command'
+);
+
+$invalid_revalidation = run_branch_ui_action(
+    ['action' => 'forkpress_branch_revalidate_conflicts', 'run' => 'abc'],
+    ['main', 'feature']
+);
+$invalid_revalidation_payload = decode_branch_ui_payload($invalid_revalidation);
+assert_same($invalid_revalidation_payload['success'] ?? null, false, 'branch conflict revalidation rejects invalid run ids');
+assert_same($invalid_revalidation_payload['message'] ?? null, 'Choose a merge run to revalidate.', 'branch conflict revalidation explains invalid run ids');
+assert_same(count($invalid_revalidation['argv']), 0, 'branch conflict revalidation does not invoke CLI for invalid run ids');
+
+$invalid_revalidation_json = run_branch_ui_action(
+    ['action' => 'forkpress_branch_revalidate_conflicts', 'run' => '42'],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    ['FORKPRESS_TEST_CLI_OUTPUT' => 'not-json']
+);
+$invalid_revalidation_json_payload = decode_branch_ui_payload($invalid_revalidation_json);
+assert_same($invalid_revalidation_json_payload['success'] ?? null, false, 'branch conflict revalidation rejects invalid CLI JSON');
+assert_same($invalid_revalidation_json_payload['message'] ?? null, 'ForkPress returned invalid revalidation JSON.', 'branch conflict revalidation explains invalid CLI JSON');
+
+$invalid_json_audit = run_branch_ui_action(
+    ['action' => 'forkpress_branch_conflicts', 'run' => '42'],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    ['FORKPRESS_TEST_CLI_OUTPUT' => 'not-json']
+);
+$invalid_json_payload = decode_branch_ui_payload($invalid_json_audit);
+assert_same($invalid_json_payload['success'] ?? null, false, 'branch conflict audit rejects invalid CLI JSON');
+assert_same($invalid_json_payload['message'] ?? null, 'ForkPress returned invalid merge audit JSON.', 'branch conflict audit explains invalid CLI JSON');
+
 $invalid_create = run_branch_ui_action(
     ['action' => 'forkpress_branch_create', 'branch' => 'feature branch', 'from' => 'feature'],
     ['main', 'feature']
@@ -320,6 +514,22 @@ assert_true(
     str_contains((string)($warning_notice_payload['html'] ?? ''), 'Merge completed with conflicts.'),
     'branch admin notice renders warning text'
 );
+
+$switcher_render = run_branch_ui_action(
+    ['action' => 'forkpress_branch_switcher_render'],
+    ['main', 'feature']
+);
+$switcher_render_payload = decode_branch_ui_payload($switcher_render);
+$switcher_html = (string)($switcher_render_payload['html'] ?? '');
+assert_true(str_contains($switcher_html, 'forkpress-conflict-list'), 'branch switcher renders conflict audit list container');
+assert_true(str_contains($switcher_html, 'function renderConflictAudit'), 'branch switcher renders conflict audit client handler');
+assert_true(str_contains($switcher_html, 'forkpress_branch_conflicts'), 'branch switcher renders conflict audit action');
+assert_true(str_contains($switcher_html, 'nonce-forkpress_branch_conflicts'), 'branch switcher renders conflict audit nonce');
+assert_true(str_contains($switcher_html, "fetchConflictAudit(payload.run, payload.message || '')"), 'branch switcher requests all conflicts after warning merges');
+assert_true(str_contains($switcher_html, "fetchConflictAudit(run, payload.message || '', { lifecycleState: 'needs-action' })"), 'branch switcher requests needs-action conflicts after revalidation');
+assert_true(str_contains($switcher_html, 'forkpress_branch_revalidate_conflicts'), 'branch switcher renders conflict revalidation action');
+assert_true(str_contains($switcher_html, 'nonce-forkpress_branch_revalidate_conflicts'), 'branch switcher renders conflict revalidation nonce');
+assert_true(str_contains($switcher_html, 'function fetchConflictRevalidation'), 'branch switcher renders conflict revalidation client handler');
 
 $forbidden = run_branch_ui_action(
     ['action' => 'forkpress_branch_create', 'branch' => 'new_feature', 'from' => 'main'],
