@@ -3285,6 +3285,16 @@ SQL);
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_posts' AND column_name = 'post_title'"), 2, 'same-cell conflicts remain auditable per merge run');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_options' AND column_name = 'option_value'"), 2, 'serialized-cell conflicts remain auditable per merge run');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE decision = 'target-wins' AND table_name IN ('wp_posts', 'wp_options')"), 4, 'target-wins decisions are recorded for each conflicting run');
+    $title_conflict_key = (string)scalar($metadata, "SELECT conflict_key FROM merge_conflicts WHERE run_id = $conflict_run_id AND table_name = 'wp_posts' AND column_name = 'post_title'");
+    $repeat_title_previous = (int)scalar($metadata, "SELECT previous_conflict_id FROM merge_conflicts WHERE run_id = $repeat_conflict_run_id AND table_name = 'wp_posts' AND column_name = 'post_title'");
+    $first_title_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE run_id = $conflict_run_id AND table_name = 'wp_posts' AND column_name = 'post_title'");
+    assert_true(str_starts_with($title_conflict_key, 'sha256:'), 'conflict rows expose a stable conflict key');
+    assert_same(
+        (string)scalar($metadata, "SELECT conflict_key FROM merge_conflicts WHERE run_id = $repeat_conflict_run_id AND table_name = 'wp_posts' AND column_name = 'post_title'"),
+        $title_conflict_key,
+        'rerunning the same logical conflict keeps the same conflict key'
+    );
+    assert_same($repeat_title_previous, $first_title_conflict_id, 'rerunning the same logical conflict links to the previous conflict row');
 
     $conflict_peer_target = $tmp . '/conflict-peer-target.sqlite';
     copy($conflict_base, $conflict_peer_target);
@@ -3304,6 +3314,16 @@ SQL);
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflict_events WHERE run_id = $peer_conflict_run_id AND event_type = 'recorded'"),
         2,
         'identical conflicts on another branch pair receive their own recorded lifecycle events'
+    );
+    assert_same(
+        (string)scalar($metadata, "SELECT conflict_key FROM merge_conflicts WHERE run_id = $peer_conflict_run_id AND table_name = 'wp_posts' AND column_name = 'post_title'"),
+        $title_conflict_key,
+        'identical logical conflicts across branch pairs retain the same conflict key for UI grouping'
+    );
+    assert_same(
+        scalar($metadata, "SELECT previous_conflict_id FROM merge_conflicts WHERE run_id = $peer_conflict_run_id AND table_name = 'wp_posts' AND column_name = 'post_title'"),
+        null,
+        'identical conflicts on another branch pair do not inherit the source branch lineage'
     );
 
     $legacy_conflict_metadata = $tmp . '/legacy-conflict-unique.sqlite';
@@ -3375,6 +3395,10 @@ SQL);
         str_contains((string)$legacy_db->querySingle("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'merge_conflicts'"), 'UNIQUE(run_id, table_name'),
         'legacy conflict metadata migrates to run-scoped conflict uniqueness'
     );
+    assert_true(
+        str_starts_with((string)$legacy_db->querySingle("SELECT conflict_key FROM merge_conflicts WHERE table_name = 'plugin_legacy_conflicts'"), 'sha256:'),
+        'legacy conflict metadata backfills stable conflict keys'
+    );
     $legacy_peer_run_id = cow_merge_start_run($legacy_db, 'feature-legacy-peer', 'main', 'base.sqlite', 'source.sqlite', 'target.sqlite');
     cow_merge_record_conflict(
         $legacy_db,
@@ -3405,6 +3429,8 @@ SQL);
     assert_same((int)$audit['runs'][0]['conflict_count'], 2, 'merge audit run summary includes conflict count');
     assert_same(count($audit['conflicts']), 2, 'merge audit report exports conflict records for a run');
     $title_audit_conflicts = array_values(array_filter($audit['conflicts'], fn($row) => ($row['table_name'] ?? null) === 'wp_posts' && ($row['column_name'] ?? null) === 'post_title'));
+    assert_same($title_audit_conflicts[0]['conflict_key'] ?? null, $title_conflict_key, 'merge audit exposes conflict keys for UI grouping');
+    assert_same($title_audit_conflicts[0]['previous_conflict_id'] ?? null, null, 'first-run merge audit exposes empty conflict lineage');
     assert_same($title_audit_conflicts[0]['stale_status'] ?? null, 'fresh', 'merge audit marks unchanged target conflicts as fresh');
     $title_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'wp_posts' AND column_name = 'post_title'");
     $GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize'] = [

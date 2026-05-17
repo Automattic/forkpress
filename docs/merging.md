@@ -75,7 +75,10 @@ append `resolution-validated` conflict events. Applying a reviewed choice append
 choice without asking the user to restate `source` or `target`.
 
 `merge-audit --format json --records conflicts` treats conflicts as
-first-class records. Each conflict includes a `conflict_class`, a
+first-class records. Each conflict includes a stable `conflict_key` for the
+logical table/row/column/type conflict, a same-source/target-branch
+`previous_conflict_id` when the conflict recurs in a later run, a
+`conflict_class`, a
 `resolution_strategy`, executable `resolution_choices`, whether the generic
 `merge-resolve conflict` path supports it, and whether `--after-revalidate` is
 available. It also includes the conflict `lifecycle_state`, `next_action`, and
@@ -89,9 +92,12 @@ UI clients should consume those fields instead of inferring behavior from raw
 Conflict rows are scoped to their merge run. Re-running the same source and
 target branch pair with the same unresolved conflict payload records new
 conflict rows and `recorded` lifecycle events for the new run, so run-scoped
-audit output always owns the conflicts it reports. A prior reviewed target
-resolution can still auto-accept the same payload as a `target-accepted`
-decision instead of reopening the conflict.
+audit output always owns the conflicts it reports. Those rows share the same
+`conflict_key` and link to the previous row for the same source/target branch
+pair through `previous_conflict_id`, while the same logical conflict on another
+source branch gets its own lineage. A prior reviewed target resolution can
+still auto-accept the same payload as a `target-accepted` decision instead of
+reopening the conflict.
 
 Use `--records conflict-events` to inspect the full append-only lifecycle
 history for conflict records.
