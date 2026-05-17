@@ -111,6 +111,20 @@ function create_explicit_attachment_graph_db(string $path): void {
     $db->close();
 }
 
+function create_explicit_postmeta_unique_collision_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_title TEXT NOT NULL,
+        post_name TEXT NOT NULL UNIQUE,
+        post_content TEXT NOT NULL,
+        post_status TEXT NOT NULL
+    )");
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_name, post_content, post_status) VALUES (1, 'Base page', 'base-page', 'Base content', 'publish')");
+    $db->close();
+}
+
 function create_explicit_term_graph_db(string $path): void {
     $db = open_db($path);
     $db->exec('CREATE TABLE wp_posts (ID INTEGER PRIMARY KEY AUTOINCREMENT, post_title TEXT NOT NULL, post_content TEXT NOT NULL, post_status TEXT NOT NULL)');
@@ -554,6 +568,57 @@ try {
     assert_true(
         (int)scalar($attachment_graph_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-explicit-attachment-graph' AND d.table_name = 'wp_options' AND d.decision = 'target-wins' AND d.reason LIKE '%outside the source branch ID band%' AND d.reason LIKE '%wp_posts%'") >= 6,
         'option conflicts explain that they are held behind the explicit attachment ID'
+    );
+
+    $postmeta_collision_base = $tmp . '/postmeta-collision-base.sqlite';
+    $postmeta_collision_source = $tmp . '/postmeta-collision-source.sqlite';
+    $postmeta_collision_target = $tmp . '/postmeta-collision-target.sqlite';
+    $postmeta_collision_metadata = $tmp . '/.forkpress/cow/merge/explicit-postmeta-collision-metadata.sqlite';
+    create_explicit_postmeta_unique_collision_db($postmeta_collision_base);
+    copy($postmeta_collision_base, $postmeta_collision_source);
+    copy($postmeta_collision_base, $postmeta_collision_target);
+    cow_merge_allocate_autoincrement_bands($postmeta_collision_source, $postmeta_collision_metadata, 'feature-explicit-postmeta-collision');
+    $postmeta_collision_post_id = (int)scalar($postmeta_collision_metadata, "SELECT band_start FROM merge_autoincrement_bands WHERE branch_name = 'feature-explicit-postmeta-collision' AND table_name = 'wp_posts'");
+
+    $postmeta_collision_source_db = open_db($postmeta_collision_source);
+    $postmeta_collision_source_db->exec("INSERT INTO wp_posts (ID, post_title, post_name, post_content, post_status) VALUES ($postmeta_collision_post_id, 'Source imported colliding post', 'shared-slug', 'source explicit in-band post', 'publish')");
+    $postmeta_collision_source_db->exec("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES ($postmeta_collision_post_id, 'source_child', 'must stay held with parent')");
+    $postmeta_collision_source_db->close();
+
+    $postmeta_collision_target_db = open_db($postmeta_collision_target);
+    $postmeta_collision_target_db->exec("INSERT INTO wp_posts (ID, post_title, post_name, post_content, post_status) VALUES (2, 'Target local colliding post', 'shared-slug', 'target local post', 'publish')");
+    $postmeta_collision_target_db->close();
+
+    $postmeta_collision_result = cow_merge_databases($postmeta_collision_base, $postmeta_collision_source, $postmeta_collision_target, $postmeta_collision_metadata, 'feature-explicit-postmeta-collision', 'main');
+    assert_same($postmeta_collision_result['status'], 'completed_with_conflicts', 'in-band explicit parent unique collisions keep dependent postmeta review-held');
+    assert_same(
+        (int)scalar($postmeta_collision_target, "SELECT COUNT(*) FROM wp_posts WHERE ID = $postmeta_collision_post_id"),
+        0,
+        'in-band explicit parent held by a unique collision is not applied'
+    );
+    assert_same(
+        (int)scalar($postmeta_collision_target, "SELECT COUNT(*) FROM wp_postmeta WHERE post_id = $postmeta_collision_post_id"),
+        0,
+        'postmeta behind an in-band explicit parent held by a unique collision is not applied'
+    );
+    assert_same(
+        (int)scalar($postmeta_collision_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-explicit-postmeta-collision' AND c.table_name = 'wp_posts' AND c.conflict_type = 'row-unique-collision'"),
+        1,
+        'in-band explicit parent records the unique collision that holds it'
+    );
+    assert_same(
+        (int)scalar($postmeta_collision_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-explicit-postmeta-collision' AND c.table_name = 'wp_postmeta' AND c.conflict_type = 'row-target-constraint'"),
+        1,
+        'postmeta behind the held in-band explicit parent records a review conflict'
+    );
+    assert_same(
+        (int)scalar($postmeta_collision_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-explicit-postmeta-collision' AND d.table_name = 'wp_postmeta' AND d.decision = 'source-applied'"),
+        0,
+        'postmeta behind the held in-band explicit parent is not marked source-applied'
+    );
+    assert_true(
+        (int)scalar($postmeta_collision_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-explicit-postmeta-collision' AND d.table_name = 'wp_postmeta' AND d.decision = 'target-wins' AND d.reason LIKE '%collides with target unique index%' AND d.reason LIKE '%wp_posts.ID%'") >= 1,
+        'postmeta conflict explains that its explicit parent is held by a unique collision'
     );
 
     $term_graph_base = $tmp . '/term-graph-base.sqlite';
