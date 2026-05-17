@@ -13,7 +13,8 @@ fake_bin="$(mktemp -d "${TMPDIR:-/tmp}/forkpress-build-dist-preflight-bin.XXXXXX
 build_dir="$(mktemp -d "${TMPDIR:-/tmp}/forkpress-build-dist-preflight-build.XXXXXX")"
 dist_dir="$(mktemp -d "${TMPDIR:-/tmp}/forkpress-build-dist-preflight-dist.XXXXXX")"
 out_file="$(mktemp "${TMPDIR:-/tmp}/forkpress-build-dist-preflight.XXXXXX.log")"
-trap 'rm -rf "$fake_bin" "$build_dir" "$dist_dir" "$out_file" "$branchfs_header_log"' EXIT
+invalid_retries_log="$(mktemp "${TMPDIR:-/tmp}/forkpress-build-dist-preflight-retries.XXXXXX.log")"
+trap 'rm -rf "$fake_bin" "$build_dir" "$dist_dir" "$out_file" "$invalid_retries_log" "$branchfs_header_log"' EXIT
 chmod 755 "$fake_bin" "$build_dir" "$dist_dir"
 
 set +e
@@ -30,6 +31,23 @@ grep -q 'Could not determine PHP headers' "$branchfs_header_log"
 for cmd in bash dirname uname mkdir; do
   ln -s "$(command -v "$cmd")" "$fake_bin/$cmd"
 done
+
+set +e
+PATH="$fake_bin" \
+FORKPRESS_BUILD_DIR="$build_dir" \
+FORKPRESS_DIST_DIR="$dist_dir" \
+FORKPRESS_STATIC_PHP_CLI_DOWNLOAD_RETRIES=0 \
+  scripts/build-dist.sh > "$invalid_retries_log" 2>&1
+invalid_retries_status=$?
+set -e
+
+if [ "$invalid_retries_status" -eq 0 ]; then
+  echo "expected build-dist preflight to reject zero static-php-cli download retries" >&2
+  cat "$invalid_retries_log" >&2
+  exit 1
+fi
+
+grep -q 'FORKPRESS_STATIC_PHP_CLI_DOWNLOAD_RETRIES must be at least 1' "$invalid_retries_log"
 
 for cmd in git composer php re2c automake bison; do
   printf '#!/usr/bin/env sh\nexit 0\n' > "$fake_bin/$cmd"
@@ -57,6 +75,8 @@ grep -q 'TRIPLE" = "aarch64-apple-darwin"' scripts/build-dist.sh
 grep -q 'arch -arm64 /usr/bin/true' scripts/build-dist.sh
 grep -q 'SPC_RUN_UNDER_ARM64=1' scripts/build-dist.sh
 grep -q 'arch -arm64 ./bin/spc "$@"' scripts/build-dist.sh
+grep -q 'FORKPRESS_STATIC_PHP_CLI_DOWNLOAD_RETRIES:-3' scripts/build-dist.sh
+grep -q 'run_spc_phase_with_retries "$SPC_DOWNLOAD_RETRIES" "download PHP and extension sources"' scripts/build-dist.sh
 if grep -q 'SPC_RUN\[@\]' scripts/build-dist.sh; then
   echo "build-dist must not expand an empty bash array under macOS bash with set -u" >&2
   exit 1
