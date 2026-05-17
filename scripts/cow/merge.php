@@ -17936,6 +17936,31 @@ function cow_merge_apply_schema_object_changes(
         }
         if ($source_sql === null) {
             if ($base_sql !== null) {
+                if ($type === 'view' && $target_sql === $base_sql) {
+                    $apply_error = null;
+                    try {
+                        cow_merge_apply_source_view_schema_resolution($target, $name, null);
+                    } catch (Throwable $e) {
+                        $apply_error = $e->getMessage();
+                    }
+                    if ($apply_error === null) {
+                        cow_merge_record_decision(
+                            $meta,
+                            $run_id,
+                            $table,
+                            null,
+                            $name,
+                            'source-applied',
+                            'source dropped a view while target kept the base definition',
+                            $base_sql,
+                            null,
+                            $target_sql,
+                            null
+                        );
+                        $applied++;
+                        continue;
+                    }
+                }
                 if (cow_merge_record_schema_conflict(
                     $meta,
                     $run_id,

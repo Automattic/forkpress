@@ -10317,6 +10317,37 @@ SQL);
         'rerunning after automatic dependent source view rewrite does not discover a schema conflict'
     );
 
+    $schema_view_drop_base = $tmp . '/schema-view-drop-base.sqlite';
+    $schema_view_drop_source = $tmp . '/schema-view-drop-source.sqlite';
+    $schema_view_drop_target = $tmp . '/schema-view-drop-target.sqlite';
+    create_base_db($schema_view_drop_base);
+    $db = open_db($schema_view_drop_base);
+    $db->exec('CREATE VIEW plugin_items_drop_review AS SELECT item_id, label FROM plugin_items');
+    $db->close();
+    copy($schema_view_drop_base, $schema_view_drop_source);
+    copy($schema_view_drop_base, $schema_view_drop_target);
+
+    $db = open_db($schema_view_drop_source);
+    $db->exec('DROP VIEW plugin_items_drop_review');
+    $db->close();
+
+    $result = cow_merge_databases($schema_view_drop_base, $schema_view_drop_source, $schema_view_drop_target, $metadata, 'feature-view-drop', 'main');
+    assert_same($result['status'], 'completed', 'compatible source-dropped view applies automatically');
+    assert_same((int)scalar($schema_view_drop_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_drop_review'"), 0, 'automatic source view drop removes the target base view');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.column_name = 'plugin_items_drop_review' AND c.conflict_type = 'schema-source-dropped-view' AND r.source_branch = 'feature-view-drop'"),
+        0,
+        'compatible source-dropped view records no schema conflict'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE d.column_name = 'plugin_items_drop_review' AND d.decision = 'source-applied' AND d.reason = 'source dropped a view while target kept the base definition' AND r.source_branch = 'feature-view-drop'"),
+        1,
+        'compatible source-dropped view records a source-applied schema decision'
+    );
+    $schema_view_drop_rerun = cow_merge_databases($schema_view_drop_base, $schema_view_drop_source, $schema_view_drop_target, $metadata, 'feature-view-drop', 'main');
+    assert_same($schema_view_drop_rerun['status'], 'completed', 'rerunning after automatic source view drop completes without a new conflict');
+    assert_same((int)scalar($schema_view_drop_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_drop_review'"), 0, 'rerunning after source view drop keeps the target view removed');
+
     $schema_view_cycle_rewrite_base = $tmp . '/schema-view-cycle-rewrite-base.sqlite';
     $schema_view_cycle_rewrite_source = $tmp . '/schema-view-cycle-rewrite-source.sqlite';
     $schema_view_cycle_rewrite_target = $tmp . '/schema-view-cycle-rewrite-target.sqlite';
