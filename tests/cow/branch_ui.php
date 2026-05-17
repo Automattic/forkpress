@@ -500,7 +500,14 @@ assert_same(count($invalid_conflict_resolution['argv']), 0, 'branch conflict res
 
 $apply_reviewed_resolution = run_branch_ui_action(
     ['action' => 'forkpress_branch_resolve_conflict', 'conflict' => '7', 'run' => '42', 'applyReviewed' => '1'],
-    ['main', 'feature']
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    ['FORKPRESS_TEST_CLI_OUTPUTS' => json_encode([
+        json_encode(['run_id' => 42, 'checked' => 1, 'stale' => 0, 'carried' => 0, 'needs_action_conflicts' => []], JSON_UNESCAPED_SLASHES),
+        '',
+    ], JSON_UNESCAPED_SLASHES)]
 );
 $apply_reviewed_resolution_payload = decode_branch_ui_payload($apply_reviewed_resolution);
 assert_same($apply_reviewed_resolution['status'], 0, 'branch conflict apply-reviewed action exits cleanly');
@@ -508,8 +515,43 @@ assert_same($apply_reviewed_resolution_payload['success'] ?? null, true, 'branch
 assert_same($apply_reviewed_resolution_payload['resolutionChoice'] ?? null, 'reviewed', 'branch conflict apply-reviewed returns reviewed choice marker');
 assert_same(
     array_slice($apply_reviewed_resolution['argv'][0] ?? [], 1),
+    ['branch', '--work-dir', $work_dir, 'merge-audit', '--revalidate', '--run', '42', '--reviewer', 'wordpress-ui', '--format', 'json'],
+    'branch conflict apply-reviewed action revalidates the run before applying'
+);
+assert_same(
+    array_slice($apply_reviewed_resolution['argv'][1] ?? [], 1),
     ['branch', '--work-dir', $work_dir, 'merge-resolve', 'conflict', '7', '--apply-reviewed', '--note', 'Applied reviewed choice from the WordPress branch switcher.', '--reviewer', 'wordpress-ui'],
     'branch conflict apply-reviewed action applies the latest validated choice'
+);
+
+$stale_apply_reviewed = run_branch_ui_action(
+    ['action' => 'forkpress_branch_resolve_conflict', 'conflict' => '7', 'run' => '42', 'applyReviewed' => '1'],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    ['FORKPRESS_TEST_CLI_OUTPUTS' => json_encode([
+        json_encode([
+            'run_id' => 42,
+            'checked' => 2,
+            'stale' => 1,
+            'carried' => 1,
+            'needs_action_conflicts' => [
+                ['conflict_id' => 7, 'revalidation_class' => 'compatible-target-drift'],
+            ],
+        ], JSON_UNESCAPED_SLASHES),
+    ], JSON_UNESCAPED_SLASHES)]
+);
+$stale_apply_reviewed_payload = decode_branch_ui_payload($stale_apply_reviewed);
+assert_same($stale_apply_reviewed_payload['success'] ?? null, false, 'branch conflict apply-reviewed rejects stale reviewed choices');
+assert_same($stale_apply_reviewed_payload['checked'] ?? null, 2, 'branch conflict stale apply-reviewed exposes revalidation checked count');
+assert_same($stale_apply_reviewed_payload['stale'] ?? null, 1, 'branch conflict stale apply-reviewed exposes stale count');
+assert_same($stale_apply_reviewed_payload['carried'] ?? null, 1, 'branch conflict stale apply-reviewed exposes carried count');
+assert_same(count($stale_apply_reviewed['argv']), 1, 'branch conflict stale apply-reviewed stops before merge-resolve');
+assert_same(
+    array_slice($stale_apply_reviewed['argv'][0] ?? [], 1),
+    ['branch', '--work-dir', $work_dir, 'merge-audit', '--revalidate', '--run', '42', '--reviewer', 'wordpress-ui', '--format', 'json'],
+    'branch conflict stale apply-reviewed uses structured revalidation before blocking'
 );
 
 $mixed_conflict_resolution = run_branch_ui_action(
