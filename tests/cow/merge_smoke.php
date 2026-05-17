@@ -115,13 +115,14 @@ function smoke_insert_usermeta(SQLite3 $db, int $id, int $user_id, string $key, 
     $stmt->execute();
 }
 
-function smoke_insert_comment(SQLite3 $db, int $id, int $post_id, int $user_id, string $author, string $content): void {
-    $stmt = $db->prepare('INSERT INTO wp_comments (comment_ID, comment_post_ID, user_id, comment_author, comment_content) VALUES (:id, :post_id, :user_id, :author, :content)');
+function smoke_insert_comment(SQLite3 $db, int $id, int $post_id, int $user_id, string $author, string $content, int $parent = 0): void {
+    $stmt = $db->prepare('INSERT INTO wp_comments (comment_ID, comment_post_ID, user_id, comment_author, comment_content, comment_parent) VALUES (:id, :post_id, :user_id, :author, :content, :parent)');
     $stmt->bindValue(':id', $id, SQLITE3_INTEGER);
     $stmt->bindValue(':post_id', $post_id, SQLITE3_INTEGER);
     $stmt->bindValue(':user_id', $user_id, SQLITE3_INTEGER);
     $stmt->bindValue(':author', $author, SQLITE3_TEXT);
     $stmt->bindValue(':content', $content, SQLITE3_TEXT);
+    $stmt->bindValue(':parent', $parent, SQLITE3_INTEGER);
     $stmt->execute();
 }
 
@@ -144,9 +145,10 @@ function smoke_insert_post(
     string $status = 'publish',
     int $parent = 0,
     string $mime_type = '',
-    string $guid = ''
+    string $guid = '',
+    int $author = 0
 ): void {
-    $stmt = $db->prepare('INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, post_parent, post_mime_type, guid) VALUES (:id, :title, :content, :status, :type, :name, :parent, :mime_type, :guid)');
+    $stmt = $db->prepare('INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, post_parent, post_mime_type, guid, post_author) VALUES (:id, :title, :content, :status, :type, :name, :parent, :mime_type, :guid, :author)');
     $stmt->bindValue(':id', $id, SQLITE3_INTEGER);
     $stmt->bindValue(':title', $title, SQLITE3_TEXT);
     $stmt->bindValue(':content', $content, SQLITE3_TEXT);
@@ -156,6 +158,7 @@ function smoke_insert_post(
     $stmt->bindValue(':parent', $parent, SQLITE3_INTEGER);
     $stmt->bindValue(':mime_type', $mime_type, SQLITE3_TEXT);
     $stmt->bindValue(':guid', $guid, SQLITE3_TEXT);
+    $stmt->bindValue(':author', $author, SQLITE3_INTEGER);
     $stmt->execute();
 }
 
@@ -169,6 +172,7 @@ function smoke_create_posts_db(string $path): void {
         post_type TEXT NOT NULL DEFAULT 'post',
         post_name TEXT NOT NULL DEFAULT '',
         post_parent INTEGER NOT NULL DEFAULT 0,
+        post_author INTEGER NOT NULL DEFAULT 0,
         post_mime_type TEXT NOT NULL DEFAULT '',
         guid TEXT NOT NULL DEFAULT ''
     )");
@@ -491,6 +495,166 @@ try {
         'page delete smoke merge audits the independent target page insert'
     );
 
+    $child_page_base = $tmp . '/child-page-base.sqlite';
+    $child_page_source = $tmp . '/child-page-source.sqlite';
+    $child_page_target = $tmp . '/child-page-target.sqlite';
+    $child_page_metadata = $tmp . '/.forkpress/cow/merge/child-page-metadata.sqlite';
+
+    smoke_create_posts_db($child_page_base);
+    copy($child_page_base, $child_page_source);
+    copy($child_page_base, $child_page_target);
+
+    $db = smoke_open_db($child_page_source);
+    smoke_insert_post($db, 18000040, 'Branch Parent Page', 'Branch parent content', 'page', 'branch-parent-page');
+    smoke_insert_post($db, 18000041, 'Branch Child Page', 'Branch child content', 'page', 'branch-child-page', 'publish', 18000040);
+    $db->close();
+
+    $db = smoke_open_db($child_page_target);
+    smoke_insert_post($db, 19000040, 'Main Parent Page', 'Main parent content', 'page', 'main-parent-page');
+    smoke_insert_post($db, 19000041, 'Main Child Page', 'Main child content', 'page', 'main-child-page', 'publish', 19000040);
+    $db->close();
+
+    $child_page_result = cow_merge_databases($child_page_base, $child_page_source, $child_page_target, $child_page_metadata, 'feature-smoke-page-child', 'main');
+    assert_same($child_page_result['status'], 'completed', 'branch and main parent/child page inserts complete cleanly');
+    assert_same((int)($child_page_result['conflicts'] ?? -1), 0, 'branch and main parent/child page inserts do not create merge conflicts');
+    assert_same(smoke_scalar($child_page_target, 'SELECT post_title FROM wp_posts WHERE ID = 18000040'), 'Branch Parent Page', 'merged target includes the branch parent page');
+    assert_same(smoke_scalar($child_page_target, 'SELECT post_title FROM wp_posts WHERE ID = 18000041'), 'Branch Child Page', 'merged target includes the branch child page');
+    assert_same((int)smoke_scalar($child_page_target, 'SELECT post_parent FROM wp_posts WHERE ID = 18000041'), 18000040, 'merged target keeps the branch child page parent reference');
+    assert_same(smoke_scalar($child_page_target, 'SELECT post_title FROM wp_posts WHERE ID = 19000040'), 'Main Parent Page', 'merged target preserves the main parent page');
+    assert_same(smoke_scalar($child_page_target, 'SELECT post_title FROM wp_posts WHERE ID = 19000041'), 'Main Child Page', 'merged target preserves the main child page');
+    assert_same((int)smoke_scalar($child_page_target, 'SELECT post_parent FROM wp_posts WHERE ID = 19000041'), 19000040, 'merged target keeps the main child page parent reference');
+    assert_same(
+        (int)smoke_scalar($child_page_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_posts'"),
+        0,
+        'page-plus-child-page smoke merge records no wp_posts conflicts'
+    );
+    assert_same(
+        (int)smoke_scalar($child_page_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'source-applied'"),
+        2,
+        'page-plus-child-page smoke merge audits the source parent and child page inserts'
+    );
+    assert_same(
+        (int)smoke_scalar($child_page_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
+        2,
+        'page-plus-child-page smoke merge audits the target parent and child page inserts'
+    );
+
+    $child_page_edit_delete_base = $tmp . '/child-page-edit-delete-base.sqlite';
+    $child_page_edit_delete_source = $tmp . '/child-page-edit-delete-source.sqlite';
+    $child_page_edit_delete_target = $tmp . '/child-page-edit-delete-target.sqlite';
+    $child_page_edit_delete_metadata = $tmp . '/.forkpress/cow/merge/child-page-edit-delete-metadata.sqlite';
+
+    smoke_create_posts_db($child_page_edit_delete_base);
+    $db = smoke_open_db($child_page_edit_delete_base);
+    smoke_insert_post($db, 17000150, 'Base Parent Page', 'Base parent content', 'page', 'base-parent-page');
+    smoke_insert_post($db, 17000151, 'Base Child Page', 'Base child content', 'page', 'base-child-page', 'publish', 17000150);
+    $db->close();
+    copy($child_page_edit_delete_base, $child_page_edit_delete_source);
+    copy($child_page_edit_delete_base, $child_page_edit_delete_target);
+
+    $db = smoke_open_db($child_page_edit_delete_source);
+    $db->exec("UPDATE wp_posts SET post_title = 'Source Edited Child Page', post_content = 'Source edited child content' WHERE ID = 17000151");
+    $db->close();
+
+    $db = smoke_open_db($child_page_edit_delete_target);
+    $db->exec('DELETE FROM wp_posts WHERE ID = 17000151');
+    $db->close();
+
+    $child_page_edit_delete_result = cow_merge_databases($child_page_edit_delete_base, $child_page_edit_delete_source, $child_page_edit_delete_target, $child_page_edit_delete_metadata, 'feature-smoke-page-child-edit-delete', 'main');
+    assert_same($child_page_edit_delete_result['status'], 'completed_with_conflicts', 'child page edit/delete graph stays reviewable');
+    assert_same((int)smoke_scalar($child_page_edit_delete_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 17000151'), 0, 'child page edit/delete preserves target child deletion before review');
+    assert_same(smoke_scalar($child_page_edit_delete_target, 'SELECT post_title FROM wp_posts WHERE ID = 17000150'), 'Base Parent Page', 'child page edit/delete preserves the unchanged parent page');
+    assert_same(
+        (int)smoke_scalar($child_page_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_posts' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'child page edit/delete records the edited child delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($child_page_edit_delete_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-wins'"),
+        1,
+        'child page edit/delete defaults the changed source child to target-wins before review'
+    );
+
+    $revision_base = $tmp . '/revision-base.sqlite';
+    $revision_source = $tmp . '/revision-source.sqlite';
+    $revision_target = $tmp . '/revision-target.sqlite';
+    $revision_metadata = $tmp . '/.forkpress/cow/merge/revision-metadata.sqlite';
+
+    smoke_create_posts_db($revision_base);
+    copy($revision_base, $revision_source);
+    copy($revision_base, $revision_target);
+
+    $db = smoke_open_db($revision_source);
+    smoke_insert_post($db, 18000042, 'Branch Revised Page', 'Branch revised page content', 'page', 'branch-revised-page');
+    smoke_insert_post($db, 18000043, 'Branch Revised Page Revision', 'Branch revision content', 'revision', '18000042-revision-v1', 'inherit', 18000042);
+    $db->close();
+
+    $db = smoke_open_db($revision_target);
+    smoke_insert_post($db, 19000042, 'Main Revised Page', 'Main revised page content', 'page', 'main-revised-page');
+    smoke_insert_post($db, 19000043, 'Main Revised Page Revision', 'Main revision content', 'revision', '19000042-revision-v1', 'inherit', 19000042);
+    $db->close();
+
+    $revision_result = cow_merge_databases($revision_base, $revision_source, $revision_target, $revision_metadata, 'feature-smoke-page-revision', 'main');
+    assert_same($revision_result['status'], 'completed', 'branch and main page revision inserts complete cleanly');
+    assert_same((int)($revision_result['conflicts'] ?? -1), 0, 'branch and main page revision inserts do not create merge conflicts');
+    assert_same(smoke_scalar($revision_target, 'SELECT post_title FROM wp_posts WHERE ID = 18000042'), 'Branch Revised Page', 'merged target includes the branch revised page');
+    assert_same(smoke_scalar($revision_target, 'SELECT post_type FROM wp_posts WHERE ID = 18000043'), 'revision', 'merged target includes the branch revision row');
+    assert_same((int)smoke_scalar($revision_target, 'SELECT post_parent FROM wp_posts WHERE ID = 18000043'), 18000042, 'merged target keeps the branch revision parent page reference');
+    assert_same(smoke_scalar($revision_target, 'SELECT post_title FROM wp_posts WHERE ID = 19000042'), 'Main Revised Page', 'merged target preserves the main revised page');
+    assert_same(smoke_scalar($revision_target, 'SELECT post_type FROM wp_posts WHERE ID = 19000043'), 'revision', 'merged target preserves the main revision row');
+    assert_same((int)smoke_scalar($revision_target, 'SELECT post_parent FROM wp_posts WHERE ID = 19000043'), 19000042, 'merged target keeps the main revision parent page reference');
+    assert_same(
+        (int)smoke_scalar($revision_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_posts'"),
+        0,
+        'page-plus-revision smoke merge records no wp_posts conflicts'
+    );
+    assert_same(
+        (int)smoke_scalar($revision_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'source-applied'"),
+        2,
+        'page-plus-revision smoke merge audits the source page and revision inserts'
+    );
+    assert_same(
+        (int)smoke_scalar($revision_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
+        2,
+        'page-plus-revision smoke merge audits the target page and revision inserts'
+    );
+
+    $revision_edit_delete_base = $tmp . '/revision-edit-delete-base.sqlite';
+    $revision_edit_delete_source = $tmp . '/revision-edit-delete-source.sqlite';
+    $revision_edit_delete_target = $tmp . '/revision-edit-delete-target.sqlite';
+    $revision_edit_delete_metadata = $tmp . '/.forkpress/cow/merge/revision-edit-delete-metadata.sqlite';
+
+    smoke_create_posts_db($revision_edit_delete_base);
+    $db = smoke_open_db($revision_edit_delete_base);
+    smoke_insert_post($db, 17000152, 'Base Revised Page', 'Base revised page content', 'page', 'base-revised-page');
+    smoke_insert_post($db, 17000153, 'Base Revised Page Revision', 'Base revision content', 'revision', '17000152-revision-v1', 'inherit', 17000152);
+    $db->close();
+    copy($revision_edit_delete_base, $revision_edit_delete_source);
+    copy($revision_edit_delete_base, $revision_edit_delete_target);
+
+    $db = smoke_open_db($revision_edit_delete_source);
+    $db->exec("UPDATE wp_posts SET post_title = 'Source Edited Page Revision', post_content = 'Source edited revision content' WHERE ID = 17000153");
+    $db->close();
+
+    $db = smoke_open_db($revision_edit_delete_target);
+    $db->exec('DELETE FROM wp_posts WHERE ID = 17000153');
+    $db->close();
+
+    $revision_edit_delete_result = cow_merge_databases($revision_edit_delete_base, $revision_edit_delete_source, $revision_edit_delete_target, $revision_edit_delete_metadata, 'feature-smoke-page-revision-edit-delete', 'main');
+    assert_same($revision_edit_delete_result['status'], 'completed_with_conflicts', 'revision edit/delete graph stays reviewable');
+    assert_same((int)smoke_scalar($revision_edit_delete_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 17000153'), 0, 'revision edit/delete preserves target revision deletion before review');
+    assert_same(smoke_scalar($revision_edit_delete_target, 'SELECT post_title FROM wp_posts WHERE ID = 17000152'), 'Base Revised Page', 'revision edit/delete preserves the unchanged parent page');
+    assert_same(
+        (int)smoke_scalar($revision_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_posts' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'revision edit/delete records the edited revision delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($revision_edit_delete_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-wins'"),
+        1,
+        'revision edit/delete defaults the changed source revision to target-wins before review'
+    );
+
     $postmeta_base = $tmp . '/postmeta-base.sqlite';
     $postmeta_source = $tmp . '/postmeta-source.sqlite';
     $postmeta_target = $tmp . '/postmeta-target.sqlite';
@@ -639,6 +803,156 @@ try {
         (int)smoke_scalar($comment_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_users', 'wp_usermeta', 'wp_comments', 'wp_commentmeta') AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
         5,
         'page-plus-comment smoke merge audits all target graph inserts'
+    );
+
+    $threaded_comment_base = $tmp . '/threaded-comment-base.sqlite';
+    $threaded_comment_source = $tmp . '/threaded-comment-source.sqlite';
+    $threaded_comment_target = $tmp . '/threaded-comment-target.sqlite';
+    $threaded_comment_metadata = $tmp . '/.forkpress/cow/merge/threaded-comment-metadata.sqlite';
+
+    smoke_create_posts_db($threaded_comment_base);
+    copy($threaded_comment_base, $threaded_comment_source);
+    copy($threaded_comment_base, $threaded_comment_target);
+
+    $db = smoke_open_db($threaded_comment_source);
+    smoke_insert_post($db, 18000075, 'Branch Page With Threaded Comments', 'Branch threaded comment content', 'page', 'branch-page-with-threaded-comments');
+    smoke_insert_user($db, 18000076, 'branch-thread-commenter', 'branch-thread-commenter@example.test', 'Branch Thread Commenter');
+    smoke_insert_comment($db, 18000077, 18000075, 18000076, 'Branch Thread Commenter', 'Branch parent comment body');
+    smoke_insert_comment($db, 18000078, 18000075, 18000076, 'Branch Thread Commenter', 'Branch reply comment body', 18000077);
+    smoke_insert_commentmeta($db, 18000079, 18000078, 'forkpress_smoke_reply_ref', '{"branch":"source","comment_id":18000078,"parent_comment_id":18000077,"post_id":18000075}');
+    $db->close();
+
+    $db = smoke_open_db($threaded_comment_target);
+    smoke_insert_post($db, 19000075, 'Main Page With Threaded Comments', 'Main threaded comment content', 'page', 'main-page-with-threaded-comments');
+    smoke_insert_user($db, 19000076, 'main-thread-commenter', 'main-thread-commenter@example.test', 'Main Thread Commenter');
+    smoke_insert_comment($db, 19000077, 19000075, 19000076, 'Main Thread Commenter', 'Main parent comment body');
+    smoke_insert_comment($db, 19000078, 19000075, 19000076, 'Main Thread Commenter', 'Main reply comment body', 19000077);
+    smoke_insert_commentmeta($db, 19000079, 19000078, 'forkpress_smoke_reply_ref', '{"branch":"target","comment_id":19000078,"parent_comment_id":19000077,"post_id":19000075}');
+    $db->close();
+
+    $threaded_comment_result = cow_merge_databases($threaded_comment_base, $threaded_comment_source, $threaded_comment_target, $threaded_comment_metadata, 'feature-smoke-page-threaded-comment', 'main');
+    assert_same($threaded_comment_result['status'], 'completed', 'branch and main page-plus-threaded-comment inserts complete cleanly');
+    assert_same((int)($threaded_comment_result['conflicts'] ?? -1), 0, 'branch and main page-plus-threaded-comment inserts do not create merge conflicts');
+    assert_same(smoke_scalar($threaded_comment_target, 'SELECT post_title FROM wp_posts WHERE ID = 18000075'), 'Branch Page With Threaded Comments', 'merged target includes the branch threaded-comment page');
+    assert_same(smoke_scalar($threaded_comment_target, 'SELECT comment_content FROM wp_comments WHERE comment_ID = 18000077'), 'Branch parent comment body', 'merged target includes the branch parent comment');
+    assert_same(smoke_scalar($threaded_comment_target, 'SELECT comment_content FROM wp_comments WHERE comment_ID = 18000078'), 'Branch reply comment body', 'merged target includes the branch reply comment');
+    assert_same((int)smoke_scalar($threaded_comment_target, 'SELECT comment_parent FROM wp_comments WHERE comment_ID = 18000078'), 18000077, 'merged target keeps the branch reply parent comment reference');
+    assert_same(smoke_scalar($threaded_comment_target, 'SELECT meta_value FROM wp_commentmeta WHERE meta_id = 18000079'), '{"branch":"source","comment_id":18000078,"parent_comment_id":18000077,"post_id":18000075}', 'merged target includes branch reply metadata with source graph references');
+    assert_same(smoke_scalar($threaded_comment_target, 'SELECT post_title FROM wp_posts WHERE ID = 19000075'), 'Main Page With Threaded Comments', 'merged target preserves the main threaded-comment page');
+    assert_same(smoke_scalar($threaded_comment_target, 'SELECT comment_content FROM wp_comments WHERE comment_ID = 19000077'), 'Main parent comment body', 'merged target preserves the main parent comment');
+    assert_same(smoke_scalar($threaded_comment_target, 'SELECT comment_content FROM wp_comments WHERE comment_ID = 19000078'), 'Main reply comment body', 'merged target preserves the main reply comment');
+    assert_same((int)smoke_scalar($threaded_comment_target, 'SELECT comment_parent FROM wp_comments WHERE comment_ID = 19000078'), 19000077, 'merged target keeps the main reply parent comment reference');
+    assert_same(smoke_scalar($threaded_comment_target, 'SELECT meta_value FROM wp_commentmeta WHERE meta_id = 19000079'), '{"branch":"target","comment_id":19000078,"parent_comment_id":19000077,"post_id":19000075}', 'merged target preserves target reply metadata with target graph references');
+    assert_same(
+        (int)smoke_scalar($threaded_comment_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name IN ('wp_posts', 'wp_users', 'wp_comments', 'wp_commentmeta')"),
+        0,
+        'page-plus-threaded-comment smoke merge records no WordPress graph conflicts'
+    );
+    assert_same(
+        (int)smoke_scalar($threaded_comment_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_users', 'wp_comments', 'wp_commentmeta') AND decision = 'source-applied'"),
+        5,
+        'page-plus-threaded-comment smoke merge audits all source graph inserts'
+    );
+    assert_same(
+        (int)smoke_scalar($threaded_comment_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_users', 'wp_comments', 'wp_commentmeta') AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
+        5,
+        'page-plus-threaded-comment smoke merge audits all target graph inserts'
+    );
+
+    $threaded_comment_edit_delete_base = $tmp . '/threaded-comment-edit-delete-base.sqlite';
+    $threaded_comment_edit_delete_source = $tmp . '/threaded-comment-edit-delete-source.sqlite';
+    $threaded_comment_edit_delete_target = $tmp . '/threaded-comment-edit-delete-target.sqlite';
+    $threaded_comment_edit_delete_metadata = $tmp . '/.forkpress/cow/merge/threaded-comment-edit-delete-metadata.sqlite';
+
+    smoke_create_posts_db($threaded_comment_edit_delete_base);
+    $db = smoke_open_db($threaded_comment_edit_delete_base);
+    smoke_insert_user($db, 17000084, 'shared-thread-commenter', 'shared-thread-commenter@example.test', 'Shared Thread Commenter');
+    smoke_insert_comment($db, 17000085, 1, 17000084, 'Shared Thread Commenter', 'Base parent thread comment body');
+    smoke_insert_comment($db, 17000086, 1, 17000084, 'Shared Thread Commenter', 'Base reply thread comment body', 17000085);
+    smoke_insert_commentmeta($db, 17000087, 17000086, 'forkpress_smoke_reply_ref', '{"branch":"base","comment_id":17000086,"parent_comment_id":17000085,"post_id":1}');
+    $db->close();
+    copy($threaded_comment_edit_delete_base, $threaded_comment_edit_delete_source);
+    copy($threaded_comment_edit_delete_base, $threaded_comment_edit_delete_target);
+
+    $db = smoke_open_db($threaded_comment_edit_delete_source);
+    $db->exec("UPDATE wp_comments SET comment_content = 'Source edited reply thread comment body' WHERE comment_ID = 17000086");
+    $db->exec("UPDATE wp_commentmeta SET meta_value = '{\"branch\":\"source\",\"comment_id\":17000086,\"parent_comment_id\":17000085,\"post_id\":1,\"edited\":true}' WHERE meta_id = 17000087");
+    $db->close();
+
+    $db = smoke_open_db($threaded_comment_edit_delete_target);
+    $db->exec('DELETE FROM wp_commentmeta WHERE comment_id = 17000086');
+    $db->exec('DELETE FROM wp_comments WHERE comment_ID = 17000086');
+    $db->close();
+
+    $threaded_comment_edit_delete_result = cow_merge_databases($threaded_comment_edit_delete_base, $threaded_comment_edit_delete_source, $threaded_comment_edit_delete_target, $threaded_comment_edit_delete_metadata, 'feature-smoke-threaded-comment-edit-delete', 'main');
+    assert_same($threaded_comment_edit_delete_result['status'], 'completed_with_conflicts', 'threaded comment reply edit/delete graph stays reviewable');
+    assert_same((int)smoke_scalar($threaded_comment_edit_delete_target, 'SELECT COUNT(*) FROM wp_comments WHERE comment_ID = 17000086'), 0, 'threaded comment edit/delete preserves target reply deletion before review');
+    assert_same((int)smoke_scalar($threaded_comment_edit_delete_target, 'SELECT COUNT(*) FROM wp_commentmeta WHERE comment_id = 17000086'), 0, 'threaded comment edit/delete preserves target reply metadata deletion before review');
+    assert_same(smoke_scalar($threaded_comment_edit_delete_target, 'SELECT comment_content FROM wp_comments WHERE comment_ID = 17000085'), 'Base parent thread comment body', 'threaded comment edit/delete preserves the unchanged parent comment');
+    assert_same(
+        (int)smoke_scalar($threaded_comment_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_comments' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'threaded comment edit/delete records the edited reply delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($threaded_comment_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_commentmeta' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'threaded comment edit/delete records the edited reply metadata delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($threaded_comment_edit_delete_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_comments', 'wp_commentmeta') AND decision = 'target-wins'"),
+        2,
+        'threaded comment edit/delete defaults the changed source reply graph to target-wins before review'
+    );
+
+    $authored_page_base = $tmp . '/authored-page-base.sqlite';
+    $authored_page_source = $tmp . '/authored-page-source.sqlite';
+    $authored_page_target = $tmp . '/authored-page-target.sqlite';
+    $authored_page_metadata = $tmp . '/.forkpress/cow/merge/authored-page-metadata.sqlite';
+
+    smoke_create_posts_db($authored_page_base);
+    copy($authored_page_base, $authored_page_source);
+    copy($authored_page_base, $authored_page_target);
+
+    $db = smoke_open_db($authored_page_source);
+    smoke_insert_user($db, 18000088, 'branch-author', 'branch-author@example.test', 'Branch Author');
+    smoke_insert_usermeta($db, 18000089, 18000088, 'forkpress_smoke_author_profile', '{"branch":"source","user_id":18000088}');
+    smoke_insert_post($db, 18000090, 'Branch Authored Page', 'Branch authored page content', 'page', 'branch-authored-page', 'publish', 0, '', '', 18000088);
+    smoke_insert_postmeta($db, 18000091, 18000090, '_forkpress_smoke_author_ref', '{"branch":"source","post_id":18000090,"author_id":18000088}');
+    $db->close();
+
+    $db = smoke_open_db($authored_page_target);
+    smoke_insert_user($db, 19000088, 'main-author', 'main-author@example.test', 'Main Author');
+    smoke_insert_usermeta($db, 19000089, 19000088, 'forkpress_smoke_author_profile', '{"branch":"target","user_id":19000088}');
+    smoke_insert_post($db, 19000090, 'Main Authored Page', 'Main authored page content', 'page', 'main-authored-page', 'publish', 0, '', '', 19000088);
+    smoke_insert_postmeta($db, 19000091, 19000090, '_forkpress_smoke_author_ref', '{"branch":"target","post_id":19000090,"author_id":19000088}');
+    $db->close();
+
+    $authored_page_result = cow_merge_databases($authored_page_base, $authored_page_source, $authored_page_target, $authored_page_metadata, 'feature-smoke-page-author', 'main');
+    assert_same($authored_page_result['status'], 'completed', 'branch and main page-plus-author inserts complete cleanly');
+    assert_same((int)($authored_page_result['conflicts'] ?? -1), 0, 'branch and main page-plus-author inserts do not create merge conflicts');
+    assert_same(smoke_scalar($authored_page_target, 'SELECT user_login FROM wp_users WHERE ID = 18000088'), 'branch-author', 'merged target includes the branch page author');
+    assert_same(smoke_scalar($authored_page_target, 'SELECT post_title FROM wp_posts WHERE ID = 18000090'), 'Branch Authored Page', 'merged target includes the branch authored page');
+    assert_same((int)smoke_scalar($authored_page_target, 'SELECT post_author FROM wp_posts WHERE ID = 18000090'), 18000088, 'merged target keeps the branch authored page author reference');
+    assert_same(smoke_scalar($authored_page_target, 'SELECT meta_value FROM wp_postmeta WHERE meta_id = 18000091'), '{"branch":"source","post_id":18000090,"author_id":18000088}', 'merged target includes branch authored-page metadata with source graph references');
+    assert_same(smoke_scalar($authored_page_target, 'SELECT user_login FROM wp_users WHERE ID = 19000088'), 'main-author', 'merged target preserves the main page author');
+    assert_same(smoke_scalar($authored_page_target, 'SELECT post_title FROM wp_posts WHERE ID = 19000090'), 'Main Authored Page', 'merged target preserves the main authored page');
+    assert_same((int)smoke_scalar($authored_page_target, 'SELECT post_author FROM wp_posts WHERE ID = 19000090'), 19000088, 'merged target keeps the main authored page author reference');
+    assert_same(smoke_scalar($authored_page_target, 'SELECT meta_value FROM wp_postmeta WHERE meta_id = 19000091'), '{"branch":"target","post_id":19000090,"author_id":19000088}', 'merged target preserves target authored-page metadata with target graph references');
+    assert_same(
+        (int)smoke_scalar($authored_page_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name IN ('wp_posts', 'wp_postmeta', 'wp_users', 'wp_usermeta')"),
+        0,
+        'page-plus-author smoke merge records no WordPress graph conflicts'
+    );
+    assert_same(
+        (int)smoke_scalar($authored_page_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_postmeta', 'wp_users', 'wp_usermeta') AND decision = 'source-applied'"),
+        4,
+        'page-plus-author smoke merge audits all source graph inserts'
+    );
+    assert_same(
+        (int)smoke_scalar($authored_page_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_postmeta', 'wp_users', 'wp_usermeta') AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
+        4,
+        'page-plus-author smoke merge audits all target graph inserts'
     );
 
     $user_edit_delete_base = $tmp . '/user-edit-delete-base.sqlite';
@@ -1092,6 +1406,93 @@ try {
         'page-plus-menu smoke merge audits all target graph inserts'
     );
 
+    $nav_widget_base = $tmp . '/nav-widget-base.sqlite';
+    $nav_widget_source = $tmp . '/nav-widget-source.sqlite';
+    $nav_widget_target = $tmp . '/nav-widget-target.sqlite';
+    $nav_widget_metadata = $tmp . '/.forkpress/cow/merge/nav-widget-metadata.sqlite';
+    $nav_widget_base_value = serialize(['_multiwidget' => 1]);
+    $nav_widget_source_value = serialize([
+        2 => [
+            'title' => 'Source nav widget',
+            'nav_menu' => 18000270,
+        ],
+        '_multiwidget' => 1,
+    ]);
+    $nav_widget_target_value = serialize([
+        3 => [
+            'title' => 'Main nav widget',
+            'nav_menu' => 19000270,
+        ],
+        '_multiwidget' => 1,
+    ]);
+
+    smoke_create_posts_db($nav_widget_base);
+    $db = smoke_open_db($nav_widget_base);
+    smoke_insert_option($db, 17000270, 'widget_nav_menu', $nav_widget_base_value);
+    $db->close();
+    copy($nav_widget_base, $nav_widget_source);
+    copy($nav_widget_base, $nav_widget_target);
+
+    $db = smoke_open_db($nav_widget_source);
+    smoke_insert_post($db, 18000271, 'Branch Nav Widget Page', 'Branch nav widget page content', 'page', 'branch-nav-widget-page');
+    smoke_insert_post($db, 18000273, 'Branch Nav Widget Item', '', 'nav_menu_item', 'branch-nav-widget-item');
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES
+        (18000270, 'Branch Nav Widget Menu', 'branch-nav-widget-menu')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES
+        (18000272, 18000270, 'nav_menu', 'Branch nav widget menu taxonomy', 0, 1)");
+    $db->exec("INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES
+        (18000273, 18000272, 0)");
+    smoke_insert_postmeta($db, 18000274, 18000273, '_menu_item_type', 'post_type');
+    smoke_insert_postmeta($db, 18000275, 18000273, '_menu_item_object', 'page');
+    smoke_insert_postmeta($db, 18000276, 18000273, '_menu_item_object_id', '18000271');
+    smoke_insert_postmeta($db, 18000277, 18000273, '_menu_item_menu_item_parent', '0');
+    smoke_update_option($db, 'widget_nav_menu', $nav_widget_source_value);
+    $db->close();
+
+    $db = smoke_open_db($nav_widget_target);
+    smoke_insert_post($db, 19000271, 'Main Nav Widget Page', 'Main nav widget page content', 'page', 'main-nav-widget-page');
+    smoke_insert_post($db, 19000273, 'Main Nav Widget Item', '', 'nav_menu_item', 'main-nav-widget-item');
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES
+        (19000270, 'Main Nav Widget Menu', 'main-nav-widget-menu')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES
+        (19000272, 19000270, 'nav_menu', 'Main nav widget menu taxonomy', 0, 1)");
+    $db->exec("INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES
+        (19000273, 19000272, 0)");
+    smoke_insert_postmeta($db, 19000274, 19000273, '_menu_item_type', 'post_type');
+    smoke_insert_postmeta($db, 19000275, 19000273, '_menu_item_object', 'page');
+    smoke_insert_postmeta($db, 19000276, 19000273, '_menu_item_object_id', '19000271');
+    smoke_insert_postmeta($db, 19000277, 19000273, '_menu_item_menu_item_parent', '0');
+    smoke_update_option($db, 'widget_nav_menu', $nav_widget_target_value);
+    $db->close();
+
+    $nav_widget_result = cow_merge_databases($nav_widget_base, $nav_widget_source, $nav_widget_target, $nav_widget_metadata, 'feature-smoke-nav-widget', 'main');
+    $nav_widget_target_value_after = unserialize(
+        (string)smoke_scalar($nav_widget_target, "SELECT option_value FROM wp_options WHERE option_name = 'widget_nav_menu'"),
+        ['allowed_classes' => false]
+    );
+    assert_same($nav_widget_result['status'], 'completed_with_conflicts', 'branch and main widget_nav_menu disagreement stays reviewable');
+    assert_same(smoke_scalar($nav_widget_target, 'SELECT name FROM wp_terms WHERE term_id = 18000270'), 'Branch Nav Widget Menu', 'nav widget conflict still merges the branch menu term');
+    assert_same(smoke_scalar($nav_widget_target, 'SELECT taxonomy FROM wp_term_taxonomy WHERE term_taxonomy_id = 18000272'), 'nav_menu', 'nav widget conflict still merges the branch menu taxonomy');
+    assert_same(smoke_scalar($nav_widget_target, 'SELECT post_title FROM wp_posts WHERE ID = 18000273'), 'Branch Nav Widget Item', 'nav widget conflict still merges the branch menu item post');
+    assert_same(smoke_scalar($nav_widget_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 18000273 AND meta_key = '_menu_item_object_id'"), '18000271', 'nav widget conflict still merges branch menu item page reference');
+    assert_same(smoke_scalar($nav_widget_target, 'SELECT name FROM wp_terms WHERE term_id = 19000270'), 'Main Nav Widget Menu', 'nav widget conflict preserves the main menu term');
+    assert_same($nav_widget_target_value_after[3]['nav_menu'] ?? null, 19000270, 'nav widget conflict keeps target widget menu before review');
+    assert_same(
+        (int)smoke_scalar($nav_widget_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_options' AND column_name = 'option_value' AND conflict_type = 'cell-conflict'"),
+        1,
+        'nav widget conflict records one serialized widget option conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($nav_widget_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_options' AND decision = 'target-wins'"),
+        1,
+        'nav widget conflict defaults widget option to target-wins before review'
+    );
+    assert_same(
+        (int)smoke_scalar($nav_widget_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_postmeta', 'wp_terms', 'wp_term_taxonomy', 'wp_term_relationships') AND decision = 'source-applied'"),
+        9,
+        'nav widget conflict audits all source menu graph inserts'
+    );
+
     $menu_edit_delete_base = $tmp . '/menu-edit-delete-base.sqlite';
     $menu_edit_delete_source = $tmp . '/menu-edit-delete-source.sqlite';
     $menu_edit_delete_target = $tmp . '/menu-edit-delete-target.sqlite';
@@ -1280,6 +1681,104 @@ try {
         'reusable block edit/delete defaults the edited source block to target-wins before review'
     );
 
+    $navigation_block_base = $tmp . '/navigation-block-base.sqlite';
+    $navigation_block_source = $tmp . '/navigation-block-source.sqlite';
+    $navigation_block_target = $tmp . '/navigation-block-target.sqlite';
+    $navigation_block_metadata = $tmp . '/.forkpress/cow/merge/navigation-block-metadata.sqlite';
+
+    smoke_create_posts_db($navigation_block_base);
+    copy($navigation_block_base, $navigation_block_source);
+    copy($navigation_block_base, $navigation_block_target);
+
+    $source_navigation_content = '<!-- wp:navigation-link {"label":"Branch Link","url":"https://example.com/branch"} /-->';
+    $source_navigation_page_content = '<!-- wp:paragraph --><p>Branch page before navigation</p><!-- /wp:paragraph -->' . "\n" .
+        '<!-- wp:navigation {"ref":18000071} /-->';
+    $target_navigation_content = '<!-- wp:navigation-link {"label":"Main Link","url":"https://example.com/main"} /-->';
+    $target_navigation_page_content = '<!-- wp:paragraph --><p>Main page before navigation</p><!-- /wp:paragraph -->' . "\n" .
+        '<!-- wp:navigation {"ref":19000071} /-->';
+
+    $db = smoke_open_db($navigation_block_source);
+    smoke_insert_post($db, 18000070, 'Branch Page With Navigation Block', $source_navigation_page_content, 'page', 'branch-page-with-navigation-block');
+    smoke_insert_post($db, 18000071, 'Branch Navigation Block', $source_navigation_content, 'wp_navigation', 'branch-navigation-block');
+    $db->close();
+
+    $db = smoke_open_db($navigation_block_target);
+    smoke_insert_post($db, 19000070, 'Main Page With Navigation Block', $target_navigation_page_content, 'page', 'main-page-with-navigation-block');
+    smoke_insert_post($db, 19000071, 'Main Navigation Block', $target_navigation_content, 'wp_navigation', 'main-navigation-block');
+    $db->close();
+
+    $navigation_block_result = cow_merge_databases($navigation_block_base, $navigation_block_source, $navigation_block_target, $navigation_block_metadata, 'feature-smoke-page-navigation-block', 'main');
+    assert_same($navigation_block_result['status'], 'completed', 'branch and main page-plus-navigation-block inserts complete cleanly');
+    assert_same((int)($navigation_block_result['conflicts'] ?? -1), 0, 'branch and main page-plus-navigation-block inserts do not create merge conflicts');
+    assert_same(smoke_scalar($navigation_block_target, 'SELECT post_type FROM wp_posts WHERE ID = 18000071'), 'wp_navigation', 'merged target includes the branch navigation block row');
+    assert_same(smoke_scalar($navigation_block_target, 'SELECT post_title FROM wp_posts WHERE ID = 18000070'), 'Branch Page With Navigation Block', 'merged target includes the branch page using a navigation block');
+    assert_same(smoke_scalar($navigation_block_target, 'SELECT post_content FROM wp_posts WHERE ID = 18000070'), $source_navigation_page_content, 'merged target preserves the branch page navigation block reference');
+    assert_same(smoke_scalar($navigation_block_target, 'SELECT post_type FROM wp_posts WHERE ID = 19000071'), 'wp_navigation', 'merged target preserves the main navigation block row');
+    assert_same(smoke_scalar($navigation_block_target, 'SELECT post_title FROM wp_posts WHERE ID = 19000070'), 'Main Page With Navigation Block', 'merged target preserves the main page using a navigation block');
+    assert_same(smoke_scalar($navigation_block_target, 'SELECT post_content FROM wp_posts WHERE ID = 19000070'), $target_navigation_page_content, 'merged target preserves the main page navigation block reference');
+    assert_same(
+        (int)smoke_scalar($navigation_block_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_posts'"),
+        0,
+        'page-plus-navigation-block smoke merge records no WordPress row conflicts'
+    );
+    assert_same(
+        (int)smoke_scalar($navigation_block_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'source-applied'"),
+        2,
+        'page-plus-navigation-block smoke merge audits the source page and navigation block inserts'
+    );
+    assert_same(
+        (int)smoke_scalar($navigation_block_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
+        2,
+        'page-plus-navigation-block smoke merge audits the target page and navigation block inserts'
+    );
+
+    $navigation_edit_delete_base = $tmp . '/navigation-edit-delete-base.sqlite';
+    $navigation_edit_delete_source = $tmp . '/navigation-edit-delete-source.sqlite';
+    $navigation_edit_delete_target = $tmp . '/navigation-edit-delete-target.sqlite';
+    $navigation_edit_delete_metadata = $tmp . '/.forkpress/cow/merge/navigation-edit-delete-metadata.sqlite';
+
+    smoke_create_posts_db($navigation_edit_delete_base);
+    $shared_navigation_content = '<!-- wp:navigation-link {"label":"Shared Link","url":"https://example.com/shared"} /-->';
+    $shared_navigation_page_content = '<!-- wp:paragraph --><p>Page before shared navigation</p><!-- /wp:paragraph -->' . "\n" .
+        '<!-- wp:navigation {"ref":17000141} /-->';
+    $target_without_navigation_content = '<!-- wp:paragraph --><p>Target removed the shared navigation</p><!-- /wp:paragraph -->';
+    $source_edited_navigation_content = '<!-- wp:navigation-link {"label":"Source Edited Link","url":"https://example.com/source"} /-->';
+
+    $db = smoke_open_db($navigation_edit_delete_base);
+    smoke_insert_post($db, 17000140, 'Shared Page With Navigation Block', $shared_navigation_page_content, 'page', 'shared-page-with-navigation-block');
+    smoke_insert_post($db, 17000141, 'Shared Navigation Block', $shared_navigation_content, 'wp_navigation', 'shared-navigation-block');
+    $db->close();
+    copy($navigation_edit_delete_base, $navigation_edit_delete_source);
+    copy($navigation_edit_delete_base, $navigation_edit_delete_target);
+
+    $db = smoke_open_db($navigation_edit_delete_source);
+    $stmt = $db->prepare("UPDATE wp_posts SET post_title = 'Source Edited Shared Navigation Block', post_content = :content WHERE ID = 17000141");
+    $stmt->bindValue(':content', $source_edited_navigation_content, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+
+    $db = smoke_open_db($navigation_edit_delete_target);
+    $stmt = $db->prepare('UPDATE wp_posts SET post_content = :content WHERE ID = 17000140');
+    $stmt->bindValue(':content', $target_without_navigation_content, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->exec('DELETE FROM wp_posts WHERE ID = 17000141');
+    $db->close();
+
+    $navigation_edit_delete_result = cow_merge_databases($navigation_edit_delete_base, $navigation_edit_delete_source, $navigation_edit_delete_target, $navigation_edit_delete_metadata, 'feature-smoke-navigation-block-edit-delete', 'main');
+    assert_same($navigation_edit_delete_result['status'], 'completed_with_conflicts', 'navigation block edit/delete graph stays reviewable');
+    assert_same((int)smoke_scalar($navigation_edit_delete_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 17000141'), 0, 'navigation block edit/delete preserves target block deletion before review');
+    assert_same(smoke_scalar($navigation_edit_delete_target, 'SELECT post_content FROM wp_posts WHERE ID = 17000140'), $target_without_navigation_content, 'navigation block edit/delete preserves target page cleanup before review');
+    assert_same(
+        (int)smoke_scalar($navigation_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_posts' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'navigation block edit/delete records the edited block delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($navigation_edit_delete_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-wins'"),
+        1,
+        'navigation block edit/delete defaults the edited source block to target-wins before review'
+    );
+
     $attachment_base_root = $tmp . '/attachment-base-root';
     $attachment_source_root = $tmp . '/attachment-source-root';
     $attachment_target_root = $tmp . '/attachment-target-root';
@@ -1404,6 +1903,391 @@ try {
         (int)smoke_scalar($attachment_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'target-kept'"),
         2,
         'page-plus-attachment smoke merge audits target upload files'
+    );
+
+    $site_icon_base_root = $tmp . '/site-icon-base-root';
+    $site_icon_source_root = $tmp . '/site-icon-source-root';
+    $site_icon_target_root = $tmp . '/site-icon-target-root';
+    $site_icon_base = $site_icon_base_root . '/wp-content/database/.ht.sqlite';
+    $site_icon_source = $site_icon_source_root . '/wp-content/database/.ht.sqlite';
+    $site_icon_target = $site_icon_target_root . '/wp-content/database/.ht.sqlite';
+    $site_icon_file_base = $tmp . '/.forkpress/cow/merge/file-bases/feature-smoke-site-icon.json';
+    $site_icon_metadata = $tmp . '/.forkpress/cow/merge/site-icon-metadata.sqlite';
+
+    mkdir(dirname($site_icon_base), 0777, true);
+    mkdir(dirname($site_icon_source), 0777, true);
+    mkdir(dirname($site_icon_target), 0777, true);
+    smoke_create_posts_db($site_icon_base);
+    $db = smoke_open_db($site_icon_base);
+    smoke_insert_option($db, 17000240, 'site_icon', '0');
+    $db->close();
+    copy($site_icon_base, $site_icon_source);
+    copy($site_icon_base, $site_icon_target);
+    cow_merge_capture_file_base($site_icon_base_root, $site_icon_file_base);
+
+    $source_site_icon_meta = serialize([
+        'file' => '2026/05/source-site-icon.png',
+        'width' => 512,
+        'height' => 512,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'source-site-icon-150x150.png',
+                'width' => 150,
+                'height' => 150,
+                'mime-type' => 'image/png',
+            ],
+        ],
+    ]);
+    $target_site_icon_meta = serialize([
+        'file' => '2026/05/main-site-icon.png',
+        'width' => 512,
+        'height' => 512,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'main-site-icon-150x150.png',
+                'width' => 150,
+                'height' => 150,
+                'mime-type' => 'image/png',
+            ],
+        ],
+    ]);
+
+    $db = smoke_open_db($site_icon_source);
+    smoke_insert_post($db, 18000240, 'source-site-icon.png', '', 'attachment', 'source-site-icon-png', 'inherit', 0, 'image/png', 'http://example.test/wp-content/uploads/2026/05/source-site-icon.png');
+    smoke_insert_postmeta($db, 18000241, 18000240, '_wp_attached_file', '2026/05/source-site-icon.png');
+    smoke_insert_postmeta($db, 18000242, 18000240, '_wp_attachment_metadata', $source_site_icon_meta);
+    smoke_update_option($db, 'site_icon', '18000240');
+    $db->close();
+    smoke_write_file($site_icon_source_root . '/wp-content/uploads/2026/05/source-site-icon.png', 'source site icon bytes');
+    smoke_write_file($site_icon_source_root . '/wp-content/uploads/2026/05/source-site-icon-150x150.png', 'source site icon thumbnail bytes');
+
+    $db = smoke_open_db($site_icon_target);
+    smoke_insert_post($db, 19000240, 'main-site-icon.png', '', 'attachment', 'main-site-icon-png', 'inherit', 0, 'image/png', 'http://example.test/wp-content/uploads/2026/05/main-site-icon.png');
+    smoke_insert_postmeta($db, 19000241, 19000240, '_wp_attached_file', '2026/05/main-site-icon.png');
+    smoke_insert_postmeta($db, 19000242, 19000240, '_wp_attachment_metadata', $target_site_icon_meta);
+    smoke_update_option($db, 'site_icon', '19000240');
+    $db->close();
+    smoke_write_file($site_icon_target_root . '/wp-content/uploads/2026/05/main-site-icon.png', 'main site icon bytes');
+    smoke_write_file($site_icon_target_root . '/wp-content/uploads/2026/05/main-site-icon-150x150.png', 'main site icon thumbnail bytes');
+
+    $site_icon_result = cow_merge_branch_state(
+        $site_icon_base,
+        $site_icon_source,
+        $site_icon_target,
+        $site_icon_metadata,
+        'feature-smoke-site-icon',
+        'main',
+        $site_icon_file_base,
+        $site_icon_source_root,
+        $site_icon_target_root
+    );
+    assert_same($site_icon_result['status'], 'completed_with_conflicts', 'branch and main site_icon disagreement stays reviewable');
+    assert_same(smoke_scalar($site_icon_target, 'SELECT post_type FROM wp_posts WHERE ID = 18000240'), 'attachment', 'site_icon conflict still merges the branch icon attachment row');
+    assert_same(smoke_scalar($site_icon_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 18000240 AND meta_key = '_wp_attached_file'"), '2026/05/source-site-icon.png', 'site_icon conflict still merges branch attached-file metadata');
+    assert_same(file_get_contents($site_icon_target_root . '/wp-content/uploads/2026/05/source-site-icon.png'), 'source site icon bytes', 'site_icon conflict still merges branch original icon file');
+    assert_same(file_get_contents($site_icon_target_root . '/wp-content/uploads/2026/05/source-site-icon-150x150.png'), 'source site icon thumbnail bytes', 'site_icon conflict still merges branch generated icon file');
+    assert_same(smoke_scalar($site_icon_target, 'SELECT post_type FROM wp_posts WHERE ID = 19000240'), 'attachment', 'site_icon conflict preserves the main icon attachment row');
+    assert_same(smoke_scalar($site_icon_target, "SELECT option_value FROM wp_options WHERE option_name = 'site_icon'"), '19000240', 'site_icon conflict keeps target scalar attachment option before review');
+    assert_same(file_get_contents($site_icon_target_root . '/wp-content/uploads/2026/05/main-site-icon.png'), 'main site icon bytes', 'site_icon conflict preserves main original icon file');
+    assert_same(
+        (int)smoke_scalar($site_icon_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_options' AND column_name = 'option_value' AND conflict_type = 'cell-conflict'"),
+        1,
+        'site_icon conflict records one scalar option-value conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($site_icon_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_options' AND decision = 'target-wins'"),
+        1,
+        'site_icon conflict defaults scalar option to target-wins before review'
+    );
+    assert_same(
+        (int)smoke_scalar($site_icon_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'source-applied'"),
+        1,
+        'site_icon conflict audits the source attachment row'
+    );
+    assert_same(
+        (int)smoke_scalar($site_icon_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_postmeta' AND decision = 'source-applied'"),
+        2,
+        'site_icon conflict audits the source attachment metadata rows'
+    );
+    assert_same(
+        (int)smoke_scalar(
+            $site_icon_metadata,
+            "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'source-applied' AND row_identity IN ('" .
+            SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/2026/05/source-site-icon.png')) . "', '" .
+            SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/2026/05/source-site-icon-150x150.png')) . "')"
+        ),
+        2,
+        'site_icon conflict audits the source upload files'
+    );
+
+    $custom_logo_base_root = $tmp . '/custom-logo-base-root';
+    $custom_logo_source_root = $tmp . '/custom-logo-source-root';
+    $custom_logo_target_root = $tmp . '/custom-logo-target-root';
+    $custom_logo_base = $custom_logo_base_root . '/wp-content/database/.ht.sqlite';
+    $custom_logo_source = $custom_logo_source_root . '/wp-content/database/.ht.sqlite';
+    $custom_logo_target = $custom_logo_target_root . '/wp-content/database/.ht.sqlite';
+    $custom_logo_file_base = $tmp . '/.forkpress/cow/merge/file-bases/feature-smoke-custom-logo.json';
+    $custom_logo_metadata = $tmp . '/.forkpress/cow/merge/custom-logo-metadata.sqlite';
+    $custom_logo_base_mods = serialize([
+        'color' => 'blue',
+        'custom_logo' => 0,
+        'nav_menu_locations' => [],
+    ]);
+    $custom_logo_source_mods = serialize([
+        'color' => 'blue',
+        'custom_logo' => 18000250,
+        'nav_menu_locations' => [],
+    ]);
+    $custom_logo_target_mods = serialize([
+        'color' => 'blue',
+        'custom_logo' => 19000250,
+        'nav_menu_locations' => [],
+    ]);
+
+    mkdir(dirname($custom_logo_base), 0777, true);
+    mkdir(dirname($custom_logo_source), 0777, true);
+    mkdir(dirname($custom_logo_target), 0777, true);
+    smoke_create_posts_db($custom_logo_base);
+    $db = smoke_open_db($custom_logo_base);
+    smoke_insert_option($db, 17000250, 'theme_mods_forkpress_logo', $custom_logo_base_mods);
+    $db->close();
+    copy($custom_logo_base, $custom_logo_source);
+    copy($custom_logo_base, $custom_logo_target);
+    cow_merge_capture_file_base($custom_logo_base_root, $custom_logo_file_base);
+
+    $source_custom_logo_meta = serialize([
+        'file' => '2026/05/source-custom-logo.png',
+        'width' => 640,
+        'height' => 240,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'source-custom-logo-150x150.png',
+                'width' => 150,
+                'height' => 150,
+                'mime-type' => 'image/png',
+            ],
+        ],
+    ]);
+    $target_custom_logo_meta = serialize([
+        'file' => '2026/05/main-custom-logo.png',
+        'width' => 640,
+        'height' => 240,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'main-custom-logo-150x150.png',
+                'width' => 150,
+                'height' => 150,
+                'mime-type' => 'image/png',
+            ],
+        ],
+    ]);
+
+    $db = smoke_open_db($custom_logo_source);
+    smoke_insert_post($db, 18000250, 'source-custom-logo.png', '', 'attachment', 'source-custom-logo-png', 'inherit', 0, 'image/png', 'http://example.test/wp-content/uploads/2026/05/source-custom-logo.png');
+    smoke_insert_postmeta($db, 18000251, 18000250, '_wp_attached_file', '2026/05/source-custom-logo.png');
+    smoke_insert_postmeta($db, 18000252, 18000250, '_wp_attachment_metadata', $source_custom_logo_meta);
+    smoke_update_option($db, 'theme_mods_forkpress_logo', $custom_logo_source_mods);
+    $db->close();
+    smoke_write_file($custom_logo_source_root . '/wp-content/uploads/2026/05/source-custom-logo.png', 'source custom logo bytes');
+    smoke_write_file($custom_logo_source_root . '/wp-content/uploads/2026/05/source-custom-logo-150x150.png', 'source custom logo thumbnail bytes');
+
+    $db = smoke_open_db($custom_logo_target);
+    smoke_insert_post($db, 19000250, 'main-custom-logo.png', '', 'attachment', 'main-custom-logo-png', 'inherit', 0, 'image/png', 'http://example.test/wp-content/uploads/2026/05/main-custom-logo.png');
+    smoke_insert_postmeta($db, 19000251, 19000250, '_wp_attached_file', '2026/05/main-custom-logo.png');
+    smoke_insert_postmeta($db, 19000252, 19000250, '_wp_attachment_metadata', $target_custom_logo_meta);
+    smoke_update_option($db, 'theme_mods_forkpress_logo', $custom_logo_target_mods);
+    $db->close();
+    smoke_write_file($custom_logo_target_root . '/wp-content/uploads/2026/05/main-custom-logo.png', 'main custom logo bytes');
+    smoke_write_file($custom_logo_target_root . '/wp-content/uploads/2026/05/main-custom-logo-150x150.png', 'main custom logo thumbnail bytes');
+
+    $custom_logo_result = cow_merge_branch_state(
+        $custom_logo_base,
+        $custom_logo_source,
+        $custom_logo_target,
+        $custom_logo_metadata,
+        'feature-smoke-custom-logo',
+        'main',
+        $custom_logo_file_base,
+        $custom_logo_source_root,
+        $custom_logo_target_root
+    );
+    $custom_logo_target_mods_after = unserialize(
+        (string)smoke_scalar($custom_logo_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_forkpress_logo'"),
+        ['allowed_classes' => false]
+    );
+    assert_same($custom_logo_result['status'], 'completed_with_conflicts', 'branch and main custom_logo disagreement stays reviewable');
+    assert_same(smoke_scalar($custom_logo_target, 'SELECT post_type FROM wp_posts WHERE ID = 18000250'), 'attachment', 'custom_logo conflict still merges the branch logo attachment row');
+    assert_same(smoke_scalar($custom_logo_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 18000250 AND meta_key = '_wp_attached_file'"), '2026/05/source-custom-logo.png', 'custom_logo conflict still merges branch attached-file metadata');
+    assert_same(file_get_contents($custom_logo_target_root . '/wp-content/uploads/2026/05/source-custom-logo.png'), 'source custom logo bytes', 'custom_logo conflict still merges branch original logo file');
+    assert_same(file_get_contents($custom_logo_target_root . '/wp-content/uploads/2026/05/source-custom-logo-150x150.png'), 'source custom logo thumbnail bytes', 'custom_logo conflict still merges branch generated logo file');
+    assert_same(smoke_scalar($custom_logo_target, 'SELECT post_type FROM wp_posts WHERE ID = 19000250'), 'attachment', 'custom_logo conflict preserves the main logo attachment row');
+    assert_same($custom_logo_target_mods_after['custom_logo'] ?? null, 19000250, 'custom_logo conflict keeps target theme mod before review');
+    assert_same(file_get_contents($custom_logo_target_root . '/wp-content/uploads/2026/05/main-custom-logo.png'), 'main custom logo bytes', 'custom_logo conflict preserves main original logo file');
+    assert_same(
+        (int)smoke_scalar($custom_logo_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_options' AND column_name = 'option_value' AND conflict_type = 'cell-conflict'"),
+        1,
+        'custom_logo conflict records one serialized theme-mod option conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($custom_logo_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_options' AND decision = 'target-wins'"),
+        1,
+        'custom_logo conflict defaults theme-mod option to target-wins before review'
+    );
+    assert_same(
+        (int)smoke_scalar($custom_logo_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'source-applied'"),
+        1,
+        'custom_logo conflict audits the source attachment row'
+    );
+    assert_same(
+        (int)smoke_scalar($custom_logo_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_postmeta' AND decision = 'source-applied'"),
+        2,
+        'custom_logo conflict audits the source attachment metadata rows'
+    );
+    assert_same(
+        (int)smoke_scalar(
+            $custom_logo_metadata,
+            "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'source-applied' AND row_identity IN ('" .
+            SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/2026/05/source-custom-logo.png')) . "', '" .
+            SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/2026/05/source-custom-logo-150x150.png')) . "')"
+        ),
+        2,
+        'custom_logo conflict audits the source upload files'
+    );
+
+    $media_widget_base_root = $tmp . '/media-widget-base-root';
+    $media_widget_source_root = $tmp . '/media-widget-source-root';
+    $media_widget_target_root = $tmp . '/media-widget-target-root';
+    $media_widget_base = $media_widget_base_root . '/wp-content/database/.ht.sqlite';
+    $media_widget_source = $media_widget_source_root . '/wp-content/database/.ht.sqlite';
+    $media_widget_target = $media_widget_target_root . '/wp-content/database/.ht.sqlite';
+    $media_widget_file_base = $tmp . '/.forkpress/cow/merge/file-bases/feature-smoke-media-widget.json';
+    $media_widget_metadata = $tmp . '/.forkpress/cow/merge/media-widget-metadata.sqlite';
+    $media_widget_base_value = serialize(['_multiwidget' => 1]);
+    $media_widget_source_value = serialize([
+        2 => [
+            'attachment_id' => 18000260,
+            'url' => 'http://example.test/wp-content/uploads/2026/05/source-media-widget.jpg',
+            'caption' => 'Source media widget',
+        ],
+        '_multiwidget' => 1,
+    ]);
+    $media_widget_target_value = serialize([
+        3 => [
+            'attachment_id' => 19000260,
+            'url' => 'http://example.test/wp-content/uploads/2026/05/main-media-widget.jpg',
+            'caption' => 'Main media widget',
+        ],
+        '_multiwidget' => 1,
+    ]);
+
+    mkdir(dirname($media_widget_base), 0777, true);
+    mkdir(dirname($media_widget_source), 0777, true);
+    mkdir(dirname($media_widget_target), 0777, true);
+    smoke_create_posts_db($media_widget_base);
+    $db = smoke_open_db($media_widget_base);
+    smoke_insert_option($db, 17000260, 'widget_media_image', $media_widget_base_value);
+    $db->close();
+    copy($media_widget_base, $media_widget_source);
+    copy($media_widget_base, $media_widget_target);
+    cow_merge_capture_file_base($media_widget_base_root, $media_widget_file_base);
+
+    $source_media_widget_meta = serialize([
+        'file' => '2026/05/source-media-widget.jpg',
+        'width' => 1024,
+        'height' => 768,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'source-media-widget-150x150.jpg',
+                'width' => 150,
+                'height' => 150,
+                'mime-type' => 'image/jpeg',
+            ],
+        ],
+    ]);
+    $target_media_widget_meta = serialize([
+        'file' => '2026/05/main-media-widget.jpg',
+        'width' => 1024,
+        'height' => 768,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'main-media-widget-150x150.jpg',
+                'width' => 150,
+                'height' => 150,
+                'mime-type' => 'image/jpeg',
+            ],
+        ],
+    ]);
+
+    $db = smoke_open_db($media_widget_source);
+    smoke_insert_post($db, 18000260, 'source-media-widget.jpg', '', 'attachment', 'source-media-widget-jpg', 'inherit', 0, 'image/jpeg', 'http://example.test/wp-content/uploads/2026/05/source-media-widget.jpg');
+    smoke_insert_postmeta($db, 18000261, 18000260, '_wp_attached_file', '2026/05/source-media-widget.jpg');
+    smoke_insert_postmeta($db, 18000262, 18000260, '_wp_attachment_metadata', $source_media_widget_meta);
+    smoke_update_option($db, 'widget_media_image', $media_widget_source_value);
+    $db->close();
+    smoke_write_file($media_widget_source_root . '/wp-content/uploads/2026/05/source-media-widget.jpg', 'source media widget image bytes');
+    smoke_write_file($media_widget_source_root . '/wp-content/uploads/2026/05/source-media-widget-150x150.jpg', 'source media widget thumbnail bytes');
+
+    $db = smoke_open_db($media_widget_target);
+    smoke_insert_post($db, 19000260, 'main-media-widget.jpg', '', 'attachment', 'main-media-widget-jpg', 'inherit', 0, 'image/jpeg', 'http://example.test/wp-content/uploads/2026/05/main-media-widget.jpg');
+    smoke_insert_postmeta($db, 19000261, 19000260, '_wp_attached_file', '2026/05/main-media-widget.jpg');
+    smoke_insert_postmeta($db, 19000262, 19000260, '_wp_attachment_metadata', $target_media_widget_meta);
+    smoke_update_option($db, 'widget_media_image', $media_widget_target_value);
+    $db->close();
+    smoke_write_file($media_widget_target_root . '/wp-content/uploads/2026/05/main-media-widget.jpg', 'main media widget image bytes');
+    smoke_write_file($media_widget_target_root . '/wp-content/uploads/2026/05/main-media-widget-150x150.jpg', 'main media widget thumbnail bytes');
+
+    $media_widget_result = cow_merge_branch_state(
+        $media_widget_base,
+        $media_widget_source,
+        $media_widget_target,
+        $media_widget_metadata,
+        'feature-smoke-media-widget',
+        'main',
+        $media_widget_file_base,
+        $media_widget_source_root,
+        $media_widget_target_root
+    );
+    $media_widget_target_value_after = unserialize(
+        (string)smoke_scalar($media_widget_target, "SELECT option_value FROM wp_options WHERE option_name = 'widget_media_image'"),
+        ['allowed_classes' => false]
+    );
+    assert_same($media_widget_result['status'], 'completed_with_conflicts', 'branch and main widget_media_image disagreement stays reviewable');
+    assert_same(smoke_scalar($media_widget_target, 'SELECT post_type FROM wp_posts WHERE ID = 18000260'), 'attachment', 'media widget conflict still merges the branch widget attachment row');
+    assert_same(smoke_scalar($media_widget_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 18000260 AND meta_key = '_wp_attached_file'"), '2026/05/source-media-widget.jpg', 'media widget conflict still merges branch attached-file metadata');
+    assert_same(file_get_contents($media_widget_target_root . '/wp-content/uploads/2026/05/source-media-widget.jpg'), 'source media widget image bytes', 'media widget conflict still merges branch original image file');
+    assert_same(file_get_contents($media_widget_target_root . '/wp-content/uploads/2026/05/source-media-widget-150x150.jpg'), 'source media widget thumbnail bytes', 'media widget conflict still merges branch generated image file');
+    assert_same(smoke_scalar($media_widget_target, 'SELECT post_type FROM wp_posts WHERE ID = 19000260'), 'attachment', 'media widget conflict preserves the main widget attachment row');
+    assert_same($media_widget_target_value_after[3]['attachment_id'] ?? null, 19000260, 'media widget conflict keeps target widget attachment before review');
+    assert_same(file_get_contents($media_widget_target_root . '/wp-content/uploads/2026/05/main-media-widget.jpg'), 'main media widget image bytes', 'media widget conflict preserves main original image file');
+    assert_same(
+        (int)smoke_scalar($media_widget_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_options' AND column_name = 'option_value' AND conflict_type = 'cell-conflict'"),
+        1,
+        'media widget conflict records one serialized widget option conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($media_widget_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_options' AND decision = 'target-wins'"),
+        1,
+        'media widget conflict defaults widget option to target-wins before review'
+    );
+    assert_same(
+        (int)smoke_scalar($media_widget_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'source-applied'"),
+        1,
+        'media widget conflict audits the source attachment row'
+    );
+    assert_same(
+        (int)smoke_scalar($media_widget_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_postmeta' AND decision = 'source-applied'"),
+        2,
+        'media widget conflict audits the source attachment metadata rows'
+    );
+    assert_same(
+        (int)smoke_scalar(
+            $media_widget_metadata,
+            "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'source-applied' AND row_identity IN ('" .
+            SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/2026/05/source-media-widget.jpg')) . "', '" .
+            SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/2026/05/source-media-widget-150x150.jpg')) . "')"
+        ),
+        2,
+        'media widget conflict audits the source upload files'
     );
 
     $attachment_edit_delete_base_root = $tmp . '/attachment-edit-delete-base-root';
@@ -2036,6 +2920,186 @@ try {
         'page-plus-media-text smoke merge audits target upload file'
     );
 
+    $media_refs_base_root = $tmp . '/media-refs-base-root';
+    $media_refs_source_root = $tmp . '/media-refs-source-root';
+    $media_refs_target_root = $tmp . '/media-refs-target-root';
+    $media_refs_base = $media_refs_base_root . '/wp-content/database/.ht.sqlite';
+    $media_refs_source = $media_refs_source_root . '/wp-content/database/.ht.sqlite';
+    $media_refs_target = $media_refs_target_root . '/wp-content/database/.ht.sqlite';
+    $media_refs_file_base = $tmp . '/.forkpress/cow/merge/file-bases/feature-smoke-page-media-refs.json';
+    $media_refs_metadata = $tmp . '/.forkpress/cow/merge/media-refs-metadata.sqlite';
+
+    mkdir(dirname($media_refs_base), 0777, true);
+    mkdir(dirname($media_refs_source), 0777, true);
+    mkdir(dirname($media_refs_target), 0777, true);
+    smoke_create_posts_db($media_refs_base);
+    copy($media_refs_base, $media_refs_source);
+    copy($media_refs_base, $media_refs_target);
+    cow_merge_capture_file_base($media_refs_base_root, $media_refs_file_base);
+
+    $media_ref_rows = [
+        [
+            'branch' => 'source',
+            'root' => $media_refs_source_root,
+            'db' => $media_refs_source,
+            'page_id' => 18000140,
+            'attachment_id' => 18000141,
+            'meta_id' => 18000142,
+            'block' => 'audio',
+            'title' => 'Branch Page With Audio Block',
+            'slug' => 'branch-page-with-audio-block',
+            'file' => '2026/05/source-audio.mp3',
+            'mime' => 'audio/mpeg',
+            'bytes' => 'source audio bytes',
+            'content' => '<!-- wp:audio {"id":18000141} --><figure class="wp-block-audio"><audio controls src="http://example.test/wp-content/uploads/2026/05/source-audio.mp3"></audio></figure><!-- /wp:audio -->',
+        ],
+        [
+            'branch' => 'source',
+            'root' => $media_refs_source_root,
+            'db' => $media_refs_source,
+            'page_id' => 18000150,
+            'attachment_id' => 18000151,
+            'meta_id' => 18000152,
+            'block' => 'cover',
+            'title' => 'Branch Page With Cover Block',
+            'slug' => 'branch-page-with-cover-block',
+            'file' => '2026/05/source-cover.jpg',
+            'mime' => 'image/jpeg',
+            'bytes' => 'source cover image bytes',
+            'content' => '<!-- wp:cover {"url":"http://example.test/wp-content/uploads/2026/05/source-cover.jpg","id":18000151,"dimRatio":50} --><div class="wp-block-cover"><span aria-hidden="true" class="wp-block-cover__background has-background-dim"></span><img class="wp-block-cover__image-background wp-image-18000151" alt="" src="http://example.test/wp-content/uploads/2026/05/source-cover.jpg"/><div class="wp-block-cover__inner-container"><!-- wp:paragraph --><p>Branch cover copy</p><!-- /wp:paragraph --></div></div><!-- /wp:cover -->',
+        ],
+        [
+            'branch' => 'source',
+            'root' => $media_refs_source_root,
+            'db' => $media_refs_source,
+            'page_id' => 18000160,
+            'attachment_id' => 18000161,
+            'meta_id' => 18000162,
+            'block' => 'video',
+            'title' => 'Branch Page With Video Block',
+            'slug' => 'branch-page-with-video-block',
+            'file' => '2026/05/source-video.mp4',
+            'mime' => 'video/mp4',
+            'bytes' => 'source video bytes',
+            'content' => '<!-- wp:video {"id":18000161} --><figure class="wp-block-video"><video controls src="http://example.test/wp-content/uploads/2026/05/source-video.mp4"></video></figure><!-- /wp:video -->',
+        ],
+        [
+            'branch' => 'target',
+            'root' => $media_refs_target_root,
+            'db' => $media_refs_target,
+            'page_id' => 19000140,
+            'attachment_id' => 19000141,
+            'meta_id' => 19000142,
+            'block' => 'audio',
+            'title' => 'Main Page With Audio Block',
+            'slug' => 'main-page-with-audio-block',
+            'file' => '2026/05/main-audio.mp3',
+            'mime' => 'audio/mpeg',
+            'bytes' => 'main audio bytes',
+            'content' => '<!-- wp:audio {"id":19000141} --><figure class="wp-block-audio"><audio controls src="http://example.test/wp-content/uploads/2026/05/main-audio.mp3"></audio></figure><!-- /wp:audio -->',
+        ],
+        [
+            'branch' => 'target',
+            'root' => $media_refs_target_root,
+            'db' => $media_refs_target,
+            'page_id' => 19000150,
+            'attachment_id' => 19000151,
+            'meta_id' => 19000152,
+            'block' => 'cover',
+            'title' => 'Main Page With Cover Block',
+            'slug' => 'main-page-with-cover-block',
+            'file' => '2026/05/main-cover.jpg',
+            'mime' => 'image/jpeg',
+            'bytes' => 'main cover image bytes',
+            'content' => '<!-- wp:cover {"url":"http://example.test/wp-content/uploads/2026/05/main-cover.jpg","id":19000151,"dimRatio":50} --><div class="wp-block-cover"><span aria-hidden="true" class="wp-block-cover__background has-background-dim"></span><img class="wp-block-cover__image-background wp-image-19000151" alt="" src="http://example.test/wp-content/uploads/2026/05/main-cover.jpg"/><div class="wp-block-cover__inner-container"><!-- wp:paragraph --><p>Main cover copy</p><!-- /wp:paragraph --></div></div><!-- /wp:cover -->',
+        ],
+        [
+            'branch' => 'target',
+            'root' => $media_refs_target_root,
+            'db' => $media_refs_target,
+            'page_id' => 19000160,
+            'attachment_id' => 19000161,
+            'meta_id' => 19000162,
+            'block' => 'video',
+            'title' => 'Main Page With Video Block',
+            'slug' => 'main-page-with-video-block',
+            'file' => '2026/05/main-video.mp4',
+            'mime' => 'video/mp4',
+            'bytes' => 'main video bytes',
+            'content' => '<!-- wp:video {"id":19000161} --><figure class="wp-block-video"><video controls src="http://example.test/wp-content/uploads/2026/05/main-video.mp4"></video></figure><!-- /wp:video -->',
+        ],
+    ];
+    foreach ([$media_refs_source, $media_refs_target] as $db_path) {
+        $db = smoke_open_db($db_path);
+        foreach ($media_ref_rows as $row) {
+            if ((string)$row['db'] !== $db_path) {
+                continue;
+            }
+            $guid = 'http://example.test/wp-content/uploads/' . $row['file'];
+            smoke_insert_post($db, (int)$row['page_id'], (string)$row['title'], (string)$row['content'], 'page', (string)$row['slug']);
+            smoke_insert_post($db, (int)$row['attachment_id'], basename((string)$row['file']), '', 'attachment', str_replace(['.', '/'], '-', basename((string)$row['file'])), 'inherit', (int)$row['page_id'], (string)$row['mime'], $guid);
+            smoke_insert_postmeta($db, (int)$row['meta_id'], (int)$row['attachment_id'], '_wp_attached_file', (string)$row['file']);
+            smoke_write_file((string)$row['root'] . '/wp-content/uploads/' . $row['file'], (string)$row['bytes']);
+        }
+        $db->close();
+    }
+
+    $media_refs_result = cow_merge_branch_state(
+        $media_refs_base,
+        $media_refs_source,
+        $media_refs_target,
+        $media_refs_metadata,
+        'feature-smoke-page-media-refs',
+        'main',
+        $media_refs_file_base,
+        $media_refs_source_root,
+        $media_refs_target_root
+    );
+    assert_same($media_refs_result['status'], 'completed', 'branch and main page-plus-audio-cover-video inserts complete cleanly');
+    assert_same((int)($media_refs_result['conflicts'] ?? -1), 0, 'branch and main page-plus-audio-cover-video inserts do not create merge conflicts');
+    foreach ($media_ref_rows as $row) {
+        $owner = (string)$row['branch'] === 'source' ? 'branch' : 'main';
+        assert_same(smoke_scalar($media_refs_target, 'SELECT post_content FROM wp_posts WHERE ID = ' . (int)$row['page_id']), (string)$row['content'], "merged target preserves $owner core/{$row['block']} block attachment reference");
+        assert_same(smoke_scalar($media_refs_target, 'SELECT post_type FROM wp_posts WHERE ID = ' . (int)$row['attachment_id']), 'attachment', "merged target includes $owner core/{$row['block']} attachment row");
+        assert_same((int)smoke_scalar($media_refs_target, 'SELECT post_parent FROM wp_posts WHERE ID = ' . (int)$row['attachment_id']), (int)$row['page_id'], "merged target keeps $owner core/{$row['block']} attachment parent page");
+        assert_same(smoke_scalar($media_refs_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = " . (int)$row['attachment_id'] . " AND meta_key = '_wp_attached_file'"), (string)$row['file'], "merged target includes $owner core/{$row['block']} attached-file metadata");
+        assert_same(file_get_contents($media_refs_target_root . '/wp-content/uploads/' . $row['file']), (string)$row['bytes'], "merged target includes $owner core/{$row['block']} upload file");
+    }
+    $source_media_ref_files = array_values(array_map(
+        fn(array $row): string => SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/' . $row['file'])),
+        array_filter($media_ref_rows, fn(array $row): bool => (string)$row['branch'] === 'source')
+    ));
+    assert_same(
+        (int)smoke_scalar($media_refs_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name IN ('wp_posts', 'wp_postmeta', '__files__')"),
+        0,
+        'page-plus-audio-cover-video smoke merge records no WordPress DB or file conflicts'
+    );
+    assert_same(
+        (int)smoke_scalar($media_refs_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'source-applied'"),
+        6,
+        'page-plus-audio-cover-video smoke merge audits the source page and attachment inserts'
+    );
+    assert_same(
+        (int)smoke_scalar($media_refs_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_postmeta' AND decision = 'source-applied'"),
+        3,
+        'page-plus-audio-cover-video smoke merge audits source attachment metadata inserts'
+    );
+    assert_same(
+        (int)smoke_scalar($media_refs_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'source-applied' AND row_identity IN ('" . implode("', '", $source_media_ref_files) . "')"),
+        3,
+        'page-plus-audio-cover-video smoke merge audits source upload files'
+    );
+    assert_same(
+        (int)smoke_scalar($media_refs_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_postmeta') AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
+        9,
+        'page-plus-audio-cover-video smoke merge audits target DB graph inserts'
+    );
+    assert_same(
+        (int)smoke_scalar($media_refs_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__files__' AND decision = 'target-kept'"),
+        3,
+        'page-plus-audio-cover-video smoke merge audits target upload files'
+    );
+
     $options_base = $tmp . '/options-base.sqlite';
     $options_source = $tmp . '/options-source.sqlite';
     $options_target = $tmp . '/options-target.sqlite';
@@ -2089,6 +3153,104 @@ try {
         'page-plus-options smoke merge audits all target graph inserts'
     );
 
+    $front_page_options_base = $tmp . '/front-page-options-base.sqlite';
+    $front_page_options_source = $tmp . '/front-page-options-source.sqlite';
+    $front_page_options_target = $tmp . '/front-page-options-target.sqlite';
+    $front_page_options_metadata = $tmp . '/.forkpress/cow/merge/front-page-options-metadata.sqlite';
+
+    smoke_create_posts_db($front_page_options_base);
+    $db = smoke_open_db($front_page_options_base);
+    smoke_insert_option($db, 17000220, 'show_on_front', 'page');
+    smoke_insert_option($db, 17000221, 'page_on_front', '1');
+    smoke_insert_option($db, 17000222, 'page_for_posts', '0');
+    $db->close();
+    copy($front_page_options_base, $front_page_options_source);
+    copy($front_page_options_base, $front_page_options_target);
+
+    $db = smoke_open_db($front_page_options_source);
+    smoke_insert_post($db, 18000220, 'Branch Front Page', 'Branch front page content', 'page', 'branch-front-page');
+    smoke_insert_post($db, 18000221, 'Branch Posts Page', 'Branch posts page content', 'page', 'branch-posts-page');
+    smoke_update_option($db, 'page_on_front', '18000220');
+    smoke_update_option($db, 'page_for_posts', '18000221');
+    $db->close();
+
+    $db = smoke_open_db($front_page_options_target);
+    smoke_insert_post($db, 19000220, 'Main Front Page', 'Main front page content', 'page', 'main-front-page');
+    smoke_insert_post($db, 19000221, 'Main Posts Page', 'Main posts page content', 'page', 'main-posts-page');
+    smoke_update_option($db, 'page_on_front', '19000220');
+    smoke_update_option($db, 'page_for_posts', '19000221');
+    $db->close();
+
+    $front_page_options_result = cow_merge_databases($front_page_options_base, $front_page_options_source, $front_page_options_target, $front_page_options_metadata, 'feature-smoke-front-page-options', 'main');
+    assert_same($front_page_options_result['status'], 'completed_with_conflicts', 'branch and main front/posts page option disagreement stays reviewable');
+    assert_same(smoke_scalar($front_page_options_target, 'SELECT post_title FROM wp_posts WHERE ID = 18000220'), 'Branch Front Page', 'front/posts option conflict still merges the branch front page row');
+    assert_same(smoke_scalar($front_page_options_target, 'SELECT post_title FROM wp_posts WHERE ID = 18000221'), 'Branch Posts Page', 'front/posts option conflict still merges the branch posts page row');
+    assert_same(smoke_scalar($front_page_options_target, 'SELECT post_title FROM wp_posts WHERE ID = 19000220'), 'Main Front Page', 'front/posts option conflict preserves the main front page row');
+    assert_same(smoke_scalar($front_page_options_target, 'SELECT post_title FROM wp_posts WHERE ID = 19000221'), 'Main Posts Page', 'front/posts option conflict preserves the main posts page row');
+    assert_same(smoke_scalar($front_page_options_target, "SELECT option_value FROM wp_options WHERE option_name = 'page_on_front'"), '19000220', 'front/posts option conflict keeps target front page option before review');
+    assert_same(smoke_scalar($front_page_options_target, "SELECT option_value FROM wp_options WHERE option_name = 'page_for_posts'"), '19000221', 'front/posts option conflict keeps target posts page option before review');
+    assert_same(
+        (int)smoke_scalar($front_page_options_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_options' AND column_name = 'option_value' AND conflict_type = 'cell-conflict'"),
+        2,
+        'front/posts option conflict records one option-value conflict per singleton option'
+    );
+    assert_same(
+        (int)smoke_scalar($front_page_options_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_options' AND decision = 'target-wins'"),
+        2,
+        'front/posts option conflict defaults singleton options to target-wins before review'
+    );
+    assert_same(
+        (int)smoke_scalar($front_page_options_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'source-applied'"),
+        2,
+        'front/posts option conflict audits the source page inserts'
+    );
+
+    $sticky_posts_base = $tmp . '/sticky-posts-base.sqlite';
+    $sticky_posts_source = $tmp . '/sticky-posts-source.sqlite';
+    $sticky_posts_target = $tmp . '/sticky-posts-target.sqlite';
+    $sticky_posts_metadata = $tmp . '/.forkpress/cow/merge/sticky-posts-metadata.sqlite';
+    $sticky_posts_base_value = serialize([1]);
+    $sticky_posts_source_value = serialize([18000230]);
+    $sticky_posts_target_value = serialize([19000230]);
+
+    smoke_create_posts_db($sticky_posts_base);
+    $db = smoke_open_db($sticky_posts_base);
+    smoke_insert_option($db, 17000230, 'sticky_posts', $sticky_posts_base_value);
+    $db->close();
+    copy($sticky_posts_base, $sticky_posts_source);
+    copy($sticky_posts_base, $sticky_posts_target);
+
+    $db = smoke_open_db($sticky_posts_source);
+    smoke_insert_post($db, 18000230, 'Branch Sticky Post', 'Branch sticky post content', 'post', 'branch-sticky-post');
+    smoke_update_option($db, 'sticky_posts', $sticky_posts_source_value);
+    $db->close();
+
+    $db = smoke_open_db($sticky_posts_target);
+    smoke_insert_post($db, 19000230, 'Main Sticky Post', 'Main sticky post content', 'post', 'main-sticky-post');
+    smoke_update_option($db, 'sticky_posts', $sticky_posts_target_value);
+    $db->close();
+
+    $sticky_posts_result = cow_merge_databases($sticky_posts_base, $sticky_posts_source, $sticky_posts_target, $sticky_posts_metadata, 'feature-smoke-sticky-posts', 'main');
+    assert_same($sticky_posts_result['status'], 'completed_with_conflicts', 'branch and main sticky_posts disagreement stays reviewable');
+    assert_same(smoke_scalar($sticky_posts_target, 'SELECT post_title FROM wp_posts WHERE ID = 18000230'), 'Branch Sticky Post', 'sticky_posts option conflict still merges the branch sticky post row');
+    assert_same(smoke_scalar($sticky_posts_target, 'SELECT post_title FROM wp_posts WHERE ID = 19000230'), 'Main Sticky Post', 'sticky_posts option conflict preserves the main sticky post row');
+    assert_same(smoke_scalar($sticky_posts_target, "SELECT option_value FROM wp_options WHERE option_name = 'sticky_posts'"), $sticky_posts_target_value, 'sticky_posts option conflict keeps target serialized post list before review');
+    assert_same(
+        (int)smoke_scalar($sticky_posts_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_options' AND column_name = 'option_value' AND conflict_type = 'cell-conflict'"),
+        1,
+        'sticky_posts option conflict records one serialized option-value conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($sticky_posts_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_options' AND decision = 'target-wins'"),
+        1,
+        'sticky_posts option conflict defaults serialized option to target-wins before review'
+    );
+    assert_same(
+        (int)smoke_scalar($sticky_posts_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'source-applied'"),
+        1,
+        'sticky_posts option conflict audits the source sticky post insert'
+    );
+
     $options_edit_delete_base = $tmp . '/options-edit-delete-base.sqlite';
     $options_edit_delete_source = $tmp . '/options-edit-delete-source.sqlite';
     $options_edit_delete_target = $tmp . '/options-edit-delete-target.sqlite';
@@ -2127,6 +3289,17 @@ try {
     $options_contract_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts']);
     assert_same(count($options_contract_audit['conflicts']), 2, 'conflict audit returns both option edit/delete conflicts');
     $options_contract_conflict_id = (int)$options_contract_audit['conflicts'][0]['id'];
+    $options_contract_conflict_key = (string)$options_contract_audit['conflicts'][0]['conflict_key'];
+    $unreviewed_filter_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['lifecycle_state' => 'unreviewed']);
+    assert_same($unreviewed_filter_audit['filters']['records'], 'conflicts', 'lifecycle-state filter defaults to conflict records');
+    assert_same(count($unreviewed_filter_audit['conflicts']), 2, 'lifecycle-state filter returns unreviewed conflicts');
+    $invalid_lifecycle_filter_message = null;
+    try {
+        cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'decisions', 'lifecycle_state' => 'unreviewed']);
+    } catch (Throwable $e) {
+        $invalid_lifecycle_filter_message = $e->getMessage();
+    }
+    assert_same(str_contains((string)$invalid_lifecycle_filter_message, '--lifecycle-state can only be combined with --records conflicts or conflict-events'), true, 'lifecycle-state filter rejects non-conflict records');
     foreach ($options_contract_audit['conflicts'] as $contract_conflict) {
         assert_same($contract_conflict['conflict_class'], 'row', 'row delete conflict advertises row class');
         assert_same($contract_conflict['resolution_strategy'], 'row-choice', 'row delete conflict advertises row choice strategy');
@@ -2148,6 +3321,12 @@ try {
     assert_same((int)$pending_audit['conflicts'][0]['event_count'], 2, 'pending review appends a conflict lifecycle event');
     assert_same($pending_audit['conflicts'][0]['latest_event_type'], 'review-pending', 'pending review advertises latest conflict event');
     assert_same($pending_audit['conflicts'][0]['latest_event_lifecycle_state'], 'deferred', 'pending review advertises latest event lifecycle state');
+    $deferred_filter_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts', 'lifecycle_state' => 'deferred']);
+    assert_same(count($deferred_filter_audit['conflicts']), 1, 'lifecycle-state filter returns deferred conflicts');
+    assert_same((int)$deferred_filter_audit['conflicts'][0]['id'], $options_contract_conflict_id, 'deferred lifecycle filter returns the reviewed conflict');
+    $still_unreviewed_filter_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts', 'lifecycle_state' => 'unreviewed']);
+    assert_same(count($still_unreviewed_filter_audit['conflicts']), 1, 'lifecycle-state filter keeps other conflicts unreviewed');
+    assert_same((int)$still_unreviewed_filter_audit['conflicts'][0]['id'] !== $options_contract_conflict_id, true, 'unreviewed lifecycle filter excludes the deferred conflict');
 
     cow_merge_review_record($options_edit_delete_metadata, 'conflict', $options_contract_conflict_id, 'needs-action', 'Revalidate option conflict before resolving.', 'cow-smoke');
     $needs_action_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts']);
@@ -2156,14 +3335,28 @@ try {
     assert_same((int)$needs_action_audit['conflicts'][0]['event_count'], 3, 'needs-action review appends a conflict lifecycle event');
     assert_same($needs_action_audit['conflicts'][0]['latest_event_type'], 'review-needs-action', 'needs-action review advertises latest conflict event');
     assert_same($needs_action_audit['conflicts'][0]['latest_event_lifecycle_state'], 'needs-action', 'needs-action review advertises latest event lifecycle state');
+    $needs_action_filter_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts', 'lifecycle_state' => 'needs-action']);
+    assert_same((int)$needs_action_filter_audit['conflicts'][0]['id'], $options_contract_conflict_id, 'lifecycle-state filter returns needs-action conflicts');
 
-    cow_merge_review_record($options_edit_delete_metadata, 'conflict', $options_contract_conflict_id, 'reviewed', 'Reviewed option conflict.', 'cow-smoke');
+    $reviewed_cli = smoke_run_merge_cli([
+        'review-record',
+        '--metadata-db', $options_edit_delete_metadata,
+        '--record', 'conflict',
+        '--conflict-key', $options_contract_conflict_key,
+        '--run', (string)$options_edit_delete_result['run_id'],
+        '--status', 'reviewed',
+        '--note', 'Reviewed option conflict.',
+        '--reviewer', 'cow-smoke',
+    ]);
+    assert_same($reviewed_cli['status'], 0, 'review-record CLI records review status by conflict key: ' . $reviewed_cli['output']);
     $reviewed_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts']);
     assert_same($reviewed_audit['conflicts'][0]['lifecycle_state'], 'reviewed', 'reviewed conflict advertises reviewed lifecycle state');
     assert_same($reviewed_audit['conflicts'][0]['next_action'], 'resolve', 'reviewed generic conflict advertises resolve next action');
     assert_same((int)$reviewed_audit['conflicts'][0]['event_count'], 4, 'reviewed note appends a conflict lifecycle event');
     assert_same($reviewed_audit['conflicts'][0]['latest_event_type'], 'review-reviewed', 'reviewed conflict advertises latest conflict event');
     assert_same($reviewed_audit['conflicts'][0]['latest_event_lifecycle_state'], 'reviewed', 'reviewed conflict advertises latest event lifecycle state');
+    $reviewed_filter_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts', 'lifecycle_state' => 'reviewed']);
+    assert_same((int)$reviewed_filter_audit['conflicts'][0]['id'], $options_contract_conflict_id, 'lifecycle-state filter returns reviewed conflicts');
 
     $validated_resolution = cow_merge_resolve_conflict($options_edit_delete_metadata, $options_contract_conflict_id, 'target', false, 'Validate target option deletion.', 'cow-smoke');
     assert_same((int)($validated_resolution['resolution_id'] ?? 0) > 0, true, 'validation-only resolution records a durable resolution id');
@@ -2176,16 +3369,19 @@ try {
     assert_same((int)$validated_audit['conflicts'][0]['latest_resolution_applied'], 0, 'validation-only resolution records unapplied resolution');
     assert_same($validated_audit['conflicts'][0]['latest_event_type'], 'resolution-validated', 'validation-only resolution advertises latest validation event');
     assert_same($validated_audit['conflicts'][0]['latest_event_lifecycle_state'], 'validated', 'validation-only resolution advertises latest event lifecycle state');
+    $validated_filter_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts', 'lifecycle_state' => 'validated']);
+    assert_same((int)$validated_filter_audit['conflicts'][0]['id'], $options_contract_conflict_id, 'lifecycle-state filter returns validated conflicts');
 
     $apply_reviewed_cli = smoke_run_merge_cli([
         'resolve-conflict',
         '--metadata-db', $options_edit_delete_metadata,
-        '--id', (string)$options_contract_conflict_id,
+        '--conflict-key', $options_contract_conflict_key,
+        '--run', (string)$options_edit_delete_result['run_id'],
         '--apply-reviewed',
         '--note', 'Keep target option deletion.',
         '--reviewer', 'cow-smoke',
     ]);
-    assert_same($apply_reviewed_cli['status'], 0, 'apply-reviewed CLI applies the latest validated choice: ' . $apply_reviewed_cli['output']);
+    assert_same($apply_reviewed_cli['status'], 0, 'apply-reviewed CLI applies the latest validated choice by conflict key: ' . $apply_reviewed_cli['output']);
     assert_same(str_contains($apply_reviewed_cli['output'], 'choice:    target'), true, 'apply-reviewed CLI reports the validated target choice');
     $resolved_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts']);
     assert_same($resolved_audit['conflicts'][0]['lifecycle_state'], 'resolved', 'applied resolution advertises resolved lifecycle state');
@@ -2198,6 +3394,15 @@ try {
     assert_same($resolved_audit['conflicts'][0]['latest_event_type'], 'resolution-applied', 'resolved conflict advertises latest resolution event');
     assert_same($resolved_audit['conflicts'][0]['latest_event_lifecycle_state'], 'resolved', 'resolved conflict advertises latest event lifecycle state');
     assert_same($resolved_audit['conflicts'][0]['latest_event_actor'], 'cow-smoke', 'resolved conflict advertises latest event actor');
+    $resolved_filter_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts', 'lifecycle_state' => 'resolved']);
+    assert_same((int)$resolved_filter_audit['conflicts'][0]['id'], $options_contract_conflict_id, 'lifecycle-state filter returns resolved conflicts');
+    $lifecycle_group_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts', 'group_by' => 'lifecycle']);
+    $lifecycle_counts = [];
+    foreach ($lifecycle_group_audit['conflict_groups'] as $group) {
+        $lifecycle_counts[$group['group_key']] = (int)$group['conflict_count'];
+    }
+    assert_same($lifecycle_counts['resolved'] ?? 0, 1, 'lifecycle grouping counts resolved conflicts');
+    assert_same($lifecycle_counts['unreviewed'] ?? 0, 1, 'lifecycle grouping counts still-unreviewed conflicts');
     $resolved_regression_message = null;
     try {
         cow_merge_resolve_conflict(
@@ -2227,9 +3432,90 @@ try {
         1,
         'conflict event audit can be limited to one conflict history'
     );
+    $resolved_event_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 6, ['records' => 'conflict-events', 'lifecycle_state' => 'resolved']);
+    assert_same(count($resolved_event_audit['conflict_events']), 1, 'lifecycle-state filter returns matching conflict lifecycle events');
+    assert_same($resolved_event_audit['conflict_events'][0]['event_type'], 'resolution-applied', 'resolved lifecycle event filter returns the applied-resolution event');
+    assert_same((int)$resolved_event_audit['conflict_events'][0]['conflict_id'], $options_contract_conflict_id, 'resolved lifecycle event filter keeps the selected conflict id');
+    assert_same(
+        str_contains(cow_merge_audit_filter_label($resolved_event_audit['filters']), 'lifecycle-state=resolved'),
+        true,
+        'lifecycle-state filter is visible in text audit filters'
+    );
     assert_same((int)$event_audit['conflict_events'][0]['conflict_id'], $options_contract_conflict_id, 'conflict event audit exposes the conflict id');
     assert_same($event_audit['conflict_events'][0]['table_name'], 'wp_options', 'conflict event audit exposes the conflict table');
     assert_same($event_audit['conflict_events'][0]['conflict_type'], 'row-target-deleted', 'conflict event audit exposes the conflict type');
+
+    $fk_blocked_base = $tmp . '/fk-blocked-source-base.sqlite';
+    $fk_blocked_source = $tmp . '/fk-blocked-source-source.sqlite';
+    $fk_blocked_target = $tmp . '/fk-blocked-source-target.sqlite';
+    $fk_blocked_metadata = $tmp . '/.forkpress/cow/merge/fk-blocked-source-metadata.sqlite';
+
+    smoke_create_posts_db($fk_blocked_base);
+    $db = smoke_open_db($fk_blocked_base);
+    $db->exec('CREATE TABLE plugin_smoke_fk_parents (id INTEGER PRIMARY KEY, label TEXT)');
+    $db->exec('CREATE TABLE plugin_smoke_fk_children (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES plugin_smoke_fk_parents(id), label TEXT)');
+    $db->exec("INSERT INTO plugin_smoke_fk_parents (id, label) VALUES (1, 'base parent')");
+    $db->close();
+    copy($fk_blocked_base, $fk_blocked_source);
+    copy($fk_blocked_base, $fk_blocked_target);
+
+    $db = smoke_open_db($fk_blocked_source);
+    $db->exec('DELETE FROM plugin_smoke_fk_parents WHERE id = 1');
+    $db->close();
+
+    $db = smoke_open_db($fk_blocked_target);
+    $db->exec("UPDATE plugin_smoke_fk_parents SET label = 'target parent edit' WHERE id = 1");
+    $db->exec("INSERT INTO plugin_smoke_fk_children (id, parent_id, label) VALUES (20, 1, 'target child blocks source delete')");
+    $db->close();
+
+    $fk_blocked_result = cow_merge_databases($fk_blocked_base, $fk_blocked_source, $fk_blocked_target, $fk_blocked_metadata, 'feature-smoke-fk-blocked-source', 'main');
+    assert_same($fk_blocked_result['status'], 'completed_with_conflicts', 'foreign-key smoke source delete is held for review while target has children');
+    assert_same((int)smoke_scalar($fk_blocked_target, 'SELECT COUNT(*) FROM plugin_smoke_fk_parents WHERE id = 1'), 1, 'foreign-key smoke keeps target parent before source delete review');
+    $fk_blocked_conflict_id = (int)smoke_scalar($fk_blocked_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_smoke_fk_parents' AND conflict_type = 'row-source-deleted' ORDER BY id DESC LIMIT 1");
+    $fk_blocked_audit = cow_merge_audit_report($fk_blocked_metadata, (int)$fk_blocked_result['run_id'], 10, ['records' => 'conflicts']);
+    $fk_blocked_audit_rows = [];
+    foreach ($fk_blocked_audit['conflicts'] as $row) {
+        $fk_blocked_audit_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $fk_blocked_audit_rows[$fk_blocked_conflict_id]['resolution_choices'],
+        ['target'],
+        'foreign-key smoke audit hides source while target children still reference the row'
+    );
+    assert_same(
+        str_contains((string)($fk_blocked_audit_rows[$fk_blocked_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'referenced by plugin_smoke_fk_children(parent_id)'),
+        true,
+        'foreign-key smoke audit explains the target child blocker'
+    );
+    $fk_blocked_source_error = null;
+    try {
+        cow_merge_resolve_conflict($fk_blocked_metadata, $fk_blocked_conflict_id, 'source', true, 'Try blocked source delete.', 'cow-smoke');
+    } catch (Throwable $e) {
+        $fk_blocked_source_error = $e->getMessage();
+    }
+    assert_same(
+        str_contains((string)$fk_blocked_source_error, 'resolution choice source is blocked'),
+        true,
+        'foreign-key smoke resolver rejects blocked source before mutation'
+    );
+    assert_same((int)smoke_scalar($fk_blocked_target, 'SELECT COUNT(*) FROM plugin_smoke_fk_parents WHERE id = 1'), 1, 'foreign-key smoke blocked source leaves target parent untouched');
+
+    $db = smoke_open_db($fk_blocked_target);
+    $db->exec('DELETE FROM plugin_smoke_fk_children WHERE parent_id = 1');
+    $db->close();
+    $fk_unblocked_audit = cow_merge_audit_report($fk_blocked_metadata, (int)$fk_blocked_result['run_id'], 10, ['records' => 'conflicts']);
+    $fk_unblocked_audit_rows = [];
+    foreach ($fk_unblocked_audit['conflicts'] as $row) {
+        $fk_unblocked_audit_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $fk_unblocked_audit_rows[$fk_blocked_conflict_id]['resolution_choices'],
+        ['source', 'target'],
+        'foreign-key smoke audit advertises source after target children are removed'
+    );
+    $fk_source_resolution = cow_merge_resolve_conflict($fk_blocked_metadata, $fk_blocked_conflict_id, 'source', true, 'Apply source delete after child review.', 'cow-smoke');
+    assert_same($fk_source_resolution['status'], 'applied', 'foreign-key smoke applies source after blockers are cleared');
+    assert_same((int)smoke_scalar($fk_blocked_target, 'SELECT COUNT(*) FROM plugin_smoke_fk_parents WHERE id = 1'), 0, 'foreign-key smoke source delete removes the parent after review');
 
     $plugin_contract = cow_merge_conflict_resolution_contract('__plugins__', 'plugin-demo-finding');
     assert_same($plugin_contract['class'], 'plugin', 'plugin conflicts advertise plugin class');
@@ -2240,6 +3526,7 @@ try {
     $schema_contract = cow_merge_conflict_resolution_contract('plugin_items', 'schema-source-added-view');
     assert_same($schema_contract['class'], 'schema', 'schema conflicts advertise schema class');
     assert_same($schema_contract['choices'], ['source', 'target'], 'schema conflicts advertise source and target choices');
+    assert_same($schema_contract['blocked_choices'], [], 'schema conflicts advertise no blocked choices by default');
     assert_same($schema_contract['after_revalidate'], false, 'schema conflicts do not advertise after-revalidate support yet');
 } finally {
     smoke_remove_tree($tmp);

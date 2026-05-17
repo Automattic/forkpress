@@ -109,6 +109,7 @@ function create_explicit_term_graph_db(string $path): void {
     $db->exec('CREATE TABLE wp_termmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, term_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
     $db->exec('CREATE TABLE wp_term_taxonomy (term_taxonomy_id INTEGER PRIMARY KEY AUTOINCREMENT, term_id INTEGER NOT NULL, taxonomy TEXT NOT NULL, description TEXT NOT NULL DEFAULT "", parent INTEGER NOT NULL DEFAULT 0, count INTEGER NOT NULL DEFAULT 0)');
     $db->exec('CREATE TABLE wp_term_relationships (object_id INTEGER NOT NULL, term_taxonomy_id INTEGER NOT NULL, term_order INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (object_id, term_taxonomy_id))');
+    $db->exec('CREATE TABLE wp_options (option_id INTEGER PRIMARY KEY AUTOINCREMENT, option_name TEXT NOT NULL, option_value TEXT NOT NULL, autoload TEXT NOT NULL DEFAULT "yes")');
     $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status) VALUES (1, 'Base term relationship post', 'Base content', 'publish')");
     $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status) VALUES (2, 'Base updated term relationship post', 'Base content', 'publish')");
     $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (1, 'Base term', 'base-term')");
@@ -492,6 +493,10 @@ try {
     $term_graph_source_db->exec("UPDATE wp_term_taxonomy SET term_id = 2 WHERE term_taxonomy_id = 1");
     $term_graph_source_db->exec("INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (1, $term_graph_taxonomy_id, 0)");
     $term_graph_source_db->exec("UPDATE wp_term_relationships SET term_taxonomy_id = $term_graph_taxonomy_id WHERE object_id = 2 AND term_taxonomy_id = 1");
+    $term_theme_mods = SQLite3::escapeString(serialize(['nav_menu_locations' => ['primary' => 2]]));
+    $term_graph_source_db->exec("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('theme_mods_explicit_term', '$term_theme_mods', 'yes')");
+    $term_nav_widget = SQLite3::escapeString(serialize([2 => ['nav_menu' => 2]]));
+    $term_graph_source_db->exec("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_nav_menu', '$term_nav_widget', 'yes')");
     $term_graph_source_db->close();
 
     $term_graph_result = cow_merge_databases($term_graph_base, $term_graph_source, $term_graph_target, $term_graph_metadata, 'feature-explicit-term-graph', 'main');
@@ -532,6 +537,11 @@ try {
         'updated term relationships behind a held explicit WordPress term taxonomy are not applied automatically'
     );
     assert_same(
+        (int)scalar($term_graph_target, "SELECT COUNT(*) FROM wp_options WHERE option_name IN ('theme_mods_explicit_term', 'widget_nav_menu')"),
+        0,
+        'serialized menu option refs behind a held explicit WordPress term are not applied automatically'
+    );
+    assert_same(
         (int)scalar($term_graph_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-explicit-term-graph' AND c.table_name = 'wp_terms' AND c.conflict_type = 'row-target-constraint'"),
         1,
         'out-of-band explicit WordPress term records a review conflict'
@@ -551,6 +561,11 @@ try {
         3,
         'term relationships behind a held explicit WordPress term taxonomy record review conflicts'
     );
+    assert_same(
+        (int)scalar($term_graph_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-explicit-term-graph' AND c.table_name = 'wp_options' AND c.conflict_type = 'row-target-constraint'"),
+        2,
+        'serialized menu option refs behind a held explicit WordPress term record review conflicts'
+    );
     $term_meta_reason = (string)scalar($term_graph_metadata, "SELECT reason FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-explicit-term-graph' AND d.table_name = 'wp_termmeta' AND d.decision = 'target-wins' ORDER BY d.id DESC LIMIT 1");
     assert_true(
         str_contains($term_meta_reason, 'outside the source branch ID band') && str_contains($term_meta_reason, 'wp_terms'),
@@ -564,6 +579,10 @@ try {
     assert_true(
         (int)scalar($term_graph_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-explicit-term-graph' AND d.table_name = 'wp_term_relationships' AND d.decision = 'target-wins' AND d.reason LIKE '%outside the source branch ID band%' AND d.reason LIKE '%wp_terms%'") >= 1,
         'term relationship conflict explains that it is held behind the explicit WordPress term graph'
+    );
+    assert_true(
+        (int)scalar($term_graph_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-explicit-term-graph' AND d.table_name = 'wp_options' AND d.decision = 'target-wins' AND d.reason LIKE '%outside the source branch ID band%' AND d.reason LIKE '%wp_terms%'") >= 2,
+        'serialized menu option conflicts explain that they are held behind the explicit WordPress term graph'
     );
 } finally {
     remove_tree($tmp);

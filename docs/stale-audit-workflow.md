@@ -33,14 +33,27 @@ from silently overwriting newer target work.
 forkpress branch revalidate-reviews
 forkpress branch revalidate-reviews --run 12 --reviewer alice
 forkpress branch revalidate-reviews --format json
+forkpress branch revalidate-reviews --run 12 --quiet
 forkpress branch merge-audit --revalidate --run 12 --reviewer alice
 forkpress branch merge-audit --review --review-status needs-action
+forkpress branch merge-audit --records conflicts --revalidation-class compatible-target-drift
+forkpress branch merge-audit --records conflicts --latest-revalidation-status target-drifted
+forkpress branch merge-audit --records conflicts --group-by latest-revalidation-status
+forkpress branch merge-audit --records conflicts --stale-status stale
+forkpress branch merge-audit --records conflicts --group-by stale-status
 ```
 
 The command does not mutate the target branch. It only writes review metadata in
 the merge metadata database. Fresh reviewed conflicts stay reviewed. Stale or
 errored reviewed conflicts are reopened as `needs-action` with a note that
 preserves the prior reviewer, status, and note text.
+The text and JSON summaries include `needs_action_conflicts`, plus separate
+`carried_conflicts` and `already_needs_action_conflicts` lists. Each entry
+names the conflict id, run id, object, classifier, drift reason, revalidation
+record, and replacement conflict id when one exists. That makes the next review
+queue explicit without requiring a second query just to discover which conflict
+ids were reopened. Use `--quiet` for automation that only wants the metadata
+mutation and exit status.
 The same transition is also recorded in `merge_conflict_events` as a
 `revalidation-required` event linked to the `merge_revalidations` row, so
 `merge-audit --records conflict-events` can reconstruct the reviewed ->
@@ -78,17 +91,52 @@ validator conflict row, so audit output can point reviewers at the exact
 validator record that superseded their prior review. These classes and links
 are audit metadata only. They do not make stale reviews apply automatically.
 
+Audit output also exposes the latest recorded revalidation as first-class
+metadata: `latest_revalidation_id`, `latest_revalidation_class`,
+`latest_revalidation_status`, `latest_revalidation_reason`,
+`latest_revalidation_at`, and, when applicable,
+`latest_revalidation_replacement_conflict_id`. The status is recomputed against
+the current source and target payloads every time audit output is generated:
+
+- `none`: no revalidation record exists for this conflict.
+- `current`: the current source and target payloads still match the latest
+  revalidation guard.
+- `source-drifted`: the source payload changed after the latest revalidation.
+- `target-drifted`: the target payload changed after the latest revalidation.
+- `source-and-target-drifted`: both sides changed after the latest
+  revalidation.
+- `unknown`: the current payloads or recorded hashes are not sufficient to
+  prove a current/drifted answer.
+
+Use `merge-audit --latest-revalidation-status <status>` to find conflicts whose
+last `--after-revalidate` guard is still current or has gone stale again. Use
+`--group-by latest-revalidation-status` for queue summaries. This is different
+from `--revalidation-class`: the class says what the last revalidation found at
+the time it ran, while the latest status says whether that recorded guard still
+matches the live source/target state now.
+
+Use `merge-audit --stale-status fresh|stale|error|unknown` to query the live
+pre-revalidation staleness that audit rows already expose, and
+`--group-by stale-status` to summarize the current conflict queue without
+client-side filtering. This is useful before deciding whether to revalidate
+reviewed conflicts or resolve still-fresh ones.
+
 Schema index, view, trigger, dropped-table restore, and table rebuild conflicts
 now record current source/target SQL when revalidation finds drift and carry
-reviewed conflicts back to `needs-action`. They remain `unclassified`: treating
-changed DDL as compatible source drift requires a schema-specific planner that
-can prove the same dependency graph and target preconditions still hold.
+reviewed conflicts back to `needs-action`. Source-added index, view, and
+trigger conflicts can be classified as `compatible-schema-*-target-drift` when
+the source object still matches review, the original target had no same-name
+object, target drifted to a same-name object, and a dry-run source replacement
+validates over the current target. Other schema drift remains `unclassified`:
+treating changed DDL as compatible source drift requires a schema-specific
+planner that can prove the same dependency graph and target preconditions still
+hold.
 Table rebuild conflicts also record rebuild-plan evidence for direct
 indexes/triggers, dependent views, and dependent view triggers. That closes the
 specific stale-audit blind spot where table SQL stayed unchanged but a source
-index, trigger, or dependent view changed after review. These conflicts should
-still be rerun manually while kept review-only until the schema planner can
-prove a guarded resolution remains compatible.
+index, trigger, or dependent view changed after review. Unclassified schema
+conflicts should still be rerun manually while kept review-only until the
+schema planner can prove a guarded resolution remains compatible.
 The reviewed -> needs-action transition is still recorded as a
 `revalidation-required` conflict event linked to the schema revalidation row, so
 schema review UIs can show the lifecycle without treating free-form review
@@ -158,18 +206,27 @@ by `merge-audit --revalidate` or `revalidate-reviews`. If the source or target
 drifts again after revalidation, or if the latest revalidation was classified
 as `incompatible`, guarded resolution fails and asks for another revalidation
 instead of applying the stale original conflict.
+The same condition is visible before attempting resolution with:
 
-The first implementation supports database cell, database row, and filesystem
-conflicts. Plugin validator conflicts now have a conservative validator-evidence
+```bash
+forkpress branch merge-audit --records conflicts --latest-revalidation-status current
+forkpress branch merge-audit --records conflicts --latest-revalidation-status target-drifted
+```
+
+The current implementation supports database cell, database row, filesystem
+conflicts, and compatible source-added schema index/view/trigger target drift.
+Plugin validator conflicts now have a conservative validator-evidence
 classifier: if a validator rerun records changed evidence for the same plugin
 object, including changed source evidence, the reviewed plugin conflict returns
 to `needs-action` with the replacement validator payload and replacement
 conflict id visible in audit. Generic merge resolution still cannot apply
 plugin conflicts; the plugin validator or a plugin-specific repair flow remains
-the authority. Schema index conflicts can now return to the review queue with
-current SQL evidence, and table rebuild conflicts include dependency-plan
-evidence, but guarded `--after-revalidate` schema resolution remains disabled
-until schema-specific planners can prove compatibility.
+the authority. Schema index, view, trigger, dropped-table restore, and table
+rebuild conflicts can return to the review queue with current SQL evidence, and
+table rebuild conflicts include dependency-plan evidence. Guarded schema
+resolution is intentionally limited to source-added index/view/trigger target
+drift where the planner recorded a compatible schema class after a dry-run
+source replacement validated against the current target.
 
 ## Test Shape
 
@@ -193,10 +250,16 @@ non-primary-key `UNIQUE` logical-key replacements are also classified as
 database cell conflicts where the reviewed cell value itself did not change.
 Schema
 index/view/trigger/table-restore/table-rebuild conflicts record changed
-source/target SQL and carry reviewed conflicts back to `needs-action` as
-`unclassified`. Table rebuild fixtures also prove dependency-only source drift
-is caught through direct index/trigger, dependent-view, and dependent
-view-trigger evidence even when the reviewed table SQL itself is unchanged.
+source/target SQL and carry reviewed conflicts back to `needs-action`. Source
+added index/view/trigger target drift can be guarded-applied after revalidation
+when it receives a compatible schema class; other schema drift remains
+`unclassified` and review-only. Table rebuild fixtures also prove
+dependency-only source drift is caught through direct index/trigger,
+dependent-view, and dependent view-trigger evidence even when the reviewed table
+SQL itself is unchanged.
+Focused stale-audit tests also cover latest revalidation status output,
+filtering, grouping, CLI JSON output, and text audit output, including the case
+where target state drifts again after a previously current revalidation guard.
 
 Future classifier tests should cover explicit plugin-supplied logical
 fingerprints for primary-key row conflicts where schema `UNIQUE` keys are not

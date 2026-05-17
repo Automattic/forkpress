@@ -89,6 +89,19 @@ SPC_REF="${FORKPRESS_STATIC_PHP_CLI_REF:-8d038f435da7845926ba425dfbae0278cd0e074
 SPC_REF_MARKER="$SPC_DIR/.forkpress-static-php-cli-ref"
 CAS_TARGET_DIR="$BUILD_DIR/cas-ffi-target"
 CAS_LIB_DIR="$CAS_TARGET_DIR/$TRIPLE/release"
+SPC_DOWNLOAD_RETRIES="${FORKPRESS_STATIC_PHP_CLI_DOWNLOAD_RETRIES:-3}"
+SPC_RETRY_DELAY_SECONDS="${FORKPRESS_STATIC_PHP_CLI_RETRY_DELAY_SECONDS:-10}"
+
+case "$SPC_DOWNLOAD_RETRIES" in
+  ''|*[!0-9]*) echo "unsupported FORKPRESS_STATIC_PHP_CLI_DOWNLOAD_RETRIES: $SPC_DOWNLOAD_RETRIES" >&2; exit 1 ;;
+esac
+if [ "$SPC_DOWNLOAD_RETRIES" -lt 1 ]; then
+  echo "FORKPRESS_STATIC_PHP_CLI_DOWNLOAD_RETRIES must be at least 1" >&2
+  exit 1
+fi
+case "$SPC_RETRY_DELAY_SECONDS" in
+  ''|*[!0-9]*) echo "unsupported FORKPRESS_STATIC_PHP_CLI_RETRY_DELAY_SECONDS: $SPC_RETRY_DELAY_SECONDS" >&2; exit 1 ;;
+esac
 
 # WordPress-ready extension set.
 # Exclusions:
@@ -195,12 +208,42 @@ if [ "$NEED_PHP_BUILD" = "1" ]; then
     local label="$1"
     shift
     echo "==> static-php-cli: $label"
-    run_spc "$@"
-    echo "==> static-php-cli: $label complete"
+    if run_spc "$@"; then
+      echo "==> static-php-cli: $label complete"
+      return 0
+    fi
+    local status=$?
+    echo "ERROR: static-php-cli: $label failed" >&2
+    return "$status"
+  }
+
+  run_spc_phase_with_retries() {
+    local attempts="$1"
+    shift
+    local label="$1"
+    shift
+    local attempt=1
+    local status=0
+
+    while [ "$attempt" -le "$attempts" ]; do
+      if run_spc_phase "$label" "$@"; then
+        return 0
+      fi
+      status=$?
+      if [ "$attempt" -eq "$attempts" ]; then
+        break
+      fi
+      echo "WARN: static-php-cli: $label failed on attempt $attempt/$attempts; retrying in ${SPC_RETRY_DELAY_SECONDS}s" >&2
+      sleep "$SPC_RETRY_DELAY_SECONDS"
+      attempt=$((attempt + 1))
+    done
+
+    echo "ERROR: static-php-cli: $label failed after $attempts attempts" >&2
+    return "$status"
   }
 
   run_spc_phase "doctor" doctor --auto-fix
-  run_spc_phase "download PHP and extension sources" download --for-extensions="$EXTENSIONS" --with-php=8.3
+  run_spc_phase_with_retries "$SPC_DOWNLOAD_RETRIES" "download PHP and extension sources" download --for-extensions="$EXTENSIONS" --with-php=8.3
 
   if [ "$PROFILE" = "dev" ]; then
     # Register branchfs as a builtin extension in spc's ext.json so its

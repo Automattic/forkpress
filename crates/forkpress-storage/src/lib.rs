@@ -1256,6 +1256,13 @@ pub struct CowMergeAuditQuery<'a> {
     pub scope: &'a str,
     pub records: &'a str,
     pub conflict_type: Option<&'a str>,
+    pub conflict_id: Option<&'a str>,
+    pub conflict_key: Option<&'a str>,
+    pub event_type: Option<&'a str>,
+    pub plugin: Option<&'a str>,
+    pub plugin_object: Option<&'a str>,
+    pub plugin_severity: Option<&'a str>,
+    pub plugin_logical_identity: Option<&'a str>,
     pub decision: Option<&'a str>,
     pub path: Option<&'a str>,
     pub path_prefix: Option<&'a str>,
@@ -1264,6 +1271,16 @@ pub struct CowMergeAuditQuery<'a> {
     pub review: bool,
     pub review_status: Option<&'a str>,
     pub resolution_status: Option<&'a str>,
+    pub lifecycle_state: Option<&'a str>,
+    pub next_action: Option<&'a str>,
+    pub revalidation_class: Option<&'a str>,
+    pub latest_revalidation_status: Option<&'a str>,
+    pub stale_status: Option<&'a str>,
+    pub resolution_choice: Option<&'a str>,
+    pub blocked_resolution_choice: Option<&'a str>,
+    pub resolution_strategy: Option<&'a str>,
+    pub generic_resolver: Option<&'a str>,
+    pub after_revalidate: Option<&'a str>,
     pub group_by: &'a str,
 }
 
@@ -1295,6 +1312,34 @@ pub fn inspect_cow_merge_audit(
         args.push("--conflict-type".into());
         args.push(conflict_type.into());
     }
+    if let Some(conflict_id) = query.conflict_id {
+        args.push("--conflict-id".into());
+        args.push(conflict_id.into());
+    }
+    if let Some(conflict_key) = query.conflict_key {
+        args.push("--conflict-key".into());
+        args.push(conflict_key.into());
+    }
+    if let Some(event_type) = query.event_type {
+        args.push("--event-type".into());
+        args.push(event_type.into());
+    }
+    if let Some(plugin) = query.plugin {
+        args.push("--plugin".into());
+        args.push(plugin.into());
+    }
+    if let Some(plugin_object) = query.plugin_object {
+        args.push("--plugin-object".into());
+        args.push(plugin_object.into());
+    }
+    if let Some(plugin_severity) = query.plugin_severity {
+        args.push("--plugin-severity".into());
+        args.push(plugin_severity.into());
+    }
+    if let Some(plugin_logical_identity) = query.plugin_logical_identity {
+        args.push("--plugin-logical-identity".into());
+        args.push(plugin_logical_identity.into());
+    }
     if let Some(decision) = query.decision {
         args.push("--decision".into());
         args.push(decision.into());
@@ -1323,6 +1368,46 @@ pub fn inspect_cow_merge_audit(
     if let Some(resolution_status) = query.resolution_status {
         args.push("--resolution-status".into());
         args.push(resolution_status.into());
+    }
+    if let Some(lifecycle_state) = query.lifecycle_state {
+        args.push("--lifecycle-state".into());
+        args.push(lifecycle_state.into());
+    }
+    if let Some(next_action) = query.next_action {
+        args.push("--next-action".into());
+        args.push(next_action.into());
+    }
+    if let Some(revalidation_class) = query.revalidation_class {
+        args.push("--revalidation-class".into());
+        args.push(revalidation_class.into());
+    }
+    if let Some(latest_revalidation_status) = query.latest_revalidation_status {
+        args.push("--latest-revalidation-status".into());
+        args.push(latest_revalidation_status.into());
+    }
+    if let Some(stale_status) = query.stale_status {
+        args.push("--stale-status".into());
+        args.push(stale_status.into());
+    }
+    if let Some(resolution_choice) = query.resolution_choice {
+        args.push("--resolution-choice".into());
+        args.push(resolution_choice.into());
+    }
+    if let Some(blocked_resolution_choice) = query.blocked_resolution_choice {
+        args.push("--blocked-resolution-choice".into());
+        args.push(blocked_resolution_choice.into());
+    }
+    if let Some(resolution_strategy) = query.resolution_strategy {
+        args.push("--resolution-strategy".into());
+        args.push(resolution_strategy.into());
+    }
+    if let Some(generic_resolver) = query.generic_resolver {
+        args.push("--generic-resolver".into());
+        args.push(generic_resolver.into());
+    }
+    if let Some(after_revalidate) = query.after_revalidate {
+        args.push("--after-revalidate".into());
+        args.push(after_revalidate.into());
     }
     if query.group_by != "none" {
         args.push("--group-by".into());
@@ -1378,8 +1463,11 @@ pub fn revalidate_cow_merge_reviews(
     runtime: &PortableRuntime,
     shared: &SharedPaths,
     run_id: Option<&str>,
+    conflict_id: Option<&str>,
+    conflict_key: Option<&str>,
     reviewer: Option<&str>,
     format: &str,
+    quiet: bool,
 ) -> Result<()> {
     let metadata_db = cow_merge_metadata_db_path(layout);
     let mut args: Vec<OsString> = vec![
@@ -1393,9 +1481,20 @@ pub fn revalidate_cow_merge_reviews(
         args.push("--run".into());
         args.push(run_id.into());
     }
+    if let Some(conflict_id) = conflict_id {
+        args.push("--conflict-id".into());
+        args.push(conflict_id.into());
+    }
+    if let Some(conflict_key) = conflict_key {
+        args.push("--conflict-key".into());
+        args.push(conflict_key.into());
+    }
     if let Some(reviewer) = reviewer {
         args.push("--reviewer".into());
         args.push(reviewer.into());
+    }
+    if quiet {
+        args.push("--quiet".into());
     }
     run_php_script(
         layout,
@@ -1508,6 +1607,47 @@ pub fn review_cow_merge_audit_record(
     )
 }
 
+pub fn review_cow_merge_conflict_key(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    conflict_key: &str,
+    run_id: Option<&str>,
+    status: &str,
+    note: &str,
+    reviewer: Option<&str>,
+) -> Result<()> {
+    let metadata_db = cow_merge_metadata_db_path(layout);
+    let mut args: Vec<OsString> = vec![
+        "review-record".into(),
+        "--metadata-db".into(),
+        metadata_db.as_os_str().to_os_string(),
+        "--record".into(),
+        "conflict".into(),
+        "--conflict-key".into(),
+        conflict_key.into(),
+        "--status".into(),
+        status.into(),
+        "--note".into(),
+        note.into(),
+    ];
+    if let Some(run_id) = run_id {
+        args.push("--run".into());
+        args.push(run_id.into());
+    }
+    if let Some(reviewer) = reviewer {
+        args.push("--reviewer".into());
+        args.push(reviewer.into());
+    }
+    run_php_script(
+        layout,
+        runtime,
+        shared,
+        "scripts/cow/merge.php",
+        args.iter().map(|arg| arg.as_os_str()),
+    )
+}
+
 pub fn resolve_cow_merge_conflict(
     layout: &Layout,
     runtime: &PortableRuntime,
@@ -1528,6 +1668,61 @@ pub fn resolve_cow_merge_conflict(
         "--id".into(),
         conflict_id.into(),
     ];
+    if let Some(choice) = choice {
+        args.push("--choice".into());
+        args.push(choice.into());
+    }
+    if apply {
+        args.push("--apply".into());
+    }
+    if apply_reviewed {
+        args.push("--apply-reviewed".into());
+    }
+    if after_revalidate {
+        args.push("--after-revalidate".into());
+    }
+    if let Some(note) = note {
+        args.push("--note".into());
+        args.push(note.into());
+    }
+    if let Some(reviewer) = reviewer {
+        args.push("--reviewer".into());
+        args.push(reviewer.into());
+    }
+    run_php_script(
+        layout,
+        runtime,
+        shared,
+        "scripts/cow/merge.php",
+        args.iter().map(|arg| arg.as_os_str()),
+    )
+}
+
+pub fn resolve_cow_merge_conflict_key(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    conflict_key: &str,
+    run_id: Option<&str>,
+    choice: Option<&str>,
+    apply: bool,
+    apply_reviewed: bool,
+    after_revalidate: bool,
+    note: Option<&str>,
+    reviewer: Option<&str>,
+) -> Result<()> {
+    let metadata_db = cow_merge_metadata_db_path(layout);
+    let mut args: Vec<OsString> = vec![
+        "resolve-conflict".into(),
+        "--metadata-db".into(),
+        metadata_db.as_os_str().to_os_string(),
+        "--conflict-key".into(),
+        conflict_key.into(),
+    ];
+    if let Some(run_id) = run_id {
+        args.push("--run".into());
+        args.push(run_id.into());
+    }
     if let Some(choice) = choice {
         args.push("--choice".into());
         args.push(choice.into());
@@ -3161,6 +3356,77 @@ fn cleanup_cow_branch_birth_files(
         },
         Err(err) => errors.push(err.to_string()),
     }
+    errors.extend(cleanup_cow_branch_birth_temp_files(layout, branch));
+    errors
+}
+
+fn cleanup_cow_branch_birth_temp_files(layout: &Layout, branch: &str) -> Vec<String> {
+    let mut errors = Vec::new();
+    match cow_merge_base_db_path(layout, branch) {
+        Ok(base_db) => {
+            if let Some(parent) = base_db.parent() {
+                errors.extend(cleanup_cow_branch_birth_temp_files_in_dir(
+                    parent,
+                    &format!(".{branch}.merge-base-"),
+                ));
+            }
+        }
+        Err(err) => errors.push(err.to_string()),
+    }
+    match cow_merge_file_base_path(layout, branch) {
+        Ok(file_base) => {
+            if let Some(parent) = file_base.parent() {
+                errors.extend(cleanup_cow_branch_birth_temp_files_in_dir(
+                    parent,
+                    &format!(".{branch}.file-merge-base-"),
+                ));
+            }
+        }
+        Err(err) => errors.push(err.to_string()),
+    }
+    errors
+}
+
+fn cleanup_cow_branch_birth_temp_files_in_dir(dir: &Path, prefix: &str) -> Vec<String> {
+    let mut errors = Vec::new();
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return errors,
+        Err(err) => {
+            errors.push(format!("failed to read {}: {err}", dir.display()));
+            return errors;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                errors.push(format!("failed to read entry in {}: {err}", dir.display()));
+                continue;
+            }
+        };
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(prefix) {
+            continue;
+        }
+        let path = entry.path();
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() || meta.is_file() => {
+                if let Err(err) = fs::remove_file(&path) {
+                    errors.push(format!("failed to remove {}: {err}", path.display()));
+                }
+            }
+            Ok(_) => errors.push(format!(
+                "{} is not a regular temporary branch birth artifact",
+                path.display()
+            )),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => errors.push(format!("failed to inspect {}: {err}", path.display())),
+        }
+    }
     errors
 }
 
@@ -3753,9 +4019,30 @@ mod tests {
         fs::write(&base_db, b"base").unwrap();
         fs::write(sqlite_sidecar_path(&base_db, "-wal"), b"wal").unwrap();
         fs::write(sqlite_sidecar_path(&base_db, "-shm"), b"shm").unwrap();
+        let temp_base = base_db
+            .parent()
+            .unwrap()
+            .join(".feature.merge-base-test.sqlite");
+        fs::write(&temp_base, b"temp base").unwrap();
+        fs::write(sqlite_sidecar_path(&temp_base, "-wal"), b"temp wal").unwrap();
+        let unrelated_temp_base = base_db
+            .parent()
+            .unwrap()
+            .join(".other.merge-base-test.sqlite");
+        fs::write(&unrelated_temp_base, b"other temp base").unwrap();
         let file_base = cow_merge_file_base_path(&layout, "feature").unwrap();
         fs::create_dir_all(file_base.parent().unwrap()).unwrap();
         fs::write(&file_base, b"{}").unwrap();
+        let temp_file_base = file_base
+            .parent()
+            .unwrap()
+            .join(".feature.file-merge-base-test.json");
+        fs::write(&temp_file_base, b"{}").unwrap();
+        let unrelated_temp_file_base = file_base
+            .parent()
+            .unwrap()
+            .join(".other.file-merge-base-test.json");
+        fs::write(&unrelated_temp_file_base, b"{}").unwrap();
 
         let errors = cleanup_cow_branch_birth_files(
             &layout,
@@ -3777,6 +4064,13 @@ mod tests {
             &base_db, "-shm"
         )));
         assert!(!path_exists_no_follow(&file_base));
+        assert!(!path_exists_no_follow(&temp_base));
+        assert!(!path_exists_no_follow(&sqlite_sidecar_path(
+            &temp_base, "-wal"
+        )));
+        assert!(!path_exists_no_follow(&temp_file_base));
+        assert!(path_exists_no_follow(&unrelated_temp_base));
+        assert!(path_exists_no_follow(&unrelated_temp_file_base));
 
         fs::remove_dir_all(root).unwrap();
     }

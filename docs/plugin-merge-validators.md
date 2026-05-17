@@ -28,7 +28,13 @@ A validator returns one of:
 - `valid`: the merged candidate preserves this plugin's invariants.
 - `conflicts`: the candidate is reviewable; each finding identifies the plugin,
   affected logical object, tables/files/options involved, and a human-readable
-  reason.
+  reason. A finding may also include `severity` (`info`, `warning`, `error`,
+  or `critical`), `resolution_policy`, `suggested_action`, and
+  `manual_review_reason`. If present, `validator` and review guidance fields
+  must be non-empty strings.
+  ForkPress records these in the conflict payload so review tools can
+  prioritize findings and distinguish review-only findings from future
+  repairable findings.
 - `failed`: the validator could not run; the merge should fail rather than
   silently accept an unchecked plugin graph.
 
@@ -61,11 +67,41 @@ This preserves the current safety model: ForkPress may apply exact safe changes,
 preserve target state, or stop with an auditable conflict, but it should not
 invent plugin-specific rewrites.
 
+Validator findings can carry first-class review guidance. For example, a media
+validator should mark missing generated upload files as `review-only` instead
+of implying that ForkPress may regenerate derivatives during the merge. A
+future merge driver can introduce an automatic repair only when it can prove the
+repair is deterministic and records the chosen repair in audit metadata.
+
 The current implementation has the metadata/audit foundation for validator
 conflicts: ForkPress can record plugin-scoped findings against a merge run,
 mark that run as `completed_with_conflicts`, filter `merge-audit` output with
-`scope = plugin`, group plugin findings separately from DB/file findings, and
-attach review notes. External validator runners can hand findings back through:
+`scope = plugin`, group plugin findings separately from DB/file findings,
+summarize plugin conflict queues with `merge-audit --scope plugin --group-by plugin`,
+`--group-by plugin-object`, `--group-by plugin-severity`, or
+`--group-by plugin-logical-identity`, and
+attach review notes. Plugin audit records expose validator metadata as
+structured fields (`plugin`, `plugin_object`, `plugin_tables`,
+`plugin_files`, `plugin_validator`, `plugin_severity`,
+`plugin_logical_identity`, and review guidance fields) so UI/API consumers do
+not need to scrape payload previews.
+The same first-class fields are filterable with `merge-audit --plugin <name>`,
+`--plugin-object <object>`, `--plugin-severity <severity>`, and
+`--plugin-logical-identity <json>`.
+Text audit output prints the same plugin identity, owned table/file, logical
+identity, and review-guidance evidence for CLI reviewers.
+Plugin conflict-event records inherit the same fields, so UI queues can render
+review, revalidation, and blocked-resolution events without a second conflict
+lookup.
+Plugin resolution records also expose those fields from the linked conflict,
+even though the resolution payload previews still show the validated/applied
+value, and `--records resolutions --group-by plugin`,
+`--group-by plugin-object`, `--group-by plugin-severity`, or
+`--group-by plugin-logical-identity` can summarize resolution queues by that
+linked plugin evidence.
+Validator findings may use either `files` or `paths`; both are normalized into
+the audit `plugin_files` field. External validator runners can hand findings
+back through:
 
 ```bash
 forkpress branch record-plugin-validator-conflicts \
@@ -143,9 +179,10 @@ Validator status and findings must agree. `valid` must emit no findings, and
 `conflicts` must emit at least one finding. Contradictory validator output is
 treated as a validator failure so plugin state is not reported with ambiguous
 review evidence. Each finding must include non-empty `plugin`, `object`, and
-`reason` fields, and its `type` must use the `plugin-*` namespace. Malformed
-object-shaped findings and malformed raw finding arrays fail the validator run
-before any plugin audit rows are recorded.
+`reason` fields, and its `type` must use the `plugin-*` namespace. `validator`,
+when emitted, must be a non-empty string. Malformed object-shaped findings and
+malformed raw finding arrays fail the validator run before any plugin audit
+rows are recorded.
 
 ## Finding Shape
 
@@ -187,10 +224,11 @@ deletion.
 
 `object` is the validator's stable review key for replacement evidence across
 reruns. `logical_identity` is optional first-class evidence for the plugin's
-semantic object identity. Validators should set it when the plugin has a
-domain identity that is not captured by SQLite primary keys or schema `UNIQUE`
-indexes, such as a slug, UUID, remote object id, or compound plugin key. If a
-rerun reports the same `plugin`, `object`, and conflict `type` but changes
+semantic object identity. When present, it must be non-null, non-empty, and
+JSON encodable. Validators should set it when the plugin has a domain identity
+that is not captured by SQLite primary keys or schema `UNIQUE` indexes, such
+as a slug, UUID, remote object id, or compound plugin key. If a rerun reports
+the same `plugin`, `object`, and conflict `type` but changes
 `logical_identity`, stale-audit revalidation treats the reviewed finding as
 replacement evidence and returns it to the review queue.
 
