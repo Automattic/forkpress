@@ -60,6 +60,8 @@ Useful filters include `--run`, `--scope all|db|files|plugin`,
 `--latest-revalidation-status none|current|source-drifted|target-drifted|source-and-target-drifted|unknown`,
 `--stale-status fresh|stale|error|unknown`,
 `--resolution-choice source|target`, `--blocked-resolution-choice source|target`,
+`--resolution-strategy manual-review|plugin-validator|schema-choice|file-choice|row-choice|cell-choice`,
+`--generic-resolver yes|no`, `--after-revalidate supported|unsupported`,
 `--group-by`, `--target-kept`, `--path`, and `--path-prefix`.
 
 `--revalidation-class` filters by what the latest revalidation found when it
@@ -70,6 +72,11 @@ still be resolved with `--after-revalidate` and which need another revalidation
 first. `--stale-status` filters by the conflict's current audited target
 staleness before revalidation, and `--group-by stale-status` summarizes those
 live fresh/stale/error/unknown queues.
+`--resolution-strategy`, `--generic-resolver`, and `--after-revalidate` filter
+conflict and conflict-event records by the resolver contract advertised on each
+conflict. Use those filters, or the matching `--group-by` values, to build
+queues such as generic resolver-ready conflicts, plugin-validator conflicts,
+and conflicts that can only be applied after a current revalidation guard.
 
 ## Review and resolve conflicts
 
@@ -168,6 +175,9 @@ history entries. Use `--next-action <action>` to build action-specific queues
 from the same `next_action` field the JSON output exposes. Use `--records
 conflicts --group-by lifecycle` or `--group-by next-action` to summarize current
 conflict queues by lifecycle state or required action.
+Use `--group-by resolution-strategy`, `--group-by generic-resolver`, or
+`--group-by after-revalidate` to summarize the resolver contract for active
+conflicts.
 
 ## What gets audited
 
