@@ -573,6 +573,16 @@ function create_wp_option_reference_db(string $path): void {
     $stmt->bindValue(':value', $widget_media_image, SQLITE3_TEXT);
     $stmt->execute();
 
+    $widget_block = serialize([
+        5 => [
+            'content' => '<!-- wp:image {"id":93,"sizeSlug":"large"} --><figure class="wp-block-image size-large"><img class="wp-image-93"/></figure><!-- /wp:image -->',
+        ],
+        '_multiwidget' => 1,
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_block', :value, 'yes')");
+    $stmt->bindValue(':value', $widget_block, SQLITE3_TEXT);
+    $stmt->execute();
+
     $widget_text = serialize([
         4 => [
             'title' => 'Base text widget',
@@ -2630,7 +2640,7 @@ PHP);
     write_test_file($option_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
 <?php
 $db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
-$res = $db->query("SELECT option_name, option_value FROM wp_options WHERE option_name LIKE 'theme_mods_%' OR option_name IN ('widget_nav_menu', 'nav_menu_options', 'widget_media_image', 'sidebars_widgets', 'site_icon', 'page_on_front', 'page_for_posts', 'sticky_posts')");
+$res = $db->query("SELECT option_name, option_value FROM wp_options WHERE option_name LIKE 'theme_mods_%' OR option_name IN ('widget_nav_menu', 'nav_menu_options', 'widget_media_image', 'widget_block', 'sidebars_widgets', 'site_icon', 'page_on_front', 'page_for_posts', 'sticky_posts')");
 $findings = [];
 while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
     $option_name = (string)$row['option_name'];
@@ -2859,6 +2869,37 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
             ];
         }
     }
+    if ($option_name === 'widget_block') {
+        foreach ($decoded as $widget_id => $widget) {
+            if (!is_array($widget) || !isset($widget['content']) || !is_string($widget['content'])) {
+                continue;
+            }
+            if (!preg_match_all('/<!--\s+wp:image\s+\{[^}]*"id"\s*:\s*(\d+)/', $widget['content'], $image_matches)) {
+                continue;
+            }
+            foreach ($image_matches[1] as $image_id) {
+                $attachment_id = (int)$image_id;
+                $exists = $attachment_id > 0 ? (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $attachment_id AND post_type = 'attachment'") : 1;
+                if ($exists !== 0) {
+                    continue;
+                }
+                $findings[] = [
+                    'plugin' => 'forkpress-wp-option-refs',
+                    'object' => 'option:' . $option_name,
+                    'reason' => 'block widget references a missing attachment',
+                    'type' => 'plugin-wp-option-missing-object',
+                    'tables' => ['wp_options', 'wp_posts'],
+                    'validator' => 'forkpress-wp-option-refs@1',
+                    'candidate' => [
+                        'option_name' => $option_name,
+                        'field' => 'widget.' . (string)$widget_id . '.content.wp:image.id',
+                        'missing_object_id' => $attachment_id,
+                        'object_type' => 'attachment',
+                    ],
+                ];
+            }
+        }
+    }
     foreach (($decoded['nav_menu_locations'] ?? []) as $location => $term_id) {
         $term_id = (int)$term_id;
         $exists = $term_id > 0 ? (int)$db->querySingle("SELECT COUNT(*) FROM wp_terms t JOIN wp_term_taxonomy tt ON tt.term_id = t.term_id AND tt.taxonomy = 'nav_menu' WHERE t.term_id = $term_id") : 1;
@@ -2956,7 +2997,7 @@ PHP);
 
     assert_same($option_result['status'], 'completed_with_conflicts', 'WordPress option reference validator holds missing option objects for review');
     assert_same((int)($option_result['plugin_validators'] ?? 0), 1, 'WordPress option reference validator is discovered from mu-plugins during merge');
-    assert_same((int)($option_result['plugin_validator_conflicts'] ?? 0), 11, 'WordPress option reference validator records missing pages, posts, attachments, nav menus, widgets, and option refs');
+    assert_same((int)($option_result['plugin_validator_conflicts'] ?? 0), 12, 'WordPress option reference validator records missing pages, posts, attachments, nav menus, widgets, and option refs');
     assert_same((int)scalar($option_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID IN (90, 91, 92, 93)'), 0, 'WordPress option reference validator leaves source object deletions staged for review');
     assert_same((int)scalar($option_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 94'), 0, 'WordPress option reference validator leaves source nav menu deletion staged for review');
 
@@ -2979,16 +3020,18 @@ PHP);
     $option_widget_media = unserialize((string)scalar($option_target, "SELECT option_value FROM wp_options WHERE option_name = 'widget_media_image'"));
     assert_same($option_widget_media[3]['caption'] ?? null, 'Target media image widget', 'WordPress option reference validator preserves the target media widget edit');
     assert_same($option_widget_media[3]['attachment_id'] ?? null, 93, 'WordPress option reference validator keeps the stale media widget attachment visible for review');
+    $option_widget_block = unserialize((string)scalar($option_target, "SELECT option_value FROM wp_options WHERE option_name = 'widget_block'"));
+    assert_true(str_contains((string)($option_widget_block[5]['content'] ?? ''), '"id":93'), 'WordPress option reference validator keeps the stale block widget attachment visible for review');
     assert_same(scalar($option_target, "SELECT option_value FROM wp_options WHERE option_name = 'widget_text'"), null, 'WordPress option reference validator leaves the source widget option deletion staged for review');
     $option_sidebars = unserialize((string)scalar($option_target, "SELECT option_value FROM wp_options WHERE option_name = 'sidebars_widgets'"));
     assert_same($option_sidebars['sidebar-1'][2] ?? null, 'text-4', 'WordPress option reference validator keeps the stale sidebar widget instance visible for review');
 
-    $option_audit = cow_merge_audit_report($option_metadata, (int)$option_result['run_id'], 12, [
+    $option_audit = cow_merge_audit_report($option_metadata, (int)$option_result['run_id'], 14, [
         'scope' => 'plugin',
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-option-missing-object',
     ]);
-    assert_same(count($option_audit['conflicts']), 11, 'WordPress option reference validator exposes missing option objects as plugin-scoped audit conflicts');
+    assert_same(count($option_audit['conflicts']), 12, 'WordPress option reference validator exposes missing option objects as plugin-scoped audit conflicts');
     $option_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $option_audit['conflicts']));
     foreach (['"missing_object_id":90', '"missing_object_id":91', '"missing_object_id":92', '"missing_object_id":93', '"missing_object_id":94'] as $needle) {
         assert_true(str_contains($option_preview, $needle), 'WordPress option reference audit includes ' . $needle);
@@ -2996,7 +3039,7 @@ PHP);
     foreach (['"object_type":"page"', '"object_type":"post"', '"object_type":"attachment"', '"object_type":"nav_menu"', '"object_type":"widget"'] as $needle) {
         assert_true(str_contains($option_preview, $needle), 'WordPress option reference audit includes ' . $needle);
     }
-    foreach (['theme_mods_forkpress_active', 'widget_nav_menu', 'nav_menu_options', 'widget_media_image', 'sidebars_widgets', 'widget_text', 'site_icon', 'page_on_front', 'page_for_posts', 'sticky_posts'] as $needle) {
+    foreach (['theme_mods_forkpress_active', 'widget_nav_menu', 'nav_menu_options', 'widget_media_image', 'widget_block', 'sidebars_widgets', 'widget_text', 'site_icon', 'page_on_front', 'page_for_posts', 'sticky_posts'] as $needle) {
         assert_true(str_contains($option_preview, $needle), 'WordPress option reference audit includes ' . $needle);
     }
 

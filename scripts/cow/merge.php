@@ -5332,7 +5332,8 @@ function cow_merge_wordpress_post_content_reference_violation(
     SQLite3 $meta,
     string $source_branch,
     array $source_row,
-    string $source_action = 'inserted'
+    string $source_action = 'inserted',
+    string $context = 'wp_posts post_content'
 ): ?string {
     $content = (string)($source_row['post_content'] ?? '');
     if ($content === '') {
@@ -5345,7 +5346,7 @@ function cow_merge_wordpress_post_content_reference_violation(
             $target,
             $meta,
             $source_branch,
-            "wp_posts post_content $label",
+            "$context $label",
             'wp_posts',
             'ID',
             $id,
@@ -5359,7 +5360,7 @@ function cow_merge_wordpress_post_content_reference_violation(
             $target,
             $meta,
             $source_branch,
-            "wp_posts post_content $label",
+            "$context $label",
             'wp_users',
             'ID',
             $id,
@@ -5373,7 +5374,7 @@ function cow_merge_wordpress_post_content_reference_violation(
             $target,
             $meta,
             $source_branch,
-            "wp_posts post_content $label",
+            "$context $label",
             'wp_terms',
             'term_id',
             $id,
@@ -5623,6 +5624,26 @@ function cow_merge_wordpress_option_reference_violation(
                 continue;
             }
             $violation = $check_post($widget['attachment_id'], 'widget.' . (string)$widget_id . '.attachment_id');
+            if ($violation !== null) {
+                return $violation;
+            }
+        }
+    }
+
+    if ($option_name === 'widget_block') {
+        foreach ($decoded as $widget_id => $widget) {
+            if (!is_array($widget) || !isset($widget['content']) || !is_string($widget['content'])) {
+                continue;
+            }
+            $violation = cow_merge_wordpress_post_content_reference_violation(
+                $source,
+                $target,
+                $meta,
+                $source_branch,
+                ['post_content' => $widget['content']],
+                $source_action,
+                "wp_options row '$option_name' widget." . (string)$widget_id . '.content'
+            );
             if ($violation !== null) {
                 return $violation;
             }
