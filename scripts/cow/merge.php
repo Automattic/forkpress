@@ -5432,15 +5432,16 @@ function cow_merge_wordpress_post_content_reference_violation(
             }
         }
 
-        if ($block_name === 'navigation-link' && array_key_exists('id', $attrs)) {
+        if (in_array($block_name, ['navigation-link', 'navigation-submenu'], true) && array_key_exists('id', $attrs)) {
+            $label = 'wp:' . $block_name . '.id';
             if (($attrs['kind'] ?? null) === 'post-type') {
-                $violation = $check_post($attrs['id'], 'wp:navigation-link.id');
+                $violation = $check_post($attrs['id'], $label);
                 if ($violation !== null) {
                     return $violation;
                 }
             }
             if (($attrs['kind'] ?? null) === 'taxonomy') {
-                $violation = $check_term($attrs['id'], 'wp:navigation-link.id');
+                $violation = $check_term($attrs['id'], $label);
                 if ($violation !== null) {
                     return $violation;
                 }
