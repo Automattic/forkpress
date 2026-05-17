@@ -129,6 +129,24 @@ function create_explicit_term_graph_db(string $path): void {
     $db->close();
 }
 
+function create_explicit_navigation_block_graph_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_title TEXT NOT NULL,
+        post_content TEXT NOT NULL,
+        post_status TEXT NOT NULL,
+        post_type TEXT NOT NULL DEFAULT 'post'
+    )");
+    $db->exec('CREATE TABLE wp_terms (term_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, slug TEXT NOT NULL)');
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type) VALUES
+        (1, 'Base navigation link consumer', '<!-- wp:paragraph --><p>base navigation link consumer</p><!-- /wp:paragraph -->', 'publish', 'page'),
+        (3, 'Base navigation submenu consumer', '<!-- wp:paragraph --><p>base navigation submenu consumer</p><!-- /wp:paragraph -->', 'publish', 'page'),
+        (5, 'Base navigation ref consumer', '<!-- wp:paragraph --><p>base navigation ref consumer</p><!-- /wp:paragraph -->', 'publish', 'page')");
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (1, 'Base nav term', 'base-nav-term')");
+    $db->close();
+}
+
 define('FORKPRESS_COW_MERGE_TESTS', true);
 require_once __DIR__ . '/../../scripts/cow/merge.php';
 
@@ -646,6 +664,78 @@ try {
     assert_true(
         (int)scalar($term_graph_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-explicit-term-graph' AND d.table_name = 'wp_options' AND d.decision = 'target-wins' AND d.reason LIKE '%outside the source branch ID band%' AND d.reason LIKE '%wp_terms%'") >= 2,
         'serialized menu option conflicts explain that they are held behind the explicit WordPress term graph'
+    );
+
+    $navigation_block_base = $tmp . '/navigation-block-base.sqlite';
+    $navigation_block_source = $tmp . '/navigation-block-source.sqlite';
+    $navigation_block_target = $tmp . '/navigation-block-target.sqlite';
+    $navigation_block_metadata = $tmp . '/.forkpress/cow/merge/explicit-navigation-block-metadata.sqlite';
+    create_explicit_navigation_block_graph_db($navigation_block_base);
+    copy($navigation_block_base, $navigation_block_source);
+    copy($navigation_block_base, $navigation_block_target);
+    cow_merge_allocate_autoincrement_bands($navigation_block_source, $navigation_block_metadata, 'feature-explicit-navigation-blocks');
+
+    $navigation_block_source_db = open_db($navigation_block_source);
+    $navigation_block_source_db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type) VALUES (2, 'Imported explicit page for navigation', '<!-- wp:paragraph --><p>imported explicit page</p><!-- /wp:paragraph -->', 'publish', 'page')");
+    $navigation_block_source_db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (2, 'Imported explicit nav term', 'imported-explicit-nav-term')");
+    $navigation_block_source_db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type) VALUES (4, 'Imported explicit navigation post', '<!-- wp:navigation-link {\"kind\":\"post-type\",\"type\":\"page\",\"id\":2} /-->', 'publish', 'wp_navigation')");
+    $navigation_block_source_db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type) VALUES ('Inserted navigation-link consumer', '<!-- wp:navigation-link {\"kind\":\"post-type\",\"type\":\"page\",\"id\":2} /-->', 'publish', 'page')");
+    $navigation_block_source_db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type) VALUES ('Inserted navigation-submenu consumer', '<!-- wp:navigation-submenu {\"kind\":\"taxonomy\",\"type\":\"category\",\"id\":2} --><!-- /wp:navigation-submenu -->', 'publish', 'page')");
+    $navigation_block_source_db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type) VALUES ('Inserted navigation ref consumer', '<!-- wp:navigation {\"ref\":4} /-->', 'publish', 'page')");
+    $navigation_block_source_db->exec("UPDATE wp_posts SET post_content = '<!-- wp:navigation-link {\"kind\":\"post-type\",\"type\":\"page\",\"id\":2} /-->' WHERE ID = 1");
+    $navigation_block_source_db->exec("UPDATE wp_posts SET post_content = '<!-- wp:navigation-submenu {\"kind\":\"taxonomy\",\"type\":\"category\",\"id\":2} --><!-- /wp:navigation-submenu -->' WHERE ID = 3");
+    $navigation_block_source_db->exec("UPDATE wp_posts SET post_content = '<!-- wp:navigation {\"ref\":4} /-->' WHERE ID = 5");
+    $navigation_block_source_db->close();
+
+    $navigation_block_result = cow_merge_databases($navigation_block_base, $navigation_block_source, $navigation_block_target, $navigation_block_metadata, 'feature-explicit-navigation-blocks', 'main');
+    assert_same($navigation_block_result['status'], 'completed_with_conflicts', 'out-of-band explicit navigation block refs stay review-held');
+    assert_same(
+        (int)scalar($navigation_block_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID IN (2, 4)'),
+        0,
+        'out-of-band explicit page and wp_navigation post IDs are not applied automatically'
+    );
+    assert_same(
+        (int)scalar($navigation_block_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 2'),
+        0,
+        'out-of-band explicit navigation term ID is not applied automatically'
+    );
+    assert_same(
+        (int)scalar($navigation_block_target, "SELECT COUNT(*) FROM wp_posts WHERE post_title IN ('Inserted navigation-link consumer', 'Inserted navigation-submenu consumer', 'Inserted navigation ref consumer')"),
+        0,
+        'inserted navigation block refs behind held explicit IDs are not applied automatically'
+    );
+    assert_same(
+        scalar($navigation_block_target, 'SELECT post_content FROM wp_posts WHERE ID = 1'),
+        '<!-- wp:paragraph --><p>base navigation link consumer</p><!-- /wp:paragraph -->',
+        'updated navigation-link refs behind held explicit page IDs are not applied automatically'
+    );
+    assert_same(
+        scalar($navigation_block_target, 'SELECT post_content FROM wp_posts WHERE ID = 3'),
+        '<!-- wp:paragraph --><p>base navigation submenu consumer</p><!-- /wp:paragraph -->',
+        'updated navigation-submenu refs behind held explicit term IDs are not applied automatically'
+    );
+    assert_same(
+        scalar($navigation_block_target, 'SELECT post_content FROM wp_posts WHERE ID = 5'),
+        '<!-- wp:paragraph --><p>base navigation ref consumer</p><!-- /wp:paragraph -->',
+        'updated navigation refs behind held explicit wp_navigation IDs are not applied automatically'
+    );
+    assert_same(
+        (int)scalar($navigation_block_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-explicit-navigation-blocks' AND c.table_name = 'wp_posts' AND c.conflict_type = 'row-target-constraint'"),
+        8,
+        'explicit page, wp_navigation, and dependent navigation block post rows record review conflicts'
+    );
+    assert_same(
+        (int)scalar($navigation_block_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-explicit-navigation-blocks' AND c.table_name = 'wp_terms' AND c.conflict_type = 'row-target-constraint'"),
+        1,
+        'explicit navigation term import records a review conflict'
+    );
+    assert_true(
+        (int)scalar($navigation_block_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-explicit-navigation-blocks' AND d.table_name = 'wp_posts' AND d.decision = 'target-wins' AND d.reason LIKE '%outside the source branch ID band%' AND d.reason LIKE '%wp_posts%'") >= 4,
+        'navigation-link and navigation ref post conflicts explain that they are held behind explicit WordPress post IDs'
+    );
+    assert_true(
+        (int)scalar($navigation_block_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-explicit-navigation-blocks' AND d.table_name = 'wp_posts' AND d.decision = 'target-wins' AND d.reason LIKE '%outside the source branch ID band%' AND d.reason LIKE '%wp_terms%'") >= 2,
+        'navigation-submenu term conflicts explain that they are held behind the explicit WordPress term ID'
     );
 } finally {
     remove_tree($tmp);
