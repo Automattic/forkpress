@@ -354,6 +354,28 @@ PHP);
     assert_same($replacement['conflicts'], 1, 'plugin validator rerun records replacement evidence for changed graph findings');
     $replacement_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-graph-json-drift' AND id > $json_conflict_id ORDER BY id DESC LIMIT 1");
     assert_true($replacement_conflict_id > $json_conflict_id, 'plugin validator replacement evidence is stored as a newer conflict');
+    $json_conflict_key = (string)scalar($metadata, "SELECT conflict_key FROM merge_conflicts WHERE id = $json_conflict_id");
+    assert_same(
+        (string)scalar($metadata, "SELECT conflict_key FROM merge_conflicts WHERE id = $replacement_conflict_id"),
+        $json_conflict_key,
+        'plugin validator replacement evidence keeps the same conflict key'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT previous_conflict_id FROM merge_conflicts WHERE id = $replacement_conflict_id"),
+        $json_conflict_id,
+        'plugin validator replacement evidence links to the prior plugin conflict'
+    );
+    $plugin_key_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_key' => $json_conflict_key,
+    ]);
+    assert_same(count($plugin_key_audit['conflicts']), 2, 'plugin conflict-key audit returns original and replacement evidence');
+    assert_same(
+        count(array_unique(array_column($plugin_key_audit['conflicts'], 'conflict_key'))),
+        1,
+        'plugin conflict-key audit stays focused on one logical plugin conflict'
+    );
 
     $revalidated = cow_merge_revalidate_reviewed_conflicts($metadata, (int)$result['run_id'], 'cow-revalidate');
     assert_same($revalidated['reviewed'], 1, 'plugin revalidation still only carries reviewed validator conflicts');

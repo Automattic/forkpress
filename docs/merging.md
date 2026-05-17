@@ -43,10 +43,11 @@ Export machine-readable audit data:
 forkpress branch merge-audit --format json --review --records conflicts
 ```
 
-Useful filters include `--run`, `--scope all|db|files`,
+Useful filters include `--run`, `--scope all|db|files|plugin`,
 `--records all|conflicts|conflict-events|decisions|resolutions|rollback-failures`,
-`--review-status unreviewed|pending|needs-action|reviewed`, `--target-kept`,
-`--path`, and `--path-prefix`.
+`--conflict-key`, `--review-status unreviewed|pending|needs-action|reviewed`,
+`--lifecycle-state unreviewed|deferred|needs-action|reviewed|validated|resolved`,
+`--group-by`, `--target-kept`, `--path`, and `--path-prefix`.
 
 ## Review and resolve conflicts
 
@@ -77,7 +78,8 @@ choice without asking the user to restate `source` or `target`.
 `merge-audit --format json --records conflicts` treats conflicts as
 first-class records. Each conflict includes a stable `conflict_key` for the
 logical table/row/column/type conflict, a same-source/target-branch
-`previous_conflict_id` when the conflict recurs in a later run, a
+`previous_conflict_id` when the conflict recurs in a later run or when a
+validator records replacement evidence for the same logical conflict, a
 `conflict_class`, a
 `resolution_strategy`, executable `resolution_choices`, whether the generic
 `merge-resolve conflict` path supports it, and whether `--after-revalidate` is
@@ -101,10 +103,20 @@ source branch gets its own lineage. A prior reviewed target resolution can
 still auto-accept the same payload as a `target-accepted` decision instead of
 reopening the conflict.
 
+Plugin validator replacement findings use the same lineage model. A validator
+rerun that reports changed evidence for the same plugin object records a newer
+plugin conflict with the same `conflict_key` and a `previous_conflict_id` back to
+the prior evidence row, so `--conflict-key` can show the original and replacement
+evidence together.
+
 Use `--records conflict-events` to inspect the full append-only lifecycle
 history for conflict records. Use `--conflict-key <key>` with `--records
 conflicts`, `conflict-events`, or `resolutions` to focus audit output on one
-logical conflict group across repeated runs.
+logical conflict group across repeated runs. Use `--lifecycle-state <state>`
+with conflict records to build queues such as `unreviewed`, `needs-action`,
+`validated`, or `resolved`, and with conflict-event records to inspect matching
+history entries. Use `--records conflicts --group-by lifecycle` to summarize
+current conflict queues by lifecycle state.
 
 ## What gets audited
 

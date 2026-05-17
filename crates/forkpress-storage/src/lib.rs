@@ -1256,6 +1256,7 @@ pub struct CowMergeAuditQuery<'a> {
     pub scope: &'a str,
     pub records: &'a str,
     pub conflict_type: Option<&'a str>,
+    pub conflict_key: Option<&'a str>,
     pub decision: Option<&'a str>,
     pub path: Option<&'a str>,
     pub path_prefix: Option<&'a str>,
@@ -1264,6 +1265,7 @@ pub struct CowMergeAuditQuery<'a> {
     pub review: bool,
     pub review_status: Option<&'a str>,
     pub resolution_status: Option<&'a str>,
+    pub lifecycle_state: Option<&'a str>,
     pub group_by: &'a str,
 }
 
@@ -1295,6 +1297,10 @@ pub fn inspect_cow_merge_audit(
         args.push("--conflict-type".into());
         args.push(conflict_type.into());
     }
+    if let Some(conflict_key) = query.conflict_key {
+        args.push("--conflict-key".into());
+        args.push(conflict_key.into());
+    }
     if let Some(decision) = query.decision {
         args.push("--decision".into());
         args.push(decision.into());
@@ -1323,6 +1329,10 @@ pub fn inspect_cow_merge_audit(
     if let Some(resolution_status) = query.resolution_status {
         args.push("--resolution-status".into());
         args.push(resolution_status.into());
+    }
+    if let Some(lifecycle_state) = query.lifecycle_state {
+        args.push("--lifecycle-state".into());
+        args.push(lifecycle_state.into());
     }
     if query.group_by != "none" {
         args.push("--group-by".into());

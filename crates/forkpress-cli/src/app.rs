@@ -3114,152 +3114,15 @@ fn cow_branch_command(
             Ok(0)
         }
         "merge-audit" | "audit" => {
-            let mut format = "text".to_string();
-            let mut limit = "20".to_string();
-            let mut run_id: Option<String> = None;
-            let mut scope = "all".to_string();
-            let mut records = "all".to_string();
-            let mut conflict_type: Option<String> = None;
-            let mut decision: Option<String> = None;
-            let mut path: Option<String> = None;
-            let mut path_prefix: Option<String> = None;
-            let mut id_band_skips = false;
-            let mut target_kept = false;
-            let mut review = false;
-            let mut revalidate = false;
-            let mut review_status: Option<String> = None;
-            let mut reviewer: Option<String> = None;
-            let mut resolution_status: Option<String> = None;
-            let mut group_by = "none".to_string();
-            let mut index = 1;
-            while index < args.args.len() {
-                match args.args[index].as_str() {
-                    "--format" => {
-                        let Some(value) = args.args.get(index + 1) else {
-                            bail!("--format requires text or json");
-                        };
-                        format = value.clone();
-                        index += 2;
-                    }
-                    "--limit" => {
-                        let Some(value) = args.args.get(index + 1) else {
-                            bail!("--limit requires a value");
-                        };
-                        limit = value.clone();
-                        index += 2;
-                    }
-                    "--run" => {
-                        let Some(value) = args.args.get(index + 1) else {
-                            bail!("--run requires a merge run id");
-                        };
-                        run_id = Some(value.clone());
-                        index += 2;
-                    }
-                    "--scope" => {
-                        let Some(value) = args.args.get(index + 1) else {
-                            bail!("--scope requires all, db, or files");
-                        };
-                        scope = value.clone();
-                        index += 2;
-                    }
-                    "--records" => {
-                        let Some(value) = args.args.get(index + 1) else {
-                            bail!(
-                                "--records requires all, conflicts, conflict-events, decisions, resolutions, or rollback-failures"
-                            );
-                        };
-                        records = value.clone();
-                        index += 2;
-                    }
-                    "--conflict-type" => {
-                        let Some(value) = args.args.get(index + 1) else {
-                            bail!("--conflict-type requires a value");
-                        };
-                        conflict_type = Some(value.clone());
-                        index += 2;
-                    }
-                    "--decision" => {
-                        let Some(value) = args.args.get(index + 1) else {
-                            bail!("--decision requires a value");
-                        };
-                        decision = Some(value.clone());
-                        index += 2;
-                    }
-                    "--path" => {
-                        let Some(value) = args.args.get(index + 1) else {
-                            bail!("--path requires a relative file path");
-                        };
-                        path = Some(value.clone());
-                        index += 2;
-                    }
-                    "--path-prefix" => {
-                        let Some(value) = args.args.get(index + 1) else {
-                            bail!("--path-prefix requires a relative file path prefix");
-                        };
-                        path_prefix = Some(value.clone());
-                        index += 2;
-                    }
-                    "--id-band-skips" => {
-                        id_band_skips = true;
-                        index += 1;
-                    }
-                    "--target-kept" => {
-                        target_kept = true;
-                        index += 1;
-                    }
-                    "--review" => {
-                        review = true;
-                        index += 1;
-                    }
-                    "--revalidate" => {
-                        revalidate = true;
-                        index += 1;
-                    }
-                    "--review-status" => {
-                        let Some(value) = args.args.get(index + 1) else {
-                            bail!(
-                                "--review-status requires unreviewed, pending, needs-action, or reviewed"
-                            );
-                        };
-                        review_status = Some(value.clone());
-                        index += 2;
-                    }
-                    "--reviewer" => {
-                        let Some(value) = args.args.get(index + 1) else {
-                            bail!("--reviewer requires a name");
-                        };
-                        reviewer = Some(value.clone());
-                        index += 2;
-                    }
-                    "--resolution-status" => {
-                        let Some(value) = args.args.get(index + 1) else {
-                            bail!("--resolution-status requires validated or applied");
-                        };
-                        resolution_status = Some(value.clone());
-                        index += 2;
-                    }
-                    "--group-by" => {
-                        let Some(value) = args.args.get(index + 1) else {
-                            bail!(
-                                "--group-by requires none, table, status, path, type, or severity"
-                            );
-                        };
-                        group_by = value.clone();
-                        index += 2;
-                    }
-                    other => {
-                        bail!("unsupported argument for `forkpress branch merge-audit`: {other}")
-                    }
-                }
-            }
-            if revalidate {
+            let audit = parse_cow_branch_merge_audit_args(&args.args)?;
+            if audit.revalidate {
                 revalidate_cow_merge_reviews(
                     &layout,
                     &runtime,
                     &args.shared,
-                    run_id.as_deref(),
-                    reviewer.as_deref(),
-                    &format,
+                    audit.run_id.as_deref(),
+                    audit.reviewer.as_deref(),
+                    &audit.format,
                 )?;
                 return Ok(0);
             }
@@ -3268,21 +3131,23 @@ fn cow_branch_command(
                 &runtime,
                 &args.shared,
                 CowMergeAuditQuery {
-                    format: &format,
-                    limit: &limit,
-                    run_id: run_id.as_deref(),
-                    scope: &scope,
-                    records: &records,
-                    conflict_type: conflict_type.as_deref(),
-                    decision: decision.as_deref(),
-                    path: path.as_deref(),
-                    path_prefix: path_prefix.as_deref(),
-                    id_band_skips,
-                    target_kept,
-                    review,
-                    review_status: review_status.as_deref(),
-                    resolution_status: resolution_status.as_deref(),
-                    group_by: &group_by,
+                    format: &audit.format,
+                    limit: &audit.limit,
+                    run_id: audit.run_id.as_deref(),
+                    scope: &audit.scope,
+                    records: &audit.records,
+                    conflict_type: audit.conflict_type.as_deref(),
+                    conflict_key: audit.conflict_key.as_deref(),
+                    decision: audit.decision.as_deref(),
+                    path: audit.path.as_deref(),
+                    path_prefix: audit.path_prefix.as_deref(),
+                    id_band_skips: audit.id_band_skips,
+                    target_kept: audit.target_kept,
+                    review: audit.review,
+                    review_status: audit.review_status.as_deref(),
+                    resolution_status: audit.resolution_status.as_deref(),
+                    lifecycle_state: audit.lifecycle_state.as_deref(),
+                    group_by: &audit.group_by,
                 },
             )?;
             Ok(0)
@@ -3492,7 +3357,7 @@ fn branch_help_text(command: Option<&str>) -> &'static str {
             "Usage: forkpress branch run-plugin-validator --run <id> --validator <path> [--format text|json]\n\nRun one plugin validator and record emitted findings as plugin-scoped merge conflicts.\n"
         }
         Some("merge-audit") | Some("audit") => {
-            "Usage: forkpress branch merge-audit [options]\n\nInspect merge runs, decisions, conflicts, conflict events, resolutions, and rollback failures. Use --revalidate to carry stale reviewed conflicts back into needs-action before resolving.\nCommon options: --format text|json, --run <id>, --scope all|db|files, --records all|conflicts|conflict-events|decisions|resolutions|rollback-failures, --review, --review-status <status>, --revalidate.\n"
+            "Usage: forkpress branch merge-audit [options]\n\nInspect merge runs, decisions, conflicts, conflict events, resolutions, and rollback failures. Use --revalidate to carry stale reviewed conflicts back into needs-action before resolving; revalidation only accepts --run, --reviewer, and --format.\nCommon options: --format text|json, --run <id>, --scope all|db|files|plugin, --records all|conflicts|conflict-events|decisions|resolutions|rollback-failures, --conflict-key <key>, --review, --review-status <status>, --lifecycle-state <state>, --group-by none|table|status|path|type|severity|lifecycle, --revalidate.\n"
         }
         Some("merge-review") => {
             "Usage: forkpress branch merge-review <conflict|decision|resolution> <id> --status <pending|needs-action|reviewed> --note <text> [--reviewer <name>]\n\nAttach review metadata to an audit record.\n"
@@ -3507,6 +3372,359 @@ fn branch_help_text(command: Option<&str>) -> &'static str {
             "Usage: forkpress branch <command> [options]\n\nCommands:\n  list                         List branches\n  show [branch]                Show branch storage details\n  create <branch> [--from b]   Create a branch; defaults to --from main\n  reset <branch> --from b      Replace a branch from another branch\n  merge <source> --into target Merge one branch into another; accepts --plugin-validator\n  recover-crash [options]      Inspect or restore pending merge crash artifacts\n  revalidate-reviews [options] Recheck reviewed conflicts for stale target drift\n  run-plugin-validator [opts]  Run one plugin validator for a merge run\n  record-plugin-validator-conflicts [opts]\n                               Record plugin-scoped validator findings\n  merge-audit [options]        Inspect merge audit records\n  merge-review <type> <id>     Mark an audit record as reviewed\n  merge-resolve conflict <id>  Validate or apply a conflict choice\n  delete <branch>              Delete a branch\n\nExamples:\n  forkpress branch list\n  forkpress branch create feature --from main\n  forkpress branch merge feature --into main\n  forkpress branch merge feature --into main --plugin-validator ./validator.php\n  forkpress branch recover-crash --restore-target-db --restore-files\n  forkpress branch revalidate-reviews --reviewer alice\n  forkpress branch run-plugin-validator --run 12 --validator ./validator.php\n  forkpress branch merge-audit --review --records conflicts\n\nRun `forkpress branch <command> --help` for command-specific help.\n"
         }
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CowBranchMergeAuditArgs {
+    format: String,
+    limit: String,
+    run_id: Option<String>,
+    scope: String,
+    records: String,
+    conflict_type: Option<String>,
+    conflict_key: Option<String>,
+    decision: Option<String>,
+    path: Option<String>,
+    path_prefix: Option<String>,
+    id_band_skips: bool,
+    target_kept: bool,
+    review: bool,
+    revalidate: bool,
+    review_status: Option<String>,
+    reviewer: Option<String>,
+    resolution_status: Option<String>,
+    lifecycle_state: Option<String>,
+    group_by: String,
+}
+
+fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAuditArgs> {
+    let mut format = "text".to_string();
+    let mut limit = "20".to_string();
+    let mut run_id: Option<String> = None;
+    let mut scope = "all".to_string();
+    let mut records = "all".to_string();
+    let mut conflict_type: Option<String> = None;
+    let mut conflict_key: Option<String> = None;
+    let mut decision: Option<String> = None;
+    let mut path: Option<String> = None;
+    let mut path_prefix: Option<String> = None;
+    let mut id_band_skips = false;
+    let mut target_kept = false;
+    let mut review = false;
+    let mut revalidate = false;
+    let mut review_status: Option<String> = None;
+    let mut reviewer: Option<String> = None;
+    let mut resolution_status: Option<String> = None;
+    let mut lifecycle_state: Option<String> = None;
+    let mut group_by = "none".to_string();
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--format" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--format requires text or json");
+                };
+                format = value.clone();
+                index += 2;
+            }
+            value if value.starts_with("--format=") => {
+                let value = value.trim_start_matches("--format=");
+                if value.is_empty() {
+                    bail!("--format requires text or json");
+                }
+                format = value.to_string();
+                index += 1;
+            }
+            "--limit" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--limit requires a value");
+                };
+                limit = value.clone();
+                index += 2;
+            }
+            value if value.starts_with("--limit=") => {
+                let value = value.trim_start_matches("--limit=");
+                if value.is_empty() {
+                    bail!("--limit requires a value");
+                }
+                limit = value.to_string();
+                index += 1;
+            }
+            "--run" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--run requires a merge run id");
+                };
+                run_id = Some(value.clone());
+                index += 2;
+            }
+            value if value.starts_with("--run=") => {
+                let value = value.trim_start_matches("--run=");
+                if value.is_empty() {
+                    bail!("--run requires a merge run id");
+                }
+                run_id = Some(value.to_string());
+                index += 1;
+            }
+            "--scope" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--scope requires all, db, files, or plugin");
+                };
+                scope = value.clone();
+                index += 2;
+            }
+            value if value.starts_with("--scope=") => {
+                let value = value.trim_start_matches("--scope=");
+                if value.is_empty() {
+                    bail!("--scope requires all, db, files, or plugin");
+                }
+                scope = value.to_string();
+                index += 1;
+            }
+            "--records" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!(
+                        "--records requires all, conflicts, conflict-events, decisions, resolutions, or rollback-failures"
+                    );
+                };
+                records = value.clone();
+                index += 2;
+            }
+            value if value.starts_with("--records=") => {
+                let value = value.trim_start_matches("--records=");
+                if value.is_empty() {
+                    bail!(
+                        "--records requires all, conflicts, conflict-events, decisions, resolutions, or rollback-failures"
+                    );
+                }
+                records = value.to_string();
+                index += 1;
+            }
+            "--conflict-type" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--conflict-type requires a value");
+                };
+                conflict_type = Some(value.clone());
+                index += 2;
+            }
+            value if value.starts_with("--conflict-type=") => {
+                let value = value.trim_start_matches("--conflict-type=");
+                if value.is_empty() {
+                    bail!("--conflict-type requires a value");
+                }
+                conflict_type = Some(value.to_string());
+                index += 1;
+            }
+            "--conflict-key" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--conflict-key requires a value");
+                };
+                conflict_key = Some(value.clone());
+                index += 2;
+            }
+            value if value.starts_with("--conflict-key=") => {
+                let value = value.trim_start_matches("--conflict-key=");
+                if value.is_empty() {
+                    bail!("--conflict-key requires a value");
+                }
+                conflict_key = Some(value.to_string());
+                index += 1;
+            }
+            "--decision" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--decision requires a value");
+                };
+                decision = Some(value.clone());
+                index += 2;
+            }
+            value if value.starts_with("--decision=") => {
+                let value = value.trim_start_matches("--decision=");
+                if value.is_empty() {
+                    bail!("--decision requires a value");
+                }
+                decision = Some(value.to_string());
+                index += 1;
+            }
+            "--path" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--path requires a relative file path");
+                };
+                path = Some(value.clone());
+                index += 2;
+            }
+            value if value.starts_with("--path=") => {
+                let value = value.trim_start_matches("--path=");
+                if value.is_empty() {
+                    bail!("--path requires a relative file path");
+                }
+                path = Some(value.to_string());
+                index += 1;
+            }
+            "--path-prefix" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--path-prefix requires a relative file path prefix");
+                };
+                path_prefix = Some(value.clone());
+                index += 2;
+            }
+            value if value.starts_with("--path-prefix=") => {
+                let value = value.trim_start_matches("--path-prefix=");
+                if value.is_empty() {
+                    bail!("--path-prefix requires a relative file path prefix");
+                }
+                path_prefix = Some(value.to_string());
+                index += 1;
+            }
+            "--id-band-skips" => {
+                id_band_skips = true;
+                index += 1;
+            }
+            "--target-kept" => {
+                target_kept = true;
+                index += 1;
+            }
+            "--review" => {
+                review = true;
+                index += 1;
+            }
+            "--revalidate" => {
+                revalidate = true;
+                index += 1;
+            }
+            "--review-status" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!(
+                        "--review-status requires unreviewed, pending, needs-action, or reviewed"
+                    );
+                };
+                review_status = Some(value.clone());
+                index += 2;
+            }
+            value if value.starts_with("--review-status=") => {
+                let value = value.trim_start_matches("--review-status=");
+                if value.is_empty() {
+                    bail!(
+                        "--review-status requires unreviewed, pending, needs-action, or reviewed"
+                    );
+                }
+                review_status = Some(value.to_string());
+                index += 1;
+            }
+            "--reviewer" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--reviewer requires a name");
+                };
+                reviewer = Some(value.clone());
+                index += 2;
+            }
+            value if value.starts_with("--reviewer=") => {
+                let value = value.trim_start_matches("--reviewer=");
+                if value.is_empty() {
+                    bail!("--reviewer requires a name");
+                }
+                reviewer = Some(value.to_string());
+                index += 1;
+            }
+            "--resolution-status" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--resolution-status requires validated or applied");
+                };
+                resolution_status = Some(value.clone());
+                index += 2;
+            }
+            value if value.starts_with("--resolution-status=") => {
+                let value = value.trim_start_matches("--resolution-status=");
+                if value.is_empty() {
+                    bail!("--resolution-status requires validated or applied");
+                }
+                resolution_status = Some(value.to_string());
+                index += 1;
+            }
+            "--lifecycle-state" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!(
+                        "--lifecycle-state requires unreviewed, deferred, needs-action, reviewed, validated, or resolved"
+                    );
+                };
+                lifecycle_state = Some(value.clone());
+                index += 2;
+            }
+            value if value.starts_with("--lifecycle-state=") => {
+                let value = value.trim_start_matches("--lifecycle-state=");
+                if value.is_empty() {
+                    bail!(
+                        "--lifecycle-state requires unreviewed, deferred, needs-action, reviewed, validated, or resolved"
+                    );
+                }
+                lifecycle_state = Some(value.to_string());
+                index += 1;
+            }
+            "--group-by" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!(
+                        "--group-by requires none, table, status, path, type, severity, or lifecycle"
+                    );
+                };
+                group_by = value.clone();
+                index += 2;
+            }
+            value if value.starts_with("--group-by=") => {
+                let value = value.trim_start_matches("--group-by=");
+                if value.is_empty() {
+                    bail!(
+                        "--group-by requires none, table, status, path, type, severity, or lifecycle"
+                    );
+                }
+                group_by = value.to_string();
+                index += 1;
+            }
+            other => bail!(
+                "unsupported argument for `forkpress branch merge-audit`: {other}\n\n{}",
+                branch_help_text(Some("merge-audit"))
+            ),
+        }
+    }
+    if revalidate
+        && (limit != "20"
+            || scope != "all"
+            || records != "all"
+            || conflict_type.is_some()
+            || conflict_key.is_some()
+            || decision.is_some()
+            || path.is_some()
+            || path_prefix.is_some()
+            || id_band_skips
+            || target_kept
+            || review
+            || review_status.is_some()
+            || resolution_status.is_some()
+            || lifecycle_state.is_some()
+            || group_by != "none")
+    {
+        bail!(
+            "`forkpress branch merge-audit --revalidate` only accepts --run, --reviewer, and --format; run merge-audit without --revalidate to filter audit output"
+        );
+    }
+    Ok(CowBranchMergeAuditArgs {
+        format,
+        limit,
+        run_id,
+        scope,
+        records,
+        conflict_type,
+        conflict_key,
+        decision,
+        path,
+        path_prefix,
+        id_band_skips,
+        target_kept,
+        review,
+        revalidate,
+        review_status,
+        reviewer,
+        resolution_status,
+        lifecycle_state,
+        group_by,
+    })
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -4941,6 +5159,11 @@ mod git_helper_tests {
         assert!(branch_help_text(Some("revalidate-reviews")).contains("--reviewer"));
         assert!(branch_help_text(Some("revalidate-reviews")).contains("needs-action"));
         assert!(branch_help_text(Some("merge-audit")).contains("--revalidate"));
+        assert!(branch_help_text(Some("merge-audit")).contains("revalidation only accepts"));
+        assert!(branch_help_text(Some("merge-audit")).contains("--scope all|db|files|plugin"));
+        assert!(branch_help_text(Some("merge-audit")).contains("--conflict-key <key>"));
+        assert!(branch_help_text(Some("merge-audit")).contains("--lifecycle-state <state>"));
+        assert!(branch_help_text(Some("merge-audit")).contains("lifecycle"));
     }
 
     #[test]
@@ -5322,6 +5545,129 @@ mod git_helper_tests {
     }
 
     #[test]
+    fn parses_cow_branch_merge_audit_lifecycle_filter_args() {
+        let args = vec![
+            "merge-audit".to_string(),
+            "--records".to_string(),
+            "conflicts".to_string(),
+            "--conflict-key".to_string(),
+            "sha256:abc123".to_string(),
+            "--lifecycle-state".to_string(),
+            "validated".to_string(),
+            "--group-by".to_string(),
+            "lifecycle".to_string(),
+        ];
+        let parsed = parse_cow_branch_merge_audit_args(&args).unwrap();
+        assert_eq!(parsed.records, "conflicts");
+        assert_eq!(parsed.conflict_key.as_deref(), Some("sha256:abc123"));
+        assert_eq!(parsed.lifecycle_state.as_deref(), Some("validated"));
+        assert_eq!(parsed.group_by, "lifecycle");
+    }
+
+    #[test]
+    fn parses_cow_branch_merge_audit_equals_form_filters() {
+        let args = vec![
+            "merge-audit".to_string(),
+            "--format=json".to_string(),
+            "--limit=12".to_string(),
+            "--run=7".to_string(),
+            "--scope=plugin".to_string(),
+            "--records=conflicts".to_string(),
+            "--conflict-type=row-target-deleted".to_string(),
+            "--conflict-key=sha256:abc123".to_string(),
+            "--path=wp-content/uploads/a.jpg".to_string(),
+            "--path-prefix=wp-content/uploads".to_string(),
+            "--review-status=needs-action".to_string(),
+            "--reviewer=alice".to_string(),
+            "--lifecycle-state=needs-action".to_string(),
+            "--group-by=lifecycle".to_string(),
+        ];
+        let parsed = parse_cow_branch_merge_audit_args(&args).unwrap();
+        assert_eq!(parsed.format, "json");
+        assert_eq!(parsed.limit, "12");
+        assert_eq!(parsed.run_id.as_deref(), Some("7"));
+        assert_eq!(parsed.scope, "plugin");
+        assert_eq!(parsed.records, "conflicts");
+        assert_eq!(parsed.conflict_type.as_deref(), Some("row-target-deleted"));
+        assert_eq!(parsed.conflict_key.as_deref(), Some("sha256:abc123"));
+        assert_eq!(parsed.path.as_deref(), Some("wp-content/uploads/a.jpg"));
+        assert_eq!(parsed.path_prefix.as_deref(), Some("wp-content/uploads"));
+        assert_eq!(parsed.review_status.as_deref(), Some("needs-action"));
+        assert_eq!(parsed.reviewer.as_deref(), Some("alice"));
+        assert_eq!(parsed.lifecycle_state.as_deref(), Some("needs-action"));
+        assert_eq!(parsed.group_by, "lifecycle");
+    }
+
+    #[test]
+    fn parses_cow_branch_merge_audit_equals_form_decision_filters() {
+        let args = vec![
+            "merge-audit".to_string(),
+            "--records=decisions".to_string(),
+            "--decision=target-kept".to_string(),
+            "--resolution-status=applied".to_string(),
+        ];
+        let parsed = parse_cow_branch_merge_audit_args(&args).unwrap();
+        assert_eq!(parsed.records, "decisions");
+        assert_eq!(parsed.decision.as_deref(), Some("target-kept"));
+        assert_eq!(parsed.resolution_status.as_deref(), Some("applied"));
+    }
+
+    #[test]
+    fn branch_merge_audit_revalidate_rejects_ignored_filters() {
+        let args = vec![
+            "merge-audit".to_string(),
+            "--revalidate".to_string(),
+            "--run=7".to_string(),
+            "--lifecycle-state=needs-action".to_string(),
+        ];
+        let err = parse_cow_branch_merge_audit_args(&args)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("merge-audit --revalidate"));
+        assert!(err.contains("only accepts --run, --reviewer, and --format"));
+    }
+
+    #[test]
+    fn branch_merge_audit_equals_form_rejects_empty_lifecycle_state() {
+        let args = vec!["merge-audit".to_string(), "--lifecycle-state=".to_string()];
+        let err = parse_cow_branch_merge_audit_args(&args)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--lifecycle-state"));
+        assert!(err.contains("requires"));
+    }
+
+    #[test]
+    fn branch_merge_audit_conflict_key_requires_value() {
+        let args = vec!["merge-audit".to_string(), "--conflict-key=".to_string()];
+        let err = parse_cow_branch_merge_audit_args(&args)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--conflict-key"));
+        assert!(err.contains("requires"));
+    }
+
+    #[test]
+    fn branch_merge_audit_errors_on_unknown_flags() {
+        let args = vec!["merge-audit".to_string(), "--target".to_string()];
+        let err = parse_cow_branch_merge_audit_args(&args)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unsupported argument"));
+        assert!(err.contains("forkpress branch merge-audit"));
+    }
+
+    #[test]
+    fn branch_merge_audit_lifecycle_state_requires_value() {
+        let args = vec!["merge-audit".to_string(), "--lifecycle-state".to_string()];
+        let err = parse_cow_branch_merge_audit_args(&args)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--lifecycle-state"));
+        assert!(err.contains("requires"));
+    }
+
+    #[test]
     fn parses_branch_merge_audit_id_band_skip_shortcut() {
         let cli = Cli::try_parse_from([
             "forkpress",
@@ -5446,6 +5792,39 @@ mod git_helper_tests {
                 "conflicts".to_string(),
                 "--group-by".to_string(),
                 "severity".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_branch_merge_audit_lifecycle_queue_grouping() {
+        let cli = Cli::try_parse_from([
+            "forkpress",
+            "branch",
+            "--work-dir",
+            ".forkpress",
+            "merge-audit",
+            "--records",
+            "conflicts",
+            "--lifecycle-state",
+            "needs-action",
+            "--group-by",
+            "lifecycle",
+        ])
+        .unwrap();
+        let Commands::Branch(args) = cli.command else {
+            panic!("expected branch command");
+        };
+        assert_eq!(
+            args.args,
+            vec![
+                "merge-audit".to_string(),
+                "--records".to_string(),
+                "conflicts".to_string(),
+                "--lifecycle-state".to_string(),
+                "needs-action".to_string(),
+                "--group-by".to_string(),
+                "lifecycle".to_string(),
             ]
         );
     }

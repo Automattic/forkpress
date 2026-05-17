@@ -3289,6 +3289,16 @@ try {
     $options_contract_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts']);
     assert_same(count($options_contract_audit['conflicts']), 2, 'conflict audit returns both option edit/delete conflicts');
     $options_contract_conflict_id = (int)$options_contract_audit['conflicts'][0]['id'];
+    $unreviewed_filter_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['lifecycle_state' => 'unreviewed']);
+    assert_same($unreviewed_filter_audit['filters']['records'], 'conflicts', 'lifecycle-state filter defaults to conflict records');
+    assert_same(count($unreviewed_filter_audit['conflicts']), 2, 'lifecycle-state filter returns unreviewed conflicts');
+    $invalid_lifecycle_filter_message = null;
+    try {
+        cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'decisions', 'lifecycle_state' => 'unreviewed']);
+    } catch (Throwable $e) {
+        $invalid_lifecycle_filter_message = $e->getMessage();
+    }
+    assert_same(str_contains((string)$invalid_lifecycle_filter_message, '--lifecycle-state can only be combined with --records conflicts or conflict-events'), true, 'lifecycle-state filter rejects non-conflict records');
     foreach ($options_contract_audit['conflicts'] as $contract_conflict) {
         assert_same($contract_conflict['conflict_class'], 'row', 'row delete conflict advertises row class');
         assert_same($contract_conflict['resolution_strategy'], 'row-choice', 'row delete conflict advertises row choice strategy');
@@ -3310,6 +3320,12 @@ try {
     assert_same((int)$pending_audit['conflicts'][0]['event_count'], 2, 'pending review appends a conflict lifecycle event');
     assert_same($pending_audit['conflicts'][0]['latest_event_type'], 'review-pending', 'pending review advertises latest conflict event');
     assert_same($pending_audit['conflicts'][0]['latest_event_lifecycle_state'], 'deferred', 'pending review advertises latest event lifecycle state');
+    $deferred_filter_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts', 'lifecycle_state' => 'deferred']);
+    assert_same(count($deferred_filter_audit['conflicts']), 1, 'lifecycle-state filter returns deferred conflicts');
+    assert_same((int)$deferred_filter_audit['conflicts'][0]['id'], $options_contract_conflict_id, 'deferred lifecycle filter returns the reviewed conflict');
+    $still_unreviewed_filter_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts', 'lifecycle_state' => 'unreviewed']);
+    assert_same(count($still_unreviewed_filter_audit['conflicts']), 1, 'lifecycle-state filter keeps other conflicts unreviewed');
+    assert_same((int)$still_unreviewed_filter_audit['conflicts'][0]['id'] !== $options_contract_conflict_id, true, 'unreviewed lifecycle filter excludes the deferred conflict');
 
     cow_merge_review_record($options_edit_delete_metadata, 'conflict', $options_contract_conflict_id, 'needs-action', 'Revalidate option conflict before resolving.', 'cow-smoke');
     $needs_action_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts']);
@@ -3318,6 +3334,8 @@ try {
     assert_same((int)$needs_action_audit['conflicts'][0]['event_count'], 3, 'needs-action review appends a conflict lifecycle event');
     assert_same($needs_action_audit['conflicts'][0]['latest_event_type'], 'review-needs-action', 'needs-action review advertises latest conflict event');
     assert_same($needs_action_audit['conflicts'][0]['latest_event_lifecycle_state'], 'needs-action', 'needs-action review advertises latest event lifecycle state');
+    $needs_action_filter_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts', 'lifecycle_state' => 'needs-action']);
+    assert_same((int)$needs_action_filter_audit['conflicts'][0]['id'], $options_contract_conflict_id, 'lifecycle-state filter returns needs-action conflicts');
 
     cow_merge_review_record($options_edit_delete_metadata, 'conflict', $options_contract_conflict_id, 'reviewed', 'Reviewed option conflict.', 'cow-smoke');
     $reviewed_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts']);
@@ -3326,6 +3344,8 @@ try {
     assert_same((int)$reviewed_audit['conflicts'][0]['event_count'], 4, 'reviewed note appends a conflict lifecycle event');
     assert_same($reviewed_audit['conflicts'][0]['latest_event_type'], 'review-reviewed', 'reviewed conflict advertises latest conflict event');
     assert_same($reviewed_audit['conflicts'][0]['latest_event_lifecycle_state'], 'reviewed', 'reviewed conflict advertises latest event lifecycle state');
+    $reviewed_filter_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts', 'lifecycle_state' => 'reviewed']);
+    assert_same((int)$reviewed_filter_audit['conflicts'][0]['id'], $options_contract_conflict_id, 'lifecycle-state filter returns reviewed conflicts');
 
     $validated_resolution = cow_merge_resolve_conflict($options_edit_delete_metadata, $options_contract_conflict_id, 'target', false, 'Validate target option deletion.', 'cow-smoke');
     assert_same((int)($validated_resolution['resolution_id'] ?? 0) > 0, true, 'validation-only resolution records a durable resolution id');
@@ -3338,6 +3358,8 @@ try {
     assert_same((int)$validated_audit['conflicts'][0]['latest_resolution_applied'], 0, 'validation-only resolution records unapplied resolution');
     assert_same($validated_audit['conflicts'][0]['latest_event_type'], 'resolution-validated', 'validation-only resolution advertises latest validation event');
     assert_same($validated_audit['conflicts'][0]['latest_event_lifecycle_state'], 'validated', 'validation-only resolution advertises latest event lifecycle state');
+    $validated_filter_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts', 'lifecycle_state' => 'validated']);
+    assert_same((int)$validated_filter_audit['conflicts'][0]['id'], $options_contract_conflict_id, 'lifecycle-state filter returns validated conflicts');
 
     $apply_reviewed_cli = smoke_run_merge_cli([
         'resolve-conflict',
@@ -3360,6 +3382,15 @@ try {
     assert_same($resolved_audit['conflicts'][0]['latest_event_type'], 'resolution-applied', 'resolved conflict advertises latest resolution event');
     assert_same($resolved_audit['conflicts'][0]['latest_event_lifecycle_state'], 'resolved', 'resolved conflict advertises latest event lifecycle state');
     assert_same($resolved_audit['conflicts'][0]['latest_event_actor'], 'cow-smoke', 'resolved conflict advertises latest event actor');
+    $resolved_filter_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts', 'lifecycle_state' => 'resolved']);
+    assert_same((int)$resolved_filter_audit['conflicts'][0]['id'], $options_contract_conflict_id, 'lifecycle-state filter returns resolved conflicts');
+    $lifecycle_group_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts', 'group_by' => 'lifecycle']);
+    $lifecycle_counts = [];
+    foreach ($lifecycle_group_audit['conflict_groups'] as $group) {
+        $lifecycle_counts[$group['group_key']] = (int)$group['conflict_count'];
+    }
+    assert_same($lifecycle_counts['resolved'] ?? 0, 1, 'lifecycle grouping counts resolved conflicts');
+    assert_same($lifecycle_counts['unreviewed'] ?? 0, 1, 'lifecycle grouping counts still-unreviewed conflicts');
     $resolved_regression_message = null;
     try {
         cow_merge_resolve_conflict(
@@ -3388,6 +3419,15 @@ try {
         count(array_unique(array_map('intval', array_column($event_audit['conflict_events'], 'conflict_id')))),
         1,
         'conflict event audit can be limited to one conflict history'
+    );
+    $resolved_event_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 6, ['records' => 'conflict-events', 'lifecycle_state' => 'resolved']);
+    assert_same(count($resolved_event_audit['conflict_events']), 1, 'lifecycle-state filter returns matching conflict lifecycle events');
+    assert_same($resolved_event_audit['conflict_events'][0]['event_type'], 'resolution-applied', 'resolved lifecycle event filter returns the applied-resolution event');
+    assert_same((int)$resolved_event_audit['conflict_events'][0]['conflict_id'], $options_contract_conflict_id, 'resolved lifecycle event filter keeps the selected conflict id');
+    assert_same(
+        str_contains(cow_merge_audit_filter_label($resolved_event_audit['filters']), 'lifecycle-state=resolved'),
+        true,
+        'lifecycle-state filter is visible in text audit filters'
     );
     assert_same((int)$event_audit['conflict_events'][0]['conflict_id'], $options_contract_conflict_id, 'conflict event audit exposes the conflict id');
     assert_same($event_audit['conflict_events'][0]['table_name'], 'wp_options', 'conflict event audit exposes the conflict table');

@@ -135,6 +135,22 @@ try {
         'stale reviewed conflict cannot apply before revalidation'
     );
 
+    $filtered_revalidate = run_merge_cli([
+        'audit',
+        '--metadata-db', $metadata,
+        '--revalidate',
+        '--scope', 'db',
+    ]);
+    assert_true($filtered_revalidate['status'] !== 0, 'audit revalidate rejects ignored filters in direct PHP CLI');
+    assert_true(
+        str_contains($filtered_revalidate['output'], 'merge-audit --revalidate only accepts --run, --reviewer, --format, and --quiet'),
+        'audit revalidate explains supported action flags'
+    );
+    assert_true(
+        str_contains($filtered_revalidate['output'], 'Ignored filters: --scope'),
+        'audit revalidate names the ignored filter'
+    );
+
     $revalidated = cow_merge_revalidate_reviewed_conflicts($metadata, $run_id, 'cow-revalidate');
     assert_same($revalidated['checked'], 1, 'revalidation checks the reviewed conflict');
     assert_same($revalidated['stale'], 1, 'revalidation detects target drift');
