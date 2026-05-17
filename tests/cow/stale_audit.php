@@ -143,7 +143,7 @@ try {
     ]);
     assert_true($filtered_revalidate['status'] !== 0, 'audit revalidate rejects ignored filters in direct PHP CLI');
     assert_true(
-        str_contains($filtered_revalidate['output'], 'merge-audit --revalidate only accepts --run, --reviewer, --format, and --quiet'),
+        str_contains($filtered_revalidate['output'], 'merge-audit --revalidate only accepts --run, --conflict-id, --reviewer, --format, and --quiet'),
         'audit revalidate explains supported action flags'
     );
     assert_true(
@@ -151,7 +151,8 @@ try {
         'audit revalidate names the ignored filter'
     );
 
-    $revalidated = cow_merge_revalidate_reviewed_conflicts($metadata, $run_id, 'cow-revalidate');
+    $revalidated = cow_merge_revalidate_reviewed_conflicts($metadata, $run_id, 'cow-revalidate', $conflict_id);
+    assert_same($revalidated['conflict_id'] ?? null, $conflict_id, 'revalidation summary preserves the requested conflict id filter');
     assert_same($revalidated['checked'], 1, 'revalidation checks the reviewed conflict');
     assert_same($revalidated['stale'], 1, 'revalidation detects target drift');
     assert_same($revalidated['carried'], 1, 'revalidation carries stale reviewer intent to needs-action');
@@ -191,10 +192,12 @@ try {
         'revalidate-reviews',
         '--metadata-db', $metadata,
         '--run', (string)$run_id,
+        '--conflict-id', (string)$conflict_id,
         '--format', 'json',
     ]);
     assert_same($again['status'], 0, 'revalidation CLI accepts already-carried stale reviews');
     $again_json = json_decode($again['output'], true);
+    assert_same($again_json['conflict_id'] ?? null, $conflict_id, 'revalidation CLI preserves the requested conflict id filter');
     assert_same($again_json['carried'] ?? null, 0, 'revalidation CLI does not duplicate carried notes');
     assert_same($again_json['already_needs_action'] ?? null, 1, 'revalidation CLI reports already-carried stale reviews');
     assert_same(count($again_json['already_needs_action_conflicts'] ?? []), 1, 'revalidation CLI returns already-open needs-action conflicts');
@@ -213,6 +216,7 @@ try {
         '--metadata-db', $metadata,
         '--revalidate',
         '--run', (string)$run_id,
+        '--conflict-id', (string)$conflict_id,
         '--quiet',
     ]);
     assert_same($again_quiet['status'], 0, 'audit revalidate supports quiet mode');
