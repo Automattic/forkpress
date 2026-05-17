@@ -868,6 +868,12 @@ PHP);
         'height' => 480,
         'sizes' => [],
     ]);
+    $nul_metadata_id = insert_attachment($db, 'Source media NUL attached file path', "2026/05/source-nul\0attached.jpg", [
+        'file' => "2026/05/source-nul\0attached.jpg",
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [],
+    ]);
     $original_dimensions_id = insert_attachment($db, 'Source media invalid original dimensions', '2026/05/source-original-dimensions.jpg', [
         'file' => '2026/05/source-original-dimensions.jpg',
         'width' => 0,
@@ -1172,7 +1178,7 @@ PHP);
 
     assert_same($result['status'], 'completed_with_conflicts', 'media validator holds incomplete generated-size metadata for review');
     assert_same((int)($result['plugin_validators'] ?? 0), 1, 'media validator is discovered from mu-plugins during merge');
-    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 36, 'media validator records missing required metadata, invalid metadata, dimensions, image metadata, filesize and MIME drift, generated-size, original-image, backup-size, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
+    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 37, 'media validator records missing required metadata, invalid metadata, dimensions, image metadata, filesize and MIME drift, generated-size, original-image, backup-size, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
     assert_same(
         scalar($target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-generated-missing-file-key.jpg',
@@ -1207,10 +1213,11 @@ PHP);
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-media-invalid-metadata',
     ]);
-    assert_same(count($invalid_audit['conflicts']), 1, 'media validator exposes invalid serialized attachment metadata as a plugin-scoped audit conflict');
-    $invalid_preview = (string)($invalid_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_same(count($invalid_audit['conflicts']), 2, 'media validator exposes invalid serialized and NUL-corrupted attachment metadata as plugin-scoped audit conflicts');
+    $invalid_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $invalid_audit['conflicts']));
     assert_true(str_contains($invalid_preview, 'source-invalid-metadata.jpg'), 'media validator invalid-metadata audit includes the affected attachment');
     assert_true(str_contains($invalid_preview, (string)$invalid_metadata_id), 'media validator invalid-metadata audit includes the affected attachment ID');
+    assert_true(str_contains($invalid_preview, (string)$nul_metadata_id), 'media validator invalid-metadata audit includes the NUL-corrupted attachment ID');
 
     $missing_metadata_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'plugin',
