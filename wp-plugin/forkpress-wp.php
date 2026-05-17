@@ -1107,6 +1107,29 @@ function forkpress_branch_conflict_audit_summary(array $report, int $run, array 
     ];
 }
 
+function forkpress_branch_revalidate_merge_run(int $run): array {
+    [$code, $output] = forkpress_branch_run_cli(['merge-audit', '--revalidate', '--run', (string) $run, '--reviewer', 'wordpress-ui', '--format', 'json']);
+    if ($code !== 0) {
+        return [$code, $output, null];
+    }
+
+    $result = json_decode($output, true);
+    if (!is_array($result)) {
+        return [1, 'ForkPress returned invalid revalidation JSON.', null];
+    }
+
+    return [0, $output, $result];
+}
+
+function forkpress_branch_revalidation_needs_action_for_conflict(array $result, int $conflict): bool {
+    foreach (($result['needs_action_conflicts'] ?? []) as $record) {
+        if (is_array($record) && (int)($record['conflict_id'] ?? 0) === $conflict) {
+            return true;
+        }
+    }
+    return false;
+}
+
 function forkpress_branch_birth_admin_notice(): void {
     $status = forkpress_branch_birth_status();
     if (!is_array($status) || ($status['ready'] ?? true)) {
@@ -1330,14 +1353,9 @@ function forkpress_handle_branch_revalidate_conflicts(): void {
         forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Choose a merge run to revalidate.');
     }
 
-    [$code, $output] = forkpress_branch_run_cli(['merge-audit', '--revalidate', '--run', (string) $run, '--reviewer', 'wordpress-ui', '--format', 'json']);
+    [$code, $output, $result] = forkpress_branch_revalidate_merge_run($run);
     if ($code !== 0) {
         forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', $output ?: 'ForkPress could not revalidate merge conflicts.');
-    }
-
-    $result = json_decode($output, true);
-    if (!is_array($result)) {
-        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'ForkPress returned invalid revalidation JSON.');
     }
 
     $checked = max(0, (int)($result['checked'] ?? 0));
@@ -1440,6 +1458,33 @@ function forkpress_handle_branch_resolve_conflict(): void {
         forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Choose source or target for the conflict resolution.');
     }
 
+    $run = forkpress_branch_post_int('run');
+    if ($apply_reviewed && $run !== null) {
+        [$code, $output, $revalidation] = forkpress_branch_revalidate_merge_run($run);
+        if ($code !== 0) {
+            forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', $output ?: 'ForkPress could not revalidate merge conflicts before applying the reviewed choice.');
+        }
+        if ($revalidation !== null && forkpress_branch_revalidation_needs_action_for_conflict($revalidation, $conflict)) {
+            $checked = max(0, (int)($revalidation['checked'] ?? 0));
+            $stale = max(0, (int)($revalidation['stale'] ?? 0));
+            $carried = max(0, (int)($revalidation['carried'] ?? 0));
+            forkpress_branch_finish_action(
+                forkpress_branch_url($current, '/wp-admin/'),
+                'error',
+                'Conflict #' . $conflict . ' changed since review. Revalidate and review it before applying the reviewed choice.',
+                [
+                    'run' => $run,
+                    'conflict' => $conflict,
+                    'checked' => $checked,
+                    'stale' => $stale,
+                    'carried' => $carried,
+                    'revalidation' => $revalidation,
+                    'auditCommand' => 'forkpress branch merge-audit --revalidate --run ' . $run . ' --reviewer wordpress-ui --format json',
+                ]
+            );
+        }
+    }
+
     $notes = [
         'source' => 'Applied source choice from the WordPress branch switcher.',
         'target' => 'Applied target choice from the WordPress branch switcher.',
@@ -1471,7 +1516,6 @@ function forkpress_handle_branch_resolve_conflict(): void {
         forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', $output ?: 'ForkPress could not apply the conflict resolution.');
     }
 
-    $run = forkpress_branch_post_int('run');
     forkpress_branch_finish_action(
         forkpress_branch_url($current, '/wp-admin/'),
         'notice',
