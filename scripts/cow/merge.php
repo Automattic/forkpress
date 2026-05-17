@@ -11608,12 +11608,15 @@ function cow_merge_resolve_schema_conflict(
     }
     $after_revalidate_schema_types = [
         'schema-source-added-index',
+        'schema-source-changed-index',
         'schema-source-added-view',
+        'schema-source-changed-view',
         'schema-source-added-trigger',
+        'schema-source-changed-trigger',
         'schema-conflict',
     ];
     if ($after_revalidate && ($choice !== 'source' || !in_array($conflict_type, $after_revalidate_schema_types, true))) {
-        throw new InvalidArgumentException('--after-revalidate currently supports source resolution for compatible source-added index/view/trigger or table rebuild drift only');
+        throw new InvalidArgumentException('--after-revalidate currently supports source resolution for compatible source-added/source-changed index/view/trigger or table rebuild drift only');
     }
 
     $source_payload = cow_merge_decode_payload_json((string)$conflict['source_payload'], 'source');
@@ -15202,10 +15205,9 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
                 }
                 $revalidation_class = 'unclassified';
                 if (
-                    $conflict_type === 'schema-source-added-index' &&
+                    in_array($conflict_type, ['schema-source-added-index', 'schema-source-changed-index'], true) &&
                     $source_fresh &&
                     !$target_fresh &&
-                    $expected_target_sql === null &&
                     $current_source_sql !== null
                 ) {
                     $target = cow_merge_open_db($target_db, SQLITE3_OPEN_READWRITE);
@@ -15280,10 +15282,14 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
                 }
                 $revalidation_class = 'unclassified';
                 if (
-                    in_array($conflict_type, ['schema-source-added-view', 'schema-source-added-trigger'], true) &&
+                    in_array($conflict_type, [
+                        'schema-source-added-view',
+                        'schema-source-changed-view',
+                        'schema-source-added-trigger',
+                        'schema-source-changed-trigger',
+                    ], true) &&
                     $source_fresh &&
                     !$target_fresh &&
-                    $expected_target_sql === null &&
                     $current_source_sql !== null
                 ) {
                     $source_error = is_array($source_payload) ? (string)($source_payload['error'] ?? '') : '';

@@ -599,6 +599,99 @@ SQL);
         'compatible schema view target drift applies the audited source view'
     );
 
+    $schema_view_changed_compatible_base = $tmp . '/schema-view-changed-compatible-base.sqlite';
+    $schema_view_changed_compatible_source = $tmp . '/schema-view-changed-compatible-source.sqlite';
+    $schema_view_changed_compatible_target = $tmp . '/schema-view-changed-compatible-target.sqlite';
+    $schema_view_changed_compatible_metadata = $tmp . '/.forkpress/cow/merge/schema-view-changed-compatible-metadata.sqlite';
+
+    $db = open_db($schema_view_changed_compatible_base);
+    $db->exec('CREATE TABLE plugin_schema_view_changed_compatible_items (label TEXT NOT NULL)');
+    $db->exec("INSERT INTO plugin_schema_view_changed_compatible_items (label) VALUES ('compatible changed view anchor')");
+    $db->exec('CREATE VIEW plugin_schema_view_changed_compatible_view AS SELECT label FROM plugin_schema_view_changed_compatible_items');
+    $db->close();
+    copy($schema_view_changed_compatible_base, $schema_view_changed_compatible_source);
+    copy($schema_view_changed_compatible_base, $schema_view_changed_compatible_target);
+
+    $source_db = open_db($schema_view_changed_compatible_source);
+    $source_db->exec('DROP VIEW plugin_schema_view_changed_compatible_view');
+    $source_db->exec("CREATE VIEW plugin_schema_view_changed_compatible_view AS SELECT label || ' source' AS label FROM plugin_schema_view_changed_compatible_items");
+    $source_changed_view_sql = (string)$source_db->querySingle("SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'plugin_schema_view_changed_compatible_view'");
+    $source_db->close();
+
+    $base_db = open_db($schema_view_changed_compatible_base);
+    $base_changed_view_sql = (string)$base_db->querySingle("SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'plugin_schema_view_changed_compatible_view'");
+    $base_db->close();
+
+    @mkdir(dirname($schema_view_changed_compatible_metadata), 0777, true);
+    $schema_view_changed_compatible_meta = open_db($schema_view_changed_compatible_metadata);
+    cow_merge_ensure_metadata($schema_view_changed_compatible_meta);
+    $schema_view_changed_compatible_run_id = cow_merge_start_run(
+        $schema_view_changed_compatible_meta,
+        'feature-schema-view-changed-compatible',
+        'main',
+        $schema_view_changed_compatible_base,
+        $schema_view_changed_compatible_source,
+        $schema_view_changed_compatible_target
+    );
+    cow_merge_record_schema_conflict(
+        $schema_view_changed_compatible_meta,
+        $schema_view_changed_compatible_run_id,
+        'plugin_schema_view_changed_compatible_items',
+        'plugin_schema_view_changed_compatible_view',
+        'schema-source-changed-view',
+        $base_changed_view_sql,
+        ['sql' => $source_changed_view_sql],
+        $base_changed_view_sql,
+        $base_changed_view_sql,
+        'manual source-changed view conflict for compatible target-drift revalidation'
+    );
+    cow_merge_finish_run($schema_view_changed_compatible_meta, $schema_view_changed_compatible_run_id, 'completed_with_conflicts');
+    $schema_view_changed_compatible_meta->close();
+
+    $schema_view_changed_compatible_conflict_id = (int)scalar($schema_view_changed_compatible_metadata, "SELECT id FROM merge_conflicts WHERE conflict_type = 'schema-source-changed-view' ORDER BY id DESC LIMIT 1");
+    assert_true($schema_view_changed_compatible_conflict_id > 0, 'compatible schema changed-view target-drift fixture records a legacy source-changed view conflict');
+    cow_merge_review_record(
+        $schema_view_changed_compatible_metadata,
+        'conflict',
+        $schema_view_changed_compatible_conflict_id,
+        'reviewed',
+        'Review source-changed view before compatible target drift.',
+        'cow-test'
+    );
+    $target_db = open_db($schema_view_changed_compatible_target);
+    $target_db->exec('DROP VIEW plugin_schema_view_changed_compatible_view');
+    $target_db->exec("CREATE VIEW plugin_schema_view_changed_compatible_view AS SELECT label || ' target' AS label FROM plugin_schema_view_changed_compatible_items");
+    $target_db->close();
+
+    $schema_view_changed_compatible_revalidated = cow_merge_revalidate_reviewed_conflicts(
+        $schema_view_changed_compatible_metadata,
+        $schema_view_changed_compatible_run_id,
+        'cow-revalidate'
+    );
+    assert_same($schema_view_changed_compatible_revalidated['checked'], 1, 'compatible schema changed-view target drift revalidation checks the reviewed conflict');
+    assert_same($schema_view_changed_compatible_revalidated['stale'], 1, 'compatible schema changed-view target drift is treated as stale');
+    assert_same($schema_view_changed_compatible_revalidated['carried'], 1, 'compatible schema changed-view target drift returns the conflict to needs-action');
+    assert_same(
+        scalar($schema_view_changed_compatible_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $schema_view_changed_compatible_conflict_id ORDER BY id DESC LIMIT 1"),
+        'compatible-schema-view-target-drift',
+        'schema changed-view target drift is classified compatible when source replacement validates'
+    );
+    $schema_view_changed_compatible_resolution = cow_merge_resolve_conflict(
+        $schema_view_changed_compatible_metadata,
+        $schema_view_changed_compatible_conflict_id,
+        'source',
+        true,
+        'Apply source-changed view after compatible target drift revalidation.',
+        'cow-test',
+        true
+    );
+    assert_same($schema_view_changed_compatible_resolution['status'], 'applied', 'compatible schema changed-view target drift resolves after revalidation');
+    assert_same(
+        scalar($schema_view_changed_compatible_target, "SELECT label FROM plugin_schema_view_changed_compatible_view"),
+        'compatible changed view anchor source',
+        'compatible schema changed-view target drift applies the audited source view'
+    );
+
     $schema_trigger_compatible_base = $tmp . '/schema-trigger-compatible-base.sqlite';
     $schema_trigger_compatible_source = $tmp . '/schema-trigger-compatible-source.sqlite';
     $schema_trigger_compatible_target = $tmp . '/schema-trigger-compatible-target.sqlite';
