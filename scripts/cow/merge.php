@@ -10776,6 +10776,98 @@ function cow_merge_trigger_validation_sql(SQLite3 $db, string $sql): ?string {
     return null;
 }
 
+function cow_merge_trigger_body_statements(string $sql): array {
+    if (!preg_match('/\bBEGIN\b(.*)\bEND\b/is', $sql, $match)) {
+        return [];
+    }
+    return cow_merge_sql_split_statements((string)$match[1]);
+}
+
+function cow_merge_sql_has_identifier(string $sql, string $identifier): bool {
+    $ignored_ranges = cow_merge_sql_ignored_ranges($sql);
+    if (!preg_match_all('/\b' . preg_quote($identifier, '/') . '\b/i', $sql, $matches, PREG_OFFSET_CAPTURE)) {
+        return false;
+    }
+    foreach ($matches[0] as $match) {
+        if (!cow_merge_sql_offset_in_ranges((int)$match[1], $ignored_ranges)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function cow_merge_rowid_sensitive_reference(SQLite3 $db, string $name, array $seen = []): ?string {
+    $key = strtolower($name);
+    if (isset($seen[$key])) {
+        return null;
+    }
+    $seen[$key] = true;
+
+    $table_sql = cow_merge_table_sql($db, $name);
+    if ($table_sql !== null) {
+        return preg_match('/\bWITHOUT\s+ROWID\b/i', $table_sql) ? $name : null;
+    }
+
+    $view_sql = cow_merge_schema_object_sql($db, 'view', $name);
+    if ($view_sql === null) {
+        return null;
+    }
+    foreach (cow_merge_sql_referenced_schema_objects($view_sql) as $reference) {
+        $schema = $reference['schema'] ?? null;
+        if ($schema !== null && $schema !== 'main') {
+            continue;
+        }
+        $sensitive = cow_merge_rowid_sensitive_reference($db, (string)$reference['name'], $seen);
+        if ($sensitive !== null) {
+            return $sensitive;
+        }
+    }
+    return null;
+}
+
+function cow_merge_validate_trigger_rowid_sensitive_references(SQLite3 $db, string $name, string $statement): void {
+    if (!cow_merge_sql_has_identifier($statement, 'rowid')) {
+        return;
+    }
+    foreach (cow_merge_sql_referenced_schema_objects($statement) as $reference) {
+        $schema = $reference['schema'] ?? null;
+        if ($schema !== null && $schema !== 'main') {
+            continue;
+        }
+        $sensitive = cow_merge_rowid_sensitive_reference($db, (string)$reference['name']);
+        if ($sensitive === null) {
+            continue;
+        }
+        throw new InvalidArgumentException(
+            'source trigger ' . $name .
+            ' failed target trigger validation: rowid reference depends on WITHOUT ROWID table ' . $sensitive
+        );
+    }
+}
+
+function cow_merge_validate_trigger_body_statements(SQLite3 $db, string $name, string $sql): void {
+    $identifier = cow_merge_identifier_pattern('column_');
+    foreach (cow_merge_trigger_body_statements($sql) as $statement) {
+        if (preg_match('/\bRAISE\s*\(/i', $statement)) {
+            continue;
+        }
+        cow_merge_validate_trigger_rowid_sensitive_references($db, $name, $statement);
+        $validation_sql = preg_replace('/\b(?:NEW|OLD)\s*\.\s*' . $identifier . '/i', 'NULL', $statement);
+        if (!is_string($validation_sql) || trim($validation_sql) === '') {
+            continue;
+        }
+        $validation_sql = 'EXPLAIN ' . $validation_sql;
+        cow_merge_test_hook('before_sqlite_query', $db, $validation_sql, 'failed to run source trigger ' . $name . ' body statement validation');
+        $res = @$db->query($validation_sql);
+        if (!$res) {
+            throw new InvalidArgumentException(
+                'source trigger ' . $name . ' failed target trigger validation: ' . $db->lastErrorMsg()
+            );
+        }
+        cow_merge_result_finalize_checked($res, 'failed to finalize source trigger ' . $name . ' body statement validation result');
+    }
+}
+
 function cow_merge_trigger_pseudo_column_references(string $sql): array {
     $refs = [];
     foreach (cow_merge_sql_split_statements($sql) as $statement) {
@@ -10858,6 +10950,7 @@ function cow_merge_validate_trigger_program(SQLite3 $db, string $name, string $s
         );
     }
     cow_merge_result_finalize_checked($res, 'failed to finalize source trigger ' . $name . ' target trigger validation result');
+    cow_merge_validate_trigger_body_statements($db, $name, $sql);
 }
 
 function cow_merge_missing_schema_references(SQLite3 $db, array $references): array {
@@ -11608,12 +11701,15 @@ function cow_merge_resolve_schema_conflict(
     }
     $after_revalidate_schema_types = [
         'schema-source-added-index',
+        'schema-source-changed-index',
         'schema-source-added-view',
+        'schema-source-changed-view',
         'schema-source-added-trigger',
+        'schema-source-changed-trigger',
         'schema-conflict',
     ];
     if ($after_revalidate && ($choice !== 'source' || !in_array($conflict_type, $after_revalidate_schema_types, true))) {
-        throw new InvalidArgumentException('--after-revalidate currently supports source resolution for compatible source-added index/view/trigger or table rebuild drift only');
+        throw new InvalidArgumentException('--after-revalidate currently supports source resolution for compatible source-added/source-changed index/view/trigger or table rebuild drift only');
     }
 
     $source_payload = cow_merge_decode_payload_json((string)$conflict['source_payload'], 'source');
@@ -11787,7 +11883,7 @@ function cow_merge_resolve_schema_conflict(
             }
         } elseif ($conflict_type === 'schema-target-dropped-table' && $object === '') {
             if ($after_revalidate) {
-                throw new InvalidArgumentException('--after-revalidate currently supports source resolution for compatible source-added index/view/trigger or table rebuild drift only');
+                throw new InvalidArgumentException('--after-revalidate currently supports source resolution for compatible source-added/source-changed index/view/trigger or table rebuild drift only');
             }
             $restore_payload = cow_merge_normalize_source_table_restore_payload($source_payload);
             if ($target_payload !== null) {
@@ -11850,7 +11946,7 @@ function cow_merge_resolve_schema_conflict(
             }
         } elseif ($conflict_type === 'schema-source-dropped-table' && $object === '') {
             if ($after_revalidate) {
-                throw new InvalidArgumentException('--after-revalidate currently supports source resolution for compatible source-added index/view/trigger or table rebuild drift only');
+                throw new InvalidArgumentException('--after-revalidate currently supports source resolution for compatible source-added/source-changed index/view/trigger or table rebuild drift only');
             }
             if ($source_payload !== null) {
                 throw new RuntimeException("schema conflict #$conflict_id has an unexpected source table payload");
@@ -15202,10 +15298,9 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
                 }
                 $revalidation_class = 'unclassified';
                 if (
-                    $conflict_type === 'schema-source-added-index' &&
+                    in_array($conflict_type, ['schema-source-added-index', 'schema-source-changed-index'], true) &&
                     $source_fresh &&
                     !$target_fresh &&
-                    $expected_target_sql === null &&
                     $current_source_sql !== null
                 ) {
                     $target = cow_merge_open_db($target_db, SQLITE3_OPEN_READWRITE);
@@ -15280,10 +15375,14 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
                 }
                 $revalidation_class = 'unclassified';
                 if (
-                    in_array($conflict_type, ['schema-source-added-view', 'schema-source-added-trigger'], true) &&
+                    in_array($conflict_type, [
+                        'schema-source-added-view',
+                        'schema-source-changed-view',
+                        'schema-source-added-trigger',
+                        'schema-source-changed-trigger',
+                    ], true) &&
                     $source_fresh &&
                     !$target_fresh &&
-                    $expected_target_sql === null &&
                     $current_source_sql !== null
                 ) {
                     $source_error = is_array($source_payload) ? (string)($source_payload['error'] ?? '') : '';
