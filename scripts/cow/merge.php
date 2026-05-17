@@ -6969,6 +6969,11 @@ function cow_merge_record_plugin_validator_conflicts(
             if (array_key_exists('logical_identity', $finding)) {
                 $payload['logical_identity'] = $finding['logical_identity'];
             }
+            foreach (['resolution_policy', 'suggested_action', 'manual_review_reason'] as $review_field) {
+                if (array_key_exists($review_field, $finding)) {
+                    $payload[$review_field] = $finding[$review_field];
+                }
+            }
             if (cow_merge_record_conflict(
                 $meta,
                 $run_id,

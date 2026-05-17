@@ -174,6 +174,13 @@ $unsafe_upload_path = static function (string $relative_file): bool {
         str_contains($relative_file, "\0") ||
         in_array('..', explode('/', str_replace('\\', '/', $relative_file)), true);
 };
+$review_only_regeneration_decision = static function (string $missing_kind): array {
+    return [
+        'resolution_policy' => 'review-only',
+        'suggested_action' => 'Regenerate attachment metadata only after a reviewer confirms WordPress can reproduce the declared upload derivative from the original file.',
+        'manual_review_reason' => 'ForkPress must not synthesize ' . $missing_kind . ' upload files during merge.',
+    ];
+};
 while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
     if ($row['attached_file'] === null || $row['metadata'] === null) {
         foreach (['_wp_attached_file' => $row['attached_file'], '_wp_attachment_metadata' => $row['metadata']] as $meta_key => $meta_value) {
@@ -314,7 +321,7 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
                 'attachment_id' => (int)$row['ID'],
                 'attached_file' => $attached_file,
             ],
-        ];
+        ] + $review_only_regeneration_decision('original');
     } elseif ($uploads_root !== '') {
         $declared_filesize = $metadata['filesize'] ?? null;
         $actual_filesize = is_file($uploads_root . '/' . $attached_file) ? filesize($uploads_root . '/' . $attached_file) : false;
@@ -349,7 +356,7 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
                     'attached_file' => $attached_file,
                     'metadata_file' => $metadata_file,
                 ],
-            ];
+            ] + $review_only_regeneration_decision('metadata original');
         } elseif ($uploads_root !== '' && !is_file($uploads_root . '/' . $metadata_file)) {
             $findings[] = [
                 'plugin' => 'forkpress-wp-media',
@@ -420,7 +427,7 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
                             'original_image' => (string)$metadata['original_image'],
                             'original_image_file' => $original_image_file,
                         ],
-                    ];
+                    ] + $review_only_regeneration_decision('original_image');
                 }
             }
         }
@@ -497,7 +504,7 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
                         'backup_size' => (string)$backup_name,
                         'backup_file' => $backup_relative_file,
                     ],
-                ];
+                ] + $review_only_regeneration_decision('backup');
             } elseif ($uploads_root !== '') {
                 $declared_backup_filesize = $backup_size['filesize'] ?? null;
                 $actual_backup_filesize = filesize($uploads_root . '/' . $backup_relative_file);
@@ -671,7 +678,7 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
                         'size' => (string)$size_name,
                         'generated_file' => $generated_file,
                     ],
-                ];
+                ] + $review_only_regeneration_decision('generated');
             } elseif ($uploads_root !== '') {
                 $declared_generated_filesize = $size['filesize'] ?? null;
                 $actual_generated_filesize = filesize($uploads_root . '/' . $generated_file);
@@ -1343,6 +1350,7 @@ PHP);
     $missing_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $missing_audit['conflicts']));
     assert_true(str_contains($missing_preview, 'source-missing-original.jpg'), 'media validator missing-file audit includes the affected original attachment');
     $missing_metadata_original_recorded = false;
+    $missing_generated_review_only_recorded = false;
     $missing_original_image_recorded = false;
     $meta_db = open_db($metadata);
     $payloads = $meta_db->query("SELECT chosen_payload FROM merge_conflicts WHERE conflict_type = 'plugin-wp-media-missing-file'");
@@ -1350,6 +1358,12 @@ PHP);
         $decoded = cow_merge_decode_payload_json((string)$payload['chosen_payload'], 'media validator missing-file payload');
         if (($decoded['candidate']['metadata_file'] ?? null) === '2026/05/source-metadata-file-mismatch-metadata.jpg') {
             $missing_metadata_original_recorded = true;
+        }
+        if (($decoded['candidate']['generated_file'] ?? null) === '2026/05/source-missing-generated-150x150.jpg') {
+            $missing_generated_review_only_recorded =
+                ($decoded['resolution_policy'] ?? null) === 'review-only' &&
+                str_contains((string)($decoded['suggested_action'] ?? ''), 'Regenerate attachment metadata only after a reviewer confirms') &&
+                str_contains((string)($decoded['manual_review_reason'] ?? ''), 'must not synthesize generated upload files');
         }
         if (($decoded['candidate']['original_image_file'] ?? null) === '2026/05/source-original-image-missing-original.jpg') {
             $missing_original_image_recorded = true;
@@ -1359,6 +1373,7 @@ PHP);
     $meta_db->close();
     assert_true($missing_metadata_original_recorded, 'media validator missing-file audit payload identifies the missing metadata original file');
     assert_true(str_contains($missing_preview, 'source-missing-generated-150x150.jpg'), 'media validator missing-file audit includes the affected generated file');
+    assert_true($missing_generated_review_only_recorded, 'media validator missing-file audit records generated derivative regeneration as review-only');
     assert_true($missing_original_image_recorded, 'media validator missing-file audit payload identifies the missing original_image file');
     assert_true(str_contains($missing_preview, (string)$original_image_missing_id), 'media validator missing-file audit includes the missing original_image attachment ID');
     assert_true(str_contains($missing_preview, 'source-backup-missing-original.jpg'), 'media validator missing-file audit includes the affected backup image file');

@@ -28,7 +28,10 @@ A validator returns one of:
 - `valid`: the merged candidate preserves this plugin's invariants.
 - `conflicts`: the candidate is reviewable; each finding identifies the plugin,
   affected logical object, tables/files/options involved, and a human-readable
-  reason.
+  reason. A finding may also include `resolution_policy`, `suggested_action`,
+  and `manual_review_reason`; ForkPress records these in the conflict payload
+  so review tools can distinguish review-only findings from future repairable
+  findings.
 - `failed`: the validator could not run; the merge should fail rather than
   silently accept an unchecked plugin graph.
 
@@ -60,6 +63,12 @@ the merge is reported as completed.
 This preserves the current safety model: ForkPress may apply exact safe changes,
 preserve target state, or stop with an auditable conflict, but it should not
 invent plugin-specific rewrites.
+
+Validator findings can carry first-class review guidance. For example, a media
+validator should mark missing generated upload files as `review-only` instead
+of implying that ForkPress may regenerate derivatives during the merge. A
+future merge driver can introduce an automatic repair only when it can prove the
+repair is deterministic and records the chosen repair in audit metadata.
 
 The current implementation has the metadata/audit foundation for validator
 conflicts: ForkPress can record plugin-scoped findings against a merge run,
