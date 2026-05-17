@@ -2484,6 +2484,13 @@ SQL);
         str_contains((string)($fk_delete_audit_rows[$fk_delete_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'referenced by plugin_fk_delete_children(parent_id)'),
         'foreign-key protected delete audit explains the blocking target child'
     );
+    ob_start();
+    cow_merge_print_audit_text($fk_delete_audit);
+    $fk_delete_audit_text = (string)ob_get_clean();
+    assert_true(
+        str_contains($fk_delete_audit_text, 'blocked-choice=source reason=source row deletion is blocked by current target foreign-key state'),
+        'text audit prints blocked source choice for foreign-key protected deletes'
+    );
     assert_throws(
         fn() => cow_merge_resolve_conflict($fk_delete_metadata, $fk_delete_conflict_id, 'source', true, 'Try parent delete while child remains.', 'cow-test'),
         'FOREIGN KEY constraint failed',
