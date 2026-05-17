@@ -548,6 +548,70 @@ function forkpress_branch_switcher_data(string $current): array {
     }, $branches);
 }
 
+function forkpress_branch_birth_recovery_command(string $branch): string {
+    return 'forkpress branch reset ' . $branch . ' --from main';
+}
+
+function forkpress_branch_birth_status(?string $branch = null): ?array {
+    $branch = $branch ?: forkpress_current_branch();
+    if (!is_string($branch) || $branch === '' || $branch === 'main') {
+        return null;
+    }
+
+    $cow_dir = getenv('FORKPRESS_COW_DIR');
+    $db_path = forkpress_db_path();
+    if (!is_string($cow_dir) || $cow_dir === '' || !is_string($db_path) || $db_path === '') {
+        return null;
+    }
+
+    $merge_dir = rtrim($cow_dir, "/\\") . '/merge';
+    $metadata_db = getenv('FORKPRESS_COW_MERGE_METADATA_DB');
+    if (!is_string($metadata_db) || $metadata_db === '') {
+        $metadata_db = $merge_dir . '/metadata.sqlite';
+    }
+
+    $missing = [];
+    if (!is_file($db_path)) {
+        $missing[] = 'branch database';
+    }
+    if (!is_file($merge_dir . '/bases/' . $branch . '.sqlite')) {
+        $missing[] = 'database merge base';
+    }
+    if (!is_file($merge_dir . '/file-bases/' . $branch . '.json')) {
+        $missing[] = 'filesystem merge base';
+    }
+    if (!is_file($metadata_db)) {
+        $missing[] = 'merge metadata';
+    }
+
+    $error = null;
+    if (!$missing) {
+        $helper = getenv('FORKPRESS_COW_MERGE_HELPER');
+        if (is_string($helper) && $helper !== '' && is_readable($helper)) {
+            try {
+                require_once $helper;
+                if (function_exists('cow_merge_validate_branch_birth_metadata')) {
+                    cow_merge_validate_branch_birth_metadata($db_path, $metadata_db, $branch);
+                }
+            } catch (Throwable $e) {
+                $error = $e->getMessage();
+            }
+        }
+    }
+
+    if (!$missing && $error === null) {
+        return ['ready' => true, 'branch' => $branch, 'missing' => [], 'error' => null];
+    }
+
+    return [
+        'ready' => false,
+        'branch' => $branch,
+        'missing' => $missing,
+        'error' => $error,
+        'recovery' => forkpress_branch_birth_recovery_command($branch),
+    ];
+}
+
 function forkpress_branch_run_cli(array $args): array {
     if (!function_exists('proc_open')) {
         return [1, 'ForkPress branch actions require proc_open().'];
@@ -645,6 +709,26 @@ function forkpress_branch_admin_notice(): void {
     echo '<div class="' . esc_attr($class) . '"><p>' . esc_html($message) . '</p></div>';
 }
 add_action('admin_notices', 'forkpress_branch_admin_notice');
+
+function forkpress_branch_birth_admin_notice(): void {
+    $status = forkpress_branch_birth_status();
+    if (!is_array($status) || ($status['ready'] ?? true)) {
+        return;
+    }
+
+    $branch = (string)($status['branch'] ?? '');
+    $missing = is_array($status['missing'] ?? null) ? $status['missing'] : [];
+    $detail = $missing ? 'Missing: ' . implode(', ', $missing) . '.' : (string)($status['error'] ?? '');
+    $message = "ForkPress branch '$branch' is missing required merge metadata. WordPress edits are blocked until it is reset or recreated.";
+    $recovery = (string)($status['recovery'] ?? forkpress_branch_birth_recovery_command($branch));
+
+    echo '<div class="notice notice-error"><p>' . esc_html($message) . '</p>';
+    if ($detail !== '') {
+        echo '<p>' . esc_html($detail) . '</p>';
+    }
+    echo '<p><code>' . esc_html($recovery) . '</code></p></div>';
+}
+add_action('admin_notices', 'forkpress_branch_birth_admin_notice');
 
 function forkpress_handle_branch_create(): void {
     if (!forkpress_branch_can_manage()) {
