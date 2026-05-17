@@ -28,7 +28,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "    [--next-action review|run-plugin-validator|wait|revalidate|resolve|apply-reviewed-choice|manual-review|none]\n");
     fwrite(STDERR, "    [--resolution-choice source|target|plugin-driver] [--blocked-resolution-choice source|target] [--resolution-strategy STRATEGY] [--generic-resolver yes|no] [--after-revalidate supported|unsupported]\n");
     fwrite(STDERR, "    [--revalidation-class CLASS] [--latest-revalidation-status STATUS] [--stale-status fresh|stale|error|unknown] [--revalidate] [--reviewer NAME]\n");
-    fwrite(STDERR, "    [--resolution-status validated|applied] [--group-by none|table|status|path|type|severity|lifecycle|event-type|next-action|conflict-key|resolution-strategy|generic-resolver|after-revalidate|revalidation-class|latest-revalidation-status|stale-status|plugin|plugin-object|plugin-severity|plugin-logical-identity]\n");
+    fwrite(STDERR, "    [--resolution-status validated|applied] [--group-by none|table|status|path|type|severity|lifecycle|event-type|next-action|conflict-key|resolution-strategy|generic-resolver|after-revalidate|revalidation-class|latest-revalidation-status|stale-status|plugin|plugin-object|plugin-severity|plugin-logical-identity] [--fail-on-unresolved]\n");
     fwrite(STDERR, "    --event-type accepts recorded, review-pending, review-needs-action, review-reviewed, resolution-validated, resolution-applied, resolution-blocked, or revalidation-required.\n");
     fwrite(STDERR, "    --group-by supports resolutions by table/status/path/plugin/plugin-object/plugin-severity/plugin-logical-identity, conflicts by table/type/path/severity/lifecycle/next-action/conflict-key/resolution-strategy/generic-resolver/after-revalidate/revalidation-class/latest-revalidation-status/stale-status/plugin/plugin-object/plugin-severity/plugin-logical-identity, conflict-events by table/type/lifecycle/event-type/conflict-key/plugin/plugin-object/plugin-severity/plugin-logical-identity, and decisions by table/type/path.\n");
     fwrite(STDERR, "    --revalidate accepts only --run, --conflict-id, --conflict-key, --reviewer, --format, and --quiet; omit --revalidate to filter audit output.\n");
@@ -18648,7 +18648,7 @@ function cow_merge_parse_cli(array $argv, array $required, int $start_index = 1)
             $args[$key] = $value;
             continue;
         }
-        if (in_array($key, ['id-band-skips', 'target-kept', 'review', 'revalidate', 'apply', 'apply-reviewed', 'after-revalidate', 'restore-target-db', 'restore-files', 'quiet'], true) && (!isset($argv[$i + 1]) || str_starts_with($argv[$i + 1], '--'))) {
+        if (in_array($key, ['id-band-skips', 'target-kept', 'review', 'revalidate', 'apply', 'apply-reviewed', 'after-revalidate', 'restore-target-db', 'restore-files', 'quiet', 'fail-on-unresolved'], true) && (!isset($argv[$i + 1]) || str_starts_with($argv[$i + 1], '--'))) {
             $args[$key] = '1';
             continue;
         }
@@ -19074,6 +19074,15 @@ if (realpath($argv[0] ?? '') === __FILE__) {
                 echo $encoded . "\n";
             } else {
                 cow_merge_print_audit_text($report);
+            }
+            if (cow_merge_bool_flag($args['fail-on-unresolved'] ?? '0')) {
+                $unresolved = (int)($report['conflict_summary']['unresolved'] ?? 0);
+                if ($unresolved > 0) {
+                    if (($args['quiet'] ?? '0') === '1') {
+                        fwrite(STDERR, "forkpress: merge audit found $unresolved unresolved conflict" . ($unresolved === 1 ? '' : 's') . "\n");
+                    }
+                    exit(2);
+                }
             }
             exit(0);
         }

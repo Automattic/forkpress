@@ -7202,6 +7202,37 @@ SQL);
     assert_true(str_contains($file_conflict_cli_audit['output'], 'scope files=1'), 'CLI audit text summarizes matching filesystem conflict scope');
     assert_true(str_contains($file_conflict_cli_audit['output'], 'review=reviewed reviewer=cow-cli-test'), 'CLI audit text prints reviewed filesystem conflict status');
     assert_true(str_contains($file_conflict_cli_audit['output'], 'note=Conflict upload reviewed through the CLI.'), 'CLI audit text prints reviewed filesystem conflict note');
+    $file_conflict_gate = run_merge_cli([
+        'audit',
+        '--metadata-db',
+        $metadata,
+        '--format',
+        'json',
+        '--scope',
+        'files',
+        '--records',
+        'conflicts',
+        '--fail-on-unresolved',
+    ]);
+    assert_same($file_conflict_gate['status'], 2, 'CLI audit --fail-on-unresolved fails when matching conflicts remain unresolved');
+    $file_conflict_gate_json = json_decode($file_conflict_gate['output'], true);
+    assert_true(is_array($file_conflict_gate_json), 'CLI audit --fail-on-unresolved still emits JSON audit output');
+    assert_same($file_conflict_gate_json['conflict_summary']['unresolved'] ?? null, 9, 'CLI audit --fail-on-unresolved reports unresolved conflict count');
+    $resolved_conflict_gate = run_merge_cli([
+        'audit',
+        '--metadata-db',
+        $metadata,
+        '--format',
+        'json',
+        '--scope',
+        'files',
+        '--records',
+        'conflicts',
+        '--lifecycle-state',
+        'resolved',
+        '--fail-on-unresolved',
+    ]);
+    assert_same($resolved_conflict_gate['status'], 0, 'CLI audit --fail-on-unresolved passes when the filtered queue has no unresolved conflicts');
     $path_prefix_audit = cow_merge_audit_report($metadata, null, 10, [
         'scope' => 'files',
         'records' => 'decisions',
