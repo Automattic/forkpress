@@ -689,6 +689,17 @@ PHP);
         1,
         'plugin audit can group conflicts by structured logical identity'
     );
+    $logical_identity_filter_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin_logical_identity' => '{"slug":"child-before-rerun","kind":"plugin-child"}',
+    ]);
+    assert_same(count($logical_identity_filter_audit['conflicts']), 1, 'plugin audit can filter conflicts by structured logical identity');
+    assert_same(
+        $logical_identity_filter_audit['conflicts'][0]['plugin_logical_identity']['slug'] ?? null,
+        'child-before-rerun',
+        'plugin logical-identity filter accepts canonical JSON regardless of object key order'
+    );
     ob_start();
     cow_merge_print_audit_text($logical_identity_audit);
     $logical_identity_text = ob_get_clean();

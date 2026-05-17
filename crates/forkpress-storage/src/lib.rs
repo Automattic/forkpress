@@ -1262,6 +1262,7 @@ pub struct CowMergeAuditQuery<'a> {
     pub plugin: Option<&'a str>,
     pub plugin_object: Option<&'a str>,
     pub plugin_severity: Option<&'a str>,
+    pub plugin_logical_identity: Option<&'a str>,
     pub decision: Option<&'a str>,
     pub path: Option<&'a str>,
     pub path_prefix: Option<&'a str>,
@@ -1334,6 +1335,10 @@ pub fn inspect_cow_merge_audit(
     if let Some(plugin_severity) = query.plugin_severity {
         args.push("--plugin-severity".into());
         args.push(plugin_severity.into());
+    }
+    if let Some(plugin_logical_identity) = query.plugin_logical_identity {
+        args.push("--plugin-logical-identity".into());
+        args.push(plugin_logical_identity.into());
     }
     if let Some(decision) = query.decision {
         args.push("--decision".into());

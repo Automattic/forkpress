@@ -3149,6 +3149,7 @@ fn cow_branch_command(
                     plugin: audit.plugin.as_deref(),
                     plugin_object: audit.plugin_object.as_deref(),
                     plugin_severity: audit.plugin_severity.as_deref(),
+                    plugin_logical_identity: audit.plugin_logical_identity.as_deref(),
                     decision: audit.decision.as_deref(),
                     path: audit.path.as_deref(),
                     path_prefix: audit.path_prefix.as_deref(),
@@ -3448,7 +3449,7 @@ fn branch_help_text(command: Option<&str>) -> &'static str {
             "Usage: forkpress branch run-plugin-validator --run <id> --validator <path> [--format text|json]\n\nRun one plugin validator and record emitted findings as plugin-scoped merge conflicts.\n"
         }
         Some("merge-audit") | Some("audit") => {
-            "Usage: forkpress branch merge-audit [options]\n\nInspect merge runs, decisions, conflicts, conflict events, resolutions, and rollback failures. Use --revalidate to carry stale reviewed conflicts back into needs-action before resolving; revalidation only accepts --run, --conflict-id, --conflict-key, --reviewer, --format, and --quiet.\nCommon options: --format text|json, --run <id>, --scope all|db|files|plugin, --records all|conflicts|conflict-events|decisions|resolutions|rollback-failures, --conflict-id <id>, --conflict-key <key>, --event-type recorded|review-pending|review-needs-action|review-reviewed|resolution-validated|resolution-applied|resolution-blocked|revalidation-required, --plugin <name>, --plugin-object <object>, --plugin-severity <severity>, --review, --review-status <status>, --lifecycle-state <state>, --next-action <action>, --revalidation-class <class>, --latest-revalidation-status <status>, --stale-status <status>, --resolution-choice source|target, --blocked-resolution-choice source|target, --resolution-strategy <strategy>, --generic-resolver yes|no, --after-revalidate supported|unsupported, --group-by none|table|status|path|type|severity|lifecycle|event-type|next-action|conflict-key|resolution-strategy|generic-resolver|after-revalidate|revalidation-class|latest-revalidation-status|stale-status|plugin|plugin-object|plugin-severity|plugin-logical-identity, --revalidate.\n"
+            "Usage: forkpress branch merge-audit [options]\n\nInspect merge runs, decisions, conflicts, conflict events, resolutions, and rollback failures. Use --revalidate to carry stale reviewed conflicts back into needs-action before resolving; revalidation only accepts --run, --conflict-id, --conflict-key, --reviewer, --format, and --quiet.\nCommon options: --format text|json, --run <id>, --scope all|db|files|plugin, --records all|conflicts|conflict-events|decisions|resolutions|rollback-failures, --conflict-id <id>, --conflict-key <key>, --event-type recorded|review-pending|review-needs-action|review-reviewed|resolution-validated|resolution-applied|resolution-blocked|revalidation-required, --plugin <name>, --plugin-object <object>, --plugin-severity <severity>, --plugin-logical-identity <json>, --review, --review-status <status>, --lifecycle-state <state>, --next-action <action>, --revalidation-class <class>, --latest-revalidation-status <status>, --stale-status <status>, --resolution-choice source|target, --blocked-resolution-choice source|target, --resolution-strategy <strategy>, --generic-resolver yes|no, --after-revalidate supported|unsupported, --group-by none|table|status|path|type|severity|lifecycle|event-type|next-action|conflict-key|resolution-strategy|generic-resolver|after-revalidate|revalidation-class|latest-revalidation-status|stale-status|plugin|plugin-object|plugin-severity|plugin-logical-identity, --revalidate.\n"
         }
         Some("merge-review") => {
             "Usage: forkpress branch merge-review <conflict|decision|resolution> <id> --status <pending|needs-action|reviewed> --note <text> [--reviewer <name>]\n       forkpress branch merge-review conflict-key <key> [--run <id>] --status <pending|needs-action|reviewed> --note <text> [--reviewer <name>]\n\nAttach review metadata to an audit record. Reviewing by conflict key is allowed only when the key identifies one unresolved conflict, or when --run disambiguates it.\n"
@@ -3479,6 +3480,7 @@ struct CowBranchMergeAuditArgs {
     plugin: Option<String>,
     plugin_object: Option<String>,
     plugin_severity: Option<String>,
+    plugin_logical_identity: Option<String>,
     decision: Option<String>,
     path: Option<String>,
     path_prefix: Option<String>,
@@ -3516,6 +3518,7 @@ fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAu
     let mut plugin: Option<String> = None;
     let mut plugin_object: Option<String> = None;
     let mut plugin_severity: Option<String> = None;
+    let mut plugin_logical_identity: Option<String> = None;
     let mut decision: Option<String> = None;
     let mut path: Option<String> = None;
     let mut path_prefix: Option<String> = None;
@@ -3727,6 +3730,21 @@ fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAu
                     bail!("--plugin-severity requires info, warning, error, or critical");
                 }
                 plugin_severity = Some(value.to_string());
+                index += 1;
+            }
+            "--plugin-logical-identity" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--plugin-logical-identity requires a JSON value");
+                };
+                plugin_logical_identity = Some(value.clone());
+                index += 2;
+            }
+            value if value.starts_with("--plugin-logical-identity=") => {
+                let value = value.trim_start_matches("--plugin-logical-identity=");
+                if value.is_empty() {
+                    bail!("--plugin-logical-identity requires a JSON value");
+                }
+                plugin_logical_identity = Some(value.to_string());
                 index += 1;
             }
             "--decision" => {
@@ -4047,6 +4065,7 @@ fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAu
             || plugin.is_some()
             || plugin_object.is_some()
             || plugin_severity.is_some()
+            || plugin_logical_identity.is_some()
             || decision.is_some()
             || path.is_some()
             || path_prefix.is_some()
@@ -4090,6 +4109,7 @@ fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAu
         plugin,
         plugin_object,
         plugin_severity,
+        plugin_logical_identity,
         decision,
         path,
         path_prefix,
@@ -6064,6 +6084,8 @@ mod git_helper_tests {
             "--plugin=forkpress-plugin-graph".to_string(),
             "--plugin-object=child:1000000".to_string(),
             "--plugin-severity=error".to_string(),
+            "--plugin-logical-identity={\"slug\":\"child-before-rerun\",\"kind\":\"plugin-child\"}"
+                .to_string(),
             "--path=wp-content/uploads/a.jpg".to_string(),
             "--path-prefix=wp-content/uploads".to_string(),
             "--review-status=needs-action".to_string(),
@@ -6093,6 +6115,10 @@ mod git_helper_tests {
         assert_eq!(parsed.plugin.as_deref(), Some("forkpress-plugin-graph"));
         assert_eq!(parsed.plugin_object.as_deref(), Some("child:1000000"));
         assert_eq!(parsed.plugin_severity.as_deref(), Some("error"));
+        assert_eq!(
+            parsed.plugin_logical_identity.as_deref(),
+            Some("{\"slug\":\"child-before-rerun\",\"kind\":\"plugin-child\"}")
+        );
         assert_eq!(parsed.path.as_deref(), Some("wp-content/uploads/a.jpg"));
         assert_eq!(parsed.path_prefix.as_deref(), Some("wp-content/uploads"));
         assert_eq!(parsed.review_status.as_deref(), Some("needs-action"));
@@ -6221,6 +6247,16 @@ mod git_helper_tests {
             .to_string();
         assert!(err.contains("--plugin-object"));
         assert!(err.contains("requires an object"));
+
+        let args = vec![
+            "merge-audit".to_string(),
+            "--plugin-logical-identity=".to_string(),
+        ];
+        let err = parse_cow_branch_merge_audit_args(&args)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--plugin-logical-identity"));
+        assert!(err.contains("requires a JSON value"));
     }
 
     #[test]
