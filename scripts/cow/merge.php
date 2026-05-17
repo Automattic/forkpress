@@ -7085,6 +7085,9 @@ function cow_merge_record_plugin_validator_conflicts(
                 'validator' => (string)($finding['validator'] ?? ''),
                 'candidate' => $finding['candidate'] ?? null,
             ];
+            if (array_key_exists('severity', $finding)) {
+                $payload['severity'] = $finding['severity'];
+            }
             if (array_key_exists('logical_identity', $finding)) {
                 $payload['logical_identity'] = $finding['logical_identity'];
             }
@@ -12270,6 +12273,7 @@ function cow_merge_audit_add_plugin_fields(array $rows): array {
             'object' => 'plugin_object',
             'reason' => 'plugin_reason',
             'validator' => 'plugin_validator',
+            'severity' => 'plugin_severity',
             'logical_identity' => 'plugin_logical_identity',
             'resolution_policy' => 'plugin_resolution_policy',
             'suggested_action' => 'plugin_suggested_action',
@@ -13813,6 +13817,7 @@ function cow_merge_print_plugin_audit_text(array $conflict): void {
         'plugin' => 'plugin',
         'plugin_object' => 'object',
         'plugin_validator' => 'validator',
+        'plugin_severity' => 'severity',
     ] as $row_key => $label) {
         if (isset($conflict[$row_key]) && (string)$conflict[$row_key] !== '') {
             $parts[] = $label . '=' . cow_merge_audit_truncate((string)$conflict[$row_key], 120);

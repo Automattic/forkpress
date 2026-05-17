@@ -235,6 +235,7 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
             'tables' => ['plugin_graph_child'],
             'paths' => [$file_path],
             'validator' => 'forkpress-plugin-graph@1',
+            'severity' => 'error',
             'resolution_policy' => 'review-only',
             'suggested_action' => 'Restore or repair the plugin-owned file reference after review',
             'manual_review_reason' => 'ForkPress cannot synthesize plugin-owned files from a validator finding',
@@ -299,6 +300,7 @@ PHP);
     assert_same($file_audit_conflicts[0]['plugin'] ?? null, 'forkpress-plugin-graph', 'plugin audit exposes the validator plugin as a first-class field');
     assert_same($file_audit_conflicts[0]['plugin_object'] ?? null, 'child:' . $child_id, 'plugin audit exposes the validator object as a first-class field');
     assert_same($file_audit_conflicts[0]['plugin_validator'] ?? null, 'forkpress-plugin-graph@1', 'plugin audit exposes the validator version as a first-class field');
+    assert_same($file_audit_conflicts[0]['plugin_severity'] ?? null, 'error', 'plugin audit exposes validator severity as a first-class field');
     assert_same($file_audit_conflicts[0]['plugin_tables'] ?? null, ['plugin_graph_child'], 'plugin audit exposes plugin-owned tables as structured fields');
     assert_same($file_audit_conflicts[0]['plugin_files'] ?? null, ['wp-content/uploads/plugin-validator-missing.dat'], 'plugin audit normalizes validator paths into structured plugin files');
     assert_same($file_audit_conflicts[0]['plugin_resolution_policy'] ?? null, 'review-only', 'plugin audit exposes validator review policy as a first-class field');
@@ -311,6 +313,7 @@ PHP);
     $plugin_audit_text = ob_get_clean();
     assert_true(str_contains($plugin_audit_text, 'plugin plugin=forkpress-plugin-graph object=child:' . $child_id), 'plugin text audit exposes validator plugin and object fields');
     assert_true(str_contains($plugin_audit_text, 'validator=forkpress-plugin-graph@1'), 'plugin text audit exposes validator version');
+    assert_true(str_contains($plugin_audit_text, 'severity=error'), 'plugin text audit exposes validator severity');
     assert_true(str_contains($plugin_audit_text, 'tables=plugin_graph_child'), 'plugin text audit exposes plugin-owned tables');
     assert_true(str_contains($plugin_audit_text, 'files=wp-content/uploads/plugin-validator-missing.dat'), 'plugin text audit exposes plugin-owned files');
     assert_true(str_contains($plugin_audit_text, 'plugin-guidance policy=review-only'), 'plugin text audit exposes validator review policy');

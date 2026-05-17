@@ -28,10 +28,10 @@ A validator returns one of:
 - `valid`: the merged candidate preserves this plugin's invariants.
 - `conflicts`: the candidate is reviewable; each finding identifies the plugin,
   affected logical object, tables/files/options involved, and a human-readable
-  reason. A finding may also include `resolution_policy`, `suggested_action`,
-  and `manual_review_reason`; ForkPress records these in the conflict payload
-  so review tools can distinguish review-only findings from future repairable
-  findings.
+  reason. A finding may also include `severity`, `resolution_policy`,
+  `suggested_action`, and `manual_review_reason`; ForkPress records these in
+  the conflict payload so review tools can prioritize findings and distinguish
+  review-only findings from future repairable findings.
 - `failed`: the validator could not run; the merge should fail rather than
   silently accept an unchecked plugin graph.
 
@@ -76,8 +76,9 @@ mark that run as `completed_with_conflicts`, filter `merge-audit` output with
 `scope = plugin`, group plugin findings separately from DB/file findings, and
 attach review notes. Plugin audit records expose validator metadata as
 structured fields (`plugin`, `plugin_object`, `plugin_tables`,
-`plugin_files`, `plugin_validator`, `plugin_logical_identity`, and review
-guidance fields) so UI/API consumers do not need to scrape payload previews.
+`plugin_files`, `plugin_validator`, `plugin_severity`,
+`plugin_logical_identity`, and review guidance fields) so UI/API consumers do
+not need to scrape payload previews.
 Text audit output prints the same plugin identity, owned table/file, logical
 identity, and review-guidance evidence for CLI reviewers.
 Validator findings may use either `files` or `paths`; both are normalized into
