@@ -12081,11 +12081,16 @@ function cow_merge_file_source_resolution_blocked_reason(array $row): ?string {
     }
     $conflict_type = (string)($row['conflict_type'] ?? '');
     if (!in_array($conflict_type, [
+        'file-directory-delete-conflict',
         'file-unsafe-symlink',
         'file-type-replacement-conflict',
         'file-unsupported-source-change',
     ], true)) {
         return null;
+    }
+
+    if ($conflict_type === 'file-directory-delete-conflict') {
+        return 'source directory deletion is blocked because target-side descendants require review';
     }
 
     $source_payload_json = $row['source_payload'] ?? null;

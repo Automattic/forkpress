@@ -365,6 +365,23 @@ try {
         cow_merge_file_identity_json('wp-content/uploads/delete-dir-conflict'),
         'directory deletion audit points at the blocked directory'
     );
+    assert_same($delete_dir_audit['conflicts'][0]['resolution_choices'], ['target'], 'directory deletion audit only offers target resolution while target descendants need review');
+    assert_true(
+        str_contains((string)($delete_dir_audit['conflicts'][0]['blocked_resolution_choices']['source'] ?? ''), 'target-side descendants require review'),
+        'directory deletion audit records why source resolution is blocked'
+    );
+    $delete_dir_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-directory-delete-conflict' AND row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/delete-dir-conflict')) . "' ORDER BY id DESC LIMIT 1");
+    $delete_dir_resolution_error = null;
+    try {
+        cow_merge_resolve_conflict($metadata, $delete_dir_conflict_id, 'source', true, 'Try applying reviewed source directory deletion.', 'cow-test');
+    } catch (Throwable $e) {
+        $delete_dir_resolution_error = $e->getMessage();
+    }
+    assert_true(
+        is_string($delete_dir_resolution_error) && str_contains($delete_dir_resolution_error, 'resolution choice source is blocked') && str_contains($delete_dir_resolution_error, 'target-side descendants require review'),
+        'reviewed source directory deletion is blocked before deleting target descendants'
+    );
+    assert_same(file_get_contents($target_root . '/wp-content/uploads/delete-dir-conflict/target-child.txt'), 'target delete-dir child', 'blocked source directory deletion preserves target descendants');
 
     $type_replacement_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'files',
