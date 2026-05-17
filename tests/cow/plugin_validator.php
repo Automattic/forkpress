@@ -822,6 +822,15 @@ PHP);
         'child-before-rerun',
         'plugin resolution rows expose structured logical identity metadata from the conflict'
     );
+    $logical_identity_resolution_group_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'records' => 'resolutions',
+        'group_by' => 'plugin-logical-identity',
+    ]);
+    $logical_identity_resolution_group_counts = [];
+    foreach ($logical_identity_resolution_group_audit['resolution_groups'] as $group) {
+        $logical_identity_resolution_group_counts[(string)$group['group_key']] = (int)$group['resolution_count'];
+    }
+    assert_true(($logical_identity_resolution_group_counts['{"kind":"plugin-child","slug":"child-before-rerun"}'] ?? 0) >= 1, 'plugin audit can group resolution records by logical identity');
 
     $serialized_base_root = $tmp . '/serialized-base';
     $serialized_source_root = $tmp . '/serialized-source';

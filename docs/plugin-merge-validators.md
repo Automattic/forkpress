@@ -95,7 +95,10 @@ review, revalidation, and blocked-resolution events without a second conflict
 lookup.
 Plugin resolution records also expose those fields from the linked conflict,
 even though the resolution payload previews still show the validated/applied
-value.
+value, and `--records resolutions --group-by plugin`,
+`--group-by plugin-object`, `--group-by plugin-severity`, or
+`--group-by plugin-logical-identity` can summarize resolution queues by that
+linked plugin evidence.
 Validator findings may use either `files` or `paths`; both are normalized into
 the audit `plugin_files` field. External validator runners can hand findings
 back through:

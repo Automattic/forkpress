@@ -178,7 +178,9 @@ with conflict records to build queues such as `unreviewed`, `needs-action`,
 `validated`, or `resolved`, and with conflict-event records to inspect matching
 history entries. Conflict-event records can be grouped by plugin, plugin
 object, plugin severity, or plugin logical identity when the event belongs to a
-validator conflict. Failed resolver attempts append `resolution-blocked` events
+validator conflict, and resolution records can be grouped by the same linked
+plugin fields after review or validation. Failed resolver attempts append
+`resolution-blocked` events
 and move the unresolved conflict back to `needs-action` with a manual-review
 next action, so UI queues do not keep offering a stale validated apply. Use
 `--event-type resolution-blocked` to audit those blocked attempts. Use

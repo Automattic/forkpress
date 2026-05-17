@@ -28,7 +28,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "    [--revalidation-class CLASS] [--latest-revalidation-status STATUS] [--stale-status fresh|stale|error|unknown] [--revalidate] [--reviewer NAME]\n");
     fwrite(STDERR, "    [--resolution-status validated|applied] [--group-by none|table|status|path|type|severity|lifecycle|event-type|next-action|conflict-key|resolution-strategy|generic-resolver|after-revalidate|revalidation-class|latest-revalidation-status|stale-status|plugin|plugin-object|plugin-severity|plugin-logical-identity]\n");
     fwrite(STDERR, "    --event-type accepts recorded, review-pending, review-needs-action, review-reviewed, resolution-validated, resolution-applied, resolution-blocked, or revalidation-required.\n");
-    fwrite(STDERR, "    --group-by supports resolutions by table/status/path, conflicts by table/type/path/severity/lifecycle/next-action/conflict-key/resolution-strategy/generic-resolver/after-revalidate/revalidation-class/latest-revalidation-status/stale-status/plugin/plugin-object/plugin-severity/plugin-logical-identity, conflict-events by table/type/lifecycle/event-type/conflict-key/plugin/plugin-object/plugin-severity/plugin-logical-identity, and decisions by table/type/path.\n");
+    fwrite(STDERR, "    --group-by supports resolutions by table/status/path/plugin/plugin-object/plugin-severity/plugin-logical-identity, conflicts by table/type/path/severity/lifecycle/next-action/conflict-key/resolution-strategy/generic-resolver/after-revalidate/revalidation-class/latest-revalidation-status/stale-status/plugin/plugin-object/plugin-severity/plugin-logical-identity, conflict-events by table/type/lifecycle/event-type/conflict-key/plugin/plugin-object/plugin-severity/plugin-logical-identity, and decisions by table/type/path.\n");
     fwrite(STDERR, "    --revalidate accepts only --run, --conflict-id, --conflict-key, --reviewer, --format, and --quiet; omit --revalidate to filter audit output.\n");
     fwrite(STDERR, "  php merge.php revalidate-reviews --metadata-db <path> [--run ID] [--conflict-id ID|--conflict-key KEY] [--reviewer NAME] [--format text|json]\n");
     fwrite(STDERR, "  php merge.php review-record --metadata-db <path> --record conflict|decision|resolution (--id ID|--conflict-key KEY [--run ID]) --status pending|needs-action|reviewed --note TEXT [--reviewer NAME]\n");
@@ -12067,8 +12067,8 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
             throw new InvalidArgumentException('--group-by can only be combined with --records conflicts, conflict-events, decisions, or resolutions');
         }
         $records = (string)($filters['records'] ?? 'resolutions');
-        if ($records === 'resolutions' && !in_array($group_by, ['table', 'status', 'path'], true)) {
-            throw new InvalidArgumentException('--records resolutions supports --group-by table, status, or path');
+        if ($records === 'resolutions' && !in_array($group_by, ['table', 'status', 'path', 'plugin', 'plugin-object', 'plugin-severity', 'plugin-logical-identity'], true)) {
+            throw new InvalidArgumentException('--records resolutions supports --group-by table, status, path, plugin, plugin-object, plugin-severity, or plugin-logical-identity');
         }
         if ($records === 'conflicts' && !in_array($group_by, ['table', 'type', 'path', 'severity', 'lifecycle', 'next-action', 'conflict-key', 'resolution-strategy', 'generic-resolver', 'after-revalidate', 'revalidation-class', 'latest-revalidation-status', 'stale-status', 'plugin', 'plugin-object', 'plugin-severity', 'plugin-logical-identity'], true)) {
             throw new InvalidArgumentException('--records conflicts supports --group-by table, type, path, severity, lifecycle, next-action, conflict-key, resolution-strategy, generic-resolver, after-revalidate, revalidation-class, latest-revalidation-status, stale-status, plugin, plugin-object, plugin-severity, or plugin-logical-identity');
@@ -13152,6 +13152,18 @@ function cow_merge_audit_resolution_group_sql(string $group_by): string {
     }
     if ($group_by === 'path') {
         return "CASE WHEN mr.table_name = '__files__' THEN COALESCE(forkpress_file_path_group(mr.row_identity), '(unknown)') ELSE mr.table_name END";
+    }
+    if ($group_by === 'plugin') {
+        return "CASE WHEN mr.table_name = '__plugins__' THEN COALESCE(forkpress_plugin_group(c.chosen_payload), '(unknown)') ELSE mr.table_name END";
+    }
+    if ($group_by === 'plugin-object') {
+        return "CASE WHEN mr.table_name = '__plugins__' THEN COALESCE(forkpress_plugin_object_group(c.chosen_payload), '(unknown)') ELSE mr.table_name END";
+    }
+    if ($group_by === 'plugin-severity') {
+        return "CASE WHEN mr.table_name = '__plugins__' THEN COALESCE(forkpress_plugin_severity_group(c.chosen_payload), '(unknown)') ELSE mr.table_name END";
+    }
+    if ($group_by === 'plugin-logical-identity') {
+        return "CASE WHEN mr.table_name = '__plugins__' THEN COALESCE(forkpress_plugin_logical_identity_group(c.chosen_payload), '(unknown)') ELSE mr.table_name END";
     }
     throw new InvalidArgumentException('unsupported resolution group');
 }
