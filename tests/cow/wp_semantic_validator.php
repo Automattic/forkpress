@@ -265,6 +265,7 @@ function create_wp_image_block_db(string $path): void {
     $image_block_content = '<!-- wp:image {"id":71,"sizeSlug":"large"} --><figure class="wp-block-image size-large"><img src="wp-content/uploads/2026/05/block-image.jpg" class="wp-image-71"/></figure><!-- /wp:image -->';
     $stmt = $db->prepare("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, guid) VALUES
         (70, 'Image block page', :content, 'publish', 'page', 'image-block-page', ''),
+        (75, 'Image block product CPT', :content, 'publish', 'forkpress_product', 'image-block-product', ''),
         (71, 'Image block attachment', '', 'inherit', 'attachment', 'block-image', 'wp-content/uploads/2026/05/block-image.jpg')");
     $stmt->bindValue(':content', $image_block_content, SQLITE3_TEXT);
     $stmt->execute();
@@ -695,7 +696,7 @@ try {
     write_test_file($base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
 <?php
 $db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
-$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type IN ('page', 'post', 'wp_template_part', 'wp_template')");
+$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type NOT IN ('attachment', 'revision') AND post_content <> ''");
 $findings = [];
 while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
     $content = (string)$row['post_content'];
@@ -1499,7 +1500,7 @@ PHP);
     write_test_file($image_block_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
 <?php
 $db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
-$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type IN ('post', 'page')");
+$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type NOT IN ('attachment', 'revision') AND post_content <> ''");
 $findings = [];
 while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
     if (!preg_match_all('/<!--\s*wp:image\s+(\{.*?\})\s*-->/', (string)$row['post_content'], $matches)) {
@@ -1549,6 +1550,7 @@ PHP);
 
     $db = open_db($image_block_target);
     $db->exec("UPDATE wp_posts SET post_title = 'Target page still using deleted image block attachment' WHERE ID = 70");
+    $db->exec("UPDATE wp_posts SET post_title = 'Target CPT still using deleted image block attachment' WHERE ID = 75");
     $db->close();
 
     $image_block_result = cow_merge_branch_state(
@@ -1565,20 +1567,23 @@ PHP);
 
     assert_same($image_block_result['status'], 'completed_with_conflicts', 'WordPress image block validator holds missing attachments for review');
     assert_same((int)($image_block_result['plugin_validators'] ?? 0), 1, 'WordPress image block validator is discovered from mu-plugins during merge');
-    assert_same((int)($image_block_result['plugin_validator_conflicts'] ?? 0), 1, 'WordPress image block validator records the missing attachment');
+    assert_same((int)($image_block_result['plugin_validator_conflicts'] ?? 0), 2, 'WordPress image block validator records missing attachment refs in page and custom post type content');
     assert_same((int)scalar($image_block_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 71'), 0, 'WordPress image block validator leaves the source attachment deletion staged for review');
     assert_true(!file_exists($image_block_target_root . '/wp-content/uploads/2026/05/block-image.jpg'), 'WordPress image block validator leaves the source upload deletion staged for review');
     assert_same(scalar($image_block_target, 'SELECT post_title FROM wp_posts WHERE ID = 70'), 'Target page still using deleted image block attachment', 'WordPress image block validator preserves the target page edit');
+    assert_same(scalar($image_block_target, 'SELECT post_title FROM wp_posts WHERE ID = 75'), 'Target CPT still using deleted image block attachment', 'WordPress image block validator preserves the target custom post type edit');
     assert_true(str_contains((string)scalar($image_block_target, 'SELECT post_content FROM wp_posts WHERE ID = 70'), '"id":71'), 'WordPress image block validator keeps the stale block attachment reference visible for review');
+    assert_true(str_contains((string)scalar($image_block_target, 'SELECT post_content FROM wp_posts WHERE ID = 75'), '"id":71'), 'WordPress image block validator keeps the stale custom post type block attachment reference visible for review');
 
     $image_block_audit = cow_merge_audit_report($image_block_metadata, (int)$image_block_result['run_id'], 10, [
         'scope' => 'plugin',
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-image-block-missing-attachment',
     ]);
-    assert_same(count($image_block_audit['conflicts']), 1, 'WordPress image block validator exposes the missing attachment as a plugin-scoped audit conflict');
-    $image_block_preview = (string)($image_block_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_same(count($image_block_audit['conflicts']), 2, 'WordPress image block validator exposes missing page and custom post type attachments as plugin-scoped audit conflicts');
+    $image_block_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $image_block_audit['conflicts']));
     assert_true(str_contains($image_block_preview, '"missing_object_id":71'), 'WordPress image block audit includes the missing attachment ID');
+    assert_true(str_contains($image_block_preview, '"post_id":75'), 'WordPress image block audit includes the custom post type owner ID');
     assert_true(
         str_contains($image_block_preview, '"block_name":"core/image"') || str_contains($image_block_preview, '"block_name":"core\/image"'),
         'WordPress image block audit includes the block name'
@@ -1608,7 +1613,7 @@ PHP);
     write_test_file($media_block_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
 <?php
 $db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
-$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type IN ('post', 'page')");
+$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type NOT IN ('attachment', 'revision') AND post_content <> ''");
 $findings = [];
 $media_id_blocks = ['audio', 'cover', 'file', 'video'];
 while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
@@ -1736,7 +1741,7 @@ PHP);
     write_test_file($avatar_nav_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
 <?php
 $db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
-$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type IN ('post', 'page', 'wp_navigation')");
+$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type NOT IN ('attachment', 'revision') AND post_content <> ''");
 $findings = [];
 while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
     if (!preg_match_all('/<!--\s*wp:([A-Za-z0-9_\/-]+)\s+(\{.*?\})\s*\/?-->/', (string)$row['post_content'], $matches, PREG_SET_ORDER)) {
@@ -1907,7 +1912,7 @@ PHP);
     write_test_file($gallery_block_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
 <?php
 $db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
-$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type IN ('post', 'page')");
+$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type NOT IN ('attachment', 'revision') AND post_content <> ''");
 $findings = [];
 while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
     if (!preg_match_all('/<!--\s*wp:gallery\s+(\{.*?\})\s*-->/', (string)$row['post_content'], $matches)) {
@@ -2014,7 +2019,7 @@ PHP);
     write_test_file($query_block_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
 <?php
 $db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
-$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type IN ('post', 'page', 'wp_template_part', 'wp_template')");
+$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type NOT IN ('attachment', 'revision') AND post_content <> ''");
 $findings = [];
 while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
     preg_match_all('/<!--\s*wp:query\s+(\{.*?\})\s*-->/', (string)$row['post_content'], $query_matches);

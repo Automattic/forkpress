@@ -233,8 +233,9 @@ deleted `post_author` users, postmeta rows left pointing at deleted posts,
 usermeta rows left pointing at deleted users, and nav menu items left pointing
 at deleted parent menu items or deleted pages, plus featured-image postmeta left pointing at deleted
 attachments/files and `core/audio`, `core/cover`, `core/file`, `core/image`,
-`core/video`, `core/media-text`, or `core/gallery` block JSON left pointing at
-deleted attachments/files, `core/query` block JSON including `taxQuery` and `core/latest-posts` filters left pointing at deleted author
+  `core/video`, `core/media-text`, or `core/gallery` block JSON left pointing at
+deleted attachments/files from content-bearing custom post types as well as
+posts/pages, `core/query` block JSON including `taxQuery` and `core/latest-posts` filters left pointing at deleted author
 users or taxonomy terms, `core/avatar` block JSON left pointing at deleted
 users, `core/navigation-link` and `core/navigation-submenu` block JSON left pointing at deleted pages or
 taxonomy terms, term relationships left pointing at deleted taxonomy terms,
