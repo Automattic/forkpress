@@ -1169,6 +1169,54 @@ SQL);
         'dependent source-added trigger chain fires after ordered materialization'
     );
 
+    $view_rewrite_base = $tmp . '/view-rewrite-base.sqlite';
+    $view_rewrite_source = $tmp . '/view-rewrite-source.sqlite';
+    $view_rewrite_target = $tmp . '/view-rewrite-target.sqlite';
+    $view_rewrite_metadata = $tmp . '/.forkpress/cow/merge/schema-view-rewrite-metadata.sqlite';
+
+    $db = open_db($view_rewrite_base);
+    $db->exec('CREATE TABLE plugin_view_rewrite_items (item_id TEXT PRIMARY KEY, label TEXT NOT NULL)');
+    $db->exec("INSERT INTO plugin_view_rewrite_items (item_id, label) VALUES ('view-rewrite', 'View Rewrite')");
+    $db->exec('CREATE VIEW plugin_view_rewrite_visible AS SELECT item_id, label FROM plugin_view_rewrite_items');
+    $db->close();
+    copy($view_rewrite_base, $view_rewrite_source);
+    copy($view_rewrite_base, $view_rewrite_target);
+
+    $source_db = open_db($view_rewrite_source);
+    $source_db->exec('DROP VIEW plugin_view_rewrite_visible');
+    $source_db->exec("CREATE VIEW plugin_view_rewrite_visible AS SELECT item_id, label || ':source' AS label FROM plugin_view_rewrite_items");
+    $source_db->close();
+
+    $view_rewrite_result = cow_merge_databases(
+        $view_rewrite_base,
+        $view_rewrite_source,
+        $view_rewrite_target,
+        $view_rewrite_metadata,
+        'feature-schema-view-rewrite',
+        'main'
+    );
+    $view_rewrite_run_id = (int)$view_rewrite_result['run_id'];
+    assert_same($view_rewrite_result['status'], 'completed', 'source-changed view merges automatically when target kept the base view');
+    assert_same(
+        (int)scalar($view_rewrite_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE run_id = $view_rewrite_run_id AND conflict_type = 'schema-source-changed-view'"),
+        0,
+        'safe source-changed view rewrite creates no review-only schema conflict'
+    );
+    assert_same(
+        (int)scalar($view_rewrite_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE run_id = $view_rewrite_run_id AND column_name = 'plugin_view_rewrite_visible' AND decision = 'source-applied'"),
+        1,
+        'automatic source-changed view rewrite is auditable'
+    );
+    assert_true(
+        str_contains((string)scalar($view_rewrite_target, "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'plugin_view_rewrite_visible'"), ':source'),
+        'automatic source-changed view rewrite installs the source view body'
+    );
+    assert_same(
+        scalar($view_rewrite_target, "SELECT label FROM plugin_view_rewrite_visible WHERE item_id = 'view-rewrite'"),
+        'View Rewrite:source',
+        'automatically rewritten source view is queryable after merge'
+    );
+
     $trigger_rewrite_base = $tmp . '/trigger-rewrite-base.sqlite';
     $trigger_rewrite_source = $tmp . '/trigger-rewrite-source.sqlite';
     $trigger_rewrite_target = $tmp . '/trigger-rewrite-target.sqlite';
