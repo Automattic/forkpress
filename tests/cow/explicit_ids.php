@@ -64,9 +64,11 @@ function create_explicit_id_db(string $path): void {
 function create_explicit_user_graph_db(string $path): void {
     $db = open_db($path);
     $db->exec('CREATE TABLE wp_users (ID INTEGER PRIMARY KEY AUTOINCREMENT, user_login TEXT NOT NULL)');
+    $db->exec('CREATE TABLE wp_posts (ID INTEGER PRIMARY KEY AUTOINCREMENT, post_author INTEGER NOT NULL DEFAULT 0, post_title TEXT NOT NULL, post_content TEXT NOT NULL, post_status TEXT NOT NULL)');
     $db->exec('CREATE TABLE wp_usermeta (umeta_id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
     $db->exec('CREATE TABLE wp_comments (comment_ID INTEGER PRIMARY KEY AUTOINCREMENT, comment_post_ID INTEGER NOT NULL, comment_content TEXT NOT NULL, user_id INTEGER NOT NULL DEFAULT 0)');
     $db->exec("INSERT INTO wp_users (ID, user_login) VALUES (1, 'base-user')");
+    $db->exec("INSERT INTO wp_posts (ID, post_author, post_title, post_content, post_status) VALUES (1, 1, 'Base user post', '<!-- wp:paragraph --><p>base user post</p><!-- /wp:paragraph -->', 'publish')");
     $db->exec("INSERT INTO wp_usermeta (umeta_id, user_id, meta_key, meta_value) VALUES (1, 1, 'base_key', 'base value')");
     $db->exec("INSERT INTO wp_comments (comment_ID, comment_post_ID, comment_content, user_id) VALUES (1, 1, 'base explicit user comment', 1)");
     $db->close();
@@ -261,6 +263,8 @@ try {
 
     $user_graph_source_db = open_db($user_graph_source);
     $user_graph_source_db->exec("INSERT INTO wp_users (ID, user_login) VALUES (2, 'imported-explicit-user')");
+    $user_graph_source_db->exec("INSERT INTO wp_posts (post_author, post_title, post_content, post_status) VALUES (2, 'post behind explicit user import', '<!-- wp:avatar {\"userId\":2} /-->', 'publish')");
+    $user_graph_source_db->exec("UPDATE wp_posts SET post_author = 2, post_content = '<!-- wp:query {\"query\":{\"author\":2}} --><!-- /wp:query -->' WHERE ID = 1");
     $user_graph_source_db->exec("INSERT INTO wp_usermeta (user_id, meta_key, meta_value) VALUES (2, 'profile_json', '{\"user_id\":2}')");
     $user_graph_source_db->exec("INSERT INTO wp_comments (comment_post_ID, comment_content, user_id) VALUES (1, 'comment behind explicit user import', 2)");
     $user_graph_source_db->exec("UPDATE wp_comments SET user_id = 2 WHERE comment_ID = 1");
@@ -272,6 +276,16 @@ try {
         (int)scalar($user_graph_target, 'SELECT COUNT(*) FROM wp_users WHERE ID = 2'),
         0,
         'out-of-band explicit WordPress user ID is not applied automatically'
+    );
+    assert_same(
+        (int)scalar($user_graph_target, "SELECT COUNT(*) FROM wp_posts WHERE post_author = 2"),
+        0,
+        'posts behind a held explicit WordPress user ID are not applied automatically'
+    );
+    assert_same(
+        scalar($user_graph_target, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+        '<!-- wp:paragraph --><p>base user post</p><!-- /wp:paragraph -->',
+        'updated post block refs behind a held explicit WordPress user ID are not applied automatically'
     );
     assert_same(
         (int)scalar($user_graph_target, "SELECT COUNT(*) FROM wp_usermeta WHERE user_id = 2 AND meta_key = 'profile_json'"),
@@ -294,6 +308,11 @@ try {
         'out-of-band explicit WordPress user records a review conflict'
     );
     assert_same(
+        (int)scalar($user_graph_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-explicit-user-graph' AND c.table_name = 'wp_posts' AND c.conflict_type = 'row-target-constraint'"),
+        2,
+        'posts behind a held explicit WordPress user record review conflicts'
+    );
+    assert_same(
         (int)scalar($user_graph_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-explicit-user-graph' AND c.table_name = 'wp_usermeta' AND c.conflict_type = 'row-target-constraint'"),
         1,
         'usermeta behind a held explicit WordPress user records a review conflict'
@@ -307,6 +326,11 @@ try {
     assert_true(
         str_contains($user_meta_reason, 'outside the source branch ID band') && str_contains($user_meta_reason, 'wp_users'),
         'usermeta conflict explains that it is held behind the explicit WordPress user ID'
+    );
+    $user_post_reason = (string)scalar($user_graph_metadata, "SELECT reason FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-explicit-user-graph' AND d.table_name = 'wp_posts' AND d.decision = 'target-wins' ORDER BY d.id DESC LIMIT 1");
+    assert_true(
+        str_contains($user_post_reason, 'outside the source branch ID band') && str_contains($user_post_reason, 'wp_users'),
+        'post conflict explains that it is held behind the explicit WordPress user ID'
     );
     $user_comment_reason = (string)scalar($user_graph_metadata, "SELECT reason FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-explicit-user-graph' AND d.table_name = 'wp_comments' AND d.decision = 'target-wins' ORDER BY d.id DESC LIMIT 1");
     assert_true(

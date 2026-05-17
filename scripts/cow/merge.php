@@ -6179,7 +6179,7 @@ function cow_merge_record_conflict(
     $chosen_hash = hash('sha256', $chosen_payload);
     $existing = cow_merge_prepare_checked(
         $meta,
-        'SELECT c.id FROM merge_conflicts c ' .
+        'SELECT c.id, c.run_id FROM merge_conflicts c ' .
         'JOIN merge_runs existing_run ON existing_run.id = c.run_id ' .
         'JOIN merge_runs current_run ON current_run.id = :run_id ' .
         'WHERE existing_run.source_branch = current_run.source_branch ' .
@@ -6189,7 +6189,7 @@ function cow_merge_record_conflict(
         'AND ((c.column_name = :column_name) OR (c.column_name IS NULL AND :column_name IS NULL)) ' .
         'AND c.conflict_type = :conflict_type ' .
         'AND c.base_hash = :base_hash AND c.source_hash = :source_hash AND c.target_hash = :target_hash AND c.chosen_hash = :chosen_hash ' .
-        'LIMIT 1',
+        'ORDER BY c.id DESC',
         'failed to prepare merge conflict lookup'
     );
     cow_merge_bind($existing, ':run_id', $run_id);
@@ -6202,10 +6202,20 @@ function cow_merge_record_conflict(
     cow_merge_bind($existing, ':target_hash', $target_hash);
     cow_merge_bind($existing, ':chosen_hash', $chosen_hash);
     $existing_result = cow_merge_execute_checked($existing, $meta, 'failed to look up existing merge conflict');
-    $existing_row = $existing_result->fetchArray(SQLITE3_ASSOC);
+    $has_target_resolution = false;
+    while ($existing_row = $existing_result->fetchArray(SQLITE3_ASSOC)) {
+        $existing_choice = cow_merge_latest_applied_resolution_choice($meta, (int)$existing_row['id']);
+        if ((int)$existing_row['run_id'] === $run_id) {
+            cow_merge_result_finalize_checked($existing_result, 'failed to finalize existing merge conflict lookup');
+            return $existing_choice !== 'target';
+        }
+        if ($existing_choice === 'target') {
+            $has_target_resolution = true;
+        }
+    }
     cow_merge_result_finalize_checked($existing_result, 'failed to finalize existing merge conflict lookup');
-    if ($existing_row) {
-        return cow_merge_latest_applied_resolution_choice($meta, (int)$existing_row['id']) !== 'target';
+    if ($has_target_resolution) {
+        return false;
     }
 
     $stmt = cow_merge_prepare_checked(
