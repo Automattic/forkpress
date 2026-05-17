@@ -274,6 +274,24 @@ and target file tree before running the driver; if a driver reports
 rolled back, and no `plugin-driver` resolution is recorded. A mutating repair
 must report `applied`.
 
+For `applied` repairs, ForkPress reruns discovered plugin validators before it
+records the `plugin-driver` resolution. If any validator still reports the same
+plugin, conflict type, and object or logical identity, the driver is treated as
+not proven: target DB/files are rolled back and no resolution is recorded. This
+prevents repairs from closing a semantic plugin conflict merely because a
+volatile validator object label changed. Validators may still report different
+findings for the same object; those remain reviewable plugin conflicts instead
+of silently closing the original one.
+If a postflight validator exits unsuccessfully or emits `failed`, the driver
+result is also treated as unproven and ForkPress-owned driver execution rolls
+back the target DB/files before returning the validator failure.
+The ForkPress-owned runner captures the validator list before the driver runs,
+so a mutating driver cannot bypass postflight by deleting or deactivating the
+validator it was supposed to satisfy. It also fingerprints those discovered
+validator files and rejects a mutating driver that rewrites one before
+postflight, because postflight validation is only trustworthy when it runs the
+same validator code that was active before the repair.
+
 The runner also rejects stale plugin conflicts before executing the driver. If
 a later validator rerun has already replaced the conflict evidence, ForkPress
 points at the replacement conflict id and requires review of the current
@@ -301,6 +319,9 @@ be supplied when the driver wants to preserve a pre-repair snapshot; otherwise
 ForkPress records the original validator finding as the previous payload. The
 command is intentionally metadata-only: the driver is responsible for any
 plugin-owned database or filesystem edits before it records an applied result.
+When `--applied` is passed, ForkPress still reruns discovered plugin validators
+before recording the resolution and refuses to close the conflict if the same
+finding remains.
 The explicit runner provides context and audit recording, but still expects
 the plugin driver to own the correctness of any repair it performs.
 

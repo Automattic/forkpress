@@ -279,6 +279,10 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
             'paths' => [$file_path],
             'validator' => 'forkpress-plugin-graph@1',
             'severity' => 'error',
+            'logical_identity' => [
+                'kind' => 'plugin-child',
+                'child_id' => $child_id,
+            ],
             'resolution_policy' => 'review-only',
             'suggested_action' => 'Restore or repair the plugin-owned file reference after review',
             'manual_review_reason' => 'ForkPress cannot synthesize plugin-owned files from a validator finding',
@@ -385,6 +389,7 @@ PHP);
         'plugin validator conflicts cannot be resolved by generic merge-resolve',
         'plugin validator conflicts remain blocked from generic source/target resolution'
     );
+    write_test_file($target_root . '/wp-content/uploads/plugin-validator-missing.dat', 'external plugin driver restored missing file');
     $driver_resolution = cow_merge_record_plugin_driver_resolution(
         $metadata,
         $missing_file_conflict_id,
@@ -433,6 +438,17 @@ PHP);
 <?php
 $context_path = (string)getenv('FORKPRESS_MERGE_CONFLICT_JSON');
 $context = is_file($context_path) ? json_decode((string)file_get_contents($context_path), true) : null;
+$target_db = (string)getenv('FORKPRESS_MERGE_TARGET_DB');
+$target_root = rtrim((string)getenv('FORKPRESS_MERGE_TARGET_ROOT'), '/');
+$child_id = (int)str_replace('child:', '', (string)getenv('FORKPRESS_MERGE_PLUGIN_OBJECT'));
+$repaired_path = 'wp-content/uploads/plugin-driver-url-repaired.dat';
+$db = new SQLite3($target_db);
+$stmt = $db->prepare('UPDATE plugin_graph_child SET file_path = :file_path WHERE child_id = :child_id');
+$stmt->bindValue(':file_path', $repaired_path, SQLITE3_TEXT);
+$stmt->bindValue(':child_id', $child_id, SQLITE3_INTEGER);
+$stmt->execute();
+@mkdir(dirname($target_root . '/' . $repaired_path), 0777, true);
+file_put_contents($target_root . '/' . $repaired_path, 'plugin driver repaired URL file reference');
 $ok = is_array($context)
     && (string)getenv('FORKPRESS_MERGE_PLUGIN') === 'forkpress-plugin-graph'
     && (string)getenv('FORKPRESS_MERGE_PLUGIN_OBJECT') === (string)($context['plugin']['object'] ?? '')
@@ -445,6 +461,7 @@ echo json_encode([
         'plugin' => getenv('FORKPRESS_MERGE_PLUGIN'),
         'object' => getenv('FORKPRESS_MERGE_PLUGIN_OBJECT'),
         'conflict_type' => getenv('FORKPRESS_MERGE_CONFLICT_TYPE'),
+        'repaired_file' => $repaired_path,
     ],
     'previous' => [
         'conflict_type' => $context['conflict_type'] ?? null,
@@ -484,6 +501,50 @@ PHP);
     assert_same(count($drive_file_audit_conflicts), 1, 'plugin audit exposes the unsafe drive-letter file conflict as a focused record');
     $drive_file_conflict_id = (int)$drive_file_audit_conflicts[0]['id'];
     $plugin_driver_resolution_count = (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE choice = 'plugin-driver'");
+    $non_clearing_driver_record = run_merge_cli([
+        'record-plugin-driver-resolution',
+        '--metadata-db', $metadata,
+        '--id', (string)$drive_file_conflict_id,
+        '--driver', 'forkpress-plugin-graph-driver@non-clearing-record',
+        '--result-json', '{"claimed":"external repair without validator proof"}',
+        '--applied',
+        '--format', 'json',
+    ]);
+    assert_true($non_clearing_driver_record['status'] !== 0, 'plugin driver recorder rejects applied repairs that do not clear the validator finding');
+    assert_true(
+        str_contains($non_clearing_driver_record['output'], 'did not clear validator conflict #' . $drive_file_conflict_id),
+        'plugin driver recorder explains uncleared validator findings'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE choice = 'plugin-driver'"),
+        $plugin_driver_resolution_count,
+        'non-clearing plugin driver recorder records no plugin-driver resolution'
+    );
+    $non_clearing_plugin_driver_path = $tmp . '/forkpress-plugin-graph-driver-non-clearing.php';
+    write_test_file($non_clearing_plugin_driver_path, <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'applied',
+    'result' => ['claimed' => 'repaired without changing the validator-owned graph'],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $non_clearing_driver_cli = run_merge_cli([
+        'run-plugin-driver',
+        '--metadata-db', $metadata,
+        '--id', (string)$drive_file_conflict_id,
+        '--driver', $non_clearing_plugin_driver_path,
+        '--format', 'json',
+    ]);
+    assert_true($non_clearing_driver_cli['status'] !== 0, 'plugin driver runner rejects applied repairs that do not clear the validator finding');
+    assert_true(
+        str_contains($non_clearing_driver_cli['output'], 'did not clear validator conflict #' . $drive_file_conflict_id),
+        'plugin driver runner explains uncleared validator findings'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE choice = 'plugin-driver'"),
+        $plugin_driver_resolution_count,
+        'non-clearing plugin driver records no plugin-driver resolution'
+    );
     $drive_child_graph_before_validated_driver = (string)scalar($target, "SELECT graph_json FROM plugin_graph_child WHERE child_id = $drive_child_id");
     $validated_mutating_driver_path = $tmp . '/forkpress-plugin-graph-driver-validated-mutating.php';
     write_test_file($validated_mutating_driver_path, <<<'PHP'
@@ -558,13 +619,196 @@ PHP);
         !is_file($target_root . '/wp-content/uploads/plugin-driver-failed-mutation.dat'),
         'failed plugin driver rolls back target filesystem mutations'
     );
+    $target_validator_path = $target_root . '/wp-content/mu-plugins/forkpress-merge-validator.php';
+    $target_validator_before_postflight_failure = (string)file_get_contents($target_validator_path);
+    $target_validator_with_postflight_failure = preg_replace('/^<\?php\s*/', <<<'PHP'
+<?php
+$target_root_for_postflight_failure = rtrim((string)getenv('FORKPRESS_MERGE_TARGET_ROOT'), '/');
+if (is_file($target_root_for_postflight_failure . '/wp-content/uploads/plugin-driver-postflight-validator-failure.dat')) {
+    echo json_encode([
+        'status' => 'failed',
+        'reason' => 'postflight validator could not prove the driver repair',
+    ], JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+PHP, $target_validator_before_postflight_failure, 1);
+    if (!is_string($target_validator_with_postflight_failure)) {
+        throw new RuntimeException('failed to prepare postflight failure validator fixture');
+    }
+    write_test_file($target_validator_path, $target_validator_with_postflight_failure);
+    $target_validator_before_postflight_failure = (string)file_get_contents($target_validator_path);
+    $drive_child_graph_before_postflight_failure = (string)scalar($target, "SELECT graph_json FROM plugin_graph_child WHERE child_id = $drive_child_id");
+    $postflight_failing_plugin_driver_path = $tmp . '/forkpress-plugin-graph-driver-postflight-validator-failure.php';
+    write_test_file($postflight_failing_plugin_driver_path, <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$child_id = (int)str_replace('child:', '', (string)getenv('FORKPRESS_MERGE_PLUGIN_OBJECT'));
+$db->exec("UPDATE plugin_graph_child SET graph_json = '{\"driver\":\"postflight validator failure\"}' WHERE child_id = " . $child_id);
+$target_root = rtrim((string)getenv('FORKPRESS_MERGE_TARGET_ROOT'), '/');
+@mkdir($target_root . '/wp-content/uploads', 0777, true);
+file_put_contents($target_root . '/wp-content/uploads/plugin-driver-postflight-validator-failure.dat', 'postflight validator failure mutation');
+echo json_encode([
+    'status' => 'applied',
+    'result' => ['postflight_validator_failure' => true],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $postflight_failing_driver_cli = run_merge_cli([
+        'run-plugin-driver',
+        '--metadata-db', $metadata,
+        '--id', (string)$drive_file_conflict_id,
+        '--driver', $postflight_failing_plugin_driver_path,
+        '--format', 'json',
+    ]);
+    assert_true($postflight_failing_driver_cli['status'] !== 0, 'plugin driver runner rejects applied repairs when postflight validator fails');
+    assert_true(
+        str_contains($postflight_failing_driver_cli['output'], 'postflight validator could not prove the driver repair'),
+        'plugin driver runner explains postflight validator failures'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE choice = 'plugin-driver'"),
+        $plugin_driver_resolution_count,
+        'postflight validator failure records no plugin-driver resolution'
+    );
+    assert_same(
+        (string)scalar($target, "SELECT graph_json FROM plugin_graph_child WHERE child_id = $drive_child_id"),
+        $drive_child_graph_before_postflight_failure,
+        'postflight validator failure rolls back target database mutations'
+    );
+    assert_true(
+        !is_file($target_root . '/wp-content/uploads/plugin-driver-postflight-validator-failure.dat'),
+        'postflight validator failure rolls back target filesystem mutations'
+    );
+    assert_same(
+        (string)file_get_contents($target_validator_path),
+        $target_validator_before_postflight_failure,
+        'postflight validator failure restores the discovered validator file'
+    );
+    $drive_child_graph_before_deleted_validator = (string)scalar($target, "SELECT graph_json FROM plugin_graph_child WHERE child_id = $drive_child_id");
+    $deleted_validator_driver_path = $tmp . '/forkpress-plugin-graph-driver-deletes-validator.php';
+    write_test_file($deleted_validator_driver_path, <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$child_id = (int)str_replace('child:', '', (string)getenv('FORKPRESS_MERGE_PLUGIN_OBJECT'));
+$repaired_path = 'wp-content/uploads/plugin-driver-deleted-validator-repair.dat';
+$stmt = $db->prepare('UPDATE plugin_graph_child SET graph_json = :graph_json, file_path = :file_path WHERE child_id = :child_id');
+$stmt->bindValue(':graph_json', json_encode([
+    'child_id' => $child_id,
+    'parent_id' => (int)$db->querySingle('SELECT parent_id FROM plugin_graph_child WHERE child_id = ' . $child_id),
+], JSON_UNESCAPED_SLASHES), SQLITE3_TEXT);
+$stmt->bindValue(':file_path', $repaired_path, SQLITE3_TEXT);
+$stmt->bindValue(':child_id', $child_id, SQLITE3_INTEGER);
+$stmt->execute();
+$target_root = rtrim((string)getenv('FORKPRESS_MERGE_TARGET_ROOT'), '/');
+@mkdir($target_root . '/wp-content/uploads', 0777, true);
+file_put_contents($target_root . '/' . $repaired_path, 'driver repaired but removed validator');
+unlink($target_root . '/wp-content/mu-plugins/forkpress-merge-validator.php');
+echo json_encode([
+    'status' => 'applied',
+    'result' => ['deleted_validator' => true],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $deleted_validator_driver_cli = run_merge_cli([
+        'run-plugin-driver',
+        '--metadata-db', $metadata,
+        '--id', (string)$drive_file_conflict_id,
+        '--driver', $deleted_validator_driver_path,
+        '--format', 'json',
+    ]);
+    assert_true($deleted_validator_driver_cli['status'] !== 0, 'plugin driver runner rejects applied repairs that remove the discovered validator');
+    assert_true(
+        str_contains($deleted_validator_driver_cli['output'], 'validator file is missing'),
+        'plugin driver runner explains missing discovered validator postflight'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE choice = 'plugin-driver'"),
+        $plugin_driver_resolution_count,
+        'deleted-validator plugin driver records no plugin-driver resolution'
+    );
+    assert_same(
+        (string)scalar($target, "SELECT graph_json FROM plugin_graph_child WHERE child_id = $drive_child_id"),
+        $drive_child_graph_before_deleted_validator,
+        'deleted-validator plugin driver rolls back target database mutations'
+    );
+    assert_true(
+        !is_file($target_root . '/wp-content/uploads/plugin-driver-deleted-validator-repair.dat'),
+        'deleted-validator plugin driver rolls back target filesystem mutations'
+    );
+    assert_same(
+        (string)file_get_contents($target_validator_path),
+        $target_validator_before_postflight_failure,
+        'deleted-validator plugin driver restores the discovered validator file'
+    );
+    $drive_child_graph_before_tampered_validator = (string)scalar($target, "SELECT graph_json FROM plugin_graph_child WHERE child_id = $drive_child_id");
+    $tampered_validator_driver_path = $tmp . '/forkpress-plugin-graph-driver-tampers-validator.php';
+    write_test_file($tampered_validator_driver_path, <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$child_id = (int)str_replace('child:', '', (string)getenv('FORKPRESS_MERGE_PLUGIN_OBJECT'));
+$repaired_path = 'wp-content/uploads/plugin-driver-tampered-validator-repair.dat';
+$stmt = $db->prepare('UPDATE plugin_graph_child SET graph_json = :graph_json, file_path = :file_path WHERE child_id = :child_id');
+$stmt->bindValue(':graph_json', json_encode([
+    'child_id' => $child_id,
+    'parent_id' => (int)$db->querySingle('SELECT parent_id FROM plugin_graph_child WHERE child_id = ' . $child_id),
+], JSON_UNESCAPED_SLASHES), SQLITE3_TEXT);
+$stmt->bindValue(':file_path', $repaired_path, SQLITE3_TEXT);
+$stmt->bindValue(':child_id', $child_id, SQLITE3_INTEGER);
+$stmt->execute();
+$target_root = rtrim((string)getenv('FORKPRESS_MERGE_TARGET_ROOT'), '/');
+@mkdir($target_root . '/wp-content/uploads', 0777, true);
+file_put_contents($target_root . '/' . $repaired_path, 'driver repaired but rewrote validator');
+file_put_contents($target_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'VALIDATOR'
+<?php
+echo json_encode([
+    'status' => 'valid',
+    'findings' => [],
+], JSON_UNESCAPED_SLASHES);
+VALIDATOR);
+echo json_encode([
+    'status' => 'applied',
+    'result' => ['tampered_validator' => true],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $tampered_validator_driver_cli = run_merge_cli([
+        'run-plugin-driver',
+        '--metadata-db', $metadata,
+        '--id', (string)$drive_file_conflict_id,
+        '--driver', $tampered_validator_driver_path,
+        '--format', 'json',
+    ]);
+    assert_true($tampered_validator_driver_cli['status'] !== 0, 'plugin driver runner rejects applied repairs that rewrite the discovered validator');
+    assert_true(
+        str_contains($tampered_validator_driver_cli['output'], 'refusing to trust postflight validation'),
+        'plugin driver runner explains tampered discovered validator postflight'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE choice = 'plugin-driver'"),
+        $plugin_driver_resolution_count,
+        'tampered-validator plugin driver records no plugin-driver resolution'
+    );
+    assert_same(
+        (string)scalar($target, "SELECT graph_json FROM plugin_graph_child WHERE child_id = $drive_child_id"),
+        $drive_child_graph_before_tampered_validator,
+        'tampered-validator plugin driver rolls back target database mutations'
+    );
+    assert_true(
+        !is_file($target_root . '/wp-content/uploads/plugin-driver-tampered-validator-repair.dat'),
+        'tampered-validator plugin driver rolls back target filesystem mutations'
+    );
+    assert_same(
+        (string)file_get_contents($target_validator_path),
+        $target_validator_before_postflight_failure,
+        'tampered-validator plugin driver restores the discovered validator file'
+    );
     $pre_resolution_failpoint_driver_path = $tmp . '/forkpress-plugin-graph-driver-pre-resolution-failpoint.php';
     write_test_file($pre_resolution_failpoint_driver_path, <<<'PHP'
 <?php
 $db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
-$db->exec("UPDATE plugin_graph_child SET graph_json = '{\"driver\":\"pre resolution mutation\"}' WHERE child_id = " . (int)str_replace('child:', '', (string)getenv('FORKPRESS_MERGE_PLUGIN_OBJECT')));
+$child_id = (int)str_replace('child:', '', (string)getenv('FORKPRESS_MERGE_PLUGIN_OBJECT'));
+$db->exec("UPDATE plugin_graph_child SET graph_json = '{\"driver\":\"pre resolution mutation\"}', file_path = 'wp-content/uploads/plugin-driver-pre-resolution-repair.dat' WHERE child_id = " . $child_id);
 $target_root = rtrim((string)getenv('FORKPRESS_MERGE_TARGET_ROOT'), '/');
 @mkdir($target_root . '/wp-content/uploads', 0777, true);
+file_put_contents($target_root . '/wp-content/uploads/plugin-driver-pre-resolution-repair.dat', 'pre resolution repair');
 file_put_contents($target_root . '/wp-content/uploads/plugin-driver-pre-resolution-mutation.dat', 'pre resolution mutation');
 echo json_encode([
     'status' => 'applied',
@@ -611,9 +855,11 @@ PHP);
     write_test_file($pre_resolution_kill_driver_path, <<<'PHP'
 <?php
 $db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
-$db->exec("UPDATE plugin_graph_child SET graph_json = '{\"driver\":\"pre resolution mutation\"}' WHERE child_id = " . (int)str_replace('child:', '', (string)getenv('FORKPRESS_MERGE_PLUGIN_OBJECT')));
+$child_id = (int)str_replace('child:', '', (string)getenv('FORKPRESS_MERGE_PLUGIN_OBJECT'));
+$db->exec("UPDATE plugin_graph_child SET graph_json = '{\"driver\":\"pre resolution mutation\"}', file_path = 'wp-content/uploads/plugin-driver-pre-resolution-kill-repair.dat' WHERE child_id = " . $child_id);
 $target_root = rtrim((string)getenv('FORKPRESS_MERGE_TARGET_ROOT'), '/');
 @mkdir($target_root . '/wp-content/uploads', 0777, true);
+file_put_contents($target_root . '/wp-content/uploads/plugin-driver-pre-resolution-kill-repair.dat', 'pre resolution kill repair');
 file_put_contents($target_root . '/wp-content/uploads/plugin-driver-pre-resolution-kill-mutation.dat', 'pre resolution kill mutation');
 echo json_encode([
     'status' => 'applied',
@@ -893,6 +1139,52 @@ PHP);
     cow_merge_print_audit_text($plugin_severity_group_audit);
     $plugin_group_text = ob_get_clean();
     assert_true(str_contains($plugin_group_text, 'plugin-severity=error conflicts=3'), 'plugin text audit exposes conflict grouping by validator severity');
+
+    $logical_alias_result = cow_merge_record_plugin_validator_conflicts($metadata, (int)$result['run_id'], [
+        [
+            'plugin' => 'forkpress-plugin-graph',
+            'object' => 'logical-alias:' . $drive_child_id,
+            'reason' => 'plugin driver should prove the semantic child graph was cleared, not just the volatile object label',
+            'type' => 'plugin-graph-file-drift',
+            'tables' => ['plugin_graph_child'],
+            'paths' => ['C:/plugin-assets/plugin-validator-drive.dat'],
+            'validator' => 'forkpress-plugin-graph@1',
+            'severity' => 'error',
+            'logical_identity' => [
+                'kind' => 'plugin-child',
+                'child_id' => $drive_child_id,
+            ],
+            'candidate' => [
+                'child_id' => $drive_child_id,
+                'file_path' => 'C:/plugin-assets/plugin-validator-drive.dat',
+            ],
+        ],
+    ]);
+    assert_same($logical_alias_result['conflicts'], 1, 'plugin validator can record a conflict with stable logical identity and a changed object label');
+    $logical_alias_identity = SQLite3::escapeString(
+        cow_merge_plugin_identity_json('forkpress-plugin-graph', 'logical-alias:' . $drive_child_id)
+    );
+    $logical_alias_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-graph-file-drift' AND row_identity = '$logical_alias_identity' ORDER BY id DESC LIMIT 1");
+    assert_true($logical_alias_conflict_id > 0, 'plugin logical-identity alias conflict is recorded');
+    $logical_identity_driver_record = run_merge_cli([
+        'record-plugin-driver-resolution',
+        '--metadata-db', $metadata,
+        '--id', (string)$logical_alias_conflict_id,
+        '--driver', 'forkpress-plugin-graph-driver@logical-identity-alias',
+        '--result-json', '{"claimed":"object label changed but semantic identity still fails validation"}',
+        '--applied',
+        '--format', 'json',
+    ]);
+    assert_true($logical_identity_driver_record['status'] !== 0, 'plugin driver recorder rejects applied repairs that leave the same logical identity open');
+    assert_true(
+        str_contains($logical_identity_driver_record['output'], 'same logical identity'),
+        'plugin driver recorder explains logical-identity postflight failures'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE choice = 'plugin-driver'"),
+        $plugin_driver_resolution_count,
+        'logical-identity plugin driver postflight records no plugin-driver resolution'
+    );
 
     $json_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-graph-json-drift' ORDER BY id ASC LIMIT 1");
     assert_true($json_conflict_id > 0, 'plugin validator fixture records a JSON graph conflict for revalidation');
