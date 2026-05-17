@@ -7808,6 +7808,7 @@ function cow_merge_plugin_driver_conflict_context(SQLite3 $meta, int $conflict_i
     }
     cow_merge_require_unresolved_conflict($meta, $conflict_id);
     cow_merge_require_current_plugin_validator_conflict($meta, $row, 'run-plugin-driver');
+    cow_merge_require_plugin_revalidated_replacement_conflict($meta, $row, 'run-plugin-driver');
     $plugin_payload = cow_merge_decode_payload_json((string)$row['chosen_payload'], 'plugin conflict');
     return [
         'metadata_db' => '',
@@ -7873,6 +7874,67 @@ function cow_merge_require_current_plugin_validator_conflict(SQLite3 $meta, arra
             . (int)($conflict['id'] ?? 0)
             . ' is current: '
             . (string)($staleness['stale_reason'] ?? 'plugin validator evidence could not be checked'));
+    }
+}
+
+function cow_merge_plugin_revalidation_source_conflict(SQLite3 $meta, int $conflict_id): ?array {
+    $rows = cow_merge_fetch_rows(
+        $meta,
+        'SELECT c.id, c.run_id, c.conflict_key, c.previous_conflict_id, c.table_name, c.row_identity, c.column_name, c.conflict_type, ' .
+        'c.source_payload, c.target_payload, c.chosen_payload, c.source_hash, c.target_hash, c.chosen_hash, ' .
+        'r.source_db, r.target_db, r.source_branch, r.target_branch ' .
+        'FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.id = :id',
+        [':id' => $conflict_id]
+    );
+    return $rows[0] ?? null;
+}
+
+function cow_merge_require_plugin_revalidated_replacement_conflict(SQLite3 $meta, array $conflict, string $command): void {
+    if ((string)($conflict['table_name'] ?? '') !== '__plugins__') {
+        return;
+    }
+    $previous_conflict_id = isset($conflict['previous_conflict_id']) ? (int)$conflict['previous_conflict_id'] : 0;
+    if ($previous_conflict_id < 1) {
+        return;
+    }
+
+    $current_conflict_id = (int)($conflict['id'] ?? 0);
+    $previous_conflict = cow_merge_plugin_revalidation_source_conflict($meta, $previous_conflict_id);
+    if ($previous_conflict === null) {
+        throw new RuntimeException("$command cannot prove plugin replacement conflict #$current_conflict_id came from a reviewed conflict revalidation");
+    }
+    if ((int)($previous_conflict['run_id'] ?? 0) !== (int)($conflict['run_id'] ?? 0)) {
+        return;
+    }
+
+    $latest_revalidation = cow_merge_latest_revalidation($meta, $previous_conflict_id);
+    if ($latest_revalidation === null) {
+        throw new RuntimeException("$command requires merge-audit --revalidate before resolving plugin replacement conflict #$current_conflict_id");
+    }
+    if ((int)($latest_revalidation['replacement_conflict_id'] ?? 0) !== $current_conflict_id) {
+        $replacement = (int)($latest_revalidation['replacement_conflict_id'] ?? 0);
+        throw new RuntimeException(
+            "$command cannot resolve plugin replacement conflict #$current_conflict_id; latest revalidation points to "
+            . ($replacement > 0 ? "replacement conflict #$replacement" : 'no replacement conflict')
+        );
+    }
+
+    $revalidation_class = (string)($latest_revalidation['revalidation_class'] ?? 'unclassified');
+    if ($revalidation_class === 'incompatible') {
+        throw new RuntimeException("$command cannot resolve plugin replacement conflict #$current_conflict_id after incompatible revalidation");
+    }
+    if ($revalidation_class !== 'replacement-evidence') {
+        throw new RuntimeException(
+            "$command cannot resolve plugin replacement conflict #$current_conflict_id after $revalidation_class revalidation"
+        );
+    }
+
+    $staleness = cow_merge_audit_conflict_target_staleness($meta, $previous_conflict);
+    $status = cow_merge_latest_revalidation_status($latest_revalidation, $staleness, $previous_conflict);
+    if ($status !== 'current') {
+        throw new RuntimeException(
+            "$command cannot resolve plugin replacement conflict #$current_conflict_id; latest revalidation status is $status"
+        );
     }
 }
 
@@ -8167,7 +8229,7 @@ function cow_merge_record_plugin_driver_resolution(
         cow_merge_ensure_metadata($meta);
         $stmt = cow_merge_prepare_checked(
             $meta,
-            'SELECT c.id, c.run_id, c.table_name, c.row_identity, c.column_name, c.conflict_type, ' .
+            'SELECT c.id, c.run_id, c.previous_conflict_id, c.table_name, c.row_identity, c.column_name, c.conflict_type, ' .
             'c.source_payload, c.target_payload, c.chosen_payload, c.source_hash, c.target_hash, c.chosen_hash, r.target_db, r.target_root ' .
             'FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.id = :id',
             'failed to prepare plugin driver conflict lookup'
@@ -8184,6 +8246,7 @@ function cow_merge_record_plugin_driver_resolution(
         }
         cow_merge_require_unresolved_conflict($meta, $conflict_id);
         cow_merge_require_current_plugin_validator_conflict($meta, $conflict, 'record-plugin-driver-resolution');
+        cow_merge_require_plugin_revalidated_replacement_conflict($meta, $conflict, 'record-plugin-driver-resolution');
         if ($previous_payload === null) {
             $previous_payload = cow_merge_decode_payload_json((string)$conflict['chosen_payload'], 'plugin conflict');
         }
