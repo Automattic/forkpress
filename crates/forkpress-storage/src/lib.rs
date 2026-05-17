@@ -3175,6 +3175,77 @@ fn cleanup_cow_branch_birth_files(
         },
         Err(err) => errors.push(err.to_string()),
     }
+    errors.extend(cleanup_cow_branch_birth_temp_files(layout, branch));
+    errors
+}
+
+fn cleanup_cow_branch_birth_temp_files(layout: &Layout, branch: &str) -> Vec<String> {
+    let mut errors = Vec::new();
+    match cow_merge_base_db_path(layout, branch) {
+        Ok(base_db) => {
+            if let Some(parent) = base_db.parent() {
+                errors.extend(cleanup_cow_branch_birth_temp_files_in_dir(
+                    parent,
+                    &format!(".{branch}.merge-base-"),
+                ));
+            }
+        }
+        Err(err) => errors.push(err.to_string()),
+    }
+    match cow_merge_file_base_path(layout, branch) {
+        Ok(file_base) => {
+            if let Some(parent) = file_base.parent() {
+                errors.extend(cleanup_cow_branch_birth_temp_files_in_dir(
+                    parent,
+                    &format!(".{branch}.file-merge-base-"),
+                ));
+            }
+        }
+        Err(err) => errors.push(err.to_string()),
+    }
+    errors
+}
+
+fn cleanup_cow_branch_birth_temp_files_in_dir(dir: &Path, prefix: &str) -> Vec<String> {
+    let mut errors = Vec::new();
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return errors,
+        Err(err) => {
+            errors.push(format!("failed to read {}: {err}", dir.display()));
+            return errors;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                errors.push(format!("failed to read entry in {}: {err}", dir.display()));
+                continue;
+            }
+        };
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(prefix) {
+            continue;
+        }
+        let path = entry.path();
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() || meta.is_file() => {
+                if let Err(err) = fs::remove_file(&path) {
+                    errors.push(format!("failed to remove {}: {err}", path.display()));
+                }
+            }
+            Ok(_) => errors.push(format!(
+                "{} is not a regular temporary branch birth artifact",
+                path.display()
+            )),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => errors.push(format!("failed to inspect {}: {err}", path.display())),
+        }
+    }
     errors
 }
 
@@ -3767,9 +3838,30 @@ mod tests {
         fs::write(&base_db, b"base").unwrap();
         fs::write(sqlite_sidecar_path(&base_db, "-wal"), b"wal").unwrap();
         fs::write(sqlite_sidecar_path(&base_db, "-shm"), b"shm").unwrap();
+        let temp_base = base_db
+            .parent()
+            .unwrap()
+            .join(".feature.merge-base-test.sqlite");
+        fs::write(&temp_base, b"temp base").unwrap();
+        fs::write(sqlite_sidecar_path(&temp_base, "-wal"), b"temp wal").unwrap();
+        let unrelated_temp_base = base_db
+            .parent()
+            .unwrap()
+            .join(".other.merge-base-test.sqlite");
+        fs::write(&unrelated_temp_base, b"other temp base").unwrap();
         let file_base = cow_merge_file_base_path(&layout, "feature").unwrap();
         fs::create_dir_all(file_base.parent().unwrap()).unwrap();
         fs::write(&file_base, b"{}").unwrap();
+        let temp_file_base = file_base
+            .parent()
+            .unwrap()
+            .join(".feature.file-merge-base-test.json");
+        fs::write(&temp_file_base, b"{}").unwrap();
+        let unrelated_temp_file_base = file_base
+            .parent()
+            .unwrap()
+            .join(".other.file-merge-base-test.json");
+        fs::write(&unrelated_temp_file_base, b"{}").unwrap();
 
         let errors = cleanup_cow_branch_birth_files(
             &layout,
@@ -3791,6 +3883,13 @@ mod tests {
             &base_db, "-shm"
         )));
         assert!(!path_exists_no_follow(&file_base));
+        assert!(!path_exists_no_follow(&temp_base));
+        assert!(!path_exists_no_follow(&sqlite_sidecar_path(
+            &temp_base, "-wal"
+        )));
+        assert!(!path_exists_no_follow(&temp_file_base));
+        assert!(path_exists_no_follow(&unrelated_temp_base));
+        assert!(path_exists_no_follow(&unrelated_temp_file_base));
 
         fs::remove_dir_all(root).unwrap();
     }
