@@ -840,6 +840,19 @@ PHP);
         'plugin resolution rows expose validator severity metadata from the conflict'
     );
     foreach ([
+        ['plugin' => 'forkpress-plugin-logical-id'],
+        ['plugin_object' => 'child-slot:' . $child_id],
+        ['plugin_severity' => 'warning'],
+    ] as $resolution_filter) {
+        $plugin_resolution_filter_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, array_merge([
+            'records' => 'resolutions',
+        ], $resolution_filter));
+        assert_true(
+            count($plugin_resolution_filter_audit['resolutions']) >= 1,
+            'plugin audit can filter resolution records by ' . array_key_first($resolution_filter)
+        );
+    }
+    foreach ([
         'plugin' => 'forkpress-plugin-logical-id',
         'plugin-object' => 'child-slot:' . $child_id,
         'plugin-severity' => 'warning',
