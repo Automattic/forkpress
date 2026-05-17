@@ -11790,7 +11790,7 @@ function cow_merge_resolve_schema_conflict(
             }
         } elseif ($conflict_type === 'schema-target-dropped-table' && $object === '') {
             if ($after_revalidate) {
-                throw new InvalidArgumentException('--after-revalidate currently supports source resolution for compatible source-added index/view/trigger or table rebuild drift only');
+                throw new InvalidArgumentException('--after-revalidate currently supports source resolution for compatible source-added/source-changed index/view/trigger or table rebuild drift only');
             }
             $restore_payload = cow_merge_normalize_source_table_restore_payload($source_payload);
             if ($target_payload !== null) {
@@ -11853,7 +11853,7 @@ function cow_merge_resolve_schema_conflict(
             }
         } elseif ($conflict_type === 'schema-source-dropped-table' && $object === '') {
             if ($after_revalidate) {
-                throw new InvalidArgumentException('--after-revalidate currently supports source resolution for compatible source-added index/view/trigger or table rebuild drift only');
+                throw new InvalidArgumentException('--after-revalidate currently supports source resolution for compatible source-added/source-changed index/view/trigger or table rebuild drift only');
             }
             if ($source_payload !== null) {
                 throw new RuntimeException("schema conflict #$conflict_id has an unexpected source table payload");
