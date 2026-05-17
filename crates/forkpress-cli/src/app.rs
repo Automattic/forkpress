@@ -3164,6 +3164,9 @@ fn cow_branch_command(
                     stale_status: audit.stale_status.as_deref(),
                     resolution_choice: audit.resolution_choice.as_deref(),
                     blocked_resolution_choice: audit.blocked_resolution_choice.as_deref(),
+                    resolution_strategy: audit.resolution_strategy.as_deref(),
+                    generic_resolver: audit.generic_resolver.as_deref(),
+                    after_revalidate: audit.after_revalidate.as_deref(),
                     group_by: &audit.group_by,
                 },
             )?;
@@ -3445,7 +3448,7 @@ fn branch_help_text(command: Option<&str>) -> &'static str {
             "Usage: forkpress branch run-plugin-validator --run <id> --validator <path> [--format text|json]\n\nRun one plugin validator and record emitted findings as plugin-scoped merge conflicts.\n"
         }
         Some("merge-audit") | Some("audit") => {
-            "Usage: forkpress branch merge-audit [options]\n\nInspect merge runs, decisions, conflicts, conflict events, resolutions, and rollback failures. Use --revalidate to carry stale reviewed conflicts back into needs-action before resolving; revalidation only accepts --run, --conflict-id, --conflict-key, --reviewer, --format, and --quiet.\nCommon options: --format text|json, --run <id>, --scope all|db|files|plugin, --records all|conflicts|conflict-events|decisions|resolutions|rollback-failures, --conflict-id <id>, --conflict-key <key>, --event-type <type>, --plugin <name>, --plugin-object <object>, --plugin-severity <severity>, --review, --review-status <status>, --lifecycle-state <state>, --next-action <action>, --revalidation-class <class>, --latest-revalidation-status <status>, --stale-status <status>, --resolution-choice source|target, --blocked-resolution-choice source|target, --group-by none|table|status|path|type|severity|lifecycle|event-type|next-action|conflict-key|resolution-strategy|generic-resolver|after-revalidate|revalidation-class|latest-revalidation-status|stale-status|plugin|plugin-object|plugin-severity, --revalidate.\n"
+            "Usage: forkpress branch merge-audit [options]\n\nInspect merge runs, decisions, conflicts, conflict events, resolutions, and rollback failures. Use --revalidate to carry stale reviewed conflicts back into needs-action before resolving; revalidation only accepts --run, --conflict-id, --conflict-key, --reviewer, --format, and --quiet.\nCommon options: --format text|json, --run <id>, --scope all|db|files|plugin, --records all|conflicts|conflict-events|decisions|resolutions|rollback-failures, --conflict-id <id>, --conflict-key <key>, --event-type <type>, --plugin <name>, --plugin-object <object>, --plugin-severity <severity>, --review, --review-status <status>, --lifecycle-state <state>, --next-action <action>, --revalidation-class <class>, --latest-revalidation-status <status>, --stale-status <status>, --resolution-choice source|target, --blocked-resolution-choice source|target, --resolution-strategy <strategy>, --generic-resolver yes|no, --after-revalidate supported|unsupported, --group-by none|table|status|path|type|severity|lifecycle|event-type|next-action|conflict-key|resolution-strategy|generic-resolver|after-revalidate|revalidation-class|latest-revalidation-status|stale-status|plugin|plugin-object|plugin-severity, --revalidate.\n"
         }
         Some("merge-review") => {
             "Usage: forkpress branch merge-review <conflict|decision|resolution> <id> --status <pending|needs-action|reviewed> --note <text> [--reviewer <name>]\n       forkpress branch merge-review conflict-key <key> [--run <id>] --status <pending|needs-action|reviewed> --note <text> [--reviewer <name>]\n\nAttach review metadata to an audit record. Reviewing by conflict key is allowed only when the key identifies one unresolved conflict, or when --run disambiguates it.\n"
@@ -3493,6 +3496,9 @@ struct CowBranchMergeAuditArgs {
     stale_status: Option<String>,
     resolution_choice: Option<String>,
     blocked_resolution_choice: Option<String>,
+    resolution_strategy: Option<String>,
+    generic_resolver: Option<String>,
+    after_revalidate: Option<String>,
     group_by: String,
     quiet: bool,
 }
@@ -3527,6 +3533,9 @@ fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAu
     let mut stale_status: Option<String> = None;
     let mut resolution_choice: Option<String> = None;
     let mut blocked_resolution_choice: Option<String> = None;
+    let mut resolution_strategy: Option<String> = None;
+    let mut generic_resolver: Option<String> = None;
+    let mut after_revalidate: Option<String> = None;
     let mut group_by = "none".to_string();
     let mut quiet = false;
     let mut index = 1;
@@ -3955,6 +3964,55 @@ fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAu
                 blocked_resolution_choice = Some(value.to_string());
                 index += 1;
             }
+            "--resolution-strategy" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!(
+                        "--resolution-strategy requires manual-review, plugin-validator, schema-choice, file-choice, row-choice, or cell-choice"
+                    );
+                };
+                resolution_strategy = Some(value.clone());
+                index += 2;
+            }
+            value if value.starts_with("--resolution-strategy=") => {
+                let value = value.trim_start_matches("--resolution-strategy=");
+                if value.is_empty() {
+                    bail!(
+                        "--resolution-strategy requires manual-review, plugin-validator, schema-choice, file-choice, row-choice, or cell-choice"
+                    );
+                }
+                resolution_strategy = Some(value.to_string());
+                index += 1;
+            }
+            "--generic-resolver" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--generic-resolver requires yes or no");
+                };
+                generic_resolver = Some(value.clone());
+                index += 2;
+            }
+            value if value.starts_with("--generic-resolver=") => {
+                let value = value.trim_start_matches("--generic-resolver=");
+                if value.is_empty() {
+                    bail!("--generic-resolver requires yes or no");
+                }
+                generic_resolver = Some(value.to_string());
+                index += 1;
+            }
+            "--after-revalidate" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--after-revalidate requires supported or unsupported");
+                };
+                after_revalidate = Some(value.clone());
+                index += 2;
+            }
+            value if value.starts_with("--after-revalidate=") => {
+                let value = value.trim_start_matches("--after-revalidate=");
+                if value.is_empty() {
+                    bail!("--after-revalidate requires supported or unsupported");
+                }
+                after_revalidate = Some(value.to_string());
+                index += 1;
+            }
             "--group-by" => {
                 let Some(value) = args.get(index + 1) else {
                     bail!(
@@ -4004,6 +4062,9 @@ fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAu
             || stale_status.is_some()
             || resolution_choice.is_some()
             || blocked_resolution_choice.is_some()
+            || resolution_strategy.is_some()
+            || generic_resolver.is_some()
+            || after_revalidate.is_some()
             || group_by != "none")
     {
         bail!(
@@ -4046,6 +4107,9 @@ fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAu
         stale_status,
         resolution_choice,
         blocked_resolution_choice,
+        resolution_strategy,
+        generic_resolver,
+        after_revalidate,
         group_by,
         quiet,
     })
@@ -6009,6 +6073,9 @@ mod git_helper_tests {
             "--stale-status=stale".to_string(),
             "--resolution-choice=target".to_string(),
             "--blocked-resolution-choice=source".to_string(),
+            "--resolution-strategy=cell-choice".to_string(),
+            "--generic-resolver=yes".to_string(),
+            "--after-revalidate=supported".to_string(),
             "--group-by=next-action".to_string(),
         ];
         let parsed = parse_cow_branch_merge_audit_args(&args).unwrap();
@@ -6041,6 +6108,9 @@ mod git_helper_tests {
         assert_eq!(parsed.stale_status.as_deref(), Some("stale"));
         assert_eq!(parsed.resolution_choice.as_deref(), Some("target"));
         assert_eq!(parsed.blocked_resolution_choice.as_deref(), Some("source"));
+        assert_eq!(parsed.resolution_strategy.as_deref(), Some("cell-choice"));
+        assert_eq!(parsed.generic_resolver.as_deref(), Some("yes"));
+        assert_eq!(parsed.after_revalidate.as_deref(), Some("supported"));
         assert_eq!(parsed.group_by, "next-action");
     }
 

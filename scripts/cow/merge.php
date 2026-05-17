@@ -24,7 +24,8 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|conflict-events|decisions|resolutions|rollback-failures] [--conflict-type TYPE] [--conflict-id ID] [--conflict-key KEY] [--event-type TYPE] [--plugin NAME] [--plugin-object OBJECT] [--plugin-severity SEVERITY] [--decision DECISION]\n");
     fwrite(STDERR, "    [--id-band-skips] [--target-kept] [--review] [--review-status unreviewed|pending|needs-action|reviewed] [--lifecycle-state unreviewed|deferred|needs-action|reviewed|validated|resolved]\n");
     fwrite(STDERR, "    [--next-action review|run-plugin-validator|wait|revalidate|resolve|apply-reviewed-choice|manual-review|none]\n");
-    fwrite(STDERR, "    [--resolution-choice source|target] [--blocked-resolution-choice source|target] [--revalidation-class CLASS] [--latest-revalidation-status STATUS] [--stale-status fresh|stale|error|unknown] [--revalidate] [--reviewer NAME]\n");
+    fwrite(STDERR, "    [--resolution-choice source|target] [--blocked-resolution-choice source|target] [--resolution-strategy STRATEGY] [--generic-resolver yes|no] [--after-revalidate supported|unsupported]\n");
+    fwrite(STDERR, "    [--revalidation-class CLASS] [--latest-revalidation-status STATUS] [--stale-status fresh|stale|error|unknown] [--revalidate] [--reviewer NAME]\n");
     fwrite(STDERR, "    [--resolution-status validated|applied] [--group-by none|table|status|path|type|severity|lifecycle|event-type|next-action|conflict-key|resolution-strategy|generic-resolver|after-revalidate|revalidation-class|latest-revalidation-status|stale-status|plugin|plugin-object|plugin-severity]\n");
     fwrite(STDERR, "    --group-by supports resolutions by table/status/path, conflicts by table/type/path/severity/lifecycle/next-action/conflict-key/resolution-strategy/generic-resolver/after-revalidate/revalidation-class/latest-revalidation-status/stale-status/plugin/plugin-object/plugin-severity, conflict-events by table/type/lifecycle/event-type/conflict-key, and decisions by table/type/path.\n");
     fwrite(STDERR, "    --revalidate accepts only --run, --conflict-id, --conflict-key, --reviewer, --format, and --quiet; omit --revalidate to filter audit output.\n");
@@ -8067,6 +8068,36 @@ function cow_merge_audit_resolution_choice_filter(?string $value, string $label)
     return $value;
 }
 
+function cow_merge_audit_resolution_strategy_filter(?string $value): ?string {
+    if ($value === null || $value === '') {
+        return null;
+    }
+    if (!in_array($value, ['manual-review', 'plugin-validator', 'schema-choice', 'file-choice', 'row-choice', 'cell-choice'], true)) {
+        throw new InvalidArgumentException('--resolution-strategy must be manual-review, plugin-validator, schema-choice, file-choice, row-choice, or cell-choice');
+    }
+    return $value;
+}
+
+function cow_merge_audit_generic_resolver_filter(?string $value): ?string {
+    if ($value === null || $value === '') {
+        return null;
+    }
+    if (!in_array($value, ['yes', 'no'], true)) {
+        throw new InvalidArgumentException('--generic-resolver must be yes or no');
+    }
+    return $value;
+}
+
+function cow_merge_audit_after_revalidate_filter(?string $value): ?string {
+    if ($value === null || $value === '') {
+        return null;
+    }
+    if (!in_array($value, ['supported', 'unsupported'], true)) {
+        throw new InvalidArgumentException('--after-revalidate must be supported or unsupported');
+    }
+    return $value;
+}
+
 function cow_merge_audit_group_by(?string $value): string {
     $group_by = $value ?? 'none';
     if (!in_array($group_by, ['none', 'table', 'status', 'path', 'type', 'severity', 'lifecycle', 'event-type', 'next-action', 'conflict-key', 'resolution-strategy', 'generic-resolver', 'after-revalidate', 'revalidation-class', 'latest-revalidation-status', 'stale-status', 'plugin', 'plugin-object', 'plugin-severity'], true)) {
@@ -11691,6 +11722,9 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
     $stale_status = ($filters['stale_status'] ?? null) !== null && (string)$filters['stale_status'] !== '';
     $resolution_choice = ($filters['resolution_choice'] ?? null) !== null && (string)$filters['resolution_choice'] !== '';
     $blocked_resolution_choice = ($filters['blocked_resolution_choice'] ?? null) !== null && (string)$filters['blocked_resolution_choice'] !== '';
+    $resolution_strategy = ($filters['resolution_strategy'] ?? null) !== null && (string)$filters['resolution_strategy'] !== '';
+    $generic_resolver = ($filters['generic_resolver'] ?? null) !== null && (string)$filters['generic_resolver'] !== '';
+    $after_revalidate = ($filters['after_revalidate'] ?? null) !== null && (string)$filters['after_revalidate'] !== '';
     $plugin_filter = (($filters['plugin'] ?? null) !== null && (string)$filters['plugin'] !== '') ||
         (($filters['plugin_object'] ?? null) !== null && (string)$filters['plugin_object'] !== '') ||
         (($filters['plugin_severity'] ?? null) !== null && (string)$filters['plugin_severity'] !== '');
@@ -11751,6 +11785,12 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
     }
     if ($target_kept && ($resolution_choice || $blocked_resolution_choice)) {
         throw new InvalidArgumentException('--target-kept cannot be combined with resolution choice filters');
+    }
+    if ($id_band_skips && ($resolution_strategy || $generic_resolver || $after_revalidate)) {
+        throw new InvalidArgumentException('--id-band-skips cannot be combined with resolver contract filters');
+    }
+    if ($target_kept && ($resolution_strategy || $generic_resolver || $after_revalidate)) {
+        throw new InvalidArgumentException('--target-kept cannot be combined with resolver contract filters');
     }
     if ($review) {
         if (($filters['decision'] ?? null) !== null) {
@@ -11902,6 +11942,19 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
             throw new InvalidArgumentException('--resolution-choice and --blocked-resolution-choice cannot be combined with --resolution-status');
         }
     }
+    if ($resolution_strategy || $generic_resolver || $after_revalidate) {
+        if (cow_merge_audit_filter_is_default_all($filters, 'records')) {
+            $filters['records'] = 'conflicts';
+        } elseif (!in_array(($filters['records'] ?? null), ['conflicts', 'conflict-events'], true)) {
+            throw new InvalidArgumentException('--resolution-strategy, --generic-resolver, and --after-revalidate can only be combined with --records conflicts or conflict-events');
+        }
+        if (($filters['decision'] ?? null) !== null) {
+            throw new InvalidArgumentException('--resolution-strategy, --generic-resolver, and --after-revalidate cannot be combined with --decision');
+        }
+        if ($resolution_status) {
+            throw new InvalidArgumentException('--resolution-strategy, --generic-resolver, and --after-revalidate cannot be combined with --resolution-status');
+        }
+    }
     if ($plugin_filter) {
         if (($filters['scope'] ?? null) === null || ($filters['scope'] ?? null) === '' || ($filters['scope'] ?? null) === 'all') {
             $filters['scope'] = 'plugin';
@@ -12030,7 +12083,7 @@ function cow_merge_audit_filters(array $filters = []): array {
         if ($scope !== 'all') {
             throw new InvalidArgumentException('--records rollback-failures cannot be combined with --scope');
         }
-        foreach (['conflict_type', 'conflict_id', 'conflict_key', 'event_type', 'plugin', 'plugin_object', 'plugin_severity', 'decision', 'review_status', 'resolution_status', 'lifecycle_state', 'next_action', 'revalidation_class', 'latest_revalidation_status', 'stale_status', 'resolution_choice', 'blocked_resolution_choice'] as $key) {
+        foreach (['conflict_type', 'conflict_id', 'conflict_key', 'event_type', 'plugin', 'plugin_object', 'plugin_severity', 'decision', 'review_status', 'resolution_status', 'lifecycle_state', 'next_action', 'revalidation_class', 'latest_revalidation_status', 'stale_status', 'resolution_choice', 'blocked_resolution_choice', 'resolution_strategy', 'generic_resolver', 'after_revalidate'] as $key) {
             if (($filters[$key] ?? null) !== null && (string)$filters[$key] !== '') {
                 throw new InvalidArgumentException('--records rollback-failures cannot be combined with --' . str_replace('_', '-', $key));
             }
@@ -12074,6 +12127,9 @@ function cow_merge_audit_filters(array $filters = []): array {
         'stale_status' => cow_merge_audit_stale_status_filter($filters['stale_status'] ?? null),
         'resolution_choice' => cow_merge_audit_resolution_choice_filter($filters['resolution_choice'] ?? null, 'resolution-choice'),
         'blocked_resolution_choice' => cow_merge_audit_resolution_choice_filter($filters['blocked_resolution_choice'] ?? null, 'blocked-resolution-choice'),
+        'resolution_strategy' => cow_merge_audit_resolution_strategy_filter($filters['resolution_strategy'] ?? null),
+        'generic_resolver' => cow_merge_audit_generic_resolver_filter($filters['generic_resolver'] ?? null),
+        'after_revalidate' => cow_merge_audit_after_revalidate_filter($filters['after_revalidate'] ?? null),
         'group_by' => cow_merge_audit_group_by($filters['group_by'] ?? null),
     ];
 }
@@ -12793,6 +12849,21 @@ function cow_merge_audit_where_sql(
     if ($record_type === 'conflicts' && ($filters['blocked_resolution_choice'] ?? null) !== null) {
         $clauses[] = cow_merge_audit_conflict_choice_sql($alias, ':blocked_resolution_choice', true);
         $params[':blocked_resolution_choice'] = $filters['blocked_resolution_choice'];
+    }
+
+    if ($record_type === 'conflicts' && ($filters['resolution_strategy'] ?? null) !== null) {
+        $clauses[] = cow_merge_audit_conflict_contract_field_sql($alias, 'resolution-strategy') . ' = :resolution_strategy';
+        $params[':resolution_strategy'] = $filters['resolution_strategy'];
+    }
+
+    if ($record_type === 'conflicts' && ($filters['generic_resolver'] ?? null) !== null) {
+        $clauses[] = cow_merge_audit_conflict_contract_field_sql($alias, 'generic-resolver') . ' = :generic_resolver';
+        $params[':generic_resolver'] = $filters['generic_resolver'];
+    }
+
+    if ($record_type === 'conflicts' && ($filters['after_revalidate'] ?? null) !== null) {
+        $clauses[] = cow_merge_audit_conflict_contract_field_sql($alias, 'after-revalidate') . ' = :after_revalidate';
+        $params[':after_revalidate'] = $filters['after_revalidate'];
     }
 
     if ($record_type === 'decisions' && $filters['decision'] !== null) {
@@ -14879,7 +14950,7 @@ function cow_merge_audit_object_label(array $row): string {
 
 function cow_merge_audit_filter_label(array $filters): string {
     $parts = [];
-    foreach (['scope', 'records', 'conflict_type', 'conflict_id', 'conflict_key', 'event_type', 'plugin', 'plugin_object', 'plugin_severity', 'decision', 'path', 'path_prefix', 'review_status', 'resolution_status', 'lifecycle_state', 'next_action', 'revalidation_class', 'latest_revalidation_status', 'stale_status', 'resolution_choice', 'blocked_resolution_choice', 'group_by'] as $key) {
+    foreach (['scope', 'records', 'conflict_type', 'conflict_id', 'conflict_key', 'event_type', 'plugin', 'plugin_object', 'plugin_severity', 'decision', 'path', 'path_prefix', 'review_status', 'resolution_status', 'lifecycle_state', 'next_action', 'revalidation_class', 'latest_revalidation_status', 'stale_status', 'resolution_choice', 'blocked_resolution_choice', 'resolution_strategy', 'generic_resolver', 'after_revalidate', 'group_by'] as $key) {
         $value = $filters[$key] ?? null;
         if ($value === null || $value === '') {
             continue;
@@ -17895,6 +17966,9 @@ if (realpath($argv[0] ?? '') === __FILE__) {
                     'stale_status' => $args['stale-status'] ?? null,
                     'resolution_choice' => $args['resolution-choice'] ?? null,
                     'blocked_resolution_choice' => $args['blocked-resolution-choice'] ?? null,
+                    'resolution_strategy' => $args['resolution-strategy'] ?? null,
+                    'generic_resolver' => $args['generic-resolver'] ?? null,
+                    'after_revalidate' => $args['after-revalidate'] ?? null,
                     'group_by' => $args['group-by'] ?? null,
                 ]
             );

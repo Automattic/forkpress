@@ -3933,10 +3933,28 @@ SQL);
     $strategy_group_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['group_by' => 'resolution-strategy']);
     assert_same($strategy_group_audit['filters']['records'], 'conflicts', 'resolution-strategy grouping defaults to conflict records');
     assert_true(in_array('cell-choice', array_column($strategy_group_audit['conflict_groups'], 'group_key'), true), 'resolution-strategy grouping includes cell-choice conflicts');
+    $strategy_filter_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['resolution_strategy' => 'cell-choice']);
+    assert_same($strategy_filter_audit['filters']['records'], 'conflicts', 'resolution-strategy filtering defaults to conflict records');
+    assert_true(count($strategy_filter_audit['conflicts']) >= 1, 'resolution-strategy filtering returns matching conflicts');
+    foreach ($strategy_filter_audit['conflicts'] as $conflict) {
+        assert_same($conflict['resolution_strategy'], 'cell-choice', 'resolution-strategy filtering returns only matching conflict contracts');
+    }
     $generic_resolver_group_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['group_by' => 'generic-resolver']);
     assert_true(in_array('yes', array_column($generic_resolver_group_audit['conflict_groups'], 'group_key'), true), 'generic-resolver grouping exposes generically resolvable conflicts');
+    $generic_resolver_filter_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['generic_resolver' => 'yes']);
+    assert_true(count($generic_resolver_filter_audit['conflicts']) >= 1, 'generic-resolver filtering returns matching conflicts');
+    foreach ($generic_resolver_filter_audit['conflicts'] as $conflict) {
+        assert_same($conflict['generic_resolver'], true, 'generic-resolver filtering returns only generic resolver conflicts');
+    }
     $after_revalidate_group_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['group_by' => 'after-revalidate']);
     assert_true(in_array('supported', array_column($after_revalidate_group_audit['conflict_groups'], 'group_key'), true), 'after-revalidate grouping exposes guarded revalidation support');
+    $after_revalidate_filter_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['after_revalidate' => 'supported']);
+    assert_true(count($after_revalidate_filter_audit['conflicts']) >= 1, 'after-revalidate filtering returns matching conflicts');
+    foreach ($after_revalidate_filter_audit['conflicts'] as $conflict) {
+        assert_same($conflict['after_revalidate_supported'], true, 'after-revalidate filtering returns only guarded revalidation conflicts');
+    }
+    $contract_event_filter_audit = cow_merge_audit_report($metadata, null, 10, ['records' => 'conflict-events', 'resolution_strategy' => 'cell-choice', 'generic_resolver' => 'yes', 'after_revalidate' => 'supported']);
+    assert_true(count($contract_event_filter_audit['conflict_events']) >= 1, 'resolver contract filters can focus conflict event history');
     $title_id_event_audit = cow_merge_audit_report($metadata, null, 10, ['records' => 'conflict-events', 'conflict_id' => (string)$title_conflict_id]);
     assert_same(count($title_id_event_audit['conflict_events']), 1, 'merge audit can filter conflict lifecycle events by conflict id');
     assert_same((int)$title_id_event_audit['conflict_events'][0]['conflict_id'], $title_conflict_id, 'conflict-id event audit returns events for the requested conflict');

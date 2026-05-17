@@ -1277,6 +1277,9 @@ pub struct CowMergeAuditQuery<'a> {
     pub stale_status: Option<&'a str>,
     pub resolution_choice: Option<&'a str>,
     pub blocked_resolution_choice: Option<&'a str>,
+    pub resolution_strategy: Option<&'a str>,
+    pub generic_resolver: Option<&'a str>,
+    pub after_revalidate: Option<&'a str>,
     pub group_by: &'a str,
 }
 
@@ -1388,6 +1391,18 @@ pub fn inspect_cow_merge_audit(
     if let Some(blocked_resolution_choice) = query.blocked_resolution_choice {
         args.push("--blocked-resolution-choice".into());
         args.push(blocked_resolution_choice.into());
+    }
+    if let Some(resolution_strategy) = query.resolution_strategy {
+        args.push("--resolution-strategy".into());
+        args.push(resolution_strategy.into());
+    }
+    if let Some(generic_resolver) = query.generic_resolver {
+        args.push("--generic-resolver".into());
+        args.push(generic_resolver.into());
+    }
+    if let Some(after_revalidate) = query.after_revalidate {
+        args.push("--after-revalidate".into());
+        args.push(after_revalidate.into());
     }
     if query.group_by != "none" {
         args.push("--group-by".into());
