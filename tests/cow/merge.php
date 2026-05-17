@@ -2470,6 +2470,20 @@ SQL);
         'foreign-key delete violation records an auditable target-wins decision'
     );
     $fk_delete_conflict_id = (int)scalar($fk_delete_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_fk_delete_parents' AND conflict_type = 'row-target-constraint' ORDER BY id DESC LIMIT 1");
+    $fk_delete_audit = cow_merge_audit_report($fk_delete_metadata, (int)$fk_delete_result['run_id'], 10, ['records' => 'conflicts']);
+    $fk_delete_audit_rows = [];
+    foreach ($fk_delete_audit['conflicts'] as $row) {
+        $fk_delete_audit_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $fk_delete_audit_rows[$fk_delete_conflict_id]['resolution_choices'],
+        ['target'],
+        'foreign-key protected delete audit does not advertise source while a target child remains'
+    );
+    assert_true(
+        str_contains((string)($fk_delete_audit_rows[$fk_delete_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'referenced by plugin_fk_delete_children(parent_id)'),
+        'foreign-key protected delete audit explains the blocking target child'
+    );
     assert_throws(
         fn() => cow_merge_resolve_conflict($fk_delete_metadata, $fk_delete_conflict_id, 'source', true, 'Try parent delete while child remains.', 'cow-test'),
         'FOREIGN KEY constraint failed',
@@ -2478,6 +2492,16 @@ SQL);
     $db = open_db($fk_delete_target);
     $db->exec('DELETE FROM plugin_fk_delete_children WHERE id = 20');
     $db->close();
+    $fk_delete_unblocked_audit = cow_merge_audit_report($fk_delete_metadata, (int)$fk_delete_result['run_id'], 10, ['records' => 'conflicts']);
+    $fk_delete_unblocked_rows = [];
+    foreach ($fk_delete_unblocked_audit['conflicts'] as $row) {
+        $fk_delete_unblocked_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $fk_delete_unblocked_rows[$fk_delete_conflict_id]['resolution_choices'],
+        ['source', 'target'],
+        'foreign-key protected delete audit advertises source after the target child is removed'
+    );
     $fk_delete_source_resolution = cow_merge_resolve_conflict(
         $fk_delete_metadata,
         $fk_delete_conflict_id,
