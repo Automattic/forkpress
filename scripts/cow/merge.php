@@ -14090,6 +14090,9 @@ function cow_merge_audit_add_conflict_staleness(SQLite3 $meta, array $rows): arr
         if ($latest_revalidation !== null) {
             $row['latest_revalidation_id'] = (int)$latest_revalidation['id'];
             $row['latest_revalidation_class'] = (string)($latest_revalidation['revalidation_class'] ?? 'unclassified');
+            $row['latest_revalidation_status'] = cow_merge_latest_revalidation_status($latest_revalidation, $staleness, $row);
+            $row['latest_revalidation_reason'] = (string)($latest_revalidation['stale_reason'] ?? '');
+            $row['latest_revalidation_at'] = (string)($latest_revalidation['created_at'] ?? '');
             if ($latest_revalidation['replacement_conflict_id'] !== null) {
                 $row['latest_revalidation_replacement_conflict_id'] = (int)$latest_revalidation['replacement_conflict_id'];
             }
@@ -14100,6 +14103,28 @@ function cow_merge_audit_add_conflict_staleness(SQLite3 $meta, array $rows): arr
     }
     unset($row);
     return $rows;
+}
+
+function cow_merge_latest_revalidation_status(array $latest_revalidation, array $staleness, array $conflict): string {
+    $current_source_payload = $staleness['current_source_payload'] ?? (string)($conflict['source_payload'] ?? '');
+    $current_target_payload = $staleness['current_target_payload'] ?? null;
+    if (!is_string($current_source_payload) || !is_string($current_target_payload)) {
+        return 'unknown';
+    }
+    $source_hash = (string)($latest_revalidation['source_hash'] ?? '');
+    $target_hash = (string)($latest_revalidation['target_hash'] ?? '');
+    if ($source_hash === '' || $target_hash === '') {
+        return 'unknown';
+    }
+    $source_current = hash_equals($source_hash, hash('sha256', $current_source_payload));
+    $target_current = hash_equals($target_hash, hash('sha256', $current_target_payload));
+    if ($source_current && $target_current) {
+        return 'current';
+    }
+    if (!$source_current && !$target_current) {
+        return 'source-and-target-drifted';
+    }
+    return $source_current ? 'target-drifted' : 'source-drifted';
 }
 
 function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $limit = 20, array $filters = []): array {
@@ -14540,6 +14565,15 @@ function cow_merge_print_audit_text(array $report): void {
             }
             if (($conflict['latest_resolution_id'] ?? null) !== null && (string)$conflict['latest_resolution_id'] !== '') {
                 echo "     latest-resolution=#{$conflict['latest_resolution_id']} choice={$conflict['latest_resolution_choice']} status={$conflict['latest_resolution_status']} applied={$conflict['latest_resolution_applied']}\n";
+            }
+            if (($conflict['latest_revalidation_id'] ?? null) !== null && (string)$conflict['latest_revalidation_id'] !== '') {
+                $replacement = (($conflict['latest_revalidation_replacement_conflict_id'] ?? null) !== null && (string)$conflict['latest_revalidation_replacement_conflict_id'] !== '')
+                    ? ' replacement=#' . $conflict['latest_revalidation_replacement_conflict_id']
+                    : '';
+                echo "     latest-revalidation=#{$conflict['latest_revalidation_id']} class={$conflict['latest_revalidation_class']} status={$conflict['latest_revalidation_status']} at={$conflict['latest_revalidation_at']}{$replacement}\n";
+                if (($conflict['latest_revalidation_reason'] ?? '') !== '') {
+                    echo "     latest-revalidation-reason=" . cow_merge_audit_truncate((string)$conflict['latest_revalidation_reason'], 240) . "\n";
+                }
             }
             cow_merge_print_plugin_audit_text($conflict);
             cow_merge_print_audit_review_text($conflict, $filters);

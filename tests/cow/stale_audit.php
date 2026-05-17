@@ -178,6 +178,7 @@ try {
     assert_true(str_contains((string)$audit['conflicts'][0]['review_note'], 'Keep target plugin value for launch.'), 'revalidated note preserves prior reviewer intent');
     assert_same($audit['conflicts'][0]['revalidation_class'] ?? null, 'compatible-target-drift', 'audit exposes the revalidation classifier');
     assert_same($audit['conflicts'][0]['latest_revalidation_class'] ?? null, 'compatible-target-drift', 'audit exposes the latest recorded revalidation classifier');
+    assert_same($audit['conflicts'][0]['latest_revalidation_status'] ?? null, 'current', 'audit marks the latest revalidation current while source and target payloads still match');
     assert_same((int)$audit['conflicts'][0]['event_count'], 3, 'revalidated conflict appends a lifecycle event');
     assert_same($audit['conflicts'][0]['latest_event_type'], 'revalidation-required', 'revalidated conflict advertises latest lifecycle event');
     assert_same($audit['conflicts'][0]['latest_event_lifecycle_state'], 'needs-action', 'revalidated conflict advertises latest event state');
@@ -281,6 +282,48 @@ try {
     assert_same((int)$resolved_audit['conflicts'][0]['event_count'], 4, 'after-revalidate resolution appends a lifecycle event');
     assert_same($resolved_audit['conflicts'][0]['latest_event_type'], 'resolution-applied', 'after-revalidate resolution advertises latest lifecycle event');
     assert_same($resolved_audit['conflicts'][0]['latest_event_lifecycle_state'], 'resolved', 'after-revalidate resolution advertises latest event state');
+
+    $revalidation_status_base = $tmp . '/revalidation-status-base.sqlite';
+    $revalidation_status_source = $tmp . '/revalidation-status-source.sqlite';
+    $revalidation_status_target = $tmp . '/revalidation-status-target.sqlite';
+    $revalidation_status_metadata = $tmp . '/.forkpress/cow/merge/revalidation-status-metadata.sqlite';
+    create_stale_audit_db($revalidation_status_base);
+    copy($revalidation_status_base, $revalidation_status_source);
+    copy($revalidation_status_base, $revalidation_status_target);
+    $source_db = open_db($revalidation_status_source);
+    $source_db->exec("UPDATE plugin_items SET value = 'source latest revalidation status' WHERE item_id = 'alpha'");
+    $source_db->close();
+    $target_db = open_db($revalidation_status_target);
+    $target_db->exec("UPDATE plugin_items SET value = 'target latest revalidation status' WHERE item_id = 'alpha'");
+    $target_db->close();
+    $revalidation_status_merge = cow_merge_databases($revalidation_status_base, $revalidation_status_source, $revalidation_status_target, $revalidation_status_metadata, 'feature-revalidation-status', 'main');
+    $revalidation_status_run_id = (int)$revalidation_status_merge['run_id'];
+    $revalidation_status_conflict_id = (int)scalar($revalidation_status_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND column_name = 'value'");
+    cow_merge_review_record(
+        $revalidation_status_metadata,
+        'conflict',
+        $revalidation_status_conflict_id,
+        'reviewed',
+        'Record a revalidation that will drift again.',
+        'cow-test'
+    );
+    $target_db = open_db($revalidation_status_target);
+    $target_db->exec("UPDATE plugin_items SET value = 'first latest revalidation target drift' WHERE item_id = 'alpha'");
+    $target_db->close();
+    $revalidation_status_result = cow_merge_revalidate_reviewed_conflicts($revalidation_status_metadata, $revalidation_status_run_id, 'cow-revalidate');
+    assert_same($revalidation_status_result['carried'], 1, 'latest revalidation status fixture records a carried stale review');
+    $revalidation_status_audit = cow_merge_audit_report($revalidation_status_metadata, $revalidation_status_run_id, 10, ['records' => 'conflicts']);
+    assert_same($revalidation_status_audit['conflicts'][0]['latest_revalidation_status'] ?? null, 'current', 'latest revalidation starts current after revalidate');
+    $target_db = open_db($revalidation_status_target);
+    $target_db->exec("UPDATE plugin_items SET value = 'second latest revalidation target drift' WHERE item_id = 'alpha'");
+    $target_db->close();
+    $revalidation_drift_audit = cow_merge_audit_report($revalidation_status_metadata, $revalidation_status_run_id, 10, ['records' => 'conflicts']);
+    assert_same($revalidation_drift_audit['conflicts'][0]['latest_revalidation_status'] ?? null, 'target-drifted', 'audit flags a latest revalidation whose target payload drifted again');
+    ob_start();
+    cow_merge_print_audit_text($revalidation_drift_audit);
+    $revalidation_drift_text = ob_get_clean();
+    assert_true(str_contains($revalidation_drift_text, 'latest-revalidation='), 'text audit prints latest revalidation metadata');
+    assert_true(str_contains($revalidation_drift_text, 'status=target-drifted'), 'text audit prints latest revalidation drift status');
 
     $source_drift_base = $tmp . '/source-drift-base.sqlite';
     $source_drift_source = $tmp . '/source-drift-source.sqlite';
