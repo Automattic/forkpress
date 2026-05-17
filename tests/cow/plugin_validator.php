@@ -539,6 +539,55 @@ PHP);
         !is_file($target_root . '/wp-content/uploads/plugin-driver-failed-mutation.dat'),
         'failed plugin driver rolls back target filesystem mutations'
     );
+    $pre_resolution_failpoint_driver_path = $tmp . '/forkpress-plugin-graph-driver-pre-resolution-failpoint.php';
+    write_test_file($pre_resolution_failpoint_driver_path, <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$db->exec("UPDATE plugin_graph_child SET graph_json = '{\"driver\":\"pre resolution mutation\"}' WHERE child_id = " . (int)str_replace('child:', '', (string)getenv('FORKPRESS_MERGE_PLUGIN_OBJECT')));
+$target_root = rtrim((string)getenv('FORKPRESS_MERGE_TARGET_ROOT'), '/');
+@mkdir($target_root . '/wp-content/uploads', 0777, true);
+file_put_contents($target_root . '/wp-content/uploads/plugin-driver-pre-resolution-mutation.dat', 'pre resolution mutation');
+echo json_encode([
+    'status' => 'applied',
+    'result' => ['pre_resolution' => true],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $drive_child_graph_before_pre_resolution_failpoint = (string)scalar($target, "SELECT graph_json FROM plugin_graph_child WHERE child_id = $drive_child_id");
+    putenv('FORKPRESS_COW_MERGE_TEST_FAILPOINT=before-plugin-driver-resolution');
+    putenv('FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION=throw');
+    $pre_resolution_failpoint_message = null;
+    try {
+        cow_merge_run_plugin_driver(
+            $metadata,
+            $drive_file_conflict_id,
+            $pre_resolution_failpoint_driver_path,
+            null,
+            'cow-test'
+        );
+    } catch (Throwable $e) {
+        $pre_resolution_failpoint_message = $e->getMessage();
+    } finally {
+        putenv('FORKPRESS_COW_MERGE_TEST_FAILPOINT');
+        putenv('FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION');
+    }
+    assert_true(
+        $pre_resolution_failpoint_message !== null && str_contains($pre_resolution_failpoint_message, 'before-plugin-driver-resolution'),
+        'plugin driver pre-resolution failpoint is surfaced to the caller'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE choice = 'plugin-driver'"),
+        $plugin_driver_resolution_count,
+        'plugin driver pre-resolution failpoint records no plugin-driver resolution'
+    );
+    assert_same(
+        (string)scalar($target, "SELECT graph_json FROM plugin_graph_child WHERE child_id = $drive_child_id"),
+        $drive_child_graph_before_pre_resolution_failpoint,
+        'plugin driver pre-resolution failpoint rolls back target database mutations'
+    );
+    assert_true(
+        !is_file($target_root . '/wp-content/uploads/plugin-driver-pre-resolution-mutation.dat'),
+        'plugin driver pre-resolution failpoint rolls back target filesystem mutations'
+    );
     $rollback_failure_before = (int)scalar($metadata, 'SELECT COUNT(*) FROM merge_rollback_failures');
     $GLOBALS['cow_merge_test_hooks']['before_file_root_snapshot_restore'] = [
         static function (array $snapshot, string $restore_root) use ($target_root): void {

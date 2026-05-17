@@ -7751,6 +7751,7 @@ function cow_merge_run_plugin_driver(
         ) {
             throw new RuntimeException("plugin driver $driver emitted validated status but mutated target DB or files; emit applied status for mutating repairs");
         }
+        cow_merge_failpoint('before-plugin-driver-resolution');
         $resolution = cow_merge_record_plugin_driver_resolution(
             $metadata_db,
             $conflict_id,

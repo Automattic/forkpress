@@ -28,6 +28,9 @@ The PHP merge suite covers these rollback classes:
 - Whole-branch DB plus file rollback after a file-phase failure.
 - Late whole-branch rollback after files were applied but metadata finalization
   failed.
+- Plugin-driver failure after a mutating driver returns but before the
+  `plugin-driver` resolution metadata is recorded, with target DB/files restored
+  from runner snapshots and no resolution row recorded.
 - Failed-run metadata write failures, including artifact-only fallback.
 - ID-band allocation rollback across target DB, metadata DB, and recovery
   artifacts.
@@ -175,6 +178,8 @@ The remaining release-hardening work is:
 - Add platform-specific kill coverage around APFS sparsebundle detach/compact.
 - Add kill coverage around cleanup of rollback artifacts outside the Git
   object-pruning and crash-recovery restore paths.
+- Add product-level process-death coverage for plugin drivers after target
+  DB/files have mutated but before driver resolution metadata is recorded.
 - Assert for each product-level checkpoint that the target branch is either the
   pre-merge snapshot, the fully completed merged state, or a blocked
   manual-recovery state with durable artifacts.
