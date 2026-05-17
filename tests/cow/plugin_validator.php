@@ -656,6 +656,7 @@ PHP);
             ],
             'reason' => 'plugin validator logical identity needs review',
             'type' => 'plugin-graph-logical-identity',
+            'severity' => 'warning',
             'tables' => ['plugin_graph_child'],
             'validator' => 'forkpress-plugin-graph@1',
             'candidate' => [
@@ -739,6 +740,7 @@ PHP);
             ],
             'reason' => 'plugin validator logical identity changed after rerun',
             'type' => 'plugin-graph-logical-identity',
+            'severity' => 'warning',
             'tables' => ['plugin_graph_child'],
             'validator' => 'forkpress-plugin-graph@1',
             'candidate' => [
@@ -822,15 +824,40 @@ PHP);
         'child-before-rerun',
         'plugin resolution rows expose structured logical identity metadata from the conflict'
     );
-    $logical_identity_resolution_group_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
-        'records' => 'resolutions',
-        'group_by' => 'plugin-logical-identity',
-    ]);
-    $logical_identity_resolution_group_counts = [];
-    foreach ($logical_identity_resolution_group_audit['resolution_groups'] as $group) {
-        $logical_identity_resolution_group_counts[(string)$group['group_key']] = (int)$group['resolution_count'];
+    assert_same(
+        $logical_identity_resolution_audit['resolutions'][0]['plugin'] ?? null,
+        'forkpress-plugin-logical-id',
+        'plugin resolution rows expose validator plugin metadata from the conflict'
+    );
+    assert_same(
+        $logical_identity_resolution_audit['resolutions'][0]['plugin_object'] ?? null,
+        'child-slot:' . $child_id,
+        'plugin resolution rows expose validator object metadata from the conflict'
+    );
+    assert_same(
+        $logical_identity_resolution_audit['resolutions'][0]['plugin_severity'] ?? null,
+        'warning',
+        'plugin resolution rows expose validator severity metadata from the conflict'
+    );
+    foreach ([
+        'plugin' => 'forkpress-plugin-logical-id',
+        'plugin-object' => 'child-slot:' . $child_id,
+        'plugin-severity' => 'warning',
+        'plugin-logical-identity' => '{"kind":"plugin-child","slug":"child-before-rerun"}',
+    ] as $group_by => $expected_group_key) {
+        $plugin_resolution_group_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+            'records' => 'resolutions',
+            'group_by' => $group_by,
+        ]);
+        $plugin_resolution_group_counts = [];
+        foreach ($plugin_resolution_group_audit['resolution_groups'] as $group) {
+            $plugin_resolution_group_counts[(string)$group['group_key']] = (int)$group['resolution_count'];
+        }
+        assert_true(
+            ($plugin_resolution_group_counts[$expected_group_key] ?? 0) >= 1,
+            "plugin audit can group resolution records by $group_by"
+        );
     }
-    assert_true(($logical_identity_resolution_group_counts['{"kind":"plugin-child","slug":"child-before-rerun"}'] ?? 0) >= 1, 'plugin audit can group resolution records by logical identity');
 
     $serialized_base_root = $tmp . '/serialized-base';
     $serialized_source_root = $tmp . '/serialized-source';
