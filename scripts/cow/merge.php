@@ -15486,6 +15486,79 @@ function cow_merge_latest_revalidation_status(array $latest_revalidation, array 
     return $source_current ? 'target-drifted' : 'source-drifted';
 }
 
+function cow_merge_audit_conflict_summary(
+    SQLite3 $db,
+    ?int $run_id,
+    array $filters,
+    bool $review_notes_exist = true,
+    bool $resolutions_exist = true,
+    bool $revalidations_exist = true,
+    bool $conflict_events_exist = true
+): array {
+    [$where, $params] = cow_merge_audit_where_sql(
+        $run_id,
+        $filters,
+        'conflicts',
+        'c',
+        $review_notes_exist,
+        $resolutions_exist,
+        $revalidations_exist,
+        $conflict_events_exist
+    );
+    $lifecycle_expr = cow_merge_audit_conflict_lifecycle_state_sql('c.id', $review_notes_exist, $resolutions_exist, $conflict_events_exist);
+    $next_action_expr = cow_merge_audit_conflict_next_action_sql('c', $review_notes_exist, $resolutions_exist, $conflict_events_exist);
+    $scope_expr = "CASE WHEN c.table_name = '__files__' THEN 'files' WHEN c.table_name = '__plugins__' THEN 'plugin' ELSE 'db' END";
+
+    $totals = cow_merge_fetch_rows(
+        $db,
+        "SELECT COUNT(*) AS total, " .
+        "SUM(CASE WHEN lifecycle_state = 'resolved' THEN 1 ELSE 0 END) AS resolved, " .
+        "SUM(CASE WHEN lifecycle_state <> 'resolved' THEN 1 ELSE 0 END) AS unresolved " .
+        "FROM (SELECT $lifecycle_expr AS lifecycle_state FROM merge_conflicts c $where)",
+        $params
+    );
+    $summary = [
+        'total' => isset($totals[0]['total']) ? (int)$totals[0]['total'] : 0,
+        'resolved' => isset($totals[0]['resolved']) ? (int)$totals[0]['resolved'] : 0,
+        'unresolved' => isset($totals[0]['unresolved']) ? (int)$totals[0]['unresolved'] : 0,
+        'by_lifecycle' => [],
+        'by_next_action' => [],
+        'by_scope' => [],
+    ];
+
+    foreach (cow_merge_fetch_rows(
+        $db,
+        "SELECT lifecycle_state, COUNT(*) AS count FROM " .
+        "(SELECT $lifecycle_expr AS lifecycle_state FROM merge_conflicts c $where) " .
+        "GROUP BY lifecycle_state ORDER BY count DESC, lifecycle_state",
+        $params
+    ) as $row) {
+        $summary['by_lifecycle'][(string)$row['lifecycle_state']] = (int)$row['count'];
+    }
+
+    foreach (cow_merge_fetch_rows(
+        $db,
+        "SELECT next_action, COUNT(*) AS count FROM " .
+        "(SELECT COALESCE($next_action_expr, 'unknown') AS next_action FROM merge_conflicts c $where) " .
+        "GROUP BY next_action ORDER BY count DESC, next_action",
+        $params
+    ) as $row) {
+        $summary['by_next_action'][(string)$row['next_action']] = (int)$row['count'];
+    }
+
+    foreach (cow_merge_fetch_rows(
+        $db,
+        "SELECT conflict_scope, COUNT(*) AS count FROM " .
+        "(SELECT $scope_expr AS conflict_scope FROM merge_conflicts c $where) " .
+        "GROUP BY conflict_scope ORDER BY count DESC, conflict_scope",
+        $params
+    ) as $row) {
+        $summary['by_scope'][(string)$row['conflict_scope']] = (int)$row['count'];
+    }
+
+    return $summary;
+}
+
 function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $limit = 20, array $filters = []): array {
     $filters = cow_merge_audit_filters($filters);
     $report = [
@@ -15503,6 +15576,14 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
         'decision_groups' => [],
         'resolutions' => [],
         'resolution_groups' => [],
+        'conflict_summary' => [
+            'total' => 0,
+            'resolved' => 0,
+            'unresolved' => 0,
+            'by_lifecycle' => [],
+            'by_next_action' => [],
+            'by_scope' => [],
+        ],
         'autoincrement_bands' => [],
         'row_identity_summary' => [],
         'rollback_failures' => [],
@@ -15604,6 +15685,15 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
         [$conflict_filter, $conflict_params] = cow_merge_audit_where_sql($run_id, $filters, 'conflicts', '', $review_notes_exist, $resolutions_exist, $revalidations_exist, $conflict_events_exist);
         $conflict_params[':limit'] = $limit;
         if ($filters['records'] === 'all' || $filters['records'] === 'conflicts') {
+            $report['conflict_summary'] = cow_merge_audit_conflict_summary(
+                $db,
+                $run_id,
+                $filters,
+                $review_notes_exist,
+                $resolutions_exist,
+                $revalidations_exist,
+                $conflict_events_exist
+            );
             $report['conflicts'] = cow_merge_audit_add_plugin_fields(cow_merge_audit_add_payload_previews(cow_merge_audit_add_conflict_lifecycle(cow_merge_audit_add_conflict_contracts(cow_merge_audit_add_conflict_staleness($db, cow_merge_audit_table_rows(
                 $db,
                 'merge_conflicts',
@@ -15926,6 +16016,26 @@ function cow_merge_print_audit_text(array $report): void {
             if ((string)$run['status'] === 'failed' && isset($run['failure_reason']) && (string)$run['failure_reason'] !== '') {
                 echo "     failure=" . cow_merge_audit_truncate((string)$run['failure_reason'], 240) . "\n";
             }
+        }
+    }
+
+    $conflict_summary = $report['conflict_summary'] ?? null;
+    if (is_array($conflict_summary) && (int)($conflict_summary['total'] ?? 0) > 0) {
+        echo "conflict-summary:\n";
+        echo "  total={$conflict_summary['total']} unresolved={$conflict_summary['unresolved']} resolved={$conflict_summary['resolved']}\n";
+        foreach ([
+            'by_lifecycle' => 'lifecycle',
+            'by_next_action' => 'next-action',
+            'by_scope' => 'scope',
+        ] as $key => $label) {
+            if (!is_array($conflict_summary[$key] ?? null) || $conflict_summary[$key] === []) {
+                continue;
+            }
+            $parts = [];
+            foreach ($conflict_summary[$key] as $bucket => $count) {
+                $parts[] = $bucket . '=' . $count;
+            }
+            echo "  $label " . implode(' ', $parts) . "\n";
         }
     }
 

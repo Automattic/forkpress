@@ -7097,6 +7097,10 @@ SQL);
     assert_same(count($file_conflict_audit['decisions']), 0, 'conflict-only audit filter omits decisions');
     assert_same(count($file_conflict_audit['autoincrement_bands']), 0, 'file conflict audit filter omits database-only band summaries');
     assert_same(count($file_conflict_audit['row_identity_summary']), 0, 'file conflict audit filter omits database-only row identity summaries');
+    assert_same($file_conflict_audit['conflict_summary']['total'], 9, 'filesystem conflict audit summarizes total matching conflicts');
+    assert_same($file_conflict_audit['conflict_summary']['unresolved'], 9, 'filesystem conflict audit summarizes unresolved conflicts');
+    assert_same($file_conflict_audit['conflict_summary']['resolved'], 0, 'filesystem conflict audit summarizes resolved conflicts');
+    assert_same($file_conflict_audit['conflict_summary']['by_scope']['files'], 9, 'filesystem conflict audit summarizes conflict scope buckets');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-conflict' AND row_identity = '$conflict_file_identity' AND base_payload = '$conflict_base_payload' AND source_payload = '$conflict_source_payload' AND target_payload = '$conflict_target_payload' AND chosen_payload = '$conflict_target_payload'"), 1, 'filesystem content conflicts record base, source, target, and chosen target payloads');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-conflict' AND row_identity = '$binary_conflict_identity' AND base_payload = '$binary_conflict_base_payload' AND source_payload = '$binary_conflict_source_payload' AND target_payload = '$binary_conflict_target_payload' AND chosen_payload = '$binary_conflict_target_payload'"), 1, 'binary filesystem content conflicts record hash payloads without text decoding');
     assert_same(count(array_filter($file_conflict_audit['conflicts'], fn($row) => $row['table_name'] === '__files__')), 9, 'filesystem audit filter exports only file records');
@@ -7146,6 +7150,8 @@ SQL);
     assert_same(count($file_conflict_queue_audit['decisions']), 0, 'file conflict review queue omits decisions');
     assert_same(count($file_conflict_queue_audit['resolutions']), 0, 'file conflict review queue omits resolutions');
     assert_true(count($file_conflict_queue_audit['conflicts']) >= 1, 'file conflict review queue returns unreviewed filesystem conflicts');
+    assert_same($file_conflict_queue_audit['conflict_summary']['total'], count($file_conflict_queue_audit['conflicts']), 'file conflict review queue summary follows active filters');
+    assert_same($file_conflict_queue_audit['conflict_summary']['resolved'], 0, 'file conflict review queue summary counts no resolved conflicts');
     $file_conflict_queue_ids = array_map(fn($row) => (int)$row['id'], $file_conflict_queue_audit['conflicts']);
     assert_true(in_array($unreviewed_file_conflict_id, $file_conflict_queue_ids, true), 'file conflict review queue includes unreviewed filesystem conflicts');
     assert_true(!in_array($reviewed_file_conflict_id, $file_conflict_queue_ids, true), 'file conflict review queue excludes reviewed filesystem conflicts');
@@ -7192,6 +7198,8 @@ SQL);
         '5',
     ]);
     assert_same($file_conflict_cli_audit['status'], 0, 'CLI audit text can filter reviewed filesystem conflicts');
+    assert_true(str_contains($file_conflict_cli_audit['output'], 'conflict-summary:'), 'CLI audit text prints a first-class conflict summary');
+    assert_true(str_contains($file_conflict_cli_audit['output'], 'scope files=1'), 'CLI audit text summarizes matching filesystem conflict scope');
     assert_true(str_contains($file_conflict_cli_audit['output'], 'review=reviewed reviewer=cow-cli-test'), 'CLI audit text prints reviewed filesystem conflict status');
     assert_true(str_contains($file_conflict_cli_audit['output'], 'note=Conflict upload reviewed through the CLI.'), 'CLI audit text prints reviewed filesystem conflict note');
     $path_prefix_audit = cow_merge_audit_report($metadata, null, 10, [
