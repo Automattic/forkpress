@@ -530,6 +530,14 @@ assert_true(str_contains($switcher_html, "fetchConflictAudit(run, payload.messag
 assert_true(str_contains($switcher_html, 'forkpress_branch_revalidate_conflicts'), 'branch switcher renders conflict revalidation action');
 assert_true(str_contains($switcher_html, 'nonce-forkpress_branch_revalidate_conflicts'), 'branch switcher renders conflict revalidation nonce');
 assert_true(str_contains($switcher_html, 'function fetchConflictRevalidation'), 'branch switcher renders conflict revalidation client handler');
+assert_true(str_contains($switcher_html, 'function conflictPluginMeta'), 'branch switcher renders structured plugin conflict metadata');
+assert_true(str_contains($switcher_html, 'record.plugin_object'), 'branch switcher renders plugin conflict object metadata');
+assert_true(str_contains($switcher_html, 'record.plugin_severity'), 'branch switcher renders plugin conflict severity metadata');
+assert_true(str_contains($switcher_html, 'record.plugin_validator'), 'branch switcher renders plugin conflict validator metadata');
+assert_true(str_contains($switcher_html, 'function conflictPluginGuidance'), 'branch switcher renders plugin conflict guidance metadata');
+assert_true(str_contains($switcher_html, 'record.plugin_resolution_policy'), 'branch switcher renders plugin conflict resolution policy');
+assert_true(str_contains($switcher_html, 'record.plugin_suggested_action'), 'branch switcher renders plugin conflict suggested action');
+assert_true(str_contains($switcher_html, 'record.plugin_manual_review_reason'), 'branch switcher renders plugin conflict manual review reason');
 
 $forbidden = run_branch_ui_action(
     ['action' => 'forkpress_branch_create', 'branch' => 'new_feature', 'from' => 'main'],

@@ -1646,6 +1646,57 @@ pub fn record_cow_plugin_driver_resolution(
     )
 }
 
+pub fn run_cow_plugin_driver(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    conflict_id: Option<&str>,
+    conflict_key: Option<&str>,
+    run_id: Option<&str>,
+    driver: &Path,
+    note: Option<&str>,
+    reviewer: Option<&str>,
+    format: &str,
+) -> Result<()> {
+    let metadata_db = cow_merge_metadata_db_path(layout);
+    let mut args: Vec<OsString> = vec![
+        "run-plugin-driver".into(),
+        "--metadata-db".into(),
+        metadata_db.as_os_str().to_os_string(),
+        "--driver".into(),
+        driver.as_os_str().to_os_string(),
+        "--format".into(),
+        format.into(),
+    ];
+    if let Some(conflict_id) = conflict_id {
+        args.push("--id".into());
+        args.push(conflict_id.into());
+    }
+    if let Some(conflict_key) = conflict_key {
+        args.push("--conflict-key".into());
+        args.push(conflict_key.into());
+    }
+    if let Some(run_id) = run_id {
+        args.push("--run".into());
+        args.push(run_id.into());
+    }
+    if let Some(note) = note {
+        args.push("--note".into());
+        args.push(note.into());
+    }
+    if let Some(reviewer) = reviewer {
+        args.push("--reviewer".into());
+        args.push(reviewer.into());
+    }
+    run_php_script(
+        layout,
+        runtime,
+        shared,
+        "scripts/cow/merge.php",
+        args.iter().map(|arg| arg.as_os_str()),
+    )
+}
+
 pub fn review_cow_merge_audit_record(
     layout: &Layout,
     runtime: &PortableRuntime,

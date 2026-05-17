@@ -251,7 +251,41 @@ not just a validator.
 Plugin driver repairs now have a first-class audit boundary. ForkPress still
 does not run generic source/target resolution for plugin validator conflicts;
 instead, a plugin-specific driver must repair or validate the plugin-owned
-object graph and then record that evidence:
+object graph and then record that evidence. ForkPress can run one explicit
+driver with merge context and a conflict-context JSON file:
+
+```bash
+forkpress branch run-plugin-driver conflict 34 \
+  --driver ./vendor/bin/my-plugin-merge-driver \
+  --format json
+```
+
+The runner sets the same merge context variables as plugin validators, plus
+`FORKPRESS_MERGE_CONFLICT_ID`, `FORKPRESS_MERGE_CONFLICT_KEY`,
+`FORKPRESS_MERGE_CONFLICT_TYPE`, `FORKPRESS_MERGE_CONFLICT_JSON`,
+`FORKPRESS_MERGE_PLUGIN`, and `FORKPRESS_MERGE_PLUGIN_OBJECT`. A driver must
+emit a JSON object with `status` (`validated`, `applied`, or `failed`) and a
+`result` value. Optional `previous` and `note` fields are recorded as audit
+evidence.
+
+`validated` is an observation-only status. ForkPress snapshots the target DB
+and target file tree before running the driver; if a driver reports
+`validated` but changes either snapshot, the run fails, the mutations are
+rolled back, and no `plugin-driver` resolution is recorded. A mutating repair
+must report `applied`.
+
+The runner also rejects stale plugin conflicts before executing the driver. If
+a later validator rerun has already replaced the conflict evidence, ForkPress
+points at the replacement conflict id and requires review of the current
+finding instead of recording a driver result against old evidence.
+
+If a driver fails or emits malformed/contradictory output after mutating the
+candidate, ForkPress restores the target DB and files from snapshots. If that
+rollback itself fails, ForkPress records a rollback-failure row and JSONL
+artifact with the original driver failure, rollback failure, and preserved
+snapshot locations for manual recovery.
+
+External driver orchestration may also record a result directly:
 
 ```bash
 forkpress branch record-plugin-driver-resolution conflict 34 \
@@ -267,8 +301,8 @@ be supplied when the driver wants to preserve a pre-repair snapshot; otherwise
 ForkPress records the original validator finding as the previous payload. The
 command is intentionally metadata-only: the driver is responsible for any
 plugin-owned database or filesystem edits before it records an applied result.
-This keeps the safety boundary explicit until ForkPress grows a controlled
-driver execution API.
+The explicit runner provides context and audit recording, but still expects
+the plugin driver to own the correctness of any repair it performs.
 
 When a validator rerun changes evidence for a reviewed plugin conflict,
 stale-audit revalidation records `replacement-evidence`, links to the newer

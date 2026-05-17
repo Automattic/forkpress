@@ -1404,6 +1404,29 @@ function forkpress_render_branch_switcher(): void {
             return 'Conflict #' + String(record && record.id ? record.id : '');
         }
 
+        function conflictPluginMeta(record) {
+            if (!record || !record.plugin) {
+                return '';
+            }
+            return [
+                'plugin: ' + String(record.plugin),
+                record.plugin_object ? 'object: ' + String(record.plugin_object) : '',
+                record.plugin_severity ? 'severity: ' + String(record.plugin_severity) : '',
+                record.plugin_validator ? 'validator: ' + String(record.plugin_validator) : ''
+            ].filter(Boolean).join(' / ');
+        }
+
+        function conflictPluginGuidance(record) {
+            if (!record || !record.plugin) {
+                return '';
+            }
+            return [
+                record.plugin_resolution_policy ? 'policy: ' + String(record.plugin_resolution_policy) : '',
+                record.plugin_suggested_action ? 'action: ' + String(record.plugin_suggested_action) : '',
+                record.plugin_manual_review_reason ? 'manual review: ' + String(record.plugin_manual_review_reason) : ''
+            ].filter(Boolean).join(' / ');
+        }
+
         function renderConflictAudit(payload, fallbackMessage) {
             var records = Array.isArray(payload.records) ? payload.records : [];
             var filters = payload.filters || {};
@@ -1430,7 +1453,8 @@ function forkpress_render_branch_switcher(): void {
                     record.lifecycle_state || record.latest_event_lifecycle_state || '',
                     record.next_action || ''
                 ].filter(Boolean).join(' / '));
-                appendConflictText(row, 'forkpress-conflict-meta', record.plugin ? 'plugin: ' + String(record.plugin) : '');
+                appendConflictText(row, 'forkpress-conflict-meta', conflictPluginMeta(record));
+                appendConflictText(row, 'forkpress-conflict-meta', conflictPluginGuidance(record));
                 conflictList.appendChild(row);
             });
 
