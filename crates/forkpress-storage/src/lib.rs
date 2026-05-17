@@ -1424,6 +1424,7 @@ pub fn revalidate_cow_merge_reviews(
     shared: &SharedPaths,
     run_id: Option<&str>,
     conflict_id: Option<&str>,
+    conflict_key: Option<&str>,
     reviewer: Option<&str>,
     format: &str,
     quiet: bool,
@@ -1443,6 +1444,10 @@ pub fn revalidate_cow_merge_reviews(
     if let Some(conflict_id) = conflict_id {
         args.push("--conflict-id".into());
         args.push(conflict_id.into());
+    }
+    if let Some(conflict_key) = conflict_key {
+        args.push("--conflict-key".into());
+        args.push(conflict_key.into());
     }
     if let Some(reviewer) = reviewer {
         args.push("--reviewer".into());

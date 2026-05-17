@@ -28,7 +28,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "    [--resolution-status validated|applied] [--group-by none|table|status|path|type|severity|lifecycle|next-action|conflict-key|plugin|plugin-object|plugin-severity]\n");
     fwrite(STDERR, "    --group-by supports resolutions by table/status/path, conflicts by table/type/path/severity/lifecycle/next-action/conflict-key/plugin/plugin-object/plugin-severity, and decisions by table/type/path.\n");
     fwrite(STDERR, "    --revalidate accepts only --run, --reviewer, --format, and --quiet; omit --revalidate to filter audit output.\n");
-    fwrite(STDERR, "  php merge.php revalidate-reviews --metadata-db <path> [--run ID] [--conflict-id ID] [--reviewer NAME] [--format text|json]\n");
+    fwrite(STDERR, "  php merge.php revalidate-reviews --metadata-db <path> [--run ID] [--conflict-id ID|--conflict-key KEY] [--reviewer NAME] [--format text|json]\n");
     fwrite(STDERR, "  php merge.php review-record --metadata-db <path> --record conflict|decision|resolution (--id ID|--conflict-key KEY [--run ID]) --status pending|needs-action|reviewed --note TEXT [--reviewer NAME]\n");
     fwrite(STDERR, "  php merge.php resolve-conflict --metadata-db <path> --id ID (--choice source|target [--apply]|--apply-reviewed) [--after-revalidate] [--note TEXT] [--reviewer NAME]\n");
 }
@@ -8188,15 +8188,25 @@ function cow_merge_revalidate_reviewed_conflicts(
     string $metadata_db,
     ?int $run_id = null,
     string $reviewer = 'forkpress',
-    ?int $conflict_id = null
+    ?int $conflict_id = null,
+    ?string $conflict_key = null
 ): array {
     if (!is_file($metadata_db)) {
         throw new RuntimeException("merge metadata database does not exist: $metadata_db");
+    }
+    if ($conflict_id !== null && $conflict_key !== null && trim($conflict_key) !== '') {
+        throw new InvalidArgumentException('--conflict-id cannot be combined with --conflict-key');
     }
     $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READWRITE);
     $transaction_started = false;
     try {
         cow_merge_ensure_metadata($meta);
+        $requested_conflict_key = $conflict_key === null || trim($conflict_key) === ''
+            ? null
+            : cow_merge_conflict_key_arg($conflict_key);
+        if ($conflict_id === null && $requested_conflict_key !== null) {
+            $conflict_id = cow_merge_conflict_id_from_key($meta, $requested_conflict_key, $run_id);
+        }
         $params = [];
         $clauses = [];
         if ($run_id !== null) {
@@ -8324,6 +8334,7 @@ function cow_merge_revalidate_reviewed_conflicts(
             'metadata_db' => $metadata_db,
             'run_id' => $run_id,
             'conflict_id' => $conflict_id,
+            'conflict_key' => $requested_conflict_key,
             'checked' => $checked,
             'reviewed' => $reviewed,
             'fresh' => $fresh,
@@ -17017,6 +17028,7 @@ function cow_merge_audit_revalidate_reject_ignored_filters(array $args): void {
         'revalidate' => true,
         'run' => true,
         'conflict-id' => true,
+        'conflict-key' => true,
         'reviewer' => true,
         'format' => true,
         'quiet' => true,
@@ -17030,7 +17042,7 @@ function cow_merge_audit_revalidate_reject_ignored_filters(array $args): void {
     if ($ignored !== []) {
         sort($ignored);
         throw new InvalidArgumentException(
-            'merge-audit --revalidate only accepts --run, --conflict-id, --reviewer, --format, and --quiet; ' .
+            'merge-audit --revalidate only accepts --run, --conflict-id, --conflict-key, --reviewer, --format, and --quiet; ' .
             'run merge-audit without --revalidate to filter audit output. Ignored filters: ' .
             implode(', ', $ignored)
         );
@@ -17259,7 +17271,8 @@ if (realpath($argv[0] ?? '') === __FILE__) {
                     $args['metadata-db'],
                     cow_merge_audit_run_id($args['run'] ?? null),
                     cow_merge_review_text($args['reviewer'] ?? 'forkpress', 'reviewer'),
-                    cow_merge_audit_conflict_id($args['conflict-id'] ?? null)
+                    cow_merge_audit_conflict_id($args['conflict-id'] ?? null),
+                    $args['conflict-key'] ?? null
                 );
                 if ($format === 'json') {
                     $encoded = json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
@@ -17318,7 +17331,8 @@ if (realpath($argv[0] ?? '') === __FILE__) {
                 $args['metadata-db'],
                 cow_merge_audit_run_id($args['run'] ?? null),
                 cow_merge_review_text($args['reviewer'] ?? 'forkpress', 'reviewer'),
-                cow_merge_audit_conflict_id($args['conflict-id'] ?? null)
+                cow_merge_audit_conflict_id($args['conflict-id'] ?? null),
+                $args['conflict-key'] ?? null
             );
             if ($format === 'json') {
                 $encoded = json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);

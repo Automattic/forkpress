@@ -115,6 +115,8 @@ try {
     assert_same($merge['status'], 'completed_with_conflicts', 'stale audit fixture starts with a reviewable cell conflict');
     $conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND column_name = 'value'");
     assert_true($conflict_id > 0, 'stale audit fixture records the cell conflict');
+    $conflict_key = (string)scalar($metadata, "SELECT conflict_key FROM merge_conflicts WHERE id = $conflict_id");
+    assert_true($conflict_key !== '', 'stale audit fixture records a stable conflict key');
 
     cow_merge_review_record(
         $metadata,
@@ -143,7 +145,7 @@ try {
     ]);
     assert_true($filtered_revalidate['status'] !== 0, 'audit revalidate rejects ignored filters in direct PHP CLI');
     assert_true(
-        str_contains($filtered_revalidate['output'], 'merge-audit --revalidate only accepts --run, --conflict-id, --reviewer, --format, and --quiet'),
+        str_contains($filtered_revalidate['output'], 'merge-audit --revalidate only accepts --run, --conflict-id, --conflict-key, --reviewer, --format, and --quiet'),
         'audit revalidate explains supported action flags'
     );
     assert_true(
@@ -151,8 +153,9 @@ try {
         'audit revalidate names the ignored filter'
     );
 
-    $revalidated = cow_merge_revalidate_reviewed_conflicts($metadata, $run_id, 'cow-revalidate', $conflict_id);
-    assert_same($revalidated['conflict_id'] ?? null, $conflict_id, 'revalidation summary preserves the requested conflict id filter');
+    $revalidated = cow_merge_revalidate_reviewed_conflicts($metadata, $run_id, 'cow-revalidate', null, $conflict_key);
+    assert_same($revalidated['conflict_id'] ?? null, $conflict_id, 'revalidation summary preserves the resolved conflict id filter');
+    assert_same($revalidated['conflict_key'] ?? null, $conflict_key, 'revalidation summary preserves the requested conflict key filter');
     assert_same($revalidated['checked'], 1, 'revalidation checks the reviewed conflict');
     assert_same($revalidated['stale'], 1, 'revalidation detects target drift');
     assert_same($revalidated['carried'], 1, 'revalidation carries stale reviewer intent to needs-action');
@@ -192,12 +195,13 @@ try {
         'revalidate-reviews',
         '--metadata-db', $metadata,
         '--run', (string)$run_id,
-        '--conflict-id', (string)$conflict_id,
+        '--conflict-key', $conflict_key,
         '--format', 'json',
     ]);
     assert_same($again['status'], 0, 'revalidation CLI accepts already-carried stale reviews');
     $again_json = json_decode($again['output'], true);
-    assert_same($again_json['conflict_id'] ?? null, $conflict_id, 'revalidation CLI preserves the requested conflict id filter');
+    assert_same($again_json['conflict_id'] ?? null, $conflict_id, 'revalidation CLI preserves the resolved conflict id filter');
+    assert_same($again_json['conflict_key'] ?? null, $conflict_key, 'revalidation CLI preserves the requested conflict key filter');
     assert_same($again_json['carried'] ?? null, 0, 'revalidation CLI does not duplicate carried notes');
     assert_same($again_json['already_needs_action'] ?? null, 1, 'revalidation CLI reports already-carried stale reviews');
     assert_same(count($again_json['already_needs_action_conflicts'] ?? []), 1, 'revalidation CLI returns already-open needs-action conflicts');
