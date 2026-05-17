@@ -3290,6 +3290,10 @@ try {
     assert_same(count($options_contract_audit['conflicts']), 2, 'conflict audit returns both option edit/delete conflicts');
     $options_contract_conflict_id = (int)$options_contract_audit['conflicts'][0]['id'];
     $options_contract_conflict_key = (string)$options_contract_audit['conflicts'][0]['conflict_key'];
+    $options_batch_conflict = $options_contract_audit['conflicts'][1];
+    $options_batch_conflict_id = (int)$options_batch_conflict['id'];
+    $options_batch_source = cow_merge_decode_payload_json((string)$options_batch_conflict['source_payload'], 'batch option conflict source');
+    $options_batch_option_name = (string)($options_batch_source['option_name'] ?? '');
     $unreviewed_filter_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['lifecycle_state' => 'unreviewed']);
     assert_same($unreviewed_filter_audit['filters']['records'], 'conflicts', 'lifecycle-state filter defaults to conflict records');
     assert_same(count($unreviewed_filter_audit['conflicts']), 2, 'lifecycle-state filter returns unreviewed conflicts');
@@ -3396,6 +3400,7 @@ try {
     assert_same($resolved_audit['conflicts'][0]['latest_event_actor'], 'cow-smoke', 'resolved conflict advertises latest event actor');
     $resolved_filter_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts', 'lifecycle_state' => 'resolved']);
     assert_same((int)$resolved_filter_audit['conflicts'][0]['id'], $options_contract_conflict_id, 'lifecycle-state filter returns resolved conflicts');
+
     $lifecycle_group_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts', 'group_by' => 'lifecycle']);
     $lifecycle_counts = [];
     foreach ($lifecycle_group_audit['conflict_groups'] as $group) {
@@ -3444,6 +3449,77 @@ try {
     assert_same((int)$event_audit['conflict_events'][0]['conflict_id'], $options_contract_conflict_id, 'conflict event audit exposes the conflict id');
     assert_same($event_audit['conflict_events'][0]['table_name'], 'wp_options', 'conflict event audit exposes the conflict table');
     assert_same($event_audit['conflict_events'][0]['conflict_type'], 'row-target-deleted', 'conflict event audit exposes the conflict type');
+
+    cow_merge_review_record($options_edit_delete_metadata, 'conflict', $options_batch_conflict_id, 'reviewed', 'Review second option conflict for batch apply.', 'cow-smoke');
+    $batch_validated_resolution = cow_merge_resolve_conflict($options_edit_delete_metadata, $options_batch_conflict_id, 'source', false, 'Validate source option restoration.', 'cow-smoke');
+    assert_same($batch_validated_resolution['status'], 'validated', 'second validation-only resolution is ready for batch apply');
+    $batch_apply_cli = smoke_run_merge_cli([
+        'apply-reviewed-resolutions',
+        '--metadata-db', $options_edit_delete_metadata,
+        '--run', (string)$options_edit_delete_result['run_id'],
+        '--limit', '10',
+        '--note', 'Apply reviewed option conflict queue.',
+        '--reviewer', 'cow-smoke',
+        '--format', 'json',
+    ]);
+    assert_same($batch_apply_cli['status'], 0, 'apply-reviewed-resolutions CLI applies validated review queue: ' . $batch_apply_cli['output']);
+    $batch_apply_result = json_decode($batch_apply_cli['output'], true);
+    assert_same($batch_apply_result['status'] ?? null, 'completed', 'batch apply reports completed status');
+    assert_same((int)($batch_apply_result['eligible'] ?? 0), 1, 'batch apply finds the one validated unapplied conflict');
+    assert_same((int)($batch_apply_result['applied'] ?? 0), 1, 'batch apply applies the validated conflict');
+    $escaped_batch_option_name = SQLite3::escapeString($options_batch_option_name);
+    assert_same((int)smoke_scalar($options_edit_delete_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = '$escaped_batch_option_name'"), 1, 'batch apply can restore the reviewed source option row');
+
+    $multi_apply_base = $tmp . '/multi-apply-base.sqlite';
+    $multi_apply_source = $tmp . '/multi-apply-source.sqlite';
+    $multi_apply_target = $tmp . '/multi-apply-target.sqlite';
+    $multi_apply_metadata = $tmp . '/.forkpress/cow/merge/multi-apply-metadata.sqlite';
+
+    smoke_create_posts_db($multi_apply_base);
+    $db = smoke_open_db($multi_apply_base);
+    smoke_insert_option($db, 17000300, 'forkpress_multi_apply_json', '{"branch":"base","slot":"json"}');
+    smoke_insert_option($db, 17000301, 'forkpress_multi_apply_serialized', serialize(['branch' => 'base', 'slot' => 'serialized']));
+    $db->close();
+    copy($multi_apply_base, $multi_apply_source);
+    copy($multi_apply_base, $multi_apply_target);
+
+    $db = smoke_open_db($multi_apply_source);
+    smoke_update_option($db, 'forkpress_multi_apply_json', '{"branch":"source","slot":"json","reviewed":true}');
+    smoke_update_option($db, 'forkpress_multi_apply_serialized', serialize(['branch' => 'source', 'slot' => 'serialized', 'reviewed' => true]));
+    $db->close();
+
+    $db = smoke_open_db($multi_apply_target);
+    $db->exec("DELETE FROM wp_options WHERE option_name IN ('forkpress_multi_apply_json', 'forkpress_multi_apply_serialized')");
+    $db->close();
+
+    $multi_apply_result = cow_merge_databases($multi_apply_base, $multi_apply_source, $multi_apply_target, $multi_apply_metadata, 'feature-smoke-multi-apply', 'main');
+    assert_same($multi_apply_result['status'], 'completed_with_conflicts', 'multi-conflict apply setup leaves both source option edits reviewable');
+    $multi_apply_audit = cow_merge_audit_report($multi_apply_metadata, null, 10, [
+        'records' => 'conflicts',
+        'conflict_type' => 'row-target-deleted',
+    ]);
+    assert_same(count($multi_apply_audit['conflicts']), 2, 'multi-conflict apply setup records both option delete conflicts');
+    foreach ($multi_apply_audit['conflicts'] as $conflict) {
+        $conflict_id = (int)$conflict['id'];
+        cow_merge_review_record($multi_apply_metadata, 'conflict', $conflict_id, 'reviewed', 'Review multi-conflict apply candidate.', 'cow-smoke');
+        $validated = cow_merge_resolve_conflict($multi_apply_metadata, $conflict_id, 'source', false, 'Validate source option restoration for multi-apply.', 'cow-smoke');
+        assert_same($validated['status'], 'validated', 'multi-conflict apply validates one source restoration');
+    }
+    $multi_apply_cli = smoke_run_merge_cli([
+        'apply-reviewed-resolutions',
+        '--metadata-db', $multi_apply_metadata,
+        '--run', (string)$multi_apply_result['run_id'],
+        '--limit', '10',
+        '--note', 'Apply multi-conflict reviewed queue.',
+        '--reviewer', 'cow-smoke',
+        '--format', 'json',
+    ]);
+    assert_same($multi_apply_cli['status'], 0, 'apply-reviewed-resolutions CLI applies multiple validated conflicts: ' . $multi_apply_cli['output']);
+    $multi_apply_cli_result = json_decode($multi_apply_cli['output'], true);
+    assert_same((int)($multi_apply_cli_result['eligible'] ?? 0), 2, 'multi-conflict batch apply finds both validated conflicts');
+    assert_same((int)($multi_apply_cli_result['applied'] ?? 0), 2, 'multi-conflict batch apply applies both validated conflicts');
+    assert_same(smoke_scalar($multi_apply_target, "SELECT option_value FROM wp_options WHERE option_name = 'forkpress_multi_apply_json'"), '{"branch":"source","slot":"json","reviewed":true}', 'multi-conflict batch apply restores source JSON option');
+    assert_same(smoke_scalar($multi_apply_target, "SELECT option_value FROM wp_options WHERE option_name = 'forkpress_multi_apply_serialized'"), serialize(['branch' => 'source', 'slot' => 'serialized', 'reviewed' => true]), 'multi-conflict batch apply restores source serialized option');
 
     $fk_blocked_base = $tmp . '/fk-blocked-source-base.sqlite';
     $fk_blocked_source = $tmp . '/fk-blocked-source-source.sqlite';
