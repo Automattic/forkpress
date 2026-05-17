@@ -3860,10 +3860,46 @@ SQL);
     $legacy_stmt->bindValue(':chosen_hash', hash('sha256', $legacy_chosen_payload), SQLITE3_TEXT);
     $legacy_stmt->bindValue(':resolver', 'target-wins', SQLITE3_TEXT);
     $legacy_stmt->execute();
+    $legacy_conflict_id = (int)$legacy_db->lastInsertRowID();
+    $legacy_db->exec(<<<'SQL'
+CREATE TABLE merge_conflict_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conflict_id INTEGER NOT NULL,
+    run_id INTEGER NOT NULL,
+    event_type TEXT NOT NULL CHECK(event_type IN ('recorded', 'review-pending', 'review-needs-action', 'review-reviewed', 'resolution-validated', 'resolution-applied', 'revalidation-required')),
+    actor TEXT NOT NULL,
+    note TEXT NOT NULL,
+    related_record_type TEXT,
+    related_record_id INTEGER,
+    lifecycle_state TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(conflict_id) REFERENCES merge_conflicts(id),
+    FOREIGN KEY(run_id) REFERENCES merge_runs(id)
+)
+SQL);
+    $legacy_event_stmt = $legacy_db->prepare(
+        'INSERT INTO merge_conflict_events (conflict_id, run_id, event_type, actor, note, lifecycle_state) ' .
+        "VALUES (:conflict_id, 1, 'recorded', 'legacy', 'legacy recorded event', 'unreviewed')"
+    );
+    $legacy_event_stmt->bindValue(':conflict_id', $legacy_conflict_id, SQLITE3_INTEGER);
+    $legacy_event_stmt->execute();
     cow_merge_ensure_metadata($legacy_db);
     assert_true(
         str_contains((string)$legacy_db->querySingle("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'merge_conflicts'"), 'UNIQUE(run_id, table_name'),
         'legacy conflict metadata migrates to run-scoped conflict uniqueness'
+    );
+    assert_true(
+        str_contains((string)$legacy_db->querySingle("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'merge_conflict_events'"), 'resolution-blocked'),
+        'legacy conflict event metadata migrates to include blocked resolution events'
+    );
+    assert_same(
+        (int)$legacy_db->querySingle("SELECT COUNT(*) FROM merge_conflict_events WHERE run_id = 1 AND event_type = 'recorded'"),
+        1,
+        'legacy conflict event metadata preserves existing events during event-type migration'
+    );
+    assert_true(
+        (bool)$legacy_db->exec("INSERT INTO merge_conflict_events (conflict_id, run_id, event_type, actor, note, lifecycle_state) VALUES ($legacy_conflict_id, 1, 'resolution-blocked', 'legacy', 'legacy blocked event', 'unreviewed')"),
+        'migrated legacy conflict event metadata accepts resolution-blocked events'
     );
     assert_true(
         str_starts_with((string)$legacy_db->querySingle("SELECT conflict_key FROM merge_conflicts WHERE table_name = 'plugin_legacy_conflicts'"), 'sha256:'),
