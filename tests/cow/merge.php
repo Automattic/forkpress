@@ -4825,6 +4825,17 @@ SQL);
     cow_merge_print_audit_text($grouped_conflict_audit);
     $conflict_group_text = ob_get_clean();
     assert_true(str_contains($conflict_group_text, 'group-by=severity') && str_contains($conflict_group_text, 'conflict-groups:'), 'conflict grouping is visible in text audit output');
+    $grouped_conflict_key_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['records' => 'conflicts', 'group_by' => 'conflict-key']);
+    assert_same($grouped_conflict_key_audit['filters']['group_by'], 'conflict-key', 'merge audit JSON report includes conflict-key grouping filter');
+    $conflict_key_group_counts = [];
+    foreach ($grouped_conflict_key_audit['conflict_groups'] as $group) {
+        $conflict_key_group_counts[$group['group_key']] = (int)$group['conflict_count'];
+    }
+    assert_same($conflict_key_group_counts[$title_conflict_key] ?? 0, 1, 'conflict-key grouping counts one title logical conflict');
+    ob_start();
+    cow_merge_print_audit_text($grouped_conflict_key_audit);
+    $conflict_key_group_text = ob_get_clean();
+    assert_true(str_contains($conflict_key_group_text, 'group-by=conflict-key') && str_contains($conflict_key_group_text, $title_conflict_key), 'conflict-key grouping is visible in text audit output');
     $grouped_decision_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['records' => 'decisions', 'group_by' => 'type']);
     assert_same($grouped_decision_audit['filters']['group_by'], 'type', 'merge audit JSON report includes decision grouping filter');
     assert_same(count($grouped_decision_audit['conflict_groups']), 0, 'decision grouping does not populate conflict groups');

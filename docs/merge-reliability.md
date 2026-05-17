@@ -341,8 +341,9 @@ should stay focused on these areas:
   conflict-event history on `unreviewed`, `deferred`, `needs-action`,
   `reviewed`, `validated`, or `resolved` records without clients
   reimplementing lifecycle inference, and
-  `merge-audit --records conflicts --group-by lifecycle` can summarize queue
-  counts without client-side aggregation.
+  `merge-audit --records conflicts --group-by lifecycle` and
+  `--group-by conflict-key` can summarize queue counts by lifecycle or logical
+  conflict without client-side aggregation.
 - Improve deterministic schema dependency planning for safe view/trigger
   reorderings while keeping cyclic or semantic ambiguity review-only.
 - Keep aarch64 macOS release artifacts and APFS sparsebundle E2E runs green for
