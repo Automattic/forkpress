@@ -10727,9 +10727,10 @@ function cow_merge_resolve_schema_conflict(
         'schema-source-added-index',
         'schema-source-added-view',
         'schema-source-added-trigger',
+        'schema-conflict',
     ];
     if ($after_revalidate && ($choice !== 'source' || !in_array($conflict_type, $after_revalidate_schema_types, true))) {
-        throw new InvalidArgumentException('--after-revalidate currently supports source resolution for compatible source-added index/view/trigger drift only');
+        throw new InvalidArgumentException('--after-revalidate currently supports source resolution for compatible source-added index/view/trigger or table rebuild drift only');
     }
 
     $source_payload = cow_merge_decode_payload_json((string)$conflict['source_payload'], 'source');
@@ -10903,7 +10904,7 @@ function cow_merge_resolve_schema_conflict(
             }
         } elseif ($conflict_type === 'schema-target-dropped-table' && $object === '') {
             if ($after_revalidate) {
-                throw new InvalidArgumentException('--after-revalidate currently supports source resolution for compatible source-added index/view/trigger drift only');
+                throw new InvalidArgumentException('--after-revalidate currently supports source resolution for compatible source-added index/view/trigger or table rebuild drift only');
             }
             $restore_payload = cow_merge_normalize_source_table_restore_payload($source_payload);
             if ($target_payload !== null) {
@@ -10966,7 +10967,7 @@ function cow_merge_resolve_schema_conflict(
             }
         } elseif ($conflict_type === 'schema-source-dropped-table' && $object === '') {
             if ($after_revalidate) {
-                throw new InvalidArgumentException('--after-revalidate currently supports source resolution for compatible source-added index/view/trigger drift only');
+                throw new InvalidArgumentException('--after-revalidate currently supports source resolution for compatible source-added index/view/trigger or table rebuild drift only');
             }
             if ($source_payload !== null) {
                 throw new RuntimeException("schema conflict #$conflict_id has an unexpected source table payload");
@@ -11016,8 +11017,18 @@ function cow_merge_resolve_schema_conflict(
                 }
                 $current_target_sql = cow_merge_table_sql($target, $table);
                 $previous = $current_target_sql;
-                if (!cow_merge_values_equal($current_target_sql, cow_merge_schema_table_payload_sql($target_payload))) {
-                    throw new RuntimeException('target table schema no longer matches the audited conflict target value; rerun merge-audit before resolving');
+                if ($after_revalidate) {
+                    $current_source_payload = cow_merge_payload_json(cow_merge_source_table_rebuild_payload($source, $table, $current_source_sql));
+                    $current_target_payload = cow_merge_payload_json(cow_merge_source_table_rebuild_payload($target, $table, $current_target_sql));
+                    cow_merge_require_after_revalidate($meta, $conflict_id, $current_source_payload, $current_target_payload);
+                    $latest_revalidation = cow_merge_latest_revalidation($meta, $conflict_id);
+                    if ((string)($latest_revalidation['revalidation_class'] ?? '') !== 'compatible-schema-table-target-drift') {
+                        throw new RuntimeException('latest schema revalidation did not prove this table rebuild target drift is compatible');
+                    }
+                } else {
+                    if (!cow_merge_values_equal($current_target_sql, cow_merge_schema_table_payload_sql($target_payload))) {
+                        throw new RuntimeException('target table schema no longer matches the audited conflict target value; rerun merge-audit before resolving');
+                    }
                 }
                 $source_columns = cow_merge_table_info($source, $table);
                 $target_columns = cow_merge_table_info($target, $table);
@@ -14482,6 +14493,27 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
                         'current_target_payload' => $current_target_payload,
                     ];
                 }
+                $revalidation_class = 'unclassified';
+                if (
+                    $source_fresh &&
+                    !$target_fresh &&
+                    $current_source_sql !== null &&
+                    cow_merge_schema_table_payload_sql($target_payload) !== null
+                ) {
+                    $source = cow_merge_open_db($source_db, SQLITE3_OPEN_READONLY);
+                    $target = cow_merge_open_db($target_db, SQLITE3_OPEN_READWRITE);
+                    try {
+                        $source_columns = cow_merge_table_info($source, $table);
+                        $target_columns = cow_merge_table_info($target, $table);
+                        cow_merge_validate_source_table_rebuild($target, $table, $current_source_sql, $source_columns, $target_columns);
+                        $revalidation_class = 'compatible-schema-table-target-drift';
+                    } catch (Throwable) {
+                        $revalidation_class = 'unclassified';
+                    } finally {
+                        $source->close();
+                        $target->close();
+                    }
+                }
                 $reason = !$source_fresh && !$target_fresh
                     ? 'schema table source and target changed after review'
                     : (!$source_fresh
@@ -14490,7 +14522,7 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
                 return [
                     'stale_status' => 'stale',
                     'stale_reason' => $reason,
-                    'revalidation_class' => 'unclassified',
+                    'revalidation_class' => $revalidation_class,
                     'current_source_payload' => $current_source_payload,
                     'current_target_payload' => $current_target_payload,
                 ];

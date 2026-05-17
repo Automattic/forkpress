@@ -1337,6 +1337,25 @@ SQL);
         str_contains((string)($table_rebuild_target_drift_payload['table_sql'] ?? ''), 'value BLOB'),
         'schema table rebuild target drift records the current target table SQL'
     );
+    assert_same(
+        scalar($table_rebuild_target_drift_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $table_rebuild_target_drift_conflict_id ORDER BY id DESC LIMIT 1"),
+        'compatible-schema-table-target-drift',
+        'schema table rebuild target drift is classified compatible when source rebuild validates against current target'
+    );
+    $table_rebuild_target_drift_resolution = cow_merge_resolve_conflict(
+        $table_rebuild_target_drift_metadata,
+        $table_rebuild_target_drift_conflict_id,
+        'source',
+        true,
+        'Apply source table rebuild after compatible target drift revalidation.',
+        'cow-test',
+        true
+    );
+    assert_same($table_rebuild_target_drift_resolution['status'], 'applied', 'compatible schema table rebuild target drift resolves after revalidation');
+    assert_true(
+        str_contains((string)scalar($table_rebuild_target_drift_target, "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'plugin_rebuild_target_drift'"), 'value INTEGER'),
+        'compatible schema table rebuild target drift applies the audited source table SQL'
+    );
 
     $index_validate_base = $tmp . '/index-validate-base.sqlite';
     $index_validate_source = $tmp . '/index-validate-source.sqlite';
