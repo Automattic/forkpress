@@ -370,7 +370,7 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
                     'attached_file' => $attached_file,
                     'metadata_file' => $metadata_file,
                 ],
-            ];
+            ] + $review_only_regeneration_decision('metadata original');
         }
     }
     $directory = trim(dirname($metadata_file !== '' ? $metadata_file : $attached_file), '.');
@@ -1349,15 +1349,28 @@ PHP);
     assert_same(count($missing_audit['conflicts']), 5, 'media validator exposes missing attached, metadata, generated, original_image, and backup image files as plugin-scoped audit conflicts');
     $missing_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $missing_audit['conflicts']));
     assert_true(str_contains($missing_preview, 'source-missing-original.jpg'), 'media validator missing-file audit includes the affected original attachment');
+    $missing_original_review_only_recorded = false;
     $missing_metadata_original_recorded = false;
+    $missing_metadata_original_review_only_recorded = false;
     $missing_generated_review_only_recorded = false;
-    $missing_original_image_recorded = false;
+    $missing_original_image_review_only_recorded = false;
+    $missing_backup_review_only_recorded = false;
     $meta_db = open_db($metadata);
     $payloads = $meta_db->query("SELECT chosen_payload FROM merge_conflicts WHERE conflict_type = 'plugin-wp-media-missing-file'");
     while ($payload = $payloads->fetchArray(SQLITE3_ASSOC)) {
         $decoded = cow_merge_decode_payload_json((string)$payload['chosen_payload'], 'media validator missing-file payload');
+        if (($decoded['candidate']['attached_file'] ?? null) === '2026/05/source-missing-original.jpg') {
+            $missing_original_review_only_recorded =
+                ($decoded['resolution_policy'] ?? null) === 'review-only' &&
+                str_contains((string)($decoded['suggested_action'] ?? ''), 'Regenerate attachment metadata only after a reviewer confirms') &&
+                str_contains((string)($decoded['manual_review_reason'] ?? ''), 'must not synthesize original upload files');
+        }
         if (($decoded['candidate']['metadata_file'] ?? null) === '2026/05/source-metadata-file-mismatch-metadata.jpg') {
             $missing_metadata_original_recorded = true;
+            $missing_metadata_original_review_only_recorded =
+                ($decoded['resolution_policy'] ?? null) === 'review-only' &&
+                str_contains((string)($decoded['suggested_action'] ?? ''), 'Regenerate attachment metadata only after a reviewer confirms') &&
+                str_contains((string)($decoded['manual_review_reason'] ?? ''), 'must not synthesize metadata original upload files');
         }
         if (($decoded['candidate']['generated_file'] ?? null) === '2026/05/source-missing-generated-150x150.jpg') {
             $missing_generated_review_only_recorded =
@@ -1366,18 +1379,30 @@ PHP);
                 str_contains((string)($decoded['manual_review_reason'] ?? ''), 'must not synthesize generated upload files');
         }
         if (($decoded['candidate']['original_image_file'] ?? null) === '2026/05/source-original-image-missing-original.jpg') {
-            $missing_original_image_recorded = true;
+            $missing_original_image_review_only_recorded =
+                ($decoded['resolution_policy'] ?? null) === 'review-only' &&
+                str_contains((string)($decoded['suggested_action'] ?? ''), 'Regenerate attachment metadata only after a reviewer confirms') &&
+                str_contains((string)($decoded['manual_review_reason'] ?? ''), 'must not synthesize original_image upload files');
+        }
+        if (($decoded['candidate']['backup_file'] ?? null) === '2026/05/source-backup-missing-original.jpg') {
+            $missing_backup_review_only_recorded =
+                ($decoded['resolution_policy'] ?? null) === 'review-only' &&
+                str_contains((string)($decoded['suggested_action'] ?? ''), 'Regenerate attachment metadata only after a reviewer confirms') &&
+                str_contains((string)($decoded['manual_review_reason'] ?? ''), 'must not synthesize backup upload files');
         }
     }
     $payloads->finalize();
     $meta_db->close();
+    assert_true($missing_original_review_only_recorded, 'media validator missing-file audit records original upload regeneration as review-only');
     assert_true($missing_metadata_original_recorded, 'media validator missing-file audit payload identifies the missing metadata original file');
+    assert_true($missing_metadata_original_review_only_recorded, 'media validator missing-file audit records metadata original regeneration as review-only');
     assert_true(str_contains($missing_preview, 'source-missing-generated-150x150.jpg'), 'media validator missing-file audit includes the affected generated file');
     assert_true($missing_generated_review_only_recorded, 'media validator missing-file audit records generated derivative regeneration as review-only');
-    assert_true($missing_original_image_recorded, 'media validator missing-file audit payload identifies the missing original_image file');
+    assert_true($missing_original_image_review_only_recorded, 'media validator missing-file audit records original_image regeneration as review-only');
     assert_true(str_contains($missing_preview, (string)$original_image_missing_id), 'media validator missing-file audit includes the missing original_image attachment ID');
     assert_true(str_contains($missing_preview, 'source-backup-missing-original.jpg'), 'media validator missing-file audit includes the affected backup image file');
     assert_true(str_contains($missing_preview, (string)$backup_missing_id), 'media validator missing-file audit includes the missing backup image attachment ID');
+    assert_true($missing_backup_review_only_recorded, 'media validator missing-file audit records backup image regeneration as review-only');
 
     $backup_file_drift_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'plugin',
