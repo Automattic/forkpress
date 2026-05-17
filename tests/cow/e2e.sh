@@ -715,6 +715,15 @@ add_action('init', function () {
         }
         update_post_meta($note_id, '_forkpress_semantic_note', $branch);
         $must_set_terms($note_id, [$topic_term_id]);
+        $topic_graph = [
+            'branch' => $branch,
+            'term_id' => (int)$topic_term_id,
+            'parent_term_id' => (int)$parent_term_id,
+            'page_id' => (int)$page_id,
+            'note_id' => (int)$note_id,
+        ];
+        update_term_meta($topic_term_id, '_forkpress_semantic_topic_graph', $topic_graph);
+        update_term_meta($topic_term_id, '_forkpress_semantic_topic_json_graph', wp_json_encode($topic_graph));
 
         $block_id = wp_insert_post([
             'post_type' => 'wp_block',
@@ -1058,6 +1067,35 @@ add_action('init', function () {
     }
     ksort($locations);
 
+    $term_graphs = [];
+    $semantic_terms = get_terms([
+        'taxonomy' => 'forkpress_topic',
+        'hide_empty' => false,
+    ]);
+    if (!is_wp_error($semantic_terms)) {
+        foreach ($semantic_terms as $term) {
+            if (strpos($term->name, 'Semantic ') !== 0) {
+                continue;
+            }
+            $graph = get_term_meta($term->term_id, '_forkpress_semantic_topic_graph', true);
+            $json_graph = json_decode((string)get_term_meta($term->term_id, '_forkpress_semantic_topic_json_graph', true), true);
+            $term_graphs[$term->name] = [
+                'id' => (int)$term->term_id,
+                'parent' => (int)$term->parent,
+                'count' => (int)$term->count,
+                'graph_term_id' => is_array($graph) ? (int)($graph['term_id'] ?? 0) : 0,
+                'graph_parent_term_id' => is_array($graph) ? (int)($graph['parent_term_id'] ?? 0) : 0,
+                'graph_page_id' => is_array($graph) ? (int)($graph['page_id'] ?? 0) : 0,
+                'graph_note_id' => is_array($graph) ? (int)($graph['note_id'] ?? 0) : 0,
+                'json_graph_term_id' => is_array($json_graph) ? (int)($json_graph['term_id'] ?? 0) : 0,
+                'json_graph_parent_term_id' => is_array($json_graph) ? (int)($json_graph['parent_term_id'] ?? 0) : 0,
+                'json_graph_page_id' => is_array($json_graph) ? (int)($json_graph['page_id'] ?? 0) : 0,
+                'json_graph_note_id' => is_array($json_graph) ? (int)($json_graph['note_id'] ?? 0) : 0,
+            ];
+        }
+    }
+    ksort($term_graphs);
+
     $plugin_graphs = [];
     $parent_table_exists = (string)$wpdb->get_var($wpdb->prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = %s", $plugin_parent_table));
     $child_table_exists = (string)$wpdb->get_var($wpdb->prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = %s", $plugin_child_table));
@@ -1114,6 +1152,7 @@ add_action('init', function () {
         'menus' => $menus,
         'menu_items' => $menu_items,
         'menu_locations' => $locations,
+        'term_graphs' => $term_graphs,
         'plugin_graphs' => $plugin_graphs,
         'source_option' => get_option('forkpress_semantic_source_option'),
         'target_option' => get_option('forkpress_semantic_target_option'),
@@ -1944,6 +1983,27 @@ $reusableBlockValid = static function (array $posts, string $suffix): bool {
     $refs = array_map("intval", $posts["Semantic $suffix Page"]["block_refs"] ?? []);
     return $blockId > 0 && in_array($blockId, $refs, true);
 };
+$termGraphValid = static function (array $termGraphs, array $posts, string $suffix): bool {
+    $topic = $termGraphs["Semantic $suffix Topic"] ?? [];
+    $parent = $termGraphs["Semantic $suffix Parent Topic"] ?? [];
+    $topicId = (int)($topic["id"] ?? 0);
+    $parentId = (int)($parent["id"] ?? 0);
+    $pageId = (int)($posts["Semantic $suffix Page"]["id"] ?? 0);
+    $noteId = (int)($posts["Semantic $suffix Note"]["id"] ?? 0);
+    return $topicId > 0
+        && $parentId > 0
+        && ((int)($topic["parent"] ?? 0) === $parentId)
+        && ((int)($topic["count"] ?? 0) === 2)
+        && ((int)($parent["count"] ?? -1) === 0)
+        && ((int)($topic["graph_term_id"] ?? 0) === $topicId)
+        && ((int)($topic["graph_parent_term_id"] ?? 0) === $parentId)
+        && ((int)($topic["graph_page_id"] ?? 0) === $pageId)
+        && ((int)($topic["graph_note_id"] ?? 0) === $noteId)
+        && ((int)($topic["json_graph_term_id"] ?? 0) === $topicId)
+        && ((int)($topic["json_graph_parent_term_id"] ?? 0) === $parentId)
+        && ((int)($topic["json_graph_page_id"] ?? 0) === $pageId)
+        && ((int)($topic["json_graph_note_id"] ?? 0) === $noteId);
+};
 $editedPageValid = static function (array $posts, array $users, string $branch, string $suffix): bool {
     $edited = $posts["Semantic $suffix Edited Page"] ?? [];
     $user = $users["forkpress_semantic_$branch"] ?? [];
@@ -1990,6 +2050,8 @@ $ok = $ok
     && $editedPageValid($posts, $users, "target", "Target")
     && $reusableBlockValid($posts, "Source")
     && $reusableBlockValid($posts, "Target")
+    && $termGraphValid($data["term_graphs"] ?? [], $posts, "Source")
+    && $termGraphValid($data["term_graphs"] ?? [], $posts, "Target")
     && $optionRefsValid($data["source_option"] ?? [], "source", "Source")
     && $optionRefsValid($data["target_option"] ?? [], "target", "Target")
     && $optionRefsValid($data["source_json_option"] ?? [], "source", "Source")
