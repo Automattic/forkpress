@@ -57,15 +57,23 @@ $cli_log = $tmp . '/cli-argv.jsonl';
 $plugin_driver = $tmp . '/forkpress-plugin-driver.php';
 $discovered_plugins_dir = $tmp . '/wp-content/plugins';
 $discovered_plugin_driver = $discovered_plugins_dir . '/real-plugin/forkpress-merge-driver.php';
+$single_file_plugin_driver = $discovered_plugins_dir . '/solo.forkpress-merge-driver.php';
+$discovered_mu_plugins_dir = $tmp . '/wp-content/mu-plugins';
+$mu_plugin_driver = $discovered_mu_plugins_dir . '/forkpress-merge-driver.php';
 $work_dir = $tmp . '/site';
 $branch_list = $tmp . '/branches.txt';
 $runner = $tmp . '/run-action.php';
 mkdir($work_dir, 0777, true);
 mkdir(dirname($discovered_plugin_driver), 0777, true);
+mkdir($discovered_mu_plugins_dir, 0777, true);
 file_put_contents($plugin_driver, "<?php echo json_encode(['status' => 'validated', 'result' => ['ok' => true]]);\n");
 chmod($plugin_driver, 0755);
 file_put_contents($discovered_plugin_driver, "<?php echo json_encode(['status' => 'validated', 'result' => ['discovered' => true]]);\n");
 chmod($discovered_plugin_driver, 0755);
+file_put_contents($single_file_plugin_driver, "<?php echo json_encode(['status' => 'validated', 'result' => ['single_file' => true]]);\n");
+chmod($single_file_plugin_driver, 0755);
+file_put_contents($mu_plugin_driver, "<?php echo json_encode(['status' => 'validated', 'result' => ['mu_plugin' => true]]);\n");
+chmod($mu_plugin_driver, 0755);
 
 file_put_contents($fake_bin, <<<'PHP'
 #!/usr/bin/env php
@@ -549,6 +557,57 @@ assert_same(
     array_slice($discovered_plugin_driver_run['argv'][0] ?? [], 1),
     ['branch', '--work-dir', $work_dir, 'run-plugin-driver', 'conflict', '7', '--driver', realpath($discovered_plugin_driver), '--reviewer', 'wordpress-ui', '--format', 'json'],
     'branch plugin driver action uses discovered active plugin driver path'
+);
+
+$single_file_driver_key = hash('sha256', 'solo' . "\0" . realpath($single_file_plugin_driver));
+$single_file_plugin_driver_run = run_branch_ui_action(
+    [
+        'action' => 'forkpress_branch_run_plugin_driver',
+        'run' => '42',
+        'conflict' => '7',
+        'driverKey' => $single_file_driver_key,
+    ],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    [
+        'FORKPRESS_TEST_WP_PLUGIN_DIR' => $discovered_plugins_dir,
+        'FORKPRESS_TEST_ACTIVE_PLUGINS' => json_encode(['solo.php'], JSON_UNESCAPED_SLASHES),
+        'FORKPRESS_TEST_CLI_OUTPUT' => $driver_output,
+    ]
+);
+$single_file_plugin_driver_payload = decode_branch_ui_payload($single_file_plugin_driver_run);
+assert_same($single_file_plugin_driver_payload['success'] ?? null, true, 'branch plugin driver action accepts single-file active plugin drivers');
+assert_same(
+    array_slice($single_file_plugin_driver_run['argv'][0] ?? [], 1),
+    ['branch', '--work-dir', $work_dir, 'run-plugin-driver', 'conflict', '7', '--driver', realpath($single_file_plugin_driver), '--reviewer', 'wordpress-ui', '--format', 'json'],
+    'branch plugin driver action uses discovered single-file plugin driver path'
+);
+
+$mu_driver_key = hash('sha256', 'mu-plugins' . "\0" . realpath($mu_plugin_driver));
+$mu_plugin_driver_run = run_branch_ui_action(
+    [
+        'action' => 'forkpress_branch_run_plugin_driver',
+        'run' => '42',
+        'conflict' => '7',
+        'driverKey' => $mu_driver_key,
+    ],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    [
+        'FORKPRESS_TEST_WPMU_PLUGIN_DIR' => $discovered_mu_plugins_dir,
+        'FORKPRESS_TEST_CLI_OUTPUT' => $driver_output,
+    ]
+);
+$mu_plugin_driver_payload = decode_branch_ui_payload($mu_plugin_driver_run);
+assert_same($mu_plugin_driver_payload['success'] ?? null, true, 'branch plugin driver action accepts discovered mu-plugin drivers');
+assert_same(
+    array_slice($mu_plugin_driver_run['argv'][0] ?? [], 1),
+    ['branch', '--work-dir', $work_dir, 'run-plugin-driver', 'conflict', '7', '--driver', realpath($mu_plugin_driver), '--reviewer', 'wordpress-ui', '--format', 'json'],
+    'branch plugin driver action uses discovered mu-plugin driver path'
 );
 
 $invalid_revalidation = run_branch_ui_action(
