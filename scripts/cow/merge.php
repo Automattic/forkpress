@@ -229,6 +229,15 @@ function cow_merge_payload_json(mixed $value): string {
     return $encoded;
 }
 
+function cow_merge_conflict_key(string $table, ?string $identity, ?string $column, string $type): string {
+    return 'sha256:' . hash('sha256', cow_merge_payload_json([
+        'table' => $table,
+        'row_identity' => $identity,
+        'column_name' => $column,
+        'conflict_type' => $type,
+    ]));
+}
+
 function cow_merge_value_key(mixed $value): string {
     return hash('sha256', cow_merge_payload_json($value));
 }
@@ -3682,6 +3691,8 @@ SQL, 'failed to create metadata table merge_decisions');
 CREATE TABLE IF NOT EXISTS merge_conflicts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id INTEGER NOT NULL,
+    conflict_key TEXT NOT NULL DEFAULT '',
+    previous_conflict_id INTEGER,
     table_name TEXT NOT NULL,
     row_identity TEXT,
     column_name TEXT,
@@ -3700,6 +3711,7 @@ CREATE TABLE IF NOT EXISTS merge_conflicts (
     resolved_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(run_id) REFERENCES merge_runs(id),
+    FOREIGN KEY(previous_conflict_id) REFERENCES merge_conflicts(id),
     UNIQUE(run_id, table_name, row_identity, column_name, conflict_type, base_hash, source_hash, target_hash, chosen_hash)
 )
 SQL, 'failed to create metadata table merge_conflicts');
@@ -3737,6 +3749,8 @@ SQL, 'failed to create metadata table merge_conflicts');
 CREATE TABLE merge_conflicts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id INTEGER NOT NULL,
+    conflict_key TEXT NOT NULL DEFAULT '',
+    previous_conflict_id INTEGER,
     table_name TEXT NOT NULL,
     row_identity TEXT,
     column_name TEXT,
@@ -3755,6 +3769,7 @@ CREATE TABLE merge_conflicts (
     resolved_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(run_id) REFERENCES merge_runs(id),
+    FOREIGN KEY(previous_conflict_id) REFERENCES merge_conflicts(id),
     UNIQUE(run_id, table_name, row_identity, column_name, conflict_type, base_hash, source_hash, target_hash, chosen_hash)
 )
 SQL, 'failed to create migrated conflict metadata table');
@@ -3780,6 +3795,11 @@ SQL, 'failed to create migrated conflict metadata table');
             throw $e;
         }
     }
+    cow_merge_ensure_metadata_column($meta, 'merge_conflicts', 'conflict_key', "TEXT NOT NULL DEFAULT ''");
+    cow_merge_ensure_metadata_column($meta, 'merge_conflicts', 'previous_conflict_id', 'INTEGER');
+    cow_merge_backfill_conflict_keys($meta);
+    cow_merge_exec_checked($meta, 'CREATE INDEX IF NOT EXISTS merge_conflicts_key_idx ON merge_conflicts(conflict_key, id)', 'failed to create metadata index merge_conflicts_key_idx');
+    cow_merge_exec_checked($meta, 'CREATE INDEX IF NOT EXISTS merge_conflicts_previous_idx ON merge_conflicts(previous_conflict_id)', 'failed to create metadata index merge_conflicts_previous_idx');
     cow_merge_exec_checked($meta, <<<'SQL'
 CREATE TABLE IF NOT EXISTS merge_conflict_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -4100,6 +4120,60 @@ function cow_merge_ensure_metadata_column(SQLite3 $meta, string $table, string $
     );
     $sql = 'ALTER TABLE ' . cow_merge_quote_ident($table) . ' ADD COLUMN ' . cow_merge_quote_ident($column) . ' ' . $definition;
     cow_merge_exec_checked($meta, $sql, "failed to migrate metadata table $table");
+}
+
+function cow_merge_previous_conflict_id(SQLite3 $meta, int $run_id, string $conflict_key, ?int $before_id = null): ?int {
+    $before_clause = $before_id === null ? '' : 'AND c.id < :before_id ';
+    $stmt = cow_merge_prepare_checked(
+        $meta,
+        'SELECT c.id FROM merge_conflicts c ' .
+        'JOIN merge_runs existing_run ON existing_run.id = c.run_id ' .
+        'JOIN merge_runs current_run ON current_run.id = :run_id ' .
+        'WHERE existing_run.source_branch = current_run.source_branch ' .
+        'AND existing_run.target_branch = current_run.target_branch ' .
+        'AND c.run_id <> :run_id ' .
+        'AND c.conflict_key = :conflict_key ' .
+        $before_clause .
+        'ORDER BY c.id DESC LIMIT 1',
+        'failed to prepare previous merge conflict lookup'
+    );
+    cow_merge_bind($stmt, ':run_id', $run_id);
+    cow_merge_bind($stmt, ':conflict_key', $conflict_key);
+    if ($before_id !== null) {
+        cow_merge_bind($stmt, ':before_id', $before_id);
+    }
+    $res = cow_merge_execute_checked($stmt, $meta, 'failed to look up previous merge conflict');
+    $row = $res->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($res, 'failed to finalize previous merge conflict lookup');
+    return $row ? (int)$row['id'] : null;
+}
+
+function cow_merge_backfill_conflict_keys(SQLite3 $meta): void {
+    $rows = cow_merge_fetch_rows(
+        $meta,
+        "SELECT id, run_id, table_name, row_identity, column_name, conflict_type " .
+        "FROM merge_conflicts WHERE conflict_key IS NULL OR conflict_key = '' ORDER BY id ASC"
+    );
+    foreach ($rows as $row) {
+        $conflict_id = (int)$row['id'];
+        $run_id = (int)$row['run_id'];
+        $key = cow_merge_conflict_key(
+            (string)$row['table_name'],
+            $row['row_identity'] === null ? null : (string)$row['row_identity'],
+            $row['column_name'] === null ? null : (string)$row['column_name'],
+            (string)$row['conflict_type']
+        );
+        $previous_conflict_id = cow_merge_previous_conflict_id($meta, $run_id, $key, $conflict_id);
+        $stmt = cow_merge_prepare_checked(
+            $meta,
+            'UPDATE merge_conflicts SET conflict_key = :conflict_key, previous_conflict_id = :previous_conflict_id WHERE id = :id',
+            'failed to prepare conflict key backfill'
+        );
+        cow_merge_bind($stmt, ':conflict_key', $key);
+        cow_merge_bind($stmt, ':previous_conflict_id', $previous_conflict_id);
+        cow_merge_bind($stmt, ':id', $conflict_id);
+        cow_merge_execute_checked($stmt, $meta, 'failed to backfill conflict key');
+    }
 }
 
 function cow_merge_failure_reason(Throwable $e): string {
@@ -6177,6 +6251,7 @@ function cow_merge_record_conflict(
     $source_hash = hash('sha256', $source_payload);
     $target_hash = hash('sha256', $target_payload);
     $chosen_hash = hash('sha256', $chosen_payload);
+    $conflict_key = cow_merge_conflict_key($table, $identity, $column, $type);
     $existing = cow_merge_prepare_checked(
         $meta,
         'SELECT c.id, c.run_id FROM merge_conflicts c ' .
@@ -6217,17 +6292,20 @@ function cow_merge_record_conflict(
     if ($has_target_resolution) {
         return false;
     }
+    $previous_conflict_id = cow_merge_previous_conflict_id($meta, $run_id, $conflict_key);
 
     $stmt = cow_merge_prepare_checked(
         $meta,
         'INSERT OR IGNORE INTO merge_conflicts ' .
-        '(run_id, table_name, row_identity, column_name, conflict_type, base_payload, source_payload, target_payload, chosen_payload, source_row_payload, target_row_payload, ' .
+        '(run_id, conflict_key, previous_conflict_id, table_name, row_identity, column_name, conflict_type, base_payload, source_payload, target_payload, chosen_payload, source_row_payload, target_row_payload, ' .
         'base_hash, source_hash, target_hash, chosen_hash, resolver, resolved_at) ' .
-        'VALUES (:run_id, :table_name, :row_identity, :column_name, :conflict_type, :base_payload, :source_payload, :target_payload, :chosen_payload, :source_row_payload, :target_row_payload, ' .
+        'VALUES (:run_id, :conflict_key, :previous_conflict_id, :table_name, :row_identity, :column_name, :conflict_type, :base_payload, :source_payload, :target_payload, :chosen_payload, :source_row_payload, :target_row_payload, ' .
         ':base_hash, :source_hash, :target_hash, :chosen_hash, :resolver, CURRENT_TIMESTAMP)',
         'failed to prepare merge conflict insert'
     );
     cow_merge_bind($stmt, ':run_id', $run_id);
+    cow_merge_bind($stmt, ':conflict_key', $conflict_key);
+    cow_merge_bind($stmt, ':previous_conflict_id', $previous_conflict_id);
     cow_merge_bind($stmt, ':table_name', $table);
     cow_merge_bind($stmt, ':row_identity', $identity);
     cow_merge_bind($stmt, ':column_name', $column);
@@ -12479,6 +12557,12 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
         $review_notes_exist = cow_merge_audit_has_table($db, 'merge_review_notes');
         $resolutions_exist = cow_merge_audit_has_table($db, 'merge_resolutions');
         $conflict_events_exist = cow_merge_audit_has_table($db, 'merge_conflict_events');
+        $conflict_key_select = cow_merge_audit_has_column($db, 'merge_conflicts', 'conflict_key')
+            ? 'merge_conflicts.conflict_key, merge_conflicts.previous_conflict_id'
+            : "NULL AS conflict_key, NULL AS previous_conflict_id";
+        $event_conflict_key_select = cow_merge_audit_has_column($db, 'merge_conflicts', 'conflict_key')
+            ? 'c.conflict_key, c.previous_conflict_id'
+            : "NULL AS conflict_key, NULL AS previous_conflict_id";
         $conflict_review_select = $review_notes_exist
             ? ", (SELECT rn.status FROM merge_review_notes rn WHERE rn.record_type = 'conflict' AND rn.record_id = merge_conflicts.id ORDER BY rn.id DESC LIMIT 1) AS review_status, " .
               "(SELECT rn.note FROM merge_review_notes rn WHERE rn.record_type = 'conflict' AND rn.record_id = merge_conflicts.id ORDER BY rn.id DESC LIMIT 1) AS review_note, " .
@@ -12547,7 +12631,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
             $report['conflicts'] = cow_merge_audit_add_payload_previews(cow_merge_audit_add_conflict_lifecycle(cow_merge_audit_add_conflict_contracts(cow_merge_audit_add_conflict_staleness($db, cow_merge_audit_table_rows(
                 $db,
                 'merge_conflicts',
-                "SELECT merge_conflicts.id AS id, run_id, table_name, row_identity, column_name, conflict_type, resolver, resolved_at, created_at, " .
+                "SELECT merge_conflicts.id AS id, run_id, $conflict_key_select, table_name, row_identity, column_name, conflict_type, resolver, resolved_at, created_at, " .
                 "base_payload, source_payload, target_payload, chosen_payload, r.source_db, r.target_db, r.source_branch, r.target_branch$conflict_review_select$conflict_resolution_select$conflict_event_select " .
                 "FROM merge_conflicts JOIN merge_runs r ON r.id = merge_conflicts.run_id $conflict_filter ORDER BY merge_conflicts.id DESC LIMIT :limit",
                 $conflict_params
@@ -12580,7 +12664,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
                 'merge_conflict_events',
                 "SELECT ce.id, ce.conflict_id, ce.run_id, ce.event_type, ce.actor, ce.note, " .
                 "ce.related_record_type, ce.related_record_id, ce.lifecycle_state, ce.created_at, " .
-                "c.table_name, c.row_identity, c.column_name, c.conflict_type, r.source_branch, r.target_branch " .
+                "$event_conflict_key_select, c.table_name, c.row_identity, c.column_name, c.conflict_type, r.source_branch, r.target_branch " .
                 "FROM merge_conflict_events ce " .
                 "JOIN merge_conflicts c ON c.id = ce.conflict_id " .
                 "JOIN merge_runs r ON r.id = ce.run_id " .
@@ -12799,6 +12883,12 @@ function cow_merge_print_audit_text(array $report): void {
             $after_revalidate = !empty($conflict['after_revalidate_supported']) ? 'yes' : 'no';
             echo "     class={$conflict['conflict_class']} strategy={$conflict['resolution_strategy']} choices=$choices generic-resolver=$generic after-revalidate=$after_revalidate\n";
             echo "     lifecycle={$conflict['lifecycle_state']} next-action={$conflict['next_action']} resolutions={$conflict['resolution_count']}\n";
+            if (($conflict['conflict_key'] ?? '') !== '') {
+                $previous = (($conflict['previous_conflict_id'] ?? null) !== null && (string)$conflict['previous_conflict_id'] !== '')
+                    ? '#' . $conflict['previous_conflict_id']
+                    : 'none';
+                echo "     conflict-key={$conflict['conflict_key']} previous=$previous\n";
+            }
             if (($conflict['latest_event_id'] ?? null) !== null && (string)$conflict['latest_event_id'] !== '') {
                 echo "     latest-event=#{$conflict['latest_event_id']} type={$conflict['latest_event_type']} state={$conflict['latest_event_lifecycle_state']} actor={$conflict['latest_event_actor']} at={$conflict['latest_event_at']} events={$conflict['event_count']}\n";
             }
@@ -12830,6 +12920,9 @@ function cow_merge_print_audit_text(array $report): void {
         foreach ($report['conflict_events'] as $event) {
             $object = cow_merge_audit_object_label($event);
             echo "  #{$event['id']} conflict=#{$event['conflict_id']} run={$event['run_id']} {$event['event_type']} state={$event['lifecycle_state']} $object actor={$event['actor']} at={$event['created_at']}\n";
+            if (($event['conflict_key'] ?? '') !== '') {
+                echo "     conflict-key={$event['conflict_key']}\n";
+            }
             if (($event['related_record_type'] ?? null) !== null && (string)$event['related_record_type'] !== '') {
                 echo "     related={$event['related_record_type']}#{$event['related_record_id']}\n";
             }

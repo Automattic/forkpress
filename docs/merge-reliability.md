@@ -302,9 +302,11 @@ should stay focused on these areas:
   durable event stream for recorded, reviewed, revalidated, and resolved
   conflicts; validation-only `merge-resolve` calls are persisted as validated
   resolutions with `resolution-validated` events, `--apply-reviewed` applies the
-  latest unapplied validated choice, conflict identity is scoped to the merge
-  run so repeated unresolved conflicts and identical payload conflicts on
-  different branch pairs receive their own rows/events, and
+  latest unapplied validated choice, conflict rows expose a stable
+  `conflict_key` for logical UI grouping plus `previous_conflict_id` lineage for
+  recurring conflicts on the same source/target branch pair, conflict rows are
+  scoped to the merge run so repeated unresolved conflicts and identical payload
+  conflicts on different branch pairs receive their own rows/events, and
   `merge-audit --records conflict-events` exposes that stream.
 - Improve deterministic schema dependency planning for safe view/trigger
   reorderings while keeping cyclic or semantic ambiguity review-only.
