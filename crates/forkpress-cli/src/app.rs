@@ -6173,6 +6173,28 @@ mod git_helper_tests {
     }
 
     #[test]
+    fn parses_cow_branch_merge_audit_resolution_plugin_filters() {
+        let args = vec![
+            "merge-audit".to_string(),
+            "--records=resolutions".to_string(),
+            "--plugin=forkpress-plugin-logical-id".to_string(),
+            "--plugin-object=child-slot:1000000".to_string(),
+            "--plugin-severity=warning".to_string(),
+            "--plugin-logical-identity={\"kind\":\"plugin-child\",\"slug\":\"child-before-rerun\"}"
+                .to_string(),
+        ];
+        let parsed = parse_cow_branch_merge_audit_args(&args).unwrap();
+        assert_eq!(parsed.records, "resolutions");
+        assert_eq!(parsed.plugin.as_deref(), Some("forkpress-plugin-logical-id"));
+        assert_eq!(parsed.plugin_object.as_deref(), Some("child-slot:1000000"));
+        assert_eq!(parsed.plugin_severity.as_deref(), Some("warning"));
+        assert_eq!(
+            parsed.plugin_logical_identity.as_deref(),
+            Some("{\"kind\":\"plugin-child\",\"slug\":\"child-before-rerun\"}")
+        );
+    }
+
+    #[test]
     fn branch_merge_audit_revalidate_rejects_ignored_filters() {
         let args = vec![
             "merge-audit".to_string(),
