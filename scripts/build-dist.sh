@@ -208,11 +208,13 @@ if [ "$NEED_PHP_BUILD" = "1" ]; then
     local label="$1"
     shift
     echo "==> static-php-cli: $label"
+    local status=0
     if run_spc "$@"; then
       echo "==> static-php-cli: $label complete"
       return 0
+    else
+      status=$?
     fi
-    local status=$?
     echo "ERROR: static-php-cli: $label failed" >&2
     return "$status"
   }
