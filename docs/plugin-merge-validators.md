@@ -28,10 +28,11 @@ A validator returns one of:
 - `valid`: the merged candidate preserves this plugin's invariants.
 - `conflicts`: the candidate is reviewable; each finding identifies the plugin,
   affected logical object, tables/files/options involved, and a human-readable
-  reason. A finding may also include `severity`, `resolution_policy`,
-  `suggested_action`, and `manual_review_reason`; ForkPress records these in
-  the conflict payload so review tools can prioritize findings and distinguish
-  review-only findings from future repairable findings.
+  reason. A finding may also include `severity` (`info`, `warning`, `error`,
+  or `critical`), `resolution_policy`, `suggested_action`, and
+  `manual_review_reason`; ForkPress records these in the conflict payload so
+  review tools can prioritize findings and distinguish review-only findings
+  from future repairable findings.
 - `failed`: the validator could not run; the merge should fail rather than
   silently accept an unchecked plugin graph.
 

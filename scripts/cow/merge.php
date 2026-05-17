@@ -7035,6 +7035,24 @@ function cow_merge_plugin_validator_string_list(array $finding, array $keys): ar
     return array_values(array_unique($values));
 }
 
+function cow_merge_plugin_validator_severity(array $finding): ?string {
+    if (!array_key_exists('severity', $finding)) {
+        return null;
+    }
+    if (!is_scalar($finding['severity'])) {
+        throw new InvalidArgumentException('plugin validator severity must be a string');
+    }
+    $severity = trim((string)$finding['severity']);
+    if ($severity === '') {
+        throw new InvalidArgumentException('plugin validator severity must not be empty');
+    }
+    $allowed = ['info', 'warning', 'error', 'critical'];
+    if (!in_array($severity, $allowed, true)) {
+        throw new InvalidArgumentException('plugin validator severity must be info, warning, error, or critical');
+    }
+    return $severity;
+}
+
 function cow_merge_record_plugin_validator_conflicts(
     string $metadata_db,
     int $run_id,
@@ -7085,8 +7103,9 @@ function cow_merge_record_plugin_validator_conflicts(
                 'validator' => (string)($finding['validator'] ?? ''),
                 'candidate' => $finding['candidate'] ?? null,
             ];
-            if (array_key_exists('severity', $finding)) {
-                $payload['severity'] = $finding['severity'];
+            $severity = cow_merge_plugin_validator_severity($finding);
+            if ($severity !== null) {
+                $payload['severity'] = $severity;
             }
             if (array_key_exists('logical_identity', $finding)) {
                 $payload['logical_identity'] = $finding['logical_identity'];

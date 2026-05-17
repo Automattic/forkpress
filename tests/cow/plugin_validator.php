@@ -1034,6 +1034,37 @@ PHP);
         0,
         'plugin validator runner does not record malformed findings'
     );
+
+    $bad_severity_validator = $tmp . '/plugin-validator-bad-severity.php';
+    write_test_file($bad_severity_validator, <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-plugin-graph',
+            'object' => 'child:bad-severity',
+            'reason' => 'malformed finding uses an unsupported severity',
+            'type' => 'plugin-graph-bad-severity',
+            'severity' => 'urgent',
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $bad_severity = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $metadata,
+        '--run', (string)$result['run_id'],
+        '--validator', $bad_severity_validator,
+        '--format', 'json',
+    ]);
+    assert_true($bad_severity['status'] !== 0, 'plugin validator runner rejects malformed finding severity');
+    assert_true(str_contains($bad_severity['output'], 'severity must be info, warning, error, or critical'), 'plugin validator runner explains malformed severity values');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE row_identity LIKE '%child:bad-severity%'"),
+        0,
+        'plugin validator runner does not record findings with malformed severity'
+    );
 } finally {
     remove_tree($tmp);
 }
