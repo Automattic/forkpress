@@ -28,7 +28,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "    [--next-action review|run-plugin-validator|wait|revalidate|resolve|apply-reviewed-choice|manual-review|none]\n");
     fwrite(STDERR, "    [--resolution-choice source|target|plugin-driver] [--blocked-resolution-choice source|target] [--resolution-strategy STRATEGY] [--generic-resolver yes|no] [--after-revalidate supported|unsupported]\n");
     fwrite(STDERR, "    [--revalidation-class CLASS] [--latest-revalidation-status STATUS] [--stale-status fresh|stale|error|unknown] [--revalidate] [--reviewer NAME]\n");
-    fwrite(STDERR, "    [--resolution-status validated|applied] [--group-by none|table|status|path|type|severity|lifecycle|event-type|next-action|conflict-key|resolution-strategy|generic-resolver|after-revalidate|revalidation-class|latest-revalidation-status|stale-status|plugin|plugin-object|plugin-severity|plugin-logical-identity]\n");
+    fwrite(STDERR, "    [--resolution-status validated|applied] [--group-by none|table|status|path|type|severity|lifecycle|event-type|next-action|conflict-key|resolution-strategy|generic-resolver|after-revalidate|revalidation-class|latest-revalidation-status|stale-status|plugin|plugin-object|plugin-severity|plugin-logical-identity] [--fail-on-unresolved]\n");
     fwrite(STDERR, "    --event-type accepts recorded, review-pending, review-needs-action, review-reviewed, resolution-validated, resolution-applied, resolution-blocked, or revalidation-required.\n");
     fwrite(STDERR, "    --group-by supports resolutions by table/status/path/plugin/plugin-object/plugin-severity/plugin-logical-identity, conflicts by table/type/path/severity/lifecycle/next-action/conflict-key/resolution-strategy/generic-resolver/after-revalidate/revalidation-class/latest-revalidation-status/stale-status/plugin/plugin-object/plugin-severity/plugin-logical-identity, conflict-events by table/type/lifecycle/event-type/conflict-key/plugin/plugin-object/plugin-severity/plugin-logical-identity, and decisions by table/type/path.\n");
     fwrite(STDERR, "    --revalidate accepts only --run, --conflict-id, --conflict-key, --reviewer, --format, and --quiet; omit --revalidate to filter audit output.\n");
@@ -15486,6 +15486,79 @@ function cow_merge_latest_revalidation_status(array $latest_revalidation, array 
     return $source_current ? 'target-drifted' : 'source-drifted';
 }
 
+function cow_merge_audit_conflict_summary(
+    SQLite3 $db,
+    ?int $run_id,
+    array $filters,
+    bool $review_notes_exist = true,
+    bool $resolutions_exist = true,
+    bool $revalidations_exist = true,
+    bool $conflict_events_exist = true
+): array {
+    [$where, $params] = cow_merge_audit_where_sql(
+        $run_id,
+        $filters,
+        'conflicts',
+        'c',
+        $review_notes_exist,
+        $resolutions_exist,
+        $revalidations_exist,
+        $conflict_events_exist
+    );
+    $lifecycle_expr = cow_merge_audit_conflict_lifecycle_state_sql('c.id', $review_notes_exist, $resolutions_exist, $conflict_events_exist);
+    $next_action_expr = cow_merge_audit_conflict_next_action_sql('c', $review_notes_exist, $resolutions_exist, $conflict_events_exist);
+    $scope_expr = "CASE WHEN c.table_name = '__files__' THEN 'files' WHEN c.table_name = '__plugins__' THEN 'plugin' ELSE 'db' END";
+
+    $totals = cow_merge_fetch_rows(
+        $db,
+        "SELECT COUNT(*) AS total, " .
+        "SUM(CASE WHEN lifecycle_state = 'resolved' THEN 1 ELSE 0 END) AS resolved, " .
+        "SUM(CASE WHEN lifecycle_state <> 'resolved' THEN 1 ELSE 0 END) AS unresolved " .
+        "FROM (SELECT $lifecycle_expr AS lifecycle_state FROM merge_conflicts c $where)",
+        $params
+    );
+    $summary = [
+        'total' => isset($totals[0]['total']) ? (int)$totals[0]['total'] : 0,
+        'resolved' => isset($totals[0]['resolved']) ? (int)$totals[0]['resolved'] : 0,
+        'unresolved' => isset($totals[0]['unresolved']) ? (int)$totals[0]['unresolved'] : 0,
+        'by_lifecycle' => [],
+        'by_next_action' => [],
+        'by_scope' => [],
+    ];
+
+    foreach (cow_merge_fetch_rows(
+        $db,
+        "SELECT lifecycle_state, COUNT(*) AS count FROM " .
+        "(SELECT $lifecycle_expr AS lifecycle_state FROM merge_conflicts c $where) " .
+        "GROUP BY lifecycle_state ORDER BY count DESC, lifecycle_state",
+        $params
+    ) as $row) {
+        $summary['by_lifecycle'][(string)$row['lifecycle_state']] = (int)$row['count'];
+    }
+
+    foreach (cow_merge_fetch_rows(
+        $db,
+        "SELECT next_action, COUNT(*) AS count FROM " .
+        "(SELECT COALESCE($next_action_expr, 'unknown') AS next_action FROM merge_conflicts c $where) " .
+        "GROUP BY next_action ORDER BY count DESC, next_action",
+        $params
+    ) as $row) {
+        $summary['by_next_action'][(string)$row['next_action']] = (int)$row['count'];
+    }
+
+    foreach (cow_merge_fetch_rows(
+        $db,
+        "SELECT conflict_scope, COUNT(*) AS count FROM " .
+        "(SELECT $scope_expr AS conflict_scope FROM merge_conflicts c $where) " .
+        "GROUP BY conflict_scope ORDER BY count DESC, conflict_scope",
+        $params
+    ) as $row) {
+        $summary['by_scope'][(string)$row['conflict_scope']] = (int)$row['count'];
+    }
+
+    return $summary;
+}
+
 function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $limit = 20, array $filters = []): array {
     $filters = cow_merge_audit_filters($filters);
     $report = [
@@ -15503,6 +15576,14 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
         'decision_groups' => [],
         'resolutions' => [],
         'resolution_groups' => [],
+        'conflict_summary' => [
+            'total' => 0,
+            'resolved' => 0,
+            'unresolved' => 0,
+            'by_lifecycle' => [],
+            'by_next_action' => [],
+            'by_scope' => [],
+        ],
         'autoincrement_bands' => [],
         'row_identity_summary' => [],
         'rollback_failures' => [],
@@ -15604,6 +15685,15 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
         [$conflict_filter, $conflict_params] = cow_merge_audit_where_sql($run_id, $filters, 'conflicts', '', $review_notes_exist, $resolutions_exist, $revalidations_exist, $conflict_events_exist);
         $conflict_params[':limit'] = $limit;
         if ($filters['records'] === 'all' || $filters['records'] === 'conflicts') {
+            $report['conflict_summary'] = cow_merge_audit_conflict_summary(
+                $db,
+                $run_id,
+                $filters,
+                $review_notes_exist,
+                $resolutions_exist,
+                $revalidations_exist,
+                $conflict_events_exist
+            );
             $report['conflicts'] = cow_merge_audit_add_plugin_fields(cow_merge_audit_add_payload_previews(cow_merge_audit_add_conflict_lifecycle(cow_merge_audit_add_conflict_contracts(cow_merge_audit_add_conflict_staleness($db, cow_merge_audit_table_rows(
                 $db,
                 'merge_conflicts',
@@ -15926,6 +16016,26 @@ function cow_merge_print_audit_text(array $report): void {
             if ((string)$run['status'] === 'failed' && isset($run['failure_reason']) && (string)$run['failure_reason'] !== '') {
                 echo "     failure=" . cow_merge_audit_truncate((string)$run['failure_reason'], 240) . "\n";
             }
+        }
+    }
+
+    $conflict_summary = $report['conflict_summary'] ?? null;
+    if (is_array($conflict_summary) && (int)($conflict_summary['total'] ?? 0) > 0) {
+        echo "conflict-summary:\n";
+        echo "  total={$conflict_summary['total']} unresolved={$conflict_summary['unresolved']} resolved={$conflict_summary['resolved']}\n";
+        foreach ([
+            'by_lifecycle' => 'lifecycle',
+            'by_next_action' => 'next-action',
+            'by_scope' => 'scope',
+        ] as $key => $label) {
+            if (!is_array($conflict_summary[$key] ?? null) || $conflict_summary[$key] === []) {
+                continue;
+            }
+            $parts = [];
+            foreach ($conflict_summary[$key] as $bucket => $count) {
+                $parts[] = $bucket . '=' . $count;
+            }
+            echo "  $label " . implode(' ', $parts) . "\n";
         }
     }
 
@@ -18538,7 +18648,7 @@ function cow_merge_parse_cli(array $argv, array $required, int $start_index = 1)
             $args[$key] = $value;
             continue;
         }
-        if (in_array($key, ['id-band-skips', 'target-kept', 'review', 'revalidate', 'apply', 'apply-reviewed', 'after-revalidate', 'restore-target-db', 'restore-files', 'quiet'], true) && (!isset($argv[$i + 1]) || str_starts_with($argv[$i + 1], '--'))) {
+        if (in_array($key, ['id-band-skips', 'target-kept', 'review', 'revalidate', 'apply', 'apply-reviewed', 'after-revalidate', 'restore-target-db', 'restore-files', 'quiet', 'fail-on-unresolved'], true) && (!isset($argv[$i + 1]) || str_starts_with($argv[$i + 1], '--'))) {
             $args[$key] = '1';
             continue;
         }
@@ -18964,6 +19074,15 @@ if (realpath($argv[0] ?? '') === __FILE__) {
                 echo $encoded . "\n";
             } else {
                 cow_merge_print_audit_text($report);
+            }
+            if (cow_merge_bool_flag($args['fail-on-unresolved'] ?? '0')) {
+                $unresolved = (int)($report['conflict_summary']['unresolved'] ?? 0);
+                if ($unresolved > 0) {
+                    if (($args['quiet'] ?? '0') === '1') {
+                        fwrite(STDERR, "forkpress: merge audit found $unresolved unresolved conflict" . ($unresolved === 1 ? '' : 's') . "\n");
+                    }
+                    exit(2);
+                }
             }
             exit(0);
         }
