@@ -1202,6 +1202,68 @@ PHP);
         'plugin validator runner does not record findings with malformed tables'
     );
 
+    $bad_validator_identity = $tmp . '/plugin-validator-bad-identity.php';
+    write_test_file($bad_validator_identity, <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-plugin-graph',
+            'object' => 'child:bad-validator-identity',
+            'reason' => 'malformed finding uses a non-string validator identity',
+            'type' => 'plugin-graph-bad-validator-identity',
+            'validator' => ['forkpress-plugin-graph@1'],
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $bad_validator_identity_result = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $metadata,
+        '--run', (string)$result['run_id'],
+        '--validator', $bad_validator_identity,
+        '--format', 'json',
+    ]);
+    assert_true($bad_validator_identity_result['status'] !== 0, 'plugin validator runner rejects malformed validator identity');
+    assert_true(str_contains($bad_validator_identity_result['output'], 'validator identity must be a string'), 'plugin validator runner explains malformed validator identity');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE row_identity LIKE '%child:bad-validator-identity%'"),
+        0,
+        'plugin validator runner does not record findings with malformed validator identity'
+    );
+
+    $empty_validator_identity = $tmp . '/plugin-validator-empty-identity.php';
+    write_test_file($empty_validator_identity, <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-plugin-graph',
+            'object' => 'child:empty-validator-identity',
+            'reason' => 'malformed finding uses empty validator identity',
+            'type' => 'plugin-graph-empty-validator-identity',
+            'validator' => '   ',
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $empty_validator_identity_result = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $metadata,
+        '--run', (string)$result['run_id'],
+        '--validator', $empty_validator_identity,
+        '--format', 'json',
+    ]);
+    assert_true($empty_validator_identity_result['status'] !== 0, 'plugin validator runner rejects empty validator identity');
+    assert_true(str_contains($empty_validator_identity_result['output'], 'validator identity must not be empty'), 'plugin validator runner explains empty validator identity');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE row_identity LIKE '%child:empty-validator-identity%'"),
+        0,
+        'plugin validator runner does not record findings with empty validator identity'
+    );
+
     $empty_guidance_validator = $tmp . '/plugin-validator-empty-guidance.php';
     write_test_file($empty_guidance_validator, <<<'PHP'
 <?php

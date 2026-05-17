@@ -7077,6 +7077,20 @@ function cow_merge_plugin_validator_optional_text(array $finding, string $field,
     return $value;
 }
 
+function cow_merge_plugin_validator_identity(array $finding): string {
+    if (!array_key_exists('validator', $finding)) {
+        return '';
+    }
+    if (!is_string($finding['validator'])) {
+        throw new InvalidArgumentException('plugin validator identity must be a string');
+    }
+    $value = trim((string)$finding['validator']);
+    if ($value === '') {
+        throw new InvalidArgumentException('plugin validator identity must not be empty');
+    }
+    return $value;
+}
+
 function cow_merge_plugin_validator_logical_identity(array $finding): mixed {
     $value = $finding['logical_identity'];
     if ($value === null) {
@@ -7149,7 +7163,7 @@ function cow_merge_record_plugin_validator_conflicts(
                 'reason' => $reason,
                 'tables' => cow_merge_plugin_validator_string_list($finding, ['tables']),
                 'files' => cow_merge_plugin_validator_string_list($finding, ['files', 'paths']),
-                'validator' => (string)($finding['validator'] ?? ''),
+                'validator' => cow_merge_plugin_validator_identity($finding),
                 'candidate' => $finding['candidate'] ?? null,
             ];
             $severity = cow_merge_plugin_validator_severity($finding);

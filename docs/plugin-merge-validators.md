@@ -30,7 +30,8 @@ A validator returns one of:
   affected logical object, tables/files/options involved, and a human-readable
   reason. A finding may also include `severity` (`info`, `warning`, `error`,
   or `critical`), `resolution_policy`, `suggested_action`, and
-  `manual_review_reason`. Review guidance fields must be non-empty strings.
+  `manual_review_reason`. If present, `validator` and review guidance fields
+  must be non-empty strings.
   ForkPress records these in the conflict payload so review tools can
   prioritize findings and distinguish review-only findings from future
   repairable findings.
@@ -167,9 +168,10 @@ Validator status and findings must agree. `valid` must emit no findings, and
 `conflicts` must emit at least one finding. Contradictory validator output is
 treated as a validator failure so plugin state is not reported with ambiguous
 review evidence. Each finding must include non-empty `plugin`, `object`, and
-`reason` fields, and its `type` must use the `plugin-*` namespace. Malformed
-object-shaped findings and malformed raw finding arrays fail the validator run
-before any plugin audit rows are recorded.
+`reason` fields, and its `type` must use the `plugin-*` namespace. `validator`,
+when emitted, must be a non-empty string. Malformed object-shaped findings and
+malformed raw finding arrays fail the validator run before any plugin audit
+rows are recorded.
 
 ## Finding Shape
 
