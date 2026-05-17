@@ -3521,6 +3521,155 @@ try {
     assert_same(smoke_scalar($multi_apply_target, "SELECT option_value FROM wp_options WHERE option_name = 'forkpress_multi_apply_json'"), '{"branch":"source","slot":"json","reviewed":true}', 'multi-conflict batch apply restores source JSON option');
     assert_same(smoke_scalar($multi_apply_target, "SELECT option_value FROM wp_options WHERE option_name = 'forkpress_multi_apply_serialized'"), serialize(['branch' => 'source', 'slot' => 'serialized', 'reviewed' => true]), 'multi-conflict batch apply restores source serialized option');
 
+    $stale_validated_base = $tmp . '/stale-validated-base.sqlite';
+    $stale_validated_source = $tmp . '/stale-validated-source.sqlite';
+    $stale_validated_target = $tmp . '/stale-validated-target.sqlite';
+    $stale_validated_metadata = $tmp . '/.forkpress/cow/merge/stale-validated-metadata.sqlite';
+
+    smoke_create_posts_db($stale_validated_base);
+    $db = smoke_open_db($stale_validated_base);
+    smoke_insert_option($db, 17000310, 'forkpress_stale_validated_choice', 'base');
+    $db->close();
+    copy($stale_validated_base, $stale_validated_source);
+    copy($stale_validated_base, $stale_validated_target);
+
+    $db = smoke_open_db($stale_validated_source);
+    smoke_update_option($db, 'forkpress_stale_validated_choice', 'source-reviewed');
+    $db->close();
+
+    $db = smoke_open_db($stale_validated_target);
+    smoke_update_option($db, 'forkpress_stale_validated_choice', 'target-before-review');
+    $db->close();
+
+    $stale_validated_result = cow_merge_databases($stale_validated_base, $stale_validated_source, $stale_validated_target, $stale_validated_metadata, 'feature-smoke-stale-validated', 'main');
+    assert_same($stale_validated_result['status'], 'completed_with_conflicts', 'stale validated setup leaves option edit conflict reviewable');
+    $stale_validated_audit = cow_merge_audit_report($stale_validated_metadata, null, 5, [
+        'records' => 'conflicts',
+        'conflict_type' => 'cell-conflict',
+    ]);
+    assert_same(count($stale_validated_audit['conflicts']), 1, 'stale validated setup records one option cell conflict');
+    $stale_validated_conflict_id = (int)$stale_validated_audit['conflicts'][0]['id'];
+    cow_merge_review_record($stale_validated_metadata, 'conflict', $stale_validated_conflict_id, 'reviewed', 'Review source option edit before target drift.', 'cow-smoke');
+    $stale_validated_choice = cow_merge_resolve_conflict($stale_validated_metadata, $stale_validated_conflict_id, 'source', false, 'Validate source option edit before target drift.', 'cow-smoke');
+    assert_same($stale_validated_choice['status'], 'validated', 'stale validated setup records a source choice before target drift');
+    $stale_validated_before_revalidation = cow_merge_audit_report($stale_validated_metadata, null, 5, ['records' => 'conflicts']);
+    assert_same($stale_validated_before_revalidation['conflicts'][0]['lifecycle_state'], 'validated', 'validated source choice is initially ready for reviewed apply');
+    assert_same($stale_validated_before_revalidation['conflicts'][0]['next_action'], 'apply-reviewed-choice', 'validated source choice initially advertises reviewed apply');
+
+    $db = smoke_open_db($stale_validated_target);
+    smoke_update_option($db, 'forkpress_stale_validated_choice', 'target-drift-after-review');
+    $db->close();
+
+    $stale_revalidate_cli = smoke_run_merge_cli([
+        'revalidate-reviews',
+        '--metadata-db', $stale_validated_metadata,
+        '--run', (string)$stale_validated_result['run_id'],
+        '--reviewer', 'cow-smoke',
+        '--format', 'json',
+    ]);
+    assert_same($stale_revalidate_cli['status'], 0, 'revalidate-reviews carries stale validated choice back to needs-action: ' . $stale_revalidate_cli['output']);
+    $stale_revalidate_result = json_decode($stale_revalidate_cli['output'], true);
+    assert_same((int)($stale_revalidate_result['stale'] ?? 0), 1, 'stale validated revalidation reports one stale conflict');
+    assert_same((int)($stale_revalidate_result['carried'] ?? 0), 1, 'stale validated revalidation carries the conflict');
+    $stale_validated_after_revalidation = cow_merge_audit_report($stale_validated_metadata, null, 5, ['records' => 'conflicts']);
+    assert_same($stale_validated_after_revalidation['conflicts'][0]['lifecycle_state'], 'needs-action', 'stale validated choice returns to needs-action after revalidation');
+    assert_same($stale_validated_after_revalidation['conflicts'][0]['next_action'], 'revalidate', 'stale validated choice asks for an after-revalidate decision');
+    assert_same($stale_validated_after_revalidation['conflicts'][0]['latest_event_type'], 'revalidation-required', 'stale validated choice records the revalidation-required event');
+    assert_same($stale_validated_after_revalidation['conflicts'][0]['latest_resolution_choice'], 'source', 'stale validated choice preserves the reviewer choice for follow-up');
+    $stale_batch_apply_cli = smoke_run_merge_cli([
+        'apply-reviewed-resolutions',
+        '--metadata-db', $stale_validated_metadata,
+        '--run', (string)$stale_validated_result['run_id'],
+        '--limit', '10',
+        '--note', 'Do not apply stale reviewed choices automatically.',
+        '--reviewer', 'cow-smoke',
+        '--format', 'json',
+    ]);
+    assert_same($stale_batch_apply_cli['status'], 0, 'batch apply skips stale revalidated choices without failing: ' . $stale_batch_apply_cli['output']);
+    $stale_batch_apply_result = json_decode($stale_batch_apply_cli['output'], true);
+    assert_same((int)($stale_batch_apply_result['eligible'] ?? -1), 0, 'batch apply excludes stale revalidated choices from apply-reviewed queue');
+    assert_same((int)($stale_batch_apply_result['applied'] ?? -1), 0, 'batch apply does not apply stale revalidated choices');
+    $stale_after_revalidate_resolution = cow_merge_resolve_conflict($stale_validated_metadata, $stale_validated_conflict_id, 'source', true, 'Apply preserved source choice after revalidation.', 'cow-smoke', true);
+    assert_same($stale_after_revalidate_resolution['status'], 'applied', 'after-revalidate resolution can still apply the preserved reviewer choice');
+    assert_same(smoke_scalar($stale_validated_target, "SELECT option_value FROM wp_options WHERE option_name = 'forkpress_stale_validated_choice'"), 'source-reviewed', 'after-revalidate resolution applies the preserved source option value');
+
+    $fresh_restored_base = $tmp . '/fresh-restored-base.sqlite';
+    $fresh_restored_source = $tmp . '/fresh-restored-source.sqlite';
+    $fresh_restored_target = $tmp . '/fresh-restored-target.sqlite';
+    $fresh_restored_metadata = $tmp . '/.forkpress/cow/merge/fresh-restored-metadata.sqlite';
+
+    smoke_create_posts_db($fresh_restored_base);
+    $db = smoke_open_db($fresh_restored_base);
+    smoke_insert_option($db, 17000311, 'forkpress_fresh_restored_choice', 'base');
+    $db->close();
+    copy($fresh_restored_base, $fresh_restored_source);
+    copy($fresh_restored_base, $fresh_restored_target);
+
+    $db = smoke_open_db($fresh_restored_source);
+    smoke_update_option($db, 'forkpress_fresh_restored_choice', 'source-reviewed');
+    $db->close();
+
+    $db = smoke_open_db($fresh_restored_target);
+    smoke_update_option($db, 'forkpress_fresh_restored_choice', 'target-before-review');
+    $db->close();
+
+    $fresh_restored_result = cow_merge_databases($fresh_restored_base, $fresh_restored_source, $fresh_restored_target, $fresh_restored_metadata, 'feature-smoke-fresh-restored', 'main');
+    assert_same($fresh_restored_result['status'], 'completed_with_conflicts', 'fresh restored setup leaves option edit conflict reviewable');
+    $fresh_restored_audit = cow_merge_audit_report($fresh_restored_metadata, null, 5, [
+        'records' => 'conflicts',
+        'conflict_type' => 'cell-conflict',
+    ]);
+    assert_same(count($fresh_restored_audit['conflicts']), 1, 'fresh restored setup records one option cell conflict');
+    $fresh_restored_conflict_id = (int)$fresh_restored_audit['conflicts'][0]['id'];
+    cow_merge_review_record($fresh_restored_metadata, 'conflict', $fresh_restored_conflict_id, 'reviewed', 'Review source option edit before temporary drift.', 'cow-smoke');
+    cow_merge_resolve_conflict($fresh_restored_metadata, $fresh_restored_conflict_id, 'source', false, 'Validate source option edit before temporary drift.', 'cow-smoke');
+
+    $db = smoke_open_db($fresh_restored_target);
+    smoke_update_option($db, 'forkpress_fresh_restored_choice', 'target-temporary-drift');
+    $db->close();
+    $fresh_restored_stale_cli = smoke_run_merge_cli([
+        'revalidate-reviews',
+        '--metadata-db', $fresh_restored_metadata,
+        '--run', (string)$fresh_restored_result['run_id'],
+        '--reviewer', 'cow-smoke',
+        '--format', 'json',
+    ]);
+    assert_same($fresh_restored_stale_cli['status'], 0, 'fresh restored setup first carries drift to needs-action: ' . $fresh_restored_stale_cli['output']);
+
+    $db = smoke_open_db($fresh_restored_target);
+    smoke_update_option($db, 'forkpress_fresh_restored_choice', 'target-before-review');
+    $db->close();
+    $fresh_restored_cli = smoke_run_merge_cli([
+        'revalidate-reviews',
+        '--metadata-db', $fresh_restored_metadata,
+        '--run', (string)$fresh_restored_result['run_id'],
+        '--reviewer', 'cow-smoke',
+        '--format', 'json',
+    ]);
+    assert_same($fresh_restored_cli['status'], 0, 'revalidate-reviews restores reviewed state when target is fresh again: ' . $fresh_restored_cli['output']);
+    $fresh_restored_cli_result = json_decode($fresh_restored_cli['output'], true);
+    assert_same((int)($fresh_restored_cli_result['fresh'] ?? 0), 1, 'fresh restored revalidation reports the conflict as fresh');
+    assert_same((int)($fresh_restored_cli_result['restored'] ?? 0), 1, 'fresh restored revalidation restores reviewer intent');
+    $fresh_restored_after_audit = cow_merge_audit_report($fresh_restored_metadata, null, 5, ['records' => 'conflicts']);
+    assert_same($fresh_restored_after_audit['conflicts'][0]['lifecycle_state'], 'validated', 'fresh restored conflict returns to validated lifecycle');
+    assert_same($fresh_restored_after_audit['conflicts'][0]['next_action'], 'apply-reviewed-choice', 'fresh restored conflict returns to reviewed apply queue');
+    assert_same($fresh_restored_after_audit['conflicts'][0]['latest_event_type'], 'review-reviewed', 'fresh restored conflict records restored review event');
+    assert_same($fresh_restored_after_audit['conflicts'][0]['latest_resolution_choice'], 'source', 'fresh restored conflict preserves the validated choice');
+    $fresh_restored_batch_cli = smoke_run_merge_cli([
+        'apply-reviewed-resolutions',
+        '--metadata-db', $fresh_restored_metadata,
+        '--run', (string)$fresh_restored_result['run_id'],
+        '--limit', '10',
+        '--note', 'Apply restored reviewed choice.',
+        '--reviewer', 'cow-smoke',
+        '--format', 'json',
+    ]);
+    assert_same($fresh_restored_batch_cli['status'], 0, 'batch apply accepts restored fresh reviewed choices: ' . $fresh_restored_batch_cli['output']);
+    $fresh_restored_batch_result = json_decode($fresh_restored_batch_cli['output'], true);
+    assert_same((int)($fresh_restored_batch_result['eligible'] ?? 0), 1, 'batch apply finds restored fresh reviewed choice');
+    assert_same((int)($fresh_restored_batch_result['applied'] ?? 0), 1, 'batch apply applies restored fresh reviewed choice');
+    assert_same(smoke_scalar($fresh_restored_target, "SELECT option_value FROM wp_options WHERE option_name = 'forkpress_fresh_restored_choice'"), 'source-reviewed', 'restored fresh batch apply uses preserved source choice');
+
     $fk_blocked_base = $tmp . '/fk-blocked-source-base.sqlite';
     $fk_blocked_source = $tmp . '/fk-blocked-source-source.sqlite';
     $fk_blocked_target = $tmp . '/fk-blocked-source-target.sqlite';
