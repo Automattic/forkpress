@@ -5321,6 +5321,21 @@ function cow_merge_wordpress_parent_reference_violation(
     if ($parent_band_violation !== null) {
         return "source $source_action $child_label references $parent_table.$parent_pk $parent_id that is outside the source branch ID band; parent $parent_label must merge before child row";
     }
+    $parent_pk_cols = cow_merge_pk_cols($target, $parent_table);
+    if (!$parent_pk_cols) {
+        $parent_pk_cols = cow_merge_pk_cols($source, $parent_table);
+    }
+    $parent_unique_collision = cow_merge_find_unique_collision(
+        $target,
+        $parent_table,
+        $parent,
+        false,
+        [$parent_pk => $parent_id],
+        $parent_pk_cols
+    );
+    if ($parent_unique_collision !== null) {
+        return "source $source_action $child_label references $parent_table.$parent_pk $parent_id that collides with target unique index " . $parent_unique_collision['index'] . "; parent $parent_label must merge before child row";
+    }
     return null;
 }
 
