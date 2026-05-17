@@ -105,6 +105,7 @@ register_shutdown_function(static function() use ($tmp): void {
 });
 
 mkdir($main . '/wp-admin', 0777, true);
+mkdir($main . '/wp-content/plugins/sample-plugin', 0777, true);
 mkdir($feature, 0777, true);
 mkdir($cow, 0777, true);
 mkdir($work_dir, 0777, true);
@@ -112,6 +113,9 @@ file_put_contents($branch_list, "main\nfeature\n");
 file_put_contents($main . '/index.php', "<?php echo \"WORDPRESS INDEX\";\n");
 file_put_contents($main . '/wp-admin/admin.php', "<?php echo \"WORDPRESS ADMIN PAGE\";\n");
 file_put_contents($main . '/wp-admin/admin-post.php', "<?php echo \"WORDPRESS ADMIN POST\";\n");
+$driver_path = $main . '/wp-content/plugins/sample-plugin/forkpress-merge-driver.php';
+file_put_contents($driver_path, "<?php echo \"sample driver\";\n");
+$driver_key = hash('sha256', 'sample-plugin' . "\0" . realpath($driver_path));
 file_put_contents($fake_bin, <<<'PHP'
 #!/usr/bin/env php
 <?php
@@ -500,6 +504,73 @@ assert_same($invalid_revalidation['status'], 400, 'async router branch conflict 
 assert_same($invalid_revalidation['json']['message'] ?? null, 'Choose a merge run to revalidate.', 'async router branch conflict revalidation explains invalid run ids');
 assert_true(!str_contains($invalid_revalidation['body'], 'WORDPRESS'), 'invalid async router branch conflict revalidation does not reach WordPress admin-post');
 
+$plugin_driver_output = json_encode([
+    'status' => 'completed',
+    'driver_status' => 'applied',
+], JSON_UNESCAPED_SLASHES);
+$plugin_driver = router_branch_action_request(
+    $child,
+    $branches,
+    $cow,
+    $router,
+    $branch_list,
+    $fake_bin,
+    $work_dir,
+    '/wp-admin/admin-post.php',
+    [
+        'action' => 'forkpress_branch_run_plugin_driver',
+        'conflict' => '77',
+        'driverKey' => $driver_key,
+        'run' => '42',
+    ],
+    true,
+    ['FORKPRESS_TEST_CLI_OUTPUT' => $plugin_driver_output]
+);
+assert_same($plugin_driver['status'], 200, 'async router plugin driver action returns 200');
+assert_same($plugin_driver['json']['success'] ?? null, true, 'async router plugin driver action returns JSON success');
+assert_same($plugin_driver['json']['driverStatus'] ?? null, 'applied', 'async router plugin driver action exposes driver status');
+assert_same($plugin_driver['json']['driverPlugin'] ?? null, 'sample-plugin', 'async router plugin driver action exposes approved plugin');
+assert_same($plugin_driver['json']['conflict'] ?? null, 77, 'async router plugin driver action exposes conflict id');
+assert_true(!str_contains($plugin_driver['body'], 'WORDPRESS'), 'async router plugin driver action does not reach WordPress admin-post');
+
+$invalid_plugin_driver_conflict = router_branch_action_request(
+    $child,
+    $branches,
+    $cow,
+    $router,
+    $branch_list,
+    $fake_bin,
+    $work_dir,
+    '/wp-admin/admin-post.php',
+    [
+        'action' => 'forkpress_branch_run_plugin_driver',
+        'conflict' => 'abc',
+        'driverKey' => $driver_key,
+    ]
+);
+assert_same($invalid_plugin_driver_conflict['status'], 400, 'async router plugin driver action rejects invalid conflict ids before CLI');
+assert_same($invalid_plugin_driver_conflict['json']['message'] ?? null, 'Choose a plugin conflict to repair.', 'async router plugin driver action explains invalid conflict ids');
+assert_true(!str_contains($invalid_plugin_driver_conflict['body'], 'WORDPRESS'), 'invalid async router plugin driver action does not reach WordPress admin-post');
+
+$invalid_plugin_driver_key = router_branch_action_request(
+    $child,
+    $branches,
+    $cow,
+    $router,
+    $branch_list,
+    $fake_bin,
+    $work_dir,
+    '/wp-admin/admin-post.php',
+    [
+        'action' => 'forkpress_branch_run_plugin_driver',
+        'conflict' => '77',
+        'driverKey' => 'not-approved',
+    ]
+);
+assert_same($invalid_plugin_driver_key['status'], 400, 'async router plugin driver action rejects unknown driver keys before CLI');
+assert_same($invalid_plugin_driver_key['json']['message'] ?? null, 'Choose an approved plugin merge driver.', 'async router plugin driver action explains unknown driver keys');
+assert_true(!str_contains($invalid_plugin_driver_key['body'], 'WORDPRESS'), 'unknown-driver async router plugin driver action does not reach WordPress admin-post');
+
 $invalid = router_branch_action_request(
     $child,
     $branches,
@@ -568,9 +639,10 @@ assert_same($argv_log[7] ?? null, ['branch', '--work-dir', $work_dir, 'recover-c
 assert_same($argv_log[8] ?? null, ['branch', '--work-dir', $work_dir, 'merge-audit', '--records', 'crash-recovery', '--run', '42', '--format', 'json'], 'filtered router branch conflict audit checks crash recovery first');
 assert_same($argv_log[9] ?? null, ['branch', '--work-dir', $work_dir, 'merge-audit', '--records', 'conflicts', '--run', '42', '--format', 'json', '--scope', 'plugin', '--lifecycle-state', 'needs-action', '--next-action', 'revalidate'], 'router branch conflict audit invokes filtered structured audit CLI command');
 assert_same($argv_log[10] ?? null, ['branch', '--work-dir', $work_dir, 'merge-audit', '--revalidate', '--run', '42', '--reviewer', 'wordpress-ui', '--format', 'json'], 'router branch conflict revalidation invokes structured revalidate CLI command');
-assert_same($argv_log[11] ?? null, ['branch', '--work-dir', $work_dir, 'create', 'html_fallback', '--from', 'main'], 'non-async router branch create invokes safe CLI command');
-assert_same($argv_log[12] ?? null, ['branch', '--work-dir', $work_dir, 'create', 'admin_page_created', '--from', 'main'], 'admin-page router branch create invokes safe CLI command');
-assert_same(count($argv_log), 13, 'invalid branch action requests do not invoke router CLI path');
+assert_same($argv_log[11] ?? null, ['branch', '--work-dir', $work_dir, 'run-plugin-driver', 'conflict', '77', '--driver', realpath($driver_path), '--reviewer', 'wordpress-ui', '--format', 'json'], 'router plugin driver action invokes approved driver CLI command');
+assert_same($argv_log[12] ?? null, ['branch', '--work-dir', $work_dir, 'create', 'html_fallback', '--from', 'main'], 'non-async router branch create invokes safe CLI command');
+assert_same($argv_log[13] ?? null, ['branch', '--work-dir', $work_dir, 'create', 'admin_page_created', '--from', 'main'], 'admin-page router branch create invokes safe CLI command');
+assert_same(count($argv_log), 14, 'invalid branch action requests do not invoke router CLI path');
 
 rm_tree($tmp);
 
