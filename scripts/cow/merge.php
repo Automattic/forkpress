@@ -5474,6 +5474,19 @@ function cow_merge_wordpress_post_content_reference_violation(
                     }
                 }
             }
+            if (isset($query['taxQuery']) && is_array($query['taxQuery'])) {
+                foreach ($query['taxQuery'] as $taxonomy => $term_ids) {
+                    if (!is_array($term_ids)) {
+                        continue;
+                    }
+                    foreach ($term_ids as $index => $term_id) {
+                        $violation = $check_term($term_id, 'wp:query.taxQuery.' . (string)$taxonomy . '.' . (string)$index);
+                        if ($violation !== null) {
+                            return $violation;
+                        }
+                    }
+                }
+            }
         }
     }
 

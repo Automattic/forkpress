@@ -15705,6 +15705,7 @@ SQL);
     $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type) VALUES ('Base taxonomy navigation submenu consumer', '<!-- wp:paragraph --><p>base taxonomy navigation submenu content</p><!-- /wp:paragraph -->', 'publish', 'page')");
     $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type) VALUES ('Base taxonomy query consumer', '<!-- wp:paragraph --><p>base taxonomy query content</p><!-- /wp:paragraph -->', 'publish', 'page')");
     $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type) VALUES ('Base tag query consumer', '<!-- wp:paragraph --><p>base tag query content</p><!-- /wp:paragraph -->', 'publish', 'page')");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type) VALUES ('Base taxonomy taxQuery consumer', '<!-- wp:paragraph --><p>base taxonomy taxQuery content</p><!-- /wp:paragraph -->', 'publish', 'page')");
     $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type) VALUES ('Base taxonomy menu item', '', 'publish', 'nav_menu_item')");
     $band_explicit_term_base_menu_item_id = (int)$db->lastInsertRowID();
     $db->exec("INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES ($band_explicit_term_base_menu_item_id, 1, 0)");
@@ -15744,6 +15745,7 @@ SQL);
     $db->exec("UPDATE wp_posts SET post_content = '<!-- wp:navigation-submenu {\"id\":2,\"kind\":\"taxonomy\",\"type\":\"category\",\"label\":\"Held submenu term\"} --><!-- /wp:navigation-submenu -->' WHERE post_title = 'Base taxonomy navigation submenu consumer'");
     $db->exec("UPDATE wp_posts SET post_content = '<!-- wp:query {\"query\":{\"categoryIds\":[2],\"perPage\":3}} --><!-- /wp:query -->' WHERE post_title = 'Base taxonomy query consumer'");
     $db->exec("UPDATE wp_posts SET post_content = '<!-- wp:query {\"query\":{\"tagIds\":[2],\"perPage\":3}} --><!-- /wp:query -->' WHERE post_title = 'Base tag query consumer'");
+    $db->exec("UPDATE wp_posts SET post_content = '<!-- wp:query {\"query\":{\"taxQuery\":{\"category\":[2],\"post_tag\":[2]},\"perPage\":3}} --><!-- /wp:query -->' WHERE post_title = 'Base taxonomy taxQuery consumer'");
     $stmt = $db->prepare('UPDATE wp_term_relationships SET term_taxonomy_id = :term_taxonomy_id WHERE object_id = :object_id AND term_taxonomy_id = 1');
     $stmt->bindValue(':term_taxonomy_id', $band_explicit_term_taxonomy_id, SQLITE3_INTEGER);
     $stmt->bindValue(':object_id', $band_explicit_term_base_menu_item_id, SQLITE3_INTEGER);
@@ -15797,6 +15799,7 @@ SQL);
     assert_same(scalar($band_explicit_term_target, "SELECT post_content FROM wp_posts WHERE post_title = 'Base taxonomy navigation submenu consumer'"), '<!-- wp:paragraph --><p>base taxonomy navigation submenu content</p><!-- /wp:paragraph -->', 'updated taxonomy navigation submenu refs pointing at a held explicit source term are not applied automatically');
     assert_same(scalar($band_explicit_term_target, "SELECT post_content FROM wp_posts WHERE post_title = 'Base taxonomy query consumer'"), '<!-- wp:paragraph --><p>base taxonomy query content</p><!-- /wp:paragraph -->', 'updated query block term refs pointing at a held explicit source term are not applied automatically');
     assert_same(scalar($band_explicit_term_target, "SELECT post_content FROM wp_posts WHERE post_title = 'Base tag query consumer'"), '<!-- wp:paragraph --><p>base tag query content</p><!-- /wp:paragraph -->', 'updated query block tag refs pointing at a held explicit source term are not applied automatically');
+    assert_same(scalar($band_explicit_term_target, "SELECT post_content FROM wp_posts WHERE post_title = 'Base taxonomy taxQuery consumer'"), '<!-- wp:paragraph --><p>base taxonomy taxQuery content</p><!-- /wp:paragraph -->', 'updated query block taxQuery refs pointing at a held explicit source term are not applied automatically');
     assert_same((int)scalar($band_explicit_term_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'theme_mods_imported_term_refs'"), 0, 'theme mods pointing at a held explicit source nav menu are not applied automatically');
     assert_same(
         (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND c.table_name = 'wp_terms' AND c.conflict_type = 'row-target-constraint'"),
@@ -15825,7 +15828,7 @@ SQL);
     );
     assert_same(
         (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND c.table_name = 'wp_posts' AND c.conflict_type = 'row-target-constraint'"),
-        4,
+        5,
         'taxonomy block refs pointing at a held explicit source term record a reviewable row conflict'
     );
     assert_same(
@@ -15838,7 +15841,7 @@ SQL);
         'options held behind an explicit source term explain the missing parent'
     );
     assert_true(
-        (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND d.table_name IN ('wp_termmeta', 'wp_term_taxonomy', 'wp_term_relationships', 'wp_postmeta', 'wp_options', 'wp_posts') AND d.decision = 'target-wins' AND d.reason LIKE 'source changed%'") === 11,
+        (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND d.table_name IN ('wp_termmeta', 'wp_term_taxonomy', 'wp_term_relationships', 'wp_postmeta', 'wp_options', 'wp_posts') AND d.decision = 'target-wins' AND d.reason LIKE 'source changed%'") === 12,
         'updated rows held behind an explicit source term explain that the source changed the row'
     );
 
