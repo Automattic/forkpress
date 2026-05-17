@@ -28,7 +28,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "    [--revalidation-class CLASS] [--latest-revalidation-status STATUS] [--stale-status fresh|stale|error|unknown] [--revalidate] [--reviewer NAME]\n");
     fwrite(STDERR, "    [--resolution-status validated|applied] [--group-by none|table|status|path|type|severity|lifecycle|event-type|next-action|conflict-key|resolution-strategy|generic-resolver|after-revalidate|revalidation-class|latest-revalidation-status|stale-status|plugin|plugin-object|plugin-severity|plugin-logical-identity]\n");
     fwrite(STDERR, "    --event-type accepts recorded, review-pending, review-needs-action, review-reviewed, resolution-validated, resolution-applied, resolution-blocked, or revalidation-required.\n");
-    fwrite(STDERR, "    --group-by supports resolutions by table/status/path, conflicts by table/type/path/severity/lifecycle/next-action/conflict-key/resolution-strategy/generic-resolver/after-revalidate/revalidation-class/latest-revalidation-status/stale-status/plugin/plugin-object/plugin-severity/plugin-logical-identity, conflict-events by table/type/lifecycle/event-type/conflict-key, and decisions by table/type/path.\n");
+    fwrite(STDERR, "    --group-by supports resolutions by table/status/path, conflicts by table/type/path/severity/lifecycle/next-action/conflict-key/resolution-strategy/generic-resolver/after-revalidate/revalidation-class/latest-revalidation-status/stale-status/plugin/plugin-object/plugin-severity/plugin-logical-identity, conflict-events by table/type/lifecycle/event-type/conflict-key/plugin/plugin-object/plugin-severity/plugin-logical-identity, and decisions by table/type/path.\n");
     fwrite(STDERR, "    --revalidate accepts only --run, --conflict-id, --conflict-key, --reviewer, --format, and --quiet; omit --revalidate to filter audit output.\n");
     fwrite(STDERR, "  php merge.php revalidate-reviews --metadata-db <path> [--run ID] [--conflict-id ID|--conflict-key KEY] [--reviewer NAME] [--format text|json]\n");
     fwrite(STDERR, "  php merge.php review-record --metadata-db <path> --record conflict|decision|resolution (--id ID|--conflict-key KEY [--run ID]) --status pending|needs-action|reviewed --note TEXT [--reviewer NAME]\n");
@@ -12076,8 +12076,8 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
         if ($records === 'decisions' && !in_array($group_by, ['table', 'type', 'path'], true)) {
             throw new InvalidArgumentException('--records decisions supports --group-by table, type, or path');
         }
-        if ($records === 'conflict-events' && !in_array($group_by, ['table', 'type', 'lifecycle', 'event-type', 'conflict-key'], true)) {
-            throw new InvalidArgumentException('--records conflict-events supports --group-by table, type, lifecycle, event-type, or conflict-key');
+        if ($records === 'conflict-events' && !in_array($group_by, ['table', 'type', 'lifecycle', 'event-type', 'conflict-key', 'plugin', 'plugin-object', 'plugin-severity', 'plugin-logical-identity'], true)) {
+            throw new InvalidArgumentException('--records conflict-events supports --group-by table, type, lifecycle, event-type, conflict-key, plugin, plugin-object, plugin-severity, or plugin-logical-identity');
         }
         if (($filters['decision'] ?? null) !== null && $records !== 'decisions') {
             throw new InvalidArgumentException('--group-by cannot be combined with --decision unless --records decisions is used');
@@ -13233,6 +13233,18 @@ function cow_merge_audit_conflict_event_group_sql(string $group_by, bool $confli
     }
     if ($group_by === 'conflict-key') {
         return $conflict_key_exists ? "COALESCE(NULLIF(c.conflict_key, ''), '(none)')" : "'(none)'";
+    }
+    if ($group_by === 'plugin') {
+        return "CASE WHEN c.table_name = '__plugins__' THEN COALESCE(forkpress_plugin_group(c.chosen_payload), '(unknown)') ELSE c.table_name END";
+    }
+    if ($group_by === 'plugin-object') {
+        return "CASE WHEN c.table_name = '__plugins__' THEN COALESCE(forkpress_plugin_object_group(c.chosen_payload), '(unknown)') ELSE c.table_name END";
+    }
+    if ($group_by === 'plugin-severity') {
+        return "CASE WHEN c.table_name = '__plugins__' THEN COALESCE(forkpress_plugin_severity_group(c.chosen_payload), '(unknown)') ELSE c.table_name END";
+    }
+    if ($group_by === 'plugin-logical-identity') {
+        return "CASE WHEN c.table_name = '__plugins__' THEN COALESCE(forkpress_plugin_logical_identity_group(c.chosen_payload), '(unknown)') ELSE c.table_name END";
     }
     throw new InvalidArgumentException('unsupported conflict event group');
 }

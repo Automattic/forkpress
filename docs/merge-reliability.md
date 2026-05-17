@@ -361,9 +361,9 @@ should stay focused on these areas:
   revalidation before apply; the same names are also filters for focusing
   conflict and conflict-event records.
   `merge-audit --records conflict-events --group-by event-type`, `--group-by
-  lifecycle`, and `--group-by conflict-key` can summarize recorded, review,
-  revalidation, blocked-resolution, and resolution event history without
-  client-side aggregation.
+  lifecycle`, `--group-by conflict-key`, and the plugin groupings can summarize
+  recorded, review, revalidation, blocked-resolution, and resolution event
+  history without client-side aggregation.
 - Improve deterministic schema dependency planning for safe view/trigger
   reorderings while keeping cyclic or semantic ambiguity review-only.
 - Keep aarch64 macOS release artifacts and APFS sparsebundle E2E runs green for

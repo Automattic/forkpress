@@ -546,6 +546,16 @@ PHP);
         fn($event) => ($event['event_type'] ?? null) === 'revalidation-required' && (int)($event['conflict_id'] ?? 0) === $json_conflict_id
     ));
     assert_same(count($plugin_filtered_revalidation_events), 1, 'plugin filtered event stream includes the matching validator revalidation event');
+    $plugin_event_group_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'records' => 'conflict-events',
+        'plugin' => 'forkpress-plugin-graph',
+        'group_by' => 'plugin-object',
+    ]);
+    $plugin_event_group_counts = [];
+    foreach ($plugin_event_group_audit['conflict_event_groups'] as $group) {
+        $plugin_event_group_counts[(string)$group['group_key']] = (int)$group['event_count'];
+    }
+    assert_true(($plugin_event_group_counts['child:' . $child_id] ?? 0) >= 1, 'plugin audit can group conflict events by validator object');
 
     $revalidated_again = cow_merge_revalidate_reviewed_conflicts($metadata, (int)$result['run_id'], 'cow-revalidate');
     assert_same($revalidated_again['carried'], 0, 'plugin revalidation does not duplicate carried replacement-evidence notes');
@@ -770,6 +780,15 @@ PHP);
         fn($event) => ($event['event_type'] ?? null) === 'revalidation-required' && (int)($event['conflict_id'] ?? 0) === $logical_identity_conflict_id
     ));
     assert_same(count($logical_identity_revalidation_events), 1, 'plugin logical-identity filter applies to conflict event queues');
+    $logical_identity_event_group_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'records' => 'conflict-events',
+        'group_by' => 'plugin-logical-identity',
+    ]);
+    $logical_identity_event_group_counts = [];
+    foreach ($logical_identity_event_group_audit['conflict_event_groups'] as $group) {
+        $logical_identity_event_group_counts[(string)$group['group_key']] = (int)$group['event_count'];
+    }
+    assert_true(($logical_identity_event_group_counts['{"kind":"plugin-child","slug":"child-before-rerun"}'] ?? 0) >= 1, 'plugin audit can group conflict events by logical identity');
 
     $serialized_base_root = $tmp . '/serialized-base';
     $serialized_source_root = $tmp . '/serialized-source';

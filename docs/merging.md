@@ -176,7 +176,9 @@ conflicts`, `conflict-events`, or `resolutions` to focus audit output on one
 logical conflict group across repeated runs. Use `--lifecycle-state <state>`
 with conflict records to build queues such as `unreviewed`, `needs-action`,
 `validated`, or `resolved`, and with conflict-event records to inspect matching
-history entries. Failed resolver attempts append `resolution-blocked` events
+history entries. Conflict-event records can be grouped by plugin, plugin
+object, plugin severity, or plugin logical identity when the event belongs to a
+validator conflict. Failed resolver attempts append `resolution-blocked` events
 and move the unresolved conflict back to `needs-action` with a manual-review
 next action, so UI queues do not keep offering a stale validated apply. Use
 `--event-type resolution-blocked` to audit those blocked attempts. Use
