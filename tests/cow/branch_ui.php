@@ -86,6 +86,19 @@ if (getenv('FORKPRESS_TEST_CLI_FAIL') === '1') {
     fwrite(STDERR, "synthetic branch command failure\n");
     exit(19);
 }
+$outputs = json_decode((string)getenv('FORKPRESS_TEST_CLI_OUTPUTS'), true);
+if (is_array($outputs)) {
+    $index = 0;
+    if (is_string($log) && $log !== '' && is_readable($log)) {
+        $lines = file($log, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        $index = is_array($lines) ? max(0, count($lines) - 1) : 0;
+    }
+    $output = $outputs[$index] ?? '';
+    if (is_scalar($output)) {
+        fwrite(STDOUT, str_replace('\n', "\n", (string)$output));
+    }
+    exit(0);
+}
 $output = getenv('FORKPRESS_TEST_CLI_OUTPUT');
 if (is_string($output) && $output !== '') {
     fwrite(STDOUT, str_replace('\n', "\n", $output));
@@ -360,13 +373,16 @@ $audit_output = json_encode([
         ],
     ],
 ], JSON_UNESCAPED_SLASHES);
+$empty_crash_recovery_output = json_encode([
+    'crash_recovery' => [],
+], JSON_UNESCAPED_SLASHES);
 $conflict_audit = run_branch_ui_action(
     ['action' => 'forkpress_branch_conflicts', 'run' => '42'],
     ['main', 'feature'],
     false,
     true,
     true,
-    ['FORKPRESS_TEST_CLI_OUTPUT' => $audit_output]
+    ['FORKPRESS_TEST_CLI_OUTPUTS' => json_encode([$empty_crash_recovery_output, $audit_output], JSON_UNESCAPED_SLASHES)]
 );
 $conflict_audit_payload = decode_branch_ui_payload($conflict_audit);
 assert_same($conflict_audit['status'], 0, 'branch conflict audit admin action exits cleanly');
@@ -385,11 +401,56 @@ assert_same(
     'Loaded 2 of 3 conflict records for merge run 42.',
     'branch conflict audit reports loaded records'
 );
-assert_same(count($conflict_audit['argv']), 1, 'branch conflict audit admin action invokes ForkPress CLI once');
+assert_same(count($conflict_audit['argv']), 2, 'branch conflict audit admin action checks crash recovery before conflicts');
 assert_same(
     array_slice($conflict_audit['argv'][0] ?? [], 1),
+    ['branch', '--work-dir', $work_dir, 'merge-audit', '--records', 'crash-recovery', '--run', '42', '--format', 'json'],
+    'branch conflict audit admin action checks crash recovery first'
+);
+assert_same(
+    array_slice($conflict_audit['argv'][1] ?? [], 1),
     ['branch', '--work-dir', $work_dir, 'merge-audit', '--records', 'conflicts', '--run', '42', '--format', 'json'],
     'branch conflict audit admin action uses structured merge-audit JSON path'
+);
+
+$pending_crash_output = json_encode([
+    'crash_recovery' => [
+        [
+            'run_id' => 42,
+            'checkpoint' => 'plugin-driver-resolution',
+            'source_branch' => 'feature',
+            'target_branch' => 'main',
+            'artifact_path' => '/tmp/forkpress/recovery.json',
+            'target_db' => '/tmp/forkpress/main/wp-content/database/.ht.sqlite',
+            'target_root' => '/tmp/forkpress/main',
+            'target_db_snapshot' => ['backup' => '/tmp/forkpress/snap.sqlite'],
+            'filesystem_snapshot' => ['entries' => []],
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+$pending_crash_audit = run_branch_ui_action(
+    ['action' => 'forkpress_branch_conflicts', 'run' => '42'],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    ['FORKPRESS_TEST_CLI_OUTPUTS' => json_encode([$pending_crash_output, $audit_output], JSON_UNESCAPED_SLASHES)]
+);
+$pending_crash_payload = decode_branch_ui_payload($pending_crash_audit);
+assert_same($pending_crash_payload['success'] ?? null, true, 'branch conflict audit returns pending crash recovery as successful warning payload');
+assert_same($pending_crash_payload['type'] ?? null, 'warning', 'branch conflict audit treats pending crash recovery as a warning');
+assert_same($pending_crash_payload['crashRecoveryCount'] ?? null, 1, 'branch conflict audit exposes pending crash recovery count');
+assert_same($pending_crash_payload['crashRecovery'][0]['checkpoint'] ?? null, 'plugin-driver-resolution', 'branch conflict audit exposes crash recovery checkpoint');
+assert_same(
+    $pending_crash_payload['recoveryCommand'] ?? null,
+    'forkpress branch recover-crash --run 42 --restore-target-db --restore-files',
+    'branch conflict audit exposes recovery command with restore flags'
+);
+assert_same(count($pending_crash_audit['argv']), 1, 'branch conflict audit skips conflict actions while crash recovery is pending');
+assert_same(
+    array_slice($pending_crash_audit['argv'][0] ?? [], 1),
+    ['branch', '--work-dir', $work_dir, 'merge-audit', '--records', 'crash-recovery', '--run', '42', '--format', 'json'],
+    'branch conflict audit only checks crash recovery when recovery is pending'
 );
 
 $invalid_audit = run_branch_ui_action(
@@ -413,7 +474,7 @@ $filtered_audit = run_branch_ui_action(
     false,
     true,
     true,
-    ['FORKPRESS_TEST_CLI_OUTPUT' => $audit_output]
+    ['FORKPRESS_TEST_CLI_OUTPUTS' => json_encode([$empty_crash_recovery_output, $audit_output], JSON_UNESCAPED_SLASHES)]
 );
 $filtered_audit_payload = decode_branch_ui_payload($filtered_audit);
 assert_same($filtered_audit_payload['success'] ?? null, true, 'branch conflict audit accepts supported filters');
@@ -426,7 +487,7 @@ assert_same(
     'branch conflict audit exposes filtered audit command'
 );
 assert_same(
-    array_slice($filtered_audit['argv'][0] ?? [], 1),
+    array_slice($filtered_audit['argv'][1] ?? [], 1),
     ['branch', '--work-dir', $work_dir, 'merge-audit', '--records', 'conflicts', '--run', '42', '--format', 'json', '--scope', 'plugin', '--lifecycle-state', 'needs-action', '--next-action', 'revalidate'],
     'branch conflict audit passes supported filters to merge-audit'
 );
@@ -637,11 +698,23 @@ $invalid_json_audit = run_branch_ui_action(
     false,
     true,
     true,
-    ['FORKPRESS_TEST_CLI_OUTPUT' => 'not-json']
+    ['FORKPRESS_TEST_CLI_OUTPUTS' => json_encode([$empty_crash_recovery_output, 'not-json'], JSON_UNESCAPED_SLASHES)]
 );
 $invalid_json_payload = decode_branch_ui_payload($invalid_json_audit);
 assert_same($invalid_json_payload['success'] ?? null, false, 'branch conflict audit rejects invalid CLI JSON');
 assert_same($invalid_json_payload['message'] ?? null, 'ForkPress returned invalid merge audit JSON.', 'branch conflict audit explains invalid CLI JSON');
+
+$invalid_crash_json_audit = run_branch_ui_action(
+    ['action' => 'forkpress_branch_conflicts', 'run' => '42'],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    ['FORKPRESS_TEST_CLI_OUTPUT' => 'not-json']
+);
+$invalid_crash_json_payload = decode_branch_ui_payload($invalid_crash_json_audit);
+assert_same($invalid_crash_json_payload['success'] ?? null, false, 'branch conflict audit rejects invalid crash recovery JSON');
+assert_same($invalid_crash_json_payload['message'] ?? null, 'ForkPress returned invalid crash recovery JSON.', 'branch conflict audit explains invalid crash recovery JSON');
 
 $invalid_create = run_branch_ui_action(
     ['action' => 'forkpress_branch_create', 'branch' => 'feature branch', 'from' => 'feature'],
@@ -700,6 +773,8 @@ $switcher_render_payload = decode_branch_ui_payload($switcher_render);
 $switcher_html = (string)($switcher_render_payload['html'] ?? '');
 assert_true(str_contains($switcher_html, 'forkpress-conflict-list'), 'branch switcher renders conflict audit list container');
 assert_true(str_contains($switcher_html, 'function renderConflictAudit'), 'branch switcher renders conflict audit client handler');
+assert_true(str_contains($switcher_html, 'pending crash recovery'), 'branch switcher renders pending crash recovery state');
+assert_true(str_contains($switcher_html, 'payload.recoveryCommand'), 'branch switcher renders crash recovery command from audit payload');
 assert_true(str_contains($switcher_html, 'forkpress_branch_conflicts'), 'branch switcher renders conflict audit action');
 assert_true(str_contains($switcher_html, 'nonce-forkpress_branch_conflicts'), 'branch switcher renders conflict audit nonce');
 assert_true(str_contains($switcher_html, "fetchConflictAudit(payload.run, payload.message || '')"), 'branch switcher requests all conflicts after warning merges');
