@@ -97,7 +97,9 @@ function create_wp_semantic_db(string $path): void {
         (32, 'Shared synced pattern', '<!-- wp:paragraph --><p>Shared synced pattern</p><!-- /wp:paragraph -->', 'publish', 'wp_block', 'shared-synced-pattern'),
         (33, 'Page with synced pattern', '<!-- wp:block {\"ref\":32} /--><!-- wp:paragraph --><p>Base synced pattern content</p><!-- /wp:paragraph -->', 'publish', 'page', 'page-with-synced-pattern'),
         (35, 'Shared navigation', '<!-- wp:navigation-link {\"label\":\"Home\",\"url\":\"/\"} /-->', 'publish', 'wp_navigation', 'shared-navigation'),
-        (36, 'Page with navigation block', '<!-- wp:navigation {\"ref\":35} /--><!-- wp:paragraph --><p>Base navigation page content</p><!-- /wp:paragraph -->', 'publish', 'page', 'page-with-navigation-block')");
+        (36, 'Page with navigation block', '<!-- wp:navigation {\"ref\":35} /--><!-- wp:paragraph --><p>Base navigation page content</p><!-- /wp:paragraph -->', 'publish', 'page', 'page-with-navigation-block'),
+        (37, 'Theme header template part', '<!-- wp:paragraph --><p>Header template part</p><!-- /wp:paragraph -->', 'publish', 'wp_template_part', 'forkpress-test//header'),
+        (38, 'Template using header part', '<!-- wp:template-part {\"slug\":\"header\",\"theme\":\"forkpress-test\",\"tagName\":\"header\"} /--><!-- wp:paragraph --><p>Base template content</p><!-- /wp:paragraph -->', 'publish', 'wp_template', 'forkpress-test//front-page')");
     $db->exec("INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES (34, 32, 'wp_pattern_sync_status', 'synced')");
     $db->close();
 }
@@ -263,6 +265,7 @@ function create_wp_image_block_db(string $path): void {
     $image_block_content = '<!-- wp:image {"id":71,"sizeSlug":"large"} --><figure class="wp-block-image size-large"><img src="wp-content/uploads/2026/05/block-image.jpg" class="wp-image-71"/></figure><!-- /wp:image -->';
     $stmt = $db->prepare("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, guid) VALUES
         (70, 'Image block page', :content, 'publish', 'page', 'image-block-page', ''),
+        (75, 'Image block product CPT', :content, 'publish', 'forkpress_product', 'image-block-product', ''),
         (71, 'Image block attachment', '', 'inherit', 'attachment', 'block-image', 'wp-content/uploads/2026/05/block-image.jpg')");
     $stmt->bindValue(':content', $image_block_content, SQLITE3_TEXT);
     $stmt->execute();
@@ -323,10 +326,12 @@ function create_wp_avatar_navigation_link_block_db(string $path): void {
     $db->exec('CREATE TABLE wp_term_taxonomy (term_taxonomy_id INTEGER PRIMARY KEY AUTOINCREMENT, term_id INTEGER NOT NULL, taxonomy TEXT NOT NULL, description TEXT NOT NULL DEFAULT "", parent INTEGER NOT NULL DEFAULT 0, count INTEGER NOT NULL DEFAULT 0)');
     $block_content = '<!-- wp:avatar {"userId":188,"size":96} /-->'
         . '<!-- wp:navigation-link {"id":189,"kind":"post-type","type":"page","label":"Deleted page","url":"/deleted-page"} /-->'
-        . '<!-- wp:navigation-link {"id":190,"kind":"taxonomy","type":"category","label":"Deleted category","url":"/category/deleted"} /-->';
+        . '<!-- wp:navigation-link {"id":190,"kind":"taxonomy","type":"category","label":"Deleted category","url":"/category/deleted"} /-->'
+        . '<!-- wp:navigation-submenu {"id":191,"kind":"post-type","type":"page","label":"Deleted submenu page","url":"/deleted-submenu-page"} --><!-- /wp:navigation-submenu -->';
     $stmt = $db->prepare("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
         (187, 'Avatar and navigation link page', :content, 'publish', 'page', 'avatar-navigation-link-page'),
-        (189, 'Deleted navigation page', '<!-- wp:paragraph --><p>Deleted nav page</p><!-- /wp:paragraph -->', 'publish', 'page', 'deleted-navigation-page')");
+        (189, 'Deleted navigation page', '<!-- wp:paragraph --><p>Deleted nav page</p><!-- /wp:paragraph -->', 'publish', 'page', 'deleted-navigation-page'),
+        (191, 'Deleted navigation submenu page', '<!-- wp:paragraph --><p>Deleted nav submenu page</p><!-- /wp:paragraph -->', 'publish', 'page', 'deleted-navigation-submenu-page')");
     $stmt->bindValue(':content', $block_content, SQLITE3_TEXT);
     $stmt->execute();
     $db->exec("INSERT INTO wp_users (ID, user_login, user_nicename, user_email, display_name) VALUES
@@ -383,7 +388,7 @@ function create_wp_query_block_db(string $path): void {
     )");
     $db->exec('CREATE TABLE wp_terms (term_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, slug TEXT NOT NULL, term_group INTEGER NOT NULL DEFAULT 0)');
     $db->exec('CREATE TABLE wp_term_taxonomy (term_taxonomy_id INTEGER PRIMARY KEY AUTOINCREMENT, term_id INTEGER NOT NULL, taxonomy TEXT NOT NULL, description TEXT NOT NULL DEFAULT "", parent INTEGER NOT NULL DEFAULT 0, count INTEGER NOT NULL DEFAULT 0)');
-    $query_block_content = '<!-- wp:query {"query":{"perPage":10,"pages":0,"offset":0,"postType":"post","order":"desc","orderBy":"date","author":75,"categoryIds":[76],"tagIds":[78]}} --><!-- wp:post-template --><!-- wp:post-title /--><!-- /wp:post-template --><!-- /wp:query -->';
+    $query_block_content = '<!-- wp:query {"query":{"perPage":10,"pages":0,"offset":0,"postType":"post","order":"desc","orderBy":"date","author":75,"categoryIds":[76],"tagIds":[78],"taxQuery":{"category":[83],"post_tag":[85]}}} --><!-- wp:post-template --><!-- wp:post-title /--><!-- /wp:post-template --><!-- /wp:query --><!-- wp:latest-posts {"selectedAuthor":75,"categories":[83],"postsToShow":5} /-->';
     $stmt = $db->prepare("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
         (79, 'Query block page', :content, 'publish', 'page', 'query-block-page')");
     $stmt->bindValue(':content', $query_block_content, SQLITE3_TEXT);
@@ -392,10 +397,14 @@ function create_wp_query_block_db(string $path): void {
         (75, 'deleted_query_author', 'deleted-query-author', 'query-author@example.com', 'Deleted Query Author')");
     $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES
         (76, 'Deleted query category', 'deleted-query-category'),
-        (78, 'Deleted query tag', 'deleted-query-tag')");
+        (78, 'Deleted query tag', 'deleted-query-tag'),
+        (83, 'Deleted taxQuery category', 'deleted-taxquery-category'),
+        (85, 'Deleted taxQuery tag', 'deleted-taxquery-tag')");
     $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, count) VALUES
         (77, 76, 'category', 'Deleted query category taxonomy', 1),
-        (80, 78, 'post_tag', 'Deleted query tag taxonomy', 1)");
+        (80, 78, 'post_tag', 'Deleted query tag taxonomy', 1),
+        (84, 83, 'category', 'Deleted taxQuery category taxonomy', 1),
+        (86, 85, 'post_tag', 'Deleted taxQuery tag taxonomy', 1)");
     $db->close();
 }
 
@@ -548,6 +557,13 @@ function create_wp_option_reference_db(string $path): void {
     $stmt->bindValue(':value', $widget_nav_menu, SQLITE3_TEXT);
     $stmt->execute();
 
+    $nav_menu_options = serialize([
+        'auto_add' => [94],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('nav_menu_options', :value, 'yes')");
+    $stmt->bindValue(':value', $nav_menu_options, SQLITE3_TEXT);
+    $stmt->execute();
+
     $widget_media_image = serialize([
         3 => [
             'attachment_id' => 93,
@@ -560,10 +576,64 @@ function create_wp_option_reference_db(string $path): void {
     $stmt->bindValue(':value', $widget_media_image, SQLITE3_TEXT);
     $stmt->execute();
 
+    $widget_media_audio = serialize([
+        6 => [
+            'attachment_id' => 93,
+            'caption' => 'Base media audio widget',
+        ],
+        '_multiwidget' => 1,
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_media_audio', :value, 'yes')");
+    $stmt->bindValue(':value', $widget_media_audio, SQLITE3_TEXT);
+    $stmt->execute();
+
+    $widget_media_video = serialize([
+        7 => [
+            'attachment_id' => 93,
+            'caption' => 'Base media video widget',
+        ],
+        '_multiwidget' => 1,
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_media_video', :value, 'yes')");
+    $stmt->bindValue(':value', $widget_media_video, SQLITE3_TEXT);
+    $stmt->execute();
+
+    $widget_media_gallery = serialize([
+        8 => [
+            'ids' => [93],
+            'caption' => 'Base media gallery widget',
+        ],
+        '_multiwidget' => 1,
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_media_gallery', :value, 'yes')");
+    $stmt->bindValue(':value', $widget_media_gallery, SQLITE3_TEXT);
+    $stmt->execute();
+
+    $widget_pages = serialize([
+        9 => [
+            'title' => 'Base pages widget',
+            'exclude' => '90',
+        ],
+        '_multiwidget' => 1,
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_pages', :value, 'yes')");
+    $stmt->bindValue(':value', $widget_pages, SQLITE3_TEXT);
+    $stmt->execute();
+
+    $widget_block = serialize([
+        5 => [
+            'content' => '<!-- wp:image {"id":93,"sizeSlug":"large"} --><figure class="wp-block-image size-large"><img class="wp-image-93"/></figure><!-- /wp:image -->',
+        ],
+        '_multiwidget' => 1,
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_block', :value, 'yes')");
+    $stmt->bindValue(':value', $widget_block, SQLITE3_TEXT);
+    $stmt->execute();
+
     $widget_text = serialize([
         4 => [
             'title' => 'Base text widget',
-            'text' => 'Base sidebar text',
+            'text' => '<!-- wp:image {"id":93,"sizeSlug":"large"} --><figure class="wp-block-image size-large"><img class="wp-image-93"/></figure><!-- /wp:image -->',
         ],
         '_multiwidget' => 1,
     ]);
@@ -571,8 +641,30 @@ function create_wp_option_reference_db(string $path): void {
     $stmt->bindValue(':value', $widget_text, SQLITE3_TEXT);
     $stmt->execute();
 
+    $widget_rss = serialize([
+        12 => [
+            'title' => 'Base RSS widget',
+            'url' => 'https://example.test/feed/',
+        ],
+        '_multiwidget' => 1,
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_rss', :value, 'yes')");
+    $stmt->bindValue(':value', $widget_rss, SQLITE3_TEXT);
+    $stmt->execute();
+
+    $widget_custom_html = serialize([
+        10 => [
+            'title' => 'Base custom HTML widget',
+            'content' => '<!-- wp:image {"id":93,"sizeSlug":"large"} --><figure class="wp-block-image size-large"><img class="wp-image-93"/></figure><!-- /wp:image -->',
+        ],
+        '_multiwidget' => 1,
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_custom_html', :value, 'yes')");
+    $stmt->bindValue(':value', $widget_custom_html, SQLITE3_TEXT);
+    $stmt->execute();
+
     $sidebars_widgets = serialize([
-        'sidebar-1' => ['nav_menu-2', 'media_image-3', 'text-4'],
+        'sidebar-1' => ['nav_menu-2', 'media_image-3', 'text-4', 'custom_html-10', 'rss-12'],
         'array_version' => 3,
     ]);
     $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('sidebars_widgets', :value, 'yes')");
@@ -604,7 +696,7 @@ try {
     write_test_file($base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
 <?php
 $db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
-$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type IN ('page', 'post', 'wp_template_part', 'wp_template')");
+$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type NOT IN ('attachment', 'revision') AND post_content <> ''");
 $findings = [];
 while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
     $content = (string)$row['post_content'];
@@ -648,6 +740,43 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
             ];
         }
     }
+    preg_match_all('/<!--\s+wp:template-part\s+(\{.*?\})\s*\/?-->/', $content, $template_part_matches);
+    foreach ($template_part_matches[1] as $raw_attrs) {
+        $attrs = json_decode($raw_attrs, true);
+        if (!is_array($attrs) || !isset($attrs['slug']) || !is_string($attrs['slug']) || $attrs['slug'] === '') {
+            continue;
+        }
+        $slug = $attrs['slug'];
+        $theme = isset($attrs['theme']) && is_string($attrs['theme']) ? $attrs['theme'] : '';
+        $post_names = [$slug];
+        if ($theme !== '') {
+            array_unshift($post_names, $theme . '//' . $slug);
+        }
+        $exists = 0;
+        foreach (array_unique($post_names) as $post_name) {
+            $escaped_post_name = SQLite3::escapeString($post_name);
+            $exists += (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE post_type = 'wp_template_part' AND post_name = '$escaped_post_name'");
+        }
+        if ($exists === 0) {
+            $findings[] = [
+                'plugin' => 'forkpress-wp-block-refs',
+                'object' => 'post:' . $row['ID'],
+                'reason' => 'post content references a missing template part',
+                'type' => 'plugin-wp-block-missing-reference',
+                'tables' => ['wp_posts'],
+                'validator' => 'forkpress-wp-block-refs@1',
+                'candidate' => [
+                    'post_id' => (int)$row['ID'],
+                    'missing_template_part' => [
+                        'theme' => $theme,
+                        'slug' => $slug,
+                    ],
+                    'block_name' => 'core/template-part',
+                    'expected_post_type' => 'wp_template_part',
+                ],
+            ];
+        }
+    }
 }
 echo json_encode([
     'status' => $findings ? 'conflicts' : 'valid',
@@ -665,6 +794,7 @@ PHP);
     $db->exec('DELETE FROM wp_posts WHERE ID = 30');
     $db->exec('DELETE FROM wp_posts WHERE ID = 32');
     $db->exec('DELETE FROM wp_posts WHERE ID = 35');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 37');
     $db->exec('DELETE FROM wp_postmeta WHERE post_id = 32');
     $db->close();
 
@@ -672,6 +802,7 @@ PHP);
     $db->exec("UPDATE wp_posts SET post_title = 'Target page still using reusable block' WHERE ID = 31");
     $db->exec("UPDATE wp_posts SET post_title = 'Target page still using synced pattern' WHERE ID = 33");
     $db->exec("UPDATE wp_posts SET post_title = 'Target page still using navigation block' WHERE ID = 36");
+    $db->exec("UPDATE wp_posts SET post_title = 'Target template still using header part' WHERE ID = 38");
     $db->close();
 
     $result = cow_merge_branch_state(
@@ -686,29 +817,41 @@ PHP);
         $target_root
     );
 
-    assert_same($result['status'], 'completed_with_conflicts', 'WordPress block-reference validator holds missing reusable blocks, synced patterns, and navigation blocks for review');
+    assert_same($result['status'], 'completed_with_conflicts', 'WordPress block-reference validator holds missing reusable blocks, synced patterns, navigation blocks, and template parts for review');
     assert_same((int)($result['plugin_validators'] ?? 0), 1, 'WordPress block-reference validator is discovered from mu-plugins during merge');
-    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 3, 'WordPress block-reference validator records missing reusable block, synced pattern, and navigation references');
+    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 4, 'WordPress block-reference validator records missing reusable block, synced pattern, navigation, and template-part references');
     assert_same((int)scalar($target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 30'), 0, 'WordPress block-reference validator leaves the source block deletion staged for review');
     assert_same((int)scalar($target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 32'), 0, 'WordPress block-reference validator leaves the source synced pattern deletion staged for review');
     assert_same((int)scalar($target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 35'), 0, 'WordPress block-reference validator leaves the source navigation deletion staged for review');
+    assert_same((int)scalar($target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 37'), 0, 'WordPress block-reference validator leaves the source template-part deletion staged for review');
     assert_same((int)scalar($target, 'SELECT COUNT(*) FROM wp_postmeta WHERE post_id = 32'), 0, 'WordPress block-reference validator leaves the synced pattern metadata deletion staged for review');
     assert_same(scalar($target, 'SELECT post_title FROM wp_posts WHERE ID = 31'), 'Target page still using reusable block', 'WordPress block-reference validator preserves the target page edit');
     assert_same(scalar($target, 'SELECT post_title FROM wp_posts WHERE ID = 33'), 'Target page still using synced pattern', 'WordPress block-reference validator preserves the target synced pattern page edit');
     assert_same(scalar($target, 'SELECT post_title FROM wp_posts WHERE ID = 36'), 'Target page still using navigation block', 'WordPress block-reference validator preserves the target navigation page edit');
+    assert_same(scalar($target, 'SELECT post_title FROM wp_posts WHERE ID = 38'), 'Target template still using header part', 'WordPress block-reference validator preserves the target template edit');
 
     $audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'plugin',
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-block-missing-reference',
     ]);
-    assert_same(count($audit['conflicts']), 3, 'WordPress block-reference validator exposes missing refs as plugin-scoped audit conflicts');
+    assert_same(count($audit['conflicts']), 4, 'WordPress block-reference validator exposes missing refs as plugin-scoped audit conflicts');
     $preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $audit['conflicts']));
     assert_true(str_contains($preview, '"missing_ref":30'), 'WordPress block-reference audit includes the missing reusable block ID');
     assert_true(str_contains($preview, '"missing_ref":32'), 'WordPress block-reference audit includes the missing synced pattern ID');
     assert_true(str_contains($preview, '"missing_ref":35'), 'WordPress block-reference audit includes the missing navigation ID');
     assert_true(str_contains($preview, '"post_id":33'), 'WordPress block-reference audit includes the synced pattern consumer page ID');
     assert_true(str_contains($preview, '"block_name":"core/navigation"'), 'WordPress block-reference audit includes the navigation block name');
+    assert_true(str_contains($preview, '"block_name":"core/template-part"'), 'WordPress block-reference audit includes the template-part block name');
+    $template_part_payloads = array_values(array_filter(
+        array_map(
+            fn($conflict) => cow_merge_audit_decode_payload(json_decode((string)($conflict['chosen_payload'] ?? ''), true)),
+            $audit['conflicts']
+        ),
+        fn($payload) => is_array($payload) && (($payload['candidate']['block_name'] ?? null) === 'core/template-part')
+    ));
+    assert_same($template_part_payloads[0]['candidate']['missing_template_part']['theme'] ?? null, 'forkpress-test', 'WordPress block-reference audit includes the missing template part theme');
+    assert_same($template_part_payloads[0]['candidate']['missing_template_part']['slug'] ?? null, 'header', 'WordPress block-reference audit includes the missing template part slug');
 
     $post_parent_base_root = $tmp . '/post-parent-base';
     $post_parent_source_root = $tmp . '/post-parent-source';
@@ -1357,7 +1500,7 @@ PHP);
     write_test_file($image_block_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
 <?php
 $db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
-$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type IN ('post', 'page')");
+$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type NOT IN ('attachment', 'revision') AND post_content <> ''");
 $findings = [];
 while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
     if (!preg_match_all('/<!--\s*wp:image\s+(\{.*?\})\s*-->/', (string)$row['post_content'], $matches)) {
@@ -1407,6 +1550,7 @@ PHP);
 
     $db = open_db($image_block_target);
     $db->exec("UPDATE wp_posts SET post_title = 'Target page still using deleted image block attachment' WHERE ID = 70");
+    $db->exec("UPDATE wp_posts SET post_title = 'Target CPT still using deleted image block attachment' WHERE ID = 75");
     $db->close();
 
     $image_block_result = cow_merge_branch_state(
@@ -1423,20 +1567,23 @@ PHP);
 
     assert_same($image_block_result['status'], 'completed_with_conflicts', 'WordPress image block validator holds missing attachments for review');
     assert_same((int)($image_block_result['plugin_validators'] ?? 0), 1, 'WordPress image block validator is discovered from mu-plugins during merge');
-    assert_same((int)($image_block_result['plugin_validator_conflicts'] ?? 0), 1, 'WordPress image block validator records the missing attachment');
+    assert_same((int)($image_block_result['plugin_validator_conflicts'] ?? 0), 2, 'WordPress image block validator records missing attachment refs in page and custom post type content');
     assert_same((int)scalar($image_block_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 71'), 0, 'WordPress image block validator leaves the source attachment deletion staged for review');
     assert_true(!file_exists($image_block_target_root . '/wp-content/uploads/2026/05/block-image.jpg'), 'WordPress image block validator leaves the source upload deletion staged for review');
     assert_same(scalar($image_block_target, 'SELECT post_title FROM wp_posts WHERE ID = 70'), 'Target page still using deleted image block attachment', 'WordPress image block validator preserves the target page edit');
+    assert_same(scalar($image_block_target, 'SELECT post_title FROM wp_posts WHERE ID = 75'), 'Target CPT still using deleted image block attachment', 'WordPress image block validator preserves the target custom post type edit');
     assert_true(str_contains((string)scalar($image_block_target, 'SELECT post_content FROM wp_posts WHERE ID = 70'), '"id":71'), 'WordPress image block validator keeps the stale block attachment reference visible for review');
+    assert_true(str_contains((string)scalar($image_block_target, 'SELECT post_content FROM wp_posts WHERE ID = 75'), '"id":71'), 'WordPress image block validator keeps the stale custom post type block attachment reference visible for review');
 
     $image_block_audit = cow_merge_audit_report($image_block_metadata, (int)$image_block_result['run_id'], 10, [
         'scope' => 'plugin',
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-image-block-missing-attachment',
     ]);
-    assert_same(count($image_block_audit['conflicts']), 1, 'WordPress image block validator exposes the missing attachment as a plugin-scoped audit conflict');
-    $image_block_preview = (string)($image_block_audit['conflicts'][0]['chosen_preview'] ?? '');
+    assert_same(count($image_block_audit['conflicts']), 2, 'WordPress image block validator exposes missing page and custom post type attachments as plugin-scoped audit conflicts');
+    $image_block_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $image_block_audit['conflicts']));
     assert_true(str_contains($image_block_preview, '"missing_object_id":71'), 'WordPress image block audit includes the missing attachment ID');
+    assert_true(str_contains($image_block_preview, '"post_id":75'), 'WordPress image block audit includes the custom post type owner ID');
     assert_true(
         str_contains($image_block_preview, '"block_name":"core/image"') || str_contains($image_block_preview, '"block_name":"core\/image"'),
         'WordPress image block audit includes the block name'
@@ -1466,7 +1613,7 @@ PHP);
     write_test_file($media_block_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
 <?php
 $db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
-$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type IN ('post', 'page')");
+$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type NOT IN ('attachment', 'revision') AND post_content <> ''");
 $findings = [];
 $media_id_blocks = ['audio', 'cover', 'file', 'video'];
 while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
@@ -1594,7 +1741,7 @@ PHP);
     write_test_file($avatar_nav_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
 <?php
 $db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
-$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type IN ('post', 'page', 'wp_navigation')");
+$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type NOT IN ('attachment', 'revision') AND post_content <> ''");
 $findings = [];
 while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
     if (!preg_match_all('/<!--\s*wp:([A-Za-z0-9_\/-]+)\s+(\{.*?\})\s*\/?-->/', (string)$row['post_content'], $matches, PREG_SET_ORDER)) {
@@ -1627,9 +1774,11 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
                 ];
             }
         }
-        if ($block_name !== 'navigation-link' || !isset($attrs['id'])) {
+        if (!in_array($block_name, ['navigation-link', 'navigation-submenu'], true) || !isset($attrs['id'])) {
             continue;
         }
+        $core_block_name = 'core/' . $block_name;
+        $block_label = $block_name === 'navigation-submenu' ? 'navigation submenu block' : 'navigation link block';
         $object_id = (int)$attrs['id'];
         if (($attrs['kind'] ?? null) === 'post-type') {
             $exists = $object_id <= 0 ? 1 : (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $object_id");
@@ -1637,13 +1786,13 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
                 $findings[] = [
                     'plugin' => 'forkpress-wp-avatar-navigation-link-refs',
                     'object' => 'post:' . $row['ID'],
-                    'reason' => 'navigation link block references a missing post object',
+                    'reason' => $block_label . ' references a missing post object',
                     'type' => 'plugin-wp-avatar-navigation-link-missing-object',
                     'tables' => ['wp_posts'],
                     'validator' => 'forkpress-wp-avatar-navigation-link-refs@1',
                     'candidate' => [
                         'post_id' => (int)$row['ID'],
-                        'block_name' => 'core/navigation-link',
+                        'block_name' => $core_block_name,
                         'field' => 'attrs.id',
                         'missing_object_id' => $object_id,
                         'object_type' => (string)($attrs['type'] ?? 'post'),
@@ -1660,13 +1809,13 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
                 $findings[] = [
                     'plugin' => 'forkpress-wp-avatar-navigation-link-refs',
                     'object' => 'post:' . $row['ID'],
-                    'reason' => 'navigation link block references a missing taxonomy term',
+                    'reason' => $block_label . ' references a missing taxonomy term',
                     'type' => 'plugin-wp-avatar-navigation-link-missing-object',
                     'tables' => ['wp_posts', 'wp_terms', 'wp_term_taxonomy'],
                     'validator' => 'forkpress-wp-avatar-navigation-link-refs@1',
                     'candidate' => [
                         'post_id' => (int)$row['ID'],
-                        'block_name' => 'core/navigation-link',
+                        'block_name' => $core_block_name,
                         'field' => 'attrs.id',
                         'missing_object_id' => $object_id,
                         'object_type' => $taxonomy,
@@ -1691,6 +1840,7 @@ PHP);
     $db = open_db($avatar_nav_source);
     $db->exec('DELETE FROM wp_users WHERE ID = 188');
     $db->exec('DELETE FROM wp_posts WHERE ID = 189');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 191');
     $db->exec('DELETE FROM wp_term_taxonomy WHERE term_id = 190');
     $db->exec('DELETE FROM wp_terms WHERE term_id = 190');
     $db->close();
@@ -1713,27 +1863,29 @@ PHP);
 
     assert_same($avatar_nav_result['status'], 'completed_with_conflicts', 'WordPress avatar/navigation-link block validator holds missing objects for review');
     assert_same((int)($avatar_nav_result['plugin_validators'] ?? 0), 1, 'WordPress avatar/navigation-link block validator is discovered from mu-plugins during merge');
-    assert_same((int)($avatar_nav_result['plugin_validator_conflicts'] ?? 0), 3, 'WordPress avatar/navigation-link block validator records missing user, page, and taxonomy refs');
+    assert_same((int)($avatar_nav_result['plugin_validator_conflicts'] ?? 0), 4, 'WordPress avatar/navigation-link block validator records missing user, page, submenu page, and taxonomy refs');
     assert_same((int)scalar($avatar_nav_target, 'SELECT COUNT(*) FROM wp_users WHERE ID = 188'), 0, 'WordPress avatar/navigation-link block validator leaves source user deletion staged for review');
     assert_same((int)scalar($avatar_nav_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 189'), 0, 'WordPress avatar/navigation-link block validator leaves source page deletion staged for review');
+    assert_same((int)scalar($avatar_nav_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 191'), 0, 'WordPress avatar/navigation-link block validator leaves source submenu page deletion staged for review');
     assert_same((int)scalar($avatar_nav_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 190'), 0, 'WordPress avatar/navigation-link block validator leaves source term deletion staged for review');
     assert_same(scalar($avatar_nav_target, 'SELECT post_title FROM wp_posts WHERE ID = 187'), 'Target page still using deleted avatar and navigation links', 'WordPress avatar/navigation-link block validator preserves the target page edit');
     $avatar_nav_content = (string)scalar($avatar_nav_target, 'SELECT post_content FROM wp_posts WHERE ID = 187');
     assert_true(str_contains($avatar_nav_content, '"userId":188'), 'WordPress avatar/navigation-link block validator keeps the stale avatar user visible for review');
     assert_true(str_contains($avatar_nav_content, '"id":189'), 'WordPress avatar/navigation-link block validator keeps the stale navigation page visible for review');
     assert_true(str_contains($avatar_nav_content, '"id":190'), 'WordPress avatar/navigation-link block validator keeps the stale navigation taxonomy visible for review');
+    assert_true(str_contains($avatar_nav_content, '"id":191'), 'WordPress avatar/navigation-link block validator keeps the stale navigation submenu page visible for review');
 
     $avatar_nav_audit = cow_merge_audit_report($avatar_nav_metadata, (int)$avatar_nav_result['run_id'], 10, [
         'scope' => 'plugin',
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-avatar-navigation-link-missing-object',
     ]);
-    assert_same(count($avatar_nav_audit['conflicts']), 3, 'WordPress avatar/navigation-link block validator exposes stale refs as plugin-scoped audit conflicts');
+    assert_same(count($avatar_nav_audit['conflicts']), 4, 'WordPress avatar/navigation-link block validator exposes stale refs as plugin-scoped audit conflicts');
     $avatar_nav_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $avatar_nav_audit['conflicts']));
-    foreach ([188, 189, 190] as $missing_id) {
+    foreach ([188, 189, 190, 191] as $missing_id) {
         assert_true(str_contains($avatar_nav_preview, '"missing_object_id":' . (string)$missing_id), 'WordPress avatar/navigation-link block audit includes missing object ID ' . (string)$missing_id);
     }
-    foreach (['core/avatar', 'core/navigation-link'] as $block_name) {
+    foreach (['core/avatar', 'core/navigation-link', 'core/navigation-submenu'] as $block_name) {
         $encoded_block_name = str_replace('/', '\\/', $block_name);
         assert_true(
             str_contains($avatar_nav_preview, '"block_name":"' . $block_name . '"') || str_contains($avatar_nav_preview, '"block_name":"' . $encoded_block_name . '"'),
@@ -1760,7 +1912,7 @@ PHP);
     write_test_file($gallery_block_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
 <?php
 $db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
-$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type IN ('post', 'page')");
+$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type NOT IN ('attachment', 'revision') AND post_content <> ''");
 $findings = [];
 while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
     if (!preg_match_all('/<!--\s*wp:gallery\s+(\{.*?\})\s*-->/', (string)$row['post_content'], $matches)) {
@@ -1867,13 +2019,11 @@ PHP);
     write_test_file($query_block_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
 <?php
 $db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
-$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type IN ('post', 'page', 'wp_template_part', 'wp_template')");
+$res = $db->query("SELECT ID, post_content FROM wp_posts WHERE post_type NOT IN ('attachment', 'revision') AND post_content <> ''");
 $findings = [];
 while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
-    if (!preg_match_all('/<!--\s*wp:query\s+(\{.*?\})\s*-->/', (string)$row['post_content'], $matches)) {
-        continue;
-    }
-    foreach ($matches[1] as $raw_attrs) {
+    preg_match_all('/<!--\s*wp:query\s+(\{.*?\})\s*-->/', (string)$row['post_content'], $query_matches);
+    foreach ($query_matches[1] as $raw_attrs) {
         $attrs = json_decode($raw_attrs, true);
         $query = is_array($attrs) && isset($attrs['query']) && is_array($attrs['query']) ? $attrs['query'] : [];
         if (isset($query['author'])) {
@@ -1928,6 +2078,94 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
                 }
             }
         }
+        if (isset($query['taxQuery']) && is_array($query['taxQuery'])) {
+            foreach ($query['taxQuery'] as $taxonomy => $term_ids) {
+                if (!is_array($term_ids)) {
+                    continue;
+                }
+                foreach ($term_ids as $index => $term_id) {
+                    $term_id = (int)$term_id;
+                    if ($term_id <= 0) {
+                        continue;
+                    }
+                    $escaped_taxonomy = SQLite3::escapeString((string)$taxonomy);
+                    $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_terms t JOIN wp_term_taxonomy tt ON tt.term_id = t.term_id AND tt.taxonomy = '$escaped_taxonomy' WHERE t.term_id = $term_id");
+                    if ($exists === 0) {
+                        $findings[] = [
+                            'plugin' => 'forkpress-wp-query-block-refs',
+                            'object' => 'post:' . $row['ID'],
+                            'reason' => 'query block references a missing taxonomy term',
+                            'type' => 'plugin-wp-query-block-missing-object',
+                            'tables' => ['wp_posts', 'wp_terms', 'wp_term_taxonomy'],
+                            'validator' => 'forkpress-wp-query-block-refs@1',
+                            'candidate' => [
+                                'post_id' => (int)$row['ID'],
+                                'block_name' => 'core/query',
+                                'field' => 'query.taxQuery.' . (string)$taxonomy . '.' . (string)$index,
+                                'missing_object_id' => $term_id,
+                                'object_type' => 'term',
+                                'taxonomy' => (string)$taxonomy,
+                            ],
+                        ];
+                    }
+                }
+            }
+        }
+    }
+    preg_match_all('/<!--\s*wp:latest-posts\s+(\{.*?\})\s*\/?-->/', (string)$row['post_content'], $latest_posts_matches);
+    foreach ($latest_posts_matches[1] as $raw_attrs) {
+        $attrs = json_decode($raw_attrs, true);
+        if (!is_array($attrs)) {
+            continue;
+        }
+        if (isset($attrs['selectedAuthor'])) {
+            $author_id = (int)$attrs['selectedAuthor'];
+            $exists = $author_id <= 0 ? 1 : (int)$db->querySingle("SELECT COUNT(*) FROM wp_users WHERE ID = $author_id");
+            if ($exists === 0) {
+                $findings[] = [
+                    'plugin' => 'forkpress-wp-query-block-refs',
+                    'object' => 'post:' . $row['ID'],
+                    'reason' => 'latest posts block references a missing author user',
+                    'type' => 'plugin-wp-query-block-missing-object',
+                    'tables' => ['wp_posts', 'wp_users'],
+                    'validator' => 'forkpress-wp-query-block-refs@1',
+                    'candidate' => [
+                        'post_id' => (int)$row['ID'],
+                        'block_name' => 'core/latest-posts',
+                        'field' => 'selectedAuthor',
+                        'missing_object_id' => $author_id,
+                        'object_type' => 'user',
+                    ],
+                ];
+            }
+        }
+        if (isset($attrs['categories']) && is_array($attrs['categories'])) {
+            foreach ($attrs['categories'] as $index => $term_id) {
+                $term_id = (int)$term_id;
+                if ($term_id <= 0) {
+                    continue;
+                }
+                $exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_terms t JOIN wp_term_taxonomy tt ON tt.term_id = t.term_id AND tt.taxonomy = 'category' WHERE t.term_id = $term_id");
+                if ($exists === 0) {
+                    $findings[] = [
+                        'plugin' => 'forkpress-wp-query-block-refs',
+                        'object' => 'post:' . $row['ID'],
+                        'reason' => 'latest posts block references a missing category term',
+                        'type' => 'plugin-wp-query-block-missing-object',
+                        'tables' => ['wp_posts', 'wp_terms', 'wp_term_taxonomy'],
+                        'validator' => 'forkpress-wp-query-block-refs@1',
+                        'candidate' => [
+                            'post_id' => (int)$row['ID'],
+                            'block_name' => 'core/latest-posts',
+                            'field' => 'categories.' . (string)$index,
+                            'missing_object_id' => $term_id,
+                            'object_type' => 'term',
+                            'taxonomy' => 'category',
+                        ],
+                    ];
+                }
+            }
+        }
     }
 }
 echo json_encode([
@@ -1943,8 +2181,8 @@ PHP);
 
     $db = open_db($query_block_source);
     $db->exec('DELETE FROM wp_users WHERE ID = 75');
-    $db->exec('DELETE FROM wp_term_taxonomy WHERE term_id IN (76, 78)');
-    $db->exec('DELETE FROM wp_terms WHERE term_id IN (76, 78)');
+    $db->exec('DELETE FROM wp_term_taxonomy WHERE term_id IN (76, 78, 83, 85)');
+    $db->exec('DELETE FROM wp_terms WHERE term_id IN (76, 78, 83, 85)');
     $db->close();
 
     $db = open_db($query_block_target);
@@ -1965,31 +2203,44 @@ PHP);
 
     assert_same($query_block_result['status'], 'completed_with_conflicts', 'WordPress query block validator holds missing query refs for review');
     assert_same((int)($query_block_result['plugin_validators'] ?? 0), 1, 'WordPress query block validator is discovered from mu-plugins during merge');
-    assert_same((int)($query_block_result['plugin_validator_conflicts'] ?? 0), 3, 'WordPress query block validator records missing author, category, and tag refs');
+    assert_same((int)($query_block_result['plugin_validator_conflicts'] ?? 0), 7, 'WordPress query block validator records missing query and latest-posts refs');
     assert_same((int)scalar($query_block_target, 'SELECT COUNT(*) FROM wp_users WHERE ID = 75'), 0, 'WordPress query block validator leaves the source author deletion staged for review');
-    assert_same((int)scalar($query_block_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id IN (76, 78)'), 0, 'WordPress query block validator leaves the source term deletions staged for review');
+    assert_same((int)scalar($query_block_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id IN (76, 78, 83, 85)'), 0, 'WordPress query block validator leaves the source term deletions staged for review');
     assert_same(scalar($query_block_target, 'SELECT post_title FROM wp_posts WHERE ID = 79'), 'Target page still using deleted query refs', 'WordPress query block validator preserves the target page edit');
     $query_block_content = (string)scalar($query_block_target, 'SELECT post_content FROM wp_posts WHERE ID = 79');
     assert_true(str_contains($query_block_content, '"author":75'), 'WordPress query block validator keeps the stale query author visible for review');
     assert_true(str_contains($query_block_content, '"categoryIds":[76]'), 'WordPress query block validator keeps the stale query category visible for review');
     assert_true(str_contains($query_block_content, '"tagIds":[78]'), 'WordPress query block validator keeps the stale query tag visible for review');
+    assert_true(str_contains($query_block_content, '"taxQuery":{"category":[83],"post_tag":[85]}'), 'WordPress query block validator keeps stale taxQuery terms visible for review');
+    assert_true(str_contains($query_block_content, '"selectedAuthor":75'), 'WordPress query block validator keeps the stale latest posts author visible for review');
+    assert_true(str_contains($query_block_content, '"categories":[83]'), 'WordPress query block validator keeps the stale latest posts category visible for review');
 
     $query_block_audit = cow_merge_audit_report($query_block_metadata, (int)$query_block_result['run_id'], 10, [
         'scope' => 'plugin',
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-query-block-missing-object',
     ]);
-    assert_same(count($query_block_audit['conflicts']), 3, 'WordPress query block validator exposes missing query refs as plugin-scoped audit conflicts');
+    assert_same(count($query_block_audit['conflicts']), 7, 'WordPress query block validator exposes missing query and latest-posts refs as plugin-scoped audit conflicts');
     $query_block_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $query_block_audit['conflicts']));
     assert_true(str_contains($query_block_preview, '"missing_object_id":75'), 'WordPress query block audit includes the missing author ID');
     assert_true(str_contains($query_block_preview, '"missing_object_id":76'), 'WordPress query block audit includes the missing category ID');
     assert_true(str_contains($query_block_preview, '"missing_object_id":78'), 'WordPress query block audit includes the missing tag ID');
+    assert_true(str_contains($query_block_preview, '"missing_object_id":83'), 'WordPress query block audit includes the missing taxQuery category ID');
+    assert_true(str_contains($query_block_preview, '"missing_object_id":85'), 'WordPress query block audit includes the missing taxQuery tag ID');
     assert_true(str_contains($query_block_preview, '"field":"query.author"'), 'WordPress query block audit includes the stale author field');
     assert_true(str_contains($query_block_preview, '"field":"query.categoryIds.0"'), 'WordPress query block audit includes the stale category field');
     assert_true(str_contains($query_block_preview, '"field":"query.tagIds.0"'), 'WordPress query block audit includes the stale tag field');
+    assert_true(str_contains($query_block_preview, '"field":"query.taxQuery.category.0"'), 'WordPress query block audit includes the stale taxQuery category field');
+    assert_true(str_contains($query_block_preview, '"field":"query.taxQuery.post_tag.0"'), 'WordPress query block audit includes the stale taxQuery tag field');
+    assert_true(str_contains($query_block_preview, '"field":"selectedAuthor"'), 'WordPress query block audit includes the stale latest-posts author field');
+    assert_true(str_contains($query_block_preview, '"field":"categories.0"'), 'WordPress query block audit includes the stale latest-posts category field');
     assert_true(
         str_contains($query_block_preview, '"block_name":"core/query"') || str_contains($query_block_preview, '"block_name":"core\/query"'),
         'WordPress query block audit includes the block name'
+    );
+    assert_true(
+        str_contains($query_block_preview, '"block_name":"core/latest-posts"') || str_contains($query_block_preview, '"block_name":"core\/latest-posts"'),
+        'WordPress query block audit includes the latest posts block name'
     );
 
     $term_base_root = $tmp . '/term-ref-base';
@@ -2513,7 +2764,7 @@ PHP);
     write_test_file($option_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
 <?php
 $db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
-$res = $db->query("SELECT option_name, option_value FROM wp_options WHERE option_name LIKE 'theme_mods_%' OR option_name IN ('widget_nav_menu', 'widget_media_image', 'sidebars_widgets', 'site_icon', 'page_on_front', 'page_for_posts', 'sticky_posts')");
+$res = $db->query("SELECT option_name, option_value FROM wp_options WHERE option_name LIKE 'theme_mods_%' OR option_name IN ('widget_nav_menu', 'nav_menu_options', 'widget_media_image', 'widget_media_audio', 'widget_media_video', 'widget_media_gallery', 'widget_pages', 'widget_block', 'widget_text', 'widget_custom_html', 'sidebars_widgets', 'site_icon', 'page_on_front', 'page_for_posts', 'sticky_posts')");
 $findings = [];
 while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
     $option_name = (string)$row['option_name'];
@@ -2693,7 +2944,30 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
             ];
         }
     }
-    if ($option_name === 'widget_media_image') {
+    if ($option_name === 'nav_menu_options') {
+        foreach (($decoded['auto_add'] ?? []) as $index => $term_id) {
+            $term_id = (int)$term_id;
+            $exists = $term_id > 0 ? (int)$db->querySingle("SELECT COUNT(*) FROM wp_terms t JOIN wp_term_taxonomy tt ON tt.term_id = t.term_id AND tt.taxonomy = 'nav_menu' WHERE t.term_id = $term_id") : 1;
+            if ($exists !== 0) {
+                continue;
+            }
+            $findings[] = [
+                'plugin' => 'forkpress-wp-option-refs',
+                'object' => 'option:' . $option_name,
+                'reason' => 'nav menu auto-add option references a missing nav menu',
+                'type' => 'plugin-wp-option-missing-object',
+                'tables' => ['wp_options', 'wp_terms', 'wp_term_taxonomy'],
+                'validator' => 'forkpress-wp-option-refs@1',
+                'candidate' => [
+                    'option_name' => $option_name,
+                    'field' => 'auto_add.' . (string)$index,
+                    'missing_object_id' => $term_id,
+                    'object_type' => 'nav_menu',
+                ],
+            ];
+        }
+    }
+    if (in_array($option_name, ['widget_media_image', 'widget_media_audio', 'widget_media_video'], true)) {
         foreach ($decoded as $widget_id => $widget) {
             if (!is_array($widget) || !isset($widget['attachment_id'])) {
                 continue;
@@ -2717,6 +2991,101 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
                     'object_type' => 'attachment',
                 ],
             ];
+        }
+    }
+    if ($option_name === 'widget_media_gallery') {
+        foreach ($decoded as $widget_id => $widget) {
+            if (!is_array($widget) || !isset($widget['ids'])) {
+                continue;
+            }
+            $ids = is_array($widget['ids']) ? $widget['ids'] : explode(',', (string)$widget['ids']);
+            foreach ($ids as $index => $attachment_id) {
+                $attachment_id = (int)$attachment_id;
+                $exists = $attachment_id > 0 ? (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $attachment_id AND post_type = 'attachment'") : 1;
+                if ($exists !== 0) {
+                    continue;
+                }
+                $findings[] = [
+                    'plugin' => 'forkpress-wp-option-refs',
+                    'object' => 'option:' . $option_name,
+                    'reason' => 'media gallery widget references a missing attachment',
+                    'type' => 'plugin-wp-option-missing-object',
+                    'tables' => ['wp_options', 'wp_posts'],
+                    'validator' => 'forkpress-wp-option-refs@1',
+                    'candidate' => [
+                        'option_name' => $option_name,
+                        'field' => 'widget.' . (string)$widget_id . '.ids.' . (string)$index,
+                        'missing_object_id' => $attachment_id,
+                        'object_type' => 'attachment',
+                    ],
+                ];
+            }
+        }
+    }
+    if ($option_name === 'widget_pages') {
+        foreach ($decoded as $widget_id => $widget) {
+            if (!is_array($widget) || !isset($widget['exclude'])) {
+                continue;
+            }
+            $excluded_ids = is_array($widget['exclude']) ? $widget['exclude'] : explode(',', (string)$widget['exclude']);
+            foreach ($excluded_ids as $index => $page_id) {
+                $page_id = (int)$page_id;
+                $exists = $page_id > 0 ? (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $page_id AND post_type = 'page'") : 1;
+                if ($exists !== 0) {
+                    continue;
+                }
+                $findings[] = [
+                    'plugin' => 'forkpress-wp-option-refs',
+                    'object' => 'option:' . $option_name,
+                    'reason' => 'pages widget references a missing page',
+                    'type' => 'plugin-wp-option-missing-object',
+                    'tables' => ['wp_options', 'wp_posts'],
+                    'validator' => 'forkpress-wp-option-refs@1',
+                    'candidate' => [
+                        'option_name' => $option_name,
+                        'field' => 'widget.' . (string)$widget_id . '.exclude.' . (string)$index,
+                        'missing_object_id' => $page_id,
+                        'object_type' => 'page',
+                    ],
+                ];
+            }
+        }
+    }
+    $block_content_widget_fields = [
+        'widget_block' => 'content',
+        'widget_custom_html' => 'content',
+        'widget_text' => 'text',
+    ];
+    $block_content_field = $block_content_widget_fields[$option_name] ?? null;
+    if ($block_content_field !== null) {
+        foreach ($decoded as $widget_id => $widget) {
+            if (!is_array($widget) || !isset($widget[$block_content_field]) || !is_string($widget[$block_content_field])) {
+                continue;
+            }
+            if (!preg_match_all('/<!--\s+wp:image\s+\{[^}]*"id"\s*:\s*(\d+)/', $widget[$block_content_field], $image_matches)) {
+                continue;
+            }
+            foreach ($image_matches[1] as $image_id) {
+                $attachment_id = (int)$image_id;
+                $exists = $attachment_id > 0 ? (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $attachment_id AND post_type = 'attachment'") : 1;
+                if ($exists !== 0) {
+                    continue;
+                }
+                $findings[] = [
+                    'plugin' => 'forkpress-wp-option-refs',
+                    'object' => 'option:' . $option_name,
+                    'reason' => 'block-content widget references a missing attachment',
+                    'type' => 'plugin-wp-option-missing-object',
+                    'tables' => ['wp_options', 'wp_posts'],
+                    'validator' => 'forkpress-wp-option-refs@1',
+                    'candidate' => [
+                        'option_name' => $option_name,
+                        'field' => 'widget.' . (string)$widget_id . '.' . $block_content_field . '.wp:image.id',
+                        'missing_object_id' => $attachment_id,
+                        'object_type' => 'attachment',
+                    ],
+                ];
+            }
         }
     }
     foreach (($decoded['nav_menu_locations'] ?? []) as $location => $term_id) {
@@ -2756,7 +3125,7 @@ PHP);
     $db->exec('DELETE FROM wp_posts WHERE ID IN (90, 91, 92, 93)');
     $db->exec('DELETE FROM wp_term_taxonomy WHERE term_id = 94');
     $db->exec('DELETE FROM wp_terms WHERE term_id = 94');
-    $db->exec("DELETE FROM wp_options WHERE option_name = 'widget_text'");
+    $db->exec("DELETE FROM wp_options WHERE option_name = 'widget_rss'");
     $db->close();
 
     $db = open_db($option_target);
@@ -2793,7 +3162,7 @@ PHP);
     $stmt->bindValue(':value', $widget_media_target, SQLITE3_TEXT);
     $stmt->execute();
     $sidebars_target = serialize([
-        'sidebar-1' => ['nav_menu-2', 'media_image-3', 'text-4'],
+        'sidebar-1' => ['nav_menu-2', 'media_image-3', 'text-4', 'custom_html-10', 'rss-12'],
         'wp_inactive_widgets' => [],
         'array_version' => 3,
     ]);
@@ -2816,7 +3185,7 @@ PHP);
 
     assert_same($option_result['status'], 'completed_with_conflicts', 'WordPress option reference validator holds missing option objects for review');
     assert_same((int)($option_result['plugin_validators'] ?? 0), 1, 'WordPress option reference validator is discovered from mu-plugins during merge');
-    assert_same((int)($option_result['plugin_validator_conflicts'] ?? 0), 10, 'WordPress option reference validator records missing pages, posts, attachments, nav menus, widgets, and option refs');
+    assert_same((int)($option_result['plugin_validator_conflicts'] ?? 0), 18, 'WordPress option reference validator records missing pages, posts, attachments, nav menus, widgets, and option refs');
     assert_same((int)scalar($option_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID IN (90, 91, 92, 93)'), 0, 'WordPress option reference validator leaves source object deletions staged for review');
     assert_same((int)scalar($option_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 94'), 0, 'WordPress option reference validator leaves source nav menu deletion staged for review');
 
@@ -2834,19 +3203,34 @@ PHP);
     $option_widget_nav = unserialize((string)scalar($option_target, "SELECT option_value FROM wp_options WHERE option_name = 'widget_nav_menu'"));
     assert_same($option_widget_nav[2]['title'] ?? null, 'Target footer menu', 'WordPress option reference validator preserves the target nav widget edit');
     assert_same($option_widget_nav[2]['nav_menu'] ?? null, 94, 'WordPress option reference validator keeps the stale nav widget menu visible for review');
+    $option_nav_menu_options = unserialize((string)scalar($option_target, "SELECT option_value FROM wp_options WHERE option_name = 'nav_menu_options'"));
+    assert_same($option_nav_menu_options['auto_add'][0] ?? null, 94, 'WordPress option reference validator keeps the stale nav menu auto-add option visible for review');
     $option_widget_media = unserialize((string)scalar($option_target, "SELECT option_value FROM wp_options WHERE option_name = 'widget_media_image'"));
     assert_same($option_widget_media[3]['caption'] ?? null, 'Target media image widget', 'WordPress option reference validator preserves the target media widget edit');
     assert_same($option_widget_media[3]['attachment_id'] ?? null, 93, 'WordPress option reference validator keeps the stale media widget attachment visible for review');
-    assert_same(scalar($option_target, "SELECT option_value FROM wp_options WHERE option_name = 'widget_text'"), null, 'WordPress option reference validator leaves the source widget option deletion staged for review');
+    $option_widget_audio = unserialize((string)scalar($option_target, "SELECT option_value FROM wp_options WHERE option_name = 'widget_media_audio'"));
+    assert_same($option_widget_audio[6]['attachment_id'] ?? null, 93, 'WordPress option reference validator keeps the stale media audio widget attachment visible for review');
+    $option_widget_video = unserialize((string)scalar($option_target, "SELECT option_value FROM wp_options WHERE option_name = 'widget_media_video'"));
+    assert_same($option_widget_video[7]['attachment_id'] ?? null, 93, 'WordPress option reference validator keeps the stale media video widget attachment visible for review');
+    $option_widget_gallery = unserialize((string)scalar($option_target, "SELECT option_value FROM wp_options WHERE option_name = 'widget_media_gallery'"));
+    assert_same($option_widget_gallery[8]['ids'][0] ?? null, 93, 'WordPress option reference validator keeps the stale media gallery widget attachment visible for review');
+    $option_widget_pages = unserialize((string)scalar($option_target, "SELECT option_value FROM wp_options WHERE option_name = 'widget_pages'"));
+    assert_same($option_widget_pages[9]['exclude'] ?? null, '90', 'WordPress option reference validator keeps the stale pages widget exclusion visible for review');
+    $option_widget_block = unserialize((string)scalar($option_target, "SELECT option_value FROM wp_options WHERE option_name = 'widget_block'"));
+    assert_true(str_contains((string)($option_widget_block[5]['content'] ?? ''), '"id":93'), 'WordPress option reference validator keeps the stale block widget attachment visible for review');
+    $option_widget_text = unserialize((string)scalar($option_target, "SELECT option_value FROM wp_options WHERE option_name = 'widget_text'"));
+    assert_true(str_contains((string)($option_widget_text[4]['text'] ?? ''), '"id":93'), 'WordPress option reference validator keeps the stale text widget attachment visible for review');
+    $option_widget_custom_html = unserialize((string)scalar($option_target, "SELECT option_value FROM wp_options WHERE option_name = 'widget_custom_html'"));
+    assert_true(str_contains((string)($option_widget_custom_html[10]['content'] ?? ''), '"id":93'), 'WordPress option reference validator keeps the stale custom HTML widget attachment visible for review');
     $option_sidebars = unserialize((string)scalar($option_target, "SELECT option_value FROM wp_options WHERE option_name = 'sidebars_widgets'"));
     assert_same($option_sidebars['sidebar-1'][2] ?? null, 'text-4', 'WordPress option reference validator keeps the stale sidebar widget instance visible for review');
 
-    $option_audit = cow_merge_audit_report($option_metadata, (int)$option_result['run_id'], 10, [
+    $option_audit = cow_merge_audit_report($option_metadata, (int)$option_result['run_id'], 20, [
         'scope' => 'plugin',
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-option-missing-object',
     ]);
-    assert_same(count($option_audit['conflicts']), 10, 'WordPress option reference validator exposes missing option objects as plugin-scoped audit conflicts');
+    assert_same(count($option_audit['conflicts']), 18, 'WordPress option reference validator exposes missing option objects as plugin-scoped audit conflicts');
     $option_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $option_audit['conflicts']));
     foreach (['"missing_object_id":90', '"missing_object_id":91', '"missing_object_id":92', '"missing_object_id":93', '"missing_object_id":94'] as $needle) {
         assert_true(str_contains($option_preview, $needle), 'WordPress option reference audit includes ' . $needle);
@@ -2854,7 +3238,7 @@ PHP);
     foreach (['"object_type":"page"', '"object_type":"post"', '"object_type":"attachment"', '"object_type":"nav_menu"', '"object_type":"widget"'] as $needle) {
         assert_true(str_contains($option_preview, $needle), 'WordPress option reference audit includes ' . $needle);
     }
-    foreach (['theme_mods_forkpress_active', 'widget_nav_menu', 'widget_media_image', 'sidebars_widgets', 'widget_text', 'site_icon', 'page_on_front', 'page_for_posts', 'sticky_posts'] as $needle) {
+    foreach (['theme_mods_forkpress_active', 'widget_nav_menu', 'nav_menu_options', 'widget_media_image', 'widget_media_audio', 'widget_media_video', 'widget_media_gallery', 'widget_pages', 'widget_block', 'widget_text', 'widget_custom_html', 'sidebars_widgets', 'widget_rss', 'site_icon', 'page_on_front', 'page_for_posts', 'sticky_posts'] as $needle) {
         assert_true(str_contains($option_preview, $needle), 'WordPress option reference audit includes ' . $needle);
     }
 

@@ -182,6 +182,27 @@ try {
         2,
         'plain INTEGER PRIMARY KEY plugin tables with implicit inserts are explicitly marked non-bandable for each branch'
     );
+    $plain_ipk_skip_audit = cow_merge_audit_report($metadata, null, 20, [
+        'id_band_skips' => '1',
+    ]);
+    assert_same($plain_ipk_skip_audit['filters']['records'], 'decisions', 'ID-band skip shortcut focuses audit records on decisions');
+    assert_same($plain_ipk_skip_audit['filters']['decision'], 'id-band-skipped', 'ID-band skip shortcut filters skipped plain INTEGER PRIMARY KEY decisions');
+    $skip_tables = array_values(array_unique(array_map(fn($row) => $row['table_name'] ?? '', $plain_ipk_skip_audit['decisions'])));
+    sort($skip_tables);
+    assert_same(
+        $skip_tables,
+        ['plugin_plain_ipk', 'plugin_plain_ipk_implicit'],
+        'ID-band skip audit names each plain INTEGER PRIMARY KEY plugin table'
+    );
+    ob_start();
+    cow_merge_print_audit_text($plain_ipk_skip_audit);
+    $plain_ipk_skip_text = ob_get_clean();
+    assert_true(
+        str_contains($plain_ipk_skip_text, 'id-band-skips') &&
+            str_contains($plain_ipk_skip_text, 'plugin_plain_ipk') &&
+            str_contains($plain_ipk_skip_text, 'plain INTEGER PRIMARY KEY tables do not have a durable sqlite_sequence reservation point'),
+        'ID-band skip text explains why plain plugin INTEGER PRIMARY KEY tables are not banded'
+    );
     assert_same(
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_plain_ipk'"),
         1,

@@ -225,8 +225,15 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
             ],
         ];
     }
-    $file_path = str_replace('\\', '/', (string)$row['file_path']);
-    if ($file_path === '' || str_starts_with($file_path, '/') || str_contains($file_path, '..') || !is_file($target_root . '/' . $file_path)) {
+    $file_path_raw = (string)$row['file_path'];
+    $file_path = str_replace('\\', '/', $file_path_raw);
+    $file_safe = $file_path !== '' &&
+        !str_starts_with($file_path, '/') &&
+        preg_match('/^[A-Za-z][A-Za-z0-9+.-]*:\/\//', $file_path) !== 1 &&
+        preg_match('/^[A-Za-z]:\//', $file_path) !== 1 &&
+        !str_contains($file_path_raw, '\\') &&
+        !in_array('..', explode('/', $file_path), true);
+    if (!$file_safe || !is_file($target_root . '/' . $file_path)) {
         $findings[] = [
             'plugin' => 'forkpress-plugin-graph',
             'object' => 'child:' . $child_id,
@@ -235,9 +242,14 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
             'tables' => ['plugin_graph_child'],
             'paths' => [$file_path],
             'validator' => 'forkpress-plugin-graph@1',
+            'severity' => 'error',
+            'resolution_policy' => 'review-only',
+            'suggested_action' => 'Restore or repair the plugin-owned file reference after review',
+            'manual_review_reason' => 'ForkPress cannot synthesize plugin-owned files from a validator finding',
             'candidate' => [
                 'child_id' => $child_id,
                 'file_path' => $file_path,
+                'file_safe' => $file_safe,
             ],
         ];
     }
@@ -259,6 +271,12 @@ PHP);
     $parent_id = (int)$source_db->lastInsertRowID();
     $source_db->exec("INSERT INTO plugin_graph_child (parent_id, graph_json, file_path) VALUES ($parent_id, '{\"child_id\":9999,\"parent_id\":$parent_id}', 'wp-content/uploads/plugin-validator-missing.dat')");
     $child_id = (int)$source_db->lastInsertRowID();
+    $source_db->exec("INSERT INTO plugin_graph_child (parent_id, graph_json, file_path) VALUES ($parent_id, '{}', 'https://example.test/plugin-validator-url.dat')");
+    $url_child_id = (int)$source_db->lastInsertRowID();
+    $source_db->exec("UPDATE plugin_graph_child SET graph_json = '{\"child_id\":$url_child_id,\"parent_id\":$parent_id}' WHERE child_id = $url_child_id");
+    $source_db->exec("INSERT INTO plugin_graph_child (parent_id, graph_json, file_path) VALUES ($parent_id, '{}', 'C:/plugin-assets/plugin-validator-drive.dat')");
+    $drive_child_id = (int)$source_db->lastInsertRowID();
+    $source_db->exec("UPDATE plugin_graph_child SET graph_json = '{\"child_id\":$drive_child_id,\"parent_id\":$parent_id}' WHERE child_id = $drive_child_id");
     $source_db->close();
 
     $result = cow_merge_branch_state(
@@ -275,7 +293,7 @@ PHP);
 
     assert_same($result['status'], 'completed_with_conflicts', 'plugin validator holds incoherent plugin graph candidates for review');
     assert_same((int)($result['plugin_validators'] ?? 0), 1, 'plugin validator is discovered from mu-plugins during merge');
-    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 2, 'plugin validator records JSON and file graph conflicts');
+    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 4, 'plugin validator records JSON, missing-file, and unsafe-file graph conflicts');
     assert_same(
         scalar($target, "SELECT parent_id FROM plugin_graph_child WHERE child_id = $child_id"),
         $parent_id,
@@ -287,10 +305,114 @@ PHP);
         'scope' => 'plugin',
         'records' => 'conflicts',
     ]);
-    assert_same(count($audit['conflicts']), 2, 'plugin validator conflicts are visible in plugin audit scope');
+    assert_same(count($audit['conflicts']), 4, 'plugin validator conflicts are visible in plugin audit scope');
     $preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $audit['conflicts']));
     assert_true(str_contains($preview, 'plugin-validator-missing.dat'), 'plugin audit exposes missing plugin file context');
+    assert_true(str_contains($preview, 'https://example.test/plugin-validator-url.dat'), 'plugin audit exposes unsafe URL plugin file context');
+    assert_true(str_contains($preview, 'C:/plugin-assets/plugin-validator-drive.dat'), 'plugin audit exposes unsafe drive-letter plugin file context');
     assert_true(str_contains($preview, '"child_id":9999'), 'plugin audit exposes mismatched JSON graph context');
+    $file_audit_conflicts = array_values(array_filter($audit['conflicts'], fn($conflict) => ($conflict['conflict_type'] ?? '') === 'plugin-graph-file-drift'));
+    assert_same(count($file_audit_conflicts), 3, 'plugin audit exposes the file validator conflicts as focused records');
+    $missing_file_audit_conflicts = array_values(array_filter(
+        $file_audit_conflicts,
+        fn(array $conflict): bool => ($conflict['plugin_files'] ?? null) === ['wp-content/uploads/plugin-validator-missing.dat']
+    ));
+    assert_same(count($missing_file_audit_conflicts), 1, 'plugin audit exposes the missing file conflict as a focused record');
+    $missing_file_audit_conflict = $missing_file_audit_conflicts[0];
+    assert_same($missing_file_audit_conflict['plugin'] ?? null, 'forkpress-plugin-graph', 'plugin audit exposes the validator plugin as a first-class field');
+    assert_same($missing_file_audit_conflict['plugin_object'] ?? null, 'child:' . $child_id, 'plugin audit exposes the validator object as a first-class field');
+    assert_same($missing_file_audit_conflict['plugin_validator'] ?? null, 'forkpress-plugin-graph@1', 'plugin audit exposes the validator version as a first-class field');
+    assert_same($missing_file_audit_conflict['plugin_severity'] ?? null, 'error', 'plugin audit exposes validator severity as a first-class field');
+    assert_same($missing_file_audit_conflict['plugin_tables'] ?? null, ['plugin_graph_child'], 'plugin audit exposes plugin-owned tables as structured fields');
+    assert_same($missing_file_audit_conflict['plugin_files'] ?? null, ['wp-content/uploads/plugin-validator-missing.dat'], 'plugin audit normalizes validator paths into structured plugin files');
+    $unsafe_file_paths = [];
+    foreach ($file_audit_conflicts as $conflict) {
+        $payload = cow_merge_decode_payload_json((string)($conflict['chosen_payload'] ?? ''), 'plugin graph file conflict');
+        if (($payload['candidate']['file_safe'] ?? null) === false) {
+            $unsafe_file_paths[] = (string)($payload['candidate']['file_path'] ?? '');
+        }
+    }
+    sort($unsafe_file_paths);
+    assert_same(
+        $unsafe_file_paths,
+        ['C:/plugin-assets/plugin-validator-drive.dat', 'https://example.test/plugin-validator-url.dat'],
+        'plugin audit records URL and drive-letter plugin file references as unsafe'
+    );
+    assert_same($missing_file_audit_conflict['plugin_resolution_policy'] ?? null, 'review-only', 'plugin audit exposes validator review policy as a first-class field');
+    assert_true(
+        str_contains((string)($missing_file_audit_conflict['plugin_manual_review_reason'] ?? ''), 'cannot synthesize plugin-owned files'),
+        'plugin audit exposes validator manual-review guidance as a first-class field'
+    );
+    ob_start();
+    cow_merge_print_audit_text($audit);
+    $plugin_audit_text = ob_get_clean();
+    assert_true(str_contains($plugin_audit_text, 'plugin plugin=forkpress-plugin-graph object=child:' . $child_id), 'plugin text audit exposes validator plugin and object fields');
+    assert_true(str_contains($plugin_audit_text, 'validator=forkpress-plugin-graph@1'), 'plugin text audit exposes validator version');
+    assert_true(str_contains($plugin_audit_text, 'severity=error'), 'plugin text audit exposes validator severity');
+    assert_true(str_contains($plugin_audit_text, 'tables=plugin_graph_child'), 'plugin text audit exposes plugin-owned tables');
+    assert_true(str_contains($plugin_audit_text, 'files=wp-content/uploads/plugin-validator-missing.dat'), 'plugin text audit exposes plugin-owned files');
+    assert_true(str_contains($plugin_audit_text, 'plugin-guidance policy=review-only'), 'plugin text audit exposes validator review policy');
+    assert_true(str_contains($plugin_audit_text, 'manual-review=ForkPress cannot synthesize plugin-owned files'), 'plugin text audit exposes validator manual-review reason');
+    $plugin_filter_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'plugin' => 'forkpress-plugin-graph',
+    ]);
+    assert_same($plugin_filter_audit['filters']['scope'], 'plugin', 'plugin audit filter defaults to plugin scope');
+    assert_same($plugin_filter_audit['filters']['records'], 'conflicts', 'plugin audit filter defaults to conflict records');
+    assert_same(count($plugin_filter_audit['conflicts']), 4, 'plugin audit can filter conflicts by validator plugin');
+    $plugin_object_filter_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'plugin_object' => 'child:' . $child_id,
+    ]);
+    assert_same(count($plugin_object_filter_audit['conflicts']), 2, 'plugin audit can filter conflicts by validator object');
+    $plugin_severity_filter_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'plugin_severity' => 'error',
+    ]);
+    assert_same(count($plugin_severity_filter_audit['conflicts']), 3, 'plugin audit can filter conflicts by validator severity');
+    assert_same($plugin_severity_filter_audit['conflicts'][0]['conflict_type'] ?? null, 'plugin-graph-file-drift', 'plugin severity filter returns the matching validator conflict');
+    $plugin_group_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'group_by' => 'plugin',
+    ]);
+    $plugin_group_counts = [];
+    foreach ($plugin_group_audit['conflict_groups'] as $group) {
+        $plugin_group_counts[(string)$group['group_key']] = (int)$group['conflict_count'];
+    }
+    assert_same($plugin_group_counts['forkpress-plugin-graph'] ?? 0, 4, 'plugin audit can group conflicts by validator plugin');
+    $plugin_object_group_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'group_by' => 'plugin-object',
+    ]);
+    $plugin_object_group_counts = [];
+    foreach ($plugin_object_group_audit['conflict_groups'] as $group) {
+        $plugin_object_group_counts[(string)$group['group_key']] = (int)$group['conflict_count'];
+    }
+    assert_same($plugin_object_group_counts['child:' . $child_id] ?? 0, 2, 'plugin audit can group conflicts by validator object');
+    $plugin_severity_group_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'group_by' => 'plugin-severity',
+    ]);
+    $plugin_severity_group_counts = [];
+    foreach ($plugin_severity_group_audit['conflict_groups'] as $group) {
+        $plugin_severity_group_counts[(string)$group['group_key']] = (int)$group['conflict_count'];
+    }
+    assert_same($plugin_severity_group_counts['error'] ?? 0, 3, 'plugin audit can group conflicts by validator severity');
+    assert_same($plugin_severity_group_counts['(unknown)'] ?? 0, 1, 'plugin audit groups findings without validator severity as unknown');
+    $plugin_group_default_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, ['scope' => 'plugin', 'group_by' => 'plugin']);
+    assert_same($plugin_group_default_audit['filters']['records'], 'conflicts', 'plugin grouping defaults audit records to conflicts');
+    $plugin_object_group_default_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, ['scope' => 'plugin', 'group_by' => 'plugin-object']);
+    assert_same($plugin_object_group_default_audit['filters']['records'], 'conflicts', 'plugin object grouping defaults audit records to conflicts');
+    $plugin_severity_group_default_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, ['scope' => 'plugin', 'group_by' => 'plugin-severity']);
+    assert_same($plugin_severity_group_default_audit['filters']['records'], 'conflicts', 'plugin severity grouping defaults audit records to conflicts');
+    ob_start();
+    cow_merge_print_audit_text($plugin_object_group_audit);
+    $plugin_object_group_text = ob_get_clean();
+    assert_true(str_contains($plugin_object_group_text, 'plugin-object=child:' . $child_id . ' conflicts=2'), 'plugin text audit exposes conflict grouping by validator object');
+    ob_start();
+    cow_merge_print_audit_text($plugin_severity_group_audit);
+    $plugin_group_text = ob_get_clean();
+    assert_true(str_contains($plugin_group_text, 'plugin-severity=error conflicts=3'), 'plugin text audit exposes conflict grouping by validator severity');
 
     $json_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-graph-json-drift' ORDER BY id ASC LIMIT 1");
     assert_true($json_conflict_id > 0, 'plugin validator fixture records a JSON graph conflict for revalidation');
@@ -354,6 +476,28 @@ PHP);
     assert_same($replacement['conflicts'], 1, 'plugin validator rerun records replacement evidence for changed graph findings');
     $replacement_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-graph-json-drift' AND id > $json_conflict_id ORDER BY id DESC LIMIT 1");
     assert_true($replacement_conflict_id > $json_conflict_id, 'plugin validator replacement evidence is stored as a newer conflict');
+    $json_conflict_key = (string)scalar($metadata, "SELECT conflict_key FROM merge_conflicts WHERE id = $json_conflict_id");
+    assert_same(
+        (string)scalar($metadata, "SELECT conflict_key FROM merge_conflicts WHERE id = $replacement_conflict_id"),
+        $json_conflict_key,
+        'plugin validator replacement evidence keeps the same conflict key'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT previous_conflict_id FROM merge_conflicts WHERE id = $replacement_conflict_id"),
+        $json_conflict_id,
+        'plugin validator replacement evidence links to the prior plugin conflict'
+    );
+    $plugin_key_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_key' => $json_conflict_key,
+    ]);
+    assert_same(count($plugin_key_audit['conflicts']), 2, 'plugin conflict-key audit returns original and replacement evidence');
+    assert_same(
+        count(array_unique(array_column($plugin_key_audit['conflicts'], 'conflict_key'))),
+        1,
+        'plugin conflict-key audit stays focused on one logical plugin conflict'
+    );
 
     $revalidated = cow_merge_revalidate_reviewed_conflicts($metadata, (int)$result['run_id'], 'cow-revalidate');
     assert_same($revalidated['reviewed'], 1, 'plugin revalidation still only carries reviewed validator conflicts');
@@ -390,6 +534,30 @@ PHP);
     assert_same($plugin_event_audit['conflict_events'][0]['related_record_type'], 'revalidation', 'plugin revalidation event links to the revalidation record');
     assert_same((int)$plugin_event_audit['conflict_events'][0]['related_record_id'], $plugin_revalidation_id, 'plugin revalidation event exposes the revalidation id');
     assert_same($plugin_event_audit['conflict_events'][0]['lifecycle_state'], 'needs-action', 'plugin revalidation event records the needs-action lifecycle state');
+    assert_same($plugin_event_audit['conflict_events'][0]['plugin'] ?? null, 'forkpress-plugin-graph', 'plugin conflict events expose validator plugin metadata');
+    assert_same($plugin_event_audit['conflict_events'][0]['plugin_object'] ?? null, 'child:' . $child_id, 'plugin conflict events expose validator object metadata');
+    $plugin_filtered_event_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 4, [
+        'records' => 'conflict-events',
+        'plugin_object' => 'child:' . $child_id,
+        'plugin' => 'forkpress-plugin-graph',
+    ]);
+    assert_same($plugin_filtered_event_audit['filters']['scope'], 'plugin', 'plugin event filters default to plugin scope');
+    assert_true(count($plugin_filtered_event_audit['conflict_events']) >= 1, 'plugin audit can filter conflict events by validator object');
+    $plugin_filtered_revalidation_events = array_values(array_filter(
+        $plugin_filtered_event_audit['conflict_events'],
+        fn($event) => ($event['event_type'] ?? null) === 'revalidation-required' && (int)($event['conflict_id'] ?? 0) === $json_conflict_id
+    ));
+    assert_same(count($plugin_filtered_revalidation_events), 1, 'plugin filtered event stream includes the matching validator revalidation event');
+    $plugin_event_group_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'records' => 'conflict-events',
+        'plugin' => 'forkpress-plugin-graph',
+        'group_by' => 'plugin-object',
+    ]);
+    $plugin_event_group_counts = [];
+    foreach ($plugin_event_group_audit['conflict_event_groups'] as $group) {
+        $plugin_event_group_counts[(string)$group['group_key']] = (int)$group['event_count'];
+    }
+    assert_true(($plugin_event_group_counts['child:' . $child_id] ?? 0) >= 1, 'plugin audit can group conflict events by validator object');
 
     $revalidated_again = cow_merge_revalidate_reviewed_conflicts($metadata, (int)$result['run_id'], 'cow-revalidate');
     assert_same($revalidated_again['carried'], 0, 'plugin revalidation does not duplicate carried replacement-evidence notes');
@@ -488,6 +656,7 @@ PHP);
             ],
             'reason' => 'plugin validator logical identity needs review',
             'type' => 'plugin-graph-logical-identity',
+            'severity' => 'warning',
             'tables' => ['plugin_graph_child'],
             'validator' => 'forkpress-plugin-graph@1',
             'candidate' => [
@@ -508,6 +677,50 @@ PHP);
         'child-before-rerun',
         'plugin logical identity is stored as first-class validator evidence'
     );
+    $logical_identity_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-graph-logical-identity',
+    ]);
+    assert_same(count($logical_identity_audit['conflicts']), 1, 'plugin logical identity is visible as a plugin-scoped audit conflict');
+    assert_same(
+        $logical_identity_audit['conflicts'][0]['plugin_logical_identity']['slug'] ?? null,
+        'child-before-rerun',
+        'plugin audit exposes logical identity as a structured field'
+    );
+    $logical_identity_group_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 20, [
+        'scope' => 'plugin',
+        'group_by' => 'plugin-logical-identity',
+    ]);
+    assert_same($logical_identity_group_audit['filters']['records'], 'conflicts', 'plugin logical-identity grouping defaults audit records to conflicts');
+    $logical_identity_group_counts = [];
+    foreach ($logical_identity_group_audit['conflict_groups'] as $group) {
+        $logical_identity_group_counts[(string)$group['group_key']] = (int)$group['conflict_count'];
+    }
+    assert_same(
+        $logical_identity_group_counts['{"kind":"plugin-child","slug":"child-before-rerun"}'] ?? 0,
+        1,
+        'plugin audit can group conflicts by structured logical identity'
+    );
+    $logical_identity_filter_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin_logical_identity' => '{"slug":"child-before-rerun","kind":"plugin-child"}',
+    ]);
+    assert_same(count($logical_identity_filter_audit['conflicts']), 1, 'plugin audit can filter conflicts by structured logical identity');
+    assert_same(
+        $logical_identity_filter_audit['conflicts'][0]['plugin_logical_identity']['slug'] ?? null,
+        'child-before-rerun',
+        'plugin logical-identity filter accepts canonical JSON regardless of object key order'
+    );
+    ob_start();
+    cow_merge_print_audit_text($logical_identity_audit);
+    $logical_identity_text = ob_get_clean();
+    assert_true(str_contains($logical_identity_text, 'plugin-logical-identity={"kind":"plugin-child","slug":"child-before-rerun"}'), 'plugin text audit exposes logical identity evidence');
+    ob_start();
+    cow_merge_print_audit_text($logical_identity_group_audit);
+    $logical_identity_group_text = ob_get_clean();
+    assert_true(str_contains($logical_identity_group_text, 'plugin-logical-identity={"kind":"plugin-child","slug":"child-before-rerun"} conflicts=1'), 'plugin text audit exposes conflict grouping by logical identity');
     cow_merge_review_record(
         $metadata,
         'conflict',
@@ -527,6 +740,7 @@ PHP);
             ],
             'reason' => 'plugin validator logical identity changed after rerun',
             'type' => 'plugin-graph-logical-identity',
+            'severity' => 'warning',
             'tables' => ['plugin_graph_child'],
             'validator' => 'forkpress-plugin-graph@1',
             'candidate' => [
@@ -561,6 +775,131 @@ PHP);
         'child-after-rerun',
         'plugin logical-identity revalidation records the updated validator identity'
     );
+    $logical_identity_event_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'records' => 'conflict-events',
+        'plugin_logical_identity' => '{"slug":"child-before-rerun","kind":"plugin-child"}',
+    ]);
+    $logical_identity_revalidation_events = array_values(array_filter(
+        $logical_identity_event_audit['conflict_events'],
+        fn($event) => ($event['event_type'] ?? null) === 'revalidation-required' && (int)($event['conflict_id'] ?? 0) === $logical_identity_conflict_id
+    ));
+    assert_same(count($logical_identity_revalidation_events), 1, 'plugin logical-identity filter applies to conflict event queues');
+    assert_same(
+        $logical_identity_revalidation_events[0]['plugin_logical_identity']['slug'] ?? null,
+        'child-before-rerun',
+        'plugin logical-identity conflict events expose structured logical identity metadata'
+    );
+    $logical_identity_event_group_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'records' => 'conflict-events',
+        'group_by' => 'plugin-logical-identity',
+    ]);
+    $logical_identity_event_group_counts = [];
+    foreach ($logical_identity_event_group_audit['conflict_event_groups'] as $group) {
+        $logical_identity_event_group_counts[(string)$group['group_key']] = (int)$group['event_count'];
+    }
+    assert_true(($logical_identity_event_group_counts['{"kind":"plugin-child","slug":"child-before-rerun"}'] ?? 0) >= 1, 'plugin audit can group conflict events by logical identity');
+    $resolution_meta = open_db($metadata);
+    cow_merge_record_resolution(
+        $resolution_meta,
+        $logical_identity_conflict_id,
+        'target',
+        false,
+        'reviewed plugin logical identity without applying',
+        'cow-test',
+        $target,
+        '__plugins__',
+        (string)scalar($metadata, "SELECT row_identity FROM merge_conflicts WHERE id = $logical_identity_conflict_id"),
+        '',
+        ['state' => 'target-before-review'],
+        ['state' => 'target-after-review']
+    );
+    $resolution_meta->close();
+    $logical_identity_resolution_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'records' => 'resolutions',
+        'plugin_logical_identity' => '{"slug":"child-before-rerun","kind":"plugin-child"}',
+    ]);
+    assert_true(count($logical_identity_resolution_audit['resolutions']) >= 1, 'plugin logical-identity filter applies to resolution queues');
+    assert_same(
+        $logical_identity_resolution_audit['resolutions'][0]['plugin_logical_identity']['slug'] ?? null,
+        'child-before-rerun',
+        'plugin resolution rows expose structured logical identity metadata from the conflict'
+    );
+    assert_same(
+        $logical_identity_resolution_audit['resolutions'][0]['plugin'] ?? null,
+        'forkpress-plugin-logical-id',
+        'plugin resolution rows expose validator plugin metadata from the conflict'
+    );
+    assert_same(
+        $logical_identity_resolution_audit['resolutions'][0]['plugin_object'] ?? null,
+        'child-slot:' . $child_id,
+        'plugin resolution rows expose validator object metadata from the conflict'
+    );
+    assert_same(
+        $logical_identity_resolution_audit['resolutions'][0]['plugin_severity'] ?? null,
+        'warning',
+        'plugin resolution rows expose validator severity metadata from the conflict'
+    );
+    ob_start();
+    cow_merge_print_audit_text($logical_identity_resolution_audit);
+    $logical_identity_resolution_text = ob_get_clean();
+    assert_true(
+        str_contains($logical_identity_resolution_text, 'plugin plugin=forkpress-plugin-logical-id object=child-slot:' . $child_id) &&
+            str_contains($logical_identity_resolution_text, 'severity=warning') &&
+            str_contains($logical_identity_resolution_text, 'plugin-logical-identity={"kind":"plugin-child","slug":"child-before-rerun"}'),
+        'plugin text audit exposes resolution row plugin metadata'
+    );
+    foreach ([
+        ['plugin' => 'forkpress-plugin-logical-id'],
+        ['plugin_object' => 'child-slot:' . $child_id],
+        ['plugin_severity' => 'warning'],
+    ] as $resolution_filter) {
+        $plugin_resolution_filter_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, array_merge([
+            'records' => 'resolutions',
+        ], $resolution_filter));
+        assert_true(
+            count($plugin_resolution_filter_audit['resolutions']) >= 1,
+            'plugin audit can filter resolution records by ' . array_key_first($resolution_filter)
+        );
+    }
+    $plugin_resolution_status_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'plugin' => 'forkpress-plugin-logical-id',
+        'resolution_status' => 'validated',
+    ]);
+    assert_same(
+        $plugin_resolution_status_audit['filters']['records'],
+        'resolutions',
+        'plugin audit with resolution status defaults to resolution records'
+    );
+    assert_true(
+        count($plugin_resolution_status_audit['resolutions']) >= 1,
+        'plugin audit with resolution status returns plugin resolution records'
+    );
+    foreach ([
+        'plugin' => 'forkpress-plugin-logical-id',
+        'plugin-object' => 'child-slot:' . $child_id,
+        'plugin-severity' => 'warning',
+        'plugin-logical-identity' => '{"kind":"plugin-child","slug":"child-before-rerun"}',
+    ] as $group_by => $expected_group_key) {
+        $plugin_resolution_group_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+            'records' => 'resolutions',
+            'group_by' => $group_by,
+        ]);
+        $plugin_resolution_group_counts = [];
+        foreach ($plugin_resolution_group_audit['resolution_groups'] as $group) {
+            $plugin_resolution_group_counts[(string)$group['group_key']] = (int)$group['resolution_count'];
+        }
+        assert_true(
+            ($plugin_resolution_group_counts[$expected_group_key] ?? 0) >= 1,
+            "plugin audit can group resolution records by $group_by"
+        );
+        ob_start();
+        cow_merge_print_audit_text($plugin_resolution_group_audit);
+        $plugin_resolution_group_text = ob_get_clean();
+        assert_true(
+            str_contains($plugin_resolution_group_text, "$group_by=$expected_group_key resolutions="),
+            "plugin text audit exposes resolution grouping by $group_by"
+        );
+    }
 
     $serialized_base_root = $tmp . '/serialized-base';
     $serialized_source_root = $tmp . '/serialized-source';
@@ -940,6 +1279,285 @@ PHP);
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE row_identity LIKE '%child:malformed%'"),
         0,
         'plugin validator runner does not record malformed findings'
+    );
+
+    $bad_severity_validator = $tmp . '/plugin-validator-bad-severity.php';
+    write_test_file($bad_severity_validator, <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-plugin-graph',
+            'object' => 'child:bad-severity',
+            'reason' => 'malformed finding uses an unsupported severity',
+            'type' => 'plugin-graph-bad-severity',
+            'severity' => 'urgent',
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $bad_severity = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $metadata,
+        '--run', (string)$result['run_id'],
+        '--validator', $bad_severity_validator,
+        '--format', 'json',
+    ]);
+    assert_true($bad_severity['status'] !== 0, 'plugin validator runner rejects malformed finding severity');
+    assert_true(str_contains($bad_severity['output'], 'severity must be info, warning, error, or critical'), 'plugin validator runner explains malformed severity values');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE row_identity LIKE '%child:bad-severity%'"),
+        0,
+        'plugin validator runner does not record findings with malformed severity'
+    );
+
+    $bad_guidance_validator = $tmp . '/plugin-validator-bad-guidance.php';
+    write_test_file($bad_guidance_validator, <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-plugin-graph',
+            'object' => 'child:bad-guidance',
+            'reason' => 'malformed finding uses non-string review guidance',
+            'type' => 'plugin-graph-bad-guidance',
+            'resolution_policy' => ['review-only'],
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $bad_guidance = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $metadata,
+        '--run', (string)$result['run_id'],
+        '--validator', $bad_guidance_validator,
+        '--format', 'json',
+    ]);
+    assert_true($bad_guidance['status'] !== 0, 'plugin validator runner rejects malformed review guidance');
+    assert_true(str_contains($bad_guidance['output'], 'resolution policy must be a string'), 'plugin validator runner explains malformed review guidance');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE row_identity LIKE '%child:bad-guidance%'"),
+        0,
+        'plugin validator runner does not record findings with malformed review guidance'
+    );
+
+    $bad_paths_validator = $tmp . '/plugin-validator-bad-paths.php';
+    write_test_file($bad_paths_validator, <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-plugin-graph',
+            'object' => 'child:bad-paths',
+            'reason' => 'malformed finding uses scalar paths',
+            'type' => 'plugin-graph-bad-paths',
+            'paths' => 'wp-content/uploads/plugin.dat',
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $bad_paths = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $metadata,
+        '--run', (string)$result['run_id'],
+        '--validator', $bad_paths_validator,
+        '--format', 'json',
+    ]);
+    assert_true($bad_paths['status'] !== 0, 'plugin validator runner rejects malformed paths fields');
+    assert_true(str_contains($bad_paths['output'], 'paths must be a list of strings'), 'plugin validator runner explains malformed paths fields');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE row_identity LIKE '%child:bad-paths%'"),
+        0,
+        'plugin validator runner does not record findings with malformed paths'
+    );
+
+    $bad_tables_validator = $tmp . '/plugin-validator-bad-tables.php';
+    write_test_file($bad_tables_validator, <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-plugin-graph',
+            'object' => 'child:bad-tables',
+            'reason' => 'malformed finding uses non-string table entries',
+            'type' => 'plugin-graph-bad-tables',
+            'tables' => [['plugin_graph_child']],
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $bad_tables = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $metadata,
+        '--run', (string)$result['run_id'],
+        '--validator', $bad_tables_validator,
+        '--format', 'json',
+    ]);
+    assert_true($bad_tables['status'] !== 0, 'plugin validator runner rejects malformed table entries');
+    assert_true(str_contains($bad_tables['output'], 'tables entries must be strings'), 'plugin validator runner explains malformed table entries');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE row_identity LIKE '%child:bad-tables%'"),
+        0,
+        'plugin validator runner does not record findings with malformed tables'
+    );
+
+    $bad_validator_identity = $tmp . '/plugin-validator-bad-identity.php';
+    write_test_file($bad_validator_identity, <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-plugin-graph',
+            'object' => 'child:bad-validator-identity',
+            'reason' => 'malformed finding uses a non-string validator identity',
+            'type' => 'plugin-graph-bad-validator-identity',
+            'validator' => ['forkpress-plugin-graph@1'],
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $bad_validator_identity_result = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $metadata,
+        '--run', (string)$result['run_id'],
+        '--validator', $bad_validator_identity,
+        '--format', 'json',
+    ]);
+    assert_true($bad_validator_identity_result['status'] !== 0, 'plugin validator runner rejects malformed validator identity');
+    assert_true(str_contains($bad_validator_identity_result['output'], 'validator identity must be a string'), 'plugin validator runner explains malformed validator identity');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE row_identity LIKE '%child:bad-validator-identity%'"),
+        0,
+        'plugin validator runner does not record findings with malformed validator identity'
+    );
+
+    $empty_validator_identity = $tmp . '/plugin-validator-empty-identity.php';
+    write_test_file($empty_validator_identity, <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-plugin-graph',
+            'object' => 'child:empty-validator-identity',
+            'reason' => 'malformed finding uses empty validator identity',
+            'type' => 'plugin-graph-empty-validator-identity',
+            'validator' => '   ',
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $empty_validator_identity_result = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $metadata,
+        '--run', (string)$result['run_id'],
+        '--validator', $empty_validator_identity,
+        '--format', 'json',
+    ]);
+    assert_true($empty_validator_identity_result['status'] !== 0, 'plugin validator runner rejects empty validator identity');
+    assert_true(str_contains($empty_validator_identity_result['output'], 'validator identity must not be empty'), 'plugin validator runner explains empty validator identity');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE row_identity LIKE '%child:empty-validator-identity%'"),
+        0,
+        'plugin validator runner does not record findings with empty validator identity'
+    );
+
+    $empty_guidance_validator = $tmp . '/plugin-validator-empty-guidance.php';
+    write_test_file($empty_guidance_validator, <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-plugin-graph',
+            'object' => 'child:empty-guidance',
+            'reason' => 'malformed finding uses empty review guidance',
+            'type' => 'plugin-graph-empty-guidance',
+            'manual_review_reason' => '   ',
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $empty_guidance = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $metadata,
+        '--run', (string)$result['run_id'],
+        '--validator', $empty_guidance_validator,
+        '--format', 'json',
+    ]);
+    assert_true($empty_guidance['status'] !== 0, 'plugin validator runner rejects empty review guidance');
+    assert_true(str_contains($empty_guidance['output'], 'manual review reason must not be empty'), 'plugin validator runner explains empty review guidance');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE row_identity LIKE '%child:empty-guidance%'"),
+        0,
+        'plugin validator runner does not record findings with empty review guidance'
+    );
+
+    $empty_logical_identity_validator = $tmp . '/plugin-validator-empty-logical-identity.php';
+    write_test_file($empty_logical_identity_validator, <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-plugin-graph',
+            'object' => 'child:empty-logical-identity',
+            'reason' => 'malformed finding uses empty identity evidence',
+            'type' => 'plugin-graph-empty-logical-identity',
+            'logical_identity' => [],
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $empty_logical_identity = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $metadata,
+        '--run', (string)$result['run_id'],
+        '--validator', $empty_logical_identity_validator,
+        '--format', 'json',
+    ]);
+    assert_true($empty_logical_identity['status'] !== 0, 'plugin validator runner rejects empty logical identity');
+    assert_true(str_contains($empty_logical_identity['output'], 'logical identity must not be empty'), 'plugin validator runner explains empty logical identity');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE row_identity LIKE '%child:empty-logical-identity%'"),
+        0,
+        'plugin validator runner does not record findings with empty logical identity'
+    );
+
+    $null_logical_identity_validator = $tmp . '/plugin-validator-null-logical-identity.php';
+    write_test_file($null_logical_identity_validator, <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-plugin-graph',
+            'object' => 'child:null-logical-identity',
+            'reason' => 'malformed finding uses null identity evidence',
+            'type' => 'plugin-graph-null-logical-identity',
+            'logical_identity' => null,
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $null_logical_identity = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $metadata,
+        '--run', (string)$result['run_id'],
+        '--validator', $null_logical_identity_validator,
+        '--format', 'json',
+    ]);
+    assert_true($null_logical_identity['status'] !== 0, 'plugin validator runner rejects null logical identity');
+    assert_true(str_contains($null_logical_identity['output'], 'logical identity must not be null'), 'plugin validator runner explains null logical identity');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE row_identity LIKE '%child:null-logical-identity%'"),
+        0,
+        'plugin validator runner does not record findings with null logical identity'
     );
 } finally {
     remove_tree($tmp);

@@ -1898,6 +1898,131 @@ try {
     assert_same(scalar($unique_target, "SELECT value FROM plugin_unique_rows WHERE slug = 'shared-slug'"), 'source row', 'source unique collision resolution replaces the target row payload');
     assert_same((int)scalar($unique_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $unique_conflict_id AND table_name = 'plugin_unique_rows' AND choice = 'source' AND applied = 1"), 1, 'source unique collision resolution is auditable');
 
+    $unique_fk_base = $tmp . '/unique-fk-base.sqlite';
+    $unique_fk_source = $tmp . '/unique-fk-source.sqlite';
+    $unique_fk_target = $tmp . '/unique-fk-target.sqlite';
+    $unique_fk_metadata = $tmp . '/.forkpress/cow/merge/unique-fk-metadata.sqlite';
+    create_base_db($unique_fk_base);
+    copy($unique_fk_base, $unique_fk_source);
+    copy($unique_fk_base, $unique_fk_target);
+    foreach ([$unique_fk_base, $unique_fk_source, $unique_fk_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_unique_fk_rows (id INTEGER PRIMARY KEY, slug TEXT UNIQUE, value TEXT)');
+        $db->exec('CREATE TABLE plugin_unique_fk_children (id INTEGER PRIMARY KEY, row_id INTEGER NOT NULL REFERENCES plugin_unique_fk_rows(id), label TEXT)');
+        $db->close();
+    }
+    $db = open_db($unique_fk_source);
+    $db->exec("INSERT INTO plugin_unique_fk_rows (id, slug, value) VALUES (100, 'shared-fk-slug', 'source FK row')");
+    $db->close();
+    $db = open_db($unique_fk_target);
+    $db->exec("INSERT INTO plugin_unique_fk_rows (id, slug, value) VALUES (200, 'shared-fk-slug', 'target FK row')");
+    $db->exec("INSERT INTO plugin_unique_fk_children (id, row_id, label) VALUES (1, 200, 'target child')");
+    $db->close();
+    $unique_fk_result = cow_merge_databases($unique_fk_base, $unique_fk_source, $unique_fk_target, $unique_fk_metadata, 'feature-unique-fk', 'main');
+    assert_same($unique_fk_result['status'], 'completed_with_conflicts', 'unique collision with target FK children is held for review');
+    assert_same((int)scalar($unique_fk_target, "SELECT id FROM plugin_unique_fk_rows WHERE slug = 'shared-fk-slug'"), 200, 'target unique FK row wins before review');
+    $unique_fk_conflict_id = (int)scalar($unique_fk_metadata, "SELECT c.id FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_unique_fk_rows' AND c.conflict_type = 'row-unique-collision' AND r.source_branch = 'feature-unique-fk' ORDER BY c.id DESC LIMIT 1");
+    $unique_fk_audit = cow_merge_audit_report($unique_fk_metadata, (int)$unique_fk_result['run_id'], 10, ['records' => 'conflicts']);
+    $unique_fk_audit_rows = [];
+    foreach ($unique_fk_audit['conflicts'] as $row) {
+        $unique_fk_audit_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $unique_fk_audit_rows[$unique_fk_conflict_id]['resolution_choices'],
+        ['target'],
+        'unique collision audit does not advertise source while target FK children block collision removal'
+    );
+    assert_true(
+        str_contains((string)($unique_fk_audit_rows[$unique_fk_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'referenced by plugin_unique_fk_children(row_id)'),
+        'unique collision audit explains the target FK child blocker'
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($unique_fk_metadata, $unique_fk_conflict_id, 'source', true, 'Try unique source before child review.', 'cow-test'),
+        'resolution choice source is blocked',
+        'source unique collision resolution is blocked before deleting a target row with FK children'
+    );
+    $unique_fk_blocked_event_audit = cow_merge_audit_report($unique_fk_metadata, (int)$unique_fk_result['run_id'], 10, [
+        'records' => 'conflict-events',
+        'event_type' => 'resolution-blocked',
+    ]);
+    assert_same(count($unique_fk_blocked_event_audit['conflict_events']), 1, 'blocked source resolution attempts are recorded as conflict events');
+    assert_same((int)$unique_fk_blocked_event_audit['conflict_events'][0]['conflict_id'], $unique_fk_conflict_id, 'blocked resolution event belongs to the attempted conflict');
+    assert_same($unique_fk_blocked_event_audit['conflict_events'][0]['lifecycle_state'], 'needs-action', 'blocked resolution events move conflicts into the needs-action lifecycle');
+    assert_true(str_contains((string)$unique_fk_blocked_event_audit['conflict_events'][0]['note'], 'Resolution blocked:'), 'blocked resolution event preserves the failure reason');
+    $unique_fk_blocked_queue_audit = cow_merge_audit_report($unique_fk_metadata, (int)$unique_fk_result['run_id'], 10, [
+        'records' => 'conflicts',
+        'lifecycle_state' => 'needs-action',
+        'conflict_id' => (string)$unique_fk_conflict_id,
+    ]);
+    assert_same(count($unique_fk_blocked_queue_audit['conflicts']), 1, 'blocked resolution conflicts are discoverable through the needs-action queue');
+    assert_same($unique_fk_blocked_queue_audit['conflicts'][0]['next_action'], 'manual-review', 'blocked resolution conflicts require manual review before another resolver attempt');
+    $unique_fk_blocked_action_audit = cow_merge_audit_report($unique_fk_metadata, (int)$unique_fk_result['run_id'], 10, [
+        'records' => 'conflicts',
+        'next_action' => 'manual-review',
+        'conflict_id' => (string)$unique_fk_conflict_id,
+    ]);
+    assert_same(count($unique_fk_blocked_action_audit['conflicts']), 1, 'blocked resolution conflicts are discoverable through the manual-review action queue');
+    $unique_fk_blocked_queue_cli = run_merge_cli([
+        'audit',
+        '--metadata-db', $unique_fk_metadata,
+        '--run', (string)$unique_fk_result['run_id'],
+        '--records=conflicts',
+        '--lifecycle-state=needs-action',
+        '--next-action=manual-review',
+        '--conflict-id', (string)$unique_fk_conflict_id,
+        '--format=json',
+    ]);
+    assert_same($unique_fk_blocked_queue_cli['status'], 0, 'blocked resolution queue audit CLI exits successfully');
+    $unique_fk_blocked_queue_cli_json = json_decode($unique_fk_blocked_queue_cli['output'], true);
+    assert_true(is_array($unique_fk_blocked_queue_cli_json), 'blocked resolution queue audit CLI emits JSON');
+    assert_same($unique_fk_blocked_queue_cli_json['filters']['lifecycle_state'] ?? null, 'needs-action', 'blocked resolution queue audit CLI preserves lifecycle filter');
+    assert_same($unique_fk_blocked_queue_cli_json['filters']['next_action'] ?? null, 'manual-review', 'blocked resolution queue audit CLI preserves next-action filter');
+    assert_same(count($unique_fk_blocked_queue_cli_json['conflicts'] ?? []), 1, 'blocked resolution queue audit CLI returns the blocked conflict');
+    $unique_fk_blocked_lifecycle_groups = cow_merge_audit_report($unique_fk_metadata, (int)$unique_fk_result['run_id'], 10, [
+        'records' => 'conflicts',
+        'group_by' => 'lifecycle',
+    ]);
+    assert_true(
+        in_array('needs-action', array_column($unique_fk_blocked_lifecycle_groups['conflict_groups'], 'group_key'), true),
+        'blocked resolution conflicts are counted in lifecycle groups'
+    );
+    $unique_fk_blocked_event_cli = run_merge_cli([
+        'audit',
+        '--metadata-db', $unique_fk_metadata,
+        '--run', (string)$unique_fk_result['run_id'],
+        '--records=conflict-events',
+        '--event-type=resolution-blocked',
+        '--format=json',
+    ]);
+    assert_same($unique_fk_blocked_event_cli['status'], 0, 'resolution-blocked event audit CLI exits successfully');
+    $unique_fk_blocked_event_cli_json = json_decode($unique_fk_blocked_event_cli['output'], true);
+    assert_true(is_array($unique_fk_blocked_event_cli_json), 'resolution-blocked event audit CLI emits JSON');
+    assert_same($unique_fk_blocked_event_cli_json['filters']['event_type'] ?? null, 'resolution-blocked', 'resolution-blocked event audit CLI preserves the event filter');
+    assert_same(count($unique_fk_blocked_event_cli_json['conflict_events'] ?? []), 1, 'resolution-blocked event audit CLI returns the blocked resolution event');
+    $db = open_db($unique_fk_target);
+    $db->exec('DELETE FROM plugin_unique_fk_children WHERE row_id = 200');
+    $db->close();
+    $unique_fk_unblocked_audit = cow_merge_audit_report($unique_fk_metadata, (int)$unique_fk_result['run_id'], 10, ['records' => 'conflicts']);
+    $unique_fk_unblocked_rows = [];
+    foreach ($unique_fk_unblocked_audit['conflicts'] as $row) {
+        $unique_fk_unblocked_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $unique_fk_unblocked_rows[$unique_fk_conflict_id]['resolution_choices'],
+        ['source', 'target'],
+        'unique collision audit advertises source after target FK children are reviewed away'
+    );
+    $unique_fk_source_resolution = cow_merge_resolve_conflict(
+        $unique_fk_metadata,
+        $unique_fk_conflict_id,
+        'source',
+        true,
+        'Apply unique source row after child review.',
+        'cow-test'
+    );
+    assert_same($unique_fk_source_resolution['status'], 'applied', 'source unique collision resolution applies after target FK children are gone');
+    assert_same((int)scalar($unique_fk_target, "SELECT id FROM plugin_unique_fk_rows WHERE slug = 'shared-fk-slug'"), 100, 'source unique collision replaces the target row after FK child review');
+
     $partial_unique_base = $tmp . '/partial-unique-base.sqlite';
     $partial_unique_source = $tmp . '/partial-unique-source.sqlite';
     $partial_unique_target = $tmp . '/partial-unique-target.sqlite';
@@ -2147,6 +2272,38 @@ try {
         'target-side constraint insert collision records an auditable target-wins decision'
     );
     $constraint_insert_conflict_id = (int)scalar($constraint_insert_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_constraint_inserts' AND conflict_type = 'row-target-constraint' ORDER BY id DESC LIMIT 1");
+    $constraint_insert_audit = cow_merge_audit_report($constraint_insert_metadata, (int)$constraint_insert_result['run_id'], 10, ['records' => 'conflicts']);
+    $constraint_insert_audit_rows = [];
+    foreach ($constraint_insert_audit['conflicts'] as $row) {
+        $constraint_insert_audit_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $constraint_insert_audit_rows[$constraint_insert_conflict_id]['resolution_choices'],
+        ['target'],
+        'target-side check constraint audit does not advertise source as executable'
+    );
+    assert_true(
+        str_contains((string)($constraint_insert_audit_rows[$constraint_insert_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'CHECK constraint failed'),
+        'target-side check constraint audit explains the blocked source choice'
+    );
+    $constraint_insert_source_choice_audit = cow_merge_audit_report($constraint_insert_metadata, (int)$constraint_insert_result['run_id'], 10, [
+        'records' => 'conflicts',
+        'resolution_choice' => 'source',
+    ]);
+    $constraint_insert_source_choice_ids = array_map(static fn(array $row): int => (int)$row['id'], $constraint_insert_source_choice_audit['conflicts']);
+    assert_true(
+        !in_array($constraint_insert_conflict_id, $constraint_insert_source_choice_ids, true),
+        'resolution-choice source filter omits target-side check constraint conflicts'
+    );
+    $constraint_insert_blocked_source_audit = cow_merge_audit_report($constraint_insert_metadata, (int)$constraint_insert_result['run_id'], 10, [
+        'records' => 'conflicts',
+        'blocked_resolution_choice' => 'source',
+    ]);
+    $constraint_insert_blocked_source_ids = array_map(static fn(array $row): int => (int)$row['id'], $constraint_insert_blocked_source_audit['conflicts']);
+    assert_true(
+        in_array($constraint_insert_conflict_id, $constraint_insert_blocked_source_ids, true),
+        'blocked-resolution-choice source filter returns target-side check constraint conflicts'
+    );
     $constraint_insert_target_resolution = cow_merge_resolve_conflict(
         $constraint_insert_metadata,
         $constraint_insert_conflict_id,
@@ -2198,6 +2355,21 @@ try {
         1,
         'target-side constraint update collision records an auditable target-wins decision'
     );
+    $constraint_update_conflict_id = (int)scalar($constraint_update_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_constraint_updates' AND conflict_type = 'row-target-constraint' ORDER BY id DESC LIMIT 1");
+    $constraint_update_audit = cow_merge_audit_report($constraint_update_metadata, (int)$constraint_update_result['run_id'], 10, ['records' => 'conflicts']);
+    $constraint_update_audit_rows = [];
+    foreach ($constraint_update_audit['conflicts'] as $row) {
+        $constraint_update_audit_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $constraint_update_audit_rows[$constraint_update_conflict_id]['resolution_choices'],
+        ['target'],
+        'target-side check update audit does not advertise source as executable'
+    );
+    assert_true(
+        str_contains((string)($constraint_update_audit_rows[$constraint_update_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'CHECK constraint failed'),
+        'target-side check update audit explains the blocked source choice'
+    );
 
     $trigger_insert_base = $tmp . '/trigger-insert-base.sqlite';
     $trigger_insert_source = $tmp . '/trigger-insert-source.sqlite';
@@ -2237,6 +2409,20 @@ SQL);
         'trigger-mutated source insert records an auditable target-wins decision'
     );
     $trigger_insert_conflict_id = (int)scalar($trigger_insert_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_trigger_insert_rows' AND conflict_type = 'row-target-constraint' ORDER BY id DESC LIMIT 1");
+    $trigger_insert_audit = cow_merge_audit_report($trigger_insert_metadata, (int)$trigger_insert_result['run_id'], 10, ['records' => 'conflicts']);
+    $trigger_insert_audit_rows = [];
+    foreach ($trigger_insert_audit['conflicts'] as $row) {
+        $trigger_insert_audit_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $trigger_insert_audit_rows[$trigger_insert_conflict_id]['resolution_choices'],
+        ['target'],
+        'target trigger rewrite audit does not advertise source as executable'
+    );
+    assert_true(
+        str_contains((string)($trigger_insert_audit_rows[$trigger_insert_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'target triggers changed the applied source row'),
+        'target trigger rewrite audit explains the blocked source choice'
+    );
     assert_throws(
         fn() => cow_merge_resolve_conflict($trigger_insert_metadata, $trigger_insert_conflict_id, 'source', true, 'Try trigger-mutated source insert.', 'cow-test'),
         'target triggers changed the applied source row',
@@ -2285,6 +2471,20 @@ SQL);
         'trigger-mutated source update records an auditable target-wins decision'
     );
     $trigger_update_conflict_id = (int)scalar($trigger_update_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_trigger_update_rows' AND conflict_type = 'row-target-constraint' ORDER BY id DESC LIMIT 1");
+    $trigger_update_audit = cow_merge_audit_report($trigger_update_metadata, (int)$trigger_update_result['run_id'], 10, ['records' => 'conflicts']);
+    $trigger_update_audit_rows = [];
+    foreach ($trigger_update_audit['conflicts'] as $row) {
+        $trigger_update_audit_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $trigger_update_audit_rows[$trigger_update_conflict_id]['resolution_choices'],
+        ['target'],
+        'target trigger update audit does not advertise source as executable'
+    );
+    assert_true(
+        str_contains((string)($trigger_update_audit_rows[$trigger_update_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'target triggers changed the applied source row'),
+        'target trigger update audit explains the blocked source choice'
+    );
     assert_throws(
         fn() => cow_merge_resolve_conflict($trigger_update_metadata, $trigger_update_conflict_id, 'source', true, 'Try trigger-mutated source update.', 'cow-test'),
         'target triggers changed the applied source row',
@@ -2434,6 +2634,328 @@ SQL);
         1,
         'foreign-key update violation is recorded as a row target constraint conflict'
     );
+    $fk_update_conflict_id = (int)scalar($fk_update_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_fk_update_children' AND conflict_type = 'row-target-constraint' ORDER BY id DESC LIMIT 1");
+    $fk_update_audit = cow_merge_audit_report($fk_update_metadata, (int)$fk_update_result['run_id'], 10, ['records' => 'conflicts']);
+    $fk_update_audit_rows = [];
+    foreach ($fk_update_audit['conflicts'] as $row) {
+        $fk_update_audit_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $fk_update_audit_rows[$fk_update_conflict_id]['resolution_choices'],
+        ['target'],
+        'foreign-key update audit does not advertise source while the target parent is missing'
+    );
+    assert_true(
+        str_contains((string)($fk_update_audit_rows[$fk_update_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'referencing plugin_fk_update_parents(id)'),
+        'foreign-key update audit explains the missing target parent'
+    );
+    ob_start();
+    cow_merge_print_audit_text($fk_update_audit);
+    $fk_update_audit_text = (string)ob_get_clean();
+    assert_true(
+        str_contains($fk_update_audit_text, 'blocked-choice=source reason=source row resolution is blocked by current target foreign-key state'),
+        'text audit prints blocked source choice for foreign-key updates'
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($fk_update_metadata, $fk_update_conflict_id, 'source', true, 'Try reparent before target parent exists.', 'cow-test'),
+        'resolution choice source is blocked',
+        'source resolution for a foreign-key update is blocked before mutation while the target parent is missing'
+    );
+    $db = open_db($fk_update_target);
+    $db->exec("INSERT INTO plugin_fk_update_parents (id, label) VALUES (999, 'target parent for reviewed source update')");
+    $db->close();
+    $fk_update_unblocked_audit = cow_merge_audit_report($fk_update_metadata, (int)$fk_update_result['run_id'], 10, ['records' => 'conflicts']);
+    $fk_update_unblocked_rows = [];
+    foreach ($fk_update_unblocked_audit['conflicts'] as $row) {
+        $fk_update_unblocked_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $fk_update_unblocked_rows[$fk_update_conflict_id]['resolution_choices'],
+        ['source', 'target'],
+        'foreign-key update audit advertises source after the target parent is restored'
+    );
+    $fk_update_source_resolution = cow_merge_resolve_conflict(
+        $fk_update_metadata,
+        $fk_update_conflict_id,
+        'source',
+        true,
+        'Apply source reparent after target parent review.',
+        'cow-test'
+    );
+    assert_same($fk_update_source_resolution['status'], 'applied', 'source foreign-key update resolution applies after the target parent exists');
+    assert_same((int)scalar($fk_update_target, 'SELECT parent_id FROM plugin_fk_update_children WHERE id = 20'), 999, 'source foreign-key update resolution reparents the child row');
+
+    $fk_cell_base = $tmp . '/fk-cell-base.sqlite';
+    $fk_cell_source = $tmp . '/fk-cell-source.sqlite';
+    $fk_cell_target = $tmp . '/fk-cell-target.sqlite';
+    $fk_cell_metadata = $tmp . '/.forkpress/cow/merge/fk-cell-metadata.sqlite';
+    create_base_db($fk_cell_base);
+    copy($fk_cell_base, $fk_cell_source);
+    copy($fk_cell_base, $fk_cell_target);
+    foreach ([$fk_cell_base, $fk_cell_source, $fk_cell_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_fk_cell_parents (id INTEGER PRIMARY KEY, label TEXT)');
+        $db->exec('CREATE TABLE plugin_fk_cell_children (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES plugin_fk_cell_parents(id), label TEXT)');
+        $db->exec("INSERT INTO plugin_fk_cell_parents (id, label) VALUES (1, 'base parent')");
+        $db->exec("INSERT INTO plugin_fk_cell_parents (id, label) VALUES (2, 'target parent')");
+        $db->exec("INSERT INTO plugin_fk_cell_children (id, parent_id, label) VALUES (20, 1, 'base child')");
+        $db->close();
+    }
+    $db = open_db($fk_cell_source);
+    $db->exec('UPDATE plugin_fk_cell_children SET parent_id = 999 WHERE id = 20');
+    $db->close();
+    $db = open_db($fk_cell_target);
+    $db->exec('UPDATE plugin_fk_cell_children SET parent_id = 2 WHERE id = 20');
+    $db->close();
+    $fk_cell_result = cow_merge_databases($fk_cell_base, $fk_cell_source, $fk_cell_target, $fk_cell_metadata, 'feature-fk-cell', 'main');
+    assert_same($fk_cell_result['status'], 'completed_with_conflicts', 'same-cell foreign-key reparent conflict is held for review');
+    assert_same((int)scalar($fk_cell_target, 'SELECT parent_id FROM plugin_fk_cell_children WHERE id = 20'), 2, 'same-cell foreign-key target value wins before review');
+    $fk_cell_conflict_id = (int)scalar($fk_cell_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_fk_cell_children' AND column_name = 'parent_id' AND conflict_type = 'cell-conflict' ORDER BY id DESC LIMIT 1");
+    $fk_cell_audit = cow_merge_audit_report($fk_cell_metadata, (int)$fk_cell_result['run_id'], 10, ['records' => 'conflicts']);
+    $fk_cell_audit_rows = [];
+    foreach ($fk_cell_audit['conflicts'] as $row) {
+        $fk_cell_audit_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $fk_cell_audit_rows[$fk_cell_conflict_id]['resolution_choices'],
+        ['target'],
+        'foreign-key cell audit does not advertise source while the target parent is missing'
+    );
+    assert_true(
+        str_contains((string)($fk_cell_audit_rows[$fk_cell_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'referencing plugin_fk_cell_parents(id)'),
+        'foreign-key cell audit explains the missing target parent'
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($fk_cell_metadata, $fk_cell_conflict_id, 'source', true, 'Try cell reparent before target parent exists.', 'cow-test'),
+        'resolution choice source is blocked',
+        'source resolution for a foreign-key cell conflict is blocked before mutation while the target parent is missing'
+    );
+    $db = open_db($fk_cell_target);
+    $db->exec("INSERT INTO plugin_fk_cell_parents (id, label) VALUES (999, 'target parent for reviewed source cell')");
+    $db->close();
+    $fk_cell_unblocked_audit = cow_merge_audit_report($fk_cell_metadata, (int)$fk_cell_result['run_id'], 10, ['records' => 'conflicts']);
+    $fk_cell_unblocked_rows = [];
+    foreach ($fk_cell_unblocked_audit['conflicts'] as $row) {
+        $fk_cell_unblocked_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $fk_cell_unblocked_rows[$fk_cell_conflict_id]['resolution_choices'],
+        ['source', 'target'],
+        'foreign-key cell audit advertises source after the target parent is restored'
+    );
+    $fk_cell_source_resolution = cow_merge_resolve_conflict(
+        $fk_cell_metadata,
+        $fk_cell_conflict_id,
+        'source',
+        true,
+        'Apply source cell reparent after target parent review.',
+        'cow-test'
+    );
+    assert_same($fk_cell_source_resolution['status'], 'applied', 'source foreign-key cell resolution applies after the target parent exists');
+    assert_same((int)scalar($fk_cell_target, 'SELECT parent_id FROM plugin_fk_cell_children WHERE id = 20'), 999, 'source foreign-key cell resolution reparents the child row');
+
+    $fk_insert_collision_base = $tmp . '/fk-insert-collision-base.sqlite';
+    $fk_insert_collision_source = $tmp . '/fk-insert-collision-source.sqlite';
+    $fk_insert_collision_target = $tmp . '/fk-insert-collision-target.sqlite';
+    $fk_insert_collision_metadata = $tmp . '/.forkpress/cow/merge/fk-insert-collision-metadata.sqlite';
+    create_base_db($fk_insert_collision_base);
+    copy($fk_insert_collision_base, $fk_insert_collision_source);
+    copy($fk_insert_collision_base, $fk_insert_collision_target);
+    foreach ([$fk_insert_collision_base, $fk_insert_collision_source, $fk_insert_collision_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_fk_insert_collision_parents (id INTEGER PRIMARY KEY, label TEXT)');
+        $db->exec('CREATE TABLE plugin_fk_insert_collision_children (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES plugin_fk_insert_collision_parents(id), label TEXT)');
+        $db->close();
+    }
+    $db = open_db($fk_insert_collision_source);
+    $db->exec("INSERT INTO plugin_fk_insert_collision_children (id, parent_id, label) VALUES (20, 999, 'source child collision')");
+    $db->close();
+    $db = open_db($fk_insert_collision_target);
+    $db->exec("INSERT INTO plugin_fk_insert_collision_parents (id, label) VALUES (1, 'target parent')");
+    $db->exec("INSERT INTO plugin_fk_insert_collision_children (id, parent_id, label) VALUES (20, 1, 'target child collision')");
+    $db->close();
+    $fk_insert_collision_result = cow_merge_databases($fk_insert_collision_base, $fk_insert_collision_source, $fk_insert_collision_target, $fk_insert_collision_metadata, 'feature-fk-insert-collision', 'main');
+    assert_same($fk_insert_collision_result['status'], 'completed_with_conflicts', 'same-primary-key foreign-key insert collision is held for review');
+    assert_same((int)scalar($fk_insert_collision_target, 'SELECT parent_id FROM plugin_fk_insert_collision_children WHERE id = 20'), 1, 'target child collision wins before review');
+    $fk_insert_collision_conflict_id = (int)scalar($fk_insert_collision_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_fk_insert_collision_children' AND conflict_type = 'row-insert-collision' ORDER BY id DESC LIMIT 1");
+    $fk_insert_collision_audit = cow_merge_audit_report($fk_insert_collision_metadata, (int)$fk_insert_collision_result['run_id'], 10, ['records' => 'conflicts']);
+    $fk_insert_collision_audit_rows = [];
+    foreach ($fk_insert_collision_audit['conflicts'] as $row) {
+        $fk_insert_collision_audit_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $fk_insert_collision_audit_rows[$fk_insert_collision_conflict_id]['resolution_choices'],
+        ['target'],
+        'foreign-key row insert collision audit does not advertise source while the target parent is missing'
+    );
+    assert_true(
+        str_contains((string)($fk_insert_collision_audit_rows[$fk_insert_collision_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'referencing plugin_fk_insert_collision_parents(id)'),
+        'foreign-key row insert collision audit explains the missing target parent'
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($fk_insert_collision_metadata, $fk_insert_collision_conflict_id, 'source', true, 'Try insert collision reparent before target parent exists.', 'cow-test'),
+        'resolution choice source is blocked',
+        'source resolution for a foreign-key row insert collision is blocked before mutation while the target parent is missing'
+    );
+    $db = open_db($fk_insert_collision_target);
+    $db->exec("INSERT INTO plugin_fk_insert_collision_parents (id, label) VALUES (999, 'target parent for insert collision review')");
+    $db->close();
+    $fk_insert_collision_unblocked_audit = cow_merge_audit_report($fk_insert_collision_metadata, (int)$fk_insert_collision_result['run_id'], 10, ['records' => 'conflicts']);
+    $fk_insert_collision_unblocked_rows = [];
+    foreach ($fk_insert_collision_unblocked_audit['conflicts'] as $row) {
+        $fk_insert_collision_unblocked_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $fk_insert_collision_unblocked_rows[$fk_insert_collision_conflict_id]['resolution_choices'],
+        ['source', 'target'],
+        'foreign-key row insert collision audit advertises source after the target parent is restored'
+    );
+    $fk_insert_collision_source_resolution = cow_merge_resolve_conflict(
+        $fk_insert_collision_metadata,
+        $fk_insert_collision_conflict_id,
+        'source',
+        true,
+        'Apply source insert collision after target parent review.',
+        'cow-test'
+    );
+    assert_same($fk_insert_collision_source_resolution['status'], 'applied', 'source foreign-key row insert collision resolution applies after the target parent exists');
+    assert_same((int)scalar($fk_insert_collision_target, 'SELECT parent_id FROM plugin_fk_insert_collision_children WHERE id = 20'), 999, 'source foreign-key row insert collision resolution reparents the child row');
+
+    $fk_target_deleted_base = $tmp . '/fk-target-deleted-base.sqlite';
+    $fk_target_deleted_source = $tmp . '/fk-target-deleted-source.sqlite';
+    $fk_target_deleted_target = $tmp . '/fk-target-deleted-target.sqlite';
+    $fk_target_deleted_metadata = $tmp . '/.forkpress/cow/merge/fk-target-deleted-metadata.sqlite';
+    create_base_db($fk_target_deleted_base);
+    copy($fk_target_deleted_base, $fk_target_deleted_source);
+    copy($fk_target_deleted_base, $fk_target_deleted_target);
+    foreach ([$fk_target_deleted_base, $fk_target_deleted_source, $fk_target_deleted_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_fk_target_deleted_parents (id INTEGER PRIMARY KEY, label TEXT)');
+        $db->exec('CREATE TABLE plugin_fk_target_deleted_children (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES plugin_fk_target_deleted_parents(id), label TEXT)');
+        $db->exec("INSERT INTO plugin_fk_target_deleted_parents (id, label) VALUES (1, 'base parent')");
+        $db->exec("INSERT INTO plugin_fk_target_deleted_children (id, parent_id, label) VALUES (20, 1, 'base child')");
+        $db->close();
+    }
+    $db = open_db($fk_target_deleted_source);
+    $db->exec("UPDATE plugin_fk_target_deleted_children SET parent_id = 999, label = 'source restore child' WHERE id = 20");
+    $db->close();
+    $db = open_db($fk_target_deleted_target);
+    $db->exec('DELETE FROM plugin_fk_target_deleted_children WHERE id = 20');
+    $db->close();
+    $fk_target_deleted_result = cow_merge_databases($fk_target_deleted_base, $fk_target_deleted_source, $fk_target_deleted_target, $fk_target_deleted_metadata, 'feature-fk-target-deleted', 'main');
+    assert_same($fk_target_deleted_result['status'], 'completed_with_conflicts', 'foreign-key target-deleted row restore is held for review');
+    assert_same((int)scalar($fk_target_deleted_target, 'SELECT COUNT(*) FROM plugin_fk_target_deleted_children WHERE id = 20'), 0, 'target deletion wins before FK row restore review');
+    $fk_target_deleted_conflict_id = (int)scalar($fk_target_deleted_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_fk_target_deleted_children' AND conflict_type = 'row-target-deleted' ORDER BY id DESC LIMIT 1");
+    $fk_target_deleted_audit = cow_merge_audit_report($fk_target_deleted_metadata, (int)$fk_target_deleted_result['run_id'], 10, ['records' => 'conflicts']);
+    $fk_target_deleted_audit_rows = [];
+    foreach ($fk_target_deleted_audit['conflicts'] as $row) {
+        $fk_target_deleted_audit_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $fk_target_deleted_audit_rows[$fk_target_deleted_conflict_id]['resolution_choices'],
+        ['target'],
+        'foreign-key target-deleted row audit does not advertise source while the target parent is missing'
+    );
+    assert_true(
+        str_contains((string)($fk_target_deleted_audit_rows[$fk_target_deleted_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'referencing plugin_fk_target_deleted_parents(id)'),
+        'foreign-key target-deleted row audit explains the missing target parent'
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($fk_target_deleted_metadata, $fk_target_deleted_conflict_id, 'source', true, 'Try restore before target parent exists.', 'cow-test'),
+        'resolution choice source is blocked',
+        'source restore for a foreign-key target-deleted row is blocked before mutation while the target parent is missing'
+    );
+    $db = open_db($fk_target_deleted_target);
+    $db->exec("INSERT INTO plugin_fk_target_deleted_parents (id, label) VALUES (999, 'target parent for row restore')");
+    $db->close();
+    $fk_target_deleted_unblocked_audit = cow_merge_audit_report($fk_target_deleted_metadata, (int)$fk_target_deleted_result['run_id'], 10, ['records' => 'conflicts']);
+    $fk_target_deleted_unblocked_rows = [];
+    foreach ($fk_target_deleted_unblocked_audit['conflicts'] as $row) {
+        $fk_target_deleted_unblocked_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $fk_target_deleted_unblocked_rows[$fk_target_deleted_conflict_id]['resolution_choices'],
+        ['source', 'target'],
+        'foreign-key target-deleted row audit advertises source after the target parent is restored'
+    );
+    $fk_target_deleted_source_resolution = cow_merge_resolve_conflict(
+        $fk_target_deleted_metadata,
+        $fk_target_deleted_conflict_id,
+        'source',
+        true,
+        'Apply source restore after target parent review.',
+        'cow-test'
+    );
+    assert_same($fk_target_deleted_source_resolution['status'], 'applied', 'source foreign-key target-deleted row restore applies after the target parent exists');
+    assert_same((int)scalar($fk_target_deleted_target, 'SELECT parent_id FROM plugin_fk_target_deleted_children WHERE id = 20'), 999, 'source foreign-key target-deleted row restore reparents the child row');
+
+    $fk_source_deleted_base = $tmp . '/fk-source-deleted-base.sqlite';
+    $fk_source_deleted_source = $tmp . '/fk-source-deleted-source.sqlite';
+    $fk_source_deleted_target = $tmp . '/fk-source-deleted-target.sqlite';
+    $fk_source_deleted_metadata = $tmp . '/.forkpress/cow/merge/fk-source-deleted-metadata.sqlite';
+    create_base_db($fk_source_deleted_base);
+    copy($fk_source_deleted_base, $fk_source_deleted_source);
+    copy($fk_source_deleted_base, $fk_source_deleted_target);
+    foreach ([$fk_source_deleted_base, $fk_source_deleted_source, $fk_source_deleted_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_fk_source_deleted_parents (id INTEGER PRIMARY KEY, label TEXT)');
+        $db->exec('CREATE TABLE plugin_fk_source_deleted_children (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES plugin_fk_source_deleted_parents(id), label TEXT)');
+        $db->exec("INSERT INTO plugin_fk_source_deleted_parents (id, label) VALUES (1, 'base parent')");
+        $db->close();
+    }
+    $db = open_db($fk_source_deleted_source);
+    $db->exec('DELETE FROM plugin_fk_source_deleted_parents WHERE id = 1');
+    $db->close();
+    $db = open_db($fk_source_deleted_target);
+    $db->exec("UPDATE plugin_fk_source_deleted_parents SET label = 'target parent edit' WHERE id = 1");
+    $db->exec("INSERT INTO plugin_fk_source_deleted_children (id, parent_id, label) VALUES (20, 1, 'target child blocks delete')");
+    $db->close();
+    $fk_source_deleted_result = cow_merge_databases($fk_source_deleted_base, $fk_source_deleted_source, $fk_source_deleted_target, $fk_source_deleted_metadata, 'feature-fk-source-deleted', 'main');
+    assert_same($fk_source_deleted_result['status'], 'completed_with_conflicts', 'foreign-key source-deleted parent row is held for review while target has children');
+    assert_same((int)scalar($fk_source_deleted_target, 'SELECT COUNT(*) FROM plugin_fk_source_deleted_parents WHERE id = 1'), 1, 'target parent wins before source delete review');
+    $fk_source_deleted_conflict_id = (int)scalar($fk_source_deleted_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_fk_source_deleted_parents' AND conflict_type = 'row-source-deleted' ORDER BY id DESC LIMIT 1");
+    $fk_source_deleted_audit = cow_merge_audit_report($fk_source_deleted_metadata, (int)$fk_source_deleted_result['run_id'], 10, ['records' => 'conflicts']);
+    $fk_source_deleted_audit_rows = [];
+    foreach ($fk_source_deleted_audit['conflicts'] as $row) {
+        $fk_source_deleted_audit_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $fk_source_deleted_audit_rows[$fk_source_deleted_conflict_id]['resolution_choices'],
+        ['target'],
+        'foreign-key source-deleted row audit does not advertise source while target children still reference it'
+    );
+    assert_true(
+        str_contains((string)($fk_source_deleted_audit_rows[$fk_source_deleted_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'referenced by plugin_fk_source_deleted_children(parent_id)'),
+        'foreign-key source-deleted row audit explains the target child blocker'
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($fk_source_deleted_metadata, $fk_source_deleted_conflict_id, 'source', true, 'Try source delete while child remains.', 'cow-test'),
+        'resolution choice source is blocked',
+        'source delete for a foreign-key source-deleted row is blocked before mutation while target children remain'
+    );
+    $db = open_db($fk_source_deleted_target);
+    $db->exec('DELETE FROM plugin_fk_source_deleted_children WHERE parent_id = 1');
+    $db->close();
+    $fk_source_deleted_unblocked_audit = cow_merge_audit_report($fk_source_deleted_metadata, (int)$fk_source_deleted_result['run_id'], 10, ['records' => 'conflicts']);
+    $fk_source_deleted_unblocked_rows = [];
+    foreach ($fk_source_deleted_unblocked_audit['conflicts'] as $row) {
+        $fk_source_deleted_unblocked_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $fk_source_deleted_unblocked_rows[$fk_source_deleted_conflict_id]['resolution_choices'],
+        ['source', 'target'],
+        'foreign-key source-deleted row audit advertises source after target children are removed'
+    );
+    $fk_source_deleted_source_resolution = cow_merge_resolve_conflict(
+        $fk_source_deleted_metadata,
+        $fk_source_deleted_conflict_id,
+        'source',
+        true,
+        'Apply source parent delete after child review.',
+        'cow-test'
+    );
+    assert_same($fk_source_deleted_source_resolution['status'], 'applied', 'source foreign-key source-deleted row delete applies after target children are gone');
+    assert_same((int)scalar($fk_source_deleted_target, 'SELECT COUNT(*) FROM plugin_fk_source_deleted_parents WHERE id = 1'), 0, 'source foreign-key source-deleted row delete removes the parent after child review');
 
     $fk_delete_base = $tmp . '/fk-delete-base.sqlite';
     $fk_delete_source = $tmp . '/fk-delete-source.sqlite';
@@ -2470,6 +2992,27 @@ SQL);
         'foreign-key delete violation records an auditable target-wins decision'
     );
     $fk_delete_conflict_id = (int)scalar($fk_delete_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_fk_delete_parents' AND conflict_type = 'row-target-constraint' ORDER BY id DESC LIMIT 1");
+    $fk_delete_audit = cow_merge_audit_report($fk_delete_metadata, (int)$fk_delete_result['run_id'], 10, ['records' => 'conflicts']);
+    $fk_delete_audit_rows = [];
+    foreach ($fk_delete_audit['conflicts'] as $row) {
+        $fk_delete_audit_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $fk_delete_audit_rows[$fk_delete_conflict_id]['resolution_choices'],
+        ['target'],
+        'foreign-key protected delete audit does not advertise source while a target child remains'
+    );
+    assert_true(
+        str_contains((string)($fk_delete_audit_rows[$fk_delete_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'referenced by plugin_fk_delete_children(parent_id)'),
+        'foreign-key protected delete audit explains the blocking target child'
+    );
+    ob_start();
+    cow_merge_print_audit_text($fk_delete_audit);
+    $fk_delete_audit_text = (string)ob_get_clean();
+    assert_true(
+        str_contains($fk_delete_audit_text, 'blocked-choice=source reason=source row deletion is blocked by current target foreign-key state'),
+        'text audit prints blocked source choice for foreign-key protected deletes'
+    );
     assert_throws(
         fn() => cow_merge_resolve_conflict($fk_delete_metadata, $fk_delete_conflict_id, 'source', true, 'Try parent delete while child remains.', 'cow-test'),
         'FOREIGN KEY constraint failed',
@@ -2478,6 +3021,16 @@ SQL);
     $db = open_db($fk_delete_target);
     $db->exec('DELETE FROM plugin_fk_delete_children WHERE id = 20');
     $db->close();
+    $fk_delete_unblocked_audit = cow_merge_audit_report($fk_delete_metadata, (int)$fk_delete_result['run_id'], 10, ['records' => 'conflicts']);
+    $fk_delete_unblocked_rows = [];
+    foreach ($fk_delete_unblocked_audit['conflicts'] as $row) {
+        $fk_delete_unblocked_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $fk_delete_unblocked_rows[$fk_delete_conflict_id]['resolution_choices'],
+        ['source', 'target'],
+        'foreign-key protected delete audit advertises source after the target child is removed'
+    );
     $fk_delete_source_resolution = cow_merge_resolve_conflict(
         $fk_delete_metadata,
         $fk_delete_conflict_id,
@@ -3390,10 +3943,46 @@ SQL);
     $legacy_stmt->bindValue(':chosen_hash', hash('sha256', $legacy_chosen_payload), SQLITE3_TEXT);
     $legacy_stmt->bindValue(':resolver', 'target-wins', SQLITE3_TEXT);
     $legacy_stmt->execute();
+    $legacy_conflict_id = (int)$legacy_db->lastInsertRowID();
+    $legacy_db->exec(<<<'SQL'
+CREATE TABLE merge_conflict_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conflict_id INTEGER NOT NULL,
+    run_id INTEGER NOT NULL,
+    event_type TEXT NOT NULL CHECK(event_type IN ('recorded', 'review-pending', 'review-needs-action', 'review-reviewed', 'resolution-validated', 'resolution-applied', 'revalidation-required')),
+    actor TEXT NOT NULL,
+    note TEXT NOT NULL,
+    related_record_type TEXT,
+    related_record_id INTEGER,
+    lifecycle_state TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(conflict_id) REFERENCES merge_conflicts(id),
+    FOREIGN KEY(run_id) REFERENCES merge_runs(id)
+)
+SQL);
+    $legacy_event_stmt = $legacy_db->prepare(
+        'INSERT INTO merge_conflict_events (conflict_id, run_id, event_type, actor, note, lifecycle_state) ' .
+        "VALUES (:conflict_id, 1, 'recorded', 'legacy', 'legacy recorded event', 'unreviewed')"
+    );
+    $legacy_event_stmt->bindValue(':conflict_id', $legacy_conflict_id, SQLITE3_INTEGER);
+    $legacy_event_stmt->execute();
     cow_merge_ensure_metadata($legacy_db);
     assert_true(
         str_contains((string)$legacy_db->querySingle("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'merge_conflicts'"), 'UNIQUE(run_id, table_name'),
         'legacy conflict metadata migrates to run-scoped conflict uniqueness'
+    );
+    assert_true(
+        str_contains((string)$legacy_db->querySingle("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'merge_conflict_events'"), 'resolution-blocked'),
+        'legacy conflict event metadata migrates to include blocked resolution events'
+    );
+    assert_same(
+        (int)$legacy_db->querySingle("SELECT COUNT(*) FROM merge_conflict_events WHERE run_id = 1 AND event_type = 'recorded'"),
+        1,
+        'legacy conflict event metadata preserves existing events during event-type migration'
+    );
+    assert_true(
+        (bool)$legacy_db->exec("INSERT INTO merge_conflict_events (conflict_id, run_id, event_type, actor, note, lifecycle_state) VALUES ($legacy_conflict_id, 1, 'resolution-blocked', 'legacy', 'legacy blocked event', 'unreviewed')"),
+        'migrated legacy conflict event metadata accepts resolution-blocked events'
     );
     assert_true(
         str_starts_with((string)$legacy_db->querySingle("SELECT conflict_key FROM merge_conflicts WHERE table_name = 'plugin_legacy_conflicts'"), 'sha256:'),
@@ -3433,6 +4022,96 @@ SQL);
     assert_same($title_audit_conflicts[0]['previous_conflict_id'] ?? null, null, 'first-run merge audit exposes empty conflict lineage');
     assert_same($title_audit_conflicts[0]['stale_status'] ?? null, 'fresh', 'merge audit marks unchanged target conflicts as fresh');
     $title_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'wp_posts' AND column_name = 'post_title'");
+    $title_id_audit = cow_merge_audit_report($metadata, null, 10, ['records' => 'conflicts', 'conflict_id' => (string)$title_conflict_id]);
+    assert_same($title_id_audit['filters']['conflict_id'], $title_conflict_id, 'merge audit JSON report includes conflict id filter');
+    assert_same(count($title_id_audit['conflicts']), 1, 'merge audit can filter conflicts by first-class conflict id');
+    assert_same((int)$title_id_audit['conflicts'][0]['id'], $title_conflict_id, 'conflict-id audit returns the requested conflict');
+    $title_key_audit = cow_merge_audit_report($metadata, null, 10, ['records' => 'conflicts', 'conflict_key' => $title_conflict_key]);
+    assert_same(count($title_key_audit['conflicts']), 3, 'merge audit can filter conflicts by stable conflict key across runs');
+    assert_same(count(array_unique(array_column($title_key_audit['conflicts'], 'conflict_key'))), 1, 'conflict-key audit returns one logical conflict group');
+    assert_same(
+        array_values(array_unique(array_column($title_key_audit['conflicts'], 'column_name'))),
+        ['post_title'],
+        'conflict-key audit excludes unrelated conflict columns'
+    );
+    $title_key_event_audit = cow_merge_audit_report($metadata, null, 10, ['records' => 'conflict-events', 'conflict_key' => $title_conflict_key]);
+    assert_same(count($title_key_event_audit['conflict_events']), 3, 'merge audit can filter conflict lifecycle events by stable conflict key');
+    assert_same(count(array_unique(array_column($title_key_event_audit['conflict_events'], 'conflict_key'))), 1, 'conflict-key event audit returns one logical conflict group');
+    $recorded_event_audit = cow_merge_audit_report($metadata, null, 10, ['event_type' => 'recorded']);
+    assert_same($recorded_event_audit['filters']['records'], 'conflict-events', 'event-type audit defaults to conflict-events records');
+    assert_true(count($recorded_event_audit['conflict_events']) >= 3, 'event-type audit returns recorded conflict events');
+    foreach ($recorded_event_audit['conflict_events'] as $event) {
+        assert_same($event['event_type'], 'recorded', 'event-type audit returns only matching conflict events');
+    }
+    $event_type_group_audit = cow_merge_audit_report($metadata, null, 10, ['group_by' => 'event-type']);
+    assert_same($event_type_group_audit['filters']['records'], 'conflict-events', 'event-type grouping defaults to conflict-events records');
+    assert_same($event_type_group_audit['filters']['group_by'], 'event-type', 'event-type grouping is preserved in audit filters');
+    $event_type_group_keys = array_column($event_type_group_audit['conflict_event_groups'], 'group_key');
+    assert_true(in_array('recorded', $event_type_group_keys, true), 'event-type grouping includes recorded event counts');
+    $recorded_group = array_values(array_filter(
+        $event_type_group_audit['conflict_event_groups'],
+        fn($row) => ($row['group_key'] ?? null) === 'recorded'
+    ));
+    assert_true((int)$recorded_group[0]['event_count'] >= 3, 'event-type grouping counts recorded events');
+    assert_true((int)$recorded_group[0]['conflict_count'] >= 3, 'event-type grouping counts affected conflicts');
+    ob_start();
+    cow_merge_print_audit_text($event_type_group_audit);
+    $event_type_group_text = ob_get_clean();
+    assert_true(str_contains($event_type_group_text, 'group-by=event-type') && str_contains($event_type_group_text, 'conflict-event-groups:'), 'event-type grouping is visible in text audit output');
+    $event_type_group_cli = run_merge_cli([
+        'audit',
+        '--metadata-db', $metadata,
+        '--group-by=event-type',
+        '--format', 'json',
+    ]);
+    assert_same($event_type_group_cli['status'], 0, 'event-type group audit CLI accepts equals-form grouping');
+    $event_type_group_cli_json = json_decode($event_type_group_cli['output'], true);
+    assert_true(is_array($event_type_group_cli_json), 'event-type group audit CLI emits JSON');
+    assert_same($event_type_group_cli_json['filters']['records'] ?? null, 'conflict-events', 'event-type group audit CLI defaults to event records');
+    assert_true(count($event_type_group_cli_json['conflict_event_groups'] ?? []) >= 1, 'event-type group audit CLI returns event groups');
+    $strategy_group_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['group_by' => 'resolution-strategy']);
+    assert_same($strategy_group_audit['filters']['records'], 'conflicts', 'resolution-strategy grouping defaults to conflict records');
+    assert_true(in_array('cell-choice', array_column($strategy_group_audit['conflict_groups'], 'group_key'), true), 'resolution-strategy grouping includes cell-choice conflicts');
+    $strategy_filter_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['resolution_strategy' => 'cell-choice']);
+    assert_same($strategy_filter_audit['filters']['records'], 'conflicts', 'resolution-strategy filtering defaults to conflict records');
+    assert_true(count($strategy_filter_audit['conflicts']) >= 1, 'resolution-strategy filtering returns matching conflicts');
+    foreach ($strategy_filter_audit['conflicts'] as $conflict) {
+        assert_same($conflict['resolution_strategy'], 'cell-choice', 'resolution-strategy filtering returns only matching conflict contracts');
+    }
+    $generic_resolver_group_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['group_by' => 'generic-resolver']);
+    assert_true(in_array('yes', array_column($generic_resolver_group_audit['conflict_groups'], 'group_key'), true), 'generic-resolver grouping exposes generically resolvable conflicts');
+    $generic_resolver_filter_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['generic_resolver' => 'yes']);
+    assert_true(count($generic_resolver_filter_audit['conflicts']) >= 1, 'generic-resolver filtering returns matching conflicts');
+    foreach ($generic_resolver_filter_audit['conflicts'] as $conflict) {
+        assert_same($conflict['generic_resolver'], true, 'generic-resolver filtering returns only generic resolver conflicts');
+    }
+    $after_revalidate_group_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['group_by' => 'after-revalidate']);
+    assert_true(in_array('supported', array_column($after_revalidate_group_audit['conflict_groups'], 'group_key'), true), 'after-revalidate grouping exposes guarded revalidation support');
+    $after_revalidate_filter_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['after_revalidate' => 'supported']);
+    assert_true(count($after_revalidate_filter_audit['conflicts']) >= 1, 'after-revalidate filtering returns matching conflicts');
+    foreach ($after_revalidate_filter_audit['conflicts'] as $conflict) {
+        assert_same($conflict['after_revalidate_supported'], true, 'after-revalidate filtering returns only guarded revalidation conflicts');
+    }
+    $contract_event_filter_audit = cow_merge_audit_report($metadata, null, 10, ['records' => 'conflict-events', 'resolution_strategy' => 'cell-choice', 'generic_resolver' => 'yes', 'after_revalidate' => 'supported']);
+    assert_true(count($contract_event_filter_audit['conflict_events']) >= 1, 'resolver contract filters can focus conflict event history');
+    $title_id_event_audit = cow_merge_audit_report($metadata, null, 10, ['records' => 'conflict-events', 'conflict_id' => (string)$title_conflict_id]);
+    assert_same(count($title_id_event_audit['conflict_events']), 1, 'merge audit can filter conflict lifecycle events by conflict id');
+    assert_same((int)$title_id_event_audit['conflict_events'][0]['conflict_id'], $title_conflict_id, 'conflict-id event audit returns events for the requested conflict');
+    assert_throws(
+        fn() => cow_merge_audit_report($metadata, null, 10, ['records' => 'conflicts', 'event_type' => 'recorded']),
+        '--event-type can only be combined',
+        'event-type audit rejects non-event records'
+    );
+    assert_throws(
+        fn() => cow_merge_audit_report($metadata, null, 10, ['records' => 'decisions', 'conflict_id' => (string)$title_conflict_id]),
+        '--conflict-id can only be combined',
+        'conflict-id audit rejects decision-only records'
+    );
+    assert_throws(
+        fn() => cow_merge_audit_report($metadata, null, 10, ['records' => 'decisions', 'conflict_key' => $title_conflict_key]),
+        '--conflict-key can only be combined',
+        'conflict-key audit rejects decision-only records'
+    );
     $GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize'] = [
         static function (SQLite3Result $result, string $message): void {
             if ($message === 'failed to finalize merge conflict lookup') {
@@ -3517,6 +4196,58 @@ SQL);
     );
     unset($GLOBALS['cow_merge_test_hooks']['before_sqlite_result_finalize']);
     assert_same((int)scalar($metadata, 'SELECT COUNT(*) FROM merge_resolutions'), 0, 'failed current-cell finalization records no resolution audit rows');
+    $repeat_title_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE run_id = $repeat_conflict_run_id AND table_name = 'wp_posts' AND column_name = 'post_title'");
+    assert_throws(
+        fn() => cow_merge_resolve_conflict_key(
+            $metadata,
+            $title_conflict_key,
+            null,
+            'source',
+            false,
+            'Preview source title resolution by ambiguous key.',
+            'cow-test'
+        ),
+        'matches multiple unresolved conflicts',
+        'conflict-key resolution rejects ambiguous logical conflict groups without a run'
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict_key(
+            $metadata,
+            $title_conflict_key,
+            null,
+            'source',
+            false,
+            'Preview source title resolution by ambiguous key.',
+            'cow-test'
+        ),
+        '#' . $repeat_title_conflict_id . ' in run #' . $repeat_conflict_run_id,
+        'conflict-key ambiguity errors list candidate conflict ids and runs'
+    );
+    $key_dry_resolution = cow_merge_resolve_conflict_key(
+        $metadata,
+        $title_conflict_key,
+        $repeat_conflict_run_id,
+        'source',
+        false,
+        'Preview source title resolution by conflict key.',
+        'cow-test'
+    );
+    assert_same($key_dry_resolution['conflict_id'], $repeat_title_conflict_id, 'conflict-key resolution selects the conflict in the requested run');
+    assert_same($key_dry_resolution['status'], 'validated', 'conflict-key source resolution validates target preconditions');
+    assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $repeat_title_conflict_id AND choice = 'source' AND applied = 0 AND status = 'validated'"), 1, 'conflict-key dry-run resolution records a validated resolution audit row');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict_key(
+            $metadata,
+            'sha256:missing-conflict-key',
+            null,
+            'source',
+            false,
+            'Preview missing conflict key.',
+            'cow-test'
+        ),
+        'does not exist',
+        'conflict-key resolution explains missing logical conflict groups'
+    );
     $dry_resolution = cow_merge_resolve_conflict(
         $metadata,
         $title_conflict_id,
@@ -4259,6 +4990,26 @@ SQL);
     assert_same(count($applied_resolution_default_records_audit['decisions']), 0, 'resolution status filter with CLI-style defaults omits decision records');
     assert_same(count($applied_resolution_default_records_audit['resolutions']), 2, 'resolution status filter with CLI-style defaults returns applied resolutions');
     assert_true(count(array_filter($applied_resolution_default_records_audit['resolution_groups'], fn($row) => $row['group_key'] === 'applied')) === 1, 'resolution status grouping works through CLI-style default records');
+    $title_key_resolution_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['records' => 'resolutions', 'conflict_key' => $title_conflict_key]);
+    assert_same(count($title_key_resolution_audit['resolutions']), 2, 'conflict-key audit can filter resolution records by logical conflict');
+    assert_same(count(array_unique(array_column($title_key_resolution_audit['resolutions'], 'conflict_key'))), 1, 'conflict-key resolution audit returns one logical conflict group');
+    assert_same(
+        array_values(array_unique(array_column($title_key_resolution_audit['resolutions'], 'column_name'))),
+        ['post_title'],
+        'conflict-key resolution audit excludes unrelated resolved columns'
+    );
+    $title_id_resolution_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['records' => 'resolutions', 'conflict_id' => (string)$title_conflict_id]);
+    assert_same(count($title_id_resolution_audit['resolutions']), 2, 'conflict-id audit can filter resolution records by conflict id');
+    assert_same(count(array_unique(array_column($title_id_resolution_audit['resolutions'], 'conflict_id'))), 1, 'conflict-id resolution audit returns one conflict group');
+    assert_same((int)$title_id_resolution_audit['resolutions'][0]['conflict_id'], $title_conflict_id, 'conflict-id resolution audit returns the requested conflict resolutions');
+    $title_key_applied_resolution_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, [
+        'records' => 'all',
+        'resolution_status' => 'applied',
+        'conflict_key' => $title_conflict_key,
+    ]);
+    assert_same($title_key_applied_resolution_audit['filters']['records'], 'resolutions', 'conflict-key plus resolution-status defaults to resolution records');
+    assert_same(count($title_key_applied_resolution_audit['resolutions']), 1, 'conflict-key plus resolution-status returns the matching applied resolution');
+    assert_same($title_key_applied_resolution_audit['resolutions'][0]['conflict_key'] ?? null, $title_conflict_key, 'resolution audit exposes the filtered conflict key');
     $validated_resolution_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['records' => 'resolutions', 'resolution_status' => 'validated']);
     assert_same(count($validated_resolution_audit['resolutions']), 1, 'validated resolution status filter returns validated resolution records');
     assert_same($validated_resolution_audit['resolutions'][0]['status'], 'validated', 'validated resolution status filter matches resolution rows');
@@ -4291,6 +5042,23 @@ SQL);
     cow_merge_print_audit_text($grouped_conflict_audit);
     $conflict_group_text = ob_get_clean();
     assert_true(str_contains($conflict_group_text, 'group-by=severity') && str_contains($conflict_group_text, 'conflict-groups:'), 'conflict grouping is visible in text audit output');
+    $grouped_lifecycle_default_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['group_by' => 'lifecycle']);
+    assert_same($grouped_lifecycle_default_audit['filters']['records'], 'conflicts', 'lifecycle grouping defaults audit records to conflicts');
+    assert_true(count($grouped_lifecycle_default_audit['conflict_groups']) > 0, 'lifecycle grouping shortcut returns conflict groups');
+    $grouped_conflict_key_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['records' => 'conflicts', 'group_by' => 'conflict-key']);
+    assert_same($grouped_conflict_key_audit['filters']['group_by'], 'conflict-key', 'merge audit JSON report includes conflict-key grouping filter');
+    $conflict_key_group_counts = [];
+    foreach ($grouped_conflict_key_audit['conflict_groups'] as $group) {
+        $conflict_key_group_counts[$group['group_key']] = (int)$group['conflict_count'];
+    }
+    assert_same($conflict_key_group_counts[$title_conflict_key] ?? 0, 1, 'conflict-key grouping counts one title logical conflict');
+    $grouped_conflict_key_default_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['group_by' => 'conflict-key']);
+    assert_same($grouped_conflict_key_default_audit['filters']['records'], 'conflicts', 'conflict-key grouping defaults audit records to conflicts');
+    assert_true(count($grouped_conflict_key_default_audit['conflict_groups']) > 0, 'conflict-key grouping shortcut returns conflict groups');
+    ob_start();
+    cow_merge_print_audit_text($grouped_conflict_key_audit);
+    $conflict_key_group_text = ob_get_clean();
+    assert_true(str_contains($conflict_key_group_text, 'group-by=conflict-key') && str_contains($conflict_key_group_text, $title_conflict_key), 'conflict-key grouping is visible in text audit output');
     $grouped_decision_audit = cow_merge_audit_report($metadata, $conflict_run_id, 10, ['records' => 'decisions', 'group_by' => 'type']);
     assert_same($grouped_decision_audit['filters']['group_by'], 'type', 'merge audit JSON report includes decision grouping filter');
     assert_same(count($grouped_decision_audit['conflict_groups']), 0, 'decision grouping does not populate conflict groups');
@@ -4860,6 +5628,27 @@ SQL);
     ));
     assert_same($reviewed_rows[0]['review_status'], 'reviewed', 'merge audit JSON exposes latest conflict review status');
     assert_same($reviewed_rows[0]['review_note'], 'Target value is intentional after manual review.', 'merge audit JSON exposes latest conflict review note');
+    $reviewed_event_audit = cow_merge_audit_report($metadata, null, 10, [
+        'records' => 'conflict-events',
+        'event_type' => 'review-reviewed',
+        'conflict_id' => (string)$reviewed_conflict_id,
+    ]);
+    assert_same(count($reviewed_event_audit['conflict_events']), 1, 'event-type audit can focus reviewed conflict events');
+    assert_same($reviewed_event_audit['conflict_events'][0]['event_type'], 'review-reviewed', 'reviewed event audit returns the requested event type');
+    assert_same((int)$reviewed_event_audit['conflict_events'][0]['conflict_id'], $reviewed_conflict_id, 'reviewed event audit remains scoped to the requested conflict');
+    $reviewed_event_cli = run_merge_cli([
+        'audit',
+        '--metadata-db', $metadata,
+        '--records', 'conflict-events',
+        '--event-type=review-reviewed',
+        '--conflict-id', (string)$reviewed_conflict_id,
+        '--format', 'json',
+    ]);
+    assert_same($reviewed_event_cli['status'], 0, 'event-type audit CLI accepts equals-form filters');
+    $reviewed_event_cli_json = json_decode($reviewed_event_cli['output'], true);
+    assert_true(is_array($reviewed_event_cli_json), 'event-type audit CLI emits JSON');
+    assert_same($reviewed_event_cli_json['filters']['event_type'] ?? null, 'review-reviewed', 'event-type audit CLI preserves the filter');
+    assert_same(count($reviewed_event_cli_json['conflict_events'] ?? []), 1, 'event-type audit CLI returns the matching conflict event');
 
     $review_queue_base = $tmp . '/review-queue-base.sqlite';
     $review_queue_source = $tmp . '/review-queue-source.sqlite';
@@ -4888,16 +5677,18 @@ SQL);
     $db = open_db($status_transition_target);
     $db->exec("UPDATE plugin_items SET value = 'target pending queue conflict' WHERE item_id = 'alpha'");
     $db->close();
-    cow_merge_databases($status_transition_base, $status_transition_source, $status_transition_target, $metadata, 'feature-status-transition', 'main');
+    $status_transition_result = cow_merge_databases($status_transition_base, $status_transition_source, $status_transition_target, $metadata, 'feature-status-transition', 'main');
     $status_transition_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND conflict_type = 'cell-conflict' ORDER BY id DESC LIMIT 1");
-    cow_merge_review_record(
+    $status_transition_conflict_key = (string)scalar($metadata, "SELECT conflict_key FROM merge_conflicts WHERE id = $status_transition_conflict_id");
+    $status_transition_key_review = cow_merge_review_conflict_key(
         $metadata,
-        'conflict',
-        $status_transition_conflict_id,
+        $status_transition_conflict_key,
+        (int)$status_transition_result['run_id'],
         'reviewed',
         'Initial status transition review.',
         'cow-test'
     );
+    assert_same($status_transition_key_review['record_id'], $status_transition_conflict_id, 'conflict-key review records the selected conflict id');
     cow_merge_review_record(
         $metadata,
         'conflict',
@@ -5006,6 +5797,74 @@ SQL);
     ));
     assert_same($needs_action_transition_rows[0]['review_status'], 'needs-action', 'needs-action review queue exposes the latest review status');
     assert_same($needs_action_transition_rows[0]['review_note'], 'Escalated for owner follow-up.', 'needs-action review queue exposes the latest review note');
+    $resolve_action_base = $tmp . '/resolve-action-base.sqlite';
+    $resolve_action_source = $tmp . '/resolve-action-source.sqlite';
+    $resolve_action_target = $tmp . '/resolve-action-target.sqlite';
+    create_base_db($resolve_action_base);
+    copy($resolve_action_base, $resolve_action_source);
+    copy($resolve_action_base, $resolve_action_target);
+    $db = open_db($resolve_action_source);
+    $db->exec("UPDATE plugin_items SET value = 'source resolve action conflict' WHERE item_id = 'alpha'");
+    $db->close();
+    $db = open_db($resolve_action_target);
+    $db->exec("UPDATE plugin_items SET value = 'target resolve action conflict' WHERE item_id = 'alpha'");
+    $db->close();
+    cow_merge_databases($resolve_action_base, $resolve_action_source, $resolve_action_target, $metadata, 'feature-resolve-action', 'main');
+    $resolve_action_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND conflict_type = 'cell-conflict' ORDER BY id DESC LIMIT 1");
+    cow_merge_review_record(
+        $metadata,
+        'conflict',
+        $resolve_action_conflict_id,
+        'reviewed',
+        'Ready for source or target resolution.',
+        'cow-test'
+    );
+    $resolve_next_action_audit = cow_merge_audit_report($metadata, null, 10, [
+        'records' => 'conflicts',
+        'next_action' => 'resolve',
+    ]);
+    assert_same($resolve_next_action_audit['filters']['next_action'], 'resolve', 'next-action filter is preserved in audit filters');
+    $resolve_next_action_ids = array_map(fn($row) => (int)$row['id'], $resolve_next_action_audit['conflicts']);
+    assert_true(in_array($resolve_action_conflict_id, $resolve_next_action_ids, true), 'next-action resolve filter returns reviewed generic conflicts');
+    assert_true(!in_array($status_transition_conflict_id, $resolve_next_action_ids, true), 'next-action resolve filter excludes deferred conflicts');
+    assert_true(!in_array($needs_action_transition_conflict_id, $resolve_next_action_ids, true), 'next-action resolve filter excludes needs-action conflicts');
+    $wait_next_action_audit = cow_merge_audit_report($metadata, null, 10, [
+        'records' => 'conflicts',
+        'next_action' => 'wait',
+    ]);
+    $wait_next_action_ids = array_map(fn($row) => (int)$row['id'], $wait_next_action_audit['conflicts']);
+    assert_true(in_array($status_transition_conflict_id, $wait_next_action_ids, true), 'next-action wait filter returns deferred conflicts');
+    $revalidate_next_action_audit = cow_merge_audit_report($metadata, null, 10, [
+        'records' => 'conflicts',
+        'next_action' => 'revalidate',
+    ]);
+    $revalidate_next_action_ids = array_map(fn($row) => (int)$row['id'], $revalidate_next_action_audit['conflicts']);
+    assert_true(in_array($needs_action_transition_conflict_id, $revalidate_next_action_ids, true), 'next-action revalidate filter returns stale-review candidates');
+    $next_action_group_audit = cow_merge_audit_report($metadata, null, 10, [
+        'records' => 'conflicts',
+        'group_by' => 'next-action',
+    ]);
+    assert_same($next_action_group_audit['filters']['group_by'], 'next-action', 'next-action grouping is preserved in audit filters');
+    $next_action_group_keys = array_column($next_action_group_audit['conflict_groups'], 'group_key');
+    assert_true(in_array('resolve', $next_action_group_keys, true), 'next-action grouping includes resolve queue counts');
+    assert_true(in_array('wait', $next_action_group_keys, true), 'next-action grouping includes wait queue counts');
+    ob_start();
+    cow_merge_print_audit_text($resolve_next_action_audit);
+    $resolve_next_action_text = ob_get_clean();
+    assert_true(str_contains($resolve_next_action_text, 'next-action=resolve'), 'next-action filter is visible in text audit output');
+    $resolve_next_action_cli = run_merge_cli([
+        'audit',
+        '--metadata-db', $metadata,
+        '--records', 'conflicts',
+        '--format', 'json',
+        '--next-action=resolve',
+    ]);
+    assert_same($resolve_next_action_cli['status'], 0, 'next-action audit CLI accepts equals-form filters');
+    $resolve_next_action_cli_json = json_decode($resolve_next_action_cli['output'], true);
+    assert_true(is_array($resolve_next_action_cli_json), 'next-action audit CLI emits JSON');
+    assert_same($resolve_next_action_cli_json['filters']['next_action'] ?? null, 'resolve', 'next-action audit CLI preserves the filter');
+    $resolve_next_action_cli_ids = array_map(fn($row) => (int)$row['id'], $resolve_next_action_cli_json['conflicts'] ?? []);
+    assert_true(in_array($resolve_action_conflict_id, $resolve_next_action_cli_ids, true), 'next-action audit CLI returns reviewed generic conflicts');
     $reviewed_status_audit = cow_merge_audit_report($metadata, null, 10, ['review_status' => 'reviewed']);
     assert_same($reviewed_status_audit['filters']['review_status'], 'reviewed', 'merge audit JSON report includes review status filter');
     assert_true(count($reviewed_status_audit['conflicts']) >= 1, 'review status filter returns reviewed conflicts');
@@ -6765,8 +7624,8 @@ SQL);
     $file_type_replacement_unsafe_dir_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-type-replacement-conflict' AND row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/replace-file-with-unsafe-dir')) . "' ORDER BY id DESC LIMIT 1");
     assert_throws(
         fn() => cow_merge_resolve_conflict($metadata, $file_type_replacement_unsafe_dir_conflict_id, 'source', true, 'Try reviewed source directory replacement with unsafe symlink descendant.', 'cow-test'),
-        'cannot apply source filesystem directory subtree',
-        'source file-to-directory resolution rejects unsafe source symlink descendants'
+        'resolution choice source is blocked',
+        'source file-to-directory resolution blocks unsafe source symlink descendants before apply'
     );
     assert_same(file_get_contents($file_resolve_target_root . '/wp-content/uploads/replace-file-with-unsafe-dir'), 'base unsafe replacement file', 'failed source file-to-directory resolution restores the target file when a subtree symlink is unsafe');
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $file_type_replacement_unsafe_dir_conflict_id"), 0, 'failed unsafe directory replacement records no resolution metadata');
@@ -6854,8 +7713,8 @@ SQL);
     $unsafe_symlink_id = (int)scalar($metadata, "SELECT c.id FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = '__files__' AND c.conflict_type = 'file-unsafe-symlink' AND r.source_branch = 'feature-file-resolve' ORDER BY c.id DESC LIMIT 1");
     assert_throws(
         fn() => cow_merge_resolve_conflict($metadata, $unsafe_symlink_id, 'source', true, 'Try unsafe source symlink.', 'cow-test'),
-        'cannot apply source filesystem conflict',
-        'unsafe source symlink conflicts cannot be applied by the deterministic resolver'
+        'resolution choice source is blocked',
+        'unsafe source symlink conflicts are blocked before deterministic resolution'
     );
 
     $file_target_keep_base_root = $tmp . '/files-target-keep-base';
@@ -8994,7 +9853,7 @@ SQL);
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $schema_column_conflict_id"), 0, 'schema conflict revalidation records no guarded payload without schema-specific evidence');
     assert_throws(
         fn() => cow_merge_resolve_conflict($metadata, $schema_column_conflict_id, 'source', false, 'Try guarded schema resolution.', 'cow-test', true),
-        '--after-revalidate currently supports database row/cell conflicts and filesystem conflicts only',
+        '--after-revalidate currently supports source resolution for compatible source-added index/view/trigger drift only',
         'schema conflicts have an explicit guarded revalidation boundary'
     );
     $schema_column_dry = cow_merge_resolve_conflict(
@@ -9677,6 +10536,21 @@ SQL);
     );
     assert_same((int)scalar($schema_view_drop_dep_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_drop_base'"), 1, 'blocked source view drop preserves target view');
     assert_same((int)scalar($schema_view_drop_dep_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_items_drop_child'"), 1, 'blocked source view drop preserves dependent target view');
+    $schema_view_drop_blocked_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'records' => 'conflicts',
+        'lifecycle_state' => 'needs-action',
+        'next_action' => 'manual-review',
+        'conflict_id' => (string)$schema_view_drop_dep_conflict_id,
+    ]);
+    assert_same(count($schema_view_drop_blocked_audit['conflicts']), 1, 'blocked schema source choices are discoverable through the manual-review queue');
+    assert_same($schema_view_drop_blocked_audit['conflicts'][0]['latest_event_type'], 'resolution-blocked', 'blocked schema source choices expose the latest blocked event');
+    $schema_view_drop_blocked_events = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'records' => 'conflict-events',
+        'event_type' => 'resolution-blocked',
+        'conflict_id' => (string)$schema_view_drop_dep_conflict_id,
+    ]);
+    assert_same(count($schema_view_drop_blocked_events['conflict_events']), 1, 'blocked schema source choices record a resolution-blocked event');
+    assert_same($schema_view_drop_blocked_events['conflict_events'][0]['lifecycle_state'], 'needs-action', 'blocked schema source choice events move conflicts into needs-action');
 
     $schema_trigger_drop_base = $tmp . '/schema-trigger-drop-base.sqlite';
     $schema_trigger_drop_source = $tmp . '/schema-trigger-drop-source.sqlite';
@@ -10288,6 +11162,52 @@ SQL);
     $source_added_fk_child_conflict_id = (int)scalar($source_added_fk_child_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_source_added_fk_child' AND conflict_type = 'row-target-constraint' ORDER BY id DESC LIMIT 1");
     assert_true($source_added_fk_parent_conflict_id > 0, 'missing parent table remains a reviewable schema conflict');
     assert_true($source_added_fk_child_conflict_id > 0, 'blocked source-added child row records a target constraint conflict');
+    $source_added_fk_child_audit = cow_merge_audit_report($source_added_fk_child_metadata, (int)$source_added_fk_child_result['run_id'], 10, ['records' => 'conflicts']);
+    $source_added_fk_child_audit_rows = [];
+    foreach ($source_added_fk_child_audit['conflicts'] as $row) {
+        $source_added_fk_child_audit_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $source_added_fk_child_audit_rows[$source_added_fk_child_conflict_id]['resolution_choices'],
+        ['target'],
+        'source-added child row audit does not advertise source while the FK parent is missing'
+    );
+    assert_true(
+        str_contains((string)($source_added_fk_child_audit_rows[$source_added_fk_child_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'parent table plugin_source_added_fk_parent could not be inspected'),
+        'source-added child row audit explains the missing FK parent blocker'
+    );
+    $source_added_fk_child_source_choice_audit = cow_merge_audit_report($source_added_fk_child_metadata, (int)$source_added_fk_child_result['run_id'], 10, [
+        'records' => 'conflicts',
+        'resolution_choice' => 'source',
+    ]);
+    $source_added_fk_child_source_choice_ids = array_map(static fn(array $row): int => (int)$row['id'], $source_added_fk_child_source_choice_audit['conflicts']);
+    assert_true(!in_array($source_added_fk_child_conflict_id, $source_added_fk_child_source_choice_ids, true), 'resolution-choice source filter omits conflicts where source is currently blocked');
+    assert_true(in_array($source_added_fk_parent_conflict_id, $source_added_fk_child_source_choice_ids, true), 'resolution-choice source filter keeps conflicts whose source choice is executable');
+    $source_added_fk_child_blocked_source_audit = cow_merge_audit_report($source_added_fk_child_metadata, (int)$source_added_fk_child_result['run_id'], 10, [
+        'blocked_resolution_choice' => 'source',
+    ]);
+    assert_same($source_added_fk_child_blocked_source_audit['filters']['records'], 'conflicts', 'blocked resolution choice filter defaults audit records to conflicts');
+    assert_same($source_added_fk_child_blocked_source_audit['filters']['blocked_resolution_choice'], 'source', 'merge audit JSON report includes blocked resolution choice filter');
+    $source_added_fk_child_blocked_source_ids = array_map(static fn(array $row): int => (int)$row['id'], $source_added_fk_child_blocked_source_audit['conflicts']);
+    assert_true(in_array($source_added_fk_child_conflict_id, $source_added_fk_child_blocked_source_ids, true), 'blocked-resolution-choice source filter returns conflicts whose source choice is unavailable');
+    assert_true(!in_array($source_added_fk_parent_conflict_id, $source_added_fk_child_blocked_source_ids, true), 'blocked-resolution-choice source filter omits executable source conflicts');
+    ob_start();
+    cow_merge_print_audit_text($source_added_fk_child_blocked_source_audit);
+    $source_added_fk_child_blocked_source_text = ob_get_clean();
+    assert_true(str_contains($source_added_fk_child_blocked_source_text, 'blocked-resolution-choice=source'), 'blocked resolution choice filter is visible in text audit output');
+    $source_added_fk_child_blocked_source_cli = run_merge_cli([
+        'audit',
+        '--metadata-db', $source_added_fk_child_metadata,
+        '--run', (string)$source_added_fk_child_result['run_id'],
+        '--format', 'json',
+        '--blocked-resolution-choice', 'source',
+    ]);
+    assert_same($source_added_fk_child_blocked_source_cli['status'], 0, 'blocked resolution choice audit CLI exits successfully');
+    $source_added_fk_child_blocked_source_cli_json = json_decode($source_added_fk_child_blocked_source_cli['output'], true);
+    assert_true(is_array($source_added_fk_child_blocked_source_cli_json), 'blocked resolution choice audit CLI emits JSON');
+    assert_same($source_added_fk_child_blocked_source_cli_json['filters']['blocked_resolution_choice'] ?? null, 'source', 'blocked resolution choice audit CLI preserves the source filter');
+    $source_added_fk_child_blocked_source_cli_ids = array_map(static fn(array $row): int => (int)$row['id'], $source_added_fk_child_blocked_source_cli_json['conflicts'] ?? []);
+    assert_true(in_array($source_added_fk_child_conflict_id, $source_added_fk_child_blocked_source_cli_ids, true), 'blocked resolution choice audit CLI returns the blocked child row conflict');
     assert_throws(
         fn() => cow_merge_resolve_conflict(
             $source_added_fk_child_metadata,
@@ -10309,6 +11229,41 @@ SQL);
         'test'
     );
     assert_same($source_added_fk_parent_resolution['status'], 'applied', 'source parent table restore applies before source-added child row resolution');
+    $source_added_fk_child_unblocked_audit = cow_merge_audit_report($source_added_fk_child_metadata, (int)$source_added_fk_child_result['run_id'], 10, ['records' => 'conflicts']);
+    $source_added_fk_child_unblocked_rows = [];
+    foreach ($source_added_fk_child_unblocked_audit['conflicts'] as $row) {
+        $source_added_fk_child_unblocked_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $source_added_fk_child_unblocked_rows[$source_added_fk_child_conflict_id]['resolution_choices'],
+        ['source', 'target'],
+        'source-added child row audit advertises source after the FK parent is restored'
+    );
+    $source_added_fk_child_unblocked_source_audit = cow_merge_audit_report($source_added_fk_child_metadata, (int)$source_added_fk_child_result['run_id'], 10, [
+        'records' => 'conflicts',
+        'resolution_choice' => 'source',
+    ]);
+    $source_added_fk_child_unblocked_source_ids = array_map(static fn(array $row): int => (int)$row['id'], $source_added_fk_child_unblocked_source_audit['conflicts']);
+    assert_true(in_array($source_added_fk_child_conflict_id, $source_added_fk_child_unblocked_source_ids, true), 'resolution-choice source filter returns the child row after its blocker is resolved');
+    $source_added_fk_child_unblocked_source_cli = run_merge_cli([
+        'audit',
+        '--metadata-db', $source_added_fk_child_metadata,
+        '--run', (string)$source_added_fk_child_result['run_id'],
+        '--format', 'json',
+        '--resolution-choice=source',
+    ]);
+    assert_same($source_added_fk_child_unblocked_source_cli['status'], 0, 'resolution choice audit CLI accepts equals-form source filter');
+    $source_added_fk_child_unblocked_source_cli_json = json_decode($source_added_fk_child_unblocked_source_cli['output'], true);
+    assert_true(is_array($source_added_fk_child_unblocked_source_cli_json), 'resolution choice audit CLI emits JSON');
+    assert_same($source_added_fk_child_unblocked_source_cli_json['filters']['resolution_choice'] ?? null, 'source', 'resolution choice audit CLI preserves the source filter');
+    $source_added_fk_child_unblocked_source_cli_ids = array_map(static fn(array $row): int => (int)$row['id'], $source_added_fk_child_unblocked_source_cli_json['conflicts'] ?? []);
+    assert_true(in_array($source_added_fk_child_conflict_id, $source_added_fk_child_unblocked_source_cli_ids, true), 'resolution choice audit CLI returns the unblocked child row conflict');
+    $source_added_fk_child_unblocked_blocked_source_audit = cow_merge_audit_report($source_added_fk_child_metadata, (int)$source_added_fk_child_result['run_id'], 10, [
+        'records' => 'conflicts',
+        'blocked_resolution_choice' => 'source',
+    ]);
+    $source_added_fk_child_unblocked_blocked_source_ids = array_map(static fn(array $row): int => (int)$row['id'], $source_added_fk_child_unblocked_blocked_source_audit['conflicts']);
+    assert_true(!in_array($source_added_fk_child_conflict_id, $source_added_fk_child_unblocked_blocked_source_ids, true), 'blocked-resolution-choice source filter drops the child row after its blocker is resolved');
     $source_added_fk_child_resolution = cow_merge_resolve_conflict(
         $source_added_fk_child_metadata,
         $source_added_fk_child_conflict_id,
@@ -14852,6 +15807,7 @@ SQL);
     $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_parent) VALUES (12, 'Base video block consumer', '<!-- wp:paragraph --><p>base video block content</p><!-- /wp:paragraph -->', 'publish', 0)");
     $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_parent) VALUES (13, 'Base post navigation link consumer', '<!-- wp:paragraph --><p>base post navigation link content</p><!-- /wp:paragraph -->', 'publish', 0)");
     $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_parent) VALUES (14, 'Base navigation block consumer', '<!-- wp:paragraph --><p>base navigation block content</p><!-- /wp:paragraph -->', 'publish', 0)");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_parent) VALUES (15, 'Base post navigation submenu consumer', '<!-- wp:paragraph --><p>base post navigation submenu content</p><!-- /wp:paragraph -->', 'publish', 0)");
     $db->exec("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (1, '_menu_item_menu_item_parent', '1')");
     $db->exec("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (1, '_forkpress_base_post_ref', 'base post metadata')");
     $db->exec("INSERT INTO wp_comments (comment_post_ID, comment_content) VALUES (1, 'Base comment reference')");
@@ -14906,6 +15862,10 @@ SQL);
     $stmt = $db->prepare('UPDATE wp_posts SET post_content = :content WHERE ID = 14');
     $stmt->bindValue(':content', $band_explicit_ref_navigation_content, SQLITE3_TEXT);
     $stmt->execute();
+    $band_explicit_ref_post_nav_submenu_content = '<!-- wp:navigation-submenu {"id":2,"kind":"post-type","type":"page","label":"Held submenu page"} --><!-- /wp:navigation-submenu -->';
+    $stmt = $db->prepare('UPDATE wp_posts SET post_content = :content WHERE ID = 15');
+    $stmt->bindValue(':content', $band_explicit_ref_post_nav_submenu_content, SQLITE3_TEXT);
+    $stmt->execute();
     $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_parent) VALUES ('Imported child page behind explicit parent', 'child of held explicit id', 'publish', 2)");
     $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (2, '_forkpress_import_ref', :value)");
     $stmt->bindValue(':value', json_encode(['post_id' => 2, 'origin' => 'import'], JSON_UNESCAPED_SLASHES), SQLITE3_TEXT);
@@ -14928,6 +15888,69 @@ SQL);
     ]);
     $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_media_image', :value, 'yes')");
     $stmt->bindValue(':value', $band_explicit_ref_media_widget, SQLITE3_TEXT);
+    $stmt->execute();
+    $band_explicit_ref_audio_widget = serialize([
+        4 => [
+            'attachment_id' => 6,
+            'caption' => 'Imported audio widget behind held explicit attachment',
+        ],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_media_audio', :value, 'yes')");
+    $stmt->bindValue(':value', $band_explicit_ref_audio_widget, SQLITE3_TEXT);
+    $stmt->execute();
+    $band_explicit_ref_video_widget = serialize([
+        5 => [
+            'attachment_id' => 6,
+            'caption' => 'Imported video widget behind held explicit attachment',
+        ],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_media_video', :value, 'yes')");
+    $stmt->bindValue(':value', $band_explicit_ref_video_widget, SQLITE3_TEXT);
+    $stmt->execute();
+    $band_explicit_ref_gallery_widget = serialize([
+        6 => [
+            'ids' => [6],
+            'caption' => 'Imported gallery widget behind held explicit attachment',
+        ],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_media_gallery', :value, 'yes')");
+    $stmt->bindValue(':value', $band_explicit_ref_gallery_widget, SQLITE3_TEXT);
+    $stmt->execute();
+    $band_explicit_ref_pages_widget = serialize([
+        8 => [
+            'title' => 'Imported pages widget behind held explicit page',
+            'exclude' => '2',
+        ],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_pages', :value, 'yes')");
+    $stmt->bindValue(':value', $band_explicit_ref_pages_widget, SQLITE3_TEXT);
+    $stmt->execute();
+    $band_explicit_ref_text_widget = serialize([
+        9 => [
+            'title' => 'Imported text widget behind held explicit attachment',
+            'text' => '<!-- wp:image {"id":6,"sizeSlug":"large"} --><figure class="wp-block-image size-large"><img class="wp-image-6"/></figure><!-- /wp:image -->',
+        ],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_text', :value, 'yes')");
+    $stmt->bindValue(':value', $band_explicit_ref_text_widget, SQLITE3_TEXT);
+    $stmt->execute();
+    $band_explicit_ref_custom_html_widget = serialize([
+        10 => [
+            'title' => 'Imported custom HTML widget behind held explicit attachment',
+            'content' => '<!-- wp:image {"id":6,"sizeSlug":"large"} --><figure class="wp-block-image size-large"><img class="wp-image-6"/></figure><!-- /wp:image -->',
+        ],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_custom_html', :value, 'yes')");
+    $stmt->bindValue(':value', $band_explicit_ref_custom_html_widget, SQLITE3_TEXT);
+    $stmt->execute();
+    $band_explicit_ref_widget_block = serialize([
+        11 => [
+            'content' => '<!-- wp:image {"id":6,"sizeSlug":"large"} --><figure class="wp-block-image size-large"><img class="wp-image-6"/></figure><!-- /wp:image -->',
+        ],
+        '_multiwidget' => 1,
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_block', :value, 'yes')");
+    $stmt->bindValue(':value', $band_explicit_ref_widget_block, SQLITE3_TEXT);
     $stmt->execute();
     $db->exec("UPDATE wp_options SET option_value = '2' WHERE option_name = 'page_for_posts'");
     $db->exec("UPDATE wp_options SET option_value = '2' WHERE option_name = 'site_icon'");
@@ -14986,6 +16009,7 @@ SQL);
     assert_same(scalar($band_explicit_ref_target, "SELECT post_content FROM wp_posts WHERE ID = 12"), '<!-- wp:paragraph --><p>base video block content</p><!-- /wp:paragraph -->', 'updated video block refs pointing at a held explicit source attachment are not applied automatically');
     assert_same(scalar($band_explicit_ref_target, "SELECT post_content FROM wp_posts WHERE ID = 13"), '<!-- wp:paragraph --><p>base post navigation link content</p><!-- /wp:paragraph -->', 'updated post navigation link refs pointing at a held explicit source post are not applied automatically');
     assert_same(scalar($band_explicit_ref_target, "SELECT post_content FROM wp_posts WHERE ID = 14"), '<!-- wp:paragraph --><p>base navigation block content</p><!-- /wp:paragraph -->', 'updated navigation block refs pointing at a held explicit source navigation post are not applied automatically');
+    assert_same(scalar($band_explicit_ref_target, "SELECT post_content FROM wp_posts WHERE ID = 15"), '<!-- wp:paragraph --><p>base post navigation submenu content</p><!-- /wp:paragraph -->', 'updated post navigation submenu refs pointing at a held explicit source post are not applied automatically');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_posts WHERE post_parent = 2"), 0, 'child posts pointing at a held explicit source post are not applied automatically');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_postmeta WHERE post_id = 2"), 0, 'postmeta pointing at a held explicit source post is not applied automatically');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_postmeta WHERE meta_key = '_thumbnail_id' AND meta_value = '2'"), 0, 'postmeta values pointing at a held explicit source post are not applied automatically');
@@ -14993,6 +16017,13 @@ SQL);
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'sticky_posts'"), 0, 'serialized options pointing at a held explicit source post are not applied automatically');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'theme_mods_imported_post_refs'"), 0, 'theme mods pointing at a held explicit source attachment are not applied automatically');
     assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'widget_media_image'"), 0, 'media widgets pointing at a held explicit source attachment are not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'widget_media_audio'"), 0, 'audio widgets pointing at a held explicit source attachment are not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'widget_media_video'"), 0, 'video widgets pointing at a held explicit source attachment are not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'widget_media_gallery'"), 0, 'gallery widgets pointing at a held explicit source attachment are not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'widget_pages'"), 0, 'pages widgets pointing at a held explicit source page are not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'widget_text'"), 0, 'text widgets pointing at a held explicit source attachment are not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'widget_custom_html'"), 0, 'custom HTML widgets pointing at a held explicit source attachment are not applied automatically');
+    assert_same((int)scalar($band_explicit_ref_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'widget_block'"), 0, 'block widgets pointing at a held explicit source attachment are not applied automatically');
     assert_same(scalar($band_explicit_ref_target, "SELECT option_value FROM wp_options WHERE option_name = 'page_for_posts'"), '1', 'updated scalar options pointing at a held explicit source post are not applied automatically');
     assert_same(scalar($band_explicit_ref_target, "SELECT option_value FROM wp_options WHERE option_name = 'site_icon'"), '1', 'updated site icons pointing at a held explicit source attachment are not applied automatically');
     assert_same(scalar($band_explicit_ref_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_test'"), 'a:1:{s:5:"color";s:4:"blue";}', 'updated theme mods pointing at a held explicit source attachment are not applied automatically');
@@ -15015,12 +16046,12 @@ SQL);
     );
     assert_same(
         (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND c.table_name = 'wp_options' AND c.conflict_type = 'row-target-constraint'"),
-        7,
+        14,
         'options pointing at a held explicit source post record reviewable row conflicts'
     );
     assert_same(
         (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND c.table_name = 'wp_posts' AND c.conflict_type = 'row-target-constraint'"),
-        14,
+        15,
         'explicit parent, attachment, child, and block consumer posts behind them record reviewable row conflicts'
     );
     assert_same(
@@ -15047,7 +16078,7 @@ SQL);
         'updated postmeta held behind an explicit source post explains that the source changed the row'
     );
     assert_true(
-        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_options' AND d.decision = 'target-wins' AND d.reason LIKE '%parent post must merge before child row%'") === 7,
+        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_options' AND d.decision = 'target-wins' AND d.reason LIKE '%parent post must merge before child row%'") === 14,
         'options held behind an explicit source post explain the missing parent'
     );
     assert_true(
@@ -15055,11 +16086,11 @@ SQL);
         'updated options held behind an explicit source post explain that the source changed the option'
     );
     assert_true(
-        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_posts' AND d.decision = 'target-wins' AND d.reason LIKE '%parent post must merge before child row%'") === 12,
+        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_posts' AND d.decision = 'target-wins' AND d.reason LIKE '%parent post must merge before child row%'") === 13,
         'child posts and block content held behind an explicit source post explain the missing parent'
     );
     assert_true(
-        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_posts' AND d.decision = 'target-wins' AND d.reason LIKE 'source changed%'") === 11,
+        (int)scalar($band_explicit_ref_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-ref-source' AND d.table_name = 'wp_posts' AND d.decision = 'target-wins' AND d.reason LIKE 'source changed%'") === 12,
         'updated child posts and block content held behind an explicit source post explain that the source changed the row'
     );
     assert_true(
@@ -15136,8 +16167,11 @@ SQL);
     $db->exec("INSERT INTO wp_termmeta (term_id, meta_key, meta_value) VALUES (1, '_forkpress_base_term_ref', 'base term metadata')");
     $db->exec('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (1, 1, 0)');
     $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type) VALUES ('Base taxonomy navigation link consumer', '<!-- wp:paragraph --><p>base taxonomy navigation link content</p><!-- /wp:paragraph -->', 'publish', 'page')");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type) VALUES ('Base taxonomy navigation submenu consumer', '<!-- wp:paragraph --><p>base taxonomy navigation submenu content</p><!-- /wp:paragraph -->', 'publish', 'page')");
     $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type) VALUES ('Base taxonomy query consumer', '<!-- wp:paragraph --><p>base taxonomy query content</p><!-- /wp:paragraph -->', 'publish', 'page')");
     $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type) VALUES ('Base tag query consumer', '<!-- wp:paragraph --><p>base tag query content</p><!-- /wp:paragraph -->', 'publish', 'page')");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type) VALUES ('Base taxonomy taxQuery consumer', '<!-- wp:paragraph --><p>base taxonomy taxQuery content</p><!-- /wp:paragraph -->', 'publish', 'page')");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type) VALUES ('Base latest posts category consumer', '<!-- wp:paragraph --><p>base latest posts category content</p><!-- /wp:paragraph -->', 'publish', 'page')");
     $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type) VALUES ('Base taxonomy menu item', '', 'publish', 'nav_menu_item')");
     $band_explicit_term_base_menu_item_id = (int)$db->lastInsertRowID();
     $db->exec("INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES ($band_explicit_term_base_menu_item_id, 1, 0)");
@@ -15151,6 +16185,10 @@ SQL);
     $band_explicit_term_base_nav_widget = serialize([2 => ['nav_menu' => 1, 'title' => 'Base nav widget']]);
     $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('widget_nav_menu', :value, 'yes')");
     $stmt->bindValue(':value', $band_explicit_term_base_nav_widget, SQLITE3_TEXT);
+    $stmt->execute();
+    $band_explicit_term_base_nav_menu_options = serialize(['auto_add' => [1]]);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('nav_menu_options', :value, 'yes')");
+    $stmt->bindValue(':value', $band_explicit_term_base_nav_menu_options, SQLITE3_TEXT);
     $stmt->execute();
     $db->close();
     copy($band_explicit_term_base, $band_explicit_term_source);
@@ -15174,8 +16212,11 @@ SQL);
     $db->exec("UPDATE wp_term_taxonomy SET term_id = 2 WHERE term_taxonomy_id = 1");
     $db->exec("UPDATE wp_term_taxonomy SET parent = 2 WHERE term_taxonomy_id = 3");
     $db->exec("UPDATE wp_posts SET post_content = '<!-- wp:navigation-link {\"id\":2,\"kind\":\"taxonomy\",\"type\":\"category\",\"label\":\"Held term\"} /-->' WHERE post_title = 'Base taxonomy navigation link consumer'");
+    $db->exec("UPDATE wp_posts SET post_content = '<!-- wp:navigation-submenu {\"id\":2,\"kind\":\"taxonomy\",\"type\":\"category\",\"label\":\"Held submenu term\"} --><!-- /wp:navigation-submenu -->' WHERE post_title = 'Base taxonomy navigation submenu consumer'");
     $db->exec("UPDATE wp_posts SET post_content = '<!-- wp:query {\"query\":{\"categoryIds\":[2],\"perPage\":3}} --><!-- /wp:query -->' WHERE post_title = 'Base taxonomy query consumer'");
     $db->exec("UPDATE wp_posts SET post_content = '<!-- wp:query {\"query\":{\"tagIds\":[2],\"perPage\":3}} --><!-- /wp:query -->' WHERE post_title = 'Base tag query consumer'");
+    $db->exec("UPDATE wp_posts SET post_content = '<!-- wp:query {\"query\":{\"taxQuery\":{\"category\":[2],\"post_tag\":[2]},\"perPage\":3}} --><!-- /wp:query -->' WHERE post_title = 'Base taxonomy taxQuery consumer'");
+    $db->exec("UPDATE wp_posts SET post_content = '<!-- wp:latest-posts {\"categories\":[2],\"postsToShow\":5} /-->' WHERE post_title = 'Base latest posts category consumer'");
     $stmt = $db->prepare('UPDATE wp_term_relationships SET term_taxonomy_id = :term_taxonomy_id WHERE object_id = :object_id AND term_taxonomy_id = 1');
     $stmt->bindValue(':term_taxonomy_id', $band_explicit_term_taxonomy_id, SQLITE3_INTEGER);
     $stmt->bindValue(':object_id', $band_explicit_term_base_menu_item_id, SQLITE3_INTEGER);
@@ -15188,6 +16229,10 @@ SQL);
     $band_explicit_term_updated_nav_widget = serialize([2 => ['nav_menu' => 2, 'title' => 'Updated nav widget']]);
     $stmt = $db->prepare("UPDATE wp_options SET option_value = :value WHERE option_name = 'widget_nav_menu'");
     $stmt->bindValue(':value', $band_explicit_term_updated_nav_widget, SQLITE3_TEXT);
+    $stmt->execute();
+    $band_explicit_term_updated_nav_menu_options = serialize(['auto_add' => [2]]);
+    $stmt = $db->prepare("UPDATE wp_options SET option_value = :value WHERE option_name = 'nav_menu_options'");
+    $stmt->bindValue(':value', $band_explicit_term_updated_nav_menu_options, SQLITE3_TEXT);
     $stmt->execute();
     $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type) VALUES ('Taxonomy menu item behind explicit term', '', 'publish', 'nav_menu_item')");
     $band_explicit_term_menu_item_id = (int)$db->lastInsertRowID();
@@ -15225,9 +16270,13 @@ SQL);
     assert_same((int)scalar($band_explicit_term_target, "SELECT COUNT(*) FROM wp_postmeta WHERE post_id = $band_explicit_term_menu_item_id AND meta_key = '_menu_item_object_id' AND meta_value = '2'"), 0, 'taxonomy menu item object references pointing at a held explicit source term are not applied automatically');
     assert_same(scalar($band_explicit_term_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_existing_term_refs'"), $band_explicit_term_base_theme_mods, 'updated theme mods pointing at a held explicit source nav menu are not applied automatically');
     assert_same(scalar($band_explicit_term_target, "SELECT option_value FROM wp_options WHERE option_name = 'widget_nav_menu'"), $band_explicit_term_base_nav_widget, 'updated nav menu widgets pointing at a held explicit source menu are not applied automatically');
+    assert_same(scalar($band_explicit_term_target, "SELECT option_value FROM wp_options WHERE option_name = 'nav_menu_options'"), $band_explicit_term_base_nav_menu_options, 'updated nav menu auto-add options pointing at a held explicit source menu are not applied automatically');
     assert_same(scalar($band_explicit_term_target, "SELECT post_content FROM wp_posts WHERE post_title = 'Base taxonomy navigation link consumer'"), '<!-- wp:paragraph --><p>base taxonomy navigation link content</p><!-- /wp:paragraph -->', 'updated taxonomy navigation link refs pointing at a held explicit source term are not applied automatically');
+    assert_same(scalar($band_explicit_term_target, "SELECT post_content FROM wp_posts WHERE post_title = 'Base taxonomy navigation submenu consumer'"), '<!-- wp:paragraph --><p>base taxonomy navigation submenu content</p><!-- /wp:paragraph -->', 'updated taxonomy navigation submenu refs pointing at a held explicit source term are not applied automatically');
     assert_same(scalar($band_explicit_term_target, "SELECT post_content FROM wp_posts WHERE post_title = 'Base taxonomy query consumer'"), '<!-- wp:paragraph --><p>base taxonomy query content</p><!-- /wp:paragraph -->', 'updated query block term refs pointing at a held explicit source term are not applied automatically');
     assert_same(scalar($band_explicit_term_target, "SELECT post_content FROM wp_posts WHERE post_title = 'Base tag query consumer'"), '<!-- wp:paragraph --><p>base tag query content</p><!-- /wp:paragraph -->', 'updated query block tag refs pointing at a held explicit source term are not applied automatically');
+    assert_same(scalar($band_explicit_term_target, "SELECT post_content FROM wp_posts WHERE post_title = 'Base taxonomy taxQuery consumer'"), '<!-- wp:paragraph --><p>base taxonomy taxQuery content</p><!-- /wp:paragraph -->', 'updated query block taxQuery refs pointing at a held explicit source term are not applied automatically');
+    assert_same(scalar($band_explicit_term_target, "SELECT post_content FROM wp_posts WHERE post_title = 'Base latest posts category consumer'"), '<!-- wp:paragraph --><p>base latest posts category content</p><!-- /wp:paragraph -->', 'updated latest posts category refs pointing at a held explicit source term are not applied automatically');
     assert_same((int)scalar($band_explicit_term_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'theme_mods_imported_term_refs'"), 0, 'theme mods pointing at a held explicit source nav menu are not applied automatically');
     assert_same(
         (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND c.table_name = 'wp_terms' AND c.conflict_type = 'row-target-constraint'"),
@@ -15256,20 +16305,20 @@ SQL);
     );
     assert_same(
         (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND c.table_name = 'wp_posts' AND c.conflict_type = 'row-target-constraint'"),
-        3,
+        6,
         'taxonomy block refs pointing at a held explicit source term record a reviewable row conflict'
     );
     assert_same(
         (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND c.table_name = 'wp_options' AND c.conflict_type = 'row-target-constraint'"),
-        3,
+        4,
         'options pointing at a held explicit source term record reviewable row conflicts'
     );
     assert_true(
-        (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND d.table_name = 'wp_options' AND d.decision = 'target-wins' AND d.reason LIKE '%parent term must merge before child row%'") === 3,
+        (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND d.table_name = 'wp_options' AND d.decision = 'target-wins' AND d.reason LIKE '%parent term must merge before child row%'") === 4,
         'options held behind an explicit source term explain the missing parent'
     );
     assert_true(
-        (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND d.table_name IN ('wp_termmeta', 'wp_term_taxonomy', 'wp_term_relationships', 'wp_postmeta', 'wp_options', 'wp_posts') AND d.decision = 'target-wins' AND d.reason LIKE 'source changed%'") === 10,
+        (int)scalar($band_explicit_term_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-term-source' AND d.table_name IN ('wp_termmeta', 'wp_term_taxonomy', 'wp_term_relationships', 'wp_postmeta', 'wp_options', 'wp_posts') AND d.decision = 'target-wins' AND d.reason LIKE 'source changed%'") === 14,
         'updated rows held behind an explicit source term explain that the source changed the row'
     );
 
@@ -15288,6 +16337,7 @@ SQL);
     $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_author) VALUES ('Base authored post', 'base author should remain', 'publish', 1)");
     $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_author) VALUES ('Base avatar block consumer', '<!-- wp:paragraph --><p>base avatar content</p><!-- /wp:paragraph -->', 'publish', 1)");
     $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_author) VALUES ('Base author query consumer', '<!-- wp:paragraph --><p>base author query content</p><!-- /wp:paragraph -->', 'publish', 1)");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_author) VALUES ('Base latest posts author consumer', '<!-- wp:paragraph --><p>base latest posts author content</p><!-- /wp:paragraph -->', 'publish', 1)");
     $db->exec("INSERT INTO wp_comments (comment_post_ID, comment_content, user_id) VALUES (1, 'Base user comment', 1)");
     $db->close();
     copy($band_explicit_user_base, $band_explicit_user_source);
@@ -15300,6 +16350,7 @@ SQL);
     $db->exec("UPDATE wp_posts SET post_author = 2 WHERE post_title = 'Base authored post'");
     $db->exec("UPDATE wp_posts SET post_content = '<!-- wp:avatar {\"userId\":2,\"size\":96} /-->' WHERE post_title = 'Base avatar block consumer'");
     $db->exec("UPDATE wp_posts SET post_content = '<!-- wp:query {\"query\":{\"author\":2,\"perPage\":3}} --><!-- /wp:query -->' WHERE post_title = 'Base author query consumer'");
+    $db->exec("UPDATE wp_posts SET post_content = '<!-- wp:latest-posts {\"selectedAuthor\":2,\"postsToShow\":5} /-->' WHERE post_title = 'Base latest posts author consumer'");
     $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_author) VALUES ('Post behind explicit author', 'author should be review-held', 'publish', 2)");
     $db->exec("UPDATE wp_comments SET user_id = 2 WHERE comment_content = 'Base user comment'");
     $db->exec("INSERT INTO wp_comments (comment_post_ID, comment_content, user_id) VALUES (1, 'Comment behind held explicit user', 2)");
@@ -15319,6 +16370,7 @@ SQL);
     assert_same((int)scalar($band_explicit_user_target, "SELECT post_author FROM wp_posts WHERE post_title = 'Base authored post'"), 1, 'updated post authors pointing at a held explicit source user are not applied automatically');
     assert_same(scalar($band_explicit_user_target, "SELECT post_content FROM wp_posts WHERE post_title = 'Base avatar block consumer'"), '<!-- wp:paragraph --><p>base avatar content</p><!-- /wp:paragraph -->', 'updated avatar block refs pointing at a held explicit source user are not applied automatically');
     assert_same(scalar($band_explicit_user_target, "SELECT post_content FROM wp_posts WHERE post_title = 'Base author query consumer'"), '<!-- wp:paragraph --><p>base author query content</p><!-- /wp:paragraph -->', 'updated query block author refs pointing at a held explicit source user are not applied automatically');
+    assert_same(scalar($band_explicit_user_target, "SELECT post_content FROM wp_posts WHERE post_title = 'Base latest posts author consumer'"), '<!-- wp:paragraph --><p>base latest posts author content</p><!-- /wp:paragraph -->', 'updated latest posts author refs pointing at a held explicit source user are not applied automatically');
     assert_same((int)scalar($band_explicit_user_target, 'SELECT COUNT(*) FROM wp_posts WHERE post_author = 2'), 0, 'posts authored by a held explicit source user are not applied automatically');
     assert_same((int)scalar($band_explicit_user_target, "SELECT user_id FROM wp_comments WHERE comment_content = 'Base user comment'"), 1, 'updated comments pointing at a held explicit source user are not applied automatically');
     assert_same((int)scalar($band_explicit_user_target, 'SELECT COUNT(*) FROM wp_comments WHERE user_id = 2'), 0, 'comments pointing at a held explicit source user are not applied automatically');
@@ -15334,7 +16386,7 @@ SQL);
     );
     assert_same(
         (int)scalar($band_explicit_user_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-band-explicit-user-source' AND c.table_name = 'wp_posts' AND c.conflict_type = 'row-target-constraint'"),
-        4,
+        5,
         'posts authored by or referencing a held explicit source user record a reviewable row conflict'
     );
     assert_same(
@@ -15343,11 +16395,11 @@ SQL);
         'comments pointing at a held explicit source user record a reviewable row conflict'
     );
     assert_true(
-        (int)scalar($band_explicit_user_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-user-source' AND d.table_name IN ('wp_usermeta', 'wp_posts', 'wp_comments') AND d.decision = 'target-wins' AND d.reason LIKE '%parent user must merge before child row%'") === 8,
+        (int)scalar($band_explicit_user_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-user-source' AND d.table_name IN ('wp_usermeta', 'wp_posts', 'wp_comments') AND d.decision = 'target-wins' AND d.reason LIKE '%parent user must merge before child row%'") === 9,
         'child rows held behind an explicit source user explain the missing parent'
     );
     assert_true(
-        (int)scalar($band_explicit_user_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-user-source' AND d.table_name IN ('wp_usermeta', 'wp_posts', 'wp_comments') AND d.decision = 'target-wins' AND d.reason LIKE 'source changed%'") === 5,
+        (int)scalar($band_explicit_user_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-band-explicit-user-source' AND d.table_name IN ('wp_usermeta', 'wp_posts', 'wp_comments') AND d.decision = 'target-wins' AND d.reason LIKE 'source changed%'") === 6,
         'updated child rows held behind an explicit source user explain that the source changed the row'
     );
 
@@ -17801,6 +18853,22 @@ PHP);
     assert_same(count($plugin_audit['autoincrement_bands']), 0, 'plugin audit scope omits DB AUTOINCREMENT band summaries');
     assert_same(count($plugin_audit['row_identity_summary']), 0, 'plugin audit scope omits DB row identity summaries');
     $plugin_conflict_id = (int)$plugin_audit['conflicts'][0]['id'];
+    $plugin_validator_action_audit = cow_merge_audit_report($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'next_action' => 'run-plugin-validator',
+    ]);
+    assert_same($plugin_validator_action_audit['filters']['next_action'], 'run-plugin-validator', 'plugin next-action audit preserves the validator queue filter');
+    $plugin_validator_action_ids = array_map(fn($row) => (int)$row['id'], $plugin_validator_action_audit['conflicts']);
+    assert_true(in_array($plugin_conflict_id, $plugin_validator_action_ids, true), 'plugin next-action audit returns unreviewed validator conflicts');
+    $plugin_next_action_group_audit = cow_merge_audit_report($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'group_by' => 'next-action',
+    ]);
+    assert_same($plugin_next_action_group_audit['filters']['group_by'], 'next-action', 'plugin next-action grouping is preserved in audit filters');
+    $plugin_next_action_group_keys = array_column($plugin_next_action_group_audit['conflict_groups'], 'group_key');
+    assert_true(in_array('run-plugin-validator', $plugin_next_action_group_keys, true), 'plugin next-action grouping includes validator rerun queues');
 
     $plugin_db_scope_audit = cow_merge_audit_report($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 10, [
         'scope' => 'db',
@@ -17838,6 +18906,13 @@ PHP);
     assert_same(count($plugin_review_audit['conflicts']), 1, 'plugin conflict review queue returns reviewed plugin conflicts');
     assert_same($plugin_review_audit['conflicts'][0]['review_status'], 'needs-action', 'plugin audit exposes latest plugin conflict review status');
     assert_same($plugin_review_audit['conflicts'][0]['stale_status'] ?? null, 'unknown', 'plugin validator conflicts are not marked fresh or stale without rerunning validators');
+    $plugin_manual_action_audit = cow_merge_audit_report($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'next_action' => 'manual-review',
+    ]);
+    $plugin_manual_action_ids = array_map(fn($row) => (int)$row['id'], $plugin_manual_action_audit['conflicts']);
+    assert_true(in_array($plugin_conflict_id, $plugin_manual_action_ids, true), 'plugin next-action audit returns reviewed manual conflicts');
     $plugin_revalidate = cow_merge_revalidate_reviewed_conflicts($plugin_graph_metadata, (int)$plugin_graph_result['run_id'], 'cow-revalidate');
     assert_same($plugin_revalidate['checked'], 1, 'plugin conflict revalidation inspects plugin conflicts in the selected run');
     assert_same($plugin_revalidate['reviewed'], 1, 'plugin conflict revalidation sees reviewed plugin conflicts');

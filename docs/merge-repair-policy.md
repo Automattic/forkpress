@@ -27,7 +27,7 @@ block JSON, options, upload files, or plugin tables, the safe default is:
 | Class | Automatic repair policy | Reason |
 | --- | --- | --- |
 | Branch ID collisions | Prevent before write with AUTOINCREMENT bands. Do not rewrite embedded IDs after the fact. | IDs are commonly serialized into JSON, PHP serialization, block attributes, and plugin payloads. Rewriting every reference is not generally knowable. |
-| Missing upload files from attachment metadata | Validator conflict by default. | Regenerating sizes changes bytes, dimensions, metadata, and possibly plugin expectations. A future media-specific repair may be valid only when WordPress can regenerate the exact declared size from an existing original. |
+| Missing upload files from attachment metadata | Validator conflict by default, with review-only regeneration guidance recorded in the conflict payload. | Regenerating sizes changes bytes, dimensions, metadata, and possibly plugin expectations. A future media-specific repair may be valid only when WordPress can regenerate the exact declared size from an existing original. |
 | `_wp_attached_file` versus `_wp_attachment_metadata['file']` drift | Validator conflict by default. | Either path can be intentional after a plugin move/import. The merge engine should not choose one without a media owner. |
 | Featured image references to deleted attachments | Validator conflict by default. | Removing `_thumbnail_id` or restoring the attachment are both semantic editorial choices. |
 | `core/image` block IDs pointing at deleted attachments | Validator conflict by default. | Updating block JSON requires knowing whether the image should be removed, replaced, or restored. |

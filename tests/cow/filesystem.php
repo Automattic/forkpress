@@ -21,6 +21,15 @@ function assert_same($actual, $expected, $msg) {
     );
 }
 
+function find_audit_conflict_by_identity(array $conflicts, string $identity): ?array {
+    foreach ($conflicts as $conflict) {
+        if (($conflict['row_identity'] ?? null) === $identity) {
+            return $conflict;
+        }
+    }
+    return null;
+}
+
 function remove_tree(string $path): void {
     if (!file_exists($path) && !is_link($path)) {
         return;
@@ -290,6 +299,13 @@ try {
     assert_true(str_contains($unsafe_symlink_preview, 'self-link.txt'), 'unsafe symlink audit exposes the rejected self-reference target');
     assert_true(str_contains($unsafe_symlink_preview, '../database/.ht.sqlite'), 'unsafe symlink audit exposes the rejected managed-path target');
     assert_true(str_contains($unsafe_symlink_preview, '../../../../outside-root.txt'), 'unsafe symlink audit exposes the rejected root-escaping target');
+    foreach ($audit['conflicts'] as $conflict) {
+        assert_same($conflict['resolution_choices'], ['target'], 'unsafe symlink audit only offers target resolution');
+        assert_true(
+            str_contains((string)($conflict['blocked_resolution_choices']['source'] ?? ''), 'source symlink cannot be safely applied automatically'),
+            'unsafe symlink audit records why source resolution is blocked'
+        );
+    }
 
     $absolute_link_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/absolute-link.txt'));
     $absolute_link_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-unsafe-symlink' AND row_identity = '$absolute_link_identity' ORDER BY id DESC LIMIT 1");
@@ -300,8 +316,8 @@ try {
         $unsafe_resolution_error = $e->getMessage();
     }
     assert_true(
-        is_string($unsafe_resolution_error) && str_contains($unsafe_resolution_error, 'cannot apply source filesystem conflict wp-content/uploads/absolute-link.txt (file-unsafe-symlink): symlink target is absolute'),
-        'reviewed source resolution cannot force-apply an unsafe absolute symlink'
+        is_string($unsafe_resolution_error) && str_contains($unsafe_resolution_error, 'resolution choice source is blocked') && str_contains($unsafe_resolution_error, 'symlink target is absolute'),
+        'reviewed source resolution is blocked before applying an unsafe absolute symlink'
     );
     assert_true(
         !file_exists($target_root . '/wp-content/uploads/absolute-link.txt') && !is_link($target_root . '/wp-content/uploads/absolute-link.txt'),
@@ -309,6 +325,17 @@ try {
     );
 
     if ($has_unsupported_special_entry) {
+        $unsupported_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+            'scope' => 'files',
+            'records' => 'conflicts',
+            'conflict_type' => 'file-unsupported-source-change',
+        ]);
+        assert_same(count($unsupported_audit['conflicts']), 1, 'file audit can focus on unsupported source entries');
+        assert_same($unsupported_audit['conflicts'][0]['resolution_choices'], ['target'], 'unsupported source entry audit only offers target resolution');
+        assert_true(
+            str_contains((string)($unsupported_audit['conflicts'][0]['blocked_resolution_choices']['source'] ?? ''), 'source filesystem entry type cannot be applied automatically'),
+            'unsupported source entry audit records why source resolution is blocked'
+        );
         $unsupported_special_entry_identity = SQLite3::escapeString(cow_merge_file_identity_json($unsupported_special_entry_path));
         $unsupported_special_entry_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-unsupported-source-change' AND row_identity = '$unsupported_special_entry_identity' ORDER BY id DESC LIMIT 1");
         $unsupported_resolution_error = null;
@@ -318,8 +345,8 @@ try {
             $unsupported_resolution_error = $e->getMessage();
         }
         assert_true(
-            is_string($unsupported_resolution_error) && str_contains($unsupported_resolution_error, 'cannot apply source filesystem conflict wp-content/uploads/source-fifo (file-unsupported-source-change): source changed a filesystem path whose type cannot be applied automatically'),
-            'reviewed source resolution cannot force-apply an unsupported filesystem entry'
+            is_string($unsupported_resolution_error) && str_contains($unsupported_resolution_error, 'resolution choice source is blocked') && str_contains($unsupported_resolution_error, 'source filesystem entry type cannot be applied automatically'),
+            'reviewed source resolution is blocked before applying an unsupported filesystem entry'
         );
         assert_true(
             !file_exists($target_root . '/' . $unsupported_special_entry_path) && !is_link($target_root . '/' . $unsupported_special_entry_path),
@@ -337,6 +364,42 @@ try {
         $delete_dir_audit['conflicts'][0]['row_identity'],
         cow_merge_file_identity_json('wp-content/uploads/delete-dir-conflict'),
         'directory deletion audit points at the blocked directory'
+    );
+    assert_same($delete_dir_audit['conflicts'][0]['resolution_choices'], ['target'], 'directory deletion audit only offers target resolution while target descendants need review');
+    assert_true(
+        str_contains((string)($delete_dir_audit['conflicts'][0]['blocked_resolution_choices']['source'] ?? ''), 'target-side descendants require review'),
+        'directory deletion audit records why source resolution is blocked'
+    );
+    $delete_dir_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-directory-delete-conflict' AND row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/delete-dir-conflict')) . "' ORDER BY id DESC LIMIT 1");
+    $delete_dir_resolution_error = null;
+    try {
+        cow_merge_resolve_conflict($metadata, $delete_dir_conflict_id, 'source', true, 'Try applying reviewed source directory deletion.', 'cow-test');
+    } catch (Throwable $e) {
+        $delete_dir_resolution_error = $e->getMessage();
+    }
+    assert_true(
+        is_string($delete_dir_resolution_error) && str_contains($delete_dir_resolution_error, 'resolution choice source is blocked') && str_contains($delete_dir_resolution_error, 'target-side descendants require review'),
+        'reviewed source directory deletion is blocked before deleting target descendants'
+    );
+    assert_same(file_get_contents($target_root . '/wp-content/uploads/delete-dir-conflict/target-child.txt'), 'target delete-dir child', 'blocked source directory deletion preserves target descendants');
+
+    $type_replacement_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'files',
+        'records' => 'conflicts',
+        'conflict_type' => 'file-type-replacement-conflict',
+    ]);
+    $dir_to_file_audit = find_audit_conflict_by_identity($type_replacement_audit['conflicts'], cow_merge_file_identity_json('wp-content/uploads/replace-dir-with-file'));
+    $file_to_dir_audit = find_audit_conflict_by_identity($type_replacement_audit['conflicts'], cow_merge_file_identity_json('wp-content/uploads/replace-file-with-dir'));
+    $unsafe_file_to_dir_audit = find_audit_conflict_by_identity($type_replacement_audit['conflicts'], cow_merge_file_identity_json('wp-content/uploads/replace-file-with-unsafe-dir'));
+    assert_true(is_array($dir_to_file_audit), 'type replacement audit includes safe directory-to-file replacement');
+    assert_true(is_array($file_to_dir_audit), 'type replacement audit includes safe file-to-directory replacement');
+    assert_true(is_array($unsafe_file_to_dir_audit), 'type replacement audit includes unsafe file-to-directory replacement');
+    assert_same($dir_to_file_audit['resolution_choices'] ?? null, ['source', 'target'], 'safe directory-to-file audit offers source and target choices');
+    assert_same($file_to_dir_audit['resolution_choices'] ?? null, ['source', 'target'], 'safe file-to-directory audit offers source and target choices');
+    assert_same($unsafe_file_to_dir_audit['resolution_choices'] ?? null, ['target'], 'unsafe source subtree audit only offers target resolution');
+    assert_true(
+        str_contains((string)(($unsafe_file_to_dir_audit['blocked_resolution_choices'] ?? [])['source'] ?? ''), 'source directory subtree contains an unsafe symlink'),
+        'unsafe source subtree audit records why source resolution is blocked'
     );
 
     $dir_to_file_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-type-replacement-conflict' AND row_identity = '$dir_to_file_identity' ORDER BY id DESC LIMIT 1");
@@ -360,8 +423,8 @@ try {
         $unsafe_subtree_resolution_error = $e->getMessage();
     }
     assert_true(
-        is_string($unsafe_subtree_resolution_error) && str_contains($unsafe_subtree_resolution_error, 'cannot apply source filesystem directory subtree wp-content/uploads/replace-file-with-unsafe-dir (file-unsafe-symlink): symlink target resolves outside the filesystem merge root'),
-        'reviewed source file-to-directory resolution cannot force-apply an unsafe symlink inside the source subtree'
+        is_string($unsafe_subtree_resolution_error) && str_contains($unsafe_subtree_resolution_error, 'resolution choice source is blocked') && str_contains($unsafe_subtree_resolution_error, 'source directory subtree contains an unsafe symlink'),
+        'reviewed source file-to-directory resolution is blocked before applying an unsafe symlink inside the source subtree'
     );
     assert_true(is_file($target_root . '/wp-content/uploads/replace-file-with-unsafe-dir'), 'failed unsafe subtree resolution keeps the target file in place');
     assert_same(file_get_contents($target_root . '/wp-content/uploads/replace-file-with-unsafe-dir'), 'base unsafe file', 'failed unsafe subtree resolution preserves target file contents');

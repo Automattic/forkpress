@@ -118,13 +118,14 @@ The Git server suite covers these publication classes:
   unreachable objects behind, but reachable branch objects are preserved and the
   next prune removes the remaining unreachable objects.
 - Multi-branch Git-created ID-band metadata failure rolls back created branch
-  metadata and merge-base artifacts.
+  metadata, branch-birth decision rows, DB merge-base SQLite sidecars, and
+  file-base artifacts.
 - Stale-source Git-created branch publication is rejected.
-- Normal branch creation removes stale unpublished merge-base and branch-birth
-  metadata for the requested branch before allocating fresh birth metadata, so
-  a retry after an interrupted create cannot inherit stale ID bands or merge
-  bases. It also clears stale pending-reset markers for deleted/recreated
-  branches.
+- Normal branch creation removes stale unpublished merge-base files, temporary
+  merge-base capture artifacts, and branch-birth metadata for the requested
+  branch before allocating fresh birth metadata, so a retry after an
+  interrupted create cannot inherit stale ID bands or merge bases. It also
+  clears stale pending-reset markers for deleted/recreated branches.
 - The product E2E suite drives a public `forkpress branch create` exit after
   branch-birth metadata is captured but before publication, then retries the
   same public branch creation and verifies fresh DB/file merge bases and ID-band
