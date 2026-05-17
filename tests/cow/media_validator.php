@@ -169,10 +169,14 @@ $res = $db->query("SELECT p.ID, p.post_mime_type, f.meta_value AS attached_file,
 $findings = [];
 $claimed_uploads = [];
 $unsafe_upload_path = static function (string $relative_file): bool {
+    $normalized_file = str_replace('\\', '/', $relative_file);
     return $relative_file === '' ||
         str_starts_with($relative_file, '/') ||
+        preg_match('/^[A-Za-z][A-Za-z0-9+.-]*:\/\//', $relative_file) === 1 ||
+        preg_match('/^[A-Za-z]:[\/\\\\]/', $relative_file) === 1 ||
+        str_contains($relative_file, '\\') ||
         str_contains($relative_file, "\0") ||
-        in_array('..', explode('/', str_replace('\\', '/', $relative_file)), true);
+        in_array('..', explode('/', $normalized_file), true);
 };
 $review_only_regeneration_decision = static function (string $missing_kind): array {
     return [
@@ -1139,6 +1143,18 @@ PHP);
         'height' => 480,
         'sizes' => [],
     ]);
+    $unsafe_url_attached_id = insert_attachment($db, 'Source media unsafe URL attached path', 'https://example.test/source-url-attached.jpg', [
+        'file' => 'https://example.test/source-url-attached.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [],
+    ]);
+    $unsafe_drive_attached_id = insert_attachment($db, 'Source media unsafe drive attached path', 'C:\\uploads\\source-drive-attached.jpg', [
+        'file' => 'C:\\uploads\\source-drive-attached.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [],
+    ]);
     $invalid_metadata_id = insert_attachment_raw_metadata(
         $db,
         'Source media invalid serialized metadata',
@@ -1178,7 +1194,7 @@ PHP);
 
     assert_same($result['status'], 'completed_with_conflicts', 'media validator holds incomplete generated-size metadata for review');
     assert_same((int)($result['plugin_validators'] ?? 0), 1, 'media validator is discovered from mu-plugins during merge');
-    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 37, 'media validator records missing required metadata, invalid metadata, dimensions, image metadata, filesize and MIME drift, generated-size, original-image, backup-size, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
+    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 39, 'media validator records missing required metadata, invalid metadata, dimensions, image metadata, filesize and MIME drift, generated-size, original-image, backup-size, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
     assert_same(
         scalar($target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-generated-missing-file-key.jpg',
@@ -1469,14 +1485,18 @@ PHP);
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-media-unsafe-path',
     ]);
-    assert_same(count($unsafe_audit['conflicts']), 5, 'media validator exposes unsafe primary, metadata, generated, original_image, and backup upload paths as plugin-scoped audit conflicts');
+    assert_same(count($unsafe_audit['conflicts']), 7, 'media validator exposes unsafe primary, URL, drive, metadata, generated, original_image, and backup upload paths as plugin-scoped audit conflicts');
     $unsafe_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $unsafe_audit['conflicts']));
     assert_true(str_contains($unsafe_preview, 'source-unsafe-generated.jpg'), 'media validator unsafe-path audit includes the affected attachment');
     assert_true(str_contains($unsafe_preview, '../source-unsafe-generated-150x150.jpg'), 'media validator unsafe-path audit includes the rejected generated path');
     assert_true(str_contains($unsafe_preview, '../source-unsafe-attached.jpg'), 'media validator unsafe-path audit includes the rejected attached file path');
+    assert_true(str_contains($unsafe_preview, 'https://example.test/source-url-attached.jpg'), 'media validator unsafe-path audit includes rejected URL upload metadata');
+    assert_true(str_contains($unsafe_preview, 'C:\\\\uploads\\\\source-drive-attached.jpg'), 'media validator unsafe-path audit includes rejected drive-letter upload metadata');
     assert_true(str_contains($unsafe_preview, '../source-unsafe-metadata-file.jpg'), 'media validator unsafe-path audit includes the rejected metadata file path');
     $unsafe_original_image_recorded = false;
     $unsafe_backup_recorded = false;
+    $unsafe_url_recorded = false;
+    $unsafe_drive_recorded = false;
     $meta_db = open_db($metadata);
     $payloads = $meta_db->query("SELECT chosen_payload FROM merge_conflicts WHERE conflict_type = 'plugin-wp-media-unsafe-path'");
     while ($payload = $payloads->fetchArray(SQLITE3_ASSOC)) {
@@ -1487,6 +1507,12 @@ PHP);
         if (($decoded['candidate']['backup_file'] ?? null) === '2026/05/../source-backup-unsafe-original.jpg') {
             $unsafe_backup_recorded = true;
         }
+        if (($decoded['candidate']['attached_file'] ?? null) === 'https://example.test/source-url-attached.jpg') {
+            $unsafe_url_recorded = true;
+        }
+        if (($decoded['candidate']['attached_file'] ?? null) === 'C:\\uploads\\source-drive-attached.jpg') {
+            $unsafe_drive_recorded = true;
+        }
     }
     $payloads->finalize();
     $meta_db->close();
@@ -1494,6 +1520,8 @@ PHP);
     assert_true(str_contains($unsafe_preview, (string)$original_image_unsafe_id), 'media validator unsafe-path audit includes the unsafe original_image attachment ID');
     assert_true($unsafe_backup_recorded, 'media validator unsafe-path audit payload identifies the rejected backup path');
     assert_true(str_contains($unsafe_preview, (string)$backup_unsafe_id), 'media validator unsafe-path audit includes the unsafe backup attachment ID');
+    assert_true($unsafe_url_recorded, 'media validator unsafe-path audit payload identifies the rejected URL upload path');
+    assert_true($unsafe_drive_recorded, 'media validator unsafe-path audit payload identifies the rejected drive-letter upload path');
     assert_true(is_file($target_root . '/wp-content/uploads/2026/05/source-unsafe-generated.jpg'), 'media validator keeps the unsafe-path attachment original file for review');
     assert_same(
         scalar($target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $unsafe_generated_id AND meta_key = '_wp_attached_file'"),
