@@ -1313,6 +1313,51 @@ try {
         'custom taxonomy count skip records no built-in recompute audit'
     );
 
+    $nav_menu_count_base = $tmp . '/nav-menu-count-base.sqlite';
+    $nav_menu_count_source = $tmp . '/nav-menu-count-source.sqlite';
+    $nav_menu_count_target = $tmp . '/nav-menu-count-target.sqlite';
+    $nav_menu_count_metadata = $tmp . '/.forkpress/cow/merge/nav-menu-count-metadata.sqlite';
+
+    smoke_create_posts_db($nav_menu_count_base);
+    $db = smoke_open_db($nav_menu_count_base);
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (16000050, 'Shared Count Menu', 'shared-count-menu')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES (16000051, 16000050, 'nav_menu', 'Shared count menu taxonomy', 0, 0)");
+    $db->close();
+    copy($nav_menu_count_base, $nav_menu_count_source);
+    copy($nav_menu_count_base, $nav_menu_count_target);
+
+    $db = smoke_open_db($nav_menu_count_source);
+    smoke_insert_post($db, 16000052, 'Branch Menu Count Page', 'Branch menu count content', 'page', 'branch-menu-count-page');
+    smoke_insert_post($db, 16000053, 'Branch Count Menu Item', '', 'nav_menu_item', 'branch-count-menu-item');
+    $db->exec('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (16000053, 16000051, 0)');
+    smoke_insert_postmeta($db, 16000054, 16000053, '_menu_item_type', 'post_type');
+    smoke_insert_postmeta($db, 16000055, 16000053, '_menu_item_object', 'page');
+    smoke_insert_postmeta($db, 16000056, 16000053, '_menu_item_object_id', '16000052');
+    smoke_insert_postmeta($db, 16000057, 16000053, '_menu_item_menu_item_parent', '0');
+    $db->exec('UPDATE wp_term_taxonomy SET count = 1 WHERE term_taxonomy_id = 16000051');
+    $db->close();
+
+    $db = smoke_open_db($nav_menu_count_target);
+    smoke_insert_post($db, 16000058, 'Main Menu Count Page', 'Main menu count content', 'page', 'main-menu-count-page');
+    smoke_insert_post($db, 16000059, 'Main Count Menu Item', '', 'nav_menu_item', 'main-count-menu-item');
+    $db->exec('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (16000059, 16000051, 0)');
+    smoke_insert_postmeta($db, 16000060, 16000059, '_menu_item_type', 'post_type');
+    smoke_insert_postmeta($db, 16000061, 16000059, '_menu_item_object', 'page');
+    smoke_insert_postmeta($db, 16000062, 16000059, '_menu_item_object_id', '16000058');
+    smoke_insert_postmeta($db, 16000063, 16000059, '_menu_item_menu_item_parent', '0');
+    $db->exec('UPDATE wp_term_taxonomy SET count = 1 WHERE term_taxonomy_id = 16000051');
+    $db->close();
+
+    $nav_menu_count_result = cow_merge_databases($nav_menu_count_base, $nav_menu_count_source, $nav_menu_count_target, $nav_menu_count_metadata, 'feature-smoke-nav-menu-count', 'main');
+    assert_same($nav_menu_count_result['status'], 'completed', 'same-menu nav item inserts complete cleanly');
+    assert_same((int)smoke_scalar($nav_menu_count_target, 'SELECT COUNT(*) FROM wp_term_relationships WHERE term_taxonomy_id = 16000051'), 2, 'same-menu nav item merge preserves both branch relationships');
+    assert_same((int)smoke_scalar($nav_menu_count_target, 'SELECT count FROM wp_term_taxonomy WHERE term_taxonomy_id = 16000051'), 2, 'same-menu nav item merge recomputes denormalized WordPress nav menu count');
+    assert_same(
+        (int)smoke_scalar($nav_menu_count_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_term_taxonomy' AND column_name = 'count' AND decision = 'source-applied' AND reason = 'recomputed WordPress term taxonomy count from merged relationships'"),
+        1,
+        'same-menu nav count recompute is auditable'
+    );
+
     $taxonomy_edit_delete_base = $tmp . '/taxonomy-edit-delete-base.sqlite';
     $taxonomy_edit_delete_source = $tmp . '/taxonomy-edit-delete-source.sqlite';
     $taxonomy_edit_delete_target = $tmp . '/taxonomy-edit-delete-target.sqlite';

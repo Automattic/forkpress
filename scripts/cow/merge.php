@@ -19128,6 +19128,14 @@ function cow_merge_wordpress_term_count_tables_available(SQLite3 $db): bool {
     return isset($taxonomy_columns['term_taxonomy_id'], $taxonomy_columns['count'], $relationship_columns['term_taxonomy_id']);
 }
 
+function cow_merge_wordpress_nav_menu_count_tables_available(SQLite3 $db): bool {
+    if (cow_merge_table_sql($db, 'wp_posts') === null) {
+        return false;
+    }
+    $post_columns = array_fill_keys(cow_merge_table_columns($db, 'wp_posts'), true);
+    return isset($post_columns['ID'], $post_columns['post_type'], $post_columns['post_status']);
+}
+
 function cow_merge_wordpress_term_taxonomy_count(SQLite3 $db, mixed $term_taxonomy_id): mixed {
     if (!cow_merge_wordpress_term_count_tables_available($db)) {
         return null;
@@ -19145,7 +19153,36 @@ function cow_merge_wordpress_term_taxonomy_count(SQLite3 $db, mixed $term_taxono
 }
 
 function cow_merge_wordpress_term_count_taxonomy_is_recomputable(string $taxonomy): bool {
-    return in_array($taxonomy, ['category', 'post_tag'], true);
+    return in_array($taxonomy, ['category', 'post_tag', 'nav_menu'], true);
+}
+
+function cow_merge_wordpress_term_taxonomy_relationship_count(
+    SQLite3 $db,
+    mixed $term_taxonomy_id,
+    string $taxonomy,
+    int $relationship_count
+): ?int {
+    if ($taxonomy !== 'nav_menu') {
+        return $relationship_count;
+    }
+    if (!cow_merge_wordpress_nav_menu_count_tables_available($db)) {
+        return null;
+    }
+    $stmt = cow_merge_prepare_checked(
+        $db,
+        'SELECT COUNT(*) AS relationship_count ' .
+        'FROM wp_term_relationships tr ' .
+        'JOIN wp_posts p ON p.ID = tr.object_id ' .
+        'WHERE tr.term_taxonomy_id = :term_taxonomy_id ' .
+        "AND p.post_type = 'nav_menu_item' " .
+        "AND p.post_status = 'publish'",
+        'failed to prepare WordPress nav menu item count'
+    );
+    cow_merge_bind($stmt, ':term_taxonomy_id', $term_taxonomy_id);
+    $res = cow_merge_execute_checked($stmt, $db, 'failed to count WordPress nav menu items');
+    $row = $res->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($res, 'failed to finalize WordPress nav menu item count');
+    return $row ? (int)$row['relationship_count'] : 0;
 }
 
 function cow_merge_recompute_wordpress_term_taxonomy_counts(
@@ -19177,7 +19214,15 @@ function cow_merge_recompute_wordpress_term_taxonomy_counts(
             continue;
         }
         $stored = (int)$row['stored_count'];
-        $relationship_count = (int)$row['relationship_count'];
+        $relationship_count = cow_merge_wordpress_term_taxonomy_relationship_count(
+            $target,
+            $row['term_taxonomy_id'],
+            (string)$row['taxonomy'],
+            (int)$row['relationship_count']
+        );
+        if ($relationship_count === null) {
+            continue;
+        }
         if ($stored === $relationship_count) {
             continue;
         }
