@@ -166,6 +166,16 @@ try {
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = 'feature-birth'") > 0,
         'branch birth setup records active row identities'
     );
+    $birth_run_ids = [];
+    $birth_runs = new SQLite3($metadata, SQLITE3_OPEN_READWRITE);
+    $birth_result = $birth_runs->query("SELECT id FROM merge_runs WHERE source_branch = 'feature-birth' AND target_branch = 'feature-birth' AND base_ref IN ('autoincrement-id-band', 'identity-capture') ORDER BY id");
+    while ($birth_row = $birth_result->fetchArray(SQLITE3_ASSOC)) {
+        $birth_run_ids[] = (int)$birth_row['id'];
+    }
+    $birth_result->finalize();
+    foreach ($birth_run_ids as $birth_run_id) {
+        $birth_runs->exec("INSERT INTO merge_decisions (run_id, table_name, decision, reason) VALUES ($birth_run_id, 'wp_posts', 'branch-birth-test', 'branch birth cleanup decision fixture')");
+    }
 
     cow_merge_allocate_autoincrement_bands($db_path, $metadata, 'feature-birth-unrelated');
     cow_merge_capture_row_identities($db_path, $metadata, 'feature-birth-unrelated');
@@ -177,6 +187,9 @@ try {
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = 'feature-birth-unrelated'") > 0,
         'branch birth cleanup fixture records unrelated active row identities'
     );
+    $unrelated_run_id = (int)scalar($metadata, "SELECT id FROM merge_runs WHERE source_branch = 'feature-birth-unrelated' AND target_branch = 'feature-birth-unrelated' ORDER BY id LIMIT 1");
+    $birth_runs->exec("INSERT INTO merge_decisions (run_id, table_name, decision, reason) VALUES ($unrelated_run_id, 'wp_posts', 'branch-birth-unrelated-test', 'unrelated branch birth cleanup decision fixture')");
+    $birth_runs->close();
 
     $cleanup = cow_merge_cleanup_branch_birth_metadata($metadata, 'feature-birth');
     assert_true($cleanup['cleaned'] > 0, 'branch birth metadata cleanup reports removed rows');
@@ -200,6 +213,11 @@ try {
         0,
         'branch birth metadata cleanup removes branch birth runs'
     );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE decision = 'branch-birth-test' AND run_id IN (" . implode(',', $birth_run_ids) . ")"),
+        0,
+        'branch birth metadata cleanup removes branch birth decisions'
+    );
     assert_true(
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = 'feature-birth-unrelated'") > 0,
         'branch birth metadata cleanup leaves unrelated branch ID bands intact'
@@ -211,6 +229,11 @@ try {
     assert_true(
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-birth-unrelated'") > 0,
         'branch birth metadata cleanup leaves unrelated branch birth runs intact'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions WHERE decision = 'branch-birth-unrelated-test' AND run_id = $unrelated_run_id"),
+        1,
+        'branch birth metadata cleanup leaves unrelated branch birth decisions intact'
     );
 
     $missing_band_db = $tmp . '/missing-band.sqlite';

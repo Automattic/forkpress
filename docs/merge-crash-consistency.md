@@ -118,7 +118,8 @@ The Git server suite covers these publication classes:
   unreachable objects behind, but reachable branch objects are preserved and the
   next prune removes the remaining unreachable objects.
 - Multi-branch Git-created ID-band metadata failure rolls back created branch
-  metadata and merge-base artifacts.
+  metadata, branch-birth decision rows, DB merge-base SQLite sidecars, and
+  file-base artifacts.
 - Stale-source Git-created branch publication is rejected.
 - Normal branch creation removes stale unpublished merge-base files, temporary
   merge-base capture artifacts, and branch-birth metadata for the requested
