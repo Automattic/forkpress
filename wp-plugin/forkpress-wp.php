@@ -876,7 +876,7 @@ function forkpress_branch_run_cli(array $args): array {
 
 function forkpress_branch_wants_json(): bool {
     $action = $_REQUEST['action'] ?? '';
-    if (is_string($action) && in_array($action, ['forkpress_branch_create', 'forkpress_branch_merge', 'forkpress_branch_conflicts', 'forkpress_branch_restore_crash', 'forkpress_branch_revalidate_conflicts', 'forkpress_branch_review_conflict', 'forkpress_branch_resolve_conflict', 'forkpress_branch_run_plugin_driver'], true)) {
+    if (is_string($action) && in_array($action, ['forkpress_branch_create', 'forkpress_branch_merge', 'forkpress_branch_conflicts', 'forkpress_branch_restore_crash', 'forkpress_branch_revalidate_conflicts', 'forkpress_branch_review_conflict', 'forkpress_branch_resolve_conflict', 'forkpress_branch_apply_reviewed_conflicts', 'forkpress_branch_run_plugin_driver'], true)) {
         return true;
     }
 
@@ -1486,6 +1486,58 @@ function forkpress_handle_branch_resolve_conflict(): void {
 }
 add_action('admin_post_forkpress_branch_resolve_conflict', 'forkpress_handle_branch_resolve_conflict');
 
+function forkpress_handle_branch_apply_reviewed_conflicts(): void {
+    if (!forkpress_branch_can_manage()) {
+        forkpress_branch_finish_action(forkpress_branch_url(forkpress_current_branch() ?: 'main', '/wp-admin/'), 'error', 'You cannot apply ForkPress merge resolutions from this site.');
+    }
+    if (function_exists('check_admin_referer')) {
+        check_admin_referer('forkpress_branch_apply_reviewed_conflicts');
+    }
+
+    $current = forkpress_current_branch() ?: 'main';
+    $run = forkpress_branch_post_int('run');
+    if ($run === null) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Choose a merge run to apply reviewed resolutions.');
+    }
+
+    [$code, $output] = forkpress_branch_run_cli([
+        'merge-apply-reviewed',
+        '--run',
+        (string) $run,
+        '--reviewer',
+        'wordpress-ui',
+        '--format',
+        'json',
+    ]);
+    if ($code !== 0) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', $output ?: 'ForkPress could not apply reviewed merge resolutions.');
+    }
+
+    $result = json_decode($output, true);
+    if (!is_array($result)) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'ForkPress returned invalid reviewed-resolution JSON.');
+    }
+
+    $applied = max(0, (int)($result['applied'] ?? 0));
+    $eligible = max(0, (int)($result['eligible'] ?? 0));
+    $message = $applied > 0
+        ? 'Applied ' . $applied . ' reviewed merge resolution' . ($applied === 1 ? '' : 's') . ' for run ' . $run . '.'
+        : 'No reviewed merge resolutions were ready to apply for run ' . $run . '.';
+    forkpress_branch_finish_action(
+        forkpress_branch_url($current, '/wp-admin/'),
+        'notice',
+        $message,
+        [
+            'run' => $run,
+            'applied' => $applied,
+            'eligible' => $eligible,
+            'applyReviewed' => $result,
+            'applyReviewedCommand' => 'forkpress branch merge-apply-reviewed --run ' . $run . ' --reviewer wordpress-ui --format json',
+        ]
+    );
+}
+add_action('admin_post_forkpress_branch_apply_reviewed_conflicts', 'forkpress_handle_branch_apply_reviewed_conflicts');
+
 function forkpress_handle_branch_run_plugin_driver(): void {
     if (!forkpress_branch_can_manage()) {
         forkpress_branch_finish_action(forkpress_branch_url(forkpress_current_branch() ?: 'main', '/wp-admin/'), 'error', 'You cannot run ForkPress plugin merge drivers from this site.');
@@ -1902,6 +1954,7 @@ function forkpress_render_branch_switcher(): void {
             'revalidateNonce' => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_revalidate_conflicts') : '',
             'reviewNonce' => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_review_conflict') : '',
             'resolveNonce' => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_resolve_conflict') : '',
+            'applyReviewedNonce' => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_apply_reviewed_conflicts') : '',
             'driverNonce' => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_run_plugin_driver') : '',
             'pluginDrivers' => array_map(
                 static fn(array $driver): array => [
@@ -2271,6 +2324,21 @@ function forkpress_render_branch_switcher(): void {
                 });
                 conflictList.appendChild(button);
             }
+            if (payload.run && actions && actions.applyReviewedNonce) {
+                var hasReviewedChoices = records.some(function (record) {
+                    return record && record.next_action === 'apply-reviewed-choice';
+                });
+                if (hasReviewedChoices) {
+                    var applyButton = document.createElement('button');
+                    applyButton.className = 'forkpress-switcher-button';
+                    applyButton.type = 'button';
+                    applyButton.textContent = 'Apply reviewed resolutions';
+                    applyButton.addEventListener('click', function () {
+                        fetchApplyReviewedConflicts(payload.run);
+                    });
+                    conflictList.appendChild(applyButton);
+                }
+            }
         }
 
         function render() {
@@ -2490,6 +2558,44 @@ function forkpress_render_branch_switcher(): void {
                 fetchConflictAudit(run, payload.message || '', { lifecycleState: 'needs-action' });
             }).catch(function (error) {
                 showStatus('error', error && error.message ? error.message : 'ForkPress conflict revalidation failed.');
+            });
+        }
+
+        function fetchApplyReviewedConflicts(run) {
+            if (!actions || !actions.applyReviewedNonce || !window.fetch || !window.FormData) {
+                return;
+            }
+            var body = new FormData();
+            body.append('action', 'forkpress_branch_apply_reviewed_conflicts');
+            body.append('_wpnonce', actions.applyReviewedNonce);
+            body.append('run', String(run));
+            showStatus('warning', 'Applying reviewed resolutions...');
+            fetch(actions.url, {
+                method: 'POST',
+                body: body,
+                credentials: 'same-origin',
+                headers: {
+                    'Accept': 'application/json',
+                    'X-ForkPress-Async': '1'
+                }
+            }).then(function (response) {
+                return response.text().then(function (text) {
+                    var payload = null;
+                    try {
+                        payload = text ? JSON.parse(text) : null;
+                    } catch (error) {
+                        payload = null;
+                    }
+                    if (!response.ok || !payload || payload.success === false) {
+                        throw new Error(payload && payload.message ? payload.message : (text || 'ForkPress reviewed-resolution apply failed.'));
+                    }
+                    return payload;
+                });
+            }).then(function (payload) {
+                showStatus('success', payload.message || 'Applied reviewed resolutions.');
+                fetchConflictAudit(run, payload.message || '', { lifecycleState: 'needs-action' });
+            }).catch(function (error) {
+                showStatus('error', error && error.message ? error.message : 'ForkPress reviewed-resolution apply failed.');
             });
         }
 
