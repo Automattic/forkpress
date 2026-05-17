@@ -7067,6 +7067,31 @@ function cow_merge_plugin_validator_optional_text(array $finding, string $field,
     return $value;
 }
 
+function cow_merge_plugin_validator_logical_identity(array $finding): mixed {
+    $value = $finding['logical_identity'];
+    if ($value === null) {
+        throw new InvalidArgumentException('plugin validator logical identity must not be null');
+    }
+    if (is_string($value)) {
+        $value = trim($value);
+        if ($value === '') {
+            throw new InvalidArgumentException('plugin validator logical identity must not be empty');
+        }
+    } elseif (is_array($value)) {
+        if ($value === []) {
+            throw new InvalidArgumentException('plugin validator logical identity must not be empty');
+        }
+    } elseif (!is_int($value) && !is_float($value) && !is_bool($value)) {
+        throw new InvalidArgumentException('plugin validator logical identity must be a string, number, boolean, or non-empty JSON object/array');
+    }
+    try {
+        cow_merge_payload_json($value);
+    } catch (Throwable $e) {
+        throw new InvalidArgumentException('plugin validator logical identity must be JSON encodable', 0, $e);
+    }
+    return $value;
+}
+
 function cow_merge_record_plugin_validator_conflicts(
     string $metadata_db,
     int $run_id,
@@ -7122,7 +7147,7 @@ function cow_merge_record_plugin_validator_conflicts(
                 $payload['severity'] = $severity;
             }
             if (array_key_exists('logical_identity', $finding)) {
-                $payload['logical_identity'] = $finding['logical_identity'];
+                $payload['logical_identity'] = cow_merge_plugin_validator_logical_identity($finding);
             }
             foreach ([
                 'resolution_policy' => 'resolution policy',

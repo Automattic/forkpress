@@ -1127,6 +1127,68 @@ PHP);
         0,
         'plugin validator runner does not record findings with empty review guidance'
     );
+
+    $empty_logical_identity_validator = $tmp . '/plugin-validator-empty-logical-identity.php';
+    write_test_file($empty_logical_identity_validator, <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-plugin-graph',
+            'object' => 'child:empty-logical-identity',
+            'reason' => 'malformed finding uses empty identity evidence',
+            'type' => 'plugin-graph-empty-logical-identity',
+            'logical_identity' => [],
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $empty_logical_identity = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $metadata,
+        '--run', (string)$result['run_id'],
+        '--validator', $empty_logical_identity_validator,
+        '--format', 'json',
+    ]);
+    assert_true($empty_logical_identity['status'] !== 0, 'plugin validator runner rejects empty logical identity');
+    assert_true(str_contains($empty_logical_identity['output'], 'logical identity must not be empty'), 'plugin validator runner explains empty logical identity');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE row_identity LIKE '%child:empty-logical-identity%'"),
+        0,
+        'plugin validator runner does not record findings with empty logical identity'
+    );
+
+    $null_logical_identity_validator = $tmp . '/plugin-validator-null-logical-identity.php';
+    write_test_file($null_logical_identity_validator, <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-plugin-graph',
+            'object' => 'child:null-logical-identity',
+            'reason' => 'malformed finding uses null identity evidence',
+            'type' => 'plugin-graph-null-logical-identity',
+            'logical_identity' => null,
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $null_logical_identity = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $metadata,
+        '--run', (string)$result['run_id'],
+        '--validator', $null_logical_identity_validator,
+        '--format', 'json',
+    ]);
+    assert_true($null_logical_identity['status'] !== 0, 'plugin validator runner rejects null logical identity');
+    assert_true(str_contains($null_logical_identity['output'], 'logical identity must not be null'), 'plugin validator runner explains null logical identity');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE row_identity LIKE '%child:null-logical-identity%'"),
+        0,
+        'plugin validator runner does not record findings with null logical identity'
+    );
 } finally {
     remove_tree($tmp);
 }

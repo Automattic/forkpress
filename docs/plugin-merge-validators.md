@@ -207,10 +207,11 @@ deletion.
 
 `object` is the validator's stable review key for replacement evidence across
 reruns. `logical_identity` is optional first-class evidence for the plugin's
-semantic object identity. Validators should set it when the plugin has a
-domain identity that is not captured by SQLite primary keys or schema `UNIQUE`
-indexes, such as a slug, UUID, remote object id, or compound plugin key. If a
-rerun reports the same `plugin`, `object`, and conflict `type` but changes
+semantic object identity. When present, it must be non-null, non-empty, and
+JSON encodable. Validators should set it when the plugin has a domain identity
+that is not captured by SQLite primary keys or schema `UNIQUE` indexes, such
+as a slug, UUID, remote object id, or compound plugin key. If a rerun reports
+the same `plugin`, `object`, and conflict `type` but changes
 `logical_identity`, stale-audit revalidation treats the reviewed finding as
 replacement evidence and returns it to the review queue.
 
