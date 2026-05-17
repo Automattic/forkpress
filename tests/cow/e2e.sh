@@ -45,6 +45,8 @@ on_error() {
   dump_if_exists "$TMP/remote-cache-show.out"
   dump_if_exists "$TMP/remote-cache-list.out"
   dump_if_exists "$TMP/remote-cache-branch.out"
+  dump_if_exists "$TMP/runtime-unready-get.out"
+  dump_if_exists "$TMP/runtime-unready-post.out"
   dump_if_exists "$TMP/autoinc-remote-cache-insert.json"
   dump_if_exists "$TMP/remote-cache-merge.out"
   dump_if_exists "$TMP/ui-create-admin.html"
@@ -1123,6 +1125,58 @@ autoinc_runtime_request main init "$TMP/autoinc-main-init.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(($data["max_id"] ?? null) === 1 ? 0 : 1);' "$TMP/autoinc-main-init.json"
 
 if [ "${FORKPRESS_E2E_ONLY:-}" != "semantic" ]; then
+log_step "block unready branch writes before WordPress"
+mkdir -p "$WORK/runtime-unready"
+cat > "$WORK/runtime-unready/index.php" <<'PHP'
+<?php
+echo "UNREADY BRANCH PHP EXECUTED";
+PHP
+if ! RUNTIME_UNREADY_GET_HTTP="$(
+  curl -sS -o "$TMP/runtime-unready-get.out" -w '%{http_code}' \
+    -H "Host: runtime-unready.wp.localhost:$PORT" \
+    "http://127.0.0.1:$PORT/"
+)"; then
+  echo "runtime unready branch GET request failed" >&2
+  dump_if_exists "$TMP/runtime-unready-get.out"
+  "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+  exit 1
+fi
+if [ "$RUNTIME_UNREADY_GET_HTTP" != "200" ]; then
+  echo "runtime unready branch GET returned $RUNTIME_UNREADY_GET_HTTP" >&2
+  dump_if_exists "$TMP/runtime-unready-get.out"
+  "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+  exit 1
+fi
+grep -F "UNREADY BRANCH PHP EXECUTED" "$TMP/runtime-unready-get.out" >/dev/null
+if ! RUNTIME_UNREADY_POST_HTTP="$(
+  curl -sS -o "$TMP/runtime-unready-post.out" -w '%{http_code}' \
+    -H "Host: runtime-unready.wp.localhost:$PORT" \
+    --data-urlencode "forkpress_e2e_autoinc=insert" \
+    "http://127.0.0.1:$PORT/"
+)"; then
+  echo "runtime unready branch POST request failed" >&2
+  dump_if_exists "$TMP/runtime-unready-post.out"
+  "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+  exit 1
+fi
+if [ "$RUNTIME_UNREADY_POST_HTTP" != "409" ]; then
+  echo "runtime unready branch POST returned $RUNTIME_UNREADY_POST_HTTP" >&2
+  dump_if_exists "$TMP/runtime-unready-post.out"
+  "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+  exit 1
+fi
+grep -F "missing required merge metadata" "$TMP/runtime-unready-post.out" >/dev/null
+grep -F "forkpress branch reset runtime-unready --from main" "$TMP/runtime-unready-post.out" >/dev/null
+grep -F "branch database" "$TMP/runtime-unready-post.out" >/dev/null
+grep -F "database merge base" "$TMP/runtime-unready-post.out" >/dev/null
+grep -F "filesystem merge base" "$TMP/runtime-unready-post.out" >/dev/null
+if grep -F "UNREADY BRANCH PHP EXECUTED" "$TMP/runtime-unready-post.out" >/dev/null; then
+  echo "runtime unready branch POST reached PHP before metadata guard" >&2
+  dump_if_exists "$TMP/runtime-unready-post.out"
+  "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+  exit 1
+fi
+
 log_step "branch remote cache and merge back"
 "$BIN" remote --work-dir "$WORK_DIR" add cache-main \
   --cache-root "$WORK/main" \

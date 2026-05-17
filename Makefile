@@ -123,6 +123,7 @@ test-cow-branch-birth:
 test-cow-branch-ui:
 	php $(COW_TEST_DIR)/branch_ui.php
 	php $(COW_TEST_DIR)/router_branch_actions.php
+	php $(COW_TEST_DIR)/router_branch_birth_guard.php
 	php $(COW_TEST_DIR)/router_lock.php
 
 test-cow-e2e-remote-cache:
@@ -175,6 +176,7 @@ test-cow-fast: test-cow-git-server test-cow-merge-smoke
 	php $(COW_TEST_DIR)/wp_semantic_validator.php
 	php $(COW_TEST_DIR)/branch_ui.php
 	php $(COW_TEST_DIR)/router_branch_actions.php
+	php $(COW_TEST_DIR)/router_branch_birth_guard.php
 	php $(COW_TEST_DIR)/router_paths.php
 	php $(COW_TEST_DIR)/router_lock.php
 

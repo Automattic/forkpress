@@ -86,6 +86,13 @@ function is_ssl() { return false; }
 function wp_json_encode($payload) { return json_encode($payload, JSON_UNESCAPED_SLASHES); }
 function wp_unslash($value) { return $value; }
 function sanitize_text_field($value) { return trim((string) $value); }
+function esc_attr($value) { return htmlspecialchars((string) $value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'); }
+function esc_html($value) { return htmlspecialchars((string) $value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'); }
+
+$fqdb = getenv('FORKPRESS_TEST_FQDB');
+if (is_string($fqdb) && $fqdb !== '' && !defined('FQDB')) {
+    define('FQDB', $fqdb);
+}
 
 $async = getenv('FORKPRESS_TEST_ASYNC') !== '0';
 $_SERVER = [
@@ -112,12 +119,19 @@ if ($action === 'forkpress_branch_create') {
 if ($action === 'forkpress_branch_merge') {
     forkpress_handle_branch_merge();
 }
+if ($action === 'forkpress_branch_birth_notice') {
+    ob_start();
+    forkpress_branch_birth_admin_notice();
+    $html = ob_get_clean();
+    echo json_encode(['html' => $html], JSON_UNESCAPED_SLASHES);
+    exit;
+}
 
 fwrite(STDERR, "unknown action\n");
 exit(3);
 PHP);
 
-function run_branch_ui_action(array $post, array $branches, bool $cli_fail = false, bool $can_manage = true, bool $async = true): array {
+function run_branch_ui_action(array $post, array $branches, bool $cli_fail = false, bool $can_manage = true, bool $async = true, array $extra_env = []): array {
     global $tmp, $plugin, $runner, $fake_bin, $cli_log, $work_dir, $branch_list;
 
     @unlink($cli_log);
@@ -134,6 +148,7 @@ function run_branch_ui_action(array $post, array $branches, bool $cli_fail = fal
         'FORKPRESS_TEST_CAN_MANAGE' => $can_manage ? '1' : '0',
         'FORKPRESS_TEST_ASYNC' => $async ? '1' : '0',
     ];
+    $env = array_merge($env, $extra_env);
     $descriptor = [
         0 => ['pipe', 'r'],
         1 => ['pipe', 'w'],
@@ -261,6 +276,42 @@ $forbidden = run_branch_ui_action(
 $forbidden_payload = decode_branch_ui_payload($forbidden);
 assert_same($forbidden_payload['success'] ?? null, false, 'branch create admin action rejects users without manage_options');
 assert_same(count($forbidden['argv']), 0, 'forbidden branch create admin action does not invoke CLI');
+
+$notice_cow = $tmp . '/cow';
+$notice_db = $tmp . '/branches/feature/wp-content/database/.ht.sqlite';
+mkdir($notice_cow, 0777, true);
+$blocked_notice = run_branch_ui_action(
+    ['action' => 'forkpress_branch_birth_notice'],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    [
+        'FORKPRESS_COW_DIR' => $notice_cow,
+        'FORKPRESS_COW_MERGE_METADATA_DB' => $notice_cow . '/merge/metadata.sqlite',
+        'FORKPRESS_TEST_FQDB' => $notice_db,
+    ]
+);
+$blocked_notice_payload = decode_branch_ui_payload($blocked_notice);
+$blocked_notice_html = (string)($blocked_notice_payload['html'] ?? '');
+assert_true(str_contains($blocked_notice_html, "missing required merge metadata"), 'branch birth admin notice explains missing merge metadata');
+assert_true(str_contains($blocked_notice_html, 'Missing: branch database, database merge base, filesystem merge base, merge metadata.'), 'branch birth admin notice lists missing artifacts');
+assert_true(str_contains($blocked_notice_html, 'forkpress branch reset feature --from main'), 'branch birth admin notice gives a reset recovery command');
+
+$main_notice = run_branch_ui_action(
+    ['action' => 'forkpress_branch_birth_notice'],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    [
+        'FORKPRESS_BRANCH' => 'main',
+        'FORKPRESS_COW_DIR' => $notice_cow,
+        'FORKPRESS_TEST_FQDB' => $notice_db,
+    ]
+);
+$main_notice_payload = decode_branch_ui_payload($main_notice);
+assert_same($main_notice_payload['html'] ?? null, '', 'branch birth admin notice does not warn on main');
 
 rm_tree($tmp);
 
