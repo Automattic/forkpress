@@ -27,6 +27,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "    [--resolution-choice source|target] [--blocked-resolution-choice source|target] [--resolution-strategy STRATEGY] [--generic-resolver yes|no] [--after-revalidate supported|unsupported]\n");
     fwrite(STDERR, "    [--revalidation-class CLASS] [--latest-revalidation-status STATUS] [--stale-status fresh|stale|error|unknown] [--revalidate] [--reviewer NAME]\n");
     fwrite(STDERR, "    [--resolution-status validated|applied] [--group-by none|table|status|path|type|severity|lifecycle|event-type|next-action|conflict-key|resolution-strategy|generic-resolver|after-revalidate|revalidation-class|latest-revalidation-status|stale-status|plugin|plugin-object|plugin-severity]\n");
+    fwrite(STDERR, "    --event-type accepts recorded, review-pending, review-needs-action, review-reviewed, resolution-validated, resolution-applied, resolution-blocked, or revalidation-required.\n");
     fwrite(STDERR, "    --group-by supports resolutions by table/status/path, conflicts by table/type/path/severity/lifecycle/next-action/conflict-key/resolution-strategy/generic-resolver/after-revalidate/revalidation-class/latest-revalidation-status/stale-status/plugin/plugin-object/plugin-severity, conflict-events by table/type/lifecycle/event-type/conflict-key, and decisions by table/type/path.\n");
     fwrite(STDERR, "    --revalidate accepts only --run, --conflict-id, --conflict-key, --reviewer, --format, and --quiet; omit --revalidate to filter audit output.\n");
     fwrite(STDERR, "  php merge.php revalidate-reviews --metadata-db <path> [--run ID] [--conflict-id ID|--conflict-key KEY] [--reviewer NAME] [--format text|json]\n");
@@ -3809,7 +3810,7 @@ CREATE TABLE IF NOT EXISTS merge_conflict_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     conflict_id INTEGER NOT NULL,
     run_id INTEGER NOT NULL,
-    event_type TEXT NOT NULL CHECK(event_type IN ('recorded', 'review-pending', 'review-needs-action', 'review-reviewed', 'resolution-validated', 'resolution-applied', 'revalidation-required')),
+    event_type TEXT NOT NULL CHECK(event_type IN ('recorded', 'review-pending', 'review-needs-action', 'review-reviewed', 'resolution-validated', 'resolution-applied', 'resolution-blocked', 'revalidation-required')),
     actor TEXT NOT NULL,
     note TEXT NOT NULL,
     related_record_type TEXT,
@@ -3840,7 +3841,7 @@ SQL, 'failed to create metadata table merge_conflict_events');
         'failed to finalize conflict-event metadata schema inspection'
     );
     unset($conflict_events_schema);
-    if (!str_contains($conflict_events_sql, 'resolution-validated')) {
+    if (!str_contains($conflict_events_sql, 'resolution-blocked')) {
         $migration_savepoint = 'migrate_merge_conflict_events_event_type';
         cow_merge_exec_checked(
             $meta,
@@ -3854,7 +3855,7 @@ CREATE TABLE merge_conflict_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     conflict_id INTEGER NOT NULL,
     run_id INTEGER NOT NULL,
-    event_type TEXT NOT NULL CHECK(event_type IN ('recorded', 'review-pending', 'review-needs-action', 'review-reviewed', 'resolution-validated', 'resolution-applied', 'revalidation-required')),
+    event_type TEXT NOT NULL CHECK(event_type IN ('recorded', 'review-pending', 'review-needs-action', 'review-reviewed', 'resolution-validated', 'resolution-applied', 'resolution-blocked', 'revalidation-required')),
     actor TEXT NOT NULL,
     note TEXT NOT NULL,
     related_record_type TEXT,
@@ -6331,6 +6332,51 @@ function cow_merge_review_conflict_lifecycle_state(string $status): string {
     };
 }
 
+function cow_merge_record_resolution_blocked_event_safely(
+    SQLite3 $meta,
+    int $conflict_id,
+    string $reviewer,
+    Throwable $failure
+): void {
+    try {
+        cow_merge_ensure_metadata($meta);
+        if (cow_merge_latest_applied_resolution_choice($meta, $conflict_id) !== null) {
+            return;
+        }
+        $stmt = cow_merge_prepare_checked(
+            $meta,
+            'SELECT c.run_id, ' .
+            '(SELECT ce.lifecycle_state FROM merge_conflict_events ce WHERE ce.conflict_id = c.id ORDER BY ce.id DESC LIMIT 1) AS lifecycle_state ' .
+            'FROM merge_conflicts c WHERE c.id = :id',
+            'failed to prepare blocked resolution event conflict lookup'
+        );
+        cow_merge_bind($stmt, ':id', $conflict_id);
+        $res = cow_merge_execute_checked($stmt, $meta, 'failed to read blocked resolution event conflict');
+        $row = $res->fetchArray(SQLITE3_ASSOC);
+        cow_merge_result_finalize_checked($res, 'failed to finalize blocked resolution event conflict lookup');
+        if (!$row) {
+            return;
+        }
+        $lifecycle = (string)($row['lifecycle_state'] ?? '');
+        if ($lifecycle === '') {
+            $lifecycle = 'unreviewed';
+        }
+        cow_merge_record_conflict_event(
+            $meta,
+            $conflict_id,
+            (int)$row['run_id'],
+            'resolution-blocked',
+            $reviewer,
+            'Resolution blocked: ' . cow_merge_failure_reason($failure),
+            null,
+            null,
+            $lifecycle
+        );
+    } catch (Throwable) {
+        // Best-effort observability must not mask the resolver's original error.
+    }
+}
+
 function cow_merge_record_conflict(
     SQLite3 $meta,
     int $run_id,
@@ -8001,8 +8047,8 @@ function cow_merge_audit_event_type_filter(?string $value): ?string {
     if ($value === null || $value === '') {
         return null;
     }
-    if (!in_array($value, ['recorded', 'review-pending', 'review-needs-action', 'review-reviewed', 'resolution-validated', 'resolution-applied', 'revalidation-required'], true)) {
-        throw new InvalidArgumentException('--event-type must be recorded, review-pending, review-needs-action, review-reviewed, resolution-validated, resolution-applied, or revalidation-required');
+    if (!in_array($value, ['recorded', 'review-pending', 'review-needs-action', 'review-reviewed', 'resolution-validated', 'resolution-applied', 'resolution-blocked', 'revalidation-required'], true)) {
+        throw new InvalidArgumentException('--event-type must be recorded, review-pending, review-needs-action, review-reviewed, resolution-validated, resolution-applied, resolution-blocked, or revalidation-required');
     }
     return $value;
 }
@@ -11699,6 +11745,9 @@ function cow_merge_resolve_conflict(
             'table_name' => $table,
             'column_name' => $conflict_type === 'cell-conflict' ? $column : null,
         ];
+    } catch (Throwable $e) {
+        cow_merge_record_resolution_blocked_event_safely($meta, $conflict_id, $reviewer, $e);
+        throw $e;
     } finally {
         if ($target instanceof SQLite3) {
             $target->close();

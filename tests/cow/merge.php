@@ -1941,6 +1941,13 @@ try {
         'resolution choice source is blocked',
         'source unique collision resolution is blocked before deleting a target row with FK children'
     );
+    $unique_fk_blocked_event_audit = cow_merge_audit_report($unique_fk_metadata, (int)$unique_fk_result['run_id'], 10, [
+        'records' => 'conflict-events',
+        'event_type' => 'resolution-blocked',
+    ]);
+    assert_same(count($unique_fk_blocked_event_audit['conflict_events']), 1, 'blocked source resolution attempts are recorded as conflict events');
+    assert_same((int)$unique_fk_blocked_event_audit['conflict_events'][0]['conflict_id'], $unique_fk_conflict_id, 'blocked resolution event belongs to the attempted conflict');
+    assert_true(str_contains((string)$unique_fk_blocked_event_audit['conflict_events'][0]['note'], 'Resolution blocked:'), 'blocked resolution event preserves the failure reason');
     $db = open_db($unique_fk_target);
     $db->exec('DELETE FROM plugin_unique_fk_children WHERE row_id = 200');
     $db->close();
