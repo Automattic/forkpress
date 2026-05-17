@@ -30,9 +30,10 @@ A validator returns one of:
   affected logical object, tables/files/options involved, and a human-readable
   reason. A finding may also include `severity` (`info`, `warning`, `error`,
   or `critical`), `resolution_policy`, `suggested_action`, and
-  `manual_review_reason`; ForkPress records these in the conflict payload so
-  review tools can prioritize findings and distinguish review-only findings
-  from future repairable findings.
+  `manual_review_reason`. Review guidance fields must be non-empty strings.
+  ForkPress records these in the conflict payload so review tools can
+  prioritize findings and distinguish review-only findings from future
+  repairable findings.
 - `failed`: the validator could not run; the merge should fail rather than
   silently accept an unchecked plugin graph.
 

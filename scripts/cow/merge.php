@@ -7053,6 +7053,20 @@ function cow_merge_plugin_validator_severity(array $finding): ?string {
     return $severity;
 }
 
+function cow_merge_plugin_validator_optional_text(array $finding, string $field, string $label): ?string {
+    if (!array_key_exists($field, $finding)) {
+        return null;
+    }
+    if (!is_string($finding[$field])) {
+        throw new InvalidArgumentException("plugin validator $label must be a string");
+    }
+    $value = trim((string)$finding[$field]);
+    if ($value === '') {
+        throw new InvalidArgumentException("plugin validator $label must not be empty");
+    }
+    return $value;
+}
+
 function cow_merge_record_plugin_validator_conflicts(
     string $metadata_db,
     int $run_id,
@@ -7110,9 +7124,14 @@ function cow_merge_record_plugin_validator_conflicts(
             if (array_key_exists('logical_identity', $finding)) {
                 $payload['logical_identity'] = $finding['logical_identity'];
             }
-            foreach (['resolution_policy', 'suggested_action', 'manual_review_reason'] as $review_field) {
-                if (array_key_exists($review_field, $finding)) {
-                    $payload[$review_field] = $finding[$review_field];
+            foreach ([
+                'resolution_policy' => 'resolution policy',
+                'suggested_action' => 'suggested action',
+                'manual_review_reason' => 'manual review reason',
+            ] as $review_field => $review_label) {
+                $review_value = cow_merge_plugin_validator_optional_text($finding, $review_field, $review_label);
+                if ($review_value !== null) {
+                    $payload[$review_field] = $review_value;
                 }
             }
             if (cow_merge_record_conflict(

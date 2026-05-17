@@ -1065,6 +1065,68 @@ PHP);
         0,
         'plugin validator runner does not record findings with malformed severity'
     );
+
+    $bad_guidance_validator = $tmp . '/plugin-validator-bad-guidance.php';
+    write_test_file($bad_guidance_validator, <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-plugin-graph',
+            'object' => 'child:bad-guidance',
+            'reason' => 'malformed finding uses non-string review guidance',
+            'type' => 'plugin-graph-bad-guidance',
+            'resolution_policy' => ['review-only'],
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $bad_guidance = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $metadata,
+        '--run', (string)$result['run_id'],
+        '--validator', $bad_guidance_validator,
+        '--format', 'json',
+    ]);
+    assert_true($bad_guidance['status'] !== 0, 'plugin validator runner rejects malformed review guidance');
+    assert_true(str_contains($bad_guidance['output'], 'resolution policy must be a string'), 'plugin validator runner explains malformed review guidance');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE row_identity LIKE '%child:bad-guidance%'"),
+        0,
+        'plugin validator runner does not record findings with malformed review guidance'
+    );
+
+    $empty_guidance_validator = $tmp . '/plugin-validator-empty-guidance.php';
+    write_test_file($empty_guidance_validator, <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'conflicts',
+    'findings' => [
+        [
+            'plugin' => 'forkpress-plugin-graph',
+            'object' => 'child:empty-guidance',
+            'reason' => 'malformed finding uses empty review guidance',
+            'type' => 'plugin-graph-empty-guidance',
+            'manual_review_reason' => '   ',
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $empty_guidance = run_merge_cli([
+        'run-plugin-validator',
+        '--metadata-db', $metadata,
+        '--run', (string)$result['run_id'],
+        '--validator', $empty_guidance_validator,
+        '--format', 'json',
+    ]);
+    assert_true($empty_guidance['status'] !== 0, 'plugin validator runner rejects empty review guidance');
+    assert_true(str_contains($empty_guidance['output'], 'manual review reason must not be empty'), 'plugin validator runner explains empty review guidance');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE row_identity LIKE '%child:empty-guidance%'"),
+        0,
+        'plugin validator runner does not record findings with empty review guidance'
+    );
 } finally {
     remove_tree($tmp);
 }
