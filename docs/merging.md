@@ -65,6 +65,9 @@ Record review status on an audit record:
 forkpress branch merge-review conflict <id> \
   --status reviewed \
   --note "Verified in wp-admin"
+forkpress branch merge-review conflict-key <key> --run <id> \
+  --status reviewed \
+  --note "Verified in wp-admin"
 ```
 
 Validate or apply a conflict choice:

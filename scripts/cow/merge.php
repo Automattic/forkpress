@@ -27,7 +27,7 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "    --group-by supports resolutions by table/status/path, conflicts by table/type/path/severity/lifecycle, and decisions by table/type/path.\n");
     fwrite(STDERR, "    --revalidate accepts only --run, --reviewer, --format, and --quiet; omit --revalidate to filter audit output.\n");
     fwrite(STDERR, "  php merge.php revalidate-reviews --metadata-db <path> [--run ID] [--reviewer NAME] [--format text|json]\n");
-    fwrite(STDERR, "  php merge.php review-record --metadata-db <path> --record conflict|decision|resolution --id ID --status pending|needs-action|reviewed --note TEXT [--reviewer NAME]\n");
+    fwrite(STDERR, "  php merge.php review-record --metadata-db <path> --record conflict|decision|resolution (--id ID|--conflict-key KEY [--run ID]) --status pending|needs-action|reviewed --note TEXT [--reviewer NAME]\n");
     fwrite(STDERR, "  php merge.php resolve-conflict --metadata-db <path> --id ID (--choice source|target [--apply]|--apply-reviewed) [--after-revalidate] [--note TEXT] [--reviewer NAME]\n");
 }
 
@@ -8318,6 +8318,34 @@ function cow_merge_conflict_id_from_key(SQLite3 $meta, string $conflict_key, ?in
         throw new InvalidArgumentException("conflict key $conflict_key matches multiple unresolved conflicts; pass --run or resolve by conflict id");
     }
     return (int)$unresolved[0]['id'];
+}
+
+function cow_merge_review_conflict_key(
+    string $metadata_db,
+    string $conflict_key,
+    ?int $run_id,
+    string $status,
+    string $note,
+    string $reviewer
+): array {
+    if (!is_file($metadata_db)) {
+        throw new InvalidArgumentException("merge metadata database does not exist: $metadata_db");
+    }
+    $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READWRITE);
+    try {
+        cow_merge_ensure_metadata($meta);
+        $conflict_id = cow_merge_conflict_id_from_key($meta, cow_merge_conflict_key_arg($conflict_key), $run_id);
+    } finally {
+        $meta->close();
+    }
+    return cow_merge_review_record(
+        $metadata_db,
+        'conflict',
+        $conflict_id,
+        $status,
+        $note,
+        $reviewer
+    );
 }
 
 function cow_merge_resolve_conflict_key(
@@ -16616,15 +16644,42 @@ if (realpath($argv[0] ?? '') === __FILE__) {
             exit(0);
         }
         if ($command === 'review-record') {
-            $args = cow_merge_parse_cli($argv, ['metadata-db', 'record', 'id', 'status', 'note'], 2);
-            $result = cow_merge_review_record(
-                $args['metadata-db'],
-                cow_merge_review_record_type($args['record'] ?? null),
-                cow_merge_review_record_id($args['id'] ?? null),
-                cow_merge_review_status($args['status'] ?? null),
-                cow_merge_review_text($args['note'] ?? null, 'note'),
-                cow_merge_review_text($args['reviewer'] ?? 'user', 'reviewer')
-            );
+            $args = cow_merge_parse_cli($argv, ['metadata-db', 'record', 'status', 'note'], 2);
+            $record_type = cow_merge_review_record_type($args['record'] ?? null);
+            $run_id = array_key_exists('run', $args)
+                ? cow_merge_audit_run_id($args['run'] ?? null)
+                : null;
+            $has_id = array_key_exists('id', $args) && (string)$args['id'] !== '';
+            $has_conflict_key = array_key_exists('conflict-key', $args) && (string)$args['conflict-key'] !== '';
+            if ($has_id === $has_conflict_key) {
+                throw new InvalidArgumentException('review-record requires exactly one of --id or --conflict-key');
+            }
+            if ($has_conflict_key && $record_type !== 'conflict') {
+                throw new InvalidArgumentException('--conflict-key can only review conflict records');
+            }
+            if ($run_id !== null && !$has_conflict_key) {
+                throw new InvalidArgumentException('--run can only be combined with --conflict-key');
+            }
+            $status = cow_merge_review_status($args['status'] ?? null);
+            $note = cow_merge_review_text($args['note'] ?? null, 'note');
+            $reviewer = cow_merge_review_text($args['reviewer'] ?? 'user', 'reviewer');
+            $result = $has_conflict_key
+                ? cow_merge_review_conflict_key(
+                    $args['metadata-db'],
+                    cow_merge_conflict_key_arg($args['conflict-key'] ?? null),
+                    $run_id,
+                    $status,
+                    $note,
+                    $reviewer
+                )
+                : cow_merge_review_record(
+                    $args['metadata-db'],
+                    $record_type,
+                    cow_merge_review_record_id($args['id'] ?? null),
+                    $status,
+                    $note,
+                    $reviewer
+                );
             if (($args['quiet'] ?? '0') !== '1') {
                 echo "forkpress: recorded COW merge review note\n";
                 echo "  note:      {$result['review_note_id']}\n";

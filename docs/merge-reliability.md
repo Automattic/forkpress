@@ -333,9 +333,10 @@ should stay focused on these areas:
   scoped to the merge run so repeated unresolved conflicts and identical payload
   conflicts on different branch pairs receive their own rows/events, and
   `merge-audit --conflict-key <key>` can focus conflict, conflict-event, or
-  resolution audit output on one logical conflict group, `merge-resolve
-  conflict-key <key> [--run <id>]` can validate or apply a conflict choice by
-  logical key when that key is unambiguous, and
+  resolution audit output on one logical conflict group, `merge-review
+  conflict-key <key> [--run <id>]` can attach review status by logical key,
+  `merge-resolve conflict-key <key> [--run <id>]` can validate or apply a
+  conflict choice by logical key when that key is unambiguous, and
   `merge-audit --lifecycle-state <state>` can focus conflict queues and
   conflict-event history on `unreviewed`, `deferred`, `needs-action`,
   `reviewed`, `validated`, or `resolved` records without clients

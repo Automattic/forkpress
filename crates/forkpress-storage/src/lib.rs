@@ -1522,6 +1522,47 @@ pub fn review_cow_merge_audit_record(
     )
 }
 
+pub fn review_cow_merge_conflict_key(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    conflict_key: &str,
+    run_id: Option<&str>,
+    status: &str,
+    note: &str,
+    reviewer: Option<&str>,
+) -> Result<()> {
+    let metadata_db = cow_merge_metadata_db_path(layout);
+    let mut args: Vec<OsString> = vec![
+        "review-record".into(),
+        "--metadata-db".into(),
+        metadata_db.as_os_str().to_os_string(),
+        "--record".into(),
+        "conflict".into(),
+        "--conflict-key".into(),
+        conflict_key.into(),
+        "--status".into(),
+        status.into(),
+        "--note".into(),
+        note.into(),
+    ];
+    if let Some(run_id) = run_id {
+        args.push("--run".into());
+        args.push(run_id.into());
+    }
+    if let Some(reviewer) = reviewer {
+        args.push("--reviewer".into());
+        args.push(reviewer.into());
+    }
+    run_php_script(
+        layout,
+        runtime,
+        shared,
+        "scripts/cow/merge.php",
+        args.iter().map(|arg| arg.as_os_str()),
+    )
+}
+
 pub fn resolve_cow_merge_conflict(
     layout: &Layout,
     runtime: &PortableRuntime,

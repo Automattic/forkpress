@@ -3338,7 +3338,17 @@ try {
     $needs_action_filter_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts', 'lifecycle_state' => 'needs-action']);
     assert_same((int)$needs_action_filter_audit['conflicts'][0]['id'], $options_contract_conflict_id, 'lifecycle-state filter returns needs-action conflicts');
 
-    cow_merge_review_record($options_edit_delete_metadata, 'conflict', $options_contract_conflict_id, 'reviewed', 'Reviewed option conflict.', 'cow-smoke');
+    $reviewed_cli = smoke_run_merge_cli([
+        'review-record',
+        '--metadata-db', $options_edit_delete_metadata,
+        '--record', 'conflict',
+        '--conflict-key', $options_contract_conflict_key,
+        '--run', (string)$options_edit_delete_result['run_id'],
+        '--status', 'reviewed',
+        '--note', 'Reviewed option conflict.',
+        '--reviewer', 'cow-smoke',
+    ]);
+    assert_same($reviewed_cli['status'], 0, 'review-record CLI records review status by conflict key: ' . $reviewed_cli['output']);
     $reviewed_audit = cow_merge_audit_report($options_edit_delete_metadata, null, 5, ['records' => 'conflicts']);
     assert_same($reviewed_audit['conflicts'][0]['lifecycle_state'], 'reviewed', 'reviewed conflict advertises reviewed lifecycle state');
     assert_same($reviewed_audit['conflicts'][0]['next_action'], 'resolve', 'reviewed generic conflict advertises resolve next action');

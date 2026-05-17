@@ -204,6 +204,9 @@ IDs embedded in blocks, JSON, serialized options, or plugin data.
    forkpress branch merge-review conflict <id> \
      --status reviewed \
      --note "Verified in wp-admin"
+   forkpress branch merge-review conflict-key <key> --run <id> \
+     --status reviewed \
+     --note "Verified in wp-admin"
    ```
 
 ## Git workflow
@@ -397,6 +400,7 @@ Useful log files:
 | `forkpress branch merge-resolve conflict <id>` | Validate or apply a conflict choice. |
 | `forkpress branch merge-resolve conflict-key <key> [--run <id>]` | Validate or apply a conflict choice by logical conflict key when unambiguous. |
 | `forkpress branch merge-review <type> <id>` | Attach review status to an audit record. |
+| `forkpress branch merge-review conflict-key <key> [--run <id>]` | Attach review status by logical conflict key when unambiguous. |
 | `forkpress branch delete <name>` | Delete a branch other than `main`. |
 | `forkpress clone [remote] [dir]` | Clone the ForkPress Git remote. |
 | `forkpress agents [dir]` | Create agent branches and Git worktrees. |

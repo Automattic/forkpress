@@ -5409,16 +5409,18 @@ SQL);
     $db = open_db($status_transition_target);
     $db->exec("UPDATE plugin_items SET value = 'target pending queue conflict' WHERE item_id = 'alpha'");
     $db->close();
-    cow_merge_databases($status_transition_base, $status_transition_source, $status_transition_target, $metadata, 'feature-status-transition', 'main');
+    $status_transition_result = cow_merge_databases($status_transition_base, $status_transition_source, $status_transition_target, $metadata, 'feature-status-transition', 'main');
     $status_transition_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND conflict_type = 'cell-conflict' ORDER BY id DESC LIMIT 1");
-    cow_merge_review_record(
+    $status_transition_conflict_key = (string)scalar($metadata, "SELECT conflict_key FROM merge_conflicts WHERE id = $status_transition_conflict_id");
+    $status_transition_key_review = cow_merge_review_conflict_key(
         $metadata,
-        'conflict',
-        $status_transition_conflict_id,
+        $status_transition_conflict_key,
+        (int)$status_transition_result['run_id'],
         'reviewed',
         'Initial status transition review.',
         'cow-test'
     );
+    assert_same($status_transition_key_review['record_id'], $status_transition_conflict_id, 'conflict-key review records the selected conflict id');
     cow_merge_review_record(
         $metadata,
         'conflict',
