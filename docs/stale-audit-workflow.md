@@ -172,17 +172,20 @@ drifts again after revalidation, or if the latest revalidation was classified
 as `incompatible`, guarded resolution fails and asks for another revalidation
 instead of applying the stale original conflict.
 
-The first implementation supports database cell, database row, and filesystem
-conflicts. Plugin validator conflicts now have a conservative validator-evidence
+The current implementation supports database cell, database row, filesystem
+conflicts, and compatible source-added schema index/view/trigger target drift.
+Plugin validator conflicts now have a conservative validator-evidence
 classifier: if a validator rerun records changed evidence for the same plugin
 object, including changed source evidence, the reviewed plugin conflict returns
 to `needs-action` with the replacement validator payload and replacement
 conflict id visible in audit. Generic merge resolution still cannot apply
 plugin conflicts; the plugin validator or a plugin-specific repair flow remains
-the authority. Schema index conflicts can now return to the review queue with
-current SQL evidence, and table rebuild conflicts include dependency-plan
-evidence, but guarded `--after-revalidate` schema resolution remains disabled
-until schema-specific planners can prove compatibility.
+the authority. Schema index, view, trigger, dropped-table restore, and table
+rebuild conflicts can return to the review queue with current SQL evidence, and
+table rebuild conflicts include dependency-plan evidence. Guarded schema
+resolution is intentionally limited to source-added index/view/trigger target
+drift where the planner recorded a compatible schema class after a dry-run
+source replacement validated against the current target.
 
 ## Test Shape
 
@@ -206,10 +209,13 @@ non-primary-key `UNIQUE` logical-key replacements are also classified as
 database cell conflicts where the reviewed cell value itself did not change.
 Schema
 index/view/trigger/table-restore/table-rebuild conflicts record changed
-source/target SQL and carry reviewed conflicts back to `needs-action` as
-`unclassified`. Table rebuild fixtures also prove dependency-only source drift
-is caught through direct index/trigger, dependent-view, and dependent
-view-trigger evidence even when the reviewed table SQL itself is unchanged.
+source/target SQL and carry reviewed conflicts back to `needs-action`. Source
+added index/view/trigger target drift can be guarded-applied after revalidation
+when it receives a compatible schema class; other schema drift remains
+`unclassified` and review-only. Table rebuild fixtures also prove
+dependency-only source drift is caught through direct index/trigger,
+dependent-view, and dependent view-trigger evidence even when the reviewed table
+SQL itself is unchanged.
 
 Future classifier tests should cover explicit plugin-supplied logical
 fingerprints for primary-key row conflicts where schema `UNIQUE` keys are not
