@@ -3160,6 +3160,7 @@ fn cow_branch_command(
                     next_action: audit.next_action.as_deref(),
                     revalidation_class: audit.revalidation_class.as_deref(),
                     latest_revalidation_status: audit.latest_revalidation_status.as_deref(),
+                    stale_status: audit.stale_status.as_deref(),
                     resolution_choice: audit.resolution_choice.as_deref(),
                     blocked_resolution_choice: audit.blocked_resolution_choice.as_deref(),
                     group_by: &audit.group_by,
@@ -3443,7 +3444,7 @@ fn branch_help_text(command: Option<&str>) -> &'static str {
             "Usage: forkpress branch run-plugin-validator --run <id> --validator <path> [--format text|json]\n\nRun one plugin validator and record emitted findings as plugin-scoped merge conflicts.\n"
         }
         Some("merge-audit") | Some("audit") => {
-            "Usage: forkpress branch merge-audit [options]\n\nInspect merge runs, decisions, conflicts, conflict events, resolutions, and rollback failures. Use --revalidate to carry stale reviewed conflicts back into needs-action before resolving; revalidation only accepts --run, --conflict-id, --conflict-key, --reviewer, --format, and --quiet.\nCommon options: --format text|json, --run <id>, --scope all|db|files|plugin, --records all|conflicts|conflict-events|decisions|resolutions|rollback-failures, --conflict-id <id>, --conflict-key <key>, --plugin <name>, --plugin-object <object>, --plugin-severity <severity>, --review, --review-status <status>, --lifecycle-state <state>, --next-action <action>, --revalidation-class <class>, --latest-revalidation-status <status>, --resolution-choice source|target, --blocked-resolution-choice source|target, --group-by none|table|status|path|type|severity|lifecycle|next-action|conflict-key|revalidation-class|latest-revalidation-status|plugin|plugin-object|plugin-severity, --revalidate.\n"
+            "Usage: forkpress branch merge-audit [options]\n\nInspect merge runs, decisions, conflicts, conflict events, resolutions, and rollback failures. Use --revalidate to carry stale reviewed conflicts back into needs-action before resolving; revalidation only accepts --run, --conflict-id, --conflict-key, --reviewer, --format, and --quiet.\nCommon options: --format text|json, --run <id>, --scope all|db|files|plugin, --records all|conflicts|conflict-events|decisions|resolutions|rollback-failures, --conflict-id <id>, --conflict-key <key>, --plugin <name>, --plugin-object <object>, --plugin-severity <severity>, --review, --review-status <status>, --lifecycle-state <state>, --next-action <action>, --revalidation-class <class>, --latest-revalidation-status <status>, --stale-status <status>, --resolution-choice source|target, --blocked-resolution-choice source|target, --group-by none|table|status|path|type|severity|lifecycle|next-action|conflict-key|revalidation-class|latest-revalidation-status|stale-status|plugin|plugin-object|plugin-severity, --revalidate.\n"
         }
         Some("merge-review") => {
             "Usage: forkpress branch merge-review <conflict|decision|resolution> <id> --status <pending|needs-action|reviewed> --note <text> [--reviewer <name>]\n       forkpress branch merge-review conflict-key <key> [--run <id>] --status <pending|needs-action|reviewed> --note <text> [--reviewer <name>]\n\nAttach review metadata to an audit record. Reviewing by conflict key is allowed only when the key identifies one unresolved conflict, or when --run disambiguates it.\n"
@@ -3487,6 +3488,7 @@ struct CowBranchMergeAuditArgs {
     next_action: Option<String>,
     revalidation_class: Option<String>,
     latest_revalidation_status: Option<String>,
+    stale_status: Option<String>,
     resolution_choice: Option<String>,
     blocked_resolution_choice: Option<String>,
     group_by: String,
@@ -3519,6 +3521,7 @@ fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAu
     let mut next_action: Option<String> = None;
     let mut revalidation_class: Option<String> = None;
     let mut latest_revalidation_status: Option<String> = None;
+    let mut stale_status: Option<String> = None;
     let mut resolution_choice: Option<String> = None;
     let mut blocked_resolution_choice: Option<String> = None;
     let mut group_by = "none".to_string();
@@ -3885,6 +3888,21 @@ fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAu
                 latest_revalidation_status = Some(value.to_string());
                 index += 1;
             }
+            "--stale-status" => {
+                let Some(value) = args.get(index + 1) else {
+                    bail!("--stale-status requires fresh, stale, error, or unknown");
+                };
+                stale_status = Some(value.clone());
+                index += 2;
+            }
+            value if value.starts_with("--stale-status=") => {
+                let value = value.trim_start_matches("--stale-status=");
+                if value.is_empty() {
+                    bail!("--stale-status requires fresh, stale, error, or unknown");
+                }
+                stale_status = Some(value.to_string());
+                index += 1;
+            }
             "--resolution-choice" => {
                 let Some(value) = args.get(index + 1) else {
                     bail!("--resolution-choice requires source or target");
@@ -3918,7 +3936,7 @@ fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAu
             "--group-by" => {
                 let Some(value) = args.get(index + 1) else {
                     bail!(
-                        "--group-by requires none, table, status, path, type, severity, lifecycle, next-action, conflict-key, revalidation-class, latest-revalidation-status, plugin, plugin-object, or plugin-severity"
+                        "--group-by requires none, table, status, path, type, severity, lifecycle, next-action, conflict-key, revalidation-class, latest-revalidation-status, stale-status, plugin, plugin-object, or plugin-severity"
                     );
                 };
                 group_by = value.clone();
@@ -3928,7 +3946,7 @@ fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAu
                 let value = value.trim_start_matches("--group-by=");
                 if value.is_empty() {
                     bail!(
-                        "--group-by requires none, table, status, path, type, severity, lifecycle, next-action, conflict-key, revalidation-class, latest-revalidation-status, plugin, plugin-object, or plugin-severity"
+                        "--group-by requires none, table, status, path, type, severity, lifecycle, next-action, conflict-key, revalidation-class, latest-revalidation-status, stale-status, plugin, plugin-object, or plugin-severity"
                     );
                 }
                 group_by = value.to_string();
@@ -3960,6 +3978,7 @@ fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAu
             || next_action.is_some()
             || revalidation_class.is_some()
             || latest_revalidation_status.is_some()
+            || stale_status.is_some()
             || resolution_choice.is_some()
             || blocked_resolution_choice.is_some()
             || group_by != "none")
@@ -4000,6 +4019,7 @@ fn parse_cow_branch_merge_audit_args(args: &[String]) -> Result<CowBranchMergeAu
         next_action,
         revalidation_class,
         latest_revalidation_status,
+        stale_status,
         resolution_choice,
         blocked_resolution_choice,
         group_by,
@@ -5499,6 +5519,7 @@ mod git_helper_tests {
         assert!(
             branch_help_text(Some("merge-audit")).contains("--latest-revalidation-status <status>")
         );
+        assert!(branch_help_text(Some("merge-audit")).contains("--stale-status <status>"));
         assert!(
             branch_help_text(Some("merge-audit")).contains("--resolution-choice source|target")
         );
@@ -5957,6 +5978,7 @@ mod git_helper_tests {
             "--next-action=revalidate".to_string(),
             "--revalidation-class=compatible-target-drift".to_string(),
             "--latest-revalidation-status=target-drifted".to_string(),
+            "--stale-status=stale".to_string(),
             "--resolution-choice=target".to_string(),
             "--blocked-resolution-choice=source".to_string(),
             "--group-by=next-action".to_string(),
@@ -5987,6 +6009,7 @@ mod git_helper_tests {
             parsed.latest_revalidation_status.as_deref(),
             Some("target-drifted")
         );
+        assert_eq!(parsed.stale_status.as_deref(), Some("stale"));
         assert_eq!(parsed.resolution_choice.as_deref(), Some("target"));
         assert_eq!(parsed.blocked_resolution_choice.as_deref(), Some("source"));
         assert_eq!(parsed.group_by, "next-action");
@@ -6116,6 +6139,16 @@ mod git_helper_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("--next-action"));
+        assert!(err.contains("requires"));
+    }
+
+    #[test]
+    fn branch_merge_audit_stale_status_requires_value() {
+        let args = vec!["merge-audit".to_string(), "--stale-status=".to_string()];
+        let err = parse_cow_branch_merge_audit_args(&args)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--stale-status"));
         assert!(err.contains("requires"));
     }
 
@@ -6320,6 +6353,20 @@ mod git_helper_tests {
             Some("target-drifted")
         );
         assert_eq!(parsed.group_by, "latest-revalidation-status");
+    }
+
+    #[test]
+    fn parses_branch_merge_audit_stale_status_filter_and_grouping() {
+        let args = vec![
+            "merge-audit".to_string(),
+            "--records=conflicts".to_string(),
+            "--stale-status=stale".to_string(),
+            "--group-by=stale-status".to_string(),
+        ];
+        let parsed = parse_cow_branch_merge_audit_args(&args).unwrap();
+        assert_eq!(parsed.records, "conflicts");
+        assert_eq!(parsed.stale_status.as_deref(), Some("stale"));
+        assert_eq!(parsed.group_by, "stale-status");
     }
 
     #[test]

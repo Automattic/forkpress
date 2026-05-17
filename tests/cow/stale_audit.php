@@ -127,9 +127,46 @@ try {
         'cow-test'
     );
 
+    $fresh_status_audit = cow_merge_audit_report($metadata, $run_id, 10, [
+        'records' => 'conflicts',
+        'stale_status' => 'fresh',
+    ]);
+    assert_same(count($fresh_status_audit['conflicts']), 1, 'audit filters reviewed conflicts whose target payload is still fresh');
+    assert_same($fresh_status_audit['conflicts'][0]['id'], $conflict_id, 'stale-status fresh filter returns the reviewed conflict before drift');
+
     $target_db = open_db($target);
     $target_db->exec("UPDATE plugin_items SET value = 'target drift after review' WHERE item_id = 'alpha'");
     $target_db->close();
+
+    $stale_status_audit = cow_merge_audit_report($metadata, $run_id, 10, [
+        'records' => 'conflicts',
+        'stale_status' => 'stale',
+    ]);
+    assert_same(count($stale_status_audit['conflicts']), 1, 'audit filters conflicts whose target payload is stale');
+    assert_same($stale_status_audit['conflicts'][0]['id'], $conflict_id, 'stale-status stale filter returns the drifted conflict');
+    $fresh_after_drift_audit = cow_merge_audit_report($metadata, $run_id, 10, [
+        'records' => 'conflicts',
+        'stale_status' => 'fresh',
+    ]);
+    assert_same(count($fresh_after_drift_audit['conflicts']), 0, 'audit excludes drifted conflicts from stale-status fresh');
+    $stale_status_groups = cow_merge_audit_report($metadata, $run_id, 10, [
+        'records' => 'conflicts',
+        'group_by' => 'stale-status',
+    ]);
+    $stale_status_group_counts = array_column($stale_status_groups['conflict_groups'], 'conflict_count', 'group_key');
+    assert_same((int)($stale_status_group_counts['stale'] ?? 0), 1, 'audit groups conflicts by live stale status');
+    $stale_status_cli = run_merge_cli([
+        'audit',
+        '--metadata-db', $metadata,
+        '--run', (string)$run_id,
+        '--records', 'conflicts',
+        '--stale-status', 'stale',
+        '--format', 'json',
+    ]);
+    assert_same($stale_status_cli['status'], 0, 'audit CLI accepts a stale-status filter');
+    $stale_status_cli_json = json_decode($stale_status_cli['output'], true);
+    assert_same(count($stale_status_cli_json['conflicts'] ?? []), 1, 'audit CLI filters JSON conflicts by stale status');
+    assert_same($stale_status_cli_json['filters']['stale_status'] ?? null, 'stale', 'audit CLI reports the stale-status filter');
 
     assert_throws(
         fn() => cow_merge_resolve_conflict($metadata, $conflict_id, 'source', true, 'Try stale source apply.', 'cow-test'),

@@ -39,6 +39,8 @@ forkpress branch merge-audit --review --review-status needs-action
 forkpress branch merge-audit --records conflicts --revalidation-class compatible-target-drift
 forkpress branch merge-audit --records conflicts --latest-revalidation-status target-drifted
 forkpress branch merge-audit --records conflicts --group-by latest-revalidation-status
+forkpress branch merge-audit --records conflicts --stale-status stale
+forkpress branch merge-audit --records conflicts --group-by stale-status
 ```
 
 The command does not mutate the target branch. It only writes review metadata in
@@ -112,6 +114,12 @@ last `--after-revalidate` guard is still current or has gone stale again. Use
 from `--revalidation-class`: the class says what the last revalidation found at
 the time it ran, while the latest status says whether that recorded guard still
 matches the live source/target state now.
+
+Use `merge-audit --stale-status fresh|stale|error|unknown` to query the live
+pre-revalidation staleness that audit rows already expose, and
+`--group-by stale-status` to summarize the current conflict queue without
+client-side filtering. This is useful before deciding whether to revalidate
+reviewed conflicts or resolve still-fresh ones.
 
 Schema index, view, trigger, dropped-table restore, and table rebuild conflicts
 now record current source/target SQL when revalidation finds drift and carry

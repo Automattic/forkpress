@@ -1273,6 +1273,7 @@ pub struct CowMergeAuditQuery<'a> {
     pub next_action: Option<&'a str>,
     pub revalidation_class: Option<&'a str>,
     pub latest_revalidation_status: Option<&'a str>,
+    pub stale_status: Option<&'a str>,
     pub resolution_choice: Option<&'a str>,
     pub blocked_resolution_choice: Option<&'a str>,
     pub group_by: &'a str,
@@ -1370,6 +1371,10 @@ pub fn inspect_cow_merge_audit(
     if let Some(latest_revalidation_status) = query.latest_revalidation_status {
         args.push("--latest-revalidation-status".into());
         args.push(latest_revalidation_status.into());
+    }
+    if let Some(stale_status) = query.stale_status {
+        args.push("--stale-status".into());
+        args.push(stale_status.into());
     }
     if let Some(resolution_choice) = query.resolution_choice {
         args.push("--resolution-choice".into());
