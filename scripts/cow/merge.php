@@ -3698,11 +3698,15 @@ CREATE TABLE IF NOT EXISTS merge_runs (
     source_db TEXT NOT NULL,
     target_db TEXT NOT NULL,
     base_db TEXT NOT NULL,
+    source_root TEXT NOT NULL DEFAULT '',
+    target_root TEXT NOT NULL DEFAULT '',
     target_before_db TEXT NOT NULL DEFAULT '',
     target_before_root TEXT NOT NULL DEFAULT '',
     failure_reason TEXT
 )
 SQL, 'failed to create metadata table merge_runs');
+    cow_merge_ensure_metadata_column($meta, 'merge_runs', 'source_root', "TEXT NOT NULL DEFAULT ''");
+    cow_merge_ensure_metadata_column($meta, 'merge_runs', 'target_root', "TEXT NOT NULL DEFAULT ''");
     cow_merge_ensure_metadata_column($meta, 'merge_runs', 'target_before_db', "TEXT NOT NULL DEFAULT ''");
     cow_merge_ensure_metadata_column($meta, 'merge_runs', 'target_before_root', "TEXT NOT NULL DEFAULT ''");
     cow_merge_ensure_metadata_column($meta, 'merge_runs', 'failure_reason', 'TEXT');
@@ -4636,7 +4640,7 @@ function cow_merge_start_identity_capture_run(
 function cow_merge_run_context(SQLite3 $meta, int $run_id): array {
     $stmt = cow_merge_prepare_checked(
         $meta,
-        'SELECT source_branch, target_branch, base_db, source_db, target_db, target_before_db, target_before_root FROM merge_runs WHERE id = :id',
+        'SELECT source_branch, target_branch, base_db, source_db, target_db, source_root, target_root, target_before_db, target_before_root FROM merge_runs WHERE id = :id',
         'failed to prepare merge run context lookup'
     );
     cow_merge_bind($stmt, ':id', $run_id);
@@ -4650,6 +4654,8 @@ function cow_merge_run_context(SQLite3 $meta, int $run_id): array {
             'base_db' => '',
             'source_db' => '',
             'target_db' => '',
+            'source_root' => '',
+            'target_root' => '',
             'target_before_db' => '',
             'target_before_root' => '',
         ];
@@ -4660,9 +4666,25 @@ function cow_merge_run_context(SQLite3 $meta, int $run_id): array {
         'base_db' => (string)$row['base_db'],
         'source_db' => (string)$row['source_db'],
         'target_db' => (string)$row['target_db'],
+        'source_root' => (string)($row['source_root'] ?? ''),
+        'target_root' => (string)($row['target_root'] ?? ''),
         'target_before_db' => (string)($row['target_before_db'] ?? ''),
         'target_before_root' => (string)($row['target_before_root'] ?? ''),
     ];
+}
+
+function cow_merge_run_context_root(array $context, string $root_key, string $db_key): string {
+    return cow_merge_root_from_db_or_stored(
+        (string)($context[$root_key] ?? ''),
+        (string)($context[$db_key] ?? '')
+    );
+}
+
+function cow_merge_root_from_db_or_stored(string $root, string $db): string {
+    if ($root !== '') {
+        return $root;
+    }
+    return $db === '' ? '' : cow_merge_branch_root_from_db_path($db);
 }
 
 function cow_merge_validator_context_base_dir(string $metadata_db): string {
@@ -4703,6 +4725,29 @@ function cow_merge_update_validator_context_paths(
             @$meta->exec('ROLLBACK');
         }
         throw $e;
+    } finally {
+        $meta->close();
+    }
+}
+
+function cow_merge_update_run_file_roots(
+    string $metadata_db,
+    int $run_id,
+    string $source_root,
+    string $target_root
+): void {
+    $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READWRITE | SQLITE3_OPEN_CREATE);
+    try {
+        cow_merge_ensure_metadata($meta);
+        $stmt = cow_merge_prepare_checked(
+            $meta,
+            'UPDATE merge_runs SET source_root = :source_root, target_root = :target_root WHERE id = :run_id',
+            'failed to prepare merge run file-root update'
+        );
+        cow_merge_bind($stmt, ':source_root', $source_root);
+        cow_merge_bind($stmt, ':target_root', $target_root);
+        cow_merge_bind($stmt, ':run_id', $run_id);
+        cow_merge_execute_checked($stmt, $meta, 'failed to update merge run file roots');
     } finally {
         $meta->close();
     }
@@ -7548,8 +7593,8 @@ function cow_merge_plugin_validator_env(string $metadata_db, int $run_id): array
         'FORKPRESS_MERGE_TARGET_DB' => $context['target_db'],
         'FORKPRESS_MERGE_TARGET_BEFORE_DB' => $context['target_before_db'],
         'FORKPRESS_MERGE_BASE_ROOT' => $context['base_db'] === '' ? '' : cow_merge_branch_root_from_db_path($context['base_db']),
-        'FORKPRESS_MERGE_SOURCE_ROOT' => $context['source_db'] === '' ? '' : cow_merge_branch_root_from_db_path($context['source_db']),
-        'FORKPRESS_MERGE_TARGET_ROOT' => $context['target_db'] === '' ? '' : cow_merge_branch_root_from_db_path($context['target_db']),
+        'FORKPRESS_MERGE_SOURCE_ROOT' => cow_merge_run_context_root($context, 'source_root', 'source_db'),
+        'FORKPRESS_MERGE_TARGET_ROOT' => cow_merge_run_context_root($context, 'target_root', 'target_db'),
         'FORKPRESS_MERGE_TARGET_BEFORE_ROOT' => $context['target_before_root'],
     ]);
 }
@@ -7714,7 +7759,7 @@ function cow_merge_plugin_driver_conflict_context(SQLite3 $meta, int $conflict_i
         'SELECT c.id, c.run_id, c.conflict_key, c.previous_conflict_id, c.table_name, c.row_identity, c.column_name, ' .
         'c.conflict_type, c.base_payload, c.source_payload, c.target_payload, c.chosen_payload, ' .
         'c.source_hash, c.target_hash, c.chosen_hash, ' .
-        'r.source_branch, r.target_branch, r.base_db, r.source_db, r.target_db, r.target_before_db, r.target_before_root ' .
+        'r.source_branch, r.target_branch, r.base_db, r.source_db, r.target_db, r.source_root, r.target_root, r.target_before_db, r.target_before_root ' .
         'FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.id = :id',
         'failed to prepare plugin driver context lookup'
     );
@@ -7762,8 +7807,14 @@ function cow_merge_plugin_driver_conflict_context(SQLite3 $meta, int $conflict_i
             'target_db' => (string)$row['target_db'],
             'target_before_db' => (string)($row['target_before_db'] ?? ''),
             'base_root' => ((string)$row['base_db']) === '' ? '' : cow_merge_branch_root_from_db_path((string)$row['base_db']),
-            'source_root' => ((string)$row['source_db']) === '' ? '' : cow_merge_branch_root_from_db_path((string)$row['source_db']),
-            'target_root' => ((string)$row['target_db']) === '' ? '' : cow_merge_branch_root_from_db_path((string)$row['target_db']),
+            'source_root' => cow_merge_root_from_db_or_stored(
+                (string)($row['source_root'] ?? ''),
+                (string)$row['source_db']
+            ),
+            'target_root' => cow_merge_root_from_db_or_stored(
+                (string)($row['target_root'] ?? ''),
+                (string)$row['target_db']
+            ),
             'target_before_root' => (string)($row['target_before_root'] ?? ''),
         ],
     ];
@@ -8084,7 +8135,7 @@ function cow_merge_record_plugin_driver_resolution(
         $stmt = cow_merge_prepare_checked(
             $meta,
             'SELECT c.id, c.run_id, c.table_name, c.row_identity, c.column_name, c.conflict_type, ' .
-            'c.source_payload, c.target_payload, c.chosen_payload, c.source_hash, c.target_hash, c.chosen_hash, r.target_db ' .
+            'c.source_payload, c.target_payload, c.chosen_payload, c.source_hash, c.target_hash, c.chosen_hash, r.target_db, r.target_root ' .
             'FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.id = :id',
             'failed to prepare plugin driver conflict lookup'
         );
@@ -8105,13 +8156,14 @@ function cow_merge_record_plugin_driver_resolution(
         }
         if ($applied) {
             $target_db = (string)$conflict['target_db'];
+            $target_root = (string)($conflict['target_root'] ?? '');
             cow_merge_assert_plugin_driver_cleared_finding(
                 $metadata_db,
                 (int)$conflict['run_id'],
                 $conflict_id,
                 (string)$conflict['conflict_type'],
                 $target_db,
-                $target_db === '' ? '' : cow_merge_branch_root_from_db_path($target_db),
+                cow_merge_root_from_db_or_stored($target_root, $target_db),
                 cow_merge_decode_payload_json((string)$conflict['chosen_payload'], 'plugin conflict')
             );
         }
@@ -19043,6 +19095,14 @@ function cow_merge_branch_state(
         $result['plugin_validators_discovered'] = 0;
         $result['plugin_validators_unchecked'] = 0;
         $result['plugin_validators_unchecked_plugins'] = [];
+        if ($has_file_args) {
+            cow_merge_update_run_file_roots(
+                $metadata_db,
+                (int)$result['run_id'],
+                (string)$source_root,
+                (string)$target_root
+            );
+        }
         if ($target_snapshot !== null) {
             cow_merge_materialize_validator_context(
                 $metadata_db,

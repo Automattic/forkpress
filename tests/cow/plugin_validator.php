@@ -1711,6 +1711,118 @@ PHP);
         );
     }
 
+    $root_context_base_root = $tmp . '/root-context-base';
+    $root_context_source_root = $tmp . '/root-context-source';
+    $root_context_target_root = $tmp . '/root-context-target';
+    $root_context_db_dir = $tmp . '/root-context-dbs';
+    $root_context_base = $root_context_db_dir . '/base.sqlite';
+    $root_context_source = $root_context_db_dir . '/source.sqlite';
+    $root_context_target = $root_context_db_dir . '/target.sqlite';
+    $root_context_metadata = $tmp . '/.forkpress/cow/merge/plugin-root-context-metadata.sqlite';
+    $root_context_file_base = $tmp . '/.forkpress/cow/merge/file-bases/plugin-root-context.json';
+
+    mkdir($root_context_base_root . '/wp-content/database', 0777, true);
+    mkdir($root_context_db_dir, 0777, true);
+    create_plugin_validator_db($root_context_base);
+    write_test_file($root_context_base_root . '/wp-content/uploads/root-context-marker.dat', 'root context marker');
+    write_test_file($root_context_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$target_root = rtrim((string)getenv('FORKPRESS_MERGE_TARGET_ROOT'), '/');
+$findings = [];
+if (!is_file($target_root . '/wp-content/uploads/root-context-marker.dat')) {
+    $findings[] = [
+        'plugin' => 'forkpress-plugin-root-context',
+        'object' => 'merge-root',
+        'reason' => 'plugin validator did not receive the explicit target file root',
+        'type' => 'plugin-root-context-env-drift',
+        'validator' => 'forkpress-plugin-root-context@1',
+        'candidate' => [
+            'target_root' => $target_root,
+        ],
+    ];
+}
+$res = $db->query('SELECT child_id, file_path FROM plugin_graph_child ORDER BY child_id');
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    $file_path = str_replace('\\', '/', (string)$row['file_path']);
+    if (!is_file($target_root . '/' . $file_path)) {
+        $findings[] = [
+            'plugin' => 'forkpress-plugin-root-context',
+            'object' => 'child:' . (int)$row['child_id'],
+            'reason' => 'plugin child references a missing file under the explicit target root',
+            'type' => 'plugin-root-context-file-drift',
+            'paths' => [$file_path],
+            'validator' => 'forkpress-plugin-root-context@1',
+            'candidate' => [
+                'child_id' => (int)$row['child_id'],
+                'file_path' => $file_path,
+            ],
+        ];
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    copy_tree_for_test($root_context_base_root, $root_context_source_root);
+    copy_tree_for_test($root_context_base_root, $root_context_target_root);
+    copy($root_context_base, $root_context_source);
+    copy($root_context_base, $root_context_target);
+    cow_merge_capture_file_base($root_context_base_root, $root_context_file_base);
+    cow_merge_allocate_autoincrement_bands($root_context_source, $root_context_metadata, 'feature-plugin-root-context-source');
+    cow_merge_allocate_autoincrement_bands($root_context_target, $root_context_metadata, 'main');
+
+    $root_context_source_db = open_db($root_context_source);
+    $root_context_source_db->exec("INSERT INTO plugin_graph_parent (label) VALUES ('source root-context parent')");
+    $root_context_parent_id = (int)$root_context_source_db->lastInsertRowID();
+    $root_context_source_db->exec("INSERT INTO plugin_graph_child (parent_id, graph_json, file_path) VALUES ($root_context_parent_id, '{}', 'wp-content/uploads/root-context-missing.dat')");
+    $root_context_child_id = (int)$root_context_source_db->lastInsertRowID();
+    $root_context_source_db->exec("UPDATE plugin_graph_child SET graph_json = '{\"child_id\":$root_context_child_id,\"parent_id\":$root_context_parent_id}' WHERE child_id = $root_context_child_id");
+    $root_context_source_db->close();
+
+    $root_context_result = cow_merge_branch_state(
+        $root_context_base,
+        $root_context_source,
+        $root_context_target,
+        $root_context_metadata,
+        'feature-plugin-root-context-source',
+        'main',
+        $root_context_file_base,
+        $root_context_source_root,
+        $root_context_target_root
+    );
+    assert_same($root_context_result['status'], 'completed_with_conflicts', 'root-context plugin validator records the real missing file finding');
+    assert_same((int)($root_context_result['plugin_validator_conflicts'] ?? 0), 1, 'plugin validator receives the explicit target file root even when the DB path is outside the root');
+    $root_context_audit = cow_merge_audit_report($root_context_metadata, (int)$root_context_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin' => 'forkpress-plugin-root-context',
+    ]);
+    assert_same(count($root_context_audit['conflicts']), 1, 'root-context audit contains only the file finding from the explicit root');
+    $root_context_conflict_id = (int)($root_context_audit['conflicts'][0]['id'] ?? 0);
+    assert_true($root_context_conflict_id > 0, 'root-context file conflict is recorded for driver postflight');
+    $root_context_resolution_count = (int)scalar($root_context_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE choice = 'plugin-driver'");
+    $root_context_uncleared_driver = run_merge_cli([
+        'record-plugin-driver-resolution',
+        '--metadata-db', $root_context_metadata,
+        '--id', (string)$root_context_conflict_id,
+        '--driver', 'forkpress-plugin-root-context-driver@non-clearing',
+        '--result-json', '{"claimed":"repair without touching explicit root files"}',
+        '--applied',
+        '--format', 'json',
+    ]);
+    assert_true($root_context_uncleared_driver['status'] !== 0, 'plugin driver recorder uses the explicit target root for postflight validation');
+    assert_true(
+        str_contains($root_context_uncleared_driver['output'], 'did not clear validator conflict #' . $root_context_conflict_id),
+        'root-context plugin driver recorder explains uncleared postflight findings'
+    );
+    assert_same(
+        (int)scalar($root_context_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE choice = 'plugin-driver'"),
+        $root_context_resolution_count,
+        'root-context non-clearing plugin driver records no plugin-driver resolution'
+    );
+
     $serialized_base_root = $tmp . '/serialized-base';
     $serialized_source_root = $tmp . '/serialized-source';
     $serialized_target_root = $tmp . '/serialized-target';
