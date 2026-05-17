@@ -12255,7 +12255,8 @@ function cow_merge_file_source_resolution_blocked_reason(array $row): ?string {
 }
 
 function cow_merge_row_source_resolution_blocked_reason(array $row): ?string {
-    if ((string)($row['conflict_type'] ?? '') !== 'row-target-constraint') {
+    $conflict_type = (string)($row['conflict_type'] ?? '');
+    if (!in_array($conflict_type, ['row-target-constraint', 'row-unique-collision'], true)) {
         return null;
     }
     $table = (string)($row['table_name'] ?? '');
@@ -12273,6 +12274,37 @@ function cow_merge_row_source_resolution_blocked_reason(array $row): ?string {
 
     $target = cow_merge_open_db($target_db, SQLITE3_OPEN_READONLY);
     try {
+        if ($conflict_type === 'row-unique-collision') {
+            if (!is_array($source_value)) {
+                return null;
+            }
+            $error = cow_merge_foreign_key_error($target, $table, $source_value);
+            if ($error !== null) {
+                return "source unique collision resolution is blocked by current target foreign-key state: $error";
+            }
+            $unique_collision = cow_merge_find_unique_collision($target, $table, $source_value, true);
+            if (!is_array($unique_collision) || !is_array($unique_collision['row'] ?? null)) {
+                return null;
+            }
+            $collision_row = $unique_collision['row'];
+            $pk_cols = cow_merge_pk_cols($target, $table);
+            if ($pk_cols) {
+                $collision_identity = [];
+                foreach ($pk_cols as $pk_col) {
+                    if (!array_key_exists($pk_col, $collision_row)) {
+                        return null;
+                    }
+                    $collision_identity[$pk_col] = $collision_row[$pk_col];
+                }
+            } elseif (isset($unique_collision['rowid'])) {
+                $collision_identity = ['rowid' => (int)$unique_collision['rowid']];
+            } else {
+                return null;
+            }
+            $error = cow_merge_foreign_key_delete_error($target, $table, $collision_identity, $pk_cols, $collision_row);
+            return $error === null ? null : "source unique collision resolution is blocked by current target foreign-key state: $error";
+        }
+
         if (is_array($source_value)) {
             $error = cow_merge_foreign_key_error($target, $table, $source_value);
             return $error === null ? null : "source row resolution is blocked by current target foreign-key state: $error";

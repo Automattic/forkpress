@@ -320,9 +320,10 @@ should stay focused on these areas:
   resolutions with `resolution-validated` events, `--apply-reviewed` applies the
   latest unapplied validated choice, payload-specific blockers such as cyclic
   schema source resolution, unresolved target dependencies for source-dropped
-  tables/views, foreign-key row and primary-key-addressable cell source choices
-  blocked by current target state, unsafe filesystem source payloads, and
-  target-descendant directory deletions are exposed as
+  tables/views, foreign-key row, unique-collision row, and
+  primary-key-addressable cell source choices blocked by current target state,
+  unsafe filesystem source payloads, and target-descendant directory deletions
+  are exposed as
   `blocked_resolution_choices`, while target-side row `CHECK` constraints and
   trigger rewrites still remain validation-time failures,
   conflict rows expose a stable

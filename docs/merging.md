@@ -104,8 +104,10 @@ schema objects, or foreign-key child tables; once those dependency conflicts
 are resolved, audit output can advertise `source` again. Row target-constraint
 conflicts and primary-key-addressable cell conflicts use the same model when
 the current target foreign-key state would reject the audited source row,
-source row deletion, or source cell value; after the missing parent or blocking
-child dependency is resolved, audit output can advertise `source` again.
+source row deletion, source cell value, or source unique-collision replacement
+that must first remove a target row with dependent children; after the missing
+parent or blocking child dependency is resolved, audit output can advertise
+`source` again.
 Target-side `CHECK` constraints and trigger rewrites are still validated by the
 resolver rather than precomputed as blocked audit choices, because their
 correctness depends on executing the target program and comparing the resulting

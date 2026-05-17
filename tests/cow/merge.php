@@ -1898,6 +1898,73 @@ try {
     assert_same(scalar($unique_target, "SELECT value FROM plugin_unique_rows WHERE slug = 'shared-slug'"), 'source row', 'source unique collision resolution replaces the target row payload');
     assert_same((int)scalar($unique_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $unique_conflict_id AND table_name = 'plugin_unique_rows' AND choice = 'source' AND applied = 1"), 1, 'source unique collision resolution is auditable');
 
+    $unique_fk_base = $tmp . '/unique-fk-base.sqlite';
+    $unique_fk_source = $tmp . '/unique-fk-source.sqlite';
+    $unique_fk_target = $tmp . '/unique-fk-target.sqlite';
+    $unique_fk_metadata = $tmp . '/.forkpress/cow/merge/unique-fk-metadata.sqlite';
+    create_base_db($unique_fk_base);
+    copy($unique_fk_base, $unique_fk_source);
+    copy($unique_fk_base, $unique_fk_target);
+    foreach ([$unique_fk_base, $unique_fk_source, $unique_fk_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_unique_fk_rows (id INTEGER PRIMARY KEY, slug TEXT UNIQUE, value TEXT)');
+        $db->exec('CREATE TABLE plugin_unique_fk_children (id INTEGER PRIMARY KEY, row_id INTEGER NOT NULL REFERENCES plugin_unique_fk_rows(id), label TEXT)');
+        $db->close();
+    }
+    $db = open_db($unique_fk_source);
+    $db->exec("INSERT INTO plugin_unique_fk_rows (id, slug, value) VALUES (100, 'shared-fk-slug', 'source FK row')");
+    $db->close();
+    $db = open_db($unique_fk_target);
+    $db->exec("INSERT INTO plugin_unique_fk_rows (id, slug, value) VALUES (200, 'shared-fk-slug', 'target FK row')");
+    $db->exec("INSERT INTO plugin_unique_fk_children (id, row_id, label) VALUES (1, 200, 'target child')");
+    $db->close();
+    $unique_fk_result = cow_merge_databases($unique_fk_base, $unique_fk_source, $unique_fk_target, $unique_fk_metadata, 'feature-unique-fk', 'main');
+    assert_same($unique_fk_result['status'], 'completed_with_conflicts', 'unique collision with target FK children is held for review');
+    assert_same((int)scalar($unique_fk_target, "SELECT id FROM plugin_unique_fk_rows WHERE slug = 'shared-fk-slug'"), 200, 'target unique FK row wins before review');
+    $unique_fk_conflict_id = (int)scalar($unique_fk_metadata, "SELECT c.id FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_unique_fk_rows' AND c.conflict_type = 'row-unique-collision' AND r.source_branch = 'feature-unique-fk' ORDER BY c.id DESC LIMIT 1");
+    $unique_fk_audit = cow_merge_audit_report($unique_fk_metadata, (int)$unique_fk_result['run_id'], 10, ['records' => 'conflicts']);
+    $unique_fk_audit_rows = [];
+    foreach ($unique_fk_audit['conflicts'] as $row) {
+        $unique_fk_audit_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $unique_fk_audit_rows[$unique_fk_conflict_id]['resolution_choices'],
+        ['target'],
+        'unique collision audit does not advertise source while target FK children block collision removal'
+    );
+    assert_true(
+        str_contains((string)($unique_fk_audit_rows[$unique_fk_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'referenced by plugin_unique_fk_children(row_id)'),
+        'unique collision audit explains the target FK child blocker'
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($unique_fk_metadata, $unique_fk_conflict_id, 'source', true, 'Try unique source before child review.', 'cow-test'),
+        'resolution choice source is blocked',
+        'source unique collision resolution is blocked before deleting a target row with FK children'
+    );
+    $db = open_db($unique_fk_target);
+    $db->exec('DELETE FROM plugin_unique_fk_children WHERE row_id = 200');
+    $db->close();
+    $unique_fk_unblocked_audit = cow_merge_audit_report($unique_fk_metadata, (int)$unique_fk_result['run_id'], 10, ['records' => 'conflicts']);
+    $unique_fk_unblocked_rows = [];
+    foreach ($unique_fk_unblocked_audit['conflicts'] as $row) {
+        $unique_fk_unblocked_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $unique_fk_unblocked_rows[$unique_fk_conflict_id]['resolution_choices'],
+        ['source', 'target'],
+        'unique collision audit advertises source after target FK children are reviewed away'
+    );
+    $unique_fk_source_resolution = cow_merge_resolve_conflict(
+        $unique_fk_metadata,
+        $unique_fk_conflict_id,
+        'source',
+        true,
+        'Apply unique source row after child review.',
+        'cow-test'
+    );
+    assert_same($unique_fk_source_resolution['status'], 'applied', 'source unique collision resolution applies after target FK children are gone');
+    assert_same((int)scalar($unique_fk_target, "SELECT id FROM plugin_unique_fk_rows WHERE slug = 'shared-fk-slug'"), 100, 'source unique collision replaces the target row after FK child review');
+
     $partial_unique_base = $tmp . '/partial-unique-base.sqlite';
     $partial_unique_source = $tmp . '/partial-unique-source.sqlite';
     $partial_unique_target = $tmp . '/partial-unique-target.sqlite';
