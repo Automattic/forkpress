@@ -2515,6 +2515,75 @@ SQL);
     assert_same($fk_update_source_resolution['status'], 'applied', 'source foreign-key update resolution applies after the target parent exists');
     assert_same((int)scalar($fk_update_target, 'SELECT parent_id FROM plugin_fk_update_children WHERE id = 20'), 999, 'source foreign-key update resolution reparents the child row');
 
+    $fk_cell_base = $tmp . '/fk-cell-base.sqlite';
+    $fk_cell_source = $tmp . '/fk-cell-source.sqlite';
+    $fk_cell_target = $tmp . '/fk-cell-target.sqlite';
+    $fk_cell_metadata = $tmp . '/.forkpress/cow/merge/fk-cell-metadata.sqlite';
+    create_base_db($fk_cell_base);
+    copy($fk_cell_base, $fk_cell_source);
+    copy($fk_cell_base, $fk_cell_target);
+    foreach ([$fk_cell_base, $fk_cell_source, $fk_cell_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_fk_cell_parents (id INTEGER PRIMARY KEY, label TEXT)');
+        $db->exec('CREATE TABLE plugin_fk_cell_children (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES plugin_fk_cell_parents(id), label TEXT)');
+        $db->exec("INSERT INTO plugin_fk_cell_parents (id, label) VALUES (1, 'base parent')");
+        $db->exec("INSERT INTO plugin_fk_cell_parents (id, label) VALUES (2, 'target parent')");
+        $db->exec("INSERT INTO plugin_fk_cell_children (id, parent_id, label) VALUES (20, 1, 'base child')");
+        $db->close();
+    }
+    $db = open_db($fk_cell_source);
+    $db->exec('UPDATE plugin_fk_cell_children SET parent_id = 999 WHERE id = 20');
+    $db->close();
+    $db = open_db($fk_cell_target);
+    $db->exec('UPDATE plugin_fk_cell_children SET parent_id = 2 WHERE id = 20');
+    $db->close();
+    $fk_cell_result = cow_merge_databases($fk_cell_base, $fk_cell_source, $fk_cell_target, $fk_cell_metadata, 'feature-fk-cell', 'main');
+    assert_same($fk_cell_result['status'], 'completed_with_conflicts', 'same-cell foreign-key reparent conflict is held for review');
+    assert_same((int)scalar($fk_cell_target, 'SELECT parent_id FROM plugin_fk_cell_children WHERE id = 20'), 2, 'same-cell foreign-key target value wins before review');
+    $fk_cell_conflict_id = (int)scalar($fk_cell_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_fk_cell_children' AND column_name = 'parent_id' AND conflict_type = 'cell-conflict' ORDER BY id DESC LIMIT 1");
+    $fk_cell_audit = cow_merge_audit_report($fk_cell_metadata, (int)$fk_cell_result['run_id'], 10, ['records' => 'conflicts']);
+    $fk_cell_audit_rows = [];
+    foreach ($fk_cell_audit['conflicts'] as $row) {
+        $fk_cell_audit_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $fk_cell_audit_rows[$fk_cell_conflict_id]['resolution_choices'],
+        ['target'],
+        'foreign-key cell audit does not advertise source while the target parent is missing'
+    );
+    assert_true(
+        str_contains((string)($fk_cell_audit_rows[$fk_cell_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'referencing plugin_fk_cell_parents(id)'),
+        'foreign-key cell audit explains the missing target parent'
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($fk_cell_metadata, $fk_cell_conflict_id, 'source', true, 'Try cell reparent before target parent exists.', 'cow-test'),
+        'resolution choice source is blocked',
+        'source resolution for a foreign-key cell conflict is blocked before mutation while the target parent is missing'
+    );
+    $db = open_db($fk_cell_target);
+    $db->exec("INSERT INTO plugin_fk_cell_parents (id, label) VALUES (999, 'target parent for reviewed source cell')");
+    $db->close();
+    $fk_cell_unblocked_audit = cow_merge_audit_report($fk_cell_metadata, (int)$fk_cell_result['run_id'], 10, ['records' => 'conflicts']);
+    $fk_cell_unblocked_rows = [];
+    foreach ($fk_cell_unblocked_audit['conflicts'] as $row) {
+        $fk_cell_unblocked_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $fk_cell_unblocked_rows[$fk_cell_conflict_id]['resolution_choices'],
+        ['source', 'target'],
+        'foreign-key cell audit advertises source after the target parent is restored'
+    );
+    $fk_cell_source_resolution = cow_merge_resolve_conflict(
+        $fk_cell_metadata,
+        $fk_cell_conflict_id,
+        'source',
+        true,
+        'Apply source cell reparent after target parent review.',
+        'cow-test'
+    );
+    assert_same($fk_cell_source_resolution['status'], 'applied', 'source foreign-key cell resolution applies after the target parent exists');
+    assert_same((int)scalar($fk_cell_target, 'SELECT parent_id FROM plugin_fk_cell_children WHERE id = 20'), 999, 'source foreign-key cell resolution reparents the child row');
+
     $fk_delete_base = $tmp . '/fk-delete-base.sqlite';
     $fk_delete_source = $tmp . '/fk-delete-source.sqlite';
     $fk_delete_target = $tmp . '/fk-delete-target.sqlite';

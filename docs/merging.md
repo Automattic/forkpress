@@ -102,11 +102,12 @@ reason the resolver will reject it. Schema conflicts use the same model for
 source drops that would invalidate target-side dependent views, triggers,
 schema objects, or foreign-key child tables; once those dependency conflicts
 are resolved, audit output can advertise `source` again. Row target-constraint
-conflicts use the same model when the current target foreign-key state would
-reject the audited source row or source row deletion; after the missing parent
-or blocking child dependency is resolved, audit output can advertise `source`
-again. Target-side `CHECK` constraints and trigger rewrites are still validated
-by the resolver rather than precomputed as blocked audit choices, because their
+conflicts and primary-key-addressable cell conflicts use the same model when
+the current target foreign-key state would reject the audited source row,
+source row deletion, or source cell value; after the missing parent or blocking
+child dependency is resolved, audit output can advertise `source` again.
+Target-side `CHECK` constraints and trigger rewrites are still validated by the
+resolver rather than precomputed as blocked audit choices, because their
 correctness depends on executing the target program and comparing the resulting
 row. It also includes the
 conflict

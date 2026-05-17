@@ -12301,6 +12301,51 @@ function cow_merge_row_source_resolution_blocked_reason(array $row): ?string {
     }
 }
 
+function cow_merge_cell_source_resolution_blocked_reason(array $row): ?string {
+    if ((string)($row['conflict_type'] ?? '') !== 'cell-conflict') {
+        return null;
+    }
+    $table = (string)($row['table_name'] ?? '');
+    $column = (string)($row['column_name'] ?? '');
+    $target_db = $row['target_db'] ?? null;
+    if ($table === '' || $column === '' || !is_string($target_db) || $target_db === '' || !is_file($target_db)) {
+        return null;
+    }
+
+    try {
+        $source_value = cow_merge_decode_payload_json((string)($row['source_payload'] ?? ''), 'cell conflict source');
+        $identity = cow_merge_decode_payload_json((string)($row['row_identity'] ?? ''), 'cell conflict identity');
+    } catch (Throwable) {
+        return null;
+    }
+    if (!is_array($identity)) {
+        return null;
+    }
+
+    $target = cow_merge_open_db($target_db, SQLITE3_OPEN_READONLY);
+    try {
+        $pk_cols = cow_merge_pk_cols($target, $table);
+        if (!$pk_cols) {
+            return null;
+        }
+        foreach ($pk_cols as $pk_col) {
+            if (!array_key_exists($pk_col, $identity)) {
+                return null;
+            }
+        }
+        $current_row = cow_merge_select_current_row($target, $table, $identity, $pk_cols);
+        if (!is_array($current_row) || !array_key_exists($column, $current_row)) {
+            return null;
+        }
+        $candidate_row = $current_row;
+        $candidate_row[$column] = $source_value;
+        $error = cow_merge_foreign_key_error($target, $table, $candidate_row);
+        return $error === null ? null : "source cell resolution is blocked by current target foreign-key state: $error";
+    } finally {
+        $target->close();
+    }
+}
+
 function cow_merge_conflict_resolution_contract(string $table, string $conflict_type, array $row = []): array {
     $class = cow_merge_conflict_class($table, $conflict_type);
     $contract = [
@@ -12367,6 +12412,15 @@ function cow_merge_conflict_resolution_contract(string $table, string $conflict_
         $contract['strategy'] = $class . '-choice';
         if ($class === 'row') {
             $source_blocked_reason = cow_merge_row_source_resolution_blocked_reason($row + [
+                'table_name' => $table,
+                'conflict_type' => $conflict_type,
+            ]);
+            if ($source_blocked_reason !== null) {
+                $contract['choices'] = ['target'];
+                $contract['blocked_choices'] = ['source' => $source_blocked_reason];
+            }
+        } elseif ($class === 'cell') {
+            $source_blocked_reason = cow_merge_cell_source_resolution_blocked_reason($row + [
                 'table_name' => $table,
                 'conflict_type' => $conflict_type,
             ]);
