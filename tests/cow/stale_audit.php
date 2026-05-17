@@ -314,11 +314,45 @@ try {
     assert_same($revalidation_status_result['carried'], 1, 'latest revalidation status fixture records a carried stale review');
     $revalidation_status_audit = cow_merge_audit_report($revalidation_status_metadata, $revalidation_status_run_id, 10, ['records' => 'conflicts']);
     assert_same($revalidation_status_audit['conflicts'][0]['latest_revalidation_status'] ?? null, 'current', 'latest revalidation starts current after revalidate');
+    $current_revalidation_status_audit = cow_merge_audit_report($revalidation_status_metadata, $revalidation_status_run_id, 10, [
+        'records' => 'conflicts',
+        'latest_revalidation_status' => 'current',
+    ]);
+    assert_same(count($current_revalidation_status_audit['conflicts']), 1, 'audit filters conflicts whose latest revalidation is still current');
     $target_db = open_db($revalidation_status_target);
     $target_db->exec("UPDATE plugin_items SET value = 'second latest revalidation target drift' WHERE item_id = 'alpha'");
     $target_db->close();
     $revalidation_drift_audit = cow_merge_audit_report($revalidation_status_metadata, $revalidation_status_run_id, 10, ['records' => 'conflicts']);
     assert_same($revalidation_drift_audit['conflicts'][0]['latest_revalidation_status'] ?? null, 'target-drifted', 'audit flags a latest revalidation whose target payload drifted again');
+    $target_drift_revalidation_status_audit = cow_merge_audit_report($revalidation_status_metadata, $revalidation_status_run_id, 10, [
+        'records' => 'conflicts',
+        'latest_revalidation_status' => 'target-drifted',
+    ]);
+    assert_same(count($target_drift_revalidation_status_audit['conflicts']), 1, 'audit filters conflicts whose latest revalidation target drifted again');
+    assert_same($target_drift_revalidation_status_audit['conflicts'][0]['id'], $revalidation_status_conflict_id, 'latest-revalidation-status filter returns the drifted conflict');
+    $current_after_drift_status_audit = cow_merge_audit_report($revalidation_status_metadata, $revalidation_status_run_id, 10, [
+        'records' => 'conflicts',
+        'latest_revalidation_status' => 'current',
+    ]);
+    assert_same(count($current_after_drift_status_audit['conflicts']), 0, 'audit excludes drifted latest revalidations from the current filter');
+    $revalidation_status_groups = cow_merge_audit_report($revalidation_status_metadata, $revalidation_status_run_id, 10, [
+        'records' => 'conflicts',
+        'group_by' => 'latest-revalidation-status',
+    ]);
+    $revalidation_status_group_counts = array_column($revalidation_status_groups['conflict_groups'], 'conflict_count', 'group_key');
+    assert_same((int)($revalidation_status_group_counts['target-drifted'] ?? 0), 1, 'audit groups conflicts by latest revalidation status');
+    $revalidation_status_cli = run_merge_cli([
+        'audit',
+        '--metadata-db', $revalidation_status_metadata,
+        '--run', (string)$revalidation_status_run_id,
+        '--records', 'conflicts',
+        '--latest-revalidation-status', 'target-drifted',
+        '--format', 'json',
+    ]);
+    assert_same($revalidation_status_cli['status'], 0, 'audit CLI accepts a latest-revalidation-status filter');
+    $revalidation_status_cli_json = json_decode($revalidation_status_cli['output'], true);
+    assert_same(count($revalidation_status_cli_json['conflicts'] ?? []), 1, 'audit CLI filters JSON conflicts by latest revalidation status');
+    assert_same($revalidation_status_cli_json['filters']['latest_revalidation_status'] ?? null, 'target-drifted', 'audit CLI reports the latest-revalidation-status filter');
     ob_start();
     cow_merge_print_audit_text($revalidation_drift_audit);
     $revalidation_drift_text = ob_get_clean();
