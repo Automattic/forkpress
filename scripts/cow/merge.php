@@ -17582,10 +17582,14 @@ function cow_merge_apply_schema_object_changes(
             continue;
         }
         if ($target_sql === $base_sql) {
-            if ($type === 'trigger') {
+            if ($type === 'trigger' || $type === 'view') {
                 $apply_error = null;
                 try {
-                    cow_merge_apply_source_trigger_schema_merge($target, $name, $source_sql);
+                    if ($type === 'trigger') {
+                        cow_merge_apply_source_trigger_schema_merge($target, $name, $source_sql);
+                    } else {
+                        cow_merge_apply_source_view_schema_resolution($target, $name, $source_sql);
+                    }
                 } catch (Throwable $e) {
                     $apply_error = $e->getMessage();
                 }
