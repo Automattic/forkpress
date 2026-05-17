@@ -60,6 +60,32 @@ The issue #2 workflow is Git/worktree based:
 - `forkpress commit` stages, commits, and pushes a worktree.
 - Each checkout includes `database.sql` as a read-only branch DB snapshot.
 
+## Local Git Sandbox Permissions
+
+Codex sandbox sessions may start with a restrictive `umask` that creates local
+`.git` object directories without execute permission. Symptoms look like Git
+repository corruption, for example `insufficient permission for adding an
+object to repository database .git/objects` during `fetch`, `commit`, or
+`push`. This is a local sandbox permissions problem, not a ForkPress product
+bug.
+
+Before commands that write Git objects or create test temp trees, use:
+
+```bash
+umask 0022
+```
+
+If a checkout is already affected, repair only that checkout's local `.git`
+permissions:
+
+```bash
+find .git -type d -exec chmod 755 {} +
+find .git -type f -exec chmod u+rw {} +
+```
+
+Do not reset the repository or revert unrelated work to fix this. After the
+permissions are repaired, rerun the original Git command with `umask 0022`.
+
 ## Tests
 
 ## Verification Budget
