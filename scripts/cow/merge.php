@@ -25,8 +25,8 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "    [--id-band-skips] [--target-kept] [--review] [--review-status unreviewed|pending|needs-action|reviewed] [--lifecycle-state unreviewed|deferred|needs-action|reviewed|validated|resolved]\n");
     fwrite(STDERR, "    [--next-action review|run-plugin-validator|wait|revalidate|resolve|apply-reviewed-choice|manual-review|none]\n");
     fwrite(STDERR, "    [--resolution-choice source|target] [--blocked-resolution-choice source|target] [--revalidation-class CLASS] [--latest-revalidation-status STATUS] [--stale-status fresh|stale|error|unknown] [--revalidate] [--reviewer NAME]\n");
-    fwrite(STDERR, "    [--resolution-status validated|applied] [--group-by none|table|status|path|type|severity|lifecycle|next-action|conflict-key|revalidation-class|latest-revalidation-status|stale-status|plugin|plugin-object|plugin-severity]\n");
-    fwrite(STDERR, "    --group-by supports resolutions by table/status/path, conflicts by table/type/path/severity/lifecycle/next-action/conflict-key/revalidation-class/latest-revalidation-status/stale-status/plugin/plugin-object/plugin-severity, and decisions by table/type/path.\n");
+    fwrite(STDERR, "    [--resolution-status validated|applied] [--group-by none|table|status|path|type|severity|lifecycle|event-type|next-action|conflict-key|revalidation-class|latest-revalidation-status|stale-status|plugin|plugin-object|plugin-severity]\n");
+    fwrite(STDERR, "    --group-by supports resolutions by table/status/path, conflicts by table/type/path/severity/lifecycle/next-action/conflict-key/revalidation-class/latest-revalidation-status/stale-status/plugin/plugin-object/plugin-severity, conflict-events by table/type/lifecycle/event-type/conflict-key, and decisions by table/type/path.\n");
     fwrite(STDERR, "    --revalidate accepts only --run, --conflict-id, --conflict-key, --reviewer, --format, and --quiet; omit --revalidate to filter audit output.\n");
     fwrite(STDERR, "  php merge.php revalidate-reviews --metadata-db <path> [--run ID] [--conflict-id ID|--conflict-key KEY] [--reviewer NAME] [--format text|json]\n");
     fwrite(STDERR, "  php merge.php review-record --metadata-db <path> --record conflict|decision|resolution (--id ID|--conflict-key KEY [--run ID]) --status pending|needs-action|reviewed --note TEXT [--reviewer NAME]\n");
@@ -8069,8 +8069,8 @@ function cow_merge_audit_resolution_choice_filter(?string $value, string $label)
 
 function cow_merge_audit_group_by(?string $value): string {
     $group_by = $value ?? 'none';
-    if (!in_array($group_by, ['none', 'table', 'status', 'path', 'type', 'severity', 'lifecycle', 'next-action', 'conflict-key', 'revalidation-class', 'latest-revalidation-status', 'stale-status', 'plugin', 'plugin-object', 'plugin-severity'], true)) {
-        throw new InvalidArgumentException('--group-by must be none, table, status, path, type, severity, lifecycle, next-action, conflict-key, revalidation-class, latest-revalidation-status, stale-status, plugin, plugin-object, or plugin-severity');
+    if (!in_array($group_by, ['none', 'table', 'status', 'path', 'type', 'severity', 'lifecycle', 'event-type', 'next-action', 'conflict-key', 'revalidation-class', 'latest-revalidation-status', 'stale-status', 'plugin', 'plugin-object', 'plugin-severity'], true)) {
+        throw new InvalidArgumentException('--group-by must be none, table, status, path, type, severity, lifecycle, event-type, next-action, conflict-key, revalidation-class, latest-revalidation-status, stale-status, plugin, plugin-object, or plugin-severity');
     }
     return $group_by;
 }
@@ -11928,9 +11928,11 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
     }
     if ($group_by !== '' && $group_by !== 'none') {
         if (cow_merge_audit_filter_is_default_all($filters, 'records')) {
-            $filters['records'] = in_array($group_by, ['lifecycle', 'next-action', 'conflict-key', 'revalidation-class', 'latest-revalidation-status', 'stale-status', 'plugin', 'plugin-object', 'plugin-severity'], true) ? 'conflicts' : 'resolutions';
-        } elseif (!in_array(($filters['records'] ?? null), ['conflicts', 'decisions', 'resolutions'], true)) {
-            throw new InvalidArgumentException('--group-by can only be combined with --records conflicts, decisions, or resolutions');
+            $filters['records'] = $group_by === 'event-type'
+                ? 'conflict-events'
+                : (in_array($group_by, ['lifecycle', 'next-action', 'conflict-key', 'revalidation-class', 'latest-revalidation-status', 'stale-status', 'plugin', 'plugin-object', 'plugin-severity'], true) ? 'conflicts' : 'resolutions');
+        } elseif (!in_array(($filters['records'] ?? null), ['conflicts', 'conflict-events', 'decisions', 'resolutions'], true)) {
+            throw new InvalidArgumentException('--group-by can only be combined with --records conflicts, conflict-events, decisions, or resolutions');
         }
         $records = (string)($filters['records'] ?? 'resolutions');
         if ($records === 'resolutions' && !in_array($group_by, ['table', 'status', 'path'], true)) {
@@ -11942,10 +11944,13 @@ function cow_merge_audit_apply_shortcuts(array $filters): array {
         if ($records === 'decisions' && !in_array($group_by, ['table', 'type', 'path'], true)) {
             throw new InvalidArgumentException('--records decisions supports --group-by table, type, or path');
         }
+        if ($records === 'conflict-events' && !in_array($group_by, ['table', 'type', 'lifecycle', 'event-type', 'conflict-key'], true)) {
+            throw new InvalidArgumentException('--records conflict-events supports --group-by table, type, lifecycle, event-type, or conflict-key');
+        }
         if (($filters['decision'] ?? null) !== null && $records !== 'decisions') {
             throw new InvalidArgumentException('--group-by cannot be combined with --decision unless --records decisions is used');
         }
-        if (($filters['conflict_type'] ?? null) !== null) {
+        if (($filters['conflict_type'] ?? null) !== null && $records !== 'conflict-events') {
             throw new InvalidArgumentException('--group-by cannot be combined with --conflict-type');
         }
         if ($id_band_skips) {
@@ -12895,6 +12900,25 @@ function cow_merge_audit_conflict_group_sql(
         return "CASE WHEN c.table_name = '__plugins__' THEN COALESCE(forkpress_plugin_severity_group(c.chosen_payload), '(unknown)') ELSE c.table_name END";
     }
     throw new InvalidArgumentException('unsupported conflict group');
+}
+
+function cow_merge_audit_conflict_event_group_sql(string $group_by, bool $conflict_key_exists = true): string {
+    if ($group_by === 'table') {
+        return 'c.table_name';
+    }
+    if ($group_by === 'type') {
+        return 'c.conflict_type';
+    }
+    if ($group_by === 'lifecycle') {
+        return 'ce.lifecycle_state';
+    }
+    if ($group_by === 'event-type') {
+        return 'ce.event_type';
+    }
+    if ($group_by === 'conflict-key') {
+        return $conflict_key_exists ? "COALESCE(NULLIF(c.conflict_key, ''), '(none)')" : "'(none)'";
+    }
+    throw new InvalidArgumentException('unsupported conflict event group');
 }
 
 function cow_merge_audit_decision_group_sql(string $group_by): string {
@@ -14474,6 +14498,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
         'conflicts' => [],
         'conflict_events' => [],
         'conflict_groups' => [],
+        'conflict_event_groups' => [],
         'decisions' => [],
         'decision_groups' => [],
         'resolutions' => [],
@@ -14632,6 +14657,23 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
                 "$event_filter ORDER BY ce.id DESC LIMIT :limit",
                 $event_params
             );
+            if ($filters['records'] === 'conflict-events' && $filters['group_by'] !== 'none') {
+                $group_expr = cow_merge_audit_conflict_event_group_sql($filters['group_by'], $conflict_key_exists);
+                $report['conflict_event_groups'] = cow_merge_audit_table_rows(
+                    $db,
+                    'merge_conflict_events',
+                    "SELECT :group_by AS group_by, $group_expr AS group_key, COUNT(*) AS event_count, " .
+                    "COUNT(DISTINCT ce.conflict_id) AS conflict_count, " .
+                    "SUM(CASE WHEN c.table_name = '__files__' THEN 1 ELSE 0 END) AS file_count, " .
+                    "SUM(CASE WHEN c.table_name = '__plugins__' THEN 1 ELSE 0 END) AS plugin_count, " .
+                    "SUM(CASE WHEN c.table_name NOT IN ('__files__', '__plugins__') THEN 1 ELSE 0 END) AS db_count " .
+                    "FROM merge_conflict_events ce " .
+                    "JOIN merge_conflicts c ON c.id = ce.conflict_id " .
+                    "JOIN merge_runs r ON r.id = ce.run_id " .
+                    "$event_filter GROUP BY group_key ORDER BY event_count DESC, group_key LIMIT :limit",
+                    $event_params + [':group_by' => $filters['group_by']]
+                );
+            }
         }
 
         [$decision_filter, $decision_params] = cow_merge_audit_where_sql($run_id, $filters, 'decisions', '', $review_notes_exist, $resolutions_exist, $revalidations_exist);
@@ -14951,6 +14993,13 @@ function cow_merge_print_audit_text(array $report): void {
                 echo "     related={$event['related_record_type']}#{$event['related_record_id']}\n";
             }
             echo "     note=" . cow_merge_audit_truncate((string)$event['note'], 240) . "\n";
+        }
+    }
+
+    if ($report['conflict_event_groups']) {
+        echo "conflict-event-groups:\n";
+        foreach ($report['conflict_event_groups'] as $group) {
+            echo "  {$group['group_by']}={$group['group_key']} events={$group['event_count']} conflicts={$group['conflict_count']} files={$group['file_count']} plugin={$group['plugin_count']} db={$group['db_count']}\n";
         }
     }
 

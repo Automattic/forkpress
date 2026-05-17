@@ -3904,6 +3904,32 @@ SQL);
     foreach ($recorded_event_audit['conflict_events'] as $event) {
         assert_same($event['event_type'], 'recorded', 'event-type audit returns only matching conflict events');
     }
+    $event_type_group_audit = cow_merge_audit_report($metadata, null, 10, ['group_by' => 'event-type']);
+    assert_same($event_type_group_audit['filters']['records'], 'conflict-events', 'event-type grouping defaults to conflict-events records');
+    assert_same($event_type_group_audit['filters']['group_by'], 'event-type', 'event-type grouping is preserved in audit filters');
+    $event_type_group_keys = array_column($event_type_group_audit['conflict_event_groups'], 'group_key');
+    assert_true(in_array('recorded', $event_type_group_keys, true), 'event-type grouping includes recorded event counts');
+    $recorded_group = array_values(array_filter(
+        $event_type_group_audit['conflict_event_groups'],
+        fn($row) => ($row['group_key'] ?? null) === 'recorded'
+    ));
+    assert_true((int)$recorded_group[0]['event_count'] >= 3, 'event-type grouping counts recorded events');
+    assert_true((int)$recorded_group[0]['conflict_count'] >= 3, 'event-type grouping counts affected conflicts');
+    ob_start();
+    cow_merge_print_audit_text($event_type_group_audit);
+    $event_type_group_text = ob_get_clean();
+    assert_true(str_contains($event_type_group_text, 'group-by=event-type') && str_contains($event_type_group_text, 'conflict-event-groups:'), 'event-type grouping is visible in text audit output');
+    $event_type_group_cli = run_merge_cli([
+        'audit',
+        '--metadata-db', $metadata,
+        '--group-by=event-type',
+        '--format', 'json',
+    ]);
+    assert_same($event_type_group_cli['status'], 0, 'event-type group audit CLI accepts equals-form grouping');
+    $event_type_group_cli_json = json_decode($event_type_group_cli['output'], true);
+    assert_true(is_array($event_type_group_cli_json), 'event-type group audit CLI emits JSON');
+    assert_same($event_type_group_cli_json['filters']['records'] ?? null, 'conflict-events', 'event-type group audit CLI defaults to event records');
+    assert_true(count($event_type_group_cli_json['conflict_event_groups'] ?? []) >= 1, 'event-type group audit CLI returns event groups');
     $title_id_event_audit = cow_merge_audit_report($metadata, null, 10, ['records' => 'conflict-events', 'conflict_id' => (string)$title_conflict_id]);
     assert_same(count($title_id_event_audit['conflict_events']), 1, 'merge audit can filter conflict lifecycle events by conflict id');
     assert_same((int)$title_id_event_audit['conflict_events'][0]['conflict_id'], $title_conflict_id, 'conflict-id event audit returns events for the requested conflict');
