@@ -537,6 +537,179 @@ function forkpress_branch_post_int(string $key): ?int {
     return $int > 0 ? $int : null;
 }
 
+function forkpress_branch_plugin_driver_entry(string $plugin, string $driver): ?array {
+    $plugin = trim($plugin);
+    $driver = trim($driver);
+    if ($plugin === '' || $driver === '') {
+        return null;
+    }
+    $real = realpath($driver);
+    if (!is_string($real) || !is_file($real)) {
+        return null;
+    }
+    if (strtolower(pathinfo($real, PATHINFO_EXTENSION)) !== 'php' && !is_executable($real)) {
+        return null;
+    }
+    $key = hash('sha256', $plugin . "\0" . $real);
+    return [
+        'key' => $key,
+        'plugin' => $plugin,
+        'driver' => $real,
+        'label' => basename($real),
+    ];
+}
+
+function forkpress_branch_plugin_driver_add(array &$drivers, string $plugin, string $driver): void {
+    $entry = forkpress_branch_plugin_driver_entry($plugin, $driver);
+    if ($entry === null) {
+        return;
+    }
+    $drivers[$entry['key']] = $entry;
+}
+
+function forkpress_branch_normalize_relative_path(string $path): ?string {
+    if ($path === '' || str_contains($path, "\0")) {
+        return null;
+    }
+    $path = str_replace('\\', '/', $path);
+    $parts = [];
+    foreach (explode('/', $path) as $part) {
+        if ($part === '' || $part === '.') {
+            continue;
+        }
+        if ($part === '..') {
+            return null;
+        }
+        $parts[] = $part;
+    }
+    return $parts ? implode('/', $parts) : null;
+}
+
+function forkpress_branch_active_plugin_paths(): array {
+    $plugins = [];
+    if (function_exists('get_option')) {
+        $active = get_option('active_plugins', []);
+        if (is_array($active)) {
+            foreach ($active as $plugin) {
+                if (!is_string($plugin)) {
+                    continue;
+                }
+                $plugin = forkpress_branch_normalize_relative_path($plugin);
+                if ($plugin !== null) {
+                    $plugins[] = $plugin;
+                }
+            }
+        }
+    }
+
+    if (function_exists('get_site_option')) {
+        $sitewide = get_site_option('active_sitewide_plugins', []);
+        if (is_array($sitewide)) {
+            foreach ($sitewide as $plugin => $enabled) {
+                $candidate = is_string($plugin) && $plugin !== '' ? $plugin : (is_string($enabled) ? $enabled : '');
+                $candidate = forkpress_branch_normalize_relative_path($candidate);
+                if ($candidate !== null) {
+                    $plugins[] = $candidate;
+                }
+            }
+        }
+    }
+
+    return array_values(array_unique($plugins));
+}
+
+function forkpress_branch_plugin_dir(): string {
+    if (defined('WP_PLUGIN_DIR') && is_string(WP_PLUGIN_DIR) && WP_PLUGIN_DIR !== '') {
+        return WP_PLUGIN_DIR;
+    }
+    return rtrim((string) ABSPATH, "/\\") . '/wp-content/plugins';
+}
+
+function forkpress_branch_mu_plugin_dir(): string {
+    if (defined('WPMU_PLUGIN_DIR') && is_string(WPMU_PLUGIN_DIR) && WPMU_PLUGIN_DIR !== '') {
+        return WPMU_PLUGIN_DIR;
+    }
+    return rtrim((string) ABSPATH, "/\\") . '/wp-content/mu-plugins';
+}
+
+function forkpress_branch_discovered_plugin_driver_map(): array {
+    $drivers = [];
+    $plugins_dir = rtrim(forkpress_branch_plugin_dir(), "/\\");
+    foreach (forkpress_branch_active_plugin_paths() as $active_plugin) {
+        $plugin_dir = dirname($active_plugin);
+        if ($plugin_dir === '.' || $plugin_dir === '') {
+            $slug = pathinfo($active_plugin, PATHINFO_FILENAME);
+            $driver = $plugins_dir . '/' . $slug . '.forkpress-merge-driver.php';
+        } else {
+            $slug = basename($plugin_dir);
+            $driver = $plugins_dir . '/' . $plugin_dir . '/forkpress-merge-driver.php';
+        }
+        forkpress_branch_plugin_driver_add($drivers, $slug, $driver);
+        forkpress_branch_plugin_driver_add($drivers, $active_plugin, $driver);
+    }
+
+    $mu_dir = rtrim(forkpress_branch_mu_plugin_dir(), "/\\");
+    if (is_dir($mu_dir)) {
+        $direct = $mu_dir . '/forkpress-merge-driver.php';
+        forkpress_branch_plugin_driver_add($drivers, 'mu-plugins', $direct);
+        foreach ([$mu_dir . '/*.forkpress-merge-driver.php', $mu_dir . '/*/forkpress-merge-driver.php'] as $pattern) {
+            $matches = glob($pattern);
+            if (!is_array($matches)) {
+                continue;
+            }
+            sort($matches, SORT_STRING);
+            foreach ($matches as $match) {
+                if (!is_file($match)) {
+                    continue;
+                }
+                $plugin = basename(dirname($match));
+                if ($plugin === 'mu-plugins') {
+                    $plugin = basename($match, '.forkpress-merge-driver.php');
+                }
+                forkpress_branch_plugin_driver_add($drivers, $plugin, $match);
+            }
+        }
+    }
+
+    return $drivers;
+}
+
+function forkpress_branch_configured_plugin_driver_map(): array {
+    $raw = getenv('FORKPRESS_PLUGIN_MERGE_DRIVERS');
+    if (!is_string($raw) || trim($raw) === '') {
+        return [];
+    }
+
+    $decoded = json_decode($raw, true);
+    if (!is_array($decoded)) {
+        return [];
+    }
+
+    $drivers = [];
+    if (array_is_list($decoded)) {
+        foreach ($decoded as $entry) {
+            if (!is_array($entry)) {
+                continue;
+            }
+            forkpress_branch_plugin_driver_add($drivers, (string)($entry['plugin'] ?? ''), (string)($entry['driver'] ?? $entry['path'] ?? ''));
+        }
+    } else {
+        foreach ($decoded as $plugin => $driver) {
+            if (is_array($driver)) {
+                forkpress_branch_plugin_driver_add($drivers, (string)$plugin, (string)($driver['driver'] ?? $driver['path'] ?? ''));
+            } else {
+                forkpress_branch_plugin_driver_add($drivers, (string)$plugin, (string)$driver);
+            }
+        }
+    }
+
+    return $drivers;
+}
+
+function forkpress_branch_plugin_driver_map(): array {
+    return forkpress_branch_configured_plugin_driver_map() + forkpress_branch_discovered_plugin_driver_map();
+}
+
 function forkpress_branch_conflict_audit_filters(): array {
     $allowed = [
         'scope' => ['all', 'db', 'files', 'plugin'],
@@ -703,7 +876,7 @@ function forkpress_branch_run_cli(array $args): array {
 
 function forkpress_branch_wants_json(): bool {
     $action = $_REQUEST['action'] ?? '';
-    if (is_string($action) && in_array($action, ['forkpress_branch_create', 'forkpress_branch_merge', 'forkpress_branch_conflicts', 'forkpress_branch_revalidate_conflicts'], true)) {
+    if (is_string($action) && in_array($action, ['forkpress_branch_create', 'forkpress_branch_merge', 'forkpress_branch_conflicts', 'forkpress_branch_revalidate_conflicts', 'forkpress_branch_run_plugin_driver'], true)) {
         return true;
     }
 
@@ -1035,6 +1208,71 @@ function forkpress_handle_branch_revalidate_conflicts(): void {
 }
 add_action('admin_post_forkpress_branch_revalidate_conflicts', 'forkpress_handle_branch_revalidate_conflicts');
 
+function forkpress_handle_branch_run_plugin_driver(): void {
+    if (!forkpress_branch_can_manage()) {
+        forkpress_branch_finish_action(forkpress_branch_url(forkpress_current_branch() ?: 'main', '/wp-admin/'), 'error', 'You cannot run ForkPress plugin merge drivers from this site.');
+    }
+    if (function_exists('check_admin_referer')) {
+        check_admin_referer('forkpress_branch_run_plugin_driver');
+    }
+
+    $current = forkpress_current_branch() ?: 'main';
+    $conflict = forkpress_branch_post_int('conflict');
+    if ($conflict === null) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Choose a plugin conflict to repair.');
+    }
+
+    $drivers = forkpress_branch_plugin_driver_map();
+    if (!$drivers) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'No approved plugin merge drivers are configured.');
+    }
+
+    $driver_key = forkpress_branch_post_value('driverKey');
+    if ($driver_key === '' || !isset($drivers[$driver_key])) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Choose an approved plugin merge driver.');
+    }
+
+    $driver = $drivers[$driver_key];
+    [$code, $output] = forkpress_branch_run_cli([
+        'run-plugin-driver',
+        'conflict',
+        (string) $conflict,
+        '--driver',
+        (string) $driver['driver'],
+        '--reviewer',
+        'wordpress-ui',
+        '--format',
+        'json',
+    ]);
+    if ($code !== 0) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', $output ?: 'ForkPress could not run the plugin merge driver.');
+    }
+
+    $result = json_decode($output, true);
+    if (!is_array($result)) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'ForkPress returned invalid plugin driver JSON.');
+    }
+
+    $driver_status = trim((string)($result['driver_status'] ?? $result['status'] ?? 'completed'));
+    if ($driver_status === '') {
+        $driver_status = 'completed';
+    }
+    $run = forkpress_branch_post_int('run');
+    forkpress_branch_finish_action(
+        forkpress_branch_url($current, '/wp-admin/'),
+        'notice',
+        'Ran plugin driver for conflict #' . $conflict . ': ' . $driver_status . '.',
+        [
+            'run' => $run,
+            'conflict' => $conflict,
+            'driverStatus' => $driver_status,
+            'driverPlugin' => (string) $driver['plugin'],
+            'result' => $result,
+        ]
+    );
+}
+add_action('admin_post_forkpress_branch_run_plugin_driver', 'forkpress_handle_branch_run_plugin_driver');
+
 add_action('admin_bar_menu', function ($wp_admin_bar) {
     $branch = forkpress_current_branch();
     if (!$branch) {
@@ -1300,6 +1538,15 @@ function forkpress_branch_switcher_assets(): void {
             color: #c3c4c7;
             font-size: 11px;
         }
+        #wpadminbar .forkpress-conflict-actions {
+            display: flex;
+            gap: 6px;
+            margin-top: 4px;
+        }
+        #wpadminbar .forkpress-conflict-actions .forkpress-switcher-button {
+            height: 26px;
+            width: auto;
+        }
         @keyframes forkpress-switcher-spin {
             to {
                 transform: rotate(360deg);
@@ -1333,6 +1580,15 @@ function forkpress_render_branch_switcher(): void {
             'mergeNonce'  => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_merge') : '',
             'auditNonce'  => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_conflicts') : '',
             'revalidateNonce' => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_revalidate_conflicts') : '',
+            'driverNonce' => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_run_plugin_driver') : '',
+            'pluginDrivers' => array_map(
+                static fn(array $driver): array => [
+                    'key' => (string) $driver['key'],
+                    'plugin' => (string) $driver['plugin'],
+                    'label' => (string) $driver['label'],
+                ],
+                array_values(forkpress_branch_plugin_driver_map())
+            ),
         ];
     }
     $actions_json = function_exists('wp_json_encode') ? wp_json_encode($actions) : json_encode($actions);
@@ -1404,6 +1660,42 @@ function forkpress_render_branch_switcher(): void {
             return 'Conflict #' + String(record && record.id ? record.id : '');
         }
 
+        function conflictPluginMeta(record) {
+            if (!record || !record.plugin) {
+                return '';
+            }
+            return [
+                'plugin: ' + String(record.plugin),
+                record.plugin_object ? 'object: ' + String(record.plugin_object) : '',
+                record.plugin_severity ? 'severity: ' + String(record.plugin_severity) : '',
+                record.plugin_validator ? 'validator: ' + String(record.plugin_validator) : ''
+            ].filter(Boolean).join(' / ');
+        }
+
+        function conflictPluginGuidance(record) {
+            if (!record || !record.plugin) {
+                return '';
+            }
+            return [
+                record.plugin_resolution_policy ? 'policy: ' + String(record.plugin_resolution_policy) : '',
+                record.plugin_suggested_action ? 'action: ' + String(record.plugin_suggested_action) : '',
+                record.plugin_manual_review_reason ? 'manual review: ' + String(record.plugin_manual_review_reason) : ''
+            ].filter(Boolean).join(' / ');
+        }
+
+        function driverForConflict(record) {
+            if (!actions || !Array.isArray(actions.pluginDrivers) || !record || !record.plugin) {
+                return null;
+            }
+            for (var i = 0; i < actions.pluginDrivers.length; i++) {
+                var driver = actions.pluginDrivers[i];
+                if (driver && driver.plugin === record.plugin && driver.key) {
+                    return driver;
+                }
+            }
+            return null;
+        }
+
         function renderConflictAudit(payload, fallbackMessage) {
             var records = Array.isArray(payload.records) ? payload.records : [];
             var filters = payload.filters || {};
@@ -1430,7 +1722,24 @@ function forkpress_render_branch_switcher(): void {
                     record.lifecycle_state || record.latest_event_lifecycle_state || '',
                     record.next_action || ''
                 ].filter(Boolean).join(' / '));
-                appendConflictText(row, 'forkpress-conflict-meta', record.plugin ? 'plugin: ' + String(record.plugin) : '');
+                appendConflictText(row, 'forkpress-conflict-meta', conflictPluginMeta(record));
+                appendConflictText(row, 'forkpress-conflict-meta', conflictPluginGuidance(record));
+                var driver = driverForConflict(record);
+                if (driver && record.id && record.lifecycle_state !== 'resolved') {
+                    var actionsRow = document.createElement('div');
+                    actionsRow.className = 'forkpress-conflict-actions';
+                    var driverButton = document.createElement('button');
+                    driverButton.className = 'forkpress-switcher-button';
+                    driverButton.type = 'button';
+                    driverButton.textContent = 'Run plugin driver';
+                    driverButton.addEventListener('click', function (record, driver) {
+                        return function () {
+                            fetchPluginDriver(record, driver, payload.run);
+                        };
+                    }(record, driver));
+                    actionsRow.appendChild(driverButton);
+                    row.appendChild(actionsRow);
+                }
                 conflictList.appendChild(row);
             });
 
@@ -1667,6 +1976,50 @@ function forkpress_render_branch_switcher(): void {
                 fetchConflictAudit(run, payload.message || '', { lifecycleState: 'needs-action' });
             }).catch(function (error) {
                 showStatus('error', error && error.message ? error.message : 'ForkPress conflict revalidation failed.');
+            });
+        }
+
+        function fetchPluginDriver(record, driver, run) {
+            if (!actions || !actions.driverNonce || !window.fetch || !window.FormData || !record || !record.id || !driver || !driver.key) {
+                return;
+            }
+            var body = new FormData();
+            body.append('action', 'forkpress_branch_run_plugin_driver');
+            body.append('_wpnonce', actions.driverNonce);
+            body.append('conflict', String(record.id));
+            body.append('driverKey', String(driver.key));
+            if (run) {
+                body.append('run', String(run));
+            }
+            showStatus('warning', 'Running plugin driver...');
+            fetch(actions.url, {
+                method: 'POST',
+                body: body,
+                credentials: 'same-origin',
+                headers: {
+                    'Accept': 'application/json',
+                    'X-ForkPress-Async': '1'
+                }
+            }).then(function (response) {
+                return response.text().then(function (text) {
+                    var payload = null;
+                    try {
+                        payload = text ? JSON.parse(text) : null;
+                    } catch (error) {
+                        payload = null;
+                    }
+                    if (!response.ok || !payload || payload.success === false) {
+                        throw new Error(payload && payload.message ? payload.message : (text || 'ForkPress plugin driver failed.'));
+                    }
+                    return payload;
+                });
+            }).then(function (payload) {
+                showStatus('success', payload.message || 'Ran plugin driver.');
+                if (run) {
+                    fetchConflictAudit(run, payload.message || '', { lifecycleState: 'needs-action' });
+                }
+            }).catch(function (error) {
+                showStatus('error', error && error.message ? error.message : 'ForkPress plugin driver failed.');
             });
         }
 

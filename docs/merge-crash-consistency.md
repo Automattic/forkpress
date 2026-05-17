@@ -28,6 +28,13 @@ The PHP merge suite covers these rollback classes:
 - Whole-branch DB plus file rollback after a file-phase failure.
 - Late whole-branch rollback after files were applied but metadata finalization
   failed.
+- Plugin-driver failure after a mutating driver returns but before the
+  `plugin-driver` resolution metadata is recorded, with target DB/files restored
+  from runner snapshots and no resolution row recorded.
+- Plugin-driver process death after a mutating driver returns but before the
+  `plugin-driver` resolution metadata is recorded, with a durable crash-recovery
+  artifact that blocks retries, preserves target DB and filesystem snapshots,
+  and restores both through `recover-crash --restore-target-db --restore-files`.
 - Failed-run metadata write failures, including artifact-only fallback.
 - ID-band allocation rollback across target DB, metadata DB, and recovery
   artifacts.

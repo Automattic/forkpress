@@ -21,6 +21,23 @@ function assert_same($actual, $expected, $msg) {
     );
 }
 
+function assert_throws(callable $fn, string $contains, string $msg): void {
+    global $pass, $fail;
+    try {
+        $fn();
+        echo "  FAIL: $msg (no exception)\n";
+        $fail++;
+    } catch (Throwable $e) {
+        if (str_contains($e->getMessage(), $contains)) {
+            echo "  PASS: $msg ({$e->getMessage()})\n";
+            $pass++;
+        } else {
+            echo "  FAIL: $msg (unexpected exception: {$e->getMessage()})\n";
+            $fail++;
+        }
+    }
+}
+
 function remove_tree(string $path): void {
     if (!file_exists($path) && !is_link($path)) {
         return;
@@ -81,16 +98,35 @@ function scalar(string $db_path, string $sql): mixed {
 }
 
 function run_merge_cli(array $args): array {
-    $cmd = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(__DIR__ . '/../../scripts/cow/merge.php');
-    foreach ($args as $arg) {
-        $cmd .= ' ' . escapeshellarg((string)$arg);
+    return run_merge_cli_env($args, []);
+}
+
+function run_merge_cli_env(array $args, array $env): array {
+    $base_env = getenv();
+    if (!is_array($base_env)) {
+        $base_env = [];
     }
-    $output = [];
-    $status = 0;
-    exec($cmd . ' 2>&1', $output, $status);
+    $pipes = [];
+    $process = proc_open(
+        array_merge([PHP_BINARY, __DIR__ . '/../../scripts/cow/merge.php'], $args),
+        [
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w'],
+        ],
+        $pipes,
+        null,
+        array_merge($base_env, $env)
+    );
+    if (!is_resource($process)) {
+        throw new RuntimeException('failed to start merge CLI subprocess');
+    }
+    $stdout = stream_get_contents($pipes[1]);
+    $stderr = stream_get_contents($pipes[2]);
+    fclose($pipes[1]);
+    fclose($pipes[2]);
     return [
-        'status' => $status,
-        'output' => implode("\n", $output),
+        'status' => proc_close($process),
+        'output' => (is_string($stdout) ? $stdout : '') . (is_string($stderr) ? $stderr : ''),
     ];
 }
 
@@ -343,6 +379,428 @@ PHP);
         str_contains((string)($missing_file_audit_conflict['plugin_manual_review_reason'] ?? ''), 'cannot synthesize plugin-owned files'),
         'plugin audit exposes validator manual-review guidance as a first-class field'
     );
+    $missing_file_conflict_id = (int)$missing_file_audit_conflict['id'];
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $missing_file_conflict_id, 'source', true, 'generic source repair should stay blocked', 'cow-test'),
+        'plugin validator conflicts cannot be resolved by generic merge-resolve',
+        'plugin validator conflicts remain blocked from generic source/target resolution'
+    );
+    $driver_resolution = cow_merge_record_plugin_driver_resolution(
+        $metadata,
+        $missing_file_conflict_id,
+        'forkpress-plugin-graph-driver@1',
+        [
+            'status' => 'repaired',
+            'restored_file' => 'wp-content/uploads/plugin-validator-missing.dat',
+        ],
+        null,
+        true,
+        'plugin driver restored the missing file reference and validated the object graph',
+        'cow-test-driver'
+    );
+    assert_same($driver_resolution['status'], 'applied', 'plugin driver resolution records an applied plugin repair');
+    assert_same($driver_resolution['choice'], 'plugin-driver', 'plugin driver resolution uses an explicit plugin-driver choice');
+    $driver_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_id' => (string)$missing_file_conflict_id,
+    ]);
+    assert_same($driver_audit['conflicts'][0]['lifecycle_state'] ?? null, 'resolved', 'plugin driver resolution closes the plugin conflict lifecycle');
+    assert_same((int)($driver_audit['conflicts'][0]['latest_resolution_applied'] ?? 0), 1, 'plugin audit exposes the applied plugin driver resolution');
+    assert_same($driver_audit['conflicts'][0]['latest_resolution_choice'] ?? null, 'plugin-driver', 'plugin audit preserves the plugin-driver resolution choice');
+    $driver_resolution_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'resolutions',
+        'plugin_object' => 'child:' . $child_id,
+    ]);
+    $driver_resolution_rows = array_values(array_filter(
+        $driver_resolution_audit['resolutions'],
+        fn(array $resolution): bool => (int)($resolution['id'] ?? 0) === (int)$driver_resolution['resolution_id']
+    ));
+    assert_same(count($driver_resolution_rows), 1, 'plugin driver resolution is visible in plugin-scoped resolution audit');
+    assert_same($driver_resolution_rows[0]['choice'] ?? null, 'plugin-driver', 'plugin resolution audit exposes the plugin-driver choice');
+    $driver_result_payload = cow_merge_decode_payload_json((string)($driver_resolution_rows[0]['chosen_payload'] ?? ''), 'plugin driver audit result');
+    assert_same($driver_result_payload['driver'] ?? null, 'forkpress-plugin-graph-driver@1', 'plugin resolution audit records the driver identity');
+    assert_same($driver_result_payload['result']['status'] ?? null, 'repaired', 'plugin resolution audit records driver result evidence');
+    $url_file_audit_conflicts = array_values(array_filter(
+        $file_audit_conflicts,
+        fn(array $conflict): bool => ($conflict['plugin_files'] ?? null) === ['https://example.test/plugin-validator-url.dat']
+    ));
+    assert_same(count($url_file_audit_conflicts), 1, 'plugin audit exposes the unsafe URL file conflict as a focused record');
+    $url_file_conflict_id = (int)$url_file_audit_conflicts[0]['id'];
+    $plugin_driver_path = $tmp . '/forkpress-plugin-graph-driver.php';
+    write_test_file($plugin_driver_path, <<<'PHP'
+<?php
+$context_path = (string)getenv('FORKPRESS_MERGE_CONFLICT_JSON');
+$context = is_file($context_path) ? json_decode((string)file_get_contents($context_path), true) : null;
+$ok = is_array($context)
+    && (string)getenv('FORKPRESS_MERGE_PLUGIN') === 'forkpress-plugin-graph'
+    && (string)getenv('FORKPRESS_MERGE_PLUGIN_OBJECT') === (string)($context['plugin']['object'] ?? '')
+    && (int)getenv('FORKPRESS_MERGE_CONFLICT_ID') === (int)($context['conflict_id'] ?? 0)
+    && (string)getenv('FORKPRESS_MERGE_TARGET_DB') === (string)($context['merge']['target_db'] ?? '');
+echo json_encode([
+    'status' => 'applied',
+    'result' => [
+        'context_ok' => $ok,
+        'plugin' => getenv('FORKPRESS_MERGE_PLUGIN'),
+        'object' => getenv('FORKPRESS_MERGE_PLUGIN_OBJECT'),
+        'conflict_type' => getenv('FORKPRESS_MERGE_CONFLICT_TYPE'),
+    ],
+    'previous' => [
+        'conflict_type' => $context['conflict_type'] ?? null,
+        'plugin_file' => $context['payloads']['chosen']['files'][0] ?? null,
+    ],
+    'note' => 'driver accepted the unsafe URL file finding after plugin-specific repair',
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $driver_cli = run_merge_cli([
+        'run-plugin-driver',
+        '--metadata-db', $metadata,
+        '--id', (string)$url_file_conflict_id,
+        '--driver', $plugin_driver_path,
+        '--format', 'json',
+    ]);
+    assert_same($driver_cli['status'], 0, 'plugin driver runner CLI records an applied driver result');
+    $driver_cli_result = json_decode($driver_cli['output'], true);
+    assert_same($driver_cli_result['driver_status'] ?? null, 'applied', 'plugin driver runner exposes the emitted driver status');
+    assert_true(is_file((string)($driver_cli_result['context_file'] ?? '')), 'plugin driver runner materializes conflict context for the driver');
+    $runner_resolution_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'resolutions',
+        'resolution_choice' => 'plugin-driver',
+        'plugin_object' => 'child:' . $url_child_id,
+    ]);
+    $runner_resolution_rows = array_values(array_filter(
+        $runner_resolution_audit['resolutions'],
+        fn(array $resolution): bool => (int)($resolution['conflict_id'] ?? 0) === $url_file_conflict_id
+    ));
+    assert_same(count($runner_resolution_rows), 1, 'plugin driver runner resolution is filterable by plugin-driver choice');
+    $runner_result_payload = cow_merge_decode_payload_json((string)($runner_resolution_rows[0]['chosen_payload'] ?? ''), 'plugin driver runner audit result');
+    assert_same($runner_result_payload['result']['context_ok'] ?? null, true, 'plugin driver runner passes conflict and merge context to the driver');
+    $drive_file_audit_conflicts = array_values(array_filter(
+        $file_audit_conflicts,
+        fn(array $conflict): bool => ($conflict['plugin_files'] ?? null) === ['C:/plugin-assets/plugin-validator-drive.dat']
+    ));
+    assert_same(count($drive_file_audit_conflicts), 1, 'plugin audit exposes the unsafe drive-letter file conflict as a focused record');
+    $drive_file_conflict_id = (int)$drive_file_audit_conflicts[0]['id'];
+    $plugin_driver_resolution_count = (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE choice = 'plugin-driver'");
+    $drive_child_graph_before_validated_driver = (string)scalar($target, "SELECT graph_json FROM plugin_graph_child WHERE child_id = $drive_child_id");
+    $validated_mutating_driver_path = $tmp . '/forkpress-plugin-graph-driver-validated-mutating.php';
+    write_test_file($validated_mutating_driver_path, <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$db->exec("UPDATE plugin_graph_child SET graph_json = '{\"driver\":\"validated mutation\"}' WHERE child_id = " . (int)str_replace('child:', '', (string)getenv('FORKPRESS_MERGE_PLUGIN_OBJECT')));
+$target_root = rtrim((string)getenv('FORKPRESS_MERGE_TARGET_ROOT'), '/');
+@mkdir($target_root . '/wp-content/uploads', 0777, true);
+file_put_contents($target_root . '/wp-content/uploads/plugin-driver-validated-mutation.dat', 'validated mutation');
+echo json_encode([
+    'status' => 'validated',
+    'result' => ['validated' => true],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $validated_mutating_cli = run_merge_cli([
+        'run-plugin-driver',
+        '--metadata-db', $metadata,
+        '--id', (string)$drive_file_conflict_id,
+        '--driver', $validated_mutating_driver_path,
+        '--format', 'json',
+    ]);
+    assert_true($validated_mutating_cli['status'] !== 0, 'plugin driver runner rejects validated status with target mutations');
+    assert_true(str_contains($validated_mutating_cli['output'], 'validated status but mutated target DB or files'), 'plugin driver runner explains validated mutation policy');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE choice = 'plugin-driver'"),
+        $plugin_driver_resolution_count,
+        'validated mutating plugin driver records no resolution'
+    );
+    assert_same(
+        (string)scalar($target, "SELECT graph_json FROM plugin_graph_child WHERE child_id = $drive_child_id"),
+        $drive_child_graph_before_validated_driver,
+        'validated mutating plugin driver rolls back target database mutations'
+    );
+    assert_true(
+        !is_file($target_root . '/wp-content/uploads/plugin-driver-validated-mutation.dat'),
+        'validated mutating plugin driver rolls back target filesystem mutations'
+    );
+    $drive_child_graph_before_failed_driver = (string)scalar($target, "SELECT graph_json FROM plugin_graph_child WHERE child_id = $drive_child_id");
+    $failing_plugin_driver_path = $tmp . '/forkpress-plugin-graph-driver-failed.php';
+    write_test_file($failing_plugin_driver_path, <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$db->exec("UPDATE plugin_graph_child SET graph_json = '{\"driver\":\"failed mutation\"}' WHERE child_id = " . (int)str_replace('child:', '', (string)getenv('FORKPRESS_MERGE_PLUGIN_OBJECT')));
+$target_root = rtrim((string)getenv('FORKPRESS_MERGE_TARGET_ROOT'), '/');
+@mkdir($target_root . '/wp-content/uploads', 0777, true);
+file_put_contents($target_root . '/wp-content/uploads/plugin-driver-failed-mutation.dat', 'failed mutation');
+echo json_encode([
+    'status' => 'failed',
+    'reason' => 'driver could not prove the plugin graph repair',
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $failing_driver_cli = run_merge_cli([
+        'run-plugin-driver',
+        '--metadata-db', $metadata,
+        '--id', (string)$drive_file_conflict_id,
+        '--driver', $failing_plugin_driver_path,
+        '--format', 'json',
+    ]);
+    assert_true($failing_driver_cli['status'] !== 0, 'plugin driver runner rejects failed driver status');
+    assert_true(str_contains($failing_driver_cli['output'], 'could not prove the plugin graph repair'), 'plugin driver runner explains failed driver status');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE choice = 'plugin-driver'"),
+        $plugin_driver_resolution_count,
+        'failed plugin driver status records no plugin-driver resolution'
+    );
+    assert_same(
+        (string)scalar($target, "SELECT graph_json FROM plugin_graph_child WHERE child_id = $drive_child_id"),
+        $drive_child_graph_before_failed_driver,
+        'failed plugin driver rolls back target database mutations'
+    );
+    assert_true(
+        !is_file($target_root . '/wp-content/uploads/plugin-driver-failed-mutation.dat'),
+        'failed plugin driver rolls back target filesystem mutations'
+    );
+    $pre_resolution_failpoint_driver_path = $tmp . '/forkpress-plugin-graph-driver-pre-resolution-failpoint.php';
+    write_test_file($pre_resolution_failpoint_driver_path, <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$db->exec("UPDATE plugin_graph_child SET graph_json = '{\"driver\":\"pre resolution mutation\"}' WHERE child_id = " . (int)str_replace('child:', '', (string)getenv('FORKPRESS_MERGE_PLUGIN_OBJECT')));
+$target_root = rtrim((string)getenv('FORKPRESS_MERGE_TARGET_ROOT'), '/');
+@mkdir($target_root . '/wp-content/uploads', 0777, true);
+file_put_contents($target_root . '/wp-content/uploads/plugin-driver-pre-resolution-mutation.dat', 'pre resolution mutation');
+echo json_encode([
+    'status' => 'applied',
+    'result' => ['pre_resolution' => true],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $drive_child_graph_before_pre_resolution_failpoint = (string)scalar($target, "SELECT graph_json FROM plugin_graph_child WHERE child_id = $drive_child_id");
+    putenv('FORKPRESS_COW_MERGE_TEST_FAILPOINT=before-plugin-driver-resolution');
+    putenv('FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION=throw');
+    $pre_resolution_failpoint_message = null;
+    try {
+        cow_merge_run_plugin_driver(
+            $metadata,
+            $drive_file_conflict_id,
+            $pre_resolution_failpoint_driver_path,
+            null,
+            'cow-test'
+        );
+    } catch (Throwable $e) {
+        $pre_resolution_failpoint_message = $e->getMessage();
+    } finally {
+        putenv('FORKPRESS_COW_MERGE_TEST_FAILPOINT');
+        putenv('FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION');
+    }
+    assert_true(
+        $pre_resolution_failpoint_message !== null && str_contains($pre_resolution_failpoint_message, 'before-plugin-driver-resolution'),
+        'plugin driver pre-resolution failpoint is surfaced to the caller'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE choice = 'plugin-driver'"),
+        $plugin_driver_resolution_count,
+        'plugin driver pre-resolution failpoint records no plugin-driver resolution'
+    );
+    assert_same(
+        (string)scalar($target, "SELECT graph_json FROM plugin_graph_child WHERE child_id = $drive_child_id"),
+        $drive_child_graph_before_pre_resolution_failpoint,
+        'plugin driver pre-resolution failpoint rolls back target database mutations'
+    );
+    assert_true(
+        !is_file($target_root . '/wp-content/uploads/plugin-driver-pre-resolution-mutation.dat'),
+        'plugin driver pre-resolution failpoint rolls back target filesystem mutations'
+    );
+    $pre_resolution_kill_driver_path = $tmp . '/forkpress-plugin-graph-driver-pre-resolution-kill.php';
+    write_test_file($pre_resolution_kill_driver_path, <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$db->exec("UPDATE plugin_graph_child SET graph_json = '{\"driver\":\"pre resolution mutation\"}' WHERE child_id = " . (int)str_replace('child:', '', (string)getenv('FORKPRESS_MERGE_PLUGIN_OBJECT')));
+$target_root = rtrim((string)getenv('FORKPRESS_MERGE_TARGET_ROOT'), '/');
+@mkdir($target_root . '/wp-content/uploads', 0777, true);
+file_put_contents($target_root . '/wp-content/uploads/plugin-driver-pre-resolution-kill-mutation.dat', 'pre resolution kill mutation');
+echo json_encode([
+    'status' => 'applied',
+    'result' => ['pre_resolution_kill' => true],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $drive_child_graph_before_pre_resolution_kill = (string)scalar($target, "SELECT graph_json FROM plugin_graph_child WHERE child_id = $drive_child_id");
+    $pre_resolution_kill = run_merge_cli_env(
+        [
+            'run-plugin-driver',
+            '--metadata-db', $metadata,
+            '--id', (string)$drive_file_conflict_id,
+            '--driver', $pre_resolution_kill_driver_path,
+            '--format', 'json',
+        ],
+        [
+            'FORKPRESS_COW_MERGE_TEST_FAILPOINT' => 'before-plugin-driver-resolution',
+            'FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION' => 'kill',
+        ]
+    );
+    assert_true($pre_resolution_kill['status'] !== 0, 'plugin driver pre-resolution process death exits unsuccessfully');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE choice = 'plugin-driver'"),
+        $plugin_driver_resolution_count,
+        'plugin driver pre-resolution process death records no plugin-driver resolution'
+    );
+    assert_same(
+        (string)scalar($target, "SELECT graph_json FROM plugin_graph_child WHERE child_id = $drive_child_id"),
+        '{"driver":"pre resolution mutation"}',
+        'plugin driver pre-resolution process death can leave target database mutations before recovery'
+    );
+    clearstatcache(true, $target_root . '/wp-content/uploads/plugin-driver-pre-resolution-kill-mutation.dat');
+    assert_true(
+        is_file($target_root . '/wp-content/uploads/plugin-driver-pre-resolution-kill-mutation.dat'),
+        'plugin driver pre-resolution process death can leave target filesystem mutations before recovery'
+    );
+    $crash_report = run_merge_cli([
+        'recover-crash',
+        '--metadata-db', $metadata,
+        '--format', 'json',
+    ]);
+    assert_same($crash_report['status'], 0, 'plugin driver pre-resolution process death leaves inspectable crash recovery state');
+    $crash_report_json = json_decode($crash_report['output'], true);
+    assert_same($crash_report_json['pending'] ?? null, 1, 'plugin driver process-death recovery reports one pending artifact');
+    assert_same(
+        $crash_report_json['artifacts'][0]['checkpoint'] ?? null,
+        'plugin-driver-resolution',
+        'plugin driver process-death recovery records the driver-resolution checkpoint'
+    );
+    assert_same(
+        $crash_report_json['artifacts'][0]['target_root'] ?? null,
+        $target_root,
+        'plugin driver process-death recovery records the target filesystem root'
+    );
+    assert_true(
+        is_array($crash_report_json['artifacts'][0]['filesystem_snapshot'] ?? null),
+        'plugin driver process-death recovery records a target filesystem snapshot'
+    );
+    assert_true(
+        !array_key_exists(
+            'wp-content/uploads/plugin-driver-pre-resolution-kill-mutation.dat',
+            $crash_report_json['artifacts'][0]['filesystem_snapshot']['entries'] ?? []
+        ),
+        'plugin driver process-death recovery snapshot predates the driver-created file'
+    );
+    $blocked_driver_retry = run_merge_cli([
+        'run-plugin-driver',
+        '--metadata-db', $metadata,
+        '--id', (string)$drive_file_conflict_id,
+        '--driver', $pre_resolution_kill_driver_path,
+        '--format', 'json',
+    ]);
+    assert_true($blocked_driver_retry['status'] !== 0, 'plugin driver runner blocks retries while crash recovery is pending');
+    assert_true(
+        str_contains($blocked_driver_retry['output'], 'pending COW merge crash recovery artifact'),
+        'plugin driver pending crash recovery error points to recovery before retry'
+    );
+    $restore_crash = run_merge_cli([
+        'recover-crash',
+        '--metadata-db', $metadata,
+        '--restore-target-db',
+        '--restore-files',
+        '--format', 'json',
+    ]);
+    assert_same($restore_crash['status'], 0, 'plugin driver process-death recovery restores target DB and files');
+    $restore_crash_json = json_decode($restore_crash['output'], true);
+    assert_same($restore_crash_json['restored'] ?? null, 1, 'plugin driver process-death recovery restores one artifact');
+    assert_same($restore_crash_json['pending'] ?? null, 0, 'plugin driver process-death recovery clears the pending artifact');
+    assert_same(
+        (string)scalar($target, "SELECT graph_json FROM plugin_graph_child WHERE child_id = $drive_child_id"),
+        $drive_child_graph_before_pre_resolution_kill,
+        'plugin driver process-death recovery restores target database mutations'
+    );
+    clearstatcache(true, $target_root . '/wp-content/uploads/plugin-driver-pre-resolution-kill-mutation.dat');
+    assert_true(
+        !is_file($target_root . '/wp-content/uploads/plugin-driver-pre-resolution-kill-mutation.dat'),
+        'plugin driver process-death recovery restores target filesystem mutations'
+    );
+    $rollback_failure_before = (int)scalar($metadata, 'SELECT COUNT(*) FROM merge_rollback_failures');
+    $GLOBALS['cow_merge_test_hooks']['before_file_root_snapshot_restore'] = [
+        static function (array $snapshot, string $restore_root) use ($target_root): void {
+            if ($restore_root === $target_root) {
+                throw new RuntimeException('forced plugin driver filesystem rollback failure');
+            }
+        },
+    ];
+    $rollback_failure_message = null;
+    try {
+        cow_merge_run_plugin_driver(
+            $metadata,
+            $drive_file_conflict_id,
+            $failing_plugin_driver_path,
+            null,
+            'cow-test'
+        );
+    } catch (Throwable $e) {
+        $rollback_failure_message = $e->getMessage();
+    } finally {
+        unset($GLOBALS['cow_merge_test_hooks']['before_file_root_snapshot_restore']);
+    }
+    assert_true(
+        $rollback_failure_message !== null && str_contains($rollback_failure_message, 'plugin driver rollback failed'),
+        'plugin driver rollback failure is surfaced to the caller'
+    );
+    assert_true(
+        str_contains((string)$rollback_failure_message, 'forced plugin driver filesystem rollback failure'),
+        'plugin driver rollback failure includes the rollback error'
+    );
+    assert_same(
+        (int)scalar($metadata, 'SELECT COUNT(*) FROM merge_rollback_failures'),
+        $rollback_failure_before + 1,
+        'plugin driver rollback failure records rollback-failure metadata'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE choice = 'plugin-driver'"),
+        $plugin_driver_resolution_count,
+        'plugin driver rollback failure records no plugin-driver resolution'
+    );
+    $plugin_driver_rollback_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 5, ['records' => 'rollback-failures']);
+    assert_same(count($plugin_driver_rollback_audit['rollback_failures']), 1, 'plugin driver rollback failure appears in rollback-failure audit exports');
+    assert_true(
+        str_contains($plugin_driver_rollback_audit['rollback_failures'][0]['original_failure'] ?? '', 'could not prove the plugin graph repair'),
+        'plugin driver rollback-failure audit preserves the driver failure'
+    );
+    assert_true(
+        str_contains($plugin_driver_rollback_audit['rollback_failures'][0]['rollback_failure'] ?? '', 'forced plugin driver filesystem rollback failure'),
+        'plugin driver rollback-failure audit preserves the rollback failure'
+    );
+    $plugin_driver_rollback_artifact_path = (string)($plugin_driver_rollback_audit['rollback_failures'][0]['artifact_path'] ?? '');
+    assert_true($plugin_driver_rollback_artifact_path !== '' && is_file($plugin_driver_rollback_artifact_path), 'plugin driver rollback failure preserves a JSONL artifact');
+    $plugin_driver_rollback_artifact_lines = file($plugin_driver_rollback_artifact_path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    assert_true(is_array($plugin_driver_rollback_artifact_lines) && count($plugin_driver_rollback_artifact_lines) === 1, 'plugin driver rollback failure writes one artifact record');
+    $plugin_driver_rollback_artifact = json_decode((string)$plugin_driver_rollback_artifact_lines[0], true);
+    assert_true(is_file($plugin_driver_rollback_artifact['artifacts']['target_db_snapshot']['backup'] ?? ''), 'plugin driver rollback failure artifact preserves target DB backup');
+    assert_true(is_dir($plugin_driver_rollback_artifact['artifacts']['filesystem_snapshot']['stage_root'] ?? ''), 'plugin driver rollback failure artifact preserves filesystem snapshot backup root');
+    $rollback_recovery = run_merge_cli([
+        'recover-crash',
+        '--metadata-db', $metadata,
+        '--restore-target-db',
+        '--restore-files',
+        '--format', 'json',
+    ]);
+    assert_same($rollback_recovery['status'], 0, 'plugin driver rollback-failure crash artifact can be restored before later work');
+    $rollback_recovery_json = json_decode($rollback_recovery['output'], true);
+    assert_same($rollback_recovery_json['pending'] ?? null, 0, 'plugin driver rollback-failure crash artifact is cleared after restore');
+    @unlink($target_root . '/wp-content/uploads/plugin-driver-failed-mutation.dat');
+    $malformed_plugin_driver_path = $tmp . '/forkpress-plugin-graph-driver-malformed.php';
+    write_test_file($malformed_plugin_driver_path, <<<'PHP'
+<?php
+echo json_encode([
+    'status' => 'applied',
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $malformed_driver_cli = run_merge_cli([
+        'run-plugin-driver',
+        '--metadata-db', $metadata,
+        '--id', (string)$drive_file_conflict_id,
+        '--driver', $malformed_plugin_driver_path,
+        '--format', 'json',
+    ]);
+    assert_true($malformed_driver_cli['status'] !== 0, 'plugin driver runner rejects applied status without result evidence');
+    assert_true(str_contains($malformed_driver_cli['output'], 'must emit a result value'), 'plugin driver runner explains missing result evidence');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE choice = 'plugin-driver'"),
+        $plugin_driver_resolution_count,
+        'malformed plugin driver output records no plugin-driver resolution'
+    );
     ob_start();
     cow_merge_print_audit_text($audit);
     $plugin_audit_text = ob_get_clean();
@@ -487,6 +945,44 @@ PHP);
         $json_conflict_id,
         'plugin validator replacement evidence links to the prior plugin conflict'
     );
+    $plugin_driver_resolution_count_before_stale = (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE choice = 'plugin-driver'");
+    $stale_driver_record = run_merge_cli([
+        'record-plugin-driver-resolution',
+        '--metadata-db', $metadata,
+        '--id', (string)$json_conflict_id,
+        '--driver', 'forkpress-plugin-graph-driver@stale',
+        '--result-json', json_encode(['stale' => true], JSON_UNESCAPED_SLASHES),
+        '--format', 'json',
+    ]);
+    assert_true($stale_driver_record['status'] !== 0, 'plugin driver recorder rejects superseded validator conflicts');
+    assert_true(str_contains($stale_driver_record['output'], 'replacement conflict #' . $replacement_conflict_id), 'plugin driver recorder points to replacement validator evidence');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE choice = 'plugin-driver'"),
+        $plugin_driver_resolution_count_before_stale,
+        'stale plugin driver recorder records no resolution'
+    );
+    $stale_driver_marker = $target_root . '/wp-content/uploads/stale-plugin-driver-ran.dat';
+    $stale_plugin_driver_path = $tmp . '/forkpress-plugin-graph-driver-stale.php';
+    write_test_file($stale_plugin_driver_path, <<<'PHP'
+<?php
+$target_root = rtrim((string)getenv('FORKPRESS_MERGE_TARGET_ROOT'), '/');
+@mkdir($target_root . '/wp-content/uploads', 0777, true);
+file_put_contents($target_root . '/wp-content/uploads/stale-plugin-driver-ran.dat', 'stale driver ran');
+echo json_encode([
+    'status' => 'applied',
+    'result' => ['unexpected' => 'stale driver ran'],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $stale_driver_run = run_merge_cli([
+        'run-plugin-driver',
+        '--metadata-db', $metadata,
+        '--id', (string)$json_conflict_id,
+        '--driver', $stale_plugin_driver_path,
+        '--format', 'json',
+    ]);
+    assert_true($stale_driver_run['status'] !== 0, 'plugin driver runner rejects superseded validator conflicts before execution');
+    assert_true(str_contains($stale_driver_run['output'], 'replacement conflict #' . $replacement_conflict_id), 'plugin driver runner points to replacement validator evidence');
+    assert_true(!is_file($stale_driver_marker), 'plugin driver runner does not execute stale validator repairs');
     $plugin_key_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'plugin',
         'records' => 'conflicts',

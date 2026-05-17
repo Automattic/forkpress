@@ -54,10 +54,26 @@ register_shutdown_function(static function () use ($tmp): void {
 
 $fake_bin = $tmp . '/forkpress';
 $cli_log = $tmp . '/cli-argv.jsonl';
+$plugin_driver = $tmp . '/forkpress-plugin-driver.php';
+$discovered_plugins_dir = $tmp . '/wp-content/plugins';
+$discovered_plugin_driver = $discovered_plugins_dir . '/real-plugin/forkpress-merge-driver.php';
+$single_file_plugin_driver = $discovered_plugins_dir . '/solo.forkpress-merge-driver.php';
+$discovered_mu_plugins_dir = $tmp . '/wp-content/mu-plugins';
+$mu_plugin_driver = $discovered_mu_plugins_dir . '/forkpress-merge-driver.php';
 $work_dir = $tmp . '/site';
 $branch_list = $tmp . '/branches.txt';
 $runner = $tmp . '/run-action.php';
 mkdir($work_dir, 0777, true);
+mkdir(dirname($discovered_plugin_driver), 0777, true);
+mkdir($discovered_mu_plugins_dir, 0777, true);
+file_put_contents($plugin_driver, "<?php echo json_encode(['status' => 'validated', 'result' => ['ok' => true]]);\n");
+chmod($plugin_driver, 0755);
+file_put_contents($discovered_plugin_driver, "<?php echo json_encode(['status' => 'validated', 'result' => ['discovered' => true]]);\n");
+chmod($discovered_plugin_driver, 0755);
+file_put_contents($single_file_plugin_driver, "<?php echo json_encode(['status' => 'validated', 'result' => ['single_file' => true]]);\n");
+chmod($single_file_plugin_driver, 0755);
+file_put_contents($mu_plugin_driver, "<?php echo json_encode(['status' => 'validated', 'result' => ['mu_plugin' => true]]);\n");
+chmod($mu_plugin_driver, 0755);
 
 file_put_contents($fake_bin, <<<'PHP'
 #!/usr/bin/env php
@@ -81,6 +97,14 @@ chmod($fake_bin, 0755);
 file_put_contents($runner, <<<'PHP'
 <?php
 define('ABSPATH', sys_get_temp_dir() . '/forkpress-test-wp/');
+$plugin_dir = getenv('FORKPRESS_TEST_WP_PLUGIN_DIR');
+if (is_string($plugin_dir) && $plugin_dir !== '' && !defined('WP_PLUGIN_DIR')) {
+    define('WP_PLUGIN_DIR', $plugin_dir);
+}
+$mu_plugin_dir = getenv('FORKPRESS_TEST_WPMU_PLUGIN_DIR');
+if (is_string($mu_plugin_dir) && $mu_plugin_dir !== '' && !defined('WPMU_PLUGIN_DIR')) {
+    define('WPMU_PLUGIN_DIR', $mu_plugin_dir);
+}
 
 function add_action($tag, $callback, $priority = 10, $accepted_args = 1) { return true; }
 function add_filter($tag, $callback, $priority = 10, $accepted_args = 1) { return true; }
@@ -94,6 +118,20 @@ function wp_unslash($value) { return $value; }
 function sanitize_text_field($value) { return trim((string) $value); }
 function esc_attr($value) { return htmlspecialchars((string) $value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'); }
 function esc_html($value) { return htmlspecialchars((string) $value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'); }
+function get_option($name, $default = false) {
+    if ($name === 'active_plugins') {
+        $plugins = json_decode((string)getenv('FORKPRESS_TEST_ACTIVE_PLUGINS'), true);
+        return is_array($plugins) ? $plugins : $default;
+    }
+    return $default;
+}
+function get_site_option($name, $default = false) {
+    if ($name === 'active_sitewide_plugins') {
+        $plugins = json_decode((string)getenv('FORKPRESS_TEST_ACTIVE_SITEWIDE_PLUGINS'), true);
+        return is_array($plugins) ? $plugins : $default;
+    }
+    return $default;
+}
 
 $fqdb = getenv('FORKPRESS_TEST_FQDB');
 if (is_string($fqdb) && $fqdb !== '' && !defined('FQDB')) {
@@ -131,6 +169,9 @@ if ($action === 'forkpress_branch_conflicts') {
 }
 if ($action === 'forkpress_branch_revalidate_conflicts') {
     forkpress_handle_branch_revalidate_conflicts();
+}
+if ($action === 'forkpress_branch_run_plugin_driver') {
+    forkpress_handle_branch_run_plugin_driver();
 }
 if ($action === 'forkpress_branch_birth_notice') {
     ob_start();
@@ -433,6 +474,142 @@ assert_same(
     'branch conflict revalidation uses structured revalidate command'
 );
 
+$driver_key = hash('sha256', 'forkpress-plugin-graph' . "\0" . realpath($plugin_driver));
+$driver_output = json_encode([
+    'conflict_id' => 7,
+    'resolution_id' => 88,
+    'driver_status' => 'validated',
+    'driver' => realpath($plugin_driver),
+    'choice' => 'plugin-driver',
+    'applied' => false,
+], JSON_UNESCAPED_SLASHES);
+$plugin_driver_run = run_branch_ui_action(
+    [
+        'action' => 'forkpress_branch_run_plugin_driver',
+        'run' => '42',
+        'conflict' => '7',
+        'driverKey' => $driver_key,
+    ],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    [
+        'FORKPRESS_PLUGIN_MERGE_DRIVERS' => json_encode(['forkpress-plugin-graph' => realpath($plugin_driver)], JSON_UNESCAPED_SLASHES),
+        'FORKPRESS_TEST_CLI_OUTPUT' => $driver_output,
+    ]
+);
+$plugin_driver_payload = decode_branch_ui_payload($plugin_driver_run);
+assert_same($plugin_driver_payload['success'] ?? null, true, 'branch plugin driver action returns JSON success');
+assert_same($plugin_driver_payload['driverStatus'] ?? null, 'validated', 'branch plugin driver action exposes driver status');
+assert_same($plugin_driver_payload['run'] ?? null, 42, 'branch plugin driver action preserves merge run for refresh');
+assert_same(
+    $plugin_driver_payload['message'] ?? null,
+    'Ran plugin driver for conflict #7: validated.',
+    'branch plugin driver action reports validated driver result'
+);
+assert_same(count($plugin_driver_run['argv']), 1, 'branch plugin driver action invokes ForkPress CLI once');
+assert_same(
+    array_slice($plugin_driver_run['argv'][0] ?? [], 1),
+    ['branch', '--work-dir', $work_dir, 'run-plugin-driver', 'conflict', '7', '--driver', realpath($plugin_driver), '--reviewer', 'wordpress-ui', '--format', 'json'],
+    'branch plugin driver action uses approved run-plugin-driver CLI path'
+);
+
+$unapproved_plugin_driver = run_branch_ui_action(
+    [
+        'action' => 'forkpress_branch_run_plugin_driver',
+        'run' => '42',
+        'conflict' => '7',
+        'driverKey' => 'not-approved',
+    ],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    ['FORKPRESS_PLUGIN_MERGE_DRIVERS' => json_encode(['forkpress-plugin-graph' => realpath($plugin_driver)], JSON_UNESCAPED_SLASHES)]
+);
+$unapproved_plugin_driver_payload = decode_branch_ui_payload($unapproved_plugin_driver);
+assert_same($unapproved_plugin_driver_payload['success'] ?? null, false, 'branch plugin driver action rejects unapproved drivers');
+assert_same($unapproved_plugin_driver_payload['message'] ?? null, 'Choose an approved plugin merge driver.', 'branch plugin driver action explains unapproved drivers');
+assert_same(count($unapproved_plugin_driver['argv']), 0, 'branch plugin driver action does not invoke CLI for unapproved drivers');
+
+$discovered_driver_key = hash('sha256', 'real-plugin' . "\0" . realpath($discovered_plugin_driver));
+$discovered_plugin_driver_run = run_branch_ui_action(
+    [
+        'action' => 'forkpress_branch_run_plugin_driver',
+        'run' => '42',
+        'conflict' => '7',
+        'driverKey' => $discovered_driver_key,
+    ],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    [
+        'FORKPRESS_TEST_WP_PLUGIN_DIR' => $discovered_plugins_dir,
+        'FORKPRESS_TEST_ACTIVE_PLUGINS' => json_encode(['real-plugin/real-plugin.php'], JSON_UNESCAPED_SLASHES),
+        'FORKPRESS_TEST_CLI_OUTPUT' => $driver_output,
+    ]
+);
+$discovered_plugin_driver_payload = decode_branch_ui_payload($discovered_plugin_driver_run);
+assert_same($discovered_plugin_driver_payload['success'] ?? null, true, 'branch plugin driver action accepts discovered active plugin drivers');
+assert_same(
+    array_slice($discovered_plugin_driver_run['argv'][0] ?? [], 1),
+    ['branch', '--work-dir', $work_dir, 'run-plugin-driver', 'conflict', '7', '--driver', realpath($discovered_plugin_driver), '--reviewer', 'wordpress-ui', '--format', 'json'],
+    'branch plugin driver action uses discovered active plugin driver path'
+);
+
+$single_file_driver_key = hash('sha256', 'solo' . "\0" . realpath($single_file_plugin_driver));
+$single_file_plugin_driver_run = run_branch_ui_action(
+    [
+        'action' => 'forkpress_branch_run_plugin_driver',
+        'run' => '42',
+        'conflict' => '7',
+        'driverKey' => $single_file_driver_key,
+    ],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    [
+        'FORKPRESS_TEST_WP_PLUGIN_DIR' => $discovered_plugins_dir,
+        'FORKPRESS_TEST_ACTIVE_PLUGINS' => json_encode(['solo.php'], JSON_UNESCAPED_SLASHES),
+        'FORKPRESS_TEST_CLI_OUTPUT' => $driver_output,
+    ]
+);
+$single_file_plugin_driver_payload = decode_branch_ui_payload($single_file_plugin_driver_run);
+assert_same($single_file_plugin_driver_payload['success'] ?? null, true, 'branch plugin driver action accepts single-file active plugin drivers');
+assert_same(
+    array_slice($single_file_plugin_driver_run['argv'][0] ?? [], 1),
+    ['branch', '--work-dir', $work_dir, 'run-plugin-driver', 'conflict', '7', '--driver', realpath($single_file_plugin_driver), '--reviewer', 'wordpress-ui', '--format', 'json'],
+    'branch plugin driver action uses discovered single-file plugin driver path'
+);
+
+$mu_driver_key = hash('sha256', 'mu-plugins' . "\0" . realpath($mu_plugin_driver));
+$mu_plugin_driver_run = run_branch_ui_action(
+    [
+        'action' => 'forkpress_branch_run_plugin_driver',
+        'run' => '42',
+        'conflict' => '7',
+        'driverKey' => $mu_driver_key,
+    ],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    [
+        'FORKPRESS_TEST_WPMU_PLUGIN_DIR' => $discovered_mu_plugins_dir,
+        'FORKPRESS_TEST_CLI_OUTPUT' => $driver_output,
+    ]
+);
+$mu_plugin_driver_payload = decode_branch_ui_payload($mu_plugin_driver_run);
+assert_same($mu_plugin_driver_payload['success'] ?? null, true, 'branch plugin driver action accepts discovered mu-plugin drivers');
+assert_same(
+    array_slice($mu_plugin_driver_run['argv'][0] ?? [], 1),
+    ['branch', '--work-dir', $work_dir, 'run-plugin-driver', 'conflict', '7', '--driver', realpath($mu_plugin_driver), '--reviewer', 'wordpress-ui', '--format', 'json'],
+    'branch plugin driver action uses discovered mu-plugin driver path'
+);
+
 $invalid_revalidation = run_branch_ui_action(
     ['action' => 'forkpress_branch_revalidate_conflicts', 'run' => 'abc'],
     ['main', 'feature']
@@ -530,6 +707,20 @@ assert_true(str_contains($switcher_html, "fetchConflictAudit(run, payload.messag
 assert_true(str_contains($switcher_html, 'forkpress_branch_revalidate_conflicts'), 'branch switcher renders conflict revalidation action');
 assert_true(str_contains($switcher_html, 'nonce-forkpress_branch_revalidate_conflicts'), 'branch switcher renders conflict revalidation nonce');
 assert_true(str_contains($switcher_html, 'function fetchConflictRevalidation'), 'branch switcher renders conflict revalidation client handler');
+assert_true(str_contains($switcher_html, 'function conflictPluginMeta'), 'branch switcher renders structured plugin conflict metadata');
+assert_true(str_contains($switcher_html, 'record.plugin_object'), 'branch switcher renders plugin conflict object metadata');
+assert_true(str_contains($switcher_html, 'record.plugin_severity'), 'branch switcher renders plugin conflict severity metadata');
+assert_true(str_contains($switcher_html, 'record.plugin_validator'), 'branch switcher renders plugin conflict validator metadata');
+assert_true(str_contains($switcher_html, 'function conflictPluginGuidance'), 'branch switcher renders plugin conflict guidance metadata');
+assert_true(str_contains($switcher_html, 'record.plugin_resolution_policy'), 'branch switcher renders plugin conflict resolution policy');
+assert_true(str_contains($switcher_html, 'record.plugin_suggested_action'), 'branch switcher renders plugin conflict suggested action');
+assert_true(str_contains($switcher_html, 'record.plugin_manual_review_reason'), 'branch switcher renders plugin conflict manual review reason');
+assert_true(str_contains($switcher_html, 'forkpress_branch_run_plugin_driver'), 'branch switcher renders plugin driver action');
+assert_true(str_contains($switcher_html, 'nonce-forkpress_branch_run_plugin_driver'), 'branch switcher renders plugin driver nonce');
+assert_true(str_contains($switcher_html, 'pluginDrivers'), 'branch switcher exposes approved plugin driver metadata');
+assert_true(str_contains($switcher_html, 'function driverForConflict'), 'branch switcher renders plugin driver matching helper');
+assert_true(str_contains($switcher_html, 'function fetchPluginDriver'), 'branch switcher renders plugin driver client handler');
+assert_true(str_contains($switcher_html, 'Run plugin driver'), 'branch switcher renders plugin driver button text');
 
 $forbidden = run_branch_ui_action(
     ['action' => 'forkpress_branch_create', 'branch' => 'new_feature', 'from' => 'main'],
