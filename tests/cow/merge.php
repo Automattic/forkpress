@@ -2651,6 +2651,73 @@ SQL);
     assert_same($fk_cell_source_resolution['status'], 'applied', 'source foreign-key cell resolution applies after the target parent exists');
     assert_same((int)scalar($fk_cell_target, 'SELECT parent_id FROM plugin_fk_cell_children WHERE id = 20'), 999, 'source foreign-key cell resolution reparents the child row');
 
+    $fk_insert_collision_base = $tmp . '/fk-insert-collision-base.sqlite';
+    $fk_insert_collision_source = $tmp . '/fk-insert-collision-source.sqlite';
+    $fk_insert_collision_target = $tmp . '/fk-insert-collision-target.sqlite';
+    $fk_insert_collision_metadata = $tmp . '/.forkpress/cow/merge/fk-insert-collision-metadata.sqlite';
+    create_base_db($fk_insert_collision_base);
+    copy($fk_insert_collision_base, $fk_insert_collision_source);
+    copy($fk_insert_collision_base, $fk_insert_collision_target);
+    foreach ([$fk_insert_collision_base, $fk_insert_collision_source, $fk_insert_collision_target] as $path) {
+        $db = open_db($path);
+        $db->exec('CREATE TABLE plugin_fk_insert_collision_parents (id INTEGER PRIMARY KEY, label TEXT)');
+        $db->exec('CREATE TABLE plugin_fk_insert_collision_children (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES plugin_fk_insert_collision_parents(id), label TEXT)');
+        $db->close();
+    }
+    $db = open_db($fk_insert_collision_source);
+    $db->exec("INSERT INTO plugin_fk_insert_collision_children (id, parent_id, label) VALUES (20, 999, 'source child collision')");
+    $db->close();
+    $db = open_db($fk_insert_collision_target);
+    $db->exec("INSERT INTO plugin_fk_insert_collision_parents (id, label) VALUES (1, 'target parent')");
+    $db->exec("INSERT INTO plugin_fk_insert_collision_children (id, parent_id, label) VALUES (20, 1, 'target child collision')");
+    $db->close();
+    $fk_insert_collision_result = cow_merge_databases($fk_insert_collision_base, $fk_insert_collision_source, $fk_insert_collision_target, $fk_insert_collision_metadata, 'feature-fk-insert-collision', 'main');
+    assert_same($fk_insert_collision_result['status'], 'completed_with_conflicts', 'same-primary-key foreign-key insert collision is held for review');
+    assert_same((int)scalar($fk_insert_collision_target, 'SELECT parent_id FROM plugin_fk_insert_collision_children WHERE id = 20'), 1, 'target child collision wins before review');
+    $fk_insert_collision_conflict_id = (int)scalar($fk_insert_collision_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_fk_insert_collision_children' AND conflict_type = 'row-insert-collision' ORDER BY id DESC LIMIT 1");
+    $fk_insert_collision_audit = cow_merge_audit_report($fk_insert_collision_metadata, (int)$fk_insert_collision_result['run_id'], 10, ['records' => 'conflicts']);
+    $fk_insert_collision_audit_rows = [];
+    foreach ($fk_insert_collision_audit['conflicts'] as $row) {
+        $fk_insert_collision_audit_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $fk_insert_collision_audit_rows[$fk_insert_collision_conflict_id]['resolution_choices'],
+        ['target'],
+        'foreign-key row insert collision audit does not advertise source while the target parent is missing'
+    );
+    assert_true(
+        str_contains((string)($fk_insert_collision_audit_rows[$fk_insert_collision_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'referencing plugin_fk_insert_collision_parents(id)'),
+        'foreign-key row insert collision audit explains the missing target parent'
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($fk_insert_collision_metadata, $fk_insert_collision_conflict_id, 'source', true, 'Try insert collision reparent before target parent exists.', 'cow-test'),
+        'resolution choice source is blocked',
+        'source resolution for a foreign-key row insert collision is blocked before mutation while the target parent is missing'
+    );
+    $db = open_db($fk_insert_collision_target);
+    $db->exec("INSERT INTO plugin_fk_insert_collision_parents (id, label) VALUES (999, 'target parent for insert collision review')");
+    $db->close();
+    $fk_insert_collision_unblocked_audit = cow_merge_audit_report($fk_insert_collision_metadata, (int)$fk_insert_collision_result['run_id'], 10, ['records' => 'conflicts']);
+    $fk_insert_collision_unblocked_rows = [];
+    foreach ($fk_insert_collision_unblocked_audit['conflicts'] as $row) {
+        $fk_insert_collision_unblocked_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $fk_insert_collision_unblocked_rows[$fk_insert_collision_conflict_id]['resolution_choices'],
+        ['source', 'target'],
+        'foreign-key row insert collision audit advertises source after the target parent is restored'
+    );
+    $fk_insert_collision_source_resolution = cow_merge_resolve_conflict(
+        $fk_insert_collision_metadata,
+        $fk_insert_collision_conflict_id,
+        'source',
+        true,
+        'Apply source insert collision after target parent review.',
+        'cow-test'
+    );
+    assert_same($fk_insert_collision_source_resolution['status'], 'applied', 'source foreign-key row insert collision resolution applies after the target parent exists');
+    assert_same((int)scalar($fk_insert_collision_target, 'SELECT parent_id FROM plugin_fk_insert_collision_children WHERE id = 20'), 999, 'source foreign-key row insert collision resolution reparents the child row');
+
     $fk_delete_base = $tmp . '/fk-delete-base.sqlite';
     $fk_delete_source = $tmp . '/fk-delete-source.sqlite';
     $fk_delete_target = $tmp . '/fk-delete-target.sqlite';

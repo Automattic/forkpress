@@ -12256,7 +12256,14 @@ function cow_merge_file_source_resolution_blocked_reason(array $row): ?string {
 
 function cow_merge_row_source_resolution_blocked_reason(array $row): ?string {
     $conflict_type = (string)($row['conflict_type'] ?? '');
-    if (!in_array($conflict_type, ['row-target-constraint', 'row-unique-collision'], true)) {
+    if (!in_array($conflict_type, [
+        'row-insert-collision',
+        'row-unique-collision',
+        'row-target-constraint',
+        'row-identity-ambiguous',
+        'row-target-deleted',
+        'row-source-deleted',
+    ], true)) {
         return null;
     }
     $table = (string)($row['table_name'] ?? '');
@@ -12310,7 +12317,7 @@ function cow_merge_row_source_resolution_blocked_reason(array $row): ?string {
             return $error === null ? null : "source row resolution is blocked by current target foreign-key state: $error";
         }
 
-        if ($source_value !== null || !is_array($target_value)) {
+        if ($source_value !== null || !is_array($target_value) || !in_array($conflict_type, ['row-target-constraint', 'row-source-deleted'], true)) {
             return null;
         }
         $pk_cols = cow_merge_pk_cols($target, $table);

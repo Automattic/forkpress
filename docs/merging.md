@@ -101,8 +101,8 @@ the executable choices and listed in `blocked_resolution_choices` with the
 reason the resolver will reject it. Schema conflicts use the same model for
 source drops that would invalidate target-side dependent views, triggers,
 schema objects, or foreign-key child tables; once those dependency conflicts
-are resolved, audit output can advertise `source` again. Row target-constraint
-conflicts and primary-key-addressable cell conflicts use the same model when
+are resolved, audit output can advertise `source` again. Row conflicts and
+primary-key-addressable cell conflicts use the same model when
 the current target foreign-key state would reject the audited source row,
 source row deletion, source cell value, or source unique-collision replacement
 that must first remove a target row with dependent children; after the missing
