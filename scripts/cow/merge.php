@@ -19056,6 +19056,107 @@ function cow_merge_sort_tables_by_foreign_keys(array $tables, SQLite3 ...$dbs): 
     return $ordered;
 }
 
+function cow_merge_wordpress_term_count_tables_available(SQLite3 $db): bool {
+    if (cow_merge_table_sql($db, 'wp_term_taxonomy') === null || cow_merge_table_sql($db, 'wp_term_relationships') === null) {
+        return false;
+    }
+    $taxonomy_columns = array_fill_keys(cow_merge_table_columns($db, 'wp_term_taxonomy'), true);
+    $relationship_columns = array_fill_keys(cow_merge_table_columns($db, 'wp_term_relationships'), true);
+    return isset($taxonomy_columns['term_taxonomy_id'], $taxonomy_columns['count'], $relationship_columns['term_taxonomy_id']);
+}
+
+function cow_merge_wordpress_term_taxonomy_count(SQLite3 $db, mixed $term_taxonomy_id): mixed {
+    if (!cow_merge_wordpress_term_count_tables_available($db)) {
+        return null;
+    }
+    $stmt = cow_merge_prepare_checked(
+        $db,
+        'SELECT ' . cow_merge_quote_ident('count') . ' FROM wp_term_taxonomy WHERE term_taxonomy_id = :term_taxonomy_id',
+        'failed to prepare WordPress term taxonomy count lookup'
+    );
+    cow_merge_bind($stmt, ':term_taxonomy_id', $term_taxonomy_id);
+    $res = cow_merge_execute_checked($stmt, $db, 'failed to look up WordPress term taxonomy count');
+    $row = $res->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($res, 'failed to finalize WordPress term taxonomy count lookup');
+    return $row ? $row['count'] : null;
+}
+
+function cow_merge_wordpress_term_count_taxonomy_is_recomputable(string $taxonomy): bool {
+    return in_array($taxonomy, ['category', 'post_tag'], true);
+}
+
+function cow_merge_recompute_wordpress_term_taxonomy_counts(
+    SQLite3 $base,
+    SQLite3 $source,
+    SQLite3 $target,
+    SQLite3 $meta,
+    int $run_id
+): int {
+    if (!cow_merge_wordpress_term_count_tables_available($target)) {
+        return 0;
+    }
+
+    $res = cow_merge_query_checked(
+        $target,
+        'SELECT tt.term_taxonomy_id, tt.taxonomy, tt.' . cow_merge_quote_ident('count') . ' AS stored_count, ' .
+        'COALESCE(rel.relationship_count, 0) AS relationship_count ' .
+        'FROM wp_term_taxonomy tt ' .
+        'LEFT JOIN (' .
+        '  SELECT term_taxonomy_id, COUNT(*) AS relationship_count ' .
+        '  FROM wp_term_relationships GROUP BY term_taxonomy_id' .
+        ') rel ON rel.term_taxonomy_id = tt.term_taxonomy_id',
+        'failed to inspect WordPress term taxonomy counts'
+    );
+
+    $updates = [];
+    while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+        if (!cow_merge_wordpress_term_count_taxonomy_is_recomputable((string)$row['taxonomy'])) {
+            continue;
+        }
+        $stored = (int)$row['stored_count'];
+        $relationship_count = (int)$row['relationship_count'];
+        if ($stored === $relationship_count) {
+            continue;
+        }
+        $updates[] = [
+            'term_taxonomy_id' => $row['term_taxonomy_id'],
+            'stored_count' => $stored,
+            'relationship_count' => $relationship_count,
+        ];
+    }
+    cow_merge_result_finalize_checked($res, 'failed to finalize WordPress term taxonomy count inspection');
+
+    foreach ($updates as $update) {
+        $term_taxonomy_id = $update['term_taxonomy_id'];
+        $relationship_count = $update['relationship_count'];
+        $stmt = cow_merge_prepare_checked(
+            $target,
+            'UPDATE wp_term_taxonomy SET ' . cow_merge_quote_ident('count') . ' = :count WHERE term_taxonomy_id = :term_taxonomy_id',
+            'failed to prepare WordPress term taxonomy count recompute'
+        );
+        cow_merge_bind($stmt, ':count', $relationship_count);
+        cow_merge_bind($stmt, ':term_taxonomy_id', $term_taxonomy_id);
+        cow_merge_execute_checked($stmt, $target, 'failed to recompute WordPress term taxonomy count');
+
+        $identity_id = is_numeric($term_taxonomy_id) ? (int)$term_taxonomy_id : $term_taxonomy_id;
+        cow_merge_record_decision(
+            $meta,
+            $run_id,
+            'wp_term_taxonomy',
+            cow_merge_identity_json(['term_taxonomy_id' => $identity_id]),
+            'count',
+            'source-applied',
+            'recomputed WordPress term taxonomy count from merged relationships',
+            cow_merge_wordpress_term_taxonomy_count($base, $term_taxonomy_id),
+            cow_merge_wordpress_term_taxonomy_count($source, $term_taxonomy_id),
+            $update['stored_count'],
+            $relationship_count
+        );
+    }
+
+    return count($updates);
+}
+
 function cow_merge_databases(
     string $base_db,
     string $source_db,
@@ -19231,6 +19332,7 @@ function cow_merge_databases(
         $trigger_result = cow_merge_apply_schema_object_changes($target, $meta, $run_id, 'trigger', $base_triggers, $source_triggers, $target_triggers);
         $applied += $trigger_result['applied'];
         $conflicts += $trigger_result['conflicts'];
+        $applied += cow_merge_recompute_wordpress_term_taxonomy_counts($base, $source, $target, $meta, $run_id);
 
         $status = $conflicts > 0 ? 'completed_with_conflicts' : 'completed';
         $crash_recovery_artifact = cow_merge_write_crash_recovery_artifact(

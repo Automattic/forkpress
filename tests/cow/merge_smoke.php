@@ -1245,6 +1245,74 @@ try {
         'page-plus-taxonomy smoke merge audits all target graph inserts'
     );
 
+    $taxonomy_count_base = $tmp . '/taxonomy-count-base.sqlite';
+    $taxonomy_count_source = $tmp . '/taxonomy-count-source.sqlite';
+    $taxonomy_count_target = $tmp . '/taxonomy-count-target.sqlite';
+    $taxonomy_count_metadata = $tmp . '/.forkpress/cow/merge/taxonomy-count-metadata.sqlite';
+
+    smoke_create_posts_db($taxonomy_count_base);
+    $db = smoke_open_db($taxonomy_count_base);
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (16000030, 'Shared Count Topic', 'shared-count-topic')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES (16000031, 16000030, 'category', 'Shared count topic', 0, 0)");
+    $db->close();
+    copy($taxonomy_count_base, $taxonomy_count_source);
+    copy($taxonomy_count_base, $taxonomy_count_target);
+
+    $db = smoke_open_db($taxonomy_count_source);
+    smoke_insert_post($db, 16000032, 'Branch Count Page', 'Branch count content', 'page', 'branch-count-page');
+    $db->exec('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (16000032, 16000031, 0)');
+    $db->exec('UPDATE wp_term_taxonomy SET count = 1 WHERE term_taxonomy_id = 16000031');
+    $db->close();
+
+    $db = smoke_open_db($taxonomy_count_target);
+    smoke_insert_post($db, 16000033, 'Main Count Page', 'Main count content', 'page', 'main-count-page');
+    $db->exec('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (16000033, 16000031, 0)');
+    $db->exec('UPDATE wp_term_taxonomy SET count = 1 WHERE term_taxonomy_id = 16000031');
+    $db->close();
+
+    $taxonomy_count_result = cow_merge_databases($taxonomy_count_base, $taxonomy_count_source, $taxonomy_count_target, $taxonomy_count_metadata, 'feature-smoke-taxonomy-count', 'main');
+    assert_same($taxonomy_count_result['status'], 'completed', 'same-term taxonomy relationship inserts complete cleanly');
+    assert_same((int)smoke_scalar($taxonomy_count_target, 'SELECT COUNT(*) FROM wp_term_relationships WHERE term_taxonomy_id = 16000031'), 2, 'same-term taxonomy merge preserves both branch relationships');
+    assert_same((int)smoke_scalar($taxonomy_count_target, 'SELECT count FROM wp_term_taxonomy WHERE term_taxonomy_id = 16000031'), 2, 'same-term taxonomy merge recomputes denormalized WordPress term count');
+    assert_same(
+        (int)smoke_scalar($taxonomy_count_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_term_taxonomy' AND column_name = 'count' AND decision = 'source-applied' AND reason = 'recomputed WordPress term taxonomy count from merged relationships'"),
+        1,
+        'same-term taxonomy count recompute is auditable'
+    );
+
+    $custom_taxonomy_count_base = $tmp . '/custom-taxonomy-count-base.sqlite';
+    $custom_taxonomy_count_source = $tmp . '/custom-taxonomy-count-source.sqlite';
+    $custom_taxonomy_count_target = $tmp . '/custom-taxonomy-count-target.sqlite';
+    $custom_taxonomy_count_metadata = $tmp . '/.forkpress/cow/merge/custom-taxonomy-count-metadata.sqlite';
+
+    smoke_create_posts_db($custom_taxonomy_count_base);
+    $db = smoke_open_db($custom_taxonomy_count_base);
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (16000040, 'Custom Count Topic', 'custom-count-topic')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES (16000041, 16000040, 'forkpress_topic', 'Custom count topic', 0, 50)");
+    $db->close();
+    copy($custom_taxonomy_count_base, $custom_taxonomy_count_source);
+    copy($custom_taxonomy_count_base, $custom_taxonomy_count_target);
+
+    $db = smoke_open_db($custom_taxonomy_count_source);
+    smoke_insert_post($db, 16000042, 'Branch Custom Count Page', 'Branch custom count content', 'page', 'branch-custom-count-page');
+    $db->exec('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (16000042, 16000041, 0)');
+    $db->close();
+
+    $db = smoke_open_db($custom_taxonomy_count_target);
+    smoke_insert_post($db, 16000043, 'Main Custom Count Page', 'Main custom count content', 'page', 'main-custom-count-page');
+    $db->exec('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (16000043, 16000041, 0)');
+    $db->close();
+
+    $custom_taxonomy_count_result = cow_merge_databases($custom_taxonomy_count_base, $custom_taxonomy_count_source, $custom_taxonomy_count_target, $custom_taxonomy_count_metadata, 'feature-smoke-custom-taxonomy-count', 'main');
+    assert_same($custom_taxonomy_count_result['status'], 'completed', 'custom taxonomy relationship inserts complete cleanly');
+    assert_same((int)smoke_scalar($custom_taxonomy_count_target, 'SELECT COUNT(*) FROM wp_term_relationships WHERE term_taxonomy_id = 16000041'), 2, 'custom taxonomy merge preserves both branch relationships');
+    assert_same((int)smoke_scalar($custom_taxonomy_count_target, 'SELECT count FROM wp_term_taxonomy WHERE term_taxonomy_id = 16000041'), 50, 'custom taxonomy merge does not rewrite plugin-defined term count semantics');
+    assert_same(
+        (int)smoke_scalar($custom_taxonomy_count_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_term_taxonomy' AND column_name = 'count' AND reason = 'recomputed WordPress term taxonomy count from merged relationships'"),
+        0,
+        'custom taxonomy count skip records no built-in recompute audit'
+    );
+
     $taxonomy_edit_delete_base = $tmp . '/taxonomy-edit-delete-base.sqlite';
     $taxonomy_edit_delete_source = $tmp . '/taxonomy-edit-delete-source.sqlite';
     $taxonomy_edit_delete_target = $tmp . '/taxonomy-edit-delete-target.sqlite';
