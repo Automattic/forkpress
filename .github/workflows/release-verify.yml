@@ -123,11 +123,7 @@ jobs:
 
       - name: Install toolchain (mac)
         if: matrix.os == 'darwin'
-        run: |
-          brew update
-          brew install composer gpatch automake re2c bison pkg-config
-          # php-cli from brew drives static-php-cli
-          brew install php || true
+        run: bash scripts/dev/install-macos-runtime-tools.sh
 
       - name: Install toolchain (linux)
         if: matrix.os == 'linux'
