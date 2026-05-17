@@ -62,6 +62,9 @@ The PHP merge suite covers these rollback classes:
   `merge-audit --records crash-recovery`, so review and branch UI surfaces can
   detect a blocked recovery state without attempting another merge or driver
   command first.
+- The WordPress branch UI and runtime router expose a restore action for pending
+  crash recovery, using `forkpress branch recover-crash --restore-target-db
+  --restore-files` instead of sending the request through WordPress.
 - Process exit after crash recovery restores a target DB or filesystem
   transaction but before recovery artifact cleanup leaves the artifact and
   rollback material retryable; a second recovery removes the artifact and

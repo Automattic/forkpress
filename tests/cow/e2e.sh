@@ -2053,13 +2053,55 @@ fi
 php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && (int)($data["pending"] ?? 0) >= 1 ? 0 : 1);' "$TMP/public-crash-recover.json"
 "$BIN" branch --work-dir "$WORK_DIR" merge-audit --records crash-recovery --format json > "$TMP/public-crash-merge-audit-crash-recovery.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); $records = is_array($data["crash_recovery"] ?? null) ? $data["crash_recovery"] : []; $ok = (($data["filters"]["records"] ?? null) === "crash-recovery"); foreach ($records as $record) { if (($record["checkpoint"] ?? null) === "target-db-commit" && ($record["source_branch"] ?? null) === "public-crash-merge" && ($record["target_branch"] ?? null) === "main" && is_array($record["target_db_snapshot"] ?? null)) { exit($ok ? 0 : 1); } } exit(1);' "$TMP/public-crash-merge-audit-crash-recovery.json"
+PUBLIC_CRASH_RUN_ID="$(php -r '$data = json_decode(file_get_contents($argv[1]), true); $records = is_array($data["crash_recovery"] ?? null) ? $data["crash_recovery"] : []; foreach ($records as $record) { if (($record["checkpoint"] ?? null) === "target-db-commit" && ($record["source_branch"] ?? null) === "public-crash-merge") { echo (int)($record["run_id"] ?? 0); exit; } } exit(1);' "$TMP/public-crash-merge-audit-crash-recovery.json")"
+if [ -z "$PUBLIC_CRASH_RUN_ID" ] || [ "$PUBLIC_CRASH_RUN_ID" = "0" ]; then
+  echo "public crash recovery audit did not expose a run id" >&2
+  cat "$TMP/public-crash-merge-audit-crash-recovery.json" >&2
+  exit 1
+fi
 if "$BIN" branch --work-dir "$WORK_DIR" merge public-crash-merge --into main > "$TMP/public-crash-blocked.out" 2>&1; then
   echo "public branch merge unexpectedly ignored pending crash recovery artifact" >&2
   exit 1
 fi
 grep -F "pending COW merge crash recovery artifact" "$TMP/public-crash-blocked.out" >/dev/null
-"$BIN" branch --work-dir "$WORK_DIR" recover-crash --restore-target-db --format json > "$TMP/public-crash-restore.json"
-php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && (int)($data["pending"] ?? 0) === 0 && (int)($data["restored"] ?? 0) >= 1 ? 0 : 1);' "$TMP/public-crash-restore.json"
+PUBLIC_CRASH_RESTORE_COOKIES="$TMP/public-crash-restore-cookies.txt"
+if ! branch_ui_nonce main restoreCrashNonce "$TMP/public-crash-restore-admin.html" "$PUBLIC_CRASH_RESTORE_COOKIES" > "$TMP/public-crash-restore-nonce.txt"; then
+  echo "failed to read WP UI crash recovery restore nonce" >&2
+  dump_if_exists "$TMP/main-restoreCrashNonce-login.html"
+  dump_if_exists "$TMP/public-crash-restore-admin.html"
+  "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+  exit 1
+fi
+PUBLIC_CRASH_RESTORE_NONCE="$(cat "$TMP/public-crash-restore-nonce.txt")"
+if ! PUBLIC_CRASH_RESTORE_HTTP="$(
+  curl -sS -o "$TMP/public-crash-restore.json" -w '%{http_code}' \
+    -b "$PUBLIC_CRASH_RESTORE_COOKIES" \
+    -H "Host: wp.localhost:$PORT" \
+    -H "Accept: application/json" \
+    -H "X-ForkPress-Async: 1" \
+    --data-urlencode "action=forkpress_branch_restore_crash" \
+    --data-urlencode "_wpnonce=$PUBLIC_CRASH_RESTORE_NONCE" \
+    --data-urlencode "run=$PUBLIC_CRASH_RUN_ID" \
+    "http://127.0.0.1:$PORT/wp-admin/admin-post.php"
+)"; then
+  echo "WP UI crash recovery restore request failed" >&2
+  dump_if_exists "$TMP/public-crash-restore.json"
+  "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+  exit 1
+fi
+if [ "$PUBLIC_CRASH_RESTORE_HTTP" != "200" ]; then
+  echo "WP UI crash recovery restore returned $PUBLIC_CRASH_RESTORE_HTTP" >&2
+  cat "$TMP/public-crash-restore.json" >&2
+  "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+  exit 1
+fi
+if grep -F "<!DOCTYPE html>" "$TMP/public-crash-restore.json" >/dev/null; then
+  echo "WP UI crash recovery restore reached WordPress HTML" >&2
+  cat "$TMP/public-crash-restore.json" >&2
+  "$BIN" logs --work-dir "$WORK_DIR" --file all -n 180 >&2 || true
+  exit 1
+fi
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $recovery = is_array($data["recovery"] ?? null) ? $data["recovery"] : []; exit(is_array($data) && ($data["success"] ?? null) === true && (int)($data["pending"] ?? -1) === 0 && (int)($data["restored"] ?? 0) >= 1 && (int)($recovery["pending"] ?? -1) === 0 ? 0 : 1);' "$TMP/public-crash-restore.json"
 "$BIN" branch --work-dir "$WORK_DIR" merge-audit --records crash-recovery --format json > "$TMP/public-crash-merge-audit-crash-recovery-cleared.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); $records = is_array($data["crash_recovery"] ?? null) ? $data["crash_recovery"] : []; exit(count($records) === 0 ? 0 : 1);' "$TMP/public-crash-merge-audit-crash-recovery-cleared.json"
 "$BIN" branch --work-dir "$WORK_DIR" merge public-crash-merge --into main > "$TMP/public-crash-retry.out"
