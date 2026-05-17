@@ -144,7 +144,7 @@ function forkpress_cow_acquire_request_lock(): bool {
 
 function forkpress_cow_is_admin_branch_action(string $path): bool {
     $action = $_REQUEST['action'] ?? '';
-    if (!is_string($action) || !in_array($action, ['forkpress_branch_create', 'forkpress_branch_merge', 'forkpress_branch_conflicts', 'forkpress_branch_revalidate_conflicts'], true)) {
+    if (!is_string($action) || !in_array($action, ['forkpress_branch_create', 'forkpress_branch_merge', 'forkpress_branch_conflicts', 'forkpress_branch_restore_crash', 'forkpress_branch_revalidate_conflicts'], true)) {
         return false;
     }
     if ($path === '/wp-admin/admin-post.php') {
@@ -554,6 +554,46 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
         $summary = forkpress_cow_branch_conflict_audit_summary($report, $run, $filters['filters']);
         $message = 'Loaded ' . $summary['recordCount'] . ' of ' . $summary['totalConflicts'] . ' conflict record' . ($summary['totalConflicts'] === 1 ? '' : 's') . ' for merge run ' . $run . '.';
         forkpress_cow_branch_finish_json(200, $current_url, true, $message, $summary);
+        return true;
+    }
+
+    if ($action === 'forkpress_branch_restore_crash') {
+        $run = forkpress_cow_branch_post_int('run');
+        if ($run === null) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'Choose a merge run to restore.');
+            return true;
+        }
+
+        [$code, $output] = forkpress_cow_branch_run_cli(['recover-crash', '--run', (string)$run, '--restore-target-db', '--restore-files', '--format', 'json']);
+        if ($code !== 0) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, $output ?: 'ForkPress could not restore pending crash recovery.');
+            return true;
+        }
+        $result = json_decode($output, true);
+        if (!is_array($result)) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'ForkPress returned invalid crash recovery restore JSON.');
+            return true;
+        }
+
+        $restored = max(0, (int)($result['restored'] ?? 0));
+        $pending = max(0, (int)($result['pending'] ?? 0));
+        $message = $restored > 0
+            ? 'Restored pending crash recovery for merge run ' . $run . '.'
+            : 'No pending crash recovery artifacts were restored for merge run ' . $run . '.';
+        forkpress_cow_branch_finish_json(
+            200,
+            $current_url,
+            true,
+            $message,
+            [
+                'type' => $pending > 0 ? 'warning' : 'notice',
+                'run' => $run,
+                'restored' => $restored,
+                'pending' => $pending,
+                'recovery' => $result,
+                'recoveryCommand' => 'forkpress branch recover-crash --run ' . $run . ' --restore-target-db --restore-files',
+            ]
+        );
         return true;
     }
 

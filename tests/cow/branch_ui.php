@@ -180,6 +180,9 @@ if ($action === 'forkpress_branch_merge') {
 if ($action === 'forkpress_branch_conflicts') {
     forkpress_handle_branch_conflicts();
 }
+if ($action === 'forkpress_branch_restore_crash') {
+    forkpress_handle_branch_restore_crash();
+}
 if ($action === 'forkpress_branch_revalidate_conflicts') {
     forkpress_handle_branch_revalidate_conflicts();
 }
@@ -452,6 +455,57 @@ assert_same(
     ['branch', '--work-dir', $work_dir, 'merge-audit', '--records', 'crash-recovery', '--run', '42', '--format', 'json'],
     'branch conflict audit only checks crash recovery when recovery is pending'
 );
+
+$restore_crash_output = json_encode([
+    'run_id' => 42,
+    'restored' => 1,
+    'pending' => 0,
+], JSON_UNESCAPED_SLASHES);
+$restore_crash = run_branch_ui_action(
+    ['action' => 'forkpress_branch_restore_crash', 'run' => '42'],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    ['FORKPRESS_TEST_CLI_OUTPUT' => $restore_crash_output]
+);
+$restore_crash_payload = decode_branch_ui_payload($restore_crash);
+assert_same($restore_crash_payload['success'] ?? null, true, 'branch crash restore returns JSON success');
+assert_same($restore_crash_payload['type'] ?? null, 'notice', 'branch crash restore returns notice type after complete recovery');
+assert_same($restore_crash_payload['restored'] ?? null, 1, 'branch crash restore exposes restored count');
+assert_same($restore_crash_payload['pending'] ?? null, 0, 'branch crash restore exposes pending count');
+assert_same(
+    $restore_crash_payload['recoveryCommand'] ?? null,
+    'forkpress branch recover-crash --run 42 --restore-target-db --restore-files',
+    'branch crash restore exposes exact restore command'
+);
+assert_same(
+    array_slice($restore_crash['argv'][0] ?? [], 1),
+    ['branch', '--work-dir', $work_dir, 'recover-crash', '--run', '42', '--restore-target-db', '--restore-files', '--format', 'json'],
+    'branch crash restore uses structured recover-crash command'
+);
+
+$invalid_restore_crash = run_branch_ui_action(
+    ['action' => 'forkpress_branch_restore_crash', 'run' => 'abc'],
+    ['main', 'feature']
+);
+$invalid_restore_crash_payload = decode_branch_ui_payload($invalid_restore_crash);
+assert_same($invalid_restore_crash_payload['success'] ?? null, false, 'branch crash restore rejects invalid run ids');
+assert_same($invalid_restore_crash_payload['message'] ?? null, 'Choose a merge run to restore.', 'branch crash restore explains invalid run ids');
+assert_same(count($invalid_restore_crash['argv']), 0, 'branch crash restore does not invoke CLI for invalid run ids');
+
+$invalid_restore_json = run_branch_ui_action(
+    ['action' => 'forkpress_branch_restore_crash', 'run' => '42'],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    ['FORKPRESS_TEST_CLI_OUTPUT' => 'not-json']
+);
+$invalid_restore_json_payload = decode_branch_ui_payload($invalid_restore_json);
+assert_same($invalid_restore_json_payload['success'] ?? null, false, 'branch crash restore rejects invalid CLI JSON');
+assert_same($invalid_restore_json_payload['message'] ?? null, 'ForkPress returned invalid crash recovery restore JSON.', 'branch crash restore explains invalid CLI JSON');
+assert_same(count($invalid_restore_json['argv']), 1, 'branch crash restore invokes CLI once before invalid JSON failure');
 
 $invalid_audit = run_branch_ui_action(
     ['action' => 'forkpress_branch_conflicts', 'run' => 'abc'],
@@ -775,6 +829,10 @@ assert_true(str_contains($switcher_html, 'forkpress-conflict-list'), 'branch swi
 assert_true(str_contains($switcher_html, 'function renderConflictAudit'), 'branch switcher renders conflict audit client handler');
 assert_true(str_contains($switcher_html, 'pending crash recovery'), 'branch switcher renders pending crash recovery state');
 assert_true(str_contains($switcher_html, 'payload.recoveryCommand'), 'branch switcher renders crash recovery command from audit payload');
+assert_true(str_contains($switcher_html, 'forkpress_branch_restore_crash'), 'branch switcher renders crash recovery restore action');
+assert_true(str_contains($switcher_html, 'nonce-forkpress_branch_restore_crash'), 'branch switcher renders crash recovery restore nonce');
+assert_true(str_contains($switcher_html, 'function fetchCrashRecoveryRestore'), 'branch switcher renders crash recovery restore client handler');
+assert_true(str_contains($switcher_html, 'Restore crash recovery'), 'branch switcher renders crash recovery restore button text');
 assert_true(str_contains($switcher_html, 'forkpress_branch_conflicts'), 'branch switcher renders conflict audit action');
 assert_true(str_contains($switcher_html, 'nonce-forkpress_branch_conflicts'), 'branch switcher renders conflict audit nonce');
 assert_true(str_contains($switcher_html, "fetchConflictAudit(payload.run, payload.message || '')"), 'branch switcher requests all conflicts after warning merges');
