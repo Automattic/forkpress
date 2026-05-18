@@ -15,6 +15,8 @@ For concrete plugin graph recipes, including WooCommerce HPOS-style orders,
 Gravity Forms-style field maps, ACF field definitions, Elementor widget JSON,
 Yoast indexables, and Events Calendar caches, see
 [Plugin Validator Recipes](./plugin-validator-recipes.md).
+For the current WordPress.org top-100 compatibility target, see
+[Top Plugin Support](./top-plugin-support.md).
 
 ## Contract
 
