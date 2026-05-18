@@ -2005,7 +2005,32 @@ function cow_merge_foreign_key_parent_insert_collision_violation(
 
         $source_parent = cow_merge_select_row_by_values($source, $parent_table, $parent_columns, $values);
         $target_parent = cow_merge_select_row_by_values($target, $parent_table, $parent_columns, $values);
-        if ($source_parent === null || $target_parent === null) {
+        if ($source_parent === null) {
+            continue;
+        }
+        if ($target_parent === null) {
+            $parent_pk_cols = cow_merge_pk_cols($target, $parent_table);
+            if (!$parent_pk_cols) {
+                $parent_pk_cols = cow_merge_pk_cols($source, $parent_table);
+            }
+            $exclude_identity = count($parent_columns) === count($values)
+                ? array_combine($parent_columns, $values)
+                : null;
+            $parent_unique_collision = cow_merge_find_unique_collision(
+                $target,
+                $parent_table,
+                $source_parent,
+                false,
+                is_array($exclude_identity) ? $exclude_identity : null,
+                $parent_pk_cols
+            );
+            if ($parent_unique_collision !== null) {
+                return 'source row references ' . $parent_table . '(' . implode(', ', $parent_columns) . ')=' .
+                    cow_merge_plain_json($values) .
+                    ' from ' . $table . '(' . implode(', ', $from_columns) . ')' .
+                    ' whose source parent row collides with target unique index ' . $parent_unique_collision['index'] .
+                    '; review the parent collision before applying the child row';
+            }
             continue;
         }
 

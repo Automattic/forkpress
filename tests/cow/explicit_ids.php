@@ -125,6 +125,22 @@ function create_explicit_postmeta_unique_collision_db(string $path): void {
     $db->close();
 }
 
+function create_explicit_plugin_logical_identity_collision_db(string $path): void {
+    $db = open_db($path);
+    $db->exec('CREATE TABLE plugin_parent (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        external_key TEXT NOT NULL UNIQUE,
+        label TEXT NOT NULL
+    )');
+    $db->exec('CREATE TABLE plugin_child (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        parent_id INTEGER NOT NULL REFERENCES plugin_parent(id),
+        payload TEXT NOT NULL
+    )');
+    $db->exec("INSERT INTO plugin_parent (id, external_key, label) VALUES (1, 'base-key', 'base plugin parent')");
+    $db->close();
+}
+
 function create_explicit_term_graph_db(string $path): void {
     $db = open_db($path);
     $db->exec('CREATE TABLE wp_posts (ID INTEGER PRIMARY KEY AUTOINCREMENT, post_title TEXT NOT NULL, post_content TEXT NOT NULL, post_status TEXT NOT NULL)');
@@ -639,6 +655,52 @@ try {
     assert_true(
         (int)scalar($postmeta_collision_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-explicit-postmeta-collision' AND d.table_name = 'wp_postmeta' AND d.decision = 'target-wins' AND d.reason LIKE '%collides with target unique index%' AND d.reason LIKE '%wp_posts.ID%'") >= 1,
         'postmeta conflict explains that its explicit parent is held by a unique collision'
+    );
+
+    $plugin_identity_base = $tmp . '/plugin-identity-base.sqlite';
+    $plugin_identity_source = $tmp . '/plugin-identity-source.sqlite';
+    $plugin_identity_target = $tmp . '/plugin-identity-target.sqlite';
+    $plugin_identity_metadata = $tmp . '/.forkpress/cow/merge/explicit-plugin-identity-collision-metadata.sqlite';
+    create_explicit_plugin_logical_identity_collision_db($plugin_identity_base);
+    copy($plugin_identity_base, $plugin_identity_source);
+    copy($plugin_identity_base, $plugin_identity_target);
+    cow_merge_allocate_autoincrement_bands($plugin_identity_source, $plugin_identity_metadata, 'feature-explicit-plugin-identity');
+    $plugin_parent_id = (int)scalar($plugin_identity_metadata, "SELECT band_start FROM merge_autoincrement_bands WHERE branch_name = 'feature-explicit-plugin-identity' AND table_name = 'plugin_parent'");
+
+    $plugin_identity_source_db = open_db($plugin_identity_source);
+    $plugin_identity_source_db->exec("INSERT INTO plugin_parent (id, external_key, label) VALUES ($plugin_parent_id, 'shared-plugin-key', 'source plugin parent')");
+    $plugin_identity_source_db->exec("INSERT INTO plugin_child (parent_id, payload) VALUES ($plugin_parent_id, 'source child must wait for parent')");
+    $plugin_identity_source_db->close();
+
+    $plugin_identity_target_db = open_db($plugin_identity_target);
+    $plugin_identity_target_db->exec("INSERT INTO plugin_parent (external_key, label) VALUES ('shared-plugin-key', 'target plugin parent')");
+    $plugin_identity_target_db->close();
+
+    $plugin_identity_result = cow_merge_databases($plugin_identity_base, $plugin_identity_source, $plugin_identity_target, $plugin_identity_metadata, 'feature-explicit-plugin-identity', 'main');
+    assert_same($plugin_identity_result['status'], 'completed_with_conflicts', 'plugin logical-identity parent collisions keep dependent children review-held');
+    assert_same(
+        (int)scalar($plugin_identity_target, "SELECT COUNT(*) FROM plugin_parent WHERE id = $plugin_parent_id"),
+        0,
+        'plugin parent with colliding logical identity is not applied automatically'
+    );
+    assert_same(
+        (int)scalar($plugin_identity_target, "SELECT COUNT(*) FROM plugin_child WHERE parent_id = $plugin_parent_id"),
+        0,
+        'plugin child behind a colliding logical-identity parent is not applied as an orphan'
+    );
+    assert_same(
+        (int)scalar($plugin_identity_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-explicit-plugin-identity' AND c.table_name = 'plugin_parent' AND c.conflict_type = 'row-unique-collision'"),
+        1,
+        'plugin logical-identity parent collision records a unique collision'
+    );
+    assert_same(
+        (int)scalar($plugin_identity_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-explicit-plugin-identity' AND c.table_name = 'plugin_child' AND c.conflict_type = 'row-target-constraint'"),
+        1,
+        'plugin child behind a colliding logical-identity parent records a review conflict'
+    );
+    assert_true(
+        str_contains((string)scalar($plugin_identity_metadata, "SELECT reason FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-explicit-plugin-identity' AND d.table_name = 'plugin_child' AND d.decision = 'target-wins' ORDER BY d.id DESC LIMIT 1"), 'collides with target unique index'),
+        'plugin child conflict explains that its parent is held by a target logical-identity collision'
     );
 
     $term_graph_base = $tmp . '/term-graph-base.sqlite';
