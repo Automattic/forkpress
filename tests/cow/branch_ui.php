@@ -145,6 +145,7 @@ function wp_unslash($value) { return $value; }
 function sanitize_text_field($value) { return trim((string) $value); }
 function esc_attr($value) { return htmlspecialchars((string) $value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'); }
 function esc_html($value) { return htmlspecialchars((string) $value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'); }
+function esc_js($value) { return addslashes((string) $value); }
 function get_option($name, $default = false) {
     if ($name === 'active_plugins') {
         $plugins = json_decode((string)getenv('FORKPRESS_TEST_ACTIVE_PLUGINS'), true);
@@ -1192,6 +1193,11 @@ assert_true(str_contains($admin_page_html, 'name="from"'), 'branch manager admin
 assert_true(str_contains($admin_page_html, 'name="action" value="forkpress_branch_merge"'), 'branch manager admin page renders merge form action');
 assert_true(str_contains($admin_page_html, 'name="source"'), 'branch manager admin page renders merge source selector');
 assert_true(str_contains($admin_page_html, 'name="target"'), 'branch manager admin page renders merge target selector');
+assert_true(str_contains($admin_page_html, 'id="forkpress-branch-history-load"'), 'branch manager admin page renders merge history button');
+assert_true(str_contains($admin_page_html, 'forkpress_branch_history'), 'branch manager admin page renders merge history action');
+assert_true(str_contains($admin_page_html, 'nonce-forkpress_branch_history'), 'branch manager admin page renders merge history nonce');
+assert_true(str_contains($admin_page_html, 'forkpress-branch-history-list'), 'branch manager admin page renders merge history list target');
+assert_true(str_contains($admin_page_html, "source + ' -> ' + target"), 'branch manager admin page renders source-to-target history rows');
 assert_same($admin_page_menus[0]['menu_slug'] ?? null, 'forkpress-branches', 'branch manager registers a wp-admin menu page');
 
 $forbidden = run_branch_ui_action(

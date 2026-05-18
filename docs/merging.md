@@ -30,9 +30,10 @@ forkpress branch history
 forkpress branch tree --format json
 ```
 
-In wp-admin, use the ForkPress branch switcher and choose **Show merge
-history** to load the same source-to-target run list. Runs with conflicts can
-jump directly into the conflict review queue.
+In wp-admin, use the ForkPress branch manager page or the branch switcher and
+choose **Show merge history** to load the same source-to-target run list. Runs
+with conflicts can jump directly into the conflict review queue from the
+switcher.
 
 Show recent runs, decisions, conflicts, and resolutions:
 
