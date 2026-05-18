@@ -315,6 +315,50 @@ function create_acf_validator_db(string $path): void {
     $db->close();
 }
 
+function create_elementor_validator_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_title TEXT NOT NULL DEFAULT '',
+        post_content TEXT NOT NULL DEFAULT '',
+        post_status TEXT NOT NULL DEFAULT 'publish',
+        post_type TEXT NOT NULL DEFAULT 'post',
+        post_name TEXT NOT NULL DEFAULT '',
+        post_parent INTEGER NOT NULL DEFAULT 0,
+        post_mime_type TEXT NOT NULL DEFAULT ''
+    )");
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, post_parent, post_mime_type) VALUES
+        (80, 'Elementor Landing Page', '', 'publish', 'page', 'elementor-landing-page', 0, ''),
+        (81, 'Hero Image', '', 'inherit', 'attachment', 'hero-image', 80, 'image/jpeg')");
+    $elementor_data = json_encode([
+        [
+            'id' => 'section-1',
+            'elType' => 'section',
+            'elements' => [
+                [
+                    'id' => 'image-widget-1',
+                    'elType' => 'widget',
+                    'widgetType' => 'image',
+                    'settings' => [
+                        'title' => 'Base hero',
+                        'image' => [
+                            'id' => 81,
+                            'url' => 'http://example.test/wp-content/uploads/2026/05/hero.jpg',
+                        ],
+                    ],
+                ],
+            ],
+        ],
+    ], JSON_UNESCAPED_SLASHES);
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES
+        (82, 81, '_wp_attached_file', '2026/05/hero.jpg'),
+        (83, 80, '_elementor_data', :elementor_data)");
+    $stmt->bindValue(':elementor_data', $elementor_data, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+}
+
 function create_yoast_indexable_validator_db(string $path): void {
     $db = open_db($path);
     $db->exec("CREATE TABLE wp_posts (
@@ -3250,6 +3294,195 @@ PHP);
     $acf_payload = cow_merge_decode_payload_json((string)($acf_audit['conflicts'][0]['chosen_payload'] ?? ''), 'ACF field-map validator payload');
     assert_same($acf_payload['object'] ?? null, 'post:60:field:field_cta_text', 'ACF audit identifies the post field reference');
     assert_same($acf_payload['candidate']['value'] ?? null, 'Target CTA copy', 'ACF audit includes the preserved target value edit');
+
+    $elementor_base_root = $tmp . '/elementor-base';
+    $elementor_source_root = $tmp . '/elementor-source';
+    $elementor_target_root = $tmp . '/elementor-target';
+    $elementor_base = $elementor_base_root . '/wp-content/database/.ht.sqlite';
+    $elementor_source = $elementor_source_root . '/wp-content/database/.ht.sqlite';
+    $elementor_target = $elementor_target_root . '/wp-content/database/.ht.sqlite';
+    $elementor_metadata = $tmp . '/.forkpress/cow/merge/plugin-elementor-validator-metadata.sqlite';
+    $elementor_file_base = $tmp . '/.forkpress/cow/merge/file-bases/plugin-elementor-validator.json';
+
+    mkdir($elementor_base_root . '/wp-content/database', 0777, true);
+    create_elementor_validator_db($elementor_base);
+    write_test_file($elementor_base_root . '/wp-content/uploads/2026/05/hero.jpg', 'base hero image bytes');
+    write_test_file($elementor_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$target_root = rtrim((string)getenv('FORKPRESS_MERGE_TARGET_ROOT'), '/');
+$findings = [];
+
+function forkpress_elementor_collect_image_refs(mixed $node, array &$refs, int $post_id, int $meta_id): void {
+    if (!is_array($node)) {
+        return;
+    }
+    if (($node['widgetType'] ?? null) === 'image' && is_array($node['settings']['image'] ?? null)) {
+        $image = $node['settings']['image'];
+        $attachment_id = (int)($image['id'] ?? 0);
+        if ($attachment_id > 0) {
+            $refs[] = [
+                'post_id' => $post_id,
+                'meta_id' => $meta_id,
+                'widget_id' => (string)($node['id'] ?? ''),
+                'attachment_id' => $attachment_id,
+                'title' => (string)($node['settings']['title'] ?? ''),
+                'url' => (string)($image['url'] ?? ''),
+            ];
+        }
+    }
+    foreach ($node as $value) {
+        forkpress_elementor_collect_image_refs($value, $refs, $post_id, $meta_id);
+    }
+}
+
+$rows = $db->query("SELECT meta_id, post_id, meta_value FROM wp_postmeta WHERE meta_key = '_elementor_data' ORDER BY meta_id");
+while ($row = $rows->fetchArray(SQLITE3_ASSOC)) {
+    $payload = json_decode((string)$row['meta_value'], true);
+    if (!is_array($payload)) {
+        continue;
+    }
+    $refs = [];
+    forkpress_elementor_collect_image_refs($payload, $refs, (int)$row['post_id'], (int)$row['meta_id']);
+    foreach ($refs as $ref) {
+        $attachment_id = (int)$ref['attachment_id'];
+        $attachment_exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $attachment_id AND post_type = 'attachment'");
+        $attached_file = null;
+        $file_exists = false;
+        $file_meta = $db->querySingle("SELECT meta_value FROM wp_postmeta WHERE post_id = $attachment_id AND meta_key = '_wp_attached_file' ORDER BY meta_id LIMIT 1");
+        if (is_string($file_meta) && $file_meta !== '') {
+            $attached_file = $file_meta;
+            $normalized = str_replace('\\', '/', $attached_file);
+            $safe = !str_starts_with($normalized, '/') &&
+                !str_contains($attached_file, '\\') &&
+                !in_array('..', explode('/', $normalized), true) &&
+                preg_match('/^[A-Za-z][A-Za-z0-9+.-]*:\/\//', $normalized) !== 1 &&
+                preg_match('/^[A-Za-z]:\//', $normalized) !== 1;
+            $file_exists = $safe && is_file($target_root . '/wp-content/uploads/' . $normalized);
+        }
+        if ($attachment_exists === 1 && $file_exists) {
+            continue;
+        }
+        $findings[] = [
+            'plugin' => 'elementor',
+            'object' => 'post:' . (int)$ref['post_id'] . ':widget:' . $ref['widget_id'] . ':attachment:' . $attachment_id,
+            'reason' => 'Elementor widget JSON references an attachment row or upload file that no longer exists after merge',
+            'type' => 'plugin-elementor-missing-widget-attachment',
+            'tables' => ['wp_posts', 'wp_postmeta'],
+            'paths' => $attached_file === null ? [] : ['wp-content/uploads/' . str_replace('\\', '/', $attached_file)],
+            'validator' => 'elementor-widget-media@forkpress-test',
+            'severity' => 'error',
+            'logical_identity' => [
+                'plugin' => 'elementor',
+                'kind' => 'widget_attachment',
+                'post_id' => (int)$ref['post_id'],
+                'meta_id' => (int)$ref['meta_id'],
+                'widget_id' => $ref['widget_id'],
+                'attachment_id' => $attachment_id,
+            ],
+            'candidate' => [
+                'post_id' => (int)$ref['post_id'],
+                'meta_id' => (int)$ref['meta_id'],
+                'widget_id' => $ref['widget_id'],
+                'title' => $ref['title'],
+                'url' => $ref['url'],
+                'attachment_id' => $attachment_id,
+                'attachment_exists' => $attachment_exists,
+                'attached_file' => $attached_file,
+                'upload_file_exists' => $file_exists,
+            ],
+        ];
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+
+    copy_tree_for_test($elementor_base_root, $elementor_source_root);
+    copy_tree_for_test($elementor_base_root, $elementor_target_root);
+    cow_merge_capture_file_base($elementor_base_root, $elementor_file_base);
+    cow_merge_allocate_autoincrement_bands($elementor_source, $elementor_metadata, 'feature-plugin-elementor-source');
+    cow_merge_allocate_autoincrement_bands($elementor_target, $elementor_metadata, 'main');
+
+    $db = open_db($elementor_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID = 81');
+    $db->exec('DELETE FROM wp_postmeta WHERE post_id = 81');
+    $db->close();
+    unlink($elementor_source_root . '/wp-content/uploads/2026/05/hero.jpg');
+
+    $elementor_target_data = json_encode([
+        [
+            'id' => 'section-1',
+            'elType' => 'section',
+            'elements' => [
+                [
+                    'id' => 'image-widget-1',
+                    'elType' => 'widget',
+                    'widgetType' => 'image',
+                    'settings' => [
+                        'title' => 'Target-edited hero',
+                        'image' => [
+                            'id' => 81,
+                            'url' => 'http://example.test/wp-content/uploads/2026/05/hero.jpg',
+                        ],
+                    ],
+                ],
+            ],
+        ],
+    ], JSON_UNESCAPED_SLASHES);
+    $db = open_db($elementor_target);
+    $stmt = $db->prepare("UPDATE wp_postmeta SET meta_value = :elementor_data WHERE meta_id = 83");
+    $stmt->bindValue(':elementor_data', $elementor_target_data, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+
+    $elementor_result = cow_merge_branch_state(
+        $elementor_base,
+        $elementor_source,
+        $elementor_target,
+        $elementor_metadata,
+        'feature-plugin-elementor-source',
+        'main',
+        $elementor_file_base,
+        $elementor_source_root,
+        $elementor_target_root
+    );
+
+    assert_same($elementor_result['status'], 'completed_with_conflicts', 'Elementor validator holds widget JSON pointing at deleted media for review');
+    assert_same((int)($elementor_result['plugin_validators'] ?? 0), 1, 'Elementor widget-media validator is discovered from mu-plugins during merge');
+    assert_same((int)($elementor_result['plugin_validator_conflicts'] ?? 0), 1, 'Elementor validator records the stale widget attachment reference');
+    assert_same((int)scalar($elementor_target, "SELECT COUNT(*) FROM wp_posts WHERE ID = 81 AND post_type = 'attachment'"), 0, 'Elementor validator leaves the source attachment deletion staged for review');
+    assert_same((int)scalar($elementor_target, "SELECT COUNT(*) FROM wp_postmeta WHERE post_id = 81 AND meta_key = '_wp_attached_file'"), 0, 'Elementor validator leaves the source attachment metadata deletion staged for review');
+    assert_true(!is_file($elementor_target_root . '/wp-content/uploads/2026/05/hero.jpg'), 'Elementor validator leaves the source upload file deletion staged for review');
+    $merged_elementor_data = json_decode((string)scalar($elementor_target, "SELECT meta_value FROM wp_postmeta WHERE meta_id = 83"), true);
+    assert_same($merged_elementor_data[0]['elements'][0]['settings']['title'] ?? null, 'Target-edited hero', 'Elementor validator preserves target widget JSON edits for review');
+    assert_same($merged_elementor_data[0]['elements'][0]['settings']['image']['id'] ?? null, 81, 'Elementor validator keeps the stale widget attachment ID visible');
+
+    $elementor_logical_identity = json_encode([
+        'plugin' => 'elementor',
+        'kind' => 'widget_attachment',
+        'post_id' => 80,
+        'meta_id' => 83,
+        'widget_id' => 'image-widget-1',
+        'attachment_id' => 81,
+    ], JSON_UNESCAPED_SLASHES);
+    $elementor_audit = cow_merge_audit_report($elementor_metadata, (int)$elementor_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin' => 'elementor',
+        'conflict_type' => 'plugin-elementor-missing-widget-attachment',
+        'plugin_logical_identity' => $elementor_logical_identity,
+    ]);
+    assert_same(count($elementor_audit['conflicts']), 1, 'Elementor audit filters stale widget attachment findings by plugin, conflict type, and logical identity');
+    assert_same($elementor_audit['conflicts'][0]['plugin'] ?? null, 'elementor', 'Elementor audit exposes the plugin as a first-class field');
+    assert_same($elementor_audit['conflicts'][0]['plugin_logical_identity']['attachment_id'] ?? null, 81, 'Elementor audit exposes the widget attachment identity');
+    $elementor_payload = cow_merge_decode_payload_json((string)($elementor_audit['conflicts'][0]['chosen_payload'] ?? ''), 'Elementor widget-media validator payload');
+    assert_same($elementor_payload['object'] ?? null, 'post:80:widget:image-widget-1:attachment:81', 'Elementor audit identifies the stale widget attachment reference');
+    assert_same($elementor_payload['candidate']['title'] ?? null, 'Target-edited hero', 'Elementor audit includes the preserved widget edit');
+    assert_same($elementor_payload['candidate']['attachment_exists'] ?? null, 0, 'Elementor audit records the missing attachment row evidence');
+    assert_same($elementor_payload['candidate']['upload_file_exists'] ?? null, false, 'Elementor audit records the missing upload file evidence');
 
     $yoast_base_root = $tmp . '/yoast-base';
     $yoast_source_root = $tmp . '/yoast-source';
