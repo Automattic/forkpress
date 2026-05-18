@@ -2602,6 +2602,45 @@ while ($row = $addresses->fetchArray(SQLITE3_ASSOC)) {
         'first_name' => (string)$row['first_name'],
     ]);
 }
+$address_groups = $db->query('SELECT order_id, address_type, COUNT(*) AS address_count FROM wp_wc_order_addresses GROUP BY order_id, address_type HAVING COUNT(*) > 1 ORDER BY order_id, address_type');
+while ($row = $address_groups->fetchArray(SQLITE3_ASSOC)) {
+    $order_id = (int)$row['order_id'];
+    $order_exists = (int)$db->querySingle('SELECT COUNT(*) FROM wp_wc_orders WHERE id = ' . $order_id);
+    if ($order_exists !== 1) {
+        continue;
+    }
+    $address_type = (string)$row['address_type'];
+    $escaped_type = SQLite3::escapeString($address_type);
+    $details = [];
+    $detail_rows = $db->query("SELECT id, first_name FROM wp_wc_order_addresses WHERE order_id = " . $order_id . " AND address_type = '" . $escaped_type . "' ORDER BY id");
+    while ($detail = $detail_rows->fetchArray(SQLITE3_ASSOC)) {
+        $details[] = [
+            'address_id' => (int)$detail['id'],
+            'first_name' => (string)$detail['first_name'],
+        ];
+    }
+    $findings[] = [
+        'plugin' => 'woocommerce',
+        'object' => 'order-address-type:' . $order_id . ':' . $address_type,
+        'reason' => 'WooCommerce HPOS has multiple addresses with the same type for one order',
+        'type' => 'plugin-woocommerce-hpos-duplicate-address-type',
+        'tables' => ['wp_wc_orders', 'wp_wc_order_addresses'],
+        'validator' => 'woocommerce-hpos@forkpress-test',
+        'severity' => 'error',
+        'logical_identity' => [
+            'plugin' => 'woocommerce',
+            'kind' => 'order_address_type',
+            'order_id' => $order_id,
+            'address_type' => $address_type,
+        ],
+        'candidate' => [
+            'order_id' => $order_id,
+            'address_type' => $address_type,
+            'address_count' => (int)$row['address_count'],
+            'addresses' => $details,
+        ],
+    ];
+}
 $order_metas = $db->query('SELECT id, order_id, meta_key, meta_value FROM wp_wc_orders_meta ORDER BY id');
 while ($row = $order_metas->fetchArray(SQLITE3_ASSOC)) {
     $check_order((int)$row['order_id'], 'order-meta:' . (int)$row['id'], ['wp_wc_orders', 'wp_wc_orders_meta'], [
@@ -2787,6 +2826,66 @@ PHP);
         }
     }
     assert_same($woocommerce_order_group_count, 5, 'WooCommerce HPOS audit groups stale graph findings by logical order identity');
+
+    $woocommerce_address_base_root = $tmp . '/woocommerce-address-type-base';
+    $woocommerce_address_source_root = $tmp . '/woocommerce-address-type-source';
+    $woocommerce_address_target_root = $tmp . '/woocommerce-address-type-target';
+    $woocommerce_address_base = $woocommerce_address_base_root . '/wp-content/database/.ht.sqlite';
+    $woocommerce_address_source = $woocommerce_address_source_root . '/wp-content/database/.ht.sqlite';
+    $woocommerce_address_target = $woocommerce_address_target_root . '/wp-content/database/.ht.sqlite';
+    $woocommerce_address_metadata = $tmp . '/.forkpress/cow/merge/plugin-woocommerce-address-type-validator-metadata.sqlite';
+    $woocommerce_address_file_base = $tmp . '/.forkpress/cow/merge/file-bases/plugin-woocommerce-address-type-validator.json';
+
+    copy_tree_for_test($woocommerce_base_root, $woocommerce_address_base_root);
+    copy_tree_for_test($woocommerce_address_base_root, $woocommerce_address_source_root);
+    copy_tree_for_test($woocommerce_address_base_root, $woocommerce_address_target_root);
+    cow_merge_capture_file_base($woocommerce_address_base_root, $woocommerce_address_file_base);
+    cow_merge_allocate_autoincrement_bands($woocommerce_address_source, $woocommerce_address_metadata, 'feature-plugin-woocommerce-address-source');
+    cow_merge_allocate_autoincrement_bands($woocommerce_address_target, $woocommerce_address_metadata, 'main');
+
+    $db = open_db($woocommerce_address_source);
+    $db->exec("INSERT INTO wp_wc_order_addresses (order_id, address_type, first_name) VALUES (20, 'billing', 'Source billing duplicate')");
+    $db->close();
+
+    $db = open_db($woocommerce_address_target);
+    $db->exec("INSERT INTO wp_wc_order_addresses (order_id, address_type, first_name) VALUES (20, 'billing', 'Target billing duplicate')");
+    $db->close();
+
+    $woocommerce_address_result = cow_merge_branch_state(
+        $woocommerce_address_base,
+        $woocommerce_address_source,
+        $woocommerce_address_target,
+        $woocommerce_address_metadata,
+        'feature-plugin-woocommerce-address-source',
+        'main',
+        $woocommerce_address_file_base,
+        $woocommerce_address_source_root,
+        $woocommerce_address_target_root
+    );
+
+    assert_same($woocommerce_address_result['status'], 'completed_with_conflicts', 'WooCommerce HPOS validator holds duplicate address types for review');
+    assert_same((int)($woocommerce_address_result['plugin_validators'] ?? 0), 1, 'WooCommerce duplicate-address validator is discovered from mu-plugins during merge');
+    assert_same((int)($woocommerce_address_result['plugin_validator_conflicts'] ?? 0), 1, 'WooCommerce duplicate-address validator records one conflict for the duplicated order address type');
+    assert_same((int)scalar($woocommerce_address_target, "SELECT COUNT(*) FROM wp_wc_order_addresses WHERE order_id = 20 AND address_type = 'billing'"), 3, 'WooCommerce duplicate-address validator leaves every branch address candidate visible for review');
+
+    $woocommerce_address_audit = cow_merge_audit_report($woocommerce_address_metadata, (int)$woocommerce_address_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin' => 'woocommerce',
+        'conflict_type' => 'plugin-woocommerce-hpos-duplicate-address-type',
+        'plugin_logical_identity' => json_encode(['plugin' => 'woocommerce', 'kind' => 'order_address_type', 'order_id' => 20, 'address_type' => 'billing'], JSON_UNESCAPED_SLASHES),
+    ]);
+    assert_same(count($woocommerce_address_audit['conflicts']), 1, 'WooCommerce HPOS audit filters duplicate address type findings by logical order address identity');
+    $woocommerce_address_payload = cow_merge_decode_payload_json((string)($woocommerce_address_audit['conflicts'][0]['chosen_payload'] ?? ''), 'WooCommerce duplicate address type validator payload');
+    assert_same($woocommerce_address_payload['object'] ?? null, 'order-address-type:20:billing', 'WooCommerce duplicate-address audit identifies the duplicated order address type');
+    assert_same($woocommerce_address_payload['candidate']['address_count'] ?? null, 3, 'WooCommerce duplicate-address audit includes the duplicate address count');
+    $woocommerce_address_names = array_map(fn($address) => (string)($address['first_name'] ?? ''), $woocommerce_address_payload['candidate']['addresses'] ?? []);
+    sort($woocommerce_address_names);
+    assert_same(
+        $woocommerce_address_names,
+        ['Base', 'Source billing duplicate', 'Target billing duplicate'],
+        'WooCommerce duplicate-address audit includes each branch-created address candidate'
+    );
 
     $woocommerce_product_base_root = $tmp . '/woocommerce-product-base';
     $woocommerce_product_source_root = $tmp . '/woocommerce-product-source';
