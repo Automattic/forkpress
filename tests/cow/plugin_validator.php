@@ -1331,6 +1331,44 @@ PHP);
         $json_conflict_id,
         'plugin validator replacement evidence links to the prior plugin conflict'
     );
+    $replacement_no_revalidation_count = (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE choice = 'plugin-driver'");
+    $replacement_no_revalidation_record = run_merge_cli([
+        'record-plugin-driver-resolution',
+        '--metadata-db', $metadata,
+        '--id', (string)$replacement_conflict_id,
+        '--driver', 'forkpress-plugin-graph-driver@needs-revalidation',
+        '--result-json', json_encode(['replacement' => 'without revalidation'], JSON_UNESCAPED_SLASHES),
+        '--format', 'json',
+    ]);
+    assert_true($replacement_no_revalidation_record['status'] !== 0, 'plugin driver recorder rejects replacement evidence before review revalidation');
+    assert_true(str_contains($replacement_no_revalidation_record['output'], 'requires merge-audit --revalidate'), 'plugin driver recorder explains missing replacement revalidation');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE choice = 'plugin-driver'"),
+        $replacement_no_revalidation_count,
+        'unrevalidated plugin replacement records no driver resolution'
+    );
+    $replacement_no_revalidation_marker = $target_root . '/wp-content/uploads/unrevalidated-plugin-driver-ran.dat';
+    $replacement_no_revalidation_driver_path = $tmp . '/forkpress-plugin-graph-driver-unrevalidated.php';
+    write_test_file($replacement_no_revalidation_driver_path, <<<'PHP'
+<?php
+$target_root = rtrim((string)getenv('FORKPRESS_MERGE_TARGET_ROOT'), '/');
+@mkdir($target_root . '/wp-content/uploads', 0777, true);
+file_put_contents($target_root . '/wp-content/uploads/unrevalidated-plugin-driver-ran.dat', 'unrevalidated driver ran');
+echo json_encode([
+    'status' => 'applied',
+    'result' => ['unexpected' => 'unrevalidated driver ran'],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $replacement_no_revalidation_run = run_merge_cli([
+        'run-plugin-driver',
+        '--metadata-db', $metadata,
+        '--id', (string)$replacement_conflict_id,
+        '--driver', $replacement_no_revalidation_driver_path,
+        '--format', 'json',
+    ]);
+    assert_true($replacement_no_revalidation_run['status'] !== 0, 'plugin driver runner rejects replacement evidence before review revalidation');
+    assert_true(str_contains($replacement_no_revalidation_run['output'], 'requires merge-audit --revalidate'), 'plugin driver runner explains missing replacement revalidation');
+    assert_true(!is_file($replacement_no_revalidation_marker), 'plugin driver runner does not execute unrevalidated replacement repairs');
     $plugin_driver_resolution_count_before_stale = (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE choice = 'plugin-driver'");
     $stale_driver_record = run_merge_cli([
         'record-plugin-driver-resolution',
@@ -1407,17 +1445,26 @@ PHP);
     assert_same($reviewed_json_conflicts[0]['stale_status'] ?? null, 'stale', 'plugin audit marks changed validator evidence as stale');
     assert_same((int)($reviewed_json_conflicts[0]['replacement_conflict_id'] ?? 0), $replacement_conflict_id, 'plugin audit exposes the live replacement conflict id');
     assert_true(str_contains((string)($reviewed_json_conflicts[0]['current_target_preview'] ?? ''), '123456'), 'plugin audit exposes replacement validator evidence');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $replacement_conflict_id, 'target', false, 'generic target repair should stay blocked', 'cow-test', true),
+        'plugin validator conflicts cannot be resolved by generic merge-resolve',
+        'generic source/target resolution remains blocked for revalidated plugin replacement conflicts'
+    );
     $plugin_event_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 4, [
         'scope' => 'plugin',
         'records' => 'conflict-events',
     ]);
-    assert_same($plugin_event_audit['conflict_events'][0]['event_type'], 'revalidation-required', 'plugin replacement revalidation is visible in the conflict event stream');
-    assert_same((int)$plugin_event_audit['conflict_events'][0]['conflict_id'], $json_conflict_id, 'plugin revalidation event belongs to the reviewed plugin conflict');
-    assert_same($plugin_event_audit['conflict_events'][0]['related_record_type'], 'revalidation', 'plugin revalidation event links to the revalidation record');
-    assert_same((int)$plugin_event_audit['conflict_events'][0]['related_record_id'], $plugin_revalidation_id, 'plugin revalidation event exposes the revalidation id');
-    assert_same($plugin_event_audit['conflict_events'][0]['lifecycle_state'], 'needs-action', 'plugin revalidation event records the needs-action lifecycle state');
-    assert_same($plugin_event_audit['conflict_events'][0]['plugin'] ?? null, 'forkpress-plugin-graph', 'plugin conflict events expose validator plugin metadata');
-    assert_same($plugin_event_audit['conflict_events'][0]['plugin_object'] ?? null, 'child:' . $child_id, 'plugin conflict events expose validator object metadata');
+    $plugin_revalidation_events = array_values(array_filter(
+        $plugin_event_audit['conflict_events'],
+        fn($event) => ($event['event_type'] ?? null) === 'revalidation-required' && (int)($event['conflict_id'] ?? 0) === $json_conflict_id
+    ));
+    assert_same(count($plugin_revalidation_events), 1, 'plugin replacement revalidation is visible in the conflict event stream');
+    assert_same((int)$plugin_revalidation_events[0]['conflict_id'], $json_conflict_id, 'plugin revalidation event belongs to the reviewed plugin conflict');
+    assert_same($plugin_revalidation_events[0]['related_record_type'], 'revalidation', 'plugin revalidation event links to the revalidation record');
+    assert_same((int)$plugin_revalidation_events[0]['related_record_id'], $plugin_revalidation_id, 'plugin revalidation event exposes the revalidation id');
+    assert_same($plugin_revalidation_events[0]['lifecycle_state'], 'needs-action', 'plugin revalidation event records the needs-action lifecycle state');
+    assert_same($plugin_revalidation_events[0]['plugin'] ?? null, 'forkpress-plugin-graph', 'plugin conflict events expose validator plugin metadata');
+    assert_same($plugin_revalidation_events[0]['plugin_object'] ?? null, 'child:' . $child_id, 'plugin conflict events expose validator object metadata');
     $plugin_filtered_event_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 4, [
         'records' => 'conflict-events',
         'plugin_object' => 'child:' . $child_id,
@@ -1451,9 +1498,252 @@ PHP);
     }
     assert_true(($plugin_event_group_counts['child:' . $child_id] ?? 0) >= 1, 'plugin audit can group conflict events by validator object');
 
+    $replacement_driver_path = $tmp . '/forkpress-plugin-graph-driver-replacement.php';
+    write_test_file($replacement_driver_path, <<<'PHP'
+<?php
+$target_db = (string)getenv('FORKPRESS_MERGE_TARGET_DB');
+$child_id = (int)str_replace('child:', '', (string)getenv('FORKPRESS_MERGE_PLUGIN_OBJECT'));
+$db = new SQLite3($target_db);
+$row = $db->querySingle('SELECT parent_id FROM plugin_graph_child WHERE child_id = ' . $child_id, true);
+$parent_id = is_array($row) ? (int)$row['parent_id'] : 0;
+$graph_json = json_encode([
+    'child_id' => $child_id,
+    'parent_id' => $parent_id,
+], JSON_UNESCAPED_SLASHES);
+$stmt = $db->prepare('UPDATE plugin_graph_child SET graph_json = :graph_json WHERE child_id = :child_id');
+$stmt->bindValue(':graph_json', $graph_json, SQLITE3_TEXT);
+$stmt->bindValue(':child_id', $child_id, SQLITE3_INTEGER);
+$stmt->execute();
+echo json_encode([
+    'status' => 'applied',
+    'result' => [
+        'repair' => 'replacement graph JSON',
+        'child_id' => $child_id,
+        'parent_id' => $parent_id,
+    ],
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    $replacement_driver_run = run_merge_cli([
+        'run-plugin-driver',
+        '--metadata-db', $metadata,
+        '--id', (string)$replacement_conflict_id,
+        '--driver', $replacement_driver_path,
+        '--format', 'json',
+    ]);
+    assert_same($replacement_driver_run['status'], 0, 'plugin driver runner applies current revalidated replacement conflict');
+    $replacement_driver_result = json_decode($replacement_driver_run['output'], true);
+    assert_same((int)($replacement_driver_result['conflict_id'] ?? 0), $replacement_conflict_id, 'plugin driver result belongs to the replacement conflict');
+    assert_same($replacement_driver_result['driver_status'] ?? null, 'applied', 'replacement plugin driver records applied status');
+    $replacement_driver_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'resolutions',
+        'resolution_choice' => 'plugin-driver',
+        'plugin_object' => 'child:' . $child_id,
+    ]);
+    $replacement_driver_rows = array_values(array_filter(
+        $replacement_driver_audit['resolutions'],
+        fn(array $resolution): bool => (int)($resolution['conflict_id'] ?? 0) === $replacement_conflict_id
+    ));
+    assert_same(count($replacement_driver_rows), 1, 'current replacement plugin-driver resolution is auditable');
+
+    $ordinary_lineage_meta = open_db($metadata);
+    $ordinary_branch = 'feature-plugin-ordinary-lineage';
+    $escaped_source = SQLite3::escapeString($source);
+    $escaped_target = SQLite3::escapeString($target);
+    $escaped_base = SQLite3::escapeString($base);
+    $escaped_target_root = SQLite3::escapeString($target_root);
+    $ordinary_lineage_meta->exec(
+        "INSERT INTO merge_runs (source_branch, target_branch, status, policy, source_db, target_db, base_db, target_root) " .
+        "VALUES ('$ordinary_branch', 'main', 'completed_with_conflicts', 'target-wins', '$escaped_source', '$escaped_target', '$escaped_base', '$escaped_target_root')"
+    );
+    $ordinary_previous_run_id = (int)$ordinary_lineage_meta->lastInsertRowID();
+    cow_merge_record_conflict(
+        $ordinary_lineage_meta,
+        $ordinary_previous_run_id,
+        '__plugins__',
+        cow_merge_plugin_identity_json('forkpress-plugin-ordinary-lineage', 'object:1'),
+        null,
+        'plugin-ordinary-lineage',
+        null,
+        null,
+        null,
+        [
+            'plugin' => 'forkpress-plugin-ordinary-lineage',
+            'object' => 'object:1',
+            'reason' => 'ordinary prior plugin conflict evidence',
+            'validator' => 'forkpress-plugin-ordinary-lineage@1',
+            'semantic_scope' => 'plugin',
+            'candidate' => ['revision' => 'previous-run'],
+        ]
+    );
+    $ordinary_previous_conflict_id = (int)$ordinary_lineage_meta->querySingle(
+        "SELECT id FROM merge_conflicts WHERE run_id = $ordinary_previous_run_id AND conflict_type = 'plugin-ordinary-lineage' ORDER BY id DESC LIMIT 1"
+    );
+    $ordinary_lineage_meta->exec(
+        "INSERT INTO merge_runs (source_branch, target_branch, status, policy, source_db, target_db, base_db, target_root) " .
+        "VALUES ('$ordinary_branch', 'main', 'completed_with_conflicts', 'target-wins', '$escaped_source', '$escaped_target', '$escaped_base', '$escaped_target_root')"
+    );
+    $ordinary_current_run_id = (int)$ordinary_lineage_meta->lastInsertRowID();
+    cow_merge_record_conflict(
+        $ordinary_lineage_meta,
+        $ordinary_current_run_id,
+        '__plugins__',
+        cow_merge_plugin_identity_json('forkpress-plugin-ordinary-lineage', 'object:1'),
+        null,
+        'plugin-ordinary-lineage',
+        null,
+        null,
+        null,
+        [
+            'plugin' => 'forkpress-plugin-ordinary-lineage',
+            'object' => 'object:1',
+            'reason' => 'ordinary current plugin conflict evidence',
+            'validator' => 'forkpress-plugin-ordinary-lineage@1',
+            'semantic_scope' => 'plugin',
+            'candidate' => ['revision' => 'current-run'],
+        ]
+    );
+    $ordinary_current_conflict_id = (int)$ordinary_lineage_meta->querySingle(
+        "SELECT id FROM merge_conflicts WHERE run_id = $ordinary_current_run_id AND conflict_type = 'plugin-ordinary-lineage' ORDER BY id DESC LIMIT 1"
+    );
+    $ordinary_lineage_meta->close();
+    assert_same(
+        (int)scalar($metadata, "SELECT previous_conflict_id FROM merge_conflicts WHERE id = $ordinary_current_conflict_id"),
+        $ordinary_previous_conflict_id,
+        'ordinary plugin conflict lineage links to the previous merge run conflict'
+    );
+    $ordinary_lineage_record = run_merge_cli([
+        'record-plugin-driver-resolution',
+        '--metadata-db', $metadata,
+        '--id', (string)$ordinary_current_conflict_id,
+        '--driver', 'forkpress-plugin-ordinary-lineage-driver@1',
+        '--result-json', json_encode(['ordinary-lineage' => 'resolved'], JSON_UNESCAPED_SLASHES),
+        '--format', 'json',
+    ]);
+    assert_same($ordinary_lineage_record['status'], 0, 'plugin driver recorder allows ordinary cross-run plugin conflict lineage');
+
     $revalidated_again = cow_merge_revalidate_reviewed_conflicts($metadata, (int)$result['run_id'], 'cow-revalidate');
     assert_same($revalidated_again['carried'], 0, 'plugin revalidation does not duplicate carried replacement-evidence notes');
     assert_same($revalidated_again['already_needs_action'], 1, 'plugin revalidation reports already-carried replacement evidence');
+
+    cow_merge_record_plugin_validator_conflicts($metadata, (int)$result['run_id'], [
+        [
+            'plugin' => 'forkpress-plugin-guard',
+            'object' => 'guard:incompatible',
+            'reason' => 'plugin guard original evidence',
+            'type' => 'plugin-guard-incompatible',
+            'validator' => 'forkpress-plugin-guard@1',
+            'candidate' => ['revision' => 'original'],
+        ],
+    ]);
+    $incompatible_original_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-guard-incompatible' ORDER BY id DESC LIMIT 1");
+    cow_merge_record_plugin_validator_conflicts($metadata, (int)$result['run_id'], [
+        [
+            'plugin' => 'forkpress-plugin-guard',
+            'object' => 'guard:incompatible',
+            'reason' => 'plugin guard incompatible replacement evidence',
+            'type' => 'plugin-guard-incompatible',
+            'validator' => 'forkpress-plugin-guard@1',
+            'candidate' => ['revision' => 'replacement'],
+        ],
+    ]);
+    $incompatible_replacement_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-guard-incompatible' AND id > $incompatible_original_id ORDER BY id DESC LIMIT 1");
+    $incompatible_meta = open_db($metadata);
+    $incompatible_review_id = cow_merge_insert_review_note(
+        $incompatible_meta,
+        'conflict',
+        $incompatible_original_id,
+        'needs-action',
+        'manual incompatible plugin revalidation fixture',
+        'cow-test'
+    );
+    cow_merge_record_revalidation(
+        $incompatible_meta,
+        $incompatible_original_id,
+        $incompatible_review_id,
+        (int)$result['run_id'],
+        'incompatible',
+        (string)scalar($metadata, "SELECT source_payload FROM merge_conflicts WHERE id = $incompatible_replacement_id"),
+        (string)scalar($metadata, "SELECT chosen_payload FROM merge_conflicts WHERE id = $incompatible_replacement_id"),
+        'plugin replacement evidence is incompatible',
+        $incompatible_replacement_id
+    );
+    $incompatible_meta->close();
+    $incompatible_driver_record = run_merge_cli([
+        'record-plugin-driver-resolution',
+        '--metadata-db', $metadata,
+        '--id', (string)$incompatible_replacement_id,
+        '--driver', 'forkpress-plugin-guard@incompatible',
+        '--result-json', json_encode(['guard' => 'incompatible'], JSON_UNESCAPED_SLASHES),
+        '--format', 'json',
+    ]);
+    assert_true($incompatible_driver_record['status'] !== 0, 'plugin driver recorder rejects incompatible plugin replacement revalidation');
+    assert_true(str_contains($incompatible_driver_record['output'], 'incompatible revalidation'), 'plugin driver recorder explains incompatible plugin replacement revalidation');
+
+    cow_merge_record_plugin_validator_conflicts($metadata, (int)$result['run_id'], [
+        [
+            'plugin' => 'forkpress-plugin-guard',
+            'object' => 'guard:drifted',
+            'reason' => 'plugin guard original drift evidence',
+            'type' => 'plugin-guard-drifted',
+            'validator' => 'forkpress-plugin-guard@1',
+            'candidate' => ['revision' => 'original'],
+        ],
+    ]);
+    $drift_original_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-guard-drifted' ORDER BY id DESC LIMIT 1");
+    cow_merge_record_plugin_validator_conflicts($metadata, (int)$result['run_id'], [
+        [
+            'plugin' => 'forkpress-plugin-guard',
+            'object' => 'guard:drifted',
+            'reason' => 'plugin guard replacement drift evidence',
+            'type' => 'plugin-guard-drifted',
+            'validator' => 'forkpress-plugin-guard@1',
+            'candidate' => ['revision' => 'replacement'],
+        ],
+    ]);
+    $drift_replacement_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-guard-drifted' AND id > $drift_original_id ORDER BY id DESC LIMIT 1");
+    $drift_meta = open_db($metadata);
+    $drift_review_id = cow_merge_insert_review_note(
+        $drift_meta,
+        'conflict',
+        $drift_original_id,
+        'needs-action',
+        'manual current plugin revalidation fixture',
+        'cow-test'
+    );
+    cow_merge_record_revalidation(
+        $drift_meta,
+        $drift_original_id,
+        $drift_review_id,
+        (int)$result['run_id'],
+        'replacement-evidence',
+        (string)scalar($metadata, "SELECT source_payload FROM merge_conflicts WHERE id = $drift_replacement_id"),
+        (string)scalar($metadata, "SELECT chosen_payload FROM merge_conflicts WHERE id = $drift_replacement_id"),
+        'plugin replacement evidence is current',
+        $drift_replacement_id
+    );
+    $drift_meta->close();
+    cow_merge_record_plugin_validator_conflicts($metadata, (int)$result['run_id'], [
+        [
+            'plugin' => 'forkpress-plugin-guard',
+            'object' => 'guard:drifted',
+            'reason' => 'plugin guard replacement drifted again',
+            'type' => 'plugin-guard-drifted',
+            'validator' => 'forkpress-plugin-guard@1',
+            'candidate' => ['revision' => 'drifted-again'],
+        ],
+    ]);
+    $drift_latest_replacement_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-guard-drifted' AND id > $drift_replacement_id ORDER BY id DESC LIMIT 1");
+    $drifted_driver_record = run_merge_cli([
+        'record-plugin-driver-resolution',
+        '--metadata-db', $metadata,
+        '--id', (string)$drift_replacement_id,
+        '--driver', 'forkpress-plugin-guard@drifted',
+        '--result-json', json_encode(['guard' => 'drifted'], JSON_UNESCAPED_SLASHES),
+        '--format', 'json',
+    ]);
+    assert_true($drifted_driver_record['status'] !== 0, 'plugin driver recorder rejects drifted plugin replacement revalidation');
+    assert_true(str_contains($drifted_driver_record['output'], 'replacement conflict #' . $drift_latest_replacement_id), 'plugin driver recorder points at drifted replacement evidence');
 
     $source_payload_result = cow_merge_record_plugin_validator_conflicts($metadata, (int)$result['run_id'], [
         [

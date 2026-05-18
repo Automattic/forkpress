@@ -4479,13 +4479,77 @@ function cow_merge_crash_recovery_artifacts(string $metadata_db, ?int $run_id = 
     return $artifacts;
 }
 
+function cow_merge_run_status_for_crash_recovery(string $metadata_db, int $run_id): ?string {
+    if ($run_id <= 0 || !is_file($metadata_db)) {
+        return null;
+    }
+    try {
+        $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READONLY);
+        try {
+            $has_runs = (int)$meta->querySingle("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'merge_runs'");
+            if ($has_runs !== 1) {
+                return null;
+            }
+            $stmt = cow_merge_prepare_checked(
+                $meta,
+                'SELECT status FROM merge_runs WHERE id = :id',
+                'failed to prepare crash recovery run status lookup'
+            );
+            cow_merge_bind($stmt, ':id', $run_id);
+            $res = cow_merge_execute_checked($stmt, $meta, 'failed to read crash recovery run status');
+            $row = $res->fetchArray(SQLITE3_ASSOC);
+            cow_merge_result_finalize_checked($res, 'failed to finalize crash recovery run status lookup');
+            return $row ? (string)$row['status'] : null;
+        } finally {
+            $meta->close();
+        }
+    } catch (Throwable) {
+        return null;
+    }
+}
+
+function cow_merge_is_stale_completed_db_crash_artifact(string $metadata_db, array $artifact): bool {
+    if (($artifact['checkpoint'] ?? null) !== 'target-db-commit') {
+        return false;
+    }
+    if (is_array($artifact['metadata_db_snapshot'] ?? null)) {
+        return false;
+    }
+    $status = cow_merge_run_status_for_crash_recovery($metadata_db, (int)($artifact['run_id'] ?? 0));
+    return in_array($status, ['completed', 'completed_with_conflicts'], true);
+}
+
+function cow_merge_pending_crash_recovery_artifacts(string $metadata_db, ?int $run_id = null, bool $cleanup_stale = false, ?int &$cleared = null): array {
+    $cleared_count = 0;
+    $pending = [];
+    foreach (cow_merge_crash_recovery_artifacts($metadata_db, $run_id) as $artifact) {
+        if (cow_merge_is_stale_completed_db_crash_artifact($metadata_db, $artifact)) {
+            if ($cleanup_stale) {
+                $snapshot = $artifact['target_db_snapshot'] ?? null;
+                if (is_array($snapshot)) {
+                    cow_merge_cleanup_sqlite_snapshot($snapshot);
+                }
+                cow_merge_remove_crash_recovery_artifact((string)$artifact['artifact_path']);
+                $cleared_count++;
+            }
+            continue;
+        }
+        $pending[] = $artifact;
+    }
+    if ($cleared !== null) {
+        $cleared += $cleared_count;
+    }
+    return $pending;
+}
+
 function cow_merge_recover_crash_artifacts(
     string $metadata_db,
     ?int $run_id = null,
     bool $restore_target_db = false,
     bool $restore_files = false
 ): array {
-    $artifacts = cow_merge_crash_recovery_artifacts($metadata_db, $run_id);
+    $cleared = 0;
+    $artifacts = cow_merge_pending_crash_recovery_artifacts($metadata_db, $run_id, true, $cleared);
     $restored = 0;
     if ($restore_target_db || $restore_files) {
         foreach ($artifacts as $artifact) {
@@ -4544,7 +4608,7 @@ function cow_merge_recover_crash_artifacts(
             }
             $restored++;
         }
-        $artifacts = cow_merge_crash_recovery_artifacts($metadata_db, $run_id);
+        $artifacts = cow_merge_pending_crash_recovery_artifacts($metadata_db, $run_id, true, $cleared);
     }
     return [
         'metadata_db' => $metadata_db,
@@ -4553,12 +4617,14 @@ function cow_merge_recover_crash_artifacts(
         'restore_files' => $restore_files,
         'pending' => count($artifacts),
         'restored' => $restored,
+        'cleared' => $cleared,
         'artifacts' => $artifacts,
     ];
 }
 
 function cow_merge_assert_no_pending_crash_recovery(string $metadata_db): void {
-    $artifacts = cow_merge_crash_recovery_artifacts($metadata_db);
+    $cleared = 0;
+    $artifacts = cow_merge_pending_crash_recovery_artifacts($metadata_db, null, true, $cleared);
     if (count($artifacts) === 0) {
         return;
     }
@@ -6766,6 +6832,16 @@ function cow_merge_copy_file_entry(string $source_root, string $target_root, str
     if (!is_file($source)) {
         throw new RuntimeException("source filesystem path is not a regular file: $source");
     }
+    $actual_size = filesize($source);
+    $actual_hash = hash_file('sha256', $source);
+    if (
+        !is_int($actual_size)
+        || !is_string($actual_hash)
+        || (int)($entry['size'] ?? -1) !== $actual_size
+        || !hash_equals((string)($entry['sha256'] ?? ''), $actual_hash)
+    ) {
+        throw new RuntimeException("source filesystem file changed while merging: $source");
+    }
     if (is_dir($target) && !is_link($target)) {
         throw new RuntimeException("target filesystem path is a directory: $target");
     }
@@ -7808,6 +7884,7 @@ function cow_merge_plugin_driver_conflict_context(SQLite3 $meta, int $conflict_i
     }
     cow_merge_require_unresolved_conflict($meta, $conflict_id);
     cow_merge_require_current_plugin_validator_conflict($meta, $row, 'run-plugin-driver');
+    cow_merge_require_plugin_revalidated_replacement_conflict($meta, $row, 'run-plugin-driver');
     $plugin_payload = cow_merge_decode_payload_json((string)$row['chosen_payload'], 'plugin conflict');
     return [
         'metadata_db' => '',
@@ -7873,6 +7950,67 @@ function cow_merge_require_current_plugin_validator_conflict(SQLite3 $meta, arra
             . (int)($conflict['id'] ?? 0)
             . ' is current: '
             . (string)($staleness['stale_reason'] ?? 'plugin validator evidence could not be checked'));
+    }
+}
+
+function cow_merge_plugin_revalidation_source_conflict(SQLite3 $meta, int $conflict_id): ?array {
+    $rows = cow_merge_fetch_rows(
+        $meta,
+        'SELECT c.id, c.run_id, c.conflict_key, c.previous_conflict_id, c.table_name, c.row_identity, c.column_name, c.conflict_type, ' .
+        'c.source_payload, c.target_payload, c.chosen_payload, c.source_hash, c.target_hash, c.chosen_hash, ' .
+        'r.source_db, r.target_db, r.source_branch, r.target_branch ' .
+        'FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.id = :id',
+        [':id' => $conflict_id]
+    );
+    return $rows[0] ?? null;
+}
+
+function cow_merge_require_plugin_revalidated_replacement_conflict(SQLite3 $meta, array $conflict, string $command): void {
+    if ((string)($conflict['table_name'] ?? '') !== '__plugins__') {
+        return;
+    }
+    $previous_conflict_id = isset($conflict['previous_conflict_id']) ? (int)$conflict['previous_conflict_id'] : 0;
+    if ($previous_conflict_id < 1) {
+        return;
+    }
+
+    $current_conflict_id = (int)($conflict['id'] ?? 0);
+    $previous_conflict = cow_merge_plugin_revalidation_source_conflict($meta, $previous_conflict_id);
+    if ($previous_conflict === null) {
+        throw new RuntimeException("$command cannot prove plugin replacement conflict #$current_conflict_id came from a reviewed conflict revalidation");
+    }
+    if ((int)($previous_conflict['run_id'] ?? 0) !== (int)($conflict['run_id'] ?? 0)) {
+        return;
+    }
+
+    $latest_revalidation = cow_merge_latest_revalidation($meta, $previous_conflict_id);
+    if ($latest_revalidation === null) {
+        throw new RuntimeException("$command requires merge-audit --revalidate before resolving plugin replacement conflict #$current_conflict_id");
+    }
+    if ((int)($latest_revalidation['replacement_conflict_id'] ?? 0) !== $current_conflict_id) {
+        $replacement = (int)($latest_revalidation['replacement_conflict_id'] ?? 0);
+        throw new RuntimeException(
+            "$command cannot resolve plugin replacement conflict #$current_conflict_id; latest revalidation points to "
+            . ($replacement > 0 ? "replacement conflict #$replacement" : 'no replacement conflict')
+        );
+    }
+
+    $revalidation_class = (string)($latest_revalidation['revalidation_class'] ?? 'unclassified');
+    if ($revalidation_class === 'incompatible') {
+        throw new RuntimeException("$command cannot resolve plugin replacement conflict #$current_conflict_id after incompatible revalidation");
+    }
+    if ($revalidation_class !== 'replacement-evidence') {
+        throw new RuntimeException(
+            "$command cannot resolve plugin replacement conflict #$current_conflict_id after $revalidation_class revalidation"
+        );
+    }
+
+    $staleness = cow_merge_audit_conflict_target_staleness($meta, $previous_conflict);
+    $status = cow_merge_latest_revalidation_status($latest_revalidation, $staleness, $previous_conflict);
+    if ($status !== 'current') {
+        throw new RuntimeException(
+            "$command cannot resolve plugin replacement conflict #$current_conflict_id; latest revalidation status is $status"
+        );
     }
 }
 
@@ -8167,7 +8305,7 @@ function cow_merge_record_plugin_driver_resolution(
         cow_merge_ensure_metadata($meta);
         $stmt = cow_merge_prepare_checked(
             $meta,
-            'SELECT c.id, c.run_id, c.table_name, c.row_identity, c.column_name, c.conflict_type, ' .
+            'SELECT c.id, c.run_id, c.previous_conflict_id, c.table_name, c.row_identity, c.column_name, c.conflict_type, ' .
             'c.source_payload, c.target_payload, c.chosen_payload, c.source_hash, c.target_hash, c.chosen_hash, r.target_db, r.target_root ' .
             'FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.id = :id',
             'failed to prepare plugin driver conflict lookup'
@@ -8184,6 +8322,7 @@ function cow_merge_record_plugin_driver_resolution(
         }
         cow_merge_require_unresolved_conflict($meta, $conflict_id);
         cow_merge_require_current_plugin_validator_conflict($meta, $conflict, 'record-plugin-driver-resolution');
+        cow_merge_require_plugin_revalidated_replacement_conflict($meta, $conflict, 'record-plugin-driver-resolution');
         if ($previous_payload === null) {
             $previous_payload = cow_merge_decode_payload_json((string)$conflict['chosen_payload'], 'plugin conflict');
         }
@@ -16506,7 +16645,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
     ];
     if ($filters['records'] === 'all' || $filters['records'] === 'crash-recovery') {
         $report['crash_recovery'] = array_slice(
-            cow_merge_crash_recovery_artifacts($metadata_db, $run_id),
+            cow_merge_pending_crash_recovery_artifacts($metadata_db, $run_id),
             0,
             $limit
         );
@@ -19064,13 +19203,257 @@ function cow_merge_sort_tables_by_foreign_keys(array $tables, SQLite3 ...$dbs): 
     return $ordered;
 }
 
+function cow_merge_wordpress_term_count_tables_available(SQLite3 $db): bool {
+    if (cow_merge_table_sql($db, 'wp_term_taxonomy') === null || cow_merge_table_sql($db, 'wp_term_relationships') === null) {
+        return false;
+    }
+    $taxonomy_columns = array_fill_keys(cow_merge_table_columns($db, 'wp_term_taxonomy'), true);
+    $relationship_columns = array_fill_keys(cow_merge_table_columns($db, 'wp_term_relationships'), true);
+    return isset($taxonomy_columns['term_taxonomy_id'], $taxonomy_columns['count'], $relationship_columns['term_taxonomy_id']);
+}
+
+function cow_merge_wordpress_nav_menu_count_tables_available(SQLite3 $db): bool {
+    if (cow_merge_table_sql($db, 'wp_posts') === null) {
+        return false;
+    }
+    $post_columns = array_fill_keys(cow_merge_table_columns($db, 'wp_posts'), true);
+    return isset($post_columns['ID'], $post_columns['post_type'], $post_columns['post_status']);
+}
+
+function cow_merge_wordpress_comment_count_tables_available(SQLite3 $db): bool {
+    if (cow_merge_table_sql($db, 'wp_posts') === null || cow_merge_table_sql($db, 'wp_comments') === null) {
+        return false;
+    }
+    $post_columns = array_fill_keys(cow_merge_table_columns($db, 'wp_posts'), true);
+    $comment_columns = array_fill_keys(cow_merge_table_columns($db, 'wp_comments'), true);
+    return isset($post_columns['ID'], $post_columns['comment_count'], $comment_columns['comment_post_ID']);
+}
+
+function cow_merge_wordpress_term_taxonomy_count(SQLite3 $db, mixed $term_taxonomy_id): mixed {
+    if (!cow_merge_wordpress_term_count_tables_available($db)) {
+        return null;
+    }
+    $stmt = cow_merge_prepare_checked(
+        $db,
+        'SELECT ' . cow_merge_quote_ident('count') . ' FROM wp_term_taxonomy WHERE term_taxonomy_id = :term_taxonomy_id',
+        'failed to prepare WordPress term taxonomy count lookup'
+    );
+    cow_merge_bind($stmt, ':term_taxonomy_id', $term_taxonomy_id);
+    $res = cow_merge_execute_checked($stmt, $db, 'failed to look up WordPress term taxonomy count');
+    $row = $res->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($res, 'failed to finalize WordPress term taxonomy count lookup');
+    return $row ? $row['count'] : null;
+}
+
+function cow_merge_wordpress_term_count_taxonomy_is_recomputable(string $taxonomy): bool {
+    return in_array($taxonomy, ['category', 'post_tag', 'nav_menu'], true);
+}
+
+function cow_merge_wordpress_term_taxonomy_relationship_count(
+    SQLite3 $db,
+    mixed $term_taxonomy_id,
+    string $taxonomy,
+    int $relationship_count
+): ?int {
+    if ($taxonomy !== 'nav_menu') {
+        return $relationship_count;
+    }
+    if (!cow_merge_wordpress_nav_menu_count_tables_available($db)) {
+        return null;
+    }
+    $stmt = cow_merge_prepare_checked(
+        $db,
+        'SELECT COUNT(*) AS relationship_count ' .
+        'FROM wp_term_relationships tr ' .
+        'JOIN wp_posts p ON p.ID = tr.object_id ' .
+        'WHERE tr.term_taxonomy_id = :term_taxonomy_id ' .
+        "AND p.post_type = 'nav_menu_item' " .
+        "AND p.post_status = 'publish'",
+        'failed to prepare WordPress nav menu item count'
+    );
+    cow_merge_bind($stmt, ':term_taxonomy_id', $term_taxonomy_id);
+    $res = cow_merge_execute_checked($stmt, $db, 'failed to count WordPress nav menu items');
+    $row = $res->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($res, 'failed to finalize WordPress nav menu item count');
+    return $row ? (int)$row['relationship_count'] : 0;
+}
+
+function cow_merge_wordpress_post_comment_count(SQLite3 $db, mixed $post_id): mixed {
+    if (!cow_merge_wordpress_comment_count_tables_available($db)) {
+        return null;
+    }
+    $stmt = cow_merge_prepare_checked(
+        $db,
+        'SELECT comment_count FROM wp_posts WHERE ID = :post_id',
+        'failed to prepare WordPress post comment count lookup'
+    );
+    cow_merge_bind($stmt, ':post_id', $post_id);
+    $res = cow_merge_execute_checked($stmt, $db, 'failed to look up WordPress post comment count');
+    $row = $res->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($res, 'failed to finalize WordPress post comment count lookup');
+    return $row ? $row['comment_count'] : null;
+}
+
+function cow_merge_recompute_wordpress_post_comment_counts(
+    SQLite3 $base,
+    SQLite3 $source,
+    SQLite3 $target,
+    SQLite3 $meta,
+    int $run_id
+): int {
+    if (!cow_merge_wordpress_comment_count_tables_available($target)) {
+        return 0;
+    }
+
+    $comment_columns = array_fill_keys(cow_merge_table_columns($target, 'wp_comments'), true);
+    $approved_predicate = isset($comment_columns['comment_approved']) ? " WHERE comment_approved = '1'" : '';
+    $res = cow_merge_query_checked(
+        $target,
+        'SELECT p.ID, p.comment_count AS stored_count, COALESCE(c.actual_comment_count, 0) AS actual_comment_count ' .
+        'FROM wp_posts p ' .
+        'LEFT JOIN (' .
+        '  SELECT comment_post_ID, COUNT(*) AS actual_comment_count ' .
+        '  FROM wp_comments' . $approved_predicate . ' GROUP BY comment_post_ID' .
+        ') c ON c.comment_post_ID = p.ID',
+        'failed to inspect WordPress post comment counts'
+    );
+
+    $updates = [];
+    while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+        $stored = (int)$row['stored_count'];
+        $actual = (int)$row['actual_comment_count'];
+        if ($stored === $actual) {
+            continue;
+        }
+        $updates[] = [
+            'post_id' => $row['ID'],
+            'stored_count' => $stored,
+            'actual_comment_count' => $actual,
+        ];
+    }
+    cow_merge_result_finalize_checked($res, 'failed to finalize WordPress post comment count inspection');
+
+    foreach ($updates as $update) {
+        $post_id = $update['post_id'];
+        $actual = $update['actual_comment_count'];
+        $stmt = cow_merge_prepare_checked(
+            $target,
+            'UPDATE wp_posts SET comment_count = :count WHERE ID = :post_id',
+            'failed to prepare WordPress post comment count recompute'
+        );
+        cow_merge_bind($stmt, ':count', $actual);
+        cow_merge_bind($stmt, ':post_id', $post_id);
+        cow_merge_execute_checked($stmt, $target, 'failed to recompute WordPress post comment count');
+
+        $identity_id = is_numeric($post_id) ? (int)$post_id : $post_id;
+        cow_merge_record_decision(
+            $meta,
+            $run_id,
+            'wp_posts',
+            cow_merge_identity_json(['ID' => $identity_id]),
+            'comment_count',
+            'source-applied',
+            'recomputed WordPress post comment count from merged comments',
+            cow_merge_wordpress_post_comment_count($base, $post_id),
+            cow_merge_wordpress_post_comment_count($source, $post_id),
+            $update['stored_count'],
+            $actual
+        );
+    }
+
+    return count($updates);
+}
+
+function cow_merge_recompute_wordpress_term_taxonomy_counts(
+    SQLite3 $base,
+    SQLite3 $source,
+    SQLite3 $target,
+    SQLite3 $meta,
+    int $run_id
+): int {
+    if (!cow_merge_wordpress_term_count_tables_available($target)) {
+        return 0;
+    }
+
+    $res = cow_merge_query_checked(
+        $target,
+        'SELECT tt.term_taxonomy_id, tt.taxonomy, tt.' . cow_merge_quote_ident('count') . ' AS stored_count, ' .
+        'COALESCE(rel.relationship_count, 0) AS relationship_count ' .
+        'FROM wp_term_taxonomy tt ' .
+        'LEFT JOIN (' .
+        '  SELECT term_taxonomy_id, COUNT(*) AS relationship_count ' .
+        '  FROM wp_term_relationships GROUP BY term_taxonomy_id' .
+        ') rel ON rel.term_taxonomy_id = tt.term_taxonomy_id',
+        'failed to inspect WordPress term taxonomy counts'
+    );
+
+    $updates = [];
+    while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+        if (!cow_merge_wordpress_term_count_taxonomy_is_recomputable((string)$row['taxonomy'])) {
+            continue;
+        }
+        $stored = (int)$row['stored_count'];
+        $relationship_count = cow_merge_wordpress_term_taxonomy_relationship_count(
+            $target,
+            $row['term_taxonomy_id'],
+            (string)$row['taxonomy'],
+            (int)$row['relationship_count']
+        );
+        if ($relationship_count === null) {
+            continue;
+        }
+        if ($stored === $relationship_count) {
+            continue;
+        }
+        $updates[] = [
+            'term_taxonomy_id' => $row['term_taxonomy_id'],
+            'stored_count' => $stored,
+            'relationship_count' => $relationship_count,
+        ];
+    }
+    cow_merge_result_finalize_checked($res, 'failed to finalize WordPress term taxonomy count inspection');
+
+    foreach ($updates as $update) {
+        $term_taxonomy_id = $update['term_taxonomy_id'];
+        $relationship_count = $update['relationship_count'];
+        $stmt = cow_merge_prepare_checked(
+            $target,
+            'UPDATE wp_term_taxonomy SET ' . cow_merge_quote_ident('count') . ' = :count WHERE term_taxonomy_id = :term_taxonomy_id',
+            'failed to prepare WordPress term taxonomy count recompute'
+        );
+        cow_merge_bind($stmt, ':count', $relationship_count);
+        cow_merge_bind($stmt, ':term_taxonomy_id', $term_taxonomy_id);
+        cow_merge_execute_checked($stmt, $target, 'failed to recompute WordPress term taxonomy count');
+
+        $identity_id = is_numeric($term_taxonomy_id) ? (int)$term_taxonomy_id : $term_taxonomy_id;
+        cow_merge_record_decision(
+            $meta,
+            $run_id,
+            'wp_term_taxonomy',
+            cow_merge_identity_json(['term_taxonomy_id' => $identity_id]),
+            'count',
+            'source-applied',
+            'recomputed WordPress term taxonomy count from merged relationships',
+            cow_merge_wordpress_term_taxonomy_count($base, $term_taxonomy_id),
+            cow_merge_wordpress_term_taxonomy_count($source, $term_taxonomy_id),
+            $update['stored_count'],
+            $relationship_count
+        );
+    }
+
+    return count($updates);
+}
+
 function cow_merge_databases(
     string $base_db,
     string $source_db,
     string $target_db,
     string $metadata_db,
     string $source_branch,
-    string $target_branch
+    string $target_branch,
+    ?array $crash_recovery_metadata_snapshot = null,
+    ?array $crash_recovery_filesystem_snapshot = null,
+    ?string $crash_recovery_filesystem_target_root = null
 ): array {
     foreach ([$base_db, $source_db, $target_db] as $path) {
         if (!is_file($path)) {
@@ -19239,6 +19622,8 @@ function cow_merge_databases(
         $trigger_result = cow_merge_apply_schema_object_changes($target, $meta, $run_id, 'trigger', $base_triggers, $source_triggers, $target_triggers);
         $applied += $trigger_result['applied'];
         $conflicts += $trigger_result['conflicts'];
+        $applied += cow_merge_recompute_wordpress_term_taxonomy_counts($base, $source, $target, $meta, $run_id);
+        $applied += cow_merge_recompute_wordpress_post_comment_counts($base, $source, $target, $meta, $run_id);
 
         $status = $conflicts > 0 ? 'completed_with_conflicts' : 'completed';
         $crash_recovery_artifact = cow_merge_write_crash_recovery_artifact(
@@ -19252,7 +19637,11 @@ function cow_merge_databases(
                 'source_db' => $source_db,
                 'target_db' => $target_db,
             ],
-            $target_snapshot
+            $target_snapshot,
+            null,
+            $crash_recovery_filesystem_target_root,
+            $crash_recovery_metadata_snapshot,
+            $crash_recovery_filesystem_snapshot
         );
         cow_merge_failpoint('before-target-db-commit');
         cow_merge_exec_checked($target, 'COMMIT', 'failed to commit target database transaction');
@@ -19263,6 +19652,7 @@ function cow_merge_databases(
         cow_merge_failpoint('before-metadata-commit');
         cow_merge_exec_checked($meta, 'COMMIT', 'failed to commit merge metadata transaction');
         $metadata_transaction_active = false;
+        cow_merge_failpoint('after-metadata-commit');
         cow_merge_remove_crash_recovery_artifact($crash_recovery_artifact);
         $crash_recovery_artifact = null;
         return [
@@ -19492,7 +19882,17 @@ function cow_merge_branch_state(
     $preserve_rollback_snapshots = false;
     $whole_branch_crash_recovery_artifact = null;
     try {
-        $result = cow_merge_databases($base_db, $source_db, $target_db, $metadata_db, $source_branch, $target_branch);
+        $result = cow_merge_databases(
+            $base_db,
+            $source_db,
+            $target_db,
+            $metadata_db,
+            $source_branch,
+            $target_branch,
+            $metadata_snapshot,
+            $filesystem_snapshot,
+            $has_file_args ? (string)$target_root : null
+        );
         $attempted_run_id = (int)$result['run_id'];
         $result['db_applied'] = $result['applied'];
         $result['db_conflicts'] = $result['conflicts'];

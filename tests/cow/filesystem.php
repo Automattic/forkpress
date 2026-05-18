@@ -134,6 +134,29 @@ try {
     $unsupported_special_entry_path = 'wp-content/uploads/source-fifo';
     $has_unsupported_special_entry = false;
 
+    $copy_source_root = $tmp . '/copy-source';
+    $copy_target_root = $tmp . '/copy-target';
+    write_test_file($copy_source_root . '/wp-content/uploads/racy.bin', str_repeat('A', 16));
+    write_test_file($copy_target_root . '/wp-content/uploads/racy.bin', 'target original');
+    $copy_manifest = cow_merge_file_manifest_for_root($copy_source_root);
+    $copy_entry = $copy_manifest['entries']['wp-content/uploads/racy.bin'];
+    write_test_file($copy_source_root . '/wp-content/uploads/racy.bin', str_repeat('B', 16));
+    $copy_error = null;
+    try {
+        cow_merge_copy_file_entry($copy_source_root, $copy_target_root, 'wp-content/uploads/racy.bin', $copy_entry);
+    } catch (RuntimeException $e) {
+        $copy_error = $e->getMessage();
+    }
+    assert_true(
+        is_string($copy_error) && str_contains($copy_error, 'source filesystem file changed while merging'),
+        'filesystem copy rejects source file content drift after manifest capture'
+    );
+    assert_same(
+        file_get_contents($copy_target_root . '/wp-content/uploads/racy.bin'),
+        'target original',
+        'filesystem copy leaves target file untouched after source content drift'
+    );
+
     mkdir($base_root . '/wp-content/database', 0777, true);
     create_filesystem_db($base);
     write_test_file($base_root . '/wp-content/uploads/shared.txt', 'base shared');

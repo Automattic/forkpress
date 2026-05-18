@@ -89,7 +89,17 @@ payloads, or changed first-class `logical_identity` evidence emitted by the
 validator. Replacement evidence also links the stale review to the newer
 validator conflict row, so audit output can point reviewers at the exact
 validator record that superseded their prior review. These classes and links
-are audit metadata only. They do not make stale reviews apply automatically.
+do not make the stale original review apply automatically. Generic
+`source`/`target` merge resolution remains blocked for plugin conflicts, and
+the stale original validator conflict cannot be resolved by a plugin driver
+once replacement evidence exists.
+
+A plugin-specific driver can resolve the current replacement validator conflict
+only when the previous reviewed conflict has a latest `replacement-evidence`
+revalidation whose replacement id points at that current conflict and whose
+guarded payloads are still current. Driver resolution is rejected when no
+replacement revalidation exists, when the latest revalidation is incompatible,
+or when newer validator evidence has drifted past the replacement conflict.
 
 Audit output also exposes the latest recorded revalidation as first-class
 metadata: `latest_revalidation_id`, `latest_revalidation_class`,
@@ -220,10 +230,13 @@ classifier: if a validator rerun records changed evidence for the same plugin
 object, including changed source evidence, the reviewed plugin conflict returns
 to `needs-action` with the replacement validator payload and replacement
 conflict id visible in audit. Generic merge resolution still cannot apply
-plugin conflicts; the plugin validator or a plugin-specific repair flow remains
-the authority. Schema index, view, trigger, dropped-table restore, and table
-rebuild conflicts can return to the review queue with current SQL evidence, and
-table rebuild conflicts include dependency-plan evidence. Guarded schema
+plugin conflicts. A plugin-specific driver may apply only the current
+replacement conflict after a current `replacement-evidence` revalidation; stale
+originals, unrevalidated replacements, incompatible revalidations, and drifted
+replacement evidence remain blocked. Schema index, view, trigger, dropped-table
+restore, and table rebuild conflicts can return to the review queue with
+current SQL evidence, and table rebuild conflicts include dependency-plan
+evidence. Guarded schema
 resolution is intentionally limited to source-added index/view/trigger target
 drift and compatible table-rebuild target drift where the planner recorded a
 compatible schema class after a dry-run source replacement validated against

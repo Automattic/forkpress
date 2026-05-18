@@ -174,7 +174,8 @@ function smoke_create_posts_db(string $path): void {
         post_parent INTEGER NOT NULL DEFAULT 0,
         post_author INTEGER NOT NULL DEFAULT 0,
         post_mime_type TEXT NOT NULL DEFAULT '',
-        guid TEXT NOT NULL DEFAULT ''
+        guid TEXT NOT NULL DEFAULT '',
+        comment_count INTEGER NOT NULL DEFAULT 0
     )");
     $db->exec("CREATE TABLE wp_postmeta (
         meta_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -231,7 +232,8 @@ function smoke_create_posts_db(string $path): void {
         user_id INTEGER NOT NULL DEFAULT 0,
         comment_author TEXT NOT NULL DEFAULT '',
         comment_content TEXT NOT NULL DEFAULT '',
-        comment_parent INTEGER NOT NULL DEFAULT 0
+        comment_parent INTEGER NOT NULL DEFAULT 0,
+        comment_approved TEXT NOT NULL DEFAULT '1'
     )");
     $db->exec("CREATE TABLE wp_commentmeta (
         meta_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -795,7 +797,7 @@ try {
         'page-plus-comment smoke merge records no WordPress graph conflicts'
     );
     assert_same(
-        (int)smoke_scalar($comment_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_users', 'wp_usermeta', 'wp_comments', 'wp_commentmeta') AND decision = 'source-applied'"),
+        (int)smoke_scalar($comment_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_users', 'wp_usermeta', 'wp_comments', 'wp_commentmeta') AND decision = 'source-applied' AND reason <> 'recomputed WordPress post comment count from merged comments'"),
         5,
         'page-plus-comment smoke merge audits all source graph inserts'
     );
@@ -803,6 +805,80 @@ try {
         (int)smoke_scalar($comment_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_users', 'wp_usermeta', 'wp_comments', 'wp_commentmeta') AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
         5,
         'page-plus-comment smoke merge audits all target graph inserts'
+    );
+
+    $comment_count_base = $tmp . '/comment-count-base.sqlite';
+    $comment_count_source = $tmp . '/comment-count-source.sqlite';
+    $comment_count_target = $tmp . '/comment-count-target.sqlite';
+    $comment_count_metadata = $tmp . '/.forkpress/cow/merge/comment-count-metadata.sqlite';
+
+    smoke_create_posts_db($comment_count_base);
+    $db = smoke_open_db($comment_count_base);
+    smoke_insert_post($db, 16000080, 'Shared Comment Count Page', 'Shared comment count content', 'page', 'shared-comment-count-page');
+    $db->close();
+    copy($comment_count_base, $comment_count_source);
+    copy($comment_count_base, $comment_count_target);
+
+    $db = smoke_open_db($comment_count_source);
+    smoke_insert_user($db, 16000081, 'branch-count-commenter', 'branch-count-commenter@example.test', 'Branch Count Commenter');
+    smoke_insert_comment($db, 16000082, 16000080, 16000081, 'Branch Count Commenter', 'Branch count comment body');
+    $db->exec('UPDATE wp_posts SET comment_count = 1 WHERE ID = 16000080');
+    $db->close();
+
+    $db = smoke_open_db($comment_count_target);
+    smoke_insert_user($db, 16000083, 'main-count-commenter', 'main-count-commenter@example.test', 'Main Count Commenter');
+    smoke_insert_comment($db, 16000084, 16000080, 16000083, 'Main Count Commenter', 'Main count comment body');
+    $db->exec('UPDATE wp_posts SET comment_count = 1 WHERE ID = 16000080');
+    $db->close();
+
+    $comment_count_result = cow_merge_databases($comment_count_base, $comment_count_source, $comment_count_target, $comment_count_metadata, 'feature-smoke-comment-count', 'main');
+    assert_same($comment_count_result['status'], 'completed', 'same-post comment inserts complete cleanly');
+    assert_same((int)smoke_scalar($comment_count_target, 'SELECT COUNT(*) FROM wp_comments WHERE comment_post_ID = 16000080'), 2, 'same-post comment merge preserves both branch comments');
+    assert_same((int)smoke_scalar($comment_count_target, 'SELECT comment_count FROM wp_posts WHERE ID = 16000080'), 2, 'same-post comment merge recomputes denormalized WordPress comment count');
+    assert_same(
+        (int)smoke_scalar($comment_count_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND column_name = 'comment_count' AND decision = 'source-applied' AND reason = 'recomputed WordPress post comment count from merged comments'"),
+        1,
+        'same-post comment count recompute is auditable'
+    );
+
+    $pending_comment_base = $tmp . '/pending-comment-count-base.sqlite';
+    $pending_comment_source = $tmp . '/pending-comment-count-source.sqlite';
+    $pending_comment_target = $tmp . '/pending-comment-count-target.sqlite';
+    $pending_comment_metadata = $tmp . '/.forkpress/cow/merge/pending-comment-count-metadata.sqlite';
+
+    smoke_create_posts_db($pending_comment_base);
+    $db = smoke_open_db($pending_comment_base);
+    smoke_insert_post($db, 16000100, 'Shared Pending Comment Count Page', 'Shared pending comment count content', 'page', 'shared-pending-comment-count-page');
+    $db->close();
+    copy($pending_comment_base, $pending_comment_source);
+    copy($pending_comment_base, $pending_comment_target);
+
+    $db = smoke_open_db($pending_comment_source);
+    smoke_insert_user($db, 16000101, 'branch-approved-commenter', 'branch-approved-commenter@example.test', 'Branch Approved Commenter');
+    smoke_insert_comment($db, 16000102, 16000100, 16000101, 'Branch Approved Commenter', 'Branch approved comment body');
+    smoke_insert_user($db, 16000105, 'branch-pending-commenter', 'branch-pending-commenter@example.test', 'Branch Pending Commenter');
+    smoke_insert_comment($db, 16000106, 16000100, 16000105, 'Branch Pending Commenter', 'Branch pending comment body');
+    $db->exec("UPDATE wp_comments SET comment_approved = '0' WHERE comment_ID = 16000106");
+    $db->exec('UPDATE wp_posts SET comment_count = 1 WHERE ID = 16000100');
+    $db->close();
+
+    $db = smoke_open_db($pending_comment_target);
+    smoke_insert_user($db, 16000103, 'main-pending-commenter', 'main-pending-commenter@example.test', 'Main Pending Commenter');
+    smoke_insert_comment($db, 16000104, 16000100, 16000103, 'Main Pending Commenter', 'Main pending comment body');
+    $db->exec("UPDATE wp_comments SET comment_approved = '0' WHERE comment_ID = 16000104");
+    smoke_insert_user($db, 16000107, 'main-approved-commenter', 'main-approved-commenter@example.test', 'Main Approved Commenter');
+    smoke_insert_comment($db, 16000108, 16000100, 16000107, 'Main Approved Commenter', 'Main approved comment body');
+    $db->exec('UPDATE wp_posts SET comment_count = 1 WHERE ID = 16000100');
+    $db->close();
+
+    $pending_comment_result = cow_merge_databases($pending_comment_base, $pending_comment_source, $pending_comment_target, $pending_comment_metadata, 'feature-smoke-pending-comment-count', 'main');
+    assert_same($pending_comment_result['status'], 'completed', 'same-post approved and pending comment inserts complete cleanly');
+    assert_same((int)smoke_scalar($pending_comment_target, 'SELECT COUNT(*) FROM wp_comments WHERE comment_post_ID = 16000100'), 4, 'same-post pending comment merge preserves all branch comments');
+    assert_same((int)smoke_scalar($pending_comment_target, 'SELECT comment_count FROM wp_posts WHERE ID = 16000100'), 2, 'same-post comment count ignores pending comments');
+    assert_same(
+        (int)smoke_scalar($pending_comment_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND column_name = 'comment_count' AND decision = 'source-applied' AND reason = 'recomputed WordPress post comment count from merged comments'"),
+        1,
+        'pending comment count recompute is auditable'
     );
 
     $threaded_comment_base = $tmp . '/threaded-comment-base.sqlite';
@@ -849,7 +925,7 @@ try {
         'page-plus-threaded-comment smoke merge records no WordPress graph conflicts'
     );
     assert_same(
-        (int)smoke_scalar($threaded_comment_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_users', 'wp_comments', 'wp_commentmeta') AND decision = 'source-applied'"),
+        (int)smoke_scalar($threaded_comment_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_users', 'wp_comments', 'wp_commentmeta') AND decision = 'source-applied' AND reason <> 'recomputed WordPress post comment count from merged comments'"),
         5,
         'page-plus-threaded-comment smoke merge audits all source graph inserts'
     );
@@ -1243,6 +1319,119 @@ try {
         (int)smoke_scalar($taxonomy_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_terms', 'wp_term_taxonomy', 'wp_term_relationships') AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
         4,
         'page-plus-taxonomy smoke merge audits all target graph inserts'
+    );
+
+    $taxonomy_count_base = $tmp . '/taxonomy-count-base.sqlite';
+    $taxonomy_count_source = $tmp . '/taxonomy-count-source.sqlite';
+    $taxonomy_count_target = $tmp . '/taxonomy-count-target.sqlite';
+    $taxonomy_count_metadata = $tmp . '/.forkpress/cow/merge/taxonomy-count-metadata.sqlite';
+
+    smoke_create_posts_db($taxonomy_count_base);
+    $db = smoke_open_db($taxonomy_count_base);
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (16000030, 'Shared Count Topic', 'shared-count-topic')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES (16000031, 16000030, 'category', 'Shared count topic', 0, 0)");
+    $db->close();
+    copy($taxonomy_count_base, $taxonomy_count_source);
+    copy($taxonomy_count_base, $taxonomy_count_target);
+
+    $db = smoke_open_db($taxonomy_count_source);
+    smoke_insert_post($db, 16000032, 'Branch Count Page', 'Branch count content', 'page', 'branch-count-page');
+    $db->exec('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (16000032, 16000031, 0)');
+    $db->exec('UPDATE wp_term_taxonomy SET count = 1 WHERE term_taxonomy_id = 16000031');
+    $db->close();
+
+    $db = smoke_open_db($taxonomy_count_target);
+    smoke_insert_post($db, 16000033, 'Main Count Page', 'Main count content', 'page', 'main-count-page');
+    $db->exec('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (16000033, 16000031, 0)');
+    $db->exec('UPDATE wp_term_taxonomy SET count = 1 WHERE term_taxonomy_id = 16000031');
+    $db->close();
+
+    $taxonomy_count_result = cow_merge_databases($taxonomy_count_base, $taxonomy_count_source, $taxonomy_count_target, $taxonomy_count_metadata, 'feature-smoke-taxonomy-count', 'main');
+    assert_same($taxonomy_count_result['status'], 'completed', 'same-term taxonomy relationship inserts complete cleanly');
+    assert_same((int)smoke_scalar($taxonomy_count_target, 'SELECT COUNT(*) FROM wp_term_relationships WHERE term_taxonomy_id = 16000031'), 2, 'same-term taxonomy merge preserves both branch relationships');
+    assert_same((int)smoke_scalar($taxonomy_count_target, 'SELECT count FROM wp_term_taxonomy WHERE term_taxonomy_id = 16000031'), 2, 'same-term taxonomy merge recomputes denormalized WordPress term count');
+    assert_same(
+        (int)smoke_scalar($taxonomy_count_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_term_taxonomy' AND column_name = 'count' AND decision = 'source-applied' AND reason = 'recomputed WordPress term taxonomy count from merged relationships'"),
+        1,
+        'same-term taxonomy count recompute is auditable'
+    );
+
+    $custom_taxonomy_count_base = $tmp . '/custom-taxonomy-count-base.sqlite';
+    $custom_taxonomy_count_source = $tmp . '/custom-taxonomy-count-source.sqlite';
+    $custom_taxonomy_count_target = $tmp . '/custom-taxonomy-count-target.sqlite';
+    $custom_taxonomy_count_metadata = $tmp . '/.forkpress/cow/merge/custom-taxonomy-count-metadata.sqlite';
+
+    smoke_create_posts_db($custom_taxonomy_count_base);
+    $db = smoke_open_db($custom_taxonomy_count_base);
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (16000040, 'Custom Count Topic', 'custom-count-topic')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES (16000041, 16000040, 'forkpress_topic', 'Custom count topic', 0, 50)");
+    $db->close();
+    copy($custom_taxonomy_count_base, $custom_taxonomy_count_source);
+    copy($custom_taxonomy_count_base, $custom_taxonomy_count_target);
+
+    $db = smoke_open_db($custom_taxonomy_count_source);
+    smoke_insert_post($db, 16000042, 'Branch Custom Count Page', 'Branch custom count content', 'page', 'branch-custom-count-page');
+    $db->exec('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (16000042, 16000041, 0)');
+    $db->close();
+
+    $db = smoke_open_db($custom_taxonomy_count_target);
+    smoke_insert_post($db, 16000043, 'Main Custom Count Page', 'Main custom count content', 'page', 'main-custom-count-page');
+    $db->exec('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (16000043, 16000041, 0)');
+    $db->close();
+
+    $custom_taxonomy_count_result = cow_merge_databases($custom_taxonomy_count_base, $custom_taxonomy_count_source, $custom_taxonomy_count_target, $custom_taxonomy_count_metadata, 'feature-smoke-custom-taxonomy-count', 'main');
+    assert_same($custom_taxonomy_count_result['status'], 'completed', 'custom taxonomy relationship inserts complete cleanly');
+    assert_same((int)smoke_scalar($custom_taxonomy_count_target, 'SELECT COUNT(*) FROM wp_term_relationships WHERE term_taxonomy_id = 16000041'), 2, 'custom taxonomy merge preserves both branch relationships');
+    assert_same((int)smoke_scalar($custom_taxonomy_count_target, 'SELECT count FROM wp_term_taxonomy WHERE term_taxonomy_id = 16000041'), 50, 'custom taxonomy merge does not rewrite plugin-defined term count semantics');
+    assert_same(
+        (int)smoke_scalar($custom_taxonomy_count_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_term_taxonomy' AND column_name = 'count' AND reason = 'recomputed WordPress term taxonomy count from merged relationships'"),
+        0,
+        'custom taxonomy count skip records no built-in recompute audit'
+    );
+
+    $nav_menu_count_base = $tmp . '/nav-menu-count-base.sqlite';
+    $nav_menu_count_source = $tmp . '/nav-menu-count-source.sqlite';
+    $nav_menu_count_target = $tmp . '/nav-menu-count-target.sqlite';
+    $nav_menu_count_metadata = $tmp . '/.forkpress/cow/merge/nav-menu-count-metadata.sqlite';
+
+    smoke_create_posts_db($nav_menu_count_base);
+    $db = smoke_open_db($nav_menu_count_base);
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (16000050, 'Shared Count Menu', 'shared-count-menu')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES (16000051, 16000050, 'nav_menu', 'Shared count menu taxonomy', 0, 0)");
+    $db->close();
+    copy($nav_menu_count_base, $nav_menu_count_source);
+    copy($nav_menu_count_base, $nav_menu_count_target);
+
+    $db = smoke_open_db($nav_menu_count_source);
+    smoke_insert_post($db, 16000052, 'Branch Menu Count Page', 'Branch menu count content', 'page', 'branch-menu-count-page');
+    smoke_insert_post($db, 16000053, 'Branch Count Menu Item', '', 'nav_menu_item', 'branch-count-menu-item');
+    $db->exec('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (16000053, 16000051, 0)');
+    smoke_insert_postmeta($db, 16000054, 16000053, '_menu_item_type', 'post_type');
+    smoke_insert_postmeta($db, 16000055, 16000053, '_menu_item_object', 'page');
+    smoke_insert_postmeta($db, 16000056, 16000053, '_menu_item_object_id', '16000052');
+    smoke_insert_postmeta($db, 16000057, 16000053, '_menu_item_menu_item_parent', '0');
+    $db->exec('UPDATE wp_term_taxonomy SET count = 1 WHERE term_taxonomy_id = 16000051');
+    $db->close();
+
+    $db = smoke_open_db($nav_menu_count_target);
+    smoke_insert_post($db, 16000058, 'Main Menu Count Page', 'Main menu count content', 'page', 'main-menu-count-page');
+    smoke_insert_post($db, 16000059, 'Main Count Menu Item', '', 'nav_menu_item', 'main-count-menu-item');
+    $db->exec('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (16000059, 16000051, 0)');
+    smoke_insert_postmeta($db, 16000060, 16000059, '_menu_item_type', 'post_type');
+    smoke_insert_postmeta($db, 16000061, 16000059, '_menu_item_object', 'page');
+    smoke_insert_postmeta($db, 16000062, 16000059, '_menu_item_object_id', '16000058');
+    smoke_insert_postmeta($db, 16000063, 16000059, '_menu_item_menu_item_parent', '0');
+    $db->exec('UPDATE wp_term_taxonomy SET count = 1 WHERE term_taxonomy_id = 16000051');
+    $db->close();
+
+    $nav_menu_count_result = cow_merge_databases($nav_menu_count_base, $nav_menu_count_source, $nav_menu_count_target, $nav_menu_count_metadata, 'feature-smoke-nav-menu-count', 'main');
+    assert_same($nav_menu_count_result['status'], 'completed', 'same-menu nav item inserts complete cleanly');
+    assert_same((int)smoke_scalar($nav_menu_count_target, 'SELECT COUNT(*) FROM wp_term_relationships WHERE term_taxonomy_id = 16000051'), 2, 'same-menu nav item merge preserves both branch relationships');
+    assert_same((int)smoke_scalar($nav_menu_count_target, 'SELECT count FROM wp_term_taxonomy WHERE term_taxonomy_id = 16000051'), 2, 'same-menu nav item merge recomputes denormalized WordPress nav menu count');
+    assert_same(
+        (int)smoke_scalar($nav_menu_count_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_term_taxonomy' AND column_name = 'count' AND decision = 'source-applied' AND reason = 'recomputed WordPress term taxonomy count from merged relationships'"),
+        1,
+        'same-menu nav count recompute is auditable'
     );
 
     $taxonomy_edit_delete_base = $tmp . '/taxonomy-edit-delete-base.sqlite';
