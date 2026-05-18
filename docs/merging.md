@@ -23,6 +23,13 @@ including IDs embedded in serialized options, JSON, blocks, and plugin data.
 
 ## Inspect merge activity
 
+Show recent merge runs as branch edges:
+
+```bash
+forkpress branch history
+forkpress branch tree --format json
+```
+
 Show recent runs, decisions, conflicts, and resolutions:
 
 ```bash
@@ -52,7 +59,7 @@ forkpress branch merge-audit --revalidate --run 12 --format json
 ```
 
 Useful filters include `--run`, `--scope all|db|files|plugin`,
-`--records all|conflicts|conflict-events|decisions|resolutions|rollback-failures`,
+`--records all|runs|conflicts|conflict-events|decisions|resolutions|rollback-failures|crash-recovery`,
 `--conflict-key`, `--review-status unreviewed|pending|needs-action|reviewed`,
 `--lifecycle-state unreviewed|deferred|needs-action|reviewed|validated|resolved`,
 `--next-action review|run-plugin-validator|wait|revalidate|resolve|apply-reviewed-choice|manual-review|none`,
