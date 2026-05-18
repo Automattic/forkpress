@@ -60,3 +60,13 @@ steps:
     notify:
       - github_commit_status:
           context: "Buildkite / Mac aarch64 cow-e2e"
+
+  - label: ":windows: Windows cow-check"
+    key: windows-cow-check
+    command: ".buildkite\\commands\\windows-cow-check.ps1"
+    plugins: [$CI_TOOLKIT_PLUGIN]
+    agents:
+      queue: windows
+    notify:
+      - github_commit_status:
+          context: "Buildkite / Windows cow-check"
