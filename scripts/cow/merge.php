@@ -5794,6 +5794,113 @@ function cow_merge_wordpress_post_content_reference_violation(
     return null;
 }
 
+function cow_merge_wordpress_post_content_references_deleted_owner(string $content, string $owner_table, int $owner_id, ?string $owner_post_type): bool {
+    if ($content === '') {
+        return false;
+    }
+    $int_refs_owner = static function (mixed $candidate) use ($owner_id): bool {
+        if (is_int($candidate)) {
+            return $candidate === $owner_id;
+        }
+        if (is_string($candidate) && preg_match('/^-?\d+$/', trim($candidate))) {
+            return (int)trim($candidate) === $owner_id;
+        }
+        return false;
+    };
+
+    if ($owner_table === 'wp_posts' && $owner_post_type === 'attachment') {
+        foreach (cow_merge_wordpress_post_content_legacy_attachment_refs($content) as $ref) {
+            if ($int_refs_owner($ref['id'] ?? null)) {
+                return true;
+            }
+        }
+    }
+
+    foreach (cow_merge_wordpress_post_content_blocks($content) as $block) {
+        $block_name = (string)$block['name'];
+        $attrs = json_decode((string)$block['attrs'], true);
+        if (!is_array($attrs)) {
+            continue;
+        }
+
+        if ($owner_table === 'wp_posts') {
+            if ($block_name === 'block' && $owner_post_type === 'wp_block' && array_key_exists('ref', $attrs) && $int_refs_owner($attrs['ref'])) {
+                return true;
+            }
+            if (in_array($block_name, ['audio', 'cover', 'file', 'image', 'video'], true) && $owner_post_type === 'attachment' && array_key_exists('id', $attrs) && $int_refs_owner($attrs['id'])) {
+                return true;
+            }
+            if ($block_name === 'media-text' && $owner_post_type === 'attachment' && array_key_exists('mediaId', $attrs) && $int_refs_owner($attrs['mediaId'])) {
+                return true;
+            }
+            if ($block_name === 'gallery' && $owner_post_type === 'attachment' && isset($attrs['ids']) && is_array($attrs['ids'])) {
+                foreach ($attrs['ids'] as $id) {
+                    if ($int_refs_owner($id)) {
+                        return true;
+                    }
+                }
+            }
+            if (in_array($block_name, ['navigation-link', 'navigation-submenu'], true) && ($attrs['kind'] ?? null) === 'post-type' && array_key_exists('id', $attrs) && $int_refs_owner($attrs['id'])) {
+                return true;
+            }
+            if ($block_name === 'navigation' && $owner_post_type === 'wp_navigation' && array_key_exists('ref', $attrs) && $int_refs_owner($attrs['ref'])) {
+                return true;
+            }
+        }
+
+        if ($owner_table === 'wp_users') {
+            if ($block_name === 'avatar' && array_key_exists('userId', $attrs) && $int_refs_owner($attrs['userId'])) {
+                return true;
+            }
+            if ($block_name === 'latest-posts' && isset($attrs['selectedAuthor']) && $int_refs_owner($attrs['selectedAuthor'])) {
+                return true;
+            }
+            if ($block_name === 'query' && isset($attrs['query']) && is_array($attrs['query']) && array_key_exists('author', $attrs['query']) && $int_refs_owner($attrs['query']['author'])) {
+                return true;
+            }
+        }
+
+        if ($owner_table === 'wp_terms') {
+            if ($block_name === 'latest-posts' && isset($attrs['categories']) && is_array($attrs['categories'])) {
+                foreach ($attrs['categories'] as $term_id) {
+                    if ($int_refs_owner($term_id)) {
+                        return true;
+                    }
+                }
+            }
+            if (in_array($block_name, ['navigation-link', 'navigation-submenu'], true) && ($attrs['kind'] ?? null) === 'taxonomy' && array_key_exists('id', $attrs) && $int_refs_owner($attrs['id'])) {
+                return true;
+            }
+            if ($block_name === 'query' && isset($attrs['query']) && is_array($attrs['query'])) {
+                foreach (['categoryIds', 'tagIds'] as $field) {
+                    if (!isset($attrs['query'][$field]) || !is_array($attrs['query'][$field])) {
+                        continue;
+                    }
+                    foreach ($attrs['query'][$field] as $term_id) {
+                        if ($int_refs_owner($term_id)) {
+                            return true;
+                        }
+                    }
+                }
+                if (isset($attrs['query']['taxQuery']) && is_array($attrs['query']['taxQuery'])) {
+                    foreach ($attrs['query']['taxQuery'] as $term_ids) {
+                        if (!is_array($term_ids)) {
+                            continue;
+                        }
+                        foreach ($term_ids as $term_id) {
+                            if ($int_refs_owner($term_id)) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
 function cow_merge_wordpress_option_reference_violation(
     SQLite3 $source,
     SQLite3 $target,
@@ -6096,6 +6203,23 @@ function cow_merge_wordpress_option_value_references_deleted_owner(string $optio
         }
     }
 
+    $block_content_widget_fields = [
+        'widget_block' => 'content',
+        'widget_custom_html' => 'content',
+        'widget_text' => 'text',
+    ];
+    $block_content_field = $block_content_widget_fields[$option_name] ?? null;
+    if ($block_content_field !== null) {
+        foreach ($decoded as $widget) {
+            if (!is_array($widget) || !isset($widget[$block_content_field]) || !is_string($widget[$block_content_field])) {
+                continue;
+            }
+            if (cow_merge_wordpress_post_content_references_deleted_owner($widget[$block_content_field], $owner_table, $owner_id, $owner_post_type)) {
+                return true;
+            }
+        }
+    }
+
     return false;
 }
 
@@ -6125,6 +6249,9 @@ function cow_merge_wordpress_target_changed_options_for_deleted_owner(SQLite3 $b
             'widget_media_video',
             'widget_nav_menu',
             'widget_pages',
+            'widget_block',
+            'widget_custom_html',
+            'widget_text',
         ];
         $placeholders = implode(',', array_fill(0, count($interesting_options), '?'));
         $stmt = cow_merge_prepare_checked(
@@ -6437,6 +6564,10 @@ function cow_merge_wordpress_delete_reference_violation(
             ]);
             if ($target_dependent_violation !== null) {
                 return $target_dependent_violation;
+            }
+            $target_option_violation = cow_merge_wordpress_target_changed_options_for_deleted_owner($base, $target, 'wp_users', (int)$user_id);
+            if ($target_option_violation !== null) {
+                return $target_option_violation;
             }
         }
     }

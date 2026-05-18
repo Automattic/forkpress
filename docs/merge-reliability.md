@@ -187,7 +187,8 @@ and the option cases cover JSON and serialized `wp_options` rows plus global
 front/posts page singleton, serialized sticky-post, and scalar site-icon option
 disagreements, plus serialized theme-mod custom-logo and media-image widget
 media/audio/video/gallery widgets, pages widget exclusions, nav-menu widget,
-nav-menu auto-add, and menu-location disagreements, that must stay reviewable.
+nav-menu auto-add, content-bearing widgets, and menu-location disagreements,
+that must stay reviewable.
 
 For filesystem merge behavior, including binary changes and conflicts, safe
 relative symlinks, unsafe absolute/root-escaping/self-referential/managed-path
