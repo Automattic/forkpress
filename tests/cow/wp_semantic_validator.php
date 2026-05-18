@@ -2321,6 +2321,55 @@ PHP);
     assert_true(str_contains($featured_preview, '"missing_object_id":61'), 'WordPress featured image audit includes the missing attachment ID');
     assert_true(str_contains($featured_preview, '"field":"_thumbnail_id"'), 'WordPress featured image audit includes the thumbnail field');
 
+    $featured_guard_base_root = $tmp . '/featured-media-owner-guard-base';
+    $featured_guard_source_root = $tmp . '/featured-media-owner-guard-source';
+    $featured_guard_target_root = $tmp . '/featured-media-owner-guard-target';
+    $featured_guard_base = $featured_guard_base_root . '/wp-content/database/.ht.sqlite';
+    $featured_guard_source = $featured_guard_source_root . '/wp-content/database/.ht.sqlite';
+    $featured_guard_target = $featured_guard_target_root . '/wp-content/database/.ht.sqlite';
+    $featured_guard_metadata = $tmp . '/.forkpress/cow/merge/wp-featured-media-owner-guard-metadata.sqlite';
+
+    mkdir($featured_guard_base_root . '/wp-content/database', 0777, true);
+    create_wp_featured_media_db($featured_guard_base);
+    copy_tree_for_test($featured_guard_base_root, $featured_guard_source_root);
+    copy_tree_for_test($featured_guard_base_root, $featured_guard_target_root);
+    cow_merge_allocate_autoincrement_bands($featured_guard_source, $featured_guard_metadata, 'feature-wp-featured-media-owner-guard-source');
+    cow_merge_allocate_autoincrement_bands($featured_guard_target, $featured_guard_metadata, 'main');
+
+    $db = open_db($featured_guard_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID = 61');
+    $db->close();
+
+    $db = open_db($featured_guard_target);
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, guid) VALUES
+        (62, 'Target page newly using featured image', '<!-- wp:paragraph --><p>Target featured page</p><!-- /wp:paragraph -->', 'publish', 'page', 'target-featured-page', '')");
+    $db->exec("INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES (6001, 62, '_thumbnail_id', '61')");
+    $db->close();
+
+    $featured_guard_result = cow_merge_branch_state(
+        $featured_guard_base,
+        $featured_guard_source,
+        $featured_guard_target,
+        $featured_guard_metadata,
+        'feature-wp-featured-media-owner-guard-source',
+        'main'
+    );
+
+    assert_same($featured_guard_result['status'], 'completed_with_conflicts', 'WordPress featured-image owner delete with target-added thumbnail metadata stays reviewable');
+    assert_same((int)($featured_guard_result['plugin_validator_conflicts'] ?? 0), 0, 'WordPress featured-image owner guard prevents missing-thumbnail validator fallout');
+    assert_same((int)scalar($featured_guard_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 61'), 1, 'WordPress featured-image owner guard keeps the referenced attachment before review');
+    assert_same(scalar($featured_guard_target, "SELECT meta_value FROM wp_postmeta WHERE meta_id = 6001"), '61', 'WordPress featured-image owner guard preserves target-added thumbnail metadata');
+
+    $featured_guard_audit = cow_merge_audit_report($featured_guard_metadata, (int)$featured_guard_result['run_id'], 10, [
+        'records' => 'conflicts',
+        'conflict_type' => 'row-target-constraint',
+    ]);
+    assert_same(count($featured_guard_audit['conflicts']), 1, 'WordPress featured-image owner guard records one row constraint conflict');
+    $featured_guard_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $featured_guard_audit['conflicts']));
+    assert_true(str_contains($featured_guard_preview, '61'), 'WordPress featured-image owner guard audit includes the guarded attachment ID');
+    $featured_guard_reason = (string)scalar($featured_guard_metadata, "SELECT reason FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-wins' ORDER BY id DESC LIMIT 1");
+    assert_true(str_contains($featured_guard_reason, 'target has changed wp_postmeta rows'), 'WordPress featured-image owner guard audit explains the changed thumbnail metadata blocker');
+
     $attachment_upload_base_root = $tmp . '/attachment-upload-base';
     $attachment_upload_source_root = $tmp . '/attachment-upload-source';
     $attachment_upload_target_root = $tmp . '/attachment-upload-target';

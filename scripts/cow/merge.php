@@ -6175,10 +6175,20 @@ function cow_merge_wordpress_delete_reference_violation(
     if ($table === 'wp_posts') {
         $post_id = $base_row['ID'] ?? null;
         if (is_int($post_id) || (is_string($post_id) && preg_match('/^-?\d+$/', $post_id))) {
-            $target_dependent_violation = cow_merge_wordpress_target_changed_dependents_for_deleted_owner($base, $target, 'wp_posts', (int)$post_id, [
+            $dependent_specs = [
                 ['table' => 'wp_postmeta', 'pk' => 'meta_id', 'owner_column' => 'post_id'],
                 ['table' => 'wp_comments', 'pk' => 'comment_ID', 'owner_column' => 'comment_post_ID'],
-            ]);
+            ];
+            if (($base_row['post_type'] ?? null) === 'attachment') {
+                $dependent_specs[] = [
+                    'table' => 'wp_postmeta',
+                    'pk' => 'meta_id',
+                    'reference_column' => 'meta_value',
+                    'filter_column' => 'meta_key',
+                    'filter_value' => '_thumbnail_id',
+                ];
+            }
+            $target_dependent_violation = cow_merge_wordpress_target_changed_dependents_for_deleted_owner($base, $target, 'wp_posts', (int)$post_id, $dependent_specs);
             if ($target_dependent_violation !== null) {
                 return $target_dependent_violation;
             }
@@ -6266,7 +6276,8 @@ function cow_merge_wordpress_target_changed_dependents_for_deleted_owner(SQLite3
         $dependent_table = (string)($spec['table'] ?? '');
         $dependent_pk = (string)($spec['pk'] ?? '');
         $owner_column = (string)($spec['owner_column'] ?? '');
-        if ($dependent_table === '' || $dependent_pk === '' || $owner_column === '') {
+        $reference_column = (string)($spec['reference_column'] ?? '');
+        if ($dependent_table === '' || $dependent_pk === '' || ($owner_column === '' && $reference_column === '')) {
             continue;
         }
         if (!cow_merge_schema_object_exists($base, $dependent_table) || !cow_merge_schema_object_exists($target, $dependent_table)) {
@@ -6277,19 +6288,45 @@ function cow_merge_wordpress_target_changed_dependents_for_deleted_owner(SQLite3
         if (
             !in_array($dependent_pk, $base_columns, true)
             || !in_array($dependent_pk, $target_columns, true)
-            || !in_array($owner_column, $target_columns, true)
         ) {
             continue;
+        }
+        $filter_column = (string)($spec['filter_column'] ?? '');
+        $filter_value = $spec['filter_value'] ?? null;
+        if ($filter_column !== '' && !in_array($filter_column, $target_columns, true)) {
+            continue;
+        }
+        $where = '';
+        if ($owner_column !== '') {
+            if (!in_array($owner_column, $target_columns, true)) {
+                continue;
+            }
+            $where = cow_merge_quote_ident($owner_column) . ' = :owner_id';
+        } else {
+            if (!in_array($reference_column, $target_columns, true)) {
+                continue;
+            }
+            $where = 'trim(' . cow_merge_quote_ident($reference_column) . ') = :owner_id_text';
+        }
+        if ($filter_column !== '') {
+            $where .= ' AND ' . cow_merge_quote_ident($filter_column) . ' = :filter_value';
         }
         $columns = cow_merge_all_columns($target_columns, $base_columns);
         $stmt = cow_merge_prepare_checked(
             $target,
             'SELECT * FROM ' . cow_merge_quote_ident($dependent_table)
-                . ' WHERE ' . cow_merge_quote_ident($owner_column) . ' = :owner_id'
+                . ' WHERE ' . $where
                 . ' ORDER BY ' . cow_merge_quote_ident($dependent_pk),
             "failed to prepare target $dependent_table dependency lookup"
         );
-        cow_merge_bind($stmt, ':owner_id', $owner_id);
+        if ($owner_column !== '') {
+            cow_merge_bind($stmt, ':owner_id', $owner_id);
+        } else {
+            cow_merge_bind($stmt, ':owner_id_text', (string)$owner_id);
+        }
+        if ($filter_column !== '') {
+            cow_merge_bind($stmt, ':filter_value', $filter_value);
+        }
         $res = cow_merge_execute_checked($stmt, $target, "failed to inspect target $dependent_table dependencies");
         try {
             while ($target_row = $res->fetchArray(SQLITE3_ASSOC)) {
