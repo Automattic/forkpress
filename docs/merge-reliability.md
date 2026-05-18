@@ -17,6 +17,10 @@ when there is a test or document that exercises the specific merge invariant.
 
 Recent additions in the current merge-reliability work:
 
+- Branch reset now finalizes birth metadata against the private staged tree
+  before publishing it: DB merge base, file merge base, row identities, and
+  AUTOINCREMENT ID-band reservations are all complete before the reset branch
+  becomes routable/listed again.
 - Plugin validators now receive first-class pre-merge target context:
   `FORKPRESS_MERGE_TARGET_BEFORE_DB` and, when file context exists,
   `FORKPRESS_MERGE_TARGET_BEFORE_ROOT`. The focused

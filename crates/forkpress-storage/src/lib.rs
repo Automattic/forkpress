@@ -850,6 +850,52 @@ pub fn reset_cow_branch(
     }
 
     write_cow_reset_pending(layout, branch, from)?;
+    let metadata_backup = match snapshot_cow_reset_metadata(layout, runtime, shared, branch, parent)
+    {
+        Ok(backup) => backup,
+        Err(err) => {
+            let _ = fs::remove_dir_all(&staging);
+            clear_cow_reset_pending_if_rollback_complete(
+                layout,
+                branch,
+                &["removed unpublished reset staging"],
+            );
+            return Err(err).context("failed to snapshot COW reset metadata before staging reset");
+        }
+    };
+
+    let finalize_staging = (|| -> Result<()> {
+        record_cow_merge_base_snapshot(layout, runtime, shared, branch, &source_db)?;
+        let staged_db = cow_sqlite_db_path(&staging);
+        if staged_db.is_file() {
+            allocate_cow_autoincrement_bands(layout, runtime, shared, branch, &staged_db)?;
+            capture_cow_row_identities(layout, runtime, shared, branch, &staged_db, Some(from))?;
+        }
+        record_cow_file_merge_base_snapshot(layout, runtime, shared, branch, &staging)?;
+        cow_storage_failpoint("after-branch-reset-birth-metadata")?;
+        Ok(())
+    })();
+
+    if let Err(err) = finalize_staging {
+        let metadata_rollback = metadata_backup.restore(layout);
+        let staging_cleanup = fs::remove_dir_all(&staging)
+            .map(|_| "removed unpublished reset staging".to_string())
+            .unwrap_or_else(|cleanup_err| {
+                format!(
+                    "rollback incomplete: failed to remove {}: {cleanup_err}",
+                    staging.display()
+                )
+            });
+        clear_cow_reset_pending_if_rollback_complete(
+            layout,
+            branch,
+            &[&metadata_rollback, &staging_cleanup],
+        );
+        return Err(err).context(format!(
+            "failed to finalize COW branch reset metadata before publish; {metadata_rollback}; {staging_cleanup}"
+        ));
+    }
+
     let mut target_moved_to_backup = false;
     let mut staging_published = false;
     let publish = (|| -> Result<()> {
@@ -878,6 +924,7 @@ pub fn reset_cow_branch(
 
     if let Err(err) = publish {
         let failed = unique_cow_operation_dir(parent, "reset-failed", branch);
+        let metadata_rollback = metadata_backup.restore(layout);
         let rollback = rollback_failed_reset_publish(
             branch,
             &target,
@@ -887,44 +934,18 @@ pub fn reset_cow_branch(
             target_moved_to_backup,
             staging_published,
         );
-        clear_cow_reset_pending_if_rollback_complete(layout, branch, &[&rollback]);
-        return Err(err).context(format!("failed to reset COW branch; {rollback}"));
+        clear_cow_reset_pending_if_rollback_complete(
+            layout,
+            branch,
+            &[&metadata_rollback, &rollback],
+        );
+        return Err(err).context(format!(
+            "failed to reset COW branch; {metadata_rollback}; {rollback}"
+        ));
     }
 
     cow_storage_failpoint("after-branch-reset-publish")?;
-    let metadata_backup = match snapshot_cow_reset_metadata(layout, runtime, shared, branch, parent)
-    {
-        Ok(backup) => backup,
-        Err(err) => {
-            let failed = unique_cow_operation_dir(parent, "reset-failed", branch);
-            let rollback = rollback_failed_reset_publish(
-                branch,
-                &target,
-                &backup,
-                &staging,
-                &failed,
-                target_moved_to_backup,
-                staging_published,
-            );
-            clear_cow_reset_pending_if_rollback_complete(layout, branch, &[&rollback]);
-            return Err(err).context(format!(
-                "failed to snapshot COW reset metadata before finalizing reset; {rollback}"
-            ));
-        }
-    };
-    let finalize = (|| -> Result<()> {
-        record_cow_merge_base_snapshot(layout, runtime, shared, branch, &source_db)?;
-        let target_db = cow_sqlite_db_path(&target);
-        if target_db.is_file() {
-            allocate_cow_autoincrement_bands(layout, runtime, shared, branch, &target_db)?;
-            capture_cow_row_identities(layout, runtime, shared, branch, &target_db, Some(from))?;
-        }
-        record_cow_file_merge_base_snapshot(layout, runtime, shared, branch, &target)?;
-        invalidate_cow_git_ref(layout, branch)?;
-        Ok(())
-    })();
-
-    if let Err(err) = finalize {
+    if let Err(err) = invalidate_cow_git_ref(layout, branch) {
         let metadata_rollback = metadata_backup.restore(layout);
         let failed = unique_cow_operation_dir(parent, "reset-failed", branch);
         let branch_rollback = rollback_failed_reset_publish(
@@ -942,7 +963,7 @@ pub fn reset_cow_branch(
             &[&metadata_rollback, &branch_rollback],
         );
         return Err(err).context(format!(
-            "failed to finalize COW branch reset metadata; {metadata_rollback}; {branch_rollback}"
+            "failed to finalize COW branch reset publication; {metadata_rollback}; {branch_rollback}"
         ));
     }
     clear_cow_reset_pending(layout, branch)?;
@@ -4625,6 +4646,148 @@ mod tests {
             "-wal"
         )));
         assert!(!path_exists_no_follow(&backup_root));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn reset_allocates_id_bands_against_staging_before_publish() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "forkpress-reset-prepublish-bands-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let layout = Layout::new(root.join(".forkpress")).unwrap();
+        let runtime = PortableRuntime::from_layout(&layout);
+        let fake_php = root.join("fake-php");
+        let fake_php_log = root.join("fake-php.log");
+        let escaped_log = fake_php_log.to_string_lossy().replace('\'', "'\\''");
+        fs::create_dir_all(layout.runtime_dir.join("runtime/cow")).unwrap();
+        fs::create_dir_all(layout.runtime_dir.join("scripts/shared")).unwrap();
+        fs::create_dir_all(layout.runtime_dir.join("scripts/cow")).unwrap();
+        fs::write(layout.runtime_dir.join("runtime/cow/bootstrap_wp.php"), b"").unwrap();
+        fs::write(
+            layout.runtime_dir.join("scripts/shared/sqlite_backup.php"),
+            b"",
+        )
+        .unwrap();
+        fs::write(layout.runtime_dir.join("scripts/cow/merge.php"), b"").unwrap();
+        fs::write(
+            &fake_php,
+            format!(
+                r#"#!/bin/sh
+while [ "$1" = "-d" ]; do
+    shift 2
+done
+script="$1"
+shift
+case "$script" in
+    */sqlite_backup.php)
+        cp "$1" "$2"
+        ;;
+    */bootstrap_wp.php)
+        ;;
+    */merge.php)
+        command="$1"
+        shift
+        case "$command" in
+            allocate-id-bands)
+                db=""
+                while [ "$#" -gt 0 ]; do
+                    key="$1"
+                    shift
+                    if [ "$key" = "--db" ] && [ "$#" -gt 0 ]; then
+                        db="$1"
+                        shift
+                    fi
+                done
+                printf 'allocate:%s\n' "$db" >> '{escaped_log}'
+                case "$db" in
+                    *".forkpress-reset-stage-feature-"*) ;;
+                    *) exit 43 ;;
+                esac
+                ;;
+            capture-identities)
+                printf 'identities\n' >> '{escaped_log}'
+                ;;
+            capture-files)
+                file_base=""
+                while [ "$#" -gt 0 ]; do
+                    key="$1"
+                    shift
+                    if [ "$key" = "--file-base" ] && [ "$#" -gt 0 ]; then
+                        file_base="$1"
+                        shift
+                    fi
+                done
+                mkdir -p "$(dirname "$file_base")"
+                printf '{{}}\n' > "$file_base"
+                printf 'files:%s\n' "$file_base" >> '{escaped_log}'
+                ;;
+            *)
+                exit 44
+                ;;
+        esac
+        ;;
+    *)
+        exit 45
+        ;;
+esac
+"#
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fake_php).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_php, permissions).unwrap();
+
+        for branch in ["main", "feature"] {
+            let branch_root = cow_branch_root(&layout, branch);
+            fs::create_dir_all(branch_root.join("wp-content/database")).unwrap();
+            fs::write(branch_root.join("wp-load.php"), b"<?php\n").unwrap();
+            fs::write(
+                branch_root.join("wp-content/database/.ht.sqlite"),
+                format!("{branch} db\n"),
+            )
+            .unwrap();
+        }
+
+        reset_cow_branch(
+            &layout,
+            &runtime,
+            &SharedPaths {
+                work_dir: layout.work_dir.clone(),
+                php_bin: Some(fake_php),
+            },
+            "feature",
+            "main",
+            false,
+        )
+        .unwrap();
+
+        let log = fs::read_to_string(&fake_php_log).unwrap();
+        let allocate_line = log
+            .lines()
+            .find(|line| line.starts_with("allocate:"))
+            .expect("reset allocated ID bands");
+        assert!(
+            allocate_line.contains(".forkpress-reset-stage-feature-"),
+            "ID bands should be allocated against the private reset staging DB before publish, got {allocate_line}"
+        );
+        assert!(!cow_reset_pending_path(&layout, "feature").unwrap().exists());
+        assert_eq!(
+            fs::read_to_string(
+                cow_branch_root(&layout, "feature").join("wp-content/database/.ht.sqlite")
+            )
+            .unwrap(),
+            "main db\n"
+        );
 
         fs::remove_dir_all(root).unwrap();
     }
