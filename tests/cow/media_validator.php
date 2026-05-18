@@ -67,6 +67,18 @@ function write_test_file(string $path, string $contents): void {
     file_put_contents($path, $contents);
 }
 
+function create_test_symlink(string $target, string $link): void {
+    if (!is_dir(dirname($link))) {
+        mkdir(dirname($link), 0777, true);
+    }
+    if ((file_exists($link) || is_link($link)) && !unlink($link)) {
+        throw new RuntimeException("failed to replace test symlink: $link");
+    }
+    if (!symlink($target, $link)) {
+        throw new RuntimeException("failed to create test symlink: $link");
+    }
+}
+
 function open_db(string $path): SQLite3 {
     $db = new SQLite3($path);
     $db->busyTimeout(5000);
@@ -195,6 +207,15 @@ $invalid_upload_entry_finding = static function (array $row, string $reason, arr
         'validator' => 'forkpress-wp-media@1',
         'candidate' => ['attachment_id' => (int)$row['ID']] + $candidate,
     ];
+};
+$invalid_upload_entry_type = static function (string $path): ?string {
+    if (is_link($path)) {
+        return 'symlink';
+    }
+    if (file_exists($path) && !is_file($path)) {
+        return filetype($path);
+    }
+    return null;
 };
 while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
     if ($row['attached_file'] === null || $row['metadata'] === null) {
@@ -342,11 +363,11 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
                 'file' => $attached_file,
             ],
         ];
-    } elseif ($uploads_root !== '' && file_exists($uploads_root . '/' . $attached_file) && !is_file($uploads_root . '/' . $attached_file)) {
+    } elseif ($uploads_root !== '' && ($entry_type = $invalid_upload_entry_type($uploads_root . '/' . $attached_file)) !== null) {
         $findings[] = $invalid_upload_entry_finding($row, 'attachment original upload path exists but is not a file', [
             'attached_file' => $attached_file,
             'file' => $attached_file,
-            'entry_type' => filetype($uploads_root . '/' . $attached_file),
+            'entry_type' => $entry_type,
         ]);
     } elseif ($uploads_root !== '' && !is_file($uploads_root . '/' . $attached_file)) {
         $findings[] = [
@@ -396,11 +417,11 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
                     'metadata_file' => $metadata_file,
                 ],
             ] + $review_only_regeneration_decision('metadata original');
-        } elseif ($uploads_root !== '' && file_exists($uploads_root . '/' . $metadata_file) && !is_file($uploads_root . '/' . $metadata_file)) {
+        } elseif ($uploads_root !== '' && ($entry_type = $invalid_upload_entry_type($uploads_root . '/' . $metadata_file)) !== null) {
             $findings[] = $invalid_upload_entry_finding($row, 'attachment metadata original upload path exists but is not a file', [
                 'attached_file' => $attached_file,
                 'metadata_file' => $metadata_file,
-                'entry_type' => filetype($uploads_root . '/' . $metadata_file),
+                'entry_type' => $entry_type,
             ]);
         } elseif ($uploads_root !== '' && !is_file($uploads_root . '/' . $metadata_file)) {
             $findings[] = [
@@ -458,12 +479,12 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
                 ];
             } else {
                 $relative_files[] = $original_image_file;
-                if ($uploads_root !== '' && file_exists($uploads_root . '/' . $original_image_file) && !is_file($uploads_root . '/' . $original_image_file)) {
+                if ($uploads_root !== '' && ($entry_type = $invalid_upload_entry_type($uploads_root . '/' . $original_image_file)) !== null) {
                     $findings[] = $invalid_upload_entry_finding($row, 'attachment original image upload path exists but is not a file', [
                         'attached_file' => $attached_file,
                         'original_image' => (string)$metadata['original_image'],
                         'original_image_file' => $original_image_file,
-                        'entry_type' => filetype($uploads_root . '/' . $original_image_file),
+                        'entry_type' => $entry_type,
                     ]);
                 } elseif ($uploads_root !== '' && !is_file($uploads_root . '/' . $original_image_file)) {
                     $findings[] = [
@@ -542,12 +563,12 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
                 continue;
             }
             $relative_files[] = $backup_relative_file;
-            if ($uploads_root !== '' && file_exists($uploads_root . '/' . $backup_relative_file) && !is_file($uploads_root . '/' . $backup_relative_file)) {
+            if ($uploads_root !== '' && ($entry_type = $invalid_upload_entry_type($uploads_root . '/' . $backup_relative_file)) !== null) {
                 $findings[] = $invalid_upload_entry_finding($row, 'attachment backup size upload path exists but is not a file', [
                     'attached_file' => $attached_file,
                     'backup_size' => (string)$backup_name,
                     'backup_file' => $backup_relative_file,
-                    'entry_type' => filetype($uploads_root . '/' . $backup_relative_file),
+                    'entry_type' => $entry_type,
                 ]);
             } elseif ($uploads_root !== '' && !is_file($uploads_root . '/' . $backup_relative_file)) {
                 $findings[] = [
@@ -741,12 +762,12 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
                 }
             }
             $relative_files[] = $generated_file;
-            if ($uploads_root !== '' && file_exists($uploads_root . '/' . $generated_file) && !is_file($uploads_root . '/' . $generated_file)) {
+            if ($uploads_root !== '' && ($entry_type = $invalid_upload_entry_type($uploads_root . '/' . $generated_file)) !== null) {
                 $findings[] = $invalid_upload_entry_finding($row, 'attachment generated size upload path exists but is not a file', [
                     'attached_file' => $attached_file,
                     'size' => (string)$size_name,
                     'generated_file' => $generated_file,
-                    'entry_type' => filetype($uploads_root . '/' . $generated_file),
+                    'entry_type' => $entry_type,
                 ]);
             } elseif ($uploads_root !== '' && !is_file($uploads_root . '/' . $generated_file)) {
                 $findings[] = [
@@ -913,6 +934,14 @@ PHP);
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-backup-dimensions-original.jpg', "source backup dimensions original bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-backup-unsafe-current.jpg', "source unsafe backup current bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-url.jpg', "source URL-like generated path original bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-symlink-target.jpg', "source symlink target bytes\n");
+    create_test_symlink('source-symlink-target.jpg', $source_root . '/wp-content/uploads/2026/05/source-symlink-original.jpg');
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-symlink-generated.jpg', "source symlink generated original bytes\n");
+    create_test_symlink('source-symlink-target.jpg', $source_root . '/wp-content/uploads/2026/05/source-symlink-generated-150x150.jpg');
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-symlink-original-image-scaled.jpg', "source symlink original_image scaled bytes\n");
+    create_test_symlink('source-symlink-target.jpg', $source_root . '/wp-content/uploads/2026/05/source-symlink-original-image-original.jpg');
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-symlink-backup-current.jpg', "source symlink backup current bytes\n");
+    create_test_symlink('source-symlink-target.jpg', $source_root . '/wp-content/uploads/2026/05/source-symlink-backup-original.jpg');
     $db = open_db($source);
     $attachment_id = insert_attachment($db, 'Source media generated missing file key', '2026/05/source-generated-missing-file-key.jpg', [
         'file' => '2026/05/source-generated-missing-file-key.jpg',
@@ -1041,6 +1070,24 @@ PHP);
             ],
         ],
     ]);
+    $symlink_original_id = insert_attachment($db, 'Source media symlink original path', '2026/05/source-symlink-original.jpg', [
+        'file' => '2026/05/source-symlink-original.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [],
+    ]);
+    $symlink_generated_id = insert_attachment($db, 'Source media symlink generated path', '2026/05/source-symlink-generated.jpg', [
+        'file' => '2026/05/source-symlink-generated.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'source-symlink-generated-150x150.jpg',
+                'width' => 150,
+                'height' => 150,
+            ],
+        ],
+    ]);
     $mime_drift_id = insert_attachment($db, 'Source media MIME type drift', '2026/05/source-mime-drift.jpg', [
         'file' => '2026/05/source-mime-drift.jpg',
         'width' => 640,
@@ -1103,6 +1150,13 @@ PHP);
         'original_image' => 'source-directory-original-image-original.jpg',
         'sizes' => [],
     ]);
+    $symlink_original_image_id = insert_attachment($db, 'Source media symlink original image entry', '2026/05/source-symlink-original-image-scaled.jpg', [
+        'file' => '2026/05/source-symlink-original-image-scaled.jpg',
+        'width' => 640,
+        'height' => 480,
+        'original_image' => 'source-symlink-original-image-original.jpg',
+        'sizes' => [],
+    ]);
     $directory_backup_id = insert_attachment($db, 'Source media directory backup entry', '2026/05/source-directory-backup-current.jpg', [
         'file' => '2026/05/source-directory-backup-current.jpg',
         'width' => 640,
@@ -1110,6 +1164,20 @@ PHP);
         'backup_sizes' => [
             'full-orig' => [
                 'file' => 'source-directory-backup-original.jpg',
+                'width' => 1200,
+                'height' => 900,
+                'mime-type' => 'image/jpeg',
+            ],
+        ],
+        'sizes' => [],
+    ]);
+    $symlink_backup_id = insert_attachment($db, 'Source media symlink backup entry', '2026/05/source-symlink-backup-current.jpg', [
+        'file' => '2026/05/source-symlink-backup-current.jpg',
+        'width' => 640,
+        'height' => 480,
+        'backup_sizes' => [
+            'full-orig' => [
+                'file' => 'source-symlink-backup-original.jpg',
                 'width' => 1200,
                 'height' => 900,
                 'mime-type' => 'image/jpeg',
@@ -1357,7 +1425,7 @@ PHP);
 
     assert_same($result['status'], 'completed_with_conflicts', 'media validator holds incomplete generated-size metadata for review');
     assert_same((int)($result['plugin_validators'] ?? 0), 1, 'media validator is discovered from mu-plugins during merge');
-    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 50, 'media validator records missing required metadata, invalid metadata, dimensions, image metadata, filesize and MIME drift, invalid file entries, generated-size, original-image, backup-size, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
+    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 54, 'media validator records missing required metadata, invalid metadata, dimensions, image metadata, filesize and MIME drift, invalid file entries, generated-size, original-image, backup-size, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
     assert_same(
         scalar($target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-generated-missing-file-key.jpg',
@@ -1495,29 +1563,51 @@ PHP);
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-media-invalid-file-entry',
     ]);
-    assert_same(count($invalid_file_entry_audit['conflicts']), 4, 'media validator exposes upload paths that exist as non-file entries as plugin-scoped audit conflicts');
+    assert_same(count($invalid_file_entry_audit['conflicts']), 8, 'media validator exposes upload paths that exist as non-file entries or symlinks as plugin-scoped audit conflicts');
     $invalid_file_entry_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $invalid_file_entry_audit['conflicts']));
     assert_true(str_contains($invalid_file_entry_preview, 'source-directory-original.jpg'), 'media validator invalid-file-entry audit includes the directory original path');
     assert_true(str_contains($invalid_file_entry_preview, (string)$directory_original_id), 'media validator invalid-file-entry audit includes the directory original attachment ID');
+    assert_true(str_contains($invalid_file_entry_preview, 'source-symlink-original.jpg'), 'media validator invalid-file-entry audit includes the symlink original path');
+    assert_true(str_contains($invalid_file_entry_preview, (string)$symlink_original_id), 'media validator invalid-file-entry audit includes the symlink original attachment ID');
     $invalid_generated_directory_recorded = false;
     $invalid_original_image_directory_recorded = false;
     $invalid_backup_directory_recorded = false;
     $invalid_directory_entry_type_recorded = false;
+    $invalid_original_symlink_recorded = false;
+    $invalid_generated_symlink_recorded = false;
+    $invalid_original_image_symlink_recorded = false;
+    $invalid_backup_symlink_recorded = false;
+    $invalid_symlink_entry_type_recorded = false;
     $meta_db = open_db($metadata);
     $payloads = $meta_db->query("SELECT chosen_payload FROM merge_conflicts WHERE conflict_type = 'plugin-wp-media-invalid-file-entry'");
     while ($payload = $payloads->fetchArray(SQLITE3_ASSOC)) {
         $decoded = cow_merge_decode_payload_json((string)$payload['chosen_payload'], 'media validator invalid-file-entry payload');
+        if (($decoded['candidate']['file'] ?? null) === '2026/05/source-symlink-original.jpg') {
+            $invalid_original_symlink_recorded = true;
+        }
         if (($decoded['candidate']['generated_file'] ?? null) === '2026/05/source-directory-generated-150x150.jpg') {
             $invalid_generated_directory_recorded = true;
+        }
+        if (($decoded['candidate']['generated_file'] ?? null) === '2026/05/source-symlink-generated-150x150.jpg') {
+            $invalid_generated_symlink_recorded = true;
         }
         if (($decoded['candidate']['original_image_file'] ?? null) === '2026/05/source-directory-original-image-original.jpg') {
             $invalid_original_image_directory_recorded = true;
         }
+        if (($decoded['candidate']['original_image_file'] ?? null) === '2026/05/source-symlink-original-image-original.jpg') {
+            $invalid_original_image_symlink_recorded = true;
+        }
         if (($decoded['candidate']['backup_file'] ?? null) === '2026/05/source-directory-backup-original.jpg') {
             $invalid_backup_directory_recorded = true;
         }
+        if (($decoded['candidate']['backup_file'] ?? null) === '2026/05/source-symlink-backup-original.jpg') {
+            $invalid_backup_symlink_recorded = true;
+        }
         if (($decoded['candidate']['entry_type'] ?? null) === 'dir') {
             $invalid_directory_entry_type_recorded = true;
+        }
+        if (($decoded['candidate']['entry_type'] ?? null) === 'symlink') {
+            $invalid_symlink_entry_type_recorded = true;
         }
     }
     $payloads->finalize();
@@ -1529,6 +1619,14 @@ PHP);
     assert_true($invalid_backup_directory_recorded, 'media validator invalid-file-entry audit payload identifies the directory backup path');
     assert_true(str_contains($invalid_file_entry_preview, (string)$directory_backup_id), 'media validator invalid-file-entry audit includes the directory backup attachment ID');
     assert_true($invalid_directory_entry_type_recorded, 'media validator invalid-file-entry audit records the non-file entry type');
+    assert_true($invalid_original_symlink_recorded, 'media validator invalid-file-entry audit payload identifies the symlink original path');
+    assert_true($invalid_generated_symlink_recorded, 'media validator invalid-file-entry audit payload identifies the symlink generated path');
+    assert_true(str_contains($invalid_file_entry_preview, (string)$symlink_generated_id), 'media validator invalid-file-entry audit includes the symlink generated attachment ID');
+    assert_true($invalid_original_image_symlink_recorded, 'media validator invalid-file-entry audit payload identifies the symlink original_image path');
+    assert_true(str_contains($invalid_file_entry_preview, (string)$symlink_original_image_id), 'media validator invalid-file-entry audit includes the symlink original_image attachment ID');
+    assert_true($invalid_backup_symlink_recorded, 'media validator invalid-file-entry audit payload identifies the symlink backup path');
+    assert_true(str_contains($invalid_file_entry_preview, (string)$symlink_backup_id), 'media validator invalid-file-entry audit includes the symlink backup attachment ID');
+    assert_true($invalid_symlink_entry_type_recorded, 'media validator invalid-file-entry audit records symlink entry types');
 
     $mime_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'plugin',
