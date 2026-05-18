@@ -10159,7 +10159,18 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
                     return;
                 }
                 $seen_paths[$path] = true;
-                if (!cow_merge_wordpress_upload_is_file($target_root, $path)) {
+                $absolute_path = rtrim($target_root, "/\\") . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $path);
+                if (is_link($absolute_path) || (file_exists($absolute_path) && !is_file($absolute_path))) {
+                    $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-upload-invalid-entry', 'attachment metadata references a non-regular upload path', [
+                        'field' => $field,
+                        'role' => $role,
+                        'attached_file' => $attached_file_raw,
+                        'invalid_file' => $path,
+                        'entry_type' => is_link($absolute_path) ? 'symlink' : filetype($absolute_path),
+                    ] + $extra, [$path]);
+                    return;
+                }
+                if (!is_file($absolute_path)) {
                     $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-upload-missing-file', 'attachment metadata references a missing upload file', [
                         'field' => $field,
                         'role' => $role,

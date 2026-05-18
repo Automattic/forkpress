@@ -87,6 +87,10 @@ Recent additions in the current merge-reliability work:
   metadata paths after normalization if they escape `wp-content/uploads`, so
   generated-size metadata such as `../../../../database/.ht.sqlite` cannot be
   treated as a valid managed database file.
+- The built-in WordPress attachment upload validator now also rejects upload
+  metadata paths that resolve to symlinks or other non-regular filesystem
+  entries, so generated-size metadata cannot satisfy an attachment reference by
+  pointing at a special upload entry.
 
 | Objective item | Evidence on trunk | Remaining gap |
 | --- | --- | --- |
