@@ -2,6 +2,16 @@
 
 set -euo pipefail
 
+# We run as root inside the docker container; the BK agent on the host runs
+# as the unprivileged `buildkite-agent` user and later tries to clean up our
+# mounted workspace. Without this chown the agent's cleanup fails ("permission
+# denied" on every cargo-emitted file) and the next checkout on the same
+# agent loops forever. Chown the workspace back to whoever owns it on the
+# host (the agent user) on exit so cleanup succeeds.
+host_uid="$(stat -c %u .)"
+host_gid="$(stat -c %g .)"
+trap 'chown -R "$host_uid:$host_gid" . 2>/dev/null || true' EXIT
+
 # Mirrors the cargo-test invocations from `linux-cow-e2e` in
 # `.github/workflows/ci.yml` that don't require the static PHP runtime bundle.
 # `make test-cow-fast` (PHP test suite) and the heavier production-build /

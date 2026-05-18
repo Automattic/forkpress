@@ -2,6 +2,15 @@
 
 set -euo pipefail
 
+# We run as root inside the docker container; the BK agent on the host runs
+# as the unprivileged `buildkite-agent` user and later tries to clean up our
+# mounted workspace. Without this chown the agent's cleanup fails ("permission
+# denied" on every static-PHP-cli artifact) and the next checkout on the same
+# agent loops forever. Chown back to the host owner on exit.
+host_uid="$(stat -c %u .)"
+host_gid="$(stat -c %g .)"
+trap 'chown -R "$host_uid:$host_gid" . 2>/dev/null || true' EXIT
+
 # Mirrors the heavy chunk of GHA `linux-cow-e2e`:
 #   - install full build toolchain (Rust target, musl, static-PHP deps)
 #   - scripts/build-dist.sh   (static PHP runtime bundle, 3-5 min)
