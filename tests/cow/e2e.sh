@@ -41,6 +41,9 @@ on_error() {
   dump_if_exists "$TMP/git-created-http-post-metadata-crash-after-restart.html"
   dump_if_exists "$TMP/git-created-http-post-metadata-crash-retry.out"
   dump_if_exists "$TMP/git-created-http-post-metadata-crash-merge.out"
+  dump_if_exists "$TMP/git-created-http-storage-crash.out"
+  dump_if_exists "$TMP/git-created-http-storage-crash-after-restart.html"
+  dump_if_exists "$TMP/git-created-http-storage-crash-merge.out"
   dump_if_exists "$TMP/git-created-http-crash.out"
   dump_if_exists "$TMP/git-created-http-crash-after-restart.html"
   dump_if_exists "$TMP/git-created-http-crash-merge.out"
@@ -1689,6 +1692,56 @@ grep -F "forkpress: merged git-created-http-post-metadata-crash into main" "$TMP
 grep -F "status:    completed" "$TMP/git-created-http-post-metadata-crash-merge.out" >/dev/null
 test -f "$WORK/main/wp-content/git-created-http-post-metadata-crash.txt"
 grep -F "created through retried post-metadata git push" "$WORK/main/wp-content/git-created-http-post-metadata-crash.txt" >/dev/null
+
+log_step "actual Git push storage publication crash recovery"
+git -C "$TMP/checkout" fetch origin +main:refs/remotes/origin/main
+git -C "$TMP/checkout" checkout -B git-created-http-storage-crash origin/main
+git -C "$TMP/checkout" reset --hard origin/main
+git -C "$TMP/checkout" clean -fd
+printf "created through storage crashed git push\n" > "$TMP/checkout/wordpress/wp-content/git-created-http-storage-crash.txt"
+"$BIN" stop --work-dir "$WORK_DIR" >/dev/null 2>&1 || true
+FORKPRESS_COW_GIT_TEST_FAILPOINT=after-created-branch-storage FORKPRESS_COW_GIT_TEST_FAILPOINT_ACTION=kill \
+  "$BIN" serve --work-dir "$WORK_DIR" --port "$PORT" --root-host wp.localhost --workers 1
+GIT_CREATED_HTTP_STORAGE_CRASH_PUSH_SURVIVED=0
+if "$BIN" commit "$TMP/checkout" --message "create cow branch through storage crashed git push" > "$TMP/git-created-http-storage-crash.out" 2>&1; then
+  GIT_CREATED_HTTP_STORAGE_CRASH_PUSH_SURVIVED=1
+fi
+for _ in $(seq 1 40); do
+  if ! "$BIN" server list | grep -F "$WORK_DIR" >/dev/null; then
+    break
+  fi
+  sleep 0.25
+done
+if "$BIN" server list | grep -F "$WORK_DIR" >/dev/null; then
+  if [ "$GIT_CREATED_HTTP_STORAGE_CRASH_PUSH_SURVIVED" = "1" ]; then
+    echo "Git push unexpectedly survived after-created-branch-storage server exit failpoint" >&2
+  else
+    echo "ForkPress server survived after-created-branch-storage server exit failpoint" >&2
+  fi
+  exit 1
+fi
+"$BIN" stop --work-dir "$WORK_DIR" >/dev/null 2>&1 || true
+"$BIN" serve --work-dir "$WORK_DIR" --port "$PORT" --root-host wp.localhost --workers 1
+test -f "$WORK/git-created-http-storage-crash/wp-content/git-created-http-storage-crash.txt"
+grep -F "created through storage crashed git push" "$WORK/git-created-http-storage-crash/wp-content/git-created-http-storage-crash.txt" >/dev/null
+curl -sS -H "Host: git-created-http-storage-crash.wp.localhost:$PORT" \
+  "http://127.0.0.1:$PORT/" \
+  -o "$TMP/git-created-http-storage-crash-after-restart.html"
+grep -F "Branch: git-created-http-storage-crash" "$TMP/git-created-http-storage-crash-after-restart.html" >/dev/null
+grep -F "Branch not found" "$TMP/git-created-http-storage-crash-after-restart.html" && exit 1
+test -f "$WORK_DIR/cow/merge/bases/git-created-http-storage-crash.sqlite"
+test -f "$WORK_DIR/cow/merge/file-bases/git-created-http-storage-crash.json"
+php -r '$meta = new SQLite3($argv[1]); $bands = (int)$meta->querySingle("SELECT COUNT(*) FROM merge_autoincrement_bands WHERE branch_name = '\''git-created-http-storage-crash'\''"); $ids = (int)$meta->querySingle("SELECT COUNT(*) FROM merge_row_identities WHERE branch_name = '\''git-created-http-storage-crash'\''"); exit($bands > 0 && $ids > 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
+git -C "$TMP/checkout" fetch origin git-created-http-storage-crash:refs/remotes/origin/git-created-http-storage-crash
+if [ "$(git -C "$TMP/checkout" rev-parse git-created-http-storage-crash)" != "$(git -C "$TMP/checkout" rev-parse refs/remotes/origin/git-created-http-storage-crash)" ]; then
+  git -C "$TMP/checkout" checkout git-created-http-storage-crash
+  git -C "$TMP/checkout" reset --hard refs/remotes/origin/git-created-http-storage-crash
+fi
+"$BIN" branch --work-dir "$WORK_DIR" merge git-created-http-storage-crash --into main > "$TMP/git-created-http-storage-crash-merge.out"
+grep -F "forkpress: merged git-created-http-storage-crash into main" "$TMP/git-created-http-storage-crash-merge.out" >/dev/null
+grep -F "status:    completed" "$TMP/git-created-http-storage-crash-merge.out" >/dev/null
+test -f "$WORK/main/wp-content/git-created-http-storage-crash.txt"
+grep -F "created through storage crashed git push" "$WORK/main/wp-content/git-created-http-storage-crash.txt" >/dev/null
 
 log_step "actual Git push pre-branch-list crash recovery"
 git -C "$TMP/checkout" fetch origin +main:refs/remotes/origin/main
