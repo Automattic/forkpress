@@ -57,7 +57,7 @@ use forkpress_storage::{
     recover_cow_merge_crash, reset_cow_branch, resolve_cow_merge_conflict,
     resolve_cow_merge_conflict_key, revalidate_cow_merge_reviews, review_cow_merge_audit_record,
     review_cow_merge_conflict_key, run_cow_plugin_driver, run_cow_plugin_validator,
-    show_cow_branch, write_cow_branch_list, write_cow_strategy_notes,
+    sanitize_remote_site_name, show_cow_branch, write_cow_branch_list, write_cow_strategy_notes,
 };
 #[cfg(feature = "dev-experiments")]
 use forkpress_storage::{copy_tree_cow, plain_branch_names};
@@ -638,6 +638,8 @@ struct RemoteArgs {
 
 #[derive(Subcommand, Debug, Clone)]
 enum RemoteCommand {
+    /// Thin-clone a remote WordPress root over SSH and optionally branch from it.
+    Clone(RemoteCloneArgs),
     /// Register an existing remote-site cache.
     Add(RemoteAddArgs),
     /// List registered remote-site caches.
@@ -646,6 +648,48 @@ enum RemoteCommand {
     Show(RemoteShowArgs),
     /// Create a normal ForkPress COW branch from a registered remote cache.
     Branch(RemoteBranchArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+struct RemoteCloneArgs {
+    /// Local name for this remote-site cache.
+    name: String,
+
+    /// Remote SSH target, e.g. user@example.com.
+    #[arg(long)]
+    ssh: String,
+
+    /// Remote WordPress root path.
+    #[arg(long = "path")]
+    remote_path: String,
+
+    /// Branch to create from the synced cache after cloning.
+    #[arg(long)]
+    branch: Option<String>,
+
+    /// Production site URL to record.
+    #[arg(long = "remote-url")]
+    remote_url: Option<String>,
+
+    /// Local URL hint to record.
+    #[arg(long = "local-url")]
+    local_url: Option<String>,
+
+    /// Include wp-content/uploads in the initial sync.
+    #[arg(long)]
+    include_uploads: bool,
+
+    /// Additional rsync exclude pattern. Can be passed more than once.
+    #[arg(long = "exclude")]
+    excludes: Vec<String>,
+
+    /// Do not delete stale local cache files that disappeared remotely.
+    #[arg(long)]
+    no_delete: bool,
+
+    /// Replace an existing remote-site registration and update its cache.
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -2751,11 +2795,147 @@ fn run_gc_once(
 fn remote_command(args: RemoteArgs) -> Result<i32> {
     let layout = Layout::new(args.shared.work_dir.clone())?;
     match args.command {
+        RemoteCommand::Clone(clone) => remote_clone_command(&args.shared, &layout, clone),
         RemoteCommand::Add(add) => remote_add_command(&layout, add),
         RemoteCommand::List => remote_list_command(&layout),
         RemoteCommand::Show(show) => remote_show_command(&layout, show),
         RemoteCommand::Branch(branch) => remote_branch_command(&args.shared, &layout, branch),
     }
+}
+
+fn remote_clone_command(
+    shared: &SharedPaths,
+    layout: &Layout,
+    args: RemoteCloneArgs,
+) -> Result<i32> {
+    let cache_root = remote_clone_cache_root(layout, &args.name)?;
+    let manifest_path = cache_root
+        .parent()
+        .ok_or_else(|| anyhow!("failed to resolve remote cache parent"))?
+        .join("manifest.json");
+    if manifest_path.exists() && !args.force {
+        bail!(
+            "remote site already exists: {}; pass --force to update it",
+            sanitize_remote_site_name(&args.name)
+        );
+    }
+
+    fs::create_dir_all(&cache_root)
+        .with_context(|| format!("failed to create {}", cache_root.display()))?;
+    let rsync_args = remote_clone_rsync_args(&args, &cache_root);
+    let status = Command::new("rsync").args(&rsync_args).status().context(
+        "failed to start rsync; install rsync or use `forkpress remote add --cache-root`",
+    )?;
+    if !status.success() {
+        bail!("rsync exited with {status}");
+    }
+    if !cache_root.join("wp-load.php").is_file() {
+        bail!(
+            "remote clone did not produce a WordPress root at {}; expected wp-load.php",
+            cache_root.display()
+        );
+    }
+
+    let manifest = add_remote_site(
+        layout,
+        RemoteSiteAdd {
+            name: args.name.clone(),
+            ssh: Some(args.ssh.clone()),
+            remote_path: Some(args.remote_path.clone()),
+            remote_url: args.remote_url.clone(),
+            local_url: args.local_url.clone(),
+            cache_root: Some(cache_root),
+            wp_cow_clone_root: None,
+            force: args.force,
+        },
+    )?;
+    let cache = forkpress_storage::remote_site_cache_stats(&manifest)?;
+    println!("forkpress: remote site '{}' cloned", manifest.name);
+    println!("  cache:     {}", manifest.cache_root.display());
+    println!("  files:     {}", cache.files);
+    println!(
+        "  uploads:   {}",
+        if args.include_uploads {
+            "included"
+        } else {
+            "skipped"
+        }
+    );
+    println!(
+        "  wp-load:   {}",
+        if cache.has_wp_load { "yes" } else { "no" }
+    );
+
+    if let Some(branch) = args.branch {
+        let strategy = require_initialized_strategy(layout, "remote clone --branch")?;
+        if strategy != StorageStrategy::Cow {
+            bail!(
+                "remote clone --branch requires COW storage, found strategy = \"{}\"",
+                strategy.as_str()
+            );
+        }
+        prepare_runtime(layout)?;
+        let runtime = PortableRuntime::from_layout(layout);
+        let _lock = lock_cow_operations(layout)?;
+        ensure_cow_file_view_ready(layout)?;
+        let report = branch_remote_site(
+            layout,
+            &runtime,
+            shared,
+            RemoteBranchOptions {
+                remote: manifest.name.clone(),
+                branch,
+                url_hint: branchctl_url_hint(layout).ok(),
+            },
+        )?;
+        println!(
+            "forkpress: remote cache '{}' branched to '{}'",
+            report.remote.name, report.branch
+        );
+        println!("  source files: {}", report.cache.files);
+    } else {
+        println!(
+            "  next:      forkpress remote --work-dir {} branch {} <branch>",
+            layout.work_dir.display(),
+            manifest.name
+        );
+    }
+    Ok(0)
+}
+
+fn remote_clone_cache_root(layout: &Layout, name: &str) -> Result<PathBuf> {
+    let name = sanitize_remote_site_name(name);
+    if name.is_empty() {
+        bail!("remote site name must contain at least one ASCII letter or number");
+    }
+    Ok(layout.cow_dir.join("remote-sites").join(name).join("cache"))
+}
+
+fn remote_clone_rsync_source(ssh: &str, remote_path: &str) -> String {
+    let mut path = remote_path.trim_end_matches('/').to_string();
+    path.push('/');
+    format!("{ssh}:{path}")
+}
+
+fn remote_clone_rsync_args(args: &RemoteCloneArgs, cache_root: &Path) -> Vec<OsString> {
+    let mut out = vec![OsString::from("-az")];
+    if !args.no_delete {
+        out.push(OsString::from("--delete"));
+    }
+    if !args.include_uploads {
+        out.push(OsString::from("--exclude"));
+        out.push(OsString::from("wp-content/uploads/"));
+    }
+    for exclude in &args.excludes {
+        out.push(OsString::from("--exclude"));
+        out.push(OsString::from(exclude));
+    }
+    out.push(OsString::from(remote_clone_rsync_source(
+        &args.ssh,
+        &args.remote_path,
+    )));
+    out.push(cache_root.as_os_str().to_os_string());
+    out
 }
 
 fn remote_add_command(layout: &Layout, args: RemoteAddArgs) -> Result<i32> {
@@ -7711,6 +7891,80 @@ mod git_helper_tests {
         assert_eq!(add.name, "calm-cottage");
         assert_eq!(add.wp_cow_clone.as_deref(), Some("calm-cottage"));
         assert!(add.force);
+    }
+
+    #[test]
+    fn parses_remote_clone_thin_cache_defaults() {
+        let cli = Cli::try_parse_from([
+            "forkpress",
+            "remote",
+            "--work-dir",
+            ".forkpress",
+            "clone",
+            "production",
+            "--ssh",
+            "deploy@example.com",
+            "--path",
+            "/srv/www/example",
+            "--branch",
+            "prod-main",
+            "--remote-url",
+            "https://example.com",
+            "--force",
+        ])
+        .unwrap();
+        let Commands::Remote(args) = cli.command else {
+            panic!("expected remote command");
+        };
+        let RemoteCommand::Clone(clone) = args.command else {
+            panic!("expected remote clone command");
+        };
+        assert_eq!(args.shared.work_dir, PathBuf::from(".forkpress"));
+        assert_eq!(clone.name, "production");
+        assert_eq!(clone.ssh, "deploy@example.com");
+        assert_eq!(clone.remote_path, "/srv/www/example");
+        assert_eq!(clone.branch.as_deref(), Some("prod-main"));
+        assert_eq!(clone.remote_url.as_deref(), Some("https://example.com"));
+        assert!(!clone.include_uploads);
+        assert!(clone.force);
+
+        let rsync = remote_clone_rsync_args(
+            &clone,
+            Path::new("/tmp/forkpress/.forkpress/cow/remote-sites/production/cache"),
+        );
+        let rsync: Vec<String> = rsync
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(rsync[0], "-az");
+        assert!(rsync.contains(&"--delete".to_string()));
+        assert!(rsync.contains(&"wp-content/uploads/".to_string()));
+        assert!(rsync.contains(&"deploy@example.com:/srv/www/example/".to_string()));
+    }
+
+    #[test]
+    fn remote_clone_can_include_uploads_and_extra_excludes() {
+        let clone = RemoteCloneArgs {
+            name: "Production".to_string(),
+            ssh: "deploy@example.com".to_string(),
+            remote_path: "/srv/www/example/".to_string(),
+            branch: None,
+            remote_url: None,
+            local_url: None,
+            include_uploads: true,
+            excludes: vec!["wp-content/cache/".to_string()],
+            no_delete: true,
+            force: false,
+        };
+        let rsync = remote_clone_rsync_args(&clone, Path::new("/tmp/cache"));
+        let rsync: Vec<String> = rsync
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(!rsync.contains(&"--delete".to_string()));
+        assert!(!rsync.contains(&"wp-content/uploads/".to_string()));
+        assert!(rsync.contains(&"wp-content/cache/".to_string()));
+        assert!(rsync.contains(&"deploy@example.com:/srv/www/example/".to_string()));
     }
 
     #[test]
