@@ -77,6 +77,22 @@ function write_test_file(string $path, string $contents): void {
     file_put_contents($path, $contents);
 }
 
+function filesystem_supports_case_distinct_paths(string $dir): bool {
+    remove_tree($dir);
+    mkdir($dir, 0777, true);
+    $upper = $dir . '/Case-Probe.txt';
+    $lower = $dir . '/case-probe.txt';
+    file_put_contents($upper, 'upper');
+    file_put_contents($lower, 'lower');
+    $supports = is_file($upper) &&
+        is_file($lower) &&
+        realpath($upper) !== realpath($lower) &&
+        file_get_contents($upper) === 'upper' &&
+        file_get_contents($lower) === 'lower';
+    remove_tree($dir);
+    return $supports;
+}
+
 function create_test_symlink(string $target, string $link): bool {
     if (!is_dir(dirname($link))) {
         mkdir(dirname($link), 0777, true);
@@ -2804,6 +2820,11 @@ PHP);
 
     write_test_file($attachment_upload_source_root . '/wp-content/uploads/2026/05/metadata-drift-attached.jpg', 'metadata drift attached bytes');
     write_test_file($attachment_upload_source_root . '/wp-content/uploads/2026/05/metadata-drift-metadata.jpg', 'metadata drift metadata bytes');
+    $has_attachment_upload_case_collision = filesystem_supports_case_distinct_paths($tmp . '/case-sensitive-probe');
+    if ($has_attachment_upload_case_collision) {
+        write_test_file($attachment_upload_source_root . '/wp-content/uploads/2026/05/Case-Collision.jpg', 'case collision upper bytes');
+        write_test_file($attachment_upload_source_root . '/wp-content/uploads/2026/05/case-collision.jpg', 'case collision lower bytes');
+    }
     unlink($attachment_upload_source_root . '/wp-content/uploads/2026/05/generated-image-150x150.jpg');
     unlink($attachment_upload_source_root . '/wp-content/uploads/2026/05/generated-image-original.jpg');
     $has_attachment_upload_symlink = create_test_symlink(
@@ -2840,6 +2861,35 @@ PHP);
     $stmt->bindValue(':post_id', $duplicate_upload_attachment_id, SQLITE3_INTEGER);
     $stmt->bindValue(':metadata', $duplicate_upload_metadata, SQLITE3_TEXT);
     $stmt->execute();
+    $case_collision_upper_id = 0;
+    $case_collision_lower_id = 0;
+    if ($has_attachment_upload_case_collision) {
+        $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_mime_type, post_name, guid) VALUES ('Source case collision upper upload', '', 'inherit', 'attachment', 'image/jpeg', 'source-case-collision-upper-upload', 'wp-content/uploads/2026/05/Case-Collision.jpg')");
+        $case_collision_upper_id = (int)$db->lastInsertRowID();
+        $case_collision_upper_metadata = serialize([
+            'file' => '2026/05/Case-Collision.jpg',
+            'width' => 1200,
+            'height' => 800,
+            'sizes' => [],
+        ]);
+        $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', '2026/05/Case-Collision.jpg'), (:post_id, '_wp_attachment_metadata', :metadata)");
+        $stmt->bindValue(':post_id', $case_collision_upper_id, SQLITE3_INTEGER);
+        $stmt->bindValue(':metadata', $case_collision_upper_metadata, SQLITE3_TEXT);
+        $stmt->execute();
+
+        $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_mime_type, post_name, guid) VALUES ('Source case collision lower upload', '', 'inherit', 'attachment', 'image/jpeg', 'source-case-collision-lower-upload', 'wp-content/uploads/2026/05/case-collision.jpg')");
+        $case_collision_lower_id = (int)$db->lastInsertRowID();
+        $case_collision_lower_metadata = serialize([
+            'file' => '2026/05/case-collision.jpg',
+            'width' => 1200,
+            'height' => 800,
+            'sizes' => [],
+        ]);
+        $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', '2026/05/case-collision.jpg'), (:post_id, '_wp_attachment_metadata', :metadata)");
+        $stmt->bindValue(':post_id', $case_collision_lower_id, SQLITE3_INTEGER);
+        $stmt->bindValue(':metadata', $case_collision_lower_metadata, SQLITE3_TEXT);
+        $stmt->execute();
+    }
     $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_mime_type, post_name, guid) VALUES ('Source metadata file drift', '', 'inherit', 'attachment', 'image/jpeg', 'source-metadata-file-drift', 'wp-content/uploads/2026/05/metadata-drift-attached.jpg')");
     $metadata_drift_attachment_id = (int)$db->lastInsertRowID();
     $metadata_drift_metadata = serialize([
@@ -2878,6 +2928,9 @@ PHP);
 
     assert_same($attachment_upload_result['status'], 'completed_with_conflicts', 'built-in WordPress attachment upload guard holds unsafe upload states for review');
     $expected_attachment_upload_conflicts = $has_attachment_upload_symlink ? 5 : 4;
+    if ($has_attachment_upload_case_collision) {
+        $expected_attachment_upload_conflicts++;
+    }
     assert_same((int)($attachment_upload_result['wordpress_semantic_validator_conflicts'] ?? 0), $expected_attachment_upload_conflicts, 'built-in WordPress attachment upload validator records unsafe-path, non-regular-entry, duplicate-owner, metadata-file-drift, and missing-metadata conflicts');
     assert_same((int)($attachment_upload_result['plugin_validator_conflicts'] ?? 0), $expected_attachment_upload_conflicts, 'built-in WordPress attachment upload validator contributes to plugin-scoped conflict totals');
     assert_same((int)($attachment_upload_result['file_conflicts'] ?? 0), 2, 'filesystem merge holds source deletions of upload files still referenced by WordPress metadata');
@@ -2952,6 +3005,22 @@ PHP);
     assert_same($attachment_upload_duplicate_owner_payload['candidate']['upload_file'] ?? null, 'wp-content/uploads/2026/05/generated-image.jpg', 'built-in WordPress attachment upload duplicate-owner audit includes the shared upload path');
     assert_same($attachment_upload_duplicate_owner_payload['candidate']['attachment_ids'] ?? null, [63, $duplicate_upload_attachment_id], 'built-in WordPress attachment upload duplicate-owner audit includes both attachment IDs');
     assert_same($attachment_upload_duplicate_owner_audit['conflicts'][0]['plugin_files'] ?? null, ['wp-content/uploads/2026/05/generated-image.jpg'], 'built-in WordPress attachment upload duplicate-owner audit exposes the shared upload path filter');
+
+    if ($has_attachment_upload_case_collision) {
+        $attachment_upload_case_collision_audit = cow_merge_audit_report($attachment_upload_metadata, (int)$attachment_upload_result['run_id'], 10, [
+            'scope' => 'plugin',
+            'records' => 'conflicts',
+            'semantic_scope' => 'wordpress',
+            'conflict_type' => 'plugin-wp-attachment-upload-case-collision',
+            'plugin_file' => 'wp-content/uploads/2026/05/Case-Collision.jpg',
+        ]);
+        assert_same(count($attachment_upload_case_collision_audit['conflicts']), 1, 'built-in WordPress attachment upload validator rejects case-insensitive upload path collisions');
+        $attachment_upload_case_collision_payload = cow_merge_audit_decode_payload(json_decode((string)($attachment_upload_case_collision_audit['conflicts'][0]['chosen_payload'] ?? ''), true));
+        assert_same($attachment_upload_case_collision_payload['candidate']['case_insensitive_file'] ?? null, 'wp-content/uploads/2026/05/case-collision.jpg', 'built-in WordPress attachment upload case-collision audit records the case-folded path');
+        assert_same($attachment_upload_case_collision_payload['candidate']['upload_files'] ?? null, ['wp-content/uploads/2026/05/Case-Collision.jpg', 'wp-content/uploads/2026/05/case-collision.jpg'], 'built-in WordPress attachment upload case-collision audit includes both upload paths');
+        assert_same($attachment_upload_case_collision_payload['candidate']['attachment_ids'] ?? null, [$case_collision_upper_id, $case_collision_lower_id], 'built-in WordPress attachment upload case-collision audit includes both attachment IDs');
+        assert_same($attachment_upload_case_collision_audit['conflicts'][0]['plugin_files'] ?? null, ['wp-content/uploads/2026/05/Case-Collision.jpg', 'wp-content/uploads/2026/05/case-collision.jpg'], 'built-in WordPress attachment upload case-collision audit exposes both upload path filters');
+    }
 
     $attachment_upload_metadata_drift_audit = cow_merge_audit_report($attachment_upload_metadata, (int)$attachment_upload_result['run_id'], 10, [
         'scope' => 'plugin',

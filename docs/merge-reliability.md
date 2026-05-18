@@ -114,6 +114,10 @@ Recent additions in the current merge-reliability work:
 - The built-in WordPress attachment upload validator now records review
   conflicts when multiple attachment rows claim the same regular upload file,
   so duplicate ownership is caught even without a plugin media validator.
+- The built-in WordPress attachment upload validator also records review
+  conflicts when distinct upload paths differ only by case, so merges cannot
+  introduce media metadata that is ambiguous on default macOS or Windows
+  filesystems.
 - The built-in WordPress attachment upload validator now records review
   conflicts when a safe `_wp_attachment_metadata.file` path disagrees with the
   safe `_wp_attached_file` path for the same attachment.
@@ -385,7 +389,9 @@ slugs for review, the built-in WordPress user-login validator that holds
 duplicate case-insensitive `wp_users.user_login` identities for review, and the
 built-in WordPress global-styles validator that holds duplicate published
 `wp_global_styles` style keys, plus duplicate published `wp_template` and
-`wp_template_part` Site Editor object keys, run:
+`wp_template_part` Site Editor object keys, and the built-in attachment upload
+validator that holds exact or case-insensitive duplicate upload ownership for
+review, run:
 
 ```bash
 make test-cow-wp-semantic-validator

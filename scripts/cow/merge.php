@@ -10264,6 +10264,7 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
 
         $issues = [];
         $upload_owners = [];
+        $upload_case_owners = [];
         $record_issue = static function (
             array &$issues,
             int $attachment_id,
@@ -10335,7 +10336,7 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
             }
 
             $seen_paths = [];
-            $check_file = static function (string $path, string $field, string $role, array $extra = []) use (&$issues, &$upload_owners, $record_issue, $target_root, $attachment_id, $post_title, $attached_file_raw, &$seen_paths): void {
+            $check_file = static function (string $path, string $field, string $role, array $extra = []) use (&$issues, &$upload_owners, &$upload_case_owners, $record_issue, $target_root, $attachment_id, $post_title, $attached_file_raw, &$seen_paths): void {
                 if (isset($seen_paths[$path])) {
                     return;
                 }
@@ -10371,6 +10372,19 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
                 }
                 $upload_owners[$path][$owner_key]['roles'][$role] = $role;
                 $upload_owners[$path][$owner_key]['fields'][$field] = $field;
+
+                $case_key = strtolower($path);
+                if (!isset($upload_case_owners[$case_key][$path][$owner_key])) {
+                    $upload_case_owners[$case_key][$path][$owner_key] = [
+                        'attachment_id' => $attachment_id,
+                        'post_title' => $post_title,
+                        'file' => $path,
+                        'roles' => [],
+                        'fields' => [],
+                    ];
+                }
+                $upload_case_owners[$case_key][$path][$owner_key]['roles'][$role] = $role;
+                $upload_case_owners[$case_key][$path][$owner_key]['fields'][$field] = $field;
             };
             $check_file($attached_path, '_wp_attached_file', 'original');
 
@@ -10511,6 +10525,47 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
                 'suggested_action' => 'Review the attachment rows and metadata, then keep one owner or create distinct upload files before accepting the merged state.',
                 'candidate' => [
                     'upload_file' => $path,
+                    'attachment_ids' => $attachment_ids,
+                    'owners' => $owners,
+                ],
+            ];
+        }
+        foreach ($upload_case_owners as $case_key => $owners_by_path) {
+            if (count($owners_by_path) < 2) {
+                continue;
+            }
+            ksort($owners_by_path, SORT_NATURAL);
+            $owners = [];
+            $files = array_keys($owners_by_path);
+            foreach ($owners_by_path as $path_owners) {
+                ksort($path_owners, SORT_NUMERIC);
+                foreach ($path_owners as $owner) {
+                    $owner['roles'] = array_values($owner['roles']);
+                    $owner['fields'] = array_values($owner['fields']);
+                    $owners[] = $owner;
+                }
+            }
+            $attachment_ids = array_values(array_unique(array_map(static fn(array $owner): int => (int)$owner['attachment_id'], $owners)));
+            sort($attachment_ids, SORT_NUMERIC);
+            $issues['plugin-wp-attachment-upload-case-collision' . "\0" . $case_key] = [
+                'plugin' => 'forkpress-wordpress-core',
+                'object' => 'upload-case:' . $case_key,
+                'reason' => 'multiple attachment upload paths differ only by case',
+                'type' => 'plugin-wp-attachment-upload-case-collision',
+                'tables' => ['wp_posts', 'wp_postmeta'],
+                'files' => $files,
+                'validator' => 'forkpress-wordpress-core-attachment-uploads@1',
+                'severity' => 'error',
+                'semantic_scope' => 'wordpress',
+                'logical_identity' => [
+                    'kind' => 'wordpress-attachment-upload-case-collision',
+                    'case_insensitive_file' => $case_key,
+                ],
+                'manual_review_reason' => 'Default macOS and Windows filesystems treat these upload paths as the same file, making attachment ownership ambiguous across platforms.',
+                'suggested_action' => 'Rename or regenerate one upload path so attachment metadata is distinct after case folding before accepting the merged state.',
+                'candidate' => [
+                    'case_insensitive_file' => $case_key,
+                    'upload_files' => $files,
                     'attachment_ids' => $attachment_ids,
                     'owners' => $owners,
                 ],
