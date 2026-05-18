@@ -1821,6 +1821,71 @@ function forkpress_render_branch_admin_page(): void {
                         run && run.finished_at ? 'finished: ' + String(run.finished_at) : ''
                     ].filter(Boolean).join(' / ');
                 }
+                function conflictTitle(record) {
+                    if (record && record.conflict_key) {
+                        return String(record.conflict_key);
+                    }
+                    if (record && record.path) {
+                        return String(record.path);
+                    }
+                    if (record && record.table_name) {
+                        return String(record.table_name) + (record.column_name ? '.' + String(record.column_name) : '');
+                    }
+                    return 'Conflict #' + String(record && record.id ? record.id : '');
+                }
+                function renderConflicts(payload) {
+                    var records = Array.isArray(payload.records) ? payload.records : [];
+                    results.innerHTML = '';
+                    var heading = document.createElement('p');
+                    heading.textContent = payload.message || ('Loaded ' + String(records.length) + ' conflict records.');
+                    results.appendChild(heading);
+                    var list = document.createElement('ul');
+                    list.className = 'forkpress-branch-conflict-list';
+                    records.slice(0, 10).forEach(function (record) {
+                        var item = document.createElement('li');
+                        item.textContent = [
+                            conflictTitle(record),
+                            record && record.conflict_type ? 'type: ' + String(record.conflict_type) : '',
+                            record && record.lifecycle_state ? 'state: ' + String(record.lifecycle_state) : '',
+                            record && record.next_action ? 'next: ' + String(record.next_action) : ''
+                        ].filter(Boolean).join(' / ');
+                        list.appendChild(item);
+                    });
+                    if (records.length) {
+                        results.appendChild(list);
+                    }
+                }
+                function fetchConflicts(runId) {
+                    var body = new FormData();
+                    body.append('action', 'forkpress_branch_conflicts');
+                    body.append('_wpnonce', '<?php echo esc_js(function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_conflicts') : ''); ?>');
+                    body.append('run', String(runId));
+                    results.textContent = 'Loading merge conflicts...';
+                    fetch('<?php echo esc_js($action_url); ?>', {
+                        method: 'POST',
+                        body: body,
+                        credentials: 'same-origin',
+                        headers: {
+                            'Accept': 'application/json',
+                            'X-ForkPress-Async': '1'
+                        }
+                    }).then(function (response) {
+                        return response.text().then(function (text) {
+                            var payload = null;
+                            try {
+                                payload = text ? JSON.parse(text) : null;
+                            } catch (error) {
+                                payload = null;
+                            }
+                            if (!response.ok || !payload || payload.success === false) {
+                                throw new Error(payload && payload.message ? payload.message : (text || 'ForkPress conflict audit failed.'));
+                            }
+                            return payload;
+                        });
+                    }).then(renderConflicts).catch(function (error) {
+                        results.textContent = error && error.message ? error.message : 'ForkPress conflict audit failed.';
+                    });
+                }
                 function renderHistory(payload) {
                     var records = Array.isArray(payload.records) ? payload.records : [];
                     results.innerHTML = '';
@@ -1829,6 +1894,19 @@ function forkpress_render_branch_admin_page(): void {
                     records.slice(0, 10).forEach(function (run) {
                         var item = document.createElement('li');
                         item.textContent = rowText(run);
+                        if (run && run.id && Number(run.conflict_count || 0) > 0) {
+                            var review = document.createElement('button');
+                            review.className = 'button button-small forkpress-branch-review-conflicts';
+                            review.type = 'button';
+                            review.textContent = 'Review conflicts';
+                            review.addEventListener('click', function (runId) {
+                                return function () {
+                                    fetchConflicts(runId);
+                                };
+                            }(run.id));
+                            item.appendChild(document.createTextNode(' '));
+                            item.appendChild(review);
+                        }
                         list.appendChild(item);
                     });
                     if (!records.length) {

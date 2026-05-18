@@ -1198,6 +1198,12 @@ assert_true(str_contains($admin_page_html, 'forkpress_branch_history'), 'branch 
 assert_true(str_contains($admin_page_html, 'nonce-forkpress_branch_history'), 'branch manager admin page renders merge history nonce');
 assert_true(str_contains($admin_page_html, 'forkpress-branch-history-list'), 'branch manager admin page renders merge history list target');
 assert_true(str_contains($admin_page_html, "source + ' -> ' + target"), 'branch manager admin page renders source-to-target history rows');
+assert_true(str_contains($admin_page_html, 'forkpress_branch_conflicts'), 'branch manager admin page renders conflict audit action');
+assert_true(str_contains($admin_page_html, 'nonce-forkpress_branch_conflicts'), 'branch manager admin page renders conflict audit nonce');
+assert_true(str_contains($admin_page_html, 'forkpress-branch-review-conflicts'), 'branch manager admin page renders conflict drilldown buttons');
+assert_true(str_contains($admin_page_html, 'function fetchConflicts'), 'branch manager admin page renders conflict drilldown fetch handler');
+assert_true(str_contains($admin_page_html, 'function renderConflicts'), 'branch manager admin page renders conflict drilldown display handler');
+assert_true(str_contains($admin_page_html, 'forkpress-branch-conflict-list'), 'branch manager admin page renders conflict list target');
 assert_same($admin_page_menus[0]['menu_slug'] ?? null, 'forkpress-branches', 'branch manager registers a wp-admin menu page');
 
 $forbidden = run_branch_ui_action(
