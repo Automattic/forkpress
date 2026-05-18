@@ -191,6 +191,15 @@ $truncated = cow_git_parse_push_commands_result("0040$old $new refs/heads/main")
 assert_true(!$truncated['ok'], 'truncated receive-pack command fails closed');
 $empty = cow_git_parse_push_commands_result('0000');
 assert_true(!$empty['ok'], 'empty receive-pack command list fails closed');
+$demux_payload = pkt_line('command payload') . '0000' . 'PACK' . str_repeat('x', 1025) . 'end';
+$demux = new WordPress\Git\Protocol\Parser\ProtocolDemultiplexer(
+    new WordPress\ByteStream\MemoryPipe($demux_payload)
+);
+$demux_chunks = '';
+while ($demux->next_chunk()) {
+    $demux_chunks .= $demux->get_chunk();
+}
+assert_same($demux_chunks, $demux_payload, 'Git protocol demuxer preserves short trailing PACK chunks');
 
 $reserved = pkt_line("$old $new refs/heads/www\0report-status\n") . '0000';
 $commands = cow_git_parse_push_commands($reserved);
