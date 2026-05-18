@@ -334,6 +334,17 @@ SQL);
     $db->exec('DROP TRIGGER plugin_contract_drop_view_observer_insert');
     $db->exec('DROP VIEW plugin_contract_drop_view_live');
     $db->close();
+    $db = open_db($drop_view_target);
+    $db->exec('DROP TRIGGER plugin_contract_drop_view_observer_insert');
+    $db->exec(<<<'SQL'
+CREATE TRIGGER plugin_contract_drop_view_observer_insert
+AFTER INSERT ON plugin_contract_drop_view_observer
+BEGIN
+    INSERT INTO plugin_contract_drop_view_audit (item_id, label)
+    SELECT item_id, label || ' target' FROM plugin_contract_drop_view_live WHERE item_id = NEW.item_id;
+END
+SQL);
+    $db->close();
     $drop_view_result = cow_merge_databases($drop_view_base, $drop_view_source, $drop_view_target, $metadata, 'feature-schema-drop-view-contract', 'main');
     $drop_view_run_id = (int)$drop_view_result['run_id'];
     assert_same($drop_view_result['status'], 'completed_with_conflicts', 'source view drop with a dependent target trigger stays reviewable');
@@ -371,6 +382,60 @@ SQL);
     );
     $drop_view_resolution = cow_merge_resolve_conflict($metadata, $drop_view_conflict_id, 'source', true, 'Apply source view drop after dependent trigger.', 'cow-test');
     assert_same($drop_view_resolution['status'], 'applied', 'source view drop applies after dependent target trigger is resolved');
+
+    $drop_index_trigger_base = $tmp . '/drop-index-trigger-base.sqlite';
+    $drop_index_trigger_source = $tmp . '/drop-index-trigger-source.sqlite';
+    $drop_index_trigger_target = $tmp . '/drop-index-trigger-target.sqlite';
+    $drop_index_trigger_metadata = $tmp . '/.forkpress/cow/merge/drop-index-trigger-metadata.sqlite';
+    $db = open_db($drop_index_trigger_base);
+    $db->exec('CREATE TABLE plugin_contract_drop_schema_items (item_id TEXT PRIMARY KEY, label TEXT)');
+    $db->exec('CREATE TABLE plugin_contract_drop_schema_audit (item_id TEXT, label TEXT)');
+    $db->exec('CREATE INDEX plugin_contract_drop_schema_label_idx ON plugin_contract_drop_schema_items(label)');
+    $db->exec(<<<'SQL'
+CREATE TRIGGER plugin_contract_drop_schema_items_insert
+AFTER INSERT ON plugin_contract_drop_schema_items
+BEGIN
+    INSERT INTO plugin_contract_drop_schema_audit (item_id, label) VALUES (NEW.item_id, NEW.label);
+END
+SQL);
+    $db->close();
+    copy($drop_index_trigger_base, $drop_index_trigger_source);
+    copy($drop_index_trigger_base, $drop_index_trigger_target);
+    $db = open_db($drop_index_trigger_source);
+    $db->exec('DROP TRIGGER plugin_contract_drop_schema_items_insert');
+    $db->exec('DROP INDEX plugin_contract_drop_schema_label_idx');
+    $db->close();
+
+    $drop_index_trigger_result = cow_merge_databases(
+        $drop_index_trigger_base,
+        $drop_index_trigger_source,
+        $drop_index_trigger_target,
+        $drop_index_trigger_metadata,
+        'feature-schema-drop-index-trigger',
+        'main'
+    );
+    $drop_index_trigger_run_id = (int)$drop_index_trigger_result['run_id'];
+    assert_same($drop_index_trigger_result['status'], 'completed', 'source-dropped index and trigger apply automatically when target kept base definitions');
+    assert_same(
+        (int)scalar($drop_index_trigger_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'plugin_contract_drop_schema_label_idx'"),
+        0,
+        'automatic schema drop removes the unchanged target index'
+    );
+    assert_same(
+        (int)scalar($drop_index_trigger_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_contract_drop_schema_items_insert'"),
+        0,
+        'automatic schema drop removes the unchanged target trigger'
+    );
+    assert_same(
+        (int)scalar($drop_index_trigger_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE run_id = $drop_index_trigger_run_id AND conflict_type IN ('schema-source-dropped-index', 'schema-source-dropped-trigger')"),
+        0,
+        'automatic unchanged-target index/trigger drops record no schema conflicts'
+    );
+    assert_same(
+        (int)scalar($drop_index_trigger_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE run_id = $drop_index_trigger_run_id AND decision = 'source-applied' AND column_name IN ('plugin_contract_drop_schema_label_idx', 'plugin_contract_drop_schema_items_insert')"),
+        2,
+        'automatic unchanged-target index/trigger drops are audited as source-applied decisions'
+    );
 
     cow_merge_review_record(
         $metadata,

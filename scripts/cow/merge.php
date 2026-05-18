@@ -17898,6 +17898,24 @@ function cow_merge_apply_index_schema_changes(
         }
         if ($source_sql === null) {
             if ($base_sql !== null) {
+                if ($target_sql === $base_sql) {
+                    cow_merge_apply_source_index_schema_resolution($target, $index, null, true);
+                    cow_merge_record_decision(
+                        $meta,
+                        $run_id,
+                        $table,
+                        null,
+                        $index,
+                        'source-applied',
+                        'source dropped an index while target kept the base definition',
+                        $base_sql,
+                        null,
+                        $target_sql,
+                        null
+                    );
+                    $applied++;
+                    continue;
+                }
                 if (cow_merge_record_schema_conflict(
                     $meta,
                     $run_id,
@@ -18048,7 +18066,8 @@ function cow_merge_apply_schema_object_changes(
     string $type,
     array $base_objects,
     array $source_objects,
-    array $target_objects
+    array $target_objects,
+    array $pending_source_drop_dependencies = []
 ): array {
     if (!in_array($type, ['view', 'trigger'], true)) {
         throw new InvalidArgumentException("unsupported schema object type: $type");
@@ -18094,10 +18113,19 @@ function cow_merge_apply_schema_object_changes(
         }
         if ($source_sql === null) {
             if ($base_sql !== null) {
-                if ($type === 'view' && $target_sql === $base_sql) {
+                $pending_drop_dependencies = cow_merge_schema_object_pending_source_drop_dependencies(
+                    $type,
+                    (string)$base_sql,
+                    $pending_source_drop_dependencies
+                );
+                if ($target_sql === $base_sql && !$pending_drop_dependencies) {
                     $apply_error = null;
                     try {
-                        cow_merge_apply_source_view_schema_resolution($target, $name, null);
+                        if ($type === 'trigger') {
+                            cow_merge_apply_source_trigger_schema_resolution($target, $name, null);
+                        } else {
+                            cow_merge_apply_source_view_schema_resolution($target, $name, null);
+                        }
                     } catch (Throwable $e) {
                         $apply_error = $e->getMessage();
                     }
@@ -18109,7 +18137,7 @@ function cow_merge_apply_schema_object_changes(
                             null,
                             $name,
                             'source-applied',
-                            'source dropped a view while target kept the base definition',
+                            "source dropped a $type while target kept the base definition",
                             $base_sql,
                             null,
                             $target_sql,
@@ -18129,7 +18157,9 @@ function cow_merge_apply_schema_object_changes(
                     null,
                     $target_sql,
                     $target_sql,
-                    "source dropped a $type; automatic $type drops are not applied"
+                    $pending_drop_dependencies
+                        ? "source dropped a $type that still references source-dropped schema objects pending review: " . implode(', ', $pending_drop_dependencies)
+                        : "source dropped a $type; automatic $type drops are not applied"
                 )) {
                     $conflicts++;
                 }
@@ -18357,6 +18387,36 @@ function cow_merge_apply_schema_object_changes(
     }
 
     return ['applied' => $applied, 'conflicts' => $conflicts];
+}
+
+function cow_merge_source_dropped_schema_names(array $base_objects, array $source_objects, array $target_objects): array {
+    $names = [];
+    foreach ($base_objects as $name => $_entry) {
+        if (!isset($source_objects[$name]) && isset($target_objects[$name])) {
+            $names[strtolower((string)$name)] = (string)$name;
+        }
+    }
+    return $names;
+}
+
+function cow_merge_schema_object_pending_source_drop_dependencies(string $type, string $sql, array $pending_source_drop_dependencies): array {
+    if (!$pending_source_drop_dependencies) {
+        return [];
+    }
+    $references = $type === 'trigger'
+        ? array_merge(
+            cow_merge_trigger_dependency_schema_objects($sql),
+            cow_merge_sql_referenced_schema_objects($sql)
+        )
+        : cow_merge_sql_referenced_schema_objects($sql);
+    $matches = [];
+    foreach ($references as $reference) {
+        $name = strtolower((string)($reference['name'] ?? ''));
+        if ($name !== '' && isset($pending_source_drop_dependencies[$name])) {
+            $matches[$name] = $pending_source_drop_dependencies[$name];
+        }
+    }
+    return array_values($matches);
 }
 
 function cow_merge_record_row_target_constraint(
@@ -19616,10 +19676,30 @@ function cow_merge_databases(
         $index_result = cow_merge_apply_index_schema_changes($target, $meta, $run_id, $base_indexes, $source_indexes, $target_indexes);
         $applied += $index_result['applied'];
         $conflicts += $index_result['conflicts'];
-        $view_result = cow_merge_apply_schema_object_changes($target, $meta, $run_id, 'view', $base_views, $source_views, $target_views);
+        $source_dropped_tables = cow_merge_source_dropped_schema_names($base_tables, $source_tables, $target_tables);
+        $source_dropped_views = cow_merge_source_dropped_schema_names($base_views, $source_views, $target_views);
+        $view_result = cow_merge_apply_schema_object_changes(
+            $target,
+            $meta,
+            $run_id,
+            'view',
+            $base_views,
+            $source_views,
+            $target_views,
+            $source_dropped_tables
+        );
         $applied += $view_result['applied'];
         $conflicts += $view_result['conflicts'];
-        $trigger_result = cow_merge_apply_schema_object_changes($target, $meta, $run_id, 'trigger', $base_triggers, $source_triggers, $target_triggers);
+        $trigger_result = cow_merge_apply_schema_object_changes(
+            $target,
+            $meta,
+            $run_id,
+            'trigger',
+            $base_triggers,
+            $source_triggers,
+            $target_triggers,
+            $source_dropped_tables + $source_dropped_views
+        );
         $applied += $trigger_result['applied'];
         $conflicts += $trigger_result['conflicts'];
         $applied += cow_merge_recompute_wordpress_term_taxonomy_counts($base, $source, $target, $meta, $run_id);
