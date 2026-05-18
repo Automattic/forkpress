@@ -6,9 +6,17 @@ set -euo pipefail
 # Runs the same script with the same env vars; the only difference is how we
 # discover the PR base branch (BUILDKITE_PULL_REQUEST_BASE_BRANCH vs github.base_ref).
 
-echo "--- :package: Installing PHP"
-sudo apt-get update
-sudo apt-get install -y --no-install-recommends php-cli php-sqlite3
+echo "--- :information_source: PHP availability"
+# The a8c BK Linux agent runs as `buildkite-agent` without passwordless sudo,
+# so `apt-get install` is not an option here. The preflight script only invokes
+# PHP when the change set actually touches `.php` files or COW patterns; for
+# changes that don't, it is a no-op. A proper PHP toolchain (via the Docker
+# plugin) is a follow-up so the script can cover the full set of changes.
+if command -v php >/dev/null 2>&1; then
+  php --version
+else
+  echo "php not installed; the preflight will skip PHP-bound checks."
+fi
 
 if [ "${BUILDKITE_PULL_REQUEST:-false}" != "false" ] && [ -n "${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-}" ]; then
   base_ref="$BUILDKITE_PULL_REQUEST_BASE_BRANCH"
