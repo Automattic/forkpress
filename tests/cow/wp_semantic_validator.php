@@ -2839,6 +2839,11 @@ PHP);
         'width' => 64,
         'height' => 64,
     ];
+    $metadata_array['sizes']['missing-file-field'] = [
+        'width' => 64,
+        'height' => 64,
+    ];
+    $metadata_array['backup_sizes']['bad-shape'] = 'not an array';
     if ($has_attachment_upload_symlink) {
         $metadata_array['sizes']['symlinked-generated'] = [
             'file' => 'generated-image-symlink.jpg',
@@ -2927,11 +2932,11 @@ PHP);
     );
 
     assert_same($attachment_upload_result['status'], 'completed_with_conflicts', 'built-in WordPress attachment upload guard holds unsafe upload states for review');
-    $expected_attachment_upload_conflicts = $has_attachment_upload_symlink ? 5 : 4;
+    $expected_attachment_upload_conflicts = $has_attachment_upload_symlink ? 7 : 6;
     if ($has_attachment_upload_case_collision) {
         $expected_attachment_upload_conflicts++;
     }
-    assert_same((int)($attachment_upload_result['wordpress_semantic_validator_conflicts'] ?? 0), $expected_attachment_upload_conflicts, 'built-in WordPress attachment upload validator records unsafe-path, non-regular-entry, duplicate-owner, metadata-file-drift, and missing-metadata conflicts');
+    assert_same((int)($attachment_upload_result['wordpress_semantic_validator_conflicts'] ?? 0), $expected_attachment_upload_conflicts, 'built-in WordPress attachment upload validator records unsafe-path, invalid-shape, non-regular-entry, duplicate-owner, metadata-file-drift, and missing-metadata conflicts');
     assert_same((int)($attachment_upload_result['plugin_validator_conflicts'] ?? 0), $expected_attachment_upload_conflicts, 'built-in WordPress attachment upload validator contributes to plugin-scoped conflict totals');
     assert_same((int)($attachment_upload_result['file_conflicts'] ?? 0), 2, 'filesystem merge holds source deletions of upload files still referenced by WordPress metadata');
     assert_true(is_file($attachment_upload_target_root . '/wp-content/uploads/2026/05/generated-image-150x150.jpg'), 'filesystem merge preserves generated files still referenced by WordPress metadata');
@@ -2977,6 +2982,25 @@ PHP);
     assert_same($attachment_upload_invalid_path_payload['candidate']['role'] ?? null, 'generated-size', 'built-in WordPress attachment upload invalid-path audit identifies generated-size files');
     assert_same($attachment_upload_invalid_path_payload['candidate']['generated_file'] ?? null, '../../../../database/.ht.sqlite', 'built-in WordPress attachment upload invalid-path audit keeps the unsafe raw metadata path');
     assert_same($attachment_upload_invalid_path_audit['conflicts'][0]['plugin_files'] ?? null, [], 'built-in WordPress attachment upload invalid-path audit does not expose managed DB paths as plugin files');
+
+    $attachment_upload_invalid_shape_audit = cow_merge_audit_report($attachment_upload_metadata, (int)$attachment_upload_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'semantic_scope' => 'wordpress',
+        'conflict_type' => 'plugin-wp-attachment-metadata-invalid-shape',
+    ]);
+    assert_same(count($attachment_upload_invalid_shape_audit['conflicts']), 2, 'built-in WordPress attachment upload validator rejects malformed generated and backup metadata entries');
+    $attachment_upload_invalid_shape_payloads = array_map(
+        fn($conflict) => cow_merge_audit_decode_payload(json_decode((string)($conflict['chosen_payload'] ?? ''), true)),
+        $attachment_upload_invalid_shape_audit['conflicts']
+    );
+    $attachment_upload_invalid_shape_fields = array_map(fn($payload) => (string)($payload['candidate']['field'] ?? ''), $attachment_upload_invalid_shape_payloads);
+    sort($attachment_upload_invalid_shape_fields, SORT_STRING);
+    assert_same($attachment_upload_invalid_shape_fields, [
+        '_wp_attachment_metadata.backup_sizes.bad-shape.file',
+        '_wp_attachment_metadata.sizes.missing-file-field.file',
+    ], 'built-in WordPress attachment upload invalid-shape audit names malformed metadata fields');
+    assert_same($attachment_upload_invalid_shape_audit['conflicts'][0]['plugin_files'] ?? null, [], 'built-in WordPress attachment upload invalid-shape audit does not expose guessed upload paths');
 
     if ($has_attachment_upload_symlink) {
         $attachment_upload_invalid_entry_audit = cow_merge_audit_report($attachment_upload_metadata, (int)$attachment_upload_result['run_id'], 10, [

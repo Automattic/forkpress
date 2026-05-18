@@ -10459,9 +10459,24 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
                 }
             }
 
+            if (isset($metadata['sizes']) && !is_array($metadata['sizes'])) {
+                $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-metadata-invalid-shape', 'attachment generated-size metadata is not an array', [
+                    'field' => '_wp_attachment_metadata.sizes',
+                    'role' => 'generated-size',
+                    'attached_file' => $attached_file_raw,
+                    'value_type' => get_debug_type($metadata['sizes']),
+                ]);
+            }
             $sizes = is_array($metadata['sizes'] ?? null) ? $metadata['sizes'] : [];
             foreach ($sizes as $size_name => $size) {
                 if (!is_array($size) || !isset($size['file']) || !is_string($size['file'])) {
+                    $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-metadata-invalid-shape', 'attachment generated-size metadata entry is missing a file name', [
+                        'field' => '_wp_attachment_metadata.sizes.' . (string)$size_name . '.file',
+                        'role' => 'generated-size',
+                        'size' => (string)$size_name,
+                        'attached_file' => $attached_file_raw,
+                        'value_type' => get_debug_type($size),
+                    ]);
                     continue;
                 }
                 $size_path = cow_merge_wordpress_upload_child_relative_path($base_path, (string)$size['file']);
@@ -10497,9 +10512,24 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
                 }
             }
 
+            if (isset($metadata['backup_sizes']) && !is_array($metadata['backup_sizes'])) {
+                $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-metadata-invalid-shape', 'attachment backup-size metadata is not an array', [
+                    'field' => '_wp_attachment_metadata.backup_sizes',
+                    'role' => 'backup-size',
+                    'attached_file' => $attached_file_raw,
+                    'value_type' => get_debug_type($metadata['backup_sizes']),
+                ]);
+            }
             $backup_sizes = is_array($metadata['backup_sizes'] ?? null) ? $metadata['backup_sizes'] : [];
             foreach ($backup_sizes as $backup_name => $backup) {
                 if (!is_array($backup) || !isset($backup['file']) || !is_string($backup['file'])) {
+                    $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-metadata-invalid-shape', 'attachment backup-size metadata entry is missing a file name', [
+                        'field' => '_wp_attachment_metadata.backup_sizes.' . (string)$backup_name . '.file',
+                        'role' => 'backup-size',
+                        'backup_size' => (string)$backup_name,
+                        'attached_file' => $attached_file_raw,
+                        'value_type' => get_debug_type($backup),
+                    ]);
                     continue;
                 }
                 $backup_path = cow_merge_wordpress_upload_child_relative_path($base_path, (string)$backup['file']);
