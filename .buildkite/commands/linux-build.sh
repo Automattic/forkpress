@@ -19,7 +19,8 @@ apt-get update -qq
 # curl, git, pkg-config, unzip. Add the rest that build-dist.sh and the musl
 # linker want.
 apt-get install -y --no-install-recommends \
-  automake bison composer musl-tools nodejs php-cli php-sqlite3 re2c \
+  automake autopoint bison cmake composer flex musl-tools nodejs \
+  php-cli php-sqlite3 re2c \
   >/dev/null
 php --version | head -1
 
