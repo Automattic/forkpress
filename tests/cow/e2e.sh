@@ -1312,6 +1312,86 @@ grep -F "status:    completed" "$TMP/remote-cache-merge.out" >/dev/null
 grep -F "merged from remote cache branch" "$WORK/main/wp-content/remote-cache-branch.txt" >/dev/null
 php -r '$db = new SQLite3($argv[1]); $rows = (int)$db->querySingle("SELECT COUNT(*) FROM wp_forkpress_e2e_autoinc WHERE label = '\''Branch runtime plugin row'\''"); exit($rows === 1 ? 0 : 1);' "$WORK/main/wp-content/database/.ht.sqlite"
 
+log_step "thin remote clone skips uploads and branches with birth metadata"
+REMOTE_THIN_SOURCE="$TMP/remote-thin-source"
+FAKE_RSYNC_BIN="$TMP/fake-rsync-bin"
+mkdir -p "$REMOTE_THIN_SOURCE" "$FAKE_RSYNC_BIN"
+cp -R "$WORK/main/." "$REMOTE_THIN_SOURCE/"
+echo "remote thin boot file" > "$REMOTE_THIN_SOURCE/wp-content/remote-thin-source.txt"
+mkdir -p "$REMOTE_THIN_SOURCE/wp-content/uploads/2026/05" "$REMOTE_THIN_SOURCE/wp-content/cache"
+echo "large upload should not boot-sync" > "$REMOTE_THIN_SOURCE/wp-content/uploads/2026/05/large-upload.jpg"
+echo "cache should not boot-sync" > "$REMOTE_THIN_SOURCE/wp-content/cache/cache-entry.txt"
+cat > "$FAKE_RSYNC_BIN/rsync" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+args=("$@")
+excludes=()
+positionals=()
+for ((i = 0; i < ${#args[@]}; i++)); do
+  case "${args[$i]}" in
+    --exclude)
+      i=$((i + 1))
+      excludes+=("${args[$i]}")
+      ;;
+    -*)
+      ;;
+    *)
+      positionals+=("${args[$i]}")
+      ;;
+  esac
+done
+if [ "${#positionals[@]}" -lt 2 ]; then
+  echo "fake rsync expected source and destination" >&2
+  exit 2
+fi
+src="${positionals[$((${#positionals[@]} - 2))]}"
+dest="${positionals[$((${#positionals[@]} - 1))]}"
+src="${src#*:}"
+src="${src%/}"
+mkdir -p "$dest"
+while IFS= read -r -d '' entry; do
+  rel="${entry#$src/}"
+  skip=0
+  for exclude in "${excludes[@]}"; do
+    exclude="${exclude%/}"
+    if [ "$rel" = "$exclude" ] || [[ "$rel" == "$exclude/"* ]]; then
+      skip=1
+      break
+    fi
+  done
+  if [ "$skip" -eq 1 ]; then
+    continue
+  fi
+  target="$dest/$rel"
+  if [ -d "$entry" ] && [ ! -L "$entry" ]; then
+    mkdir -p "$target"
+  else
+    mkdir -p "$(dirname "$target")"
+    cp -P "$entry" "$target"
+  fi
+done < <(find "$src" -mindepth 1 -print0)
+SH
+chmod +x "$FAKE_RSYNC_BIN/rsync"
+PATH="$FAKE_RSYNC_BIN:$PATH" "$BIN" remote --work-dir "$WORK_DIR" clone thin-prod \
+  --ssh fake-remote \
+  --path "$REMOTE_THIN_SOURCE" \
+  --branch remote-thin-branch \
+  --remote-url "https://thin.example.test/" \
+  > "$TMP/remote-thin-clone.out"
+grep -F "forkpress: remote site 'thin-prod' cloned" "$TMP/remote-thin-clone.out" >/dev/null
+grep -F "sync:      boot cache" "$TMP/remote-thin-clone.out" >/dev/null
+grep -F "forkpress: remote cache 'thin-prod' branched to 'remote-thin-branch'" "$TMP/remote-thin-clone.out" >/dev/null
+test -f "$WORK_DIR/cow/remote-sites/thin-prod/cache/wp-load.php"
+test -f "$WORK_DIR/cow/remote-sites/thin-prod/cache/wp-content/remote-thin-source.txt"
+test ! -e "$WORK_DIR/cow/remote-sites/thin-prod/cache/wp-content/uploads/2026/05/large-upload.jpg"
+test ! -e "$WORK_DIR/cow/remote-sites/thin-prod/cache/wp-content/cache/cache-entry.txt"
+test -f "$WORK/remote-thin-branch/wp-load.php"
+test -f "$WORK/remote-thin-branch/wp-content/database/.ht.sqlite"
+test -f "$WORK/remote-thin-branch/wp-content/remote-thin-source.txt"
+test ! -e "$WORK/remote-thin-branch/wp-content/uploads/2026/05/large-upload.jpg"
+autoinc_runtime_request remote-thin-branch insert "$TMP/autoinc-remote-thin-insert.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $meta = new SQLite3($argv[2]); $branch = new SQLite3($argv[3]); $max = (int)($data["max_id"] ?? 0); $band = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''remote-thin-branch'\'' AND table_name = '\''wp_forkpress_e2e_autoinc'\''", true); $has_db_base = is_file($argv[4]); $has_file_base = is_file($argv[5]); $seq = (int)$branch->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''wp_forkpress_e2e_autoinc'\''"); exit($band && $has_db_base && $has_file_base && $max >= (int)$band["band_start"] && $max <= (int)$band["band_end"] && $seq === $max ? 0 : 1);' "$TMP/autoinc-remote-thin-insert.json" "$WORK_DIR/cow/merge/metadata.sqlite" "$WORK/remote-thin-branch/wp-content/database/.ht.sqlite" "$WORK_DIR/cow/merge/bases/remote-thin-branch.sqlite" "$WORK_DIR/cow/merge/file-bases/remote-thin-branch.json"
+
 if [ "${FORKPRESS_E2E_ONLY:-}" = "remote-cache" ]; then
   log_step "remote cache branch slice complete"
   exit 0
