@@ -123,6 +123,10 @@ Recent additions in the current merge-reliability work:
 - Non-AUTOINCREMENT `INTEGER PRIMARY KEY` plugin-table parent collisions now
   also hold dependent source child rows when a foreign key would otherwise bind
   them to a different target parent row with the same key.
+- Plugin AUTOINCREMENT parent rows with branch-band IDs but colliding
+  plugin-defined unique/logical keys now hold dependent source child rows with
+  an auditable parent unique-collision reason instead of surfacing only a
+  low-level constraint failure.
 
 | Objective item | Evidence on trunk | Remaining gap |
 | --- | --- | --- |
