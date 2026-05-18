@@ -54,6 +54,8 @@ on_error() {
   dump_if_exists "$TMP/remote-cache-show.out"
   dump_if_exists "$TMP/remote-cache-list.out"
   dump_if_exists "$TMP/remote-cache-branch.out"
+  dump_if_exists "$TMP/remote-mysql-branch.html"
+  dump_if_exists "$TMP/remote-mysql-force-branch.html"
   dump_if_exists "$TMP/runtime-unready-get.out"
   dump_if_exists "$TMP/runtime-unready-post.out"
   dump_if_exists "$TMP/autoinc-remote-cache-insert.json"
@@ -124,6 +126,11 @@ on_error() {
   dump_if_exists "$TMP/merge-audit.out"
   dump_if_exists "$TMP/merge-audit.json"
   dump_if_exists "$TMP/merge-pending-reset.out"
+  dump_if_exists "$TMP/branch-url-source-page.html"
+  dump_if_exists "$TMP/branch-url-merge.out"
+  dump_if_exists "$TMP/branch-url-main-check.out"
+  dump_if_exists "$TMP/merge-source-url-page.html"
+  dump_if_exists "$TMP/merge-url-main-check.out"
   dump_if_exists "$TMP/public-crash-merge.out"
   dump_if_exists "$TMP/public-crash-recover.json"
   dump_if_exists "$TMP/public-crash-merge-audit-crash-recovery.json"
@@ -1259,6 +1266,97 @@ PHP
 autoinc_runtime_request main init "$TMP/autoinc-main-init.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(($data["max_id"] ?? null) === 1 ? 0 : 1);' "$TMP/autoinc-main-init.json"
 
+if [ "${FORKPRESS_E2E_ONLY:-}" = "branch-urls" ]; then
+  log_step "branch URL previews and merge rewrites"
+  "$BIN" branch --work-dir "$WORK_DIR" create url-rewrite-source
+  URL_REWRITE_TITLE="URL rewrite source $(date +%s)"
+  create_branch_post url-rewrite-source "$URL_REWRITE_TITLE"
+  URL_REWRITE_POST_ID="$(php -r '$db = new SQLite3($argv[1]); $stmt = $db->prepare("SELECT ID FROM wp_posts WHERE post_title = :title ORDER BY ID DESC LIMIT 1"); $stmt->bindValue(":title", $argv[2], SQLITE3_TEXT); $row = $stmt->execute()->fetchArray(SQLITE3_ASSOC); if (!$row) { exit(1); } echo (int)$row["ID"];' "$WORK/url-rewrite-source/wp-content/database/.ht.sqlite" "$URL_REWRITE_TITLE")"
+  php -r '
+$db = new SQLite3($argv[1]);
+$post_id = (int)$argv[2];
+$port = $argv[3];
+$branch_url = "http://url-rewrite-source.wp.localhost:$port";
+$main_url = "http://wp.localhost:$port";
+$content = "Branch absolute: $branch_url/branch-only\nMain absolute: $main_url/main-only\nJSON URL: " . json_encode(["url" => "$branch_url/json-inline"], JSON_UNESCAPED_SLASHES)
+    . "\nEscaped branch JSON URL: " . json_encode(["url" => "$branch_url/json-escaped-inline"])
+    . "\nEscaped main JSON URL: " . json_encode(["url" => "$main_url/escaped-main"]);
+$stmt = $db->prepare("UPDATE wp_posts SET post_content = :content WHERE ID = :id");
+$stmt->bindValue(":content", $content, SQLITE3_TEXT);
+$stmt->bindValue(":id", $post_id, SQLITE3_INTEGER);
+$stmt->execute();
+$json = json_encode(["url" => "$branch_url/json-meta"], JSON_UNESCAPED_SLASHES);
+$serialized = serialize(["url" => "$branch_url/serialized-meta"]);
+foreach ([["_forkpress_url_json", $json], ["_forkpress_url_serialized", $serialized]] as $meta) {
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, :meta_key, :meta_value)");
+    $stmt->bindValue(":post_id", $post_id, SQLITE3_INTEGER);
+    $stmt->bindValue(":meta_key", $meta[0], SQLITE3_TEXT);
+    $stmt->bindValue(":meta_value", $meta[1], SQLITE3_TEXT);
+    $stmt->execute();
+}
+' "$WORK/url-rewrite-source/wp-content/database/.ht.sqlite" "$URL_REWRITE_POST_ID" "$PORT"
+  URL_REWRITE_HTTP="$(curl -sS -o "$TMP/branch-url-source-page.html" -w '%{http_code}' --resolve "url-rewrite-source.wp.localhost:$PORT:127.0.0.1" "http://url-rewrite-source.wp.localhost:$PORT/?p=$URL_REWRITE_POST_ID")"
+  if [ "$URL_REWRITE_HTTP" != "200" ]; then
+    echo "url-rewrite-source page returned $URL_REWRITE_HTTP" >&2
+    cat "$TMP/branch-url-source-page.html" >&2
+    exit 1
+  fi
+  grep -F "http://url-rewrite-source.wp.localhost:$PORT/main-only" "$TMP/branch-url-source-page.html" >/dev/null
+  grep -F "http:\\/\\/url-rewrite-source.wp.localhost:$PORT\\/escaped-main" "$TMP/branch-url-source-page.html" >/dev/null
+  if grep -F "http://wp.localhost:$PORT/main-only" "$TMP/branch-url-source-page.html" >/dev/null; then
+    echo "branch preview left a main-domain absolute URL in rendered content" >&2
+    cat "$TMP/branch-url-source-page.html" >&2
+    exit 1
+  fi
+  if grep -F "url-rewrite-source.wp.localhost:$PORT:$PORT" "$TMP/branch-url-source-page.html" >/dev/null; then
+    echo "branch preview duplicated the port while rewriting URLs" >&2
+    cat "$TMP/branch-url-source-page.html" >&2
+    exit 1
+  fi
+  "$BIN" branch --work-dir "$WORK_DIR" merge url-rewrite-source --into main > "$TMP/branch-url-merge.out"
+  php -r '
+$db = new SQLite3($argv[1]);
+$title = $argv[2];
+$port = $argv[3];
+$stmt = $db->prepare("SELECT ID, post_content FROM wp_posts WHERE post_title = :title ORDER BY ID DESC LIMIT 1");
+$stmt->bindValue(":title", $title, SQLITE3_TEXT);
+$row = $stmt->execute()->fetchArray(SQLITE3_ASSOC);
+if (!$row) {
+    file_put_contents($argv[4], "missing merged post\n");
+    exit(1);
+}
+$content = (string)$row["post_content"];
+$main = "http://wp.localhost:$port";
+$branch = "http://url-rewrite-source.wp.localhost:$port";
+$ok = str_contains($content, "$main/branch-only")
+    && str_contains($content, "$main/json-inline")
+    && str_contains($content, "http:\\/\\/wp.localhost:$port\\/json-escaped-inline")
+    && str_contains($content, "http:\\/\\/wp.localhost:$port\\/escaped-main")
+    && !str_contains($content, $branch);
+$post_id = (int)$row["ID"];
+$stmt = $db->prepare("SELECT meta_value FROM wp_postmeta WHERE post_id = :post_id AND meta_key = :meta_key ORDER BY meta_id DESC LIMIT 1");
+$stmt->bindValue(":post_id", $post_id, SQLITE3_INTEGER);
+$stmt->bindValue(":meta_key", "_forkpress_url_json", SQLITE3_TEXT);
+$json_row = $stmt->execute()->fetchArray(SQLITE3_ASSOC);
+$json_value = is_array($json_row) ? (string)$json_row["meta_value"] : "";
+$json = json_decode($json_value, true);
+$ok = $ok && is_array($json) && (($json["url"] ?? null) === "$main/json-meta");
+$stmt = $db->prepare("SELECT meta_value FROM wp_postmeta WHERE post_id = :post_id AND meta_key = :meta_key ORDER BY meta_id DESC LIMIT 1");
+$stmt->bindValue(":post_id", $post_id, SQLITE3_INTEGER);
+$stmt->bindValue(":meta_key", "_forkpress_url_serialized", SQLITE3_TEXT);
+$serialized_row = $stmt->execute()->fetchArray(SQLITE3_ASSOC);
+$serialized_value = is_array($serialized_row) ? (string)$serialized_row["meta_value"] : "";
+$serialized = @unserialize($serialized_value, ["allowed_classes" => false]);
+$ok = $ok && is_array($serialized) && (($serialized["url"] ?? null) === "$main/serialized-meta");
+if (!$ok) {
+    file_put_contents($argv[4], "content=$content\njson=$json_value\nserialized=$serialized_value\n");
+    exit(1);
+}
+' "$WORK/main/wp-content/database/.ht.sqlite" "$URL_REWRITE_TITLE" "$PORT" "$TMP/branch-url-main-check.out"
+  log_step "branch URL rewrite slice complete"
+  exit 0
+fi
+
 if [ "${FORKPRESS_E2E_ONLY:-}" != "semantic" ]; then
 log_step "block unready branch writes before WordPress"
 mkdir -p "$WORK/runtime-unready"
@@ -1426,7 +1524,7 @@ define('DB_NAME', 'wordpress');
 define('DB_USER', 'wordpress');
 define('DB_PASSWORD', 'wordpress');
 define('DB_HOST', 'localhost');
-$table_prefix = 'wp_';
+$table_prefix = 'fp_';
 PHP
 cat > "$FAKE_RSYNC_BIN/ssh" <<'SH'
 #!/usr/bin/env bash
@@ -1434,10 +1532,10 @@ set -euo pipefail
 cat >/dev/null
 php -r '
 function emit($record) { echo json_encode($record, JSON_UNESCAPED_SLASHES), "\n"; }
-emit(["type" => "meta", "database" => "wordpress", "table_prefix" => "wp_"]);
+emit(["type" => "meta", "database" => "wordpress", "table_prefix" => "fp_"]);
 emit([
     "type" => "table",
-    "name" => "wp_posts",
+    "name" => "fp_posts",
     "columns" => [
         ["name" => "ID", "type" => "bigint(20) unsigned", "null" => "NO", "key" => "PRI", "default" => null, "extra" => "auto_increment"],
         ["name" => "post_title", "type" => "text", "null" => "NO", "key" => "", "default" => null, "extra" => ""],
@@ -1449,7 +1547,7 @@ emit([
 ]);
 emit([
     "type" => "row",
-    "table" => "wp_posts",
+    "table" => "fp_posts",
     "values" => [
         "ID" => base64_encode("11"),
         "post_title" => base64_encode("Imported remote MySQL page"),
@@ -1458,7 +1556,7 @@ emit([
 ]);
 emit([
     "type" => "table",
-    "name" => "wp_options",
+    "name" => "fp_options",
     "columns" => [
         ["name" => "option_id", "type" => "bigint(20) unsigned", "null" => "NO", "key" => "PRI", "default" => null, "extra" => "auto_increment"],
         ["name" => "option_name", "type" => "varchar(191)", "null" => "NO", "key" => "UNI", "default" => "", "extra" => ""],
@@ -1471,7 +1569,7 @@ emit([
 ]);
 emit([
     "type" => "row",
-    "table" => "wp_options",
+    "table" => "fp_options",
     "values" => [
         "option_id" => base64_encode("1"),
         "option_name" => base64_encode("siteurl"),
@@ -1495,8 +1593,21 @@ test -f "$WORK_DIR/cow/remote-sites/mysql-prod/cache/wp-content/database/.ht.sql
 test -f "$WORK/remote-mysql-branch/wp-content/database/.ht.sqlite"
 test -f "$WORK_DIR/cow/merge/bases/remote-mysql-branch.sqlite"
 test -f "$WORK_DIR/cow/merge/file-bases/remote-mysql-branch.json"
-php -r '$db = new SQLite3($argv[1]); $title = $db->querySingle("SELECT post_title FROM wp_posts WHERE ID = 11"); $seq = (int)$db->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''wp_posts'\''"); exit($title === "Imported remote MySQL page" && $seq >= 11 ? 0 : 1);' "$WORK/remote-mysql-branch/wp-content/database/.ht.sqlite"
-php -r '$meta = new SQLite3($argv[1]); $band = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''remote-mysql-branch'\'' AND table_name = '\''wp_posts'\''", true); exit($band && (int)$band["band_start"] > 11 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
+grep -F "\$table_prefix = 'fp_';" "$WORK/remote-mysql-branch/wp-config.php" >/dev/null
+php -r '$db = new SQLite3($argv[1]); $title = $db->querySingle("SELECT post_title FROM fp_posts WHERE ID = 11"); $seq = (int)$db->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''fp_posts'\''"); exit($title === "Imported remote MySQL page" && $seq >= 11 ? 0 : 1);' "$WORK/remote-mysql-branch/wp-content/database/.ht.sqlite"
+php -r '$meta = new SQLite3($argv[1]); $band = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''remote-mysql-branch'\'' AND table_name = '\''fp_posts'\''", true); exit($band && (int)$band["band_start"] > 11 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
+REMOTE_MYSQL_HTTP="$(curl -sS -o "$TMP/remote-mysql-branch.html" -w '%{http_code}' --resolve "remote-mysql-branch.wp.localhost:$PORT:127.0.0.1" "http://remote-mysql-branch.wp.localhost:$PORT/wp-admin/install.php")"
+if [ "$REMOTE_MYSQL_HTTP" != "200" ]; then
+  echo "remote MySQL branch returned HTTP $REMOTE_MYSQL_HTTP" >&2
+  cat "$TMP/remote-mysql-branch.html" >&2
+  exit 1
+fi
+grep -F "Already Installed" "$TMP/remote-mysql-branch.html" >/dev/null
+if grep -F "Welcome to WordPress" "$TMP/remote-mysql-branch.html" >/dev/null; then
+  echo "remote MySQL branch showed the WordPress installer" >&2
+  cat "$TMP/remote-mysql-branch.html" >&2
+  exit 1
+fi
 
 log_step "remote clone refuses stale branch before syncing and --force recreates it"
 FAILING_RSYNC_BIN="$TMP/failing-rsync-bin"
@@ -1535,7 +1646,20 @@ grep -F "forkpress: remote cache 'mysql-prod' branched to 'remote-mysql-branch'"
 test -f "$WORK/remote-mysql-branch/wp-content/database/.ht.sqlite"
 test -f "$WORK_DIR/cow/merge/bases/remote-mysql-branch.sqlite"
 test -f "$WORK_DIR/cow/merge/file-bases/remote-mysql-branch.json"
-php -r '$db = new SQLite3($argv[1]); $title = $db->querySingle("SELECT post_title FROM wp_posts WHERE ID = 11"); $seq = (int)$db->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''wp_posts'\''"); exit($title === "Imported remote MySQL page" && $seq >= 11 ? 0 : 1);' "$WORK/remote-mysql-branch/wp-content/database/.ht.sqlite"
+grep -F "\$table_prefix = 'fp_';" "$WORK/remote-mysql-branch/wp-config.php" >/dev/null
+php -r '$db = new SQLite3($argv[1]); $title = $db->querySingle("SELECT post_title FROM fp_posts WHERE ID = 11"); $seq = (int)$db->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''fp_posts'\''"); exit($title === "Imported remote MySQL page" && $seq >= 11 ? 0 : 1);' "$WORK/remote-mysql-branch/wp-content/database/.ht.sqlite"
+REMOTE_MYSQL_FORCE_HTTP="$(curl -sS -o "$TMP/remote-mysql-force-branch.html" -w '%{http_code}' --resolve "remote-mysql-branch.wp.localhost:$PORT:127.0.0.1" "http://remote-mysql-branch.wp.localhost:$PORT/wp-admin/install.php")"
+if [ "$REMOTE_MYSQL_FORCE_HTTP" != "200" ]; then
+  echo "force-recloned remote MySQL branch returned HTTP $REMOTE_MYSQL_FORCE_HTTP" >&2
+  cat "$TMP/remote-mysql-force-branch.html" >&2
+  exit 1
+fi
+grep -F "Already Installed" "$TMP/remote-mysql-force-branch.html" >/dev/null
+if grep -F "Welcome to WordPress" "$TMP/remote-mysql-force-branch.html" >/dev/null; then
+  echo "force-recloned remote MySQL branch showed the WordPress installer" >&2
+  cat "$TMP/remote-mysql-force-branch.html" >&2
+  exit 1
+fi
 
 if [ "${FORKPRESS_E2E_ONLY:-}" = "remote-cache" ]; then
   log_step "remote cache branch slice complete"
@@ -2565,6 +2689,40 @@ php -r '$db = new SQLite3($argv[1]); $db->exec("CREATE TABLE IF NOT EXISTS forkp
 "$BIN" branch --work-dir "$WORK_DIR" create merge-source
 MERGE_TITLE="Merge source $(date +%s)"
 create_branch_post merge-source "$MERGE_TITLE"
+MERGE_SOURCE_POST_ID="$(php -r '$db = new SQLite3($argv[1]); $stmt = $db->prepare("SELECT ID FROM wp_posts WHERE post_title = :title ORDER BY ID DESC LIMIT 1"); $stmt->bindValue(":title", $argv[2], SQLITE3_TEXT); $row = $stmt->execute()->fetchArray(SQLITE3_ASSOC); if (!$row) { exit(1); } echo (int)$row["ID"];' "$WORK/merge-source/wp-content/database/.ht.sqlite" "$MERGE_TITLE")"
+php -r '
+$db = new SQLite3($argv[1]);
+$post_id = (int)$argv[2];
+$port = $argv[3];
+$branch_url = "http://merge-source.wp.localhost:$port";
+$main_url = "http://wp.localhost:$port";
+$content = "Branch absolute: $branch_url/branch-only\nMain absolute: $main_url/main-only\nEscaped JSON URL: " . json_encode(["url" => "$branch_url/json-inline"], JSON_UNESCAPED_SLASHES);
+$stmt = $db->prepare("UPDATE wp_posts SET post_content = :content WHERE ID = :id");
+$stmt->bindValue(":content", $content, SQLITE3_TEXT);
+$stmt->bindValue(":id", $post_id, SQLITE3_INTEGER);
+$stmt->execute();
+$json = json_encode(["url" => "$branch_url/json-meta"], JSON_UNESCAPED_SLASHES);
+$serialized = serialize(["url" => "$branch_url/serialized-meta"]);
+foreach ([["_forkpress_url_json", $json], ["_forkpress_url_serialized", $serialized]] as $meta) {
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, :meta_key, :meta_value)");
+    $stmt->bindValue(":post_id", $post_id, SQLITE3_INTEGER);
+    $stmt->bindValue(":meta_key", $meta[0], SQLITE3_TEXT);
+    $stmt->bindValue(":meta_value", $meta[1], SQLITE3_TEXT);
+    $stmt->execute();
+}
+' "$WORK/merge-source/wp-content/database/.ht.sqlite" "$MERGE_SOURCE_POST_ID" "$PORT"
+MERGE_SOURCE_HTTP="$(curl -sS -o "$TMP/merge-source-url-page.html" -w '%{http_code}' --resolve "merge-source.wp.localhost:$PORT:127.0.0.1" "http://merge-source.wp.localhost:$PORT/?p=$MERGE_SOURCE_POST_ID")"
+if [ "$MERGE_SOURCE_HTTP" != "200" ]; then
+  echo "merge-source URL rewrite page returned $MERGE_SOURCE_HTTP" >&2
+  cat "$TMP/merge-source-url-page.html" >&2
+  exit 1
+fi
+grep -F "http://merge-source.wp.localhost:$PORT/main-only" "$TMP/merge-source-url-page.html" >/dev/null
+if grep -F "http://wp.localhost:$PORT/main-only" "$TMP/merge-source-url-page.html" >/dev/null; then
+  echo "branch preview left a main-domain absolute URL in rendered content" >&2
+  cat "$TMP/merge-source-url-page.html" >&2
+  exit 1
+fi
 php -r '$db = new SQLite3($argv[1]); $db->exec("INSERT INTO forkpress_e2e_target_kept (id, label) VALUES (1, '\''target-only row'\'')");' "$WORK/main/wp-content/database/.ht.sqlite"
 echo "merged through branch merge" > "$WORK/merge-source/wp-content/merge-source-file.txt"
 echo "kept on target through branch merge" > "$WORK/main/wp-content/main-target-file.txt"
@@ -2588,6 +2746,41 @@ curl -sS -H "Host: wp.localhost:$PORT" \
   -o "$TMP/main-after-merge-edit.html"
 grep -F "$MERGE_TITLE" "$TMP/main-after-merge-edit.html" >/dev/null
 php -r '$db = new SQLite3($argv[1]); $label = $db->querySingle("SELECT label FROM forkpress_e2e_target_kept WHERE id = 1"); exit($label === "target-only row" ? 0 : 1);' "$WORK/main/wp-content/database/.ht.sqlite"
+php -r '
+$db = new SQLite3($argv[1]);
+$title = $argv[2];
+$port = $argv[3];
+$stmt = $db->prepare("SELECT ID, post_content FROM wp_posts WHERE post_title = :title ORDER BY ID DESC LIMIT 1");
+$stmt->bindValue(":title", $title, SQLITE3_TEXT);
+$row = $stmt->execute()->fetchArray(SQLITE3_ASSOC);
+if (!$row) {
+    file_put_contents($argv[4], "missing merged post\n");
+    exit(1);
+}
+$content = (string)$row["post_content"];
+$main = "http://wp.localhost:$port";
+$branch = "http://merge-source.wp.localhost:$port";
+$ok = str_contains($content, "$main/branch-only")
+    && str_contains($content, "$main/json-inline")
+    && !str_contains($content, $branch);
+$post_id = (int)$row["ID"];
+$stmt = $db->prepare("SELECT meta_value FROM wp_postmeta WHERE post_id = :post_id AND meta_key = :meta_key ORDER BY meta_id DESC LIMIT 1");
+$stmt->bindValue(":post_id", $post_id, SQLITE3_INTEGER);
+$stmt->bindValue(":meta_key", "_forkpress_url_json", SQLITE3_TEXT);
+$json_value = (string)$stmt->execute()->fetchArray(SQLITE3_ASSOC)["meta_value"];
+$json = json_decode($json_value, true);
+$ok = $ok && is_array($json) && (($json["url"] ?? null) === "$main/json-meta");
+$stmt = $db->prepare("SELECT meta_value FROM wp_postmeta WHERE post_id = :post_id AND meta_key = :meta_key ORDER BY meta_id DESC LIMIT 1");
+$stmt->bindValue(":post_id", $post_id, SQLITE3_INTEGER);
+$stmt->bindValue(":meta_key", "_forkpress_url_serialized", SQLITE3_TEXT);
+$serialized_value = (string)$stmt->execute()->fetchArray(SQLITE3_ASSOC)["meta_value"];
+$serialized = @unserialize($serialized_value, ["allowed_classes" => false]);
+$ok = $ok && is_array($serialized) && (($serialized["url"] ?? null) === "$main/serialized-meta");
+if (!$ok) {
+    file_put_contents($argv[4], "content=$content\njson=$json_value\nserialized=$serialized_value\n");
+    exit(1);
+}
+' "$WORK/main/wp-content/database/.ht.sqlite" "$MERGE_TITLE" "$PORT" "$TMP/merge-url-main-check.out"
 test -f "$WORK_DIR/cow/merge/metadata.sqlite"
 php -r '$db = new SQLite3($argv[1]); $count = (int)$db->querySingle("SELECT COUNT(*) FROM merge_runs WHERE source_branch = '\''merge-source'\'' AND target_branch = '\''main'\'' AND status IN ('\''completed'\'', '\''completed_with_conflicts'\'')"); exit($count > 0 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
 "$BIN" branch --work-dir "$WORK_DIR" merge-audit --limit 8 > "$TMP/merge-audit.out"
@@ -2595,6 +2788,11 @@ grep -F "forkpress: COW merge audit" "$TMP/merge-audit.out" >/dev/null
 grep -F "merge-source -> main" "$TMP/merge-audit.out" >/dev/null
 "$BIN" branch --work-dir "$WORK_DIR" merge-audit --format json --limit 3 > "$TMP/merge-audit.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); exit(is_array($data) && !empty($data["runs"]) ? 0 : 1);' "$TMP/merge-audit.json"
+
+if [ "${FORKPRESS_E2E_ONLY:-}" = "merge" ]; then
+  log_step "branch merge slice complete"
+  exit 0
+fi
 
 log_step "public branch merge crash recovery"
 "$BIN" branch --work-dir "$WORK_DIR" create public-crash-merge

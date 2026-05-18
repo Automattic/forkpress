@@ -1302,6 +1302,7 @@ pub fn merge_cow_branch(
     shared: &SharedPaths,
     source: &str,
     target: &str,
+    root_host: Option<&str>,
     plugin_validator: Option<&Path>,
 ) -> Result<()> {
     validate_branch_name(source)?;
@@ -1376,6 +1377,10 @@ pub fn merge_cow_branch(
         "--target-root".into(),
         target_root.as_os_str().to_os_string(),
     ];
+    if let Some(root_host) = root_host {
+        args.push("--root-host".into());
+        args.push(root_host.into());
+    }
     if let Some(plugin_validator) = plugin_validator {
         args.push("--plugin-validator".into());
         args.push(plugin_validator.as_os_str().to_os_string());

@@ -3404,12 +3404,15 @@ fn cow_branch_command(
         }
         "merge" => {
             let merge = parse_cow_branch_merge_args(&args.args)?;
+            let (root_host, _) = branchctl_url_hint(&layout)
+                .unwrap_or_else(|_| ("wp.localhost".to_string(), "18080".to_string()));
             merge_cow_branch(
                 &layout,
                 &runtime,
                 &args.shared,
                 &merge.source,
                 &merge.target,
+                Some(&root_host),
                 merge.plugin_validator.as_deref(),
             )?;
             Ok(0)

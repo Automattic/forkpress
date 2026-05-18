@@ -83,6 +83,23 @@ if (!file_exists($plugin_dest . '/load.php')) {
     $copied = forkpress_cow_copy_tree($sqlite_plugin_source, $plugin_dest);
 }
 
+function forkpress_cow_existing_table_prefix(string $branch_root): string {
+    $config_path = rtrim($branch_root, '/') . '/wp-config.php';
+    if (!is_file($config_path)) {
+        return 'wp_';
+    }
+    $config = file_get_contents($config_path);
+    if ($config === false) {
+        return 'wp_';
+    }
+    if (preg_match('/\$table_prefix\s*=\s*([\'"])(.*?)\1\s*;/s', $config, $matches)) {
+        return $matches[2];
+    }
+    return 'wp_';
+}
+
+$table_prefix = forkpress_cow_existing_table_prefix($branch_root);
+
 $dropin = <<<'PHP'
 <?php
 /**
@@ -126,7 +143,7 @@ define('DB_HOST', 'localhost');
 define('DB_CHARSET', 'utf8mb4');
 define('DB_COLLATE', '');
 
-$table_prefix = 'wp_';
+$table_prefix = '__TABLE_PREFIX__';
 
 define('AUTH_KEY',         'forkpress-cow-k1-xxxxxxxxxxxxxxxx');
 define('SECURE_AUTH_KEY',  'forkpress-cow-k2-xxxxxxxxxxxxxxxx');
@@ -166,6 +183,7 @@ $config = str_replace('__FQDB__', $db_path, $config);
 $config = str_replace('__DB_DIR__', $db_dir, $config);
 $config = str_replace('__DB_FILE__', $db_file, $config);
 $config = str_replace('__DEBUG_LOG__', $debug_log, $config);
+$config = str_replace('__TABLE_PREFIX__', addcslashes($table_prefix, "\\'"), $config);
 file_put_contents($branch_root . '/wp-config.php', $config);
 
 if (!file_exists($db_path) || filesize($db_path) === 0) {
