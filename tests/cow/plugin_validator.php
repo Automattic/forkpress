@@ -227,6 +227,10 @@ function create_woocommerce_hpos_validator_db(string $path): void {
         meta_key TEXT NOT NULL,
         meta_value TEXT NOT NULL
     )");
+    $db->exec("CREATE TABLE wp_wc_product_meta_lookup (
+        product_id INTEGER PRIMARY KEY,
+        sku TEXT NOT NULL
+    )");
     $db->exec("CREATE TABLE wp_options (
         option_id INTEGER PRIMARY KEY AUTOINCREMENT,
         option_name TEXT NOT NULL,
@@ -237,6 +241,7 @@ function create_woocommerce_hpos_validator_db(string $path): void {
     $db->exec("INSERT INTO wp_wc_order_addresses (id, order_id, address_type, first_name) VALUES (21, 20, 'billing', 'Base')");
     $db->exec("INSERT INTO wp_woocommerce_order_items (order_item_id, order_id, order_item_name, order_item_type) VALUES (22, 20, 'Base product', 'line_item')");
     $db->exec("INSERT INTO wp_woocommerce_order_itemmeta (meta_id, order_item_id, meta_key, meta_value) VALUES (23, 22, '_product_id', '100')");
+    $db->exec("INSERT INTO wp_wc_product_meta_lookup (product_id, sku) VALUES (100, 'base-product')");
     $recent_orders = json_encode(['recent_order_ids' => [20]], JSON_UNESCAPED_SLASHES);
     $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('woocommerce_recent_order_ids', :value, 'yes')");
     $stmt->bindValue(':value', $recent_orders, SQLITE3_TEXT);
@@ -2524,6 +2529,35 @@ while ($row = $metas->fetchArray(SQLITE3_ASSOC)) {
         'order_item_id' => (int)$row['order_item_id'],
         'meta_key' => (string)$row['meta_key'],
     ]);
+    if ((string)$row['meta_key'] === '_product_id') {
+        $product_id = (int)$row['meta_value'];
+        if ($product_id > 0) {
+            $product_exists = (int)$db->querySingle('SELECT COUNT(*) FROM wp_wc_product_meta_lookup WHERE product_id = ' . $product_id);
+            if ($product_exists !== 1) {
+                $findings[] = [
+                    'plugin' => 'woocommerce',
+                    'object' => 'order-item-product:' . (int)$row['meta_id'],
+                    'reason' => 'WooCommerce order item metadata references a missing product lookup row',
+                    'type' => 'plugin-woocommerce-hpos-missing-product',
+                    'tables' => ['wp_wc_product_meta_lookup', 'wp_woocommerce_order_itemmeta'],
+                    'validator' => 'woocommerce-hpos@forkpress-test',
+                    'severity' => 'error',
+                    'logical_identity' => [
+                        'plugin' => 'woocommerce',
+                        'kind' => 'product',
+                        'product_id' => $product_id,
+                    ],
+                    'candidate' => [
+                        'meta_id' => (int)$row['meta_id'],
+                        'order_item_id' => (int)$row['order_item_id'],
+                        'order_id' => $order_id,
+                        'product_id' => $product_id,
+                        'product_exists' => $product_exists,
+                    ],
+                ];
+            }
+        }
+    }
 }
 $option_value = $db->querySingle("SELECT option_value FROM wp_options WHERE option_name = 'woocommerce_recent_order_ids'");
 $option_payload = is_string($option_value) ? json_decode($option_value, true) : null;
@@ -2554,6 +2588,7 @@ PHP);
     $db = open_db($woocommerce_target);
     $db->exec("UPDATE wp_wc_order_addresses SET first_name = 'Target' WHERE id = 21");
     $db->exec("UPDATE wp_woocommerce_order_items SET order_item_name = 'Target product' WHERE order_item_id = 22");
+    $db->exec("INSERT INTO wp_wc_product_meta_lookup (product_id, sku) VALUES (200, 'target-product')");
     $db->exec("UPDATE wp_woocommerce_order_itemmeta SET meta_value = '200' WHERE meta_id = 23");
     $target_recent_orders = json_encode(['recent_order_ids' => [20], 'target_note' => 'edited on main'], JSON_UNESCAPED_SLASHES);
     $stmt = $db->prepare("UPDATE wp_options SET option_value = :value WHERE option_name = 'woocommerce_recent_order_ids'");
@@ -2628,6 +2663,69 @@ PHP);
         }
     }
     assert_same($woocommerce_order_group_count, 4, 'WooCommerce HPOS audit groups stale graph findings by logical order identity');
+
+    $woocommerce_product_base_root = $tmp . '/woocommerce-product-base';
+    $woocommerce_product_source_root = $tmp . '/woocommerce-product-source';
+    $woocommerce_product_target_root = $tmp . '/woocommerce-product-target';
+    $woocommerce_product_base = $woocommerce_product_base_root . '/wp-content/database/.ht.sqlite';
+    $woocommerce_product_source = $woocommerce_product_source_root . '/wp-content/database/.ht.sqlite';
+    $woocommerce_product_target = $woocommerce_product_target_root . '/wp-content/database/.ht.sqlite';
+    $woocommerce_product_metadata = $tmp . '/.forkpress/cow/merge/plugin-woocommerce-product-validator-metadata.sqlite';
+    $woocommerce_product_file_base = $tmp . '/.forkpress/cow/merge/file-bases/plugin-woocommerce-product-validator.json';
+
+    copy_tree_for_test($woocommerce_base_root, $woocommerce_product_base_root);
+    copy_tree_for_test($woocommerce_product_base_root, $woocommerce_product_source_root);
+    copy_tree_for_test($woocommerce_product_base_root, $woocommerce_product_target_root);
+    cow_merge_capture_file_base($woocommerce_product_base_root, $woocommerce_product_file_base);
+    cow_merge_allocate_autoincrement_bands($woocommerce_product_source, $woocommerce_product_metadata, 'feature-plugin-woocommerce-product-source');
+    cow_merge_allocate_autoincrement_bands($woocommerce_product_target, $woocommerce_product_metadata, 'main');
+
+    $db = open_db($woocommerce_product_source);
+    $db->exec('DELETE FROM wp_wc_product_meta_lookup WHERE product_id = 100');
+    $db->close();
+
+    $db = open_db($woocommerce_product_target);
+    $db->exec("UPDATE wp_woocommerce_order_items SET order_item_name = 'Target product still references lookup' WHERE order_item_id = 22");
+    $db->close();
+
+    $woocommerce_product_result = cow_merge_branch_state(
+        $woocommerce_product_base,
+        $woocommerce_product_source,
+        $woocommerce_product_target,
+        $woocommerce_product_metadata,
+        'feature-plugin-woocommerce-product-source',
+        'main',
+        $woocommerce_product_file_base,
+        $woocommerce_product_source_root,
+        $woocommerce_product_target_root
+    );
+
+    assert_same($woocommerce_product_result['status'], 'completed_with_conflicts', 'WooCommerce HPOS validator holds order items pointing at deleted product lookup rows for review');
+    assert_same((int)($woocommerce_product_result['plugin_validators'] ?? 0), 1, 'WooCommerce product lookup validator is discovered from mu-plugins during merge');
+    assert_same((int)($woocommerce_product_result['plugin_validator_conflicts'] ?? 0), 1, 'WooCommerce product lookup validator records the stale product reference');
+    assert_same((int)scalar($woocommerce_product_target, 'SELECT COUNT(*) FROM wp_wc_product_meta_lookup WHERE product_id = 100'), 0, 'WooCommerce product lookup validator leaves the source product lookup delete staged for review');
+    assert_same(scalar($woocommerce_product_target, 'SELECT order_item_name FROM wp_woocommerce_order_items WHERE order_item_id = 22'), 'Target product still references lookup', 'WooCommerce product lookup validator preserves target order item edits for review');
+    assert_same(scalar($woocommerce_product_target, "SELECT meta_value FROM wp_woocommerce_order_itemmeta WHERE meta_id = 23 AND meta_key = '_product_id'"), '100', 'WooCommerce product lookup validator keeps the stale product itemmeta visible');
+
+    $woocommerce_product_audit = cow_merge_audit_report($woocommerce_product_metadata, (int)$woocommerce_product_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin' => 'woocommerce',
+        'conflict_type' => 'plugin-woocommerce-hpos-missing-product',
+    ]);
+    assert_same(count($woocommerce_product_audit['conflicts']), 1, 'WooCommerce HPOS audit exposes the stale product lookup reference as a plugin conflict');
+    $woocommerce_product_payload = cow_merge_decode_payload_json((string)($woocommerce_product_audit['conflicts'][0]['chosen_payload'] ?? ''), 'WooCommerce product lookup validator payload');
+    assert_same($woocommerce_product_payload['object'] ?? null, 'order-item-product:23', 'WooCommerce product audit identifies the order itemmeta product owner');
+    assert_same($woocommerce_product_payload['candidate']['product_id'] ?? null, 100, 'WooCommerce product audit includes the missing product ID');
+    assert_same($woocommerce_product_payload['candidate']['order_item_id'] ?? null, 22, 'WooCommerce product audit includes the order item using the missing product');
+
+    $woocommerce_product_logical_identity_audit = cow_merge_audit_report($woocommerce_product_metadata, (int)$woocommerce_product_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin' => 'woocommerce',
+        'plugin_logical_identity' => json_encode(['plugin' => 'woocommerce', 'kind' => 'product', 'product_id' => 100], JSON_UNESCAPED_SLASHES),
+    ]);
+    assert_same(count($woocommerce_product_logical_identity_audit['conflicts']), 1, 'WooCommerce HPOS audit filters product lookup findings by plugin logical product identity');
 
     $env_validator = $tmp . '/plugin-validator-env.php';
     write_test_file($env_validator, <<<'PHP'

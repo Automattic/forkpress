@@ -26,6 +26,12 @@ Recent additions in the current merge-reliability work:
   `FORKPRESS_MERGE_TARGET_BEFORE_ROOT`. The focused
   `tests/cow/plugin_validator.php` contract probe verifies that a validator can
   compare the candidate target with the target-before snapshot.
+- `tests/cow/plugin_validator.php` now includes a WooCommerce HPOS-shaped
+  validator for real plugin graph semantics: order addresses, order items,
+  itemmeta, cached order options, and `_product_id` itemmeta pointing at
+  `wp_wc_product_meta_lookup` rows. Source deletes that leave order or product
+  graphs dangling stay reviewable with plugin logical identities instead of
+  being treated as generic row merges.
 - `tests/cow/wp_semantic_validator.php` now includes a built-in WordPress
   global-styles validator case where source and target each add a published
   `wp_global_styles` row with the same style key. The merge stays reviewable,
@@ -415,9 +421,9 @@ PR #46 should be treated as a merge-reliability hardening milestone, not the
 final proof that all merges are automatic or fully reliable. The next work
 should stay focused on these areas:
 
-- Add validators for real plugins with known cross-table, serialized, JSON, and
-  file graphs. Add plugin-owned merge drivers only when the plugin can prove a
-  deterministic repair.
+- Add more validators for real plugins with known cross-table, serialized,
+  JSON, and file graphs. Add plugin-owned merge drivers only when the plugin
+  can prove a deterministic repair.
 - Build broader external kill harnesses for public Git push/serve entry points,
   then verify recovery from a fresh process after each interruption.
 - Expand explicit-ID/import handling beyond the currently covered
