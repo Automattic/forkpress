@@ -91,6 +91,9 @@ Recent additions in the current merge-reliability work:
   metadata paths that resolve to symlinks or other non-regular filesystem
   entries, so generated-size metadata cannot satisfy an attachment reference by
   pointing at a special upload entry.
+- The built-in WordPress attachment upload validator now records review
+  conflicts when multiple attachment rows claim the same regular upload file,
+  so duplicate ownership is caught even without a plugin media validator.
 
 | Objective item | Evidence on trunk | Remaining gap |
 | --- | --- | --- |

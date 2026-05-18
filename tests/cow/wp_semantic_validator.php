@@ -2824,6 +2824,18 @@ PHP);
     $stmt = $db->prepare("UPDATE wp_postmeta SET meta_value = :metadata WHERE post_id = 63 AND meta_key = '_wp_attachment_metadata'");
     $stmt->bindValue(':metadata', serialize($metadata_array), SQLITE3_TEXT);
     $stmt->execute();
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name, guid) VALUES ('Source duplicate upload owner', '', 'inherit', 'attachment', 'source-duplicate-upload-owner', 'wp-content/uploads/2026/05/generated-image.jpg')");
+    $duplicate_upload_attachment_id = (int)$db->lastInsertRowID();
+    $duplicate_upload_metadata = serialize([
+        'file' => '2026/05/generated-image.jpg',
+        'width' => 1200,
+        'height' => 800,
+        'sizes' => [],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', '2026/05/generated-image.jpg'), (:post_id, '_wp_attachment_metadata', :metadata)");
+    $stmt->bindValue(':post_id', $duplicate_upload_attachment_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':metadata', $duplicate_upload_metadata, SQLITE3_TEXT);
+    $stmt->execute();
     $db->close();
 
     $db = open_db($attachment_upload_target);
@@ -2843,8 +2855,8 @@ PHP);
     );
 
     assert_same($attachment_upload_result['status'], 'completed_with_conflicts', 'built-in WordPress attachment upload validator holds missing generated files for review');
-    $expected_attachment_upload_conflicts = $has_attachment_upload_symlink ? 3 : 2;
-    assert_same((int)($attachment_upload_result['wordpress_semantic_validator_conflicts'] ?? 0), $expected_attachment_upload_conflicts, 'built-in WordPress attachment upload validator records generated-file, unsafe-path, and non-regular-entry conflicts');
+    $expected_attachment_upload_conflicts = $has_attachment_upload_symlink ? 4 : 3;
+    assert_same((int)($attachment_upload_result['wordpress_semantic_validator_conflicts'] ?? 0), $expected_attachment_upload_conflicts, 'built-in WordPress attachment upload validator records generated-file, unsafe-path, non-regular-entry, and duplicate-owner conflicts');
     assert_same((int)($attachment_upload_result['plugin_validator_conflicts'] ?? 0), $expected_attachment_upload_conflicts, 'built-in WordPress attachment upload validator contributes to plugin-scoped conflict totals');
     assert_true(!file_exists($attachment_upload_target_root . '/wp-content/uploads/2026/05/generated-image-150x150.jpg'), 'built-in WordPress attachment upload validator leaves the source generated-file deletion staged for review');
     assert_true(is_file($attachment_upload_target_root . '/wp-content/uploads/2026/05/generated-image.jpg'), 'built-in WordPress attachment upload validator preserves the original upload file');
@@ -2892,6 +2904,19 @@ PHP);
         assert_same($attachment_upload_invalid_entry_payload['candidate']['invalid_file'] ?? null, 'wp-content/uploads/2026/05/generated-image-symlink.jpg', 'built-in WordPress attachment upload invalid-entry audit includes the symlink upload path');
         assert_same($attachment_upload_invalid_entry_audit['conflicts'][0]['plugin_files'] ?? null, ['wp-content/uploads/2026/05/generated-image-symlink.jpg'], 'built-in WordPress attachment upload invalid-entry audit exposes the symlink upload path filter');
     }
+
+    $attachment_upload_duplicate_owner_audit = cow_merge_audit_report($attachment_upload_metadata, (int)$attachment_upload_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'semantic_scope' => 'wordpress',
+        'conflict_type' => 'plugin-wp-attachment-upload-duplicate-owner',
+        'plugin_file' => 'wp-content/uploads/2026/05/generated-image.jpg',
+    ]);
+    assert_same(count($attachment_upload_duplicate_owner_audit['conflicts']), 1, 'built-in WordPress attachment upload validator rejects duplicate upload ownership');
+    $attachment_upload_duplicate_owner_payload = cow_merge_audit_decode_payload(json_decode((string)($attachment_upload_duplicate_owner_audit['conflicts'][0]['chosen_payload'] ?? ''), true));
+    assert_same($attachment_upload_duplicate_owner_payload['candidate']['upload_file'] ?? null, 'wp-content/uploads/2026/05/generated-image.jpg', 'built-in WordPress attachment upload duplicate-owner audit includes the shared upload path');
+    assert_same($attachment_upload_duplicate_owner_payload['candidate']['attachment_ids'] ?? null, [63, $duplicate_upload_attachment_id], 'built-in WordPress attachment upload duplicate-owner audit includes both attachment IDs');
+    assert_same($attachment_upload_duplicate_owner_audit['conflicts'][0]['plugin_files'] ?? null, ['wp-content/uploads/2026/05/generated-image.jpg'], 'built-in WordPress attachment upload duplicate-owner audit exposes the shared upload path filter');
 
     $existing_attachment_upload_base_root = $tmp . '/existing-attachment-upload-base';
     $existing_attachment_upload_source_root = $tmp . '/existing-attachment-upload-source';

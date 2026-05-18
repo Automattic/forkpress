@@ -10085,6 +10085,7 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
         }
 
         $issues = [];
+        $upload_owners = [];
         $record_issue = static function (
             array &$issues,
             int $attachment_id,
@@ -10154,7 +10155,7 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
             }
 
             $seen_paths = [];
-            $check_file = static function (string $path, string $field, string $role, array $extra = []) use (&$issues, $record_issue, $target_root, $attachment_id, $post_title, $attached_file_raw, &$seen_paths): void {
+            $check_file = static function (string $path, string $field, string $role, array $extra = []) use (&$issues, &$upload_owners, $record_issue, $target_root, $attachment_id, $post_title, $attached_file_raw, &$seen_paths): void {
                 if (isset($seen_paths[$path])) {
                     return;
                 }
@@ -10177,7 +10178,19 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
                         'attached_file' => $attached_file_raw,
                         'missing_file' => $path,
                     ] + $extra, [$path]);
+                    return;
                 }
+                $owner_key = (string)$attachment_id;
+                if (!isset($upload_owners[$path][$owner_key])) {
+                    $upload_owners[$path][$owner_key] = [
+                        'attachment_id' => $attachment_id,
+                        'post_title' => $post_title,
+                        'roles' => [],
+                        'fields' => [],
+                    ];
+                }
+                $upload_owners[$path][$owner_key]['roles'][$role] = $role;
+                $upload_owners[$path][$owner_key]['fields'][$field] = $field;
             };
             $check_file($attached_path, '_wp_attached_file', 'original');
 
@@ -10273,6 +10286,41 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
             }
         }
         cow_merge_result_finalize_checked($res, 'failed to finalize WordPress attachment upload inspection');
+        foreach ($upload_owners as $path => $owners_by_attachment) {
+            if (count($owners_by_attachment) < 2) {
+                continue;
+            }
+            ksort($owners_by_attachment, SORT_NUMERIC);
+            $owners = [];
+            foreach ($owners_by_attachment as $owner) {
+                $owner['roles'] = array_values($owner['roles']);
+                $owner['fields'] = array_values($owner['fields']);
+                $owners[] = $owner;
+            }
+            $attachment_ids = array_map(static fn(array $owner): int => (int)$owner['attachment_id'], $owners);
+            $issues['plugin-wp-attachment-upload-duplicate-owner' . "\0" . $path] = [
+                'plugin' => 'forkpress-wordpress-core',
+                'object' => 'upload:' . $path,
+                'reason' => 'multiple attachments claim the same upload file',
+                'type' => 'plugin-wp-attachment-upload-duplicate-owner',
+                'tables' => ['wp_posts', 'wp_postmeta'],
+                'files' => [$path],
+                'validator' => 'forkpress-wordpress-core-attachment-uploads@1',
+                'severity' => 'error',
+                'semantic_scope' => 'wordpress',
+                'logical_identity' => [
+                    'kind' => 'wordpress-attachment-upload-ownership',
+                    'file' => $path,
+                ],
+                'manual_review_reason' => 'WordPress attachment metadata assigns one upload file to multiple attachments.',
+                'suggested_action' => 'Review the attachment rows and metadata, then keep one owner or create distinct upload files before accepting the merged state.',
+                'candidate' => [
+                    'upload_file' => $path,
+                    'attachment_ids' => $attachment_ids,
+                    'owners' => $owners,
+                ],
+            ];
+        }
         return $issues;
     } finally {
         $db->close();
