@@ -25,6 +25,8 @@ full CLI help.
 | `forkpress branch create <name> [--from main]` | Create a branch. |
 | `forkpress branch reset <name> --from <source>` | Replace a branch from another branch. |
 | `forkpress branch merge <source> --into <target>` | Merge one branch into another. |
+| `forkpress branch history` | Show recent merge runs as source-to-target branch edges. |
+| `forkpress branch tree` | Alias for merge history when you want the branch topology view. |
 | `forkpress branch merge-audit` | Inspect merge runs, decisions, conflicts, conflict events, resolutions, and rollback failures. |
 | `forkpress branch revalidate-reviews [--run <id>]` | Recheck reviewed conflicts and carry stale reviews back to `needs-action`. |
 | `forkpress branch merge-review <type> <id>` | Attach review status to an audit record. |

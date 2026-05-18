@@ -113,6 +113,28 @@ try {
     $merge = cow_merge_databases($base, $source, $target, $metadata, 'feature-stale-audit', 'main');
     $run_id = (int)$merge['run_id'];
     assert_same($merge['status'], 'completed_with_conflicts', 'stale audit fixture starts with a reviewable cell conflict');
+
+    $runs_only_audit = cow_merge_audit_report($metadata, $run_id, 10, ['records' => 'runs']);
+    assert_same($runs_only_audit['filters']['records'], 'runs', 'runs-only audit records the history filter');
+    assert_same(count($runs_only_audit['runs']), 1, 'runs-only audit returns the selected merge run');
+    assert_same($runs_only_audit['runs'][0]['source_branch'], 'feature-stale-audit', 'runs-only audit records the source branch edge');
+    assert_same($runs_only_audit['runs'][0]['target_branch'], 'main', 'runs-only audit records the target branch edge');
+    assert_same(count($runs_only_audit['conflicts']), 0, 'runs-only audit omits conflict rows');
+    assert_same(count($runs_only_audit['decisions']), 0, 'runs-only audit omits decision rows');
+
+    $runs_only_cli = run_merge_cli([
+        'audit',
+        '--metadata-db', $metadata,
+        '--records', 'runs',
+        '--format', 'json',
+        '--run', (string)$run_id,
+    ]);
+    assert_same($runs_only_cli['status'], 0, 'runs-only audit CLI exits successfully');
+    $runs_only_json = json_decode($runs_only_cli['output'], true);
+    assert_true(is_array($runs_only_json), 'runs-only audit CLI emits JSON');
+    assert_same($runs_only_json['filters']['records'], 'runs', 'runs-only audit CLI preserves the records filter');
+    assert_same($runs_only_json['runs'][0]['source_branch'], 'feature-stale-audit', 'runs-only audit CLI emits branch history');
+
     $conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND column_name = 'value'");
     assert_true($conflict_id > 0, 'stale audit fixture records the cell conflict');
     $conflict_key = (string)scalar($metadata, "SELECT conflict_key FROM merge_conflicts WHERE id = $conflict_id");

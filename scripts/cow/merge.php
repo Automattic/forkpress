@@ -22,8 +22,8 @@ function cow_merge_usage(): void {
     fwrite(STDERR, "  php merge.php run-plugin-driver --metadata-db <path> (--id ID|--conflict-key KEY [--run ID]) --driver <path> [--note TEXT] [--reviewer NAME] [--format text|json]\n");
     fwrite(STDERR, "  php merge.php recover-crash --metadata-db <path> [--run ID] [--restore-target-db] [--restore-files] [--format text|json]\n");
     fwrite(STDERR, "  php merge.php audit --metadata-db <path> [--format text|json] [--limit N] [--run ID]\n");
-    fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|conflict-events|decisions|resolutions|rollback-failures|crash-recovery] [--path <path>] [--path-prefix <prefix>]\n");
-    fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|conflicts|conflict-events|decisions|resolutions|rollback-failures|crash-recovery] [--conflict-type TYPE] [--conflict-id ID] [--conflict-key KEY] [--event-type TYPE] [--plugin NAME] [--plugin-object OBJECT] [--plugin-severity SEVERITY] [--plugin-logical-identity JSON] [--semantic-scope wordpress|plugin] [--plugin-file PATH] [--decision DECISION]\n");
+    fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|runs|conflicts|conflict-events|decisions|resolutions|rollback-failures|crash-recovery] [--path <path>] [--path-prefix <prefix>]\n");
+    fwrite(STDERR, "    [--scope all|db|files|plugin] [--records all|runs|conflicts|conflict-events|decisions|resolutions|rollback-failures|crash-recovery] [--conflict-type TYPE] [--conflict-id ID] [--conflict-key KEY] [--event-type TYPE] [--plugin NAME] [--plugin-object OBJECT] [--plugin-severity SEVERITY] [--plugin-logical-identity JSON] [--semantic-scope wordpress|plugin] [--plugin-file PATH] [--decision DECISION]\n");
     fwrite(STDERR, "    [--id-band-skips] [--target-kept] [--review] [--review-status unreviewed|pending|needs-action|reviewed] [--lifecycle-state unreviewed|deferred|needs-action|reviewed|validated|resolved]\n");
     fwrite(STDERR, "    [--next-action review|run-plugin-validator|wait|revalidate|resolve|apply-reviewed-choice|manual-review|none]\n");
     fwrite(STDERR, "    [--resolution-choice source|target|plugin-driver] [--blocked-resolution-choice source|target] [--resolution-strategy STRATEGY] [--generic-resolver yes|no] [--after-revalidate supported|unsupported]\n");
@@ -11434,8 +11434,8 @@ function cow_merge_audit_scope(?string $value): string {
 
 function cow_merge_audit_records(?string $value): string {
     $records = $value ?? 'all';
-    if (!in_array($records, ['all', 'conflicts', 'conflict-events', 'decisions', 'resolutions', 'rollback-failures', 'crash-recovery'], true)) {
-        throw new InvalidArgumentException('--records must be all, conflicts, conflict-events, decisions, resolutions, rollback-failures, or crash-recovery');
+    if (!in_array($records, ['all', 'runs', 'conflicts', 'conflict-events', 'decisions', 'resolutions', 'rollback-failures', 'crash-recovery'], true)) {
+        throw new InvalidArgumentException('--records must be all, runs, conflicts, conflict-events, decisions, resolutions, rollback-failures, or crash-recovery');
     }
     return $records;
 }
@@ -16252,7 +16252,7 @@ function cow_merge_audit_filters(array $filters = []): array {
     if ($scope !== 'all' && $scope !== 'files' && ($path !== null || $path_prefix !== null)) {
         throw new InvalidArgumentException('--path and --path-prefix require file audit scope');
     }
-    if (in_array($records, ['rollback-failures', 'crash-recovery'], true)) {
+    if (in_array($records, ['runs', 'rollback-failures', 'crash-recovery'], true)) {
         if ($scope !== 'all') {
             throw new InvalidArgumentException("--records $records cannot be combined with --scope");
         }
