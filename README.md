@@ -17,41 +17,87 @@ auditable merge decisions, and includes CLI diagnostics for logs and storage.
 
 It ships as a single executable with no external runtime dependencies.
 
+<video controls playsinline preload="metadata" width="100%" src="https://videos.files.wordpress.com/QomF3klq/forkpress.mp4">
+  <a href="https://videos.files.wordpress.com/QomF3klq/forkpress.mp4">Watch the ForkPress demo video.</a>
+</video>
+
 ## Quick start
+
+### 1. Install ForkPress
+
+Choose the command for your operating system, then open a new terminal if your
+shell does not immediately pick up the updated `PATH`.
+
+#### macOS
+
+```bash
+brew install automattic/tap/forkpress
+```
+
+Without Homebrew:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Automattic/forkpress/trunk/scripts/install.sh | sh
+```
+
+#### Linux
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Automattic/forkpress/trunk/scripts/install.sh | sh
+```
+
+This installs `forkpress` into `$HOME/.local/bin`. Add that directory to your
+`PATH` if your shell does not already include it.
+
+If you already use Homebrew on Linux, this works too:
+
+```bash
+brew install automattic/tap/forkpress
+```
+
+#### Windows
+
+Download `ForkPressSetup.exe` from
+<https://github.com/Automattic/forkpress/releases> and run it.
+
+The installer adds `forkpress.exe` to the user `PATH`, prepares the ReFS Dev
+Drive setup ForkPress uses on Windows, creates a starter site, and adds Start
+Menu and desktop shortcuts. It does not require WSL, Docker, WinFsp, or manual
+Windows feature setup.
+
+### 2. Create and start a site
 
 Commands below assume `forkpress` is on your `PATH`. If you unpacked a release
 archive in the current directory, use `./forkpress` instead.
 
-1. **Create and start a site.**
+```bash
+mkdir my-site
+cd my-site
+forkpress init
+forkpress serve
+```
 
-   ```bash
-   mkdir my-site
-   cd my-site
-   forkpress init
-   forkpress serve
-   ```
+### 3. Open the local preview
 
-2. **Open the local preview.**
+```text
+http://wp.localhost:18080/
+http://wp.localhost:18080/wp-admin/
+```
 
-   ```text
-   http://wp.localhost:18080/
-   http://wp.localhost:18080/wp-admin/
-   ```
+The admin opens logged in by default. To use the normal WordPress login form,
+start the server with:
 
-   The admin opens logged in by default. To use the normal WordPress login
-   form, start the server with:
+```bash
+FORKPRESS_AUTO_LOGIN=0 forkpress serve
+```
 
-   ```bash
-   FORKPRESS_AUTO_LOGIN=0 forkpress serve
-   ```
+### 4. Stop the site
 
-3. **Stop the site.**
+```bash
+forkpress stop
+```
 
-   ```bash
-   forkpress stop
-   ```
-
-   `stop` also detaches mount-backed branch storage when the site uses it.
+`stop` also detaches mount-backed branch storage when the site uses it.
 
 ## Installation
 

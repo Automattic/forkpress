@@ -50,3 +50,20 @@ npm run preview
 
 The build publishes `docs-dist/`, including `llms.txt`, `llms-full.txt`, and the
 Pagefind search index.
+
+## Mermaid diagrams
+
+The docs build renders fenced `mermaid` code blocks as diagrams. Use this form
+in Markdown:
+
+````markdown
+```mermaid
+flowchart LR
+    start[Edit docs] --> build[npm run build]
+    build --> publish[Publish docs-dist]
+```
+````
+
+The Mermaid integration must run before Starlight in `astro.config.mjs` so
+Starlight receives transformed diagram nodes instead of syntax-highlighted code
+blocks.

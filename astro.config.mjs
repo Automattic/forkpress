@@ -1,5 +1,6 @@
 import starlight from '@astrojs/starlight';
 import { defineConfig } from 'astro/config';
+import mermaid from 'astro-mermaid';
 import starlightLlmsTxt from 'starlight-llms-txt';
 
 import rewriteDocLinks from './src/remark-rewrite-doc-links.mjs';
@@ -18,6 +19,10 @@ export default defineConfig({
 		remarkPlugins: [rewriteDocLinks, removePageTitleHeading],
 	},
 	integrations: [
+		mermaid({
+			autoTheme: true,
+			enableLog: false,
+		}),
 		starlight({
 			title: 'ForkPress',
 			description: 'Static binary WordPress branch previews with copy-on-write storage.',
