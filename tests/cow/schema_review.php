@@ -1626,6 +1626,61 @@ SQL);
         'source-changed trigger can query its source-added table dependency after merge'
     );
 
+    $trigger_rewrite_source_view_base = $tmp . '/trigger-rewrite-source-view-base.sqlite';
+    $trigger_rewrite_source_view_source = $tmp . '/trigger-rewrite-source-view-source.sqlite';
+    $trigger_rewrite_source_view_target = $tmp . '/trigger-rewrite-source-view-target.sqlite';
+    $trigger_rewrite_source_view_metadata = $tmp . '/.forkpress/cow/merge/schema-trigger-rewrite-source-view-metadata.sqlite';
+
+    $db = open_db($trigger_rewrite_source_view_base);
+    $db->exec('CREATE TABLE plugin_trigger_rewrite_source_view_items (item_id TEXT PRIMARY KEY, label TEXT NOT NULL)');
+    $db->exec('CREATE TABLE plugin_trigger_rewrite_source_view_suffixes (suffix_key TEXT PRIMARY KEY, suffix TEXT NOT NULL)');
+    $db->exec("INSERT INTO plugin_trigger_rewrite_source_view_suffixes (suffix_key, suffix) VALUES ('default', ':base-view')");
+    $db->exec('CREATE TABLE plugin_trigger_rewrite_source_view_audit (item_id TEXT, label TEXT)');
+    $db->exec('CREATE TRIGGER plugin_trigger_rewrite_source_view_items_after AFTER INSERT ON plugin_trigger_rewrite_source_view_items BEGIN INSERT INTO plugin_trigger_rewrite_source_view_audit (item_id, label) VALUES (NEW.item_id, NEW.label); END');
+    $db->close();
+    copy($trigger_rewrite_source_view_base, $trigger_rewrite_source_view_source);
+    copy($trigger_rewrite_source_view_base, $trigger_rewrite_source_view_target);
+
+    $source_db = open_db($trigger_rewrite_source_view_source);
+    $source_db->exec("CREATE VIEW plugin_trigger_rewrite_source_view_suffix_view AS SELECT suffix FROM plugin_trigger_rewrite_source_view_suffixes WHERE suffix_key = 'default'");
+    $source_db->exec('DROP TRIGGER plugin_trigger_rewrite_source_view_items_after');
+    $source_db->exec("CREATE TRIGGER plugin_trigger_rewrite_source_view_items_after AFTER INSERT ON plugin_trigger_rewrite_source_view_items WHEN EXISTS (SELECT 1 FROM plugin_trigger_rewrite_source_view_suffix_view) BEGIN INSERT INTO plugin_trigger_rewrite_source_view_audit (item_id, label) SELECT NEW.item_id, NEW.label || suffix FROM plugin_trigger_rewrite_source_view_suffix_view; END");
+    $source_db->close();
+
+    $trigger_rewrite_source_view_result = cow_merge_databases(
+        $trigger_rewrite_source_view_base,
+        $trigger_rewrite_source_view_source,
+        $trigger_rewrite_source_view_target,
+        $trigger_rewrite_source_view_metadata,
+        'feature-schema-trigger-rewrite-source-view',
+        'main'
+    );
+    $trigger_rewrite_source_view_run_id = (int)$trigger_rewrite_source_view_result['run_id'];
+    assert_same($trigger_rewrite_source_view_result['status'], 'completed', 'source-changed trigger depending on a source-added view merges automatically');
+    assert_same(
+        (int)scalar($trigger_rewrite_source_view_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_trigger_rewrite_source_view_suffix_view'"),
+        1,
+        'source-added view installs before source-changed trigger validation'
+    );
+    assert_same(
+        (int)scalar($trigger_rewrite_source_view_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE run_id = $trigger_rewrite_source_view_run_id AND conflict_type IN ('schema-source-added-view', 'schema-source-changed-trigger')"),
+        0,
+        'source-changed trigger and source-added view dependency create no review-only schema conflicts'
+    );
+    assert_same(
+        (int)scalar($trigger_rewrite_source_view_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE run_id = $trigger_rewrite_source_view_run_id AND column_name IN ('plugin_trigger_rewrite_source_view_suffix_view', 'plugin_trigger_rewrite_source_view_items_after') AND decision = 'source-applied'"),
+        2,
+        'source-added view and dependent changed trigger are auditable'
+    );
+    $target_db = open_db($trigger_rewrite_source_view_target);
+    $target_db->exec("INSERT INTO plugin_trigger_rewrite_source_view_items (item_id, label) VALUES ('trigger-rewrite-source-view', 'Trigger Rewrite Source View')");
+    $target_db->close();
+    assert_same(
+        scalar($trigger_rewrite_source_view_target, "SELECT label FROM plugin_trigger_rewrite_source_view_audit WHERE item_id = 'trigger-rewrite-source-view'"),
+        'Trigger Rewrite Source View:base-view',
+        'source-changed trigger can query its source-added view dependency after merge'
+    );
+
     $trigger_source_table_base = $tmp . '/trigger-source-table-base.sqlite';
     $trigger_source_table_source = $tmp . '/trigger-source-table-source.sqlite';
     $trigger_source_table_target = $tmp . '/trigger-source-table-target.sqlite';
