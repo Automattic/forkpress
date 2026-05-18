@@ -1885,6 +1885,7 @@ function forkpress_render_branch_admin_page(): void {
                 }
                 function renderConflicts(payload) {
                     var records = Array.isArray(payload.records) ? payload.records : [];
+                    var run = payload.run || '';
                     results.innerHTML = '';
                     var heading = document.createElement('p');
                     heading.textContent = payload.message || ('Loaded ' + String(records.length) + ' conflict records.');
@@ -1899,11 +1900,176 @@ function forkpress_render_branch_admin_page(): void {
                             record && record.lifecycle_state ? 'state: ' + String(record.lifecycle_state) : '',
                             record && record.next_action ? 'next: ' + String(record.next_action) : ''
                         ].filter(Boolean).join(' / ');
+                        if (record && record.id && record.lifecycle_state !== 'resolved') {
+                            var actions = document.createElement('div');
+                            actions.className = 'forkpress-branch-conflict-actions';
+                            ['reviewed', 'needs-action', 'pending'].forEach(function (status) {
+                                var reviewButton = document.createElement('button');
+                                reviewButton.className = 'button button-small';
+                                reviewButton.type = 'button';
+                                reviewButton.textContent = status === 'reviewed' ? 'Mark reviewed' : (status === 'needs-action' ? 'Needs action' : 'Pending');
+                                reviewButton.addEventListener('click', function (record, status, run) {
+                                    return function () {
+                                        fetchConflictReview(record, status, run);
+                                    };
+                                }(record, status, run));
+                                actions.appendChild(reviewButton);
+                            });
+                            ['source', 'target'].forEach(function (choice) {
+                                if (!conflictResolutionChoiceAvailable(record, choice)) {
+                                    return;
+                                }
+                                var resolveButton = document.createElement('button');
+                                resolveButton.className = 'button button-small';
+                                resolveButton.type = 'button';
+                                resolveButton.textContent = choice === 'source' ? 'Use source' : 'Keep target';
+                                resolveButton.addEventListener('click', function (record, choice, run) {
+                                    return function () {
+                                        fetchConflictResolution(record, choice, run, conflictResolutionAfterRevalidate(record));
+                                    };
+                                }(record, choice, run));
+                                actions.appendChild(resolveButton);
+                            });
+                            if (conflictApplyReviewedAvailable(record)) {
+                                var applyReviewedButton = document.createElement('button');
+                                applyReviewedButton.className = 'button button-small';
+                                applyReviewedButton.type = 'button';
+                                applyReviewedButton.textContent = 'Apply reviewed';
+                                applyReviewedButton.addEventListener('click', function (record, run) {
+                                    return function () {
+                                        fetchConflictResolution(record, 'reviewed', run, false);
+                                    };
+                                }(record, run));
+                                actions.appendChild(applyReviewedButton);
+                            }
+                            if (actions.childNodes.length) {
+                                item.appendChild(actions);
+                            }
+                        }
                         list.appendChild(item);
                     });
                     if (records.length) {
                         results.appendChild(list);
                     }
+                }
+                function conflictResolutionChoiceAvailable(record, choice) {
+                    if (!record || record.lifecycle_state === 'resolved') {
+                        return false;
+                    }
+                    if (!Array.isArray(record.resolution_choices) || record.resolution_choices.indexOf(choice) === -1) {
+                        return false;
+                    }
+                    if (record.blocked_resolution_choices && record.blocked_resolution_choices[choice]) {
+                        return false;
+                    }
+                    return true;
+                }
+                function conflictApplyReviewedAvailable(record) {
+                    if (!record || record.lifecycle_state === 'resolved') {
+                        return false;
+                    }
+                    if (record.next_action === 'apply-reviewed-choice') {
+                        return true;
+                    }
+                    return record.lifecycle_state === 'validated' && !!record.latest_resolution_choice && record.latest_resolution_applied !== 1;
+                }
+                function conflictResolutionAfterRevalidate(record) {
+                    return !!(record && record.after_revalidate_supported === true && record.next_action === 'revalidate');
+                }
+                function fetchConflictReview(record, status, run) {
+                    if (!record || !record.id) {
+                        return;
+                    }
+                    var body = new FormData();
+                    body.append('action', 'forkpress_branch_review_conflict');
+                    body.append('_wpnonce', '<?php echo esc_js(function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_review_conflict') : ''); ?>');
+                    body.append('conflict', String(record.id));
+                    body.append('status', String(status));
+                    if (run) {
+                        body.append('run', String(run));
+                    }
+                    results.textContent = 'Recording conflict review...';
+                    fetch('<?php echo esc_js($action_url); ?>', {
+                        method: 'POST',
+                        body: body,
+                        credentials: 'same-origin',
+                        headers: {
+                            'Accept': 'application/json',
+                            'X-ForkPress-Async': '1'
+                        }
+                    }).then(function (response) {
+                        return response.text().then(function (text) {
+                            var payload = null;
+                            try {
+                                payload = text ? JSON.parse(text) : null;
+                            } catch (error) {
+                                payload = null;
+                            }
+                            if (!response.ok || !payload || payload.success === false) {
+                                throw new Error(payload && payload.message ? payload.message : (text || 'ForkPress conflict review failed.'));
+                            }
+                            return payload;
+                        });
+                    }).then(function (payload) {
+                        if (run) {
+                            fetchConflicts(run);
+                            return;
+                        }
+                        results.textContent = payload.message || 'Recorded conflict review.';
+                    }).catch(function (error) {
+                        results.textContent = error && error.message ? error.message : 'ForkPress conflict review failed.';
+                    });
+                }
+                function fetchConflictResolution(record, choice, run, afterRevalidate) {
+                    if (!record || !record.id) {
+                        return;
+                    }
+                    var body = new FormData();
+                    body.append('action', 'forkpress_branch_resolve_conflict');
+                    body.append('_wpnonce', '<?php echo esc_js(function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_resolve_conflict') : ''); ?>');
+                    body.append('conflict', String(record.id));
+                    if (choice === 'reviewed') {
+                        body.append('applyReviewed', '1');
+                    } else {
+                        body.append('choice', String(choice));
+                        if (afterRevalidate) {
+                            body.append('afterRevalidate', '1');
+                        }
+                    }
+                    if (run) {
+                        body.append('run', String(run));
+                    }
+                    results.textContent = 'Applying conflict resolution...';
+                    fetch('<?php echo esc_js($action_url); ?>', {
+                        method: 'POST',
+                        body: body,
+                        credentials: 'same-origin',
+                        headers: {
+                            'Accept': 'application/json',
+                            'X-ForkPress-Async': '1'
+                        }
+                    }).then(function (response) {
+                        return response.text().then(function (text) {
+                            var payload = null;
+                            try {
+                                payload = text ? JSON.parse(text) : null;
+                            } catch (error) {
+                                payload = null;
+                            }
+                            if (!response.ok || !payload || payload.success === false) {
+                                throw new Error(payload && payload.message ? payload.message : (text || 'ForkPress conflict resolution failed.'));
+                            }
+                            return payload;
+                        });
+                    }).then(function (payload) {
+                        if (run) {
+                            fetchConflicts(run);
+                            return;
+                        }
+                        results.textContent = payload.message || 'Applied conflict resolution.';
+                    }).catch(function (error) {
+                        results.textContent = error && error.message ? error.message : 'ForkPress conflict resolution failed.';
+                    });
                 }
                 function fetchConflicts(runId) {
                     var body = new FormData();

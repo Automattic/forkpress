@@ -1247,6 +1247,16 @@ assert_true(str_contains($admin_page_html, 'forkpress-branch-review-conflicts'),
 assert_true(str_contains($admin_page_html, 'function fetchConflicts'), 'branch manager admin page renders conflict drilldown fetch handler');
 assert_true(str_contains($admin_page_html, 'function renderConflicts'), 'branch manager admin page renders conflict drilldown display handler');
 assert_true(str_contains($admin_page_html, 'forkpress-branch-conflict-list'), 'branch manager admin page renders conflict list target');
+assert_true(str_contains($admin_page_html, 'forkpress-branch-conflict-actions'), 'branch manager admin page renders conflict action controls');
+assert_true(str_contains($admin_page_html, 'nonce-forkpress_branch_review_conflict'), 'branch manager admin page renders conflict review nonce');
+assert_true(str_contains($admin_page_html, 'nonce-forkpress_branch_resolve_conflict'), 'branch manager admin page renders conflict resolution nonce');
+assert_true(str_contains($admin_page_html, 'function fetchConflictReview'), 'branch manager admin page renders conflict review handler');
+assert_true(str_contains($admin_page_html, 'function fetchConflictResolution'), 'branch manager admin page renders conflict resolution handler');
+assert_true(str_contains($admin_page_html, 'function conflictResolutionChoiceAvailable'), 'branch manager admin page checks conflict resolution availability');
+assert_true(str_contains($admin_page_html, 'function conflictApplyReviewedAvailable'), 'branch manager admin page checks apply-reviewed availability');
+assert_true(str_contains($admin_page_html, 'Use source'), 'branch manager admin page renders source resolution action');
+assert_true(str_contains($admin_page_html, 'Keep target'), 'branch manager admin page renders target resolution action');
+assert_true(str_contains($admin_page_html, 'Apply reviewed'), 'branch manager admin page renders apply-reviewed action');
 assert_same($admin_page_menus[0]['menu_slug'] ?? null, 'forkpress-branches', 'branch manager registers a wp-admin menu page');
 
 $forbidden = run_branch_ui_action(
