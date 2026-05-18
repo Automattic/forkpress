@@ -2727,6 +2727,67 @@ PHP);
     ]);
     assert_same(count($woocommerce_product_logical_identity_audit['conflicts']), 1, 'WooCommerce HPOS audit filters product lookup findings by plugin logical product identity');
 
+    $woocommerce_itemmeta_base_root = $tmp . '/woocommerce-itemmeta-base';
+    $woocommerce_itemmeta_source_root = $tmp . '/woocommerce-itemmeta-source';
+    $woocommerce_itemmeta_target_root = $tmp . '/woocommerce-itemmeta-target';
+    $woocommerce_itemmeta_base = $woocommerce_itemmeta_base_root . '/wp-content/database/.ht.sqlite';
+    $woocommerce_itemmeta_source = $woocommerce_itemmeta_source_root . '/wp-content/database/.ht.sqlite';
+    $woocommerce_itemmeta_target = $woocommerce_itemmeta_target_root . '/wp-content/database/.ht.sqlite';
+    $woocommerce_itemmeta_metadata = $tmp . '/.forkpress/cow/merge/plugin-woocommerce-itemmeta-validator-metadata.sqlite';
+    $woocommerce_itemmeta_file_base = $tmp . '/.forkpress/cow/merge/file-bases/plugin-woocommerce-itemmeta-validator.json';
+
+    copy_tree_for_test($woocommerce_base_root, $woocommerce_itemmeta_base_root);
+    copy_tree_for_test($woocommerce_itemmeta_base_root, $woocommerce_itemmeta_source_root);
+    copy_tree_for_test($woocommerce_itemmeta_base_root, $woocommerce_itemmeta_target_root);
+    cow_merge_capture_file_base($woocommerce_itemmeta_base_root, $woocommerce_itemmeta_file_base);
+    cow_merge_allocate_autoincrement_bands($woocommerce_itemmeta_source, $woocommerce_itemmeta_metadata, 'feature-plugin-woocommerce-itemmeta-source');
+    cow_merge_allocate_autoincrement_bands($woocommerce_itemmeta_target, $woocommerce_itemmeta_metadata, 'main');
+
+    $db = open_db($woocommerce_itemmeta_source);
+    $db->exec('DELETE FROM wp_woocommerce_order_items WHERE order_item_id = 22');
+    $db->close();
+
+    $db = open_db($woocommerce_itemmeta_target);
+    $db->exec("UPDATE wp_woocommerce_order_itemmeta SET meta_value = 'target meta keeps product 100' WHERE meta_id = 23");
+    $db->close();
+
+    $woocommerce_itemmeta_result = cow_merge_branch_state(
+        $woocommerce_itemmeta_base,
+        $woocommerce_itemmeta_source,
+        $woocommerce_itemmeta_target,
+        $woocommerce_itemmeta_metadata,
+        'feature-plugin-woocommerce-itemmeta-source',
+        'main',
+        $woocommerce_itemmeta_file_base,
+        $woocommerce_itemmeta_source_root,
+        $woocommerce_itemmeta_target_root
+    );
+
+    assert_same($woocommerce_itemmeta_result['status'], 'completed_with_conflicts', 'WooCommerce HPOS validator holds itemmeta pointing at deleted order items for review');
+    assert_same((int)($woocommerce_itemmeta_result['plugin_validators'] ?? 0), 1, 'WooCommerce order-item metadata validator is discovered from mu-plugins during merge');
+    assert_same((int)($woocommerce_itemmeta_result['plugin_validator_conflicts'] ?? 0), 1, 'WooCommerce order-item metadata validator records the stale itemmeta reference');
+    assert_same((int)scalar($woocommerce_itemmeta_target, 'SELECT COUNT(*) FROM wp_woocommerce_order_items WHERE order_item_id = 22'), 0, 'WooCommerce order-item metadata validator leaves the source order-item delete staged for review');
+    assert_same(scalar($woocommerce_itemmeta_target, 'SELECT meta_value FROM wp_woocommerce_order_itemmeta WHERE meta_id = 23'), 'target meta keeps product 100', 'WooCommerce order-item metadata validator preserves target itemmeta edits for review');
+
+    $woocommerce_itemmeta_audit = cow_merge_audit_report($woocommerce_itemmeta_metadata, (int)$woocommerce_itemmeta_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin' => 'woocommerce',
+        'conflict_type' => 'plugin-woocommerce-hpos-missing-order-item',
+    ]);
+    assert_same(count($woocommerce_itemmeta_audit['conflicts']), 1, 'WooCommerce HPOS audit exposes stale order item metadata as a plugin conflict');
+    $woocommerce_itemmeta_payload = cow_merge_decode_payload_json((string)($woocommerce_itemmeta_audit['conflicts'][0]['chosen_payload'] ?? ''), 'WooCommerce order itemmeta validator payload');
+    assert_same($woocommerce_itemmeta_payload['object'] ?? null, 'order-itemmeta:23', 'WooCommerce itemmeta audit identifies the stale itemmeta row');
+    assert_same($woocommerce_itemmeta_payload['candidate']['order_item_id'] ?? null, 22, 'WooCommerce itemmeta audit includes the missing order item ID');
+
+    $woocommerce_itemmeta_logical_identity_audit = cow_merge_audit_report($woocommerce_itemmeta_metadata, (int)$woocommerce_itemmeta_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin' => 'woocommerce',
+        'plugin_logical_identity' => json_encode(['plugin' => 'woocommerce', 'kind' => 'order_item', 'order_item_id' => 22], JSON_UNESCAPED_SLASHES),
+    ]);
+    assert_same(count($woocommerce_itemmeta_logical_identity_audit['conflicts']), 1, 'WooCommerce HPOS audit filters stale itemmeta findings by plugin logical order-item identity');
+
     $env_validator = $tmp . '/plugin-validator-env.php';
     write_test_file($env_validator, <<<'PHP'
 <?php
