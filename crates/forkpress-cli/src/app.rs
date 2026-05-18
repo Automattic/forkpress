@@ -659,6 +659,14 @@ struct RemoteCloneArgs {
     #[arg(long)]
     ssh: String,
 
+    /// SSH private key to use for rsync, e.g. ~/.ssh/id_ed25519.
+    #[arg(long = "ssh-key")]
+    ssh_key: Option<PathBuf>,
+
+    /// SSH port to use for rsync.
+    #[arg(long = "ssh-port")]
+    ssh_port: Option<u16>,
+
     /// Remote WordPress root path.
     #[arg(long = "path")]
     remote_path: String,
@@ -668,7 +676,7 @@ struct RemoteCloneArgs {
     branch: Option<String>,
 
     /// Production site URL to record.
-    #[arg(long = "remote-url")]
+    #[arg(long = "remote-url", alias = "url")]
     remote_url: Option<String>,
 
     /// Local URL hint to record.
@@ -2925,6 +2933,10 @@ fn remote_clone_rsync_source(ssh: &str, remote_path: &str) -> String {
 
 fn remote_clone_rsync_args(args: &RemoteCloneArgs, cache_root: &Path) -> Vec<OsString> {
     let mut out = vec![OsString::from("-az")];
+    if let Some(ssh_command) = remote_clone_rsync_ssh_command(args) {
+        out.push(OsString::from("-e"));
+        out.push(OsString::from(ssh_command));
+    }
     if !args.no_delete {
         out.push(OsString::from("--delete"));
     }
@@ -2944,6 +2956,23 @@ fn remote_clone_rsync_args(args: &RemoteCloneArgs, cache_root: &Path) -> Vec<OsS
     )));
     out.push(cache_root.as_os_str().to_os_string());
     out
+}
+
+fn remote_clone_rsync_ssh_command(args: &RemoteCloneArgs) -> Option<String> {
+    if args.ssh_key.is_none() && args.ssh_port.is_none() {
+        return None;
+    }
+
+    let mut command = String::from("ssh");
+    if let Some(key) = &args.ssh_key {
+        command.push_str(" -i ");
+        command.push_str(&shell_quote_path(key));
+    }
+    if let Some(port) = args.ssh_port {
+        command.push_str(" -p ");
+        command.push_str(&port.to_string());
+    }
+    Some(command)
 }
 
 fn remote_clone_default_excludes(include_uploads: bool) -> Vec<&'static str> {
@@ -8147,11 +8176,15 @@ mod git_helper_tests {
             "production",
             "--ssh",
             "deploy@example.com",
+            "--ssh-key",
+            "/Users/alex/.ssh/forkpress id",
+            "--ssh-port",
+            "2222",
             "--path",
             "/srv/www/example",
             "--branch",
             "prod-main",
-            "--remote-url",
+            "--url",
             "https://example.com",
             "--force",
         ])
@@ -8165,6 +8198,11 @@ mod git_helper_tests {
         assert_eq!(args.shared.work_dir, PathBuf::from(".forkpress"));
         assert_eq!(clone.name, "production");
         assert_eq!(clone.ssh, "deploy@example.com");
+        assert_eq!(
+            clone.ssh_key.as_deref(),
+            Some(Path::new("/Users/alex/.ssh/forkpress id"))
+        );
+        assert_eq!(clone.ssh_port, Some(2222));
         assert_eq!(clone.remote_path, "/srv/www/example");
         assert_eq!(clone.branch.as_deref(), Some("prod-main"));
         assert_eq!(clone.remote_url.as_deref(), Some("https://example.com"));
@@ -8181,6 +8219,15 @@ mod git_helper_tests {
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
         assert_eq!(rsync[0], "-az");
+        assert_eq!(
+            rsync.iter().position(|arg| arg == "-e").map(|index| {
+                rsync
+                    .get(index + 1)
+                    .expect("missing rsync ssh command after -e")
+                    .as_str()
+            }),
+            Some("ssh -i '/Users/alex/.ssh/forkpress id' -p 2222")
+        );
         assert!(rsync.contains(&"--delete".to_string()));
         assert!(rsync.contains(&"wp-content/uploads/".to_string()));
         assert!(rsync.contains(&"wp-content/cache/".to_string()));
@@ -8196,6 +8243,8 @@ mod git_helper_tests {
         let clone = RemoteCloneArgs {
             name: "Production".to_string(),
             ssh: "deploy@example.com".to_string(),
+            ssh_key: None,
+            ssh_port: None,
             remote_path: "/srv/www/example/".to_string(),
             branch: None,
             remote_url: None,
@@ -8212,6 +8261,7 @@ mod git_helper_tests {
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
         assert!(!rsync.contains(&"--delete".to_string()));
+        assert!(!rsync.contains(&"-e".to_string()));
         assert!(!rsync.contains(&"wp-content/uploads/".to_string()));
         assert!(rsync.contains(&"wp-content/cache/".to_string()));
         assert!(rsync.contains(&"wp-content/upgrade/".to_string()));
@@ -8254,6 +8304,26 @@ mod git_helper_tests {
         assert!(!rsync.contains(&"wp-content/upgrade/".to_string()));
         assert!(rsync.contains(&"private/".to_string()));
         assert!(rsync.contains(&"deploy@example.com:/srv/www/example/".to_string()));
+    }
+
+    #[test]
+    fn remote_clone_rsync_ssh_command_is_omitted_without_credentials() {
+        let clone = RemoteCloneArgs {
+            name: "production".to_string(),
+            ssh: "deploy@example.com".to_string(),
+            ssh_key: None,
+            ssh_port: None,
+            remote_path: "/srv/www/example".to_string(),
+            branch: None,
+            remote_url: None,
+            local_url: None,
+            include_uploads: false,
+            full_sync: false,
+            excludes: Vec::new(),
+            no_delete: false,
+            force: false,
+        };
+        assert_eq!(remote_clone_rsync_ssh_command(&clone), None);
     }
 
     #[test]

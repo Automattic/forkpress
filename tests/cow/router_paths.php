@@ -75,6 +75,9 @@ mkdir(dirname($secret), 0777, true);
 mkdir($cow, 0777, true);
 file_put_contents($main . '/index.php', "<?php echo \"INDEX\";\n");
 file_put_contents($main . '/safe.txt', "safe\n");
+mkdir($main . '/wp-admin', 0777, true);
+file_put_contents($main . '/wp-admin/plugin-install.php', "<?php echo \"PLUGIN INSTALL ADMIN\";\n");
+file_put_contents($main . '/wp-admin/update.php', "<?php echo \"PLUGIN UPDATE ADMIN\";\n");
 file_put_contents($secret, "strategy = \"cow\"\nsecret = \"do not serve\"\n");
 file_put_contents($child, <<<'PHP'
 <?php
@@ -105,6 +108,21 @@ assert_same($response['exit'], 0, 'safe static request exits cleanly');
 assert_same($response['status'], 200, 'safe static request returns 200');
 assert_same($response['body'], "safe\n", 'safe static request serves branch file');
 assert_same($response['stderr'], '', 'safe static request produces no stderr');
+
+$response = router_request($child, $branches, $cow, $router, '/wp-admin/plugin-install.php');
+assert_same($response['exit'], 0, 'wp-admin plugin install request exits cleanly');
+assert_same($response['status'], 200, 'wp-admin plugin install request returns 200');
+assert_same($response['body'], 'PLUGIN INSTALL ADMIN', 'wp-admin plugin install request reaches the plugin install admin screen');
+
+$response = router_request($child, $branches, $cow, $router, '/plugin-install.php?tab=upload');
+assert_same($response['exit'], 0, 'legacy plugin install request exits cleanly');
+assert_same($response['status'], 302, 'legacy plugin install request redirects to wp-admin');
+assert_true(!str_contains($response['body'], 'INDEX'), 'legacy plugin install request does not fall through to the front controller');
+
+$response = router_request($child, $branches, $cow, $router, '/update.php?action=install-plugin&plugin=hello-dolly');
+assert_same($response['exit'], 0, 'legacy plugin update request exits cleanly');
+assert_same($response['status'], 302, 'legacy plugin update request redirects to wp-admin');
+assert_true(!str_contains($response['body'], 'INDEX'), 'legacy plugin update request does not fall through to the front controller');
 
 foreach ([
     '/../.forkpress/site.toml',

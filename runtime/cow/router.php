@@ -1117,10 +1117,10 @@ $_SERVER['FORKPRESS_BRANCH'] = $branch;
 putenv('FORKPRESS_BRANCH=' . $branch);
 header('X-ForkPress-Branch: ' . $branch);
 
-if ($path === '/plugins.php'
-    && !file_exists($branch_root . '/plugins.php')
-    && file_exists($branch_root . '/wp-admin/plugins.php')) {
-    header('Location: /wp-admin/plugins.php' . ($query !== '' ? '?' . $query : ''), true, 302);
+if (in_array($path, ['/plugins.php', '/plugin-install.php', '/update.php'], true)
+    && !file_exists($branch_root . $path)
+    && file_exists($branch_root . '/wp-admin' . $path)) {
+    header('Location: /wp-admin' . $path . ($query !== '' ? '?' . $query : ''), true, 302);
     return true;
 }
 
