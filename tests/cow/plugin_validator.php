@@ -315,6 +315,33 @@ function create_acf_validator_db(string $path): void {
     $db->close();
 }
 
+function create_yoast_indexable_validator_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_title TEXT NOT NULL DEFAULT '',
+        post_content TEXT NOT NULL DEFAULT '',
+        post_status TEXT NOT NULL DEFAULT 'publish',
+        post_type TEXT NOT NULL DEFAULT 'post',
+        post_name TEXT NOT NULL DEFAULT '',
+        post_parent INTEGER NOT NULL DEFAULT 0
+    )");
+    $db->exec("CREATE TABLE wp_yoast_indexable (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        object_id INTEGER,
+        object_type TEXT NOT NULL,
+        object_sub_type TEXT NOT NULL DEFAULT '',
+        permalink TEXT NOT NULL DEFAULT '',
+        title TEXT NOT NULL DEFAULT '',
+        description TEXT NOT NULL DEFAULT ''
+    )");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, post_parent) VALUES
+        (70, 'SEO Landing Page', '<!-- wp:paragraph --><p>SEO landing page</p><!-- /wp:paragraph -->', 'publish', 'page', 'seo-landing-page', 0)");
+    $db->exec("INSERT INTO wp_yoast_indexable (id, object_id, object_type, object_sub_type, permalink, title, description) VALUES
+        (80, 70, 'post', 'page', 'https://example.test/seo-landing-page/', 'Base SEO title', 'Base SEO description')");
+    $db->close();
+}
+
 define('FORKPRESS_COW_MERGE_TESTS', true);
 require_once __DIR__ . '/../../scripts/cow/merge.php';
 
@@ -3101,6 +3128,115 @@ PHP);
     $acf_payload = cow_merge_decode_payload_json((string)($acf_audit['conflicts'][0]['chosen_payload'] ?? ''), 'ACF field-map validator payload');
     assert_same($acf_payload['object'] ?? null, 'post:60:field:field_cta_text', 'ACF audit identifies the post field reference');
     assert_same($acf_payload['candidate']['value'] ?? null, 'Target CTA copy', 'ACF audit includes the preserved target value edit');
+
+    $yoast_base_root = $tmp . '/yoast-base';
+    $yoast_source_root = $tmp . '/yoast-source';
+    $yoast_target_root = $tmp . '/yoast-target';
+    $yoast_base = $yoast_base_root . '/wp-content/database/.ht.sqlite';
+    $yoast_source = $yoast_source_root . '/wp-content/database/.ht.sqlite';
+    $yoast_target = $yoast_target_root . '/wp-content/database/.ht.sqlite';
+    $yoast_metadata = $tmp . '/.forkpress/cow/merge/plugin-yoast-validator-metadata.sqlite';
+    $yoast_file_base = $tmp . '/.forkpress/cow/merge/file-bases/plugin-yoast-validator.json';
+
+    mkdir($yoast_base_root . '/wp-content/database', 0777, true);
+    create_yoast_indexable_validator_db($yoast_base);
+    write_test_file($yoast_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$findings = [];
+$rows = $db->query("SELECT id, object_id, object_type, object_sub_type, permalink, title, description FROM wp_yoast_indexable WHERE object_type = 'post' ORDER BY id");
+while ($row = $rows->fetchArray(SQLITE3_ASSOC)) {
+    $object_id = (int)$row['object_id'];
+    if ($object_id <= 0) {
+        continue;
+    }
+    $post_exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $object_id");
+    if ($post_exists === 1) {
+        continue;
+    }
+    $findings[] = [
+        'plugin' => 'wordpress-seo',
+        'object' => 'indexable:' . (int)$row['id'] . ':post:' . $object_id,
+        'reason' => 'Yoast SEO indexable row references a WordPress post that no longer exists after merge',
+        'type' => 'plugin-yoast-indexable-missing-post',
+        'tables' => ['wp_posts', 'wp_yoast_indexable'],
+        'validator' => 'yoast-indexable@forkpress-test',
+        'severity' => 'error',
+        'logical_identity' => [
+            'plugin' => 'wordpress-seo',
+            'kind' => 'indexable_object',
+            'object_type' => 'post',
+            'object_id' => $object_id,
+        ],
+        'candidate' => [
+            'indexable_id' => (int)$row['id'],
+            'object_id' => $object_id,
+            'object_sub_type' => (string)$row['object_sub_type'],
+            'permalink' => (string)$row['permalink'],
+            'title' => (string)$row['title'],
+            'description' => (string)$row['description'],
+            'post_exists' => $post_exists,
+        ],
+    ];
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+
+    copy_tree_for_test($yoast_base_root, $yoast_source_root);
+    copy_tree_for_test($yoast_base_root, $yoast_target_root);
+    cow_merge_capture_file_base($yoast_base_root, $yoast_file_base);
+    cow_merge_allocate_autoincrement_bands($yoast_source, $yoast_metadata, 'feature-plugin-yoast-source');
+    cow_merge_allocate_autoincrement_bands($yoast_target, $yoast_metadata, 'main');
+
+    $db = open_db($yoast_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID = 70');
+    $db->close();
+
+    $db = open_db($yoast_target);
+    $db->exec("UPDATE wp_yoast_indexable SET title = 'Target SEO title', description = 'Target SEO description' WHERE id = 80");
+    $db->close();
+
+    $yoast_result = cow_merge_branch_state(
+        $yoast_base,
+        $yoast_source,
+        $yoast_target,
+        $yoast_metadata,
+        'feature-plugin-yoast-source',
+        'main',
+        $yoast_file_base,
+        $yoast_source_root,
+        $yoast_target_root
+    );
+
+    assert_same($yoast_result['status'], 'completed_with_conflicts', 'Yoast validator holds indexables pointing at deleted posts for review');
+    assert_same((int)($yoast_result['plugin_validators'] ?? 0), 1, 'Yoast indexable validator is discovered from mu-plugins during merge');
+    assert_same((int)($yoast_result['plugin_validator_conflicts'] ?? 0), 1, 'Yoast validator records the stale indexable object reference');
+    assert_same((int)scalar($yoast_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 70'), 0, 'Yoast validator leaves the source post deletion staged for review');
+    assert_same(scalar($yoast_target, 'SELECT title FROM wp_yoast_indexable WHERE id = 80'), 'Target SEO title', 'Yoast validator preserves target indexable title edits for review');
+    assert_same(scalar($yoast_target, 'SELECT description FROM wp_yoast_indexable WHERE id = 80'), 'Target SEO description', 'Yoast validator preserves target indexable description edits for review');
+
+    $yoast_logical_identity = json_encode([
+        'plugin' => 'wordpress-seo',
+        'kind' => 'indexable_object',
+        'object_type' => 'post',
+        'object_id' => 70,
+    ], JSON_UNESCAPED_SLASHES);
+    $yoast_audit = cow_merge_audit_report($yoast_metadata, (int)$yoast_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin' => 'wordpress-seo',
+        'conflict_type' => 'plugin-yoast-indexable-missing-post',
+        'plugin_logical_identity' => $yoast_logical_identity,
+    ]);
+    assert_same(count($yoast_audit['conflicts']), 1, 'Yoast audit filters stale indexable findings by plugin, conflict type, and logical identity');
+    assert_same($yoast_audit['conflicts'][0]['plugin'] ?? null, 'wordpress-seo', 'Yoast audit exposes the plugin as a first-class field');
+    assert_same($yoast_audit['conflicts'][0]['plugin_logical_identity']['object_id'] ?? null, 70, 'Yoast audit exposes the indexed object identity');
+    $yoast_payload = cow_merge_decode_payload_json((string)($yoast_audit['conflicts'][0]['chosen_payload'] ?? ''), 'Yoast indexable validator payload');
+    assert_same($yoast_payload['object'] ?? null, 'indexable:80:post:70', 'Yoast audit identifies the stale indexable row');
+    assert_same($yoast_payload['candidate']['title'] ?? null, 'Target SEO title', 'Yoast audit includes the preserved target indexable edit');
 
     $env_validator = $tmp . '/plugin-validator-env.php';
     write_test_file($env_validator, <<<'PHP'

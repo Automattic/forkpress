@@ -1406,6 +1406,7 @@ try {
     smoke_insert_post($db, 16000052, 'Branch Menu Count Page', 'Branch menu count content', 'page', 'branch-menu-count-page');
     smoke_insert_post($db, 16000053, 'Branch Count Menu Item', '', 'nav_menu_item', 'branch-count-menu-item');
     $db->exec('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (16000053, 16000051, 0)');
+    $db->exec('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (16000052, 16000051, 0)');
     smoke_insert_postmeta($db, 16000054, 16000053, '_menu_item_type', 'post_type');
     smoke_insert_postmeta($db, 16000055, 16000053, '_menu_item_object', 'page');
     smoke_insert_postmeta($db, 16000056, 16000053, '_menu_item_object_id', '16000052');
@@ -1417,6 +1418,8 @@ try {
     smoke_insert_post($db, 16000058, 'Main Menu Count Page', 'Main menu count content', 'page', 'main-menu-count-page');
     smoke_insert_post($db, 16000059, 'Main Count Menu Item', '', 'nav_menu_item', 'main-count-menu-item');
     $db->exec('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (16000059, 16000051, 0)');
+    smoke_insert_post($db, 16000064, 'Draft Count Menu Item', '', 'nav_menu_item', 'draft-count-menu-item', 'draft');
+    $db->exec('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (16000064, 16000051, 0)');
     smoke_insert_postmeta($db, 16000060, 16000059, '_menu_item_type', 'post_type');
     smoke_insert_postmeta($db, 16000061, 16000059, '_menu_item_object', 'page');
     smoke_insert_postmeta($db, 16000062, 16000059, '_menu_item_object_id', '16000058');
@@ -1426,8 +1429,13 @@ try {
 
     $nav_menu_count_result = cow_merge_databases($nav_menu_count_base, $nav_menu_count_source, $nav_menu_count_target, $nav_menu_count_metadata, 'feature-smoke-nav-menu-count', 'main');
     assert_same($nav_menu_count_result['status'], 'completed', 'same-menu nav item inserts complete cleanly');
-    assert_same((int)smoke_scalar($nav_menu_count_target, 'SELECT COUNT(*) FROM wp_term_relationships WHERE term_taxonomy_id = 16000051'), 2, 'same-menu nav item merge preserves both branch relationships');
-    assert_same((int)smoke_scalar($nav_menu_count_target, 'SELECT count FROM wp_term_taxonomy WHERE term_taxonomy_id = 16000051'), 2, 'same-menu nav item merge recomputes denormalized WordPress nav menu count');
+    assert_same((int)smoke_scalar($nav_menu_count_target, 'SELECT COUNT(*) FROM wp_term_relationships WHERE term_taxonomy_id = 16000051'), 4, 'same-menu nav item merge preserves published, draft, and non-menu relationships');
+    assert_same(
+        (int)smoke_scalar($nav_menu_count_target, "SELECT COUNT(*) FROM wp_term_relationships tr JOIN wp_posts p ON p.ID = tr.object_id WHERE tr.term_taxonomy_id = 16000051 AND p.post_type = 'nav_menu_item' AND p.post_status = 'publish'"),
+        2,
+        'same-menu nav item fixture has only two published menu-item relationships'
+    );
+    assert_same((int)smoke_scalar($nav_menu_count_target, 'SELECT count FROM wp_term_taxonomy WHERE term_taxonomy_id = 16000051'), 2, 'same-menu nav item merge recomputes WordPress nav menu count from published menu items only');
     assert_same(
         (int)smoke_scalar($nav_menu_count_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_term_taxonomy' AND column_name = 'count' AND decision = 'source-applied' AND reason = 'recomputed WordPress term taxonomy count from merged relationships'"),
         1,
