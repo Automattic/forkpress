@@ -24,6 +24,16 @@ To see the plan without running it:
 scripts/dev/cow-changed-test-plan.sh --list
 ```
 
+For local iteration, run the independent checks in parallel:
+
+```bash
+scripts/dev/cow-changed-test-plan.sh --jobs 4
+```
+
+The same setting is available as `FORKPRESS_CHANGED_TEST_PLAN_JOBS=4`, which is
+useful when calling `make test-cow-changed`. Keep `--jobs 1` when debugging
+interleaved failures or when the machine is already CPU-bound.
+
 CI uses the same planner as a COW/PHP preflight before the expensive Linux,
 macOS, and Windows COW jobs. That CI scope intentionally avoids Rust and release
 packaging checks so the preflight remains a fast fail gate, while local runs keep

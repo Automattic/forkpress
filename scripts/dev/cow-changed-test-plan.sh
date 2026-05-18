@@ -6,21 +6,24 @@ cd "$ROOT"
 
 BASE="${FORKPRESS_TEST_BASE:-origin/trunk}"
 SCOPE="${FORKPRESS_CHANGED_TEST_PLAN_SCOPE:-all}"
+JOBS="${FORKPRESS_CHANGED_TEST_PLAN_JOBS:-1}"
 LIST_ONLY=0
 
 usage() {
   cat <<'EOF'
-Usage: scripts/dev/cow-changed-test-plan.sh [--base <ref>] [--list]
+Usage: scripts/dev/cow-changed-test-plan.sh [--base <ref>] [--jobs <n>] [--list]
 
 Runs a focused local preflight for the current COW merge change set. The plan is
 chosen from files changed against the base ref plus staged/unstaged edits.
 
 Options:
   --base <ref>  Compare committed changes against this ref. Defaults to origin/trunk.
+  --jobs <n>    Run selected checks with up to n concurrent jobs. Defaults to 1.
   --list        Print the selected commands without running them.
 
 Environment:
   FORKPRESS_CHANGED_TEST_PLAN_SCOPE=cow  Limit selection to COW/PHP checks.
+  FORKPRESS_CHANGED_TEST_PLAN_JOBS=n     Same as --jobs.
 EOF
 }
 
@@ -32,6 +35,14 @@ while [ "$#" -gt 0 ]; do
         exit 2
       fi
       BASE="$2"
+      shift 2
+      ;;
+    --jobs)
+      if [ "$#" -lt 2 ]; then
+        echo "changed-test-plan: --jobs requires a positive integer" >&2
+        exit 2
+      fi
+      JOBS="$2"
       shift 2
       ;;
     --list)
@@ -47,8 +58,13 @@ while [ "$#" -gt 0 ]; do
       usage >&2
       exit 2
       ;;
-  esac
+    esac
 done
+
+if ! [[ "$JOBS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "changed-test-plan: --jobs must be a positive integer" >&2
+  exit 2
+fi
 
 case "$SCOPE" in
   all|cow) ;;
@@ -202,7 +218,7 @@ if [ "${#commands[@]}" -le 2 ] && { has_file "scripts/cow/*" || has_file "tests/
 fi
 
 echo "changed-test-plan: base=$BASE"
-echo "changed-test-plan: files=${#files[@]} commands=${#commands[@]}"
+echo "changed-test-plan: files=${#files[@]} commands=${#commands[@]} jobs=$JOBS"
 for cmd in "${commands[@]}"; do
   echo "+ $cmd"
 done
@@ -211,6 +227,69 @@ if [ "$LIST_ONLY" -eq 1 ]; then
   exit 0
 fi
 
-for cmd in "${commands[@]}"; do
-  bash -lc "$cmd"
+if [ "$JOBS" -eq 1 ] || [ "${#commands[@]}" -le 1 ]; then
+  for cmd in "${commands[@]}"; do
+    bash -lc "$cmd"
+  done
+  exit 0
+fi
+
+logs_dir="$(mktemp -d "${TMPDIR:-/tmp}/forkpress-cow-changed-test-plan.XXXXXX")"
+cleanup_logs() {
+  rm -rf "$logs_dir"
+}
+trap cleanup_logs EXIT
+
+declare -a pids=()
+declare -a running_indices=()
+declare -a statuses=()
+next_command=0
+failed=0
+
+start_command() {
+  local index="$1"
+  local log="$logs_dir/$index.log"
+  (
+    bash -lc "${commands[$index]}"
+  ) >"$log" 2>&1 &
+  pids[$index]=$!
+  running_indices+=("$index")
+}
+
+wait_one_command() {
+  local wait_index="${running_indices[0]}"
+  local pid="${pids[$wait_index]}"
+  local status=0
+  if wait "$pid"; then
+    status=0
+  else
+    status=$?
+  fi
+  statuses[$wait_index]=$status
+  if [ "$status" -ne 0 ]; then
+    failed=1
+  fi
+  running_indices=("${running_indices[@]:1}")
+}
+
+while [ "$next_command" -lt "${#commands[@]}" ] || [ "${#running_indices[@]}" -gt 0 ]; do
+  while [ "$next_command" -lt "${#commands[@]}" ] && [ "${#running_indices[@]}" -lt "$JOBS" ]; do
+    start_command "$next_command"
+    next_command=$((next_command + 1))
+  done
+  if [ "${#running_indices[@]}" -gt 0 ]; then
+    wait_one_command
+  fi
 done
+
+for index in "${!commands[@]}"; do
+  status="${statuses[$index]:-0}"
+  if [ -s "$logs_dir/$index.log" ]; then
+    cat "$logs_dir/$index.log"
+  fi
+  if [ "$status" -ne 0 ]; then
+    echo "changed-test-plan: command failed with status $status: ${commands[$index]}" >&2
+  fi
+done
+
+exit "$failed"
