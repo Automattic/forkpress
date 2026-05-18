@@ -451,7 +451,9 @@ definition posts while preserving target value-meta edits for review. A
 Yoast SEO-shaped fixture covers `wp_yoast_indexable` rows whose `object_id`
 points at a deleted WordPress post while preserving target SEO title and
 description edits for review, plus duplicate canonical permalink groups where
-independent branch-created indexables share the same URL. Plugin validator
+independent branch-created indexables share the same URL. It also covers
+`wp_yoast_indexable_hierarchy` rows left pointing at deleted child or ancestor
+indexables while preserving target hierarchy edits for review. Plugin validator
 reruns also cover changed source evidence and changed first-class
 `logical_identity` evidence returning reviewed findings to `needs-action` as
 replacement evidence.

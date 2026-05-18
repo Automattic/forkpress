@@ -379,10 +379,19 @@ function create_yoast_indexable_validator_db(string $path): void {
         title TEXT NOT NULL DEFAULT '',
         description TEXT NOT NULL DEFAULT ''
     )");
+    $db->exec("CREATE TABLE wp_yoast_indexable_hierarchy (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        indexable_id INTEGER NOT NULL,
+        ancestor_id INTEGER NOT NULL,
+        depth INTEGER NOT NULL
+    )");
     $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, post_parent) VALUES
-        (70, 'SEO Landing Page', '<!-- wp:paragraph --><p>SEO landing page</p><!-- /wp:paragraph -->', 'publish', 'page', 'seo-landing-page', 0)");
+        (69, 'SEO Parent Page', '<!-- wp:paragraph --><p>SEO parent page</p><!-- /wp:paragraph -->', 'publish', 'page', 'seo-parent-page', 0),
+        (70, 'SEO Landing Page', '<!-- wp:paragraph --><p>SEO landing page</p><!-- /wp:paragraph -->', 'publish', 'page', 'seo-landing-page', 69)");
     $db->exec("INSERT INTO wp_yoast_indexable (id, object_id, object_type, object_sub_type, permalink, title, description) VALUES
+        (79, 69, 'post', 'page', 'https://example.test/seo-parent-page/', 'Base SEO parent title', 'Base SEO parent description'),
         (80, 70, 'post', 'page', 'https://example.test/seo-landing-page/', 'Base SEO title', 'Base SEO description')");
+    $db->exec('INSERT INTO wp_yoast_indexable_hierarchy (id, indexable_id, ancestor_id, depth) VALUES (90, 80, 79, 1)');
     $db->close();
 }
 
@@ -3572,6 +3581,40 @@ while ($row = $permalink_groups->fetchArray(SQLITE3_ASSOC)) {
         ],
     ];
 }
+$hierarchies = $db->query('SELECT id, indexable_id, ancestor_id, depth FROM wp_yoast_indexable_hierarchy ORDER BY id');
+while ($row = $hierarchies->fetchArray(SQLITE3_ASSOC)) {
+    $indexable_id = (int)$row['indexable_id'];
+    $ancestor_id = (int)$row['ancestor_id'];
+    $indexable_exists = (int)$db->querySingle('SELECT COUNT(*) FROM wp_yoast_indexable WHERE id = ' . $indexable_id);
+    $ancestor_exists = (int)$db->querySingle('SELECT COUNT(*) FROM wp_yoast_indexable WHERE id = ' . $ancestor_id);
+    if ($indexable_exists === 1 && $ancestor_exists === 1) {
+        continue;
+    }
+    $findings[] = [
+        'plugin' => 'wordpress-seo',
+        'object' => 'indexable-hierarchy:' . (int)$row['id'],
+        'reason' => 'Yoast SEO indexable hierarchy row references an indexable row that no longer exists after merge',
+        'type' => 'plugin-yoast-indexable-hierarchy-missing-node',
+        'tables' => ['wp_yoast_indexable', 'wp_yoast_indexable_hierarchy'],
+        'validator' => 'yoast-indexable@forkpress-test',
+        'severity' => 'error',
+        'logical_identity' => [
+            'plugin' => 'wordpress-seo',
+            'kind' => 'indexable_hierarchy',
+            'hierarchy_id' => (int)$row['id'],
+            'indexable_id' => $indexable_id,
+            'ancestor_id' => $ancestor_id,
+        ],
+        'candidate' => [
+            'hierarchy_id' => (int)$row['id'],
+            'indexable_id' => $indexable_id,
+            'ancestor_id' => $ancestor_id,
+            'depth' => (int)$row['depth'],
+            'indexable_exists' => $indexable_exists,
+            'ancestor_exists' => $ancestor_exists,
+        ],
+    ];
+}
 echo json_encode([
     'status' => $findings ? 'conflicts' : 'valid',
     'findings' => $findings,
@@ -3704,6 +3747,68 @@ PHP);
         ['Base SEO title', 'Branch duplicate SEO title', 'Target duplicate SEO title'],
         'Yoast audit includes each branch-created duplicate indexable candidate'
     );
+
+    $yoast_hierarchy_base_root = $tmp . '/yoast-hierarchy-base';
+    $yoast_hierarchy_source_root = $tmp . '/yoast-hierarchy-source';
+    $yoast_hierarchy_target_root = $tmp . '/yoast-hierarchy-target';
+    $yoast_hierarchy_base = $yoast_hierarchy_base_root . '/wp-content/database/.ht.sqlite';
+    $yoast_hierarchy_source = $yoast_hierarchy_source_root . '/wp-content/database/.ht.sqlite';
+    $yoast_hierarchy_target = $yoast_hierarchy_target_root . '/wp-content/database/.ht.sqlite';
+    $yoast_hierarchy_metadata = $tmp . '/.forkpress/cow/merge/plugin-yoast-hierarchy-validator-metadata.sqlite';
+    $yoast_hierarchy_file_base = $tmp . '/.forkpress/cow/merge/file-bases/plugin-yoast-hierarchy-validator.json';
+
+    copy_tree_for_test($yoast_base_root, $yoast_hierarchy_base_root);
+    copy_tree_for_test($yoast_hierarchy_base_root, $yoast_hierarchy_source_root);
+    copy_tree_for_test($yoast_hierarchy_base_root, $yoast_hierarchy_target_root);
+    cow_merge_capture_file_base($yoast_hierarchy_base_root, $yoast_hierarchy_file_base);
+    cow_merge_allocate_autoincrement_bands($yoast_hierarchy_source, $yoast_hierarchy_metadata, 'feature-plugin-yoast-hierarchy-source');
+    cow_merge_allocate_autoincrement_bands($yoast_hierarchy_target, $yoast_hierarchy_metadata, 'main');
+
+    $db = open_db($yoast_hierarchy_source);
+    $db->exec('DELETE FROM wp_yoast_indexable WHERE id = 79');
+    $db->close();
+
+    $db = open_db($yoast_hierarchy_target);
+    $db->exec('UPDATE wp_yoast_indexable_hierarchy SET depth = 2 WHERE id = 90');
+    $db->close();
+
+    $yoast_hierarchy_result = cow_merge_branch_state(
+        $yoast_hierarchy_base,
+        $yoast_hierarchy_source,
+        $yoast_hierarchy_target,
+        $yoast_hierarchy_metadata,
+        'feature-plugin-yoast-hierarchy-source',
+        'main',
+        $yoast_hierarchy_file_base,
+        $yoast_hierarchy_source_root,
+        $yoast_hierarchy_target_root
+    );
+
+    assert_same($yoast_hierarchy_result['status'], 'completed_with_conflicts', 'Yoast validator holds indexable hierarchy rows pointing at deleted indexables for review');
+    assert_same((int)($yoast_hierarchy_result['plugin_validators'] ?? 0), 1, 'Yoast hierarchy validator is discovered from mu-plugins during merge');
+    assert_same((int)($yoast_hierarchy_result['plugin_validator_conflicts'] ?? 0), 1, 'Yoast validator records one missing hierarchy node conflict');
+    assert_same((int)scalar($yoast_hierarchy_target, 'SELECT COUNT(*) FROM wp_yoast_indexable WHERE id = 79'), 0, 'Yoast hierarchy validator leaves the source ancestor indexable deletion staged for review');
+    assert_same((int)scalar($yoast_hierarchy_target, 'SELECT depth FROM wp_yoast_indexable_hierarchy WHERE id = 90'), 2, 'Yoast hierarchy validator preserves target hierarchy edits for review');
+
+    $yoast_hierarchy_identity = json_encode([
+        'plugin' => 'wordpress-seo',
+        'kind' => 'indexable_hierarchy',
+        'hierarchy_id' => 90,
+        'indexable_id' => 80,
+        'ancestor_id' => 79,
+    ], JSON_UNESCAPED_SLASHES);
+    $yoast_hierarchy_audit = cow_merge_audit_report($yoast_hierarchy_metadata, (int)$yoast_hierarchy_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin' => 'wordpress-seo',
+        'conflict_type' => 'plugin-yoast-indexable-hierarchy-missing-node',
+        'plugin_logical_identity' => $yoast_hierarchy_identity,
+    ]);
+    assert_same(count($yoast_hierarchy_audit['conflicts']), 1, 'Yoast audit filters missing hierarchy node findings by plugin, conflict type, and logical identity');
+    $yoast_hierarchy_payload = cow_merge_decode_payload_json((string)($yoast_hierarchy_audit['conflicts'][0]['chosen_payload'] ?? ''), 'Yoast indexable hierarchy validator payload');
+    assert_same($yoast_hierarchy_payload['object'] ?? null, 'indexable-hierarchy:90', 'Yoast audit identifies the stale hierarchy row');
+    assert_same($yoast_hierarchy_payload['candidate']['ancestor_exists'] ?? null, 0, 'Yoast audit records the missing hierarchy ancestor evidence');
+    assert_same($yoast_hierarchy_payload['candidate']['depth'] ?? null, 2, 'Yoast audit includes the preserved target hierarchy edit');
 
     $events_base_root = $tmp . '/events-base';
     $events_source_root = $tmp . '/events-source';

@@ -44,6 +44,9 @@ Recent additions in the current merge-reliability work:
   validator: independently merged `wp_yoast_indexable` rows with the same
   object type and canonical permalink stay reviewable with a plugin logical
   permalink identity.
+- The same Yoast-shaped validator now covers `wp_yoast_indexable_hierarchy`
+  rows, holding hierarchy edges whose child or ancestor indexable was removed
+  while preserving target-side hierarchy edits for review.
 - `tests/cow/wp_semantic_validator.php` now includes a built-in WordPress
   global-styles validator case where source and target each add a published
   `wp_global_styles` row with the same style key. The merge stays reviewable,
@@ -199,7 +202,8 @@ Recent focused coverage also tightens three roadmap edges:
   `wp_yoast_indexable` fixture where an index row points at a deleted
   WordPress post and target SEO title/description edits stay reviewable. The
   same validator now holds duplicate canonical permalink groups for review
-  when source and target independently add indexables for the same URL.
+  when source and target independently add indexables for the same URL, and
+  hierarchy edges whose child or ancestor indexable was removed.
 - The same suite includes an Elementor-shaped `_elementor_data` fixture where
   plugin-owned JSON points at a deleted attachment row/upload file while target
   widget edits remain visible for review.
