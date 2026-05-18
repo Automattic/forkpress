@@ -839,6 +839,34 @@ function create_wp_option_reference_db(string $path): void {
     $db->close();
 }
 
+function create_wp_scalar_option_owner_reference_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_title TEXT NOT NULL DEFAULT '',
+        post_content TEXT NOT NULL DEFAULT '',
+        post_status TEXT NOT NULL DEFAULT 'publish',
+        post_type TEXT NOT NULL DEFAULT 'post',
+        post_name TEXT NOT NULL DEFAULT '',
+        guid TEXT NOT NULL DEFAULT ''
+    )");
+    $db->exec("CREATE TABLE wp_options (
+        option_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        option_name TEXT NOT NULL,
+        option_value TEXT NOT NULL,
+        autoload TEXT NOT NULL DEFAULT 'yes'
+    )");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, guid) VALUES
+        (130, 'Target front page candidate', '<!-- wp:paragraph --><p>Front page</p><!-- /wp:paragraph -->', 'publish', 'page', 'target-front-page-candidate', ''),
+        (131, 'Target posts page candidate', '<!-- wp:paragraph --><p>Posts page</p><!-- /wp:paragraph -->', 'publish', 'page', 'target-posts-page-candidate', ''),
+        (132, 'Target site icon attachment', '', 'inherit', 'attachment', 'target-site-icon', 'wp-content/uploads/2026/05/site-icon.png')");
+    $db->exec("INSERT INTO wp_options (option_id, option_name, option_value, autoload) VALUES
+        (1300, 'page_on_front', '0', 'yes'),
+        (1301, 'page_for_posts', '0', 'yes'),
+        (1302, 'site_icon', '0', 'yes')");
+    $db->close();
+}
+
 define('FORKPRESS_COW_MERGE_TESTS', true);
 require_once __DIR__ . '/../../scripts/cow/merge.php';
 
@@ -2369,6 +2397,58 @@ PHP);
     assert_true(str_contains($featured_guard_preview, '61'), 'WordPress featured-image owner guard audit includes the guarded attachment ID');
     $featured_guard_reason = (string)scalar($featured_guard_metadata, "SELECT reason FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-wins' ORDER BY id DESC LIMIT 1");
     assert_true(str_contains($featured_guard_reason, 'target has changed wp_postmeta rows'), 'WordPress featured-image owner guard audit explains the changed thumbnail metadata blocker');
+
+    $scalar_option_guard_base_root = $tmp . '/scalar-option-owner-guard-base';
+    $scalar_option_guard_source_root = $tmp . '/scalar-option-owner-guard-source';
+    $scalar_option_guard_target_root = $tmp . '/scalar-option-owner-guard-target';
+    $scalar_option_guard_base = $scalar_option_guard_base_root . '/wp-content/database/.ht.sqlite';
+    $scalar_option_guard_source = $scalar_option_guard_source_root . '/wp-content/database/.ht.sqlite';
+    $scalar_option_guard_target = $scalar_option_guard_target_root . '/wp-content/database/.ht.sqlite';
+    $scalar_option_guard_metadata = $tmp . '/.forkpress/cow/merge/wp-scalar-option-owner-guard-metadata.sqlite';
+
+    mkdir($scalar_option_guard_base_root . '/wp-content/database', 0777, true);
+    create_wp_scalar_option_owner_reference_db($scalar_option_guard_base);
+    copy_tree_for_test($scalar_option_guard_base_root, $scalar_option_guard_source_root);
+    copy_tree_for_test($scalar_option_guard_base_root, $scalar_option_guard_target_root);
+    cow_merge_allocate_autoincrement_bands($scalar_option_guard_source, $scalar_option_guard_metadata, 'feature-wp-scalar-option-owner-guard-source');
+    cow_merge_allocate_autoincrement_bands($scalar_option_guard_target, $scalar_option_guard_metadata, 'main');
+
+    $db = open_db($scalar_option_guard_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID IN (130, 131, 132)');
+    $db->close();
+
+    $db = open_db($scalar_option_guard_target);
+    $db->exec("UPDATE wp_options SET option_value = '130' WHERE option_name = 'page_on_front'");
+    $db->exec("UPDATE wp_options SET option_value = '131' WHERE option_name = 'page_for_posts'");
+    $db->exec("UPDATE wp_options SET option_value = '132' WHERE option_name = 'site_icon'");
+    $db->close();
+
+    $scalar_option_guard_result = cow_merge_branch_state(
+        $scalar_option_guard_base,
+        $scalar_option_guard_source,
+        $scalar_option_guard_target,
+        $scalar_option_guard_metadata,
+        'feature-wp-scalar-option-owner-guard-source',
+        'main'
+    );
+
+    assert_same($scalar_option_guard_result['status'], 'completed_with_conflicts', 'WordPress scalar option owner deletes with target-edited option references stay reviewable');
+    assert_same((int)scalar($scalar_option_guard_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID IN (130, 131, 132)'), 3, 'WordPress scalar option owner guard keeps referenced pages and site icon before review');
+    assert_same(scalar($scalar_option_guard_target, "SELECT option_value FROM wp_options WHERE option_name = 'page_on_front'"), '130', 'WordPress scalar option owner guard preserves target front-page option edit');
+    assert_same(scalar($scalar_option_guard_target, "SELECT option_value FROM wp_options WHERE option_name = 'page_for_posts'"), '131', 'WordPress scalar option owner guard preserves target posts-page option edit');
+    assert_same(scalar($scalar_option_guard_target, "SELECT option_value FROM wp_options WHERE option_name = 'site_icon'"), '132', 'WordPress scalar option owner guard preserves target site-icon option edit');
+
+    $scalar_option_guard_audit = cow_merge_audit_report($scalar_option_guard_metadata, (int)$scalar_option_guard_result['run_id'], 10, [
+        'records' => 'conflicts',
+        'conflict_type' => 'row-target-constraint',
+    ]);
+    assert_same(count($scalar_option_guard_audit['conflicts']), 3, 'WordPress scalar option owner guard records one row constraint per guarded option owner');
+    $scalar_option_guard_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $scalar_option_guard_audit['conflicts']));
+    foreach (['130', '131', '132'] as $needle) {
+        assert_true(str_contains($scalar_option_guard_preview, $needle), 'WordPress scalar option owner guard audit includes ' . $needle);
+    }
+    $scalar_option_guard_reasons = (string)scalar($scalar_option_guard_metadata, "SELECT group_concat(reason, '\n') FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-wins'");
+    assert_true(str_contains($scalar_option_guard_reasons, 'target has changed wp_options rows'), 'WordPress scalar option owner guard audit explains the changed option blockers');
 
     $attachment_upload_base_root = $tmp . '/attachment-upload-base';
     $attachment_upload_source_root = $tmp . '/attachment-upload-source';

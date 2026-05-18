@@ -6187,6 +6187,29 @@ function cow_merge_wordpress_delete_reference_violation(
                     'filter_column' => 'meta_key',
                     'filter_value' => '_thumbnail_id',
                 ];
+                $dependent_specs[] = [
+                    'table' => 'wp_options',
+                    'pk' => 'option_id',
+                    'reference_column' => 'option_value',
+                    'filter_column' => 'option_name',
+                    'filter_value' => 'site_icon',
+                ];
+            }
+            if (($base_row['post_type'] ?? null) === 'page') {
+                $dependent_specs[] = [
+                    'table' => 'wp_options',
+                    'pk' => 'option_id',
+                    'reference_column' => 'option_value',
+                    'filter_column' => 'option_name',
+                    'filter_value' => 'page_on_front',
+                ];
+                $dependent_specs[] = [
+                    'table' => 'wp_options',
+                    'pk' => 'option_id',
+                    'reference_column' => 'option_value',
+                    'filter_column' => 'option_name',
+                    'filter_value' => 'page_for_posts',
+                ];
             }
             $target_dependent_violation = cow_merge_wordpress_target_changed_dependents_for_deleted_owner($base, $target, 'wp_posts', (int)$post_id, $dependent_specs);
             if ($target_dependent_violation !== null) {
