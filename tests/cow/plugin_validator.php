@@ -3534,6 +3534,44 @@ while ($row = $rows->fetchArray(SQLITE3_ASSOC)) {
         ],
     ];
 }
+$permalink_groups = $db->query("SELECT object_type, permalink, COUNT(*) AS indexable_count FROM wp_yoast_indexable WHERE permalink <> '' GROUP BY object_type, permalink HAVING COUNT(*) > 1 ORDER BY object_type, permalink");
+while ($row = $permalink_groups->fetchArray(SQLITE3_ASSOC)) {
+    $object_type = (string)$row['object_type'];
+    $permalink = (string)$row['permalink'];
+    $escaped_object_type = SQLite3::escapeString($object_type);
+    $escaped_permalink = SQLite3::escapeString($permalink);
+    $candidates = [];
+    $candidate_rows = $db->query("SELECT id, object_id, object_sub_type, title FROM wp_yoast_indexable WHERE object_type = '$escaped_object_type' AND permalink = '$escaped_permalink' ORDER BY id");
+    while ($candidate = $candidate_rows->fetchArray(SQLITE3_ASSOC)) {
+        $candidates[] = [
+            'indexable_id' => (int)$candidate['id'],
+            'object_id' => (int)$candidate['object_id'],
+            'object_sub_type' => (string)$candidate['object_sub_type'],
+            'title' => (string)$candidate['title'],
+        ];
+    }
+    $findings[] = [
+        'plugin' => 'wordpress-seo',
+        'object' => 'indexable-permalink:' . $object_type . ':' . $permalink,
+        'reason' => 'Yoast SEO indexables have multiple rows for the same object type and permalink',
+        'type' => 'plugin-yoast-indexable-duplicate-permalink',
+        'tables' => ['wp_yoast_indexable'],
+        'validator' => 'yoast-indexable@forkpress-test',
+        'severity' => 'error',
+        'logical_identity' => [
+            'plugin' => 'wordpress-seo',
+            'kind' => 'indexable_permalink',
+            'object_type' => $object_type,
+            'permalink' => $permalink,
+        ],
+        'candidate' => [
+            'object_type' => $object_type,
+            'permalink' => $permalink,
+            'indexable_count' => (int)$row['indexable_count'],
+            'indexables' => $candidates,
+        ],
+    ];
+}
 echo json_encode([
     'status' => $findings ? 'conflicts' : 'valid',
     'findings' => $findings,
@@ -3592,6 +3630,80 @@ PHP);
     $yoast_payload = cow_merge_decode_payload_json((string)($yoast_audit['conflicts'][0]['chosen_payload'] ?? ''), 'Yoast indexable validator payload');
     assert_same($yoast_payload['object'] ?? null, 'indexable:80:post:70', 'Yoast audit identifies the stale indexable row');
     assert_same($yoast_payload['candidate']['title'] ?? null, 'Target SEO title', 'Yoast audit includes the preserved target indexable edit');
+
+    $yoast_permalink_base_root = $tmp . '/yoast-permalink-base';
+    $yoast_permalink_source_root = $tmp . '/yoast-permalink-source';
+    $yoast_permalink_target_root = $tmp . '/yoast-permalink-target';
+    $yoast_permalink_base = $yoast_permalink_base_root . '/wp-content/database/.ht.sqlite';
+    $yoast_permalink_source = $yoast_permalink_source_root . '/wp-content/database/.ht.sqlite';
+    $yoast_permalink_target = $yoast_permalink_target_root . '/wp-content/database/.ht.sqlite';
+    $yoast_permalink_metadata = $tmp . '/.forkpress/cow/merge/plugin-yoast-permalink-validator-metadata.sqlite';
+    $yoast_permalink_file_base = $tmp . '/.forkpress/cow/merge/file-bases/plugin-yoast-permalink-validator.json';
+
+    copy_tree_for_test($yoast_base_root, $yoast_permalink_base_root);
+    copy_tree_for_test($yoast_permalink_base_root, $yoast_permalink_source_root);
+    copy_tree_for_test($yoast_permalink_base_root, $yoast_permalink_target_root);
+    cow_merge_capture_file_base($yoast_permalink_base_root, $yoast_permalink_file_base);
+    cow_merge_allocate_autoincrement_bands($yoast_permalink_source, $yoast_permalink_metadata, 'feature-plugin-yoast-permalink-source');
+    cow_merge_allocate_autoincrement_bands($yoast_permalink_target, $yoast_permalink_metadata, 'main');
+
+    $db = open_db($yoast_permalink_source);
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name, post_parent) VALUES ('Branch SEO Duplicate', '<!-- wp:paragraph --><p>Branch duplicate</p><!-- /wp:paragraph -->', 'publish', 'page', 'branch-seo-duplicate', 0)");
+    $source_post_id = $db->lastInsertRowID();
+    $stmt = $db->prepare("INSERT INTO wp_yoast_indexable (object_id, object_type, object_sub_type, permalink, title, description) VALUES (:object_id, 'post', 'page', 'https://example.test/seo-landing-page/', 'Branch duplicate SEO title', 'Branch duplicate SEO description')");
+    $stmt->bindValue(':object_id', $source_post_id, SQLITE3_INTEGER);
+    $stmt->execute();
+    $db->close();
+
+    $db = open_db($yoast_permalink_target);
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name, post_parent) VALUES ('Main SEO Duplicate', '<!-- wp:paragraph --><p>Main duplicate</p><!-- /wp:paragraph -->', 'publish', 'page', 'main-seo-duplicate', 0)");
+    $target_post_id = $db->lastInsertRowID();
+    $stmt = $db->prepare("INSERT INTO wp_yoast_indexable (object_id, object_type, object_sub_type, permalink, title, description) VALUES (:object_id, 'post', 'page', 'https://example.test/seo-landing-page/', 'Target duplicate SEO title', 'Target duplicate SEO description')");
+    $stmt->bindValue(':object_id', $target_post_id, SQLITE3_INTEGER);
+    $stmt->execute();
+    $db->close();
+
+    $yoast_permalink_result = cow_merge_branch_state(
+        $yoast_permalink_base,
+        $yoast_permalink_source,
+        $yoast_permalink_target,
+        $yoast_permalink_metadata,
+        'feature-plugin-yoast-permalink-source',
+        'main',
+        $yoast_permalink_file_base,
+        $yoast_permalink_source_root,
+        $yoast_permalink_target_root
+    );
+
+    assert_same($yoast_permalink_result['status'], 'completed_with_conflicts', 'Yoast validator holds duplicate indexable permalinks for review');
+    assert_same((int)($yoast_permalink_result['plugin_validators'] ?? 0), 1, 'Yoast duplicate-permalink validator is discovered from mu-plugins during merge');
+    assert_same((int)($yoast_permalink_result['plugin_validator_conflicts'] ?? 0), 1, 'Yoast validator records one duplicate permalink conflict');
+    assert_same((int)scalar($yoast_permalink_target, "SELECT COUNT(*) FROM wp_yoast_indexable WHERE permalink = 'https://example.test/seo-landing-page/'"), 3, 'Yoast duplicate-permalink validator leaves all indexable candidates visible for review');
+
+    $yoast_permalink_identity = json_encode([
+        'plugin' => 'wordpress-seo',
+        'kind' => 'indexable_permalink',
+        'object_type' => 'post',
+        'permalink' => 'https://example.test/seo-landing-page/',
+    ], JSON_UNESCAPED_SLASHES);
+    $yoast_permalink_audit = cow_merge_audit_report($yoast_permalink_metadata, (int)$yoast_permalink_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin' => 'wordpress-seo',
+        'conflict_type' => 'plugin-yoast-indexable-duplicate-permalink',
+        'plugin_logical_identity' => $yoast_permalink_identity,
+    ]);
+    assert_same(count($yoast_permalink_audit['conflicts']), 1, 'Yoast audit filters duplicate permalink findings by plugin, conflict type, and logical identity');
+    $yoast_permalink_payload = cow_merge_decode_payload_json((string)($yoast_permalink_audit['conflicts'][0]['chosen_payload'] ?? ''), 'Yoast duplicate permalink validator payload');
+    assert_same($yoast_permalink_payload['object'] ?? null, 'indexable-permalink:post:https://example.test/seo-landing-page/', 'Yoast audit identifies the duplicate permalink group');
+    assert_same($yoast_permalink_payload['candidate']['indexable_count'] ?? null, 3, 'Yoast audit includes the duplicate indexable count');
+    $yoast_permalink_titles = array_map(fn($indexable) => (string)($indexable['title'] ?? ''), $yoast_permalink_payload['candidate']['indexables'] ?? []);
+    sort($yoast_permalink_titles);
+    assert_same(
+        $yoast_permalink_titles,
+        ['Base SEO title', 'Branch duplicate SEO title', 'Target duplicate SEO title'],
+        'Yoast audit includes each branch-created duplicate indexable candidate'
+    );
 
     $events_base_root = $tmp . '/events-base';
     $events_source_root = $tmp . '/events-source';
