@@ -13883,6 +13883,88 @@ function cow_merge_trigger_body_dependencies(SQLite3 $db, array $schema_objects,
     return $triggers;
 }
 
+function cow_merge_source_dropped_trigger_dependencies_for_view_resolution(
+    SQLite3 $target,
+    string $view,
+    array $base_triggers,
+    array $source_triggers,
+    array $pending_source_drop_dependencies = []
+): array {
+    $base_by_name = [];
+    foreach ($base_triggers as $name => $entry) {
+        $base_by_name[strtolower((string)$name)] = [
+            'name' => (string)$name,
+            'table' => (string)($entry['table'] ?? ''),
+            'sql' => (string)($entry['sql'] ?? ''),
+        ];
+    }
+    $source_by_name = array_fill_keys(array_map('strtolower', array_map('strval', array_keys($source_triggers))), true);
+
+    $dependent_views = cow_merge_table_dependent_views($target, $view, $view);
+    $view_dependencies = cow_merge_table_rebuild_dependencies($target, $view);
+    $dependent_view_triggers = cow_merge_view_trigger_dependencies($target, $dependent_views);
+    $dependent_trigger_names = array_map(
+        static fn(array $dependency): string => (string)$dependency['name'],
+        array_filter(
+            array_merge($view_dependencies, $dependent_view_triggers),
+            static fn(array $dependency): bool => (string)($dependency['type'] ?? '') === 'trigger'
+        )
+    );
+    $dependent_trigger_bodies = cow_merge_trigger_body_dependencies(
+        $target,
+        array_merge([['name' => $view]], $dependent_views),
+        $dependent_trigger_names
+    );
+
+    $planned = [];
+    foreach (array_merge($view_dependencies, $dependent_view_triggers, $dependent_trigger_bodies) as $dependency) {
+        if ((string)($dependency['type'] ?? '') !== 'trigger') {
+            continue;
+        }
+        $name = (string)($dependency['name'] ?? '');
+        $key = strtolower($name);
+        if ($name === '' || isset($planned[$key]) || !isset($base_by_name[$key]) || isset($source_by_name[$key])) {
+            continue;
+        }
+        $base_entry = $base_by_name[$key];
+        if (cow_merge_schema_object_pending_source_drop_dependencies('trigger', (string)$base_entry['sql'], $pending_source_drop_dependencies)) {
+            continue;
+        }
+        $current_sql = cow_merge_schema_object_sql($target, 'trigger', $name);
+        if ($current_sql === null || !cow_merge_values_equal($current_sql, (string)$base_entry['sql'])) {
+            continue;
+        }
+        $planned[$key] = [
+            'name' => $name,
+            'table' => (string)($base_entry['table'] !== '' ? $base_entry['table'] : ($dependency['table'] ?? $name)),
+            'sql' => (string)$base_entry['sql'],
+        ];
+    }
+
+    return array_values($planned);
+}
+
+function cow_merge_drop_source_dropped_trigger_dependencies_for_view_resolution(
+    SQLite3 $target,
+    array $trigger_dependencies,
+    string $view
+): void {
+    foreach ($trigger_dependencies as $dependency) {
+        $name = (string)($dependency['name'] ?? '');
+        if ($name === '') {
+            throw new InvalidArgumentException("source view $view has an invalid planned trigger dependency");
+        }
+        if (cow_merge_schema_object_sql($target, 'trigger', $name) === null) {
+            continue;
+        }
+        cow_merge_exec_checked(
+            $target,
+            'DROP TRIGGER ' . cow_merge_quote_ident($name),
+            "failed to drop source-dropped trigger $name before source view $view schema resolution"
+        );
+    }
+}
+
 function cow_merge_validate_views(SQLite3 $db, array $views, string $context): void {
     foreach ($views as $view) {
         $name = is_array($view) ? (string)$view['name'] : (string)$view;
@@ -20572,7 +20654,9 @@ function cow_merge_apply_schema_object_changes(
     array $base_objects,
     array $source_objects,
     array $target_objects,
-    array $pending_source_drop_dependencies = []
+    array $pending_source_drop_dependencies = [],
+    array $base_triggers = [],
+    array $source_triggers = []
 ): array {
     if (!in_array($type, ['view', 'trigger'], true)) {
         throw new InvalidArgumentException("unsupported schema object type: $type");
@@ -20825,7 +20909,51 @@ function cow_merge_apply_schema_object_changes(
                     if ($type === 'trigger') {
                         cow_merge_apply_source_trigger_schema_merge($target, $name, $source_sql);
                     } else {
-                        cow_merge_apply_source_view_schema_resolution($target, $name, $source_sql);
+                        $planned_trigger_drops = cow_merge_source_dropped_trigger_dependencies_for_view_resolution(
+                            $target,
+                            $name,
+                            $base_triggers,
+                            $source_triggers,
+                            $pending_source_drop_dependencies
+                        );
+                        $planned_savepoint_started = false;
+                        try {
+                            if ($planned_trigger_drops) {
+                                cow_merge_exec_checked(
+                                    $target,
+                                    'SAVEPOINT forkpress_view_dependency_plan',
+                                    'failed to start source view dependency planning savepoint'
+                                );
+                                $planned_savepoint_started = true;
+                                cow_merge_drop_source_dropped_trigger_dependencies_for_view_resolution(
+                                    $target,
+                                    $planned_trigger_drops,
+                                    $name
+                                );
+                            }
+                            cow_merge_apply_source_view_schema_resolution($target, $name, $source_sql);
+                            if ($planned_savepoint_started) {
+                                cow_merge_release_savepoint_checked(
+                                    $target,
+                                    'forkpress_view_dependency_plan',
+                                    'source view dependency planning'
+                                );
+                                $planned_savepoint_started = false;
+                            }
+                        } catch (Throwable $e) {
+                            if ($planned_savepoint_started) {
+                                $cleanup_failure = cow_merge_rollback_release_savepoint_checked(
+                                    $target,
+                                    'forkpress_view_dependency_plan',
+                                    'source view dependency planning',
+                                    $e
+                                );
+                                if ($cleanup_failure !== null) {
+                                    throw $cleanup_failure;
+                                }
+                            }
+                            throw $e;
+                        }
                     }
                 } catch (Throwable $e) {
                     $apply_error = $e->getMessage();
@@ -22229,7 +22357,9 @@ function cow_merge_databases(
             $base_views,
             $source_views,
             $target_views,
-            $source_dropped_tables
+            $source_dropped_tables,
+            $base_triggers,
+            $source_triggers
         );
         $applied += $view_result['applied'];
         $conflicts += $view_result['conflicts'];
