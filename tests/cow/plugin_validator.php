@@ -293,6 +293,28 @@ function create_gravity_forms_validator_db(string $path): void {
     $db->close();
 }
 
+function create_acf_validator_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_title TEXT NOT NULL DEFAULT '',
+        post_content TEXT NOT NULL DEFAULT '',
+        post_status TEXT NOT NULL DEFAULT 'publish',
+        post_type TEXT NOT NULL DEFAULT 'post',
+        post_name TEXT NOT NULL DEFAULT '',
+        post_parent INTEGER NOT NULL DEFAULT 0
+    )");
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, post_parent) VALUES
+        (50, 'Landing Page Fields', '', 'publish', 'acf-field-group', 'group_landing_page', 0),
+        (51, 'CTA Text', 'a:2:{s:4:\"type\";s:4:\"text\";s:4:\"name\";s:8:\"cta_text\";}', 'publish', 'acf-field', 'field_cta_text', 50),
+        (60, 'Landing Page', '<!-- wp:paragraph --><p>Landing page</p><!-- /wp:paragraph -->', 'publish', 'page', 'landing-page', 0)");
+    $db->exec("INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES
+        (61, 60, 'cta_text', 'Base CTA copy'),
+        (62, 60, '_cta_text', 'field_cta_text')");
+    $db->close();
+}
+
 define('FORKPRESS_COW_MERGE_TESTS', true);
 require_once __DIR__ . '/../../scripts/cow/merge.php';
 
@@ -2965,6 +2987,120 @@ PHP);
         'plugin_logical_identity' => json_encode(['plugin' => 'gravityforms', 'kind' => 'form_field', 'form_id' => 30, 'field_id' => 5], JSON_UNESCAPED_SLASHES),
     ]);
     assert_same(count($gravity_logical_identity_audit['conflicts']), 1, 'Gravity Forms audit filters stale field findings by plugin logical form-field identity');
+
+    $acf_base_root = $tmp . '/acf-base';
+    $acf_source_root = $tmp . '/acf-source';
+    $acf_target_root = $tmp . '/acf-target';
+    $acf_base = $acf_base_root . '/wp-content/database/.ht.sqlite';
+    $acf_source = $acf_source_root . '/wp-content/database/.ht.sqlite';
+    $acf_target = $acf_target_root . '/wp-content/database/.ht.sqlite';
+    $acf_metadata = $tmp . '/.forkpress/cow/merge/plugin-acf-validator-metadata.sqlite';
+    $acf_file_base = $tmp . '/.forkpress/cow/merge/file-bases/plugin-acf-validator.json';
+
+    mkdir($acf_base_root . '/wp-content/database', 0777, true);
+    create_acf_validator_db($acf_base);
+    write_test_file($acf_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$findings = [];
+$meta = $db->query("SELECT meta_id, post_id, meta_key, meta_value FROM wp_postmeta WHERE substr(meta_key, 1, 1) = '_' AND substr(meta_value, 1, 6) = 'field_' ORDER BY meta_id");
+while ($row = $meta->fetchArray(SQLITE3_ASSOC)) {
+    $field_key = (string)$row['meta_value'];
+    $field_name = substr((string)$row['meta_key'], 1);
+    $escaped_field_key = SQLite3::escapeString($field_key);
+    $field_exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE post_type = 'acf-field' AND post_name = '$escaped_field_key'");
+    if ($field_exists === 1) {
+        continue;
+    }
+    $post_id = (int)$row['post_id'];
+    $escaped_field_name = SQLite3::escapeString($field_name);
+    $value_meta = $db->querySingle("SELECT meta_id, meta_value FROM wp_postmeta WHERE post_id = $post_id AND meta_key = '$escaped_field_name' ORDER BY meta_id LIMIT 1", true);
+    $findings[] = [
+        'plugin' => 'advanced-custom-fields',
+        'object' => 'post:' . $post_id . ':field:' . $field_key,
+        'reason' => 'ACF value metadata references a field key whose field definition post was removed',
+        'type' => 'plugin-acf-missing-field-definition',
+        'tables' => ['wp_posts', 'wp_postmeta'],
+        'validator' => 'acf-field-map@forkpress-test',
+        'severity' => 'error',
+        'logical_identity' => [
+            'plugin' => 'advanced-custom-fields',
+            'kind' => 'field_key',
+            'post_id' => $post_id,
+            'meta_key' => $field_name,
+            'field_key' => $field_key,
+        ],
+        'candidate' => [
+            'field_ref_meta_id' => (int)$row['meta_id'],
+            'value_meta_id' => is_array($value_meta) ? (int)$value_meta['meta_id'] : null,
+            'post_id' => $post_id,
+            'meta_key' => $field_name,
+            'field_key' => $field_key,
+            'value' => is_array($value_meta) ? (string)$value_meta['meta_value'] : null,
+            'field_exists' => $field_exists,
+        ],
+    ];
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+
+    copy_tree_for_test($acf_base_root, $acf_source_root);
+    copy_tree_for_test($acf_base_root, $acf_target_root);
+    cow_merge_capture_file_base($acf_base_root, $acf_file_base);
+    cow_merge_allocate_autoincrement_bands($acf_source, $acf_metadata, 'feature-plugin-acf-source');
+    cow_merge_allocate_autoincrement_bands($acf_target, $acf_metadata, 'main');
+
+    $db = open_db($acf_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID = 51');
+    $db->close();
+
+    $db = open_db($acf_target);
+    $db->exec("UPDATE wp_postmeta SET meta_value = 'Target CTA copy' WHERE meta_id = 61");
+    $db->close();
+
+    $acf_result = cow_merge_branch_state(
+        $acf_base,
+        $acf_source,
+        $acf_target,
+        $acf_metadata,
+        'feature-plugin-acf-source',
+        'main',
+        $acf_file_base,
+        $acf_source_root,
+        $acf_target_root
+    );
+
+    assert_same($acf_result['status'], 'completed_with_conflicts', 'ACF validator holds postmeta pointing at deleted field definitions for review');
+    assert_same((int)($acf_result['plugin_validators'] ?? 0), 1, 'ACF field-map validator is discovered from mu-plugins during merge');
+    assert_same((int)($acf_result['plugin_validator_conflicts'] ?? 0), 1, 'ACF validator records the stale field-key metadata reference');
+    assert_same((int)scalar($acf_target, "SELECT COUNT(*) FROM wp_posts WHERE ID = 51 AND post_type = 'acf-field'"), 0, 'ACF validator leaves the source field definition deletion staged for review');
+    assert_same(scalar($acf_target, 'SELECT meta_value FROM wp_postmeta WHERE meta_id = 61'), 'Target CTA copy', 'ACF validator preserves target value postmeta edits for review');
+    assert_same(scalar($acf_target, 'SELECT meta_value FROM wp_postmeta WHERE meta_id = 62'), 'field_cta_text', 'ACF validator keeps the stale hidden field-key metadata visible');
+
+    $acf_logical_identity = json_encode([
+        'plugin' => 'advanced-custom-fields',
+        'kind' => 'field_key',
+        'post_id' => 60,
+        'meta_key' => 'cta_text',
+        'field_key' => 'field_cta_text',
+    ], JSON_UNESCAPED_SLASHES);
+    $acf_audit = cow_merge_audit_report($acf_metadata, (int)$acf_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin' => 'advanced-custom-fields',
+        'conflict_type' => 'plugin-acf-missing-field-definition',
+        'plugin_logical_identity' => $acf_logical_identity,
+    ]);
+    assert_same(count($acf_audit['conflicts']), 1, 'ACF audit filters stale field-key findings by plugin, conflict type, and logical identity');
+    assert_same($acf_audit['conflicts'][0]['plugin'] ?? null, 'advanced-custom-fields', 'ACF audit exposes the plugin as a first-class field');
+    assert_same($acf_audit['conflicts'][0]['conflict_type'] ?? null, 'plugin-acf-missing-field-definition', 'ACF audit exposes the semantic conflict type');
+    assert_same($acf_audit['conflicts'][0]['plugin_logical_identity']['field_key'] ?? null, 'field_cta_text', 'ACF audit exposes the field-key logical identity');
+    $acf_payload = cow_merge_decode_payload_json((string)($acf_audit['conflicts'][0]['chosen_payload'] ?? ''), 'ACF field-map validator payload');
+    assert_same($acf_payload['object'] ?? null, 'post:60:field:field_cta_text', 'ACF audit identifies the post field reference');
+    assert_same($acf_payload['candidate']['value'] ?? null, 'Target CTA copy', 'ACF audit includes the preserved target value edit');
 
     $env_validator = $tmp . '/plugin-validator-env.php';
     write_test_file($env_validator, <<<'PHP'

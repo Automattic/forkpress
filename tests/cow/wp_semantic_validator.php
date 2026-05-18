@@ -2876,43 +2876,42 @@ PHP);
         $attachment_upload_target_root
     );
 
-    assert_same($attachment_upload_result['status'], 'completed_with_conflicts', 'built-in WordPress attachment upload validator holds missing generated files for review');
-    $expected_attachment_upload_conflicts = $has_attachment_upload_symlink ? 7 : 6;
-    assert_same((int)($attachment_upload_result['wordpress_semantic_validator_conflicts'] ?? 0), $expected_attachment_upload_conflicts, 'built-in WordPress attachment upload validator records generated-file, original-image, unsafe-path, non-regular-entry, duplicate-owner, metadata-file-drift, and missing-metadata conflicts');
+    assert_same($attachment_upload_result['status'], 'completed_with_conflicts', 'built-in WordPress attachment upload guard holds unsafe upload states for review');
+    $expected_attachment_upload_conflicts = $has_attachment_upload_symlink ? 5 : 4;
+    assert_same((int)($attachment_upload_result['wordpress_semantic_validator_conflicts'] ?? 0), $expected_attachment_upload_conflicts, 'built-in WordPress attachment upload validator records unsafe-path, non-regular-entry, duplicate-owner, metadata-file-drift, and missing-metadata conflicts');
     assert_same((int)($attachment_upload_result['plugin_validator_conflicts'] ?? 0), $expected_attachment_upload_conflicts, 'built-in WordPress attachment upload validator contributes to plugin-scoped conflict totals');
-    assert_true(!file_exists($attachment_upload_target_root . '/wp-content/uploads/2026/05/generated-image-150x150.jpg'), 'built-in WordPress attachment upload validator leaves the source generated-file deletion staged for review');
-    assert_true(!file_exists($attachment_upload_target_root . '/wp-content/uploads/2026/05/generated-image-original.jpg'), 'built-in WordPress attachment upload validator leaves the source original-image deletion staged for review');
+    assert_same((int)($attachment_upload_result['file_conflicts'] ?? 0), 2, 'filesystem merge holds source deletions of upload files still referenced by WordPress metadata');
+    assert_true(is_file($attachment_upload_target_root . '/wp-content/uploads/2026/05/generated-image-150x150.jpg'), 'filesystem merge preserves generated files still referenced by WordPress metadata');
+    assert_true(is_file($attachment_upload_target_root . '/wp-content/uploads/2026/05/generated-image-original.jpg'), 'filesystem merge preserves original_image files still referenced by WordPress metadata');
     assert_true(is_file($attachment_upload_target_root . '/wp-content/uploads/2026/05/generated-image.jpg'), 'built-in WordPress attachment upload validator preserves the original upload file');
     assert_true(is_file($attachment_upload_target_root . '/wp-content/uploads/2026/05/generated-image-300x200.jpg'), 'built-in WordPress attachment upload validator preserves unrelated generated files');
     assert_same(scalar($attachment_upload_target, 'SELECT post_title FROM wp_posts WHERE ID = 63'), 'Target attachment keeps generated metadata', 'built-in WordPress attachment upload validator preserves the target attachment edit');
 
-    $attachment_upload_audit = cow_merge_audit_report($attachment_upload_metadata, (int)$attachment_upload_result['run_id'], 10, [
-        'scope' => 'plugin',
+    $attachment_upload_file_audit = cow_merge_audit_report($attachment_upload_metadata, (int)$attachment_upload_result['run_id'], 10, [
+        'scope' => 'files',
         'records' => 'conflicts',
-        'semantic_scope' => 'wordpress',
-        'conflict_type' => 'plugin-wp-attachment-upload-missing-file',
-        'plugin_file' => 'wp-content/uploads/2026/05/generated-image-150x150.jpg',
+        'conflict_type' => 'file-wordpress-upload-reference-delete-conflict',
+        'path' => 'wp-content/uploads/2026/05/generated-image-150x150.jpg',
     ]);
-    assert_same(count($attachment_upload_audit['conflicts']), 1, 'built-in WordPress attachment upload validator exposes missing generated files as WordPress-scoped audit conflicts');
-    $attachment_upload_preview = (string)($attachment_upload_audit['conflicts'][0]['chosen_preview'] ?? '');
-    $attachment_upload_payload = cow_merge_audit_decode_payload(json_decode((string)($attachment_upload_audit['conflicts'][0]['chosen_payload'] ?? ''), true));
-    assert_true(str_contains($attachment_upload_preview, '"attachment_id":63'), 'built-in WordPress attachment upload audit includes the attachment ID');
-    assert_same($attachment_upload_payload['candidate']['role'] ?? null, 'generated-size', 'built-in WordPress attachment upload audit identifies generated-size files');
-    assert_same($attachment_upload_payload['candidate']['missing_file'] ?? null, 'wp-content/uploads/2026/05/generated-image-150x150.jpg', 'built-in WordPress attachment upload audit includes the missing upload path');
-    assert_same($attachment_upload_audit['conflicts'][0]['plugin_files'] ?? null, ['wp-content/uploads/2026/05/generated-image-150x150.jpg'], 'built-in WordPress attachment upload audit exposes the missing generated file filter');
+    assert_same(count($attachment_upload_file_audit['conflicts']), 1, 'filesystem audit exposes guarded generated upload deletes as file conflicts');
+    assert_same($attachment_upload_file_audit['conflicts'][0]['conflict_type'] ?? null, 'file-wordpress-upload-reference-delete-conflict', 'filesystem audit classifies guarded generated upload deletes');
 
-    $attachment_upload_original_audit = cow_merge_audit_report($attachment_upload_metadata, (int)$attachment_upload_result['run_id'], 10, [
+    $attachment_upload_original_file_audit = cow_merge_audit_report($attachment_upload_metadata, (int)$attachment_upload_result['run_id'], 10, [
+        'scope' => 'files',
+        'records' => 'conflicts',
+        'conflict_type' => 'file-wordpress-upload-reference-delete-conflict',
+        'path' => 'wp-content/uploads/2026/05/generated-image-original.jpg',
+    ]);
+    assert_same(count($attachment_upload_original_file_audit['conflicts']), 1, 'filesystem audit exposes guarded original_image upload deletes as file conflicts');
+    assert_same($attachment_upload_original_file_audit['conflicts'][0]['conflict_type'] ?? null, 'file-wordpress-upload-reference-delete-conflict', 'filesystem audit classifies guarded original_image upload deletes');
+
+    $attachment_upload_missing_file_audit = cow_merge_audit_report($attachment_upload_metadata, (int)$attachment_upload_result['run_id'], 10, [
         'scope' => 'plugin',
         'records' => 'conflicts',
         'semantic_scope' => 'wordpress',
         'conflict_type' => 'plugin-wp-attachment-upload-missing-file',
-        'plugin_file' => 'wp-content/uploads/2026/05/generated-image-original.jpg',
     ]);
-    assert_same(count($attachment_upload_original_audit['conflicts']), 1, 'built-in WordPress attachment upload validator exposes missing original_image files as WordPress-scoped audit conflicts');
-    $attachment_upload_original_payload = cow_merge_audit_decode_payload(json_decode((string)($attachment_upload_original_audit['conflicts'][0]['chosen_payload'] ?? ''), true));
-    assert_same($attachment_upload_original_payload['candidate']['role'] ?? null, 'original-image', 'built-in WordPress attachment upload audit identifies original_image files');
-    assert_same($attachment_upload_original_payload['candidate']['missing_file'] ?? null, 'wp-content/uploads/2026/05/generated-image-original.jpg', 'built-in WordPress attachment upload audit includes the missing original_image upload path');
-    assert_same($attachment_upload_original_audit['conflicts'][0]['plugin_files'] ?? null, ['wp-content/uploads/2026/05/generated-image-original.jpg'], 'built-in WordPress attachment upload audit exposes the missing original_image file filter');
+    assert_same(count($attachment_upload_missing_file_audit['conflicts']), 0, 'built-in WordPress attachment upload validator does not report missing files when guarded deletes preserve referenced uploads');
 
     $attachment_upload_invalid_path_audit = cow_merge_audit_report($attachment_upload_metadata, (int)$attachment_upload_result['run_id'], 10, [
         'scope' => 'plugin',

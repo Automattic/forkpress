@@ -8063,6 +8063,28 @@ function cow_merge_file_deleted_dir_is_safe(
     return true;
 }
 
+function cow_merge_file_path_has_protected_wordpress_upload_reference(
+    string $path,
+    ?array $entry,
+    array $protected_upload_paths
+): bool {
+    if ($protected_upload_paths === []) {
+        return false;
+    }
+    if (isset($protected_upload_paths[$path])) {
+        return true;
+    }
+    if (($entry['type'] ?? null) !== 'dir') {
+        return false;
+    }
+    foreach ($protected_upload_paths as $protected_path => $_) {
+        if (cow_merge_file_has_prefix($protected_path, $path)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 function cow_merge_record_file_conflict(
     SQLite3 $meta,
     int $run_id,
@@ -10500,6 +10522,95 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
     }
 }
 
+function cow_merge_wordpress_attachment_upload_referenced_paths(string $target_db): array {
+    $db = cow_merge_open_db($target_db, SQLITE3_OPEN_READONLY);
+    try {
+        $post_columns = array_fill_keys(cow_merge_table_columns($db, 'wp_posts'), true);
+        foreach (['ID', 'post_type'] as $column) {
+            if (!isset($post_columns[$column])) {
+                return [];
+            }
+        }
+        $postmeta_columns = array_fill_keys(cow_merge_table_columns($db, 'wp_postmeta'), true);
+        foreach (['meta_id', 'post_id', 'meta_key', 'meta_value'] as $column) {
+            if (!isset($postmeta_columns[$column])) {
+                return [];
+            }
+        }
+
+        $paths = [];
+        $add_path = static function (?string $path) use (&$paths): void {
+            if ($path !== null) {
+                $paths[$path] = true;
+            }
+        };
+
+        $stmt = cow_merge_prepare_checked(
+            $db,
+            "SELECT p.ID,
+                    (SELECT f.meta_value FROM wp_postmeta f WHERE f.post_id = p.ID AND f.meta_key = '_wp_attached_file' ORDER BY f.meta_id DESC LIMIT 1) AS attached_file,
+                    (SELECT m.meta_value FROM wp_postmeta m WHERE m.post_id = p.ID AND m.meta_key = '_wp_attachment_metadata' ORDER BY m.meta_id DESC LIMIT 1) AS attachment_metadata
+             FROM wp_posts p
+             WHERE p.post_type = 'attachment'
+             ORDER BY p.ID",
+            'failed to prepare WordPress attachment upload reference inspection'
+        );
+        $res = cow_merge_execute_checked($stmt, $db, 'failed to inspect WordPress attachment upload references');
+        while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+            $attached_file_raw = is_string($row['attached_file'] ?? null) ? (string)$row['attached_file'] : '';
+            $attached_path = cow_merge_wordpress_upload_relative_path($attached_file_raw);
+            if ($attached_path === null) {
+                continue;
+            }
+            $add_path($attached_path);
+
+            $metadata_raw = is_string($row['attachment_metadata'] ?? null) ? (string)$row['attachment_metadata'] : '';
+            if ($metadata_raw === '') {
+                continue;
+            }
+            $metadata = @unserialize($metadata_raw, ['allowed_classes' => false]);
+            if (!is_array($metadata)) {
+                continue;
+            }
+
+            $base_path = $attached_path;
+            if (isset($metadata['file']) && is_string($metadata['file']) && trim($metadata['file']) !== '') {
+                $metadata_path = cow_merge_wordpress_upload_relative_path((string)$metadata['file']);
+                if ($metadata_path !== null) {
+                    $base_path = $metadata_path;
+                    $add_path($metadata_path);
+                }
+            }
+
+            $sizes = is_array($metadata['sizes'] ?? null) ? $metadata['sizes'] : [];
+            foreach ($sizes as $size) {
+                if (!is_array($size) || !isset($size['file']) || !is_string($size['file'])) {
+                    continue;
+                }
+                $add_path(cow_merge_wordpress_upload_child_relative_path($base_path, (string)$size['file']));
+            }
+
+            if (isset($metadata['original_image']) && is_string($metadata['original_image']) && trim($metadata['original_image']) !== '') {
+                $add_path(cow_merge_wordpress_upload_child_relative_path($base_path, (string)$metadata['original_image']));
+            }
+
+            $backup_sizes = is_array($metadata['backup_sizes'] ?? null) ? $metadata['backup_sizes'] : [];
+            foreach ($backup_sizes as $backup) {
+                if (!is_array($backup) || !isset($backup['file']) || !is_string($backup['file'])) {
+                    continue;
+                }
+                $add_path(cow_merge_wordpress_upload_child_relative_path($base_path, (string)$backup['file']));
+            }
+        }
+        cow_merge_result_finalize_checked($res, 'failed to finalize WordPress attachment upload reference inspection');
+        $paths = array_keys($paths);
+        sort($paths);
+        return $paths;
+    } finally {
+        $db->close();
+    }
+}
+
 function cow_merge_collect_wordpress_attachment_upload_findings(
     string $target_db,
     string $target_root,
@@ -10581,7 +10692,8 @@ function cow_merge_files(
     string $source_root,
     string $target_root,
     string $metadata_db,
-    int $run_id
+    int $run_id,
+    array $protected_wordpress_upload_paths = []
 ): array {
     if (!is_dir($source_root)) {
         throw new RuntimeException("source filesystem root does not exist: $source_root");
@@ -10592,6 +10704,7 @@ function cow_merge_files(
     $base_entries = cow_merge_read_file_base($base_files);
     $source_entries = cow_merge_file_manifest_for_root($source_root)['entries'];
     $target_entries = cow_merge_file_manifest_for_root($target_root)['entries'];
+    $protected_wordpress_upload_paths = array_fill_keys(array_values($protected_wordpress_upload_paths), true);
     $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READWRITE | SQLITE3_OPEN_CREATE);
     cow_merge_ensure_metadata($meta);
 
@@ -10709,6 +10822,28 @@ function cow_merge_files(
                         'source deleted a filesystem directory that has target-side descendants'
                     )) {
                         $conflicts++;
+                    }
+                    continue;
+                }
+                if (
+                    $source === null
+                    && cow_merge_file_path_has_protected_wordpress_upload_reference($path, $base, $protected_wordpress_upload_paths)
+                ) {
+                    if (cow_merge_record_file_conflict(
+                        $meta,
+                        $run_id,
+                        $path,
+                        'file-wordpress-upload-reference-delete-conflict',
+                        $base,
+                        $source,
+                        $target,
+                        $target,
+                        'source deleted a WordPress upload file still referenced by the merged target database'
+                    )) {
+                        $conflicts++;
+                    }
+                    if (($base['type'] ?? null) === 'dir') {
+                        $target_kept_subtree_conflict_prefixes[] = $path;
                     }
                     continue;
                 }
@@ -22041,7 +22176,15 @@ function cow_merge_branch_state(
                 $filesystem_snapshot
             );
             cow_merge_failpoint('before-file-op');
-            $file_result = cow_merge_files($base_files, $source_root, $target_root, $metadata_db, (int)$result['run_id']);
+            $protected_wordpress_upload_paths = cow_merge_wordpress_attachment_upload_referenced_paths($target_db);
+            $file_result = cow_merge_files(
+                $base_files,
+                $source_root,
+                $target_root,
+                $metadata_db,
+                (int)$result['run_id'],
+                $protected_wordpress_upload_paths
+            );
             $result['file_applied'] = $file_result['applied'];
             $result['file_conflicts'] = $file_result['conflicts'];
             $result['applied'] += $file_result['applied'];

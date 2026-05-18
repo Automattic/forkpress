@@ -439,6 +439,9 @@ plugin-scoped review conflicts grouped by WooCommerce logical identity. A
 Gravity Forms-shaped fixture covers plugin schema stored in JSON: `wp_gf_entry`
 metadata whose field key points at a field removed from
 `wp_gf_form_meta.display_meta` stays reviewable and is filterable by form-field
-logical identity. Plugin validator reruns also cover changed source evidence
-and changed first-class `logical_identity` evidence returning reviewed findings
-to `needs-action` as replacement evidence.
+logical identity. An ACF-shaped fixture covers hidden postmeta field-key
+references (`_field_name = field_*`) left pointing at deleted `acf-field`
+definition posts while preserving target value-meta edits for review. Plugin
+validator reruns also cover changed source evidence and changed first-class
+`logical_identity` evidence returning reviewed findings to `needs-action` as
+replacement evidence.
