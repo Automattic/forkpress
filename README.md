@@ -406,6 +406,7 @@ Useful log files:
 | `forkpress agents [dir]` | Create agent branches and Git worktrees. |
 | `forkpress commit -m "message"` | Commit and push the current Git branch back to ForkPress. |
 | `forkpress pull` | Pull with rebase and autostash. |
+| `forkpress remote clone <name> --ssh <host> --path <wp-root> --branch <branch>` | Thin-clone a boot-ready remote WordPress root over SSH, skipping uploads, caches, backups, logs, and upgrade temp files by default, then create a local COW branch. |
 | `forkpress logs --file <name>` | Read WordPress, PHP, server, and maintenance logs. |
 | `forkpress storage status` | Show selected storage and mount state. |
 | `forkpress storage mount` | Attach mount-backed storage. |
