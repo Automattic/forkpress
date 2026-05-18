@@ -63,3 +63,15 @@ cargo build --release --target "$TARGET" -p forkpress-cli --bin forkpress --lock
 
 echo "--- :cow: COW strategy e2e"
 tests/cow/e2e.sh "target/$TARGET/release/forkpress"
+
+# Dev variant: builds a second runtime bundle (with experimental BranchFS/CAS
+# support), `forkpress-dev` binary, then exercises the content-addressable
+# storage e2e suite.
+echo "--- :package: Building dev PHP runtime bundle ($TARGET)"
+FORKPRESS_RUNTIME_PROFILE=dev FORKPRESS_TARGET="$TARGET" scripts/build-dist.sh
+
+echo "--- :crab: cargo build --release forkpress-dev ($TARGET)"
+cargo build --release --target "$TARGET" -p forkpress-cli --features dev-experiments --bin forkpress-dev --locked
+
+echo "--- :package: CAS strategy e2e (dev)"
+experiments/cas/tests/e2e.sh "target/$TARGET/release/forkpress-dev"
