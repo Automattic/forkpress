@@ -675,9 +675,13 @@ struct RemoteCloneArgs {
     #[arg(long = "local-url")]
     local_url: Option<String>,
 
-    /// Include wp-content/uploads in the initial sync.
+    /// Include wp-content/uploads in the initial boot sync.
     #[arg(long)]
     include_uploads: bool,
+
+    /// Download the full WordPress tree instead of the boot-critical subset.
+    #[arg(long)]
+    full_sync: bool,
 
     /// Additional rsync exclude pattern. Can be passed more than once.
     #[arg(long = "exclude")]
@@ -2854,11 +2858,13 @@ fn remote_clone_command(
     println!("  cache:     {}", manifest.cache_root.display());
     println!("  files:     {}", cache.files);
     println!(
-        "  uploads:   {}",
-        if args.include_uploads {
-            "included"
+        "  sync:      {}",
+        if args.full_sync {
+            "full tree"
+        } else if args.include_uploads {
+            "boot cache, uploads included"
         } else {
-            "skipped"
+            "boot cache"
         }
     );
     println!(
@@ -2922,9 +2928,11 @@ fn remote_clone_rsync_args(args: &RemoteCloneArgs, cache_root: &Path) -> Vec<OsS
     if !args.no_delete {
         out.push(OsString::from("--delete"));
     }
-    if !args.include_uploads {
-        out.push(OsString::from("--exclude"));
-        out.push(OsString::from("wp-content/uploads/"));
+    if !args.full_sync {
+        for exclude in remote_clone_default_excludes(args.include_uploads) {
+            out.push(OsString::from("--exclude"));
+            out.push(OsString::from(exclude));
+        }
     }
     for exclude in &args.excludes {
         out.push(OsString::from("--exclude"));
@@ -2936,6 +2944,24 @@ fn remote_clone_rsync_args(args: &RemoteCloneArgs, cache_root: &Path) -> Vec<OsS
     )));
     out.push(cache_root.as_os_str().to_os_string());
     out
+}
+
+fn remote_clone_default_excludes(include_uploads: bool) -> Vec<&'static str> {
+    let mut excludes = vec![
+        "wp-content/cache/",
+        "wp-content/upgrade/",
+        "wp-content/backups/",
+        "wp-content/backup-db/",
+        "wp-content/ai1wm-backups/",
+        "wp-content/updraft/",
+        "wp-content/wflogs/",
+        "wp-content/debug.log",
+        ".git/",
+    ];
+    if !include_uploads {
+        excludes.insert(0, "wp-content/uploads/");
+    }
+    excludes
 }
 
 fn remote_add_command(layout: &Layout, args: RemoteAddArgs) -> Result<i32> {
@@ -7926,6 +7952,7 @@ mod git_helper_tests {
         assert_eq!(clone.branch.as_deref(), Some("prod-main"));
         assert_eq!(clone.remote_url.as_deref(), Some("https://example.com"));
         assert!(!clone.include_uploads);
+        assert!(!clone.full_sync);
         assert!(clone.force);
 
         let rsync = remote_clone_rsync_args(
@@ -7939,11 +7966,16 @@ mod git_helper_tests {
         assert_eq!(rsync[0], "-az");
         assert!(rsync.contains(&"--delete".to_string()));
         assert!(rsync.contains(&"wp-content/uploads/".to_string()));
+        assert!(rsync.contains(&"wp-content/cache/".to_string()));
+        assert!(rsync.contains(&"wp-content/upgrade/".to_string()));
+        assert!(rsync.contains(&"wp-content/backups/".to_string()));
+        assert!(rsync.contains(&"wp-content/debug.log".to_string()));
+        assert!(rsync.contains(&".git/".to_string()));
         assert!(rsync.contains(&"deploy@example.com:/srv/www/example/".to_string()));
     }
 
     #[test]
-    fn remote_clone_can_include_uploads_and_extra_excludes() {
+    fn remote_clone_include_uploads_keeps_other_boot_excludes() {
         let clone = RemoteCloneArgs {
             name: "Production".to_string(),
             ssh: "deploy@example.com".to_string(),
@@ -7952,6 +7984,7 @@ mod git_helper_tests {
             remote_url: None,
             local_url: None,
             include_uploads: true,
+            full_sync: false,
             excludes: vec!["wp-content/cache/".to_string()],
             no_delete: true,
             force: false,
@@ -7964,6 +7997,45 @@ mod git_helper_tests {
         assert!(!rsync.contains(&"--delete".to_string()));
         assert!(!rsync.contains(&"wp-content/uploads/".to_string()));
         assert!(rsync.contains(&"wp-content/cache/".to_string()));
+        assert!(rsync.contains(&"wp-content/upgrade/".to_string()));
+        assert!(rsync.contains(&"deploy@example.com:/srv/www/example/".to_string()));
+    }
+
+    #[test]
+    fn remote_clone_full_sync_disables_boot_excludes() {
+        let cli = Cli::try_parse_from([
+            "forkpress",
+            "remote",
+            "clone",
+            "production",
+            "--ssh",
+            "deploy@example.com",
+            "--path",
+            "/srv/www/example/",
+            "--full-sync",
+            "--exclude",
+            "private/",
+        ])
+        .unwrap();
+        let Commands::Remote(args) = cli.command else {
+            panic!("expected remote command");
+        };
+        let RemoteCommand::Clone(clone) = args.command else {
+            panic!("expected remote clone command");
+        };
+        assert!(clone.full_sync);
+        assert!(!clone.include_uploads);
+
+        let rsync = remote_clone_rsync_args(&clone, Path::new("/tmp/cache"));
+        let rsync: Vec<String> = rsync
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(rsync.contains(&"--delete".to_string()));
+        assert!(!rsync.contains(&"wp-content/uploads/".to_string()));
+        assert!(!rsync.contains(&"wp-content/cache/".to_string()));
+        assert!(!rsync.contains(&"wp-content/upgrade/".to_string()));
+        assert!(rsync.contains(&"private/".to_string()));
         assert!(rsync.contains(&"deploy@example.com:/srv/www/example/".to_string()));
     }
 
