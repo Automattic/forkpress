@@ -1,4 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
+#[cfg(test)]
+use std::cell::RefCell;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::ffi::CString;
 use std::ffi::{OsStr, OsString};
@@ -25,6 +27,11 @@ use forkpress_runtime::{PortableRuntime, run_php_script};
 use windows_sys::Win32::Storage::FileSystem::{
     MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
 };
+
+#[cfg(test)]
+thread_local! {
+    static COW_STORAGE_TEST_FAILPOINT: RefCell<Option<(String, String)>> = RefCell::new(None);
+}
 
 mod remote;
 pub use remote::{
@@ -718,6 +725,16 @@ fn ensure_no_pending_cow_reset(layout: &Layout, branch: &str) -> Result<()> {
 }
 
 fn cow_storage_failpoint(name: &str) -> Result<()> {
+    #[cfg(test)]
+    {
+        let configured = COW_STORAGE_TEST_FAILPOINT.with(|failpoint| failpoint.borrow().clone());
+        if let Some((configured_name, action)) = configured {
+            if configured_name == name {
+                return cow_storage_failpoint_action(name, &action);
+            }
+        }
+    }
+
     let configured = match std::env::var("FORKPRESS_COW_STORAGE_TEST_FAILPOINT") {
         Ok(value) if !value.is_empty() => value,
         _ => return Ok(()),
@@ -730,10 +747,13 @@ fn cow_storage_failpoint(name: &str) -> Result<()> {
         return Ok(());
     }
 
-    match std::env::var("FORKPRESS_COW_STORAGE_TEST_FAILPOINT_ACTION")
-        .unwrap_or_else(|_| "throw".to_string())
-        .as_str()
-    {
+    let action = std::env::var("FORKPRESS_COW_STORAGE_TEST_FAILPOINT_ACTION")
+        .unwrap_or_else(|_| "throw".to_string());
+    cow_storage_failpoint_action(name, &action)
+}
+
+fn cow_storage_failpoint_action(name: &str, action: &str) -> Result<()> {
+    match action {
         "exit" => std::process::exit(86),
         _ => bail!("forced COW storage failpoint: {name}"),
     }
@@ -4242,6 +4262,26 @@ fn path_bytes(path: &Path) -> &[u8] {
 mod tests {
     use super::*;
 
+    struct CowStorageTestFailpointGuard {
+        previous: Option<(String, String)>,
+    }
+
+    impl CowStorageTestFailpointGuard {
+        fn set(name: &str, action: &str) -> Self {
+            let previous = COW_STORAGE_TEST_FAILPOINT
+                .with(|failpoint| failpoint.replace(Some((name.to_string(), action.to_string()))));
+            Self { previous }
+        }
+    }
+
+    impl Drop for CowStorageTestFailpointGuard {
+        fn drop(&mut self) {
+            COW_STORAGE_TEST_FAILPOINT.with(|failpoint| {
+                failpoint.replace(self.previous.take());
+            });
+        }
+    }
+
     #[test]
     fn atomic_publish_preserves_existing_destination_on_publish_failure() {
         let root = std::env::temp_dir().join(format!(
@@ -4788,6 +4828,215 @@ esac
             .unwrap(),
             "main db\n"
         );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn reset_birth_metadata_failpoint_rolls_back_artifacts_before_publish() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "forkpress-reset-birth-metadata-rollback-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let layout = Layout::new(root.join(".forkpress")).unwrap();
+        let runtime = PortableRuntime::from_layout(&layout);
+        let fake_php = root.join("fake-php");
+        let fake_php_log = root.join("fake-php.log");
+        let escaped_log = fake_php_log.to_string_lossy().replace('\'', "'\\''");
+        fs::create_dir_all(layout.runtime_dir.join("runtime/cow")).unwrap();
+        fs::create_dir_all(layout.runtime_dir.join("scripts/shared")).unwrap();
+        fs::create_dir_all(layout.runtime_dir.join("scripts/cow")).unwrap();
+        fs::write(layout.runtime_dir.join("runtime/cow/bootstrap_wp.php"), b"").unwrap();
+        fs::write(
+            layout.runtime_dir.join("scripts/shared/sqlite_backup.php"),
+            b"",
+        )
+        .unwrap();
+        fs::write(layout.runtime_dir.join("scripts/cow/merge.php"), b"").unwrap();
+        fs::write(
+            &fake_php,
+            format!(
+                r#"#!/bin/sh
+while [ "$1" = "-d" ]; do
+    shift 2
+done
+script="$1"
+shift
+case "$script" in
+    */sqlite_backup.php)
+        cp "$1" "$2"
+        ;;
+    */bootstrap_wp.php)
+        ;;
+    */merge.php)
+        command="$1"
+        shift
+        case "$command" in
+            allocate-id-bands)
+                db=""
+                metadata_db=""
+                while [ "$#" -gt 0 ]; do
+                    key="$1"
+                    shift
+                    case "$key" in
+                        --db)
+                            db="$1"
+                            shift
+                            ;;
+                        --metadata-db)
+                            metadata_db="$1"
+                            shift
+                            ;;
+                    esac
+                done
+                printf 'allocate:%s\n' "$db" >> '{escaped_log}'
+                case "$db" in
+                    *".forkpress-reset-stage-feature-"*) ;;
+                    *) exit 43 ;;
+                esac
+                mkdir -p "$(dirname "$metadata_db")"
+                printf 'new reset metadata\n' > "$metadata_db"
+                ;;
+            capture-identities)
+                metadata_db=""
+                while [ "$#" -gt 0 ]; do
+                    key="$1"
+                    shift
+                    if [ "$key" = "--metadata-db" ] && [ "$#" -gt 0 ]; then
+                        metadata_db="$1"
+                        shift
+                    fi
+                done
+                printf 'identities\n' >> '{escaped_log}'
+                printf 'captured identities\n' >> "$metadata_db"
+                ;;
+            capture-files)
+                file_base=""
+                while [ "$#" -gt 0 ]; do
+                    key="$1"
+                    shift
+                    if [ "$key" = "--file-base" ] && [ "$#" -gt 0 ]; then
+                        file_base="$1"
+                        shift
+                    fi
+                done
+                mkdir -p "$(dirname "$file_base")"
+                printf '{{"reset":true}}\n' > "$file_base"
+                printf 'files:%s\n' "$file_base" >> '{escaped_log}'
+                ;;
+            *)
+                exit 44
+                ;;
+        esac
+        ;;
+    *)
+        exit 45
+        ;;
+esac
+"#
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fake_php).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_php, permissions).unwrap();
+
+        let main_root = cow_branch_root(&layout, "main");
+        let feature_root = cow_branch_root(&layout, "feature");
+        for (branch, root, db_contents, marker) in [
+            ("main", &main_root, "main db\n", "main published\n"),
+            ("feature", &feature_root, "feature db\n", "feature old\n"),
+        ] {
+            fs::create_dir_all(root.join("wp-content/database")).unwrap();
+            fs::write(root.join("wp-load.php"), b"<?php\n").unwrap();
+            fs::write(root.join("wp-content/database/.ht.sqlite"), db_contents).unwrap();
+            fs::write(root.join("wp-content/marker.txt"), marker).unwrap();
+            assert!(cow_branch_root(&layout, branch).exists());
+        }
+
+        let metadata_db = cow_merge_metadata_db_path(&layout);
+        fs::create_dir_all(metadata_db.parent().unwrap()).unwrap();
+        fs::write(&metadata_db, b"old reset metadata\n").unwrap();
+        let merge_base = cow_merge_base_db_path(&layout, "feature").unwrap();
+        fs::create_dir_all(merge_base.parent().unwrap()).unwrap();
+        fs::write(&merge_base, b"old feature merge base\n").unwrap();
+        let file_base = cow_merge_file_base_path(&layout, "feature").unwrap();
+        fs::create_dir_all(file_base.parent().unwrap()).unwrap();
+        fs::write(&file_base, b"{\"old\":true}\n").unwrap();
+
+        let err = {
+            let _guard =
+                CowStorageTestFailpointGuard::set("after-branch-reset-birth-metadata", "throw");
+            reset_cow_branch(
+                &layout,
+                &runtime,
+                &SharedPaths {
+                    work_dir: layout.work_dir.clone(),
+                    php_bin: Some(fake_php.clone()),
+                },
+                "feature",
+                "main",
+                false,
+            )
+            .expect_err("reset should fail at the post-birth-metadata failpoint")
+        };
+        let message = format!("{err:#}");
+        assert!(message.contains("after-branch-reset-birth-metadata"));
+        assert!(message.contains("failed to finalize COW branch reset metadata before publish"));
+        assert_eq!(
+            fs::read_to_string(feature_root.join("wp-content/database/.ht.sqlite")).unwrap(),
+            "feature db\n"
+        );
+        assert_eq!(
+            fs::read_to_string(feature_root.join("wp-content/marker.txt")).unwrap(),
+            "feature old\n"
+        );
+        assert!(!cow_reset_pending_path(&layout, "feature").unwrap().exists());
+        assert_eq!(fs::read(&metadata_db).unwrap(), b"old reset metadata\n");
+        assert_eq!(fs::read(&merge_base).unwrap(), b"old feature merge base\n");
+        assert_eq!(fs::read(&file_base).unwrap(), b"{\"old\":true}\n");
+
+        let branch_parent = feature_root.parent().unwrap();
+        let staging_leftovers = fs::read_dir(branch_parent)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".forkpress-reset-stage-feature-")
+            })
+            .count();
+        assert_eq!(staging_leftovers, 0);
+
+        reset_cow_branch(
+            &layout,
+            &runtime,
+            &SharedPaths {
+                work_dir: layout.work_dir.clone(),
+                php_bin: Some(fake_php),
+            },
+            "feature",
+            "main",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(feature_root.join("wp-content/database/.ht.sqlite")).unwrap(),
+            "main db\n"
+        );
+        assert_eq!(
+            fs::read_to_string(feature_root.join("wp-content/marker.txt")).unwrap(),
+            "main published\n"
+        );
+        assert!(!cow_reset_pending_path(&layout, "feature").unwrap().exists());
 
         fs::remove_dir_all(root).unwrap();
     }

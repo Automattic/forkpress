@@ -215,6 +215,12 @@ function create_woocommerce_hpos_validator_db(string $path): void {
         address_type TEXT NOT NULL,
         first_name TEXT NOT NULL
     )");
+    $db->exec("CREATE TABLE wp_wc_orders_meta (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_id INTEGER NOT NULL,
+        meta_key TEXT NOT NULL,
+        meta_value TEXT NOT NULL
+    )");
     $db->exec("CREATE TABLE wp_woocommerce_order_items (
         order_item_id INTEGER PRIMARY KEY AUTOINCREMENT,
         order_id INTEGER NOT NULL,
@@ -227,6 +233,10 @@ function create_woocommerce_hpos_validator_db(string $path): void {
         meta_key TEXT NOT NULL,
         meta_value TEXT NOT NULL
     )");
+    $db->exec("CREATE TABLE wp_wc_product_meta_lookup (
+        product_id INTEGER PRIMARY KEY,
+        sku TEXT NOT NULL
+    )");
     $db->exec("CREATE TABLE wp_options (
         option_id INTEGER PRIMARY KEY AUTOINCREMENT,
         option_name TEXT NOT NULL,
@@ -237,10 +247,119 @@ function create_woocommerce_hpos_validator_db(string $path): void {
     $db->exec("INSERT INTO wp_wc_order_addresses (id, order_id, address_type, first_name) VALUES (21, 20, 'billing', 'Base')");
     $db->exec("INSERT INTO wp_woocommerce_order_items (order_item_id, order_id, order_item_name, order_item_type) VALUES (22, 20, 'Base product', 'line_item')");
     $db->exec("INSERT INTO wp_woocommerce_order_itemmeta (meta_id, order_item_id, meta_key, meta_value) VALUES (23, 22, '_product_id', '100')");
+    $db->exec("INSERT INTO wp_wc_orders_meta (id, order_id, meta_key, meta_value) VALUES (24, 20, '_forkpress_note', 'Base note')");
+    $db->exec("INSERT INTO wp_wc_product_meta_lookup (product_id, sku) VALUES (100, 'base-product')");
     $recent_orders = json_encode(['recent_order_ids' => [20]], JSON_UNESCAPED_SLASHES);
     $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('woocommerce_recent_order_ids', :value, 'yes')");
     $stmt->bindValue(':value', $recent_orders, SQLITE3_TEXT);
     $stmt->execute();
+    $db->close();
+}
+
+function create_gravity_forms_validator_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_gf_form (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        is_active INTEGER NOT NULL DEFAULT 1
+    )");
+    $db->exec("CREATE TABLE wp_gf_form_meta (
+        form_id INTEGER PRIMARY KEY,
+        display_meta TEXT NOT NULL
+    )");
+    $db->exec("CREATE TABLE wp_gf_entry (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        form_id INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active'
+    )");
+    $db->exec("CREATE TABLE wp_gf_entry_meta (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        form_id INTEGER NOT NULL,
+        entry_id INTEGER NOT NULL,
+        meta_key TEXT NOT NULL,
+        meta_value TEXT NOT NULL
+    )");
+    $db->exec("INSERT INTO wp_gf_form (id, title, is_active) VALUES (30, 'Contact', 1)");
+    $display_meta = json_encode([
+        'fields' => [
+            ['id' => 5, 'label' => 'Name', 'type' => 'text'],
+        ],
+    ], JSON_UNESCAPED_SLASHES);
+    $stmt = $db->prepare('INSERT INTO wp_gf_form_meta (form_id, display_meta) VALUES (30, :display_meta)');
+    $stmt->bindValue(':display_meta', $display_meta, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->exec("INSERT INTO wp_gf_entry (id, form_id, status) VALUES (40, 30, 'active')");
+    $db->exec("INSERT INTO wp_gf_entry_meta (id, form_id, entry_id, meta_key, meta_value) VALUES (41, 30, 40, '5', 'Base field value')");
+    $db->close();
+}
+
+function create_acf_validator_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_title TEXT NOT NULL DEFAULT '',
+        post_content TEXT NOT NULL DEFAULT '',
+        post_status TEXT NOT NULL DEFAULT 'publish',
+        post_type TEXT NOT NULL DEFAULT 'post',
+        post_name TEXT NOT NULL DEFAULT '',
+        post_parent INTEGER NOT NULL DEFAULT 0
+    )");
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, post_parent) VALUES
+        (50, 'Landing Page Fields', '', 'publish', 'acf-field-group', 'group_landing_page', 0),
+        (51, 'CTA Text', 'a:2:{s:4:\"type\";s:4:\"text\";s:4:\"name\";s:8:\"cta_text\";}', 'publish', 'acf-field', 'field_cta_text', 50),
+        (60, 'Landing Page', '<!-- wp:paragraph --><p>Landing page</p><!-- /wp:paragraph -->', 'publish', 'page', 'landing-page', 0)");
+    $db->exec("INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES
+        (61, 60, 'cta_text', 'Base CTA copy'),
+        (62, 60, '_cta_text', 'field_cta_text')");
+    $db->close();
+}
+
+function create_yoast_indexable_validator_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_title TEXT NOT NULL DEFAULT '',
+        post_content TEXT NOT NULL DEFAULT '',
+        post_status TEXT NOT NULL DEFAULT 'publish',
+        post_type TEXT NOT NULL DEFAULT 'post',
+        post_name TEXT NOT NULL DEFAULT '',
+        post_parent INTEGER NOT NULL DEFAULT 0
+    )");
+    $db->exec("CREATE TABLE wp_yoast_indexable (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        object_id INTEGER,
+        object_type TEXT NOT NULL,
+        object_sub_type TEXT NOT NULL DEFAULT '',
+        permalink TEXT NOT NULL DEFAULT '',
+        title TEXT NOT NULL DEFAULT '',
+        description TEXT NOT NULL DEFAULT ''
+    )");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, post_parent) VALUES
+        (70, 'SEO Landing Page', '<!-- wp:paragraph --><p>SEO landing page</p><!-- /wp:paragraph -->', 'publish', 'page', 'seo-landing-page', 0)");
+    $db->exec("INSERT INTO wp_yoast_indexable (id, object_id, object_type, object_sub_type, permalink, title, description) VALUES
+        (80, 70, 'post', 'page', 'https://example.test/seo-landing-page/', 'Base SEO title', 'Base SEO description')");
+    $db->close();
+}
+
+function create_events_calendar_validator_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_title TEXT NOT NULL DEFAULT '',
+        post_content TEXT NOT NULL DEFAULT '',
+        post_status TEXT NOT NULL DEFAULT 'publish',
+        post_type TEXT NOT NULL DEFAULT 'post',
+        post_name TEXT NOT NULL DEFAULT '',
+        post_parent INTEGER NOT NULL DEFAULT 0
+    )");
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, post_parent) VALUES
+        (90, 'Spring Conference', '', 'publish', 'tribe_events', 'spring-conference', 0),
+        (91, 'Main Hall', '', 'publish', 'tribe_venue', 'main-hall', 0)");
+    $db->exec("INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES
+        (100, 90, '_EventVenueID', '91'),
+        (101, 90, '_EventStartDate', '2026-06-01 09:00:00')");
     $db->close();
 }
 
@@ -2483,6 +2602,14 @@ while ($row = $addresses->fetchArray(SQLITE3_ASSOC)) {
         'first_name' => (string)$row['first_name'],
     ]);
 }
+$order_metas = $db->query('SELECT id, order_id, meta_key, meta_value FROM wp_wc_orders_meta ORDER BY id');
+while ($row = $order_metas->fetchArray(SQLITE3_ASSOC)) {
+    $check_order((int)$row['order_id'], 'order-meta:' . (int)$row['id'], ['wp_wc_orders', 'wp_wc_orders_meta'], [
+        'order_meta_id' => (int)$row['id'],
+        'meta_key' => (string)$row['meta_key'],
+        'meta_value' => (string)$row['meta_value'],
+    ]);
+}
 $items = $db->query('SELECT order_item_id, order_id, order_item_name FROM wp_woocommerce_order_items ORDER BY order_item_id');
 while ($row = $items->fetchArray(SQLITE3_ASSOC)) {
     $check_order((int)$row['order_id'], 'order-item:' . (int)$row['order_item_id'], ['wp_wc_orders', 'wp_woocommerce_order_items'], [
@@ -2524,6 +2651,35 @@ while ($row = $metas->fetchArray(SQLITE3_ASSOC)) {
         'order_item_id' => (int)$row['order_item_id'],
         'meta_key' => (string)$row['meta_key'],
     ]);
+    if ((string)$row['meta_key'] === '_product_id') {
+        $product_id = (int)$row['meta_value'];
+        if ($product_id > 0) {
+            $product_exists = (int)$db->querySingle('SELECT COUNT(*) FROM wp_wc_product_meta_lookup WHERE product_id = ' . $product_id);
+            if ($product_exists !== 1) {
+                $findings[] = [
+                    'plugin' => 'woocommerce',
+                    'object' => 'order-item-product:' . (int)$row['meta_id'],
+                    'reason' => 'WooCommerce order item metadata references a missing product lookup row',
+                    'type' => 'plugin-woocommerce-hpos-missing-product',
+                    'tables' => ['wp_wc_product_meta_lookup', 'wp_woocommerce_order_itemmeta'],
+                    'validator' => 'woocommerce-hpos@forkpress-test',
+                    'severity' => 'error',
+                    'logical_identity' => [
+                        'plugin' => 'woocommerce',
+                        'kind' => 'product',
+                        'product_id' => $product_id,
+                    ],
+                    'candidate' => [
+                        'meta_id' => (int)$row['meta_id'],
+                        'order_item_id' => (int)$row['order_item_id'],
+                        'order_id' => $order_id,
+                        'product_id' => $product_id,
+                        'product_exists' => $product_exists,
+                    ],
+                ];
+            }
+        }
+    }
 }
 $option_value = $db->querySingle("SELECT option_value FROM wp_options WHERE option_name = 'woocommerce_recent_order_ids'");
 $option_payload = is_string($option_value) ? json_decode($option_value, true) : null;
@@ -2553,7 +2709,9 @@ PHP);
 
     $db = open_db($woocommerce_target);
     $db->exec("UPDATE wp_wc_order_addresses SET first_name = 'Target' WHERE id = 21");
+    $db->exec("UPDATE wp_wc_orders_meta SET meta_value = 'Target note' WHERE id = 24");
     $db->exec("UPDATE wp_woocommerce_order_items SET order_item_name = 'Target product' WHERE order_item_id = 22");
+    $db->exec("INSERT INTO wp_wc_product_meta_lookup (product_id, sku) VALUES (200, 'target-product')");
     $db->exec("UPDATE wp_woocommerce_order_itemmeta SET meta_value = '200' WHERE meta_id = 23");
     $target_recent_orders = json_encode(['recent_order_ids' => [20], 'target_note' => 'edited on main'], JSON_UNESCAPED_SLASHES);
     $stmt = $db->prepare("UPDATE wp_options SET option_value = :value WHERE option_name = 'woocommerce_recent_order_ids'");
@@ -2575,9 +2733,10 @@ PHP);
 
     assert_same($woocommerce_result['status'], 'completed_with_conflicts', 'WooCommerce HPOS validator holds orphaned order graphs for review');
     assert_same((int)($woocommerce_result['plugin_validators'] ?? 0), 1, 'WooCommerce HPOS validator is discovered from mu-plugins during merge');
-    assert_same((int)($woocommerce_result['plugin_validator_conflicts'] ?? 0), 4, 'WooCommerce HPOS validator records address, item, itemmeta, and option order graph conflicts');
+    assert_same((int)($woocommerce_result['plugin_validator_conflicts'] ?? 0), 5, 'WooCommerce HPOS validator records address, meta, item, itemmeta, and option order graph conflicts');
     assert_same((int)scalar($woocommerce_target, 'SELECT COUNT(*) FROM wp_wc_orders WHERE id = 20'), 0, 'WooCommerce HPOS validator leaves the source order delete staged for review');
     assert_same(scalar($woocommerce_target, 'SELECT first_name FROM wp_wc_order_addresses WHERE id = 21'), 'Target', 'WooCommerce HPOS validator preserves target address edits for review');
+    assert_same(scalar($woocommerce_target, 'SELECT meta_value FROM wp_wc_orders_meta WHERE id = 24'), 'Target note', 'WooCommerce HPOS validator preserves target order metadata edits for review');
     assert_same(scalar($woocommerce_target, 'SELECT order_item_name FROM wp_woocommerce_order_items WHERE order_item_id = 22'), 'Target product', 'WooCommerce HPOS validator preserves target order item edits for review');
     assert_same(scalar($woocommerce_target, 'SELECT meta_value FROM wp_woocommerce_order_itemmeta WHERE meta_id = 23'), '200', 'WooCommerce HPOS validator preserves target itemmeta edits for review');
     $woocommerce_option = json_decode((string)scalar($woocommerce_target, "SELECT option_value FROM wp_options WHERE option_name = 'woocommerce_recent_order_ids'"), true);
@@ -2590,7 +2749,7 @@ PHP);
         'plugin' => 'woocommerce',
         'conflict_type' => 'plugin-woocommerce-hpos-missing-order',
     ]);
-    assert_same(count($woocommerce_audit['conflicts']), 4, 'WooCommerce HPOS validator exposes every stale order reference as plugin audit conflicts');
+    assert_same(count($woocommerce_audit['conflicts']), 5, 'WooCommerce HPOS validator exposes every stale order reference as plugin audit conflicts');
     $woocommerce_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $woocommerce_audit['conflicts']));
     assert_true(str_contains($woocommerce_preview, '"order_id":20'), 'WooCommerce HPOS audit includes the missing order ID');
     $woocommerce_objects = [];
@@ -2601,8 +2760,8 @@ PHP);
     sort($woocommerce_objects);
     assert_same(
         $woocommerce_objects,
-        ['option:woocommerce_recent_order_ids:0', 'order-address:21', 'order-item:22', 'order-itemmeta:23'],
-        'WooCommerce HPOS audit exposes the stale address, item, itemmeta, and cached option objects'
+        ['option:woocommerce_recent_order_ids:0', 'order-address:21', 'order-item:22', 'order-itemmeta:23', 'order-meta:24'],
+        'WooCommerce HPOS audit exposes the stale address, meta, item, itemmeta, and cached option objects'
     );
     $woocommerce_logical_identity_audit = cow_merge_audit_report($woocommerce_metadata, (int)$woocommerce_result['run_id'], 10, [
         'scope' => 'plugin',
@@ -2610,7 +2769,7 @@ PHP);
         'plugin' => 'woocommerce',
         'plugin_logical_identity' => json_encode(['plugin' => 'woocommerce', 'kind' => 'shop_order', 'order_id' => 20], JSON_UNESCAPED_SLASHES),
     ]);
-    assert_same(count($woocommerce_logical_identity_audit['conflicts']), 4, 'WooCommerce HPOS audit filters conflicts by plugin logical order identity');
+    assert_same(count($woocommerce_logical_identity_audit['conflicts']), 5, 'WooCommerce HPOS audit filters conflicts by plugin logical order identity');
     $woocommerce_group_audit = cow_merge_audit_report($woocommerce_metadata, (int)$woocommerce_result['run_id'], 10, [
         'scope' => 'plugin',
         'records' => 'conflicts',
@@ -2627,7 +2786,596 @@ PHP);
             $woocommerce_order_group_count += $conflict_count;
         }
     }
-    assert_same($woocommerce_order_group_count, 4, 'WooCommerce HPOS audit groups stale graph findings by logical order identity');
+    assert_same($woocommerce_order_group_count, 5, 'WooCommerce HPOS audit groups stale graph findings by logical order identity');
+
+    $woocommerce_product_base_root = $tmp . '/woocommerce-product-base';
+    $woocommerce_product_source_root = $tmp . '/woocommerce-product-source';
+    $woocommerce_product_target_root = $tmp . '/woocommerce-product-target';
+    $woocommerce_product_base = $woocommerce_product_base_root . '/wp-content/database/.ht.sqlite';
+    $woocommerce_product_source = $woocommerce_product_source_root . '/wp-content/database/.ht.sqlite';
+    $woocommerce_product_target = $woocommerce_product_target_root . '/wp-content/database/.ht.sqlite';
+    $woocommerce_product_metadata = $tmp . '/.forkpress/cow/merge/plugin-woocommerce-product-validator-metadata.sqlite';
+    $woocommerce_product_file_base = $tmp . '/.forkpress/cow/merge/file-bases/plugin-woocommerce-product-validator.json';
+
+    copy_tree_for_test($woocommerce_base_root, $woocommerce_product_base_root);
+    copy_tree_for_test($woocommerce_product_base_root, $woocommerce_product_source_root);
+    copy_tree_for_test($woocommerce_product_base_root, $woocommerce_product_target_root);
+    cow_merge_capture_file_base($woocommerce_product_base_root, $woocommerce_product_file_base);
+    cow_merge_allocate_autoincrement_bands($woocommerce_product_source, $woocommerce_product_metadata, 'feature-plugin-woocommerce-product-source');
+    cow_merge_allocate_autoincrement_bands($woocommerce_product_target, $woocommerce_product_metadata, 'main');
+
+    $db = open_db($woocommerce_product_source);
+    $db->exec('DELETE FROM wp_wc_product_meta_lookup WHERE product_id = 100');
+    $db->close();
+
+    $db = open_db($woocommerce_product_target);
+    $db->exec("UPDATE wp_woocommerce_order_items SET order_item_name = 'Target product still references lookup' WHERE order_item_id = 22");
+    $db->close();
+
+    $woocommerce_product_result = cow_merge_branch_state(
+        $woocommerce_product_base,
+        $woocommerce_product_source,
+        $woocommerce_product_target,
+        $woocommerce_product_metadata,
+        'feature-plugin-woocommerce-product-source',
+        'main',
+        $woocommerce_product_file_base,
+        $woocommerce_product_source_root,
+        $woocommerce_product_target_root
+    );
+
+    assert_same($woocommerce_product_result['status'], 'completed_with_conflicts', 'WooCommerce HPOS validator holds order items pointing at deleted product lookup rows for review');
+    assert_same((int)($woocommerce_product_result['plugin_validators'] ?? 0), 1, 'WooCommerce product lookup validator is discovered from mu-plugins during merge');
+    assert_same((int)($woocommerce_product_result['plugin_validator_conflicts'] ?? 0), 1, 'WooCommerce product lookup validator records the stale product reference');
+    assert_same((int)scalar($woocommerce_product_target, 'SELECT COUNT(*) FROM wp_wc_product_meta_lookup WHERE product_id = 100'), 0, 'WooCommerce product lookup validator leaves the source product lookup delete staged for review');
+    assert_same(scalar($woocommerce_product_target, 'SELECT order_item_name FROM wp_woocommerce_order_items WHERE order_item_id = 22'), 'Target product still references lookup', 'WooCommerce product lookup validator preserves target order item edits for review');
+    assert_same(scalar($woocommerce_product_target, "SELECT meta_value FROM wp_woocommerce_order_itemmeta WHERE meta_id = 23 AND meta_key = '_product_id'"), '100', 'WooCommerce product lookup validator keeps the stale product itemmeta visible');
+
+    $woocommerce_product_audit = cow_merge_audit_report($woocommerce_product_metadata, (int)$woocommerce_product_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin' => 'woocommerce',
+        'conflict_type' => 'plugin-woocommerce-hpos-missing-product',
+    ]);
+    assert_same(count($woocommerce_product_audit['conflicts']), 1, 'WooCommerce HPOS audit exposes the stale product lookup reference as a plugin conflict');
+    $woocommerce_product_payload = cow_merge_decode_payload_json((string)($woocommerce_product_audit['conflicts'][0]['chosen_payload'] ?? ''), 'WooCommerce product lookup validator payload');
+    assert_same($woocommerce_product_payload['object'] ?? null, 'order-item-product:23', 'WooCommerce product audit identifies the order itemmeta product owner');
+    assert_same($woocommerce_product_payload['candidate']['product_id'] ?? null, 100, 'WooCommerce product audit includes the missing product ID');
+    assert_same($woocommerce_product_payload['candidate']['order_item_id'] ?? null, 22, 'WooCommerce product audit includes the order item using the missing product');
+
+    $woocommerce_product_logical_identity_audit = cow_merge_audit_report($woocommerce_product_metadata, (int)$woocommerce_product_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin' => 'woocommerce',
+        'plugin_logical_identity' => json_encode(['plugin' => 'woocommerce', 'kind' => 'product', 'product_id' => 100], JSON_UNESCAPED_SLASHES),
+    ]);
+    assert_same(count($woocommerce_product_logical_identity_audit['conflicts']), 1, 'WooCommerce HPOS audit filters product lookup findings by plugin logical product identity');
+
+    $woocommerce_itemmeta_base_root = $tmp . '/woocommerce-itemmeta-base';
+    $woocommerce_itemmeta_source_root = $tmp . '/woocommerce-itemmeta-source';
+    $woocommerce_itemmeta_target_root = $tmp . '/woocommerce-itemmeta-target';
+    $woocommerce_itemmeta_base = $woocommerce_itemmeta_base_root . '/wp-content/database/.ht.sqlite';
+    $woocommerce_itemmeta_source = $woocommerce_itemmeta_source_root . '/wp-content/database/.ht.sqlite';
+    $woocommerce_itemmeta_target = $woocommerce_itemmeta_target_root . '/wp-content/database/.ht.sqlite';
+    $woocommerce_itemmeta_metadata = $tmp . '/.forkpress/cow/merge/plugin-woocommerce-itemmeta-validator-metadata.sqlite';
+    $woocommerce_itemmeta_file_base = $tmp . '/.forkpress/cow/merge/file-bases/plugin-woocommerce-itemmeta-validator.json';
+
+    copy_tree_for_test($woocommerce_base_root, $woocommerce_itemmeta_base_root);
+    copy_tree_for_test($woocommerce_itemmeta_base_root, $woocommerce_itemmeta_source_root);
+    copy_tree_for_test($woocommerce_itemmeta_base_root, $woocommerce_itemmeta_target_root);
+    cow_merge_capture_file_base($woocommerce_itemmeta_base_root, $woocommerce_itemmeta_file_base);
+    cow_merge_allocate_autoincrement_bands($woocommerce_itemmeta_source, $woocommerce_itemmeta_metadata, 'feature-plugin-woocommerce-itemmeta-source');
+    cow_merge_allocate_autoincrement_bands($woocommerce_itemmeta_target, $woocommerce_itemmeta_metadata, 'main');
+
+    $db = open_db($woocommerce_itemmeta_source);
+    $db->exec('DELETE FROM wp_woocommerce_order_items WHERE order_item_id = 22');
+    $db->close();
+
+    $db = open_db($woocommerce_itemmeta_target);
+    $db->exec("UPDATE wp_woocommerce_order_itemmeta SET meta_value = 'target meta keeps product 100' WHERE meta_id = 23");
+    $db->close();
+
+    $woocommerce_itemmeta_result = cow_merge_branch_state(
+        $woocommerce_itemmeta_base,
+        $woocommerce_itemmeta_source,
+        $woocommerce_itemmeta_target,
+        $woocommerce_itemmeta_metadata,
+        'feature-plugin-woocommerce-itemmeta-source',
+        'main',
+        $woocommerce_itemmeta_file_base,
+        $woocommerce_itemmeta_source_root,
+        $woocommerce_itemmeta_target_root
+    );
+
+    assert_same($woocommerce_itemmeta_result['status'], 'completed_with_conflicts', 'WooCommerce HPOS validator holds itemmeta pointing at deleted order items for review');
+    assert_same((int)($woocommerce_itemmeta_result['plugin_validators'] ?? 0), 1, 'WooCommerce order-item metadata validator is discovered from mu-plugins during merge');
+    assert_same((int)($woocommerce_itemmeta_result['plugin_validator_conflicts'] ?? 0), 1, 'WooCommerce order-item metadata validator records the stale itemmeta reference');
+    assert_same((int)scalar($woocommerce_itemmeta_target, 'SELECT COUNT(*) FROM wp_woocommerce_order_items WHERE order_item_id = 22'), 0, 'WooCommerce order-item metadata validator leaves the source order-item delete staged for review');
+    assert_same(scalar($woocommerce_itemmeta_target, 'SELECT meta_value FROM wp_woocommerce_order_itemmeta WHERE meta_id = 23'), 'target meta keeps product 100', 'WooCommerce order-item metadata validator preserves target itemmeta edits for review');
+
+    $woocommerce_itemmeta_audit = cow_merge_audit_report($woocommerce_itemmeta_metadata, (int)$woocommerce_itemmeta_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin' => 'woocommerce',
+        'conflict_type' => 'plugin-woocommerce-hpos-missing-order-item',
+    ]);
+    assert_same(count($woocommerce_itemmeta_audit['conflicts']), 1, 'WooCommerce HPOS audit exposes stale order item metadata as a plugin conflict');
+    $woocommerce_itemmeta_payload = cow_merge_decode_payload_json((string)($woocommerce_itemmeta_audit['conflicts'][0]['chosen_payload'] ?? ''), 'WooCommerce order itemmeta validator payload');
+    assert_same($woocommerce_itemmeta_payload['object'] ?? null, 'order-itemmeta:23', 'WooCommerce itemmeta audit identifies the stale itemmeta row');
+    assert_same($woocommerce_itemmeta_payload['candidate']['order_item_id'] ?? null, 22, 'WooCommerce itemmeta audit includes the missing order item ID');
+
+    $woocommerce_itemmeta_logical_identity_audit = cow_merge_audit_report($woocommerce_itemmeta_metadata, (int)$woocommerce_itemmeta_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin' => 'woocommerce',
+        'plugin_logical_identity' => json_encode(['plugin' => 'woocommerce', 'kind' => 'order_item', 'order_item_id' => 22], JSON_UNESCAPED_SLASHES),
+    ]);
+    assert_same(count($woocommerce_itemmeta_logical_identity_audit['conflicts']), 1, 'WooCommerce HPOS audit filters stale itemmeta findings by plugin logical order-item identity');
+
+    $gravity_base_root = $tmp . '/gravity-base';
+    $gravity_source_root = $tmp . '/gravity-source';
+    $gravity_target_root = $tmp . '/gravity-target';
+    $gravity_base = $gravity_base_root . '/wp-content/database/.ht.sqlite';
+    $gravity_source = $gravity_source_root . '/wp-content/database/.ht.sqlite';
+    $gravity_target = $gravity_target_root . '/wp-content/database/.ht.sqlite';
+    $gravity_metadata = $tmp . '/.forkpress/cow/merge/plugin-gravity-validator-metadata.sqlite';
+    $gravity_file_base = $tmp . '/.forkpress/cow/merge/file-bases/plugin-gravity-validator.json';
+
+    mkdir($gravity_base_root . '/wp-content/database', 0777, true);
+    create_gravity_forms_validator_db($gravity_base);
+    write_test_file($gravity_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$findings = [];
+$forms = [];
+$form_meta = $db->query('SELECT form_id, display_meta FROM wp_gf_form_meta ORDER BY form_id');
+while ($row = $form_meta->fetchArray(SQLITE3_ASSOC)) {
+    $payload = json_decode((string)$row['display_meta'], true);
+    $field_ids = [];
+    if (is_array($payload)) {
+        foreach (($payload['fields'] ?? []) as $field) {
+            if (is_array($field) && array_key_exists('id', $field)) {
+                $field_ids[(string)(int)$field['id']] = true;
+            }
+        }
+    }
+    $forms[(int)$row['form_id']] = $field_ids;
+}
+$entry_meta = $db->query('SELECT id, form_id, entry_id, meta_key, meta_value FROM wp_gf_entry_meta ORDER BY id');
+while ($row = $entry_meta->fetchArray(SQLITE3_ASSOC)) {
+    $form_id = (int)$row['form_id'];
+    $field_id = (int)$row['meta_key'];
+    if ((string)$field_id !== (string)$row['meta_key']) {
+        continue;
+    }
+    if (isset($forms[$form_id][(string)$field_id])) {
+        continue;
+    }
+    $findings[] = [
+        'plugin' => 'gravityforms',
+        'object' => 'entry-meta:' . (int)$row['id'] . ':field:' . $field_id,
+        'reason' => 'Gravity Forms entry metadata references a field removed from the form definition',
+        'type' => 'plugin-gravityforms-missing-field-definition',
+        'tables' => ['wp_gf_form_meta', 'wp_gf_entry_meta'],
+        'validator' => 'gravityforms-field-map@forkpress-test',
+        'severity' => 'error',
+        'logical_identity' => [
+            'plugin' => 'gravityforms',
+            'kind' => 'form_field',
+            'form_id' => $form_id,
+            'field_id' => $field_id,
+        ],
+        'candidate' => [
+            'entry_meta_id' => (int)$row['id'],
+            'entry_id' => (int)$row['entry_id'],
+            'form_id' => $form_id,
+            'field_id' => $field_id,
+            'meta_value' => (string)$row['meta_value'],
+        ],
+    ];
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+
+    copy_tree_for_test($gravity_base_root, $gravity_source_root);
+    copy_tree_for_test($gravity_base_root, $gravity_target_root);
+    cow_merge_capture_file_base($gravity_base_root, $gravity_file_base);
+    cow_merge_allocate_autoincrement_bands($gravity_source, $gravity_metadata, 'feature-plugin-gravity-source');
+    cow_merge_allocate_autoincrement_bands($gravity_target, $gravity_metadata, 'main');
+
+    $db = open_db($gravity_source);
+    $display_meta_without_field = json_encode(['fields' => []], JSON_UNESCAPED_SLASHES);
+    $stmt = $db->prepare('UPDATE wp_gf_form_meta SET display_meta = :display_meta WHERE form_id = 30');
+    $stmt->bindValue(':display_meta', $display_meta_without_field, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+
+    $db = open_db($gravity_target);
+    $db->exec("UPDATE wp_gf_entry_meta SET meta_value = 'Target edited field value' WHERE id = 41");
+    $db->close();
+
+    $gravity_result = cow_merge_branch_state(
+        $gravity_base,
+        $gravity_source,
+        $gravity_target,
+        $gravity_metadata,
+        'feature-plugin-gravity-source',
+        'main',
+        $gravity_file_base,
+        $gravity_source_root,
+        $gravity_target_root
+    );
+
+    assert_same($gravity_result['status'], 'completed_with_conflicts', 'Gravity Forms validator holds entry metadata for removed form fields for review');
+    assert_same((int)($gravity_result['plugin_validators'] ?? 0), 1, 'Gravity Forms field-map validator is discovered from mu-plugins during merge');
+    assert_same((int)($gravity_result['plugin_validator_conflicts'] ?? 0), 1, 'Gravity Forms validator records the stale entry metadata field reference');
+    $gravity_display_meta = json_decode((string)scalar($gravity_target, 'SELECT display_meta FROM wp_gf_form_meta WHERE form_id = 30'), true);
+    assert_same($gravity_display_meta['fields'] ?? null, [], 'Gravity Forms validator leaves the source form field removal staged for review');
+    assert_same(scalar($gravity_target, 'SELECT meta_value FROM wp_gf_entry_meta WHERE id = 41'), 'Target edited field value', 'Gravity Forms validator preserves target entry metadata edits for review');
+
+    $gravity_audit = cow_merge_audit_report($gravity_metadata, (int)$gravity_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin' => 'gravityforms',
+        'conflict_type' => 'plugin-gravityforms-missing-field-definition',
+    ]);
+    assert_same(count($gravity_audit['conflicts']), 1, 'Gravity Forms audit exposes stale field-definition entry metadata as a plugin conflict');
+    $gravity_payload = cow_merge_decode_payload_json((string)($gravity_audit['conflicts'][0]['chosen_payload'] ?? ''), 'Gravity Forms field-map validator payload');
+    assert_same($gravity_payload['object'] ?? null, 'entry-meta:41:field:5', 'Gravity Forms audit identifies the stale entry metadata field');
+    assert_same($gravity_payload['candidate']['form_id'] ?? null, 30, 'Gravity Forms audit includes the form ID');
+    assert_same($gravity_payload['candidate']['field_id'] ?? null, 5, 'Gravity Forms audit includes the removed field ID');
+
+    $gravity_logical_identity_audit = cow_merge_audit_report($gravity_metadata, (int)$gravity_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin' => 'gravityforms',
+        'plugin_logical_identity' => json_encode(['plugin' => 'gravityforms', 'kind' => 'form_field', 'form_id' => 30, 'field_id' => 5], JSON_UNESCAPED_SLASHES),
+    ]);
+    assert_same(count($gravity_logical_identity_audit['conflicts']), 1, 'Gravity Forms audit filters stale field findings by plugin logical form-field identity');
+
+    $acf_base_root = $tmp . '/acf-base';
+    $acf_source_root = $tmp . '/acf-source';
+    $acf_target_root = $tmp . '/acf-target';
+    $acf_base = $acf_base_root . '/wp-content/database/.ht.sqlite';
+    $acf_source = $acf_source_root . '/wp-content/database/.ht.sqlite';
+    $acf_target = $acf_target_root . '/wp-content/database/.ht.sqlite';
+    $acf_metadata = $tmp . '/.forkpress/cow/merge/plugin-acf-validator-metadata.sqlite';
+    $acf_file_base = $tmp . '/.forkpress/cow/merge/file-bases/plugin-acf-validator.json';
+
+    mkdir($acf_base_root . '/wp-content/database', 0777, true);
+    create_acf_validator_db($acf_base);
+    write_test_file($acf_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$findings = [];
+$meta = $db->query("SELECT meta_id, post_id, meta_key, meta_value FROM wp_postmeta WHERE substr(meta_key, 1, 1) = '_' AND substr(meta_value, 1, 6) = 'field_' ORDER BY meta_id");
+while ($row = $meta->fetchArray(SQLITE3_ASSOC)) {
+    $field_key = (string)$row['meta_value'];
+    $field_name = substr((string)$row['meta_key'], 1);
+    $escaped_field_key = SQLite3::escapeString($field_key);
+    $field_exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE post_type = 'acf-field' AND post_name = '$escaped_field_key'");
+    if ($field_exists === 1) {
+        continue;
+    }
+    $post_id = (int)$row['post_id'];
+    $escaped_field_name = SQLite3::escapeString($field_name);
+    $value_meta = $db->querySingle("SELECT meta_id, meta_value FROM wp_postmeta WHERE post_id = $post_id AND meta_key = '$escaped_field_name' ORDER BY meta_id LIMIT 1", true);
+    $findings[] = [
+        'plugin' => 'advanced-custom-fields',
+        'object' => 'post:' . $post_id . ':field:' . $field_key,
+        'reason' => 'ACF value metadata references a field key whose field definition post was removed',
+        'type' => 'plugin-acf-missing-field-definition',
+        'tables' => ['wp_posts', 'wp_postmeta'],
+        'validator' => 'acf-field-map@forkpress-test',
+        'severity' => 'error',
+        'logical_identity' => [
+            'plugin' => 'advanced-custom-fields',
+            'kind' => 'field_key',
+            'post_id' => $post_id,
+            'meta_key' => $field_name,
+            'field_key' => $field_key,
+        ],
+        'candidate' => [
+            'field_ref_meta_id' => (int)$row['meta_id'],
+            'value_meta_id' => is_array($value_meta) ? (int)$value_meta['meta_id'] : null,
+            'post_id' => $post_id,
+            'meta_key' => $field_name,
+            'field_key' => $field_key,
+            'value' => is_array($value_meta) ? (string)$value_meta['meta_value'] : null,
+            'field_exists' => $field_exists,
+        ],
+    ];
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+
+    copy_tree_for_test($acf_base_root, $acf_source_root);
+    copy_tree_for_test($acf_base_root, $acf_target_root);
+    cow_merge_capture_file_base($acf_base_root, $acf_file_base);
+    cow_merge_allocate_autoincrement_bands($acf_source, $acf_metadata, 'feature-plugin-acf-source');
+    cow_merge_allocate_autoincrement_bands($acf_target, $acf_metadata, 'main');
+
+    $db = open_db($acf_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID = 51');
+    $db->close();
+
+    $db = open_db($acf_target);
+    $db->exec("UPDATE wp_postmeta SET meta_value = 'Target CTA copy' WHERE meta_id = 61");
+    $db->close();
+
+    $acf_result = cow_merge_branch_state(
+        $acf_base,
+        $acf_source,
+        $acf_target,
+        $acf_metadata,
+        'feature-plugin-acf-source',
+        'main',
+        $acf_file_base,
+        $acf_source_root,
+        $acf_target_root
+    );
+
+    assert_same($acf_result['status'], 'completed_with_conflicts', 'ACF validator holds postmeta pointing at deleted field definitions for review');
+    assert_same((int)($acf_result['plugin_validators'] ?? 0), 1, 'ACF field-map validator is discovered from mu-plugins during merge');
+    assert_same((int)($acf_result['plugin_validator_conflicts'] ?? 0), 1, 'ACF validator records the stale field-key metadata reference');
+    assert_same((int)scalar($acf_target, "SELECT COUNT(*) FROM wp_posts WHERE ID = 51 AND post_type = 'acf-field'"), 0, 'ACF validator leaves the source field definition deletion staged for review');
+    assert_same(scalar($acf_target, 'SELECT meta_value FROM wp_postmeta WHERE meta_id = 61'), 'Target CTA copy', 'ACF validator preserves target value postmeta edits for review');
+    assert_same(scalar($acf_target, 'SELECT meta_value FROM wp_postmeta WHERE meta_id = 62'), 'field_cta_text', 'ACF validator keeps the stale hidden field-key metadata visible');
+
+    $acf_logical_identity = json_encode([
+        'plugin' => 'advanced-custom-fields',
+        'kind' => 'field_key',
+        'post_id' => 60,
+        'meta_key' => 'cta_text',
+        'field_key' => 'field_cta_text',
+    ], JSON_UNESCAPED_SLASHES);
+    $acf_audit = cow_merge_audit_report($acf_metadata, (int)$acf_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin' => 'advanced-custom-fields',
+        'conflict_type' => 'plugin-acf-missing-field-definition',
+        'plugin_logical_identity' => $acf_logical_identity,
+    ]);
+    assert_same(count($acf_audit['conflicts']), 1, 'ACF audit filters stale field-key findings by plugin, conflict type, and logical identity');
+    assert_same($acf_audit['conflicts'][0]['plugin'] ?? null, 'advanced-custom-fields', 'ACF audit exposes the plugin as a first-class field');
+    assert_same($acf_audit['conflicts'][0]['conflict_type'] ?? null, 'plugin-acf-missing-field-definition', 'ACF audit exposes the semantic conflict type');
+    assert_same($acf_audit['conflicts'][0]['plugin_logical_identity']['field_key'] ?? null, 'field_cta_text', 'ACF audit exposes the field-key logical identity');
+    $acf_payload = cow_merge_decode_payload_json((string)($acf_audit['conflicts'][0]['chosen_payload'] ?? ''), 'ACF field-map validator payload');
+    assert_same($acf_payload['object'] ?? null, 'post:60:field:field_cta_text', 'ACF audit identifies the post field reference');
+    assert_same($acf_payload['candidate']['value'] ?? null, 'Target CTA copy', 'ACF audit includes the preserved target value edit');
+
+    $yoast_base_root = $tmp . '/yoast-base';
+    $yoast_source_root = $tmp . '/yoast-source';
+    $yoast_target_root = $tmp . '/yoast-target';
+    $yoast_base = $yoast_base_root . '/wp-content/database/.ht.sqlite';
+    $yoast_source = $yoast_source_root . '/wp-content/database/.ht.sqlite';
+    $yoast_target = $yoast_target_root . '/wp-content/database/.ht.sqlite';
+    $yoast_metadata = $tmp . '/.forkpress/cow/merge/plugin-yoast-validator-metadata.sqlite';
+    $yoast_file_base = $tmp . '/.forkpress/cow/merge/file-bases/plugin-yoast-validator.json';
+
+    mkdir($yoast_base_root . '/wp-content/database', 0777, true);
+    create_yoast_indexable_validator_db($yoast_base);
+    write_test_file($yoast_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$findings = [];
+$rows = $db->query("SELECT id, object_id, object_type, object_sub_type, permalink, title, description FROM wp_yoast_indexable WHERE object_type = 'post' ORDER BY id");
+while ($row = $rows->fetchArray(SQLITE3_ASSOC)) {
+    $object_id = (int)$row['object_id'];
+    if ($object_id <= 0) {
+        continue;
+    }
+    $post_exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $object_id");
+    if ($post_exists === 1) {
+        continue;
+    }
+    $findings[] = [
+        'plugin' => 'wordpress-seo',
+        'object' => 'indexable:' . (int)$row['id'] . ':post:' . $object_id,
+        'reason' => 'Yoast SEO indexable row references a WordPress post that no longer exists after merge',
+        'type' => 'plugin-yoast-indexable-missing-post',
+        'tables' => ['wp_posts', 'wp_yoast_indexable'],
+        'validator' => 'yoast-indexable@forkpress-test',
+        'severity' => 'error',
+        'logical_identity' => [
+            'plugin' => 'wordpress-seo',
+            'kind' => 'indexable_object',
+            'object_type' => 'post',
+            'object_id' => $object_id,
+        ],
+        'candidate' => [
+            'indexable_id' => (int)$row['id'],
+            'object_id' => $object_id,
+            'object_sub_type' => (string)$row['object_sub_type'],
+            'permalink' => (string)$row['permalink'],
+            'title' => (string)$row['title'],
+            'description' => (string)$row['description'],
+            'post_exists' => $post_exists,
+        ],
+    ];
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+
+    copy_tree_for_test($yoast_base_root, $yoast_source_root);
+    copy_tree_for_test($yoast_base_root, $yoast_target_root);
+    cow_merge_capture_file_base($yoast_base_root, $yoast_file_base);
+    cow_merge_allocate_autoincrement_bands($yoast_source, $yoast_metadata, 'feature-plugin-yoast-source');
+    cow_merge_allocate_autoincrement_bands($yoast_target, $yoast_metadata, 'main');
+
+    $db = open_db($yoast_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID = 70');
+    $db->close();
+
+    $db = open_db($yoast_target);
+    $db->exec("UPDATE wp_yoast_indexable SET title = 'Target SEO title', description = 'Target SEO description' WHERE id = 80");
+    $db->close();
+
+    $yoast_result = cow_merge_branch_state(
+        $yoast_base,
+        $yoast_source,
+        $yoast_target,
+        $yoast_metadata,
+        'feature-plugin-yoast-source',
+        'main',
+        $yoast_file_base,
+        $yoast_source_root,
+        $yoast_target_root
+    );
+
+    assert_same($yoast_result['status'], 'completed_with_conflicts', 'Yoast validator holds indexables pointing at deleted posts for review');
+    assert_same((int)($yoast_result['plugin_validators'] ?? 0), 1, 'Yoast indexable validator is discovered from mu-plugins during merge');
+    assert_same((int)($yoast_result['plugin_validator_conflicts'] ?? 0), 1, 'Yoast validator records the stale indexable object reference');
+    assert_same((int)scalar($yoast_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 70'), 0, 'Yoast validator leaves the source post deletion staged for review');
+    assert_same(scalar($yoast_target, 'SELECT title FROM wp_yoast_indexable WHERE id = 80'), 'Target SEO title', 'Yoast validator preserves target indexable title edits for review');
+    assert_same(scalar($yoast_target, 'SELECT description FROM wp_yoast_indexable WHERE id = 80'), 'Target SEO description', 'Yoast validator preserves target indexable description edits for review');
+
+    $yoast_logical_identity = json_encode([
+        'plugin' => 'wordpress-seo',
+        'kind' => 'indexable_object',
+        'object_type' => 'post',
+        'object_id' => 70,
+    ], JSON_UNESCAPED_SLASHES);
+    $yoast_audit = cow_merge_audit_report($yoast_metadata, (int)$yoast_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin' => 'wordpress-seo',
+        'conflict_type' => 'plugin-yoast-indexable-missing-post',
+        'plugin_logical_identity' => $yoast_logical_identity,
+    ]);
+    assert_same(count($yoast_audit['conflicts']), 1, 'Yoast audit filters stale indexable findings by plugin, conflict type, and logical identity');
+    assert_same($yoast_audit['conflicts'][0]['plugin'] ?? null, 'wordpress-seo', 'Yoast audit exposes the plugin as a first-class field');
+    assert_same($yoast_audit['conflicts'][0]['plugin_logical_identity']['object_id'] ?? null, 70, 'Yoast audit exposes the indexed object identity');
+    $yoast_payload = cow_merge_decode_payload_json((string)($yoast_audit['conflicts'][0]['chosen_payload'] ?? ''), 'Yoast indexable validator payload');
+    assert_same($yoast_payload['object'] ?? null, 'indexable:80:post:70', 'Yoast audit identifies the stale indexable row');
+    assert_same($yoast_payload['candidate']['title'] ?? null, 'Target SEO title', 'Yoast audit includes the preserved target indexable edit');
+
+    $events_base_root = $tmp . '/events-base';
+    $events_source_root = $tmp . '/events-source';
+    $events_target_root = $tmp . '/events-target';
+    $events_base = $events_base_root . '/wp-content/database/.ht.sqlite';
+    $events_source = $events_source_root . '/wp-content/database/.ht.sqlite';
+    $events_target = $events_target_root . '/wp-content/database/.ht.sqlite';
+    $events_metadata = $tmp . '/.forkpress/cow/merge/plugin-events-calendar-validator-metadata.sqlite';
+    $events_file_base = $tmp . '/.forkpress/cow/merge/file-bases/plugin-events-calendar-validator.json';
+
+    mkdir($events_base_root . '/wp-content/database', 0777, true);
+    create_events_calendar_validator_db($events_base);
+    write_test_file($events_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$findings = [];
+$rows = $db->query("SELECT meta_id, post_id, meta_key, meta_value FROM wp_postmeta WHERE meta_key = '_EventVenueID' ORDER BY meta_id");
+while ($row = $rows->fetchArray(SQLITE3_ASSOC)) {
+    $event_id = (int)$row['post_id'];
+    $venue_id = (int)$row['meta_value'];
+    if ($venue_id <= 0) {
+        continue;
+    }
+    $event = $db->querySingle("SELECT ID, post_title, post_type FROM wp_posts WHERE ID = $event_id", true);
+    if (!is_array($event) || ($event['post_type'] ?? '') !== 'tribe_events') {
+        continue;
+    }
+    $venue_exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $venue_id AND post_type = 'tribe_venue'");
+    if ($venue_exists === 1) {
+        continue;
+    }
+    $findings[] = [
+        'plugin' => 'the-events-calendar',
+        'object' => 'event:' . $event_id . ':venue:' . $venue_id,
+        'reason' => 'The Events Calendar event venue metadata references a venue post that no longer exists after merge',
+        'type' => 'plugin-the-events-calendar-missing-venue',
+        'tables' => ['wp_posts', 'wp_postmeta'],
+        'validator' => 'the-events-calendar-venue-map@forkpress-test',
+        'severity' => 'error',
+        'logical_identity' => [
+            'plugin' => 'the-events-calendar',
+            'kind' => 'event_venue',
+            'event_id' => $event_id,
+            'venue_id' => $venue_id,
+            'meta_key' => '_EventVenueID',
+        ],
+        'candidate' => [
+            'meta_id' => (int)$row['meta_id'],
+            'event_id' => $event_id,
+            'venue_id' => $venue_id,
+            'event_title' => (string)$event['post_title'],
+            'meta_key' => (string)$row['meta_key'],
+            'venue_exists' => $venue_exists,
+        ],
+    ];
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+
+    copy_tree_for_test($events_base_root, $events_source_root);
+    copy_tree_for_test($events_base_root, $events_target_root);
+    cow_merge_capture_file_base($events_base_root, $events_file_base);
+    cow_merge_allocate_autoincrement_bands($events_source, $events_metadata, 'feature-plugin-events-calendar-source');
+    cow_merge_allocate_autoincrement_bands($events_target, $events_metadata, 'main');
+
+    $db = open_db($events_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID = 91');
+    $db->close();
+
+    $db = open_db($events_target);
+    $db->exec("UPDATE wp_posts SET post_title = 'Target Spring Conference' WHERE ID = 90");
+    $db->exec("UPDATE wp_postmeta SET meta_value = '2026-06-01 10:00:00' WHERE meta_id = 101");
+    $db->close();
+
+    $events_result = cow_merge_branch_state(
+        $events_base,
+        $events_source,
+        $events_target,
+        $events_metadata,
+        'feature-plugin-events-calendar-source',
+        'main',
+        $events_file_base,
+        $events_source_root,
+        $events_target_root
+    );
+
+    assert_same($events_result['status'], 'completed_with_conflicts', 'The Events Calendar validator holds event venue metadata pointing at deleted venues for review');
+    assert_same((int)($events_result['plugin_validators'] ?? 0), 1, 'The Events Calendar venue validator is discovered from mu-plugins during merge');
+    assert_same((int)($events_result['plugin_validator_conflicts'] ?? 0), 1, 'The Events Calendar validator records the stale venue metadata reference');
+    assert_same((int)scalar($events_target, "SELECT COUNT(*) FROM wp_posts WHERE ID = 91 AND post_type = 'tribe_venue'"), 0, 'The Events Calendar validator leaves the source venue deletion staged for review');
+    assert_same(scalar($events_target, 'SELECT post_title FROM wp_posts WHERE ID = 90'), 'Target Spring Conference', 'The Events Calendar validator preserves target event edits for review');
+    assert_same(scalar($events_target, 'SELECT meta_value FROM wp_postmeta WHERE meta_id = 100'), '91', 'The Events Calendar validator keeps the stale venue postmeta visible');
+    assert_same(scalar($events_target, 'SELECT meta_value FROM wp_postmeta WHERE meta_id = 101'), '2026-06-01 10:00:00', 'The Events Calendar validator preserves unrelated target event metadata edits');
+
+    $events_identity = json_encode([
+        'plugin' => 'the-events-calendar',
+        'kind' => 'event_venue',
+        'event_id' => 90,
+        'venue_id' => 91,
+        'meta_key' => '_EventVenueID',
+    ], JSON_UNESCAPED_SLASHES);
+    $events_audit = cow_merge_audit_report($events_metadata, (int)$events_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin' => 'the-events-calendar',
+        'conflict_type' => 'plugin-the-events-calendar-missing-venue',
+        'plugin_logical_identity' => $events_identity,
+    ]);
+    assert_same(count($events_audit['conflicts']), 1, 'The Events Calendar audit filters stale venue findings by plugin, conflict type, and logical identity');
+    assert_same($events_audit['conflicts'][0]['plugin'] ?? null, 'the-events-calendar', 'The Events Calendar audit exposes the plugin as a first-class field');
+    assert_same($events_audit['conflicts'][0]['plugin_logical_identity']['venue_id'] ?? null, 91, 'The Events Calendar audit exposes the missing venue identity');
+    $events_payload = cow_merge_decode_payload_json((string)($events_audit['conflicts'][0]['chosen_payload'] ?? ''), 'The Events Calendar venue validator payload');
+    assert_same($events_payload['object'] ?? null, 'event:90:venue:91', 'The Events Calendar audit identifies the stale event venue reference');
+    assert_same($events_payload['candidate']['event_title'] ?? null, 'Target Spring Conference', 'The Events Calendar audit includes the preserved target event edit');
+    assert_same($events_payload['candidate']['venue_exists'] ?? null, 0, 'The Events Calendar audit records the missing venue evidence');
 
     $env_validator = $tmp . '/plugin-validator-env.php';
     write_test_file($env_validator, <<<'PHP'

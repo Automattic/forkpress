@@ -768,6 +768,52 @@ assert_same($admin_page_create['json']['success'] ?? null, true, 'admin-page rou
 assert_same($admin_page_create['json']['message'] ?? null, 'Created branch admin_page_created.', 'admin-page router branch create reports created branch');
 assert_true(!str_contains($admin_page_create['body'], 'WORDPRESS'), 'admin-page router branch create does not reach WordPress admin page');
 
+$non_async_merge = router_branch_action_request(
+    $child,
+    $branches,
+    $cow,
+    $router,
+    $branch_list,
+    $fake_bin,
+    $work_dir,
+    '/wp-admin/admin-post.php',
+    ['action' => 'forkpress_branch_merge', 'source' => 'router_created', 'target' => 'main'],
+    false
+);
+assert_same($non_async_merge['exit'], 0, 'non-async router branch merge exits cleanly');
+assert_same($non_async_merge['status'], 200, 'non-async router branch merge returns 200');
+assert_same($non_async_merge['json']['success'] ?? null, true, 'non-async router branch merge still returns JSON success');
+assert_same($non_async_merge['json']['message'] ?? null, 'Merged router_created into main.', 'non-async router branch merge reports merged branch');
+assert_true(!str_contains($non_async_merge['body'], 'WORDPRESS'), 'non-async router branch merge does not reach WordPress admin-post');
+
+$admin_page_merge_output = "forkpress: merged router_created into main\\n  run:       43\\n  status:    completed_with_conflicts\\n  conflicts: 2\\n";
+$admin_page_merge = router_branch_action_request(
+    $child,
+    $branches,
+    $cow,
+    $router,
+    $branch_list,
+    $fake_bin,
+    $work_dir,
+    '/wp-admin/admin.php?page=forkpress-branches',
+    ['action' => 'forkpress_branch_merge', 'source' => 'router_created', 'target' => 'main'],
+    false,
+    ['FORKPRESS_TEST_CLI_OUTPUT' => $admin_page_merge_output]
+);
+assert_same($admin_page_merge['exit'], 0, 'admin-page router branch merge exits cleanly');
+assert_same($admin_page_merge['status'], 200, 'admin-page router branch merge returns 200');
+assert_same($admin_page_merge['json']['success'] ?? null, true, 'admin-page router branch merge returns JSON success');
+assert_same($admin_page_merge['json']['type'] ?? null, 'warning', 'admin-page router branch merge returns warning type');
+assert_same($admin_page_merge['json']['mergeStatus'] ?? null, 'completed_with_conflicts', 'admin-page router branch merge exposes merge status');
+assert_same($admin_page_merge['json']['conflicts'] ?? null, 2, 'admin-page router branch merge exposes conflict count');
+assert_same($admin_page_merge['json']['run'] ?? null, 43, 'admin-page router branch merge exposes merge run id');
+assert_same(
+    $admin_page_merge['json']['auditCommand'] ?? null,
+    'forkpress branch merge-audit --records conflicts --run 43',
+    'admin-page router branch merge exposes audit command'
+);
+assert_true(!str_contains($admin_page_merge['body'], 'WORDPRESS'), 'admin-page router branch merge does not reach WordPress admin page');
+
 $argv_log = [];
 foreach (file($cli_log, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as $line) {
     $decoded = json_decode($line, true);
@@ -795,7 +841,9 @@ assert_same($argv_log[16] ?? null, ['branch', '--work-dir', $work_dir, 'merge-re
 assert_same($argv_log[17] ?? null, ['branch', '--work-dir', $work_dir, 'run-plugin-driver', 'conflict', '77', '--driver', realpath($driver_path), '--reviewer', 'wordpress-ui', '--format', 'json'], 'router plugin driver action invokes approved driver CLI command');
 assert_same($argv_log[18] ?? null, ['branch', '--work-dir', $work_dir, 'create', 'html_fallback', '--from', 'main'], 'non-async router branch create invokes safe CLI command');
 assert_same($argv_log[19] ?? null, ['branch', '--work-dir', $work_dir, 'create', 'admin_page_created', '--from', 'main'], 'admin-page router branch create invokes safe CLI command');
-assert_same(count($argv_log), 20, 'invalid branch action requests do not invoke router CLI path');
+assert_same($argv_log[20] ?? null, ['branch', '--work-dir', $work_dir, 'merge', 'router_created', '--into', 'main'], 'non-async router branch merge invokes audited CLI command');
+assert_same($argv_log[21] ?? null, ['branch', '--work-dir', $work_dir, 'merge', 'router_created', '--into', 'main'], 'admin-page router branch merge invokes audited CLI command');
+assert_same(count($argv_log), 22, 'invalid branch action requests do not invoke router CLI path');
 
 rm_tree($tmp);
 

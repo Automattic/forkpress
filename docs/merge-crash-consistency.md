@@ -194,7 +194,11 @@ commit, before the file phase, after an individual file operation, and during
 crash-recovery cleanup; plus Git-created branch publication before metadata
 capture, after metadata capture, after storage publish, after public-link
 creation, before/after branch-list publication, after existing-branch update
-publish, after branch-delete staging, and after object pruning.
+publish, after branch-delete staging, and after object pruning. The storage
+unit suite also covers branch reset after reset birth metadata is finalized but
+before publication, proving rollback restores the previous metadata DB,
+database merge base, filesystem merge base, clears the pending reset marker,
+removes staging, and permits a clean retry.
 
 The remaining release-hardening work is:
 

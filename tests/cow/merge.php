@@ -4579,10 +4579,20 @@ SQL);
     $source_drift_audit = cow_merge_audit_report($source_drift_metadata, $source_drift_run_id, 10, ['records' => 'conflicts']);
     $source_drift_conflicts = array_values(array_filter($source_drift_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $source_drift_conflict_id));
     assert_same($source_drift_conflicts[0]['revalidation_class'] ?? null, 'compatible-source-drift', 'cell audit exposes source-drift revalidation class');
-    assert_throws(
-        fn() => cow_merge_resolve_conflict($source_drift_metadata, $source_drift_conflict_id, 'source', true, 'Try source after source-drift revalidation.', 'cow-test', true),
-        'source payload changed after latest merge revalidation',
-        'after-revalidate source resolution fails if the source payload changed after review'
+    $source_drift_resolution = cow_merge_resolve_conflict(
+        $source_drift_metadata,
+        $source_drift_conflict_id,
+        'source',
+        true,
+        'Apply source after source-drift revalidation.',
+        'cow-test',
+        true
+    );
+    assert_same($source_drift_resolution['status'], 'applied', 'after-revalidate source resolution applies compatible cell source drift');
+    assert_same(
+        scalar($source_drift_target, "SELECT value FROM plugin_items WHERE item_id = 'alpha'"),
+        'source drift after review',
+        'after-revalidate source resolution writes the revalidated current source cell'
     );
 
     $row_source_drift_base = $tmp . '/row-source-drift-base.sqlite';
@@ -4623,10 +4633,20 @@ SQL);
     $row_source_drift_audit = cow_merge_audit_report($row_source_drift_metadata, $row_source_drift_run_id, 10, ['records' => 'conflicts']);
     $row_source_drift_conflicts = array_values(array_filter($row_source_drift_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $row_source_drift_conflict_id));
     assert_same($row_source_drift_conflicts[0]['revalidation_class'] ?? null, 'compatible-source-drift', 'row audit exposes source-drift revalidation class');
-    assert_throws(
-        fn() => cow_merge_resolve_conflict($row_source_drift_metadata, $row_source_drift_conflict_id, 'source', true, 'Try source row after source-drift revalidation.', 'cow-test', true),
-        'source payload changed after latest merge revalidation',
-        'after-revalidate row resolution fails if the source row changed after review'
+    $row_source_drift_resolution = cow_merge_resolve_conflict(
+        $row_source_drift_metadata,
+        $row_source_drift_conflict_id,
+        'source',
+        true,
+        'Apply source row after source-drift revalidation.',
+        'cow-test',
+        true
+    );
+    assert_same($row_source_drift_resolution['status'], 'applied', 'after-revalidate row resolution applies compatible source drift');
+    assert_same(
+        scalar($row_source_drift_target, "SELECT label || '|' || value FROM plugin_items WHERE item_id = 'source-drift-row'"),
+        'source row drifted label|source row drifted value',
+        'after-revalidate row resolution writes the revalidated current source row'
     );
 
     $source_semantic_identity_cases = [
@@ -7683,10 +7703,20 @@ SQL);
         'path' => 'wp-content/uploads/revalidate-source-drift.txt',
     ]);
     assert_same($file_source_drift_audit['conflicts'][0]['revalidation_class'] ?? null, 'compatible-source-drift', 'filesystem audit exposes source-drift revalidation class');
-    assert_throws(
-        fn() => cow_merge_resolve_conflict($metadata, $file_source_drift_conflict_id, 'source', true, 'Try source file after source-drift revalidation.', 'cow-test', true),
-        'source payload changed after latest merge revalidation',
-        'after-revalidate filesystem resolution fails if the source file changed after review'
+    $file_source_drift_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $file_source_drift_conflict_id,
+        'source',
+        true,
+        'Apply source file after source-drift revalidation.',
+        'cow-test',
+        true
+    );
+    assert_same($file_source_drift_resolution['status'], 'applied', 'after-revalidate filesystem resolution applies compatible source drift');
+    assert_same(
+        file_get_contents($file_resolve_target_root . '/wp-content/uploads/revalidate-source-drift.txt'),
+        'source file drift after review',
+        'after-revalidate filesystem resolution copies the revalidated current source file'
     );
     $file_rollback_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND row_identity = '" . SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/rollback-conflict.txt')) . "' ORDER BY id DESC LIMIT 1");
     $file_rollback_meta = open_db($metadata);
@@ -10027,7 +10057,7 @@ SQL);
     assert_same((int)scalar($metadata, "SELECT COUNT(*) FROM merge_revalidations WHERE conflict_id = $schema_column_conflict_id"), 0, 'schema conflict revalidation records no guarded payload without schema-specific evidence');
     assert_throws(
         fn() => cow_merge_resolve_conflict($metadata, $schema_column_conflict_id, 'source', false, 'Try guarded schema resolution.', 'cow-test', true),
-        '--after-revalidate currently supports source resolution for compatible source-added/source-changed index/view/trigger or table rebuild drift only',
+        '--after-revalidate currently supports source resolution for compatible source-added/source-changed/source-dropped index, source-added/source-changed view/trigger, table restore, or table rebuild drift only',
         'schema conflicts have an explicit guarded revalidation boundary'
     );
     $schema_column_dry = cow_merge_resolve_conflict(
@@ -17548,7 +17578,13 @@ PHP);
     );
     assert_same($wp_media_result['status'], 'completed_with_conflicts', 'WordPress media validator holds missing generated upload files for review');
     assert_same((int)($wp_media_result['plugin_validators'] ?? 0), 1, 'WordPress media validator is discovered from mu-plugins during merge');
-    assert_same((int)($wp_media_result['plugin_validator_conflicts'] ?? 0), 17, 'WordPress media validator records missing files, duplicate files, backup files, image metadata drift, media metadata drift, and metadata mismatches');
+    $wp_media_semantic_conflicts = (int)($wp_media_result['wordpress_semantic_validator_conflicts'] ?? 0);
+    assert_same($wp_media_semantic_conflicts, 13, 'built-in WordPress semantic validators record upload coherence conflicts');
+    assert_same(
+        (int)($wp_media_result['plugin_validator_conflicts'] ?? 0) - $wp_media_semantic_conflicts,
+        17,
+        'WordPress media validator records missing files, duplicate files, backup files, image metadata drift, media metadata drift, and metadata mismatches'
+    );
     assert_same(
         scalar($wp_media_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $wp_media_attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-original.jpg',
@@ -18267,12 +18303,13 @@ PHP);
     );
     assert_same($wp_option_ref_result['status'], 'completed_with_conflicts', 'WordPress option reference validator holds missing option objects for review');
     assert_same((int)($wp_option_ref_result['plugin_validators'] ?? 0), 1, 'WordPress option reference validator is discovered from mu-plugins during merge');
-    assert_same((int)($wp_option_ref_result['plugin_validator_conflicts'] ?? 0), 10, 'WordPress option reference validator records missing featured pages, posts page, sticky posts, sidebar widgets, media widgets, menu locations, menu widgets, and option attachments');
+    assert_same((int)($wp_option_ref_result['plugin_validator_conflicts'] ?? 0), 5, 'WordPress option reference validator records unresolved missing featured pages, posts page, sticky posts, and sidebar widgets');
     assert_same((int)scalar($wp_option_ref_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 50'), 0, 'WordPress option reference validator leaves the source featured page deletion staged for review');
-    assert_same((int)scalar($wp_option_ref_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 52'), 0, 'WordPress option reference validator leaves the source attachment deletion staged for review');
+    assert_same((int)scalar($wp_option_ref_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 52'), 1, 'WordPress owner-delete guard preserves target-referenced attachments');
     assert_same((int)scalar($wp_option_ref_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 53'), 0, 'WordPress option reference validator leaves the source sticky post deletion staged for review');
     assert_same((int)scalar($wp_option_ref_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 54'), 0, 'WordPress option reference validator leaves the source posts page deletion staged for review');
-    assert_same((int)scalar($wp_option_ref_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 51'), 0, 'WordPress option reference validator leaves the source nav menu deletion staged for review');
+    assert_same((int)scalar($wp_option_ref_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 51'), 1, 'WordPress owner-delete guard preserves target-referenced nav menu terms');
+    assert_same((int)scalar($wp_option_ref_target, "SELECT COUNT(*) FROM wp_term_taxonomy WHERE term_id = 51 AND taxonomy = 'nav_menu'"), 1, 'WordPress owner-delete guard preserves target-referenced nav menu taxonomy rows');
     $wp_option_ref_value = scalar($wp_option_ref_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_forkpress_active'");
     $wp_option_ref_mods = is_string($wp_option_ref_value) ? unserialize($wp_option_ref_value) : null;
     assert_same($wp_option_ref_mods['forkpress_accent'] ?? null, 'target', 'WordPress option reference validator preserves the target option edit');
@@ -18302,34 +18339,23 @@ PHP);
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-option-missing-object',
     ]);
-    assert_same(count($wp_option_ref_audit['conflicts']), 10, 'WordPress option reference validator exposes missing option objects as plugin-scoped audit conflicts');
+    assert_same(count($wp_option_ref_audit['conflicts']), 5, 'WordPress option reference validator exposes unresolved missing option objects as plugin-scoped audit conflicts');
     $wp_option_ref_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $wp_option_ref_audit['conflicts']));
     assert_true(str_contains($wp_option_ref_preview, '"missing_object_id":50'), 'WordPress option reference audit includes the missing page ID');
-    assert_true(str_contains($wp_option_ref_preview, '"missing_object_id":51'), 'WordPress option reference audit includes the missing nav menu term ID');
-    assert_true(str_contains($wp_option_ref_preview, '"missing_object_id":52'), 'WordPress option reference audit includes the missing attachment ID');
     assert_true(str_contains($wp_option_ref_preview, '"missing_object_id":53'), 'WordPress option reference audit includes the missing sticky post ID');
     assert_true(str_contains($wp_option_ref_preview, '"missing_object_id":54'), 'WordPress option reference audit includes the missing posts page ID');
-    assert_true(str_contains($wp_option_ref_preview, '"object_type":"nav_menu"'), 'WordPress option reference audit includes the nav menu object type');
-    assert_true(str_contains($wp_option_ref_preview, '"object_type":"attachment"'), 'WordPress option reference audit includes the attachment object type');
     assert_true(str_contains($wp_option_ref_preview, '"object_type":"page"'), 'WordPress option reference audit includes the page object type');
     assert_true(str_contains($wp_option_ref_preview, '"object_type":"post"'), 'WordPress option reference audit includes the post object type');
     assert_true(str_contains($wp_option_ref_preview, '"object_type":"widget"'), 'WordPress option reference audit includes the widget object type');
     assert_true(str_contains($wp_option_ref_preview, 'theme_mods_forkpress_active'), 'WordPress option reference audit includes the option name');
-    assert_true(str_contains($wp_option_ref_preview, 'widget_nav_menu'), 'WordPress option reference audit includes the nav menu widget option name');
-    assert_true(str_contains($wp_option_ref_preview, 'site_icon'), 'WordPress option reference audit includes the site icon option name');
     assert_true(str_contains($wp_option_ref_preview, 'page_on_front'), 'WordPress option reference audit includes the front page option name');
     assert_true(str_contains($wp_option_ref_preview, 'page_for_posts'), 'WordPress option reference audit includes the posts page option name');
     assert_true(str_contains($wp_option_ref_preview, 'sticky_posts'), 'WordPress option reference audit includes the sticky posts option name');
-    assert_true(str_contains($wp_option_ref_preview, 'widget_media_image'), 'WordPress option reference audit includes the media image widget option name');
     assert_true(str_contains($wp_option_ref_preview, 'sidebars_widgets'), 'WordPress option reference audit includes the sidebars widgets option name');
     assert_true(str_contains($wp_option_ref_preview, 'widget_text'), 'WordPress option reference audit includes the missing widget option name');
-    assert_true(str_contains($wp_option_ref_preview, '"field":"custom_logo"'), 'WordPress option reference audit includes the custom logo field');
-    assert_true(str_contains($wp_option_ref_preview, '"field":"site_icon"'), 'WordPress option reference audit includes the site icon field');
     assert_true(str_contains($wp_option_ref_preview, '"field":"page_on_front"'), 'WordPress option reference audit includes the front page option field');
     assert_true(str_contains($wp_option_ref_preview, '"field":"page_for_posts"'), 'WordPress option reference audit includes the posts page option field');
     assert_true(str_contains($wp_option_ref_preview, '"field":"sticky_posts.0"'), 'WordPress option reference audit includes the sticky posts field');
-    assert_true(str_contains($wp_option_ref_preview, '"field":"widget.2.nav_menu"'), 'WordPress option reference audit includes the nav menu widget field');
-    assert_true(str_contains($wp_option_ref_preview, '"field":"widget.3.attachment_id"'), 'WordPress option reference audit includes the media image widget attachment field');
     assert_true(str_contains($wp_option_ref_preview, '"field":"sidebar-1.2"'), 'WordPress option reference audit includes the sidebar widget slot field');
 
     $wp_featured_media_base_root = $tmp . '/wp-featured-media-validator-files-base';

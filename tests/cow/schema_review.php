@@ -1213,6 +1213,89 @@ SQL);
         'compatible schema changed-index target drift applies the audited source index'
     );
 
+    $schema_index_drop_target_drift_base = $tmp . '/schema-index-drop-target-drift-base.sqlite';
+    $schema_index_drop_target_drift_source = $tmp . '/schema-index-drop-target-drift-source.sqlite';
+    $schema_index_drop_target_drift_target = $tmp . '/schema-index-drop-target-drift-target.sqlite';
+    $schema_index_drop_target_drift_metadata = $tmp . '/.forkpress/cow/merge/schema-index-drop-target-drift-metadata.sqlite';
+
+    $db = open_db($schema_index_drop_target_drift_base);
+    $db->exec('CREATE TABLE plugin_schema_index_drop_target_drift_items (label TEXT NOT NULL, slug TEXT NOT NULL)');
+    $db->exec("INSERT INTO plugin_schema_index_drop_target_drift_items (label, slug) VALUES ('Drop Index Target Drift', 'drop-index-target-drift')");
+    $db->exec('CREATE INDEX plugin_schema_index_drop_target_drift_idx ON plugin_schema_index_drop_target_drift_items(label)');
+    $db->close();
+    copy($schema_index_drop_target_drift_base, $schema_index_drop_target_drift_source);
+    copy($schema_index_drop_target_drift_base, $schema_index_drop_target_drift_target);
+
+    $source_db = open_db($schema_index_drop_target_drift_source);
+    $source_db->exec('DROP INDEX plugin_schema_index_drop_target_drift_idx');
+    $source_db->close();
+
+    $target_db = open_db($schema_index_drop_target_drift_target);
+    $target_db->exec('DROP INDEX plugin_schema_index_drop_target_drift_idx');
+    $target_db->exec('CREATE INDEX plugin_schema_index_drop_target_drift_idx ON plugin_schema_index_drop_target_drift_items(slug)');
+    $target_db->close();
+
+    $schema_index_drop_target_drift_result = cow_merge_databases(
+        $schema_index_drop_target_drift_base,
+        $schema_index_drop_target_drift_source,
+        $schema_index_drop_target_drift_target,
+        $schema_index_drop_target_drift_metadata,
+        'feature-schema-index-drop-target-drift',
+        'main'
+    );
+    $schema_index_drop_target_drift_run_id = (int)$schema_index_drop_target_drift_result['run_id'];
+    assert_same($schema_index_drop_target_drift_result['status'], 'completed_with_conflicts', 'source-dropped index with target drift starts reviewable');
+    $schema_index_drop_target_drift_conflict_id = (int)scalar($schema_index_drop_target_drift_metadata, "SELECT id FROM merge_conflicts WHERE conflict_type = 'schema-source-dropped-index' AND column_name = 'plugin_schema_index_drop_target_drift_idx' ORDER BY id DESC LIMIT 1");
+    assert_true($schema_index_drop_target_drift_conflict_id > 0, 'source-dropped index target-drift fixture records an index conflict');
+    cow_merge_review_record(
+        $schema_index_drop_target_drift_metadata,
+        'conflict',
+        $schema_index_drop_target_drift_conflict_id,
+        'reviewed',
+        'Review source-dropped index before compatible target drift.',
+        'cow-test'
+    );
+
+    $target_db = open_db($schema_index_drop_target_drift_target);
+    $target_db->exec('DROP INDEX plugin_schema_index_drop_target_drift_idx');
+    $target_db->exec('CREATE INDEX plugin_schema_index_drop_target_drift_idx ON plugin_schema_index_drop_target_drift_items(label, slug)');
+    $target_db->close();
+
+    $schema_index_drop_target_drift_revalidated = cow_merge_revalidate_reviewed_conflicts(
+        $schema_index_drop_target_drift_metadata,
+        $schema_index_drop_target_drift_run_id,
+        'cow-revalidate'
+    );
+    assert_same($schema_index_drop_target_drift_revalidated['checked'], 1, 'source-dropped index target drift revalidation checks the reviewed conflict');
+    assert_same($schema_index_drop_target_drift_revalidated['stale'], 1, 'source-dropped index target drift is treated as stale');
+    assert_same($schema_index_drop_target_drift_revalidated['carried'], 1, 'source-dropped index target drift returns the conflict to needs-action');
+    assert_same(
+        scalar($schema_index_drop_target_drift_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $schema_index_drop_target_drift_conflict_id ORDER BY id DESC LIMIT 1"),
+        'compatible-schema-index-target-drift',
+        'source-dropped index target drift is classified compatible when the source drop validates'
+    );
+    $schema_index_drop_target_drift_audit = cow_merge_audit_report($schema_index_drop_target_drift_metadata, $schema_index_drop_target_drift_run_id, 10, [
+        'records' => 'conflicts',
+        'revalidation_class' => 'compatible-schema-index-target-drift',
+    ]);
+    assert_same(count($schema_index_drop_target_drift_audit['conflicts']), 1, 'source-dropped index target drift can be filtered by revalidation class');
+    assert_true($schema_index_drop_target_drift_audit['conflicts'][0]['after_revalidate_supported'] ?? false, 'source-dropped index target drift advertises guarded after-revalidate support');
+    $schema_index_drop_target_drift_resolution = cow_merge_resolve_conflict(
+        $schema_index_drop_target_drift_metadata,
+        $schema_index_drop_target_drift_conflict_id,
+        'source',
+        true,
+        'Apply source-dropped index after compatible target drift revalidation.',
+        'cow-test',
+        true
+    );
+    assert_same($schema_index_drop_target_drift_resolution['status'], 'applied', 'compatible source-dropped index target drift resolves after revalidation');
+    assert_same(
+        scalar($schema_index_drop_target_drift_target, "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'plugin_schema_index_drop_target_drift_idx'"),
+        null,
+        'compatible source-dropped index target drift removes the current target index'
+    );
+
     $view_order_base = $tmp . '/view-order-base.sqlite';
     $view_order_source = $tmp . '/view-order-source.sqlite';
     $view_order_target = $tmp . '/view-order-target.sqlite';
@@ -1626,6 +1709,61 @@ SQL);
         'source-changed trigger can query its source-added table dependency after merge'
     );
 
+    $trigger_rewrite_source_view_base = $tmp . '/trigger-rewrite-source-view-base.sqlite';
+    $trigger_rewrite_source_view_source = $tmp . '/trigger-rewrite-source-view-source.sqlite';
+    $trigger_rewrite_source_view_target = $tmp . '/trigger-rewrite-source-view-target.sqlite';
+    $trigger_rewrite_source_view_metadata = $tmp . '/.forkpress/cow/merge/schema-trigger-rewrite-source-view-metadata.sqlite';
+
+    $db = open_db($trigger_rewrite_source_view_base);
+    $db->exec('CREATE TABLE plugin_trigger_rewrite_source_view_items (item_id TEXT PRIMARY KEY, label TEXT NOT NULL)');
+    $db->exec('CREATE TABLE plugin_trigger_rewrite_source_view_suffixes (suffix_key TEXT PRIMARY KEY, suffix TEXT NOT NULL)');
+    $db->exec("INSERT INTO plugin_trigger_rewrite_source_view_suffixes (suffix_key, suffix) VALUES ('default', ':base-view')");
+    $db->exec('CREATE TABLE plugin_trigger_rewrite_source_view_audit (item_id TEXT, label TEXT)');
+    $db->exec('CREATE TRIGGER plugin_trigger_rewrite_source_view_items_after AFTER INSERT ON plugin_trigger_rewrite_source_view_items BEGIN INSERT INTO plugin_trigger_rewrite_source_view_audit (item_id, label) VALUES (NEW.item_id, NEW.label); END');
+    $db->close();
+    copy($trigger_rewrite_source_view_base, $trigger_rewrite_source_view_source);
+    copy($trigger_rewrite_source_view_base, $trigger_rewrite_source_view_target);
+
+    $source_db = open_db($trigger_rewrite_source_view_source);
+    $source_db->exec("CREATE VIEW plugin_trigger_rewrite_source_view_suffix_view AS SELECT suffix FROM plugin_trigger_rewrite_source_view_suffixes WHERE suffix_key = 'default'");
+    $source_db->exec('DROP TRIGGER plugin_trigger_rewrite_source_view_items_after');
+    $source_db->exec("CREATE TRIGGER plugin_trigger_rewrite_source_view_items_after AFTER INSERT ON plugin_trigger_rewrite_source_view_items WHEN EXISTS (SELECT 1 FROM plugin_trigger_rewrite_source_view_suffix_view) BEGIN INSERT INTO plugin_trigger_rewrite_source_view_audit (item_id, label) SELECT NEW.item_id, NEW.label || suffix FROM plugin_trigger_rewrite_source_view_suffix_view; END");
+    $source_db->close();
+
+    $trigger_rewrite_source_view_result = cow_merge_databases(
+        $trigger_rewrite_source_view_base,
+        $trigger_rewrite_source_view_source,
+        $trigger_rewrite_source_view_target,
+        $trigger_rewrite_source_view_metadata,
+        'feature-schema-trigger-rewrite-source-view',
+        'main'
+    );
+    $trigger_rewrite_source_view_run_id = (int)$trigger_rewrite_source_view_result['run_id'];
+    assert_same($trigger_rewrite_source_view_result['status'], 'completed', 'source-changed trigger depending on a source-added view merges automatically');
+    assert_same(
+        (int)scalar($trigger_rewrite_source_view_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'plugin_trigger_rewrite_source_view_suffix_view'"),
+        1,
+        'source-added view installs before source-changed trigger validation'
+    );
+    assert_same(
+        (int)scalar($trigger_rewrite_source_view_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE run_id = $trigger_rewrite_source_view_run_id AND conflict_type IN ('schema-source-added-view', 'schema-source-changed-trigger')"),
+        0,
+        'source-changed trigger and source-added view dependency create no review-only schema conflicts'
+    );
+    assert_same(
+        (int)scalar($trigger_rewrite_source_view_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE run_id = $trigger_rewrite_source_view_run_id AND column_name IN ('plugin_trigger_rewrite_source_view_suffix_view', 'plugin_trigger_rewrite_source_view_items_after') AND decision = 'source-applied'"),
+        2,
+        'source-added view and dependent changed trigger are auditable'
+    );
+    $target_db = open_db($trigger_rewrite_source_view_target);
+    $target_db->exec("INSERT INTO plugin_trigger_rewrite_source_view_items (item_id, label) VALUES ('trigger-rewrite-source-view', 'Trigger Rewrite Source View')");
+    $target_db->close();
+    assert_same(
+        scalar($trigger_rewrite_source_view_target, "SELECT label FROM plugin_trigger_rewrite_source_view_audit WHERE item_id = 'trigger-rewrite-source-view'"),
+        'Trigger Rewrite Source View:base-view',
+        'source-changed trigger can query its source-added view dependency after merge'
+    );
+
     $trigger_source_table_base = $tmp . '/trigger-source-table-base.sqlite';
     $trigger_source_table_source = $tmp . '/trigger-source-table-source.sqlite';
     $trigger_source_table_target = $tmp . '/trigger-source-table-target.sqlite';
@@ -1832,8 +1970,8 @@ SQL);
     assert_same($table_restore_revalidated['carried'], 1, 'schema table restore revalidation carries changed source evidence to needs-action');
     assert_same(
         scalar($table_restore_revalidate_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $table_restore_revalidate_conflict_id ORDER BY id DESC LIMIT 1"),
-        'unclassified',
-        'schema table restore source drift remains unclassified until a schema planner proves compatibility'
+        'compatible-source-drift',
+        'schema table restore source drift is classified compatible when the current restore validates'
     );
     assert_true(
         str_contains((string)scalar($table_restore_revalidate_metadata, "SELECT stale_reason FROM merge_revalidations WHERE conflict_id = $table_restore_revalidate_conflict_id ORDER BY id DESC LIMIT 1"), 'source changed'),
@@ -1853,7 +1991,28 @@ SQL);
     ]);
     $table_restore_revalidate_conflicts = array_values(array_filter($table_restore_revalidate_audit['conflicts'], fn($conflict) => (int)($conflict['id'] ?? 0) === $table_restore_revalidate_conflict_id));
     assert_same(count($table_restore_revalidate_conflicts), 1, 'schema table restore source drift returns the reviewed conflict to the needs-action audit queue');
-    assert_same($table_restore_revalidate_conflicts[0]['revalidation_class'] ?? null, 'unclassified', 'schema table restore audit exposes conservative unclassified revalidation');
+    assert_same($table_restore_revalidate_conflicts[0]['revalidation_class'] ?? null, 'compatible-source-drift', 'schema table restore audit exposes compatible source-drift revalidation');
+    assert_true($table_restore_revalidate_conflicts[0]['after_revalidate_supported'] ?? false, 'schema table restore advertises guarded after-revalidate support');
+    $table_restore_revalidate_resolution = cow_merge_resolve_conflict(
+        $table_restore_revalidate_metadata,
+        $table_restore_revalidate_conflict_id,
+        'source',
+        true,
+        'Apply current source table restore after compatible source drift.',
+        'cow-test',
+        true
+    );
+    assert_same($table_restore_revalidate_resolution['status'], 'applied', 'compatible schema table restore source drift resolves after revalidation');
+    assert_same(
+        scalar($table_restore_revalidate_target, "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'plugin_restore_revalidate_label_idx'"),
+        null,
+        'compatible schema table restore defers current source indexes that still have their own schema conflicts'
+    );
+    assert_same(
+        scalar($table_restore_revalidate_target, 'SELECT label FROM plugin_restore_revalidate WHERE id = 1'),
+        'Alpha',
+        'compatible schema table restore restores source rows after revalidation'
+    );
 
     $table_restore_target_drift_base = $tmp . '/table-restore-target-drift-base.sqlite';
     $table_restore_target_drift_source = $tmp . '/table-restore-target-drift-source.sqlite';
@@ -1977,8 +2136,8 @@ SQL);
     assert_same($table_rebuild_revalidated['carried'], 1, 'schema table rebuild revalidation carries changed source evidence to needs-action');
     assert_same(
         scalar($table_rebuild_revalidate_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $table_rebuild_revalidate_conflict_id ORDER BY id DESC LIMIT 1"),
-        'unclassified',
-        'schema table rebuild source drift remains unclassified until a schema planner proves compatibility'
+        'compatible-source-drift',
+        'schema table rebuild source drift is classified compatible when the current source rebuild validates against target'
     );
     assert_true(
         str_contains((string)scalar($table_rebuild_revalidate_metadata, "SELECT stale_reason FROM merge_revalidations WHERE conflict_id = $table_rebuild_revalidate_conflict_id ORDER BY id DESC LIMIT 1"), 'source and target changed'),
@@ -2003,7 +2162,35 @@ SQL);
     ]);
     $table_rebuild_revalidate_conflicts = array_values(array_filter($table_rebuild_revalidate_audit['conflicts'], fn($conflict) => (int)($conflict['id'] ?? 0) === $table_rebuild_revalidate_conflict_id));
     assert_same(count($table_rebuild_revalidate_conflicts), 1, 'schema table rebuild source drift returns the reviewed conflict to the needs-action audit queue');
-    assert_same($table_rebuild_revalidate_conflicts[0]['revalidation_class'] ?? null, 'unclassified', 'schema table rebuild audit exposes conservative unclassified revalidation');
+    assert_same($table_rebuild_revalidate_conflicts[0]['revalidation_class'] ?? null, 'compatible-source-drift', 'schema table rebuild audit exposes compatible source-drift revalidation');
+    $table_rebuild_revalidate_filtered = cow_merge_audit_report($table_rebuild_revalidate_metadata, $table_rebuild_revalidate_run_id, 10, [
+        'records' => 'conflicts',
+        'revalidation_class' => 'compatible-source-drift',
+    ]);
+    assert_same(count($table_rebuild_revalidate_filtered['conflicts']), 1, 'schema table rebuild audit filters compatible source drift conflicts by revalidation class');
+    assert_same($table_rebuild_revalidate_filtered['conflicts'][0]['id'] ?? null, $table_rebuild_revalidate_conflict_id, 'schema table rebuild compatible source-drift filter returns the revalidated conflict');
+    $table_rebuild_revalidate_resolution = cow_merge_resolve_conflict(
+        $table_rebuild_revalidate_metadata,
+        $table_rebuild_revalidate_conflict_id,
+        'source',
+        true,
+        'Apply source table rebuild after compatible source drift revalidation.',
+        'cow-test',
+        true
+    );
+    assert_same($table_rebuild_revalidate_resolution['status'], 'applied', 'compatible schema table rebuild source drift resolves after revalidation');
+    assert_true(
+        str_contains((string)scalar($table_rebuild_revalidate_target, "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'plugin_rebuild_revalidate'"), 'value INTEGER'),
+        'compatible schema table rebuild source drift applies the current source table SQL'
+    );
+    assert_true(
+        str_contains((string)scalar($table_rebuild_revalidate_target, "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'plugin_rebuild_revalidate_value_idx'"), 'value + 0'),
+        'compatible schema table rebuild source drift applies the current source index SQL'
+    );
+    assert_true(
+        str_contains((string)scalar($table_rebuild_revalidate_target, "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_rebuild_revalidate_noop'"), 'NEW.id'),
+        'compatible schema table rebuild source drift applies the current source trigger SQL'
+    );
 
     $table_rebuild_target_drift_base = $tmp . '/table-rebuild-target-drift-base.sqlite';
     $table_rebuild_target_drift_source = $tmp . '/table-rebuild-target-drift-source.sqlite';
@@ -2235,6 +2422,10 @@ SQL);
     $db->exec('CREATE UNIQUE INDEX plugin_index_revalidate_label_idx ON plugin_index_revalidate(upper(label))');
     $db->close();
 
+    $db = open_db($index_revalidate_target);
+    $db->exec('DELETE FROM plugin_index_revalidate WHERE id = 2');
+    $db->close();
+
     $index_revalidated = cow_merge_revalidate_reviewed_conflicts($index_revalidate_metadata, $index_revalidate_run_id, 'cow-revalidate');
     assert_same($index_revalidated['checked'], 1, 'schema index revalidation checks the reviewed index conflict');
     assert_same($index_revalidated['reviewed'], 1, 'schema index revalidation sees the reviewed index conflict');
@@ -2242,8 +2433,8 @@ SQL);
     assert_same($index_revalidated['carried'], 1, 'schema index revalidation carries changed source index evidence to needs-action');
     assert_same(
         scalar($index_revalidate_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $index_revalidate_conflict_id ORDER BY id DESC LIMIT 1"),
-        'unclassified',
-        'schema index source drift remains unclassified until a schema planner proves compatibility'
+        'compatible-source-drift',
+        'schema index source drift is classified compatible when the current source index validates'
     );
     assert_true(
         str_contains((string)scalar($index_revalidate_metadata, "SELECT stale_reason FROM merge_revalidations WHERE conflict_id = $index_revalidate_conflict_id ORDER BY id DESC LIMIT 1"), 'source changed'),
@@ -2263,7 +2454,22 @@ SQL);
     ]);
     $index_revalidate_conflicts = array_values(array_filter($index_revalidate_audit['conflicts'], fn($conflict) => (int)($conflict['id'] ?? 0) === $index_revalidate_conflict_id));
     assert_same(count($index_revalidate_conflicts), 1, 'schema index source drift returns the reviewed conflict to the needs-action audit queue');
-    assert_same($index_revalidate_conflicts[0]['revalidation_class'] ?? null, 'unclassified', 'schema index audit exposes the conservative unclassified revalidation');
+    assert_same($index_revalidate_conflicts[0]['revalidation_class'] ?? null, 'compatible-source-drift', 'schema index audit exposes compatible source-drift revalidation');
+    assert_true($index_revalidate_conflicts[0]['after_revalidate_supported'] ?? false, 'schema index source drift advertises guarded after-revalidate support');
+    $index_revalidate_resolution = cow_merge_resolve_conflict(
+        $index_revalidate_metadata,
+        $index_revalidate_conflict_id,
+        'source',
+        true,
+        'Apply current source index after compatible source drift.',
+        'cow-test',
+        true
+    );
+    assert_same($index_revalidate_resolution['status'], 'applied', 'compatible schema index source drift resolves after revalidation');
+    assert_true(
+        str_contains((string)scalar($index_revalidate_target, "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'plugin_index_revalidate_label_idx'"), 'upper(label)'),
+        'compatible schema index source drift applies the current source index SQL'
+    );
 } finally {
     remove_tree($tmp);
 }

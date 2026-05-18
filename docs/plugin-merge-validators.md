@@ -431,6 +431,23 @@ WordPress media-shaped mu-plugin validator that inspects the candidate target
 root and records plugin-scoped conflicts when attachment metadata references
 missing original or generated upload files, plus WordPress comment-reference
 validators for comments or commentmeta left pointing at deleted posts, users,
-parent comments, or comments. Plugin validator reruns also cover changed
-source evidence and changed first-class `logical_identity` evidence returning
-reviewed findings to `needs-action` as replacement evidence.
+parent comments, or comments. A WooCommerce HPOS-shaped fixture covers a real
+plugin graph: order addresses, order metadata, order items, itemmeta, cached
+order options, and `_product_id` metadata that must point at
+`wp_wc_product_meta_lookup`. Missing order and product lookup rows produce
+plugin-scoped review conflicts grouped by WooCommerce logical identity. A
+Gravity Forms-shaped fixture covers plugin schema stored in JSON: `wp_gf_entry`
+metadata whose field key points at a field removed from
+`wp_gf_form_meta.display_meta` stays reviewable and is filterable by form-field
+logical identity. An Events Calendar-shaped fixture covers scalar postmeta
+foreign keys: `_EventVenueID` on `tribe_events` posts left pointing at a deleted
+`tribe_venue` post stays reviewable while target event/date edits are preserved.
+An ACF-shaped fixture covers hidden postmeta field-key
+references (`_field_name = field_*`) left pointing at deleted `acf-field`
+definition posts while preserving target value-meta edits for review. A
+Yoast SEO-shaped fixture covers `wp_yoast_indexable` rows whose `object_id`
+points at a deleted WordPress post while preserving target SEO title and
+description edits for review. Plugin
+validator reruns also cover changed source evidence and changed first-class
+`logical_identity` evidence returning reviewed findings to `needs-action` as
+replacement evidence.

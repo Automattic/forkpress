@@ -237,6 +237,21 @@ try {
     $in_band_source_db->exec("INSERT INTO plugin_autoinc (id, label) VALUES ($plugin_band_end, 'in-band explicit plugin row')");
     $in_band_source_db->close();
 
+    $in_band_refresh = cow_merge_allocate_autoincrement_bands($in_band_source, $in_band_metadata, 'feature-explicit-in-band');
+    assert_same((int)$in_band_refresh['allocated'], 1, 'exhausted explicit AUTOINCREMENT band allocates a fresh band before future inserts');
+    assert_same((int)$in_band_refresh['reused'], 1, 'non-exhausted AUTOINCREMENT tables still reuse their existing band');
+    $plugin_refreshed_band_start = (int)scalar($in_band_metadata, "SELECT band_start FROM merge_autoincrement_bands WHERE branch_name = 'feature-explicit-in-band' AND table_name = 'plugin_autoinc'");
+    $plugin_refreshed_band_end = (int)scalar($in_band_metadata, "SELECT band_end FROM merge_autoincrement_bands WHERE branch_name = 'feature-explicit-in-band' AND table_name = 'plugin_autoinc'");
+    assert_true($plugin_refreshed_band_start > $plugin_band_end, 'fresh plugin AUTOINCREMENT band starts after the exhausted explicit ID band');
+    $in_band_source_db = open_db($in_band_source);
+    $in_band_source_db->exec("INSERT INTO plugin_autoinc (label) VALUES ('implicit row after exhausted band')");
+    $plugin_implicit_id = (int)$in_band_source_db->lastInsertRowID();
+    $in_band_source_db->close();
+    assert_true(
+        $plugin_implicit_id >= $plugin_refreshed_band_start && $plugin_implicit_id <= $plugin_refreshed_band_end,
+        'implicit plugin AUTOINCREMENT insert after an exhausted explicit ID stays inside the fresh band'
+    );
+
     $in_band_result = cow_merge_databases($in_band_base, $in_band_source, $in_band_target, $in_band_metadata, 'feature-explicit-in-band', 'main');
     assert_same($in_band_result['status'], 'completed', 'in-band explicit AUTOINCREMENT imports merge automatically');
     assert_same(
@@ -248,6 +263,11 @@ try {
         scalar($in_band_target, "SELECT label FROM plugin_autoinc WHERE id = $plugin_band_end"),
         'in-band explicit plugin row',
         'in-band explicit plugin AUTOINCREMENT ID is preserved without rewrite'
+    );
+    assert_same(
+        scalar($in_band_target, "SELECT label FROM plugin_autoinc WHERE id = $plugin_implicit_id"),
+        'implicit row after exhausted band',
+        'fresh-band implicit plugin AUTOINCREMENT row merges after explicit band exhaustion'
     );
     assert_same(
         (int)scalar($in_band_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-explicit-in-band' AND c.conflict_type = 'row-target-constraint'"),

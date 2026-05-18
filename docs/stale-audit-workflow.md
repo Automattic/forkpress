@@ -20,8 +20,9 @@ Today a resolution may apply only when:
 - The conflict or decision still exists.
 - The target row, cell, schema object, or filesystem path still matches the
   audited target payload.
-- The source payload still matches the audited source payload where source
-  application depends on it.
+- The source payload still matches either the audited source payload or, for a
+  supported `--after-revalidate` source-drift path, the latest revalidated
+  source payload.
 - Any target-side constraints still accept the requested source operation.
 
 If any precondition changed, resolution fails. This prevents stale review notes
@@ -145,10 +146,19 @@ reviewed conflicts back to `needs-action`. Source-added index, view, and
 trigger conflicts can be classified as `compatible-schema-*-target-drift` when
 the source object still matches review, the original target had no same-name
 object, target drifted to a same-name object, and a dry-run source replacement
-validates over the current target. Other schema drift remains `unclassified`:
-treating changed DDL as compatible source drift requires a schema-specific
-planner that can prove the same dependency graph and target preconditions still
-hold.
+validates over the current target. Source-dropped indexes can use the same
+`compatible-schema-index-target-drift` guard when the reviewed source drop is
+still current and the current target index can be dry-run dropped safely.
+Source-added or source-changed index, view, and trigger conflicts can be
+classified as `compatible-source-drift` when the
+target side still matches review and the current source object validates over
+the current target. Dropped-table restore conflicts can be
+classified as `compatible-source-drift` when the target table is still absent
+and a dry-run restore of the current source table, rows, and dependencies
+validates; source indexes or triggers that already have their own schema
+conflicts remain deferred to those conflicts. Other schema drift remains `unclassified`: treating
+changed DDL as compatible source drift requires a schema-specific planner that
+can prove the same dependency graph and target preconditions still hold.
 Table rebuild conflicts also record rebuild-plan evidence for direct
 indexes/triggers, dependent views, and dependent view triggers. That closes the
 specific stale-audit blind spot where table SQL stayed unchanged but a source
@@ -202,10 +212,12 @@ To support this cleanly, audit metadata should retain:
   recorded source/target row context for this classifier when the conflict was
   audited after that metadata became available.
   Schema index/view/trigger/table-restore/table-rebuild conflicts can record
-  current source/target SQL but stay `unclassified`. Future work should add
-  richer schema-specific evidence for dependency rebuild plans, plus explicit
-  plugin-supplied logical identities where schema `UNIQUE` keys are not enough
-  to prove object identity.
+  current source/target SQL; compatible table rebuild source drift can be
+  source-applied after revalidation when the dry-run planner proves the current
+  source rebuild and dependency replacement are safe. Future work should add
+  richer schema-specific evidence for the remaining ambiguous dependency
+  rebuild plans, plus explicit plugin-supplied logical identities where schema
+  `UNIQUE` keys are not enough to prove object identity.
 - Logical identity fingerprint separate from the raw payload.
 - Re-audit timestamp and merge run id.
 
@@ -232,7 +244,10 @@ forkpress branch merge-audit --records conflicts --latest-revalidation-status ta
 ```
 
 The current implementation supports database cell, database row, filesystem
-conflicts, and compatible source-added schema index/view/trigger target drift.
+conflicts, compatible source-added/source-changed schema index/view/trigger,
+compatible source-dropped schema index target drift,
+source and target drift, compatible dropped-table restore source drift, and
+compatible table rebuild source drift.
 Plugin validator conflicts now have a conservative validator-evidence
 classifier: if a validator rerun records changed evidence for the same plugin
 object, including changed source evidence, the reviewed plugin conflict returns
@@ -244,11 +259,12 @@ originals, unrevalidated replacements, incompatible revalidations, and drifted
 replacement evidence remain blocked. Schema index, view, trigger, dropped-table
 restore, and table rebuild conflicts can return to the review queue with
 current SQL evidence, and table rebuild conflicts include dependency-plan
-evidence. Guarded schema
-resolution is intentionally limited to source-added index/view/trigger target
-drift and compatible table-rebuild target drift where the planner recorded a
-compatible schema class after a dry-run source replacement validated against
-the current target.
+evidence. Guarded schema resolution is intentionally limited to source-added or
+source-changed index/view/trigger source and target drift, source-dropped index
+target drift, dropped-table restore source drift, compatible table-rebuild
+source drift, and compatible table-rebuild target drift where the planner
+recorded a compatible schema class after a dry-run source replacement, table
+restore, or table rebuild validated against the current target.
 
 ## Test Shape
 
@@ -273,8 +289,9 @@ database cell conflicts where the reviewed cell value itself did not change.
 Schema
 index/view/trigger/table-restore/table-rebuild conflicts record changed
 source/target SQL and carry reviewed conflicts back to `needs-action`. Source
-added index/view/trigger target drift can be guarded-applied after revalidation
-when it receives a compatible schema class; other schema drift remains
+added index/view/trigger target drift, source-dropped index target drift, and
+compatible table rebuild source drift can be guarded-applied after revalidation
+when they receive a compatible schema class; other schema drift remains
 `unclassified` and review-only. Table rebuild fixtures also prove
 dependency-only source drift is caught through direct index/trigger,
 dependent-view, and dependent view-trigger evidence even when the reviewed table
