@@ -39,6 +39,11 @@ macOS, and Windows COW jobs. That CI scope intentionally avoids Rust and release
 packaging checks so the preflight remains a fast fail gate, while local runs keep
 the broader mappings by default.
 
+The full release-verification matrix is reserved for binary, packaging, runtime
+bundle, release-script, installer, dependency, and workflow changes. Pure
+`scripts/cow/**` merge-logic PRs rely on the changed-file COW preflight plus the
+platform COW jobs instead of also waiting for duplicated release bundle builds.
+
 This is an iteration gate, not a release gate. Run broader checks before asking
 for review when a change crosses subsystem boundaries:
 
