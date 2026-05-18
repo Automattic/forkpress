@@ -1122,6 +1122,17 @@ function forkpress_branch_history_summary(array $report, int $limit): array {
     ];
 }
 
+function forkpress_branch_tree_summary(array $report, int $limit): array {
+    $records = is_array($report['runs'] ?? null) ? array_values($report['runs']) : [];
+    return [
+        'records' => $records,
+        'recordCount' => count($records),
+        'limit' => $limit,
+        'treeCommand' => 'forkpress branch tree --limit ' . $limit . ' --format json',
+        'audit' => $report,
+    ];
+}
+
 function forkpress_branch_revalidate_merge_run(int $run): array {
     [$code, $output] = forkpress_branch_run_cli(['merge-audit', '--revalidate', '--run', (string) $run, '--reviewer', 'wordpress-ui', '--format', 'json']);
     if ($code !== 0) {
@@ -1284,6 +1295,41 @@ function forkpress_handle_branch_history(): void {
     );
 }
 add_action('admin_post_forkpress_branch_history', 'forkpress_handle_branch_history');
+
+function forkpress_handle_branch_tree(): void {
+    if (!forkpress_branch_can_manage()) {
+        forkpress_branch_finish_action(forkpress_branch_url(forkpress_current_branch() ?: 'main', '/wp-admin/'), 'error', 'You cannot inspect ForkPress branch history from this site.');
+    }
+    if (function_exists('check_admin_referer')) {
+        check_admin_referer('forkpress_branch_tree');
+    }
+
+    $current = forkpress_current_branch() ?: 'main';
+    $limit = forkpress_branch_post_int('limit') ?? 20;
+    if ($limit < 1 || $limit > 50) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Choose a branch tree limit from 1 to 50.');
+    }
+
+    [$code, $output] = forkpress_branch_run_cli(['tree', '--limit', (string) $limit, '--format', 'json']);
+    if ($code !== 0) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', $output ?: 'ForkPress could not inspect the branch tree.');
+    }
+
+    $report = json_decode($output, true);
+    if (!is_array($report)) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'ForkPress returned invalid branch tree JSON.');
+    }
+
+    $summary = forkpress_branch_tree_summary($report, $limit);
+    $count = (int)($summary['recordCount'] ?? 0);
+    forkpress_branch_finish_action(
+        forkpress_branch_url($current, '/wp-admin/'),
+        'notice',
+        $count > 0 ? 'Loaded ' . $count . ' branch tree ' . ($count === 1 ? 'edge.' : 'edges.') : 'No branch tree edges found.',
+        $summary
+    );
+}
+add_action('admin_post_forkpress_branch_tree', 'forkpress_handle_branch_tree');
 
 function forkpress_handle_branch_conflicts(): void {
     if (!forkpress_branch_can_manage()) {
@@ -1800,14 +1846,18 @@ function forkpress_render_branch_admin_page(): void {
         </form>
         <hr>
         <h2>Merge History</h2>
-        <p><button id="forkpress-branch-history-load" class="button" type="button"<?php echo $disabled; ?>>Show merge history</button></p>
+        <p>
+            <button id="forkpress-branch-history-load" class="button" type="button"<?php echo $disabled; ?>>Show merge history</button>
+            <button id="forkpress-branch-tree-load" class="button" type="button"<?php echo $disabled; ?>>Show branch tree</button>
+        </p>
         <div id="forkpress-branch-history-results" aria-live="polite"></div>
         <?php if ($can_manage): ?>
             <script>
             (function () {
                 var button = document.getElementById('forkpress-branch-history-load');
+                var treeButton = document.getElementById('forkpress-branch-tree-load');
                 var results = document.getElementById('forkpress-branch-history-results');
-                if (!button || !results || !window.fetch || !window.FormData) {
+                if (!button || !treeButton || !results || !window.fetch || !window.FormData) {
                     return;
                 }
                 function rowText(run) {
@@ -1917,13 +1967,41 @@ function forkpress_render_branch_admin_page(): void {
                         results.appendChild(list);
                     }
                 }
-                button.addEventListener('click', function () {
+                function renderTree(payload) {
+                    var records = Array.isArray(payload.records) ? payload.records : [];
+                    results.innerHTML = '';
+                    if (!records.length) {
+                        var empty = document.createElement('p');
+                        empty.textContent = payload.message || 'No branch tree edges found.';
+                        results.appendChild(empty);
+                        return;
+                    }
+                    var branches = {};
+                    records.slice(0, 20).forEach(function (run) {
+                        var source = run && run.source_branch ? String(run.source_branch) : '?';
+                        var target = run && run.target_branch ? String(run.target_branch) : '?';
+                        if (!branches[target]) {
+                            branches[target] = [];
+                        }
+                        branches[target].push(source + (run && run.id ? ' (#' + String(run.id) + ')' : ''));
+                    });
+                    var list = document.createElement('ul');
+                    list.className = 'forkpress-branch-tree-list';
+                    Object.keys(branches).sort().forEach(function (target) {
+                        var item = document.createElement('li');
+                        item.textContent = target + ' <- ' + branches[target].join(', ');
+                        list.appendChild(item);
+                    });
+                    results.appendChild(list);
+                }
+                function fetchBranchInspect(action, nonce, limit, loading, render) {
                     var body = new FormData();
-                    body.append('action', 'forkpress_branch_history');
-                    body.append('_wpnonce', '<?php echo esc_js(function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_history') : ''); ?>');
-                    body.append('limit', '10');
+                    body.append('action', action);
+                    body.append('_wpnonce', nonce);
+                    body.append('limit', limit);
                     button.disabled = true;
-                    results.textContent = 'Loading merge history...';
+                    treeButton.disabled = true;
+                    results.textContent = loading;
                     fetch('<?php echo esc_js($action_url); ?>', {
                         method: 'POST',
                         body: body,
@@ -1945,11 +2023,30 @@ function forkpress_render_branch_admin_page(): void {
                             }
                             return payload;
                         });
-                    }).then(renderHistory).catch(function (error) {
-                        results.textContent = error && error.message ? error.message : 'ForkPress merge history failed.';
+                    }).then(render).catch(function (error) {
+                        results.textContent = error && error.message ? error.message : 'ForkPress branch inspection failed.';
                     }).then(function () {
                         button.disabled = false;
+                        treeButton.disabled = false;
                     });
+                }
+                button.addEventListener('click', function () {
+                    fetchBranchInspect(
+                        'forkpress_branch_history',
+                        '<?php echo esc_js(function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_history') : ''); ?>',
+                        '10',
+                        'Loading merge history...',
+                        renderHistory
+                    );
+                });
+                treeButton.addEventListener('click', function () {
+                    fetchBranchInspect(
+                        'forkpress_branch_tree',
+                        '<?php echo esc_js(function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_tree') : ''); ?>',
+                        '20',
+                        'Loading branch tree...',
+                        renderTree
+                    );
                 });
             }());
             </script>

@@ -195,6 +195,9 @@ if ($action === 'forkpress_branch_merge') {
 if ($action === 'forkpress_branch_history') {
     forkpress_handle_branch_history();
 }
+if ($action === 'forkpress_branch_tree') {
+    forkpress_handle_branch_tree();
+}
 if ($action === 'forkpress_branch_conflicts') {
     forkpress_handle_branch_conflicts();
 }
@@ -387,6 +390,29 @@ assert_same(
     array_slice($history['argv'][0] ?? [], 1),
     ['branch', '--work-dir', $work_dir, 'history', '--limit', '5', '--format', 'json'],
     'branch history admin action uses audited branch history CLI path'
+);
+
+$tree = run_branch_ui_action(
+    ['action' => 'forkpress_branch_tree', 'limit' => '5'],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    ['FORKPRESS_TEST_CLI_OUTPUT' => $history_json]
+);
+$tree_payload = decode_branch_ui_payload($tree);
+assert_same($tree['status'], 0, 'branch tree admin action exits cleanly');
+assert_same($tree_payload['success'] ?? null, true, 'branch tree admin action returns JSON success');
+assert_same($tree_payload['message'] ?? null, 'Loaded 1 branch tree edge.', 'branch tree admin action reports loaded edge count');
+assert_same($tree_payload['recordCount'] ?? null, 1, 'branch tree admin action reports record count');
+assert_same($tree_payload['records'][0]['source_branch'] ?? null, 'feature', 'branch tree admin action exposes source branch');
+assert_same($tree_payload['records'][0]['target_branch'] ?? null, 'main', 'branch tree admin action exposes target branch');
+assert_same($tree_payload['treeCommand'] ?? null, 'forkpress branch tree --limit 5 --format json', 'branch tree admin action exposes the matching CLI command');
+assert_same(count($tree['argv']), 1, 'branch tree admin action invokes ForkPress CLI once');
+assert_same(
+    array_slice($tree['argv'][0] ?? [], 1),
+    ['branch', '--work-dir', $work_dir, 'tree', '--limit', '5', '--format', 'json'],
+    'branch tree admin action uses audited branch tree CLI path'
 );
 
 $conflicted_merge_output = "forkpress: merged feature into main\\n  run:       42\\n  status:    completed_with_conflicts\\n  applied:   yes\\n  conflicts: 3\\n";
@@ -1054,6 +1080,18 @@ $invalid_history_payload = decode_branch_ui_payload($invalid_history_json);
 assert_same($invalid_history_payload['success'] ?? null, false, 'branch history rejects invalid CLI JSON');
 assert_same($invalid_history_payload['message'] ?? null, 'ForkPress returned invalid merge history JSON.', 'branch history explains invalid CLI JSON');
 
+$invalid_tree_json = run_branch_ui_action(
+    ['action' => 'forkpress_branch_tree', 'limit' => '10'],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    ['FORKPRESS_TEST_CLI_OUTPUT' => 'not-json']
+);
+$invalid_tree_payload = decode_branch_ui_payload($invalid_tree_json);
+assert_same($invalid_tree_payload['success'] ?? null, false, 'branch tree rejects invalid CLI JSON');
+assert_same($invalid_tree_payload['message'] ?? null, 'ForkPress returned invalid branch tree JSON.', 'branch tree explains invalid CLI JSON');
+
 $invalid_create = run_branch_ui_action(
     ['action' => 'forkpress_branch_create', 'branch' => 'feature branch', 'from' => 'feature'],
     ['main', 'feature']
@@ -1194,10 +1232,15 @@ assert_true(str_contains($admin_page_html, 'name="action" value="forkpress_branc
 assert_true(str_contains($admin_page_html, 'name="source"'), 'branch manager admin page renders merge source selector');
 assert_true(str_contains($admin_page_html, 'name="target"'), 'branch manager admin page renders merge target selector');
 assert_true(str_contains($admin_page_html, 'id="forkpress-branch-history-load"'), 'branch manager admin page renders merge history button');
+assert_true(str_contains($admin_page_html, 'id="forkpress-branch-tree-load"'), 'branch manager admin page renders branch tree button');
 assert_true(str_contains($admin_page_html, 'forkpress_branch_history'), 'branch manager admin page renders merge history action');
 assert_true(str_contains($admin_page_html, 'nonce-forkpress_branch_history'), 'branch manager admin page renders merge history nonce');
+assert_true(str_contains($admin_page_html, 'forkpress_branch_tree'), 'branch manager admin page renders branch tree action');
+assert_true(str_contains($admin_page_html, 'nonce-forkpress_branch_tree'), 'branch manager admin page renders branch tree nonce');
 assert_true(str_contains($admin_page_html, 'forkpress-branch-history-list'), 'branch manager admin page renders merge history list target');
+assert_true(str_contains($admin_page_html, 'forkpress-branch-tree-list'), 'branch manager admin page renders branch tree list target');
 assert_true(str_contains($admin_page_html, "source + ' -> ' + target"), 'branch manager admin page renders source-to-target history rows');
+assert_true(str_contains($admin_page_html, "target + ' <- ' + branches[target].join(', ')"), 'branch manager admin page renders target-to-source branch tree rows');
 assert_true(str_contains($admin_page_html, 'forkpress_branch_conflicts'), 'branch manager admin page renders conflict audit action');
 assert_true(str_contains($admin_page_html, 'nonce-forkpress_branch_conflicts'), 'branch manager admin page renders conflict audit nonce');
 assert_true(str_contains($admin_page_html, 'forkpress-branch-review-conflicts'), 'branch manager admin page renders conflict drilldown buttons');
