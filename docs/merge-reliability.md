@@ -40,6 +40,10 @@ Recent additions in the current merge-reliability work:
   validator: `_elementor_data` JSON image widgets that still point at a deleted
   attachment row or upload file stay reviewable with a plugin logical widget
   attachment identity.
+- The same plugin-validator suite now includes a Yoast SEO-shaped permalink
+  validator: independently merged `wp_yoast_indexable` rows with the same
+  object type and canonical permalink stay reviewable with a plugin logical
+  permalink identity.
 - `tests/cow/wp_semantic_validator.php` now includes a built-in WordPress
   global-styles validator case where source and target each add a published
   `wp_global_styles` row with the same style key. The merge stays reviewable,
@@ -193,7 +197,9 @@ Recent focused coverage also tightens three roadmap edges:
   the count.
 - `tests/cow/plugin_validator.php` includes a Yoast SEO-shaped
   `wp_yoast_indexable` fixture where an index row points at a deleted
-  WordPress post and target SEO title/description edits stay reviewable.
+  WordPress post and target SEO title/description edits stay reviewable. The
+  same validator now holds duplicate canonical permalink groups for review
+  when source and target independently add indexables for the same URL.
 - The same suite includes an Elementor-shaped `_elementor_data` fixture where
   plugin-owned JSON points at a deleted attachment row/upload file while target
   widget edits remain visible for review.
