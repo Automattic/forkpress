@@ -186,7 +186,8 @@ theme-mod location cleanup, the attachment case covers the DB and file graph,
 and the option cases cover JSON and serialized `wp_options` rows plus global
 front/posts page singleton, serialized sticky-post, and scalar site-icon option
 disagreements, plus serialized theme-mod custom-logo and media-image widget
-and nav-menu widget disagreements, that must stay reviewable.
+media/audio/video/gallery widgets, pages widget exclusions, nav-menu widget,
+nav-menu auto-add, and menu-location disagreements, that must stay reviewable.
 
 For filesystem merge behavior, including binary changes and conflicts, safe
 relative symlinks, unsafe absolute/root-escaping/self-referential/managed-path

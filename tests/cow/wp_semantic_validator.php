@@ -867,6 +867,90 @@ function create_wp_scalar_option_owner_reference_db(string $path): void {
     $db->close();
 }
 
+function create_wp_serialized_option_owner_reference_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_title TEXT NOT NULL DEFAULT '',
+        post_content TEXT NOT NULL DEFAULT '',
+        post_status TEXT NOT NULL DEFAULT 'publish',
+        post_type TEXT NOT NULL DEFAULT 'post',
+        post_name TEXT NOT NULL DEFAULT '',
+        guid TEXT NOT NULL DEFAULT ''
+    )");
+    $db->exec("CREATE TABLE wp_terms (
+        term_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        slug TEXT NOT NULL,
+        term_group INTEGER NOT NULL DEFAULT 0
+    )");
+    $db->exec("CREATE TABLE wp_term_taxonomy (
+        term_taxonomy_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        term_id INTEGER NOT NULL,
+        taxonomy TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        parent INTEGER NOT NULL DEFAULT 0,
+        count INTEGER NOT NULL DEFAULT 0
+    )");
+    $db->exec("CREATE TABLE wp_options (
+        option_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        option_name TEXT NOT NULL,
+        option_value TEXT NOT NULL,
+        autoload TEXT NOT NULL DEFAULT 'yes'
+    )");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, guid) VALUES
+        (140, 'Sticky post candidate', '<!-- wp:paragraph --><p>Sticky post</p><!-- /wp:paragraph -->', 'publish', 'post', 'sticky-post-candidate', ''),
+        (141, 'Pages widget candidate', '<!-- wp:paragraph --><p>Pages widget</p><!-- /wp:paragraph -->', 'publish', 'page', 'pages-widget-candidate', ''),
+        (142, 'Serialized media attachment', '', 'inherit', 'attachment', 'serialized-media-attachment', 'wp-content/uploads/2026/05/serialized-media.jpg')");
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug, term_group) VALUES
+        (143, 'Serialized Menu', 'serialized-menu', 0)");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES
+        (1430, 143, 'nav_menu', '', 0, 0)");
+
+    $options = [
+        [1400, 'sticky_posts', serialize([140])],
+        [1401, 'theme_mods_forkpress_active', serialize([
+            'custom_logo' => 142,
+            'nav_menu_locations' => ['primary' => 143],
+            'forkpress_accent' => 'base',
+        ])],
+        [1402, 'widget_nav_menu', serialize([
+            2 => ['title' => 'Base menu widget', 'nav_menu' => 143],
+            '_multiwidget' => 1,
+        ])],
+        [1403, 'nav_menu_options', serialize(['auto_add' => [143]])],
+        [1404, 'widget_media_image', serialize([
+            3 => ['attachment_id' => 142, 'caption' => 'Base image widget'],
+            '_multiwidget' => 1,
+        ])],
+        [1405, 'widget_media_audio', serialize([
+            4 => ['attachment_id' => 142, 'caption' => 'Base audio widget'],
+            '_multiwidget' => 1,
+        ])],
+        [1406, 'widget_media_video', serialize([
+            5 => ['attachment_id' => 142, 'caption' => 'Base video widget'],
+            '_multiwidget' => 1,
+        ])],
+        [1407, 'widget_media_gallery', serialize([
+            6 => ['ids' => [142], 'caption' => 'Base gallery widget'],
+            '_multiwidget' => 1,
+        ])],
+        [1408, 'widget_pages', serialize([
+            7 => ['exclude' => '141', 'title' => 'Base pages widget'],
+            '_multiwidget' => 1,
+        ])],
+    ];
+    $stmt = $db->prepare('INSERT INTO wp_options (option_id, option_name, option_value, autoload) VALUES (:id, :name, :value, :autoload)');
+    foreach ($options as [$option_id, $option_name, $option_value]) {
+        $stmt->bindValue(':id', $option_id, SQLITE3_INTEGER);
+        $stmt->bindValue(':name', $option_name, SQLITE3_TEXT);
+        $stmt->bindValue(':value', $option_value, SQLITE3_TEXT);
+        $stmt->bindValue(':autoload', 'yes', SQLITE3_TEXT);
+        $stmt->execute();
+    }
+    $db->close();
+}
+
 define('FORKPRESS_COW_MERGE_TESTS', true);
 require_once __DIR__ . '/../../scripts/cow/merge.php';
 
@@ -2547,6 +2631,98 @@ PHP);
     }
     $scalar_option_guard_reasons = (string)scalar($scalar_option_guard_metadata, "SELECT group_concat(reason, '\n') FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-wins'");
     assert_true(str_contains($scalar_option_guard_reasons, 'target has changed wp_options rows'), 'WordPress scalar option owner guard audit explains the changed option blockers');
+
+    $serialized_option_guard_base_root = $tmp . '/serialized-option-owner-guard-base';
+    $serialized_option_guard_source_root = $tmp . '/serialized-option-owner-guard-source';
+    $serialized_option_guard_target_root = $tmp . '/serialized-option-owner-guard-target';
+    $serialized_option_guard_base = $serialized_option_guard_base_root . '/wp-content/database/.ht.sqlite';
+    $serialized_option_guard_source = $serialized_option_guard_source_root . '/wp-content/database/.ht.sqlite';
+    $serialized_option_guard_target = $serialized_option_guard_target_root . '/wp-content/database/.ht.sqlite';
+    $serialized_option_guard_metadata = $tmp . '/.forkpress/cow/merge/wp-serialized-option-owner-guard-metadata.sqlite';
+
+    mkdir($serialized_option_guard_base_root . '/wp-content/database', 0777, true);
+    create_wp_serialized_option_owner_reference_db($serialized_option_guard_base);
+    copy_tree_for_test($serialized_option_guard_base_root, $serialized_option_guard_source_root);
+    copy_tree_for_test($serialized_option_guard_base_root, $serialized_option_guard_target_root);
+    cow_merge_allocate_autoincrement_bands($serialized_option_guard_source, $serialized_option_guard_metadata, 'feature-wp-serialized-option-owner-guard-source');
+    cow_merge_allocate_autoincrement_bands($serialized_option_guard_target, $serialized_option_guard_metadata, 'main');
+
+    $db = open_db($serialized_option_guard_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID IN (140, 141, 142)');
+    $db->exec('DELETE FROM wp_terms WHERE term_id = 143');
+    $db->close();
+
+    $db = open_db($serialized_option_guard_target);
+    $set_option_value = function (string $option_name, string $option_value) use ($db): void {
+        $stmt = $db->prepare('UPDATE wp_options SET option_value = :value WHERE option_name = :name');
+        $stmt->bindValue(':value', $option_value, SQLITE3_TEXT);
+        $stmt->bindValue(':name', $option_name, SQLITE3_TEXT);
+        $stmt->execute();
+    };
+    $set_option_value('sticky_posts', serialize(['140']));
+    $set_option_value('theme_mods_forkpress_active', serialize([
+        'custom_logo' => 142,
+        'nav_menu_locations' => ['primary' => 143],
+        'forkpress_accent' => 'target',
+    ]));
+    $set_option_value('widget_nav_menu', serialize([
+        2 => ['title' => 'Target menu widget', 'nav_menu' => '143'],
+        '_multiwidget' => 1,
+    ]));
+    $set_option_value('nav_menu_options', serialize(['auto_add' => ['143']]));
+    $set_option_value('widget_media_image', serialize([
+        3 => ['attachment_id' => '142', 'caption' => 'Target image widget'],
+        '_multiwidget' => 1,
+    ]));
+    $set_option_value('widget_media_audio', serialize([
+        4 => ['attachment_id' => 142, 'caption' => 'Target audio widget'],
+        '_multiwidget' => 1,
+    ]));
+    $set_option_value('widget_media_video', serialize([
+        5 => ['attachment_id' => 142, 'caption' => 'Target video widget'],
+        '_multiwidget' => 1,
+    ]));
+    $set_option_value('widget_media_gallery', serialize([
+        6 => ['ids' => '142', 'caption' => 'Target gallery widget'],
+        '_multiwidget' => 1,
+    ]));
+    $set_option_value('widget_pages', serialize([
+        7 => ['exclude' => ['141'], 'title' => 'Target pages widget'],
+        '_multiwidget' => 1,
+    ]));
+    $db->close();
+
+    $serialized_option_guard_result = cow_merge_branch_state(
+        $serialized_option_guard_base,
+        $serialized_option_guard_source,
+        $serialized_option_guard_target,
+        $serialized_option_guard_metadata,
+        'feature-wp-serialized-option-owner-guard-source',
+        'main'
+    );
+
+    assert_same($serialized_option_guard_result['status'], 'completed_with_conflicts', 'WordPress serialized option owner deletes with target-edited references stay reviewable');
+    assert_same((int)scalar($serialized_option_guard_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID IN (140, 141, 142)'), 3, 'WordPress serialized option owner guard keeps referenced posts before review');
+    assert_same((int)scalar($serialized_option_guard_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 143'), 1, 'WordPress serialized option owner guard keeps referenced nav menu term before review');
+
+    $target_theme_mods = unserialize((string)scalar($serialized_option_guard_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_forkpress_active'"), ['allowed_classes' => false]);
+    $target_gallery_widget = unserialize((string)scalar($serialized_option_guard_target, "SELECT option_value FROM wp_options WHERE option_name = 'widget_media_gallery'"), ['allowed_classes' => false]);
+    $target_pages_widget = unserialize((string)scalar($serialized_option_guard_target, "SELECT option_value FROM wp_options WHERE option_name = 'widget_pages'"), ['allowed_classes' => false]);
+    assert_same($target_theme_mods['forkpress_accent'] ?? null, 'target', 'WordPress serialized option owner guard preserves target theme-mod edit');
+    assert_same($target_gallery_widget[6]['caption'] ?? null, 'Target gallery widget', 'WordPress serialized option owner guard preserves target media gallery edit');
+    assert_same($target_pages_widget[7]['title'] ?? null, 'Target pages widget', 'WordPress serialized option owner guard preserves target pages widget edit');
+
+    $serialized_option_guard_audit = cow_merge_audit_report($serialized_option_guard_metadata, (int)$serialized_option_guard_result['run_id'], 10, [
+        'records' => 'conflicts',
+        'conflict_type' => 'row-target-constraint',
+    ]);
+    assert_same(count($serialized_option_guard_audit['conflicts']), 4, 'WordPress serialized option owner guard records one row constraint per guarded owner');
+    $serialized_option_guard_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $serialized_option_guard_audit['conflicts']));
+    foreach (['140', '141', '142', '143'] as $needle) {
+        assert_true(str_contains($serialized_option_guard_preview, $needle), 'WordPress serialized option owner guard audit includes ' . $needle);
+    }
+    $serialized_option_guard_reasons = (string)scalar($serialized_option_guard_metadata, "SELECT group_concat(reason, '\n') FROM merge_decisions WHERE decision = 'target-wins'");
+    assert_true(str_contains($serialized_option_guard_reasons, 'target has changed wp_options rows'), 'WordPress serialized option owner guard audit explains the changed option blockers');
 
     $attachment_upload_base_root = $tmp . '/attachment-upload-base';
     $attachment_upload_source_root = $tmp . '/attachment-upload-source';
@@ -4392,9 +4568,10 @@ PHP);
 
     assert_same($option_result['status'], 'completed_with_conflicts', 'WordPress option reference validator holds missing option objects for review');
     assert_same((int)($option_result['plugin_validators'] ?? 0), 1, 'WordPress option reference validator is discovered from mu-plugins during merge');
-    assert_same((int)($option_result['plugin_validator_conflicts'] ?? 0), 18, 'WordPress option reference validator records missing pages, posts, attachments, nav menus, widgets, and option refs');
-    assert_same((int)scalar($option_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID IN (90, 91, 92, 93)'), 0, 'WordPress option reference validator leaves source object deletions staged for review');
-    assert_same((int)scalar($option_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 94'), 0, 'WordPress option reference validator leaves source nav menu deletion staged for review');
+    assert_same((int)($option_result['plugin_validator_conflicts'] ?? 0), 9, 'WordPress option reference validator records only unguarded missing pages, posts, widgets, and option refs');
+    assert_same((int)scalar($option_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID IN (90, 91, 92)'), 0, 'WordPress option reference validator leaves unguarded source object deletions staged for review');
+    assert_same((int)scalar($option_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 93'), 1, 'WordPress option owner guard keeps target-edited attachment option refs before validation');
+    assert_same((int)scalar($option_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 94'), 1, 'WordPress option owner guard keeps target-edited nav menu option refs before validation');
 
     $option_theme_mods_value = scalar($option_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_forkpress_active'");
     $option_theme_mods = is_string($option_theme_mods_value) ? unserialize($option_theme_mods_value) : null;
@@ -4437,17 +4614,24 @@ PHP);
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-option-missing-object',
     ]);
-    assert_same(count($option_audit['conflicts']), 18, 'WordPress option reference validator exposes missing option objects as plugin-scoped audit conflicts');
+    assert_same(count($option_audit['conflicts']), 9, 'WordPress option reference validator exposes remaining missing option objects as plugin-scoped audit conflicts');
     $option_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $option_audit['conflicts']));
-    foreach (['"missing_object_id":90', '"missing_object_id":91', '"missing_object_id":92', '"missing_object_id":93', '"missing_object_id":94'] as $needle) {
+    foreach (['"missing_object_id":90', '"missing_object_id":91', '"missing_object_id":92', '"missing_object_id":94'] as $needle) {
         assert_true(str_contains($option_preview, $needle), 'WordPress option reference audit includes ' . $needle);
     }
-    foreach (['"object_type":"page"', '"object_type":"post"', '"object_type":"attachment"', '"object_type":"nav_menu"', '"object_type":"widget"'] as $needle) {
+    foreach (['"object_type":"page"', '"object_type":"post"', '"object_type":"nav_menu"', '"object_type":"widget"'] as $needle) {
         assert_true(str_contains($option_preview, $needle), 'WordPress option reference audit includes ' . $needle);
     }
-    foreach (['theme_mods_forkpress_active', 'widget_nav_menu', 'nav_menu_options', 'widget_media_image', 'widget_media_audio', 'widget_media_video', 'widget_media_gallery', 'widget_pages', 'widget_block', 'widget_text', 'widget_custom_html', 'sidebars_widgets', 'widget_rss', 'site_icon', 'page_on_front', 'page_for_posts', 'sticky_posts'] as $needle) {
+    foreach (['theme_mods_forkpress_active', 'nav_menu_options', 'widget_pages', 'sidebars_widgets', 'widget_rss', 'page_on_front', 'page_for_posts', 'sticky_posts'] as $needle) {
         assert_true(str_contains($option_preview, $needle), 'WordPress option reference audit includes ' . $needle);
     }
+    $option_owner_guard_audit = cow_merge_audit_report($option_metadata, (int)$option_result['run_id'], 10, [
+        'records' => 'conflicts',
+        'conflict_type' => 'row-target-constraint',
+    ]);
+    $option_owner_guard_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $option_owner_guard_audit['conflicts']));
+    assert_true(str_contains($option_owner_guard_preview, '93'), 'WordPress option owner guard audit includes the guarded attachment ID');
+    assert_true(str_contains($option_owner_guard_preview, '94'), 'WordPress option owner guard audit includes the guarded nav menu term ID');
 
     $plugin_cpt_base_root = $tmp . '/wp-plugin-cpt-validator-files-base';
     $plugin_cpt_source_root = $tmp . '/wp-plugin-cpt-validator-files-source';

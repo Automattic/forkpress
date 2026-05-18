@@ -5972,6 +5972,193 @@ function cow_merge_wordpress_option_reference_violation(
     return null;
 }
 
+function cow_merge_wordpress_option_value_references_deleted_owner(string $option_name, string $option_value, string $owner_table, int $owner_id, ?string $owner_post_type): bool {
+    $int_refs_owner = static function (mixed $candidate) use ($owner_id): bool {
+        if (is_int($candidate)) {
+            return $candidate === $owner_id;
+        }
+        if (is_string($candidate) && preg_match('/^-?\d+$/', trim($candidate))) {
+            return (int)trim($candidate) === $owner_id;
+        }
+        return false;
+    };
+
+    if ($owner_table === 'wp_posts') {
+        if (in_array($option_name, ['page_on_front', 'page_for_posts'], true)) {
+            return $owner_post_type === 'page' && $int_refs_owner($option_value);
+        }
+        if ($option_name === 'site_icon') {
+            return $owner_post_type === 'attachment' && $int_refs_owner($option_value);
+        }
+    }
+
+    $decoded = @unserialize($option_value, ['allowed_classes' => false]);
+    if (!is_array($decoded)) {
+        return false;
+    }
+
+    if ($owner_table === 'wp_posts') {
+        if ($option_name === 'sticky_posts') {
+            foreach ($decoded as $post_id) {
+                if ($owner_post_type === 'post' && $int_refs_owner($post_id)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        if (str_starts_with($option_name, 'theme_mods_')) {
+            return $owner_post_type === 'attachment'
+                && array_key_exists('custom_logo', $decoded)
+                && $int_refs_owner($decoded['custom_logo']);
+        }
+
+        if (in_array($option_name, ['widget_media_image', 'widget_media_audio', 'widget_media_video'], true)) {
+            if ($owner_post_type !== 'attachment') {
+                return false;
+            }
+            foreach ($decoded as $widget) {
+                if (is_array($widget) && array_key_exists('attachment_id', $widget) && $int_refs_owner($widget['attachment_id'])) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        if ($option_name === 'widget_media_gallery') {
+            if ($owner_post_type !== 'attachment') {
+                return false;
+            }
+            foreach ($decoded as $widget) {
+                if (!is_array($widget) || !array_key_exists('ids', $widget)) {
+                    continue;
+                }
+                $ids = is_array($widget['ids']) ? $widget['ids'] : explode(',', (string)$widget['ids']);
+                foreach ($ids as $attachment_id) {
+                    if ($int_refs_owner($attachment_id)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        if ($option_name === 'widget_pages') {
+            if ($owner_post_type !== 'page') {
+                return false;
+            }
+            foreach ($decoded as $widget) {
+                if (!is_array($widget) || !array_key_exists('exclude', $widget)) {
+                    continue;
+                }
+                $excluded_ids = is_array($widget['exclude']) ? $widget['exclude'] : explode(',', (string)$widget['exclude']);
+                foreach ($excluded_ids as $post_id) {
+                    if ($int_refs_owner($post_id)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+    }
+
+    if ($owner_table === 'wp_terms') {
+        if (str_starts_with($option_name, 'theme_mods_')) {
+            $locations = $decoded['nav_menu_locations'] ?? null;
+            if (is_array($locations)) {
+                foreach ($locations as $term_id) {
+                    if ($int_refs_owner($term_id)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        if ($option_name === 'widget_nav_menu') {
+            foreach ($decoded as $widget) {
+                if (is_array($widget) && array_key_exists('nav_menu', $widget) && $int_refs_owner($widget['nav_menu'])) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        if ($option_name === 'nav_menu_options') {
+            $auto_add = $decoded['auto_add'] ?? null;
+            if (is_array($auto_add)) {
+                foreach ($auto_add as $term_id) {
+                    if ($int_refs_owner($term_id)) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
+function cow_merge_wordpress_target_changed_options_for_deleted_owner(SQLite3 $base, SQLite3 $target, string $owner_table, int $owner_id, ?string $owner_post_type = null): ?string {
+    foreach (['wp_options'] as $option_table) {
+        if (!cow_merge_schema_object_exists($base, $option_table) || !cow_merge_schema_object_exists($target, $option_table)) {
+            continue;
+        }
+        $base_columns = cow_merge_table_columns($base, $option_table);
+        $target_columns = cow_merge_table_columns($target, $option_table);
+        foreach (['option_id', 'option_name', 'option_value'] as $required_column) {
+            if (!in_array($required_column, $base_columns, true) || !in_array($required_column, $target_columns, true)) {
+                continue 2;
+            }
+        }
+
+        $columns = cow_merge_all_columns($target_columns, $base_columns);
+        $interesting_options = [
+            'nav_menu_options',
+            'page_for_posts',
+            'page_on_front',
+            'site_icon',
+            'sticky_posts',
+            'widget_media_audio',
+            'widget_media_gallery',
+            'widget_media_image',
+            'widget_media_video',
+            'widget_nav_menu',
+            'widget_pages',
+        ];
+        $placeholders = implode(',', array_fill(0, count($interesting_options), '?'));
+        $stmt = cow_merge_prepare_checked(
+            $target,
+            'SELECT * FROM ' . cow_merge_quote_ident($option_table)
+                . " WHERE option_name LIKE 'theme_mods_%' OR option_name IN ($placeholders)"
+                . ' ORDER BY option_id',
+            "failed to prepare target $option_table WordPress option dependency lookup"
+        );
+        foreach ($interesting_options as $index => $option_name) {
+            cow_merge_bind($stmt, $index + 1, $option_name);
+        }
+        $res = cow_merge_execute_checked($stmt, $target, "failed to inspect target $option_table WordPress option dependencies");
+        try {
+            while ($target_row = $res->fetchArray(SQLITE3_ASSOC)) {
+                $option_name = (string)($target_row['option_name'] ?? '');
+                $option_value = (string)($target_row['option_value'] ?? '');
+                if (!cow_merge_wordpress_option_value_references_deleted_owner($option_name, $option_value, $owner_table, $owner_id, $owner_post_type)) {
+                    continue;
+                }
+                $option_id = $target_row['option_id'] ?? null;
+                $base_row = cow_merge_wordpress_source_row($base, $option_table, 'option_id', $option_id);
+                if ($base_row === null || !cow_merge_row_values_equal($target_row, $base_row, $columns)) {
+                    return "source deleted $owner_table row $owner_id while target has changed $option_table rows referencing it";
+                }
+            }
+        } finally {
+            cow_merge_result_finalize_checked($res, "failed to finalize target $option_table WordPress option dependency lookup");
+        }
+    }
+
+    return null;
+}
+
 function cow_merge_wordpress_theme_mods_nav_locations_merge(?string $base_value, ?string $source_value, ?string $target_value): ?string {
     if ($source_value === null || $target_value === null) {
         return null;
@@ -6235,6 +6422,10 @@ function cow_merge_wordpress_delete_reference_violation(
             if ($target_dependent_violation !== null) {
                 return $target_dependent_violation;
             }
+            $target_option_violation = cow_merge_wordpress_target_changed_options_for_deleted_owner($base, $target, 'wp_posts', (int)$post_id, (string)($base_row['post_type'] ?? ''));
+            if ($target_option_violation !== null) {
+                return $target_option_violation;
+            }
         }
     }
     if ($table === 'wp_users') {
@@ -6267,6 +6458,10 @@ function cow_merge_wordpress_delete_reference_violation(
             ]);
             if ($target_dependent_violation !== null) {
                 return $target_dependent_violation;
+            }
+            $target_option_violation = cow_merge_wordpress_target_changed_options_for_deleted_owner($base, $target, 'wp_terms', (int)$term_id);
+            if ($target_option_violation !== null) {
+                return $target_option_violation;
             }
         }
     }
