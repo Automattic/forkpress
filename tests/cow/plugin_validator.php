@@ -342,6 +342,27 @@ function create_yoast_indexable_validator_db(string $path): void {
     $db->close();
 }
 
+function create_events_calendar_validator_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_title TEXT NOT NULL DEFAULT '',
+        post_content TEXT NOT NULL DEFAULT '',
+        post_status TEXT NOT NULL DEFAULT 'publish',
+        post_type TEXT NOT NULL DEFAULT 'post',
+        post_name TEXT NOT NULL DEFAULT '',
+        post_parent INTEGER NOT NULL DEFAULT 0
+    )");
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, post_parent) VALUES
+        (90, 'Spring Conference', '', 'publish', 'tribe_events', 'spring-conference', 0),
+        (91, 'Main Hall', '', 'publish', 'tribe_venue', 'main-hall', 0)");
+    $db->exec("INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES
+        (100, 90, '_EventVenueID', '91'),
+        (101, 90, '_EventStartDate', '2026-06-01 09:00:00')");
+    $db->close();
+}
+
 define('FORKPRESS_COW_MERGE_TESTS', true);
 require_once __DIR__ . '/../../scripts/cow/merge.php';
 
@@ -3237,6 +3258,124 @@ PHP);
     $yoast_payload = cow_merge_decode_payload_json((string)($yoast_audit['conflicts'][0]['chosen_payload'] ?? ''), 'Yoast indexable validator payload');
     assert_same($yoast_payload['object'] ?? null, 'indexable:80:post:70', 'Yoast audit identifies the stale indexable row');
     assert_same($yoast_payload['candidate']['title'] ?? null, 'Target SEO title', 'Yoast audit includes the preserved target indexable edit');
+
+    $events_base_root = $tmp . '/events-base';
+    $events_source_root = $tmp . '/events-source';
+    $events_target_root = $tmp . '/events-target';
+    $events_base = $events_base_root . '/wp-content/database/.ht.sqlite';
+    $events_source = $events_source_root . '/wp-content/database/.ht.sqlite';
+    $events_target = $events_target_root . '/wp-content/database/.ht.sqlite';
+    $events_metadata = $tmp . '/.forkpress/cow/merge/plugin-events-calendar-validator-metadata.sqlite';
+    $events_file_base = $tmp . '/.forkpress/cow/merge/file-bases/plugin-events-calendar-validator.json';
+
+    mkdir($events_base_root . '/wp-content/database', 0777, true);
+    create_events_calendar_validator_db($events_base);
+    write_test_file($events_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$findings = [];
+$rows = $db->query("SELECT meta_id, post_id, meta_key, meta_value FROM wp_postmeta WHERE meta_key = '_EventVenueID' ORDER BY meta_id");
+while ($row = $rows->fetchArray(SQLITE3_ASSOC)) {
+    $event_id = (int)$row['post_id'];
+    $venue_id = (int)$row['meta_value'];
+    if ($venue_id <= 0) {
+        continue;
+    }
+    $event = $db->querySingle("SELECT ID, post_title, post_type FROM wp_posts WHERE ID = $event_id", true);
+    if (!is_array($event) || ($event['post_type'] ?? '') !== 'tribe_events') {
+        continue;
+    }
+    $venue_exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $venue_id AND post_type = 'tribe_venue'");
+    if ($venue_exists === 1) {
+        continue;
+    }
+    $findings[] = [
+        'plugin' => 'the-events-calendar',
+        'object' => 'event:' . $event_id . ':venue:' . $venue_id,
+        'reason' => 'The Events Calendar event venue metadata references a venue post that no longer exists after merge',
+        'type' => 'plugin-the-events-calendar-missing-venue',
+        'tables' => ['wp_posts', 'wp_postmeta'],
+        'validator' => 'the-events-calendar-venue-map@forkpress-test',
+        'severity' => 'error',
+        'logical_identity' => [
+            'plugin' => 'the-events-calendar',
+            'kind' => 'event_venue',
+            'event_id' => $event_id,
+            'venue_id' => $venue_id,
+            'meta_key' => '_EventVenueID',
+        ],
+        'candidate' => [
+            'meta_id' => (int)$row['meta_id'],
+            'event_id' => $event_id,
+            'venue_id' => $venue_id,
+            'event_title' => (string)$event['post_title'],
+            'meta_key' => (string)$row['meta_key'],
+            'venue_exists' => $venue_exists,
+        ],
+    ];
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+
+    copy_tree_for_test($events_base_root, $events_source_root);
+    copy_tree_for_test($events_base_root, $events_target_root);
+    cow_merge_capture_file_base($events_base_root, $events_file_base);
+    cow_merge_allocate_autoincrement_bands($events_source, $events_metadata, 'feature-plugin-events-calendar-source');
+    cow_merge_allocate_autoincrement_bands($events_target, $events_metadata, 'main');
+
+    $db = open_db($events_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID = 91');
+    $db->close();
+
+    $db = open_db($events_target);
+    $db->exec("UPDATE wp_posts SET post_title = 'Target Spring Conference' WHERE ID = 90");
+    $db->exec("UPDATE wp_postmeta SET meta_value = '2026-06-01 10:00:00' WHERE meta_id = 101");
+    $db->close();
+
+    $events_result = cow_merge_branch_state(
+        $events_base,
+        $events_source,
+        $events_target,
+        $events_metadata,
+        'feature-plugin-events-calendar-source',
+        'main',
+        $events_file_base,
+        $events_source_root,
+        $events_target_root
+    );
+
+    assert_same($events_result['status'], 'completed_with_conflicts', 'The Events Calendar validator holds event venue metadata pointing at deleted venues for review');
+    assert_same((int)($events_result['plugin_validators'] ?? 0), 1, 'The Events Calendar venue validator is discovered from mu-plugins during merge');
+    assert_same((int)($events_result['plugin_validator_conflicts'] ?? 0), 1, 'The Events Calendar validator records the stale venue metadata reference');
+    assert_same((int)scalar($events_target, "SELECT COUNT(*) FROM wp_posts WHERE ID = 91 AND post_type = 'tribe_venue'"), 0, 'The Events Calendar validator leaves the source venue deletion staged for review');
+    assert_same(scalar($events_target, 'SELECT post_title FROM wp_posts WHERE ID = 90'), 'Target Spring Conference', 'The Events Calendar validator preserves target event edits for review');
+    assert_same(scalar($events_target, 'SELECT meta_value FROM wp_postmeta WHERE meta_id = 100'), '91', 'The Events Calendar validator keeps the stale venue postmeta visible');
+    assert_same(scalar($events_target, 'SELECT meta_value FROM wp_postmeta WHERE meta_id = 101'), '2026-06-01 10:00:00', 'The Events Calendar validator preserves unrelated target event metadata edits');
+
+    $events_identity = json_encode([
+        'plugin' => 'the-events-calendar',
+        'kind' => 'event_venue',
+        'event_id' => 90,
+        'venue_id' => 91,
+        'meta_key' => '_EventVenueID',
+    ], JSON_UNESCAPED_SLASHES);
+    $events_audit = cow_merge_audit_report($events_metadata, (int)$events_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin' => 'the-events-calendar',
+        'conflict_type' => 'plugin-the-events-calendar-missing-venue',
+        'plugin_logical_identity' => $events_identity,
+    ]);
+    assert_same(count($events_audit['conflicts']), 1, 'The Events Calendar audit filters stale venue findings by plugin, conflict type, and logical identity');
+    assert_same($events_audit['conflicts'][0]['plugin'] ?? null, 'the-events-calendar', 'The Events Calendar audit exposes the plugin as a first-class field');
+    assert_same($events_audit['conflicts'][0]['plugin_logical_identity']['venue_id'] ?? null, 91, 'The Events Calendar audit exposes the missing venue identity');
+    $events_payload = cow_merge_decode_payload_json((string)($events_audit['conflicts'][0]['chosen_payload'] ?? ''), 'The Events Calendar venue validator payload');
+    assert_same($events_payload['object'] ?? null, 'event:90:venue:91', 'The Events Calendar audit identifies the stale event venue reference');
+    assert_same($events_payload['candidate']['event_title'] ?? null, 'Target Spring Conference', 'The Events Calendar audit includes the preserved target event edit');
+    assert_same($events_payload['candidate']['venue_exists'] ?? null, 0, 'The Events Calendar audit records the missing venue evidence');
 
     $env_validator = $tmp . '/plugin-validator-env.php';
     write_test_file($env_validator, <<<'PHP'

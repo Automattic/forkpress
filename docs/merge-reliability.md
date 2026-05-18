@@ -167,6 +167,9 @@ Recent focused coverage also tightens three roadmap edges:
 - `tests/cow/plugin_validator.php` includes a Yoast SEO-shaped
   `wp_yoast_indexable` fixture where an index row points at a deleted
   WordPress post and target SEO title/description edits stay reviewable.
+- The same suite includes an Events Calendar-shaped `_EventVenueID` fixture
+  where scalar event postmeta points at a deleted `tribe_venue` post while
+  target event/date edits remain visible for review.
 - `crates/forkpress-storage/src/lib.rs` covers the branch-reset crash window
   after reset birth metadata has been finalized but before the reset branch is
   published, proving old metadata/base snapshots are restored and reset can be
