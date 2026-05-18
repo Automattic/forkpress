@@ -308,10 +308,14 @@ function create_acf_validator_db(string $path): void {
     $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, post_parent) VALUES
         (50, 'Landing Page Fields', '', 'publish', 'acf-field-group', 'group_landing_page', 0),
         (51, 'CTA Text', 'a:2:{s:4:\"type\";s:4:\"text\";s:4:\"name\";s:8:\"cta_text\";}', 'publish', 'acf-field', 'field_cta_text', 50),
+        (52, 'Related Story', '<!-- wp:paragraph --><p>Related story</p><!-- /wp:paragraph -->', 'publish', 'post', 'related-story', 0),
+        (53, 'Related Posts', 'a:2:{s:4:\"type\";s:12:\"relationship\";s:4:\"name\";s:13:\"related_posts\";}', 'publish', 'acf-field', 'field_related_posts', 50),
         (60, 'Landing Page', '<!-- wp:paragraph --><p>Landing page</p><!-- /wp:paragraph -->', 'publish', 'page', 'landing-page', 0)");
     $db->exec("INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES
         (61, 60, 'cta_text', 'Base CTA copy'),
-        (62, 60, '_cta_text', 'field_cta_text')");
+        (62, 60, '_cta_text', 'field_cta_text'),
+        (63, 60, 'related_posts', 'a:1:{i:0;i:52;}'),
+        (64, 60, '_related_posts', 'field_related_posts')");
     $db->close();
 }
 
@@ -3243,6 +3247,60 @@ while ($row = $meta->fetchArray(SQLITE3_ASSOC)) {
         ],
     ];
 }
+$meta = $db->query("SELECT ref.meta_id AS field_ref_meta_id, ref.post_id, ref.meta_key, ref.meta_value AS field_key, value.meta_id AS value_meta_id, value.meta_value, field.post_content FROM wp_postmeta ref JOIN wp_postmeta value ON value.post_id = ref.post_id AND value.meta_key = substr(ref.meta_key, 2) JOIN wp_posts field ON field.post_type = 'acf-field' AND field.post_name = ref.meta_value WHERE substr(ref.meta_key, 1, 1) = '_' ORDER BY ref.meta_id");
+while ($row = $meta->fetchArray(SQLITE3_ASSOC)) {
+    $field = @unserialize((string)$row['post_content']);
+    if (!is_array($field) || ($field['type'] ?? null) !== 'relationship') {
+        continue;
+    }
+    $value = @unserialize((string)$row['meta_value']);
+    if (!is_array($value)) {
+        continue;
+    }
+    foreach ($value as $related_post_id) {
+        if (!is_int($related_post_id) && !(is_string($related_post_id) && ctype_digit($related_post_id))) {
+            continue;
+        }
+        $related_post_id = (int)$related_post_id;
+        if ($related_post_id <= 0) {
+            continue;
+        }
+        $related_exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $related_post_id");
+        if ($related_exists === 1) {
+            continue;
+        }
+        $post_id = (int)$row['post_id'];
+        $field_key = (string)$row['field_key'];
+        $field_name = substr((string)$row['meta_key'], 1);
+        $findings[] = [
+            'plugin' => 'advanced-custom-fields',
+            'object' => 'post:' . $post_id . ':field:' . $field_key . ':related-post:' . $related_post_id,
+            'reason' => 'ACF relationship field metadata references a WordPress post that no longer exists after merge',
+            'type' => 'plugin-acf-relationship-missing-post',
+            'tables' => ['wp_posts', 'wp_postmeta'],
+            'validator' => 'acf-field-map@forkpress-test',
+            'severity' => 'error',
+            'logical_identity' => [
+                'plugin' => 'advanced-custom-fields',
+                'kind' => 'relationship_post',
+                'post_id' => $post_id,
+                'meta_key' => $field_name,
+                'field_key' => $field_key,
+                'related_post_id' => $related_post_id,
+            ],
+            'candidate' => [
+                'field_ref_meta_id' => (int)$row['field_ref_meta_id'],
+                'value_meta_id' => (int)$row['value_meta_id'],
+                'post_id' => $post_id,
+                'meta_key' => $field_name,
+                'field_key' => $field_key,
+                'related_post_id' => $related_post_id,
+                'value' => array_values($value),
+                'related_post_exists' => $related_exists,
+            ],
+        ];
+    }
+}
 echo json_encode([
     'status' => $findings ? 'conflicts' : 'valid',
     'findings' => $findings,
@@ -3257,10 +3315,12 @@ PHP);
 
     $db = open_db($acf_source);
     $db->exec('DELETE FROM wp_posts WHERE ID = 51');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 52');
     $db->close();
 
     $db = open_db($acf_target);
     $db->exec("UPDATE wp_postmeta SET meta_value = 'Target CTA copy' WHERE meta_id = 61");
+    $db->exec("UPDATE wp_postmeta SET meta_value = 'a:2:{i:0;i:52;i:1;i:60;}' WHERE meta_id = 63");
     $db->close();
 
     $acf_result = cow_merge_branch_state(
@@ -3277,10 +3337,12 @@ PHP);
 
     assert_same($acf_result['status'], 'completed_with_conflicts', 'ACF validator holds postmeta pointing at deleted field definitions for review');
     assert_same((int)($acf_result['plugin_validators'] ?? 0), 1, 'ACF field-map validator is discovered from mu-plugins during merge');
-    assert_same((int)($acf_result['plugin_validator_conflicts'] ?? 0), 1, 'ACF validator records the stale field-key metadata reference');
+    assert_same((int)($acf_result['plugin_validator_conflicts'] ?? 0), 2, 'ACF validator records stale field-key and relationship metadata references');
     assert_same((int)scalar($acf_target, "SELECT COUNT(*) FROM wp_posts WHERE ID = 51 AND post_type = 'acf-field'"), 0, 'ACF validator leaves the source field definition deletion staged for review');
+    assert_same((int)scalar($acf_target, "SELECT COUNT(*) FROM wp_posts WHERE ID = 52"), 0, 'ACF validator leaves the source related post deletion staged for review');
     assert_same(scalar($acf_target, 'SELECT meta_value FROM wp_postmeta WHERE meta_id = 61'), 'Target CTA copy', 'ACF validator preserves target value postmeta edits for review');
     assert_same(scalar($acf_target, 'SELECT meta_value FROM wp_postmeta WHERE meta_id = 62'), 'field_cta_text', 'ACF validator keeps the stale hidden field-key metadata visible');
+    assert_same(scalar($acf_target, 'SELECT meta_value FROM wp_postmeta WHERE meta_id = 63'), 'a:2:{i:0;i:52;i:1;i:60;}', 'ACF validator preserves target relationship postmeta edits for review');
 
     $acf_logical_identity = json_encode([
         'plugin' => 'advanced-custom-fields',
@@ -3303,6 +3365,27 @@ PHP);
     $acf_payload = cow_merge_decode_payload_json((string)($acf_audit['conflicts'][0]['chosen_payload'] ?? ''), 'ACF field-map validator payload');
     assert_same($acf_payload['object'] ?? null, 'post:60:field:field_cta_text', 'ACF audit identifies the post field reference');
     assert_same($acf_payload['candidate']['value'] ?? null, 'Target CTA copy', 'ACF audit includes the preserved target value edit');
+
+    $acf_relationship_identity = json_encode([
+        'plugin' => 'advanced-custom-fields',
+        'kind' => 'relationship_post',
+        'post_id' => 60,
+        'meta_key' => 'related_posts',
+        'field_key' => 'field_related_posts',
+        'related_post_id' => 52,
+    ], JSON_UNESCAPED_SLASHES);
+    $acf_relationship_audit = cow_merge_audit_report($acf_metadata, (int)$acf_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin' => 'advanced-custom-fields',
+        'conflict_type' => 'plugin-acf-relationship-missing-post',
+        'plugin_logical_identity' => $acf_relationship_identity,
+    ]);
+    assert_same(count($acf_relationship_audit['conflicts']), 1, 'ACF audit filters stale relationship findings by plugin, conflict type, and logical identity');
+    assert_same($acf_relationship_audit['conflicts'][0]['plugin_logical_identity']['related_post_id'] ?? null, 52, 'ACF audit exposes the related-post logical identity');
+    $acf_relationship_payload = cow_merge_decode_payload_json((string)($acf_relationship_audit['conflicts'][0]['chosen_payload'] ?? ''), 'ACF relationship validator payload');
+    assert_same($acf_relationship_payload['object'] ?? null, 'post:60:field:field_related_posts:related-post:52', 'ACF audit identifies the stale relationship post reference');
+    assert_same($acf_relationship_payload['candidate']['value'] ?? null, [52, 60], 'ACF audit includes the preserved target relationship value');
 
     $elementor_base_root = $tmp . '/elementor-base';
     $elementor_source_root = $tmp . '/elementor-source';

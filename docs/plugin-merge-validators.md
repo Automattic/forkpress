@@ -447,7 +447,10 @@ foreign keys: `_EventVenueID` on `tribe_events` posts left pointing at a deleted
 `tribe_venue` post stays reviewable while target event/date edits are preserved.
 An ACF-shaped fixture covers hidden postmeta field-key
 references (`_field_name = field_*`) left pointing at deleted `acf-field`
-definition posts while preserving target value-meta edits for review. A
+definition posts while preserving target value-meta edits for review. The same
+fixture covers ACF relationship fields whose serialized value arrays still
+contain deleted WordPress post IDs, with findings filterable by related-post
+logical identity. A
 Yoast SEO-shaped fixture covers `wp_yoast_indexable` rows whose `object_id`
 points at a deleted WordPress post while preserving target SEO title and
 description edits for review, plus duplicate canonical permalink groups where

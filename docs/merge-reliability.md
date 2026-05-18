@@ -36,6 +36,10 @@ Recent additions in the current merge-reliability work:
   map validator: entry metadata whose `meta_key` points at a form field removed
   from `wp_gf_form_meta.display_meta` stays reviewable with a plugin logical
   form-field identity.
+- The same plugin-validator suite now includes ACF-shaped field metadata
+  coverage: hidden field-key postmeta that points at deleted `acf-field`
+  definition posts and serialized relationship field values that point at
+  deleted WordPress posts stay reviewable with plugin logical identities.
 - The same plugin-validator suite now includes an Elementor-shaped widget media
   validator: `_elementor_data` JSON image widgets that still point at a deleted
   attachment row or upload file stay reviewable with a plugin logical widget
