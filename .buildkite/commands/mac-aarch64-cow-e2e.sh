@@ -53,6 +53,27 @@ bash scripts/dev/install-macos-runtime-tools.sh
 echo "--- :cow: make test-cow-fast"
 make test-cow-fast
 
+echo "--- :hammer: Pre-running spc doctor --auto-fix"
+# Same reasoning as `.buildkite/commands/linux-build.sh`:
+# `tests/release/build-dist-preflight.sh` forbids `--auto-fix` inside
+# `scripts/build-dist.sh`, so we run doctor here from a matching spc checkout
+# to install spc's local prereqs (pkg-config in `PKG_ROOT_PATH/bin/`) before
+# build-dist.sh's own doctor runs.
+SPC_REF="8d038f435da7845926ba425dfbae0278cd0e0746"
+build_dir=".build/$TARGET"
+spc_dir="$build_dir/static-php-cli"
+mkdir -p "$build_dir"
+if [ ! -d "$spc_dir/.git" ]; then
+  git clone --no-checkout https://github.com/crazywhalecc/static-php-cli.git "$spc_dir"
+fi
+git -C "$spc_dir" fetch --depth 1 origin "$SPC_REF"
+git -C "$spc_dir" checkout --detach FETCH_HEAD
+(
+  cd "$spc_dir"
+  composer install --no-dev --no-interaction --quiet
+  ./bin/spc doctor --auto-fix
+)
+
 echo "--- :package: Building static PHP runtime bundle ($TARGET)"
 FORKPRESS_TARGET="$TARGET" scripts/build-dist.sh
 
