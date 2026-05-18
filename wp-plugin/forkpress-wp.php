@@ -880,7 +880,7 @@ function forkpress_branch_run_cli(array $args): array {
 
 function forkpress_branch_wants_json(): bool {
     $action = $_REQUEST['action'] ?? '';
-    if (is_string($action) && in_array($action, ['forkpress_branch_create', 'forkpress_branch_merge', 'forkpress_branch_conflicts', 'forkpress_branch_restore_crash', 'forkpress_branch_revalidate_conflicts', 'forkpress_branch_review_conflict', 'forkpress_branch_resolve_conflict', 'forkpress_branch_apply_reviewed_conflicts', 'forkpress_branch_run_plugin_driver'], true)) {
+    if (is_string($action) && in_array($action, ['forkpress_branch_create', 'forkpress_branch_merge', 'forkpress_branch_history', 'forkpress_branch_conflicts', 'forkpress_branch_restore_crash', 'forkpress_branch_revalidate_conflicts', 'forkpress_branch_review_conflict', 'forkpress_branch_resolve_conflict', 'forkpress_branch_apply_reviewed_conflicts', 'forkpress_branch_run_plugin_driver'], true)) {
         return true;
     }
 
@@ -1111,6 +1111,17 @@ function forkpress_branch_conflict_audit_summary(array $report, int $run, array 
     ];
 }
 
+function forkpress_branch_history_summary(array $report, int $limit): array {
+    $records = is_array($report['runs'] ?? null) ? array_values($report['runs']) : [];
+    return [
+        'records' => $records,
+        'recordCount' => count($records),
+        'limit' => $limit,
+        'historyCommand' => 'forkpress branch history --limit ' . $limit . ' --format json',
+        'audit' => $report,
+    ];
+}
+
 function forkpress_branch_revalidate_merge_run(int $run): array {
     [$code, $output] = forkpress_branch_run_cli(['merge-audit', '--revalidate', '--run', (string) $run, '--reviewer', 'wordpress-ui', '--format', 'json']);
     if ($code !== 0) {
@@ -1238,6 +1249,41 @@ function forkpress_handle_branch_merge(): void {
     );
 }
 add_action('admin_post_forkpress_branch_merge', 'forkpress_handle_branch_merge');
+
+function forkpress_handle_branch_history(): void {
+    if (!forkpress_branch_can_manage()) {
+        forkpress_branch_finish_action(forkpress_branch_url(forkpress_current_branch() ?: 'main', '/wp-admin/'), 'error', 'You cannot inspect ForkPress merge history from this site.');
+    }
+    if (function_exists('check_admin_referer')) {
+        check_admin_referer('forkpress_branch_history');
+    }
+
+    $current = forkpress_current_branch() ?: 'main';
+    $limit = forkpress_branch_post_int('limit') ?? 10;
+    if ($limit < 1 || $limit > 50) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Choose a merge history limit from 1 to 50.');
+    }
+
+    [$code, $output] = forkpress_branch_run_cli(['history', '--limit', (string) $limit, '--format', 'json']);
+    if ($code !== 0) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', $output ?: 'ForkPress could not inspect merge history.');
+    }
+
+    $report = json_decode($output, true);
+    if (!is_array($report)) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'ForkPress returned invalid merge history JSON.');
+    }
+
+    $summary = forkpress_branch_history_summary($report, $limit);
+    $count = (int)($summary['recordCount'] ?? 0);
+    forkpress_branch_finish_action(
+        forkpress_branch_url($current, '/wp-admin/'),
+        'notice',
+        $count > 0 ? 'Loaded ' . $count . ' merge history ' . ($count === 1 ? 'run.' : 'runs.') : 'No merge history found.',
+        $summary
+    );
+}
+add_action('admin_post_forkpress_branch_history', 'forkpress_handle_branch_history');
 
 function forkpress_handle_branch_conflicts(): void {
     if (!forkpress_branch_can_manage()) {
@@ -2115,6 +2161,7 @@ function forkpress_render_branch_switcher(): void {
             'adminPageUrl' => forkpress_branch_admin_page_url(),
             'createNonce' => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_create') : '',
             'mergeNonce'  => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_merge') : '',
+            'historyNonce' => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_history') : '',
             'auditNonce'  => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_conflicts') : '',
             'restoreCrashNonce' => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_restore_crash') : '',
             'revalidateNonce' => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_revalidate_conflicts') : '',
@@ -2505,6 +2552,87 @@ function forkpress_render_branch_switcher(): void {
                     conflictList.appendChild(applyButton);
                 }
             }
+        }
+
+        function renderBranchHistory(payload) {
+            var records = Array.isArray(payload.records) ? payload.records : [];
+            showStatus('success', payload.message || 'Loaded merge history.');
+            clearConflictAudit();
+            conflictList.className = 'forkpress-conflict-list is-visible';
+
+            var heading = document.createElement('div');
+            heading.className = 'forkpress-conflict-heading';
+            heading.textContent = 'Recent merge history: ' + String(payload.recordCount || records.length) + ' runs';
+            conflictList.appendChild(heading);
+
+            records.slice(0, 10).forEach(function (run) {
+                var row = document.createElement('div');
+                row.className = 'forkpress-conflict-row';
+                var source = run && run.source_branch ? String(run.source_branch) : '?';
+                var target = run && run.target_branch ? String(run.target_branch) : '?';
+                appendConflictText(row, 'forkpress-conflict-title', '#' + String(run && run.id ? run.id : '') + ' ' + source + ' \u2192 ' + target);
+                appendConflictText(row, 'forkpress-conflict-meta', [
+                    run && run.status ? 'status: ' + String(run.status) : '',
+                    run && run.decision_count !== undefined ? 'decisions: ' + String(run.decision_count) : '',
+                    run && run.conflict_count !== undefined ? 'conflicts: ' + String(run.conflict_count) : '',
+                    run && run.finished_at ? 'finished: ' + String(run.finished_at) : ''
+                ].filter(Boolean).join(' / '));
+                if (run && run.id && Number(run.conflict_count || 0) > 0) {
+                    var button = document.createElement('button');
+                    button.className = 'forkpress-switcher-button';
+                    button.type = 'button';
+                    button.textContent = 'Review conflicts';
+                    button.addEventListener('click', function (runId) {
+                        return function () {
+                            fetchConflictAudit(runId, 'Loaded conflicts from merge history.');
+                        };
+                    }(run.id));
+                    row.appendChild(button);
+                }
+                conflictList.appendChild(row);
+            });
+
+            if (records.length > 10) {
+                appendConflictText(conflictList, 'forkpress-conflict-meta', String(records.length - 10) + ' more runs in merge history.');
+            }
+            appendConflictText(conflictList, 'forkpress-conflict-command', payload.historyCommand || '');
+        }
+
+        function fetchBranchHistory(limit) {
+            if (!actions || !actions.historyNonce || !window.fetch || !window.FormData) {
+                return;
+            }
+            var body = new FormData();
+            body.append('action', 'forkpress_branch_history');
+            body.append('_wpnonce', actions.historyNonce);
+            body.append('limit', String(limit || 10));
+            showStatus('warning', 'Loading merge history...');
+            fetch(actions.url, {
+                method: 'POST',
+                body: body,
+                credentials: 'same-origin',
+                headers: {
+                    'Accept': 'application/json',
+                    'X-ForkPress-Async': '1'
+                }
+            }).then(function (response) {
+                return response.text().then(function (text) {
+                    var payload = null;
+                    try {
+                        payload = text ? JSON.parse(text) : null;
+                    } catch (error) {
+                        payload = null;
+                    }
+                    if (!response.ok || !payload || payload.success === false) {
+                        throw new Error(payload && payload.message ? payload.message : (text || 'ForkPress merge history failed.'));
+                    }
+                    return payload;
+                });
+            }).then(function (payload) {
+                renderBranchHistory(payload);
+            }).catch(function (error) {
+                showStatus('error', error && error.message ? error.message : 'ForkPress merge history failed.');
+            });
         }
 
         function render() {
@@ -2955,6 +3083,16 @@ function forkpress_render_branch_switcher(): void {
                 adminLink.href = actions.adminPageUrl;
                 adminLink.textContent = 'Open branch manager';
                 tools.appendChild(adminLink);
+            }
+            if (actions.historyNonce) {
+                var historyButton = document.createElement('button');
+                historyButton.className = 'forkpress-switcher-button';
+                historyButton.type = 'button';
+                historyButton.textContent = 'Show merge history';
+                historyButton.addEventListener('click', function () {
+                    fetchBranchHistory(10);
+                });
+                tools.appendChild(historyButton);
             }
 
             var createForm = document.createElement('form');
