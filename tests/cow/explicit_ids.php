@@ -85,6 +85,22 @@ function create_explicit_comment_graph_db(string $path): void {
     $db->close();
 }
 
+function create_explicit_post_parent_graph_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_parent INTEGER NOT NULL DEFAULT 0,
+        post_title TEXT NOT NULL,
+        post_content TEXT NOT NULL,
+        post_status TEXT NOT NULL,
+        post_type TEXT NOT NULL DEFAULT 'page'
+    )");
+    $db->exec("INSERT INTO wp_posts (ID, post_parent, post_title, post_content, post_status, post_type) VALUES
+        (1, 0, 'Base parent page', '<!-- wp:paragraph --><p>base parent</p><!-- /wp:paragraph -->', 'publish', 'page'),
+        (3, 1, 'Base child page', '<!-- wp:paragraph --><p>base child</p><!-- /wp:paragraph -->', 'publish', 'page')");
+    $db->close();
+}
+
 function create_explicit_attachment_graph_db(string $path): void {
     $db = open_db($path);
     $db->exec("CREATE TABLE wp_posts (
@@ -474,6 +490,48 @@ try {
         (int)scalar($comment_graph_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-explicit-comment-graph' AND d.table_name = 'wp_comments' AND d.decision = 'target-wins' AND d.reason LIKE '%outside the source branch ID band%' AND d.reason LIKE '%wp_comments%'"),
         1,
         'threaded comment conflict explains that it is held behind the explicit WordPress comment ID'
+    );
+
+    $post_parent_graph_base = $tmp . '/post-parent-graph-base.sqlite';
+    $post_parent_graph_source = $tmp . '/post-parent-graph-source.sqlite';
+    $post_parent_graph_target = $tmp . '/post-parent-graph-target.sqlite';
+    $post_parent_graph_metadata = $tmp . '/.forkpress/cow/merge/explicit-post-parent-graph-metadata.sqlite';
+    create_explicit_post_parent_graph_db($post_parent_graph_base);
+    copy($post_parent_graph_base, $post_parent_graph_source);
+    copy($post_parent_graph_base, $post_parent_graph_target);
+    cow_merge_allocate_autoincrement_bands($post_parent_graph_source, $post_parent_graph_metadata, 'feature-explicit-post-parent-graph');
+    $post_child_id = (int)scalar($post_parent_graph_metadata, "SELECT band_start FROM merge_autoincrement_bands WHERE branch_name = 'feature-explicit-post-parent-graph' AND table_name = 'wp_posts'");
+
+    $post_parent_graph_source_db = open_db($post_parent_graph_source);
+    $post_parent_graph_source_db->exec("INSERT INTO wp_posts (ID, post_parent, post_title, post_content, post_status, post_type) VALUES (2, 0, 'Imported explicit parent page', '<!-- wp:paragraph --><p>explicit parent</p><!-- /wp:paragraph -->', 'publish', 'page')");
+    $post_parent_graph_source_db->exec("INSERT INTO wp_posts (ID, post_parent, post_title, post_content, post_status, post_type) VALUES ($post_child_id, 2, 'Child behind explicit parent page', '<!-- wp:paragraph --><p>child behind explicit parent</p><!-- /wp:paragraph -->', 'publish', 'page')");
+    $post_parent_graph_source_db->close();
+
+    $post_parent_graph_result = cow_merge_databases($post_parent_graph_base, $post_parent_graph_source, $post_parent_graph_target, $post_parent_graph_metadata, 'feature-explicit-post-parent-graph', 'main');
+    assert_same($post_parent_graph_result['status'], 'completed_with_conflicts', 'post_parent children behind held explicit page imports stay review-held');
+    assert_same(
+        (int)scalar($post_parent_graph_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 2'),
+        0,
+        'out-of-band explicit parent page ID is not applied automatically'
+    );
+    assert_same(
+        (int)scalar($post_parent_graph_target, "SELECT COUNT(*) FROM wp_posts WHERE ID = $post_child_id"),
+        0,
+        'in-band child page behind a held explicit parent is not applied as an orphan'
+    );
+    assert_same(
+        scalar($post_parent_graph_target, 'SELECT post_parent FROM wp_posts WHERE ID = 3'),
+        1,
+        'existing child page parent is unchanged while explicit parent import is held'
+    );
+    assert_same(
+        (int)scalar($post_parent_graph_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-explicit-post-parent-graph' AND c.table_name = 'wp_posts' AND c.conflict_type = 'row-target-constraint'"),
+        2,
+        'explicit parent page and dependent child page both record review conflicts'
+    );
+    assert_true(
+        (int)scalar($post_parent_graph_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-explicit-post-parent-graph' AND d.table_name = 'wp_posts' AND d.decision = 'target-wins' AND d.reason LIKE '%outside the source branch ID band%' AND d.reason LIKE '%wp_posts%'") >= 1,
+        'post_parent conflicts explain that the child is held behind the explicit parent page ID'
     );
 
     $attachment_graph_base = $tmp . '/attachment-graph-base.sqlite';
