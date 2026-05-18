@@ -49,6 +49,10 @@ make test-release
 
 echo "--- :beer: Installing macOS runtime build tools"
 bash scripts/dev/install-macos-runtime-tools.sh
+# `tests/cow/e2e.sh` shells out to `node` to parse the WP-admin HTML and pull
+# the nonce out of the inline `var actions = {...};` literal. The GHA
+# `macos-14` runner ships node by default; the BK mac VM doesn't.
+brew list node >/dev/null 2>&1 || brew install node
 
 echo "--- :cow: make test-cow-fast"
 make test-cow-fast
