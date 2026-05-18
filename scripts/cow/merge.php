@@ -23009,11 +23009,14 @@ function cow_merge_print_revalidation_text(array $result): void {
     echo "  errors:               {$result['errors']}\n";
     echo "  carried:              {$result['carried']}\n";
     echo "  already-needs-action: {$result['already_needs_action']}\n";
+    echo "  restored:             {$result['restored']}\n";
     echo "  metadata:             {$result['metadata_db']}\n";
-    $needs_action = $result['needs_action_conflicts'] ?? [];
-    if (is_array($needs_action) && $needs_action !== []) {
-        echo "needs-action-conflicts:\n";
-        foreach ($needs_action as $conflict) {
+    $print_conflicts = static function(string $heading, array $conflicts): void {
+        if ($conflicts === []) {
+            return;
+        }
+        echo "$heading:\n";
+        foreach ($conflicts as $conflict) {
             $column = ($conflict['column_name'] ?? null) !== null && (string)$conflict['column_name'] !== ''
                 ? '.' . $conflict['column_name']
                 : '';
@@ -23029,6 +23032,14 @@ function cow_merge_print_revalidation_text(array $result): void {
                 echo "     review-note=" . cow_merge_audit_truncate((string)$conflict['review_note'], 240) . "\n";
             }
         }
+    };
+    $restored = $result['restored_conflicts'] ?? [];
+    if (is_array($restored)) {
+        $print_conflicts('restored-conflicts', $restored);
+    }
+    $needs_action = $result['needs_action_conflicts'] ?? [];
+    if (is_array($needs_action) && $needs_action !== []) {
+        $print_conflicts('needs-action-conflicts', $needs_action);
     }
 }
 
