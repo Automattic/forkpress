@@ -2733,6 +2733,159 @@ try {
         'page-plus-attachment smoke merge audits target upload files'
     );
 
+    $composite_base_root = $tmp . '/composite-base-root';
+    $composite_source_root = $tmp . '/composite-source-root';
+    $composite_target_root = $tmp . '/composite-target-root';
+    $composite_base = $composite_base_root . '/wp-content/database/.ht.sqlite';
+    $composite_source = $composite_source_root . '/wp-content/database/.ht.sqlite';
+    $composite_target = $composite_target_root . '/wp-content/database/.ht.sqlite';
+    $composite_file_base = $tmp . '/.forkpress/cow/merge/file-bases/feature-smoke-composite-wordpress.json';
+    $composite_metadata = $tmp . '/.forkpress/cow/merge/composite-wordpress-metadata.sqlite';
+
+    mkdir(dirname($composite_base), 0777, true);
+    mkdir(dirname($composite_source), 0777, true);
+    mkdir(dirname($composite_target), 0777, true);
+    smoke_create_posts_db($composite_base);
+    copy($composite_base, $composite_source);
+    copy($composite_base, $composite_target);
+    cow_merge_capture_file_base($composite_base_root, $composite_file_base);
+
+    $source_composite_attachment_meta = serialize([
+        'file' => '2026/05/source-composite.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'source-composite-150x150.jpg',
+                'width' => 150,
+                'height' => 150,
+                'mime-type' => 'image/jpeg',
+            ],
+        ],
+    ]);
+    $target_composite_attachment_meta = serialize([
+        'file' => '2026/05/main-composite.jpg',
+        'width' => 800,
+        'height' => 600,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'main-composite-150x150.jpg',
+                'width' => 150,
+                'height' => 150,
+                'mime-type' => 'image/jpeg',
+            ],
+        ],
+    ]);
+    $source_composite_page_content = '<!-- wp:block {"ref":18000420} /-->' .
+        '<!-- wp:image {"id":18000410,"sizeSlug":"full","linkDestination":"none"} --><figure class="wp-block-image size-full"><img src="http://example.test/wp-content/uploads/2026/05/source-composite.jpg" class="wp-image-18000410"/></figure><!-- /wp:image -->';
+    $target_composite_page_content = '<!-- wp:block {"ref":19000420} /-->' .
+        '<!-- wp:image {"id":19000410,"sizeSlug":"full","linkDestination":"none"} --><figure class="wp-block-image size-full"><img src="http://example.test/wp-content/uploads/2026/05/main-composite.jpg" class="wp-image-19000410"/></figure><!-- /wp:image -->';
+    $source_composite_json = json_encode([
+        'branch' => 'source',
+        'page_id' => 18000400,
+        'attachment_id' => 18000410,
+        'block_id' => 18000420,
+        'menu_item_id' => 18000433,
+        'menu_term_id' => 18000431,
+        'category_term_taxonomy_id' => 18000430,
+        'upload' => '2026/05/source-composite.jpg',
+    ], JSON_UNESCAPED_SLASHES);
+    $target_composite_json = json_encode([
+        'branch' => 'target',
+        'page_id' => 19000400,
+        'attachment_id' => 19000410,
+        'block_id' => 19000420,
+        'menu_item_id' => 19000433,
+        'menu_term_id' => 19000431,
+        'category_term_taxonomy_id' => 19000430,
+        'upload' => '2026/05/main-composite.jpg',
+    ], JSON_UNESCAPED_SLASHES);
+
+    $db = smoke_open_db($composite_source);
+    smoke_insert_post($db, 18000420, 'Branch Composite Reusable Block', '<!-- wp:paragraph --><p>Branch reusable block</p><!-- /wp:paragraph -->', 'wp_block', 'branch-composite-block');
+    smoke_insert_post($db, 18000400, 'Branch Composite Page', $source_composite_page_content, 'page', 'branch-composite-page');
+    smoke_insert_post($db, 18000410, 'source-composite.jpg', '', 'attachment', 'source-composite-jpg', 'inherit', 18000400, 'image/jpeg', 'http://example.test/wp-content/uploads/2026/05/source-composite.jpg');
+    smoke_insert_postmeta($db, 18000411, 18000400, '_thumbnail_id', '18000410');
+    smoke_insert_postmeta($db, 18000412, 18000410, '_wp_attached_file', '2026/05/source-composite.jpg');
+    smoke_insert_postmeta($db, 18000413, 18000410, '_wp_attachment_metadata', $source_composite_attachment_meta);
+    smoke_insert_postmeta($db, 18000414, 18000400, '_forkpress_composite_graph', $source_composite_json);
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (18000429, 'Branch Composite Category', 'branch-composite-category')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES (18000430, 18000429, 'category', 'Branch composite category', 0, 1)");
+    $db->exec("INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (18000400, 18000430, 0)");
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (18000431, 'Branch Composite Menu', 'branch-composite-menu')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES (18000432, 18000431, 'nav_menu', 'Branch composite menu', 0, 1)");
+    smoke_insert_post($db, 18000433, 'Branch Composite Menu Item', '', 'nav_menu_item', 'branch-composite-menu-item');
+    smoke_insert_postmeta($db, 18000434, 18000433, '_menu_item_type', 'post_type');
+    smoke_insert_postmeta($db, 18000435, 18000433, '_menu_item_object', 'page');
+    smoke_insert_postmeta($db, 18000436, 18000433, '_menu_item_object_id', '18000400');
+    $db->exec("INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (18000433, 18000432, 0)");
+    smoke_insert_option($db, 18000437, 'forkpress_source_composite_graph', $source_composite_json);
+    smoke_insert_option($db, 18000438, 'forkpress_source_composite_serialized', serialize(['branch' => 'source', 'page_id' => 18000400, 'attachment_id' => 18000410, 'block_id' => 18000420]));
+    smoke_update_option($db, 'theme_mods_forkpress_smoke', serialize(['color' => 'blue', 'nav_menu_locations' => ['source_composite' => 18000431]]));
+    $db->close();
+    smoke_write_file($composite_source_root . '/wp-content/uploads/2026/05/source-composite.jpg', 'source composite original bytes');
+    smoke_write_file($composite_source_root . '/wp-content/uploads/2026/05/source-composite-150x150.jpg', 'source composite thumbnail bytes');
+
+    $db = smoke_open_db($composite_target);
+    smoke_insert_post($db, 19000420, 'Main Composite Reusable Block', '<!-- wp:paragraph --><p>Main reusable block</p><!-- /wp:paragraph -->', 'wp_block', 'main-composite-block');
+    smoke_insert_post($db, 19000400, 'Main Composite Page', $target_composite_page_content, 'page', 'main-composite-page');
+    smoke_insert_post($db, 19000410, 'main-composite.jpg', '', 'attachment', 'main-composite-jpg', 'inherit', 19000400, 'image/jpeg', 'http://example.test/wp-content/uploads/2026/05/main-composite.jpg');
+    smoke_insert_postmeta($db, 19000411, 19000400, '_thumbnail_id', '19000410');
+    smoke_insert_postmeta($db, 19000412, 19000410, '_wp_attached_file', '2026/05/main-composite.jpg');
+    smoke_insert_postmeta($db, 19000413, 19000410, '_wp_attachment_metadata', $target_composite_attachment_meta);
+    smoke_insert_postmeta($db, 19000414, 19000400, '_forkpress_composite_graph', $target_composite_json);
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (19000429, 'Main Composite Category', 'main-composite-category')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES (19000430, 19000429, 'category', 'Main composite category', 0, 1)");
+    $db->exec("INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (19000400, 19000430, 0)");
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (19000431, 'Main Composite Menu', 'main-composite-menu')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES (19000432, 19000431, 'nav_menu', 'Main composite menu', 0, 1)");
+    smoke_insert_post($db, 19000433, 'Main Composite Menu Item', '', 'nav_menu_item', 'main-composite-menu-item');
+    smoke_insert_postmeta($db, 19000434, 19000433, '_menu_item_type', 'post_type');
+    smoke_insert_postmeta($db, 19000435, 19000433, '_menu_item_object', 'page');
+    smoke_insert_postmeta($db, 19000436, 19000433, '_menu_item_object_id', '19000400');
+    $db->exec("INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (19000433, 19000432, 0)");
+    smoke_insert_option($db, 19000437, 'forkpress_target_composite_graph', $target_composite_json);
+    smoke_insert_option($db, 19000438, 'forkpress_target_composite_serialized', serialize(['branch' => 'target', 'page_id' => 19000400, 'attachment_id' => 19000410, 'block_id' => 19000420]));
+    smoke_update_option($db, 'theme_mods_forkpress_smoke', serialize(['color' => 'blue', 'nav_menu_locations' => ['target_composite' => 19000431]]));
+    $db->close();
+    smoke_write_file($composite_target_root . '/wp-content/uploads/2026/05/main-composite.jpg', 'main composite original bytes');
+    smoke_write_file($composite_target_root . '/wp-content/uploads/2026/05/main-composite-150x150.jpg', 'main composite thumbnail bytes');
+
+    $composite_result = cow_merge_branch_state(
+        $composite_base,
+        $composite_source,
+        $composite_target,
+        $composite_metadata,
+        'feature-smoke-composite-wordpress',
+        'main',
+        $composite_file_base,
+        $composite_source_root,
+        $composite_target_root
+    );
+    assert_same($composite_result['status'], 'completed', 'composite WordPress object graph inserts complete cleanly');
+    assert_same((int)($composite_result['conflicts'] ?? -1), 0, 'composite WordPress object graph inserts do not create merge conflicts');
+    assert_same(smoke_scalar($composite_target, 'SELECT post_content FROM wp_posts WHERE ID = 18000400'), $source_composite_page_content, 'merged target keeps branch page block JSON references');
+    assert_same(smoke_scalar($composite_target, 'SELECT post_title FROM wp_posts WHERE ID = 18000420'), 'Branch Composite Reusable Block', 'merged target includes branch reusable block');
+    assert_same(smoke_scalar($composite_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 18000400 AND meta_key = '_thumbnail_id'"), '18000410', 'merged target keeps branch featured-image metadata');
+    assert_same(smoke_scalar($composite_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 18000410 AND meta_key = '_wp_attachment_metadata'"), $source_composite_attachment_meta, 'merged target keeps branch attachment metadata');
+    assert_same((int)smoke_scalar($composite_target, 'SELECT COUNT(*) FROM wp_term_relationships WHERE object_id = 18000400 AND term_taxonomy_id = 18000430'), 1, 'merged target keeps branch page taxonomy relationship');
+    assert_same(smoke_scalar($composite_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 18000433 AND meta_key = '_menu_item_object_id'"), '18000400', 'merged target keeps branch menu item page reference');
+    assert_same(smoke_scalar($composite_target, "SELECT option_value FROM wp_options WHERE option_name = 'forkpress_source_composite_graph'"), $source_composite_json, 'merged target keeps branch JSON option graph');
+    assert_same(file_get_contents($composite_target_root . '/wp-content/uploads/2026/05/source-composite.jpg'), 'source composite original bytes', 'merged target includes branch original upload file');
+    assert_same(file_get_contents($composite_target_root . '/wp-content/uploads/2026/05/source-composite-150x150.jpg'), 'source composite thumbnail bytes', 'merged target includes branch generated upload file');
+    assert_same(smoke_scalar($composite_target, 'SELECT post_content FROM wp_posts WHERE ID = 19000400'), $target_composite_page_content, 'merged target preserves main page block JSON references');
+    assert_same(smoke_scalar($composite_target, 'SELECT post_title FROM wp_posts WHERE ID = 19000420'), 'Main Composite Reusable Block', 'merged target preserves main reusable block');
+    assert_same(smoke_scalar($composite_target, "SELECT option_value FROM wp_options WHERE option_name = 'forkpress_target_composite_graph'"), $target_composite_json, 'merged target preserves main JSON option graph');
+    assert_same(file_get_contents($composite_target_root . '/wp-content/uploads/2026/05/main-composite.jpg'), 'main composite original bytes', 'merged target preserves main original upload file');
+    $composite_theme_mods = unserialize((string)smoke_scalar($composite_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_forkpress_smoke'"), ['allowed_classes' => false]);
+    assert_same($composite_theme_mods['nav_menu_locations']['source_composite'] ?? null, 18000431, 'merged target includes branch menu location');
+    assert_same($composite_theme_mods['nav_menu_locations']['target_composite'] ?? null, 19000431, 'merged target preserves main menu location');
+    assert_same(
+        (int)smoke_scalar($composite_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name IN ('wp_posts', 'wp_postmeta', 'wp_terms', 'wp_term_taxonomy', 'wp_term_relationships', 'wp_options', '__files__')"),
+        0,
+        'composite WordPress smoke merge records no DB or file conflicts'
+    );
+
     $site_icon_base_root = $tmp . '/site-icon-base-root';
     $site_icon_source_root = $tmp . '/site-icon-source-root';
     $site_icon_target_root = $tmp . '/site-icon-target-root';

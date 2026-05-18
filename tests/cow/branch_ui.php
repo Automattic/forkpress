@@ -1259,6 +1259,25 @@ assert_true(str_contains($admin_page_html, 'Keep target'), 'branch manager admin
 assert_true(str_contains($admin_page_html, 'Apply reviewed'), 'branch manager admin page renders apply-reviewed action');
 assert_same($admin_page_menus[0]['menu_slug'] ?? null, 'forkpress-branches', 'branch manager registers a wp-admin menu page');
 
+$admin_page_with_driver = run_branch_ui_action(
+    ['action' => 'forkpress_branch_admin_page'],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    ['FORKPRESS_PLUGIN_MERGE_DRIVERS' => json_encode(['forkpress-plugin-graph' => realpath($plugin_driver)], JSON_UNESCAPED_SLASHES)]
+);
+$admin_page_with_driver_payload = decode_branch_ui_payload($admin_page_with_driver);
+$admin_page_with_driver_html = (string)($admin_page_with_driver_payload['html'] ?? '');
+assert_same($admin_page_with_driver['status'], 0, 'branch manager admin page with plugin driver renders cleanly');
+assert_true(str_contains($admin_page_with_driver_html, 'forkpress_branch_run_plugin_driver'), 'branch manager admin page renders plugin driver action');
+assert_true(str_contains($admin_page_with_driver_html, 'nonce-forkpress_branch_run_plugin_driver'), 'branch manager admin page renders plugin driver nonce');
+assert_true(str_contains($admin_page_with_driver_html, 'pluginDrivers'), 'branch manager admin page exposes approved plugin driver metadata');
+assert_true(str_contains($admin_page_with_driver_html, $driver_key), 'branch manager admin page exposes the approved plugin driver key');
+assert_true(str_contains($admin_page_with_driver_html, 'function driverForConflict'), 'branch manager admin page renders plugin driver matching helper');
+assert_true(str_contains($admin_page_with_driver_html, 'function fetchPluginDriver'), 'branch manager admin page renders plugin driver client handler');
+assert_true(str_contains($admin_page_with_driver_html, 'Run plugin driver'), 'branch manager admin page renders plugin driver button text');
+
 $forbidden = run_branch_ui_action(
     ['action' => 'forkpress_branch_create', 'branch' => 'new_feature', 'from' => 'main'],
     ['main', 'feature'],

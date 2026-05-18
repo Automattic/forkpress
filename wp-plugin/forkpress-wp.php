@@ -1796,6 +1796,18 @@ function forkpress_render_branch_admin_page(): void {
     $action_url = forkpress_branch_action_url();
     $default_source = $current === 'main' && count($branches) > 1 ? ($branches[1] ?? $current) : $current;
     $disabled = $can_manage ? '' : ' disabled';
+    $plugin_drivers = array_map(
+        static fn(array $driver): array => [
+            'key' => (string) $driver['key'],
+            'plugin' => (string) $driver['plugin'],
+            'label' => (string) $driver['label'],
+        ],
+        array_values(forkpress_branch_plugin_driver_map())
+    );
+    $plugin_drivers_json = function_exists('wp_json_encode') ? wp_json_encode($plugin_drivers) : json_encode($plugin_drivers);
+    if (!is_string($plugin_drivers_json) || $plugin_drivers_json === '') {
+        $plugin_drivers_json = '[]';
+    }
     ?>
     <div class="wrap forkpress-branches-admin">
         <h1>ForkPress Branches</h1>
@@ -1857,6 +1869,7 @@ function forkpress_render_branch_admin_page(): void {
                 var button = document.getElementById('forkpress-branch-history-load');
                 var treeButton = document.getElementById('forkpress-branch-tree-load');
                 var results = document.getElementById('forkpress-branch-history-results');
+                var pluginDrivers = <?php echo $plugin_drivers_json; ?>;
                 if (!button || !treeButton || !results || !window.fetch || !window.FormData) {
                     return;
                 }
@@ -1942,6 +1955,19 @@ function forkpress_render_branch_admin_page(): void {
                                 }(record, run));
                                 actions.appendChild(applyReviewedButton);
                             }
+                            var driver = driverForConflict(record);
+                            if (driver) {
+                                var driverButton = document.createElement('button');
+                                driverButton.className = 'button button-small';
+                                driverButton.type = 'button';
+                                driverButton.textContent = 'Run plugin driver';
+                                driverButton.addEventListener('click', function (record, driver, run) {
+                                    return function () {
+                                        fetchPluginDriver(record, driver, run);
+                                    };
+                                }(record, driver, run));
+                                actions.appendChild(driverButton);
+                            }
                             if (actions.childNodes.length) {
                                 item.appendChild(actions);
                             }
@@ -1975,6 +2001,18 @@ function forkpress_render_branch_admin_page(): void {
                 }
                 function conflictResolutionAfterRevalidate(record) {
                     return !!(record && record.after_revalidate_supported === true && record.next_action === 'revalidate');
+                }
+                function driverForConflict(record) {
+                    if (!record || !record.plugin || !Array.isArray(pluginDrivers)) {
+                        return null;
+                    }
+                    for (var i = 0; i < pluginDrivers.length; i++) {
+                        var driver = pluginDrivers[i];
+                        if (driver && driver.plugin === record.plugin && driver.key) {
+                            return driver;
+                        }
+                    }
+                    return null;
                 }
                 function fetchConflictReview(record, status, run) {
                     if (!record || !record.id) {
@@ -2069,6 +2107,50 @@ function forkpress_render_branch_admin_page(): void {
                         results.textContent = payload.message || 'Applied conflict resolution.';
                     }).catch(function (error) {
                         results.textContent = error && error.message ? error.message : 'ForkPress conflict resolution failed.';
+                    });
+                }
+                function fetchPluginDriver(record, driver, run) {
+                    if (!record || !record.id || !driver || !driver.key) {
+                        return;
+                    }
+                    var body = new FormData();
+                    body.append('action', 'forkpress_branch_run_plugin_driver');
+                    body.append('_wpnonce', '<?php echo esc_js(function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_run_plugin_driver') : ''); ?>');
+                    body.append('conflict', String(record.id));
+                    body.append('driverKey', String(driver.key));
+                    if (run) {
+                        body.append('run', String(run));
+                    }
+                    results.textContent = 'Running plugin driver...';
+                    fetch('<?php echo esc_js($action_url); ?>', {
+                        method: 'POST',
+                        body: body,
+                        credentials: 'same-origin',
+                        headers: {
+                            'Accept': 'application/json',
+                            'X-ForkPress-Async': '1'
+                        }
+                    }).then(function (response) {
+                        return response.text().then(function (text) {
+                            var payload = null;
+                            try {
+                                payload = text ? JSON.parse(text) : null;
+                            } catch (error) {
+                                payload = null;
+                            }
+                            if (!response.ok || !payload || payload.success === false) {
+                                throw new Error(payload && payload.message ? payload.message : (text || 'ForkPress plugin driver failed.'));
+                            }
+                            return payload;
+                        });
+                    }).then(function (payload) {
+                        if (run) {
+                            fetchConflicts(run);
+                            return;
+                        }
+                        results.textContent = payload.message || 'Ran plugin driver.';
+                    }).catch(function (error) {
+                        results.textContent = error && error.message ? error.message : 'ForkPress plugin driver failed.';
                     });
                 }
                 function fetchConflicts(runId) {

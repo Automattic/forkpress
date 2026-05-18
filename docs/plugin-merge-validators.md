@@ -349,9 +349,10 @@ finding remains.
 The explicit runner provides context and audit recording, but still expects
 the plugin driver to own the correctness of any repair it performs.
 
-The WordPress branch switcher can run approved plugin drivers for plugin
-conflict rows. It does not accept arbitrary browser-posted driver paths. Active
-plugins can expose a driver next to their plugin file:
+The WordPress branch switcher and the full ForkPress Branches wp-admin page can
+run approved plugin drivers for plugin conflict rows. They do not accept
+arbitrary browser-posted driver paths. Active plugins can expose a driver next
+to their plugin file:
 
 - directory plugins: `wp-content/plugins/my-plugin/forkpress-merge-driver.php`
 - single-file plugins:
