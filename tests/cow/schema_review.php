@@ -1826,6 +1826,67 @@ SQL);
         'source-added trigger can use source-added body and WHEN dependency tables after merge'
     );
 
+    $trigger_source_view_base = $tmp . '/trigger-source-view-base.sqlite';
+    $trigger_source_view_source = $tmp . '/trigger-source-view-source.sqlite';
+    $trigger_source_view_target = $tmp . '/trigger-source-view-target.sqlite';
+    $trigger_source_view_metadata = $tmp . '/.forkpress/cow/merge/schema-trigger-source-view-metadata.sqlite';
+
+    $db = open_db($trigger_source_view_base);
+    $db->exec('CREATE TABLE plugin_trigger_source_view_items (item_id TEXT PRIMARY KEY, label TEXT NOT NULL)');
+    $db->close();
+    copy($trigger_source_view_base, $trigger_source_view_source);
+    copy($trigger_source_view_base, $trigger_source_view_target);
+
+    $source_db = open_db($trigger_source_view_source);
+    $source_db->exec('CREATE TABLE plugin_trigger_source_view_audit (item_id TEXT, label TEXT)');
+    $source_db->exec('CREATE TABLE plugin_trigger_source_view_suffixes (suffix_key TEXT PRIMARY KEY, suffix TEXT NOT NULL)');
+    $source_db->exec("INSERT INTO plugin_trigger_source_view_suffixes (suffix_key, suffix) VALUES ('default', ':source-view')");
+    $source_db->exec('CREATE TABLE plugin_trigger_source_view_gate (enabled INTEGER NOT NULL)');
+    $source_db->exec('INSERT INTO plugin_trigger_source_view_gate (enabled) VALUES (1)');
+    $source_db->exec("CREATE VIEW plugin_trigger_source_view_suffix_view AS SELECT suffix FROM plugin_trigger_source_view_suffixes WHERE suffix_key = 'default'");
+    $source_db->exec('CREATE VIEW plugin_trigger_source_view_gate_view AS SELECT enabled FROM plugin_trigger_source_view_gate WHERE enabled = 1');
+    $source_db->exec("CREATE TRIGGER plugin_trigger_source_view_items_after AFTER INSERT ON plugin_trigger_source_view_items WHEN EXISTS (SELECT 1 FROM plugin_trigger_source_view_gate_view) BEGIN INSERT INTO plugin_trigger_source_view_audit (item_id, label) SELECT NEW.item_id, NEW.label || suffix FROM plugin_trigger_source_view_suffix_view; END");
+    $source_db->close();
+
+    $trigger_source_view_result = cow_merge_databases(
+        $trigger_source_view_base,
+        $trigger_source_view_source,
+        $trigger_source_view_target,
+        $trigger_source_view_metadata,
+        'feature-schema-trigger-source-view',
+        'main'
+    );
+    $trigger_source_view_run_id = (int)$trigger_source_view_result['run_id'];
+    assert_same($trigger_source_view_result['status'], 'completed', 'source-added triggers depending on source-added views merge automatically');
+    assert_same(
+        (int)scalar($trigger_source_view_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name IN ('plugin_trigger_source_view_suffix_view', 'plugin_trigger_source_view_gate_view')"),
+        2,
+        'source-added trigger body and WHEN dependency views install before trigger validation'
+    );
+    assert_same(
+        (int)scalar($trigger_source_view_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_trigger_source_view_items_after'"),
+        1,
+        'source-added trigger depending on source-added views installs'
+    );
+    assert_same(
+        (int)scalar($trigger_source_view_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE run_id = $trigger_source_view_run_id AND conflict_type IN ('schema-source-added-view', 'schema-source-added-trigger')"),
+        0,
+        'source-added trigger dependencies on source-added views create no review-only schema conflicts'
+    );
+    assert_same(
+        (int)scalar($trigger_source_view_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE run_id = $trigger_source_view_run_id AND column_name IN ('plugin_trigger_source_view_suffix_view', 'plugin_trigger_source_view_gate_view', 'plugin_trigger_source_view_items_after') AND decision = 'source-applied'"),
+        3,
+        'source-added views and dependent trigger creation are auditable'
+    );
+    $target_db = open_db($trigger_source_view_target);
+    $target_db->exec("INSERT INTO plugin_trigger_source_view_items (item_id, label) VALUES ('source-view-trigger', 'Source View Trigger')");
+    $target_db->close();
+    assert_same(
+        scalar($trigger_source_view_target, "SELECT label FROM plugin_trigger_source_view_audit WHERE item_id = 'source-view-trigger'"),
+        'Source View Trigger:source-view',
+        'source-added trigger can use source-added body and WHEN dependency views after merge'
+    );
+
     $trigger_dependency_base = $tmp . '/trigger-dependency-base.sqlite';
     $trigger_dependency_source = $tmp . '/trigger-dependency-source.sqlite';
     $trigger_dependency_target = $tmp . '/trigger-dependency-target.sqlite';
