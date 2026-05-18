@@ -212,10 +212,12 @@ To support this cleanly, audit metadata should retain:
   recorded source/target row context for this classifier when the conflict was
   audited after that metadata became available.
   Schema index/view/trigger/table-restore/table-rebuild conflicts can record
-  current source/target SQL but stay `unclassified`. Future work should add
-  richer schema-specific evidence for dependency rebuild plans, plus explicit
-  plugin-supplied logical identities where schema `UNIQUE` keys are not enough
-  to prove object identity.
+  current source/target SQL; compatible table rebuild source drift can be
+  source-applied after revalidation when the dry-run planner proves the current
+  source rebuild and dependency replacement are safe. Future work should add
+  richer schema-specific evidence for the remaining ambiguous dependency
+  rebuild plans, plus explicit plugin-supplied logical identities where schema
+  `UNIQUE` keys are not enough to prove object identity.
 - Logical identity fingerprint separate from the raw payload.
 - Re-audit timestamp and merge run id.
 
@@ -244,7 +246,8 @@ forkpress branch merge-audit --records conflicts --latest-revalidation-status ta
 The current implementation supports database cell, database row, filesystem
 conflicts, compatible source-added/source-changed schema index/view/trigger,
 compatible source-dropped schema index target drift,
-source and target drift, and compatible dropped-table restore source drift.
+source and target drift, compatible dropped-table restore source drift, and
+compatible table rebuild source drift.
 Plugin validator conflicts now have a conservative validator-evidence
 classifier: if a validator rerun records changed evidence for the same plugin
 object, including changed source evidence, the reviewed plugin conflict returns
@@ -258,10 +261,10 @@ restore, and table rebuild conflicts can return to the review queue with
 current SQL evidence, and table rebuild conflicts include dependency-plan
 evidence. Guarded schema resolution is intentionally limited to source-added or
 source-changed index/view/trigger source and target drift, source-dropped index
-target drift, dropped-table restore
+target drift, dropped-table restore source drift, compatible table-rebuild
 source drift, and compatible table-rebuild target drift where the planner
-recorded a compatible schema class after a dry-run source replacement or table
-restore validated against the current target.
+recorded a compatible schema class after a dry-run source replacement, table
+restore, or table rebuild validated against the current target.
 
 ## Test Shape
 
@@ -286,9 +289,9 @@ database cell conflicts where the reviewed cell value itself did not change.
 Schema
 index/view/trigger/table-restore/table-rebuild conflicts record changed
 source/target SQL and carry reviewed conflicts back to `needs-action`. Source
-added index/view/trigger target drift and source-dropped index target drift can
-be guarded-applied after revalidation
-when it receives a compatible schema class; other schema drift remains
+added index/view/trigger target drift, source-dropped index target drift, and
+compatible table rebuild source drift can be guarded-applied after revalidation
+when they receive a compatible schema class; other schema drift remains
 `unclassified` and review-only. Table rebuild fixtures also prove
 dependency-only source drift is caught through direct index/trigger,
 dependent-view, and dependent view-trigger evidence even when the reviewed table

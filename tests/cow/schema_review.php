@@ -2136,8 +2136,8 @@ SQL);
     assert_same($table_rebuild_revalidated['carried'], 1, 'schema table rebuild revalidation carries changed source evidence to needs-action');
     assert_same(
         scalar($table_rebuild_revalidate_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $table_rebuild_revalidate_conflict_id ORDER BY id DESC LIMIT 1"),
-        'unclassified',
-        'schema table rebuild source drift remains unclassified until a schema planner proves compatibility'
+        'compatible-source-drift',
+        'schema table rebuild source drift is classified compatible when the current source rebuild validates against target'
     );
     assert_true(
         str_contains((string)scalar($table_rebuild_revalidate_metadata, "SELECT stale_reason FROM merge_revalidations WHERE conflict_id = $table_rebuild_revalidate_conflict_id ORDER BY id DESC LIMIT 1"), 'source and target changed'),
@@ -2162,7 +2162,35 @@ SQL);
     ]);
     $table_rebuild_revalidate_conflicts = array_values(array_filter($table_rebuild_revalidate_audit['conflicts'], fn($conflict) => (int)($conflict['id'] ?? 0) === $table_rebuild_revalidate_conflict_id));
     assert_same(count($table_rebuild_revalidate_conflicts), 1, 'schema table rebuild source drift returns the reviewed conflict to the needs-action audit queue');
-    assert_same($table_rebuild_revalidate_conflicts[0]['revalidation_class'] ?? null, 'unclassified', 'schema table rebuild audit exposes conservative unclassified revalidation');
+    assert_same($table_rebuild_revalidate_conflicts[0]['revalidation_class'] ?? null, 'compatible-source-drift', 'schema table rebuild audit exposes compatible source-drift revalidation');
+    $table_rebuild_revalidate_filtered = cow_merge_audit_report($table_rebuild_revalidate_metadata, $table_rebuild_revalidate_run_id, 10, [
+        'records' => 'conflicts',
+        'revalidation_class' => 'compatible-source-drift',
+    ]);
+    assert_same(count($table_rebuild_revalidate_filtered['conflicts']), 1, 'schema table rebuild audit filters compatible source drift conflicts by revalidation class');
+    assert_same($table_rebuild_revalidate_filtered['conflicts'][0]['id'] ?? null, $table_rebuild_revalidate_conflict_id, 'schema table rebuild compatible source-drift filter returns the revalidated conflict');
+    $table_rebuild_revalidate_resolution = cow_merge_resolve_conflict(
+        $table_rebuild_revalidate_metadata,
+        $table_rebuild_revalidate_conflict_id,
+        'source',
+        true,
+        'Apply source table rebuild after compatible source drift revalidation.',
+        'cow-test',
+        true
+    );
+    assert_same($table_rebuild_revalidate_resolution['status'], 'applied', 'compatible schema table rebuild source drift resolves after revalidation');
+    assert_true(
+        str_contains((string)scalar($table_rebuild_revalidate_target, "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'plugin_rebuild_revalidate'"), 'value INTEGER'),
+        'compatible schema table rebuild source drift applies the current source table SQL'
+    );
+    assert_true(
+        str_contains((string)scalar($table_rebuild_revalidate_target, "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'plugin_rebuild_revalidate_value_idx'"), 'value + 0'),
+        'compatible schema table rebuild source drift applies the current source index SQL'
+    );
+    assert_true(
+        str_contains((string)scalar($table_rebuild_revalidate_target, "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_rebuild_revalidate_noop'"), 'NEW.id'),
+        'compatible schema table rebuild source drift applies the current source trigger SQL'
+    );
 
     $table_rebuild_target_drift_base = $tmp . '/table-rebuild-target-drift-base.sqlite';
     $table_rebuild_target_drift_source = $tmp . '/table-rebuild-target-drift-source.sqlite';
