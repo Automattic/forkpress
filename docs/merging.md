@@ -34,7 +34,9 @@ In wp-admin, use the ForkPress branch manager page or the branch switcher and
 choose **Show merge history** to load the same source-to-target run list. Runs
 with conflicts can jump directly into the conflict review queue. The full
 branch manager page also has **Show branch tree** for a target-to-source view of
-recent merge edges.
+recent merge edges. From a conflict row there, reviewers can mark the conflict,
+choose source or target when the audited resolver allows it, or apply a
+previously reviewed choice.
 
 Show recent runs, decisions, conflicts, and resolutions:
 
