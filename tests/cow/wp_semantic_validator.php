@@ -2801,6 +2801,8 @@ PHP);
     cow_merge_allocate_autoincrement_bands($attachment_upload_source, $attachment_upload_metadata, 'feature-wp-attachment-upload-source');
     cow_merge_allocate_autoincrement_bands($attachment_upload_target, $attachment_upload_metadata, 'main');
 
+    write_test_file($attachment_upload_source_root . '/wp-content/uploads/2026/05/metadata-drift-attached.jpg', 'metadata drift attached bytes');
+    write_test_file($attachment_upload_source_root . '/wp-content/uploads/2026/05/metadata-drift-metadata.jpg', 'metadata drift metadata bytes');
     unlink($attachment_upload_source_root . '/wp-content/uploads/2026/05/generated-image-150x150.jpg');
     $has_attachment_upload_symlink = create_test_symlink(
         'generated-image.jpg',
@@ -2836,6 +2838,18 @@ PHP);
     $stmt->bindValue(':post_id', $duplicate_upload_attachment_id, SQLITE3_INTEGER);
     $stmt->bindValue(':metadata', $duplicate_upload_metadata, SQLITE3_TEXT);
     $stmt->execute();
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name, guid) VALUES ('Source metadata file drift', '', 'inherit', 'attachment', 'source-metadata-file-drift', 'wp-content/uploads/2026/05/metadata-drift-attached.jpg')");
+    $metadata_drift_attachment_id = (int)$db->lastInsertRowID();
+    $metadata_drift_metadata = serialize([
+        'file' => '2026/05/metadata-drift-metadata.jpg',
+        'width' => 800,
+        'height' => 600,
+        'sizes' => [],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', '2026/05/metadata-drift-attached.jpg'), (:post_id, '_wp_attachment_metadata', :metadata)");
+    $stmt->bindValue(':post_id', $metadata_drift_attachment_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':metadata', $metadata_drift_metadata, SQLITE3_TEXT);
+    $stmt->execute();
     $db->close();
 
     $db = open_db($attachment_upload_target);
@@ -2855,8 +2869,8 @@ PHP);
     );
 
     assert_same($attachment_upload_result['status'], 'completed_with_conflicts', 'built-in WordPress attachment upload validator holds missing generated files for review');
-    $expected_attachment_upload_conflicts = $has_attachment_upload_symlink ? 4 : 3;
-    assert_same((int)($attachment_upload_result['wordpress_semantic_validator_conflicts'] ?? 0), $expected_attachment_upload_conflicts, 'built-in WordPress attachment upload validator records generated-file, unsafe-path, non-regular-entry, and duplicate-owner conflicts');
+    $expected_attachment_upload_conflicts = $has_attachment_upload_symlink ? 5 : 4;
+    assert_same((int)($attachment_upload_result['wordpress_semantic_validator_conflicts'] ?? 0), $expected_attachment_upload_conflicts, 'built-in WordPress attachment upload validator records generated-file, unsafe-path, non-regular-entry, duplicate-owner, and metadata-file-drift conflicts');
     assert_same((int)($attachment_upload_result['plugin_validator_conflicts'] ?? 0), $expected_attachment_upload_conflicts, 'built-in WordPress attachment upload validator contributes to plugin-scoped conflict totals');
     assert_true(!file_exists($attachment_upload_target_root . '/wp-content/uploads/2026/05/generated-image-150x150.jpg'), 'built-in WordPress attachment upload validator leaves the source generated-file deletion staged for review');
     assert_true(is_file($attachment_upload_target_root . '/wp-content/uploads/2026/05/generated-image.jpg'), 'built-in WordPress attachment upload validator preserves the original upload file');
@@ -2917,6 +2931,19 @@ PHP);
     assert_same($attachment_upload_duplicate_owner_payload['candidate']['upload_file'] ?? null, 'wp-content/uploads/2026/05/generated-image.jpg', 'built-in WordPress attachment upload duplicate-owner audit includes the shared upload path');
     assert_same($attachment_upload_duplicate_owner_payload['candidate']['attachment_ids'] ?? null, [63, $duplicate_upload_attachment_id], 'built-in WordPress attachment upload duplicate-owner audit includes both attachment IDs');
     assert_same($attachment_upload_duplicate_owner_audit['conflicts'][0]['plugin_files'] ?? null, ['wp-content/uploads/2026/05/generated-image.jpg'], 'built-in WordPress attachment upload duplicate-owner audit exposes the shared upload path filter');
+
+    $attachment_upload_metadata_drift_audit = cow_merge_audit_report($attachment_upload_metadata, (int)$attachment_upload_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'semantic_scope' => 'wordpress',
+        'conflict_type' => 'plugin-wp-attachment-upload-metadata-file-drift',
+        'plugin_file' => 'wp-content/uploads/2026/05/metadata-drift-metadata.jpg',
+    ]);
+    assert_same(count($attachment_upload_metadata_drift_audit['conflicts']), 1, 'built-in WordPress attachment upload validator rejects mismatched attached-file and metadata-file paths');
+    $attachment_upload_metadata_drift_payload = cow_merge_audit_decode_payload(json_decode((string)($attachment_upload_metadata_drift_audit['conflicts'][0]['chosen_payload'] ?? ''), true));
+    assert_same($attachment_upload_metadata_drift_payload['candidate']['attached_file'] ?? null, '2026/05/metadata-drift-attached.jpg', 'built-in WordPress attachment upload metadata-file-drift audit includes the attached file');
+    assert_same($attachment_upload_metadata_drift_payload['candidate']['metadata_file'] ?? null, '2026/05/metadata-drift-metadata.jpg', 'built-in WordPress attachment upload metadata-file-drift audit includes the metadata file');
+    assert_same($attachment_upload_metadata_drift_audit['conflicts'][0]['plugin_files'] ?? null, ['wp-content/uploads/2026/05/metadata-drift-attached.jpg', 'wp-content/uploads/2026/05/metadata-drift-metadata.jpg'], 'built-in WordPress attachment upload metadata-file-drift audit exposes both upload path filters');
 
     $existing_attachment_upload_base_root = $tmp . '/existing-attachment-upload-base';
     $existing_attachment_upload_source_root = $tmp . '/existing-attachment-upload-source';

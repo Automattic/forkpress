@@ -10218,6 +10218,14 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
                         'metadata_file' => (string)$metadata['file'],
                     ]);
                 } else {
+                    if ($metadata_path !== $attached_path) {
+                        $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-upload-metadata-file-drift', 'attachment metadata file disagrees with _wp_attached_file', [
+                            'field' => '_wp_attachment_metadata.file',
+                            'role' => 'metadata-file',
+                            'attached_file' => $attached_file_raw,
+                            'metadata_file' => (string)$metadata['file'],
+                        ], array_values(array_unique([$attached_path, $metadata_path])));
+                    }
                     $base_path = $metadata_path;
                     $check_file($metadata_path, '_wp_attachment_metadata.file', 'metadata-file', [
                         'metadata_file' => (string)$metadata['file'],

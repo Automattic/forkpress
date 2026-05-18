@@ -94,6 +94,9 @@ Recent additions in the current merge-reliability work:
 - The built-in WordPress attachment upload validator now records review
   conflicts when multiple attachment rows claim the same regular upload file,
   so duplicate ownership is caught even without a plugin media validator.
+- The built-in WordPress attachment upload validator now records review
+  conflicts when a safe `_wp_attachment_metadata.file` path disagrees with the
+  safe `_wp_attached_file` path for the same attachment.
 
 | Objective item | Evidence on trunk | Remaining gap |
 | --- | --- | --- |
