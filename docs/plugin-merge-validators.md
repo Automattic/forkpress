@@ -178,6 +178,21 @@ validator as `unchecked`. This is coverage metadata, not a hard conflict: it
 keeps current plugin installs mergeable while making it explicit that ForkPress
 only ran generic SQLite/files logic for those plugin graphs.
 
+ForkPress records each unchecked active plugin as a durable
+`plugin-validator-unchecked` decision in the merge audit metadata. Reviewers
+can list those decisions with:
+
+```bash
+forkpress branch merge-audit \
+  --scope plugin \
+  --records decisions \
+  --decision plugin-validator-unchecked
+```
+
+The decision payload includes the plugin basename, `coverage: unchecked`, and
+review guidance explaining that generic merge rules were used because no
+plugin-owned validator was discovered.
+
 When this inline validator returns `conflicts`, the merge completes as
 `completed_with_conflicts` and records plugin-scoped conflict rows before the
 result is reported. When it returns `failed` or exits unsuccessfully, the merge

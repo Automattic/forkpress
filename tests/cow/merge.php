@@ -10229,25 +10229,20 @@ SQL);
     $db->close();
 
     $result = cow_merge_databases($schema_index_drop_base, $schema_index_drop_source, $schema_index_drop_target, $metadata, 'feature-index-drop', 'main');
-    assert_same($result['status'], 'completed_with_conflicts', 'source-dropped index remains a schema conflict');
-    $schema_index_drop_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND column_name = 'plugin_items_drop_idx' AND conflict_type = 'schema-source-dropped-index' ORDER BY id DESC LIMIT 1");
-    $schema_index_drop_resolution = cow_merge_resolve_conflict(
-        $metadata,
-        $schema_index_drop_conflict_id,
-        'source',
-        true,
-        'Apply source index drop.',
-        'test'
+    assert_same($result['status'], 'completed', 'safe source-dropped index applies automatically when target kept the base definition');
+    assert_same(scalar($schema_index_drop_target, "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'plugin_items_drop_idx'"), null, 'automatic source index drop removes target index');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE d.table_name = 'plugin_items' AND d.column_name = 'plugin_items_drop_idx' AND d.decision = 'source-applied' AND r.source_branch = 'feature-index-drop'"),
+        1,
+        'automatic source index drop records a source-applied schema decision'
     );
-    assert_same($schema_index_drop_resolution['status'], 'applied', 'source index drop resolution records applied status');
-    assert_same(scalar($schema_index_drop_target, "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'plugin_items_drop_idx'"), null, 'source index drop resolution removes target index');
     $schema_index_drop_rerun = cow_merge_databases($schema_index_drop_base, $schema_index_drop_source, $schema_index_drop_target, $metadata, 'feature-index-drop', 'main');
-    assert_same($schema_index_drop_rerun['status'], 'completed', 'rerunning after source index drop resolution completes without a new conflict');
-    assert_same(scalar($schema_index_drop_target, "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'plugin_items_drop_idx'"), null, 'rerunning after source index drop keeps the target index removed');
+    assert_same($schema_index_drop_rerun['status'], 'completed', 'rerunning after automatic source index drop completes without a new conflict');
+    assert_same(scalar($schema_index_drop_target, "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'plugin_items_drop_idx'"), null, 'rerunning after automatic source index drop keeps the target index removed');
     assert_same(
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.table_name = 'plugin_items' AND c.column_name = 'plugin_items_drop_idx' AND c.conflict_type = 'schema-source-dropped-index' AND r.source_branch = 'feature-index-drop'"),
-        1,
-        'rerunning after source index drop resolution does not rediscover the resolved schema conflict'
+        0,
+        'automatic source index drop does not discover a schema conflict'
     );
 
     $schema_object_base = $tmp . '/schema-object-base.sqlite';
@@ -10710,29 +10705,24 @@ SQL);
     $db->close();
 
     $result = cow_merge_databases($schema_trigger_drop_base, $schema_trigger_drop_source, $schema_trigger_drop_target, $metadata, 'feature-trigger-drop', 'main');
-    assert_same($result['status'], 'completed_with_conflicts', 'source-dropped trigger remains a schema conflict');
-    $schema_trigger_drop_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_items_drop_trigger' AND conflict_type = 'schema-source-dropped-trigger' ORDER BY id DESC LIMIT 1");
-    $schema_trigger_drop_resolution = cow_merge_resolve_conflict(
-        $metadata,
-        $schema_trigger_drop_conflict_id,
-        'source',
-        true,
-        'Apply source trigger drop.',
-        'test'
+    assert_same($result['status'], 'completed', 'safe source-dropped trigger applies automatically when target kept the base definition');
+    assert_same(scalar($schema_trigger_drop_target, "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_items_drop_trigger'"), null, 'automatic source trigger drop removes target trigger');
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE d.column_name = 'plugin_items_drop_trigger' AND d.decision = 'source-applied' AND r.source_branch = 'feature-trigger-drop'"),
+        1,
+        'automatic source trigger drop records a source-applied schema decision'
     );
-    assert_same($schema_trigger_drop_resolution['status'], 'applied', 'source trigger drop resolution records applied status');
-    assert_same(scalar($schema_trigger_drop_target, "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_items_drop_trigger'"), null, 'source trigger drop resolution removes target trigger');
     $db = open_db($schema_trigger_drop_target);
     $db->exec("INSERT INTO plugin_items (item_id, label, value) VALUES ('delta', 'Delta', 'dropped trigger')");
     $db->close();
-    assert_same((int)scalar($schema_trigger_drop_target, "SELECT COUNT(*) FROM plugin_trigger_audit WHERE item_id = 'delta'"), 0, 'dropped trigger no longer fires after source resolution');
+    assert_same((int)scalar($schema_trigger_drop_target, "SELECT COUNT(*) FROM plugin_trigger_audit WHERE item_id = 'delta'"), 0, 'dropped trigger no longer fires after automatic source drop');
     $schema_trigger_drop_rerun = cow_merge_databases($schema_trigger_drop_base, $schema_trigger_drop_source, $schema_trigger_drop_target, $metadata, 'feature-trigger-drop', 'main');
-    assert_same($schema_trigger_drop_rerun['status'], 'completed', 'rerunning after source trigger drop resolution completes without a new conflict');
-    assert_same(scalar($schema_trigger_drop_target, "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_items_drop_trigger'"), null, 'rerunning after source trigger drop keeps the target trigger removed');
+    assert_same($schema_trigger_drop_rerun['status'], 'completed', 'rerunning after automatic source trigger drop completes without a new conflict');
+    assert_same(scalar($schema_trigger_drop_target, "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_items_drop_trigger'"), null, 'rerunning after automatic source trigger drop keeps the target trigger removed');
     assert_same(
         (int)scalar($metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.column_name = 'plugin_items_drop_trigger' AND c.conflict_type = 'schema-source-dropped-trigger' AND r.source_branch = 'feature-trigger-drop'"),
-        1,
-        'rerunning after source trigger drop resolution does not rediscover the resolved schema conflict'
+        0,
+        'automatic source trigger drop does not discover a schema conflict'
     );
 
     $schema_table_drop_base = $tmp . '/schema-table-drop-base.sqlite';
@@ -12252,11 +12242,21 @@ SQL);
         'feature-changed-trigger-dependency-cycle',
         'main'
     );
-    assert_same($schema_changed_trigger_dependency_cycle_result['status'], 'completed_with_conflicts', 'source-changed trigger with a source-dropped target trigger dependency remains reviewable');
+    assert_same($schema_changed_trigger_dependency_cycle_result['status'], 'completed_with_conflicts', 'source-changed trigger remains reviewable after an automatic source-dropped trigger dependency');
     $schema_changed_trigger_dependency_cycle_rewrite_conflict_id = (int)scalar($schema_changed_trigger_dependency_cycle_metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_trigger_dependency_cycle_alpha_insert' AND conflict_type = 'schema-source-changed-trigger' ORDER BY id DESC LIMIT 1");
     $schema_changed_trigger_dependency_cycle_drop_conflict_id = (int)scalar($schema_changed_trigger_dependency_cycle_metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_trigger_dependency_cycle_beta_insert' AND conflict_type = 'schema-source-dropped-trigger' ORDER BY id DESC LIMIT 1");
     assert_true($schema_changed_trigger_dependency_cycle_rewrite_conflict_id > 0, 'source-changed trigger dependency cycle records a rewrite conflict');
-    assert_true($schema_changed_trigger_dependency_cycle_drop_conflict_id > 0, 'source-dropped target trigger dependency records a drop conflict');
+    assert_same($schema_changed_trigger_dependency_cycle_drop_conflict_id, 0, 'safe source-dropped target trigger dependency applies automatically');
+    assert_same(
+        (int)scalar($schema_changed_trigger_dependency_cycle_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE d.column_name = 'plugin_trigger_dependency_cycle_beta_insert' AND d.decision = 'source-applied' AND r.source_branch = 'feature-changed-trigger-dependency-cycle'"),
+        1,
+        'automatic source-dropped trigger dependency records a source-applied decision'
+    );
+    assert_same(
+        (int)scalar($schema_changed_trigger_dependency_cycle_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_trigger_dependency_cycle_beta_insert'"),
+        0,
+        'automatic source-dropped trigger dependency is absent before resolving the changed trigger'
+    );
     $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
         static function (SQLite3 $db, string $sql, string $message): void {
             if ($sql === 'SAVEPOINT forkpress_schema_object_resolution_validation' && $message === 'failed to start schema object resolution validation target savepoint') {
@@ -12289,36 +12289,6 @@ SQL);
         str_contains((string)scalar($schema_changed_trigger_dependency_cycle_target, "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_trigger_dependency_cycle_alpha_insert'"), 'SELECT NEW.label'),
         'failed schema object validation savepoint leaves target trigger unchanged'
     );
-    assert_throws(
-        fn() => cow_merge_resolve_conflict(
-            $schema_changed_trigger_dependency_cycle_metadata,
-            $schema_changed_trigger_dependency_cycle_rewrite_conflict_id,
-            'source',
-            false,
-            'Preview changed trigger before dropping cyclic dependency.',
-            'test'
-        ),
-        'unsupported cyclic trigger dependencies',
-        'source-changed trigger rewrite remains gated until the source-dropped trigger dependency is resolved'
-    );
-    assert_same(
-        (int)scalar($schema_changed_trigger_dependency_cycle_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_changed_trigger_dependency_cycle_rewrite_conflict_id"),
-        0,
-        'failed changed-trigger dependency cycle preview does not record a resolution'
-    );
-    assert_true(
-        str_contains((string)scalar($schema_changed_trigger_dependency_cycle_target, "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_trigger_dependency_cycle_alpha_insert'"), 'SELECT NEW.label'),
-        'failed changed-trigger dependency cycle preview rolls back the trigger rewrite'
-    );
-    $schema_changed_trigger_dependency_cycle_drop_resolution = cow_merge_resolve_conflict(
-        $schema_changed_trigger_dependency_cycle_metadata,
-        $schema_changed_trigger_dependency_cycle_drop_conflict_id,
-        'source',
-        true,
-        'Drop source-dropped trigger before changed trigger rewrite.',
-        'test'
-    );
-    assert_same($schema_changed_trigger_dependency_cycle_drop_resolution['status'], 'applied', 'source-dropped cyclic trigger dependency applies before changed trigger rewrite');
     $GLOBALS['cow_merge_test_hooks']['before_sqlite_exec'] = [
         static function (SQLite3 $db, string $sql, string $message): void {
             if ($sql === 'RELEASE forkpress_schema_object_resolution_validation' && $message === 'failed to release schema object resolution validation savepoint') {
@@ -12385,7 +12355,7 @@ SQL);
     assert_same($schema_changed_trigger_dependency_cycle_rerun['status'], 'completed', 'rerunning after changed trigger dependency cycle resolution completes without new conflicts');
     assert_same(
         (int)scalar($schema_changed_trigger_dependency_cycle_metadata, "SELECT COUNT(*) FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE r.source_branch = 'feature-changed-trigger-dependency-cycle'"),
-        2,
+        1,
         'rerunning after changed trigger dependency cycle resolution does not rediscover resolved conflicts'
     );
 
@@ -12420,47 +12390,26 @@ SQL);
     $schema_restore_trigger_target_cycle_table_conflict_id = (int)scalar($schema_restore_trigger_target_cycle_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_trigger_restore_cycle_alpha' AND conflict_type = 'schema-target-dropped-table' ORDER BY id DESC LIMIT 1");
     $schema_restore_trigger_target_cycle_trigger_conflict_id = (int)scalar($schema_restore_trigger_target_cycle_metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_trigger_restore_cycle_beta_insert' AND conflict_type = 'schema-source-dropped-trigger' ORDER BY id DESC LIMIT 1");
     assert_true($schema_restore_trigger_target_cycle_table_conflict_id > 0, 'target-dropped table conflict is recorded before trigger-cycle restore');
-    assert_true($schema_restore_trigger_target_cycle_trigger_conflict_id > 0, 'source-dropped target trigger conflict is recorded before trigger-cycle restore');
-    assert_throws(
-        fn() => cow_merge_resolve_conflict(
-            $schema_restore_trigger_target_cycle_metadata,
-            $schema_restore_trigger_target_cycle_table_conflict_id,
-            'source',
-            false,
-            'Preview table restore before trigger drop.',
-            'test'
-        ),
-        'unsupported cyclic trigger dependencies',
-        'table restore dry-run remains gated while restored trigger cycles with target trigger'
+    assert_same($schema_restore_trigger_target_cycle_trigger_conflict_id, 0, 'safe source-dropped target trigger applies automatically before table restore review');
+    assert_same(
+        (int)scalar($schema_restore_trigger_target_cycle_metadata, "SELECT COUNT(*) FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE d.column_name = 'plugin_trigger_restore_cycle_beta_insert' AND d.decision = 'source-applied' AND r.source_branch = 'feature-restore-trigger-target-cycle'"),
+        1,
+        'automatic source-dropped target trigger records a source-applied decision before table restore review'
     );
     assert_same(
-        (int)scalar($schema_restore_trigger_target_cycle_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $schema_restore_trigger_target_cycle_table_conflict_id"),
+        (int)scalar($schema_restore_trigger_target_cycle_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_trigger_restore_cycle_beta_insert'"),
         0,
-        'failed table restore trigger-cycle dry-run does not record a resolution'
+        'automatic source-dropped target trigger is absent before table restore review'
     );
-    assert_same(
-        (int)scalar($schema_restore_trigger_target_cycle_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_trigger_restore_cycle_alpha'"),
-        0,
-        'failed table restore trigger-cycle dry-run rolls back the restored table'
-    );
-    $schema_restore_trigger_target_cycle_drop_resolution = cow_merge_resolve_conflict(
-        $schema_restore_trigger_target_cycle_metadata,
-        $schema_restore_trigger_target_cycle_trigger_conflict_id,
-        'source',
-        true,
-        'Drop source-dropped trigger before table restore.',
-        'test'
-    );
-    assert_same($schema_restore_trigger_target_cycle_drop_resolution['status'], 'applied', 'source-dropped target trigger applies before table restore');
     $schema_restore_trigger_target_cycle_restore_resolution = cow_merge_resolve_conflict(
         $schema_restore_trigger_target_cycle_metadata,
         $schema_restore_trigger_target_cycle_table_conflict_id,
         'source',
         true,
-        'Restore table after trigger drop.',
+        'Restore table after automatic trigger drop.',
         'test'
     );
-    assert_same($schema_restore_trigger_target_cycle_restore_resolution['status'], 'applied', 'table restore applies after dependent target trigger is dropped');
+    assert_same($schema_restore_trigger_target_cycle_restore_resolution['status'], 'applied', 'table restore applies after dependent target trigger is automatically dropped');
     assert_same((int)scalar($schema_restore_trigger_target_cycle_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_trigger_restore_cycle_alpha_insert'"), 1, 'source table restore installs the restored trigger after cycle dependency is resolved');
     assert_same((int)scalar($schema_restore_trigger_target_cycle_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_trigger_restore_cycle_beta_insert'"), 0, 'source-dropped target trigger stays dropped after table restore');
     $schema_restore_trigger_target_cycle_rerun = cow_merge_databases(
@@ -19632,6 +19581,7 @@ PHP);
     assert_true(str_contains($auto_validator_merge['output'], 'plugins:   validators=2 conflicts=2'), 'automatic plugin validator discovery reports regular and network-active validator conflicts');
     assert_true(str_contains($auto_validator_merge['output'], 'unchecked=1'), 'automatic plugin validator discovery reports active plugins without validators');
     assert_same(scalar($auto_validator_target_db, 'SELECT post_content FROM wp_posts WHERE ID = 1'), 'source automatic validator content', 'automatic validator conflict keeps the staged DB candidate');
+    $auto_validator_run_id = (int)scalar($auto_validator_metadata, 'SELECT MAX(id) FROM merge_runs');
     assert_same(
         (int)scalar($auto_validator_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__plugins__' AND conflict_type = 'plugin-auto-validator-conflict'"),
         1,
@@ -19642,6 +19592,21 @@ PHP);
         1,
         'automatically discovered network-active validator records plugin-scoped conflicts during merge'
     );
+    assert_same(
+        (int)scalar($auto_validator_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = '__plugins__' AND decision = 'plugin-validator-unchecked'"),
+        1,
+        'automatic plugin validator discovery records unchecked active plugins as durable audit metadata'
+    );
+    $unchecked_plugin_audit = cow_merge_audit_report($auto_validator_metadata, $auto_validator_run_id, 10, [
+        'scope' => 'plugin',
+        'records' => 'decisions',
+        'decision' => 'plugin-validator-unchecked',
+    ]);
+    assert_same(count($unchecked_plugin_audit['decisions']), 1, 'unchecked active plugin coverage is visible in plugin decision audit scope');
+    assert_true(str_contains((string)($unchecked_plugin_audit['decisions'][0]['row_identity_preview'] ?? ''), 'unchecked-auto/unchecked-auto.php'), 'unchecked active plugin audit identity includes the plugin basename');
+    $unchecked_plugin_payload = cow_merge_decode_payload_json((string)($unchecked_plugin_audit['decisions'][0]['chosen_payload'] ?? ''), 'unchecked plugin coverage payload');
+    assert_same($unchecked_plugin_payload['plugin'] ?? null, 'unchecked-auto/unchecked-auto.php', 'unchecked active plugin audit payload records the plugin path');
+    assert_same($unchecked_plugin_payload['coverage'] ?? null, 'unchecked', 'unchecked active plugin audit payload records coverage state');
 
     $plugin_explicit_import_base_root = $tmp . '/plugin-explicit-import-base';
     $plugin_explicit_import_source_root = $tmp . '/plugin-explicit-import-source';
