@@ -168,6 +168,34 @@ if [ "$NEED_PHP_BUILD" = "1" ]; then
   # baseline we can rely on (ubuntu-24.04, macos-14 via brew).
   composer install --no-dev --prefer-dist --ignore-platform-reqs
 
+  # Some upstream source entries include a single hardcoded alternate mirror.
+  # If that mirror is unavailable, static-php-cli will not try its default
+  # dl.static-php.dev fallback. Remove known-stale alternates so transient
+  # primary failures can still fall back to the maintained source mirror.
+  php -r '
+$path = "config/source.json";
+$config = json_decode(file_get_contents($path), true);
+if (!is_array($config)) {
+    fwrite(STDERR, "failed to parse static-php-cli source config\n");
+    exit(1);
+}
+$changed = false;
+foreach ($config as &$source) {
+    if (!is_array($source) || !isset($source["alt"]) || !is_array($source["alt"])) {
+        continue;
+    }
+    $url = $source["alt"]["url"] ?? "";
+    if (is_string($url) && strpos($url, "mirror.souseiseki.middlendian.com") !== false) {
+        unset($source["alt"]);
+        $changed = true;
+    }
+}
+unset($source);
+if ($changed) {
+    file_put_contents($path, json_encode($config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n");
+}
+'
+
   # macOS BSD patch fails on some static-php-cli patches ("out of memory").
   # Shim `patch` to gpatch when available.
   if [ "$UNAME_S" = "Darwin" ] && command -v gpatch >/dev/null 2>&1; then
