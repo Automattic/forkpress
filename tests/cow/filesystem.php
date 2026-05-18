@@ -279,6 +279,45 @@ try {
         1,
         'binary filesystem content conflicts record hash payloads without text decoding'
     );
+    $binary_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-conflict' AND row_identity = '$binary_conflict_identity' ORDER BY id DESC LIMIT 1");
+    cow_merge_review_record(
+        $metadata,
+        'conflict',
+        $binary_conflict_id,
+        'reviewed',
+        'Review source binary file after source drift.',
+        'cow-test'
+    );
+    write_test_file($source_root . '/wp-content/uploads/binary-conflict.bin', "source drift\0binary conflict\xfd");
+    $binary_revalidated = cow_merge_revalidate_reviewed_conflicts($metadata, (int)$result['run_id'], 'cow-revalidate');
+    assert_same(
+        $binary_revalidated['checked'],
+        $has_unsupported_special_entry ? 11 : 10,
+        'filesystem source-drift revalidation checks the unresolved filesystem conflict set'
+    );
+    assert_same($binary_revalidated['reviewed'], 1, 'filesystem source-drift revalidation sees the reviewed binary conflict');
+    assert_same($binary_revalidated['stale'], 1, 'filesystem source-drift revalidation detects changed source bytes');
+    assert_same($binary_revalidated['carried'], 1, 'filesystem source-drift revalidation carries changed source evidence to needs-action');
+    assert_same(
+        scalar($metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $binary_conflict_id ORDER BY id DESC LIMIT 1"),
+        'compatible-source-drift',
+        'filesystem source drift is classified compatible when target still matches review'
+    );
+    $binary_revalidated_resolution = cow_merge_resolve_conflict(
+        $metadata,
+        $binary_conflict_id,
+        'source',
+        true,
+        'Apply current source binary after compatible source drift.',
+        'cow-test',
+        true
+    );
+    assert_same($binary_revalidated_resolution['status'], 'applied', 'filesystem source drift resolves after revalidation');
+    assert_same(
+        file_get_contents($target_root . '/wp-content/uploads/binary-conflict.bin'),
+        "source drift\0binary conflict\xfd",
+        'filesystem after-revalidate source resolution applies current source bytes'
+    );
     $source_changed_link_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/shared-link.txt'));
     $source_added_link_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/uploads/links/source-link.txt'));
     assert_same(

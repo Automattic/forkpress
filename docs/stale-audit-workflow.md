@@ -238,7 +238,8 @@ forkpress branch merge-audit --records conflicts --latest-revalidation-status ta
 ```
 
 The current implementation supports database cell, database row, filesystem
-conflicts, and compatible source-added schema index/view/trigger target drift.
+conflicts, compatible source-added/source-changed schema index/view/trigger
+source and target drift, and compatible dropped-table restore source drift.
 Plugin validator conflicts now have a conservative validator-evidence
 classifier: if a validator rerun records changed evidence for the same plugin
 object, including changed source evidence, the reviewed plugin conflict returns
@@ -250,11 +251,11 @@ originals, unrevalidated replacements, incompatible revalidations, and drifted
 replacement evidence remain blocked. Schema index, view, trigger, dropped-table
 restore, and table rebuild conflicts can return to the review queue with
 current SQL evidence, and table rebuild conflicts include dependency-plan
-evidence. Guarded schema
-resolution is intentionally limited to source-added index/view/trigger target
-drift and compatible table-rebuild target drift where the planner recorded a
-compatible schema class after a dry-run source replacement validated against
-the current target.
+evidence. Guarded schema resolution is intentionally limited to source-added or
+source-changed index/view/trigger source and target drift, dropped-table restore
+source drift, and compatible table-rebuild target drift where the planner
+recorded a compatible schema class after a dry-run source replacement or table
+restore validated against the current target.
 
 ## Test Shape
 

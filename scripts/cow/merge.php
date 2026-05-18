@@ -14530,14 +14530,17 @@ function cow_merge_resolve_conflict(
             }
 
             if ($after_revalidate) {
+                $source_entries = cow_merge_file_manifest_for_root($source_root)['entries'];
+                $current_source_value = $source_entries[$path] ?? null;
                 $target_entries = cow_merge_file_manifest_for_root($target_root)['entries'];
                 $current_value = $target_entries[$path] ?? null;
                 cow_merge_require_after_revalidate(
                     $meta,
                     $conflict_id,
-                    (string)$conflict['source_payload'],
+                    cow_merge_payload_json(cow_merge_file_path_payload($path, $current_source_value)),
                     cow_merge_payload_json(cow_merge_file_path_payload($path, $current_value))
                 );
+                $source_value = $current_source_value;
                 $target_value = $current_value;
             } else {
                 $current_value = cow_merge_validate_current_file_entry($target_root, $path, $target_value, 'target');
