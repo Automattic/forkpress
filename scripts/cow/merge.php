@@ -7645,6 +7645,68 @@ function cow_merge_record_plugin_validator_conflicts(
     ];
 }
 
+function cow_merge_record_unchecked_plugin_validator_coverage(
+    string $metadata_db,
+    int $run_id,
+    array $unchecked_plugins
+): int {
+    if ($unchecked_plugins === []) {
+        return 0;
+    }
+    if (!array_is_list($unchecked_plugins)) {
+        throw new InvalidArgumentException('unchecked plugin list must be a list');
+    }
+
+    $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READWRITE | SQLITE3_OPEN_CREATE);
+    $metadata_transaction_active = false;
+    $recorded = 0;
+    try {
+        cow_merge_ensure_metadata($meta);
+        cow_merge_exec_checked($meta, 'BEGIN IMMEDIATE', 'failed to start unchecked plugin coverage metadata transaction');
+        $metadata_transaction_active = true;
+        foreach ($unchecked_plugins as $plugin) {
+            if (!is_string($plugin) || trim($plugin) === '') {
+                throw new InvalidArgumentException('unchecked plugin entries must be non-empty strings');
+            }
+            $plugin = trim($plugin);
+            cow_merge_record_decision(
+                $meta,
+                $run_id,
+                '__plugins__',
+                cow_merge_plugin_identity_json($plugin, 'validator'),
+                null,
+                'plugin-validator-unchecked',
+                'active WordPress plugin has no discoverable ForkPress merge validator',
+                null,
+                null,
+                null,
+                [
+                    'plugin' => $plugin,
+                    'object' => 'validator',
+                    'reason' => 'active WordPress plugin has no discoverable ForkPress merge validator',
+                    'validator' => null,
+                    'semantic_scope' => 'plugin',
+                    'coverage' => 'unchecked',
+                    'resolution_policy' => 'coverage-metadata',
+                    'manual_review_reason' => 'ForkPress merged this active plugin with generic database and filesystem semantics because no plugin validator was discovered.',
+                    'suggested_action' => 'Install or write a ForkPress merge validator for this plugin if its data graph cannot be proven coherent by generic merge rules.',
+                ]
+            );
+            $recorded++;
+        }
+        cow_merge_exec_checked($meta, 'COMMIT', 'failed to commit unchecked plugin coverage metadata');
+        $metadata_transaction_active = false;
+        return $recorded;
+    } catch (Throwable $e) {
+        if ($metadata_transaction_active) {
+            cow_merge_exec_checked($meta, 'ROLLBACK', 'failed to roll back unchecked plugin coverage metadata');
+        }
+        throw $e;
+    } finally {
+        $meta->close();
+    }
+}
+
 function cow_merge_decode_plugin_validator_stdout(string $stdout, string $validator): array {
     $decoded = json_decode($stdout, true);
     if (json_last_error() !== JSON_ERROR_NONE) {
@@ -15715,7 +15777,7 @@ function cow_merge_audit_add_payload_previews(array $rows): array {
             }
         }
         if (array_key_exists('row_identity', $row)) {
-            $row['row_identity_preview'] = cow_merge_audit_json_preview($row['row_identity']);
+            $row['row_identity_preview'] = cow_merge_audit_payload_preview($row['row_identity']);
         }
     }
     unset($row);
@@ -18390,7 +18452,8 @@ function cow_merge_apply_index_schema_changes(
     int $run_id,
     array $base_indexes,
     array $source_indexes,
-    array $target_indexes
+    array $target_indexes,
+    array $pending_source_drop_tables = []
 ): array {
     $applied = 0;
     $conflicts = 0;
@@ -18424,8 +18487,31 @@ function cow_merge_apply_index_schema_changes(
         }
         if ($source_sql === null) {
             if ($base_sql !== null) {
-                if ($target_sql === $base_sql) {
-                    cow_merge_apply_source_index_schema_resolution($target, $index, null, true);
+                $pending_table_drop = isset($pending_source_drop_tables[strtolower($table)]);
+                if ($target_sql === $base_sql && !$pending_table_drop) {
+                    $apply_error = null;
+                    try {
+                        cow_merge_apply_source_index_schema_resolution($target, $index, null, true);
+                    } catch (Throwable $e) {
+                        $apply_error = $e->getMessage();
+                    }
+                    if ($apply_error !== null) {
+                        if (cow_merge_record_schema_conflict(
+                            $meta,
+                            $run_id,
+                            $table,
+                            $index,
+                            'schema-source-dropped-index',
+                            $base_sql,
+                            ['validation_error' => $apply_error],
+                            $target_sql,
+                            $target_sql,
+                            'source dropped an existing index that target validation rejected'
+                        )) {
+                            $conflicts++;
+                        }
+                        continue;
+                    }
                     cow_merge_record_decision(
                         $meta,
                         $run_id,
@@ -18450,10 +18536,12 @@ function cow_merge_apply_index_schema_changes(
                     'schema-source-dropped-index',
                     $base_sql,
                     null,
-                    $target_sql,
-                    $target_sql,
-                    'source dropped an index; automatic index drops are not applied'
-                )) {
+                        $target_sql,
+                        $target_sql,
+                        $pending_table_drop
+                            ? 'source dropped an index attached to a source-dropped table pending review'
+                            : 'source dropped an index; automatic index drops are not applied'
+                    )) {
                     $conflicts++;
                 }
             } elseif ($target_sql !== null) {
@@ -18644,6 +18732,10 @@ function cow_merge_apply_schema_object_changes(
                     (string)$base_sql,
                     $pending_source_drop_dependencies
                 );
+                $pending_table = strtolower($table);
+                if ($pending_table !== '' && isset($pending_source_drop_dependencies[$pending_table])) {
+                    $pending_drop_dependencies[$pending_table] = $pending_source_drop_dependencies[$pending_table];
+                }
                 if ($target_sql === $base_sql && !$pending_drop_dependencies) {
                     $apply_error = null;
                     try {
@@ -20198,12 +20290,12 @@ function cow_merge_databases(
             $conflicts += $result['conflicts'];
         }
 
-        $target_indexes = cow_merge_index_sql_map($target);
-        $index_result = cow_merge_apply_index_schema_changes($target, $meta, $run_id, $base_indexes, $source_indexes, $target_indexes);
-        $applied += $index_result['applied'];
-        $conflicts += $index_result['conflicts'];
         $source_dropped_tables = cow_merge_source_dropped_schema_names($base_tables, $source_tables, $target_tables);
         $source_dropped_views = cow_merge_source_dropped_schema_names($base_views, $source_views, $target_views);
+        $target_indexes = cow_merge_index_sql_map($target);
+        $index_result = cow_merge_apply_index_schema_changes($target, $meta, $run_id, $base_indexes, $source_indexes, $target_indexes, $source_dropped_tables);
+        $applied += $index_result['applied'];
+        $conflicts += $index_result['conflicts'];
         $view_result = cow_merge_apply_schema_object_changes(
             $target,
             $meta,
@@ -20577,6 +20669,11 @@ function cow_merge_branch_state(
             $result['plugin_validators_discovered'] = count($discovered_plugin_validators);
             $result['plugin_validators_unchecked_plugins'] = $plugin_validator_discovery['unchecked_plugins'];
             $result['plugin_validators_unchecked'] = count($plugin_validator_discovery['unchecked_plugins']);
+            cow_merge_record_unchecked_plugin_validator_coverage(
+                $metadata_db,
+                (int)$result['run_id'],
+                $plugin_validator_discovery['unchecked_plugins']
+            );
             $plugin_validators = cow_merge_unique_plugin_validator_paths(array_merge(
                 $plugin_validators,
                 $discovered_plugin_validators

@@ -62,12 +62,15 @@ The issue #2 workflow is Git/worktree based:
 
 ## Local Git Sandbox Permissions
 
-Codex sandbox sessions may start with a restrictive `umask` and create local
-`.git` object directories without execute permission. Symptoms look like Git
-repository corruption or branch workflow breakage, for example `insufficient
-permission for adding an object to repository database .git/objects` during
-`fetch`, `commit`, or `push`. Treat this as a local Codex sandbox permissions
-problem, not a ForkPress product bug.
+Known Codex-only failure mode: default sandbox sessions may start with a
+restrictive `umask` and create local Git object directories without execute
+permission. Symptoms look like repository corruption or branch workflow
+breakage, for example `insufficient permission for adding an object to
+repository database .git/objects` during `fetch`, `commit`, or `push`.
+
+Treat these `.git` permission failures as Codex sandbox damage first. They are
+not evidence of a ForkPress Git, merge, release, or CI regression unless the
+same failure reproduces outside the default Codex sandbox permissions state.
 
 Before commands that write Git objects or create test temp trees, use:
 
@@ -85,13 +88,15 @@ find "$git_dir" -type d -exec chmod 755 {} +
 find "$git_dir" -type f -exec chmod u+rw {} +
 ```
 
-Do not reset the repository, rewrite history, or revert unrelated work to fix
-this. Do not patch ForkPress Git/merge code until this local cause is ruled
-out. After the permissions are repaired, rerun the original Git command with
-`umask 0022`. If the same failure appears in a default Codex sandbox, move work
-to a danger-full-access lane or repair the sandbox checkout permissions there;
-do not treat it as a ForkPress Git, merge, release, or CI regression unless the
-failure reproduces outside the Codex sandbox permissions state.
+Do not reset the repository, rewrite history, delete worktrees, or revert
+unrelated work to fix this. Do not patch ForkPress Git/merge code for this
+class of error. After the permissions are repaired, rerun the original Git
+command with `umask 0022`.
+
+If the failure happens in a default Codex sandbox, move the work to a
+danger-full-access lane or repair the sandbox checkout permissions there. Record
+the sandbox diagnosis in notes or PR context so later agents do not spend time
+debugging product code for an environment issue.
 
 ## Tests
 
