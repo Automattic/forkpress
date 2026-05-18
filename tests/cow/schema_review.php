@@ -249,6 +249,68 @@ try {
     $drop_table_resolution = cow_merge_resolve_conflict($metadata, $drop_table_conflict_id, 'source', true, 'Apply source table drop after dependent view.', 'cow-test');
     assert_same($drop_table_resolution['status'], 'applied', 'source table drop applies after dependent target view is resolved');
 
+    $drop_table_when_base = $tmp . '/drop-table-trigger-when-base.sqlite';
+    $drop_table_when_source = $tmp . '/drop-table-trigger-when-source.sqlite';
+    $drop_table_when_target = $tmp . '/drop-table-trigger-when-target.sqlite';
+    $db = open_db($drop_table_when_base);
+    $db->exec('CREATE TABLE plugin_contract_drop_when_anchor (item_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL)');
+    $db->exec('CREATE TABLE plugin_contract_drop_when_observer (item_id TEXT PRIMARY KEY)');
+    $db->exec('CREATE TABLE plugin_contract_drop_when_audit (item_id TEXT)');
+    $db->exec(<<<'SQL'
+CREATE TRIGGER plugin_contract_drop_when_observer_insert
+AFTER INSERT ON plugin_contract_drop_when_observer
+WHEN EXISTS (SELECT 1 FROM plugin_contract_drop_when_anchor WHERE enabled = 1)
+BEGIN
+    INSERT INTO plugin_contract_drop_when_audit (item_id) VALUES (NEW.item_id);
+END
+SQL);
+    $db->close();
+    copy($drop_table_when_base, $drop_table_when_source);
+    copy($drop_table_when_base, $drop_table_when_target);
+    $db = open_db($drop_table_when_source);
+    $db->exec('DROP TRIGGER plugin_contract_drop_when_observer_insert');
+    $db->exec('DROP TABLE plugin_contract_drop_when_anchor');
+    $db->close();
+    $drop_table_when_result = cow_merge_databases($drop_table_when_base, $drop_table_when_source, $drop_table_when_target, $metadata, 'feature-schema-drop-table-trigger-when-contract', 'main');
+    $drop_table_when_run_id = (int)$drop_table_when_result['run_id'];
+    assert_same($drop_table_when_result['status'], 'completed_with_conflicts', 'source table drop with dependent target trigger WHEN clause stays reviewable');
+    $drop_table_when_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_contract_drop_when_anchor' AND conflict_type = 'schema-source-dropped-table' ORDER BY id DESC LIMIT 1");
+    $drop_table_when_trigger_conflict_id = (int)scalar($metadata, "SELECT id FROM merge_conflicts WHERE column_name = 'plugin_contract_drop_when_observer_insert' AND conflict_type = 'schema-source-dropped-trigger' ORDER BY id DESC LIMIT 1");
+    $drop_table_when_audit = cow_merge_audit_report($metadata, $drop_table_when_run_id, 10, ['records' => 'conflicts']);
+    $drop_table_when_rows = [];
+    foreach ($drop_table_when_audit['conflicts'] as $row) {
+        $drop_table_when_rows[(int)$row['id']] = $row;
+    }
+    assert_same(
+        $drop_table_when_rows[$drop_table_when_conflict_id]['resolution_choices'],
+        ['target'],
+        'source table drop audit does not advertise source while a target trigger WHEN clause depends on it'
+    );
+    assert_true(
+        str_contains((string)($drop_table_when_rows[$drop_table_when_conflict_id]['blocked_resolution_choices']['source'] ?? ''), 'dependent target trigger programs'),
+        'source table drop audit explains dependent target trigger WHEN blocker'
+    );
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($metadata, $drop_table_when_conflict_id, 'source', false, 'Preview table drop before trigger WHEN dependency.', 'cow-test'),
+        'dependent target trigger programs',
+        'source table drop preview refuses to leave target trigger WHEN clause invalid'
+    );
+    assert_same(
+        (int)scalar($metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $drop_table_when_conflict_id"),
+        0,
+        'failed trigger-WHEN table drop preview records no resolution metadata'
+    );
+    assert_same((int)scalar($drop_table_when_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_contract_drop_when_anchor'"), 1, 'blocked trigger-WHEN table drop preserves target table');
+    assert_same((int)scalar($drop_table_when_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_contract_drop_when_observer_insert'"), 1, 'blocked trigger-WHEN table drop preserves target trigger');
+    cow_merge_resolve_conflict($metadata, $drop_table_when_trigger_conflict_id, 'source', true, 'Apply source trigger WHEN dependency drop.', 'cow-test');
+    $drop_table_when_resolution = cow_merge_resolve_conflict($metadata, $drop_table_when_conflict_id, 'source', true, 'Apply table drop after trigger WHEN dependency.', 'cow-test');
+    assert_same($drop_table_when_resolution['status'], 'applied', 'source table drop applies after dependent trigger WHEN clause is resolved');
+    assert_same(
+        (int)scalar($drop_table_when_target, "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('plugin_contract_drop_when_anchor', 'plugin_contract_drop_when_observer_insert')"),
+        0,
+        'source table drop removes table after dependent trigger WHEN clause is resolved'
+    );
+
     $drop_view_base = $tmp . '/drop-view-contract-base.sqlite';
     $drop_view_source = $tmp . '/drop-view-contract-source.sqlite';
     $drop_view_target = $tmp . '/drop-view-contract-target.sqlite';
