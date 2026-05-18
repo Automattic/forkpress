@@ -4579,10 +4579,20 @@ SQL);
     $source_drift_audit = cow_merge_audit_report($source_drift_metadata, $source_drift_run_id, 10, ['records' => 'conflicts']);
     $source_drift_conflicts = array_values(array_filter($source_drift_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $source_drift_conflict_id));
     assert_same($source_drift_conflicts[0]['revalidation_class'] ?? null, 'compatible-source-drift', 'cell audit exposes source-drift revalidation class');
-    assert_throws(
-        fn() => cow_merge_resolve_conflict($source_drift_metadata, $source_drift_conflict_id, 'source', true, 'Try source after source-drift revalidation.', 'cow-test', true),
-        'source payload changed after latest merge revalidation',
-        'after-revalidate source resolution fails if the source payload changed after review'
+    $source_drift_resolution = cow_merge_resolve_conflict(
+        $source_drift_metadata,
+        $source_drift_conflict_id,
+        'source',
+        true,
+        'Apply source after source-drift revalidation.',
+        'cow-test',
+        true
+    );
+    assert_same($source_drift_resolution['status'], 'applied', 'after-revalidate source resolution applies compatible cell source drift');
+    assert_same(
+        scalar($source_drift_target, "SELECT value FROM plugin_items WHERE item_id = 'alpha'"),
+        'source drift after review',
+        'after-revalidate source resolution writes the revalidated current source cell'
     );
 
     $row_source_drift_base = $tmp . '/row-source-drift-base.sqlite';
@@ -4623,10 +4633,20 @@ SQL);
     $row_source_drift_audit = cow_merge_audit_report($row_source_drift_metadata, $row_source_drift_run_id, 10, ['records' => 'conflicts']);
     $row_source_drift_conflicts = array_values(array_filter($row_source_drift_audit['conflicts'], fn($row) => (int)($row['id'] ?? 0) === $row_source_drift_conflict_id));
     assert_same($row_source_drift_conflicts[0]['revalidation_class'] ?? null, 'compatible-source-drift', 'row audit exposes source-drift revalidation class');
-    assert_throws(
-        fn() => cow_merge_resolve_conflict($row_source_drift_metadata, $row_source_drift_conflict_id, 'source', true, 'Try source row after source-drift revalidation.', 'cow-test', true),
-        'source payload changed after latest merge revalidation',
-        'after-revalidate row resolution fails if the source row changed after review'
+    $row_source_drift_resolution = cow_merge_resolve_conflict(
+        $row_source_drift_metadata,
+        $row_source_drift_conflict_id,
+        'source',
+        true,
+        'Apply source row after source-drift revalidation.',
+        'cow-test',
+        true
+    );
+    assert_same($row_source_drift_resolution['status'], 'applied', 'after-revalidate row resolution applies compatible source drift');
+    assert_same(
+        scalar($row_source_drift_target, "SELECT label || '|' || value FROM plugin_items WHERE item_id = 'source-drift-row'"),
+        'source row drifted label|source row drifted value',
+        'after-revalidate row resolution writes the revalidated current source row'
     );
 
     $source_semantic_identity_cases = [

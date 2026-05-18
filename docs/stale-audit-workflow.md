@@ -20,8 +20,9 @@ Today a resolution may apply only when:
 - The conflict or decision still exists.
 - The target row, cell, schema object, or filesystem path still matches the
   audited target payload.
-- The source payload still matches the audited source payload where source
-  application depends on it.
+- The source payload still matches either the audited source payload or, for a
+  supported `--after-revalidate` source-drift path, the latest revalidated
+  source payload.
 - Any target-side constraints still accept the requested source operation.
 
 If any precondition changed, resolution fails. This prevents stale review notes
