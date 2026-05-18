@@ -197,6 +197,10 @@ try {
     assert_same($revalidated['stale'], 1, 'revalidation detects target drift');
     assert_same($revalidated['carried'], 1, 'revalidation carries stale reviewer intent to needs-action');
     assert_same(count($revalidated['carried_conflicts'] ?? []), 1, 'revalidation returns the carried conflict summary');
+    assert_true(
+        str_contains((string)($revalidated['carried_conflicts'][0]['review_note'] ?? ''), 'Keep target plugin value for launch.'),
+        'revalidation summary includes the carried reviewer intent note'
+    );
     assert_same(count($revalidated['needs_action_conflicts'] ?? []), 1, 'revalidation returns the needs-action conflict queue');
     assert_same($revalidated['needs_action_conflicts'][0]['conflict_id'] ?? null, $conflict_id, 'revalidation summary names the reopened conflict id');
     assert_same($revalidated['needs_action_conflicts'][0]['revalidation_class'] ?? null, 'compatible-target-drift', 'revalidation summary names the classifier');
@@ -275,6 +279,10 @@ try {
     assert_same($again_json['already_needs_action'] ?? null, 1, 'revalidation CLI reports already-carried stale reviews');
     assert_same(count($again_json['already_needs_action_conflicts'] ?? []), 1, 'revalidation CLI returns already-open needs-action conflicts');
     assert_same($again_json['already_needs_action_conflicts'][0]['conflict_id'] ?? null, $conflict_id, 'revalidation CLI summary keeps the conflict id visible');
+    assert_true(
+        str_contains((string)($again_json['already_needs_action_conflicts'][0]['review_note'] ?? ''), 'Keep target plugin value for launch.'),
+        'revalidation CLI summary includes already-carried reviewer intent'
+    );
     assert_same(count($again_json['needs_action_conflicts'] ?? []), 1, 'revalidation CLI returns the complete needs-action conflict queue');
     $again_text = run_merge_cli([
         'revalidate-reviews',
@@ -284,6 +292,7 @@ try {
     assert_same($again_text['status'], 0, 'text revalidation CLI accepts already-carried stale reviews');
     assert_true(str_contains($again_text['output'], 'needs-action-conflicts:'), 'text revalidation output lists actionable conflicts');
     assert_true(str_contains($again_text['output'], "#$conflict_id"), 'text revalidation output names the actionable conflict id');
+    assert_true(str_contains($again_text['output'], 'Keep target plugin value for launch.'), 'text revalidation output previews carried reviewer intent');
     $again_quiet = run_merge_cli([
         'audit',
         '--metadata-db', $metadata,
