@@ -1213,6 +1213,89 @@ SQL);
         'compatible schema changed-index target drift applies the audited source index'
     );
 
+    $schema_index_drop_target_drift_base = $tmp . '/schema-index-drop-target-drift-base.sqlite';
+    $schema_index_drop_target_drift_source = $tmp . '/schema-index-drop-target-drift-source.sqlite';
+    $schema_index_drop_target_drift_target = $tmp . '/schema-index-drop-target-drift-target.sqlite';
+    $schema_index_drop_target_drift_metadata = $tmp . '/.forkpress/cow/merge/schema-index-drop-target-drift-metadata.sqlite';
+
+    $db = open_db($schema_index_drop_target_drift_base);
+    $db->exec('CREATE TABLE plugin_schema_index_drop_target_drift_items (label TEXT NOT NULL, slug TEXT NOT NULL)');
+    $db->exec("INSERT INTO plugin_schema_index_drop_target_drift_items (label, slug) VALUES ('Drop Index Target Drift', 'drop-index-target-drift')");
+    $db->exec('CREATE INDEX plugin_schema_index_drop_target_drift_idx ON plugin_schema_index_drop_target_drift_items(label)');
+    $db->close();
+    copy($schema_index_drop_target_drift_base, $schema_index_drop_target_drift_source);
+    copy($schema_index_drop_target_drift_base, $schema_index_drop_target_drift_target);
+
+    $source_db = open_db($schema_index_drop_target_drift_source);
+    $source_db->exec('DROP INDEX plugin_schema_index_drop_target_drift_idx');
+    $source_db->close();
+
+    $target_db = open_db($schema_index_drop_target_drift_target);
+    $target_db->exec('DROP INDEX plugin_schema_index_drop_target_drift_idx');
+    $target_db->exec('CREATE INDEX plugin_schema_index_drop_target_drift_idx ON plugin_schema_index_drop_target_drift_items(slug)');
+    $target_db->close();
+
+    $schema_index_drop_target_drift_result = cow_merge_databases(
+        $schema_index_drop_target_drift_base,
+        $schema_index_drop_target_drift_source,
+        $schema_index_drop_target_drift_target,
+        $schema_index_drop_target_drift_metadata,
+        'feature-schema-index-drop-target-drift',
+        'main'
+    );
+    $schema_index_drop_target_drift_run_id = (int)$schema_index_drop_target_drift_result['run_id'];
+    assert_same($schema_index_drop_target_drift_result['status'], 'completed_with_conflicts', 'source-dropped index with target drift starts reviewable');
+    $schema_index_drop_target_drift_conflict_id = (int)scalar($schema_index_drop_target_drift_metadata, "SELECT id FROM merge_conflicts WHERE conflict_type = 'schema-source-dropped-index' AND column_name = 'plugin_schema_index_drop_target_drift_idx' ORDER BY id DESC LIMIT 1");
+    assert_true($schema_index_drop_target_drift_conflict_id > 0, 'source-dropped index target-drift fixture records an index conflict');
+    cow_merge_review_record(
+        $schema_index_drop_target_drift_metadata,
+        'conflict',
+        $schema_index_drop_target_drift_conflict_id,
+        'reviewed',
+        'Review source-dropped index before compatible target drift.',
+        'cow-test'
+    );
+
+    $target_db = open_db($schema_index_drop_target_drift_target);
+    $target_db->exec('DROP INDEX plugin_schema_index_drop_target_drift_idx');
+    $target_db->exec('CREATE INDEX plugin_schema_index_drop_target_drift_idx ON plugin_schema_index_drop_target_drift_items(label, slug)');
+    $target_db->close();
+
+    $schema_index_drop_target_drift_revalidated = cow_merge_revalidate_reviewed_conflicts(
+        $schema_index_drop_target_drift_metadata,
+        $schema_index_drop_target_drift_run_id,
+        'cow-revalidate'
+    );
+    assert_same($schema_index_drop_target_drift_revalidated['checked'], 1, 'source-dropped index target drift revalidation checks the reviewed conflict');
+    assert_same($schema_index_drop_target_drift_revalidated['stale'], 1, 'source-dropped index target drift is treated as stale');
+    assert_same($schema_index_drop_target_drift_revalidated['carried'], 1, 'source-dropped index target drift returns the conflict to needs-action');
+    assert_same(
+        scalar($schema_index_drop_target_drift_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $schema_index_drop_target_drift_conflict_id ORDER BY id DESC LIMIT 1"),
+        'compatible-schema-index-target-drift',
+        'source-dropped index target drift is classified compatible when the source drop validates'
+    );
+    $schema_index_drop_target_drift_audit = cow_merge_audit_report($schema_index_drop_target_drift_metadata, $schema_index_drop_target_drift_run_id, 10, [
+        'records' => 'conflicts',
+        'revalidation_class' => 'compatible-schema-index-target-drift',
+    ]);
+    assert_same(count($schema_index_drop_target_drift_audit['conflicts']), 1, 'source-dropped index target drift can be filtered by revalidation class');
+    assert_true($schema_index_drop_target_drift_audit['conflicts'][0]['after_revalidate_supported'] ?? false, 'source-dropped index target drift advertises guarded after-revalidate support');
+    $schema_index_drop_target_drift_resolution = cow_merge_resolve_conflict(
+        $schema_index_drop_target_drift_metadata,
+        $schema_index_drop_target_drift_conflict_id,
+        'source',
+        true,
+        'Apply source-dropped index after compatible target drift revalidation.',
+        'cow-test',
+        true
+    );
+    assert_same($schema_index_drop_target_drift_resolution['status'], 'applied', 'compatible source-dropped index target drift resolves after revalidation');
+    assert_same(
+        scalar($schema_index_drop_target_drift_target, "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'plugin_schema_index_drop_target_drift_idx'"),
+        null,
+        'compatible source-dropped index target drift removes the current target index'
+    );
+
     $view_order_base = $tmp . '/view-order-base.sqlite';
     $view_order_source = $tmp . '/view-order-source.sqlite';
     $view_order_target = $tmp . '/view-order-target.sqlite';
