@@ -5413,11 +5413,8 @@ function cow_merge_lookup_autoincrement_band(SQLite3 $meta, string $branch, stri
 }
 
 function cow_merge_autoincrement_band_ranges(SQLite3 $meta, string $branch, string $table): array {
-    $ranges = [];
+    $ranges_by_key = [];
     $band = cow_merge_lookup_autoincrement_band($meta, $branch, $table);
-    if ($band !== null) {
-        $ranges[] = $band;
-    }
 
     $stmt = cow_merge_prepare_checked(
         $meta,
@@ -5439,15 +5436,23 @@ function cow_merge_autoincrement_band_ranges(SQLite3 $meta, string $branch, stri
         if (!is_array($payload) || !isset($payload['band_start'], $payload['band_end'], $payload['band_size'])) {
             continue;
         }
-        $ranges[] = [
+        if (($payload['retired_prior_bands'] ?? false) === true) {
+            $ranges_by_key = [];
+        }
+        $range = [
             'band_start' => (int)$payload['band_start'],
             'band_end' => (int)$payload['band_end'],
             'band_size' => (int)$payload['band_size'],
         ];
+        $ranges_by_key[$range['band_start'] . ':' . $range['band_end']] = $range;
     }
     cow_merge_result_finalize_checked($res, 'failed to finalize AUTOINCREMENT band range lookup');
 
-    return $ranges;
+    if ($band !== null) {
+        $ranges_by_key[$band['band_start'] . ':' . $band['band_end']] = $band;
+    }
+
+    return array_values($ranges_by_key);
 }
 
 function cow_merge_has_plain_integer_primary_key_skip(SQLite3 $meta, string $branch, string $table): bool {
@@ -7021,6 +7026,7 @@ function cow_merge_allocate_autoincrement_bands(
             $current_floor = max($max_rowid, $old_seq);
             $existing = cow_merge_lookup_autoincrement_band($meta, $branch, $table);
             $new_allocation = false;
+            $retired_prior_bands = false;
 
             if (
                 $existing !== null
@@ -7036,6 +7042,7 @@ function cow_merge_allocate_autoincrement_bands(
                 $band_start = cow_merge_next_autoincrement_band_start($meta, $table, $current_floor + 1, $band_size_for_table);
                 $band_end = $band_start + $band_size_for_table - 1;
                 $new_allocation = true;
+                $retired_prior_bands = $existing !== null && $current_floor < ((int)$existing['band_start']) - 1;
                 $allocated++;
             }
 
@@ -7054,7 +7061,12 @@ function cow_merge_allocate_autoincrement_bands(
                 $new_allocation ? 'id-band-allocated' : 'id-band-reused',
                 'branch AUTOINCREMENT sequence reserved to avoid merge-time ID collisions',
                 ['seq' => $old_seq, 'max_rowid' => $max_rowid],
-                ['band_start' => $band_start, 'band_end' => $band_end, 'band_size' => $band_size_for_table],
+                [
+                    'band_start' => $band_start,
+                    'band_end' => $band_end,
+                    'band_size' => $band_size_for_table,
+                    'retired_prior_bands' => $retired_prior_bands,
+                ],
                 ['seq' => $old_seq],
                 ['seq' => $target_seq]
             );

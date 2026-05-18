@@ -335,6 +335,31 @@ try {
         3,
         'initial, reused, and reset-safe AUTOINCREMENT allocation runs are auditable'
     );
+
+    $reset_target = $tmp . '/reset-target.sqlite';
+    copy($base, $reset_target);
+    $reset_db = open_db($reset);
+    $reset_db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status) VALUES ($source_post_id, 'Retired band import', 'old band explicit import', 'publish')");
+    $reset_db->close();
+
+    $reset_import_result = cow_merge_databases($base, $reset, $reset_target, $metadata, 'feature-source', 'main-reset-target');
+    assert_same(
+        $reset_import_result['status'],
+        'completed_with_conflicts',
+        'explicit imports into a retired pre-reset AUTOINCREMENT band stay review-held'
+    );
+    assert_same(
+        (int)scalar($reset_target, "SELECT COUNT(*) FROM wp_posts WHERE ID = $source_post_id"),
+        0,
+        'retired pre-reset AUTOINCREMENT band IDs are not applied automatically'
+    );
+    assert_true(
+        str_contains(
+            (string)scalar($metadata, "SELECT reason FROM merge_decisions d JOIN merge_runs r ON r.id = d.run_id WHERE r.source_branch = 'feature-source' AND d.table_name = 'wp_posts' AND d.decision = 'target-wins' ORDER BY d.id DESC LIMIT 1"),
+            'outside reserved branch band'
+        ),
+        'retired pre-reset AUTOINCREMENT band conflict explains the active branch-band violation'
+    );
 } finally {
     remove_tree($tmp);
 }
