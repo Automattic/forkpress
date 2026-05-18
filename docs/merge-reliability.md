@@ -83,6 +83,10 @@ Recent additions in the current merge-reliability work:
 - The built-in WordPress semantic validator now scans `block.json` `file:`
   references in active plugins and records review conflicts when a merge leaves
   standard block metadata pointing at a missing or unsafe plugin asset.
+- The built-in WordPress attachment upload validator now rejects upload
+  metadata paths after normalization if they escape `wp-content/uploads`, so
+  generated-size metadata such as `../../../../database/.ht.sqlite` cannot be
+  treated as a valid managed database file.
 
 | Objective item | Evidence on trunk | Remaining gap |
 | --- | --- | --- |

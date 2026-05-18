@@ -2792,6 +2792,18 @@ PHP);
     cow_merge_allocate_autoincrement_bands($attachment_upload_target, $attachment_upload_metadata, 'main');
 
     unlink($attachment_upload_source_root . '/wp-content/uploads/2026/05/generated-image-150x150.jpg');
+    $db = open_db($attachment_upload_source);
+    $metadata_value = (string)$db->querySingle("SELECT meta_value FROM wp_postmeta WHERE post_id = 63 AND meta_key = '_wp_attachment_metadata'");
+    $metadata_array = unserialize($metadata_value, ['allowed_classes' => false]);
+    $metadata_array['sizes']['escaped-managed-db'] = [
+        'file' => '../../../../database/.ht.sqlite',
+        'width' => 64,
+        'height' => 64,
+    ];
+    $stmt = $db->prepare("UPDATE wp_postmeta SET meta_value = :metadata WHERE post_id = 63 AND meta_key = '_wp_attachment_metadata'");
+    $stmt->bindValue(':metadata', serialize($metadata_array), SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
 
     $db = open_db($attachment_upload_target);
     $db->exec("UPDATE wp_posts SET post_title = 'Target attachment keeps generated metadata' WHERE ID = 63");
@@ -2810,8 +2822,8 @@ PHP);
     );
 
     assert_same($attachment_upload_result['status'], 'completed_with_conflicts', 'built-in WordPress attachment upload validator holds missing generated files for review');
-    assert_same((int)($attachment_upload_result['wordpress_semantic_validator_conflicts'] ?? 0), 1, 'built-in WordPress attachment upload validator records the generated file conflict');
-    assert_same((int)($attachment_upload_result['plugin_validator_conflicts'] ?? 0), 1, 'built-in WordPress attachment upload validator contributes to plugin-scoped conflict totals');
+    assert_same((int)($attachment_upload_result['wordpress_semantic_validator_conflicts'] ?? 0), 2, 'built-in WordPress attachment upload validator records generated-file and unsafe-path conflicts');
+    assert_same((int)($attachment_upload_result['plugin_validator_conflicts'] ?? 0), 2, 'built-in WordPress attachment upload validator contributes to plugin-scoped conflict totals');
     assert_true(!file_exists($attachment_upload_target_root . '/wp-content/uploads/2026/05/generated-image-150x150.jpg'), 'built-in WordPress attachment upload validator leaves the source generated-file deletion staged for review');
     assert_true(is_file($attachment_upload_target_root . '/wp-content/uploads/2026/05/generated-image.jpg'), 'built-in WordPress attachment upload validator preserves the original upload file');
     assert_true(is_file($attachment_upload_target_root . '/wp-content/uploads/2026/05/generated-image-300x200.jpg'), 'built-in WordPress attachment upload validator preserves unrelated generated files');
@@ -2831,6 +2843,18 @@ PHP);
     assert_same($attachment_upload_payload['candidate']['role'] ?? null, 'generated-size', 'built-in WordPress attachment upload audit identifies generated-size files');
     assert_same($attachment_upload_payload['candidate']['missing_file'] ?? null, 'wp-content/uploads/2026/05/generated-image-150x150.jpg', 'built-in WordPress attachment upload audit includes the missing upload path');
     assert_same($attachment_upload_audit['conflicts'][0]['plugin_files'] ?? null, ['wp-content/uploads/2026/05/generated-image-150x150.jpg'], 'built-in WordPress attachment upload audit exposes the missing generated file filter');
+
+    $attachment_upload_invalid_path_audit = cow_merge_audit_report($attachment_upload_metadata, (int)$attachment_upload_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'semantic_scope' => 'wordpress',
+        'conflict_type' => 'plugin-wp-attachment-upload-invalid-path',
+    ]);
+    assert_same(count($attachment_upload_invalid_path_audit['conflicts']), 1, 'built-in WordPress attachment upload validator rejects metadata paths that normalize outside uploads');
+    $attachment_upload_invalid_path_payload = cow_merge_audit_decode_payload(json_decode((string)($attachment_upload_invalid_path_audit['conflicts'][0]['chosen_payload'] ?? ''), true));
+    assert_same($attachment_upload_invalid_path_payload['candidate']['role'] ?? null, 'generated-size', 'built-in WordPress attachment upload invalid-path audit identifies generated-size files');
+    assert_same($attachment_upload_invalid_path_payload['candidate']['generated_file'] ?? null, '../../../../database/.ht.sqlite', 'built-in WordPress attachment upload invalid-path audit keeps the unsafe raw metadata path');
+    assert_same($attachment_upload_invalid_path_audit['conflicts'][0]['plugin_files'] ?? null, [], 'built-in WordPress attachment upload invalid-path audit does not expose managed DB paths as plugin files');
 
     $existing_attachment_upload_base_root = $tmp . '/existing-attachment-upload-base';
     $existing_attachment_upload_source_root = $tmp . '/existing-attachment-upload-source';

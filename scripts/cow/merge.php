@@ -10039,7 +10039,11 @@ function cow_merge_wordpress_upload_relative_path(string $path): ?string {
     $relative = str_starts_with($path, 'wp-content/uploads/')
         ? $path
         : 'wp-content/uploads/' . ltrim($path, '/');
-    return cow_merge_normalize_relative_path($relative);
+    $normalized = cow_merge_normalize_relative_path($relative);
+    if ($normalized === null || !str_starts_with($normalized, 'wp-content/uploads/')) {
+        return null;
+    }
+    return $normalized;
 }
 
 function cow_merge_wordpress_upload_child_relative_path(string $base_path, string $filename): ?string {
