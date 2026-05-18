@@ -8,7 +8,7 @@
     "build": "astro build",
     "preview": "astro preview",
     "check": "astro check",
-    "test": "node --test src/remark-rewrite-doc-links.test.mjs src/astro-config.test.mjs scripts/release-metadata.test.mjs scripts/release-prepare.test.mjs scripts/release-homebrew-formula.test.mjs scripts/install.test.mjs scripts/forkpress-launcher.test.mjs",
+    "test": "node --test src/remark-rewrite-doc-links.test.mjs src/astro-config.test.mjs scripts/release-metadata.test.mjs scripts/release-prepare.test.mjs scripts/release-homebrew-formula.test.mjs scripts/install.test.mjs scripts/forkpress-launcher.test.mjs scripts/popular-plugin-compat.test.mjs",
     "release:prepare": "node scripts/release-prepare.mjs",
     "release:validate": "node scripts/release-validate.mjs",
     "validate": "npm run check && npm run test && npm run build"
