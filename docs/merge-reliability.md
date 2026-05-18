@@ -169,6 +169,11 @@ Recent additions in the current merge-reliability work:
   conflicts when a present `_wp_attachment_metadata.original_image` value is
   empty or not a string, so malformed scaled-image metadata cannot skip the
   original-image filename checks.
+- The built-in WordPress attachment upload validator now records generated-size
+  and backup-size child `mime-type` metadata as invalid shape when the field is
+  present but empty or non-string. `tests/cow/media_validator.php` covers empty
+  and numeric child MIME values and verifies those cases do not inflate the
+  built-in MIME-drift queue.
 - Non-AUTOINCREMENT `INTEGER PRIMARY KEY` plugin-table parent collisions now
   also hold dependent source child rows when a foreign key would otherwise bind
   them to a different target parent row with the same key.
@@ -176,6 +181,12 @@ Recent additions in the current merge-reliability work:
   plugin-defined unique/logical keys now hold dependent source child rows with
   an auditable parent unique-collision reason instead of surfacing only a
   low-level constraint failure.
+- Explicit out-of-band parent page imports now have focused coverage for
+  `wp_posts.post_parent`: an in-band child page behind a held explicit parent
+  stays review-held, so ForkPress does not merge a dangling page hierarchy.
+- Release `v0.1.43` was published from trunk commit
+  `01f0e423614e89f6404c20a16e7dd2306a43d4b0` after all five release targets
+  built, packaged, and smoke-tested, including `aarch64-apple-darwin`.
 - Existing non-main Git branch updates now reject missing branch SQLite
   databases before staging or publishing pushed files, matching the runtime
   write guard for incomplete branch-birth metadata.
