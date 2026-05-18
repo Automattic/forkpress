@@ -10263,15 +10263,29 @@ function cow_merge_wordpress_upload_relative_path(string $path): ?string {
 
 function cow_merge_wordpress_upload_child_relative_path(string $base_path, string $filename): ?string {
     $filename = trim(cow_merge_path_to_unix($filename));
-    if ($filename === '' || preg_match('/^[A-Za-z][A-Za-z0-9+.-]*:/', $filename) === 1) {
+    if (
+        $filename === ''
+        || cow_merge_relative_path_is_absolute($filename)
+        || preg_match('/^[A-Za-z][A-Za-z0-9+.-]*:/', $filename) === 1
+    ) {
         return null;
     }
-    if (str_starts_with($filename, 'wp-content/uploads/') || str_contains($filename, '/')) {
+    if (str_starts_with($filename, 'wp-content/uploads/')) {
         return cow_merge_wordpress_upload_relative_path($filename);
+    }
+    if (str_contains($filename, '/')) {
+        foreach (explode('/', $filename) as $segment) {
+            if ($segment === '' || $segment === '.' || $segment === '..') {
+                return null;
+            }
+        }
     }
     $directory = dirname($base_path);
     $directory = $directory === '.' ? 'wp-content/uploads' : $directory;
-    return cow_merge_normalize_relative_path($directory . '/' . $filename);
+    $relative = cow_merge_normalize_relative_path($directory . '/' . $filename);
+    return $relative !== null && str_starts_with($relative, 'wp-content/uploads/')
+        ? $relative
+        : null;
 }
 
 function cow_merge_wordpress_upload_is_file(string $root, string $relative_path): bool {
@@ -10659,6 +10673,16 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
                     ]);
                     continue;
                 }
+                $size_file_name = trim(cow_merge_path_to_unix((string)$size['file']));
+                if (str_contains($size_file_name, '/')) {
+                    $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-metadata-invalid-shape', 'attachment generated-size file is not a basename', [
+                        'field' => '_wp_attachment_metadata.sizes.' . (string)$size_name . '.file',
+                        'role' => 'generated-size-filename',
+                        'size' => (string)$size_name,
+                        'attached_file' => $attached_file_raw,
+                        'generated_file' => (string)$size['file'],
+                    ], [$size_path]);
+                }
                 $check_file($size_path, '_wp_attachment_metadata.sizes.' . (string)$size_name . '.file', 'generated-size', [
                     'size' => (string)$size_name,
                     'generated_file' => (string)$size['file'],
@@ -10714,6 +10738,15 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
                         'original_image' => (string)$metadata['original_image'],
                     ]);
                 } else {
+                    $original_image_name = trim(cow_merge_path_to_unix((string)$metadata['original_image']));
+                    if (str_contains($original_image_name, '/')) {
+                        $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-metadata-invalid-shape', 'attachment original_image file is not a basename', [
+                            'field' => '_wp_attachment_metadata.original_image',
+                            'role' => 'original-image-filename',
+                            'attached_file' => $attached_file_raw,
+                            'original_image' => (string)$metadata['original_image'],
+                        ], [$original_path]);
+                    }
                     $check_file($original_path, '_wp_attachment_metadata.original_image', 'original-image', [
                         'original_image' => (string)$metadata['original_image'],
                     ]);
@@ -10750,6 +10783,16 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
                         'backup_file' => (string)$backup['file'],
                     ]);
                     continue;
+                }
+                $backup_file_name = trim(cow_merge_path_to_unix((string)$backup['file']));
+                if (str_contains($backup_file_name, '/')) {
+                    $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-metadata-invalid-shape', 'attachment backup-size file is not a basename', [
+                        'field' => '_wp_attachment_metadata.backup_sizes.' . (string)$backup_name . '.file',
+                        'role' => 'backup-size-filename',
+                        'backup_size' => (string)$backup_name,
+                        'attached_file' => $attached_file_raw,
+                        'backup_file' => (string)$backup['file'],
+                    ], [$backup_path]);
                 }
                 $check_file($backup_path, '_wp_attachment_metadata.backup_sizes.' . (string)$backup_name . '.file', 'backup-size', [
                     'backup_size' => (string)$backup_name,

@@ -159,6 +159,12 @@ Recent additions in the current merge-reliability work:
 - The same validator also records review conflicts when recognizable upload
   bytes for original, generated-size, or backup-size files disagree with common
   WordPress media file extensions, such as PDF bytes behind a `.jpg` path.
+- The built-in WordPress attachment upload validator now records review
+  conflicts when generated-size, `original_image`, or backup-size child
+  metadata filenames contain safe subdirectories instead of basenames. It
+  resolves those child paths relative to the attachment directory for file
+  evidence, matching WordPress behavior, while still rejecting unsafe `..`,
+  empty segment, absolute, URL-like, and drive-letter child paths.
 - Non-AUTOINCREMENT `INTEGER PRIMARY KEY` plugin-table parent collisions now
   also hold dependent source child rows when a foreign key would otherwise bind
   them to a different target parent row with the same key.
