@@ -1245,14 +1245,17 @@ function cow_git_validate_existing_branch_birth_metadata_for_update(
         return;
     }
 
-    require_once __DIR__ . '/merge.php';
-
     $branch_list_path = $branch_list_path ?: dirname($git_repo_dir) . '/branches.txt';
     $merge_dir = dirname($branch_list_path) . '/merge';
     $db = rtrim($storage_root, "/\\") . '/wp-content/database/.ht.sqlite';
     if (!is_file($db)) {
-        return;
+        throw new \RuntimeException(
+            "existing Git branch '$branch' is missing its branch database before update: $db"
+        );
     }
+
+    require_once __DIR__ . '/merge.php';
+
     $base_db = rtrim($merge_dir, "/\\") . '/bases/' . $branch . '.sqlite';
     if (!is_file($base_db)) {
         throw new \RuntimeException(
