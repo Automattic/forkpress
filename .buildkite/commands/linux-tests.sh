@@ -7,6 +7,14 @@ set -euo pipefail
 # `make test-cow-fast` (PHP test suite) and the heavier production-build /
 # COW-e2e chunks land in follow-up steps with their own image / cache setup.
 
+# We're root inside the `rust:1.95-bookworm` container, so apt-get works
+# without sudo. The image doesn't ship PHP; install it so `make test-cow-fast`
+# can run its sqlite-backed PHP test suite. ~15s overhead per build.
+echo "--- :package: Installing PHP"
+apt-get update -qq
+apt-get install -y --no-install-recommends php-cli php-sqlite3 >/dev/null
+php --version | head -1
+
 echo "--- :information_source: Toolchain"
 rustc --version
 cargo --version
@@ -30,3 +38,6 @@ FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo test -p forkpress-cli --features dev-ex
 
 echo "--- :package: make test-release"
 make test-release
+
+echo "--- :cow: make test-cow-fast"
+make test-cow-fast
