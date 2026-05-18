@@ -2311,6 +2311,126 @@ try {
         'template edit/delete defaults the edited source template to target-wins before review'
     );
 
+    $global_styles_base = $tmp . '/global-styles-base.sqlite';
+    $global_styles_source = $tmp . '/global-styles-source.sqlite';
+    $global_styles_target = $tmp . '/global-styles-target.sqlite';
+    $global_styles_metadata = $tmp . '/.forkpress/cow/merge/global-styles-metadata.sqlite';
+
+    smoke_create_posts_db($global_styles_base);
+    copy($global_styles_base, $global_styles_source);
+    copy($global_styles_base, $global_styles_target);
+
+    $source_global_styles = json_encode([
+        'version' => 3,
+        'styles' => [
+            'color' => [
+                'background' => '#f6f7f7',
+                'text' => '#111111',
+            ],
+        ],
+        'settings' => [
+            'layout' => [
+                'contentSize' => '720px',
+            ],
+        ],
+    ], JSON_UNESCAPED_SLASHES);
+    $target_global_styles = json_encode([
+        'version' => 3,
+        'styles' => [
+            'typography' => [
+                'fontSize' => '18px',
+            ],
+        ],
+        'settings' => [
+            'layout' => [
+                'wideSize' => '1080px',
+            ],
+        ],
+    ], JSON_UNESCAPED_SLASHES);
+
+    $db = smoke_open_db($global_styles_source);
+    smoke_insert_post($db, 18000076, 'Branch theme styles', (string)$source_global_styles, 'wp_global_styles', 'wp-global-styles-forkpress-smoke-branch');
+    $db->close();
+
+    $db = smoke_open_db($global_styles_target);
+    smoke_insert_post($db, 19000076, 'Main theme styles', (string)$target_global_styles, 'wp_global_styles', 'wp-global-styles-forkpress-smoke-main');
+    $db->close();
+
+    $global_styles_result = cow_merge_databases($global_styles_base, $global_styles_source, $global_styles_target, $global_styles_metadata, 'feature-smoke-global-styles', 'main');
+    assert_same($global_styles_result['status'], 'completed', 'branch and main global-styles inserts complete cleanly');
+    assert_same((int)($global_styles_result['conflicts'] ?? -1), 0, 'branch and main global-styles inserts do not create merge conflicts');
+    assert_same(smoke_scalar($global_styles_target, 'SELECT post_content FROM wp_posts WHERE ID = 18000076'), $source_global_styles, 'merged target includes the branch global styles row');
+    assert_same(smoke_scalar($global_styles_target, 'SELECT post_content FROM wp_posts WHERE ID = 19000076'), $target_global_styles, 'merged target preserves the main global styles row');
+    assert_same(
+        (int)smoke_scalar($global_styles_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_posts'"),
+        0,
+        'global-styles smoke merge records no WordPress row conflicts'
+    );
+    assert_same(
+        (int)smoke_scalar($global_styles_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'source-applied'"),
+        1,
+        'global-styles smoke merge audits the source style insert'
+    );
+    assert_same(
+        (int)smoke_scalar($global_styles_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
+        1,
+        'global-styles smoke merge audits the target style insert'
+    );
+
+    $global_styles_edit_delete_base = $tmp . '/global-styles-edit-delete-base.sqlite';
+    $global_styles_edit_delete_source = $tmp . '/global-styles-edit-delete-source.sqlite';
+    $global_styles_edit_delete_target = $tmp . '/global-styles-edit-delete-target.sqlite';
+    $global_styles_edit_delete_metadata = $tmp . '/.forkpress/cow/merge/global-styles-edit-delete-metadata.sqlite';
+
+    smoke_create_posts_db($global_styles_edit_delete_base);
+    $shared_global_styles = json_encode([
+        'version' => 3,
+        'styles' => [
+            'color' => [
+                'text' => '#333333',
+            ],
+        ],
+    ], JSON_UNESCAPED_SLASHES);
+    $source_edited_global_styles = json_encode([
+        'version' => 3,
+        'styles' => [
+            'color' => [
+                'text' => '#111111',
+                'background' => '#ffffff',
+            ],
+        ],
+    ], JSON_UNESCAPED_SLASHES);
+
+    $db = smoke_open_db($global_styles_edit_delete_base);
+    smoke_insert_post($db, 17000147, 'Shared theme styles', (string)$shared_global_styles, 'wp_global_styles', 'wp-global-styles-forkpress-smoke-shared');
+    $db->close();
+    copy($global_styles_edit_delete_base, $global_styles_edit_delete_source);
+    copy($global_styles_edit_delete_base, $global_styles_edit_delete_target);
+
+    $db = smoke_open_db($global_styles_edit_delete_source);
+    $stmt = $db->prepare("UPDATE wp_posts SET post_title = 'Source edited theme styles', post_content = :content WHERE ID = 17000147");
+    $stmt->bindValue(':content', $source_edited_global_styles, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+
+    $db = smoke_open_db($global_styles_edit_delete_target);
+    $db->exec('DELETE FROM wp_posts WHERE ID = 17000147');
+    $db->close();
+
+    $global_styles_edit_delete_result = cow_merge_databases($global_styles_edit_delete_base, $global_styles_edit_delete_source, $global_styles_edit_delete_target, $global_styles_edit_delete_metadata, 'feature-smoke-global-styles-edit-delete', 'main');
+    assert_same($global_styles_edit_delete_result['status'], 'completed_with_conflicts', 'global-styles edit/delete graph stays reviewable');
+    assert_same((int)smoke_scalar($global_styles_edit_delete_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 17000147'), 0, 'global-styles edit/delete preserves target style deletion before review');
+    assert_same(
+        (int)smoke_scalar($global_styles_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_posts' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'global-styles edit/delete records the edited style delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($global_styles_edit_delete_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-wins'"),
+        1,
+        'global-styles edit/delete defaults the edited source style to target-wins before review'
+    );
+
     $attachment_base_root = $tmp . '/attachment-base-root';
     $attachment_source_root = $tmp . '/attachment-source-root';
     $attachment_target_root = $tmp . '/attachment-target-root';

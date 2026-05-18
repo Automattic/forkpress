@@ -1932,12 +1932,98 @@ function cow_merge_row_exists_by_values(SQLite3 $db, string $table, array $colum
     return $exists;
 }
 
+function cow_merge_select_row_by_values(SQLite3 $db, string $table, array $columns, array $values): ?array {
+    if (!$columns || count($columns) !== count($values) || cow_merge_table_sql($db, $table) === null) {
+        return null;
+    }
+
+    $clauses = [];
+    foreach ($columns as $column) {
+        $clauses[] = cow_merge_quote_ident($column) . ' = ?';
+    }
+    $stmt = cow_merge_prepare_checked(
+        $db,
+        'SELECT * FROM ' . cow_merge_quote_ident($table) . ' WHERE ' . implode(' AND ', $clauses) . ' LIMIT 1',
+        "failed to prepare row value selection on $table"
+    );
+    foreach ($values as $i => $value) {
+        cow_merge_bind($stmt, $i + 1, $value);
+    }
+    $res = cow_merge_execute_checked($stmt, $db, "failed to query row value selection on $table");
+    $row = $res->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($res, "failed to finalize row value selection on $table");
+    return $row ?: null;
+}
+
 function cow_merge_find_row_entry_by_values(array $rows, array $columns, array $values): ?array {
     foreach ($rows as $key => $entry) {
         $row = $entry['row'] ?? null;
         if (is_array($row) && cow_merge_row_matches_values($row, $columns, $values)) {
             return [$key, $entry];
         }
+    }
+    return null;
+}
+
+function cow_merge_foreign_key_parent_insert_collision_violation(
+    SQLite3 $base,
+    SQLite3 $source,
+    SQLite3 $target,
+    string $table,
+    array $source_row
+): ?string {
+    foreach (cow_merge_foreign_key_groups($target, $table) as $group) {
+        $parent_table = (string)($group[0]['table'] ?? '');
+        if ($parent_table === '') {
+            continue;
+        }
+        $parent_columns = cow_merge_foreign_key_parent_columns($target, $parent_table, $group);
+        if ($parent_columns === null) {
+            continue;
+        }
+
+        $values = [];
+        $from_columns = [];
+        $skip = false;
+        foreach ($group as $i => $part) {
+            $from = (string)($part['from'] ?? '');
+            if ($from === '' || !isset($parent_columns[$i]) || !array_key_exists($from, $source_row) || $source_row[$from] === null) {
+                $skip = true;
+                break;
+            }
+            $from_columns[] = $from;
+            $values[] = $source_row[$from];
+        }
+        if ($skip || !$values) {
+            continue;
+        }
+
+        $base_parent = cow_merge_select_row_by_values($base, $parent_table, $parent_columns, $values);
+        if ($base_parent !== null) {
+            continue;
+        }
+
+        $source_parent = cow_merge_select_row_by_values($source, $parent_table, $parent_columns, $values);
+        $target_parent = cow_merge_select_row_by_values($target, $parent_table, $parent_columns, $values);
+        if ($source_parent === null || $target_parent === null) {
+            continue;
+        }
+
+        $parent_row_columns = cow_merge_all_columns(
+            cow_merge_table_columns($base, $parent_table),
+            cow_merge_table_columns($source, $parent_table),
+            cow_merge_table_columns($target, $parent_table),
+            array_keys($source_parent),
+            array_keys($target_parent)
+        );
+        if (cow_merge_row_values_equal($source_parent, $target_parent, $parent_row_columns)) {
+            continue;
+        }
+
+        return 'source row references ' . $parent_table . '(' . implode(', ', $parent_columns) . ')=' .
+            cow_merge_plain_json($values) .
+            ' from ' . $table . '(' . implode(', ', $from_columns) . ')' .
+            ' whose source parent row collides with a different target parent row; review the parent collision before applying the child row';
     }
     return null;
 }
@@ -10861,12 +10947,13 @@ function cow_merge_audit_revalidation_class_filter(?string $value): ?string {
         'compatible-schema-index-target-drift',
         'compatible-schema-view-target-drift',
         'compatible-schema-trigger-target-drift',
+        'compatible-schema-table-target-drift',
         'missing',
         'incompatible',
         'replacement-evidence',
         'unclassified',
     ], true)) {
-        throw new InvalidArgumentException('--revalidation-class must be unchanged, compatible-target-drift, compatible-source-drift, compatible-schema-index-target-drift, compatible-schema-view-target-drift, compatible-schema-trigger-target-drift, missing, incompatible, replacement-evidence, or unclassified');
+        throw new InvalidArgumentException('--revalidation-class must be unchanged, compatible-target-drift, compatible-source-drift, compatible-schema-index-target-drift, compatible-schema-view-target-drift, compatible-schema-trigger-target-drift, compatible-schema-table-target-drift, missing, incompatible, replacement-evidence, or unclassified');
     }
     return $value;
 }
@@ -11680,6 +11767,8 @@ function cow_merge_apply_reviewed_resolutions(
         'next_action' => 'apply-reviewed-choice',
     ]);
     $applied = [];
+    $revalidations = [];
+    $skipped = [];
     $errors = [];
     foreach ($audit['conflicts'] as $conflict) {
         $conflict_id = (int)($conflict['id'] ?? 0);
@@ -11687,6 +11776,40 @@ function cow_merge_apply_reviewed_resolutions(
             continue;
         }
         try {
+            $stale_status = (string)($conflict['stale_status'] ?? 'unknown');
+            if (in_array($stale_status, ['stale', 'error'], true)) {
+                $revalidation = cow_merge_revalidate_reviewed_conflicts(
+                    $metadata_db,
+                    isset($conflict['run_id']) ? (int)$conflict['run_id'] : $run_id,
+                    $reviewer,
+                    $conflict_id
+                );
+                $revalidations[] = $revalidation;
+                if ((int)($revalidation['stale'] ?? 0) + (int)($revalidation['errors'] ?? 0) > 0) {
+                    $carried = (int)($revalidation['carried'] ?? 0);
+                    $already_needs_action = (int)($revalidation['already_needs_action'] ?? 0);
+                    if ($carried + $already_needs_action < 1) {
+                        $errors[] = [
+                            'conflict_id' => $conflict_id,
+                            'error' => 'stale validated conflict has no reviewed intent to carry back to needs-action',
+                        ];
+                        break;
+                    }
+                    $skipped[] = [
+                        'conflict_id' => $conflict_id,
+                        'reason' => 'revalidation-required',
+                        'stale_status' => $stale_status,
+                    ];
+                    continue;
+                }
+                if ((int)($revalidation['fresh'] ?? 0) < 1) {
+                    $errors[] = [
+                        'conflict_id' => $conflict_id,
+                        'error' => 'stale preflight revalidation did not produce a fresh or actionable reviewed conflict',
+                    ];
+                    break;
+                }
+            }
             $choice = cow_merge_latest_validated_resolution_choice_from_db($metadata_db, $conflict_id);
             $applied[] = cow_merge_resolve_conflict(
                 $metadata_db,
@@ -11711,8 +11834,12 @@ function cow_merge_apply_reviewed_resolutions(
         'limit' => $limit,
         'eligible' => count($audit['conflicts']),
         'applied' => count($applied),
+        'revalidated' => count($revalidations),
+        'skipped' => count($skipped),
         'status' => $errors === [] ? 'completed' : 'completed_with_errors',
         'resolutions' => $applied,
+        'revalidations' => $revalidations,
+        'skipped_conflicts' => $skipped,
         'errors' => $errors,
     ];
 }
@@ -20330,6 +20457,23 @@ function cow_merge_table_rows(
                 }
                 continue;
             }
+            $parent_insert_collision_violation = cow_merge_foreign_key_parent_insert_collision_violation($base, $source, $target, $table, $source_row);
+            if ($parent_insert_collision_violation !== null) {
+                if (cow_merge_record_row_target_constraint(
+                    $meta,
+                    $run_id,
+                    $table,
+                    $key,
+                    null,
+                    $source_row,
+                    null,
+                    'insert',
+                    $parent_insert_collision_violation
+                )) {
+                    $conflicts++;
+                }
+                continue;
+            }
             $wp_reference_violation = cow_merge_wordpress_insert_reference_violation($source, $target, $meta, $source_branch, $table, $source_row);
             if ($wp_reference_violation !== null) {
                 if (cow_merge_record_row_target_constraint(
@@ -20646,6 +20790,23 @@ function cow_merge_table_rows(
             $where_identity = cow_merge_entry_where_identity($target_entry, $pk_cols);
             if ($where_identity === null) {
                 throw new RuntimeException("cannot update $table row without a target identity");
+            }
+            $parent_insert_collision_violation = cow_merge_foreign_key_parent_insert_collision_violation($base, $source, $target, $table, $source_row);
+            if ($parent_insert_collision_violation !== null) {
+                if (cow_merge_record_row_target_constraint(
+                    $meta,
+                    $run_id,
+                    $table,
+                    $key,
+                    $base_row,
+                    $source_row,
+                    $target_row,
+                    'update',
+                    $parent_insert_collision_violation
+                )) {
+                    $conflicts++;
+                }
+                continue;
             }
             $wp_reference_violation = cow_merge_wordpress_update_reference_violation($source, $target, $meta, $source_branch, $table, $source_row);
             if ($wp_reference_violation !== null) {
@@ -22447,6 +22608,8 @@ if (realpath($argv[0] ?? '') === __FILE__) {
                 echo "  status:    {$result['status']}\n";
                 echo "  eligible:  {$result['eligible']}\n";
                 echo "  applied:   {$result['applied']}\n";
+                echo "  revalidated: {$result['revalidated']}\n";
+                echo "  skipped:   {$result['skipped']}\n";
                 echo "  metadata:  {$result['metadata_db']}\n";
                 if ($result['errors'] !== []) {
                     foreach ($result['errors'] as $error) {

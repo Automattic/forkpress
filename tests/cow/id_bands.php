@@ -63,6 +63,13 @@ function create_id_band_db(string $path): void {
     $db->close();
 }
 
+function create_plain_ipk_parent_graph_db(string $path): void {
+    $db = open_db($path);
+    $db->exec('CREATE TABLE plugin_plain_ipk_parent (id INTEGER PRIMARY KEY, label TEXT NOT NULL)');
+    $db->exec('CREATE TABLE plugin_plain_ipk_child (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES plugin_plain_ipk_parent(id), label TEXT NOT NULL)');
+    $db->close();
+}
+
 define('FORKPRESS_COW_MERGE_TESTS', true);
 require_once __DIR__ . '/../../scripts/cow/merge.php';
 
@@ -254,6 +261,60 @@ try {
         scalar($target, 'SELECT payload FROM plugin_plain_ipk WHERE id = 9'),
         'target non-colliding plain integer key',
         'target non-colliding plain INTEGER PRIMARY KEY plugin rows remain'
+    );
+
+    $graph_base = $tmp . '/plain-ipk-parent-graph-base.sqlite';
+    $graph_source = $tmp . '/plain-ipk-parent-graph-source.sqlite';
+    $graph_target = $tmp . '/plain-ipk-parent-graph-target.sqlite';
+    $graph_metadata = $tmp . '/.forkpress/cow/merge/plain-ipk-parent-graph-metadata.sqlite';
+    create_plain_ipk_parent_graph_db($graph_base);
+    copy($graph_base, $graph_source);
+    copy($graph_base, $graph_target);
+    cow_merge_allocate_autoincrement_bands($graph_source, $graph_metadata, 'feature-plain-graph-source');
+    cow_merge_allocate_autoincrement_bands($graph_target, $graph_metadata, 'feature-plain-graph-target');
+    $graph_source_db = open_db($graph_source);
+    $graph_source_db->exec("INSERT INTO plugin_plain_ipk_parent (id, label) VALUES (10, 'source parent')");
+    $graph_source_db->exec("INSERT INTO plugin_plain_ipk_child (id, parent_id, label) VALUES (20, 10, 'source child')");
+    $graph_source_db->close();
+    $graph_target_db = open_db($graph_target);
+    $graph_target_db->exec("INSERT INTO plugin_plain_ipk_parent (id, label) VALUES (10, 'target parent')");
+    $graph_target_db->close();
+
+    $graph_result = cow_merge_databases(
+        $graph_base,
+        $graph_source,
+        $graph_target,
+        $graph_metadata,
+        'feature-plain-graph-source',
+        'feature-plain-graph-target'
+    );
+    assert_same($graph_result['status'], 'completed_with_conflicts', 'plain INTEGER PRIMARY KEY parent collision keeps dependent source rows reviewable');
+    assert_same(
+        scalar($graph_target, 'SELECT label FROM plugin_plain_ipk_parent WHERE id = 10'),
+        'target parent',
+        'plain INTEGER PRIMARY KEY parent collision keeps the target parent before review'
+    );
+    assert_same(
+        scalar($graph_target, 'SELECT label FROM plugin_plain_ipk_child WHERE id = 20'),
+        null,
+        'source child row is not applied to a different target parent with the same plain INTEGER PRIMARY KEY'
+    );
+    assert_same(
+        (int)scalar($graph_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_plain_ipk_parent' AND conflict_type = 'row-insert-collision'"),
+        1,
+        'plain INTEGER PRIMARY KEY parent collision is recorded as a review conflict'
+    );
+    assert_same(
+        (int)scalar($graph_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'plugin_plain_ipk_child' AND conflict_type = 'row-target-constraint'"),
+        1,
+        'dependent source child row is held behind the parent collision'
+    );
+    assert_true(
+        str_contains(
+            (string)scalar($graph_metadata, "SELECT reason FROM merge_decisions WHERE table_name = 'plugin_plain_ipk_child' AND decision = 'target-wins' ORDER BY id DESC LIMIT 1"),
+            'collides with a different target parent row'
+        ),
+        'dependent source child row explains the parent collision guard'
     );
 
     $reset = $tmp . '/reset.sqlite';

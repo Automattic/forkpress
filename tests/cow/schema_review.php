@@ -61,6 +61,16 @@ function scalar(string $db_path, string $sql): mixed {
     return $value;
 }
 
+function run_merge_cli(array $args): array {
+    $script = dirname(__DIR__, 2) . '/scripts/cow/merge.php';
+    $command = array_map('escapeshellarg', array_merge([PHP_BINARY, $script], $args));
+    exec(implode(' ', $command) . ' 2>&1', $output, $status);
+    return [
+        'status' => $status,
+        'output' => implode("\n", $output) . ($output === [] ? '' : "\n"),
+    ];
+}
+
 function create_schema_review_db(string $path): void {
     $db = open_db($path);
     $db->exec('CREATE TABLE plugin_trigger_cycle_self (label TEXT)');
@@ -2071,6 +2081,24 @@ SQL);
         'compatible-schema-table-target-drift',
         'schema table rebuild target drift is classified compatible when source rebuild validates against current target'
     );
+    $table_rebuild_target_drift_filtered = cow_merge_audit_report($table_rebuild_target_drift_metadata, $table_rebuild_target_drift_run_id, 10, [
+        'records' => 'conflicts',
+        'revalidation_class' => 'compatible-schema-table-target-drift',
+    ]);
+    assert_same(count($table_rebuild_target_drift_filtered['conflicts']), 1, 'schema table rebuild audit filters compatible target drift conflicts by revalidation class');
+    assert_same($table_rebuild_target_drift_filtered['conflicts'][0]['id'] ?? null, $table_rebuild_target_drift_conflict_id, 'schema table rebuild revalidation-class filter returns the revalidated conflict');
+    $table_rebuild_target_drift_cli_filter = run_merge_cli([
+        'audit',
+        '--metadata-db', $table_rebuild_target_drift_metadata,
+        '--run', (string)$table_rebuild_target_drift_run_id,
+        '--records', 'conflicts',
+        '--revalidation-class', 'compatible-schema-table-target-drift',
+        '--format', 'json',
+    ]);
+    assert_same($table_rebuild_target_drift_cli_filter['status'], 0, 'schema table rebuild audit CLI accepts compatible table target-drift revalidation-class');
+    $table_rebuild_target_drift_cli_json = json_decode($table_rebuild_target_drift_cli_filter['output'], true);
+    assert_same(count($table_rebuild_target_drift_cli_json['conflicts'] ?? []), 1, 'schema table rebuild audit CLI filters compatible table target-drift conflicts');
+    assert_same($table_rebuild_target_drift_cli_json['filters']['revalidation_class'] ?? null, 'compatible-schema-table-target-drift', 'schema table rebuild audit CLI reports compatible table target-drift filter');
     $table_rebuild_target_drift_resolution = cow_merge_resolve_conflict(
         $table_rebuild_target_drift_metadata,
         $table_rebuild_target_drift_conflict_id,

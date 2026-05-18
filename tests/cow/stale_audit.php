@@ -329,6 +329,72 @@ try {
     assert_same($resolved_audit['conflicts'][0]['latest_event_type'], 'resolution-applied', 'after-revalidate resolution advertises latest lifecycle event');
     assert_same($resolved_audit['conflicts'][0]['latest_event_lifecycle_state'], 'resolved', 'after-revalidate resolution advertises latest event state');
 
+    $bulk_stale_base = $tmp . '/bulk-stale-base.sqlite';
+    $bulk_stale_source = $tmp . '/bulk-stale-source.sqlite';
+    $bulk_stale_target = $tmp . '/bulk-stale-target.sqlite';
+    $bulk_stale_metadata = $tmp . '/.forkpress/cow/merge/bulk-stale-metadata.sqlite';
+    create_stale_audit_db($bulk_stale_base);
+    copy($bulk_stale_base, $bulk_stale_source);
+    copy($bulk_stale_base, $bulk_stale_target);
+    $db = open_db($bulk_stale_source);
+    $db->exec("UPDATE plugin_items SET value = 'source validated before bulk apply' WHERE item_id = 'alpha'");
+    $db->close();
+    $db = open_db($bulk_stale_target);
+    $db->exec("UPDATE plugin_items SET value = 'target validated before bulk apply' WHERE item_id = 'alpha'");
+    $db->close();
+    $bulk_stale_merge = cow_merge_databases($bulk_stale_base, $bulk_stale_source, $bulk_stale_target, $bulk_stale_metadata, 'feature-bulk-stale-review', 'main');
+    $bulk_stale_run_id = (int)$bulk_stale_merge['run_id'];
+    $bulk_stale_conflict_id = (int)scalar($bulk_stale_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND column_name = 'value'");
+    cow_merge_review_record(
+        $bulk_stale_metadata,
+        'conflict',
+        $bulk_stale_conflict_id,
+        'reviewed',
+        'Bulk apply should preserve this source choice after revalidation.',
+        'cow-test'
+    );
+    $bulk_stale_validated = cow_merge_resolve_conflict(
+        $bulk_stale_metadata,
+        $bulk_stale_conflict_id,
+        'source',
+        false,
+        'Validate source before bulk apply target drift.',
+        'cow-test'
+    );
+    assert_same($bulk_stale_validated['status'], 'validated', 'bulk apply stale fixture records an unapplied validated source choice');
+    $db = open_db($bulk_stale_target);
+    $db->exec("UPDATE plugin_items SET value = 'target drift before bulk apply' WHERE item_id = 'alpha'");
+    $db->close();
+
+    $bulk_stale_apply_cli = run_merge_cli([
+        'apply-reviewed-resolutions',
+        '--metadata-db', $bulk_stale_metadata,
+        '--run', (string)$bulk_stale_run_id,
+        '--limit', '10',
+        '--note', 'Bulk apply must revalidate stale choices before applying.',
+        '--reviewer', 'cow-test',
+        '--format', 'json',
+    ]);
+    assert_same($bulk_stale_apply_cli['status'], 0, 'bulk apply stale fixture exits successfully after revalidating stale choices: ' . $bulk_stale_apply_cli['output']);
+    $bulk_stale_apply = json_decode($bulk_stale_apply_cli['output'], true);
+    assert_true(is_array($bulk_stale_apply), 'bulk apply stale fixture returns JSON output');
+    assert_same($bulk_stale_apply['status'], 'completed', 'bulk apply revalidates stale validated choices without surfacing a raw apply failure');
+    assert_same($bulk_stale_apply['eligible'], 1, 'bulk apply finds the stale validated choice before revalidation');
+    assert_same($bulk_stale_apply['applied'], 0, 'bulk apply does not apply a stale validated choice');
+    assert_same($bulk_stale_apply['revalidated'], 1, 'bulk apply records one revalidation for the stale validated choice');
+    assert_same($bulk_stale_apply['skipped'], 1, 'bulk apply skips the stale validated choice after revalidation');
+    assert_same($bulk_stale_apply['errors'], [], 'bulk apply reports no resolver error for a revalidated stale choice');
+    assert_same(
+        scalar($bulk_stale_target, "SELECT value FROM plugin_items WHERE item_id = 'alpha'"),
+        'target drift before bulk apply',
+        'bulk apply preserves target drift instead of applying stale reviewer intent'
+    );
+    $bulk_stale_audit = cow_merge_audit_report($bulk_stale_metadata, $bulk_stale_run_id, 10, ['records' => 'conflicts']);
+    assert_same($bulk_stale_audit['conflicts'][0]['lifecycle_state'], 'needs-action', 'bulk apply moves stale validated choices back to needs-action');
+    assert_same($bulk_stale_audit['conflicts'][0]['next_action'], 'revalidate', 'bulk apply stale choices require guarded follow-up');
+    assert_same($bulk_stale_audit['conflicts'][0]['latest_event_type'], 'revalidation-required', 'bulk apply records a revalidation-required event for stale choices');
+    assert_same($bulk_stale_audit['conflicts'][0]['latest_resolution_choice'], 'source', 'bulk apply preserves the validated source choice for after-revalidate follow-up');
+
     $revalidation_status_base = $tmp . '/revalidation-status-base.sqlite';
     $revalidation_status_source = $tmp . '/revalidation-status-source.sqlite';
     $revalidation_status_target = $tmp . '/revalidation-status-target.sqlite';

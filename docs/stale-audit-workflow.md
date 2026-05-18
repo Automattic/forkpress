@@ -131,6 +131,14 @@ pre-revalidation staleness that audit rows already expose, and
 client-side filtering. This is useful before deciding whether to revalidate
 reviewed conflicts or resolve still-fresh ones.
 
+Bulk reviewed-queue application uses the same guard. If
+`apply-reviewed-resolutions` sees a validated choice whose live target payload
+is stale or errored, it revalidates that conflict, carries the reviewed intent
+back to `needs-action`, reports the conflict as skipped, and leaves the target
+unchanged. This keeps automation from failing on a raw resolver error or
+silently applying reviewer intent that was validated against older target
+state.
+
 Schema index, view, trigger, dropped-table restore, and table rebuild conflicts
 now record current source/target SQL when revalidation finds drift and carry
 reviewed conflicts back to `needs-action`. Source-added index, view, and
@@ -272,8 +280,10 @@ dependency-only source drift is caught through direct index/trigger,
 dependent-view, and dependent view-trigger evidence even when the reviewed table
 SQL itself is unchanged.
 Focused stale-audit tests also cover latest revalidation status output,
-filtering, grouping, CLI JSON output, and text audit output, including the case
-where target state drifts again after a previously current revalidation guard.
+filtering, grouping, CLI JSON output, text audit output, and bulk
+`apply-reviewed-resolutions` revalidating stale validated choices instead of
+applying them, including the case where target state drifts again after a
+previously current revalidation guard.
 
 Future classifier tests should cover explicit plugin-supplied logical
 fingerprints for primary-key row conflicts where schema `UNIQUE` keys are not
