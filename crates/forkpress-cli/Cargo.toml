@@ -1,6 +1,6 @@
 [package]
 name = "forkpress-cli"
-version = "0.1.40"
+version = "0.1.41"
 edition = "2024"
 build = "build.rs"
 autobins = false
