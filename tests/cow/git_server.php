@@ -1725,6 +1725,12 @@ $feature_config = "<?php\n"
     . "define('WP_DEBUG_LOG', '" . cow_git_php_single_quoted($feature_debug) . "');\n";
 file_put_contents($branches . '/main/wp-config.php', $main_config);
 file_put_contents($branches . '/feature/wp-config.php', $feature_config);
+(new SQLite3($main_db))->close();
+(new SQLite3($feature_db))->close();
+cow_git_capture_created_branch_db_merge_base($tmp . '/merge', 'feature', $feature_db);
+cow_git_capture_created_branch_file_merge_base($tmp . '/merge', 'feature', $branches . '/feature');
+cow_merge_allocate_autoincrement_bands($feature_db, $tmp . '/merge/metadata.sqlite', 'feature');
+cow_merge_capture_row_identities($feature_db, $tmp . '/merge/metadata.sqlite', 'feature');
 
 $fs = WordPress\Filesystem\LocalFilesystem::create($git);
 $repo = new WordPress\Git\GitRepository($fs, ['default_branch' => 'main']);
@@ -1843,6 +1849,31 @@ $nested_blob = $repo->add_object('blob', "nested\n");
 $flat_blob = $repo->add_object('blob', "flat\n");
 $link_file_blob = $repo->add_object('blob', "real file\n");
 $link_nested_blob = $repo->add_object('blob', "real nested\n");
+
+mkdir($branches . '/feature-missing-db/wp-content', 0777, true);
+file_put_contents($branches . '/feature-missing-db/wp-load.php', "<?php\n");
+$failed = false;
+$missing_db_message = '';
+try {
+    cow_git_apply_existing_branch_update(
+        $repo,
+        $branches,
+        $branches,
+        'feature-missing-db',
+        ['wp-load.php' => $wp_load_blob],
+        'file-copy',
+        '',
+        false,
+        $git,
+        $tmp . '/cow/branches.txt'
+    );
+} catch (Throwable $e) {
+    $failed = true;
+    $missing_db_message = $e->getMessage();
+}
+assert_true($failed, 'existing non-main branch update rejects missing branch database');
+assert_true(str_contains($missing_db_message, 'branch database'), 'missing branch database update error names the missing invariant');
+
 $replacement_files = [
     'wp-load.php' => $wp_load_blob,
     'wp-content/keep.txt' => $keep_blob,
