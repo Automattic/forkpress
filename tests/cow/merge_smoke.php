@@ -1702,6 +1702,13 @@ try {
     smoke_insert_postmeta($db, 17000106, 17000103, '_menu_item_object_id', '17000100');
     smoke_insert_postmeta($db, 17000107, 17000103, '_menu_item_menu_item_parent', '0');
     smoke_insert_postmeta($db, 17000108, 17000103, '_menu_item_classes', serialize([]));
+    smoke_insert_option($db, 17000109, 'widget_nav_menu', serialize([
+        2 => [
+            'title' => 'Shared menu widget',
+            'nav_menu' => 17000101,
+        ],
+        '_multiwidget' => 1,
+    ]));
     smoke_update_option($db, 'theme_mods_forkpress_smoke', serialize([
         'color' => 'blue',
         'nav_menu_locations' => [
@@ -1719,6 +1726,13 @@ try {
     $stmt = $db->prepare('UPDATE wp_postmeta SET meta_value = :value WHERE meta_id = 17000108');
     $stmt->bindValue(':value', serialize(['source-edited-menu']), SQLITE3_TEXT);
     $stmt->execute();
+    smoke_update_option($db, 'widget_nav_menu', serialize([
+        2 => [
+            'title' => 'Source edited shared menu widget',
+            'nav_menu' => 17000101,
+        ],
+        '_multiwidget' => 1,
+    ]));
     $db->close();
 
     $db = smoke_open_db($menu_edit_delete_target);
@@ -1727,6 +1741,7 @@ try {
     $db->exec('DELETE FROM wp_posts WHERE ID = 17000103');
     $db->exec('DELETE FROM wp_term_taxonomy WHERE term_taxonomy_id = 17000102');
     $db->exec('DELETE FROM wp_terms WHERE term_id = 17000101');
+    $db->exec("DELETE FROM wp_options WHERE option_name = 'widget_nav_menu'");
     smoke_update_option($db, 'theme_mods_forkpress_smoke', serialize([
         'color' => 'red',
         'nav_menu_locations' => [],
@@ -1740,6 +1755,7 @@ try {
     assert_same((int)smoke_scalar($menu_edit_delete_target, 'SELECT COUNT(*) FROM wp_term_taxonomy WHERE term_taxonomy_id = 17000102'), 0, 'menu edit/delete preserves target menu taxonomy deletion before review');
     assert_same((int)smoke_scalar($menu_edit_delete_target, 'SELECT COUNT(*) FROM wp_term_relationships WHERE object_id = 17000103 AND term_taxonomy_id = 17000102'), 0, 'menu edit/delete preserves target menu relationship deletion before review');
     assert_same((int)smoke_scalar($menu_edit_delete_target, 'SELECT COUNT(*) FROM wp_postmeta WHERE post_id = 17000103'), 0, 'menu edit/delete preserves target nav item metadata deletion before review');
+    assert_same((int)smoke_scalar($menu_edit_delete_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'widget_nav_menu'"), 0, 'menu edit/delete preserves target nav widget cleanup before review');
     $menu_edit_delete_theme_mods = unserialize(
         (string)smoke_scalar($menu_edit_delete_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_forkpress_smoke'"),
         ['allowed_classes' => false]
@@ -1767,9 +1783,14 @@ try {
         'menu edit/delete records the edited nav item metadata delete conflict'
     );
     assert_same(
-        (int)smoke_scalar($menu_edit_delete_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_terms', 'wp_term_taxonomy', 'wp_postmeta') AND decision = 'target-wins'"),
-        4,
-        'menu edit/delete defaults the changed source graph to target-wins before review'
+        (int)smoke_scalar($menu_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_options' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'menu edit/delete records the edited nav widget option delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($menu_edit_delete_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_terms', 'wp_term_taxonomy', 'wp_postmeta', 'wp_options') AND decision = 'target-wins'"),
+        5,
+        'menu edit/delete defaults the changed source graph and widget option to target-wins before review'
     );
 
     $block_base = $tmp . '/block-base.sqlite';
