@@ -99,7 +99,10 @@ forkpress remote clone production \
   --exclude wp-content/private-exports/
 ```
 
-Use `--force` to update an existing remote-site cache registration.
+Use `--force` to update an existing remote-site cache registration. When
+`--branch` is also provided, `--force` recreates that local branch from the
+fresh remote cache. Without `--force`, ForkPress refuses an existing branch
+before rsync so a retry cannot silently leave you previewing stale local data.
 
 ## Branch Later From A Cache
 
@@ -135,6 +138,10 @@ http://production-main.wp.localhost:18080/wp-admin/
 
 The admin opens logged in by default. The branch switcher in the admin bar lets
 you move between local branches.
+
+The plain root URL, `http://wp.localhost:18080/`, is the local `main` branch
+created by `forkpress init`. A remote clone made with
+`--branch production-main` is served at the branch URL above.
 
 ## Install Plugins
 

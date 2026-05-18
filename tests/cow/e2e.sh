@@ -1498,6 +1498,45 @@ test -f "$WORK_DIR/cow/merge/file-bases/remote-mysql-branch.json"
 php -r '$db = new SQLite3($argv[1]); $title = $db->querySingle("SELECT post_title FROM wp_posts WHERE ID = 11"); $seq = (int)$db->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''wp_posts'\''"); exit($title === "Imported remote MySQL page" && $seq >= 11 ? 0 : 1);' "$WORK/remote-mysql-branch/wp-content/database/.ht.sqlite"
 php -r '$meta = new SQLite3($argv[1]); $band = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''remote-mysql-branch'\'' AND table_name = '\''wp_posts'\''", true); exit($band && (int)$band["band_start"] > 11 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
 
+log_step "remote clone refuses stale branch before syncing and --force recreates it"
+FAILING_RSYNC_BIN="$TMP/failing-rsync-bin"
+mkdir -p "$FAILING_RSYNC_BIN"
+cat > "$FAILING_RSYNC_BIN/rsync" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+touch "${FORKPRESS_FAILING_RSYNC_MARKER:?}"
+echo "rsync should not have been called" >&2
+exit 66
+SH
+chmod +x "$FAILING_RSYNC_BIN/rsync"
+if FORKPRESS_FAILING_RSYNC_MARKER="$TMP/failing-rsync-called" \
+  PATH="$FAILING_RSYNC_BIN:$FAKE_RSYNC_BIN:$PATH" "$BIN" remote --work-dir "$WORK_DIR" clone mysql-prod-retry \
+    --ssh fake-mysql-remote \
+    --path "$REMOTE_MYSQL_SOURCE" \
+    --branch remote-mysql-branch \
+    --remote-url "https://mysql.example.test/" \
+    > "$TMP/remote-mysql-existing-branch.out" 2>&1; then
+  echo "remote clone unexpectedly succeeded with an existing target branch" >&2
+  cat "$TMP/remote-mysql-existing-branch.out" >&2
+  exit 1
+fi
+grep -F "branch already exists: remote-mysql-branch" "$TMP/remote-mysql-existing-branch.out" >/dev/null
+grep -F "pass --force to replace it from the remote clone" "$TMP/remote-mysql-existing-branch.out" >/dev/null
+test ! -e "$TMP/failing-rsync-called"
+PATH="$FAKE_RSYNC_BIN:$PATH" "$BIN" remote --work-dir "$WORK_DIR" clone mysql-prod \
+  --ssh fake-mysql-remote \
+  --path "$REMOTE_MYSQL_SOURCE" \
+  --branch remote-mysql-branch \
+  --remote-url "https://mysql.example.test/" \
+  --force \
+  > "$TMP/remote-mysql-force-reclone.out"
+grep -F "forkpress: replaced existing branch 'remote-mysql-branch' from remote cache 'mysql-prod'" "$TMP/remote-mysql-force-reclone.out" >/dev/null
+grep -F "forkpress: remote cache 'mysql-prod' branched to 'remote-mysql-branch'" "$TMP/remote-mysql-force-reclone.out" >/dev/null
+test -f "$WORK/remote-mysql-branch/wp-content/database/.ht.sqlite"
+test -f "$WORK_DIR/cow/merge/bases/remote-mysql-branch.sqlite"
+test -f "$WORK_DIR/cow/merge/file-bases/remote-mysql-branch.json"
+php -r '$db = new SQLite3($argv[1]); $title = $db->querySingle("SELECT post_title FROM wp_posts WHERE ID = 11"); $seq = (int)$db->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''wp_posts'\''"); exit($title === "Imported remote MySQL page" && $seq >= 11 ? 0 : 1);' "$WORK/remote-mysql-branch/wp-content/database/.ht.sqlite"
+
 if [ "${FORKPRESS_E2E_ONLY:-}" = "remote-cache" ]; then
   log_step "remote cache branch slice complete"
   exit 0

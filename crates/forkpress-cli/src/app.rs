@@ -46,8 +46,8 @@ use forkpress_server::{
 use forkpress_storage::{
     CowMergeAuditQuery, CowSiteInit, RemoteBranchOptions, RemoteSiteAdd, add_remote_site,
     apply_reviewed_cow_merge_resolutions, branch_remote_site,
-    compact_macos_apfs_sparsebundle_file_view, cow_branch_names, cow_branch_root,
-    create_cow_branch, delete_cow_branch, detach_linux_xfs_loop_file_view,
+    compact_macos_apfs_sparsebundle_file_view, cow_branch_exists, cow_branch_names,
+    cow_branch_root, create_cow_branch, delete_cow_branch, detach_linux_xfs_loop_file_view,
     detach_macos_apfs_sparsebundle_file_view, ensure_cow_branch_exists, ensure_cow_file_view_ready,
     ensure_cow_main_branch, inspect_cow_merge_audit, list_remote_sites, lock_cow_lifecycle,
     lock_cow_operations, merge_cow_branch, prepare_cow_file_view, print_cow_storage_status,
@@ -698,7 +698,7 @@ struct RemoteCloneArgs {
     #[arg(long)]
     no_delete: bool,
 
-    /// Replace an existing remote-site registration and update its cache.
+    /// Replace an existing remote-site registration and, with --branch, recreate the local branch from the remote cache.
     #[arg(long)]
     force: bool,
 }
@@ -2830,6 +2830,26 @@ fn remote_clone_command(
             sanitize_remote_site_name(&args.name)
         );
     }
+    if let Some(branch) = &args.branch {
+        let strategy = require_initialized_strategy(layout, "remote clone --branch")?;
+        if strategy != StorageStrategy::Cow {
+            bail!(
+                "remote clone --branch requires COW storage, found strategy = \"{}\"",
+                strategy.as_str()
+            );
+        }
+        if cow_branch_exists(layout, branch)? && !args.force {
+            bail!(
+                "branch already exists: {branch}. Open http://{branch}.{}:{}/ or pass --force to replace it from the remote clone.",
+                branchctl_url_hint(layout)
+                    .map(|(host, _)| host)
+                    .unwrap_or_else(|_| "wp.localhost".to_string()),
+                branchctl_url_hint(layout)
+                    .map(|(_, port)| port)
+                    .unwrap_or_else(|_| "18080".to_string())
+            );
+        }
+    }
 
     fs::create_dir_all(&cache_root)
         .with_context(|| format!("failed to create {}", cache_root.display()))?;
@@ -2890,13 +2910,6 @@ fn remote_clone_command(
     );
 
     if let Some(branch) = args.branch {
-        let strategy = require_initialized_strategy(layout, "remote clone --branch")?;
-        if strategy != StorageStrategy::Cow {
-            bail!(
-                "remote clone --branch requires COW storage, found strategy = \"{}\"",
-                strategy.as_str()
-            );
-        }
         prepare_runtime(layout)?;
         let runtime = PortableRuntime::from_layout(layout);
         let _lock = lock_cow_operations(layout)?;
@@ -2908,9 +2921,16 @@ fn remote_clone_command(
             RemoteBranchOptions {
                 remote: manifest.name.clone(),
                 branch,
+                replace_existing: args.force,
                 url_hint: branchctl_url_hint(layout).ok(),
             },
         )?;
+        if report.replaced_existing {
+            println!(
+                "forkpress: replaced existing branch '{}' from remote cache '{}'",
+                report.branch, report.remote.name
+            );
+        }
         println!(
             "forkpress: remote cache '{}' branched to '{}'",
             report.remote.name, report.branch
@@ -3185,6 +3205,7 @@ fn remote_branch_command(
         RemoteBranchOptions {
             remote: args.remote,
             branch: args.branch,
+            replace_existing: false,
             url_hint: branchctl_url_hint(layout).ok(),
         },
     )?;

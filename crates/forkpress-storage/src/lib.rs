@@ -539,6 +539,16 @@ pub fn create_cow_branch_from_external_tree(
     )
 }
 
+pub fn cow_branch_exists(layout: &Layout, branch: &str) -> Result<bool> {
+    validate_branch_name(branch)?;
+    let file_view = read_site_manifest(layout)?
+        .and_then(|manifest| manifest.file_view)
+        .unwrap_or(FileViewStrategy::Copy);
+    let public_root = cow_branch_root(layout, branch);
+    let storage_root = cow_branch_storage_root(layout, branch, file_view);
+    Ok(path_exists_no_follow(&public_root) || path_exists_no_follow(&storage_root))
+}
+
 fn create_cow_branch_from_tree_with_copy_mode(
     layout: &Layout,
     runtime: &PortableRuntime,
@@ -1127,6 +1137,29 @@ fn cleanup_cow_branch_birth_metadata(
         "scripts/cow/merge.php",
         args.iter().map(|arg| arg.as_os_str()),
     )
+}
+
+pub fn cleanup_cow_branch_recreate_metadata(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    branch: &str,
+) -> Result<()> {
+    cleanup_cow_branch_birth_metadata(layout, runtime, shared, branch)?;
+
+    let base_db = cow_merge_base_db_path(layout, branch)?;
+    remove_sqlite_file_and_sidecars(&base_db)?;
+
+    let file_base = cow_merge_file_base_path(layout, branch)?;
+    match fs::remove_file(&file_base) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(err).with_context(|| format!("failed to remove {}", file_base.display()));
+        }
+    }
+
+    Ok(())
 }
 
 fn allocate_cow_autoincrement_bands(
