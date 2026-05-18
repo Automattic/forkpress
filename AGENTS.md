@@ -75,20 +75,23 @@ Before commands that write Git objects or create test temp trees, use:
 umask 0022
 ```
 
-If a checkout is already affected, repair only that checkout's local `.git`
-permissions:
+If a checkout is already affected, repair only that checkout's local Git
+directory. Use `git rev-parse --git-dir` because linked worktrees may store
+`.git` as a file that points somewhere else:
 
 ```bash
-find .git -type d -exec chmod 755 {} +
-find .git -type f -exec chmod u+rw {} +
+git_dir="$(git rev-parse --git-dir)"
+find "$git_dir" -type d -exec chmod 755 {} +
+find "$git_dir" -type f -exec chmod u+rw {} +
 ```
 
 Do not reset the repository, rewrite history, or revert unrelated work to fix
 this. Do not patch ForkPress Git/merge code until this local cause is ruled
 out. After the permissions are repaired, rerun the original Git command with
-`umask 0022`. If the same failure appears in a default Codex sandbox, move the
-work to a danger-full-access lane or repair the sandbox checkout permissions;
-do not treat it as a ForkPress Git, merge, release, or CI regression.
+`umask 0022`. If the same failure appears in a default Codex sandbox, move work
+to a danger-full-access lane or repair the sandbox checkout permissions there;
+do not treat it as a ForkPress Git, merge, release, or CI regression unless the
+failure reproduces outside the Codex sandbox permissions state.
 
 ## Tests
 
