@@ -191,6 +191,9 @@ if ($action === 'forkpress_branch_create') {
 if ($action === 'forkpress_branch_merge') {
     forkpress_handle_branch_merge();
 }
+if ($action === 'forkpress_branch_history') {
+    forkpress_handle_branch_history();
+}
 if ($action === 'forkpress_branch_conflicts') {
     forkpress_handle_branch_conflicts();
 }
@@ -347,6 +350,42 @@ assert_same(
     array_slice($merge['argv'][0] ?? [], 1),
     ['branch', '--work-dir', $work_dir, 'merge', 'feature', '--into', 'main'],
     'branch merge admin action uses audited branch merge CLI path'
+);
+
+$history_json = json_encode([
+    'runs' => [
+        [
+            'id' => 42,
+            'source_branch' => 'feature',
+            'target_branch' => 'main',
+            'status' => 'completed_with_conflicts',
+            'decision_count' => 9,
+            'conflict_count' => 3,
+            'finished_at' => '2026-05-18 12:00:00',
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+$history = run_branch_ui_action(
+    ['action' => 'forkpress_branch_history', 'limit' => '5'],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    ['FORKPRESS_TEST_CLI_OUTPUT' => $history_json]
+);
+$history_payload = decode_branch_ui_payload($history);
+assert_same($history['status'], 0, 'branch history admin action exits cleanly');
+assert_same($history_payload['success'] ?? null, true, 'branch history admin action returns JSON success');
+assert_same($history_payload['message'] ?? null, 'Loaded 1 merge history run.', 'branch history admin action reports loaded run count');
+assert_same($history_payload['recordCount'] ?? null, 1, 'branch history admin action reports record count');
+assert_same($history_payload['records'][0]['source_branch'] ?? null, 'feature', 'branch history admin action exposes source branch');
+assert_same($history_payload['records'][0]['target_branch'] ?? null, 'main', 'branch history admin action exposes target branch');
+assert_same($history_payload['historyCommand'] ?? null, 'forkpress branch history --limit 5 --format json', 'branch history admin action exposes the matching CLI command');
+assert_same(count($history['argv']), 1, 'branch history admin action invokes ForkPress CLI once');
+assert_same(
+    array_slice($history['argv'][0] ?? [], 1),
+    ['branch', '--work-dir', $work_dir, 'history', '--limit', '5', '--format', 'json'],
+    'branch history admin action uses audited branch history CLI path'
 );
 
 $conflicted_merge_output = "forkpress: merged feature into main\\n  run:       42\\n  status:    completed_with_conflicts\\n  applied:   yes\\n  conflicts: 3\\n";
@@ -1002,6 +1041,18 @@ $invalid_crash_json_payload = decode_branch_ui_payload($invalid_crash_json_audit
 assert_same($invalid_crash_json_payload['success'] ?? null, false, 'branch conflict audit rejects invalid crash recovery JSON');
 assert_same($invalid_crash_json_payload['message'] ?? null, 'ForkPress returned invalid crash recovery JSON.', 'branch conflict audit explains invalid crash recovery JSON');
 
+$invalid_history_json = run_branch_ui_action(
+    ['action' => 'forkpress_branch_history', 'limit' => '10'],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    ['FORKPRESS_TEST_CLI_OUTPUT' => 'not-json']
+);
+$invalid_history_payload = decode_branch_ui_payload($invalid_history_json);
+assert_same($invalid_history_payload['success'] ?? null, false, 'branch history rejects invalid CLI JSON');
+assert_same($invalid_history_payload['message'] ?? null, 'ForkPress returned invalid merge history JSON.', 'branch history explains invalid CLI JSON');
+
 $invalid_create = run_branch_ui_action(
     ['action' => 'forkpress_branch_create', 'branch' => 'feature branch', 'from' => 'feature'],
     ['main', 'feature']
@@ -1059,6 +1110,12 @@ $switcher_render_payload = decode_branch_ui_payload($switcher_render);
 $switcher_html = (string)($switcher_render_payload['html'] ?? '');
 assert_true(str_contains($switcher_html, 'Open branch manager'), 'branch switcher links to the full branch manager page');
 assert_true(str_contains($switcher_html, '/wp-admin/admin.php?page=forkpress-branches'), 'branch switcher uses the wp-admin branch manager URL');
+assert_true(str_contains($switcher_html, 'forkpress_branch_history'), 'branch switcher renders branch history action');
+assert_true(str_contains($switcher_html, 'nonce-forkpress_branch_history'), 'branch switcher renders branch history nonce');
+assert_true(str_contains($switcher_html, 'Show merge history'), 'branch switcher renders branch history button text');
+assert_true(str_contains($switcher_html, 'function fetchBranchHistory'), 'branch switcher renders branch history fetch handler');
+assert_true(str_contains($switcher_html, 'function renderBranchHistory'), 'branch switcher renders branch history display handler');
+assert_true(str_contains($switcher_html, 'Review conflicts'), 'branch switcher can jump from history runs into conflict review');
 assert_true(str_contains($switcher_html, 'Create branch'), 'branch switcher renders branch create controls');
 assert_true(str_contains($switcher_html, 'forkpress-conflict-list'), 'branch switcher renders conflict audit list container');
 assert_true(str_contains($switcher_html, 'forkpress-conflict-summary'), 'branch switcher renders conflict summary container');
